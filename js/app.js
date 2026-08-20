@@ -1,0 +1,395 @@
+/* Powermove — application bootstrap, project I/O, shell, autosave. */
+(() => {
+const PM = window.PM, h = PM.h, $ = PM.$;
+const APP = { fileHandle: null, dirty: false, saveTimer: 0 };
+PM.app = APP;
+
+/* ── appearance (light default, dark alternate) ────────── */
+PM.theme = (() => {
+  const root = document.documentElement;
+  const syncNative = () => {
+    try {
+      window.webkit && window.webkit.messageHandlers.pmTheme &&
+        window.webkit.messageHandlers.pmTheme.postMessage(root.dataset.theme || 'light');
+    } catch (e) { }
+  };
+  const apply = (t) => {
+    if (t === 'dark') root.dataset.theme = 'dark'; else delete root.dataset.theme;
+    PM.store.set('theme', t);
+    syncNative();
+    /* layout event re-resolves CSS-token caches (timeline canvas) */
+    PM.bus.emit('layout');
+    PM.invalidate();
+  };
+  const saved = PM.store.get('theme', 'light');
+  apply(saved === 'dark' ? 'dark' : 'light');
+  return {
+    get current() { return root.dataset.theme === 'dark' ? 'dark' : 'light'; },
+    apply,
+    toggle() { apply(this.current === 'dark' ? 'light' : 'dark'); },
+  };
+})();
+
+/* ── project boot / migration ───────────────────────────── */
+function loadBootProject() {
+  const raw = PM.store.get('autosave', null);
+  if (raw && raw.proj) {
+    const layers = raw.proj.layers;
+    const usable = Array.isArray(layers) && layers.length > 0;
+    if (usable) {
+      try {
+        const proj = hydrate(raw.proj);
+        if (proj.layers.length) return proj;
+      } catch (e) { console.warn('Autosave could not be loaded', e); }
+    } else {
+      console.warn('Discarding empty autosave');
+    }
+    /* Empty or corrupt autosave must never win over the demo. */
+    PM.store.del('autosave');
+  }
+  return demo();
+}
+function hydrate(p) {
+  const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
+  Object.assign(base, p);
+  base.layers = Array.isArray(p.layers) ? p.layers : [];
+  base.assets = p.assets || {};
+  base.markers = p.markers || [];
+  base.work = p.work && p.work.length === 2 ? p.work : [0, base.dur];
+  base.params = p.params || {};
+  base.shutter = p.shutter == null ? .5 : p.shutter;
+  base.layers.forEach(L => {
+    L.on = L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
+    L.collapsed = L.collapsed !== false; L.fx = L.fx || []; L.p = L.p || {}; L.d = L.d || {};
+    L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
+    const fresh = PM.mkLayer(L.type || 'null', {}, base);
+    Object.keys(fresh.p).forEach(k => {
+      if (!L.p[k]) L.p[k] = fresh.p[k];
+      L.p[k].kf = L.p[k].kf || []; L.p[k].expr = L.p[k].expr || null;
+      L.p[k].kf.forEach(q => { if (!q.i) q.i = PM.uid('k'); });
+    });
+    L.fx.forEach(f => { f.p = f.p || {}; f.on = f.on !== false; });
+    if (L.type === 'shader') PM.syncShaderUniforms(L);
+  });
+  return base;
+}
+function demo() {
+  const p = PM.mkProject({ name: 'Velocity Study', w: 1920, h: 1080, fps: 30, dur: 8, bg: '#080809' });
+  p.shutter = .5;
+  const add = L => { p.layers.push(L); return L; };
+  const key = (L, ch, list) => { const prop = L.p[ch]; list.forEach(([t,v,e='power']) => prop.kf.push(PM.KF(t,v,e))); };
+
+  const eyebrow = add(PM.mkLayer('text', { name: 'Kicker', from: .35, dur: 6.1, d: {
+    text: 'DESIGN  /  MOTION  /  SYSTEM', font: 'Geist Mono', weight: 560, size: 28, tracking: 8, leading: 1, color: '#FF8A47', align: 'center',
+  }, p: { 'position.x': 960, 'position.y': 404 } }, p));
+  key(eyebrow, 'opacity', [[0,0,'power'],[.45,100,'power'],[5.3,100,'easeIn'],[5.8,0,'easeIn']]);
+  key(eyebrow, 'position.y', [[0,430,'power'],[.58,404,'power']]);
+
+  const title = add(PM.mkLayer('text', { name: 'Powermove', from: .45, dur: 6, d: {
+    text: 'Make the move.', font: 'Geist', weight: 650, size: 164, tracking: -7, leading: 1, color: '#F1F0EC', align: 'center',
+  }, p: { 'position.x': 960, 'position.y': 535 } }, p));
+  key(title, 'opacity', [[0,0,'power'],[.6,100,'power'],[5.05,100,'easeIn'],[5.62,0,'easeIn']]);
+  key(title, 'position.y', [[0,630,'power'],[.72,535,'power'],[5.05,535,'easeIn'],[5.62,475,'easeIn']]);
+  key(title, 'scale.x', [[0,94,'glide'],[.8,100,'glide']]);
+  key(title, 'scale.y', [[0,94,'glide'],[.8,100,'glide']]);
+
+  const sub = add(PM.mkLayer('text', { name: 'Descriptor', from: 1.1, dur: 5, d: {
+    text: 'A design-aware motion instrument.', font: 'Geist', weight: 430, size: 42, tracking: -.4, leading: 1.1, color: '#9C9A97', align: 'center',
+  }, p: { 'position.x': 960, 'position.y': 660 } }, p));
+  key(sub, 'opacity', [[0,0,'glide'],[.65,100,'glide'],[4.3,100,'easeIn'],[4.85,0,'easeIn']]);
+
+  const signal = add(PM.mkLayer('shape', { name: 'Signal', from: .15, dur: 7.85, d: {
+    shape: 'ellipse', color: '#FF6B1A', w: 110, h: 110, radius: 0, stroke: 0, strokeColor: '#FFFFFF', points: 5,
+  }, p: { 'position.x': 960, 'position.y': 540 } }, p));
+  signal.blend = 'screen'; signal.mblur = true;
+  key(signal, 'scale.x', [[0,0,'power'],[.7,100,'backOut'],[5.2,100,'glide'],[7.1,1800,'expoIn']]);
+  key(signal, 'scale.y', [[0,0,'power'],[.7,100,'backOut'],[5.2,100,'glide'],[7.1,1800,'expoIn']]);
+  key(signal, 'opacity', [[0,0,'power'],[.25,100,'power'],[5.65,100,'linear'],[7.2,92,'linear']]);
+  const glow = PM.mkEffect('glow'); glow.p.threshold.v = 18; glow.p.radius.v = 120; glow.p.intensity.v = 165; signal.fx.push(glow);
+
+  const bg = add(PM.mkLayer('shader', { name: 'Atmosphere', from: 0, dur: 8, d: {
+    code: `uniform float uSpeed; // @param 0.16 0 2
+uniform float uScale; // @param 2.1 0.4 8
+uniform vec3 uEmber; // @param #FF6B1A
+uniform float uEnergy; // @param 0.75 0 2
+void main(){
+  vec2 p=(uv-.5)*vec2(iResolution.x/iResolution.y,1.);
+  float t=iTime*uSpeed;
+  float a=fbm(p*uScale+vec2(t,-t*.34));
+  float b=fbm(rot(.82)*p*uScale*1.6+vec2(-t*.5,t*.72)+13.7);
+  float field=smoothstep(.42,.83,a*.72+b*.4);
+  vec3 col=mix(vec3(.015,.014,.017),uEmber,field*.52*uEnergy);
+  col+=uEmber*pow(field,8.)*.26;
+  float halo=exp(-length(p-vec2(.0,.05))*2.7);
+  col+=uEmber*halo*.035;
+  col*=1.-dot(p,p)*.3;
+  fragColor=vec4(col,1.);
+}`, w: 1920, h: 1080, uniforms: {},
+  } }, p));
+  PM.syncShaderUniforms(bg);
+  p.notes = 'One continuous signal becomes the field. Keep the hierarchy singular, restrained, and physical.';
+  return p;
+}
+
+/* Dev safety: while the app is being built, a malformed persisted snapshot can boot
+   into a blank/off-looking project. Bump PM.bootVersion to force a one-time reset to
+   the known-good demo on next launch. This never discards real saved projects (⌘S),
+   only the volatile in-progress autosave. */
+(function resetIfStale() {
+  const bv = PM.store.get('bootVersion', 0);
+  if (bv !== PM.bootVersion) {
+    PM.store.del('autosave');
+    PM.store.set('bootVersion', PM.bootVersion);
+  }
+})();
+
+PM.proj = loadBootProject();
+/* External media blobs cannot survive a browser restart; keep metadata but hide unresolved layers. */
+PM.proj.layers.forEach(L => {
+  if ((L.type === 'image' || L.type === 'video' || L.type === 'audio') && L.d.asset && !PM.assets.get(L.d.asset)) L.on = false;
+});
+PM.WS.init();
+PM.selectLayers(PM.proj.layers.find(l => l.name === 'Powermove')?.id || []);
+PM.setTime(.9, { raw: true, force: true });
+PM.hist.clear();
+
+/* ── shell ─────────────────────────────────────────────── */
+function themeButton(button) {
+  const b = button(PM.theme.current === 'dark' ? 'sun' : 'moon', 'Toggle light / dark appearance', () => PM.theme.toggle());
+  PM.bus.on('layout', () => {
+    const dark = PM.theme.current === 'dark';
+    b.textContent = '';
+    b.appendChild(PM.icon(dark ? 'sun' : 'moon'));
+    b.title = dark ? 'Switch to light appearance' : 'Switch to dark appearance';
+  });
+  return b;
+}
+function buildTitlebar() {
+  const tabs = $('#tabs'), right = $('#tb-right'), bar = $('#titlebar');
+  /* Native window drag: WKWebView ignores -webkit-app-region, so forward pointerdown
+     on empty titlebar regions to the AppKit drag bridge. Interactive children opt out. */
+  const dragBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowDrag;
+  bar.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button, .tab, input, a, .tb-right')) return;
+    if (!dragBridge) return;
+    e.preventDefault();
+    /* Native-feel window drag: pin the arrow cursor, drop any hover state, and
+       swallow the gesture so the web content never shows grab/hand feedback. */
+    document.body.style.cursor = 'default';
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    const pin = () => { document.body.style.cursor = 'default'; };
+    window.addEventListener('pointermove', pin, true);
+    dragBridge.postMessage({ x: e.clientX, y: e.clientY });
+    window.addEventListener('pointerup', () => {
+      window.removeEventListener('pointermove', pin, true);
+      document.body.style.cursor = '';
+    }, { once: true });
+  });
+  bar.addEventListener('dblclick', (e) => {
+    if (e.target.closest('button, .tab, input, a, .tb-right')) return;
+    /* mimic standard macOS titlebar double-click (zoom) */
+    const zb = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowZoom;
+    if (zb) zb.postMessage({});
+  });
+  const paintTabs = () => {
+    tabs.textContent = '';
+    tabs.appendChild(h('div.tab.on', h('span', PM.proj.name), APP.dirty ? h('span', { style: { color: 'var(--accent)' } }, '•') : null));
+    const ws = h('button.tab', { onpointerdown: e => workspaceMenu(e, ws) }, PM.icon('panel'), PM.WS.current.name, PM.icon('chevD'));
+    tabs.appendChild(ws);
+  };
+  right.textContent = '';
+  const button = (icon, title, run) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
+  const undoButton = button('undo', 'Undo', () => PM.hist.undo());
+  const redoButton = button('redo', 'Redo', () => PM.hist.redo());
+  const syncHistoryButtons = () => {
+    undoButton.disabled = !PM.hist.canUndo();
+    redoButton.disabled = !PM.hist.canRedo();
+    undoButton.title = undoButton.disabled ? 'Undo — no edits yet' : 'Undo';
+    redoButton.title = redoButton.disabled ? 'Redo — no reverted edit' : 'Redo';
+  };
+  right.append(
+    undoButton,
+    redoButton,
+    button('plus', 'New layer', e => addMenu(e)),
+    button('wand', 'New shader layer', () => PM.cmd('newShader')),
+    button('export', 'Export', () => PM.Export.dialog()),
+    themeButton(button),
+    button('gear', 'Workspace definition', () => PM.WS.editJSON()),
+  );
+  PM.bus.on('workspaces', paintTabs); PM.bus.on('project', paintTabs); PM.bus.on('history', paintTabs);
+  PM.bus.on('history', syncHistoryButtons);
+  paintTabs(); syncHistoryButtons();
+}
+function workspaceMenu(e, anchor) {
+  e.preventDefault();
+  PM.menu(anchor, [
+    { header: 'Workspaces' },
+    ...PM.WS.list().map(w => ({ label: w.name, on: w.id === PM.WS.current.id, run: () => PM.WS.activate(w.id) })),
+    '-', { label: 'Undo interface change', kb: '⌥⌘Z', disabled: !PM.WS.canUndo(), run: () => PM.WS.undo() },
+    { label: 'Redo interface change', kb: '⌥⌘⇧Z', disabled: !PM.WS.canRedo(), run: () => PM.WS.redo() },
+    '-', { label: 'Save current as new…', run: () => PM.WS.saveAsNew() },
+    { label: 'Edit workspace manifest…', run: () => PM.WS.editJSON() },
+    { label: 'Restore default workspace', run: () => PM.WS.restoreDefault() },
+  ]);
+}
+function addMenu(e) {
+  const a = e.currentTarget;
+  PM.menu(a, [
+    { header: 'New layer' },
+    { label: 'Text', kb: '⌘T', run: () => PM.cmd('newText') },
+    { label: 'Shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
+    { label: 'Solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
+    { label: 'Shader', kb: '⌘⇧G', run: () => PM.cmd('newShader') },
+    { label: 'Null', run: () => PM.cmd('newNull') },
+    '-', { label: 'Import media…', kb: '⌘I', run: () => PM.pickFiles() },
+  ], { right: true });
+}
+function buildStatus() {
+  const s = $('#status');
+  const paint = () => {
+    const keys = PM.proj.layers.reduce((n,L) => n + PM.allProps(L).reduce((m,x) => m + x.prop.kf.length, 0), 0);
+    s.textContent = '';
+    s.append(
+      h('span', APP.dirty ? 'UNSAVED' : 'SAVED'),
+      h('span', `${PM.proj.layers.length} layers`), h('span', `${keys} keys`),
+      h('span.sp'),
+      h('span', PM.GL.gl ? [h('b.live', '●'), ' WebGL2'] : 'WebGL unavailable'),
+      h('span', `${PM.perf.fps || '—'} fps`),
+      h('span', `${PM.round(PM.perf.ms || 0, 1)} ms`),
+      h('span', `${PM.proj.w}×${PM.proj.h} · ${PM.proj.fps} fps`),
+    );
+  };
+  ['draw:status','layers','project','history','assets'].forEach(ev => PM.bus.on(ev, paint));
+  setInterval(() => PM.invalidate('status'), 1000);
+  paint();
+}
+buildTitlebar(); buildStatus();
+
+/* ── AE-style tool toolbar, mounted as a fixed strip above #body ── */
+function buildToolbar() {
+  const def = PM.PANELS.toolbar; if (!def) return;
+  const el = document.createElement('div');
+  el.id = 'toolbar-strip';
+  const body = document.createElement('div');
+  el.appendChild(body);
+  const bodyEl = document.getElementById('body');
+  bodyEl.parentNode.insertBefore(el, bodyEl);
+  try { def.build(body, {}); } catch (e) { console.error('toolbar', e); }
+}
+buildToolbar();
+
+/* ── persistence ───────────────────────────────────────── */
+PM.autosave = () => {
+  APP.dirty = true;
+  clearTimeout(APP.saveTimer);
+  APP.saveTimer = setTimeout(() => {
+    try {
+      PM.store.set('autosave', { v: PM.version, at: Date.now(), proj: PM.proj });
+      APP.dirty = false; PM.invalidate('status'); PM.bus.emit('project:saved');
+    } catch (e) { console.warn('Autosave failed', e); }
+  }, 550);
+};
+['layers','project','assets'].forEach(ev => PM.bus.on(ev, PM.autosave));
+
+PM.saveProject = async () => {
+  const text = PM.serialize();
+  if (APP.fileHandle && APP.fileHandle.createWritable) {
+    try {
+      const w = await APP.fileHandle.createWritable(); await w.write(text); await w.close();
+      APP.dirty = false; PM.toast('Project saved'); PM.invalidate('status'); return;
+    } catch (e) { console.warn(e); }
+  }
+  if (window.showSaveFilePicker) {
+    try {
+      APP.fileHandle = await showSaveFilePicker({ suggestedName: safeName(PM.proj.name) + '.pmv', types: [{ description: 'Powermove Project', accept: { 'application/json': ['.pmv'] } }] });
+      const w = await APP.fileHandle.createWritable(); await w.write(text); await w.close();
+      APP.dirty = false; PM.toast('Project saved'); PM.invalidate('status'); return;
+    } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  PM.download(new Blob([text], { type: 'application/json' }), safeName(PM.proj.name) + '.pmv');
+  APP.dirty = false; PM.toast('Project downloaded'); PM.invalidate('status');
+};
+PM.openProject = () => {
+  const inp = h('input', { type: 'file', accept: '.pmv,.json,application/json' });
+  inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
+  inp.click();
+};
+async function openProjectFile(file) {
+  try {
+    const o = JSON.parse(await file.text());
+    switchProject(hydrate(o.proj || o));
+    PM.toast('Opened ' + file.name);
+  } catch (e) { PM.toast('Could not open project: ' + e.message, 4500); }
+}
+PM.newProject = () => {
+  const name = h('input', { value: 'Untitled' });
+  PM.modal({ title: 'New composition', body: h('div.field', name), width: 400, actions: [
+    { label: 'Cancel' }, { label: 'Create', pri: true, run: () => switchProject(PM.mkProject({ name: name.value.trim() || 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' })) },
+  ] });
+  setTimeout(() => { name.focus(); name.select(); }, 30);
+};
+function switchProject(p) {
+  PM.pause();
+  PM.proj = hydrate(p);
+  PM.time = 0;
+  PM.sel.layers = [];
+  PM.sel.keys = [];
+  PM.sel.chan = null;
+  PM.hist.clear();
+  PM.rasterClear();
+  PM.assets.map.clear();
+  APP.fileHandle = null;
+  APP.dirty = true;
+  PM.bus.emit('project');
+  PM.bus.emit('layers');
+  PM.bus.emit('sel');
+  PM.bus.emit('assets');
+  PM.Inspector.refresh();
+  PM.Viewer.layout();
+  PM.invalidate('all');
+  PM.invalidate('status');
+  PM.autosave();
+}
+
+/* ── media import ──────────────────────────────────────── */
+PM.pickFiles = (opt = {}) => {
+  const inp = h('input', { type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.pmv' });
+  inp.onchange = () => PM.importFiles([...inp.files], opt); inp.click();
+};
+PM.importFiles = async (files, opt = {}) => {
+  const place = opt.place !== false;
+  let n = 0;
+  for (const f of files) {
+    if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
+    if (!/^(image|video|audio)\//.test(f.type)) { PM.toast('Unsupported file · ' + f.name); continue; }
+    const a = await PM.assets.add(f);
+    n++;
+    if (place) PM.cmd('addFromAsset', a.id);
+  }
+  PM.autosave();
+  if (n) PM.toast(n === 1 ? 'Imported ' + files[0].name : `Imported ${n} files`);
+};
+addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+addEventListener('drop', e => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  e.preventDefault(); PM.importFiles([...e.dataTransfer.files]);
+});
+
+function safeName(s) { return String(s || 'powermove').replace(/[\\/:*?"<>|]+/g, '-').trim() || 'powermove'; }
+addEventListener('beforeunload', () => {
+  clearTimeout(APP.saveTimer);
+  try { PM.store.set('autosave', { v: PM.version, at: Date.now(), proj: PM.proj }); } catch (e) { }
+});
+
+/* first full frame after persistent panels have measured */
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  PM.Viewer.layout();
+  PM.TL.frameView();
+  PM.bus.emit('layers');
+  PM.bus.emit('sel');
+  PM.Inspector.refresh();
+  PM.invalidate('all');
+  PM.invalidate('status');
+}));
+})();

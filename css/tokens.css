@@ -1,0 +1,93 @@
+/* Powermove — design tokens. Default theme is light; dark is the alternate. */
+:root{color-scheme:light}
+:root[data-theme="dark"]{color-scheme:dark}
+:root{
+  --bg-window:#EDEDEF;
+  --bg-rail:#F4F4F6;
+  --bg-panel:#FCFCFD;
+  --bg-panel-2:#F3F3F5;
+  --bg-sunken:#E4E4E7;
+  --bg-row:#F1F1F4;
+  --bg-row-hi:#E9E9ED;
+  --bg-field:#F1F1F4;
+  --bg-float:#FFFFFF;
+
+  --line:rgba(15,15,20,.09);
+  --line-2:rgba(15,15,20,.14);
+  --line-strong:rgba(15,15,20,.22);
+
+  --tx:#1C1C1F;
+  --tx-2:#5D5D65;
+  --tx-3:#8B8B93;
+  --tx-4:#B4B4BB;
+
+  --accent:#F0580A;
+  --accent-dim:rgba(240,88,10,.13);
+  --accent-tx:#D84E06;
+
+  --blue:#2B6FE3;
+  --blue-deep:#2B4FD8;
+  --cream:#A89B76;
+  --sand:#8D8163;
+  --violet:#4C5BD8;
+  --gray:#6E6E76;
+  --green:#149A66;
+  --red:#E23B3B;
+  --yellow:#A87B00;
+
+  --r-xs:5px; --r-sm:7px; --r-md:9px; --r-lg:12px; --r-xl:16px;
+
+  --row-h:30px;
+  --hdr-h:36px;
+  --gut:8px;
+  --pad:10px;  /* uniform outer padding for the whole shell */
+  --gap:8px;   /* uniform gap between docks/panels */
+
+  --f-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;
+  --f-mono:"Geist Mono","SF Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
+
+  --fs-xs:10.5px; --fs-sm:11.5px; --fs-md:12.5px; --fs-lg:14px; --fs-xl:17px;
+
+  --shadow-float:0 12px 40px rgba(0,0,0,.18),0 1px 0 rgba(255,255,255,.55) inset;
+  --ease:cubic-bezier(.22,1,.36,1);
+}
+:root[data-density="compact"]{ --row-h:26px; --hdr-h:30px; --fs-md:11.5px; --gut:6px; --pad:8px; --gap:6px; }
+:root[data-density="comfy"]{ --row-h:34px; --hdr-h:40px; --fs-md:13px; --gut:10px; --pad:12px; --gap:10px; }
+
+/* ── dark theme (alternate) ────────────────────────────── */
+:root[data-theme="dark"]{
+  --bg-window:#0b0b0c;
+  --bg-rail:#0e0e0f;
+  --bg-panel:#141416;
+  --bg-panel-2:#101012;
+  --bg-sunken:#0a0a0b;
+  --bg-row:#1a1a1d;
+  --bg-row-hi:#212125;
+  --bg-field:#131316;
+  --bg-float:#1c1c20;
+
+  --line:rgba(255,255,255,.07);
+  --line-2:rgba(255,255,255,.11);
+  --line-strong:rgba(255,255,255,.18);
+
+  --tx:#ededee;
+  --tx-2:#9b9ba1;
+  --tx-3:#6a6a70;
+  --tx-4:#48484e;
+
+  --accent:#FF6B1A;
+  --accent-dim:rgba(255,107,26,.16);
+  --accent-tx:#ff8b4d;
+
+  --blue:#4C8DFF;
+  --blue-deep:#3B62E8;
+  --cream:#E8E2CF;
+  --sand:#D8CFAF;
+  --violet:#6C7BE8;
+  --gray:#A9A9AE;
+  --green:#3FCF8E;
+  --red:#FF5C5C;
+  --yellow:#FFD66B;
+
+  --shadow-float:0 12px 40px rgba(0,0,0,.6),0 1px 0 rgba(255,255,255,.06) inset;
+}
