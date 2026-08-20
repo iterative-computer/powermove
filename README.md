@@ -1,16 +1,13 @@
 # Powermove
 
-Powermove is an AI-native motion and video editor for macOS. Its interface is a versioned document: sections can be split, stacked, tabbed, duplicated, floated, overlaid, moved, previewed, undone, and generated from a prompt without flattening the underlying project.
+Powermove is an AI-native motion and video editor for macOS. This main branch keeps the original compact editing interface and adds ChatGPT subscription access through the signed-in local Codex client.
 
 ## What works
 
 - WebGL composition preview, editable layers, keyframes, effects, shaders, media, timeline, inspector, export, and takes
-- Recursive workspace manifests instead of fixed left/center/right docks
-- Tabs, horizontal and vertical splits, floating panels, overlays, native pop-outs, and linked viewer/timeline instances
-- Generated control sections with safe bindings to project, selection, and scene parameters
-- Reversible generated-workspace previews plus interface-specific undo and redo
+- Prompt-driven composition, motion, shader, and workspace edits
+- Compact docked workspaces with editable panels and custom parameter controls
 - ChatGPT subscription generation through the signed-in local Codex client; account tokens never enter the web interface
-- Legacy workspace migration and guards against collapsed or unreachable sections
 
 ## Build
 
@@ -31,10 +28,9 @@ The ChatGPT subscription provider requires the Codex CLI to be installed and sig
 
 ## Architecture
 
-- `js/core/workspace-schema.js` is the pure, testable workspace document model.
-- `js/ui/layout.js` renders that document recursively and owns panel placement.
-- `js/core/workspace.js` owns workspace state, previews, history, and generated controls.
+- `js/ui/layout.js` renders the compact docked workspace.
+- `js/core/workspace.js` owns workspace state and custom controls.
 - `js/agent/` exposes bounded editing tools and provider bridges.
 - `native/main.swift` packages the editor as a lightweight WKWebView macOS app and brokers native-only capabilities.
 
-Large projects stay responsive by keeping project state semantic, rendering the composition on the GPU, limiting DOM work to visible editor surfaces, and treating secondary viewers/timelines as linked mirrors rather than duplicate engines.
+Large projects stay responsive by keeping project state semantic and rendering the composition on the GPU. The earlier recursive-layout architecture is preserved on the `experimental-architecture` branch for future work; it is not the interface shipped by this branch.

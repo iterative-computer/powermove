@@ -21,7 +21,7 @@ function actx() {
   if (AU.ctx.state === 'suspended') AU.ctx.resume();
   return AU.ctx;
 }
-function audioLayers() { return PM.proj.layers.filter(l => l.type === 'audio' && l.on && l.audio !== false && l.d.asset); }
+function audioLayers() { return PM.proj.layers.filter(l => l.type === 'audio' && l.on && l.d.asset); }
 
 function startAudio(T) {
   actx();
@@ -48,7 +48,6 @@ function scrubVideos(T) {
     if (L.type !== 'video' || !L.d.asset) continue;
     const a = PM.assets.get(L.d.asset); if (!a) continue;
     const inRange = PM.active(L, T);
-    a.el.muted = L.audio === false;
     if (PM.playing && inRange) { if (a.el.paused) { a.el.currentTime = PM.clamp(T - L.from + (L.d.trim || 0), 0, a.dur); a.el.play().catch(() => { }); } }
     else if (!a.el.paused) a.el.pause();
   }

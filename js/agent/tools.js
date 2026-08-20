@@ -196,60 +196,36 @@ reg('select', 'Select layers and optionally a channel or playhead time.', {
   return ok(`Selected ${ls.length ? ls.map(l => l.name).join(', ') : 'full composition'}`);
 });
 
-reg('set_workspace', 'Generate or edit the app interface. Supports recursive horizontal/vertical splits, stacks, tabs, overlays, floating sections, duplicate linked viewers/timelines, theme, density, features, and generated component panels with safe project/selection/parameter bindings. Use preview:true for a reversible try-before-keep interface.', {
+reg('set_workspace', 'Create or edit an authored workspace: panels, docks, dimensions, theme, features, density, and custom parameter controls.', {
   type: 'object', properties: {
-    name: { type: 'string' }, base: { type: 'string' }, create: { type: 'boolean' }, preview: { type: 'boolean' }, action: { type: 'string', enum: ['apply', 'preview', 'commit_preview', 'cancel_preview'] }, density: { type: 'string', enum: ['compact', 'normal', 'comfy'] },
+    name: { type: 'string' }, base: { type: 'string' }, create: { type: 'boolean' }, density: { type: 'string', enum: ['compact', 'normal', 'comfy'] },
     theme: { type: 'object' }, features: { type: 'object' },
-    manifest: { type: 'object' }, layout: { type: 'object' },
     docks: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, size: { type: 'number' }, panels: { type: 'array' } } } },
     show: { type: 'array', items: { type: 'string' } }, hide: { type: 'array', items: { type: 'string' } },
     move: { type: 'array', items: { type: 'object', properties: { panel: { type: 'string' }, dock: { type: 'string' } } } },
-    placements: { type: 'array', items: { type: 'object', properties: { panel: { type: 'string' }, instance: { type: 'string' }, target: { type: 'string' }, where: { type: 'string', enum: ['left', 'right', 'top', 'bottom', 'tab'] }, mode: { type: 'string', enum: ['overlay', 'floating'] }, duplicate: { type: 'boolean' }, width: { type: 'number' }, height: { type: 'number' }, anchor: { type: 'string' } } } },
     customPanels: { type: 'array' },
   },
 }, async (x) => {
-  if (x.action === 'commit_preview') { PM.WS.commitPreview(); return ok('Generated workspace preview kept'); }
-  if (x.action === 'cancel_preview') { PM.WS.cancelPreview(); return ok('Generated workspace preview reverted'); }
-  const S = window.PMWorkspaceSchema;
-  let draft = S.clone(x.manifest || PM.WS.get(x.base) || PM.WS.current);
-  if (x.create) { draft.id = PM.uid('ws'); draft.builtin = false; draft.name = x.name || 'Generated workspace'; }
-  if (x.name) draft.name = x.name;
-  if (x.density) draft.density = x.density;
-  if (x.theme) draft.theme = Object.assign(draft.theme || {}, x.theme);
-  if (x.features) draft.features = Object.assign(draft.features || {}, x.features);
-  if (x.layout) draft.layout = x.layout;
-  if (x.docks) draft.layout = { docks: x.docks.map(d => ({ id: d.id, size: d.size, panels: (d.panels || []).map(q => typeof q === 'string' ? { id: q, flex: true } : q) })) };
-  draft = S.normalizeWorkspace(draft);
-  for (const id of x.hide || []) {
-    const found = S.listPanels(draft).find(entry => entry.panel === id || entry.instance === id);
-    if (found) draft = S.removeInstance(draft, found.instance).workspace;
-  }
-  for (const id of x.show || []) {
-    const target = S.listPanels(draft)[0]?.instance;
-    draft = S.placePanel(draft, S.panel(id, { instance: S.uniqueInstance(draft, id) }), { target, where: id === 'chat' ? 'left' : 'right', duplicate: true });
-  }
-  for (const movement of x.move || []) {
-    const found = S.listPanels(draft).find(entry => entry.panel === movement.panel || entry.instance === movement.panel);
-    const target = S.listPanels(draft).find(entry => entry.instance !== found?.instance)?.instance;
-    if (found) draft = S.placePanel(draft, found, { target, where: movement.dock === 'left' ? 'left' : movement.dock === 'center' ? 'tab' : 'right' });
-  }
-  if (x.customPanels) {
-    draft.custom = x.customPanels.map(cp => ({ id: cp.id || 'custom-' + PM.uid('p'), title: cp.title || 'Controls', size: cp.size || 220, note: cp.note, components: cp.components || cp.controls || [] }));
-    PM.WS.registerCustom(draft);
-  }
-  for (const placement of x.placements || []) {
-    const existing = S.listPanels(draft).find(entry => entry.instance === placement.instance || entry.panel === placement.panel);
-    const panelNode = existing || S.panel(placement.panel, { instance: placement.instance || S.uniqueInstance(draft, placement.panel) });
-    draft = S.placePanel(draft, panelNode, placement);
-  }
-  for (const custom of draft.custom || []) if (!S.listPanels(draft).some(entry => entry.panel === custom.id)) {
-    const target = S.listPanels(draft)[0]?.instance;
-    draft = S.placePanel(draft, S.panel(custom.id, { instance: S.uniqueInstance(draft, custom.id) }), { target, where: 'right', duplicate: true });
-  }
-  const preview = x.preview === true || x.action === 'preview';
-  PM.WS.replace(draft, { preview, keepId: !x.create, label: 'Agent · interface' });
-  const sections = S.listPanels(PM.WS.current).map(entry => ({ panel: entry.panel, instance: entry.instance, region: entry.region }));
-  return ok(`${preview ? 'Previewing' : 'Applied'} “${PM.WS.current.name}” with ${sections.length} sections`, { manifestVersion: 2, sections, preview });
+  let w;
+  if (x.create) w = PM.WS.create({ name: x.name || 'Custom', base: x.base || PM.WS.current.id });
+  const apply = (z) => {
+    if (x.name) z.name = x.name;
+    if (x.density) z.density = x.density;
+    if (x.theme) z.theme = Object.assign(z.theme || {}, x.theme);
+    if (x.features) z.features = Object.assign(z.features || {}, x.features);
+    if (x.docks) z.layout.docks = x.docks.map(d => ({ id: d.id, size: d.size, panels: (d.panels || []).map(q => typeof q === 'string' ? { id: q, flex: true } : q) }));
+    for (const id of x.hide || []) PM.Layout.removePanel(z, id);
+    for (const id of x.show || []) PM.Layout.addPanel(z, id, id === 'chat' ? 'left' : 'right');
+    for (const m of x.move || []) PM.Layout.addPanel(z, m.panel, m.dock);
+    if (x.customPanels) {
+      z.custom = x.customPanels.map((cp, i) => ({ id: cp.id || 'custom-' + PM.uid('p'), title: cp.title || 'Controls', size: cp.size || 220, note: cp.note, controls: cp.controls || [] }));
+      PM.WS.registerCustom(z);
+      z.custom.forEach(cp => { if (!PM.Layout.hasPanel(z, cp.id)) PM.Layout.addPanel(z, cp.id, 'right'); });
+    }
+  };
+  if (x.create) PM.WS.mutate(apply, { inPlace: true });
+  else PM.WS.mutate(apply);
+  return ok(`Workspace is now “${PM.WS.current.name}”`, { docks: PM.WS.current.layout.docks });
 });
 
 reg('add_scene_parameter', 'Expose a purposeful global scene control that expressions can read with param("Name").', {

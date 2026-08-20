@@ -127,6 +127,7 @@ void main(){
 }`, w: 1920, h: 1080, uniforms: {},
   } }, p));
   PM.syncShaderUniforms(bg);
+  p.markers = [{ t: .45, name: 'Reveal' }, { t: 5.55, name: 'Expansion' }, { t: 7.25, name: 'Resolve' }];
   p.notes = 'One continuous signal becomes the field. Keep the hierarchy singular, restrained, and physical.';
   return p;
 }
@@ -200,17 +201,9 @@ function buildTitlebar() {
   };
   right.textContent = '';
   const button = (icon, title, run) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
-  const undoButton = button('undo', 'Undo', () => PM.hist.undo());
-  const redoButton = button('redo', 'Redo', () => PM.hist.redo());
-  const syncHistoryButtons = () => {
-    undoButton.disabled = !PM.hist.canUndo();
-    redoButton.disabled = !PM.hist.canRedo();
-    undoButton.title = undoButton.disabled ? 'Undo — no edits yet' : 'Undo';
-    redoButton.title = redoButton.disabled ? 'Redo — no reverted edit' : 'Redo';
-  };
   right.append(
-    undoButton,
-    redoButton,
+    button('undo', 'Undo', () => PM.hist.undo()),
+    button('redo', 'Redo', () => PM.hist.redo()),
     button('plus', 'New layer', e => addMenu(e)),
     button('wand', 'New shader layer', () => PM.cmd('newShader')),
     button('export', 'Export', () => PM.Export.dialog()),
@@ -218,19 +211,15 @@ function buildTitlebar() {
     button('gear', 'Workspace definition', () => PM.WS.editJSON()),
   );
   PM.bus.on('workspaces', paintTabs); PM.bus.on('project', paintTabs); PM.bus.on('history', paintTabs);
-  PM.bus.on('history', syncHistoryButtons);
-  paintTabs(); syncHistoryButtons();
+  paintTabs();
 }
 function workspaceMenu(e, anchor) {
   e.preventDefault();
   PM.menu(anchor, [
     { header: 'Workspaces' },
     ...PM.WS.list().map(w => ({ label: w.name, on: w.id === PM.WS.current.id, run: () => PM.WS.activate(w.id) })),
-    '-', { label: 'Undo interface change', kb: '⌥⌘Z', disabled: !PM.WS.canUndo(), run: () => PM.WS.undo() },
-    { label: 'Redo interface change', kb: '⌥⌘⇧Z', disabled: !PM.WS.canRedo(), run: () => PM.WS.redo() },
     '-', { label: 'Save current as new…', run: () => PM.WS.saveAsNew() },
-    { label: 'Edit workspace manifest…', run: () => PM.WS.editJSON() },
-    { label: 'Restore default workspace', run: () => PM.WS.restoreDefault() },
+    { label: 'Edit workspace JSON…', run: () => PM.WS.editJSON() },
   ]);
 }
 function addMenu(e) {
@@ -353,22 +342,18 @@ function switchProject(p) {
 }
 
 /* ── media import ──────────────────────────────────────── */
-PM.pickFiles = (opt = {}) => {
+PM.pickFiles = () => {
   const inp = h('input', { type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.pmv' });
-  inp.onchange = () => PM.importFiles([...inp.files], opt); inp.click();
+  inp.onchange = () => PM.importFiles([...inp.files]); inp.click();
 };
-PM.importFiles = async (files, opt = {}) => {
-  const place = opt.place !== false;
-  let n = 0;
+PM.importFiles = async (files) => {
   for (const f of files) {
     if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
     if (!/^(image|video|audio)\//.test(f.type)) { PM.toast('Unsupported file · ' + f.name); continue; }
     const a = await PM.assets.add(f);
-    n++;
-    if (place) PM.cmd('addFromAsset', a.id);
+    PM.cmd('addFromAsset', a.id);
   }
-  PM.autosave();
-  if (n) PM.toast(n === 1 ? 'Imported ' + files[0].name : `Imported ${n} files`);
+  PM.autosave(); PM.toast(files.length === 1 ? 'Imported ' + files[0].name : `Imported ${files.length} files`);
 };
 addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
 addEventListener('drop', e => {

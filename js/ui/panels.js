@@ -28,147 +28,32 @@ PM.registerPanel('layers', {
   },
 });
 
-/* ── Media browser ─────────────────────────────────────── */
+/* ── Assets ────────────────────────────────────────────── */
 PM.registerPanel('assets', {
-  title: 'Media', size: 200, noscroll: true,
-  header(hdr) {
-    if (hdr.querySelector('.mb-add')) return;
-    hdr.appendChild(h('button.iconbtn.mb-add', {
-      title: 'Import media (⌘I)',
-      onclick: () => PM.pickFiles({ place: false }),
-    }, PM.icon('plus')));
-  },
+  title: 'Project', size: 200,
   build(body) {
-    const st = { q: '', kind: 'all', list: false, sel: null };
-    const bar = h('div.mb-bar');
-    const q = h('input.mb-q', { type: 'search', placeholder: 'Search media', spellcheck: 'false' });
-    q.addEventListener('input', () => { st.q = q.value; paint(); });
-    q.addEventListener('keydown', e => e.stopPropagation());
-    const kinds = h('div.mb-kinds');
-    ['all', 'image', 'video', 'audio'].forEach(k => {
-      const b = h('button.mb-f' + (k === 'all' ? '.on' : ''), k === 'all' ? 'All' : k[0].toUpperCase() + k.slice(1));
-      b.onclick = () => { st.kind = k; [...kinds.children].forEach(c => c.classList.toggle('on', c === b)); paint(); };
-      kinds.appendChild(b);
-    });
-    const view = h('button.iconbtn', { title: 'List view' }, PM.icon('layers'));
-    view.onclick = () => {
-      st.list = !st.list;
-      view.title = st.list ? 'Grid view' : 'List view';
-      view.textContent = ''; view.appendChild(PM.icon(st.list ? 'grid' : 'layers'));
-      paint();
-    };
-    bar.append(q, h('div.mb-row', kinds, view));
-    const grid = h('div.mb-grid');
-    body.append(bar, grid);
-    body.classList.add('mb');
-
-    const fmtDur = (s) => {
-      if (!s || !isFinite(s)) return '';
-      const m = Math.floor(s / 60), r = Math.round(s % 60);
-      return m + ':' + String(r).padStart(2, '0');
-    };
-    const metaOf = (as) => {
-      if (as.kind === 'audio') return fmtDur(as.dur) || 'Audio';
-      if (as.kind === 'video') return [fmtDur(as.dur), as.w ? as.w + '×' + as.h : ''].filter(Boolean).join(' · ');
-      return as.w ? as.w + '×' + as.h : 'Image';
-    };
-    const shotOf = (as) => {
-      const live = PM.assets.get(as.id);
-      const shot = h('div.mb-shot');
-      if (!live) { shot.appendChild(h('div.mb-ph', PM.icon(as.kind === 'audio' ? 'audio' : 'cam'))); shot.classList.add('off'); return shot; }
-      if (as.kind === 'audio') { shot.appendChild(h('div.mb-ph', PM.icon('audio'))); return shot; }
-      if (live.thumbEl) { shot.appendChild(live.thumbEl); return shot; }
-      if (as.kind === 'image' && live.el) {
-        const img = h('img');
-        img.src = live.url || (live.el.toDataURL && live.el.toDataURL()) || live.el.src;
-        live.thumbEl = img;
-        shot.appendChild(img);
-        return shot;
-      }
-      if (as.kind === 'video' && live.el) {
-        const img = h('img');
-        const v = live.el;
-        const cap = () => {
-          try {
-            const c = document.createElement('canvas');
-            c.width = Math.max(2, v.videoWidth || 320);
-            c.height = Math.max(2, v.videoHeight || 180);
-            c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-            img.src = c.toDataURL('image/jpeg', .7);
-          } catch (e) { }
-        };
-        if (v.readyState >= 2) cap();
-        else v.addEventListener('seeked', cap, { once: true });
-        try { v.currentTime = Math.min(.12, (v.duration || 1) * .04); } catch (e) { }
-        live.thumbEl = img;
-        shot.appendChild(img);
-        return shot;
-      }
-      shot.appendChild(h('div.mb-ph', PM.icon('cam')));
-      return shot;
-    };
-
+    const list = h('div', { style: { padding: '6px' } });
+    const drop = h('div', {
+      style: { margin: '6px', padding: '14px', border: '1px dashed var(--line-2)', borderRadius: '10px', textAlign: 'center', color: 'var(--tx-3)', fontSize: '11.5px' },
+    }, 'Drop media here');
+    body.append(list, drop);
     const paint = () => {
-      grid.textContent = '';
-      grid.classList.toggle('list', st.list);
-      const qv = st.q.trim().toLowerCase();
-      const items = Object.values(PM.proj.assets).filter(as => {
-        if (st.kind !== 'all' && as.kind !== st.kind) return false;
-        if (qv && !as.name.toLowerCase().includes(qv)) return false;
-        return true;
+      list.textContent = '';
+      const a = Object.values(PM.proj.assets);
+      a.forEach(as => {
+        const row = h('div.lyr', h('span.sw2', { style: { background: as.kind === 'audio' ? 'var(--blue)' : as.kind === 'video' ? 'var(--blue-deep)' : 'var(--gray)' } }),
+          h('span.nm', as.name), h('span.idx', as.kind[0].toUpperCase()));
+        row.ondblclick = () => PM.cmd('addFromAsset', as.id);
+        list.appendChild(row);
       });
-      if (!items.length) {
-        const empty = Object.values(PM.proj.assets).length;
-        grid.appendChild(h('div.mb-empty',
-          empty ? 'Nothing matches.' : 'Drop footage, stills, or audio',
-          empty ? null : h('span', 'or click to import · ⌘I')));
-        return;
-      }
-      items.forEach(as => {
-        const card = h('div.mb-card' + (st.sel === as.id ? '.on' : ''),
-          { draggable: 'true' },
-          shotOf(as),
-          h('div.mb-cap',
-            h('div.mb-name', { title: as.name }, as.name.replace(/\.[^.]+$/, '')),
-            h('div.mb-meta', metaOf(as))));
-        card.onclick = (e) => { st.sel = as.id; paint(); };
-        card.ondblclick = () => PM.cmd('addFromAsset', as.id);
-        card.oncontextmenu = (e) => {
-          e.preventDefault();
-          st.sel = as.id; paint();
-          PM.menu(document.body, [
-            { header: as.name },
-            { label: 'Add to composition', run: () => PM.cmd('addFromAsset', as.id) },
-            '-',
-            { label: 'Delete from media', run: () => PM.hist.do('Remove media', () => PM.assets.remove(as.id)) },
-          ], { x: e.clientX, y: e.clientY });
-        };
-        card.addEventListener('dragstart', (e) => {
-          e.dataTransfer.setData('application/x-pm-asset', as.id);
-          e.dataTransfer.setData('text/plain', as.id);
-          e.dataTransfer.effectAllowed = 'copy';
-        });
-        grid.appendChild(card);
-      });
+      if (!a.length) list.appendChild(h('div.empty', 'No media imported.'));
     };
-    paint();
-    PM.bus.on('assets', paint);
-
-    const hot = (on) => body.classList.toggle('hot', on);
-    body.addEventListener('dragover', (e) => {
-      if (![...e.dataTransfer.types].includes('Files')) return;
-      e.preventDefault(); e.stopPropagation(); hot(true);
-    });
-    body.addEventListener('dragleave', (e) => { if (!body.contains(e.relatedTarget)) hot(false); });
-    body.addEventListener('drop', (e) => {
-      if (![...e.dataTransfer.types].includes('Files')) return;
-      e.preventDefault(); e.stopPropagation(); hot(false);
-      PM.importFiles([...e.dataTransfer.files], { place: false });
-    });
-    grid.addEventListener('click', (e) => {
-      if (Object.values(PM.proj.assets).length) return;
-      if (e.target === grid || e.target.closest('.mb-empty')) PM.pickFiles({ place: false });
-    });
+    paint(); PM.bus.on('assets', paint);
+    ['dragover', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      if (ev === 'drop') PM.importFiles([...e.dataTransfer.files]);
+    }));
+    drop.onclick = () => PM.pickFiles();
   },
 });
 

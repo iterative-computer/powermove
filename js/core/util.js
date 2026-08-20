@@ -2,7 +2,7 @@
 const PM = (window.PM = window.PM || {});
 
 PM.version = '1.0.0';
-PM.bootVersion = 20260818;
+PM.bootVersion = 20260816;
 
 /* ── dom ───────────────────────────────────────────────── */
 const h = (tag, attrs, ...kids) => {
@@ -93,10 +93,7 @@ PM.ICONS = {
   frame: '<path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/>',
   code: '<path d="m8 8-4 4 4 4M16 8l4 4-4 4"/>',
   cam: '<path d="M3 7h11v10H3z"/><path d="m14 11 7-4v10l-7-4z"/>',
-  audio: '<path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4"/>',
   graph: '<path d="M3 20c6 0 6-16 18-16"/><circle cx="3" cy="20" r="1.6" fill="currentColor"/><circle cx="21" cy="4" r="1.6" fill="currentColor"/>',
-  mtnS: '<path d="M3 17 8 10l3 4 4-6 6 9"/>',
-  mtnL: '<path d="M2 19 8 7l4 6 5-8 5 14"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',
   sparkle: '<path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 15.5 19 17l1.5.5L19 18l-.5 1.5L18 18l-1.5-.5L18 17z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/>',
@@ -171,77 +168,6 @@ PM.store = {
   del(k) { localStorage.removeItem('pm.' + k); },
 };
 
-/* ── hover tips ────────────────────────────────────────── */
-/* First hover waits briefly; once a tip is up, moving to a sibling is instant. */
-(() => {
-  const SHOW_MS = 280, HIDE_MS = 80, WARM_MS = 480;
-  let cur = null, tip = null, showT = 0, hideT = 0, coolT = 0, warm = false;
-
-  const hostOf = (n) => {
-    while (n && n.nodeType === 1) {
-      if (n.dataset && n.dataset.tip != null) return n;
-      if (n.classList && n.classList.contains('iconbtn') && n.title) return n;
-      n = n.parentElement;
-    }
-    return null;
-  };
-  const arm = (el) => {
-    if (el.title && el.dataset.tip == null) {
-      el.dataset.tip = el.title;
-      el.removeAttribute('title');
-    }
-    return el.dataset.tip || '';
-  };
-  const paint = (el) => {
-    const raw = arm(el);
-    if (!raw) { drop(); return; }
-    const m = raw.match(/^(.+?)\s+\(([^)]+)\)\s*$/);
-    if (!tip) {
-      tip = h('div#pm-tip');
-      document.body.appendChild(tip);
-    }
-    tip.textContent = '';
-    if (m) tip.append(h('span', m[1]), h('kbd', m[2]));
-    else tip.appendChild(h('span', raw));
-    const r = el.getBoundingClientRect();
-    const w = tip.offsetWidth, ht = tip.offsetHeight;
-    const above = r.top > innerHeight * .42;
-    let x = r.left + r.width / 2 - w / 2;
-    let y = above ? r.top - ht - 7 : r.bottom + 7;
-    tip.style.left = clamp(x, 6, innerWidth - w - 6) + 'px';
-    tip.style.top = clamp(y, 6, innerHeight - ht - 6) + 'px';
-    tip.classList.add('on');
-    warm = true;
-  };
-  const drop = () => {
-    if (tip) { tip.remove(); tip = null; }
-    cur = null;
-    clearTimeout(coolT);
-    coolT = setTimeout(() => { warm = false; }, WARM_MS);
-  };
-  const adopt = (el, instant) => {
-    arm(el);
-    clearTimeout(showT); clearTimeout(hideT);
-    cur = el;
-    if (instant || warm) paint(el);
-    else showT = setTimeout(() => { if (cur === el) paint(el); }, SHOW_MS);
-  };
-
-  addEventListener('pointerover', (e) => {
-    const el = hostOf(e.target);
-    if (!el || el === cur) return;
-    adopt(el, !!(hostOf(e.relatedTarget) || warm));
-  });
-  addEventListener('pointerout', (e) => {
-    if (!cur || hostOf(e.target) !== cur) return;
-    if (hostOf(e.relatedTarget)) return;
-    clearTimeout(showT);
-    hideT = setTimeout(drop, HIDE_MS);
-  });
-  addEventListener('scroll', () => { if (tip) drop(); }, true);
-  addEventListener('pointerdown', () => { if (tip) drop(); }, true);
-})();
-
 /* ── toasts ────────────────────────────────────────────── */
 PM.toast = (msg, ms = 2200) => {
   const el = h('div.toast', msg);
@@ -256,9 +182,8 @@ PM.menu = (anchor, items, opt = {}) => {
   for (const it of items) {
     if (it === '-') { el.appendChild(h('div.sep')); continue; }
     if (it.header) { el.appendChild(h('div.hd', it.header)); continue; }
-    el.appendChild(h('div.di' + (it.on ? '.on' : '') + (it.disabled ? '.disabled' : ''), {
-      role: 'menuitem', 'aria-disabled': it.disabled ? 'true' : 'false',
-      onclick: (e) => { e.stopPropagation(); if(it.disabled)return; PM.closeMenus(); it.run && it.run(); }
+    el.appendChild(h('div.di' + (it.on ? '.on' : ''), {
+      onclick: (e) => { e.stopPropagation(); PM.closeMenus(); it.run && it.run(); }
     }, it.on ? '✓ ' : '', it.label, it.kb ? h('span', { style: { marginLeft: 'auto', fontFamily: 'var(--f-mono)', fontSize: '10.5px', color: 'var(--tx-4)' } }, it.kb) : null));
   }
   document.body.appendChild(el);
@@ -268,14 +193,10 @@ PM.menu = (anchor, items, opt = {}) => {
   let y = opt.y != null ? opt.y : r.bottom + 5;
   el.style.left = clamp(x, 6, innerWidth - w - 6) + 'px';
   el.style.top = clamp(y, 6, innerHeight - ht - 6) + 'px';
-  PM._menuOutside = (event) => { if (!el.contains(event.target)) PM.closeMenus(); };
-  setTimeout(() => document.addEventListener('pointerdown', PM._menuOutside), 0);
+  setTimeout(() => document.addEventListener('pointerdown', PM.closeMenus, { once: true }), 0);
   return el;
 };
-PM.closeMenus = () => {
-  $$('.drop').forEach(e => e.remove());
-  if(PM._menuOutside){document.removeEventListener('pointerdown',PM._menuOutside);PM._menuOutside=null;}
-};
+PM.closeMenus = () => $$('.drop').forEach(e => e.remove());
 
 /* ── drag helper ───────────────────────────────────────── */
 PM.drag = (e, { move, up, cursor }) => {

@@ -30,14 +30,16 @@ PM.registerPanel('toolbar', {
     const nullB  = tool('null',  'frame', 'New null object',       () => PM.cmd('newNull'));
     const camB   = tool('camera','cam',   'Import media (⌘I)',     () => PM.cmd('import'));
 
-    /* snapping is an edit tool; preview overlays live on the viewer */
+    /* right-aligned workspace toggles */
     const snapB = h('button.iconbtn.tl.tg', { title: 'Snapping (S)', onclick: () => { PM.snap = !PM.snap; syncTg(); PM.invalidate(); } }, PM.icon('magnet'));
+    const guidB = h('button.iconbtn.tl.tg', { title: 'Guides & safe areas', onclick: () => { PM.guides = !PM.guides; syncTg(); PM.invalidate(); } }, PM.icon('grid'));
+    const mbluB = h('button.iconbtn.tl.tg', { title: 'Motion blur preview', onclick: () => { PM.mblurOn = !PM.mblurOn; syncTg(); PM.invalidate(); } }, PM.icon('clock'));
 
     body.append(
       selB, handB, zoomB, sep(),
       textB, shapeB, solidB, shdrB, nullB, sep(), camB,
       h('span', { style: { flex: 1 } }),
-      snapB,
+      snapB, guidB, mbluB,
     );
 
     function syncTools() {
@@ -45,6 +47,8 @@ PM.registerPanel('toolbar', {
     }
     function syncTg() {
       snapB.classList.toggle('on', !!PM.snap);
+      guidB.classList.toggle('on', !!PM.guides);
+      mbluB.classList.toggle('on', !!PM.mblurOn);
     }
     PM.bus.on('tool', syncTools);
     syncTools(); syncTg();

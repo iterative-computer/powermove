@@ -329,7 +329,6 @@ GL.render = (T, opt = {}) => {
     if (L.type === 'audio' || L.type === 'null') continue;
     if (soloOn && !L.solo) continue;
     if (!PM.active(L, T)) continue;
-    if (PM.Viewer && PM.Viewer.editing === L) continue;
     if (L.shy && opt.hideShy) continue;
     const alpha = PM.worldOpacity(L, T);
     if (alpha <= .001) continue;

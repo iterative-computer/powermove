@@ -135,18 +135,6 @@ PM.assets = {
     return a;
   },
   get: (id) => PM.assets.map.get(id),
-  remove(id) {
-    const live = PM.assets.map.get(id);
-    if (live && live.url) try { URL.revokeObjectURL(live.url); } catch (e) { }
-    PM.assets.map.delete(id);
-    delete PM.proj.assets[id];
-    PM.proj.layers.forEach(L => {
-      if (L.d && L.d.asset === id) { L.d.asset = null; L.on = false; }
-    });
-    PM.touch();
-    PM.bus.emit('assets');
-    PM.bus.emit('layers');
-  },
   /** Procedural placeholder so demo projects work with zero imports. */
   gradient(name, c0, c1) {
     const cv = getCanvas(1280, 720);

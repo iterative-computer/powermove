@@ -3,7 +3,7 @@
 const PM = window.PM, h = PM.h, clamp = PM.clamp;
 
 const T = {
-  gut: 268, row: 30, ruler: 36, pps: 90, scrollT: 0, scrollY: 0,
+  gut: 214, row: 30, ruler: 26, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null,
 };
@@ -12,177 +12,51 @@ PM.TL = T;
 PM.registerPanel('timeline', {
   title: 'Timeline', flush: true, noscroll: true, persist: true, headless: true, size: 300,
   build(body) {
+    const head = h('div#tl-head');
     const wrap = h('div#tl-canvas-wrap');
     const cv = h('canvas#tl-canvas');
     wrap.appendChild(cv);
-    const foot = h('div#tl-foot');
-    body.append(wrap, foot);
+    body.append(head, wrap);
     T.cv = cv; T.ctx = cv.getContext('2d', { alpha: false });
-    buildTime(wrap);
-    buildFoot(foot);
+    buildHead(head);
     bind(cv, wrap);
     new ResizeObserver(() => resize(wrap)).observe(wrap);
     requestAnimationFrame(() => resize(wrap));
   },
 });
 
-function buildTime(wrap) {
-  const box = h('div#tl-timebox');
+function buildHead(head) {
+  const btn = (icon, fn, title) => h('button.iconbtn', { title, onclick: fn }, PM.icon(icon));
+  const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
-  const sub = h('div#tl-time-sub');
-  box.append(time, sub);
-  wrap.appendChild(box);
-  T.timeEl = time; T.timeSub = sub;
-  const sync = () => {
-    if (time.classList.contains('edit')) return;
-    const fps = PM.proj.fps;
-    time.textContent = PM.tc(PM.time, fps);
-    sub.textContent = Math.round(PM.time * fps) + ' (' + fps + ' fps)';
-  };
-  T.syncTime = sync;
-  PM.bus.on('time', sync); PM.bus.on('project', sync); PM.bus.on('transport', sync); sync();
-  box.addEventListener('pointerdown', (e) => {
-    if (time.classList.contains('edit') || e.button !== 0) return;
-    const start = PM.time;
-    let moved = false;
-    PM.drag(e, {
-      cursor: 'ew-resize',
-      move: (dx) => {
-        if (!moved && Math.abs(dx) < 3) return;
-        moved = true;
-        PM.setTime(start + dx / 12 / PM.proj.fps);
-      },
-      up: () => { if (!moved) editTime(time); },
-    });
-  });
-}
-function editTime(el) {
-  el.classList.add('edit');
-  const inp = h('input', { value: PM.tc(PM.time, PM.proj.fps) });
-  el.textContent = ''; el.appendChild(inp);
-  inp.focus(); inp.select();
-  let skip = false;
-  const done = (ok) => {
-    el.classList.remove('edit');
-    if (ok) {
-      const n = PM.parseTc(inp.value.replace(/;/g, ':'), PM.proj.fps);
-      if (n != null && isFinite(n)) PM.setTime(n);
-    }
-    if (T.syncTime) T.syncTime();
-  };
-  inp.addEventListener('blur', () => done(!skip));
-  inp.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
-    if (e.key === 'Escape') { e.preventDefault(); skip = true; inp.blur(); }
-  });
-}
+  const zoom = h('input', { type: 'range', min: 8, max: 900, value: T.pps, step: 1 });
+  zoom.addEventListener('input', () => { T.pps = +zoom.value; PM.invalidate('timeline'); });
+  const snap = h('button.iconbtn' + (PM.snap ? '.on' : ''), { title: 'Snapping (S)' }, PM.icon('magnet'));
+  snap.onclick = () => { PM.snap = !PM.snap; snap.classList.toggle('on', PM.snap); };
+  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (G)' }, PM.icon('graph'));
+  graph.onclick = () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); };
+  const loop = h('button.iconbtn' + (PM.loop ? '.on' : ''), { title: 'Loop' }, PM.icon('undo'));
+  loop.onclick = () => { PM.loop = !PM.loop; loop.classList.toggle('on', PM.loop); };
 
-function buildFoot(foot) {
-  const graph = h('button.iconbtn.sm' + (T.graph ? '.on' : ''), { title: 'Graph Editor (G)' }, PM.icon('graph'));
-  graph.onclick = () => T.toggleGraph();
-  T.graphBtn = graph;
-  const meta = h('div#tl-foot-meta');
-  T.footMeta = meta;
-  const nav = h('div#tl-nav', h('div#tl-nav-thumb'));
-  T.navEl = nav; T.navThumb = nav.firstChild;
-  bindNav(nav);
-  const zoom = h('input#tl-zoom', { type: 'range', min: 8, max: 900, value: T.pps, step: 1, title: 'Zoom' });
-  T.zoomEl = zoom;
-  zoom.addEventListener('input', () => setPps(+zoom.value, PM.time));
-  const mtnS = h('button.tl-mtn.s', { title: 'Zoom out' }, PM.icon('mtnS'));
-  const mtnL = h('button.tl-mtn.l', { title: 'Zoom in' }, PM.icon('mtnL'));
-  mtnS.onclick = () => setPps(T.pps / 1.25, PM.time);
-  mtnL.onclick = () => setPps(T.pps * 1.25, PM.time);
-  foot.append(
-    h('div#tl-foot-l', graph, meta),
-    h('div#tl-foot-r', nav, mtnS, zoom, mtnL),
+  head.append(
+    btn('prev', () => PM.setTime(prevEdge()), 'Previous edge'),
+    playBtn,
+    btn('next', () => PM.setTime(nextEdge()), 'Next edge'),
+    time,
+    h('span', { style: { flex: 1 } }),
+    h('div.zoomrow', h('span', '−'), zoom, h('span', '+')),
+    btn('frame', () => T.frameView(), 'Frame entire composition (⇧F)'),
+    loop, snap, graph,
   );
-}
-T.toggleGraph = () => {
-  T.graph = !T.graph;
-  if (T.graphBtn) T.graphBtn.classList.toggle('on', T.graph);
-  PM.invalidate('timeline');
-};
-function setPps(pps, anchorT) {
-  const vis = Math.max(40, T.w - T.gut);
-  const a = anchorT != null ? anchorT : T.scrollT + (vis / T.pps) / 2;
-  const ax = t2x(a);
-  T.pps = clamp(pps, 4, 4000);
-  if (T.zoomEl) T.zoomEl.value = String(clamp(T.pps, 8, 900));
-  T.scrollT = a - (ax - T.gut) / T.pps;
-  T.scrollT = Math.max(-.4, T.scrollT);
-  PM.invalidate('timeline');
-}
-function visDur() { return Math.max(.001, (T.w - T.gut) / T.pps); }
-function updateNav() {
-  const nav = T.navEl, th = T.navThumb;
-  if (!nav || !th) return;
-  const dur = Math.max(.001, PM.proj.dur);
-  const vis = visDur();
-  const nw = nav.clientWidth || 1;
-  let x = (T.scrollT / dur) * nw;
-  let w = (vis / dur) * nw;
-  if (w >= nw - .5) { x = 0; w = nw; }
-  x = clamp(x, 0, Math.max(0, nw - 8));
-  w = clamp(w, 8, nw - x);
-  th.style.left = x + 'px';
-  th.style.width = w + 'px';
-  if (T.zoomEl && document.activeElement !== T.zoomEl) T.zoomEl.value = String(clamp(T.pps, 8, 900));
-  if (T.graphBtn) T.graphBtn.classList.toggle('on', !!T.graph);
-  if (T.footMeta) {
-    const ms = PM.perf && PM.perf.ms;
-    T.footMeta.textContent = 'Frame Render Time: ' + (ms < 1 ? (ms || 0).toFixed(1) : Math.round(ms)) + 'ms';
-  }
-}
-function bindNav(nav) {
-  nav.addEventListener('pointermove', (e) => {
-    const th = T.navThumb && T.navThumb.getBoundingClientRect();
-    if (!th) return;
-    const edge = 6;
-    nav.style.cursor = (e.clientX >= th.left - 2 && e.clientX <= th.left + edge) ||
-      (e.clientX >= th.right - edge && e.clientX <= th.right + 2) ? 'ew-resize' : 'grab';
+  const sync = () => {
+    time.textContent = PM.tc(PM.time, PM.proj.fps);
+    playBtn.textContent = '';
+    playBtn.appendChild(PM.icon(PM.playing ? 'pause' : 'play'));
+  };
+  PM.bus.on('time', sync); PM.bus.on('transport', sync); sync();
+  time.addEventListener('pointerdown', (e) => {
+    PM.drag(e, { cursor: 'ew-resize', move: (dx) => PM.setTime(PM.time + dx / 12 / PM.proj.fps) });
   });
-  nav.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    const r = nav.getBoundingClientRect();
-    const dur = () => Math.max(.001, PM.proj.dur);
-    const xOf = (ev) => clamp((ev.clientX - r.left) / Math.max(1, r.width), 0, 1);
-    const th = T.navThumb.getBoundingClientRect();
-    const edge = 6;
-    let mode = 'jump';
-    if (e.clientX >= th.left - 2 && e.clientX <= th.right + 2) {
-      if (e.clientX <= th.left + edge) mode = 'in';
-      else if (e.clientX >= th.right - edge) mode = 'out';
-      else mode = 'pan';
-    }
-    const startT = T.scrollT, startVis = visDur(), startX = xOf(e);
-    if (mode === 'jump') {
-      T.scrollT = clamp(xOf(e) * dur() - visDur() / 2, 0, Math.max(0, dur() - visDur()));
-      PM.invalidate('timeline');
-      mode = 'pan';
-    }
-    PM.drag(e, {
-      cursor: mode === 'pan' ? 'grabbing' : 'ew-resize',
-      move: (dx, dy, ev) => {
-        const x = xOf(ev), D = dur();
-        if (mode === 'pan') {
-          T.scrollT = clamp(startT + (x - startX) * D, -.4, Math.max(-.4, D - visDur() * .15));
-        } else if (mode === 'in') {
-          const end = startT + startVis;
-          const nt = clamp(x * D, 0, end - .05);
-          T.scrollT = nt;
-          T.pps = clamp((T.w - T.gut) / (end - nt), 4, 4000);
-        } else {
-          const nt1 = clamp(x * D, startT + .05, D);
-          T.pps = clamp((T.w - T.gut) / (nt1 - startT), 4, 4000);
-        }
-        PM.invalidate('timeline');
-      },
-    });
-  });
-  nav.addEventListener('dblclick', (e) => { e.preventDefault(); T.frameView(); });
 }
 
 function resize(wrap) {
@@ -216,25 +90,8 @@ function buildRows() {
     if (L.shy) continue;
     rows.push({ kind: 'layer', L, i });
     if (!L.collapsed) {
-      const shown = new Set();
-      (PM.PAIRS || []).forEach(([label, keys]) => {
-        const cells = keys.map(k => L.p[k] && { key: k, prop: L.p[k] }).filter(Boolean);
-        if (!cells.length) return;
-        rows.push({ kind: 'prop', L, label, cells });
-        cells.forEach(c => shown.add(c.key));
-        if (L._open && L._open[label] && cells.length > 1) {
-          cells.forEach(c => rows.push({
-            kind: 'prop', L, label: (PM.CH[c.key] && PM.CH[c.key].label) || c.key,
-            cells: [c], child: true,
-          }));
-        }
-      });
-      PM.allProps(L).forEach(p => {
-        if (shown.has(p.key)) return;
-        if (p.prop.kf.length || p.prop.expr || PM.sel.chan === p.key || alwaysShow(L, p.key)) {
-          rows.push({ kind: 'prop', L, label: p.label, cells: [{ key: p.key, prop: p.prop }] });
-        }
-      });
+      const props = PM.allProps(L).filter(p => p.prop.kf.length || p.prop.expr || PM.sel.chan === p.key || alwaysShow(L, p.key));
+      props.forEach(p => rows.push({ kind: 'prop', L, ...p }));
     }
   }
   T.rows = rows;
@@ -326,7 +183,6 @@ function drawInner() {
   drawRuler(c, W, H);
   drawPlayhead(c, W, H);
   drawScrollThumb(c, W, H, maxScroll);
-  updateNav();
   if (window.__tlDebug) {
     const px = t2x(PM.time);
     const msg = '[tl] t=' + PM.time.toFixed(3) + ' px=' + (isFinite(px) ? px.toFixed(1) : String(px)) + ' gut=' + T.gut + ' W=' + W + ' sT=' + T.scrollT.toFixed(3) + ' pps=' + T.pps + ' rows=' + T.rows.length + ' graph=' + T.graph;
@@ -494,18 +350,17 @@ function drawPropKeys(c, r, y) {
   const L = r.L, cy = y + T.row / 2;
   c.strokeStyle = INK.grid;
   c.beginPath(); c.moveTo(T.gut, cy); c.lineTo(T.w, cy); c.stroke();
-  propCells(r).forEach(cell => {
-    for (const k of cell.prop.kf) {
-      const x = t2x(L.from + k.t);
-      if (x < T.gut - 6 || x > T.w + 6) continue;
-      const sel = PM.sel.keys.some(s => s.i === k.i);
-      c.fillStyle = sel ? theme.accent : INK.key;
-      if (k.hold) { c.fillRect(x - 3.4, cy - 3.4, 6.8, 6.8); }
-      else {
-        c.beginPath(); c.moveTo(x, cy - 4.4); c.lineTo(x + 4.4, cy); c.lineTo(x, cy + 4.4); c.lineTo(x - 4.4, cy); c.fill();
-      }
+  const kf = r.prop.kf;
+  for (const k of kf) {
+    const x = t2x(L.from + k.t);
+    if (x < T.gut - 6 || x > T.w + 6) continue;
+    const sel = PM.sel.keys.some(s => s.i === k.i);
+  c.fillStyle = sel ? theme.accent : INK.key;
+    if (k.hold) { c.fillRect(x - 3.4, cy - 3.4, 6.8, 6.8); }
+    else {
+      c.beginPath(); c.moveTo(x, cy - 4.4); c.lineTo(x + 4.4, cy); c.lineTo(x, cy + 4.4); c.lineTo(x - 4.4, cy); c.fill();
     }
-  });
+  }
 }
 
 function drawGutter(c, W, H) {
@@ -519,61 +374,41 @@ function drawGutter(c, W, H) {
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
     if (r.kind === 'layer') {
-      const L = r.L, sel = PM.sel.layers.includes(L.id), mid = y + T.row / 2;
+      const L = r.L, sel = PM.sel.layers.includes(L.id);
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
-      /* A/V Features: Video · Audio · Solo · Lock  (AE order) */
-      icoEye(c, SW.eye, mid, L.on);
-      icoAudio(c, SW.audio, mid, L.audio !== false, L.type === 'audio' || L.type === 'video');
-      icoSolo(c, SW.solo, mid, !!L.solo);
-      icoLock(c, SW.lock, mid, L.lock);
-      /* label color · # · twirl · name */
-      c.fillStyle = L.color; roundRect(c, SW.label - 5, mid - 5, 10, 10, 2); c.fill();
-      c.font = '500 10.5px ' + fmono();
-      c.fillStyle = theme.tx3; c.textBaseline = 'middle'; c.textAlign = 'center';
-      c.fillText(String(r.i + 1), SW.num, mid);
-      c.textAlign = 'left';
+      c.font = '500 11px ' + fmono();
+      c.fillStyle = theme.tx3; c.textBaseline = 'middle';
+      c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
+      /* eye / lock */
+      icoEye(c, 30, y + T.row / 2, L.on);
+      icoLock(c, 48, y + T.row / 2, L.lock);
+      if (L.solo) { c.fillStyle = theme.accent; c.beginPath(); c.arc(64, y + T.row / 2, 3, 0, 7); c.fill(); }
+      /* twirl */
       c.save();
-      c.translate(SW.twirl, mid); c.rotate(L.collapsed ? 0 : Math.PI / 2);
+      c.translate(76, y + T.row / 2); c.rotate(L.collapsed ? 0 : Math.PI / 2);
       c.strokeStyle = theme.tx3; c.lineWidth = 1.4; c.beginPath();
       c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
       c.restore();
+      /* color chip + name */
+      c.fillStyle = L.color; roundRect(c, 86, y + T.row / 2 - 6, 3, 12, 1.5); c.fill();
       c.font = (sel ? '560 ' : '450 ') + '11.5px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      clipText(c, L.name, SW.name, mid, T.gut - SW.name - 8);
-      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fmono(); c.fillText('↳', SW.name - 12, mid); }
+      clipText(c, L.name, 96, y + T.row / 2, T.gut - 130);
+      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fmono(); c.fillText('↳', T.gut - 24, y + T.row / 2); }
+      if (L.mblur) { c.fillStyle = theme.accent; c.font = '500 8.5px ' + fmono(); c.fillText('MB', T.gut - 15, y + T.row / 2); }
     } else {
-      const L = r.L, mid = y + T.row / 2;
-      const cells = propCells(r);
-      const sel = cells.some(c => PM.sel.chan === c.key);
-      const keyed = cells.some(c => c.prop.kf.length);
-      const nameX = r.child ? SW.name + 28 : SW.name + 16;
-      if (!r.child) {
-        c.save();
-        c.translate(SW.twirl, mid);
-        c.rotate((L._open && L._open[r.label]) ? Math.PI / 2 : 0);
-        c.strokeStyle = cells.length > 1 ? theme.tx3 : INK.lo;
-        c.lineWidth = 1.4; c.beginPath();
-        c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
-        c.restore();
-        icoWatch(c, SW.name, mid, keyed);
-      }
+      const L = r.L;
       c.font = '450 11px ' + fui();
-      c.fillStyle = sel ? theme.accent : theme.tx3;
-      clipText(c, r.label, nameX, mid, T.gut - cells.length * (VAL_W + 4) - nameX - 8);
-      if (cells.some(c => c.prop.expr)) { c.fillStyle = theme.accent; c.fillText('ƒ', nameX - 12, mid); }
-      cells.forEach((cell, ci) => {
-        const box = valBox(i, ci, cells.length);
-        if (T.editingVal && T.editingVal.row === i && T.editingVal.cell === ci) return;
-        const hot = T.hoverVal && T.hoverVal.row === i && T.hoverVal.cell === ci;
-        c.fillStyle = hot ? 'rgba(15,15,20,.10)' : 'rgba(15,15,20,.06)';
-        roundRect(c, box.x, box.y, box.w, box.h, 4); c.fill();
-        const v = PM.evP(L, cell.prop, PM.time, cell.key);
-        c.font = '500 11px ' + fmono();
-        c.fillStyle = cell.prop.kf.length ? theme.accent : theme.tx;
-        c.textAlign = 'right';
-        c.fillText(fmtVal(v), box.x + box.w - 5, y + T.row / 2);
-        c.textAlign = 'left';
-      });
+      c.fillStyle = PM.sel.chan === r.key ? theme.accent : theme.tx3;
+      clipText(c, r.label, 112, y + T.row / 2, T.gut - 150);
+      /* value at playhead */
+      const v = PM.evP(L, r.prop, PM.time, r.key);
+      c.font = '400 10px ' + fmono();
+      c.fillStyle = INK.sub;
+      c.textAlign = 'right';
+      c.fillText(typeof v === 'number' ? PM.round(v, 1) : String(v).slice(0, 8), T.gut - 8, y + T.row / 2);
+      c.textAlign = 'left';
+      if (r.prop.expr) { c.fillStyle = theme.accent; c.fillText('ƒ', 100, y + T.row / 2); }
     }
   }
   c.restore();
@@ -583,57 +418,17 @@ function clipText(c, s, x, y, max) {
   if (c.measureText(t).width > max) { while (t.length > 3 && c.measureText(t + '…').width > max) t = t.slice(0, -1); t += '…'; }
   c.fillText(t, x, y);
 }
-/* AE A/V Features · Source Name columns */
-const SW = { eye: 13, audio: 31, solo: 49, lock: 67, label: 84, num: 102, twirl: 120, name: 134 };
-const LABEL_COLORS = ['#E23B3B', '#E8A23C', '#A89B76', '#4C8DFF', '#6C7BE8', '#E8E2CF', '#3FCF8E', '#FF6B1A', '#A9A9AE', '#6a6a70'];
-function hitSwitch(x) {
-  if (x < 22) return 'eye';
-  if (x < 40) return 'audio';
-  if (x < 58) return 'solo';
-  if (x < 76) return 'lock';
-  if (x < 94) return 'label';
-  if (x < 114) return 'num';
-  if (x < 130) return 'twirl';
-  return 'name';
-}
 function icoEye(c, x, y, on) {
   c.strokeStyle = on ? INK.hi : INK.lo;
   c.lineWidth = 1.1; c.beginPath();
   c.ellipse(x, y, 5, 3.2, 0, 0, 7); c.stroke();
   if (on) { c.fillStyle = INK.hi; c.beginPath(); c.arc(x, y, 1.5, 0, 7); c.fill(); }
 }
-function icoAudio(c, x, y, on, has) {
-  c.strokeStyle = on && has ? INK.hi : INK.lo;
-  c.fillStyle = on && has ? INK.hi : INK.lo;
-  c.lineWidth = 1.15;
-  c.beginPath();
-  c.moveTo(x - 3.4, y - 1.8); c.lineTo(x - 1.2, y - 1.8); c.lineTo(x + 2.2, y - 4.2);
-  c.lineTo(x + 2.2, y + 4.2); c.lineTo(x - 1.2, y + 1.8); c.lineTo(x - 3.4, y + 1.8); c.closePath();
-  if (on) c.fill(); else c.stroke();
-  if (on && has) {
-    c.beginPath(); c.arc(x + 2.4, y, 3.4, -.55, .55); c.stroke();
-  }
-}
-function icoSolo(c, x, y, on) {
-  c.strokeStyle = on ? theme.accent : INK.lo;
-  c.fillStyle = on ? theme.accent : 'transparent';
-  c.lineWidth = 1.15;
-  c.beginPath(); c.arc(x, y, 4.1, 0, 7); on ? c.fill() : c.stroke();
-  if (on) { c.fillStyle = '#fff'; c.beginPath(); c.arc(x, y, 1.5, 0, 7); c.fill(); }
-}
 function icoLock(c, x, y, on) {
   c.strokeStyle = on ? theme.accent : INK.lo;
   c.lineWidth = 1.1;
   c.strokeRect(x - 3.4, y - 1, 6.8, 5);
   c.beginPath(); c.arc(x, y - 1, 2.4, Math.PI, 0); c.stroke();
-}
-function icoWatch(c, x, y, on) {
-  c.strokeStyle = on ? theme.accent : INK.lo;
-  c.fillStyle = on ? theme.accent : 'transparent';
-  c.lineWidth = 1.15;
-  c.beginPath(); c.arc(x, y, 4.3, 0, 7); on ? c.fill() : c.stroke();
-  c.strokeStyle = on ? '#fff' : INK.lo;
-  c.beginPath(); c.moveTo(x, y); c.lineTo(x, y - 2.2); c.moveTo(x, y); c.lineTo(x + 1.7, y + .6); c.stroke();
 }
 function roundRect(c, x, y, w, hh, r) {
   r = Math.min(r, Math.abs(w) / 2, Math.abs(hh) / 2);
@@ -656,41 +451,22 @@ function drawPlayhead(c, W, H) {
 
 /* ── graph editor ──────────────────────────────────────── */
 function drawGraph(c, W, H) {
-  const rows = T.rows.filter(r => r.kind === 'prop' && propCells(r).some(c => PM.sel.chan === c.key || c.prop.kf.length));
-  const targetRow = rows.find(r => propCells(r).some(c => c.key === PM.sel.chan)) || rows[0];
+  const rows = T.rows.filter(r => r.kind === 'prop' && (PM.sel.chan === r.key || r.prop.kf.length));
+  const target = rows.find(r => PM.sel.chan === r.key) || rows[0];
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
-  if (!targetRow) {
+  if (!target) {
     c.fillStyle = theme.tx3; c.font = '400 11.5px ' + fui(); c.textAlign = 'center';
     c.fillText('Select an animated property to edit its curve', (W + T.gut) / 2, (H + T.ruler) / 2);
     c.textAlign = 'left'; c.restore(); return;
   }
-  const cell = propCells(targetRow).find(c => c.key === PM.sel.chan && c.prop.kf.length)
-    || propCells(targetRow).find(c => c.prop.kf.length) || propCells(targetRow)[0];
-  const target = { L: targetRow.L, prop: cell.prop, key: cell.key, label: targetRow.label };
   const kf = target.prop.kf, L = target.L;
-  let vmin, vmax;
-  if (T._graphLock) {
-    vmin = T._graphLock.vmin; vmax = T._graphLock.vmax;
-  } else {
-    vmin = Infinity; vmax = -Infinity;
-    const grow = (v) => { if (v == null || !isFinite(v)) return; vmin = Math.min(vmin, v); vmax = Math.max(vmax, v); };
-    kf.forEach((k, i) => {
-      grow(k.v);
-      const nx = kf[i + 1], pv = kf[i - 1];
-      if (nx) grow(k.v + (nx.v - k.v) * k.eo[1]);
-      if (pv) grow(pv.v + (k.v - pv.v) * k.ei[1]);
-    });
-    if (kf.length) {
-      const t0 = kf[0].t, t1 = kf[kf.length - 1].t, span = Math.max(1e-4, t1 - t0);
-      const n = Math.max(64, Math.min(240, Math.ceil(span * 80)));
-      for (let i = 0; i <= n; i++) grow(PM.evalKfs(kf, t0 + span * i / n));
-    }
-    if (!isFinite(vmin)) { vmin = 0; vmax = 1; }
-    if (vmax - vmin < 1e-6) { vmax = vmin + 1; }
-    const padv = (vmax - vmin) * .08;
-    vmin -= padv; vmax += padv;
-  }
-  const top = T.ruler + 28, bot = H - 16;
+  let vmin = Infinity, vmax = -Infinity;
+  kf.forEach(k => { vmin = Math.min(vmin, k.v); vmax = Math.max(vmax, k.v); });
+  if (!isFinite(vmin)) { vmin = 0; vmax = 1; }
+  if (vmax - vmin < 1e-6) { vmax = vmin + 1; }
+  const padv = (vmax - vmin) * .22;
+  vmin -= padv; vmax += padv;
+  const top = T.ruler + 16, bot = H - 16;
   const v2y = (v) => bot - (v - vmin) / (vmax - vmin) * (bot - top);
   T._graph = { target, vmin, vmax, v2y, y2v: (y) => vmin + (bot - y) / (bot - top) * (vmax - vmin) };
 
@@ -748,64 +524,12 @@ function hitRow(y) {
   return T.rows[i] ? { row: T.rows[i], i } : null;
 }
 
-const VAL_W = 58;
-function propCells(r) { return r.cells || (r.prop ? [{ key: r.key, prop: r.prop }] : []); }
-function fmtVal(v) {
-  if (typeof v !== 'number' || !isFinite(v)) return String(v).slice(0, 8);
-  return String(PM.round(v, Math.abs(v) < 10 ? 2 : 1));
-}
-function valBox(rowIdx, cellIdx, n) {
-  const y = rowY(rowIdx);
-  const w = VAL_W;
-  const x = T.gut - 6 - (n - cellIdx) * (w + 3);
-  return { x, y: y + 5, w, h: T.row - 10 };
-}
-function hitVal(x, y) {
-  const hr = hitRow(y);
-  if (!hr || hr.row.kind !== 'prop') return null;
-  const cells = propCells(hr.row);
-  for (let ci = 0; ci < cells.length; ci++) {
-    const b = valBox(hr.i, ci, cells.length);
-    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return { ...hr, cell: ci, cells };
-  }
-  return null;
-}
-
-function ensureEditEl(wrap) {
-  wrap = wrap || (T.cv && T.cv.parentElement);
-  if (!wrap) return null;
-  let edit = wrap.querySelector('#tl-edit');
-  if (edit) { T.editEl = edit; return edit; }
-  edit = h('input#tl-edit', { spellcheck: 'false' });
-  wrap.appendChild(edit);
-  T.editEl = edit;
-  edit.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); edit.blur(); }
-    if (e.key === 'Escape') { e.preventDefault(); T._editSkip = true; edit.blur(); }
-    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      const meta = (T._editMeta) || {};
-      const d = (e.key === 'ArrowUp' ? 1 : -1) * (meta.step || 1) * (e.shiftKey ? 10 : 1);
-      edit.value = String(PM.round(parseFloat(edit.value || 0) + d, 4));
-    }
-  });
-  edit.addEventListener('blur', () => commitEdit());
-  return edit;
-}
-
 function bind(cv, wrap) {
-  ensureEditEl(wrap);
   cv.addEventListener('pointerdown', onDown);
   cv.addEventListener('pointermove', onMove);
-  cv.addEventListener('pointerleave', () => {
-    if (T.hoverVal != null) { T.hoverVal = null; PM.invalidate('timeline'); }
-    T.cv.style.cursor = 'default';
-  });
   cv.addEventListener('dblclick', onDbl);
   cv.addEventListener('contextmenu', onCtx);
   cv.addEventListener('wheel', (e) => {
-    if (T.editEl && T.editEl.style.display === 'block') T.editEl.blur();
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
       const tAt = x2t(e.offsetX);
@@ -825,11 +549,7 @@ function bind(cv, wrap) {
 function onMove(e) {
   const x = e.offsetX, y = e.offsetY;
   let cur = 'default';
-  let hover = null;
-  if (x < T.gut) {
-    const hv = hitVal(x, y);
-    if (hv && !hv.row.L.lock) { cur = 'ew-resize'; hover = { row: hv.i, cell: hv.cell }; }
-  } else {
+  if (x > T.gut) {
     const hr = hitRow(y);
     if (hr && hr.row.kind === 'layer') {
       const L = hr.row.L;
@@ -839,9 +559,6 @@ function onMove(e) {
     }
     if (y < T.ruler) cur = 'ew-resize';
   }
-  const same = T.hoverVal && hover && T.hoverVal.row === hover.row && T.hoverVal.cell === hover.cell;
-  const bothNull = !T.hoverVal && !hover;
-  if (!same && !bothNull) { T.hoverVal = hover; PM.invalidate('timeline'); }
   T.cv.style.cursor = cur;
 }
 
@@ -859,20 +576,18 @@ function onDown(e) {
   if (x < T.gut) return gutterDown(e, x, y);
   if (T.graph) return graphDown(e, x, y);
   const hr = hitRow(y);
-  if (!hr) return marquee(e);
+  if (!hr) { PM.selectLayers([]); return marquee(e); }
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
   const L = r.L;
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
-  if (Math.abs(x - x0) < 5 || Math.abs(x - x1) < 5 || (x > x0 && x < x1)) {
-    if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id, e.shiftKey || e.metaKey);
-    else if (e.shiftKey) PM.selectLayers(L.id, true);
-    if (L.lock) return;
-    if (Math.abs(x - x0) < 5) return trim(e, 'in');
-    if (Math.abs(x - x1) < 5) return trim(e, 'out');
-    return slide(e);
-  }
-  return marquee(e);
+  if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id, e.shiftKey || e.metaKey);
+  else if (e.shiftKey) PM.selectLayers(L.id, true);
+  if (L.lock) return;
+  if (Math.abs(x - x0) < 5) return trim(e, 'in');
+  if (Math.abs(x - x1) < 5) return trim(e, 'out');
+  if (x > x0 && x < x1) return slide(e);
+  scrub(e);
 }
 
 function workAreaDrag(e, idx) {
@@ -901,52 +616,21 @@ function scrub(e) {
 }
 
 function gutterDown(e, x, y) {
-  const hv = hitVal(x, y);
-  if (hv) return scrubValue(e, hv);
   const hr = hitRow(y);
   if (!hr) return;
   const r = hr.row;
-  if (r.kind !== 'layer') {
-    const cells = propCells(r);
-    const c0 = cells[0];
-    if (c0) PM.sel.chan = c0.key;
-    PM.selectLayers(r.L.id);
-    if (!r.child && x >= 114 && x < 128 && cells.length > 1) {
-      r.L._open = r.L._open || {};
-      r.L._open[r.label] = !r.L._open[r.label];
-      PM.invalidate('timeline');
-      return;
-    }
-    if (!r.child && x >= 128 && x < 148) {
-      PM.hist.do('Animate ' + r.label, () => {
-        const any = cells.some(c => c.prop.kf.length);
-        cells.forEach(c => {
-          if (any) { c.prop.v = PM.evP(r.L, c.prop, PM.time, c.key); c.prop.kf = []; }
-          else PM.setKeyOn(c.prop, PM.time - r.L.from, PM.evP(r.L, c.prop, PM.time, c.key), 'power', PM.proj.fps);
-        });
-        PM.touch();
-      });
-      PM.invalidate();
-      return;
-    }
-    PM.invalidate('timeline'); return;
-  }
+  if (r.kind !== 'layer') { PM.sel.chan = r.key; PM.selectLayers(r.L.id); PM.invalidate('timeline'); return; }
   const L = r.L;
-  const sw = hitSwitch(x);
-  if (sw === 'eye') { PM.hist.do('Toggle visibility', () => { L.on = !L.on; }); PM.invalidate(); return; }
-  if (sw === 'audio') { PM.hist.do('Toggle audio', () => { L.audio = L.audio === false; }); PM.invalidate(); return; }
-  if (sw === 'solo') { PM.hist.do('Toggle solo', () => { L.solo = !L.solo; }); PM.invalidate(); return; }
-  if (sw === 'lock') { PM.hist.do('Toggle lock', () => { L.lock = !L.lock; }); PM.invalidate(); return; }
-  if (sw === 'label') {
-    PM.hist.do('Label color', () => {
-      const i = LABEL_COLORS.indexOf(L.color);
-      L.color = LABEL_COLORS[(i + 1) % LABEL_COLORS.length];
-    });
-    PM.invalidate(); return;
-  }
-  if (sw === 'twirl') {
+  if (x < 22) { }
+  else if (x < 40) { PM.hist.do('Toggle visibility', () => { L.on = !L.on; }); PM.invalidate(); return; }
+  else if (x < 58) { PM.hist.do('Toggle lock', () => { L.lock = !L.lock; }); PM.invalidate(); return; }
+  else if (x < 72) { PM.hist.do('Toggle solo', () => { L.solo = !L.solo; }); PM.invalidate(); return; }
+  else if (x < 86) {
     L.collapsed = !L.collapsed;
-    if (!L.collapsed) keepRowsVisible(hr.i, (PM.PAIRS || []).length);
+    if (!L.collapsed) {
+      const kids = PM.allProps(L).filter(pp => pp.prop.kf.length || pp.prop.expr || PM.sel.chan === pp.key || alwaysShow(L, pp.key)).length;
+      keepRowsVisible(hr.i, kids);
+    }
     PM.invalidate('timeline');
     return;
   }
@@ -967,87 +651,6 @@ function gutterDown(e, x, y) {
     },
     up: () => { if (done) { PM.hist.commit('Reorder layer'); PM.bus.emit('layers'); } },
   });
-}
-
-function scrubValue(e, hr) {
-  const cell = hr.cells[hr.cell];
-  const L = hr.row.L, key = cell.key, prop = cell.prop;
-  PM.selectLayers(L.id);
-  PM.sel.chan = key;
-  PM.invalidate('timeline');
-  if (L.lock) return;
-  const meta = PM.CH[key] || {};
-  const read = () => {
-    const v = PM.evP(L, prop, PM.time, key);
-    return typeof v === 'number' && isFinite(v) ? v : 0;
-  };
-  const write = (v) => {
-    if (meta.min != null) v = Math.max(meta.min, v);
-    if (meta.max != null) v = Math.min(meta.max, v);
-    PM.setOrKey(L, key, PM.round(v, 3), PM.time);
-    PM.invalidate();
-  };
-  const start = read();
-  let moved = false;
-  PM.hist.begin(hr.row.label);
-  PM.drag(e, {
-    cursor: 'ew-resize',
-    move: (dx, dy, ev) => {
-      if (!moved && Math.abs(dx) < 3) return;
-      moved = true;
-      const mult = ev.shiftKey ? 10 : ev.altKey ? .1 : 1;
-      write(start + dx * (meta.step || 1) * mult * .5);
-    },
-    up: () => {
-      if (!moved) { PM.hist.cancel(); editValue(hr); }
-      else PM.hist.commit(hr.row.label);
-    },
-  });
-}
-
-function editValue(hr) {
-  const el = ensureEditEl(); if (!el) return;
-  const cell = hr.cells[hr.cell];
-  const L = hr.row.L, key = cell.key, prop = cell.prop;
-  const v = PM.evP(L, prop, PM.time, key);
-  const box = valBox(hr.i, hr.cell, hr.cells.length);
-  T.editingVal = { row: hr.i, cell: hr.cell };
-  T._editSkip = false;
-  T._editHr = hr;
-  T._editMeta = PM.CH[key] || {};
-  el.style.display = 'block';
-  el.style.left = box.x + 'px';
-  el.style.top = box.y + 'px';
-  el.style.width = box.w + 'px';
-  el.style.height = box.h + 'px';
-  el.value = typeof v === 'number' ? String(PM.round(v, 3)) : String(v);
-  PM.invalidate('timeline');
-  el.focus(); el.select();
-}
-function commitEdit() {
-  const el = T.editEl;
-  const hr = T._editHr;
-  const skip = T._editSkip;
-  T.editingVal = null; T._editHr = null; T._editSkip = false;
-  if (el) el.style.display = 'none';
-  if (!skip && hr && el) {
-    const cell = hr.cells[hr.cell];
-    const cur = PM.evP(hr.row.L, cell.prop, PM.time, cell.key);
-    const raw = el.value.trim();
-    let n = NaN;
-    if (/^[-+*/]/.test(raw) && typeof cur === 'number') {
-      try { n = Function('"use strict";return (' + cur + raw + ')')(); } catch { n = NaN; }
-    } else if (/^[-+*/(). 0-9e]+$/i.test(raw)) {
-      try { n = Function('"use strict";return (' + raw + ')')(); } catch { n = NaN; }
-    }
-    if (isFinite(n)) {
-      const meta = PM.CH[cell.key] || {};
-      if (meta.min != null) n = Math.max(meta.min, n);
-      if (meta.max != null) n = Math.min(meta.max, n);
-      PM.hist.do(hr.row.label, () => PM.setOrKey(hr.row.L, cell.key, PM.round(n, 4), PM.time));
-    }
-  }
-  PM.invalidate();
 }
 
 function slide(e) {
@@ -1101,21 +704,12 @@ function trim(e, side) {
 }
 
 function keyDown(e, r, x, y, rowIdx) {
-  const cells = propCells(r);
-  const cell = cells.find(c => c.prop.kf.some(k => Math.abs(t2x(r.L.from + k.t) - x) < 6)) || cells[0];
-  if (cell) PM.sel.chan = cell.key;
-  const hit = cell && cell.prop.kf.find(k => Math.abs(t2x(r.L.from + k.t) - x) < 6);
-  if (!hit) return marquee(e);
-  if (!PM.sel.layers.includes(r.L.id)) {
-    const keep = [...PM.sel.keys];
-    PM.selectLayers(r.L.id, true);
-    if (!e.shiftKey) PM.sel.keys = keep;
-  }
-  if (e.shiftKey) {
-    if (!PM.sel.keys.some(k => k.i === hit.i)) PM.sel.keys.push(hit);
-  } else if (!PM.sel.keys.some(k => k.i === hit.i)) {
-    PM.sel.keys = [hit];
-  }
+  PM.sel.chan = r.key;
+  PM.selectLayers(r.L.id);
+  const hit = r.prop.kf.find(k => Math.abs(t2x(r.L.from + k.t) - x) < 6);
+  if (!hit) { PM.sel.keys = []; PM.invalidate('timeline'); return scrub(e); }
+  if (e.shiftKey) PM.sel.keys.push(hit);
+  else if (!PM.sel.keys.some(k => k.i === hit.i)) PM.sel.keys = [hit];
   const keys = PM.sel.keys.length ? PM.sel.keys : [hit];
   const start = keys.map(k => ({ k, t: k.t }));
   PM.hist.begin('Move keyframe');
@@ -1125,18 +719,12 @@ function keyDown(e, r, x, y, rowIdx) {
       moved = true;
       const dt = PM.snapF(dx / T.pps, PM.proj.fps);
       start.forEach(s => { s.k.t = Math.max(0, s.t + dt); });
-      PM.proj.layers.forEach(L => PM.allProps(L).forEach(p => p.prop.kf.sort((a, b) => a.t - b.t)));
+      r.prop.kf.sort((a, b) => a.t - b.t);
       PM.touch(); PM.invalidate();
     },
     up: () => { moved ? PM.hist.commit('Move keyframe') : PM.hist.cancel(); PM.invalidate('timeline'); },
   });
 }
-
-function lockGraph() {
-  const g = T._graph;
-  if (g && !T._graphLock) T._graphLock = { vmin: g.vmin, vmax: g.vmax };
-}
-function unlockGraph() { T._graphLock = null; PM.invalidate('timeline'); }
 
 function graphDown(e, x, y) {
   const g = T._graph; if (!g) return;
@@ -1146,123 +734,62 @@ function graphDown(e, x, y) {
     if (k._hi && Math.hypot(x - k._hi[0], y - k._hi[1]) < 7) return dragHandle(e, k, 'ei', g, kf, L);
   }
   const hit = kf.find(k => k._pt && Math.hypot(x - k._pt[0], y - k._pt[1]) < 8);
-  if (!hit) return marquee(e, 'graph');
+  if (!hit) return scrub(e);
   PM.sel.keys = e.shiftKey ? [...PM.sel.keys, hit] : [hit];
-  lockGraph();
-  const y2v = g.y2v;
+  const start = { t: hit.t, v: hit.v };
   PM.hist.begin('Edit curve');
   PM.drag(e, {
-    move: (dx, dy, ev) => {
-      const rec = T.cv.getBoundingClientRect();
-      hit.t = Math.max(0, PM.snapF(x2t(ev.clientX - rec.left) - L.from, PM.proj.fps));
-      hit.v = PM.round(y2v(ev.clientY - rec.top), 3);
+    move: (dx, dy) => {
+      hit.t = Math.max(0, PM.snapF(start.t + dx / T.pps, PM.proj.fps));
+      hit.v = PM.round(start.v + (g.y2v(0) - g.y2v(dy)) * -1, 3);
       kf.sort((a, b) => a.t - b.t);
       PM.touch(); PM.invalidate();
     },
-    up: () => { PM.hist.commit('Edit curve'); unlockGraph(); },
+    up: () => PM.hist.commit('Edit curve'),
   });
 }
 function dragHandle(e, k, which, g, kf, L) {
   const i = kf.indexOf(k);
   const other = which === 'eo' ? kf[i + 1] : kf[i - 1];
   if (!other) return;
-  lockGraph();
-  const self = { x: t2x(L.from + k.t), y: g.v2y(k.v) };
-  const oth = { x: t2x(L.from + other.t), y: g.v2y(other.v) };
+  const ax = t2x(L.from + k.t), ay = g.v2y(k.v);
+  const bx = t2x(L.from + other.t), by = g.v2y(other.v);
+  const start = [...k[which]];
   PM.hist.begin('Adjust easing');
   PM.drag(e, {
-    move: (dx, dy, ev) => {
-      const rec = T.cv.getBoundingClientRect();
-      const px = ev.clientX - rec.left, py = ev.clientY - rec.top;
-      let nx, ny;
-      if (which === 'eo') {
-        nx = (px - self.x) / (oth.x - self.x || 1);
-        ny = (py - self.y) / (oth.y - self.y || 1);
-      } else {
-        nx = (px - oth.x) / (self.x - oth.x || 1);
-        ny = (py - oth.y) / (self.y - oth.y || 1);
-      }
-      k[which] = [PM.round(clamp(nx, 0, 1), 3), PM.round(ny, 3)];
+    move: (dx, dy) => {
+      const nx = clamp(start[0] + dx / (bx - ax || 1), 0, 1);
+      const ny = start[1] + dy / (by - ay || 1);
+      k[which] = [PM.round(nx, 3), PM.round(ny, 3)];
       PM.touch(); PM.invalidate();
     },
-    up: () => { PM.hist.commit('Adjust easing'); unlockGraph(); },
+    up: () => PM.hist.commit('Adjust easing'),
   });
 }
 
-function keysInBox(m) {
-  const out = [];
-  T.rows.forEach((row, i) => {
-    if (row.kind !== 'prop') return;
-    const cy = rowY(i) + T.row / 2;
-    if (cy < m.y0 - 4 || cy > m.y1 + 4) return;
-    propCells(row).forEach(cell => {
-      cell.prop.kf.forEach(k => {
-        const x = t2x(row.L.from + k.t);
-        if (x + 5 >= m.x0 && x - 5 <= m.x1) out.push(k);
-      });
-    });
-  });
-  return out;
-}
-function graphKeysInBox(m) {
-  const g = T._graph; if (!g) return [];
-  return g.target.prop.kf.filter(k => k._pt && k._pt[0] + 5 >= m.x0 && k._pt[0] - 5 <= m.x1 && k._pt[1] + 5 >= m.y0 && k._pt[1] - 5 <= m.y1);
-}
-function layersInBox(m) {
-  const out = [];
-  T.rows.forEach((row, i) => {
-    if (row.kind !== 'layer') return;
-    const y = rowY(i);
-    if (y + T.row < m.y0 || y > m.y1) return;
-    const a = t2x(row.L.from), b = t2x(row.L.from + row.L.dur);
-    if (b > m.x0 && a < m.x1) out.push(row.L.id);
-  });
-  return out;
-}
-function ownersOfKeys(keys) {
-  const ids = [];
-  T.rows.forEach(row => {
-    if (row.kind !== 'prop') return;
-    if (propCells(row).some(cell => cell.prop.kf.some(k => keys.some(s => s.i === k.i))) && !ids.includes(row.L.id)) ids.push(row.L.id);
-  });
-  return ids;
-}
-
-function marquee(e, mode) {
+function marquee(e) {
   const r = T.cv.getBoundingClientRect();
   const x0 = e.clientX - r.left, y0 = e.clientY - r.top;
-  const add = e.shiftKey;
-  const startKeys = add ? [...PM.sel.keys] : [];
-  const startLayers = add ? [...PM.sel.layers] : [];
-  let dragged = false;
   PM.drag(e, {
     move: (dx, dy) => {
-      if (!dragged && Math.hypot(dx, dy) < 3) return;
-      dragged = true;
       T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
-      const m = T.marquee;
-      const keys = mode === 'graph' ? graphKeysInBox(m) : keysInBox(m);
-      const layers = mode === 'graph' ? [] : layersInBox(m);
-      if (add) {
-        const seen = new Set(startKeys.map(k => k.i));
-        PM.sel.keys = startKeys.concat(keys.filter(k => !seen.has(k.i)));
-        const have = new Set(startLayers);
-        PM.sel.layers = startLayers.concat(layers.filter(id => !have.has(id)));
-      } else {
-        PM.sel.keys = keys;
-        const next = layers.length ? layers : ownersOfKeys(keys);
-        PM.sel.layers = next;
-      }
       PM.invalidate('timeline');
     },
     up: () => {
-      if (!dragged && !add) {
-        PM.sel.keys = [];
-        if (!hitRow(y0)) PM.sel.layers = [];
+      if (T.marquee) {
+        const m = T.marquee;
+        const picked = [];
+        T.rows.forEach((row, i) => {
+          const y = rowY(i);
+          if (y + T.row < m.y0 || y > m.y1) return;
+          if (row.kind === 'layer') {
+            const a = t2x(row.L.from), b = t2x(row.L.from + row.L.dur);
+            if (b > m.x0 && a < m.x1) picked.push(row.L.id);
+          }
+        });
+        if (picked.length) PM.selectLayers(picked);
       }
-      T.marquee = null;
-      PM.bus.emit('sel');
-      PM.invalidate('timeline');
+      T.marquee = null; PM.invalidate('timeline');
     },
   });
 }
@@ -1279,7 +806,7 @@ function renameLayer(L, rowIdx) {
   const inp = h('input', {
     value: L.name,
     style: {
-      position: 'absolute', left: SW.name + 'px', top: (rowY(rowIdx) + 5) + 'px', width: (T.gut - SW.name - 8) + 'px',
+      position: 'absolute', left: '94px', top: (rowY(rowIdx) + 5) + 'px', width: (T.gut - 110) + 'px',
       height: '20px', background: '#000', border: '1px solid var(--accent)', borderRadius: '4px',
       color: 'var(--tx)', fontSize: '11.5px', padding: '0 5px', zIndex: 9,
     },
@@ -1300,18 +827,16 @@ function onCtx(e) {
   const items = [];
   if (hr && hr.row.kind === 'prop') {
     const r = hr.row;
-    const cells = propCells(r);
-    const cell = cells.find(c => c.prop.kf.some(k => Math.abs(t2x(r.L.from + k.t) - x) < 7)) || cells[0];
-    const key = cell && cell.prop.kf.find(k => Math.abs(t2x(r.L.from + k.t) - x) < 7);
+    const key = r.prop.kf.find(k => Math.abs(t2x(r.L.from + k.t) - x) < 7);
     if (key) {
       items.push({ header: 'Keyframe' });
       ['power', 'linear', 'easeOut', 'easeInOut', 'expoOut', 'backOut', 'snap', 'glide'].forEach(n =>
         items.push({ label: 'Ease · ' + n, run: () => PM.hist.do('Ease', () => PM.applyEaseTo([key], n)) }));
       items.push({ label: key.hold ? 'Remove hold' : 'Toggle hold', run: () => PM.hist.do('Hold', () => { key.hold = !key.hold; }) });
-      items.push('-', { label: 'Delete keyframe', run: () => PM.hist.do('Delete keyframe', () => PM.removeKey(cell.prop, key)) });
-    } else if (cell) {
-      items.push({ label: 'Add keyframe here', run: () => PM.hist.do('Add keyframe', () => PM.setKeyOn(cell.prop, x2t(x) - r.L.from, PM.evP(r.L, cell.prop, x2t(x), cell.key), 'power', PM.proj.fps)) });
-      items.push({ label: 'Clear all keyframes', run: () => PM.hist.do('Clear keys', () => { cells.forEach(c => { c.prop.kf = []; }); PM.touch(); }) });
+      items.push('-', { label: 'Delete keyframe', run: () => PM.hist.do('Delete keyframe', () => PM.removeKey(r.prop, key)) });
+    } else {
+      items.push({ label: 'Add keyframe here', run: () => PM.hist.do('Add keyframe', () => PM.setKeyOn(r.prop, x2t(x) - r.L.from, PM.evP(r.L, r.prop, x2t(x), r.key), 'power', PM.proj.fps)) });
+      items.push({ label: 'Clear all keyframes', run: () => PM.hist.do('Clear keys', () => { r.prop.kf = []; PM.touch(); }) });
     }
   } else if (hr && hr.row.kind === 'layer') {
     const L = hr.row.L;
@@ -1353,7 +878,7 @@ function edges() {
 function nextEdge() { const e = edges(); return e.find(t => t > PM.time + 1e-4) ?? PM.proj.dur; }
 function prevEdge() { const e = edges(); return [...e].reverse().find(t => t < PM.time - 1e-4) ?? 0; }
 T.nextEdge = nextEdge; T.prevEdge = prevEdge;
-T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, PM.proj.dur), 4, 4000); if (T.zoomEl) T.zoomEl.value = String(clamp(T.pps, 8, 900)); PM.invalidate('timeline'); };
+T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, PM.proj.dur), 4, 4000); PM.invalidate('timeline'); };
 T.reveal = (L, keys) => {
   L.collapsed = false; L._reveal = keys;
   buildRows();

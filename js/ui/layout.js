@@ -1,193 +1,439 @@
-/* Powermove — recursive workspace renderer. */
+/* Powermove — dock layout engine. The workspace JSON is the single source of UI truth.
+   Panels are resizable (splitters), movable (drag header between docks), and can be
+   popped out into their own native window via the panelWindow bridge. */
 (() => {
-const PM=window.PM,h=PM.h,$=PM.$,Schema=window.PMWorkspaceSchema;
-PM.PANELS={}; PM.panelInst={};
-PM.registerPanel=(id,def)=>{PM.PANELS[id]=Object.assign({id,title:id},def);};
-const L={ws:null,root:null}; PM.Layout=L;
-const MIRRORABLE=new Set(['viewer','timeline']);
+const PM = window.PM, h = PM.h, $ = PM.$;
 
-function sectionTitle(node){
-  if(!node)return 'Section';
-  if(node.type==='panel')return node.title||PM.PANELS[node.panel]?.title||node.panel;
-  return sectionTitle(node.children?.[0]);
-}
+PM.PANELS = {};      // id -> {title, icon, build(body, panel), header(el), persist}
+PM.panelInst = {};   // id -> {el, body, def, cache, spec}
 
-function makeGrip(){return h('span.grip',{title:'Drag to place · right-click for options'},PM.icon('grip'));}
-function ensureGrip(header){if(header&&!header.querySelector('.grip'))header.insertBefore(makeGrip(),header.firstChild);}
-L.ensureGrip=ensureGrip;
+PM.registerPanel = (id, def) => { PM.PANELS[id] = Object.assign({ id, title: id }, def); };
 
-function primaryInstance(panelId){return Object.values(PM.panelInst).find((inst)=>inst.panelId===panelId&&inst.real&&inst.built&&(!L.requestedInstances||L.requestedInstances.has(inst.key)));}
+const L = { root: null, ws: null };
+PM.Layout = L;
 
-function buildPanel(spec){
-  const def=PM.PANELS[spec.panel]; if(!def)return missingPanel(spec);
-  const key=spec.instance||spec.panel;
-  let inst=PM.panelInst[key];
-  const primary=primaryInstance(spec.panel);
-  const mirror=!!(MIRRORABLE.has(spec.panel)&&primary&&primary.key!==key);
-  if(inst?.el&&inst.built&&inst.mirror!==mirror){inst.el.remove();inst.built=false;}
-  if(inst?.el&&inst.built&&(def.persist||inst.mirror)){
-    inst.spec=spec; applyPanelSize(inst.el,spec,def); return inst.el;
+/* Panels that own live GL/canvas state and cannot be safely re-hosted in a popout. */
+const NO_POPOUT = new Set(['viewer', 'timeline']);
+
+/* ── panel construction ────────────────────────────────── */
+function buildPanel(spec, dock) {
+  const def = PM.PANELS[spec.id];
+  if (!def) return null;
+  const inst = PM.panelInst[spec.id] || (PM.panelInst[spec.id] = { def, cache: null });
+  /* Reuse the live panel element for persist canvases so apply() never destroys
+     the timeline/viewer backing store (the source of clip/gutter misalignment). */
+  if (def.persist && inst.el && inst.built) {
+    inst.spec = spec;
+    applyPanelSize(inst.el, spec, def);
+    inst.el.style.minHeight = (spec.min || 56) + 'px';
+    inst.el.dataset.collapsed = '0';
+    if (inst.body) inst.body.style.display = '';
+    return inst.el;
   }
-  inst=PM.panelInst[key]||(PM.panelInst[key]={key,panelId:spec.panel,def,cache:null});
-  inst.def=def; inst.spec=spec; inst.mirror=mirror; inst.real=!mirror;
-  const cls='.panel'+(def.flush?'.flush':'')+(def.noscroll?'.noscroll':'')+(spec.headless||def.headless?'.headless':'')+(mirror?'.linked-mirror-panel':'');
-  const el=h('div'+cls,{id:key===spec.panel||!document.getElementById('panel-'+spec.panel)?'panel-'+spec.panel:'panel-'+key});
-  el.dataset.panel=spec.panel;el.dataset.instance=key;
-  const header=h('header'),title=h('span.ptitle',spec.title||def.title);header.append(title,h('span.sp'));el.appendChild(header);ensureGrip(header);
-  const body=h('div.body');el.appendChild(body);
-  inst.el=el;inst.body=body;inst.header=header;
-  applyPanelSize(el,spec,def);
-  el.style.minWidth=(spec.minWidth||def.minWidth||80)+'px';el.style.minHeight=(spec.minHeight||def.minHeight||56)+'px';
-  try{
-    if(mirror)buildMirror(body,spec.panel,primary);
-    else def.build&&def.build(body,inst);
-    inst.built=true;
-  }catch(error){console.error('[panel] '+spec.panel,error);body.appendChild(h('div.empty','Panel error: '+error.message));}
-  if(!mirror){try{def.header&&def.header(header,inst);}catch(error){}}
-  ensureGrip(header);
-  header.addEventListener('pointerdown',(event)=>{if(event.target.closest('button')||event.button!==0)return;startPanelDrag(event,spec,el);});
-  header.addEventListener('dblclick',(event)=>{if(event.target.closest('button')||el.classList.contains('headless'))return;toggleCollapse(inst);});
-  header.addEventListener('contextmenu',(event)=>{event.preventDefault();panelMenu(event,spec);});
+  const cls = '.panel' + (def.flush ? '.flush' : '') + (def.noscroll ? '.noscroll' : '') + (spec.headless || def.headless ? '.headless' : '');
+  const el = h('div' + cls, { id: 'panel-' + spec.id });
+  el.dataset.panel = spec.id;
+
+  const hdr = h('header');
+  const grip = h('span.grip', { title: 'Drag to move · right-click for options' }, PM.icon('grip'));
+  const title = h('span.ptitle', spec.title || def.title);
+  hdr.append(grip, title, h('span.sp'));
+  el.appendChild(hdr);
+
+  let body = h('div.body');
+  if (def.persist && inst.cache) body = inst.cache;
+  el.appendChild(body);
+
+  inst.el = el; inst.body = body; inst.header = hdr; inst.spec = spec;
+  if (def.persist) inst.cache = body;
+
+  /* sizing */
+  applyPanelSize(el, spec, def);
+  el.style.minHeight = (spec.min || 56) + 'px';
+
+  if (!def.persist || !inst.built) {
+    body.textContent = '';
+    try { def.build && def.build(body, inst); } catch (e) { console.error('[panel]' + spec.id, e); body.appendChild(h('div.empty', 'Panel error: ' + e.message)); }
+    inst.built = true;
+  }
+  try { def.header && def.header(hdr, inst); } catch (e) { }
+  if (!hdr.querySelector('.grip')) hdr.insertBefore(grip, hdr.firstChild);
+
+  /* header interactions: drag to move, dblclick collapse, context menu */
+  hdr.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    if (e.button !== 0) return;
+    startPanelDrag(e, spec, dock, el);
+  });
+  hdr.addEventListener('dblclick', (e) => {
+    if (e.target.closest('button')) return;
+    const collapsed = el.dataset.collapsed === '1';
+    el.dataset.collapsed = collapsed ? '0' : '1';
+    body.style.display = collapsed ? '' : 'none';
+    el.style.flex = collapsed ? (spec.flex ? '1 1 auto' : '0 0 ' + (spec.size || def.size) + 'px') : '0 0 var(--hdr-h)';
+    if (!collapsed) PM.bus.emit('layout:applied');
+  });
+  hdr.addEventListener('contextmenu', (e) => { e.preventDefault(); panelMenu(e, spec, dock); });
   return el;
 }
 
-function missingPanel(spec){const el=h('div.panel.missing-section',h('header',h('span.ptitle','Missing section')),h('div.body.empty','“'+(spec.panel||spec.id)+'” is unavailable.'));el.dataset.instance=spec.instance||spec.panel;return el;}
-function applyPanelSize(el,spec,def){el.style.flex=spec.flex||(!spec.size&&!def.size)?'1 1 auto':'0 0 '+(spec.size||def.size)+'px';}
-function toggleCollapse(inst){const collapsed=inst.el.dataset.collapsed==='1';inst.el.dataset.collapsed=collapsed?'0':'1';inst.body.style.display=collapsed?'':'none';inst.el.classList.toggle('collapsed',!collapsed);PM.bus.emit('layout:applied');}
+function applyPanelSize(el, spec, def) {
+  if (spec.flex || (!spec.size && !def.size)) el.style.flex = '1 1 auto';
+  else el.style.flex = '0 0 ' + (spec.size || def.size) + 'px';
+}
 
-function buildMirror(body,panelId,primary){
-  const canvas=h('canvas.linked-mirror'); body.appendChild(canvas);
-  const paint=()=>requestAnimationFrame(()=>{
-    const source=panelId==='viewer'?PM.GL?.canvas:PM.TL?.cv;if(!source||!source.width||!source.height||!canvas.isConnected)return;
-    const rect=body.getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);canvas.width=Math.max(2,Math.round(rect.width*dpr));canvas.height=Math.max(2,Math.round(rect.height*dpr));
-    const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(source,0,0,canvas.width,canvas.height);
+/* ── drag to move panels between docks ─────────────────── */
+let dragState = null;
+function startPanelDrag(e, spec, dock, el) {
+  const rect = el.getBoundingClientRect();
+  const ghost = h('div.panel-ghost', h('span', PM.PANELS[spec.id].title));
+  ghost.style.width = rect.width + 'px';
+  ghost.style.height = Math.min(rect.height, 120) + 'px';
+  document.body.appendChild(ghost);
+  dragState = { spec, fromDock: dock.id, ghost, moved: false };
+
+  const move = (dx, dy, ev) => {
+    if (!dragState.moved && Math.hypot(dx, dy) < 5) return;
+    dragState.moved = true;
+    ghost.classList.add('on');
+    ghost.style.left = ev.clientX + 12 + 'px';
+    ghost.style.top = ev.clientY + 12 + 'px';
+    updateDropTarget(ev);
+  };
+  const up = (dx, dy, ev) => {
+    ghost.remove();
+    clearDropHints();
+    const target = dragState.dropTarget;
+    const wasMoved = dragState.moved;
+    dragState = null;
+    if (!wasMoved) return;
+    if (target) {
+      PM.WS.mutate(w => {
+        removePanel(w, spec.id);
+        insertPanel(w, spec, target.dockId, target.index);
+      });
+      PM.toast('Moved ' + PM.PANELS[spec.id].title + ' → ' + target.dockId);
+    }
+  };
+  PM.drag(e, { move, up, cursor: 'grabbing' });
+}
+
+function updateDropTarget(ev) {
+  clearDropHints();
+  dragState.dropTarget = null;
+  const el = document.elementFromPoint(ev.clientX, ev.clientY);
+  if (!el) return;
+  const dockEl = el.closest('.dock');
+  if (!dockEl) return;
+  const dockId = dockEl.id.replace('dock-', '');
+  /* find insertion index from hovered panel */
+  const panelEl = el.closest('.panel');
+  let index = null;
+  if (panelEl && dockEl.contains(panelEl)) {
+    const panels = [...dockEl.querySelectorAll(':scope > .panel')];
+    const i = panels.indexOf(panelEl);
+    const r = panelEl.getBoundingClientRect();
+    const before = ev.clientY < r.top + r.height / 2;
+    index = before ? i : i + 1;
+    panelEl.classList.add(before ? 'drop-before' : 'drop-after');
+  } else {
+    dockEl.classList.add('drop-into');
+    index = dockEl.querySelectorAll(':scope > .panel').length;
+  }
+  dragState.dropTarget = { dockId, index };
+}
+function clearDropHints() {
+  PM.$$('.drop-before,.drop-after,.drop-into').forEach(x => x.classList.remove('drop-before', 'drop-after', 'drop-into'));
+}
+
+/* ── panel context menu ────────────────────────────────── */
+function panelMenu(e, spec, dock) {
+  const ws = L.ws;
+  const def = PM.PANELS[spec.id];
+  const items = [
+    { header: def.title },
+    !NO_POPOUT.has(spec.id) ? { label: 'Pop out to window', run: () => PM.Popout.open(spec.id) } : null,
+    { label: 'Hide panel', run: () => PM.WS.mutate(w => { removePanel(w, spec.id); }) },
+    '-',
+    { header: 'Move to' },
+    { label: 'Left dock', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'left')) },
+    { label: 'Center dock', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'center')) },
+    { label: 'Right dock', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'right')) },
+    '-',
+    { header: 'Add panel' },
+    ...Object.values(PM.PANELS).filter(p => !hasPanel(ws, p.id) && p.id !== 'toolbar').map(p => ({
+      label: p.title, run: () => PM.WS.mutate(w => addPanel(w, p.id, dock.id)),
+    })),
+  ].filter(Boolean);
+  PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
+}
+
+/* ── workspace model ops ───────────────────────────────── */
+const eachDock = (ws, fn) => ws.layout.docks.forEach(fn);
+const hasPanel = (ws, id) => ws.layout.docks.some(d => d.panels.some(p => p.id === id));
+function removePanel(ws, id) { eachDock(ws, d => { d.panels = d.panels.filter(p => p.id !== id); }); }
+function findPanel(ws, id) {
+  for (const d of ws.layout.docks) { const s = d.panels.find(p => p.id === id); if (s) return { dock: d, spec: s }; }
+  return null;
+}
+function addPanel(ws, id, dockId) {
+  removePanel(ws, id);
+  const d = ws.layout.docks.find(d => d.id === (dockId || 'right')) || ws.layout.docks[0];
+  d.panels.push({ id, flex: d.panels.length === 0 });
+  if (d.hidden) d.hidden = false;
+}
+function insertPanel(ws, spec, dockId, index) {
+  const d = ws.layout.docks.find(d => d.id === dockId) || ws.layout.docks[0];
+  const clean = { id: spec.id };
+  if (spec.size) clean.size = spec.size;
+  if (spec.flex) clean.flex = true;
+  const i = index == null ? d.panels.length : Math.max(0, Math.min(index, d.panels.length));
+  d.panels.splice(i, 0, clean);
+  if (d.hidden) d.hidden = false;
+}
+function movePanel(ws, id, dockId) { addPanel(ws, id, dockId); }
+L.removePanel = removePanel; L.addPanel = addPanel; L.hasPanel = hasPanel; L.findPanel = findPanel;
+
+/* ── splitters ─────────────────────────────────────────── */
+/* A splitter always resizes the nearest *fixed* pane and leaves the flex pane
+   to absorb the change. Sign is chosen so dragging the bar toward a pane shrinks
+   that pane — never the opposite direction. */
+function isFlexDock(d) { return !d || d.id === 'center' || !!d.flex; }
+function isFlexPanel(spec) {
+  if (!spec) return true;
+  const def = PM.PANELS[spec.id] || {};
+  return !!(spec.flex || (!spec.size && !def.size));
+}
+function vSplit(prev, next) {
+  const s = h('div.splitter');
+  /* Prefer the side dock. Dragging right grows the left dock / shrinks the right dock. */
+  const useLeft = !isFlexDock(prev);
+  const target = useLeft ? prev : next;
+  const sign = useLeft ? 1 : -1;
+  s.addEventListener('pointerdown', (e) => {
+    const el = document.getElementById('dock-' + target.id);
+    if (!el) return;
+    const start = el.getBoundingClientRect().width;
+    s.classList.add('drag');
+    let raf = 0;
+    PM.drag(e, {
+      cursor: 'col-resize',
+      move: (dx) => {
+        const w = PM.clamp(start + sign * dx, 200, 760);
+        el.style.flex = '0 0 ' + w + 'px';
+        target.size = Math.round(w);
+        target.flex = false;
+        if (!raf) raf = requestAnimationFrame(() => { raf = 0; PM.bus.emit('layout:applied'); });
+      },
+      up: () => {
+        s.classList.remove('drag');
+        PM.WS.save();
+        PM.bus.emit('layout');
+        PM.bus.emit('layout:applied');
+      },
+    });
   });
-  PM.bus.on(panelId==='viewer'?'overlay':'draw:timeline',paint);PM.bus.on('layout:applied',paint);paint();
-  canvas.addEventListener('pointerdown',(event)=>{
-    const rect=canvas.getBoundingClientRect(),u=(event.clientX-rect.left)/rect.width,v=(event.clientY-rect.top)/rect.height;
-    if(panelId==='timeline'&&PM.TL){const x=u*PM.TL.w;if(x>=PM.TL.gut)PM.setTime((x-PM.TL.gut)/PM.TL.pps+PM.TL.scrollT);return;}
-    if(panelId==='viewer'&&PM.GL){const layer=PM.GL.pick(u*PM.proj.w,v*PM.proj.h,PM.time);if(layer)PM.selectLayers(layer.id);}
+  s.addEventListener('dblclick', () => {
+    const def = target.id === 'right' ? 300 : 250;
+    const el = document.getElementById('dock-' + target.id);
+    if (!el) return;
+    el.style.flex = '0 0 ' + def + 'px'; target.size = def;
+    PM.WS.save(); PM.bus.emit('layout:applied');
   });
-  body.appendChild(h('div.linked-badge','Linked '+(panelId==='viewer'?'viewer':'timeline')));
+  return s;
 }
-
-function buildNode(node,path=[]){
-  if(!node)return h('div.workspace-empty','No section');
-  if(node.type==='panel')return buildPanel(node);
-  if(node.type==='tabs')return buildTabs(node,path);
-  const direction=node.type==='stack'||node.direction==='column'?'column':'row';
-  const container=h('div.workspace-split.is-'+direction);container.dataset.nodePath=path.join('.');
-  const sizes=Schema.normalizeSizes(node.sizes,node.children.length);node.sizes=sizes;
-  node.children.forEach((child,index)=>{
-    const pane=h('div.workspace-pane');pane.style.flex=`${sizes[index]} 1 0`;pane.appendChild(buildNode(child,path.concat(index)));container.appendChild(pane);
-    if(index<node.children.length-1)container.appendChild(buildSplitter(node,index,container,direction));
+function hSplit(aboveSpec, aboveEl, belowSpec, belowEl) {
+  const s = h('div.splitter.h');
+  const useAbove = !isFlexPanel(aboveSpec);
+  const spec = useAbove ? aboveSpec : belowSpec;
+  const node = useAbove ? aboveEl : belowEl;
+  const sign = useAbove ? 1 : -1;
+  s.addEventListener('pointerdown', (e) => {
+    const start = node.getBoundingClientRect().height;
+    s.classList.add('drag');
+    let raf = 0;
+    PM.drag(e, {
+      cursor: 'row-resize',
+      move: (dx, dy) => {
+        const hh = PM.clamp(start + sign * dy, 72, innerHeight - 160);
+        node.style.flex = '0 0 ' + hh + 'px';
+        spec.size = Math.round(hh);
+        delete spec.flex;
+        const other = spec === aboveSpec ? belowSpec : aboveSpec;
+        const otherEl = spec === aboveSpec ? belowEl : aboveEl;
+        if (other && otherEl) {
+          other.flex = true; delete other.size;
+          otherEl.style.flex = '1 1 auto';
+        }
+        if (!raf) raf = requestAnimationFrame(() => { raf = 0; PM.bus.emit('layout:applied'); });
+      },
+      up: () => {
+        s.classList.remove('drag');
+        PM.WS.save();
+        PM.bus.emit('layout');
+        PM.bus.emit('layout:applied');
+      },
+    });
   });
-  return container;
+  return s;
 }
 
-function buildTabs(node,path){
-  if(!node.children.some((child)=>child.instance===node.active))node.active=node.children[0]?.instance;
-  const wrap=h('div.workspace-tabs'),bar=h('div.workspace-tabbar'),body=h('div.workspace-tabbody');
-  node.children.forEach((child)=>{
-    const instance=child.instance||firstInstance(child),button=h('button.workspace-tab'+(instance===node.active?'.on':''),sectionTitle(child));
-    button.onclick=()=>PM.WS.mutate((workspace)=>{const target=Schema.atPath(workspace.layout.root,path);if(target?.type==='tabs')target.active=instance;},{label:'Switch section tab',inPlace:true});
-    bar.appendChild(button);
-    if(instance===node.active)body.appendChild(buildNode(child,path.concat(node.children.indexOf(child))));
+/* ── apply ─────────────────────────────────────────────── */
+L.apply = (ws) => {
+  L.ws = ws;
+  const root = $('#body');
+  /* Lift persist panels out before wiping the dock tree so their canvases
+     stay alive and ResizeObservers do not record a 0×0 frame. */
+  const park = document.createElement('div');
+  park.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;';
+  document.body.appendChild(park);
+  Object.values(PM.panelInst).forEach(inst => {
+    if (inst.def && inst.def.persist && inst.el && inst.el.parentNode) park.appendChild(inst.el);
   });
-  wrap.append(bar,body);return wrap;
-}
-function firstInstance(node){let result=null;Schema.walk(node,(child)=>{if(!result&&child.type==='panel')result=child.instance;});return result;}
-
-function buildSplitter(node,index,container,direction){
-  const splitter=h('div.workspace-splitter.'+(direction==='row'?'vertical':'horizontal'));
-  splitter.addEventListener('pointerdown',(event)=>{
-    const panes=[...container.children].filter((child)=>child.classList.contains('workspace-pane')),a=panes[index],b=panes[index+1],ra=a.getBoundingClientRect(),rb=b.getBoundingClientRect();
-    const total=direction==='row'?ra.width+rb.width:ra.height+rb.height,startA=direction==='row'?ra.width:ra.height,start=node.sizes.slice();splitter.classList.add('drag');
-    PM.drag(event,{cursor:direction==='row'?'col-resize':'row-resize',move:(dx,dy)=>{const delta=direction==='row'?dx:dy,minimum=70,nextA=PM.clamp(startA+delta,minimum,total-minimum),combined=start[index]+start[index+1];node.sizes[index]=combined*(nextA/total);node.sizes[index+1]=combined-node.sizes[index];a.style.flex=`${node.sizes[index]} 1 0`;b.style.flex=`${node.sizes[index+1]} 1 0`;PM.bus.emit('layout:applied');},up:()=>{splitter.classList.remove('drag');PM.WS.save();PM.bus.emit('layout:applied');}});
-  });return splitter;
-}
-
-function parkPersistent(){
-  const park=document.createElement('div');park.id='pm-persist-park';park.style.cssText='position:absolute;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;';document.body.appendChild(park);
-  Object.values(PM.panelInst).forEach((inst)=>{if((inst.def?.persist||inst.mirror)&&inst.el?.parentNode)park.appendChild(inst.el);});return park;
-}
-
-L.apply=(workspace)=>{
-  L.ws=workspace;L.requestedInstances=new Set(Schema.listPanels(workspace).map((entry)=>entry.instance));const root=$('#body'),park=parkPersistent();root.textContent='';root.classList.add('workspace-root');
-  const tree=buildNode(workspace.layout.root,[]);tree.classList.add('workspace-main');root.appendChild(tree);
-  (workspace.layout.overlays||[]).forEach((item)=>root.appendChild(buildFloating(item,'overlay')));
-  (workspace.layout.floating||[]).forEach((item)=>root.appendChild(buildFloating(item,'floating')));
-  applyTheme(workspace.theme||{});document.documentElement.dataset.density=workspace.density||'normal';PM.bus.emit('layout');
-  if(!park.childNodes.length)park.remove();
-  requestAnimationFrame(()=>{PM.bus.emit('layout:applied');requestAnimationFrame(()=>{PM.bus.emit('layout:applied');PM.invalidate();});});
+  root.textContent = '';
+  const docks = ws.layout.docks;
+  let prevVisible = null;
+  docks.forEach((dock, di) => {
+    if (dock.hidden || !dock.panels.length) return;
+    const el = h('div.dock.col', { id: 'dock-' + dock.id });
+    el.dataset.dock = dock.id;
+    if (dock.id === 'center' || dock.flex) el.style.flex = '1 1 auto';
+    else el.style.flex = '0 0 ' + (dock.size || (dock.id === 'right' ? 300 : 250)) + 'px';
+    const built = [];
+    dock.panels.forEach((spec) => {
+      const p = buildPanel(spec, dock);
+      if (!p) return;
+      if (built.length) {
+        const prev = built[built.length - 1];
+        el.appendChild(hSplit(prev.spec, prev.el, spec, p));
+      }
+      el.appendChild(p);
+      built.push({ spec, el: p });
+    });
+    if (prevVisible) root.appendChild(vSplit(prevVisible, dock));
+    root.appendChild(el);
+    prevVisible = dock;
+  });
+  applyTheme(ws.theme || {});
+  document.documentElement.dataset.density = ws.density || 'normal';
+  PM.bus.emit('layout');
+  PM.$$('#pm-persist-park').forEach(x => x.remove());
+  if (park.childNodes.length) {
+    park.id = 'pm-persist-park';
+  } else {
+    park.remove();
+  }
+  /* Two frames: first after DOM insert, second after flex layout resolves. */
+  requestAnimationFrame(() => {
+    PM.bus.emit('layout:applied');
+    requestAnimationFrame(() => { PM.bus.emit('layout:applied'); PM.invalidate(); });
+  });
 };
 
-function buildFloating(item,mode){
-  const shell=h('div.workspace-floating.'+mode);shell.dataset.floatId=item.id;shell.style.width=item.width+'px';shell.style.height=item.height+'px';positionFloating(shell,item);
-  const content=buildNode(item.node,['@'+mode,item.id]);shell.appendChild(content);
-  const handle=h('span.float-resize');shell.appendChild(handle);
-  const header=content.matches?.('.panel')?content.querySelector(':scope > header'):content.querySelector?.('.panel > header');
-  if(header)header.addEventListener('pointerdown',(event)=>{if(event.target.closest('button')||event.button!==0)return;const startX=item.x,startY=item.y;PM.drag(event,{cursor:'move',move:(dx,dy)=>{item.anchor='free';item.x=startX+dx;item.y=startY+dy;positionFloating(shell,item);},up:()=>PM.WS.save()});});
-  handle.addEventListener('pointerdown',(event)=>{event.stopPropagation();const w=item.width,hgt=item.height;PM.drag(event,{cursor:'nwse-resize',move:(dx,dy)=>{item.width=PM.clamp(w+dx,140,innerWidth-20);item.height=PM.clamp(hgt+dy,90,innerHeight-20);shell.style.width=item.width+'px';shell.style.height=item.height+'px';PM.bus.emit('layout:applied');},up:()=>PM.WS.save()});});
-  return shell;
+function applyTheme(t) {
+  const r = document.documentElement.style;
+  const map = {
+    accent: '--accent', bg: '--bg-window', panel: '--bg-panel', text: '--tx',
+    line: '--line', radius: null, font: '--f-ui', mono: '--f-mono',
+  };
+  ['accent', 'bg', 'panel', 'text', 'line', 'font', 'mono'].forEach(k => {
+    if (t[k]) r.setProperty(map[k], t[k]); else r.removeProperty(map[k]);
+  });
+  if (t.accent) {
+    r.setProperty('--accent-dim', hexA(t.accent, .16));
+    r.setProperty('--accent-tx', t.accent);
+  } else { r.removeProperty('--accent-dim'); r.removeProperty('--accent-tx'); }
+  if (t.radius != null) {
+    r.setProperty('--r-lg', t.radius + 'px');
+    r.setProperty('--r-md', Math.max(2, t.radius - 3) + 'px');
+    r.setProperty('--r-sm', Math.max(2, t.radius - 5) + 'px');
+  } else { r.removeProperty('--r-lg'); r.removeProperty('--r-md'); r.removeProperty('--r-sm'); }
 }
-function positionFloating(shell,item){
-  shell.style.left=shell.style.right=shell.style.top=shell.style.bottom='auto';const pad=14;
-  if(item.anchor==='top-right'){shell.style.right=(item.x??pad)+'px';shell.style.top=(item.y??pad)+'px';}
-  else if(item.anchor==='bottom-left'){shell.style.left=(item.x??pad)+'px';shell.style.bottom=(item.y??pad)+'px';}
-  else if(item.anchor==='bottom-right'){shell.style.right=(item.x??pad)+'px';shell.style.bottom=(item.y??pad)+'px';}
-  else if(item.anchor==='center'){shell.style.left='50%';shell.style.top='50%';shell.style.transform='translate(-50%,-50%)';}
-  else{shell.style.left=(item.x??pad)+'px';shell.style.top=(item.y??pad)+'px';shell.style.transform='';}
+function hexA(hex, a) {
+  const [r, g, b] = PM.hex2rgb(hex);
+  return `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${a})`;
 }
+L.applyTheme = applyTheme;
 
-function applyTheme(theme){
-  const style=document.documentElement.style,map={accent:'--accent',bg:'--bg-window',panel:'--bg-panel',text:'--tx',line:'--line',font:'--f-ui',mono:'--f-mono'};
-  Object.keys(map).forEach((key)=>theme[key]?style.setProperty(map[key],theme[key]):style.removeProperty(map[key]));
-  if(theme.accent){style.setProperty('--accent-dim',hexA(theme.accent,.16));style.setProperty('--accent-tx',theme.accent);}else{style.removeProperty('--accent-dim');style.removeProperty('--accent-tx');}
-  if(theme.radius!=null){style.setProperty('--r-lg',theme.radius+'px');style.setProperty('--r-md',Math.max(2,theme.radius-3)+'px');style.setProperty('--r-sm',Math.max(2,theme.radius-5)+'px');}
-}
-function hexA(hex,alpha){const [r,g,b]=PM.hex2rgb(hex);return `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${alpha})`;}
-L.applyTheme=applyTheme;
+/* Refresh a single panel body without rebuilding the whole layout. */
+L.refresh = (id) => {
+  const inst = PM.panelInst[id];
+  if (!inst || !inst.el || !inst.el.isConnected) return;
+  inst.body.textContent = '';
+  try { inst.def.build && inst.def.build(inst.body, inst); } catch (e) { console.error(e); }
+  inst.def.header && inst.def.header(inst.header, inst);
+};
 
-/* ── direct placement ─────────────────────────────────── */
-function moveRelative(spec,target,where,duplicate=false){PM.WS.mutate((workspace)=>{workspace.layout=Schema.placePanel(workspace,{...spec,instance:spec.instance},{target,where,duplicate}).layout;},{label:(duplicate?'Duplicate ':'Move ')+(PM.PANELS[spec.panel]?.title||spec.panel)});}
-function moveToRegion(spec,where){const target=Schema.listPanels(L.ws).find((entry)=>entry.region==='root'&&entry.instance!==spec.instance)?.instance;moveRelative(spec,target,where);}
-function floatSection(spec,mode){PM.WS.mutate((workspace)=>{workspace.layout=Schema.placePanel(workspace,spec,{mode,width:mode==='overlay'?320:440,height:mode==='overlay'?220:360,anchor:mode==='overlay'?'top-right':'free',viewerOverlay:mode==='overlay'}).layout;},{label:(mode==='overlay'?'Overlay ':'Float ')+sectionTitle(spec)});}
-function removeSection(instance){PM.WS.mutate((workspace)=>{workspace.layout=Schema.removeInstance(workspace,instance).workspace.layout;},{label:'Hide section'});}
-function duplicateSection(spec,where='right'){const target=spec.instance;PM.WS.mutate((workspace)=>{workspace.layout=Schema.placePanel(workspace,{...spec,instance:spec.instance},{target,where,duplicate:true}).layout;},{label:'Duplicate '+sectionTitle(spec)});}
+/* ── pop-out panels ────────────────────────────────────── */
+/* Reparents the live panel element into a real child window opened via window.open
+   (WKWebView createWebViewWith). Same JS realm, same element — all listeners, bus
+   subscriptions and build state survive. Styles are inlined because the child webview
+   has no file: read access. Canvas panels (viewer/timeline) stay docked. */
+PM.Popout = {
+  wins: {},
+  open(id) {
+    const def = PM.PANELS[id]; if (!def) return;
+    if (NO_POPOUT.has(id)) { PM.toast(def.title + ' stays docked'); return; }
+    const inst = PM.panelInst[id];
+    if (!inst || !inst.el) { PM.toast('Panel not mounted'); return; }
+    if (this.wins[id] && !this.wins[id].closed) { this.wins[id].focus(); return; }
 
-L.hasPanel=(workspace,id)=>Schema.listPanels(Schema.normalizeWorkspace(workspace)).some((entry)=>entry.panel===id);
-L.findPanel=(workspace,id)=>Schema.listPanels(Schema.normalizeWorkspace(workspace)).find((entry)=>entry.panel===id||entry.instance===id)||null;
-L.removePanel=(workspace,id)=>{const found=L.findPanel(workspace,id);if(found)workspace.layout=Schema.removeInstance(Schema.normalizeWorkspace(workspace),found.instance).workspace.layout;};
-L.addPanel=(workspace,id,where='right')=>{const normalized=Schema.normalizeWorkspace(workspace),target=Schema.listPanels(normalized)[0]?.instance;workspace.layout=Schema.placePanel(normalized,Schema.panel(id,{instance:Schema.uniqueInstance(normalized,id)}),{target,where,duplicate:true}).layout;};
+    const w = window.open('', 'pm-popout-' + id, 'width=480,height=620,left=160,top=120');
+    if (!w) { PM.toast('Pop-out blocked'); return; }
+    this.wins[id] = w;
+    const el = inst.el;
 
-function panelMenu(event,spec){
-  const others=Schema.listPanels(L.ws).filter((entry)=>entry.region==='root'&&entry.instance!==spec.instance);
-  PM.menu(document.body,[
-    {header:sectionTitle(spec)},
-    {label:'Duplicate beside',run:()=>duplicateSection(spec,'right')},
-    others.length?{label:'Add as tab with '+sectionTitle(others[0]),run:()=>moveRelative(spec,others[0].instance,'tab')}:null,
-    {label:'Overlay workspace',run:()=>floatSection(spec,'overlay')},
-    {label:'Float in workspace',run:()=>floatSection(spec,'floating')},
-    !MIRRORABLE.has(spec.panel)?{label:'Pop out to native window',run:()=>PM.Popout.open(spec.instance)}:null,
-    '-',{header:'Place at edge'},
-    {label:'Left',run:()=>moveToRegion(spec,'left')},{label:'Right',run:()=>moveToRegion(spec,'right')},{label:'Top',run:()=>moveToRegion(spec,'top')},{label:'Bottom',run:()=>moveToRegion(spec,'bottom')},
-    '-',{label:'Hide section',run:()=>removeSection(spec.instance)},
-    '-',{header:'Add section'},
-    ...Object.values(PM.PANELS).filter((def)=>def.id!=='toolbar').map((def)=>({label:def.title,run:()=>PM.WS.mutate((workspace)=>{const normalized=Schema.normalizeWorkspace(workspace),target=spec.instance;workspace.layout=Schema.placePanel(normalized,Schema.panel(def.id,{instance:Schema.uniqueInstance(normalized,def.id)}),{target,where:'right',duplicate:true}).layout;},{label:'Add '+def.title})})),
-  ].filter(Boolean),{x:event.clientX,y:event.clientY});
-}
+    const setup = () => {
+      if (w.closed) return;
+      const d = w.document;
+      if (!d || !d.body) { setTimeout(setup, 30); return; }
+      d.title = def.title + ' — Powermove';
+      /* inline every stylesheet rule so the popout needs no file access */
+      let css = 'html,body{height:100%;margin:0;overflow:hidden;background:var(--bg-panel)}';
+      for (const ss of document.styleSheets) {
+        try { for (const r of ss.cssRules) css += r.cssText + '\n'; } catch (e) { }
+      }
+      const st = d.createElement('style'); st.textContent = css; d.head.appendChild(st);
+      d.documentElement.dataset.density = document.documentElement.dataset.density;
+      d.body.style.cssText = 'display:flex;flex-direction:column;background:var(--bg-panel)';
 
-let dragState=null;
-function startPanelDrag(event,spec,el){
-  const rect=el.getBoundingClientRect(),ghost=h('div.panel-ghost',sectionTitle(spec));ghost.style.width=Math.min(rect.width,360)+'px';ghost.style.height='44px';document.body.appendChild(ghost);dragState={spec,ghost,moved:false,target:null};
-  PM.drag(event,{cursor:'grabbing',move:(dx,dy,ev)=>{if(!dragState.moved&&Math.hypot(dx,dy)<5)return;dragState.moved=true;ghost.classList.add('on');ghost.style.left=ev.clientX+12+'px';ghost.style.top=ev.clientY+12+'px';updateDropTarget(ev);},up:()=>{const state=dragState;dragState=null;ghost.remove();clearDropHints();if(state?.moved&&state.target)moveRelative(spec,state.target.instance,state.target.where);}});
-}
-function updateDropTarget(event){clearDropHints();dragState.target=null;const targetEl=document.elementFromPoint(event.clientX,event.clientY)?.closest?.('.panel');if(!targetEl||targetEl.dataset.instance===dragState.spec.instance)return;const rect=targetEl.getBoundingClientRect(),x=(event.clientX-rect.left)/rect.width,y=(event.clientY-rect.top)/rect.height;let where='tab';if(x<.24)where='left';else if(x>.76)where='right';else if(y<.24)where='top';else if(y>.76)where='bottom';targetEl.classList.add('drop-'+where);dragState.target={instance:targetEl.dataset.instance,where};}
-function clearDropHints(){PM.$$('.drop-left,.drop-right,.drop-top,.drop-bottom,.drop-tab').forEach((el)=>el.classList.remove('drop-left','drop-right','drop-top','drop-bottom','drop-tab'));}
+      /* popout titlebar with a dock-back button */
+      const bar = h('div.pop-bar',
+        h('span.pop-title', def.title),
+        h('span.sp'),
+        h('button.iconbtn', { title: 'Dock back in main window', onclick: () => PM.Popout.dock(id) }, PM.icon('panelL')));
+      d.body.appendChild(bar);
 
-L.refresh=(id)=>{Object.values(PM.panelInst).filter((inst)=>inst.panelId===id&&inst.real&&inst.el?.isConnected).forEach((inst)=>{inst.body.textContent='';try{inst.def.build&&inst.def.build(inst.body,inst);}catch(error){console.error(error);}inst.def.header&&inst.def.header(inst.header,inst);ensureGrip(inst.header);});};
+      /* move the live panel into the popout */
+      el.classList.add('popped');
+      d.body.appendChild(el);
 
-/* Native pop-outs remain available for ordinary panels. */
-PM.Popout={wins:{},open(instance){const inst=PM.panelInst[instance];if(!inst||inst.mirror)return PM.toast('This linked section stays in the workspace');if(this.wins[instance]&&!this.wins[instance].closed){this.wins[instance].focus();return;}const win=window.open('','pm-popout-'+instance,'width=480,height=620,left=160,top=120');if(!win)return PM.toast('Pop-out blocked');this.wins[instance]=win;const setup=()=>{if(win.closed)return;const doc=win.document;if(!doc?.body){setTimeout(setup,30);return;}doc.title=sectionTitle(inst.spec)+' — Powermove';let css='html,body{height:100%;margin:0;overflow:hidden;background:var(--bg-panel)}';for(const sheet of document.styleSheets)try{for(const rule of sheet.cssRules)css+=rule.cssText+'\n';}catch(error){}const style=doc.createElement('style');style.textContent=css;doc.head.appendChild(style);doc.body.style.cssText='display:flex;flex-direction:column';const bar=h('div.pop-bar',h('span.pop-title',sectionTitle(inst.spec)),h('span.sp'),h('button.iconbtn',{onclick:()=>PM.Popout.dock(instance)},PM.icon('panelL')));doc.body.append(bar,inst.el);inst.el.classList.add('popped');const timer=setInterval(()=>{if(win.closed){clearInterval(timer);PM.Popout.reclaim(instance);}},350);};setup();},reclaim(instance){const inst=PM.panelInst[instance];delete this.wins[instance];inst?.el?.classList.remove('popped');PM.Layout.apply(PM.WS.current);},dock(instance){const win=this.wins[instance];delete this.wins[instance];PM.panelInst[instance]?.el?.classList.remove('popped');PM.Layout.apply(PM.WS.current);if(win&&!win.closed)win.close();}};
+      /* drop it from the docked model while popped */
+      PM.WS.mutate(ws => removePanel(ws, id));
+      PM.toast(def.title + ' popped out');
+
+      /* watch for the user closing the OS window */
+      const timer = setInterval(() => {
+        if (w.closed) { clearInterval(timer); PM.Popout.reclaim(id); }
+      }, 350);
+    };
+    setup();
+  },
+  /* element returns to the docked layout (window already closed or closing) */
+  reclaim(id) {
+    const inst = PM.panelInst[id];
+    delete this.wins[id];
+    if (inst && inst.el) inst.el.classList.remove('popped');
+    PM.WS.mutate(ws => addPanel(ws, id, 'right'));
+  },
+  /* user pressed the in-popout dock button */
+  dock(id) {
+    const w = this.wins[id];
+    delete this.wins[id];
+    const inst = PM.panelInst[id];
+    if (inst && inst.el) inst.el.classList.remove('popped');
+    PM.WS.mutate(ws => addPanel(ws, id, 'right'));
+    if (w && !w.closed) w.close();
+  },
+};
 })();

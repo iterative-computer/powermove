@@ -4,13 +4,14 @@ const PM = window.PM, A = PM.Agent;
 const P = { all: {} };
 PM.Providers = P;
 
-/* Native bridge to the locally installed Codex client. The client owns ChatGPT
-   authentication; no subscription cookie or token enters the web interface. */
+/* Native bridge to the locally installed Codex client. The Codex client owns
+   ChatGPT authentication; no subscription cookie or account token enters the
+   Powermove web interface. */
 const pendingCodex = new Map();
 PM.CodexBridge = {
   request(prompt, schema) {
     const bridge = window.webkit?.messageHandlers?.pmCodex;
-    if (!bridge) return Promise.reject(new Error('ChatGPT subscription generation is available in the macOS app'));
+    if (!bridge) return Promise.reject(new Error('ChatGPT subscription is available in the Powermove macOS app'));
     const id = PM.uid('codex');
     return new Promise((resolve, reject) => {
       pendingCodex.set(id, { resolve, reject });
@@ -24,7 +25,7 @@ PM.CodexBridge = {
     try {
       const bytes = Uint8Array.from(atob(result.dataBase64 || ''), char => char.charCodeAt(0));
       text = new TextDecoder().decode(bytes);
-    } catch (error) { text = 'Could not decode ChatGPT response'; }
+    } catch (error) { text = 'Could not decode the ChatGPT response'; }
     if (result.ok) pending.resolve(text); else pending.reject(new Error(text));
   },
 };
@@ -66,62 +67,33 @@ P.register('chatgpt', {
         assistant: { type: 'string' },
         calls: { type: 'array', items: {
           type: 'object', additionalProperties: false, required: ['name', 'arguments'],
-          properties: { name: { type: 'string', enum: toolNames }, arguments: { type: 'string' } },
+          properties: {
+            name: { type: 'string', enum: toolNames },
+            arguments: { type: 'string' },
+          },
         } },
       },
     };
-    const prompt = `${A.system()}\n\n# LIVE COMPOSITION STATE\n${A.digest()}\n\n# USER REQUEST\n${text}\n\n# PLANNING CONTRACT\nReturn a compact JSON action plan matching the supplied schema. Do not edit files and do not run shell commands. Put each Powermove tool call in calls, with arguments as a JSON-encoded object string. For substantial interface generation use set_workspace with preview:true. Available tool schemas:\n${JSON.stringify(A.toolSchemas())}`;
+    const prompt = `${A.system()}\n\n# LIVE COMPOSITION STATE\n${A.digest()}\n\n# USER REQUEST\n${text}\n\n# PLANNING CONTRACT\nReturn a compact JSON action plan matching the supplied schema. Do not edit files and do not run shell commands. Put each Powermove tool call in calls, with arguments as a JSON-encoded object string. Use only the supplied tool schemas.\n${JSON.stringify(A.toolSchemas())}`;
     const raw = await PM.CodexBridge.request(prompt, schema);
+    /* Stop remains meaningful even though Codex runs outside the web view: a
+       stopped request is never allowed to apply a late action plan. */
+    if (!A.running) return;
     let plan;
     try { plan = JSON.parse(raw); }
     catch (error) { throw new Error('ChatGPT returned an invalid action plan'); }
     const calls = Array.isArray(plan.calls) ? plan.calls.slice(0, A.maxSteps) : [];
     for (const call of calls) {
+      if (!A.running) return;
       let args = {};
       try { args = JSON.parse(call.arguments || '{}'); }
       catch (error) { throw new Error(`ChatGPT returned invalid arguments for ${call.name}`); }
-      if(call.name==='set_workspace')args=enforceStructuredWorkspace(text,args);
       const result = await A.callTool(call.name, args);
       if (result?.ok === false) throw new Error(result.message || `${call.name} failed`);
     }
     A.push({ role: 'assistant', content: plan.assistant || (calls.length ? 'The generated changes are live.' : 'I did not find a safe change to make.') });
   },
 });
-
-/* The model supplies the creative manifest; this compiler makes explicit
-   multi-section requests complete and structurally safe. It only activates
-   when a request names several known editor sections, so open-ended interface
-   generation remains model-directed. */
-function enforceStructuredWorkspace(text,args){
-  const q=String(text||'').toLowerCase(),has=(re)=>re.test(q);
-  const wanted={
-    assets:has(/\b(media|assets?|footage)\b/),chat:has(/\b(assistant|chat)\b/),
-    viewer:has(/\b(viewers?|canvas|preview)\b/),layers:has(/\blayers?\b/),
-    timeline:has(/\btimeline\b/),inspector:has(/\b(properties|inspector)\b/),perf:has(/\b(performance|profiler|fps)\b/),
-  };
-  if(Object.values(wanted).filter(Boolean).length<4)return args;
-  const panel=(id,instance)=>({type:'panel',panel:id,instance:instance||id});
-  const manifest={...(args.manifest||{})};
-  const custom=manifest.custom||args.customPanels||[];
-  if(!manifest.custom&&custom.length)manifest.custom=custom.map((item)=>({...item,components:item.components||item.controls||[]}));
-  const customIds=custom.map((item)=>item.id).filter(Boolean);
-  const left=[];if(wanted.assets)left.push(panel('assets','assets-main'));if(wanted.chat)left.push(panel('chat','chat-main'));
-  let leftNode=left[0];if(left.length>1)leftNode={type:'tabs',active:wanted.chat?'chat-main':left[0].instance,children:left};
-  const viewers=[];if(wanted.viewer){viewers.push(panel('viewer','viewer-main'));if(has(/\b(two|dual|linked|comparison|compare)\b[^.]{0,28}\bviewers?\b|\bviewers?\b[^.]{0,28}\b(two|dual|linked|comparison|compare)\b/))viewers.push(panel('viewer','viewer-compare'));}
-  let viewerNode=viewers[0];if(viewers.length>1)viewerNode={type:'split',direction:'row',sizes:[.5,.5],children:viewers};
-  const bottom=[];if(wanted.layers)bottom.push(panel('layers','layers-main'));if(wanted.timeline)bottom.push(panel('timeline','timeline-main'));
-  let bottomNode=bottom[0];if(bottom.length>1)bottomNode={type:'split',direction:'row',sizes:[.32,.68],children:bottom};
-  const centerChildren=[viewerNode,bottomNode].filter(Boolean);
-  const center=centerChildren.length>1?{type:'stack',direction:'column',sizes:[.68,.32],children:centerChildren}:centerChildren[0];
-  const right=[];if(wanted.inspector)right.push(panel('inspector','inspector-main'));customIds.forEach((id)=>right.push(panel(id,id+'-main')));
-  let rightNode=right[0];if(right.length>1)rightNode={type:'stack',direction:'column',sizes:[.62,...right.slice(1).map(()=>.38/Math.max(1,right.length-1))],children:right};
-  const roots=[leftNode,center,rightNode].filter(Boolean),sizes=roots.length===3?[.19,.59,.22]:roots.map(()=>1/roots.length);
-  manifest.layout={root:roots.length===1?roots[0]:{type:'split',direction:'row',sizes,children:roots},overlays:[],floating:[]};
-  if(wanted.perf&&has(/\b(float|floating|overlay)\b/))manifest.layout.floating.push({id:'performance-float',node:panel('perf','perf-main'),x:18,y:18,width:300,height:250,anchor:'bottom-right'});
-  else if(wanted.perf){const target=rightNode||center;manifest.layout.root={type:'split',direction:'row',sizes:[.78,.22],children:[manifest.layout.root,panel('perf','perf-main')]};}
-  args={...args,manifest};delete args.layout;delete args.docks;delete args.placements;delete args.show;delete args.hide;delete args.move;
-  return args;
-}
 
 P.register('openai', {
   label: 'OpenAI',

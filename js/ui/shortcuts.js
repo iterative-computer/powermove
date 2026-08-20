@@ -22,11 +22,7 @@ function addLayer(type, opts = {}) {
 PM.addLayerCmd = addLayer;
 
 /* ── layer creation ────────────────────────────────────── */
-def('newText', 'New text layer', '⌘T', () => {
-  const L = addLayer('text', { name: 'Headline', p: center() });
-  requestAnimationFrame(() => PM.Viewer && PM.Viewer.editText && PM.Viewer.editText(L));
-  return L;
-}, 'Create');
+def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headline', p: center() }), 'Create');
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
 def('newShader', 'New shader layer', '⌘⇧G', () => { const L = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms(L); PM.openShaderEditor(L); return L; }, 'Create');
@@ -35,12 +31,10 @@ def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
 def('toolHand', 'Hand tool', 'H', () => PM.setTool('hand'), 'Tool');
 def('toolZoom', 'Zoom tool', 'Z', () => PM.setTool('zoom'), 'Tool');
-def('addFromAsset', 'Add layer from asset', null, (id, pos) => {
+def('addFromAsset', 'Add layer from asset', null, (id) => {
   const a = PM.proj.assets[id]; if (!a) return;
   const type = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
-  const opts = { name: a.name, d: { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h } };
-  if (pos) opts.p = { 'position.x': pos[0], 'position.y': pos[1] };
-  const L = addLayer(type, opts);
+  const L = addLayer(type, { name: a.name, d: { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h } });
   if (a.dur) L.dur = Math.min(a.dur, PM.proj.dur - L.from);
   return L;
 }, 'Create');
@@ -100,7 +94,7 @@ def('revealKeys', 'Reveal animated properties', 'U', () => {
   PM.selLayers().forEach(L => { L.collapsed = false; L._reveal = null; });
   PM.invalidate('timeline');
 }, 'Reveal');
-def('graph', 'Toggle graph editor', 'G', () => { if (PM.TL.toggleGraph) PM.TL.toggleGraph(); else { PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); } }, 'Reveal');
+def('graph', 'Toggle graph editor', 'G', () => { PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
 def('easeOut', 'Easy ease keys', 'F9', () => PM.hist.do('Easy ease', () => {
@@ -144,7 +138,6 @@ addEventListener('keydown', (e) => {
   const go = (id) => { e.preventDefault(); PM.cmd(id); };
 
   if (m && k.toLowerCase() === 'k') return go('palette');
-  if (m && a && k.toLowerCase() === 'z') { e.preventDefault(); return s ? PM.WS.redo() : PM.WS.undo(); }
   if (m && k.toLowerCase() === 'z') return go(s ? 'redo' : 'undo');
   if (m && k.toLowerCase() === 'y' && !s && !a) return go('newSolid');
   if (m && s && k.toLowerCase() === 'y') return go('newShape');
@@ -159,7 +152,6 @@ addEventListener('keydown', (e) => {
   if (m && k.toLowerCase() === 'n') return go('newProject');
   if (m && k.toLowerCase() === 'l') return go('focusChat');
   if (k === 'F9') return go(m ? 'easeLinear' : s ? 'easePower' : 'easeOut');
-  if (k === 'F3' && s) return go('graph');
 
   switch (k) {
     case ' ': return go('play');
@@ -169,15 +161,6 @@ addEventListener('keydown', (e) => {
     case 'ArrowLeft': return go(s ? 'prevEdge' : 'prevFrame');
     case 'Backspace': case 'Delete': return go('delete');
     case 'Escape': return go('deselect');
-    case 'Enter': {
-      const L = PM.firstSel();
-      if (L && L.type === 'text' && !(PM.Viewer && PM.Viewer.editing)) {
-        e.preventDefault();
-        PM.Viewer.editText(L);
-        return;
-      }
-      break;
-    }
   }
   if (a || m) return;
   switch (k.toLowerCase()) {

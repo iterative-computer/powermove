@@ -21,7 +21,7 @@ PM.registerPanel('chat', {
     const foot = h('div#cfoot');
     composer.append(cbox, foot);
     body.append(head, thread, composer);
-    U.root = body; U.thread = thread; U.input = input; U.send = send; U.mode = mode; U.provider = provider; U.clear = clear; U.foot = foot;
+    U.root = body; U.thread = thread; U.input = input; U.send = send; U.mode = mode; U.provider = provider; U.foot = foot;
 
     input.addEventListener('input', () => { autoSize(); syncState(); });
     input.addEventListener('keydown', e => {
@@ -74,13 +74,10 @@ function autoSize() {
 function syncState() {
   if (!U.send) return;
   const hot = !!(U.input && U.input.value.trim());
-  U.send.disabled = !hot && !A.running;
-  if(U.clear)U.clear.disabled = !A.thread.length && !A.running;
   U.send.classList.toggle('hot', hot || A.running);
   U.send.textContent = '';
   U.send.appendChild(A.running ? PM.icon('x') : PM.icon('up'));
-  U.send.title = A.running ? 'Stop' : hot ? 'Send' : 'Type a request to send';
-  if(U.clear)U.clear.title = U.clear.disabled ? 'No conversation to clear' : 'Clear conversation';
+  U.send.title = A.running ? 'Stop' : 'Send';
   U.foot.textContent = '';
   const sel = PM.selLayers();
   U.foot.append(

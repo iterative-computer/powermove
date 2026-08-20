@@ -12,12 +12,11 @@ PM.registerPanel('inspector', {
     const L = PM.firstSel();
     const type = L && PM.TYPE_META[L.type];
     hdr.append(
-      h('span.ptitle', L ? L.name : 'Properties'),
+      h('span', L ? L.name : 'Properties'),
       type ? h('span.sub', ' · ' + type.label) : h('span'),
       h('span.sp'),
       h('button.iconbtn', { title: 'New layer', onpointerdown: (e) => { e.preventDefault(); newLayerMenu(e.target); } }, PM.icon('layers')),
       h('button.iconbtn', { title: 'Add effect', onpointerdown: (e) => { e.preventDefault(); fxMenu(e.target); } }, PM.icon('plus')));
-    if (PM.Layout && PM.Layout.ensureGrip) PM.Layout.ensureGrip(hdr);
   },
 });
 
@@ -365,7 +364,6 @@ function sceneParams(wrap) {
 
 I.focusText = (L) => {
   PM.selectLayers(L.id);
-  if (PM.Viewer && PM.Viewer.editText) PM.Viewer.editText(L);
-  else requestAnimationFrame(() => { if (I.textArea) { I.textArea.focus(); I.textArea.select(); } });
+  requestAnimationFrame(() => { if (I.textArea) { I.textArea.focus(); I.textArea.select(); } });
 };
 })();

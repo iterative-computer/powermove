@@ -26,119 +26,61 @@ PM.registerPanel('viewer', {
 });
 
 function buildFoot(foot) {
-  const size = h('div.chip.size-chip', { title: 'Composition size' });
-  const wF = sizeNum('w');
-  const hF = sizeNum('h');
-  const sep = h('button.size-sep', { title: 'Size presets', tabindex: '-1', onpointerdown: (e) => { e.preventDefault(); e.stopPropagation(); sizeMenu(e); } }, '×');
-  size.append(wF, sep, hF);
-  size.addEventListener('contextmenu', (e) => { e.preventDefault(); sizeMenu(e, size); });
-  const q = h('button.chip', { title: 'Preview quality', onpointerdown: (e) => qualityMenu(e) });
+  const p = PM.proj;
+  const aspect = h('button.chip', { onpointerdown: (e) => compMenu(e) });
+  const zoom = h('button.chip', { onpointerdown: (e) => zoomMenu(e) });
+  const q = h('button.chip', { onpointerdown: (e) => qualityMenu(e) });
   const tc = h('span.mono');
+  const cmt = h('button.iconbtn', { title: 'Notes' }, PM.icon('code'));
   const exp = h('button.chip.solid', { onclick: () => PM.Export.dialog() }, PM.icon('export'), 'Export');
-  foot.append(size, q, h('span', { style: { flex: 1 } }), tc, exp);
-  const qLabel = () => {
-    const v = PM.quality;
-    if (Math.abs(v - 1) < .02) return 'Full';
-    if (Math.abs(v - .5) < .02) return 'Half';
-    if (Math.abs(v - 1 / 3) < .03) return 'Third';
-    if (Math.abs(v - .25) < .02) return 'Quarter';
-    return Math.round(v * 100) + '%';
-  };
+  foot.append(aspect, zoom, q, h('span', { style: { flex: 1 } }), cmt, tc, exp);
   const sync = () => {
     const p = PM.proj;
-    wF.sync(); hF.sync();
-    q.textContent = qLabel();
+    const g = gcd(p.w, p.h);
+    aspect.textContent = `${p.w / g}:${p.h / g}`;
+    zoom.textContent = V.fit ? 'Fit' : Math.round(V.zoom * 100) + '%';
+    q.textContent = PM.quality === 1 ? 'Full' : PM.quality === .5 ? 'Half' : PM.quality === .25 ? 'Quarter' : Math.round(PM.quality * 100) + '%';
     tc.textContent = PM.tc(PM.time, p.fps) + '  /  ' + PM.tc(p.dur, p.fps);
   };
   PM.bus.on('time', sync); PM.bus.on('project', sync); PM.bus.on('quality', sync);
-  PM.bus.on('viewopts', sync); PM.bus.on('draw:ui', sync); PM.bus.on('draw:status', sync);
+  PM.bus.on('draw:ui', sync); PM.bus.on('draw:status', sync);
   sync();
 }
+const gcd = (a, b) => (b ? gcd(b, a % b) : a);
 
-const COMP_MIN = 16, COMP_MAX = 16384;
-function applyCompSize(w, h) {
-  w = Math.round(clamp(w, COMP_MIN, COMP_MAX));
-  h = Math.round(clamp(h, COMP_MIN, COMP_MAX));
-  if (PM.proj.w === w && PM.proj.h === h) return false;
-  PM.proj.w = w; PM.proj.h = h;
-  PM.bus.emit('project');
-  V.layout();
-  return true;
-}
-function parseDim(s) {
-  const n = parseInt(String(s).replace(/[^\d]/g, ''), 10);
-  return isFinite(n) ? n : NaN;
-}
-function sizeNum(axis) {
-  const inp = h('input.size-num', {
-    type: 'text', inputmode: 'numeric', spellcheck: 'false', autocomplete: 'off',
-    title: axis === 'w' ? 'Width' : 'Height',
-    'aria-label': axis === 'w' ? 'Composition width' : 'Composition height',
-  });
-  const read = () => axis === 'w' ? PM.proj.w : PM.proj.h;
-  let live = false, startW = 0, startH = 0;
-  inp.sync = () => { if (document.activeElement !== inp) inp.value = String(read()); };
-  inp.sync();
-  const applyTyped = (n, force) => {
-    if (!isFinite(n)) return;
-    if (!force && n < COMP_MIN) return;
-    n = Math.round(clamp(n, COMP_MIN, COMP_MAX));
-    if (!live) { startW = PM.proj.w; startH = PM.proj.h; PM.hist.begin('Comp size'); live = true; }
-    if (axis === 'w') applyCompSize(n, PM.proj.h);
-    else applyCompSize(PM.proj.w, n);
-  };
-  inp.addEventListener('focus', () => inp.select());
-  inp.addEventListener('pointerdown', (e) => e.stopPropagation());
-  inp.addEventListener('input', () => applyTyped(parseDim(inp.value), false));
-  inp.addEventListener('blur', () => {
-    const n = parseDim(inp.value);
-    if (isFinite(n)) applyTyped(n, true);
-    if (live) {
-      if (PM.proj.w === startW && PM.proj.h === startH) PM.hist.cancel();
-      else PM.hist.commit('Comp size');
-      live = false;
-    }
-    inp.sync();
-  });
-  inp.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      if (live) { PM.proj.w = startW; PM.proj.h = startH; PM.hist.cancel(); live = false; PM.bus.emit('project'); V.layout(); }
-      inp.value = String(read());
-      inp.blur();
-    }
-    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      const d = (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 10 : 1);
-      const n = clamp((parseDim(inp.value) || read()) + d, COMP_MIN, COMP_MAX);
-      inp.value = String(n);
-      applyTyped(n, true);
-    }
-  });
-  return inp;
-}
-
-function sizeMenu(e, anchor) {
+function compMenu(e) {
   e.preventDefault();
   const presets = [[1920, 1080, '1080p 16:9'], [3840, 2160, '4K UHD'], [1080, 1080, 'Square 1:1'], [1080, 1920, 'Vertical 9:16'], [1280, 720, '720p'], [2560, 1080, 'Cinemascope']];
-  PM.menu(anchor || e.currentTarget || e.target, [
+  PM.menu(e.target, [
     { header: 'Composition size' },
     ...presets.map(([w, hh, l]) => ({
-      label: l + ' · ' + w + '×' + hh, on: PM.proj.w === w && PM.proj.h === hh,
-      run: () => PM.hist.do('Comp size', () => applyCompSize(w, hh)),
+      label: l, on: PM.proj.w === w && PM.proj.h === hh,
+      run: () => PM.hist.do('Comp size', () => { PM.proj.w = w; PM.proj.h = hh; PM.bus.emit('project'); V.layout(); }),
+    })),
+    '-',
+    { header: 'Frame rate' },
+    ...[24, 25, 30, 50, 60].map(f => ({
+      label: f + ' fps', on: PM.proj.fps === f,
+      run: () => PM.hist.do('Frame rate', () => { PM.proj.fps = f; PM.bus.emit('project'); }),
     })),
   ]);
+}
+function zoomMenu(e) {
+  e.preventDefault();
+  PM.menu(e.target, [{ label: 'Fit', on: V.fit, run: () => { V.fit = true; V.layout(); } },
+  ...[.25, .5, 1, 2].map(z => ({ label: z * 100 + '%', on: !V.fit && V.zoom === z, run: () => { V.fit = false; V.zoom = z; V.layout(); } }))]);
 }
 function qualityMenu(e) {
   e.preventDefault();
   PM.menu(e.target, [
-    { header: 'Preview quality' },
-    ...[[1, 'Full'], [.5, 'Half'], [1 / 3, 'Third'], [.25, 'Quarter']].map(([qv, l]) => ({
-      label: l, on: Math.abs(PM.quality - qv) < .03 && !PM.perf.auto,
-      run: () => { PM.perf.auto = false; PM.quality = qv; V.layout(); PM.bus.emit('quality'); },
+    { header: 'Preview resolution' },
+    ...[[1, 'Full'], [.5, 'Half'], [.25, 'Quarter']].map(([q, l]) => ({
+      label: l, on: PM.quality === q, run: () => { PM.perf.auto = false; PM.quality = q; V.layout(); PM.bus.emit('quality'); },
     })),
+    { label: 'Adaptive', on: PM.perf.auto, run: () => { PM.perf.auto = true; PM.bus.emit('quality'); } },
+    '-',
+    { label: 'Motion blur', on: PM.mblurOn, run: () => { PM.mblurOn = !PM.mblurOn; PM.invalidate(); } },
+    { label: 'Guides & safe areas', on: PM.guides, run: () => { PM.guides = !PM.guides; PM.invalidate(); } },
   ]);
 }
 
@@ -164,7 +106,6 @@ V.layout = () => {
   V.ov.width = Math.round(dw * dpr); V.ov.height = Math.round(dh * dpr);
   V.ov.style.width = dw + 'px'; V.ov.style.height = dh + 'px';
   PM.invalidate();
-  if (V.editing) placeTextEdit();
 };
 PM.bus.on('quality', () => V.layout());
 PM.bus.on('project', () => V.layout());
@@ -212,7 +153,7 @@ function drawOverlay() {
     c.strokeStyle = ink('.1'); c.stroke();
   }
 
-  const sels = PM.selLayers().filter(L => PM.active(L, PM.time) && L !== V.editing);
+  const sels = PM.selLayers().filter(L => PM.active(L, PM.time));
   for (const L of sels) {
     const b = PM.GL.bounds(L, PM.time);
     if (!b) continue;
@@ -249,119 +190,11 @@ function bindStage(stage, inner) {
     }
   }, { passive: false });
   inner.addEventListener('dblclick', (e) => {
-    if (e.target === V.editEl) return;
     const [x, y] = toComp(e);
     const L = PM.GL.pick(x, y, PM.time);
-    if (L && L.type === 'text') startTextEdit(L);
-  });
-  const isAssetDrag = (e) => [...e.dataTransfer.types].includes('application/x-pm-asset');
-  stage.addEventListener('dragover', (e) => { if (isAssetDrag(e)) e.preventDefault(); });
-  stage.addEventListener('drop', (e) => {
-    const id = e.dataTransfer.getData('application/x-pm-asset') || e.dataTransfer.getData('text/plain');
-    if (!id || !PM.proj.assets[id]) return;
-    e.preventDefault();
-    const [x, y] = toComp(e);
-    const a = PM.proj.assets[id];
-    PM.cmd('addFromAsset', id, a && a.kind !== 'audio' ? [x, y] : null);
+    if (L && L.type === 'text') PM.Inspector.focusText(L);
   });
 }
-
-/* ── on-canvas text editing ────────────────────────────── */
-const textFont = (d) => `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px "${d.font}", "Geist", -apple-system, sans-serif`;
-
-function measureEditBox(d) {
-  const c = (V._tm = V._tm || document.createElement('canvas').getContext('2d'));
-  c.font = textFont(d);
-  if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
-  const lines = String(d.text == null ? '' : d.text).split('\n');
-  let wMax = d.size * .4;
-  for (const line of lines) wMax = Math.max(wMax, c.measureText(line || ' ').width);
-  const lh = d.size * (d.leading || 1.15);
-  return { w: wMax + d.size * .35, h: lh * Math.max(1, lines.length) + d.size * .15, lh };
-}
-
-function startTextEdit(L) {
-  if (!L || L.type !== 'text' || L.lock || !V.inner) return;
-  if (V.editing === L) { placeTextEdit(); V.editEl && V.editEl.focus(); return; }
-  endTextEdit(true);
-  PM.pause();
-  PM.selectLayers(L.id);
-  V.editing = L;
-  V._editStart = String(L.d.text == null ? '' : L.d.text);
-  PM.hist.cancel();
-  PM.hist.begin('Edit text');
-  const el = h('textarea#text-edit', {
-    autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off', wrap: 'off', rows: 1,
-  });
-  el.spellcheck = false;
-  el.value = V._editStart;
-  V.editEl = el;
-  V.inner.appendChild(el);
-  V.inner.classList.add('editing');
-  placeTextEdit();
-  el.focus();
-  el.select();
-  el.addEventListener('input', () => {
-    L.d.text = el.value;
-    PM.touch();
-    if (PM.Inspector.textArea && PM.Inspector.textArea.isConnected) PM.Inspector.textArea.value = el.value;
-    placeTextEdit();
-    PM.invalidate();
-  });
-  el.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.key === 'Enter')) {
-      e.preventDefault();
-      endTextEdit(true);
-    }
-  });
-  el.addEventListener('pointerdown', (e) => e.stopPropagation());
-  PM.invalidate();
-}
-
-function endTextEdit(commit) {
-  const L = V.editing, el = V.editEl;
-  if (!L) return;
-  const next = commit && el ? el.value : V._editStart;
-  L.d.text = next == null ? '' : next;
-  if (el) el.remove();
-  if (V.inner) V.inner.classList.remove('editing');
-  V.editing = null; V.editEl = null;
-  if (commit && L.d.text !== V._editStart) PM.hist.commit('Edit text');
-  else PM.hist.cancel();
-  PM.touch();
-  PM.invalidate();
-  if (PM.Inspector.refresh) PM.Inspector.refresh();
-}
-
-function placeTextEdit() {
-  const L = V.editing, el = V.editEl;
-  if (!L || !el || !V.inner) return;
-  if (!PM.active(L, PM.time)) { endTextEdit(true); return; }
-  const d = L.d;
-  const box = measureEditBox(d);
-  const z = V.shown || 1;
-  const m = PM.worldMatrix(L, PM.time);
-  const align = d.align || 'left';
-  const lx = align === 'center' ? -box.w / 2 : align === 'right' ? -box.w : 0;
-  const ly = -d.size * .08;
-  const tx = (m[0] * lx + m[2] * ly + m[4]) * z;
-  const ty = (m[1] * lx + m[3] * ly + m[5]) * z;
-  el.style.width = box.w + 'px';
-  el.style.height = box.h + 'px';
-  el.style.font = textFont(d);
-  el.style.letterSpacing = (d.tracking || 0) + 'px';
-  el.style.lineHeight = box.lh + 'px';
-  el.style.textAlign = align;
-  el.style.color = d.color || '#fff';
-  el.style.transform = `matrix(${m[0] * z}, ${m[1] * z}, ${m[2] * z}, ${m[3] * z}, ${tx}, ${ty})`;
-}
-
-V.editText = startTextEdit;
-V.endTextEdit = endTextEdit;
-PM.bus.on('sel', () => { if (V.editing && !PM.sel.layers.includes(V.editing.id)) endTextEdit(true); });
-PM.bus.on('time', () => { if (V.editing) placeTextEdit(); });
-PM.bus.on('layers', () => { if (V.editing && !PM.L(V.editing.id)) endTextEdit(false); });
 
 function startPan(e) {
   const sx = e.clientX, sy = e.clientY, start = [V.pan[0], V.pan[1]];
@@ -374,8 +207,6 @@ function startPan(e) {
 
 function onDown(e) {
   if (e.button !== 0) return;
-  if (e.target === V.editEl) return;
-  if (V.editing) endTextEdit(true);
 
   /* AE-style tool override: Hand pans, Zoom zooms. Space/⌘ temporarily = Hand. */
   const tool = (PM.tool === 'hand' || PM.tool === 'zoom') ? PM.tool : (e.metaKey || e.altKey ? 'hand' : 'select');
@@ -486,7 +317,7 @@ function startTransform(e, L, hit, T) {
 
 /** Write a value: sets a keyframe when the channel is animated, otherwise the static value. */
 function setOrKey(L, key, v, T) {
-  const p = PM.findProp ? PM.findProp(L, key) : L.p[key];
+  const p = L.p[key];
   if (!p) return;
   if (p.kf.length) PM.setKeyOn(p, T - L.from, v, 'power', PM.proj.fps);
   else p.v = v;
