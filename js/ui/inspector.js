@@ -55,7 +55,11 @@ function chRow(wrap, L, key, label) {
   sw.onclick = () => { PM.hist.do('Animate ' + label, () => PM.toggleStopwatch(L, key, PM.time)); I.refresh(); };
   const num = PM.numField(() => PM.ev(L, key, PM.time), (v) => {
     PM.setOrKey(L, key, v, PM.time); PM.invalidate();
-  }, { label, step: meta.step || 1, unit: meta.unit, min: meta.min, max: meta.max, link: !!p.expr });
+  }, {
+    label, step: meta.step || 1, unit: meta.unit, min: meta.min, max: meta.max, link: !!p.expr,
+    origin: 'inspector',
+    command: (value) => ({ type: 'set_property', target: L.id, path: key, value, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' }),
+  });
   I.syncs.push(num.sync);
   const kd = h('button.stopwatch', { title: 'Keyframe at playhead' }, PM.svg('<path d="M12 5l7 7-7 7-7-7z"/>'));
   const syncKd = () => {
@@ -121,6 +125,10 @@ function content(wrap, L) {
   wrap.appendChild(PM.section('Content'));
   const set = (k) => (v) => { d[k] = v; PM.touch(); PM.invalidate(); };
   const get = (k) => () => d[k];
+  const edit = (k, opt = {}) => ({
+    ...opt, origin: 'inspector',
+    command: (value) => ({ type: 'set_content', target: L.id, patch: { [k]: value } }),
+  });
 
   if (L.type === 'text') {
     const ta = h('textarea', {
@@ -129,32 +137,32 @@ function content(wrap, L) {
         padding: '8px 10px', fontSize: '12.5px', lineHeight: 1.5, resize: 'vertical', color: 'var(--tx)',
       },
     }, d.text);
-    ta.addEventListener('focus', () => PM.hist.begin('Edit text'));
-    ta.addEventListener('input', () => { d.text = ta.value; PM.touch(); PM.invalidate(); });
-    ta.addEventListener('blur', () => PM.hist.commit('Edit text'));
+    ta.addEventListener('focus', () => PM.Edit.begin('Edit text', { origin: 'inspector' }));
+    ta.addEventListener('input', () => PM.Edit.dispatch({ type: 'set_content', target: L.id, patch: { text: ta.value } }));
+    ta.addEventListener('blur', () => PM.Edit.commit('Edit text'));
     ta.addEventListener('keydown', e => e.stopPropagation());
     I.textArea = ta;
     wrap.appendChild(ta);
     wrap.appendChild(PM.row('Font', PM.selectField(get('font'), set('font'),
-      ['Geist', 'Geist Mono', 'Helvetica Neue', 'Georgia', 'Times New Roman', 'Courier New', 'Impact', 'Futura', 'Avenir Next', 'SF Pro Display'], { label: 'Font' })));
+      ['Geist', 'Geist Mono', 'Helvetica Neue', 'Georgia', 'Times New Roman', 'Courier New', 'Impact', 'Futura', 'Avenir Next', 'SF Pro Display'], edit('font', { label: 'Font' }))));
     wrap.appendChild(PM.row('Weight', PM.selectField(get('weight'), set('weight'),
-      [{ v: 300, label: '300' }, { v: 400, label: '400' }, { v: 500, label: '500' }, { v: 600, label: '600' }, { v: 700, label: '700' }, { v: 800, label: '800' }], { label: 'Weight' })));
-    numRow(wrap, 'Size', get('size'), set('size'), { step: 1, min: 4, unit: 'px' });
-    numRow(wrap, 'Tracking', get('tracking'), set('tracking'), { step: .5, unit: 'px' });
-    numRow(wrap, 'Leading', get('leading'), set('leading'), { step: .02, precision: 2 });
-    wrap.appendChild(PM.row('Align', PM.selectField(get('align'), set('align'), ['left', 'center', 'right'], { label: 'Align' })));
-    wrap.appendChild(PM.row('Color', PM.colorField(get('color'), set('color'), { label: 'Text color' })));
+      [{ v: 300, label: '300' }, { v: 400, label: '400' }, { v: 500, label: '500' }, { v: 600, label: '600' }, { v: 700, label: '700' }, { v: 800, label: '800' }], edit('weight', { label: 'Weight' }))));
+    numRow(wrap, 'Size', get('size'), set('size'), edit('size', { step: 1, min: 4, unit: 'px' }));
+    numRow(wrap, 'Tracking', get('tracking'), set('tracking'), edit('tracking', { step: .5, unit: 'px' }));
+    numRow(wrap, 'Leading', get('leading'), set('leading'), edit('leading', { step: .02, precision: 2 }));
+    wrap.appendChild(PM.row('Align', PM.selectField(get('align'), set('align'), ['left', 'center', 'right'], edit('align', { label: 'Align' }))));
+    wrap.appendChild(PM.row('Color', PM.colorField(get('color'), set('color'), edit('color', { label: 'Text color' }))));
   }
   else if (L.type === 'solid' || L.type === 'shape') {
-    wrap.appendChild(PM.row('Fill', PM.colorField(get('color'), set('color'), { label: 'Fill' })));
-    if (L.type === 'shape') wrap.appendChild(PM.row('Shape', PM.selectField(get('shape'), set('shape'), ['rect', 'ellipse', 'polygon', 'star', 'line'], { label: 'Shape' })));
-    numRow(wrap, 'Width', get('w'), set('w'), { step: 1, min: 1, unit: 'px' });
-    numRow(wrap, 'Height', get('h'), set('h'), { step: 1, min: 1, unit: 'px' });
-    numRow(wrap, 'Corner radius', get('radius'), set('radius'), { step: 1, min: 0, unit: 'px' });
+    wrap.appendChild(PM.row('Fill', PM.colorField(get('color'), set('color'), edit('color', { label: 'Fill' }))));
+    if (L.type === 'shape') wrap.appendChild(PM.row('Shape', PM.selectField(get('shape'), set('shape'), ['rect', 'ellipse', 'polygon', 'star', 'line'], edit('shape', { label: 'Shape' }))));
+    numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Corner radius', get('radius'), set('radius'), edit('radius', { step: 1, min: 0, unit: 'px' }));
     if (L.type === 'shape') {
-      numRow(wrap, 'Stroke', get('stroke'), set('stroke'), { step: .5, min: 0, unit: 'px' });
-      wrap.appendChild(PM.row('Stroke color', PM.colorField(get('strokeColor'), set('strokeColor'), { label: 'Stroke' })));
-      if (d.shape === 'polygon' || d.shape === 'star') numRow(wrap, 'Points', get('points'), set('points'), { step: 1, min: 3, max: 24 });
+      numRow(wrap, 'Stroke', get('stroke'), set('stroke'), edit('stroke', { step: .5, min: 0, unit: 'px' }));
+      wrap.appendChild(PM.row('Stroke color', PM.colorField(get('strokeColor'), set('strokeColor'), edit('strokeColor', { label: 'Stroke' }))));
+      if (d.shape === 'polygon' || d.shape === 'star') numRow(wrap, 'Points', get('points'), set('points'), edit('points', { step: 1, min: 3, max: 24 }));
     }
   }
   else if (L.type === 'image' || L.type === 'video') {
@@ -162,31 +170,31 @@ function content(wrap, L) {
     wrap.appendChild(PM.row('Source', PM.selectField(
       () => { const a = PM.proj.assets[d.asset]; return a ? a.name : 'none'; },
       (v) => { d.asset = v; PM.invalidate(); },
-      assets.map(a => ({ v: a.id, label: a.name })).concat([{ v: null, label: 'none' }]), { label: 'Source' })));
-    wrap.appendChild(PM.row('Fit', PM.selectField(get('fit'), set('fit'), ['cover', 'contain', 'stretch'], { label: 'Fit' })));
-    numRow(wrap, 'Width', get('w'), set('w'), { step: 1, min: 1, unit: 'px' });
-    numRow(wrap, 'Height', get('h'), set('h'), { step: 1, min: 1, unit: 'px' });
+      assets.map(a => ({ v: a.id, label: a.name })).concat([{ v: null, label: 'none' }]), edit('asset', { label: 'Source' }))));
+    wrap.appendChild(PM.row('Fit', PM.selectField(get('fit'), set('fit'), ['cover', 'contain', 'stretch'], edit('fit', { label: 'Fit' }))));
+    numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
     if (L.type === 'video') {
-      numRow(wrap, 'Trim start', get('trim'), set('trim'), { step: .05, precision: 2, unit: 's' });
-      numRow(wrap, 'Speed', get('speed'), set('speed'), { step: .05, precision: 2, min: .05 });
+      numRow(wrap, 'Trim start', get('trim'), set('trim'), edit('trim', { step: .05, precision: 2, unit: 's' }));
+      numRow(wrap, 'Speed', get('speed'), set('speed'), edit('speed', { step: .05, precision: 2, min: .05 }));
     }
   }
   else if (L.type === 'audio') {
     const assets = Object.values(PM.proj.assets).filter(a => a.kind === 'audio');
     wrap.appendChild(PM.row('Source', PM.selectField(
       () => { const a = PM.proj.assets[d.asset]; return a ? a.name : 'none'; },
-      (v) => { d.asset = v; }, assets.map(a => ({ v: a.id, label: a.name })), { label: 'Source' })));
-    numRow(wrap, 'Gain', get('gain'), set('gain'), { step: .05, precision: 2, min: 0, max: 4 });
-    numRow(wrap, 'Fade in', get('fadeIn'), set('fadeIn'), { step: .05, precision: 2, unit: 's' });
-    numRow(wrap, 'Fade out', get('fadeOut'), set('fadeOut'), { step: .05, precision: 2, unit: 's' });
+      (v) => { d.asset = v; }, assets.map(a => ({ v: a.id, label: a.name })), edit('asset', { label: 'Source' }))));
+    numRow(wrap, 'Gain', get('gain'), set('gain'), edit('gain', { step: .05, precision: 2, min: 0, max: 4 }));
+    numRow(wrap, 'Fade in', get('fadeIn'), set('fadeIn'), edit('fadeIn', { step: .05, precision: 2, unit: 's' }));
+    numRow(wrap, 'Fade out', get('fadeOut'), set('fadeOut'), edit('fadeOut', { step: .05, precision: 2, unit: 's' }));
   }
   else if (L.type === 'shader') {
     const b = h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '30px' }, onclick: () => PM.openShaderEditor(L) }, PM.icon('code'), 'Edit shader source');
     wrap.appendChild(b);
     const err = PM.GL.compileError(L._shaderKey);
     if (err) wrap.appendChild(h('div', { style: { fontFamily: 'var(--f-mono)', fontSize: '10.5px', color: 'var(--red)', padding: '6px 4px', whiteSpace: 'pre-wrap', maxHeight: '90px', overflow: 'auto' } }, err));
-    numRow(wrap, 'Width', get('w'), set('w'), { step: 1, min: 1, unit: 'px' });
-    numRow(wrap, 'Height', get('h'), set('h'), { step: 1, min: 1, unit: 'px' });
+    numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
   }
 }
 
@@ -221,9 +229,15 @@ function shaderUniforms(wrap, L) {
     const p = L.d.uniforms[def.name];
     if (!p) return;
     if (def.control === 'color') {
-      wrap.appendChild(PM.row(def.label, PM.colorField(() => p.v, (v) => { p.v = v; PM.invalidate(); }, { label: def.label })));
+      wrap.appendChild(PM.row(def.label, PM.colorField(() => p.v, (v) => { p.v = v; PM.invalidate(); }, {
+        label: def.label, origin: 'inspector',
+        command: (value) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, preserveHandEdits: false }),
+      })));
     } else if (def.control === 'toggle') {
-      wrap.appendChild(PM.row(def.label, PM.toggleField(() => p.v, (v) => { p.v = v; PM.invalidate(); }, { label: def.label })));
+      wrap.appendChild(PM.row(def.label, PM.toggleField(() => p.v, (v) => { p.v = v; PM.invalidate(); }, {
+        label: def.label, origin: 'inspector',
+        command: (value) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, preserveHandEdits: false }),
+      })));
     } else {
       const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
       sw.onclick = () => {
@@ -236,7 +250,11 @@ function shaderUniforms(wrap, L) {
       const f = PM.numField(() => PM.evP(L, p, PM.time, def.name), (v) => {
         if (p.kf.length) PM.setKeyOn(p, PM.time - L.from, v, 'power', PM.proj.fps); else p.v = v;
         PM.touch(); PM.invalidate();
-      }, { label: def.label, step: (def.max - def.min) / 200 || .01, min: def.min, max: def.max, precision: 3 });
+      }, {
+        label: def.label, step: (def.max - def.min) / 200 || .01, min: def.min, max: def.max, precision: 3,
+        origin: 'inspector',
+        command: (value) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, mode: 'auto', preserveHandEdits: false }),
+      });
       I.syncs.push(f.sync);
       const r = PM.row(def.label, f, { left: sw });
       r.insertBefore(sw, r.firstChild);
@@ -266,17 +284,27 @@ function effects(wrap, L) {
     const def = PM.FX[fx.type]; if (!def) return;
     const tw = h('span.twirl' + (fx.open ? '.open' : ''), PM.icon('chev'));
     const onBtn = h('button.stopwatch' + (fx.on ? '.on' : ''), PM.icon('eye'));
-    onBtn.onclick = (e) => { e.stopPropagation(); PM.hist.do('Toggle effect', () => { fx.on = !fx.on; }); I.refresh(); PM.invalidate(); };
+    onBtn.onclick = (e) => {
+      e.stopPropagation();
+      PM.Edit.apply({ type: 'set_effect', target: L.id, effect: fx.id, patch: { enabled: !fx.on } }, { label: 'Toggle effect', origin: 'inspector' });
+      I.refresh(); PM.invalidate();
+    };
     const head = h('div.row', { style: { marginTop: '4px', background: 'rgba(128,128,136,.08)' } },
       tw, h('div.k', { style: { color: 'var(--tx)', fontWeight: 500 } }, def.label), onBtn,
-      h('button.stopwatch', { onclick: (e) => { e.stopPropagation(); PM.hist.do('Remove effect', () => { L.fx.splice(i, 1); }); I.refresh(); PM.invalidate(); } }, PM.icon('x')));
+      h('button.stopwatch', { onclick: (e) => { e.stopPropagation(); PM.Edit.apply({ type: 'remove_effect', target: L.id, effect: fx.id }, { label: 'Remove effect', origin: 'inspector' }); I.refresh(); PM.invalidate(); } }, PM.icon('x')));
     head.onclick = () => { fx.open = !fx.open; I.refresh(); };
     wrap.appendChild(head);
     if (!fx.open) return;
     const g = h('div.grp');
     def.params.forEach(pd => {
       const p = fx.p[pd.k];
-      if (pd.type === 'color') { g.appendChild(PM.row(pd.label, PM.colorField(() => p.v, v => { p.v = v; PM.invalidate(); }, { label: pd.label }))); return; }
+      if (pd.type === 'color') {
+        g.appendChild(PM.row(pd.label, PM.colorField(() => p.v, v => { p.v = v; PM.invalidate(); }, {
+          label: pd.label, origin: 'inspector',
+          command: (value) => ({ type: 'set_property', target: L.id, path: fx.id + '.' + pd.k, value, time: PM.time, preserveHandEdits: false }),
+        })));
+        return;
+      }
       const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
       sw.onclick = () => {
         PM.hist.do('Animate ' + pd.label, () => {
@@ -288,7 +316,11 @@ function effects(wrap, L) {
       const f = PM.numField(() => PM.evP(L, p, PM.time, pd.k), (v) => {
         if (p.kf.length) PM.setKeyOn(p, PM.time - L.from, v, 'power', PM.proj.fps); else p.v = v;
         PM.touch(); PM.invalidate();
-      }, { label: pd.label, step: pd.step, min: pd.min, max: pd.max, unit: pd.unit });
+      }, {
+        label: pd.label, step: pd.step, min: pd.min, max: pd.max, unit: pd.unit,
+        origin: 'inspector',
+        command: (value) => ({ type: 'set_property', target: L.id, path: fx.id + '.' + pd.k, value, time: PM.time, mode: 'auto', preserveHandEdits: false }),
+      });
       I.syncs.push(f.sync);
       const r = PM.row(pd.label, f, { left: sw });
       r.insertBefore(sw, r.firstChild);
@@ -320,7 +352,7 @@ function fxMenu(anchor) {
   Object.entries(groups).forEach(([g, list]) => {
     items.push({ header: g });
     list.forEach(([k, d]) => items.push({
-      label: d.label, run: () => PM.hist.do('Add ' + d.label, () => { const fx = PM.mkEffect(k); fx.open = true; L.fx.push(fx); I.refresh(); PM.invalidate(); }),
+      label: d.label, run: () => { PM.Edit.apply({ type: 'add_effect', target: L.id, effect: k }, { label: 'Add ' + d.label, origin: 'inspector' }); I.refresh(); PM.invalidate(); },
     }));
   });
   PM.menu(anchor, items, { right: true });
@@ -330,33 +362,36 @@ PM.fxMenu = fxMenu;
 /* ── layer options ─────────────────────────────────────── */
 function layerOptions(wrap, L) {
   wrap.appendChild(PM.section('Layer'));
-  wrap.appendChild(PM.row('Blend mode', PM.selectField(() => L.blend, v => { L.blend = v; PM.invalidate(); }, PM.BLENDS, { label: 'Blend' })));
-  wrap.appendChild(PM.row('Motion blur', PM.toggleField(() => L.mblur, v => { L.mblur = v; PM.invalidate(); }, { label: 'Motion blur' })));
+  const layerEdit = (key, opt = {}) => ({ ...opt, origin: 'inspector', command: (value) => ({ type: 'set_layer', target: L.id, patch: { [key]: value } }) });
+  wrap.appendChild(PM.row('Blend mode', PM.selectField(() => L.blend, v => { L.blend = v; PM.invalidate(); }, PM.BLENDS, layerEdit('blend', { label: 'Blend' }))));
+  wrap.appendChild(PM.row('Motion blur', PM.toggleField(() => L.mblur, v => { L.mblur = v; PM.invalidate(); }, layerEdit('motionBlur', { label: 'Motion blur' }))));
   wrap.appendChild(PM.row('Parent', PM.selectField(
     () => { const p = PM.L(L.parent); return p ? p.name : 'none'; },
     (v) => { L.parent = v; PM.invalidate(); },
-    [{ v: null, label: 'none' }, ...PM.proj.layers.filter(o => o.id !== L.id).map(o => ({ v: o.id, label: o.name }))], { label: 'Parent' })));
-  wrap.appendChild(PM.row('Color', PM.colorField(() => L.color, v => { L.color = v; PM.invalidate(); }, { label: 'Label color' })));
-  numRow(wrap, 'Start', () => L.from, v => { L.from = Math.max(0, v); PM.invalidate(); }, { step: .05, precision: 2, unit: 's' });
-  numRow(wrap, 'Duration', () => L.dur, v => { L.dur = Math.max(.02, v); PM.invalidate(); }, { step: .05, precision: 2, unit: 's' });
+    [{ v: null, label: 'none' }, ...PM.proj.layers.filter(o => o.id !== L.id).map(o => ({ v: o.id, label: o.name }))], layerEdit('parent', { label: 'Parent' }))));
+  wrap.appendChild(PM.row('Color', PM.colorField(() => L.color, v => { L.color = v; PM.invalidate(); }, layerEdit('color', { label: 'Label color' }))));
+  numRow(wrap, 'Start', () => L.from, v => { L.from = Math.max(0, v); PM.invalidate(); }, layerEdit('from', { step: .05, precision: 2, unit: 's' }));
+  numRow(wrap, 'Duration', () => L.dur, v => { L.dur = Math.max(.02, v); PM.invalidate(); }, layerEdit('duration', { step: .05, precision: 2, unit: 's' }));
 }
 
 /* ── scene params (project level, agent-authored) ──────── */
 function sceneParams(wrap) {
   const ps = Object.values(PM.proj.params || {});
+  const compEdit = (key, opt = {}) => ({ ...opt, origin: 'inspector', command: (value) => ({ type: 'set_composition', patch: { [key]: value } }) });
+  const paramEdit = (p, opt = {}) => ({ ...opt, origin: 'inspector', command: (value) => ({ type: 'set_scene_parameter', name: p.name, value }) });
   wrap.appendChild(PM.section('Composition'));
-  numRow(wrap, 'Width', () => PM.proj.w, v => { PM.proj.w = Math.round(v); PM.bus.emit('project'); }, { step: 2, min: 16 });
-  numRow(wrap, 'Height', () => PM.proj.h, v => { PM.proj.h = Math.round(v); PM.bus.emit('project'); }, { step: 2, min: 16 });
-  numRow(wrap, 'Duration', () => PM.proj.dur, v => { PM.proj.dur = Math.max(.2, v); PM.proj.work = [0, PM.proj.dur]; PM.bus.emit('project'); }, { step: .5, precision: 2, unit: 's' });
-  numRow(wrap, 'Frame rate', () => PM.proj.fps, v => { PM.proj.fps = Math.round(PM.clamp(v, 1, 240)); PM.bus.emit('project'); }, { step: 1 });
-  wrap.appendChild(PM.row('Background', PM.colorField(() => PM.proj.bg, v => { PM.proj.bg = v; PM.invalidate(); }, { label: 'Background' })));
+  numRow(wrap, 'Width', () => PM.proj.w, v => { PM.proj.w = Math.round(v); PM.bus.emit('project'); }, compEdit('width', { step: 2, min: 16 }));
+  numRow(wrap, 'Height', () => PM.proj.h, v => { PM.proj.h = Math.round(v); PM.bus.emit('project'); }, compEdit('height', { step: 2, min: 16 }));
+  numRow(wrap, 'Duration', () => PM.proj.dur, v => { PM.proj.dur = Math.max(.2, v); PM.proj.work = [0, PM.proj.dur]; PM.bus.emit('project'); }, compEdit('duration', { step: .5, precision: 2, unit: 's' }));
+  numRow(wrap, 'Frame rate', () => PM.proj.fps, v => { PM.proj.fps = Math.round(PM.clamp(v, 1, 240)); PM.bus.emit('project'); }, compEdit('fps', { step: 1 }));
+  wrap.appendChild(PM.row('Background', PM.colorField(() => PM.proj.bg, v => { PM.proj.bg = v; PM.invalidate(); }, compEdit('background', { label: 'Background' }))));
   if (ps.length) {
     wrap.appendChild(PM.section('Scene parameters'));
     ps.forEach(p => {
-      if (p.control === 'color') wrap.appendChild(PM.row(p.label, PM.colorField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, { label: p.label })));
-      else if (p.control === 'toggle') wrap.appendChild(PM.row(p.label, PM.toggleField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, { label: p.label })));
-      else if (p.control === 'select') wrap.appendChild(PM.row(p.label, PM.selectField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, p.options || [], { label: p.label })));
-      else numRow(wrap, p.label, () => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, { step: (p.max - p.min) / 200 || .01, min: p.min, max: p.max, precision: 3 });
+      if (p.control === 'color') wrap.appendChild(PM.row(p.label, PM.colorField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, paramEdit(p, { label: p.label }))));
+      else if (p.control === 'toggle') wrap.appendChild(PM.row(p.label, PM.toggleField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, paramEdit(p, { label: p.label }))));
+      else if (p.control === 'select') wrap.appendChild(PM.row(p.label, PM.selectField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, p.options || [], paramEdit(p, { label: p.label }))));
+      else numRow(wrap, p.label, () => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, paramEdit(p, { step: (p.max - p.min) / 200 || .01, min: p.min, max: p.max, precision: 3 }));
     });
   }
   wrap.appendChild(h('div.empty', 'Select a layer to edit its properties.'));

@@ -602,18 +602,18 @@ function onDown(e) {
 }
 
 function workAreaDrag(e, idx) {
-  PM.hist.begin('Work area');
+  PM.Edit.begin('Work area', { origin: 'timeline' });
   PM.drag(e, {
     cursor: 'ew-resize',
     move: (dx, dy, ev) => {
       const r = T.cv.getBoundingClientRect();
       let t = Math.max(0, PM.snapF(x2t(ev.clientX - r.left), PM.proj.fps));
-      const wa = PM.proj.work;
+      const wa = [...PM.proj.work];
       wa[idx] = t;
       if (wa[0] > wa[1]) { const o = wa[0]; wa[0] = wa[1]; wa[1] = o; idx = 1 - idx; }
-      PM.bus.emit('project'); PM.invalidate();
+      if (wa[1] > wa[0]) PM.Edit.dispatch({ type: 'set_composition', patch: { workArea: wa } });
     },
-    up: () => PM.hist.commit('Work area'),
+    up: () => PM.Edit.commit('Work area'),
   });
 }
 
@@ -633,9 +633,9 @@ function gutterDown(e, x, y) {
   if (r.kind !== 'layer') { PM.sel.chan = r.key; PM.selectLayers(r.L.id); PM.invalidate('timeline'); return; }
   const L = r.L;
   if (x < 22) { }
-  else if (x < 40) { PM.hist.do('Toggle visibility', () => { L.on = !L.on; }); PM.invalidate(); return; }
-  else if (x < 58) { PM.hist.do('Toggle lock', () => { L.lock = !L.lock; }); PM.invalidate(); return; }
-  else if (x < 72) { PM.hist.do('Toggle solo', () => { L.solo = !L.solo; }); PM.invalidate(); return; }
+  else if (x < 40) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !L.on } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
+  else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
+  else if (x < 72) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { solo: !L.solo } }, { label: 'Toggle solo', origin: 'timeline' }); return; }
   else if (x < 86) {
     L.collapsed = !L.collapsed;
     if (!L.collapsed) {
@@ -654,20 +654,18 @@ function gutterDown(e, x, y) {
       const delta = Math.round(dy / T.row);
       const to = clamp(startIdx + delta, 0, PM.proj.layers.length - 1);
       if (to !== PM.proj.layers.indexOf(L)) {
-        if (!done) { PM.hist.begin('Reorder layer'); done = true; }
-        PM.proj.layers.splice(PM.proj.layers.indexOf(L), 1);
-        PM.proj.layers.splice(to, 0, L);
-        PM.invalidate('timeline');
+        if (!done) { PM.Edit.begin('Reorder layer', { origin: 'timeline' }); done = true; }
+        PM.Edit.dispatch({ type: 'reorder_layer', target: L.id, index: to });
       }
     },
-    up: () => { if (done) { PM.hist.commit('Reorder layer'); PM.bus.emit('layers'); } },
+    up: () => { if (done) PM.Edit.commit('Reorder layer'); },
   });
 }
 
 function slide(e) {
   const layers = PM.selLayers().filter(l => !l.lock);
   const start = layers.map(L => ({ L, from: L.from }));
-  PM.hist.begin('Move clip');
+  PM.Edit.begin('Move clip', { origin: 'timeline' });
   let moved = false;
   PM.drag(e, {
     cursor: 'grabbing',
@@ -675,10 +673,9 @@ function slide(e) {
       moved = true;
       let dt = dx / T.pps;
       if (PM.snap) dt = snapDelta(start, dt);
-      start.forEach(s => { s.L.from = Math.max(0, PM.snapF(s.from + dt, PM.proj.fps)); });
-      PM.invalidate();
+      start.forEach(s => PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: Math.max(0, PM.snapF(s.from + dt, PM.proj.fps)) } }));
     },
-    up: () => { moved ? PM.hist.commit('Move clip') : PM.hist.cancel(); },
+    up: () => { moved ? PM.Edit.commit('Move clip') : PM.Edit.cancel(); },
   });
 }
 function snapDelta(start, dt) {
@@ -695,7 +692,7 @@ function snapDelta(start, dt) {
 function trim(e, side) {
   const layers = PM.selLayers().filter(l => !l.lock);
   const start = layers.map(L => ({ L, from: L.from, dur: L.dur }));
-  PM.hist.begin('Trim clip');
+  PM.Edit.begin('Trim clip', { origin: 'timeline' });
   let moved = false;
   PM.drag(e, {
     cursor: 'ew-resize',
@@ -705,12 +702,11 @@ function trim(e, side) {
       start.forEach(s => {
         if (side === 'in') {
           const nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / PM.proj.fps);
-          s.L.from = nf; s.L.dur = s.dur + (s.from - nf);
-        } else s.L.dur = Math.max(1 / PM.proj.fps, s.dur + dt);
+          PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: nf, duration: s.dur + (s.from - nf) } });
+        } else PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { duration: Math.max(1 / PM.proj.fps, s.dur + dt) } });
       });
-      PM.invalidate();
     },
-    up: () => { moved ? PM.hist.commit('Trim clip') : PM.hist.cancel(); },
+    up: () => { moved ? PM.Edit.commit('Trim clip') : PM.Edit.cancel(); },
   });
 }
 
@@ -824,7 +820,7 @@ function renameLayer(L, rowIdx) {
   });
   wrap.appendChild(inp); inp.focus(); inp.select();
   const done = (ok) => {
-    if (ok && inp.value.trim()) PM.hist.do('Rename layer', () => { L.name = inp.value.trim(); });
+    if (ok && inp.value.trim()) PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { name: inp.value.trim() } }, { label: 'Rename layer', origin: 'timeline' });
     inp.remove(); PM.invalidate();
   };
   inp.onblur = () => done(true);
@@ -854,24 +850,24 @@ function onCtx(e) {
     items.push({ header: L.name },
       { label: 'Duplicate', kb: '⌘D', run: () => PM.cmd('duplicate') },
       { label: 'Split at playhead', kb: '⌘⇧D', run: () => PM.cmd('split') },
-      { label: 'Trim in to playhead', run: () => PM.hist.do('Trim', () => { const d = PM.time - L.from; L.dur -= d; L.from = PM.time; }) },
-      { label: 'Trim out to playhead', run: () => PM.hist.do('Trim', () => { L.dur = Math.max(1 / PM.proj.fps, PM.time - L.from); }) },
+      { label: 'Trim in to playhead', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: PM.time, duration: L.dur - (PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
+      { label: 'Trim out to playhead', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { duration: Math.max(1 / PM.proj.fps, PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
       '-',
-      { label: L.mblur ? 'Motion blur off' : 'Motion blur on', run: () => PM.hist.do('Motion blur', () => { L.mblur = !L.mblur; }) },
-      { label: 'Fit to composition', run: () => PM.hist.do('Fit', () => { L.from = 0; L.dur = PM.proj.dur; }) },
+      { label: L.mblur ? 'Motion blur off' : 'Motion blur on', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { motionBlur: !L.mblur } }, { label: 'Motion blur', origin: 'timeline' }) },
+      { label: 'Fit to composition', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: 0, duration: PM.proj.dur } }, { label: 'Fit', origin: 'timeline' }) },
       '-',
       { header: 'Parent to' },
-      { label: 'None', on: !L.parent, run: () => PM.hist.do('Parent', () => { L.parent = null; }) },
+      { label: 'None', on: !L.parent, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: null } }, { label: 'Parent', origin: 'timeline' }) },
       ...PM.proj.layers.filter(o => o.id !== L.id).map(o => ({
-        label: o.name, on: L.parent === o.id, run: () => PM.hist.do('Parent', () => { L.parent = o.id; }),
+        label: o.name, on: L.parent === o.id, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: o.id } }, { label: 'Parent', origin: 'timeline' }),
       })),
       '-',
       { label: 'Delete', run: () => PM.cmd('delete') });
   } else {
-    items.push({ label: 'Add marker at playhead', run: () => PM.hist.do('Marker', () => { PM.proj.markers.push({ t: PM.time, name: 'M' + (PM.proj.markers.length + 1) }); }) },
-      { label: 'Set work area start', run: () => PM.hist.do('Work area', () => { PM.proj.work[0] = PM.time; }) },
-      { label: 'Set work area end', run: () => PM.hist.do('Work area', () => { PM.proj.work[1] = PM.time; }) },
-      { label: 'Reset work area', run: () => PM.hist.do('Work area', () => { PM.proj.work = [0, PM.proj.dur]; }) });
+    items.push({ label: 'Add marker at playhead', run: () => PM.Edit.apply({ type: 'add_marker', time: PM.time }, { label: 'Marker', origin: 'timeline' }) },
+      { label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Reset work area', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Work area', origin: 'timeline' }) });
   }
   PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
 }

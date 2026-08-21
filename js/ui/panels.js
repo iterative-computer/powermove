@@ -16,7 +16,7 @@ PM.registerPanel('layers', {
           h('span.sw2', { style: { background: L.color } }),
           h('span.nm', L.name),
           h('button.stopwatch' + (L.on ? '.on' : ''), {
-            onclick: (e) => { e.stopPropagation(); PM.hist.do('Visibility', () => { L.on = !L.on; }); PM.invalidate(); },
+            onclick: (e) => { e.stopPropagation(); PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !L.on } }, { label: 'Visibility', origin: 'layers-panel' }); PM.invalidate(); },
           }, PM.icon(L.on ? 'eye' : 'eyeoff')));
         row.onclick = (e) => PM.selectLayers(L.id, e.shiftKey || e.metaKey);
         list.appendChild(row);
@@ -71,7 +71,7 @@ PM.registerPanel('fxbrowser', {
         row.ondblclick = row.onclick = () => {
           const L = PM.firstSel();
           if (!L) return PM.toast('Select a layer first');
-          PM.hist.do('Add ' + d.label, () => { const fx = PM.mkEffect(k); fx.open = true; L.fx.push(fx); });
+          PM.Edit.apply({ type: 'add_effect', target: L.id, effect: k }, { label: 'Add ' + d.label, origin: 'effects-panel' });
           PM.Inspector.refresh(); PM.invalidate();
         };
         wrap.appendChild(row);
@@ -92,7 +92,7 @@ PM.registerPanel('shader', {
     presets.onpointerdown = (e) => {
       e.preventDefault();
       PM.menu(presets, Object.keys(PM.SHADER_PRESETS).map(n => ({
-        label: n, run: () => { const L = target(); if (!L) return; PM.hist.do('Shader preset', () => { L.d.code = PM.SHADER_PRESETS[n]; }); ta.value = L.d.code; apply(); },
+        label: n, run: () => { const L = target(); if (!L) return; ta.value = PM.SHADER_PRESETS[n]; apply('Shader preset'); },
       })));
     };
     bar.append(status, h('span', { style: { flex: 1 } }), presets,
@@ -113,9 +113,9 @@ PM.registerPanel('shader', {
       status.className = err ? 'bad' : 'ok';
       status.textContent = err ? err.split('\n')[0].slice(0, 90) : '✓ compiled · ' + (L._udefs || []).length + ' uniforms';
     }
-    function apply() {
+    function apply(label = 'Edit shader') {
       const L = target(); if (!L) return;
-      PM.hist.do('Edit shader', () => { L.d.code = ta.value; });
+      PM.Edit.apply({ type: 'set_content', target: L.id, patch: { code: ta.value } }, { label, origin: 'shader-panel' });
       PM.syncShaderUniforms(L);
       PM.GL.dropProgram(L._shaderKey);
       PM.invalidate();

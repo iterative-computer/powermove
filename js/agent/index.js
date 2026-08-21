@@ -46,7 +46,7 @@ A.digest = (opt = {}) => {
   };
   const ws = PM.WS.current;
   const lines = [
-    `COMPOSITION "${p.name}" ${p.w}×${p.h} @${p.fps}fps duration ${p.dur}s bg ${p.bg}`,
+    `COMPOSITION "${p.name}" ${p.w}×${p.h} @${p.fps}fps duration ${p.dur}s bg ${p.bg} revision ${p.revision || 0}`,
     `playhead ${PM.round(PM.time, 3)}s (frame ${Math.round(PM.time * p.fps)})  work area ${PM.round(p.work[0], 2)}→${PM.round(p.work[1], 2)}s`,
     `LAYERS (${p.layers.length}, top first):`,
     ...(p.layers.length ? p.layers.map(L) : ['    (empty composition)']),
@@ -73,7 +73,7 @@ A.digest = (opt = {}) => {
 
 /** Structured snapshot used by tools and the local planner. */
 A.state = () => ({
-  comp: { w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, bg: PM.proj.bg, time: PM.time },
+  comp: { w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, bg: PM.proj.bg, time: PM.time, revision: PM.proj.revision || 0 },
   layers: PM.proj.layers.map((l, i) => ({
     index: i + 1, id: l.id, name: l.name, type: l.type, from: l.from, dur: l.dur,
     visible: l.on, locked: l.lock, blend: l.blend, effects: l.fx.map(f => f.type),
@@ -90,6 +90,7 @@ A.system = () => `You are the motion designer inside Powermove, a GPU-native mot
 - Read the COMPOSITION STATE below before acting. It is the live truth: layers, timing, keyframes, easing, effects, shader source, selection, and the current workspace layout.
 - Time is SECONDS everywhere. Keyframe times are LAYER-LOCAL (relative to a layer's start). fps is sampling density only.
 - Take action with tools. Batch related edits, then call \`look\` to render real frames and judge them like a director. You are blind until you look.
+- Prefer one \`edit_source\` transaction for related source changes. It is the same validated command language used by canvas handles, inspectors, and generated controls.
 - After a new composition or a substantial motion change: look at representative moments from every beat plus the frames around each transition, critique, fix, and look again. Do this at least twice before saying you are done.
 - Keep replies to one or two sentences about what you changed and why it feels right. Speak as a designer: "the reveal", "the settle", "the ember pass" — never file names or code terms, unless the user is working on a shader.
 
@@ -105,7 +106,7 @@ A.system = () => `You are the motion designer inside Powermove, a GPU-native mot
 - Preserve the user's copy casing and use comfortable letter spacing unless they ask otherwise.
 
 # Interface authorship
-You can rebuild the app's own UI. \`set_workspace\` moves, adds, hides, and resizes panels; sets theme accent, density, and radius; toggles features; and defines custom panels whose sliders write scene parameters that expressions read via param("Name"). When the user asks for a workspace or a UI change, actually change it — do not just describe it.
+You can rebuild the app's own UI. \`set_workspace\` moves, adds, hides, and resizes panels; sets theme accent, density, and radius; toggles features; and defines custom panels. Controls may write scene parameters through param("Name"), or bind directly to real layer source with target plus a properties.*, content.*, or layer.* path. Buttons may submit typed source-edit commands. When the user asks for a workspace or a UI change, actually change it — do not just describe it.
 
 # Shaders
 Shader layers are GLSL ES 3.0 fragment shaders. Write to \`fragColor\`; \`uv\` is 0..1 across the layer; \`iTime\` is layer-local seconds, \`iProgress\` is 0..1 across the layer, \`iResolution\` is layer pixels. Helpers available: hash, noise, fbm, rot, palette, luma, sdCircle, sdBox, rgb2hsv, hsv2rgb. Declare controls as \`uniform float uName; // @param default min max\` or \`uniform vec3 uColor; // @param #RRGGBB\` — every annotated uniform becomes an inspector control and is keyframable. Never redeclare the built-ins. Always \`look\` after writing a shader; a compile error means the canvas still shows the old frame.

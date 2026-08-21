@@ -21,24 +21,32 @@ reg('inspect_project', 'Read semantic state for the composition, selection, laye
   type: 'object', properties: { detail: { type: 'string', enum: ['compact', 'full'] } },
 }, async ({ detail = 'compact' } = {}) => ok('Project inspected', detail === 'full' ? A.digest() : A.state()));
 
+reg('edit_source', 'Apply one atomic transaction using the same typed source edits as the canvas, inspector, timeline, and generated controls.', {
+  type: 'object', required: ['commands'], properties: {
+    label: { type: 'string' }, baseRevision: { type: 'number' },
+    commands: { type: 'array', items: { type: 'object', required: ['type'], properties: {
+      type: { type: 'string', enum: Object.keys(PM.Edit.operations) },
+      target: {}, targets: { type: 'array' }, path: { type: 'string' }, value: {}, patch: { type: 'object' },
+      layerType: { type: 'string' }, name: { type: 'string' }, content: { type: 'object' }, properties: { type: 'object' },
+      keyframes: { type: 'array' }, expression: {}, effect: { type: 'string' }, parameters: { type: 'object' }, index: { type: 'number' },
+    } } },
+  },
+}, async (x) => {
+  const result = PM.Edit.apply(x.commands, { label: x.label || 'Agent · source edit', origin: 'agent', baseRevision: x.baseRevision });
+  return result.ok ? ok(result.message, result.data) : fail(result.message);
+});
+
 reg('set_composition', 'Set composition name, dimensions, frame rate, duration, background, shutter, or work area.', {
   type: 'object', properties: {
     name: { type: 'string' }, width: { type: 'number' }, height: { type: 'number' }, fps: { type: 'number' },
     duration: { type: 'number' }, background: { type: 'string' }, shutter: { type: 'number' }, workArea: { type: 'array', items: { type: 'number' } },
   },
 }, async (x) => {
-  PM.hist.do('Agent · composition', () => {
-    const p = PM.proj;
-    if (x.name != null) p.name = x.name;
-    if (x.width != null) p.w = Math.max(16, Math.round(x.width));
-    if (x.height != null) p.h = Math.max(16, Math.round(x.height));
-    if (x.fps != null) p.fps = PM.clamp(Math.round(x.fps), 1, 240);
-    if (x.duration != null) { p.dur = Math.max(.1, x.duration); if (!x.workArea) p.work = [0, p.dur]; }
-    if (x.background != null) p.bg = x.background;
-    if (x.shutter != null) p.shutter = PM.clamp(x.shutter, 0, 2);
-    if (x.workArea && x.workArea.length === 2) p.work = [Math.max(0, x.workArea[0]), Math.min(p.dur, x.workArea[1])];
-    PM.bus.emit('project');
-  });
+  const patch = {};
+  for (const key of ['name', 'width', 'height', 'fps', 'duration', 'background', 'shutter']) if (x[key] != null) patch[key] = x[key];
+  if (x.workArea) patch.workArea = x.workArea;
+  const result = PM.Edit.apply({ type: 'set_composition', patch }, { label: 'Agent · composition', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
   PM.Viewer.layout();
   return ok(`Composition is ${PM.proj.w}×${PM.proj.h}, ${PM.proj.fps} fps, ${PM.proj.dur}s`);
 });
@@ -50,16 +58,13 @@ reg('add_layer', 'Add a text, solid, shape, shader, null, image, video, or audio
     content: { type: 'object' }, properties: { type: 'object' }, color: { type: 'string' }, select: { type: 'boolean' },
   },
 }, async (x) => {
-  let L;
-  PM.hist.do('Agent · add ' + x.type, () => {
-    L = PM.mkLayer(x.type, { name: x.name, from: x.from, dur: x.duration, d: x.content, p: x.properties, color: x.color });
-    if (x.from != null) L.from = x.from;
-    if (x.duration != null) L.dur = x.duration;
-    else L.dur = Math.max(.1, PM.proj.dur - L.from);
-    PM.addLayer(L, 0);
-    if (x.type === 'shader') PM.syncShaderUniforms(L);
-    if (x.select !== false) PM.selectLayers(L.id);
-  });
+  const result = PM.Edit.apply({
+    type: 'add_layer', layerType: x.type, name: x.name, from: x.from,
+    duration: x.duration, content: x.content || {}, properties: x.properties || {},
+    color: x.color, select: x.select,
+  }, { label: 'Agent · add ' + x.type, origin: 'agent' });
+  if (!result.ok) return fail(result.message);
+  const L = PM.L(result.data.results[0].data.id);
   PM.invalidate();
   return ok(`Added ${x.type} layer “${L.name}”`, { id: L.id, name: L.name });
 });
@@ -74,24 +79,23 @@ reg('update_layer', 'Update a layer’s content, timing, transform, visibility, 
 }, async (x) => {
   const L = layer(x.layer); if (!L) return fail('Layer not found: ' + x.layer);
   const skipped = [];
-  PM.hist.do('Agent · update ' + L.name, () => {
-    if (x.name != null) L.name = x.name;
-    if (x.from != null) L.from = Math.max(0, x.from);
-    if (x.duration != null) L.dur = Math.max(1 / PM.proj.fps, x.duration);
-    if (x.visible != null) L.on = x.visible;
-    if (x.locked != null) L.lock = x.locked;
-    if (x.blend != null && PM.BLENDS.includes(x.blend)) L.blend = x.blend;
-    if (x.motionBlur != null) L.mblur = x.motionBlur;
-    if (x.parent !== undefined) { const p = layer(x.parent); L.parent = p && p.id !== L.id ? p.id : null; }
-    if (x.content) Object.assign(L.d, x.content);
-    if (x.properties) for (const k in x.properties) {
-      const intent = k.split('.')[0];
-      if (x.preserveHandEdits !== false && L.locked_intent && L.locked_intent[intent]) { skipped.push(k); continue; }
-      const p = L.p[k]; if (p) p.v = x.properties[k];
-    }
-    if (L.type === 'shader') PM.syncShaderUniforms(L);
-    PM.touch(); PM.bus.emit('layers');
-  });
+  const changes = [];
+  const fields = {};
+  for (const [input, output] of [['name','name'],['from','from'],['duration','duration'],['visible','visible'],['locked','locked'],['blend','blend'],['motionBlur','motionBlur']]) {
+    if (x[input] != null) fields[output] = x[input];
+  }
+  if (x.parent !== undefined) fields.parent = x.parent;
+  if (x.content) changes.push({ type: 'set_content', target: L.id, patch: x.content });
+  if (x.properties) for (const k in x.properties) {
+    const root = k.split('.')[0];
+    if (x.preserveHandEdits !== false && L.locked_intent && (L.locked_intent[k] || L.locked_intent[root])) { skipped.push(k); continue; }
+    changes.push({ type: 'set_property', target: L.id, path: k, value: x.properties[k], mode: 'static', preserveHandEdits: false });
+  }
+  if (Object.keys(fields).length) changes.push({ type: 'set_layer', target: L.id, patch: fields });
+  if (changes.length) {
+    const result = PM.Edit.apply(changes, { label: 'Agent · update ' + L.name, origin: 'agent' });
+    if (!result.ok) return fail(result.message);
+  }
   PM.invalidate();
   return ok(`Updated “${L.name}”${skipped.length ? '; preserved hand-edited ' + skipped.join(', ') : ''}`, { id: L.id, skipped });
 });
@@ -106,18 +110,13 @@ reg('animate', 'Create or replace keyframes on one channel. Times are layer-loca
   const L = layer(x.layer); if (!L) return fail('Layer not found: ' + x.layer);
   const root = x.channel.split('.')[0];
   if (x.preserveHandEdits !== false && L.locked_intent && L.locked_intent[root]) return fail(`Preserved hand-edited ${root}; ask explicitly to overwrite it`);
-  let p = PM.findProp(L, x.channel);
-  if (!p && L.p[x.channel]) p = L.p[x.channel];
-  if (!p) return fail(`Channel “${x.channel}” not found on “${L.name}”`);
-  PM.hist.do('Agent · animate ' + x.channel, () => {
-    if (x.replace !== false) p.kf = [];
-    for (const k of x.keyframes) {
-      const z = PM.setKeyOn(p, Math.max(0, k.time), k.value, k.ease || 'power', PM.proj.fps);
-      if (k.hold) z.hold = true;
-    }
-    if (x.expression !== undefined) p.expr = x.expression || null;
-    PM.touch(); L.collapsed = false; L._reveal = [x.channel];
-  });
+  const result = PM.Edit.apply({
+    type: 'replace_keyframes', target: L.id, path: x.channel,
+    keyframes: x.keyframes, replace: x.replace, expression: x.expression,
+    preserveHandEdits: x.preserveHandEdits,
+  }, { label: 'Agent · animate ' + x.channel, origin: 'agent' });
+  if (!result.ok) return fail(result.message);
+  L.collapsed = false; L._reveal = [x.channel];
   PM.sel.chan = x.channel; PM.invalidate();
   return ok(`Animated ${L.name} · ${x.channel} with ${x.keyframes.length} keyframes`);
 });
@@ -126,8 +125,8 @@ reg('set_expression', 'Set a time-based expression on a layer channel. Helpers: 
   type: 'object', required: ['layer', 'channel', 'expression'], properties: { layer: {}, channel: { type: 'string' }, expression: { type: ['string', 'null'] } },
 }, async (x) => {
   const L = layer(x.layer); if (!L) return fail('Layer not found');
-  const p = PM.findProp(L, x.channel); if (!p) return fail('Channel not found');
-  PM.hist.do('Agent · expression', () => { p.expr = x.expression || null; PM.touch(); });
+  const result = PM.Edit.apply({ type: 'set_expression', target: L.id, path: x.channel, expression: x.expression }, { label: 'Agent · expression', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
   PM.invalidate();
   return ok(`${x.expression ? 'Set' : 'Removed'} expression on ${L.name} · ${x.channel}`);
 });
@@ -139,36 +138,29 @@ reg('add_effect', 'Add a GPU effect to a layer and optionally set its parameters
   },
 }, async (x) => {
   const L = layer(x.layer); if (!L) return fail('Layer not found');
-  const fx = PM.mkEffect(x.effect); if (!fx) return fail('Unknown effect');
-  PM.hist.do('Agent · effect', () => {
-    fx.open = true;
-    if (x.parameters) for (const k in x.parameters) if (fx.p[k]) fx.p[k].v = x.parameters[k];
-    L.fx.push(fx); PM.touch();
-  });
+  const result = PM.Edit.apply({ type: 'add_effect', target: L.id, effect: x.effect, parameters: x.parameters || {} }, { label: 'Agent · effect', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
+  const effectId = result.data.results[0].data.effectId;
   PM.Inspector.refresh(); PM.invalidate();
-  return ok(`Added ${PM.FX[x.effect].label} to “${L.name}”`, { effectId: fx.id });
+  return ok(`Added ${PM.FX[x.effect].label} to “${L.name}”`, { effectId });
 });
 
 reg('remove_effect', 'Remove one effect by type or effect id from a layer.', {
   type: 'object', required: ['layer', 'effect'], properties: { layer: {}, effect: { type: 'string' } },
 }, async (x) => {
   const L = layer(x.layer); if (!L) return fail('Layer not found');
-  const old = L.fx.length;
-  PM.hist.do('Agent · remove effect', () => { L.fx = L.fx.filter(f => f.id !== x.effect && f.type !== x.effect); PM.touch(); });
+  const result = PM.Edit.apply({ type: 'remove_effect', target: L.id, effect: x.effect }, { label: 'Agent · remove effect', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
   PM.invalidate();
-  return ok(`Removed ${old - L.fx.length} effect(s) from “${L.name}”`);
+  return ok(`Removed ${result.data.results[0].data.removed} effect(s) from “${L.name}”`);
 });
 
 reg('write_shader', 'Create or replace GLSL source on a shader layer. Annotated uniforms become controls.', {
   type: 'object', required: ['layer', 'source'], properties: { layer: {}, source: { type: 'string' }, openEditor: { type: 'boolean' } },
 }, async (x) => {
   const L = layer(x.layer); if (!L || L.type !== 'shader') return fail('Shader layer not found');
-  PM.hist.do('Agent · shader', () => {
-    L.d.code = x.source;
-    PM.syncShaderUniforms(L);
-    if (L._shaderKey) PM.GL.dropProgram(L._shaderKey);
-    PM.touch();
-  });
+  const result = PM.Edit.apply({ type: 'set_content', target: L.id, patch: { code: x.source } }, { label: 'Agent · shader', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
   PM.invalidate();
   await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   const err = PM.GL.compileError(L._shaderKey);
@@ -181,7 +173,8 @@ reg('delete_layers', 'Delete layers by name/id/index. Defaults to the current se
 }, async (x = {}) => {
   const ls = x.layers && x.layers.length ? x.layers.map(layer).filter(Boolean) : PM.selLayers();
   if (!ls.length) return fail('No layers to delete');
-  PM.hist.do('Agent · delete', () => PM.removeLayers(ls.map(l => l.id)));
+  const result = PM.Edit.apply({ type: 'delete_layers', targets: ls.map(l => l.id) }, { label: 'Agent · delete', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
   PM.invalidate();
   return ok('Deleted ' + ls.map(l => '“' + l.name + '”').join(', '));
 });
@@ -216,6 +209,9 @@ reg('set_workspace', 'Create or edit an authored workspace: panels, docks, dimen
         type: { type: 'string', enum: ['slider', 'color', 'toggle', 'select', 'button'] },
         label: { type: 'string' }, param: { type: 'string', description: 'Stable scene parameter name used by expressions.' }, def: {}, min: { type: 'number' }, max: { type: 'number' },
         step: { type: 'number' }, unit: { type: 'string' }, options: { type: 'array', items: { type: 'string' } },
+        target: { description: 'Layer id/name or $selection for a source-bound control.' },
+        path: { type: 'string', description: 'properties.*, content.*, or layer.* source path.' },
+        commands: { type: 'array', items: { type: 'object' } },
         cmd: { type: 'string' }, prompt: { type: 'string' },
       } } },
     } } },
@@ -251,10 +247,13 @@ reg('add_scene_parameter', 'Expose a purposeful global scene control that expres
     name: { type: 'string' }, label: { type: 'string' }, control: { type: 'string', enum: ['num', 'color', 'toggle', 'select'] }, value: {}, min: { type: 'number' }, max: { type: 'number' }, options: { type: 'array' },
   },
 }, async (x) => {
-  PM.hist.do('Agent · scene parameter', () => {
-    PM.proj.params[x.name] = { name: x.name, label: x.label || x.name, control: x.control || 'num', value: x.value, min: x.min == null ? 0 : x.min, max: x.max == null ? Math.max(1, Number(x.value) * 2) : x.max, options: x.options || [] };
-    PM.touch();
-  });
+  const result = PM.Edit.apply({
+    type: 'set_scene_parameter', name: x.name, label: x.label, control: x.control,
+    value: x.value, min: x.min == null ? 0 : x.min,
+    max: x.max == null ? Math.max(1, Number(x.value) * 2) : x.max,
+    options: x.options || [],
+  }, { label: 'Agent · scene parameter', origin: 'agent' });
+  if (!result.ok) return fail(result.message);
   PM.Inspector.refresh();
   return ok(`Added scene control “${x.label || x.name}”`);
 });

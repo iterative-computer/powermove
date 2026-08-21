@@ -253,15 +253,10 @@ function handleAt(L, x, y, T) {
   return null;
 }
 
-function markIntent(L, what) {
-  L.locked_intent = L.locked_intent || {};
-  L.locked_intent[what] = { at: Date.now(), t: PM.round(PM.time - L.from, 3) };
-}
-
 function startMove(e, layers, T) {
   if (!layers.length) return;
   const start = layers.map(L => ({ L, x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T) }));
-  PM.hist.begin('Move layer');
+  PM.Edit.begin('Move layer', { origin: 'canvas' });
   let moved = false;
   PM.drag(e, {
     move: (dx, dy, ev) => {
@@ -271,11 +266,10 @@ function startMove(e, layers, T) {
       start.forEach(s => {
         setOrKey(s.L, 'position.x', s.x + ddx, T);
         setOrKey(s.L, 'position.y', s.y + ddy, T);
-        markIntent(s.L, 'position');
       });
       PM.invalidate();
     },
-    up: () => { moved ? PM.hist.commit('Move layer') : PM.hist.cancel(); PM.Inspector.refresh(); },
+    up: () => { moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector.refresh(); },
   });
 }
 
@@ -286,7 +280,7 @@ function startTransform(e, L, hit, T) {
   const cx = m[4], cy = m[5];
   const r0 = V.ov.getBoundingClientRect();
   const a0 = Math.atan2((e.clientY - r0.top) / V.shown - cy, (e.clientX - r0.left) / V.shown - cx);
-  PM.hist.begin(hit.rotate ? 'Rotate layer' : 'Scale layer');
+  PM.Edit.begin(hit.rotate ? 'Rotate layer' : 'Scale layer', { origin: 'canvas' });
   let moved = false;
   PM.drag(e, {
     cursor: hit.rotate ? 'grabbing' : 'nwse-resize',
@@ -297,7 +291,6 @@ function startTransform(e, L, hit, T) {
         let deg = s0.r + (a - a0) * 180 / Math.PI;
         if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
         setOrKey(L, 'rotation', PM.round(deg, 2), T);
-        markIntent(L, 'rotation');
       } else {
         const sgnX = hit.corner[0] === 0 ? -1 : hit.corner[0] === 1 ? 1 : 0;
         const sgnY = hit.corner[1] === 0 ? -1 : hit.corner[1] === 1 ? 1 : 0;
@@ -307,21 +300,19 @@ function startTransform(e, L, hit, T) {
         if (!ev.altKey) { const k = sgnX && sgnY ? Math.max(kx, ky) : (sgnX ? kx : ky); nx = s0.sx * k; ny = s0.sy * k; }
         setOrKey(L, 'scale.x', PM.round(nx, 2), T);
         setOrKey(L, 'scale.y', PM.round(ny, 2), T);
-        markIntent(L, 'scale');
       }
       PM.invalidate();
     },
-    up: () => { moved ? PM.hist.commit() : PM.hist.cancel(); PM.Inspector.refresh(); },
+    up: () => { moved ? PM.Edit.commit() : PM.Edit.cancel(); PM.Inspector.refresh(); },
   });
 }
 
 /** Write a value: sets a keyframe when the channel is animated, otherwise the static value. */
 function setOrKey(L, key, v, T) {
-  const p = L.p[key];
-  if (!p) return;
-  if (p.kf.length) PM.setKeyOn(p, T - L.from, v, 'power', PM.proj.fps);
-  else p.v = v;
-  PM.touch();
+  return PM.Edit.dispatch({
+    type: 'set_property', target: L.id, path: key, value: v, time: T,
+    mode: 'auto', preserveHandEdits: false, markIntent: 'human',
+  });
 }
 PM.setOrKey = setOrKey;
 })();
