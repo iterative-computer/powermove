@@ -500,6 +500,22 @@ GL.render = (T, opt = {}) => {
   GL.stats.ms = performance.now() - t0;
 };
 
+/** Render one frame and read back raw RGBA pixels (bottom-up, premultiplied).
+    Used for transparent PNG export where the canvas itself is opaque. */
+GL.renderToPixels = (T, W, H, opt = {}) => {
+  const gl = GL.gl; if (!gl) return null;
+  PM.scope.push(PM.proj);
+  let acc;
+  try { acc = GL.renderProject(PM.proj, T, W, H, opt); }
+  finally { PM.scope.pop(); }
+  bind(acc);
+  const px = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  free(acc);
+  GL.pool.forEach(f => f.busy = false);
+  return px;
+};
+
 /* Hit test: which layer is under a comp-space point (top-most first). */
 GL.pick = (x, y, T) => {
   const layers = PM.proj.layers;

@@ -27,8 +27,9 @@ function idBytes(id) {
   return new Uint8Array(out);
 }
 function el(id, payload) {
-  const data = payload instanceof Uint8Array ? payload : concat(payload);
-  return concat([idBytes(id), vint(data.length), data]);
+  /* ArrayBuffer.isView is realm-safe (unlike instanceof), keeping the muxer testable headlessly */
+  const data = ArrayBuffer.isView(payload) ? payload : concat(payload);
+  return concat([idBytes(id), vint(data.length ?? data.byteLength), data]);
 }
 function elUnknownSize(id) { return concat([idBytes(id), new Uint8Array([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]); }
 function concat(arrs) {
@@ -39,45 +40,144 @@ function concat(arrs) {
 }
 const str = (s) => new TextEncoder().encode(s);
 
-function muxWebM(frames, { width, height, fps, codecId = 'V_VP9' }) {
+function muxWebM(frames, { width, height, fps, codecId = 'V_VP9', audio }) {
   const scale = 1e6; // 1ms ticks
   const header = el(0x1A45DFA3, [
     el(0x4286, uintBytes(1)), el(0x42F7, uintBytes(1)),
     el(0x42F2, uintBytes(4)), el(0x42F3, uintBytes(8)),
     el(0x4282, str('webm')), el(0x4287, uintBytes(2)), el(0x4285, uintBytes(2)),
   ]);
-  const durMs = frames.length ? (frames[frames.length - 1].ts / 1000) + 1000 / fps : 0;
+  /* merged, time-ordered block stream so clusters interleave video + audio */
+  const blocks = frames.map(f => ({ ms: Math.round(f.ts / 1000), track: 1, key: f.key, data: f.data }));
+  if (audio && audio.chunks.length) {
+    audio.chunks.forEach(b => blocks.push({ ms: Math.round(b.ts / 1000), track: 2, key: false, data: b.data }));
+    blocks.sort((a, b) => a.ms - b.ms || a.track - b.track);
+  }
+  const lastMs = blocks.length ? blocks[blocks.length - 1].ms : 0;
+  const durMs = lastMs + 1000 / fps;
   const info = el(0x1549A966, [
     el(0x2AD7B1, uintBytes(scale)),
     el(0x4D80, str('Powermove')), el(0x5741, str('Powermove ' + PM.version)),
     el(0x4489, floatBytes(durMs)),
   ]);
-  const tracks = el(0x1654AE6B, [
+  const tracks = [
     el(0xAE, [
       el(0xD7, uintBytes(1)), el(0x73C5, uintBytes(1)), el(0x83, uintBytes(1)),
       el(0x536E, str('Video')), el(0x86, str(codecId)),
       el(0xE0, [el(0xB0, uintBytes(width)), el(0xBA, uintBytes(height))]),
     ]),
-  ]);
-  /* one cluster per ~2s keeps blocks addressable */
+  ];
+  if (audio && audio.chunks.length) {
+    tracks.push(el(0xAE, [
+      el(0xD7, uintBytes(2)), el(0x73C5, uintBytes(2)), el(0x83, uintBytes(2)),
+      el(0x536E, str('Audio')), el(0x86, str('A_OPUS')),
+      ...(audio.priv ? [el(0x63A2, audio.priv)] : []),
+      el(0xE1, [
+        el(0xB5, floatBytes(audio.rate || 48000)),
+        el(0x9F, uintBytes(audio.channels || 2)),
+      ]),
+    ]));
+  }
+  const tracksEl = el(0x1654AE6B, tracks);
+  /* one cluster per ~2s keeps block-relative timecodes inside their vint */
   const clusters = [];
   let cur = null, curStart = 0;
-  for (const f of frames) {
-    const ms = Math.round(f.ts / 1000);
-    if (!cur || ms - curStart > 2000) {
+  for (const b of blocks) {
+    if (!cur || b.ms - curStart > 2000) {
       if (cur) clusters.push(el(0x1F43B675, [el(0xE7, uintBytes(curStart)), ...cur]));
-      cur = []; curStart = ms;
+      cur = []; curStart = b.ms;
     }
-    const rel = ms - curStart;
+    const rel = b.ms - curStart;
     const bh = new Uint8Array(4);
-    bh[0] = 0x81;                    // track 1, vint
+    bh[0] = 0x80 | b.track;          // track number, single-byte vint
     bh[1] = (rel >> 8) & 0xff; bh[2] = rel & 0xff;
-    bh[3] = f.key ? 0x80 : 0x00;
-    cur.push(el(0xA3, concat([bh, f.data])));
+    bh[3] = b.key ? 0x80 : 0x00;
+    cur.push(el(0xA3, concat([bh, b.data])));
   }
   if (cur) clusters.push(el(0x1F43B675, [el(0xE7, uintBytes(curStart)), ...cur]));
-  const segment = el(0x18538067, [info, tracks, ...clusters]);
+  const segment = el(0x18538067, [info, tracksEl, ...clusters]);
   return new Blob([header, segment], { type: 'video/webm' });
+}
+
+/* ── audio mixdown + opus encode ───────────────────────── */
+async function mixAudio(t0, t1) {
+  const spans = [];
+  for (const L of PM.proj.layers) {
+    if (L.type !== 'audio' || !L.on || !L.d.asset) continue;
+    const s = Math.max(L.from, t0), e = Math.min(L.from + L.dur, t1);
+    if (e - s <= .01) continue;
+    const a = PM.assets.get(L.d.asset); if (!a) continue;
+    spans.push({ L, a, s, e });
+  }
+  if (!spans.length) return null;
+  const SR = 48000;
+  let ctx;
+  try { ctx = new OfflineAudioContext(2, Math.ceil((t1 - t0) * SR), SR); } catch (e) { return null; }
+  for (const { L, a, s, e } of spans) {
+    try {
+      const buf = await ctx.decodeAudioData(await (await fetch(a.url)).arrayBuffer());
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const g = ctx.createGain();
+      src.connect(g).connect(ctx.destination);
+      const gain = PM.clamp(L.d.gain == null ? 1 : L.d.gain, 0, 4);
+      const fi = Math.max(0, L.d.fadeIn || 0), fo = Math.max(0, L.d.fadeOut || 0);
+      const sRel = s - t0, eRel = e - t0;
+      if (fi > .01) {
+        g.gain.setValueAtTime(.0001, sRel);
+        g.gain.exponentialRampToValueAtTime(Math.max(gain, .0001), sRel + Math.min(fi, eRel - sRel));
+      } else g.gain.setValueAtTime(gain, sRel);
+      if (fo > .01 && eRel - fo > sRel) {
+        g.gain.setValueAtTime(gain, eRel - fo);
+        g.gain.linearRampToValueAtTime(.0001, eRel);
+      }
+      /* comp time → source time: playback starts where the layer window begins */
+      src.start(sRel, Math.max(0, (s - L.from) + (L.d.trim || 0)), e - s);
+    } catch (err) { console.warn('Audio layer skipped during export', err); }
+  }
+  try { return await ctx.startRendering(); } catch (e) { console.warn('Audio mixdown failed', e); return null; }
+}
+
+async function encodeOpus(buffer) {
+  if (!buffer || typeof AudioEncoder === 'undefined') return null;
+  const cfg = { codec: 'opus', sampleRate: buffer.sampleRate, numberOfChannels: Math.min(2, buffer.numberOfChannels), bitrate: 160000 };
+  const sup = await AudioEncoder.isConfigSupported(cfg).catch(() => null);
+  if (!sup || !sup.supported) return null;
+  const chunks = [];
+  let priv = null;
+  const enc = new AudioEncoder({
+    output: (chunk, meta) => {
+      /* first output carries the OpusHead needed for WebM CodecPrivate */
+      if (!priv && meta && meta.decoderConfig && meta.decoderConfig.description) {
+        priv = new Uint8Array(meta.decoderConfig.description);
+      }
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      chunks.push({ ts: chunk.timestamp, data });
+    },
+    error: (e) => console.warn('audio encode error', e),
+  });
+  enc.configure(cfg);
+  const ch = cfg.numberOfChannels;
+  const chan = [];
+  for (let c = 0; c < ch; c++) chan.push(buffer.getChannelData(c));
+  const slice = Math.floor(buffer.sampleRate * .02); // 20ms frames
+  for (let off = 0; off < buffer.length; off += slice) {
+    const n = Math.min(slice, buffer.length - off);
+    const planar = new Float32Array(n * ch);
+    for (let c = 0; c < ch; c++) planar.set(chan[c].subarray(off, off + n), c * n);
+    const ad = new AudioData({
+      format: 'f32-planar', sampleRate: buffer.sampleRate,
+      numberOfFrames: n, numberOfChannels: ch,
+      timestamp: Math.round(off / buffer.sampleRate * 1e6),
+      data: planar,
+    });
+    enc.encode(ad); ad.close();
+    if (enc.encodeQueueSize > 16) await new Promise(r => setTimeout(r, 4));
+  }
+  await enc.flush();
+  enc.close();
+  return chunks.length ? { chunks, priv, rate: buffer.sampleRate, channels: ch } : null;
 }
 
 /* ── export core ───────────────────────────────────────── */
@@ -108,6 +208,9 @@ X.dialog = () => {
   mk('Quality', PM.selectField(() => opts.quality, v => { opts.quality = v; info(); },
     [{ v: 'draft', label: 'Draft · 4 Mbps' }, { v: 'high', label: 'High · 16 Mbps' }, { v: 'max', label: 'Max · 40 Mbps' }]));
   mk('Motion blur', PM.toggleField(() => opts.mblur, v => { opts.mblur = v; }));
+  const hasAudio = p.layers.some(l => l.type === 'audio' && l.on && l.d.asset);
+  mk('Include audio', PM.toggleField(() => opts.audio !== false, v => { opts.audio = v; }, { label: hasAudio ? 'Mixes composition audio (WebM)' : 'No audio layers in this project' }));
+  mk('Transparent background', PM.toggleField(() => !!opts.alpha, v => { opts.alpha = v; }, { label: 'PNG / still only' }));
   const nfo = h('div', { style: { fontFamily: 'var(--f-mono)', fontSize: '11px', color: 'var(--tx-3)', padding: '10px 4px 0', lineHeight: 1.7 } });
   body.appendChild(nfo);
   function info() {
@@ -159,7 +262,7 @@ async function run(opts) {
     return PM.toast('Project exported');
   }
   if (opts.format === 'still') {
-    const cv = PM.renderFrameTo(PM.time, W, H);
+    const cv = opts.alpha ? alphaFrame(PM.time, W, H, opts.mblur) : PM.renderFrameTo(PM.time, W, H);
     cv.toBlob(b => PM.download(b, `${p.name}_${PM.tc(PM.time, p.fps).replace(/:/g, '-')}.png`));
     return PM.toast('Frame exported');
   }
@@ -201,6 +304,36 @@ function renderInto(T, W, H, mblur) {
   PM.GL.resize(W, H);
   PM.GL.render(T, { mblur, mbSamples: 20, shutter: PM.proj.shutter || .5 });
   return PM.GL.canvas;
+}
+
+/* Transparent frames: read back the composited FBO (premultiplied, bottom-up)
+   and convert to straight-alpha top-down ImageData. */
+function alphaFrame(T, W, H, mblur) {
+  const px = PM.GL.renderToPixels(T, W, H, {
+    transparent: true, mblur: mblur !== false, mbSamples: 20, shutter: PM.proj.shutter || .5,
+  });
+  if (!px) return null;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const c = cv.getContext('2d');
+  const img = c.createImageData(W, H);
+  const d = img.data;
+  for (let y = 0; y < H; y++) {
+    let si = ((H - 1 - y) * W) * 4, di = y * W * 4;
+    for (let x = 0; x < W; x++, si += 4, di += 4) {
+      const a = px[si + 3];
+      if (a === 255) { d[di] = px[si]; d[di + 1] = px[si + 1]; d[di + 2] = px[si + 2]; d[di + 3] = 255; }
+      else if (a === 0) { d[di] = d[di + 1] = d[di + 2] = d[di + 3] = 0; }
+      else {
+        d[di] = Math.min(255, (px[si] * 255 / a) | 0);
+        d[di + 1] = Math.min(255, (px[si + 1] * 255 / a) | 0);
+        d[di + 2] = Math.min(255, (px[si + 2] * 255 / a) | 0);
+        d[di + 3] = a;
+      }
+    }
+  }
+  c.putImageData(img, 0, 0);
+  return cv;
 }
 
 async function exportWebCodecs({ opts, W, H, t0, total, ui, pctx, bitrate }) {
@@ -245,8 +378,19 @@ async function exportWebCodecs({ opts, W, H, t0, total, ui, pctx, bitrate }) {
   if (X.cancel) return;
   ui.set(total, 'muxing…');
   await new Promise(r => setTimeout(r, 16));
-  const blob = muxWebM(frames, { width: W, height: H, fps: opts.fps, codecId: chosen.id });
+  let audioPayload = null, audioNote = '';
+  if (opts.audio !== false) {
+    ui.set(total, 'mixing audio…');
+    await new Promise(r => setTimeout(r, 16));
+    const mix = await mixAudio(t0, t1);
+    if (mix) {
+      audioPayload = await encodeOpus(mix);
+      if (!audioPayload) audioNote = ' · no system opus encoder';
+    }
+  }
+  const blob = muxWebM(frames, { width: W, height: H, fps: opts.fps, codecId: chosen.id, audio: audioPayload });
   PM.download(blob, `${PM.proj.name || 'powermove'}.webm`);
+  if (audioNote) PM.toast(audioNote, 4000);
 }
 
 async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }) {
@@ -286,7 +430,9 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }) {
   for (let i = 0; i < total; i++) {
     if (X.cancel) break;
     const T = t0 + i / opts.fps;
-    const cv = renderInto(T, W, H, opts.mblur);
+    let cv;
+    if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur);
+    if (!cv) cv = renderInto(T, W, H, opts.mblur);
     const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
     const name = `${PM.proj.name || 'frame'}_${String(i).padStart(5, '0')}.png`;
     if (dir) {
@@ -301,7 +447,10 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }) {
 }
 
 /* Programmatic export — used by tests and the native menu. */
-X.run = (opts) => run(Object.assign({ format: 'webm', scale: 1, fps: PM.proj.fps, range: 'work', quality: 'high', mblur: true, name: PM.proj.name }, opts || {}));
+X.run = (opts) => run(Object.assign({ format: 'webm', scale: 1, fps: PM.proj.fps, range: 'work', quality: 'high', mblur: true, alpha: false, audio: true, name: PM.proj.name }, opts || {}));
+
+/* Test hooks: the muxer is deterministic pure JS, so it is verifiable headlessly. */
+X.muxWebM = muxWebM;
 
 /* Fast still capture used by the agent's `look` tool. */
 X.snapshot = (T, maxW = 480) => {
