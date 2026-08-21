@@ -138,6 +138,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.evaluateJavaScript("document.documentElement.classList.add('native-app')")
         positionTrafficLights()
+        /* Boot self-check: surfaces renderer state on stderr for support/diagnostics. */
+        webView.evaluateJavaScript("""
+        setTimeout(function() {
+          try {
+            var ok = !!(window.PM && PM.GL && PM.GL.gl);
+            var msg = 'boot gl=' + ok +
+              ' layers=' + (window.PM && PM.proj ? PM.proj.layers.length : -1) +
+              ' ms=' + (PM.perf ? (PM.perf.ms || 0).toFixed(1) : '?');
+            window.webkit.messageHandlers.pmLog.postMessage(msg);
+          } catch (e) {}
+        }, 1200);
+        """)
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {

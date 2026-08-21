@@ -407,7 +407,7 @@ GL.renderProject = (proj, T, W, H, opt = {}) => {
   const layers = proj.layers;
   const soloOn = layers.some(l => l.solo);
 
-  const acc = grab(W, H);
+  let acc = grab(W, H);
   bind(acc);
   if (opt.transparent) clear(0, 0, 0, 0);
   else { const bg = PM.hex2rgb(proj.bg); clear(bg[0], bg[1], bg[2], 1); }
