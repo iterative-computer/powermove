@@ -57,3 +57,17 @@ test('invalid replacement docks fall back to the previous usable layout', () => 
   assert.equal(workspace.layout.docks[0].panels[0].id, 'viewer');
   assert.equal(workspace.layout.docks[0].flex, true);
 });
+
+test('the malformed app-only Gradient layout is narrowly recognized for migration', () => {
+  const WS = workspaceModel();
+  const legacy = {
+    id: 'saved-gradient', name: 'Gradient', builtin: false,
+    layout: { docks: [
+      { id: 'left', panels: [{ id: 'gradient-controls' }, { id: 'assets' }] },
+      { id: 'right', panels: [{ id: 'viewer' }, { id: 'timeline' }, { id: 'layers' }, { id: 'inspector' }] },
+    ] },
+  };
+  assert.equal(WS.isLegacyGradient(legacy), true);
+  assert.equal(WS.isLegacyGradient({ ...legacy, name: 'My Gradient' }), false);
+  assert.equal(WS.isLegacyGradient({ ...legacy, layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] } }), false);
+});

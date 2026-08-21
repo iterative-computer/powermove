@@ -7,7 +7,6 @@ const PM = window.PM, h = PM.h;
 function vint(n, len) {
   if (!len) { len = 1; while (n >= 2 ** (7 * len) - 1) len++; }
   const b = new Uint8Array(len);
-  let v = n + (1 << (7 * len - (len - 1) * 0)) * 0;
   for (let i = len - 1; i >= 0; i--) { b[i] = n & 0xff; n = Math.floor(n / 256); }
   b[0] |= 1 << (8 - len);
   return b;

@@ -335,7 +335,7 @@ function layerOptions(wrap, L) {
   wrap.appendChild(PM.row('Parent', PM.selectField(
     () => { const p = PM.L(L.parent); return p ? p.name : 'none'; },
     (v) => { L.parent = v; PM.invalidate(); },
-    [{ v: null, label: 'none' }, ...PM.proj.layers.filter(o => o.id !== L.id).map(o => ({ v: o.id, label: o.name }))], { label: 'Parent' })));
+    [{ v: null, label: 'none' }, ...PM.proj.layers.filter(o => o.id !== L.id && !PM.wouldCycle(L, o.id)).map(o => ({ v: o.id, label: o.name }))], { label: 'Parent' })));
   wrap.appendChild(PM.row('Color', PM.colorField(() => L.color, v => { L.color = v; PM.invalidate(); }, { label: 'Label color' })));
   numRow(wrap, 'Start', () => L.from, v => { L.from = Math.max(0, v); PM.invalidate(); }, { step: .05, precision: 2, unit: 's' });
   numRow(wrap, 'Duration', () => L.dur, v => { L.dur = Math.max(.02, v); PM.invalidate(); }, { step: .05, precision: 2, unit: 's' });

@@ -35,7 +35,7 @@ function startAudio(T) {
       const src = AU.ctx.createMediaElementSource(el);
       const gain = AU.ctx.createGain();
       src.connect(gain).connect(AU.ctx.destination);
-      n = { el, gain }; AU.nodes.set(L.id, n);
+      n = { el, gain, src }; AU.nodes.set(L.id, n);
     }
     n.gain.gain.value = PM.clamp(L.d.gain == null ? 1 : L.d.gain, 0, 4);
     try { n.el.currentTime = PM.clamp(local + (L.d.trim || 0), 0, a.dur || 0); } catch (e) { }
@@ -43,13 +43,31 @@ function startAudio(T) {
   }
 }
 function stopAudio() { AU.nodes.forEach(n => n.el.pause()); }
+/* Evict WebAudio nodes for layers that no longer exist — otherwise deleted/duplicated
+   audio layers leak media-element sources and eventually exhaust the audio graph. */
+function evictStaleAudio() {
+  const live = new Set(PM.proj.layers.map(l => l.id));
+  for (const [id, n] of AU.nodes) {
+    if (!live.has(id)) {
+      try { n.el.pause(); n.el.src = ''; } catch (e) { }
+      try { n.gain.disconnect(); } catch (e) { }
+      try { n.src.disconnect(); } catch (e) { }
+      AU.nodes.delete(id);
+    }
+  }
+}
+PM.bus.on('layers', evictStaleAudio);
+PM.bus.on('project', () => { stopAudio(); evictStaleAudio(); });
 function scrubVideos(T) {
   for (const L of PM.proj.layers) {
     if (L.type !== 'video' || !L.d.asset) continue;
     const a = PM.assets.get(L.d.asset); if (!a) continue;
     const inRange = PM.active(L, T);
-    if (PM.playing && inRange) { if (a.el.paused) { a.el.currentTime = PM.clamp(T - L.from + (L.d.trim || 0), 0, a.dur); a.el.play().catch(() => { }); } }
-    else if (!a.el.paused) a.el.pause();
+    /* playback position must respect layer speed, matching the compositor's vt math */
+    const vt = PM.clamp((T - L.from) * (L.d.speed || 1) + (L.d.trim || 0), 0, Math.max(0, (a.dur || 0) - .04));
+    if (PM.playing && inRange) { if (a.el.paused) { a.el.currentTime = vt; a.el.play().catch(() => { }); } }
+    else if (!PM.playing && !a.el.paused) a.el.pause();
+    else if (!PM.playing && Math.abs(a.el.currentTime - vt) > .02) { try { a.el.currentTime = vt; } catch (e) { } }
   }
 }
 

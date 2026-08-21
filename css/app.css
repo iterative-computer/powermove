@@ -51,9 +51,12 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
 
 /* ── tool toolbar (AE-style) ───────────────────────────── */
 #toolbar-strip{
+  --toolbar-control-inset:6px;
   flex:0 0 40px;display:flex;align-items:center;margin:0 var(--pad) var(--pad);
-  background:var(--bg-panel);border:1px solid var(--line);border-radius:var(--r-md);
-  padding:0 8px;position:relative;z-index:30;
+  background:var(--bg-panel);border:1px solid var(--line);
+  /* Concentric corners: outer radius = selected-tool radius + inset. */
+  border-radius:calc(var(--r-sm) + var(--toolbar-control-inset));
+  padding:0 calc(var(--toolbar-control-inset) - 1px);position:relative;z-index:30;
 }
 #toolbar{display:flex;align-items:center;gap:2px;width:100%}
 #toolbar .tl-sep{width:1px;height:20px;background:var(--line-2);margin:0 6px;flex:none}
@@ -76,12 +79,12 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
 .dock#dock-left{flex:0 0 250px;min-width:200px}
 .dock#dock-right{flex:0 0 300px;min-width:220px}
 .dock.hidden{display:none}
-.dock.drop-into{outline:1.5px dashed var(--accent);outline-offset:-3px;border-radius:var(--r-lg)}
 
 /* splitters sit inside the gap, with a generous invisible hit area */
 .splitter{flex:0 0 var(--gap);cursor:col-resize;position:relative;z-index:5;margin:0 calc(var(--gap) * -1)}
 .splitter::after{content:'';position:absolute;inset:0 calc((var(--gap) - 4px) / 2);border-radius:3px;transition:background .15s}
 .splitter:hover::after,.splitter.drag::after{background:var(--accent)}
+.panel-dragging .splitter::after{background:transparent}
 .splitter.h{flex:0 0 var(--gap);cursor:row-resize;width:100%;margin:calc(var(--gap) * -1) 0}
 .splitter.h::after{inset:calc((var(--gap) - 4px) / 2) 0}
 
@@ -116,14 +119,14 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
 }
 .panel-move-handle.inline:hover{color:var(--tx-2);background:transparent;box-shadow:none;opacity:1}
 .panel > header .ptitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.panel.drop-before{box-shadow:0 -2px 0 0 var(--accent)}
-.panel.drop-after{box-shadow:0 2px 0 0 var(--accent)}
 .panel-ghost{
-  position:fixed;z-index:300;pointer-events:none;background:var(--bg-float);border:1px solid var(--accent);
-  border-radius:var(--r-md);box-shadow:var(--shadow-float);display:flex;align-items:center;padding:0 12px;
-  font-size:var(--fs-md);font-weight:560;color:var(--tx);opacity:0;transform:scale(.96);transition:opacity .12s,transform .12s;
+  position:fixed;z-index:300;pointer-events:none;background:var(--bg-float);border:1px solid var(--line-2);
+  border-radius:8px;box-shadow:var(--shadow-float);display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;
+  color:var(--tx);opacity:0;transform:translateY(-2px) scale(.97);transition:opacity .1s,transform .1s;
 }
-.panel-ghost.on{opacity:.92;transform:scale(1)}
+.panel-ghost.on{opacity:.96;transform:translateY(0) scale(1)}
+.panel-ghost-label{font-size:var(--fs-md);font-weight:600;white-space:nowrap}
+.panel-ghost-destination{font-size:var(--fs-sm);font-weight:450;color:var(--tx-3);white-space:nowrap}
 .panel > header .sub{color:var(--tx-3);font-weight:400;font-size:var(--fs-sm);font-family:var(--f-mono)}
 .panel > header .sp{flex:1}
 .panel > .body{flex:1;min-height:0;overflow:auto;position:relative}

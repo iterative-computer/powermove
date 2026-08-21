@@ -116,19 +116,42 @@ PM.localMatrix = (L, T) => {
   return m;
 };
 
-PM.worldMatrix = (L, T, depth = 0) => {
+/* Cycle-safe parenting: a visited set breaks parent loops deterministically
+   instead of silently freezing transforms after an arbitrary depth cap. */
+PM.worldMatrix = (L, T, seen = null) => {
   let m = PM.localMatrix(L, T);
-  if (L.parent && depth < 12) {
+  if (L.parent) {
+    seen = seen || new Set();
+    if (seen.has(L.id)) return m;
+    seen.add(L.id);
     const p = PM.L(L.parent);
-    if (p) m = mul(PM.worldMatrix(p, T, depth + 1), m);
+    if (p && !seen.has(p.id)) m = mul(PM.worldMatrix(p, T, seen), m);
   }
   return m;
 };
 
-PM.worldOpacity = (L, T, depth = 0) => {
+PM.worldOpacity = (L, T, seen = null) => {
   let o = PM.ev(L, 'opacity', T) / 100;
-  if (L.parent && depth < 12) { const p = PM.L(L.parent); if (p) o *= PM.worldOpacity(p, T, depth + 1); }
+  if (L.parent) {
+    seen = seen || new Set();
+    if (seen.has(L.id)) return clamp(o, 0, 1);
+    seen.add(L.id);
+    const p = PM.L(L.parent);
+    if (p && !seen.has(p.id)) o *= PM.worldOpacity(p, T, seen);
+  }
   return clamp(o, 0, 1);
+};
+
+/* True when assigning parentId to L would create a parenting cycle. */
+PM.wouldCycle = (L, parentId) => {
+  if (!parentId) return false;
+  if (parentId === L.id) return true;
+  let cur = PM.L(parentId), guard = 0;
+  while (cur && guard++ < 256) {
+    if (cur.id === L.id) return true;
+    cur = cur.parent ? PM.L(cur.parent) : null;
+  }
+  return false;
 };
 
 /* ── keyframe operations ───────────────────────────────── */

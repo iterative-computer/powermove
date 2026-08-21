@@ -120,23 +120,26 @@ function applyPanelSize(el, spec, def) {
 /* ── drag to move panels between docks ─────────────────── */
 let dragState = null;
 function startPanelDrag(e, spec, dock, el) {
-  const rect = el.getBoundingClientRect();
-  const ghost = h('div.panel-ghost', h('span', PM.PANELS[spec.id].title));
-  ghost.style.width = rect.width + 'px';
-  ghost.style.height = Math.min(rect.height, 120) + 'px';
+  const label = h('span.panel-ghost-label', PM.PANELS[spec.id].title);
+  const destination = h('span.panel-ghost-destination', 'Move panel');
+  const ghost = h('div.panel-ghost', label, destination);
   document.body.appendChild(ghost);
-  dragState = { spec, fromDock: dock.id, ghost, moved: false };
+  dragState = { spec, fromDock: dock.id, ghost, destination, moved: false };
 
   const move = (dx, dy, ev) => {
     if (!dragState.moved && Math.hypot(dx, dy) < 5) return;
-    dragState.moved = true;
+    if (!dragState.moved) {
+      dragState.moved = true;
+      document.body.classList.add('panel-dragging');
+    }
     ghost.classList.add('on');
-    ghost.style.left = ev.clientX + 12 + 'px';
-    ghost.style.top = ev.clientY + 12 + 'px';
     updateDropTarget(ev);
+    ghost.style.left = PM.clamp(ev.clientX + 12, 8, innerWidth - ghost.offsetWidth - 8) + 'px';
+    ghost.style.top = PM.clamp(ev.clientY + 12, 8, innerHeight - ghost.offsetHeight - 8) + 'px';
   };
   const up = (dx, dy, ev) => {
     ghost.remove();
+    document.body.classList.remove('panel-dragging');
     clearDropHints();
     const target = dragState.dropTarget;
     const wasMoved = dragState.moved;
@@ -156,6 +159,7 @@ function startPanelDrag(e, spec, dock, el) {
 function updateDropTarget(ev) {
   clearDropHints();
   dragState.dropTarget = null;
+  dragState.destination.textContent = 'Move panel';
   const el = document.elementFromPoint(ev.clientX, ev.clientY);
   if (!el) return;
   const dockEl = el.closest('.dock');
@@ -170,10 +174,11 @@ function updateDropTarget(ev) {
     const r = panelEl.getBoundingClientRect();
     const before = ev.clientY < r.top + r.height / 2;
     index = before ? i : i + 1;
-    panelEl.classList.add(before ? 'drop-before' : 'drop-after');
+    const title = PM.PANELS[panelEl.dataset.panel]?.title || 'panel';
+    dragState.destination.textContent = (before ? 'Before ' : 'After ') + title;
   } else {
-    dockEl.classList.add('drop-into');
     index = dockEl.querySelectorAll(':scope > .panel').length;
+    dragState.destination.textContent = 'End of ' + dockId + ' dock';
   }
   dragState.dropTarget = { dockId, index };
 }

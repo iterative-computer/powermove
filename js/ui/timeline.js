@@ -288,12 +288,6 @@ function drawRuler(c, W, H) {
   const wa = p.work || [0, p.dur];
   c.fillStyle = INK.sub;
   c.fillRect(t2x(wa[0]) - 1, 2, 3, 8); c.fillRect(t2x(wa[1]) - 1, 2, 3, 8);
-  /* markers */
-  (p.markers || []).forEach(m => {
-    const x = t2x(m.t);
-    c.fillStyle = theme.accent;
-    c.beginPath(); c.moveTo(x, T.ruler - 9); c.lineTo(x + 5, T.ruler - 4); c.lineTo(x, T.ruler); c.lineTo(x - 5, T.ruler - 4); c.fill();
-  });
   c.restore();
 }
 function fmtRuler(t, step, fps) {
@@ -862,7 +856,7 @@ function onCtx(e) {
       '-',
       { header: 'Parent to' },
       { label: 'None', on: !L.parent, run: () => PM.hist.do('Parent', () => { L.parent = null; }) },
-      ...PM.proj.layers.filter(o => o.id !== L.id).map(o => ({
+      ...PM.proj.layers.filter(o => o.id !== L.id && !PM.wouldCycle(L, o.id)).map(o => ({
         label: o.name, on: L.parent === o.id, run: () => PM.hist.do('Parent', () => { L.parent = o.id; }),
       })),
       '-',

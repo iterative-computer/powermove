@@ -82,7 +82,7 @@ reg('update_layer', 'Update a layer’s content, timing, transform, visibility, 
     if (x.locked != null) L.lock = x.locked;
     if (x.blend != null && PM.BLENDS.includes(x.blend)) L.blend = x.blend;
     if (x.motionBlur != null) L.mblur = x.motionBlur;
-    if (x.parent !== undefined) { const p = layer(x.parent); L.parent = p && p.id !== L.id ? p.id : null; }
+    if (x.parent !== undefined) { const p = layer(x.parent); L.parent = p && p.id !== L.id && !PM.wouldCycle(L, p.id) ? p.id : null; }
     if (x.content) Object.assign(L.d, x.content);
     if (x.properties) for (const k in x.properties) {
       const intent = k.split('.')[0];

@@ -114,11 +114,35 @@ const PRESETS = () => ([
     features: { motionBlur: true, snapping: true, guides: true, autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
-        dock('left', [p('assets', { size: 150 }), p('layers', { flex: true }), p('chat', { size: 280 })], 250),
+        /* The timeline already owns layer ordering and visibility in Design;
+           use the left rail for project media and the assistant. */
+        dock('left', [p('assets', { size: 150 }), p('chat', { flex: true })], 250),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
         dock('right', [p('inspector', { flex: true })], 300),
       ],
     },
+  },
+  {
+    id: 'gradient', name: 'Gradient', builtin: true, density: 'compact',
+    theme: { accent: '#FF6B1A', radius: 10 },
+    features: { motionBlur: true, snapping: true, guides: true, autosave: true, adaptiveQuality: true },
+    layout: {
+      docks: [
+        dock('left', [p('gradient-controls', { flex: true }), p('assets', { size: 190 })], 300),
+        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
+        dock('right', [p('inspector', { flex: true })], 340),
+      ],
+    },
+    custom: [{
+      id: 'gradient-controls', title: 'Gradient Editor', size: 220,
+      controls: [
+        { type: 'color', label: 'Gradient Start', param: 'Gradient Start', def: '#FF6B1A' },
+        { type: 'color', label: 'Gradient End', param: 'Gradient End', def: '#34144F' },
+        { type: 'slider', label: 'Gradient Angle', param: 'Gradient Angle', min: 0, max: 360, def: 0, step: 1 },
+        { type: 'slider', label: 'Gradient Midpoint', param: 'Gradient Midpoint', min: 0, max: 100, def: 50, step: 1 },
+        { type: 'slider', label: 'Gradient Softness', param: 'Gradient Softness', min: 0, max: 100, def: 50, step: 1 },
+      ],
+    }],
   },
   {
     id: 'animate', name: 'Animate', builtin: true, density: 'compact',
@@ -183,12 +207,30 @@ const WS = {
 };
 PM.WS = WS;
 
+/* The first agent-authored Gradient workspace used a two-dock layout that put
+   the canvas, timeline, Layers, and Inspector into one vertical stack. Replace
+   only that recognizable legacy shape with the shared repaired preset. */
+WS.isLegacyGradient = (w) => {
+  if (!w || w.builtin || w.name !== 'Gradient') return false;
+  const docks = w.layout && Array.isArray(w.layout.docks) ? w.layout.docks : [];
+  const panelIds = docks.flatMap(d => Array.isArray(d.panels) ? d.panels.map(q => q && q.id) : []);
+  return docks.length === 2
+    && panelIds.includes('gradient-controls')
+    && panelIds.includes('viewer')
+    && panelIds.includes('timeline')
+    && panelIds.includes('layers');
+};
+
 WS.init = () => {
   const saved = PM.store.get('workspaces', null);
   WS.all = saved && saved.length ? saved.map(w => normalizeWorkspace(w)) : PRESETS();
+  const lastSavedId = PM.store.get('workspace', 'design');
+  const legacyGradientIds = new Set(WS.all.filter(WS.isLegacyGradient).map(w => w.id));
+  if (legacyGradientIds.size) WS.all = WS.all.filter(w => !legacyGradientIds.has(w.id));
   /* always keep builtins available even if the user saved before they existed */
   PRESETS().forEach(preset => { if (!WS.all.some(w => w.id === preset.id)) WS.all.push(preset); });
-  const lastId = PM.store.get('workspace', 'design');
+  if (legacyGradientIds.size) WS.save();
+  const lastId = legacyGradientIds.has(lastSavedId) ? 'gradient' : lastSavedId;
   WS.activate(WS.get(lastId) ? lastId : 'design', true);
 };
 

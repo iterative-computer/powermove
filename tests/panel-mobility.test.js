@@ -25,6 +25,18 @@ test('persisted canvas panels resolve their current dock before moving again', (
   assert.match(layout, /startPanelDrag\(e, current\.spec, current\.dock, el\)/);
 });
 
+test('panel dragging uses one compact destination label without workspace lines', () => {
+  assert.match(layout, /span\.panel-ghost-destination/);
+  assert.match(layout, /document\.body\.classList\.add\('panel-dragging'\)/);
+  assert.match(layout, /document\.body\.classList\.remove\('panel-dragging'\)/);
+  assert.doesNotMatch(layout, /classList\.add\(before \? 'drop-before' : 'drop-after'\)/);
+  assert.doesNotMatch(layout, /dockEl\.classList\.add\('drop-into'\)/);
+  assert.doesNotMatch(css, /\.dock\.drop-into\s*\{/);
+  assert.doesNotMatch(css, /\.panel\.drop-(?:before|after)\s*\{/);
+  assert.match(css, /\.panel-dragging \.splitter::after\{background:transparent\}/);
+  assert.match(css, /\.panel-ghost\s*\{[^}]*height:32px/s);
+});
+
 test('timeline section resize never exposes an opaque cleared canvas', () => {
   assert.doesNotMatch(timeline, /getContext\('2d',\s*\{\s*alpha:\s*false\s*\}\)/);
   assert.match(timeline, /const changed = T\.cv\.width !== width \|\| T\.cv\.height !== height/);

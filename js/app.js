@@ -58,17 +58,36 @@ function hydrate(p) {
   base.work = p.work && p.work.length === 2 ? p.work : [0, base.dur];
   base.params = p.params || {};
   base.shutter = p.shutter == null ? .5 : p.shutter;
-  base.layers.forEach(L => {
+  /* Production rule: a saved project must never poison the renderer. Every channel,
+     keyframe, effect and layer field is normalized here so malformed data degrades
+     to a static value instead of NaN transforms or a broken keyframe search. */
+  const num = (x, fb) => { const n = Number(x); return Number.isFinite(n) ? n : fb; };
+  base.layers.forEach((L, li) => {
+    L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
+    if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
+    L.from = Math.max(0, num(L.from, 0)); L.dur = Math.max(.01, num(L.dur, 5));
+    if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
     L.on = L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
-    L.collapsed = L.collapsed !== false; L.fx = L.fx || []; L.p = L.p || {}; L.d = L.d || {};
+    L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
     L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
+    if (L.parent === L.id || (typeof L.parent === 'string' && !base.layers.some(o => o.id === L.parent))) L.parent = null;
     const fresh = PM.mkLayer(L.type || 'null', {}, base);
     Object.keys(fresh.p).forEach(k => {
-      if (!L.p[k]) L.p[k] = fresh.p[k];
-      L.p[k].kf = L.p[k].kf || []; L.p[k].expr = L.p[k].expr || null;
-      L.p[k].kf.forEach(q => { if (!q.i) q.i = PM.uid('k'); });
+      if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
+      const prop = L.p[k];
+      prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
+      /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
+      prop.kf = prop.kf
+        .filter(q => q && typeof q === 'object' && Number.isFinite(num(q.t)) && Number.isFinite(num(q.v)))
+        .map(q => ({ ...q, t: num(q.t), v: num(q.v), i: q.i || PM.uid('k'), hold: !!q.hold }))
+        .sort((a, b) => a.t - b.t)
+        .filter((q, i, arr) => i === 0 || q.t - arr[i - 1].t > 1e-6);
+      prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
+      prop.v = num(prop.v, fresh.p[k].v);
     });
-    L.fx.forEach(f => { f.p = f.p || {}; f.on = f.on !== false; });
+    Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
+    L.fx = L.fx.filter(f => f && typeof f === 'object' && PM.FX && PM.FX[f.type]);
+    L.fx.forEach(f => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
     if (L.type === 'shader') PM.syncShaderUniforms(L);
   });
   return base;
