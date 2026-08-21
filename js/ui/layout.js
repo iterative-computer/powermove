@@ -23,14 +23,15 @@ function buildPanel(spec, dock) {
   /* Reuse the live panel element for persist canvases so apply() never destroys
      the timeline/viewer backing store (the source of clip/gutter misalignment). */
   if (def.persist && inst.el && inst.built) {
-    inst.spec = spec;
+    inst.spec = spec; inst.dock = dock;
     applyPanelSize(inst.el, spec, def);
     inst.el.style.minHeight = (spec.min || 56) + 'px';
     inst.el.dataset.collapsed = '0';
     if (inst.body) inst.body.style.display = '';
     return inst.el;
   }
-  const cls = '.panel' + (def.flush ? '.flush' : '') + (def.noscroll ? '.noscroll' : '') + (spec.headless || def.headless ? '.headless' : '');
+  const headless = !!(spec.headless || def.headless);
+  const cls = '.panel' + (def.flush ? '.flush' : '') + (def.noscroll ? '.noscroll' : '') + (headless ? '.headless' : '');
   const el = h('div' + cls, { id: 'panel-' + spec.id });
   el.dataset.panel = spec.id;
 
@@ -44,7 +45,17 @@ function buildPanel(spec, dock) {
   if (def.persist && inst.cache) body = inst.cache;
   el.appendChild(body);
 
-  inst.el = el; inst.body = body; inst.header = hdr; inst.spec = spec;
+  /* Headless canvas panels still need an explicit, non-canvas drag surface.
+     Keeping it small prevents panel movement from stealing timeline/stage input. */
+  const moveHandle = headless
+    ? h('button.panel-move-handle', {
+      title: `Move ${def.title} · right-click for options`,
+      'aria-label': `Move ${def.title} panel`,
+    }, PM.icon('grip'))
+    : null;
+  if (moveHandle) el.appendChild(moveHandle);
+
+  inst.el = el; inst.body = body; inst.header = hdr; inst.spec = spec; inst.dock = dock; inst.moveHandle = moveHandle;
   if (def.persist) inst.cache = body;
 
   /* sizing */
@@ -56,24 +67,48 @@ function buildPanel(spec, dock) {
     try { def.build && def.build(body, inst); } catch (e) { console.error('[panel]' + spec.id, e); body.appendChild(h('div.empty', 'Panel error: ' + e.message)); }
     inst.built = true;
   }
+  if (moveHandle && def.moveSlot) {
+    const slot = body.querySelector(def.moveSlot);
+    if (slot) { moveHandle.classList.add('inline'); slot.insertBefore(moveHandle, slot.firstChild); }
+  }
   try { def.header && def.header(hdr, inst); } catch (e) { }
   if (!hdr.querySelector('.grip')) hdr.insertBefore(grip, hdr.firstChild);
 
-  /* header interactions: drag to move, dblclick collapse, context menu */
+  const liveLocation = () => (L.ws && findPanel(L.ws, spec.id)) || { spec: inst.spec || spec, dock: inst.dock || dock };
+  const beginMove = (e) => {
+    if (e.button !== 0) return;
+    const current = liveLocation();
+    if (!current || !current.dock || !current.spec) return;
+    e.stopPropagation();
+    startPanelDrag(e, current.spec, current.dock, el);
+  };
+
+  /* Header interactions use the live workspace location. Persisted canvas panels
+     keep their DOM nodes while moving, so captured initial dock objects go stale. */
   hdr.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button')) return;
-    if (e.button !== 0) return;
-    startPanelDrag(e, spec, dock, el);
+    beginMove(e);
   });
   hdr.addEventListener('dblclick', (e) => {
     if (e.target.closest('button')) return;
+    const current = liveLocation();
+    const liveSpec = current && current.spec ? current.spec : spec;
     const collapsed = el.dataset.collapsed === '1';
     el.dataset.collapsed = collapsed ? '0' : '1';
     body.style.display = collapsed ? '' : 'none';
-    el.style.flex = collapsed ? (spec.flex ? '1 1 auto' : '0 0 ' + (spec.size || def.size) + 'px') : '0 0 var(--hdr-h)';
+    el.style.flex = collapsed ? (liveSpec.flex ? '1 1 auto' : '0 0 ' + (liveSpec.size || def.size) + 'px') : '0 0 var(--hdr-h)';
     if (!collapsed) PM.bus.emit('layout:applied');
   });
-  hdr.addEventListener('contextmenu', (e) => { e.preventDefault(); panelMenu(e, spec, dock); });
+  const openPanelMenu = (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const current = liveLocation();
+    if (current && current.dock && current.spec) panelMenu(e, current.spec, current.dock);
+  };
+  hdr.addEventListener('contextmenu', openPanelMenu);
+  if (moveHandle) {
+    moveHandle.addEventListener('pointerdown', beginMove);
+    moveHandle.addEventListener('contextmenu', openPanelMenu);
+  }
   return el;
 }
 

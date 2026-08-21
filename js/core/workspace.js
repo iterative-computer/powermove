@@ -5,6 +5,108 @@ const PM = window.PM, h = PM.h;
 const dock = (id, panels, size) => ({ id, size, panels });
 const p = (id, o = {}) => ({ id, ...o });
 
+const copy = (value) => JSON.parse(JSON.stringify(value));
+const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+const text = (value, fallback = '') => typeof value === 'string' && value.trim() ? value.trim() : fallback;
+
+/* Agent-authored workspace JSON is persisted, so tolerate common model aliases and
+   repair older malformed workspaces before they reach the layout or controls UI. */
+function normalizeControl(control, index) {
+  const raw = control && typeof control === 'object' ? control : {};
+  const rawDefault = raw.def !== undefined ? raw.def : raw.default !== undefined ? raw.default : raw.value;
+  let type = text(raw.type).toLowerCase();
+  if (!['slider', 'color', 'toggle', 'select', 'button'].includes(type)) {
+    if (Array.isArray(raw.options)) type = 'select';
+    else if (typeof rawDefault === 'boolean') type = 'toggle';
+    else if (typeof rawDefault === 'string' && /^#[0-9a-f]{3,8}$/i.test(rawDefault)) type = 'color';
+    else type = 'slider';
+  }
+  const legacyParam = text(raw.parameter);
+  const savedParam = text(raw.param);
+  const generatedParam = /^Control \d+$/.test(savedParam);
+  const authoredParam = generatedParam && legacyParam ? legacyParam : text(savedParam, legacyParam);
+  const savedLabel = text(raw.label);
+  const label = generatedParam && /^Control \d+$/.test(savedLabel) && legacyParam
+    ? legacyParam
+    : text(savedLabel, text(raw.name, text(authoredParam, `Control ${index + 1}`)));
+  const out = { ...raw, type, label };
+  if (type === 'button') return out;
+  out.param = text(authoredParam, text(raw.name, label));
+  if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6B1A';
+  else if (type === 'toggle') out.def = rawDefault === undefined ? false : !!rawDefault;
+  else if (type === 'select') {
+    out.options = Array.isArray(raw.options) ? raw.options.filter(v => typeof v === 'string') : [];
+    out.def = rawDefault !== undefined ? rawDefault : (out.options[0] || '');
+  } else {
+    out.min = finite(raw.min) ? raw.min : 0;
+    out.max = finite(raw.max) ? raw.max : Math.max(1, finite(rawDefault) ? Math.abs(rawDefault) * 2 : 1);
+    if (out.max < out.min) [out.min, out.max] = [out.max, out.min];
+    out.def = finite(rawDefault) ? rawDefault : out.min;
+    out.step = finite(raw.step) && raw.step > 0 ? raw.step : Math.max((out.max - out.min) / 100, .01);
+  }
+  return out;
+}
+
+function normalizeWorkspace(workspace, fallback) {
+  const raw = workspace && typeof workspace === 'object' ? copy(workspace) : {};
+  const backup = fallback && typeof fallback === 'object' ? copy(fallback) : null;
+  raw.id = text(raw.id, PM.uid('ws'));
+  raw.name = text(raw.name, 'Workspace');
+  raw.density = ['compact', 'normal', 'comfy'].includes(raw.density) ? raw.density : 'normal';
+  raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
+  raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
+  raw.custom = (Array.isArray(raw.custom) ? raw.custom : []).map((panel, index) => {
+    const cp = panel && typeof panel === 'object' ? panel : {};
+    return {
+      ...cp,
+      id: text(cp.id, `custom-${raw.id}-${index + 1}`),
+      title: text(cp.title, text(cp.name, 'Controls')),
+      size: finite(cp.size) ? PM.clamp(cp.size, 72, 1200) : 220,
+      controls: (Array.isArray(cp.controls) ? cp.controls : []).map(normalizeControl),
+    };
+  });
+
+  let docks = raw.layout && Array.isArray(raw.layout.docks) ? raw.layout.docks : null;
+  if (!docks || !docks.some(d => d && Array.isArray(d.panels) && d.panels.length)) {
+    docks = backup && backup.layout && Array.isArray(backup.layout.docks)
+      ? backup.layout.docks
+      : [{ id: 'center', panels: [{ id: 'viewer', flex: true }] }];
+  }
+  const usedPanels = new Set();
+  docks = docks.map((item, index) => {
+    const d = item && typeof item === 'object' ? item : {};
+    const panels = (Array.isArray(d.panels) ? d.panels : []).map(spec => {
+      const q = typeof spec === 'string' ? { id: spec } : (spec && typeof spec === 'object' ? spec : {});
+      const id = text(q.id);
+      if (!id || usedPanels.has(id)) return null;
+      usedPanels.add(id);
+      const clean = { id };
+      if (q.flex) clean.flex = true;
+      if (finite(q.size)) clean.size = PM.clamp(q.size, 56, 1600);
+      if (finite(q.min)) clean.min = PM.clamp(q.min, 32, 800);
+      if (text(q.title)) clean.title = text(q.title);
+      return clean;
+    }).filter(Boolean);
+    const out = { id: text(d.id, `dock-${index + 1}`), panels };
+    if (finite(d.size)) out.size = PM.clamp(d.size, 200, 760);
+    if (d.hidden) out.hidden = true;
+    if (d.flex) out.flex = true;
+    return out;
+  }).filter(d => d.panels.length);
+  if (!docks.length) docks = [{ id: 'center', panels: [{ id: 'viewer', flex: true }], flex: true }];
+
+  /* The layout must always have one dock that consumes unused width. Models often
+     call it "main" or "canvas" instead of "center"; the viewer/timeline dock is
+     the semantic center regardless of its authored name. */
+  const fluid = docks.find(d => d.id === 'center')
+    || docks.find(d => d.panels.some(q => q.id === 'viewer' || q.id === 'timeline'))
+    || docks.find(d => d.flex)
+    || docks[0];
+  fluid.flex = true;
+  raw.layout = { ...(raw.layout && typeof raw.layout === 'object' ? raw.layout : {}), docks };
+  return raw;
+}
+
 const PRESETS = () => ([
   {
     id: 'design', name: 'Design', builtin: true, density: 'normal',
@@ -83,7 +185,7 @@ PM.WS = WS;
 
 WS.init = () => {
   const saved = PM.store.get('workspaces', null);
-  WS.all = saved && saved.length ? saved : PRESETS();
+  WS.all = saved && saved.length ? saved.map(w => normalizeWorkspace(w)) : PRESETS();
   /* always keep builtins available even if the user saved before they existed */
   PRESETS().forEach(preset => { if (!WS.all.some(w => w.id === preset.id)) WS.all.push(preset); });
   const lastId = PM.store.get('workspace', 'design');
@@ -127,20 +229,26 @@ WS.mutate = (fn, opts = {}) => {
     WS.all.push(copy);
     WS.current = copy;
   }
+  const fallback = copy(WS.current);
   fn(WS.current);
+  const normalized = normalizeWorkspace(WS.current, fallback);
+  const index = WS.all.findIndex(item => item.id === WS.current.id);
+  if (index >= 0) WS.all[index] = normalized;
+  WS.current = normalized;
   WS.save();
   WS.activate(WS.current.id, true);
   return WS.current;
 };
 
 WS.create = (spec) => {
-  const base = JSON.parse(JSON.stringify(WS.get(spec.base) || WS.get('design')));
+  const base = copy(WS.get(spec.base) || WS.get('design'));
   const w = Object.assign(base, spec, { id: PM.uid('ws'), builtin: false });
   w.name = spec.name || 'Workspace';
-  WS.all.push(w);
+  const normalized = normalizeWorkspace(w, base);
+  WS.all.push(normalized);
   WS.save();
-  WS.activate(w.id);
-  return w;
+  WS.activate(normalized.id);
+  return normalized;
 };
 
 WS.remove = (id) => {
@@ -230,4 +338,5 @@ function applyParam(param) {
   PM.touch(); PM.invalidate();
 }
 WS.registerCustom = registerCustom;
+WS.normalize = normalizeWorkspace;
 })();

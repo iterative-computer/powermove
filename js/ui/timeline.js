@@ -10,14 +10,18 @@ const T = {
 PM.TL = T;
 
 PM.registerPanel('timeline', {
-  title: 'Timeline', flush: true, noscroll: true, persist: true, headless: true, size: 300,
+  title: 'Timeline', flush: true, noscroll: true, persist: true, headless: true, size: 300, moveSlot: '#tl-head',
   build(body) {
     const head = h('div#tl-head');
     const wrap = h('div#tl-canvas-wrap');
     const cv = h('canvas#tl-canvas');
     wrap.appendChild(cv);
     body.append(head, wrap);
-    T.cv = cv; T.ctx = cv.getContext('2d', { alpha: false });
+    /* Keep the backing store transparent while a host resize is in flight.
+       An opaque 2D canvas is cleared to black as soon as its bitmap changes,
+       which made the whole timeline flash/stick black while a section was
+       being adjusted. The timeline still paints its own solid background. */
+    T.cv = cv; T.ctx = cv.getContext('2d');
     buildHead(head);
     bind(cv, wrap);
     new ResizeObserver(() => resize(wrap)).observe(wrap);
@@ -66,8 +70,15 @@ function resize(wrap) {
   if (r.width < 8 || r.height < 8) return; /* detached / mid-remount */
   T.dpr = Math.min(devicePixelRatio || 1, 2);
   T.w = r.width; T.hgt = r.height;
-  T.cv.width = Math.max(2, Math.round(r.width * T.dpr));
-  T.cv.height = Math.max(2, Math.round(r.height * T.dpr));
+  const width = Math.max(2, Math.round(r.width * T.dpr));
+  const height = Math.max(2, Math.round(r.height * T.dpr));
+  const changed = T.cv.width !== width || T.cv.height !== height;
+  if (T.cv.width !== width) T.cv.width = width;
+  if (T.cv.height !== height) T.cv.height = height;
+  /* Paint synchronously after the bitmap is cleared. ResizeObserver can run
+     after an already-requested animation frame, so relying only on the shared
+     invalidation queue can expose the canvas's cleared backing store. */
+  if (changed) draw();
   PM.invalidate('timeline');
 }
 addEventListener('resize', () => resize());
@@ -143,7 +154,7 @@ function drawInner() {
      panel element, and drawing into a detached canvas is the root cause of
      gutter/clip misalignment after layout changes. */
   const liveCv = PM.$('#tl-canvas');
-  if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d', { alpha: false }); }
+  if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d'); }
   const c = T.ctx; if (!c) return;
   /* Unconditional size sync: measure the wrap every draw so the bitmap always
      matches the laid-out size, regardless of missed observer/RAF frames. */

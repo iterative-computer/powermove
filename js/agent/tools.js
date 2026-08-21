@@ -200,12 +200,30 @@ reg('set_workspace', 'Create or edit an authored workspace: panels, docks, dimen
   type: 'object', properties: {
     name: { type: 'string' }, base: { type: 'string' }, create: { type: 'boolean' }, density: { type: 'string', enum: ['compact', 'normal', 'comfy'] },
     theme: { type: 'object' }, features: { type: 'object' },
-    docks: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, size: { type: 'number' }, panels: { type: 'array' } } } },
+    docks: { type: 'array', items: { type: 'object', required: ['id', 'panels'], properties: {
+      id: { type: 'string', description: 'Use left, center, or right. The center dock expands to fill the window.' },
+      size: { type: 'number' }, flex: { type: 'boolean' },
+      panels: { type: 'array', items: { type: 'object', required: ['id'], properties: {
+        id: { type: 'string', description: 'A panel id from available panels or a custom panel id.' },
+        size: { type: 'number' }, flex: { type: 'boolean' }, min: { type: 'number' },
+      } } },
+    } } },
     show: { type: 'array', items: { type: 'string' } }, hide: { type: 'array', items: { type: 'string' } },
     move: { type: 'array', items: { type: 'object', properties: { panel: { type: 'string' }, dock: { type: 'string' } } } },
-    customPanels: { type: 'array' },
+    customPanels: { type: 'array', items: { type: 'object', required: ['title', 'controls'], properties: {
+      id: { type: 'string' }, title: { type: 'string' }, note: { type: 'string' }, size: { type: 'number' },
+      controls: { type: 'array', items: { type: 'object', required: ['type', 'label'], properties: {
+        type: { type: 'string', enum: ['slider', 'color', 'toggle', 'select', 'button'] },
+        label: { type: 'string' }, param: { type: 'string', description: 'Stable scene parameter name used by expressions.' }, def: {}, min: { type: 'number' }, max: { type: 'number' },
+        step: { type: 'number' }, unit: { type: 'string' }, options: { type: 'array', items: { type: 'string' } },
+        cmd: { type: 'string' }, prompt: { type: 'string' },
+      } } },
+    } } },
   },
 }, async (x) => {
+  if (x.docks && (!x.docks.length || !x.docks.some(d => d && Array.isArray(d.panels) && d.panels.length))) {
+    return fail('Workspace needs at least one dock with a panel');
+  }
   let w;
   if (x.create) w = PM.WS.create({ name: x.name || 'Custom', base: x.base || PM.WS.current.id });
   const apply = (z) => {

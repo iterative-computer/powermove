@@ -100,6 +100,21 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
 .panel > header .grip{display:grid;place-items:center;width:16px;height:16px;color:var(--tx-4);flex:none;opacity:0;transition:opacity .15s}
 .panel > header:hover .grip{opacity:1}
 .panel > header .grip svg{width:13px;height:13px}
+.panel-move-handle{
+  position:absolute;z-index:24;top:7px;left:50%;transform:translateX(-50%);
+  width:32px;height:18px;border-radius:7px;display:grid;place-items:center;
+  color:var(--tx-3);background:color-mix(in srgb,var(--bg-float) 82%,transparent);
+  border:1px solid var(--line-2);box-shadow:0 1px 5px rgba(15,15,20,.08);
+  opacity:.62;cursor:grab;transition:opacity .12s,background .12s,color .12s,box-shadow .12s;
+}
+.panel-move-handle:hover{opacity:1;color:var(--tx);background:var(--bg-float);box-shadow:0 2px 8px rgba(15,15,20,.14)}
+.panel-move-handle:active{cursor:grabbing}
+.panel-move-handle svg{width:13px;height:13px;pointer-events:none}
+.panel-move-handle.inline{
+  position:static;transform:none;flex:none;width:16px;height:16px;margin-right:4px;border:0;border-radius:0;
+  color:var(--tx-4);background:transparent;box-shadow:none;opacity:.58;
+}
+.panel-move-handle.inline:hover{color:var(--tx-2);background:transparent;box-shadow:none;opacity:1}
 .panel > header .ptitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .panel.drop-before{box-shadow:0 -2px 0 0 var(--accent)}
 .panel.drop-after{box-shadow:0 2px 0 0 var(--accent)}
