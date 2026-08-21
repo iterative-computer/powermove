@@ -14,6 +14,7 @@ function animModel() {
     exprCache: new Map(),
     bus: { emit() {} },
     L: (id) => PM.proj.layers.find(l => l.id === id) || null,
+    curComp: () => PM.proj,
   };
   const context = vm.createContext({ window: { PM }, console });
   vm.runInContext(fs.readFileSync(path.join(root, 'js/core/easing.js'), 'utf8'), context);
@@ -67,4 +68,75 @@ test('evalKfs tolerates unsorted input by clamping to endpoints rather than NaN'
     const v = PM.evalKfs(kf, t);
     assert.ok(Number.isFinite(v), `finite at ${t}`);
   }
+});
+
+function projectModel() {
+  let nextId = 0;
+  const PM = {
+    clamp: (v, a, b) => Math.max(a, Math.min(b, v)),
+    uid: (p) => `${p}${++nextId}`,
+    exprCache: new Map(),
+    bus: { emit() {} },
+    scope: [],
+    invalidate: () => {},
+    selectLayers: () => {},
+    Ease: null,
+    version: 'test',
+  };
+  const context = vm.createContext({ window: { PM }, console });
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/core/easing.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/core/anim.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/core/model.js'), 'utf8'), context);
+  return PM;
+}
+
+function baseProject(PM) {
+  const p = PM.mkProject({ name: 'T', w: 1920, h: 1080, fps: 30, dur: 10 });
+  PM.proj = p;
+  return p;
+}
+
+test('precompose collapses selected layers into a nested comp with an identical span', () => {
+  const PM = projectModel();
+  const p = baseProject(PM);
+  const a = PM.mkLayer('shape', { name: 'A' }, p); a.from = 1; a.dur = 3;
+  const b = PM.mkLayer('text', { name: 'B' }, p); b.from = 2; b.dur = 3;
+  const keep = PM.mkLayer('solid', { name: 'Keep' }, p);
+  p.layers.push(a, b, keep);
+
+  const L = PM.precompose([a.id, b.id], 'Group');
+  assert.ok(L, 'precomp layer created');
+  assert.equal(L.type, 'precomp');
+  assert.ok(p.comps[L.d.comp], 'nested comp registered');
+  const sub = p.comps[L.d.comp];
+  assert.deepEqual([...sub.layers.map(l => l.name)], ['A', 'B'], 'layers moved in stack order');
+  assert.deepEqual([...p.layers.map(l => l.name)], ['Group', 'Keep']);
+  assert.equal(L.from, 1, 'span starts at earliest layer');
+  assert.equal(Math.abs(L.dur - 4) < 1e-9, true, 'span ends at latest layer');
+  assert.ok(PM.compOf(L) === sub, 'compOf resolves the nested comp');
+});
+
+test('precompose breaks parenting across the comp boundary', () => {
+  const PM = projectModel();
+  const p = baseProject(PM);
+  const inner = PM.mkLayer('shape', { name: 'Inner' }, p);
+  const outer = PM.mkLayer('null', { name: 'Outer' }, p);
+  inner.parent = outer.id;          // parent outside the future group
+  p.layers.push(outer, inner);
+  const L = PM.precompose([inner.id], 'Group');
+  const sub = p.comps[L.d.comp];
+  assert.equal(sub.layers[0].parent, null, 'inbound parenting severed');
+  assert.equal(outer.parent, null);
+});
+
+test('deleting a precomp layer garbage-collects its composition', () => {
+  const PM = projectModel();
+  const p = baseProject(PM);
+  const a = PM.mkLayer('shape', { name: 'A' }, p);
+  p.layers.push(a);
+  const L = PM.precompose([a.id], 'Group');
+  const cid = L.d.comp;
+  assert.ok(p.comps[cid]);
+  PM.removeLayers([L.id]);
+  assert.ok(!p.comps[cid], 'orphaned comp removed');
 });

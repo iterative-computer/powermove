@@ -63,6 +63,15 @@ def('split', 'Split at playhead', '⌘⇧D', () => PM.hist.do('Split', () => {
 }), 'Edit');
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map(l => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
+def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
+  const sels = PM.selLayers(); if (!sels.length) return PM.toast('Select layers to precompose');
+  const name = h('input', { value: 'Precomp' });
+  PM.modal({ title: 'Precompose ' + sels.length + (sels.length === 1 ? ' layer' : ' layers'), body: h('div.field', name), width: 400, actions: [
+    { label: 'Cancel' },
+    { label: 'Create', pri: true, run: () => PM.hist.do('Precompose', () => PM.precompose(sels.map(l => l.id), name.value.trim() || undefined)) },
+  ] });
+  setTimeout(() => { name.focus(); name.select(); }, 30);
+}, 'Edit');
 def('undo', 'Undo', '⌘Z', () => PM.hist.undo(), 'Edit');
 def('redo', 'Redo', '⌘⇧Z', () => PM.hist.redo(), 'Edit');
 
@@ -144,6 +153,7 @@ addEventListener('keydown', (e) => {
   if (m && k.toLowerCase() === 't') return go('newText');
   if (m && s && k.toLowerCase() === 'g') return go('newShader');
   if (m && k.toLowerCase() === 'd') return go(s ? 'split' : 'duplicate');
+  if (m && s && k.toLowerCase() === 'c') return go('precompose');
   if (m && k.toLowerCase() === 'a') return go('selectAll');
   if (m && k.toLowerCase() === 'i') return go('import');
   if (m && k.toLowerCase() === 's') return go(s ? 'takeSave' : 'save');

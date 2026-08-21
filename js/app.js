@@ -60,36 +60,54 @@ function hydrate(p) {
   base.shutter = p.shutter == null ? .5 : p.shutter;
   /* Production rule: a saved project must never poison the renderer. Every channel,
      keyframe, effect and layer field is normalized here so malformed data degrades
-     to a static value instead of NaN transforms or a broken keyframe search. */
+     to a static value instead of NaN transforms or a broken keyframe search.
+     Applied recursively to nested compositions as well. */
   const num = (x, fb) => { const n = Number(x); return Number.isFinite(n) ? n : fb; };
-  base.layers.forEach((L, li) => {
-    L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
-    if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
-    L.from = Math.max(0, num(L.from, 0)); L.dur = Math.max(.01, num(L.dur, 5));
-    if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
-    L.on = L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
-    L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
-    L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
-    if (L.parent === L.id || (typeof L.parent === 'string' && !base.layers.some(o => o.id === L.parent))) L.parent = null;
-    const fresh = PM.mkLayer(L.type || 'null', {}, base);
-    Object.keys(fresh.p).forEach(k => {
-      if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
-      const prop = L.p[k];
-      prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
-      /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
-      prop.kf = prop.kf
-        .filter(q => q && typeof q === 'object' && Number.isFinite(num(q.t)) && Number.isFinite(num(q.v)))
-        .map(q => ({ ...q, t: num(q.t), v: num(q.v), i: q.i || PM.uid('k'), hold: !!q.hold }))
-        .sort((a, b) => a.t - b.t)
-        .filter((q, i, arr) => i === 0 || q.t - arr[i - 1].t > 1e-6);
-      prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
-      prop.v = num(prop.v, fresh.p[k].v);
+  const sanitizeLayers = (layers, container) => {
+    layers.forEach((L, li) => {
+      L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
+      if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
+      L.from = Math.max(0, num(L.from, 0)); L.dur = Math.max(.01, num(L.dur, 5));
+      if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
+      L.on = L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
+      L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
+      L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
+      if (L.parent === L.id || (typeof L.parent === 'string' && !container.layers.some(o => o.id === L.parent))) L.parent = null;
+      const fresh = PM.mkLayer(L.type || 'null', {}, container);
+      Object.keys(fresh.p).forEach(k => {
+        if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
+        const prop = L.p[k];
+        prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
+        /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
+        prop.kf = prop.kf
+          .filter(q => q && typeof q === 'object' && Number.isFinite(num(q.t)) && Number.isFinite(num(q.v)))
+          .map(q => ({ ...q, t: num(q.t), v: num(q.v), i: q.i || PM.uid('k'), hold: !!q.hold }))
+          .sort((a, b) => a.t - b.t)
+          .filter((q, i, arr) => i === 0 || q.t - arr[i - 1].t > 1e-6);
+        prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
+        prop.v = num(prop.v, fresh.p[k].v);
+      });
+      Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
+      L.fx = L.fx.filter(f => f && typeof f === 'object' && PM.FX && PM.FX[f.type]);
+      L.fx.forEach(f => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
+      if (L.type === 'shader') PM.syncShaderUniforms(L);
     });
-    Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
-    L.fx = L.fx.filter(f => f && typeof f === 'object' && PM.FX && PM.FX[f.type]);
-    L.fx.forEach(f => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
-    if (L.type === 'shader') PM.syncShaderUniforms(L);
+  };
+  base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
+  Object.entries(base.comps).forEach(([cid, c]) => {
+    if (!c || typeof c !== 'object') { delete base.comps[cid]; return; }
+    c.id = cid;
+    c.name = typeof c.name === 'string' && c.name ? c.name : 'Precomp';
+    c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
+    c.fps = Math.max(1, num(c.fps, base.fps)); c.dur = Math.max(.04, num(c.dur, base.dur));
+    c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
+    c.params = c.params && typeof c.params === 'object' ? c.params : {};
+    c.layers = Array.isArray(c.layers) ? c.layers : [];
+    sanitizeLayers(c.layers, c);
   });
+  sanitizeLayers(base.layers, base);
+  /* precomp layers whose referenced comp failed to load degrade to empty layers */
+  base.layers.forEach(L => { if (L.type === 'precomp' && !(L.d && L.d.comp && base.comps[L.d.comp])) L.d.comp = null; });
   return base;
 }
 function demo() {

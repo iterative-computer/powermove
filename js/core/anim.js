@@ -70,7 +70,8 @@ function evalProp(prop, tLocal, ctx) {
 }
 
 const paramGet = (name) => {
-  const p = PM.proj.params[name];
+  const comp = PM.curComp();
+  const p = comp.params && comp.params[name];
   return p ? p.value : 0;
 };
 
@@ -79,15 +80,19 @@ PM.ev = (L, key, T) => {
   const prop = L.p[key];
   if (!prop) return 0;
   const tl = T - L.from;
+  const comp = PM.curComp();
   return evalProp(prop, tl, {
-    T, fps: PM.proj.fps, layer: L, comp: PM.proj, param: paramGet,
-    key, idx: PM.proj.layers.indexOf(L),
+    T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet,
+    key, idx: comp.layers.indexOf(L),
   });
 };
 /** Evaluate an effect / uniform param (also layer-local). */
-PM.evP = (L, prop, T, key) => evalProp(prop, T - L.from, {
-  T, fps: PM.proj.fps, layer: L, comp: PM.proj, param: paramGet, key, idx: PM.proj.layers.indexOf(L),
-});
+PM.evP = (L, prop, T, key) => {
+  const comp = PM.curComp();
+  return evalProp(prop, T - L.from, {
+    T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet, key, idx: comp.layers.indexOf(L),
+  });
+};
 
 PM.active = (L, T) => L.on && T >= L.from - 1e-6 && T < L.from + L.dur - 1e-6;
 

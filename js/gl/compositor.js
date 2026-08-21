@@ -236,8 +236,34 @@ function contentQuad(L, T, W, H) {
     GL.gl.enable(GL.gl.BLEND);
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
   }
+  if (L.type === 'precomp') {
+    const sub = PM.compOf(L);
+    if (!sub || pcDepth >= PC_MAX_DEPTH) return null;
+    const w = Math.max(2, Math.round(d.w || W)), hh = Math.max(2, Math.round(d.h || H));
+    const f = grab(w, hh);
+    bind(f); clear(0, 0, 0, 0);
+    pmScopePush(sub);
+    try {
+      const inner = GL.renderProject(sub, T - L.from, w, hh, { transparent: true });
+      /* blit the nested result into our FBO so ownership stays with this level */
+      bind(f);
+      const p = program('copyA', PM.FRAG_DRAW);
+      const g = use(p);
+      bindTex(0, inner.tex); setI(p, 'u_tex', 0);
+      g.u('u_m', fullQuad(w, hh)); g.u('u_res', w, hh); g.u('u_uv', 0, 0, 1, 1);
+      g.u('u_alpha', 1); setI(p, 'u_fromFbo', 1);
+      gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
+      free(inner);
+    } finally {
+      pmScopePop();
+    }
+    return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
+  }
   return null;
 }
+/* Scope management for nested rendering — renderProject runs inside these. */
+function pmScopePush(proj) { PM.scope.push(proj); pcDepth++; }
+function pmScopePop() { PM.scope.pop(); pcDepth--; }
 function hashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; }
 
 /* Draw one layer's content (with transform) into the bound target. */
@@ -310,19 +336,20 @@ function runEffects(L, T, srcF, W, H) {
 
 /* ── main render ───────────────────────────────────────── */
 const BLEND_ID = { normal: 0, add: 1, screen: 2, multiply: 3, overlay: 4, softlight: 5, difference: 6, lighten: 7, darken: 8 };
+const PC_MAX_DEPTH = 6;
+let pcDepth = 0;
 
-GL.render = (T, opt = {}) => {
-  const gl = GL.gl; if (!gl) return;
-  const t0 = performance.now();
-  GL.stats.draws = 0; GL.stats.passes = 0;
-  const proj = PM.proj;
-  const W = GL.canvas.width, H = GL.canvas.height;
+/** Render a whole project (main or nested) into a pooled FBO and return it.
+    opt.transparent skips the background fill (nested comps composite over). */
+GL.renderProject = (proj, T, W, H, opt = {}) => {
+  const gl = GL.gl;
   const layers = proj.layers;
   const soloOn = layers.some(l => l.solo);
-  const bg = PM.hex2rgb(proj.bg);
 
-  let acc = grab(W, H);
-  bind(acc); clear(bg[0], bg[1], bg[2], 1);
+  const acc = grab(W, H);
+  bind(acc);
+  if (opt.transparent) clear(0, 0, 0, 0);
+  else { const bg = PM.hex2rgb(proj.bg); clear(bg[0], bg[1], bg[2], 1); }
 
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
@@ -379,6 +406,22 @@ GL.render = (T, opt = {}) => {
     if (res !== lf) free(res);
     free(lf);
   }
+  return acc;
+};
+
+GL.render = (T, opt = {}) => {
+  const gl = GL.gl; if (!gl) return;
+  const t0 = performance.now();
+  GL.stats.draws = 0; GL.stats.passes = 0;
+  const W = GL.canvas.width, H = GL.canvas.height;
+
+  PM.scope.push(PM.proj);
+  let acc;
+  try {
+    acc = GL.renderProject(PM.proj, T, W, H, opt);
+  } finally {
+    PM.scope.pop();
+  }
 
   /* present */
   bind(null);
@@ -415,6 +458,7 @@ GL.bounds = (L, T) => {
   const d = L.d;
   let w, h, ax, ay;
   if (L.type === 'solid' || L.type === 'shader') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
+  else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'text' || L.type === 'shape') {
     const r = PM.raster(L, 1);
     w = r.w; h = r.h;

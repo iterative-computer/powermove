@@ -847,6 +847,7 @@ function onCtx(e) {
     const L = hr.row.L;
     items.push({ header: L.name },
       { label: 'Duplicate', kb: '⌘D', run: () => PM.cmd('duplicate') },
+      { label: 'Precompose', kb: '⌘⇧C', run: () => PM.cmd('precompose') },
       { label: 'Split at playhead', kb: '⌘⇧D', run: () => PM.cmd('split') },
       { label: 'Trim in to playhead', run: () => PM.hist.do('Trim', () => { const d = PM.time - L.from; L.dur -= d; L.from = PM.time; }) },
       { label: 'Trim out to playhead', run: () => PM.hist.do('Trim', () => { L.dur = Math.max(1 / PM.proj.fps, PM.time - L.from); }) },

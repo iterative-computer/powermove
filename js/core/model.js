@@ -84,7 +84,7 @@ const DEFAULTS = {
     L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0;
   },
   null:   (L) => { L.d = {}; },
-  precomp:(L) => { L.d = { comp: null }; },
+  precomp:(L, c) => { L.d = { comp: null, w: c.w, h: c.h }; L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0; },
 };
 
 PM.mkLayer = (type, opts = {}, comp) => {
@@ -96,7 +96,7 @@ PM.mkLayer = (type, opts = {}, comp) => {
   if (opts.dur != null) L.dur = opts.dur;
   if (opts.color) L.color = opts.color;
   if (opts.p) for (const k in opts.p) if (L.p[k]) L.p[k].v = opts.p[k];
-  if (type === 'solid' || type === 'shader') { L.p['position.x'].v = 0; L.p['position.y'].v = 0; }
+  if (['solid', 'shader', 'precomp'].includes(type)) { L.p['position.x'].v = 0; L.p['position.y'].v = 0; }
   return L;
 };
 
@@ -107,6 +107,7 @@ PM.mkProject = (o = {}) => ({
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
   bg: o.bg || '#000000',
   layers: [],
+  comps: {},          // nested compositions, referenced by precomp layers (d.comp = comp id)
   assets: {},
   markers: [],
   work: [0, o.dur || 10],
@@ -115,7 +116,14 @@ PM.mkProject = (o = {}) => ({
 });
 
 /* ── lookups & mutation helpers ────────────────────────── */
-PM.L = (id) => PM.proj.layers.find(l => l.id === id) || null;
+/* Render scope: while a nested composition renders, lookups resolve inside it.
+   Empty stack = the main project (all UI/tool paths). */
+PM.scope = [];
+PM.curComp = () => PM.scope[PM.scope.length - 1] || PM.proj;
+PM.L = (id) => {
+  const c = PM.curComp();
+  return c.layers.find(l => l.id === id) || null;
+};
 PM.byName = (n) => {
   const q = String(n).toLowerCase().trim();
   return PM.proj.layers.find(l => l.name.toLowerCase() === q)
@@ -142,8 +150,55 @@ PM.removeLayers = (ids) => {
   ids = [].concat(ids);
   PM.proj.layers = PM.proj.layers.filter(l => !ids.includes(l.id));
   PM.proj.layers.forEach(l => { if (ids.includes(l.parent)) l.parent = null; });
+  /* garbage-collect compositions that are no longer referenced by any precomp layer */
+  const referenced = new Set();
+  const scan = (layers) => layers.forEach(l => {
+    if (l.type === 'precomp' && l.d && l.d.comp) referenced.add(l.d.comp);
+  });
+  scan(PM.proj.layers);
+  Object.values(PM.proj.comps || {}).forEach(c => scan(c.layers));
+  for (const cid of Object.keys(PM.proj.comps || {})) if (!referenced.has(cid)) delete PM.proj.comps[cid];
   PM.sel.layers = PM.sel.layers.filter(i => !ids.includes(i));
   PM.bus.emit('layers');
+};
+
+/* ── precompose: collapse layers into a nested composition (AE-style) ──
+   The nested comp shares the parent's dimensions, so layer coordinates stay
+   valid and the visual result is identical to the un-nested stack. */
+PM.precompose = (ids, name) => {
+  ids = [].concat(ids);
+  const sel = PM.proj.layers.filter(l => ids.includes(l.id));
+  if (!sel.length) return null;
+  const compId = uid('C');
+  const sub = PM.mkProject({
+    name: name || 'Precomp', w: PM.proj.w, h: PM.proj.h,
+    fps: PM.proj.fps, dur: PM.proj.dur, bg: '#000000',
+  });
+  sub.id = compId;
+  sub.layers = sel;
+  /* parenting across the comp boundary would be ambiguous — break it explicitly */
+  sub.layers.forEach(l => { if (l.parent && !ids.includes(l.parent)) l.parent = null; });
+  const start = Math.min(...sel.map(l => l.from));
+  const end = Math.max(...sel.map(l => l.from + l.dur));
+  const idx = Math.min(...sel.map(l => PM.proj.layers.indexOf(l)));
+  const L = PM.mkLayer('precomp', { name: name || ('Precomp ' + (Object.keys(PM.proj.comps).length + 1)), d: { comp: compId, w: PM.proj.w, h: PM.proj.h } }, PM.proj);
+  L.from = Math.max(0, Math.min(start, end - .04));
+  L.dur = Math.max(.04, end - L.from);
+  PM.proj.comps[compId] = sub;
+  PM.proj.layers = PM.proj.layers.filter(l => !ids.includes(l.id));
+  PM.proj.layers.forEach(l => { if (l.parent && ids.includes(l.parent)) l.parent = null; });
+  PM.sel.layers = [];
+  PM.proj.layers.splice(Math.min(idx, PM.proj.layers.length), 0, L);
+  PM.selectLayers(L.id);
+  PM.bus.emit('layers');
+  return L;
+};
+
+/** Resolve a precomp layer to its nested project (null when unresolved). */
+PM.compOf = (L) => {
+  if (!L || L.type !== 'precomp' || !L.d || !L.d.comp) return null;
+  const c = PM.proj.comps && PM.proj.comps[L.d.comp];
+  return c && Array.isArray(c.layers) ? c : null;
 };
 
 /* Deep clone that also refreshes ids. */
