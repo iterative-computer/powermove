@@ -479,6 +479,7 @@ GL.render = (T, opt = {}) => {
   GL.stats.draws = 0; GL.stats.passes = 0;
   const W = GL.canvas.width, H = GL.canvas.height;
 
+  PM.beginEval(T);
   PM.scope.push(PM.proj);
   let acc;
   try {

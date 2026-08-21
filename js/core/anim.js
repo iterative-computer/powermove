@@ -3,8 +3,15 @@
 const PM = window.PM, Ease = PM.Ease, clamp = PM.clamp;
 
 let version = 0;
-PM.touch = () => { version++; PM.exprCache.clear(); };
+PM.touch = () => {
+  version++;
+  PM.exprCache.clear();
+  /* hierarchy memos must never outlive an edit */
+  woMemo.clear(); wmMemo.clear(); memoT = null;
+};
 PM.animVersion = () => version;
+let memoT = null;
+const woMemo = new Map(), wmMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
 function evalKfs(kf, t) {
@@ -42,14 +49,17 @@ const loop=(dur,x)=>dur<=0?x:x%dur;
 const pingpong=(dur,x)=>{if(dur<=0)return x;const m=x%(dur*2);return m<dur?m:dur*2-m;};
 `;
 function compile(src) {
-  let f = PM.exprCache.get(src);
-  if (f !== undefined) return f;
+  let c = PM.exprCache.get(src);
+  if (c !== undefined) return c;
   try {
-    f = new Function('t', 'T', 'fps', 'value', 'layer', 'comp', 'param', 'ch', 'idx',
+    /* idx costs O(n) to resolve — only materialize it for expressions that use it */
+    const needsIdx = /\bidx\b/.test(src);
+    const f = new Function('t', 'T', 'fps', 'value', 'layer', 'comp', 'param', 'ch',
       HELPERS + '\nreturn (' + src + ');');
-  } catch (e) { f = null; }
-  PM.exprCache.set(src, f);
-  return f;
+    c = { f, needsIdx };
+  } catch (e) { c = null; }
+  PM.exprCache.set(src, c);
+  return c;
 }
 PM.compileExpr = compile;
 
@@ -57,10 +67,11 @@ PM.compileExpr = compile;
 function evalProp(prop, tLocal, ctx) {
   let v = prop.kf.length ? evalKfs(prop.kf, tLocal) : prop.v;
   if (prop.expr) {
-    const f = compile(prop.expr);
-    if (f) {
+    const c = compile(prop.expr);
+    if (c && c.f) {
       try {
-        const r = f(tLocal, ctx.T, ctx.fps, v, ctx.layer, ctx.comp, ctx.param, ctx.key, ctx.idx);
+        const r = c.f(tLocal, ctx.T, ctx.fps, v, ctx.layer, ctx.comp, ctx.param, ctx.key,
+          c.needsIdx ? ctx.comp.layers.indexOf(ctx.layer) : 0);
         if (typeof r === 'number' && isFinite(r)) v = r;
         else if (typeof r === 'string') v = r;
       } catch (e) { /* keep base value */ }
@@ -82,15 +93,14 @@ PM.ev = (L, key, T) => {
   const tl = T - L.from;
   const comp = PM.curComp();
   return evalProp(prop, tl, {
-    T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet,
-    key, idx: comp.layers.indexOf(L),
+    T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet, key,
   });
 };
 /** Evaluate an effect / uniform param (also layer-local). */
 PM.evP = (L, prop, T, key) => {
   const comp = PM.curComp();
   return evalProp(prop, T - L.from, {
-    T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet, key, idx: comp.layers.indexOf(L),
+    T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet, key,
   });
 };
 
@@ -121,30 +131,60 @@ PM.localMatrix = (L, T) => {
   return m;
 };
 
-/* Cycle-safe parenting: a visited set breaks parent loops deterministically
-   instead of silently freezing transforms after an arbitrary depth cap. */
-PM.worldMatrix = (L, T, seen = null) => {
-  let m = PM.localMatrix(L, T);
-  if (L.parent) {
-    seen = seen || new Set();
-    if (seen.has(L.id)) return m;
-    seen.add(L.id);
-    const p = PM.L(L.parent);
-    if (p && !seen.has(p.id)) m = mul(PM.worldMatrix(p, T, seen), m);
+/* Cycle-safe parenting with per-timestamp memoization. Each query climbs the
+   parent chain, stopping at any cached ancestor, then caches the cumulative
+   result for EVERY node on the way back down — so a hierarchy costs one walk
+   per frame total, not one walk per layer per frame. PM.touch() invalidates. */
+const chainSeen = () => new Set();
+
+/** Start a fresh evaluation window (called by the compositor per frame). */
+PM.beginEval = (T) => { memoT = T; };
+
+PM.worldMatrix = (L, T) => {
+  if (memoT === T) { const c = wmMemo.get(L.id); if (c) return c; }
+  const chain = [];
+  const seen = chainSeen();
+  let cur = L, hit = false;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    chain.push(cur);
+    if (memoT === T) { const c = wmMemo.get(cur.id); if (c) { hit = c; break; } }
+    cur = cur.parent ? PM.L(cur.parent) : null;
   }
+  /* fold from the topmost ancestor down to L */
+  let m, i0;
+  if (hit !== false) { m = hit; i0 = chain.length - 2; }
+  else { m = PM.localMatrix(chain[chain.length - 1], T); i0 = chain.length - 2; }
+  for (let i = i0; i >= 0; i--) {
+    m = mul(m, PM.localMatrix(chain[i], T));
+    if (memoT === T && i > 0) wmMemo.set(chain[i].id, m);
+  }
+  if (memoT === T) wmMemo.set(L.id, m);
   return m;
 };
 
-PM.worldOpacity = (L, T, seen = null) => {
-  let o = PM.ev(L, 'opacity', T) / 100;
-  if (L.parent) {
-    seen = seen || new Set();
-    if (seen.has(L.id)) return clamp(o, 0, 1);
-    seen.add(L.id);
-    const p = PM.L(L.parent);
-    if (p && !seen.has(p.id)) o *= PM.worldOpacity(p, T, seen);
+PM.worldOpacity = (L, T) => {
+  if (memoT === T) { const c = woMemo.get(L.id); if (c !== undefined) return c; }
+  const chain = [];
+  const seen = chainSeen();
+  let cur = L, hit = undefined;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    chain.push(cur);
+    if (memoT === T) { const c = woMemo.get(cur.id); if (c !== undefined) { hit = c; break; } }
+    cur = cur.parent ? PM.L(cur.parent) : null;
   }
-  return clamp(o, 0, 1);
+  /* hit is the cached cumulative opacity of some ancestor — apply only the layers below it */
+  let o, i0;
+  if (hit !== undefined) { o = hit; i0 = chain.length - 2; }
+  else { o = 1; i0 = chain.length - 1; }
+  for (let i = i0; i >= 0; i--) {
+    o *= clamp(PM.ev(chain[i], 'opacity', T) / 100, 0, 1);
+    if (i > 0 && memoT === T) woMemo.set(chain[i].id, o);
+  }
+  o = clamp(o, 0, 1);
+  if (memoT === T) woMemo.set(L.id, o);
+  return o;
 };
 
 /* True when assigning parentId to L would create a parenting cycle. */
