@@ -43,6 +43,7 @@ function render() {
   transform(wrap, L);
   if (L.type === 'shader') shaderUniforms(wrap, L);
   effects(wrap, L);
+  masksSection(wrap, L);
   layerOptions(wrap, L);
 }
 
@@ -297,6 +298,55 @@ function effects(wrap, L) {
     });
     wrap.appendChild(g);
   });
+}
+
+/* ── masks ─────────────────────────────────────────────── */
+const MASK_FIELDS = [
+  ['x', 'X', 1, 'px'], ['y', 'Y', 1, 'px'],
+  ['w', 'Width', 1, 'px'], ['h', 'Height', 1, 'px'],
+  ['rotation', 'Rotation', 1, '°'], ['feather', 'Feather', .5, 'px'],
+];
+function masksSection(wrap, L) {
+  const sec = PM.section('Masks');
+  wrap.appendChild(sec);
+  if (!(L.masks || []).length) {
+    wrap.appendChild(h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '28px' }, onclick: () => PM.hist.do('Add mask', () => { L.masks.push(PM.mkMask('rect', PM.curComp())); I.refresh(); PM.invalidate(); }) }, PM.icon('plus'), 'Add mask'));
+    return;
+  }
+  L.masks.forEach((m, i) => {
+    const tw = h('span.twirl.open', PM.icon('chev'));
+    const onBtn = h('button.stopwatch' + (m.on !== false ? '.on' : ''), PM.icon('eye'));
+    onBtn.onclick = (e) => { e.stopPropagation(); PM.hist.do('Toggle mask', () => { m.on = m.on === false; }); I.refresh(); PM.invalidate(); };
+    const head = h('div.row', { style: { marginTop: '4px', background: 'rgba(128,128,136,.08)' } },
+      tw,
+      h('div.k', { style: { color: 'var(--tx)', fontWeight: 500 } }, `Mask ${i + 1}`),
+      h('button.stopwatch', { title: 'Delete mask', onclick: (e) => { e.stopPropagation(); PM.hist.do('Remove mask', () => { L.masks.splice(i, 1); }); I.refresh(); PM.invalidate(); } }, PM.icon('x')));
+    wrap.appendChild(head);
+    const g = h('div.grp');
+    g.appendChild(PM.row('Shape', PM.selectField(() => m.shape, v => { m.shape = v; PM.invalidate(); }, PM.MASK_SHAPES, { label: 'Shape' })));
+    g.appendChild(PM.row('Mode', PM.selectField(() => m.mode || 'add', v => { m.mode = v; PM.invalidate(); }, ['add', 'subtract'], { label: 'Mode' })));
+    MASK_FIELDS.forEach(([k, label, step, unit]) => {
+      const p = m.p[k];
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
+      sw.onclick = () => {
+        PM.hist.do('Animate ' + label, () => {
+          if (p.kf.length) { p.v = PM.evP(L, p, PM.time, k); p.kf = []; }
+          else PM.setKeyOn(p, PM.time - L.from, p.v, 'power', PM.proj.fps);
+        });
+        I.refresh();
+      };
+      const f = PM.numField(() => PM.evP(L, p, PM.time, k), (v) => {
+        if (p.kf.length) PM.setKeyOn(p, PM.time - L.from, v, 'power', PM.proj.fps); else p.v = v;
+        PM.touch(); PM.invalidate();
+      }, { label, step });
+      I.syncs.push(f.sync);
+      const r = PM.row(label, f, { left: sw });
+      r.insertBefore(sw, r.firstChild);
+      g.appendChild(r);
+    });
+    wrap.appendChild(g);
+  });
+  wrap.appendChild(h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '28px', marginTop: '2px' }, onclick: () => PM.hist.do('Add mask', () => { L.masks.push(PM.mkMask('rect', PM.curComp())); I.refresh(); PM.invalidate(); }) }, PM.icon('plus'), 'Add mask'));
 }
 
 function newLayerMenu(anchor) {

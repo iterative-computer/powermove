@@ -334,6 +334,67 @@ function runEffects(L, T, srcF, W, H) {
   return cur;
 }
 
+/* ── masks ─────────────────────────────────────────────── */
+/* Rasterize analytic mask coverage (comp px → layer px via the inverse world
+   matrix) and multiply it into the layer buffer. Runs before effects, AE-style. */
+const MASK_MAX = 8;
+function applyMasks(L, T, srcF, W, H) {
+  const gl = GL.gl;
+  const masks = (L.masks || []).filter(m => m && m.on !== false && m.p);
+  if (!masks.length) return srcF;
+  const world = PM.worldMatrix(L, T);
+  const det = world[0] * world[3] - world[1] * world[2];
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return srcF;
+  /* inverse of the 2×3 world matrix */
+  const inv = [
+    world[3] / det, -world[1] / det, -world[2] / det, world[0] / det,
+    (-world[3] * world[4] + world[2] * world[5]) / det,
+    (world[1] * world[4] - world[0] * world[5]) / det,
+  ];
+
+  const cov = grab(W, H);
+  bind(cov); clear(0, 0, 0, 0);
+  const p = program('masks', PM.FRAG_MASK);
+  if (!p) { free(cov); return srcF; }
+  const gArr = new Array(32).fill(0), qArr = new Array(32).fill(0);
+  let cnt = 0, hasAdd = 0;
+  for (const m of masks) {
+    if (cnt >= MASK_MAX) break;
+    const g = cnt * 4, q = cnt * 4;
+    gArr[g + 0] = Number(PM.evP(L, m.p.x, T, 'x')) || 0;
+    gArr[g + 1] = Number(PM.evP(L, m.p.y, T, 'y')) || 0;
+    gArr[g + 2] = Math.abs(Number(PM.evP(L, m.p.w, T, 'w')) || 0);
+    gArr[g + 3] = Math.abs(Number(PM.evP(L, m.p.h, T, 'h')) || 0);
+    qArr[q + 0] = (Number(PM.evP(L, m.p.rotation, T, 'rotation')) || 0) * Math.PI / 180;
+    qArr[q + 1] = Math.max(0, Number(PM.evP(L, m.p.feather, T, 'feather')) || 0);
+    qArr[q + 2] = m.shape === 'ellipse' ? 1 : 0;
+    qArr[q + 3] = m.mode === 'subtract' ? 1 : 0;
+    if (m.mode !== 'subtract') hasAdd = 1;
+    cnt++;
+  }
+  if (cnt === 0) { free(cov); return srcF; }
+  {
+    const pm = use(p);
+    pm.u('u_m', fullQuad(W, H)); pm.u('u_res', W, H); pm.u('u_uv', 0, 0, 1, 1);
+    setU(p, 'u_inv', m3(inv));
+    setI(p, 'u_cnt', cnt); setI(p, 'u_hasAdd', hasAdd);
+    setU(p, 'u_g', [gArr]); setU(p, 'u_q', [qArr]);
+    gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
+    GL.stats.passes++;
+  }
+  const out = grab(W, H);
+  bind(out); clear();
+  const pa = program('maskApply', PM.FRAG_MASK_APPLY);
+  const ga = use(pa);
+  bindTex(0, srcF.tex); setI(pa, 'u_tex', 0);
+  bindTex(1, cov.tex); setI(pa, 'u_cov', 1);
+  ga.u('u_m', fullQuad(W, H)); ga.u('u_res', W, H); ga.u('u_uv', 0, 0, 1, 1);
+  gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
+  GL.stats.passes++;
+  free(cov);
+  return out;
+}
+
 /* ── main render ───────────────────────────────────────── */
 const BLEND_ID = { normal: 0, add: 1, screen: 2, multiply: 3, overlay: 4, softlight: 5, difference: 6, lighten: 7, darken: 8 };
 const PC_MAX_DEPTH = 6;
@@ -361,11 +422,12 @@ GL.renderProject = (proj, T, W, H, opt = {}) => {
     if (alpha <= .001) continue;
 
     const hasFx = L.fx.some(f => f.on);
+    const hasMasks = (L.masks || []).some(m => m.on !== false);
     const blend = BLEND_ID[L.blend] || 0;
     const mb = L.mblur && opt.mblur !== false;
 
-    /* fast path: no effects, normal blend, no motion blur → straight into acc */
-    if (!hasFx && !blend && !mb) {
+    /* fast path: no masks, no effects, normal blend, no motion blur → straight into acc */
+    if (!hasMasks && !hasFx && !blend && !mb) {
       bind(acc);
       drawContent(L, T, W, H, alpha);
       continue;
@@ -381,7 +443,9 @@ GL.renderProject = (proj, T, W, H, opt = {}) => {
       }
     } else drawContent(L, T, W, H, alpha);
 
-    const res = hasFx ? runEffects(L, T, lf, W, H) : lf;
+    let res = lf;
+    if (hasMasks) res = applyMasks(L, T, res, W, H);
+    if (hasFx) res = runEffects(L, T, res, W, H);
 
     if (!blend) {
       bind(acc);

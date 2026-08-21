@@ -201,17 +201,25 @@ PM.animate = (L, key, points, opt = {}) => {
   return true;
 };
 
-/* Collect every animatable prop of a layer (transform + effects + shader uniforms). */
+/* Collect every animatable prop of a layer (transform + effects + masks + shader uniforms). */
 PM.allProps = (L) => {
   const out = [];
   for (const k in L.p) out.push({ key: k, prop: L.p[k], label: PM.CH[k] ? PM.CH[k].label : k, group: 'Transform' });
   L.fx.forEach(fx => { for (const k in fx.p) out.push({ key: fx.id + '.' + k, prop: fx.p[k], label: k, group: fx.type }); });
+  (L.masks || []).forEach((m, i) => {
+    for (const k in m.p) out.push({ key: 'm.' + m.id + '.' + k, prop: m.p[k], label: k, group: 'Mask ' + (i + 1) });
+  });
   if (L.type === 'shader') for (const k in L.d.uniforms) out.push({ key: 'u.' + k, prop: L.d.uniforms[k], label: k, group: 'Shader' });
   return out;
 };
 PM.findProp = (L, key) => {
   if (L.p[key]) return L.p[key];
   if (key.startsWith('u.')) return L.d.uniforms && L.d.uniforms[key.slice(2)];
+  if (key.startsWith('m.')) {
+    const [, mid, mk] = key.split('.');
+    const m = (L.masks || []).find(x => x.id === mid);
+    return m ? m.p[mk] : null;
+  }
   const [fid, pk] = key.split('.');
   const fx = L.fx.find(f => f.id === fid);
   return fx ? fx.p[pk] : null;

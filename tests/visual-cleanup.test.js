@@ -7,9 +7,12 @@ const root = path.resolve(__dirname, '..');
 const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
 const workspace = fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8');
 
-test('timeline ruler does not draw orange composition-marker diamonds', () => {
+test('timeline ruler renders composition markers as compact, labeled diamonds', () => {
   const ruler = timeline.slice(timeline.indexOf('function drawRuler'), timeline.indexOf('function fmtRuler'));
-  assert.doesNotMatch(ruler, /markers/);
+  /* markers must be visible and clickable — created-but-invisible state is a trap */
+  assert.match(ruler, /markers/);
+  assert.match(ruler, /closePath\(\)\.fill|c\.fill\(\)/);
+  assert.match(ruler, /m\.name/, 'marker names render when there is room');
   assert.doesNotMatch(ruler, /lineTo\(x \+ 5/);
   assert.match(timeline, /PM\.proj\.markers\.map\(m => m\.t\)/, 'marker timing data remains editable');
 });

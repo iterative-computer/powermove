@@ -63,6 +63,17 @@ function hydrate(p) {
      to a static value instead of NaN transforms or a broken keyframe search.
      Applied recursively to nested compositions as well. */
   const num = (x, fb) => { const n = Number(x); return Number.isFinite(n) ? n : fb; };
+  const sanitizeProp = (prop, fresh) => {
+    prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
+    /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
+    prop.kf = prop.kf
+      .filter(q => q && typeof q === 'object' && Number.isFinite(num(q.t)) && Number.isFinite(num(q.v)))
+      .map(q => ({ ...q, t: num(q.t), v: num(q.v), i: q.i || PM.uid('k'), hold: !!q.hold }))
+      .sort((a, b) => a.t - b.t)
+      .filter((q, i, arr) => i === 0 || q.t - arr[i - 1].t > 1e-6);
+    prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
+    prop.v = num(prop.v, fresh.v);
+  };
   const sanitizeLayers = (layers, container) => {
     layers.forEach((L, li) => {
       L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
@@ -76,20 +87,25 @@ function hydrate(p) {
       const fresh = PM.mkLayer(L.type || 'null', {}, container);
       Object.keys(fresh.p).forEach(k => {
         if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
-        const prop = L.p[k];
-        prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
-        /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
-        prop.kf = prop.kf
-          .filter(q => q && typeof q === 'object' && Number.isFinite(num(q.t)) && Number.isFinite(num(q.v)))
-          .map(q => ({ ...q, t: num(q.t), v: num(q.v), i: q.i || PM.uid('k'), hold: !!q.hold }))
-          .sort((a, b) => a.t - b.t)
-          .filter((q, i, arr) => i === 0 || q.t - arr[i - 1].t > 1e-6);
-        prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
-        prop.v = num(prop.v, fresh.p[k].v);
+        sanitizeProp(L.p[k], fresh.p[k]);
       });
       Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
       L.fx = L.fx.filter(f => f && typeof f === 'object' && PM.FX && PM.FX[f.type]);
       L.fx.forEach(f => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
+      /* masks: validate shape/mode and every animatable channel */
+      L.masks = Array.isArray(L.masks) ? L.masks.filter(m => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
+      L.masks.forEach(m => {
+        m.id = typeof m.id === 'string' && m.id ? m.id : PM.uid('K');
+        if (!PM.MASK_SHAPES.includes(m.shape)) m.shape = 'rect';
+        if (m.mode !== 'subtract') m.mode = 'add';
+        m.on = m.on !== false;
+        const freshM = PM.mkMask(m.shape, container);
+        Object.keys(freshM.p).forEach(k => {
+          if (!m.p[k] || typeof m.p[k] !== 'object') m.p[k] = freshM.p[k];
+          sanitizeProp(m.p[k], freshM.p[k]);
+        });
+        Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
+      });
       if (L.type === 'shader') PM.syncShaderUniforms(L);
     });
   };

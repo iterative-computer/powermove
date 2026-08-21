@@ -51,6 +51,19 @@ const TYPE_META = {
 };
 PM.TYPE_META = TYPE_META;
 
+/* ── masks ─────────────────────────────────────────────── */
+/* Parametric layer masks (rect / ellipse) living in layer space, fully animatable.
+   Geometry follows the layer transform; feather is a signed-distance falloff. */
+PM.MASK_SHAPES = ['rect', 'ellipse'];
+PM.mkMask = (shape = 'rect', comp) => {
+  comp = comp || PM.proj;
+  const s = Math.round(Math.min(comp.w, comp.h) * .5);
+  return {
+    id: uid('K'), shape, mode: 'add', on: true,
+    p: { x: P(0), y: P(0), w: P(s), h: P(s), rotation: P(0), feather: P(24) },
+  };
+};
+
 /* ── layer factory ─────────────────────────────────────── */
 function baseLayer(type, name, comp) {
   const w = comp ? comp.w : 1920, hgt = comp ? comp.h : 1080;
@@ -66,6 +79,7 @@ function baseLayer(type, name, comp) {
       'rotation': P(0), 'opacity': P(100), 'skew': P(0),
     },
     fx: [],
+    masks: [],
     d: {},
     locked_intent: {},   // hand edits the agent must preserve
   };

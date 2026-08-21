@@ -90,6 +90,42 @@ PM.FRAG_COPY = PRE + `void main(){ o = texture(u_tex, v_st); }`;
 
 PM.FRAG_SOLID = PRE + `uniform vec4 u_color; void main(){ o = u_color; }`;
 
+/* ── layer masks: analytic SDF coverage in one fullscreen pass ── */
+PM.FRAG_MASK = PRE + `
+uniform mat3 u_inv;          // comp px → layer px
+uniform int u_cnt;
+uniform int u_hasAdd;
+uniform vec4 u_g[8];         // cx, cy, w, h   (layer px)
+uniform vec4 u_q[8];         // rotation rad, feather px, shape 0rect/1ellipse, mode 0add/1sub
+float sdBox(vec2 p, vec2 b){ vec2 d = abs(p) - b; return length(max(d, 0.)) + min(max(d.x, d.y), 0.); }
+void main(){
+  vec2 lp = (u_inv * vec3(v_px, 1.0)).xy;
+  float cov = u_hasAdd == 1 ? 0.0 : 1.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= u_cnt) break;
+    vec4 g = u_g[i];
+    vec4 q = u_q[i];
+    if (g.z < .01 || g.w < .01) continue;
+    vec2 p = lp - g.xy;
+    float r = q.x;
+    if (abs(r) > 1e-4) { float c = cos(r), s = sin(r); p = mat2(c, -s, s, c) * p; }
+    vec2 h = max(g.zw * .5, vec2(.001));
+    float d = q.z < .5 ? sdBox(p, h) : (length(p / h) - 1.0) * min(h.x, h.y);
+    float f = max(q.y, 0.0);
+    float a = f > .01 ? 1.0 - smoothstep(-f * .5, f * .5, d) : step(d, 0.0);
+    if (q.w < .5) cov = max(cov, a);
+    else cov = min(cov, 1.0 - a);
+  }
+  o = vec4(cov, cov, cov, 1.0);
+}`;
+
+PM.FRAG_MASK_APPLY = PRE + `
+uniform sampler2D u_cov;
+void main(){
+  vec4 c = texture(u_tex, v_st);
+  o = c * texture(u_cov, v_st).r;
+}`;
+
 /* ── effects registry ──────────────────────────────────── */
 const F = (body, extra = '') => PRE + extra + '\nvoid main(){\n' + body + '\n}';
 

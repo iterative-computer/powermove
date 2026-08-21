@@ -72,6 +72,27 @@ def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
   ] });
   setTimeout(() => { name.focus(); name.select(); }, 30);
 }, 'Edit');
+
+/* ── layer clipboard ───────────────────────────────────── */
+let layerClip = null;
+def('copyLayers', 'Copy layers', '⌘C', () => {
+  const sels = PM.selLayers(); if (!sels.length) return;
+  layerClip = sels.map(L => JSON.parse(JSON.stringify(L)));
+  PM.toast(`Copied ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
+}, 'Edit');
+def('pasteLayers', 'Paste layers', '⌘V', () => {
+  if (!layerClip || !layerClip.length) return;
+  PM.hist.do('Paste layers', () => {
+    /* clones keep their relative stack order; parenting inside the set survives */
+    const pairs = layerClip.map(src => [src, PM.cloneLayer(JSON.parse(JSON.stringify(src)))]);
+    const map = new Map(pairs.map(([src, c]) => [src.id, c]));
+    pairs.forEach(([src, c]) => { c.parent = src.parent && map.has(src.parent) ? map.get(src.parent).id : null; });
+    const pasted = pairs.map(([, c]) => c);
+    for (let i = pasted.length - 1; i >= 0; i--) PM.addLayer(pasted[i], 0);
+    PM.selectLayers(pasted.map(c => c.id));
+  });
+  PM.toast(`Pasted ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
+}, 'Edit');
 def('undo', 'Undo', '⌘Z', () => PM.hist.undo(), 'Edit');
 def('redo', 'Redo', '⌘⇧Z', () => PM.hist.redo(), 'Edit');
 
@@ -153,7 +174,8 @@ addEventListener('keydown', (e) => {
   if (m && k.toLowerCase() === 't') return go('newText');
   if (m && s && k.toLowerCase() === 'g') return go('newShader');
   if (m && k.toLowerCase() === 'd') return go(s ? 'split' : 'duplicate');
-  if (m && s && k.toLowerCase() === 'c') return go('precompose');
+  if (m && k.toLowerCase() === 'c') return go(s ? 'precompose' : 'copyLayers');
+  if (m && k.toLowerCase() === 'v' && !s) return go('pasteLayers');
   if (m && k.toLowerCase() === 'a') return go('selectAll');
   if (m && k.toLowerCase() === 'i') return go('import');
   if (m && k.toLowerCase() === 's') return go(s ? 'takeSave' : 'save');
