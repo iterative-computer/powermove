@@ -316,3 +316,95 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .drop .hd{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx-4);padding:6px 9px 3px}
 /* Persistent canvas panels need an explicit internal flex column. */
 #panel-timeline > .body{display:flex;flex-direction:column;overflow:hidden}
+
+/* ── assistant rail ────────────────────────────────────── */
+/* Collapsible sidebar hosting the live chat panel, above the docks. */
+#chat-rail{
+  position:fixed;top:calc(var(--hdr-h) + 46px);right:10px;bottom:34px;width:min(360px,32vw);z-index:80;
+  pointer-events:none;
+}
+#chat-rail .chat-rail-inner{
+  position:relative;height:100%;display:flex;flex-direction:column;pointer-events:auto;
+  background:var(--bg-panel);border:1px solid var(--line-2);border-radius:12px;
+  box-shadow:0 18px 52px rgba(10,10,14,.24);overflow:hidden;
+  transform:translateX(calc(100% + 16px));opacity:.4;
+  transition:transform .26s cubic-bezier(.3,.9,.35,1),opacity .2s ease;
+}
+#chat-rail.on .chat-rail-inner{transform:none;opacity:1}
+.chat-rail-body{flex:1;min-height:0;display:flex;flex-direction:column}
+/* the hosted panel fills the rail and keeps its own header */
+.chat-rail-body .panel{flex:1 1 auto;display:flex;flex-direction:column;border:0;border-radius:0;min-height:0;box-shadow:none}
+.chat-rail-close{
+  position:absolute;top:6px;right:6px;z-index:2;width:22px;height:22px;display:grid;place-items:center;
+  border:0;background:transparent;color:var(--tx-4);cursor:pointer;border-radius:6px;
+}
+.chat-rail-close:hover{color:var(--tx);background:rgba(15,15,20,.08)}
+.chat-rail-close svg{width:12px;height:12px}
+/* collapsed state: an edge tab to reopen */
+#chat-rail-tab{
+  position:absolute;left:-30px;top:8px;width:26px;height:44px;pointer-events:auto;cursor:pointer;
+  display:none;place-items:center;border:1px solid var(--line-2);border-right:0;
+  border-radius:9px 0 0 9px;background:var(--bg-panel);color:var(--tx-3);
+}
+#chat-rail-tab:hover{color:var(--accent-tx)}
+#chat-rail-tab svg{width:14px;height:14px}
+#chat-rail:not(.on) #chat-rail-tab{display:grid}
+
+/* ── generative library ────────────────────────────────── */
+.lib-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:4px}
+.lib-card{position:relative;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--bg-panel-2);cursor:pointer;transition:border-color .15s}
+.lib-card:hover{border-color:var(--line-2)}
+.lib-thumb{aspect-ratio:16/9;background:#000;position:relative}
+.lib-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.lib-empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--tx-4);font-size:18px}
+.lib-name{font-size:11px;font-weight:520;color:var(--tx-2);padding:5px 7px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-acts{position:absolute;top:4px;right:4px;display:none;gap:3px}
+.lib-card:hover .lib-acts{display:flex}
+.lib-acts .stopwatch{background:var(--bg-float);box-shadow:0 2px 8px rgba(15,15,20,.2)}
+
+/* ── drag placement preview ────────────────────────────── */
+.panel-drop-preview{
+  border:1.5px dashed var(--accent);border-radius:10px;background:var(--accent-dim);
+  display:grid;place-items:center;color:var(--accent-tx);
+  font-size:11px;font-weight:550;letter-spacing:.02em;
+  pointer-events:none;margin:0;min-height:40px;
+}
+.panel.drag-src{opacity:.4}
+
+/* ── projects screen ───────────────────────────────────── */
+#projects-screen{position:fixed;inset:0;z-index:150;background:var(--bg-window);display:none;flex-direction:column;padding:44px 64px;overflow:auto}
+#projects-screen.on{display:flex}
+.ps-top{display:flex;align-items:center;gap:12px;margin-bottom:28px}
+.ps-title{display:flex;flex-direction:column;gap:2px;margin-right:auto}
+.ps-title b{font-size:21px;font-weight:640;color:var(--tx)}
+.ps-title span{font-size:11.5px;color:var(--tx-4);font-family:var(--f-mono)}
+.ps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:20px;align-content:start}
+.ps-card{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg-panel);cursor:pointer;transition:border-color .15s,transform .15s}
+.ps-card:hover{border-color:var(--line-2);transform:translateY(-2px)}
+.ps-card.active{border-color:var(--accent)}
+.ps-thumb{aspect-ratio:16/9;background:#0a0a0c}
+.ps-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.ps-meta{padding:10px 13px 4px}
+.ps-name{font-weight:600;font-size:13.5px;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ps-sub{font-size:11px;color:var(--tx-4);font-family:var(--f-mono);margin-top:3px}
+.ps-acts{display:none;gap:6px;padding:8px 12px 12px}
+.ps-card:hover .ps-acts{display:flex}
+
+/* ── titlebar tabs ─────────────────────────────────────── */
+.tab{position:relative}
+.tabx{width:15px;height:15px;display:none;place-items:center;border:0;border-radius:5px;background:transparent;color:inherit;cursor:pointer;padding:0}
+.tabx svg{width:9px;height:9px}
+.tab:hover .tabx,.tab.on .tabx{display:grid}
+.tabx:hover{background:rgba(128,128,136,.25);color:var(--tx)}
+.newtab-btn{padding:0 9px;color:var(--tx-4)}
+
+/* ── generative detail studio ──────────────────────────── */
+.lib-detail{display:flex;flex-direction:column;gap:8px}
+.lib-bigthumb{border-radius:10px;overflow:hidden;background:#000;aspect-ratio:16/9}
+.lib-bigthumb img{width:100%;height:100%;object-fit:cover;display:block}
+.lib-layers{display:flex;flex-wrap:wrap;gap:5px}
+.lyr-tag{font-size:10.5px;font-family:var(--f-mono);color:var(--tx-3);border:1px solid var(--line);border-radius:6px;padding:2px 7px}
+.lib-comments{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto;padding:2px}
+.lib-cmt{border-left:2px solid var(--accent);padding:4px 9px;background:rgba(128,128,136,.07);border-radius:0 7px 7px 0}
+.cmt-at{font-size:10px;font-family:var(--f-mono);color:var(--tx-4)}
+.cmt-tx{font-size:12px;color:var(--tx-2);line-height:1.5;margin-top:1px;white-space:pre-wrap}

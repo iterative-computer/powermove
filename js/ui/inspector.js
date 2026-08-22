@@ -403,6 +403,12 @@ function sceneParams(wrap) {
   if (ps.length) {
     wrap.appendChild(PM.section('Scene parameters'));
     ps.forEach(p => {
+      /* params come from models and hand-edited JSON — coerce before rendering */
+      if (!p || !p.label && !p.name) return;
+      p.control = ['color', 'toggle', 'select'].includes(p.control) ? p.control : 'num';
+      if (p.value === undefined || (p.control === 'num' && !Number.isFinite(Number(p.value)))) {
+        p.value = p.control === 'color' ? '#FF6B1A' : p.control === 'toggle' ? false : Number(p.min) || 0;
+      }
       if (p.control === 'color') wrap.appendChild(PM.row(p.label, PM.colorField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, { label: p.label })));
       else if (p.control === 'toggle') wrap.appendChild(PM.row(p.label, PM.toggleField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, { label: p.label })));
       else if (p.control === 'select') wrap.appendChild(PM.row(p.label, PM.selectField(() => p.value, v => { p.value = v; PM.touch(); PM.invalidate(); }, p.options || [], { label: p.label })));

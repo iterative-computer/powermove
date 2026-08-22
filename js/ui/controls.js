@@ -75,12 +75,14 @@ function evalSafe(s) {
 }
 
 PM.colorField = (get, set, opt = {}) => {
-  const sw = h('div.sw', { style: { background: get() } });
-  const val = h('span', { style: { fontFamily: 'var(--f-mono)', fontSize: 'var(--fs-md)', color: 'var(--tx)' } }, String(get()).toUpperCase());
+  /* tolerate undefined/non-string values instead of painting "UNDEFINED" */
+  const safe = () => { const v = get(); return typeof v === 'string' && /^#[0-9a-f]{3,8}$/i.test(v) ? v : '#808080'; };
+  const sw = h('div.sw', { style: { background: safe() } });
+  const val = h('span', { style: { fontFamily: 'var(--f-mono)', fontSize: 'var(--fs-md)', color: 'var(--tx)' } }, safe().toUpperCase());
   const wrap = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, val, sw);
-  const inp = h('input', { type: 'color', value: get(), style: { position: 'absolute', width: 0, height: 0, opacity: 0 } });
+  const inp = h('input', { type: 'color', value: safe(), style: { position: 'absolute', width: 0, height: 0, opacity: 0 } });
   wrap.appendChild(inp);
-  wrap.sync = () => { sw.style.background = get(); val.textContent = String(get()).toUpperCase(); };
+  wrap.sync = () => { sw.style.background = safe(); val.textContent = safe().toUpperCase(); };
   let live = false;
   inp.addEventListener('input', () => { if (!live) { PM.hist.begin(opt.label || 'Color'); live = true; } set(inp.value); wrap.sync(); });
   inp.addEventListener('change', () => { PM.hist.commit(opt.label || 'Color'); live = false; });

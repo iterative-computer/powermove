@@ -149,9 +149,17 @@ def('palette', 'Command palette', '⌘K', () => palette(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
 def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');
 def('export', 'Export…', '⌘E', () => PM.Export.dialog(), 'File');
+def('projects', 'Projects screen', '⌘P', () => PM.ProjectsScreen && PM.ProjectsScreen.toggle(), 'File');
 def('newProject', 'New project', '⌘N', () => PM.newProject(), 'File');
 def('takeSave', 'Save take', '⌘⇧S', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
-def('focusChat', 'Focus assistant', '⌘L', () => { const el = PM.$('#cinput'); if (el) el.focus(); }, 'View');
+def('focusChat', 'Toggle assistant', '⌘L', () => {
+  if (PM.ChatRail.isOpen) {
+    const inp = PM.$('#cinput');
+    if (document.activeElement === inp) PM.ChatRail.close();
+    else if (inp) { PM.ChatRail.open(); inp.focus(); }
+    else PM.ChatRail.open();
+  } else PM.ChatRail.open();
+}, 'View');
 
 /* ── keymap ────────────────────────────────────────────── */
 const isField = (e) => {
@@ -181,9 +189,9 @@ addEventListener('keydown', (e) => {
   if (m && k.toLowerCase() === 's') return go(s ? 'takeSave' : 'save');
   if (m && k.toLowerCase() === 'o') return go('open');
   if (m && k.toLowerCase() === 'e') return go('export');
+  if (m && k.toLowerCase() === 'p' && !s) return go('projects');
   if (m && k.toLowerCase() === 'n') return go('newProject');
-  if (m && k.toLowerCase() === 'l') return go('focusChat');
-  if (k === 'F9') return go(m ? 'easeLinear' : s ? 'easePower' : 'easeOut');
+  if (m && k.toLowerCase() === 'l') return go('focusChat');  if (k === 'F9') return go(m ? 'easeLinear' : s ? 'easePower' : 'easeOut');
 
   switch (k) {
     case ' ': return go('play');

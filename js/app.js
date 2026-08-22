@@ -32,19 +32,24 @@ PM.theme = (() => {
 
 /* ── project boot / migration ───────────────────────────── */
 function loadBootProject() {
+  /* Prefer the registry: the most recently touched open project. */
+  const tabs = PM.Projects.tabs();
+  for (const id of tabs) {
+    const raw = PM.Projects.get(id);
+    if (!raw) continue;
+    try {
+      return hydrate(raw);
+    } catch (e) { console.warn('Saved project could not be loaded', id, e); }
+  }
+  /* Legacy single-project autosave → migrate into the registry. */
   const raw = PM.store.get('autosave', null);
-  if (raw && raw.proj) {
-    const layers = raw.proj.layers;
-    const usable = Array.isArray(layers) && layers.length > 0;
-    if (usable) {
-      try {
-        const proj = hydrate(raw.proj);
-        if (proj.layers.length) return proj;
-      } catch (e) { console.warn('Autosave could not be loaded', e); }
-    } else {
-      console.warn('Discarding empty autosave');
-    }
-    /* Empty or corrupt autosave must never win over the demo. */
+  if (raw && raw.proj && Array.isArray(raw.proj.layers) && raw.proj.layers.length > 0) {
+    try {
+      const proj = hydrate(raw.proj);
+      if (proj.layers.length) return proj;
+    } catch (e) { console.warn('Autosave could not be loaded', e); }
+  } else if (raw) {
+    console.warn('Discarding empty autosave');
     PM.store.del('autosave');
   }
   return demo();
@@ -197,6 +202,17 @@ void main(){
   }
 })();
 
+/* Boot hygiene: repeated launches can leave several untouched "Untitled" projects
+   in the registry and the tab strip. Keep the newest; drop only truly empty ones. */
+(function pruneEmptyUntitled() {
+  const empties = PM.Projects.list().filter(m => m.name === 'Untitled');
+  if (empties.length <= 1) return;
+  empties.slice(1).forEach(m => {
+    const raw = PM.Projects.get(m.id);
+    if (!raw || (Array.isArray(raw.layers) && raw.layers.length === 0)) PM.Projects.remove(m.id);
+  });
+})();
+
 PM.proj = loadBootProject();
 /* External media blobs cannot survive a browser restart; keep metadata but hide unresolved layers. */
 PM.proj.layers.forEach(L => {
@@ -248,10 +264,28 @@ function buildTitlebar() {
   });
   const paintTabs = () => {
     tabs.textContent = '';
-    tabs.appendChild(h('div.tab.on', h('span', PM.proj.name), APP.dirty ? h('span', { style: { color: 'var(--accent)' } }, '•') : null));
+    /* open-project tabs, most recently active last; "+" opens the projects screen */
+    PM.Projects.tabs().forEach(id => {
+      const meta = PM.Projects.list().find(m => m.id === id);
+      const active = id === PM.proj.id;
+      const tab = h('div.tab' + (active ? '.on' : ''), {
+        title: (meta && meta.name) || id,
+      },
+        h('span', (meta && meta.name) || 'Untitled'),
+        active && APP.dirty ? h('span', { style: { color: 'var(--accent)' } }, '•') : null,
+        h('button.tabx', {
+          title: 'Close project',
+          onclick: (e) => { e.stopPropagation(); closeTab(id); },
+        }, PM.icon('x')));
+      tab.onclick = () => { if (!active) openTab(id); };
+      tabs.appendChild(tab);
+    });
+    const plus = h('button.tab.newtab-btn', { title: 'Projects · ⌘P', onclick: () => PM.ProjectsScreen.show() }, PM.icon('plus'));
+    tabs.appendChild(plus);
     const ws = h('button.tab', { onpointerdown: e => workspaceMenu(e, ws) }, PM.icon('panel'), PM.WS.current.name, PM.icon('chevD'));
     tabs.appendChild(ws);
   };
+  PM.bus.on('projects:tabs', paintTabs);
   right.textContent = '';
   const button = (icon, title, run) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
   right.append(
@@ -259,6 +293,16 @@ function buildTitlebar() {
     button('redo', 'Redo', () => PM.hist.redo()),
     button('plus', 'New layer', e => addMenu(e)),
     button('wand', 'New shader layer', () => PM.cmd('newShader')),
+    (() => {
+      const b = button('sparkle', 'Show assistant · ⌘L', () => PM.ChatRail.toggle());
+      const sync = () => {
+        b.style.color = PM.ChatRail.isOpen ? 'var(--accent)' : '';
+        b.title = PM.ChatRail.isOpen ? 'Hide assistant · ⌘L' : 'Show assistant · ⌘L';
+      };
+      sync();
+      PM.bus.on('chatrail', sync);
+      return b;
+    })(),
     button('export', 'Export', () => PM.Export.dialog()),
     themeButton(button),
     button('gear', 'Workspace definition', () => PM.WS.editJSON()),
@@ -322,14 +366,26 @@ function buildToolbar() {
 buildToolbar();
 
 /* ── persistence ───────────────────────────────────────── */
+/* Thumbnails are captured at most once per 5s so autosave never janks. */
+let lastThumbAt = 0;
+function projectThumb() {
+  const now = Date.now();
+  if (now - lastThumbAt < 5000) return undefined;
+  lastThumbAt = now;
+  try { return PM.Export.snapshot(PM.time, 320); } catch (e) { return undefined; }
+}
+function persistCurrent(withThumb) {
+  try {
+    PM.Projects.put(PM.proj, withThumb ? projectThumb() : undefined);
+    APP.dirty = false;
+  } catch (e) { console.warn('Project save failed', e); }
+}
 PM.autosave = () => {
   APP.dirty = true;
   clearTimeout(APP.saveTimer);
-  APP.saveTimer = setTimeout(() => {
-    try {
-      PM.store.set('autosave', { v: PM.version, at: Date.now(), proj: PM.proj });
-      APP.dirty = false; PM.invalidate('status'); PM.bus.emit('project:saved');
-    } catch (e) { console.warn('Autosave failed', e); }
+  PM.saveTimer = setTimeout(() => {
+    persistCurrent(true);
+    PM.invalidate('status'); PM.bus.emit('project:saved'); PM.bus.emit('projects:tabs');
   }, 550);
 };
 ['layers','project','assets'].forEach(ev => PM.bus.on(ev, PM.autosave));
@@ -374,6 +430,9 @@ PM.newProject = () => {
 function switchProject(p) {
   PM.pause();
   PM.proj = hydrate(p);
+  PM.Projects.markOpen(PM.proj.id);
+  persistCurrent(false);
+  PM.bus.emit('projects:tabs');
   PM.time = 0;
   PM.sel.layers = [];
   PM.sel.keys = [];
@@ -417,8 +476,35 @@ addEventListener('drop', e => {
 function safeName(s) { return String(s || 'powermove').replace(/[\\/:*?"<>|]+/g, '-').trim() || 'powermove'; }
 addEventListener('beforeunload', () => {
   clearTimeout(APP.saveTimer);
-  try { PM.store.set('autosave', { v: PM.version, at: Date.now(), proj: PM.proj }); } catch (e) { }
+  persistCurrent(false);
 });
+
+/* ── open-project tabs ─────────────────────────────────── */
+function openTab(id) {
+  if (!id || id === PM.proj.id) return;
+  const raw = PM.Projects.get(id);
+  if (!raw) { PM.toast('That project could not be found'); PM.Projects.markClosed(id); PM.bus.emit('projects:tabs'); return; }
+  switchProject(raw);
+}
+function closeTab(id) {
+  if (id === PM.proj.id) persistCurrent(false);
+  PM.Projects.markClosed(id);
+  const rest = PM.Projects.tabs();
+  if (id === PM.proj.id) {
+    if (rest.length) openTab(rest[0]);
+    else switchProject(PM.mkProject({ name: 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' }));
+  }
+  PM.bus.emit('projects:tabs');
+}
+window.addEventListener('pm-open-project', (e) => {
+  const p = e.detail;
+  if (p && typeof p === 'object') switchProject(p);
+});
+
+/* boot registration: the startup project becomes the first tab */
+PM.Projects.markOpen(PM.proj.id);
+persistCurrent(false);
+PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
 
 /* first full frame after persistent panels have measured */
 requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -429,5 +515,6 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
   PM.Inspector.refresh();
   PM.invalidate('all');
   PM.invalidate('status');
+  if (PM.ChatRail) PM.ChatRail.init();
 }));
 })();

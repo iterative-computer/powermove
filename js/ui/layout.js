@@ -84,13 +84,17 @@ function buildPanel(spec, dock) {
   };
 
   /* Header interactions use the live workspace location. Persisted canvas panels
-     keep their DOM nodes while moving, so captured initial dock objects go stale. */
-  hdr.addEventListener('pointerdown', (e) => {
-    if (e.target.closest('button')) return;
-    beginMove(e);
-  });
-  hdr.addEventListener('dblclick', (e) => {
-    if (e.target.closest('button')) return;
+      keep their DOM nodes while moving, so captured initial dock objects go stale.
+      The assistant is rail-hosted — docking it would be silently discarded by
+      workspace normalization, so it never starts a move. */
+   hdr.addEventListener('pointerdown', (e) => {
+     if (e.target.closest('button')) return;
+     if (spec.id === 'chat') return;
+     beginMove(e);
+   });
+   hdr.addEventListener('dblclick', (e) => {
+     if (e.target.closest('button')) return;
+     if (spec.id === 'chat') return;
     const current = liveLocation();
     const liveSpec = current && current.spec ? current.spec : spec;
     const collapsed = el.dataset.collapsed === '1';
@@ -104,7 +108,10 @@ function buildPanel(spec, dock) {
     const current = liveLocation();
     if (current && current.dock && current.spec) panelMenu(e, current.spec, current.dock);
   };
-  hdr.addEventListener('contextmenu', openPanelMenu);
+  hdr.addEventListener('contextmenu', (e) => {
+    if (spec.id === 'chat') { e.preventDefault(); return; }
+    openPanelMenu(e);
+  });
   if (moveHandle) {
     moveHandle.addEventListener('pointerdown', beginMove);
     moveHandle.addEventListener('contextmenu', openPanelMenu);
@@ -140,16 +147,20 @@ function startPanelDrag(e, spec, dock, el) {
   const label = h('span.panel-ghost-label', PM.PANELS[spec.id].title);
   const destination = h('span.panel-ghost-destination', '');
   const ghost = h('div.panel-ghost', label, destination);
-  document.body.appendChild(ghost);
+  /* live placement preview: a slot that shows exactly where the panel will land */
+  const preview = h('div.panel-drop-preview', PM.PANELS[spec.id].title);
+  document.body.append(ghost, preview);
+  el.classList.add('drag-src');
   const fromIndex = Math.max(0, dock.panels.findIndex(p => p.id === spec.id));
-  dragState = { spec, fromDock: dock.id, fromIndex, ghost, destination, moved: false };
+  dragState = { spec, fromDock: dock.id, fromIndex, ghost, destination, preview, srcEl: el, moved: false };
 
   function finish(wasCancelled) {
     const state = dragState;
     if (!state) return;
     dragState = null;
     window.removeEventListener('keydown', state.onKey, true);
-    ghost.remove();
+    ghost.remove(); preview.remove();
+    state.srcEl && state.srcEl.classList.remove('drag-src');
     document.body.classList.remove('panel-dragging');
     if (!state.moved) return;
     if (wasCancelled) { PM.toast('Move cancelled'); return; }
@@ -191,20 +202,29 @@ function startPanelDrag(e, spec, dock, el) {
   window.addEventListener('keydown', dragState.onKey, true);
 }
 
+const dockPanels = (dockEl) =>
+  [...dockEl.querySelectorAll(':scope > .panel:not(.panel-drop-preview)')];
+
 function updateDropTarget(ev) {
+  const preview = dragState.preview;
   dragState.dropTarget = null;
   const el = document.elementFromPoint(ev.clientX, ev.clientY);
   const dockEl = el && el.closest('.dock');
   if (!dockEl) {
+    preview.remove();
     dragState.destination.textContent = 'Not a drop zone';
     return;
   }
   const dockId = dockEl.id.replace('dock-', '');
-  /* find insertion index from hovered panel */
+  /* find insertion index from hovered panel (preview never counts as a panel) */
   const panelEl = el.closest('.panel');
   let index = null;
+  if (panelEl && panelEl.classList.contains('panel-drop-preview')) {
+    /* hovering our own preview: keep the last computed target */
+    return;
+  }
   if (panelEl && dockEl.contains(panelEl)) {
-    const panels = [...dockEl.querySelectorAll(':scope > .panel')];
+    const panels = dockPanels(dockEl);
     const i = panels.indexOf(panelEl);
     const r = panelEl.getBoundingClientRect();
     const before = ev.clientY < r.top + r.height / 2;
@@ -212,10 +232,22 @@ function updateDropTarget(ev) {
     const title = PM.PANELS[panelEl.dataset.panel]?.title || 'panel';
     dragState.destination.textContent = (before ? 'Before ' : 'After ') + title;
   } else {
-    index = dockEl.querySelectorAll(':scope > .panel').length;
+    index = dockPanels(dockEl).length;
     dragState.destination.textContent = 'End of ' + dockLabel(dockId);
   }
   dragState.dropTarget = { dockId, index };
+  placePreview(preview, dockEl, index, ev);
+}
+
+/** Show the slot where the panel will land. The preview is purely visual —
+    pointer-events:none keeps hit-testing stable while it moves under the cursor. */
+function placePreview(preview, dockEl, index, ev) {
+  const panels = dockPanels(dockEl);
+  const ref = panels[index];
+  if (ref) dockEl.insertBefore(preview, ref);
+  else dockEl.appendChild(preview);
+  const srcH = dragState.srcEl ? dragState.srcEl.getBoundingClientRect().height : 0;
+  preview.style.flex = '0 0 ' + PM.clamp(srcH || 120, 56, 320) + 'px';
 }
 
 /* ── panel context menu ────────────────────────────────── */
@@ -434,6 +466,21 @@ L.refresh = (id) => {
   inst.body.textContent = '';
   try { inst.def.build && inst.def.build(inst.body, inst); } catch (e) { console.error(e); }
   inst.def.header && inst.def.header(inst.header, inst);
+};
+
+/** Build (or reuse) a panel element outside any dock — for hosts like the
+    assistant rail that manage their own placement. */
+L.mountFloatingPanel = (id) => {
+  const def = PM.PANELS[id];
+  if (!def) return null;
+  let inst = PM.panelInst[id];
+  if (!inst || !inst.el) {
+    const spec = { id };
+    buildPanel(spec, { id: 'float', panels: [spec] });
+    inst = PM.panelInst[id];
+  }
+  if (inst && inst.el) { inst.el.classList.remove('popped'); inst.el.style.flex = '1 1 auto'; }
+  return inst ? inst.el : null;
 };
 
 /* ── pop-out panels ────────────────────────────────────── */

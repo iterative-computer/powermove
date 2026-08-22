@@ -1,32 +1,7 @@
-/* Powermove — auxiliary panels: layers, assets, shader editor, workspaces, takes, perf. */
+/* Powermove — auxiliary panels: assets, shader editor, workspaces, takes, perf.
+   The timeline owns layer ordering/visibility, so there is no separate Layers panel. */
 (() => {
 const PM = window.PM, h = PM.h;
-
-/* ── Layers ────────────────────────────────────────────── */
-PM.registerPanel('layers', {
-  title: 'Layers', size: 220,
-  build(body) {
-    const list = h('div', { style: { padding: '6px' } });
-    body.appendChild(list);
-    const paint = () => {
-      list.textContent = '';
-      PM.proj.layers.forEach((L, i) => {
-        const row = h('div.lyr' + (PM.sel.layers.includes(L.id) ? '.sel' : ''),
-          h('span.idx', String(i + 1).padStart(2, '0')),
-          h('span.sw2', { style: { background: L.color } }),
-          h('span.nm', L.name),
-          h('button.stopwatch' + (L.on ? '.on' : ''), {
-            onclick: (e) => { e.stopPropagation(); PM.hist.do('Visibility', () => { L.on = !L.on; }); PM.invalidate(); },
-          }, PM.icon(L.on ? 'eye' : 'eyeoff')));
-        row.onclick = (e) => PM.selectLayers(L.id, e.shiftKey || e.metaKey);
-        list.appendChild(row);
-      });
-      if (!PM.proj.layers.length) list.appendChild(h('div.empty', 'No layers yet.\nPress ⌘T for text, ⌘Y for a solid,\nor ask the assistant.'));
-    };
-    paint();
-    PM.bus.on('layers', paint); PM.bus.on('sel', paint);
-  },
-});
 
 /* ── Assets ────────────────────────────────────────────── */
 PM.registerPanel('assets', {
@@ -230,6 +205,126 @@ PM.registerPanel('notes', {
     ta.addEventListener('input', () => { PM.proj.notes = ta.value; });
     ta.addEventListener('keydown', e => e.stopPropagation());
     body.appendChild(ta);
+  },
+});
+
+/* ── Generative library ────────────────────────────────── */
+/* Browsable home for AI-generated and hand-saved sections (layer groups) and
+   looks (shader presets). Everything carries a live thumbnail captured when
+   it was saved. */
+PM.registerPanel('library', {
+  title: 'Generative', size: 250,
+  build(body) {
+    const wrap = h('div', { style: { padding: '6px' } });
+    const bar = h('div', { style: { display: 'flex', gap: '6px', padding: '2px' } },
+      h('button.chip', {
+        title: 'Save selected layers as a reusable section',
+        onclick: () => { const sels = PM.selLayers(); PM.Library.saveSection(null, sels.length ? sels.map(l => l.id) : null); paint(); },
+      }, PM.icon('plus'), 'Section'),
+      h('button.chip', {
+        title: 'Save the selected shader layer as a look',
+        onclick: () => { PM.Library.saveLook(); paint(); },
+      }, PM.icon('wand'), 'Look'));
+    body.append(bar, wrap);
+
+    const card = (entry, kind) => {
+      const img = h('img', { src: entry.thumb || '', alt: entry.name });
+      const cv = h('div.lib-thumb', img);
+      if (!entry.thumb) cv.appendChild(h('div.lib-empty', kind === 'sections' ? '▣' : '✦'));
+      const c = h('div.lib-card',
+        cv,
+        h('div.lib-name', entry.name),
+        h('div.lib-acts',
+          h('button.stopwatch', { title: kind === 'sections' ? 'Insert at playhead' : 'Add shader layer', onclick: (e) => { e.stopPropagation(); kind === 'sections' ? PM.Library.insertSection(entry.id) : PM.Library.applyLook(entry.id); } }, PM.icon('plus')),
+          h('button.stopwatch', { title: 'Details, notes & refinement', onclick: (e) => { e.stopPropagation(); detail(entry, kind, paint); } }, PM.icon('grip')),
+          h('button.stopwatch', { title: 'Remove from library', onclick: (e) => { e.stopPropagation(); PM.Library.drop(kind, entry.id); paint(); } }, PM.icon('x'))));
+      c.onclick = () => detail(entry, kind, paint);
+      return c;
+    };
+
+    /* Detail studio: big preview, layer contents, comment thread, and a
+       one-click refine prompt handed to the assistant. */
+    function detail(entry, kind, refresh) {
+      const isSection = kind === 'sections';
+      const cmts = h('div.lib-comments');
+      const paintCmts = () => {
+        cmts.textContent = '';
+        (entry.comments || []).forEach(c => cmts.appendChild(
+          h('div.lib-cmt',
+            h('span.cmt-at', new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+            h('div.cmt-tx', c.text))));
+        if (!(entry.comments || []).length) cmts.appendChild(h('div.empty', 'No notes yet — leave direction for future you.'));
+      };
+      const noteInp = h('textarea', { placeholder: 'Add a comment — creative intent, tweaks to try…', rows: 2 });
+      noteInp.addEventListener('keydown', e => e.stopPropagation());
+      const addNote = () => {
+        if (!noteInp.value.trim()) return;
+        PM.Library.comment(kind, entry.id, noteInp.value);
+        noteInp.value = '';
+        paintCmts();
+      };
+
+      const refine = () => {
+        if (isSection) PM.Library.insertSection(entry.id);
+        else PM.Library.applyLook(entry.id);
+        PM.ChatRail.open(true);
+        const ci = PM.$('#cinput');
+        if (ci) {
+          ci.value = (isSection
+            ? `Refine the inserted section “${entry.name}” (its layers are selected). `
+            : `Refine the applied look “${entry.name}” (its shader layer is selected). `)
+            + ((entry.comments || []).slice(-1)[0] ? `Latest note: “${entry.comments.slice(-1)[0].text}”. ` : '');
+          ci.dispatchEvent(new Event('input'));
+        }
+      };
+
+      const layersInfo = isSection
+        ? h('div.lib-layers', ...(entry.layers || []).map(l =>
+            h('span.lyr-tag', PM.TYPE_META[l.type] ? PM.TYPE_META[l.type].label : l.type, ': ', l.name)))
+        : null;
+
+      const body = h('div.lib-detail',
+        h('div.lib-bigthumb', h('img', { src: entry.thumb || '', alt: entry.name })),
+        layersInfo,
+        h('div.sec', { style: { margin: '10px 2px 6px' } }, 'Notes'),
+        cmts,
+        h('div.field', noteInp),
+        h('button.chip', { style: { marginTop: '-4px' }, onclick: addNote }, 'Add note'));
+
+      PM.modal({
+        title: entry.name,
+        body, width: 560,
+        actions: [
+          { label: 'Delete', run: () => { PM.Library.drop(kind, entry.id); refresh && refresh(); } },
+          { label: 'Refine with assistant', pri: true, run: refine },
+          { label: isSection ? 'Insert at playhead' : 'Apply look', run: () => {
+              isSection ? PM.Library.insertSection(entry.id) : PM.Library.applyLook(entry.id);
+              refresh && refresh();
+            } },
+        ],
+      });
+      paintCmts();
+    }
+
+    function paint() {
+      wrap.textContent = '';
+      const L = PM.Library.all();
+      if (L.sections.length) {
+        wrap.appendChild(h('div.sec', { style: { margin: '8px 4px 4px' } }, 'Sections'));
+        wrap.appendChild(h('div.lib-grid', ...L.sections.map(s => card(s, 'sections'))));
+      }
+      if (L.looks.length) {
+        wrap.appendChild(h('div.sec', { style: { margin: '10px 4px 4px' } }, 'Looks · shaders'));
+        wrap.appendChild(h('div.lib-grid', ...L.looks.map(k => card(k, 'looks'))));
+      }
+      if (!L.sections.length && !L.looks.length) {
+        wrap.appendChild(h('div.empty', { style: { textAlign: 'left', padding: '10px 6px' } },
+          'Nothing saved yet.\n\nSelect layers and press Section to keep a reusable piece of the composition — or ask the assistant to “save this as a section”. Generated shaders can be kept as Looks.'));
+      }
+    }
+    paint();
+    PM.bus.on('library', paint);
+    PM.bus.on('layers', paint);
   },
 });
 })();

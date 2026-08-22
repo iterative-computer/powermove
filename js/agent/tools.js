@@ -259,6 +259,33 @@ reg('add_scene_parameter', 'Expose a purposeful global scene control that expres
   return ok(`Added scene control “${x.label || x.name}”`);
 });
 
+reg('save_section', 'Save the selected layers (or the whole composition when nothing is selected) as a named, thumbnail-previewed section in the Generative library. Use this whenever you finish a self-contained piece the user may want to reuse.', {
+  type: 'object', required: ['name'], properties: {
+    name: { type: 'string' }, layer_ids: { type: 'array', items: { type: 'string' } },
+  },
+}, async (x) => {
+  const ids = Array.isArray(x.layer_ids) && x.layer_ids.length ? x.layer_ids : null;
+  let entry = null;
+  PM.hist.do('Agent · save section', () => { entry = PM.Library.saveSection(x.name, ids); });
+  if (!entry) return fail('Nothing to save — no matching layers.');
+  PM.toast(`Saved section “${entry.name}”`);
+  return ok(`Saved section “${entry.name}” (${entry.layers.length} layers) to the Generative library.`);
+});
+
+reg('save_look', 'Save the selected shader layer’s code and uniform values as a named Look in the Generative library for later reuse.', {
+  type: 'object', required: ['name'], properties: {
+    name: { type: 'string' }, layer_id: { type: 'string' },
+  },
+}, async (x) => {
+  const L = x.layer_id ? PM.L(x.layer_id) : PM.firstSel();
+  if (!L || L.type !== 'shader') return fail('Select or name a shader layer to save a look.');
+  let entry = null;
+  PM.hist.do('Agent · save look', () => { entry = PM.Library.saveLook(x.name, L); });
+  if (!entry) return fail('Could not save the look.');
+  PM.toast(`Saved look “${entry.name}”`);
+  return ok(`Saved look “${entry.name}” to the Generative library.`);
+});
+
 reg('look', 'Render real frames of the live composition. Use representative beat moments and boundary triplets.', {
   type: 'object', properties: { times: { type: 'array', items: { type: 'number' } }, width: { type: 'number' }, note: { type: 'string' } },
 }, async (x = {}) => {

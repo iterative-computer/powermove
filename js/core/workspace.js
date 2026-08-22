@@ -75,10 +75,12 @@ function normalizeWorkspace(workspace, fallback) {
   const usedPanels = new Set();
   docks = docks.map((item, index) => {
     const d = item && typeof item === 'object' ? item : {};
+    /* the assistant lives exclusively in its own collapsible rail */
     const panels = (Array.isArray(d.panels) ? d.panels : []).map(spec => {
       const q = typeof spec === 'string' ? { id: spec } : (spec && typeof spec === 'object' ? spec : {});
       const id = text(q.id);
-      if (!id || usedPanels.has(id)) return null;
+      /* the assistant lives in its rail; the redundant Layers panel was removed */
+      if (!id || id === 'chat' || id === 'layers' || usedPanels.has(id)) return null;
       usedPanels.add(id);
       const clean = { id };
       if (q.flex) clean.flex = true;
@@ -114,9 +116,9 @@ const PRESETS = () => ([
     features: { motionBlur: true, snapping: true, guides: true, autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
-        /* The timeline already owns layer ordering and visibility in Design;
-           use the left rail for project media and the assistant. */
-        dock('left', [p('assets', { size: 150 }), p('chat', { flex: true })], 250),
+        /* the timeline already owns layer ordering and visibility in Design;
+           use the left rail for project media, the generative library, and effects */
+        dock('left', [p('assets', { size: 150 }), p('library', { size: 220 }), p('fxbrowser', { flex: true })], 250),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
         dock('right', [p('inspector', { flex: true })], 300),
       ],
@@ -150,7 +152,7 @@ const PRESETS = () => ([
     features: { motionBlur: true, snapping: true, guides: false, autosave: true, graphOnOpen: true },
     layout: {
       docks: [
-        dock('left', [p('layers', { flex: true }), p('takes', { size: 160 })], 230),
+        dock('left', [p('takes', { flex: true }), p('assets', { size: 170 })], 230),
         dock('center', [p('viewer', { size: 300 }), p('timeline', { flex: true })]),
         dock('right', [p('inspector', { flex: true })], 320),
       ],
@@ -174,7 +176,7 @@ const PRESETS = () => ([
     features: { motionBlur: false, snapping: true, guides: true, autosave: true },
     layout: {
       docks: [
-        dock('left', [p('assets', { flex: true }), p('layers', { size: 240 })], 250),
+        dock('left', [p('assets', { flex: true }), p('fxbrowser', { size: 240 })], 250),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 360 })]),
         dock('right', [p('inspector', { flex: true })], 280),
       ],
@@ -187,7 +189,7 @@ const PRESETS = () => ([
     layout: {
       docks: [
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 180 })]),
-        dock('right', [p('chat', { flex: true }), p('notes', { size: 170 })], 400),
+        dock('right', [p('library', { flex: true }), p('notes', { size: 170 })], 400),
       ],
     },
   },

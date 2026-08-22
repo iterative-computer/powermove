@@ -18,9 +18,11 @@ test('timeline ruler renders composition markers as compact, labeled diamonds', 
 });
 
 test('Design workspace uses the timeline instead of a redundant Layers panel', () => {
-  const design = workspace.slice(workspace.indexOf("id: 'design'"), workspace.indexOf("id: 'animate'"));
+  const design = workspace.slice(workspace.indexOf("id: 'design'"), workspace.indexOf("id: 'gradient'"));
   assert.doesNotMatch(design, /p\('layers'/);
-  assert.match(design, /p\('assets', \{ size: 150 \}\), p\('chat', \{ flex: true \}\)/);
+  /* the assistant is rail-hosted, never docked; the generative library ships in Design */
+  assert.doesNotMatch(design, /p\('chat'/);
+  assert.match(design, /p\('assets', \{ size: 150 \}\), p\('library', \{ size: 220 \}\), p\('fxbrowser', \{ flex: true \}\)/);
 });
 
 test('Gradient is a clean shared preset instead of app-only saved state', () => {
