@@ -6,7 +6,7 @@ const PM = window.PM;
 const R = {
   KEY: 'projects',          // [{id, name, at, thumb}]
   SLOT: 'project.',         // + id → serialized project
-  openKey: 'openTabs',      // [id] in MRU order
+  openKey: 'openTabs',      // [id] in stable visible tab order
   trashKey: 'projectTrash', // metadata for recoverable deletion; slots stay intact
 };
 
@@ -119,9 +119,11 @@ R.tabs = () => {
   return Array.isArray(t) ? t.filter(id => R.list().some(m => m.id === id)) : [];
 };
 R.markOpen = (id) => {
-  const t = R.tabs().filter(x => x !== id);
-  t.unshift(id);
-  PM.store.set(R.openKey, t.slice(0, 8));
+  const t = R.tabs();
+  /* Selecting an existing project must not move its tab. New projects join at
+     the end, matching the visible left-to-right order in the titlebar. */
+  if (!t.includes(id)) t.push(id);
+  PM.store.set(R.openKey, t.slice(-8));
 };
 R.markClosed = (id) => PM.store.set(R.openKey, R.tabs().filter(x => x !== id));
 

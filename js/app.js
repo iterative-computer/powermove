@@ -332,16 +332,12 @@ function buildTitlebar() {
   right.append(
     button('undo', 'Undo', () => PM.hist.undo()),
     button('redo', 'Redo', () => PM.hist.redo()),
-    button('plus', 'New layer', e => addMenu(e)),
-    button('wand', 'New shader layer', () => PM.cmd('newShader')),
-    button('export', 'Export', () => PM.Export.dialog()),
     (() => {
       const b = button('panel', 'Workspace · ' + PM.WS.current.name, e => workspaceMenu(e, b));
       PM.bus.on('workspaces', () => { b.title = 'Workspace · ' + PM.WS.current.name; });
       return b;
     })(),
     themeButton(button),
-    button('gear', 'Workspace definition', () => PM.WS.editJSON()),
   );
   PM.bus.on('workspaces', paintTabs); PM.bus.on('project', paintTabs); PM.bus.on('history', paintTabs);
   paintTabs();
@@ -354,18 +350,6 @@ function workspaceMenu(e, anchor) {
     '-', { label: 'Save current as new…', run: () => PM.WS.saveAsNew() },
     { label: 'Edit workspace JSON…', run: () => PM.WS.editJSON() },
   ]);
-}
-function addMenu(e) {
-  const a = e.currentTarget;
-  PM.menu(a, [
-    { header: 'New layer' },
-    { label: 'Text', kb: '⌘T', run: () => PM.cmd('newText') },
-    { label: 'Shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
-    { label: 'Solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
-    { label: 'Shader', kb: '⌘⇧G', run: () => PM.cmd('newShader') },
-    { label: 'Null', run: () => PM.cmd('newNull') },
-    '-', { label: 'Import media…', kb: '⌘I', run: () => PM.pickFiles() },
-  ], { right: true });
 }
 function buildStatus() {
   const s = $('#status');

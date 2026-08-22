@@ -65,7 +65,7 @@ const S = {
   root: null, ink: null, path: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
-  gpuAdapter: null,
+  gpuAdapter: null, hintFrame: 0,
 };
 
 const Spatial = {
@@ -74,7 +74,7 @@ const Spatial = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan },
+  math: { shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, hintPosition },
 };
 PM.SpatialAssistant = Spatial;
 
@@ -85,7 +85,7 @@ function init() {
   addEventListener('pointerup', () => { S.pressed = false; }, true);
   addEventListener('pointercancel', () => { S.pressed = false; }, true);
   addEventListener('pointermove', watchShake, true);
-  S.gpuAdapter = navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' }) || null;
+  S.gpuAdapter = navigator.gpu?.requestAdapter?.() || null;
   refreshSceneCache();
 }
 
@@ -95,6 +95,7 @@ function watchShake(event) {
   if (S.active) {
     const live = event.getCoalescedEvents?.().at(-1) || event;
     S.origin.x = live.clientX; S.origin.y = live.clientY;
+    queueHint(live.clientX, live.clientY);
     return;
   }
   if (S.pressed || event.buttons || performance.now() - S.lastTrigger < 1600) return;
@@ -135,7 +136,7 @@ function warmRipple() {
   const warmup = {
     claimed: false,
     capture: S.sceneCache ? null : PM.WindowCapture.request(),
-    adapter: S.gpuAdapter || navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' }) || null,
+    adapter: S.gpuAdapter || navigator.gpu?.requestAdapter?.() || null,
   };
   S.rippleWarmup = warmup;
   setTimeout(() => {
@@ -191,7 +192,7 @@ function activate(x, y, warmup = null) {
   S.path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   S.ink = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   S.ink.classList.add('spatial-ink'); S.ink.appendChild(S.path);
-  S.hint = h('div.spatial-hint', h('i'), h('span', 'Circle any part of the interface'));
+  S.hint = h('div.spatial-hint', h('span', 'Circle any part of the interface'));
   S.root = h('div#spatial-assistant', { role: 'dialog', 'aria-label': 'Spatial coding assistant' },
     canvas, h('div.spatial-wash'), S.ink, S.hint);
   addEventListener('keydown', onKey, true);
@@ -203,8 +204,39 @@ function activate(x, y, warmup = null) {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     S.root.addEventListener('pointerdown', beginCircle);
     document.body.appendChild(S.root);
+    placeHint(S.origin.x, S.origin.y);
     S.renderStop = startRipple(canvas, S.origin, sceneBitmap, warmup?.adapter || S.gpuAdapter || null);
     setTimeout(() => { if (S.active && S.phase === 'arming') S.phase = 'selecting'; }, 340);
+  });
+}
+
+function hintPosition(point, viewport, size, offset = { x: 16, y: 18 }) {
+  const margin = 12;
+  const maxX = Math.max(margin, viewport.width - size.width - margin);
+  const maxY = Math.max(margin, viewport.height - size.height - margin);
+  return {
+    x: PM.clamp(point.x + offset.x, margin, maxX),
+    y: PM.clamp(point.y + offset.y, margin, maxY),
+  };
+}
+
+function placeHint(x, y) {
+  if (!S.hint || S.hint.style.display === 'none') return;
+  const rect = S.hint.getBoundingClientRect();
+  const p = hintPosition(
+    { x, y },
+    { width: innerWidth, height: innerHeight },
+    { width: rect.width || 196, height: rect.height || 38 },
+  );
+  S.hint.style.left = `${Math.round(p.x)}px`;
+  S.hint.style.top = `${Math.round(p.y)}px`;
+}
+
+function queueHint(x, y) {
+  cancelAnimationFrame(S.hintFrame);
+  S.hintFrame = requestAnimationFrame(() => {
+    S.hintFrame = 0;
+    placeHint(x, y);
   });
 }
 
@@ -566,6 +598,7 @@ function onKey(event) {
 function cancel() {
   if (!S.active) return;
   S.active = false; S.phase = 'idle'; S.requestToken++;
+  cancelAnimationFrame(S.hintFrame); S.hintFrame = 0;
   removeEventListener('keydown', onKey, true);
   if (S.renderStop) S.renderStop();
   S.root?.remove();
@@ -574,10 +607,14 @@ function cancel() {
 }
 
 function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
-  let stopped = false, failed = false, frame = 0, fallbackTimer = 0, device = null;
+  let stopped = false, failed = false, frame = 0, fallbackTimer = 0, device = null, context = null;
   const fallback = reason => {
     if (stopped || failed) return;
     failed = true; cancelAnimationFrame(frame);
+    /* A lost device can leave an opaque last swapchain frame over the CSS
+       fallback. Detach and clear it before showing the resilient visual. */
+    try { context?.unconfigure?.(); } catch {}
+    canvas.width = 1; canvas.height = 1;
     canvas.dataset.renderer = 'css-fallback';
     canvas.style.background = `radial-gradient(circle at ${origin.x}px ${origin.y}px,rgba(255,107,26,.38),rgba(31,18,18,.16) 24%,transparent 70%)`;
     canvas.style.transition = 'opacity .28s ease';
@@ -590,12 +627,16 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
   (async () => {
     if (!navigator.gpu) throw new Error('WebGPU is not supported by this web view');
     canvas.dataset.renderer = 'webgpu-initializing';
-    const adapter = await (adapterPromise || navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }));
+    const adapter = await (adapterPromise || navigator.gpu.requestAdapter());
     if (!adapter) throw new Error('No WebGPU adapter is available');
+    /* Dawn/WebKit adapters may be single-use for requestDevice(). Rotate the
+       prewarm as soon as this activation claims one, so the next shake never
+       retries a consumed adapter. */
+    S.gpuAdapter = navigator.gpu.requestAdapter();
     device = await adapter.requestDevice();
     if (stopped) { device.destroy(); return; }
 
-    const context = canvas.getContext('webgpu');
+    context = canvas.getContext('webgpu');
     if (!context) throw new Error('Could not create a WebGPU canvas context');
     let format = navigator.gpu.getPreferredCanvasFormat();
     let hdr = false;
@@ -751,8 +792,17 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
     let priorFrameAt = startedAt;
     canvas.dataset.renderer = 'webgpu';
 
+    device.addEventListener?.('uncapturederror', event => {
+      console.warn('WebGPU ripple uncaptured error', event.error || event);
+    });
     device.lost.then(info => {
-      if (!stopped) fallback(info.message || 'The WebGPU device was lost');
+      if (stopped) return;
+      const reason = info?.reason || 'unknown';
+      const message = info?.message || 'The WebGPU device was lost';
+      /* Lost-device resources cannot be reused. Prepare a completely fresh
+         adapter for the next shake while this activation uses visible CSS. */
+      if (reason !== 'destroyed') S.gpuAdapter = navigator.gpu?.requestAdapter?.() || null;
+      fallback(new Error(`${message} (reason: ${reason})`));
     });
     const draw = now => {
       if (stopped || failed) return;

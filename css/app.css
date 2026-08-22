@@ -4,8 +4,13 @@ body{
   background:var(--bg-window);color:var(--tx);
   font-family:var(--f-ui);font-size:var(--fs-md);
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
-  user-select:none;cursor:default;
+  -webkit-user-select:none;user-select:none;cursor:default;
 }
+/* WKWebView still honors the prefixed selection property for descendants.
+   App chrome is inert, while real editing surfaces keep normal caret/selection. */
+body *{-webkit-user-select:none;user-select:none}
+input:not([type=range]):not([type=color]):not([type=file]),textarea,
+[contenteditable]:not([contenteditable="false"]){-webkit-user-select:text;user-select:text}
 ::selection{background:var(--accent-dim);color:#fff}
 button{font:inherit;color:inherit;background:none;border:0;cursor:default}
 button:focus-visible{outline:2px solid color-mix(in srgb,var(--accent) 72%,transparent);outline-offset:2px}
@@ -303,8 +308,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .spatial-wash{z-index:1;pointer-events:none;background:rgba(8,8,12,.012)}
 .spatial-ink{z-index:2;pointer-events:none;overflow:visible}
 .spatial-ink path{fill:rgba(255,107,26,.08);stroke:#ff7b32;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 8px rgba(255,107,26,.55))}
-.spatial-hint{position:fixed;z-index:4;left:50%;top:72px;transform:translateX(-50%);height:38px;padding:0 15px;display:flex;align-items:center;gap:9px;border:1px solid rgba(255,255,255,.16);border-radius:19px;background:rgba(17,17,22,.78);box-shadow:0 12px 38px rgba(0,0,0,.22);backdrop-filter:blur(18px);font-size:12.5px;font-weight:540;letter-spacing:-.01em;white-space:nowrap}
-.spatial-hint i{width:6px;height:6px;border-radius:50%;background:#ff7b32;box-shadow:0 0 12px #ff6b1a}
+.spatial-hint{position:fixed;z-index:4;left:0;top:0;height:38px;padding:0 15px;display:flex;align-items:center;border:1px solid rgba(255,255,255,.16);border-radius:19px;background:rgba(17,17,22,.78);box-shadow:0 12px 38px rgba(0,0,0,.22);backdrop-filter:blur(18px);font-size:12.5px;font-weight:540;letter-spacing:-.01em;white-space:nowrap;pointer-events:none;will-change:left,top}
 .spatial-compose{position:fixed;z-index:5;width:min(420px,calc(100vw - 28px));padding:10px;border:1px solid rgba(255,255,255,.18);border-radius:18px;background:rgba(18,18,24,.9);box-shadow:0 22px 70px rgba(0,0,0,.36);backdrop-filter:blur(24px);cursor:default;animation:spatial-card-in .18s var(--ease)}
 @keyframes spatial-card-in{from{opacity:0;transform:translateY(5px) scale(.98)}}
 .spatial-target{padding:2px 4px 8px;color:rgba(255,255,255,.58);font-size:10.5px;font-family:var(--f-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

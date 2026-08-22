@@ -53,6 +53,26 @@ test('one click exits while a drag remains a selection gesture', () => {
   assert.match(source, /if \(isClickGesture\(S\.points\)\) \{ cancel\(\); return; \}/);
 });
 
+test('instruction pill follows the cursor with a stable offset and viewport clamping', () => {
+  const math = spatialModel();
+  assert.deepEqual({ ...math.hintPosition({ x: 100, y: 80 }, { width: 800, height: 600 }, { width: 196, height: 38 }) }, { x: 116, y: 98 });
+  assert.deepEqual({ ...math.hintPosition({ x: 790, y: 590 }, { width: 800, height: 600 }, { width: 196, height: 38 }) }, { x: 592, y: 550 });
+  assert.match(source, /S\.origin\.x = live\.clientX; S\.origin\.y = live\.clientY;\s*queueHint\(live\.clientX, live\.clientY\)/);
+  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Circle any part of the interface'\)\)/);
+  assert.doesNotMatch(source, /S\.hint = h\('div\.spatial-hint', h\('i'\)/);
+});
+
+test('device loss clears stale WebGPU pixels and prepares a fresh adapter', () => {
+  assert.match(source, /context\?\.unconfigure\?\.\(\)/);
+  assert.match(source, /canvas\.width = 1; canvas\.height = 1;[\s\S]*canvas\.dataset\.renderer = 'css-fallback'/);
+  assert.match(source, /const reason = info\?\.reason \|\| 'unknown'/);
+  assert.match(source, /reason !== 'destroyed'\) S\.gpuAdapter = navigator\.gpu\?\.requestAdapter\?\.\(\)/);
+  assert.match(source, /addEventListener\?\.\('uncapturederror'/);
+  assert.match(source, /const adapter = await[\s\S]*S\.gpuAdapter = navigator\.gpu\.requestAdapter\(\);\s*device = await adapter\.requestDevice\(\)/,
+    'each claimed adapter is rotated before a device is requested');
+  assert.doesNotMatch(source, /powerPreference: 'high-performance'/);
+});
+
 test('generated section manifests are bounded and discard unsafe button commands', () => {
   const math = spatialModel();
   const plan = math.sanitizePlan({

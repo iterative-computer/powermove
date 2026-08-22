@@ -90,7 +90,7 @@ test('trash is recoverable until explicitly destroyed', () => {
   assert.equal(mem.has('project.P1'), false, 'delete forever removes data');
 });
 
-test('open-tab bookkeeping is MRU-ordered and self-heals', () => {
+test('open-tab bookkeeping keeps visible order stable when an existing tab is selected', () => {
   const { PM } = projectsModel();
   PM.proj = { id: 'A', name: 'A', layers: [] };
   PM.Projects.put(PM.proj);
@@ -99,9 +99,12 @@ test('open-tab bookkeeping is MRU-ordered and self-heals', () => {
   PM.Projects.markOpen('A');
   PM.Projects.markOpen('B');
   PM.Projects.markOpen('A');
-  assert.deepEqual([...PM.Projects.tabs()], ['A', 'B'], 'most recent first, deduped');
+  assert.deepEqual([...PM.Projects.tabs()], ['A', 'B'], 'selection does not reorder tabs');
   PM.Projects.markClosed('A');
   assert.deepEqual([...PM.Projects.tabs()], ['B']);
+  PM.Projects.markOpen('A');
+  assert.deepEqual([...PM.Projects.tabs()], ['B', 'A'], 'explicitly reopening a closed tab appends it');
+  PM.Projects.markClosed('A');
   /* a tab pointing at a deleted project disappears instead of crashing boot */
   PM.Projects.markOpen('GONE');
   assert.deepEqual([...PM.Projects.tabs()], ['B']);

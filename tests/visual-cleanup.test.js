@@ -8,6 +8,7 @@ const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
 const workspace = fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8');
 const tokens = fs.readFileSync(path.join(root, 'css/tokens.css'), 'utf8');
 const appCss = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
+const app = fs.readFileSync(path.join(root, 'js/app.js'), 'utf8');
 
 test('major section borders have a dedicated perceptual weight in both themes', () => {
   const light = tokens.slice(tokens.indexOf(':root{'), tokens.indexOf(':root[data-density'));
@@ -44,4 +45,25 @@ test('Gradient is a clean shared preset instead of app-only saved state', () => 
   assert.doesNotMatch(gradient, /p\('layers'/);
   assert.match(gradient, /label: 'Gradient End'.*def: '#34144F'/);
   assert.match(gradient, /label: 'Gradient Midpoint'.*def: 50/);
+});
+
+test('non-editable chrome cannot be selected while text editors remain selectable', () => {
+  assert.match(appCss, /body \*\{-webkit-user-select:none;user-select:none\}/);
+  assert.match(appCss, /textarea,[\s\S]*\[contenteditable\][\s\S]*-webkit-user-select:text;user-select:text/);
+});
+
+test('window corner controls omit actions already reachable in canonical surfaces', () => {
+  const titlebar = app.slice(app.indexOf('right.append('), app.indexOf("PM.bus.on('workspaces', paintTabs)"));
+  assert.doesNotMatch(titlebar, /button\('plus', 'New layer'/);
+  assert.doesNotMatch(titlebar, /button\('wand', 'New shader layer'/);
+  assert.doesNotMatch(titlebar, /button\('export', 'Export'/);
+  assert.doesNotMatch(titlebar, /button\('gear', 'Workspace definition'/);
+  assert.match(app, /label: 'Edit workspace JSON…'.*PM\.WS\.editJSON/s,
+    'workspace definition remains reachable from the workspace menu');
+  assert.match(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /PM\.cmd\('newShader'\)/,
+    'shader creation remains reachable from the canonical tool strip');
+  assert.match(fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8'), /PM\.Export\.dialog\(\)/,
+    'export remains reachable from the composition surface');
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /title: 'Snapping \(S\)'/,
+    'the global snapping duplicate is removed while the timeline owns its control');
 });

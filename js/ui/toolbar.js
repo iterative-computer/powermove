@@ -31,7 +31,6 @@ PM.registerPanel('toolbar', {
     const camB   = tool('camera','cam',   'Import media (⌘I)',     () => PM.cmd('import'));
 
     /* right-aligned workspace toggles */
-    const snapB = h('button.iconbtn.tl.tg', { title: 'Snapping (S)', onclick: () => { PM.snap = !PM.snap; syncTg(); PM.invalidate(); } }, PM.icon('magnet'));
     const guidB = h('button.iconbtn.tl.tg', { title: 'Guides & safe areas', onclick: () => { PM.guides = !PM.guides; syncTg(); PM.invalidate(); } }, PM.icon('grid'));
     const mbluB = h('button.iconbtn.tl.tg', { title: 'Motion blur preview', onclick: () => { PM.mblurOn = !PM.mblurOn; syncTg(); PM.invalidate(); } }, PM.icon('clock'));
 
@@ -39,14 +38,13 @@ PM.registerPanel('toolbar', {
       selB, handB, zoomB, sep(),
       textB, shapeB, solidB, shdrB, nullB, sep(), camB,
       h('span', { style: { flex: 1 } }),
-      snapB, guidB, mbluB,
+      guidB, mbluB,
     );
 
     function syncTools() {
       [selB, handB, zoomB].forEach(b => b.classList.toggle('on', b.dataset.tool === PM.tool));
     }
     function syncTg() {
-      snapB.classList.toggle('on', !!PM.snap);
       guidB.classList.toggle('on', !!PM.guides);
       mbluB.classList.toggle('on', !!PM.mblurOn);
     }
