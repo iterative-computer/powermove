@@ -37,6 +37,22 @@ test('panel dragging uses one compact destination label without workspace lines'
   assert.match(css, /\.panel-ghost\s*\{[^}]*height:32px/s);
 });
 
+test('panel placement preview is an overlay and never reflows the dock under the pointer', () => {
+  assert.match(layout, /Fixed overlay:[\s\S]*never reflows the/);
+  assert.doesNotMatch(layout, /dockEl\.(?:insertBefore|appendChild)\(preview/);
+  assert.match(css, /\.panel-drop-preview\s*\{[^}]*position:fixed[^}]*height:4px/s);
+  assert.match(css, /\.panel-drop-preview\.on/);
+});
+
+test('drag motion is frame-coalesced, stable at panel midpoints, and animates only the drop', () => {
+  assert.match(layout, /requestAnimationFrame\(renderDragFrame\)/);
+  assert.match(layout, /Math\.abs\(ev\.clientY - midpoint\) < 8/);
+  assert.match(layout, /capturePanelRects\(\)/);
+  assert.match(layout, /node\.animate\(\[/);
+  assert.match(layout, /prefers-reduced-motion: reduce/);
+  assert.match(css, /@media \(prefers-reduced-motion:reduce\)/);
+});
+
 test('timeline section resize never exposes an opaque cleared canvas', () => {
   assert.doesNotMatch(timeline, /getContext\('2d',\s*\{\s*alpha:\s*false\s*\}\)/);
   assert.match(timeline, /const changed = T\.cv\.width !== width \|\| T\.cv\.height !== height/);

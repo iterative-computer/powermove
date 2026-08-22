@@ -6,6 +6,18 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
 const workspace = fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8');
+const tokens = fs.readFileSync(path.join(root, 'css/tokens.css'), 'utf8');
+const appCss = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
+
+test('major section borders have a dedicated perceptual weight in both themes', () => {
+  const light = tokens.slice(tokens.indexOf(':root{'), tokens.indexOf(':root[data-density'));
+  const dark = tokens.slice(tokens.indexOf(':root[data-theme="dark"]{', tokens.indexOf('/* ── dark theme')));
+  assert.match(light, /--section-line:rgba\(15,15,20,\.13\)/);
+  assert.match(dark, /--section-line:rgba\(255,255,255,\.08\)/);
+  assert.match(appCss, /\.panel\s*\{[^}]*border:1px solid var\(--section-line\)/s);
+  assert.match(appCss, /\.panel > header\s*\{[^}]*border-bottom:1px solid var\(--section-line\)/s);
+  assert.match(appCss, /#tl-head\s*\{[^}]*border-bottom:1px solid var\(--section-line\)/s);
+});
 
 test('timeline ruler renders composition markers as compact, labeled diamonds', () => {
   const ruler = timeline.slice(timeline.indexOf('function drawRuler'), timeline.indexOf('function fmtRuler'));
@@ -20,7 +32,7 @@ test('timeline ruler renders composition markers as compact, labeled diamonds', 
 test('Design workspace uses the timeline instead of a redundant Layers panel', () => {
   const design = workspace.slice(workspace.indexOf("id: 'design'"), workspace.indexOf("id: 'gradient'"));
   assert.doesNotMatch(design, /p\('layers'/);
-  /* the assistant is rail-hosted, never docked; the generative library ships in Design */
+  /* no assistant is docked; the generative library ships in Design */
   assert.doesNotMatch(design, /p\('chat'/);
   assert.match(design, /p\('assets', \{ size: 150 \}\), p\('library', \{ size: 220 \}\), p\('fxbrowser', \{ flex: true \}\)/);
 });

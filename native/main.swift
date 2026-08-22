@@ -21,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         config.userContentController.add(self, name: "pmLog")
         config.userContentController.add(self, name: "pmTheme")
         config.userContentController.add(self, name: "pmCodex")
+        config.userContentController.add(self, name: "pmCaptureWindow")
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
@@ -40,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.isMovableByWindowBackground = false
         window.appearance = NSAppearance(named: .aqua)
         window.backgroundColor = NSColor(white: 0.929, alpha: 1)
+        window.colorSpace = NSColorSpace.extendedSRGB
+        window.contentView?.wantsLayer = true
+        window.contentView?.layer?.wantsExtendedDynamicRangeContent = true
         window.minSize = NSSize(width: 980, height: 640)
         window.collectionBehavior = [.fullScreenPrimary]
         window.contentView = webView
@@ -205,6 +209,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             runCodex(requestId: requestId, prompt: prompt, schema: body["schema"])
             return
         }
+        if message.name == "pmCaptureWindow" {
+            guard let body = message.body as? [String: Any],
+                  let requestId = body["id"] as? String else { return }
+            captureWindow(requestId: requestId)
+            return
+        }
+    }
+
+    /* WebGPU cannot directly sample DOM pixels. Capture the live WKWebView before
+       the overlay mounts so the WGSL ripple can genuinely displace the interface. */
+    private func captureWindow(requestId: String) {
+        let configuration = WKSnapshotConfiguration()
+        configuration.afterScreenUpdates = true
+        webView.takeSnapshot(with: configuration) { [weak self] image, error in
+            guard let self = self,
+                  error == nil,
+                  let tiff = image?.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiff),
+                  let png = bitmap.representation(using: .png, properties: [:]) else {
+                self?.sendWindowCapture(requestId: requestId, ok: false, data: nil)
+                return
+            }
+            self.sendWindowCapture(requestId: requestId, ok: true, data: png)
+        }
+    }
+
+    private func sendWindowCapture(requestId: String, ok: Bool, data: Data?) {
+        let payload: [String: Any] = ["ok": ok, "dataBase64": data?.base64EncodedString() ?? ""]
+        guard let encoded = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: encoded, encoding: .utf8) else { return }
+        let safeId = requestId.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        webView.evaluateJavaScript("window.PM && PM.WindowCapture && PM.WindowCapture.resolve('\(safeId)', \(json))")
     }
 
     /* ChatGPT subscription bridge. Powermove never reads account tokens: it asks

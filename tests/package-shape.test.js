@@ -19,11 +19,14 @@ test('all browser scripts parse', () => {
   }
 });
 
-test('clean interface includes the native ChatGPT subscription bridge', () => {
-  const provider = fs.readFileSync(path.join(root, 'js/agent/providers.js'), 'utf8');
+test('spatial assistant uses the native Codex bridge without writable shell access', () => {
+  const spatial = fs.readFileSync(path.join(root, 'js/assistant/spatial.js'), 'utf8');
   const native = fs.readFileSync(path.join(root, 'native/main.swift'), 'utf8');
-  assert.match(provider, /ChatGPT subscription/);
-  assert.match(provider, /messageHandlers\?\.pmCodex/);
+  assert.match(spatial, /messageHandlers\?\.pmCodex/);
+  assert.match(spatial, /responseSchema\(\)/);
   assert.match(native, /name: "pmCodex"/);
+  assert.match(native, /name: "pmCaptureWindow"/);
+  assert.match(native, /takeSnapshot/);
+  assert.match(native, /wantsExtendedDynamicRangeContent = true/);
   assert.match(native, /"--sandbox",\s*"read-only"/);
 });

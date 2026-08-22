@@ -156,7 +156,7 @@ test('all editing surfaces are wired to the shared source command boundary', () 
   const inspector = source('js/ui/inspector.js');
   const controls = source('js/ui/controls.js');
   const workspace = source('js/core/workspace.js');
-  const agent = source('js/agent/tools.js');
+  const spatial = source('js/assistant/spatial.js');
   assert.match(index, /js\/core\/editing\.js/);
   assert.match(viewer, /PM\.Edit\.dispatch/);
   assert.match(timeline, /origin: 'timeline'/);
@@ -166,5 +166,6 @@ test('all editing surfaces are wired to the shared source command boundary', () 
   assert.match(workspace, /path\.startsWith\('properties\.'\)/);
   assert.match(workspace, /PM\.proj\.params\[param\.name\]/);
   assert.match(workspace, /\['draw:ui', 'project', 'history'\]/);
-  assert.match(agent, /reg\('edit_source'/);
+  assert.match(spatial, /workspace\.custom\.push/, 'generated sections enter the validated workspace model');
+  assert.match(spatial, /PM\.WS\.mutate/, 'spatial changes use the shared workspace mutation boundary');
 });

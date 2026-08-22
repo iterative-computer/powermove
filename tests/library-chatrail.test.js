@@ -143,7 +143,7 @@ function workspaceModel() {
   return PM;
 }
 
-test('normalization strips docked chat panels — the assistant is rail-hosted', () => {
+test('normalization strips legacy docked chat panels', () => {
   const PM = workspaceModel();
   const w = PM.WS.normalize({
     id: 'w1', name: 'Legacy',
@@ -153,50 +153,29 @@ test('normalization strips docked chat panels — the assistant is rail-hosted',
     ] },
   });
   const panelIds = w.layout.docks.flatMap(d => d.panels.map(q => q.id));
-  assert.equal(panelIds.includes('chat'), false, 'chat never renders inside a dock');
+  assert.equal(panelIds.includes('chat'), false, 'retired chat never renders inside a dock');
   assert.ok(panelIds.includes('assets'));
 });
 
-test('no built-in preset docks the assistant; Design ships the generative library', () => {
+test('no built-in preset docks retired assistant UI; Design keeps the generative library', () => {
   const src = utf8('js/core/workspace.js');
   const chatDocked = [...src.matchAll(/p\('chat'/g)];
-  assert.equal(chatDocked.length, 0, 'presets reference no chat panel');
+  assert.equal(chatDocked.length, 0, 'presets reference no retired chat panel');
   assert.match(src, /p\('library', \{ size: 220 \}\)/, 'Design preset includes the Generative panel');
 });
 
-test('rail wiring exists end to end', () => {
+test('the spatial assistant is the only loaded assistant surface', () => {
   const index = utf8('index.html');
-  const layoutSrc = utf8('js/ui/layout.js');
-  const rail = utf8('js/ui/chatrail.js');
+  const app = utf8('js/app.js');
   const shortcuts = utf8('js/ui/shortcuts.js');
-  assert.ok(index.indexOf('js/ui/chat.js') < index.indexOf('js/ui/chatrail.js'), 'rail loads after the chat panel registers');
-  assert.match(layoutSrc, /L\.mountFloatingPanel/, 'layout can host panels outside docks');
-  assert.match(rail, /mountFloatingPanel\('chat'\)/, 'rail hosts the live chat element');
-  assert.match(rail, /PM\.store\.set\('chatRail'/, 'rail state persists across boots');
-  assert.match(shortcuts, /Toggle assistant/, '⌘L command toggles the rail');
+  assert.match(index, /js\/assistant\/spatial\.js/);
+  assert.doesNotMatch(index, /js\/agent\/|js\/ui\/chat/);
+  assert.doesNotMatch(app, /ChatRail|Show assistant/);
+  assert.doesNotMatch(shortcuts, /focusChat|Toggle assistant/);
 });
 
-test('assistant is a hideable left sidebar that pushes wide layouts', () => {
-  const css = utf8('css/app.css');
-  assert.match(css, /#chat-rail\{[\s\S]*left:10px/, 'rail is anchored to the left edge');
-  assert.match(css, /#chat-rail:not\(\.on\) #chat-rail-tab\{display:grid\}/, 'collapsed rail exposes its reopen tab');
-  assert.match(css, /#chat-rail-tab\{[\s\S]*left:-10px;right:auto/, 'reopen handle stays on the actual left window edge');
-  assert.match(css, /body\.chat-rail-open #body\{margin-left:/, 'open rail reserves left-side workspace');
-  assert.doesNotMatch(css, /body\.chat-rail-open #body\{margin-right:/, 'right-side push is gone');
-});
-
-test('assistant can close while its composer has keyboard focus', () => {
-  const shortcuts = utf8('js/ui/shortcuts.js');
-  const rail = utf8('js/ui/chatrail.js');
-  assert.match(shortcuts, /isField\(e\)[\s\S]*metaKey[\s\S]*toLowerCase\(\) === 'l'[\s\S]*focusChat/,
-    'Command-L is handled before focused fields return');
-  assert.match(rail, /onpointerdown:[\s\S]*ChatRail\.close/,
-    'the visible close affordance closes immediately on press');
-});
-
-test('library edits autosave and the agent digest advertises reusable work', () => {
+test('library edits still autosave after the old agent runtime is removed', () => {
   assert.match(utf8('js/app.js'), /\['layers','project','assets','library'\]/, 'library mutations enter autosave');
-  assert.match(utf8('js/agent/index.js'), /GENERATIVE LIBRARY:/, 'agent receives a compact library summary');
 });
 
 test('snapshot renders in composition coordinates before thumbnail downscaling', () => {

@@ -15,6 +15,9 @@
   --line:rgba(15,15,20,.09);
   --line-2:rgba(15,15,20,.14);
   --line-strong:rgba(15,15,20,.22);
+  /* Major section outlines need more contrast than internal hairlines in
+     light mode, where the panel and window surfaces are both near-white. */
+  --section-line:rgba(15,15,20,.13);
 
   --tx:#1C1C1F;
   --tx-2:#5D5D65;
@@ -69,6 +72,8 @@
   --line:rgba(255,255,255,.07);
   --line-2:rgba(255,255,255,.11);
   --line-strong:rgba(255,255,255,.18);
+  /* Match the perceived weight of the light outline without bright halos. */
+  --section-line:rgba(255,255,255,.08);
 
   --tx:#ededee;
   --tx-2:#9b9ba1;

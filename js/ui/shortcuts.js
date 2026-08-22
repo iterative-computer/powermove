@@ -156,14 +156,6 @@ def('export', 'Export…', '⌘E', () => PM.Export.dialog(), 'File');
 def('projects', 'Projects screen', '⌘P', () => PM.ProjectsScreen && PM.ProjectsScreen.toggle(), 'File');
 def('newProject', 'New project', '⌘N', () => PM.newProject(), 'File');
 def('takeSave', 'Save take', '⌘⇧S', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
-def('focusChat', 'Toggle assistant', '⌘L', () => {
-  if (PM.ChatRail.isOpen) {
-    const inp = PM.$('#cinput');
-    if (document.activeElement === inp) PM.ChatRail.close();
-    else if (inp) { PM.ChatRail.open(); inp.focus(); }
-    else PM.ChatRail.open();
-  } else PM.ChatRail.open();
-}, 'View');
 
 /* ── keymap ────────────────────────────────────────────── */
 const isField = (e) => {
@@ -172,11 +164,6 @@ const isField = (e) => {
 };
 addEventListener('keydown', (e) => {
   if (isField(e)) {
-    /* The assistant toggle must still work while its own composer has focus. */
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l') {
-      e.preventDefault(); PM.cmd('focusChat');
-      return;
-    }
     if (e.key === 'Escape') e.target.blur();
     return;
   }
@@ -200,7 +187,7 @@ addEventListener('keydown', (e) => {
   if (m && k.toLowerCase() === 'e') return go('export');
   if (m && k.toLowerCase() === 'p' && !s) return go('projects');
   if (m && k.toLowerCase() === 'n') return go('newProject');
-  if (m && k.toLowerCase() === 'l') return go('focusChat');  if (k === 'F9') return go(m ? 'easeLinear' : s ? 'easePower' : 'easeOut');
+  if (k === 'F9') return go(m ? 'easeLinear' : s ? 'easePower' : 'easeOut');
 
   switch (k) {
     case ' ': return go('play');

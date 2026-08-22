@@ -75,11 +75,10 @@ function normalizeWorkspace(workspace, fallback) {
   const usedPanels = new Set();
   docks = docks.map((item, index) => {
     const d = item && typeof item === 'object' ? item : {};
-    /* the assistant lives exclusively in its own collapsible rail */
     const panels = (Array.isArray(d.panels) ? d.panels : []).map(spec => {
       const q = typeof spec === 'string' ? { id: spec } : (spec && typeof spec === 'object' ? spec : {});
       const id = text(q.id);
-      /* the assistant lives in its rail; the redundant Layers panel was removed */
+      /* Strip the legacy chat panel and the redundant Layers panel. */
       if (!id || id === 'chat' || id === 'layers' || usedPanels.has(id)) return null;
       usedPanels.add(id);
       const clean = { id };
@@ -362,7 +361,7 @@ function registerCustom(w) {
               onclick: () => {
                 if (Array.isArray(ct.commands)) PM.Edit.apply(ct.commands, { label: ct.label, origin: 'generated-ui' });
                 else if (ct.cmd) PM.cmd(ct.cmd);
-                else if (ct.prompt) PM.Agent.send(ct.prompt);
+                else if (ct.prompt) PM.toast('Shake the pointer and circle this section to change it');
               },
             }, ct.label));
             return;

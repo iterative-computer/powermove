@@ -163,6 +163,8 @@ test('projects surface has production library controls and Powermove selection c
     'active project tabs retain a compact Powermove orange state mark');
   assert.match(css, /#tabs\{[\s\S]*background:var\(--bg-sunken\)/,
     'project tabs live in one intentional compact switcher');
+  assert.match(css, /#tabs\{[\s\S]*border:0/,
+    'project switcher has no outer border');
   assert.match(css, /#tabs\{[\s\S]*width:max-content[\s\S]*flex:0 1 auto/,
     'the switcher wraps its projects instead of leaving an empty trough');
   assert.match(screen, /className = 'ps-grid'[\s\S]*' empty'/,

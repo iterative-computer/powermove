@@ -334,16 +334,6 @@ function buildTitlebar() {
     button('redo', 'Redo', () => PM.hist.redo()),
     button('plus', 'New layer', e => addMenu(e)),
     button('wand', 'New shader layer', () => PM.cmd('newShader')),
-    (() => {
-      const b = button('sparkle', 'Show assistant · ⌘L', () => PM.ChatRail.toggle());
-      const sync = () => {
-        b.style.color = PM.ChatRail.isOpen ? 'var(--accent)' : '';
-        b.title = PM.ChatRail.isOpen ? 'Hide assistant · ⌘L' : 'Show assistant · ⌘L';
-      };
-      sync();
-      PM.bus.on('chatrail', sync);
-      return b;
-    })(),
     button('export', 'Export', () => PM.Export.dialog()),
     (() => {
       const b = button('panel', 'Workspace · ' + PM.WS.current.name, e => workspaceMenu(e, b));
@@ -561,7 +551,7 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
   PM.Inspector.refresh();
   PM.invalidate('all');
   PM.invalidate('status');
-  if (PM.ChatRail) PM.ChatRail.init();
+  if (PM.SpatialAssistant) PM.SpatialAssistant.init();
   /* A brand-new registry entry has no card preview yet. Capture only after the
      first real composition frame has painted; capturing during boot produces a
      black placeholder even though the viewer becomes healthy a moment later. */

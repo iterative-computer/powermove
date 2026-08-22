@@ -141,7 +141,7 @@ PM.registerPanel('workspaces', {
         h('button.chip', { onclick: () => PM.WS.saveAsNew() }, PM.icon('plus'), 'Save current'),
         h('button.chip', { onclick: () => PM.WS.editJSON() }, PM.icon('code'), 'JSON')));
       wrap.appendChild(h('div.empty', { style: { padding: '10px 8px', textAlign: 'left' } },
-        'Ask the assistant: “make a workspace for shader work”, “hide the timeline”, “put properties on the left”.'));
+        'Shake the pointer, then circle a panel to redesign or add an interface section.'));
     };
     paint(); PM.bus.on('workspaces', paint); PM.bus.on('layout', paint);
   },
@@ -163,7 +163,7 @@ PM.registerPanel('takes', {
         row.onclick = () => PM.takes.restore(t.id);
         wrap.appendChild(row);
       });
-      if (!list.length) wrap.appendChild(h('div.empty', 'Takes are saved automatically\nbefore the assistant edits.'));
+      if (!list.length) wrap.appendChild(h('div.empty', 'Save a take before exploring a new motion direction.'));
       wrap.appendChild(h('button.chip', { style: { margin: '6px' }, onclick: () => PM.takes.save() }, PM.icon('plus'), 'Save take'));
     };
     paint(); PM.bus.on('takes', paint);
@@ -200,7 +200,7 @@ PM.registerPanel('notes', {
   build(body) {
     const ta = h('textarea', {
       style: { width: '100%', height: '100%', minHeight: '120px', background: 'transparent', padding: '10px 12px', fontSize: '12.5px', lineHeight: 1.6, resize: 'none', color: 'var(--tx-2)' },
-      placeholder: 'Direction notes — the assistant reads these as creative brief.',
+      placeholder: 'Direction notes — saved with this project as its creative brief.',
     }, PM.proj.notes || '');
     ta.addEventListener('input', () => { PM.proj.notes = ta.value; });
     ta.addEventListener('keydown', e => e.stopPropagation());
@@ -242,8 +242,7 @@ PM.registerPanel('library', {
       return c;
     };
 
-    /* Detail studio: big preview, layer contents, comment thread, and a
-       one-click refine prompt handed to the assistant. */
+    /* Detail studio: big preview, layer contents, and a persistent comment thread. */
     function detail(entry, kind, refresh) {
       const isSection = kind === 'sections';
       const cmts = h('div.lib-comments');
@@ -262,20 +261,6 @@ PM.registerPanel('library', {
         PM.Library.comment(kind, entry.id, noteInp.value);
         noteInp.value = '';
         paintCmts();
-      };
-
-      const refine = () => {
-        if (isSection) PM.Library.insertSection(entry.id);
-        else PM.Library.applyLook(entry.id);
-        PM.ChatRail.open(true);
-        const ci = PM.$('#cinput');
-        if (ci) {
-          ci.value = (isSection
-            ? `Refine the inserted section “${entry.name}” (its layers are selected). `
-            : `Refine the applied look “${entry.name}” (its shader layer is selected). `)
-            + ((entry.comments || []).slice(-1)[0] ? `Latest note: “${entry.comments.slice(-1)[0].text}”. ` : '');
-          ci.dispatchEvent(new Event('input'));
-        }
       };
 
       const layersInfo = isSection
@@ -301,7 +286,6 @@ PM.registerPanel('library', {
             const ids = PM.sel && PM.sel.layers && PM.sel.layers.length ? PM.sel.layers : null;
             PM.Library.saveVersion(entry.id, ids); refresh && refresh();
           } }] : []),
-          { label: 'Refine with assistant', pri: true, run: refine },
           { label: isSection ? 'Insert at playhead' : 'Apply look', run: () => {
               isSection ? PM.Library.insertSection(entry.id) : PM.Library.applyLook(entry.id);
               refresh && refresh();
@@ -324,7 +308,7 @@ PM.registerPanel('library', {
       }
       if (!L.sections.length && !L.looks.length) {
         wrap.appendChild(h('div.empty', { style: { textAlign: 'left', padding: '10px 6px' } },
-          'Nothing saved yet.\n\nSelect layers and press Section to keep a reusable piece of the composition — or ask the assistant to “save this as a section”. Generated shaders can be kept as Looks.'));
+          'Nothing saved yet.\n\nSelect layers and press Section to keep a reusable piece of the composition. Generated shaders can be kept as Looks.'));
       }
     }
     paint();
