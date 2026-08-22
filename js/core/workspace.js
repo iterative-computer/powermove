@@ -56,6 +56,8 @@ function normalizeWorkspace(workspace, fallback) {
   raw.density = ['compact', 'normal', 'comfy'].includes(raw.density) ? raw.density : 'normal';
   raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
   raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
+  delete raw.features.motionBlur;
+  delete raw.features.guides;
   raw.scope = raw.scope === 'project' ? 'project' : 'global';
   raw.projectId = raw.scope === 'project' ? text(raw.projectId, PM.proj?.id || '') : null;
   raw.custom = (Array.isArray(raw.custom) ? raw.custom : []).map((panel, index) => {
@@ -136,7 +138,7 @@ const PRESETS = () => ([
   {
     id: 'design', name: 'Design', builtin: true, density: 'normal',
     theme: { accent: '#FF6B1A' },
-    features: { motionBlur: true, snapping: true, guides: true, autosave: true, adaptiveQuality: true },
+    features: { snapping: true, autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
         /* the timeline owns layer ordering; the left rail stays focused on
@@ -150,7 +152,7 @@ const PRESETS = () => ([
   {
     id: 'gradient', name: 'Gradient', builtin: true, density: 'compact',
     theme: { accent: '#FF6B1A', radius: 10 },
-    features: { motionBlur: true, snapping: true, guides: true, autosave: true, adaptiveQuality: true },
+    features: { snapping: true, autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
         dock('left', [p('gradient-controls', { flex: true }), p('assets', { size: 190 })], 300),
@@ -172,7 +174,7 @@ const PRESETS = () => ([
   {
     id: 'animate', name: 'Animate', builtin: true, density: 'compact',
     theme: { accent: '#FF6B1A' },
-    features: { motionBlur: true, snapping: true, guides: false, autosave: true, graphOnOpen: true },
+    features: { snapping: true, autosave: true, graphOnOpen: true },
     layout: {
       docks: [
         dock('left', [p('takes', { flex: true }), p('assets', { size: 170 })], 230),
@@ -184,7 +186,7 @@ const PRESETS = () => ([
   {
     id: 'shaderlab', name: 'Shader Lab', builtin: true, density: 'compact',
     theme: { accent: '#4C8DFF' },
-    features: { motionBlur: false, snapping: true, guides: false, autosave: true },
+    features: { snapping: true, autosave: true },
     layout: {
       docks: [
         dock('left', [p('shader', { flex: true })], 460),
@@ -196,7 +198,7 @@ const PRESETS = () => ([
   {
     id: 'edit', name: 'Edit', builtin: true, density: 'normal',
     theme: { accent: '#3FCF8E' },
-    features: { motionBlur: false, snapping: true, guides: true, autosave: true },
+    features: { snapping: true, autosave: true },
     layout: {
       docks: [
         dock('left', [p('assets', { flex: true }), p('fxbrowser', { size: 240 })], 250),
@@ -208,7 +210,7 @@ const PRESETS = () => ([
   {
     id: 'review', name: 'Review', builtin: true, density: 'comfy',
     theme: { accent: '#FF6B1A' },
-    features: { motionBlur: true, snapping: true, guides: false, autosave: true },
+    features: { snapping: true, autosave: true },
     layout: {
       docks: [
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 180 })]),
@@ -219,7 +221,7 @@ const PRESETS = () => ([
   {
     id: 'focus', name: 'Focus', builtin: true, density: 'normal',
     theme: { accent: '#FF6B1A' },
-    features: { motionBlur: true, snapping: true, guides: false, autosave: true },
+    features: { snapping: true, autosave: true },
     layout: { docks: [dock('center', [p('viewer', { flex: true })])] },
   },
 ]);
@@ -274,9 +276,7 @@ WS.activate = (id, silent) => {
 
 function applyFeatures(w) {
   const f = w.features || {};
-  if (f.motionBlur !== undefined) PM.mblurOn = !!f.motionBlur;
   if (f.snapping !== undefined) PM.snap = !!f.snapping;
-  if (f.guides !== undefined) PM.guides = !!f.guides;
   if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
   if (f.graphOnOpen !== undefined) PM.TL.graph = !!f.graphOnOpen;
   PM.invalidate();

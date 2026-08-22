@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
-    /* Keep the native lights vertically centered in our 46px custom titlebar. */
+    /* Keep the native lights vertically centered in our compact 44px titlebar. */
     private func applyTheme(dark: Bool) {
         let name: NSAppearance.Name = dark ? .darkAqua : .aqua
         window.appearance = NSAppearance(named: name)
@@ -358,6 +358,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         win.contentView = wv
         win.isReleasedWhenClosed = false
         win.delegate = self
+        /* Closing the child is the pin-back signal. Target the window directly,
+           so this remains reliable even when the accessory is not first responder. */
+        let returnButton = NSButton(title: "Return to layout", target: win, action: #selector(NSWindow.performClose(_:)))
+        returnButton.bezelStyle = .rounded
+        returnButton.controlSize = .small
+        returnButton.toolTip = "Pin this panel back into the main Powermove layout"
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = returnButton
+        accessory.layoutAttribute = .right
+        win.addTitlebarAccessoryViewController(accessory)
         let wc = NSWindowController(window: win)
         panelWCs.append(wc)
         win.setFrameOrigin(NSPoint(x: window.frame.midX - w / 2, y: window.frame.midY - h / 2))

@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '..');
 /* ── library harness: easing + model + library with UI/runtime stubs ── */
 function libraryModel() {
   let nextId = 0;
+  const historyLabels = [];
   const PM = {
     clamp: (v, a, b) => Math.max(a, Math.min(b, v)),
     uid: (p) => `${p}${++nextId}`,
@@ -18,7 +19,7 @@ function libraryModel() {
     bus: { emit() {}, on() {} },
     invalidate: () => {},
     toast: () => {},
-    hist: { do: (_label, fn) => fn() },
+    hist: { do: (label, fn) => { historyLabels.push(label); return fn(); } },
     selectLayers: () => {},
     addLayer: null, // provided by model.js
     firstSel: () => null,
@@ -38,6 +39,7 @@ function libraryModel() {
     for (const k in u) if (!defs.some(d => d.name === k)) delete u[k];
   };
   vm.runInContext(fs.readFileSync(path.join(root, 'js/core/library.js'), 'utf8'), context);
+  PM.__historyLabels = historyLabels;
   return PM;
 }
 function utf8(rel) { return fs.readFileSync(path.join(root, rel), 'utf8'); }
@@ -125,11 +127,15 @@ test('section deletion is recoverable and library storage stays bounded at 24', 
   const e1 = PM.Library.saveSection('one');
   PM.Library.saveSection('two');
   assert.equal(PM.Library.all().sections.length, 2);
-  PM.Library.drop('sections', e1.id);
+  const layersBefore = PM.proj.layers.map(layer => layer.id);
+  PM.Library.trashSection(e1.id);
   assert.deepEqual([...PM.Library.catalog('project').map(s => s.name)], ['two'], 'trashed sections leave the active catalog');
   assert.equal(PM.Library.catalog('project', true).find(s => s.id === e1.id).deletedAt > 0, true);
+  assert.equal(PM.proj.layers.map(layer => layer.id).join(','), layersBefore.join(','), 'deleting a reusable section does not delete scene layers');
+  assert.equal(PM.__historyLabels.at(-1), 'Delete section');
   PM.Library.restoreSection(e1.id);
   assert.deepEqual([...PM.Library.catalog('project').map(s => s.name)].sort(), ['one', 'two']);
+  assert.equal(PM.__historyLabels.at(-1), 'Restore section');
 
   for (let i = 0; i < 30; i++) PM.Library.saveSection('bulk ' + i);
   assert.equal(PM.Library.all().sections.length, 24, 'library stays bounded');

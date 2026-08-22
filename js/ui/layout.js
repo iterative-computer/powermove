@@ -128,6 +128,7 @@ function applyPanelSize(el, spec, def) {
 /* ── drag to move panels between docks ─────────────────── */
 const DOCK_LABELS = { left: 'Left dock', center: 'Center dock', right: 'Right dock' };
 const dockLabel = (id) => DOCK_LABELS[id] || id.replace(/^\w/, c => c.toUpperCase()) + ' dock';
+const DOCK_ORDER = { left: 0, center: 1, right: 2 };
 
 /** Convert a pre-removal drop index into a post-removal insertion index.
     The drop target is measured against DOM order that still contains the
@@ -164,6 +165,23 @@ L.hitTestDockPlacement = (docks, x, y, tolerance = 28) => {
     if (r && y < r.top + r.height / 2) { index = i; break; }
   }
   return { dockId: best.dock.id, index };
+};
+
+/** Add generous edge targets for missing side docks. Saved layouts are allowed
+    to contain only a center dock; without these virtual targets, left/right
+    docking is literally unreachable by dragging. Virtual targets come first so
+    they win intentional edge drops when the center currently spans the window. */
+L.buildDockDropTargets = (docks, bodyRect, edgeWidth = 96) => {
+  const targets = [...(docks || [])];
+  if (!bodyRect) return targets;
+  const virtual = [];
+  const make = (id, left, right) => ({
+    id, virtual: true, panels: [],
+    rect: { left, right, top: bodyRect.top, bottom: bodyRect.bottom, width: right - left, height: bodyRect.bottom - bodyRect.top },
+  });
+  if (!targets.some(dock => dock.id === 'left')) virtual.push(make('left', bodyRect.left, Math.min(bodyRect.right, bodyRect.left + edgeWidth)));
+  if (!targets.some(dock => dock.id === 'right')) virtual.push(make('right', Math.max(bodyRect.left, bodyRect.right - edgeWidth), bodyRect.right));
+  return [...virtual, ...targets];
 };
 
 let dragState = null;
@@ -268,7 +286,9 @@ function updateDropTarget(ev) {
     id: el.id.replace('dock-', ''), el, rect: el.getBoundingClientRect(),
     panels: dockPanels(el).map(panel => ({ el: panel, rect: panel.getBoundingClientRect() })),
   }));
-  const target = L.hitTestDockPlacement(docks, ev.clientX, ev.clientY);
+  const bodyRect = document.getElementById('body')?.getBoundingClientRect();
+  const targets = L.buildDockDropTargets(docks, bodyRect);
+  const target = L.hitTestDockPlacement(targets, ev.clientX, ev.clientY);
   if (!target) {
     preview.classList.remove('on');
     dragState.targetKey = '';
@@ -276,7 +296,7 @@ function updateDropTarget(ev) {
     dragState.destination.textContent = 'Not a drop zone';
     return;
   }
-  const dock = docks.find(item => item.id === target.dockId);
+  const dock = targets.find(item => item.id === target.dockId);
   const dockEl = dock.el;
   const panels = dock.panels;
   const before = panels[target.index];
@@ -285,12 +305,30 @@ function updateDropTarget(ev) {
   else if (after) dragState.destination.textContent = 'Below ' + (PM.PANELS[after.el.dataset.panel]?.title || 'panel');
   else dragState.destination.textContent = 'Place in ' + dockLabel(target.dockId);
   dragState.dropTarget = target;
-  placePreview(preview, dockEl, target.index);
+  if (dock.virtual) placeEdgePreview(preview, dock);
+  else placePreview(preview, dockEl, target.index);
+}
+
+function placeEdgePreview(preview, dock) {
+  const r = dock.rect;
+  const width = Math.min(dock.id === 'right' ? 300 : 250, Math.max(120, Math.round((r.right - r.left) * 2.5)));
+  preview.classList.add('dock-edge');
+  preview.style.left = Math.round(dock.id === 'right' ? r.right - width : r.left) + 'px';
+  preview.style.top = Math.round(r.top) + 'px';
+  preview.style.width = width + 'px';
+  preview.style.height = Math.max(80, Math.round(r.bottom - r.top)) + 'px';
+  const key = `virtual:${dock.id}`;
+  if (dragState.targetKey !== key) {
+    dragState.targetKey = key; preview.classList.remove('on');
+    requestAnimationFrame(() => { if (preview.isConnected) preview.classList.add('on'); });
+  } else preview.classList.add('on');
 }
 
 /** Show a fixed placement bar between panels. It is deliberately outside the
     dock flow, so moving it cannot alter hit-testing geometry. */
 function placePreview(preview, dockEl, index) {
+  preview.classList.remove('dock-edge');
+  preview.style.height = '';
   const panels = dockPanels(dockEl);
   const dockRect = dockEl.getBoundingClientRect();
   const before = panels[index];
@@ -343,6 +381,7 @@ function animatePanelLayout(previousRects) {
 function panelMenu(e, spec, dock) {
   const ws = L.ws;
   const def = PM.PANELS[spec.id];
+  const position = dock.panels.findIndex(item => item.id === spec.id);
   const items = [
     { header: def.title },
     !NO_POPOUT.has(spec.id) ? { label: 'Pop out to window', run: () => PM.Popout.open(spec.id) } : null,
@@ -352,6 +391,8 @@ function panelMenu(e, spec, dock) {
     { label: 'Left dock', disabled: dock.id === 'left', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'left')) },
     { label: 'Center dock', disabled: dock.id === 'center', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'center')) },
     { label: 'Right dock', disabled: dock.id === 'right', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'right')) },
+    { label: 'Move up', disabled: position <= 0, run: () => PM.WS.mutate(w => movePanelBy(w, spec.id, -1)) },
+    { label: 'Move down', disabled: position < 0 || position >= dock.panels.length - 1, run: () => PM.WS.mutate(w => movePanelBy(w, spec.id, 1)) },
     '-',
     { header: 'Add panel' },
     ...Object.values(PM.PANELS).filter(p => !hasPanel(ws, p.id) && !(ws.hiddenPanels || []).some(item => item.id === p.id) && p.id !== 'toolbar').map(p => ({
@@ -368,6 +409,17 @@ function panelMenu(e, spec, dock) {
 const eachDock = (ws, fn) => ws.layout.docks.forEach(fn);
 const hasPanel = (ws, id) => ws.layout.docks.some(d => d.panels.some(p => p.id === id));
 function removePanel(ws, id) { eachDock(ws, d => { d.panels = d.panels.filter(p => p.id !== id); }); }
+function ensureDock(ws, id) {
+  let dock = ws.layout.docks.find(item => item.id === id);
+  if (dock) return dock;
+  dock = { id, panels: [] };
+  if (id === 'center') dock.flex = true;
+  else dock.size = id === 'right' ? 300 : 250;
+  const order = DOCK_ORDER[id] ?? 3;
+  const index = ws.layout.docks.findIndex(item => (DOCK_ORDER[item.id] ?? 3) > order);
+  ws.layout.docks.splice(index < 0 ? ws.layout.docks.length : index, 0, dock);
+  return dock;
+}
 function hidePanel(ws, id) {
   if (id === 'viewer') return false;
   const found = findPanel(ws, id); if (!found) return false;
@@ -404,12 +456,12 @@ function findPanel(ws, id) {
 function addPanel(ws, id, dockId) {
   removePanel(ws, id);
   ws.hiddenPanels = (ws.hiddenPanels || []).filter(item => item.id !== id);
-  const d = ws.layout.docks.find(d => d.id === (dockId || 'right')) || ws.layout.docks[0];
+  const d = ensureDock(ws, dockId || 'right');
   d.panels.push({ id, flex: d.panels.length === 0 });
   if (d.hidden) d.hidden = false;
 }
 function insertPanel(ws, spec, dockId, index) {
-  const d = ws.layout.docks.find(d => d.id === dockId) || ws.layout.docks[0];
+  const d = ensureDock(ws, dockId || 'center');
   const clean = { id: spec.id };
   if (spec.size) clean.size = spec.size;
   if (spec.flex) clean.flex = true;
@@ -417,9 +469,25 @@ function insertPanel(ws, spec, dockId, index) {
   d.panels.splice(i, 0, clean);
   if (d.hidden) d.hidden = false;
 }
-function movePanel(ws, id, dockId) { addPanel(ws, id, dockId); }
+function movePanel(ws, id, dockId) {
+  const found = findPanel(ws, id); if (!found || found.dock.id === dockId) return false;
+  const spec = { ...found.spec };
+  removePanel(ws, id);
+  insertPanel(ws, spec, dockId);
+  ws.hiddenPanels = (ws.hiddenPanels || []).filter(item => item.id !== id);
+  return true;
+}
+function movePanelBy(ws, id, delta) {
+  const found = findPanel(ws, id); if (!found || !Number.isInteger(delta) || !delta) return false;
+  const from = found.dock.panels.indexOf(found.spec);
+  const to = Math.max(0, Math.min(from + delta, found.dock.panels.length - 1));
+  if (to === from) return false;
+  found.dock.panels.splice(from, 1);
+  found.dock.panels.splice(to, 0, found.spec);
+  return true;
+}
 L.removePanel = removePanel; L.hidePanel = hidePanel; L.restorePanel = restorePanel;
-L.addPanel = addPanel; L.hasPanel = hasPanel; L.findPanel = findPanel;
+L.addPanel = addPanel; L.movePanel = movePanel; L.movePanelBy = movePanelBy; L.ensureDock = ensureDock; L.hasPanel = hasPanel; L.findPanel = findPanel;
 
 /* ── splitters ─────────────────────────────────────────── */
 /* A splitter always resizes the nearest *fixed* pane and leaves the flex pane
@@ -431,6 +499,11 @@ function isFlexPanel(spec) {
   const def = PM.PANELS[spec.id] || {};
   return !!(spec.flex || (!spec.size && !def.size));
 }
+L.clampPanelHeight = (start, delta, sign, pairHeight, minHeight = 88, otherMinHeight = 88, gap = 8) => {
+  const min = Math.max(72, Number(minHeight) || 88);
+  const max = Math.max(min, (Number(pairHeight) || min * 2 + gap) - Math.max(72, Number(otherMinHeight) || 88) - gap);
+  return PM.clamp(start + sign * delta, min, max);
+};
 function vSplit(prev, next) {
   const s = h('div.splitter');
   /* Prefer the side dock. Dragging right grows the left dock / shrinks the right dock. */
@@ -474,30 +547,51 @@ function hSplit(aboveSpec, aboveEl, belowSpec, belowEl) {
   const useAbove = !isFlexPanel(aboveSpec);
   const spec = useAbove ? aboveSpec : belowSpec;
   const node = useAbove ? aboveEl : belowEl;
+  const other = useAbove ? belowSpec : aboveSpec;
+  const otherEl = useAbove ? belowEl : aboveEl;
   const sign = useAbove ? 1 : -1;
   s.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
     const start = node.getBoundingClientRect().height;
+    const otherStart = otherEl.getBoundingClientRect().height;
+    const pairHeight = start + otherStart;
+    const saved = { size: spec.size, flex: spec.flex };
+    const otherSaved = { size: other.size, flex: other.flex };
+    const min = spec.min || PM.PANELS[spec.id]?.min || 88;
+    const otherMin = other.min || PM.PANELS[other.id]?.min || 88;
+    let changed = false;
     s.classList.add('drag');
     let raf = 0;
     PM.drag(e, {
       cursor: 'row-resize',
       move: (dx, dy) => {
-        const hh = PM.clamp(start + sign * dy, 72, innerHeight - 160);
+        if (!changed && Math.abs(dy) < 2) return;
+        changed = true;
+        const hh = L.clampPanelHeight(start, dy, sign, pairHeight, min, otherMin, parseFloat(getComputedStyle(s).height) || 8);
         node.style.flex = '0 0 ' + hh + 'px';
         spec.size = Math.round(hh);
         delete spec.flex;
-        const other = spec === aboveSpec ? belowSpec : aboveSpec;
-        const otherEl = spec === aboveSpec ? belowEl : aboveEl;
-        if (other && otherEl) {
-          other.flex = true; delete other.size;
-          otherEl.style.flex = '1 1 auto';
-        }
+        other.flex = true; delete other.size;
+        otherEl.style.flex = '1 1 auto';
         if (!raf) raf = requestAnimationFrame(() => { raf = 0; PM.bus.emit('layout:applied'); });
       },
       up: () => {
         s.classList.remove('drag');
+        if (!changed) return;
         PM.WS.save();
         PM.bus.emit('layout');
+        PM.bus.emit('layout:applied');
+      },
+      cancel: () => {
+        s.classList.remove('drag');
+        if (!changed) return;
+        if (saved.size == null) delete spec.size; else spec.size = saved.size;
+        if (saved.flex == null) delete spec.flex; else spec.flex = saved.flex;
+        if (otherSaved.size == null) delete other.size; else other.size = otherSaved.size;
+        if (otherSaved.flex == null) delete other.flex; else other.flex = otherSaved.flex;
+        applyPanelSize(node, spec, PM.PANELS[spec.id] || {});
+        applyPanelSize(otherEl, other, PM.PANELS[other.id] || {});
         PM.bus.emit('layout:applied');
       },
     });
@@ -521,14 +615,15 @@ L.apply = (ws) => {
   const docks = ws.layout.docks;
   let prevVisible = null;
   docks.forEach((dock, di) => {
-    if (dock.hidden || !dock.panels.length) return;
+    const visibleSpecs = dock.panels.filter(spec => !PM.Popout?.isOpen(spec.id));
+    if (dock.hidden || !visibleSpecs.length) return;
     const el = h('div.dock.col', { id: 'dock-' + dock.id });
     el.dataset.dock = dock.id;
     if (dock.id === 'center' || dock.flex) el.style.flex = '1 1 auto';
     else el.style.flex = '0 0 ' + (dock.size || (dock.id === 'right' ? 300 : 250)) + 'px';
     const built = [];
-    dock.panels.forEach((spec) => {
-      const p = PM.Popout?.isOpen(spec.id) ? detachedPlaceholder(spec) : buildPanel(spec, dock);
+    visibleSpecs.forEach((spec) => {
+      const p = buildPanel(spec, dock);
       if (!p) return;
       if (built.length) {
         const prev = built[built.length - 1];
@@ -556,13 +651,6 @@ L.apply = (ws) => {
     requestAnimationFrame(() => { PM.bus.emit('layout:applied'); PM.invalidate(); });
   });
 };
-
-function detachedPlaceholder(spec) {
-  const def = PM.PANELS[spec.id];
-  return h('div.panel.detached-placeholder', { 'data-panel': spec.id },
-    h('div', PM.icon('panelL'), h('b', def?.title || spec.id), h('span', 'Open in a separate window'),
-      h('button.btn', { onclick: () => PM.Popout.dock(spec.id) }, 'Return to layout')));
-}
 
 function applyTheme(t) {
   const r = document.documentElement.style;
@@ -641,21 +729,18 @@ PM.Popout = {
       d.documentElement.style.cssText = document.documentElement.style.cssText;
       d.body.style.cssText = 'display:flex;flex-direction:column;background:var(--bg-panel)';
 
-      /* popout titlebar with a dock-back button */
+      /* In-panel identity; the native titlebar owns the reliable pin-back action. */
       const bar = d.createElement('div'); bar.className = 'pop-bar';
       const title = d.createElement('span'); title.className = 'pop-title'; title.textContent = def.title;
-      const space = d.createElement('span'); space.className = 'sp';
-      const dock = d.createElement('button'); dock.className = 'btn'; dock.title = 'Dock back in main window';
-      dock.textContent = 'Return to layout'; dock.onclick = () => PM.Popout.dock(id);
-      bar.append(title, space, dock); d.body.appendChild(bar);
+      bar.append(title); d.body.appendChild(bar);
 
-      /* Preserve the structured layout and leave an intentional placeholder. The
-         original stays mounted (but hidden) as the single editable owner. */
-      const placeholder = detachedPlaceholder(inst.spec || { id });
-      if (el.isConnected) el.replaceWith(placeholder);
+      /* Preserve the structured layout while freeing the panel's entire dock slot.
+         The original remains the single hidden owner; L.apply omits detached IDs,
+         so neighboring content reflows without mutating the saved manifest. */
       const sourceHost = document.createElement('div');
       sourceHost.hidden = true; sourceHost.setAttribute('aria-hidden', 'true');
-      sourceHost.appendChild(el); document.body.appendChild(sourceHost);
+      if (el.isConnected) sourceHost.appendChild(el);
+      document.body.appendChild(sourceHost);
       const mirrorHost = d.createElement('div'); mirrorHost.className = 'pop-mirror'; d.body.appendChild(mirrorHost);
 
       const pathTo = (root, node) => {
@@ -690,6 +775,7 @@ PM.Popout = {
       observer.observe(el, { subtree: true, childList: true, characterData: true, attributes: true });
       renderMirror();
       Object.assign(PM.Popout.wins[id], { sourceHost, mirrorHost, observer });
+      if (L.ws) L.apply(L.ws);
       PM.toast(def.title + ' popped out');
 
       /* watch for the user closing the OS window */

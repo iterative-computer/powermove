@@ -78,9 +78,6 @@ function qualityMenu(e) {
       label: l, on: PM.quality === q, run: () => { PM.perf.auto = false; PM.quality = q; V.layout(); PM.bus.emit('quality'); },
     })),
     { label: 'Adaptive', on: PM.perf.auto, run: () => { PM.perf.auto = true; PM.bus.emit('quality'); } },
-    '-',
-    { label: 'Motion blur', on: PM.mblurOn, run: () => { PM.mblurOn = !PM.mblurOn; PM.invalidate(); } },
-    { label: 'Guides & safe areas', on: PM.guides, run: () => { PM.guides = !PM.guides; PM.invalidate(); } },
   ]);
 }
 
@@ -139,19 +136,6 @@ function drawOverlay() {
   const S = V.shown * dpr;
   c.save(); c.scale(S, S);
   c.lineWidth = 1 / S;
-
-  const ink = (a) => (document.documentElement.dataset.theme === 'dark' ? 'rgba(255,255,255,' : 'rgba(15,15,20,') + a + ')';
-  if (PM.guides) {
-    c.strokeStyle = ink('.16');
-    c.setLineDash([6 / S, 6 / S]);
-    [[.1, .1, .8, .8], [.05, .05, .9, .9]].forEach(([x, y, w, hh], i) => {
-      c.strokeRect(p.w * x, p.h * y, p.w * w, p.h * hh);
-    });
-    c.setLineDash([]);
-    c.beginPath(); c.moveTo(p.w / 2, 0); c.lineTo(p.w / 2, p.h);
-    c.moveTo(0, p.h / 2); c.lineTo(p.w, p.h / 2);
-    c.strokeStyle = ink('.1'); c.stroke();
-  }
 
   const sels = PM.selLayers().filter(L => PM.active(L, PM.time));
   for (const L of sels) {

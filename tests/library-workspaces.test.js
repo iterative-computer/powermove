@@ -7,6 +7,7 @@ const vm = require('node:vm');
 const root = path.resolve(__dirname, '..');
 const ui = fs.readFileSync(path.join(root, 'js/ui/library.js'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 
 function workspaceModel() {
   let nextId = 0;
@@ -32,7 +33,26 @@ test('Library exposes Sections, Workspaces, scope, previews, and explicit save d
   assert.match(ui, /Save as new/);
   assert.match(ui, /Existing placed layers remain exactly as edited/);
   assert.match(ui, /Apply workspace\?/);
-  assert.match(ui, /Move to Trash/);
+  assert.match(ui, /Delete section/);
+});
+
+test('Library is a focus-trapped modal with a full scrim and safe close paths', () => {
+  assert.match(ui, /div#library-overlay/);
+  assert.match(ui, /'aria-modal': 'true'/);
+  assert.match(ui, /document\.getElementById\('app'\)\.inert = true/);
+  assert.match(ui, /document\.getElementById\('app'\)\.inert = false/);
+  assert.match(ui, /event\.target === state\.overlay\) close\(\)/);
+  assert.match(ui, /event\.key === 'Escape'/);
+  assert.match(ui, /event\.key !== 'Tab'/);
+  assert.match(css, /#library-overlay\{[^}]*position:fixed[^}]*inset:0[^}]*background:rgba\(12,12,15,\.48\)/s);
+  assert.match(css, /#library-screen\{[^}]*position:relative[^}]*width:min\(1120px,calc\(100vw - 36px\)\)/s);
+});
+
+test('Library belongs only to the project tab where it opened', () => {
+  assert.match(ui, /state\.originProjectId = PM\.proj\.id/);
+  assert.match(ui, /PM\.bus\.on\('project'/);
+  assert.match(ui, /state\.originProjectId !== PM\.proj\.id\) close\(\)/);
+  assert.doesNotMatch(ui, /openTabs|splice|sort/, 'modal scoping never mutates tab order');
 });
 
 test('workspace manifests always preserve Composition and are versioned', () => {

@@ -30,26 +30,16 @@ PM.registerPanel('toolbar', {
     const nullB  = tool('null',  'frame', 'New null object',       () => PM.cmd('newNull'));
     const camB   = tool('camera','cam',   'Import media (⌘I)',     () => PM.cmd('import'));
 
-    /* right-aligned workspace toggles */
-    const guidB = h('button.iconbtn.tl.tg', { title: 'Guides & safe areas', onclick: () => { PM.guides = !PM.guides; syncTg(); PM.invalidate(); } }, PM.icon('grid'));
-    const mbluB = h('button.iconbtn.tl.tg', { title: 'Motion blur preview', onclick: () => { PM.mblurOn = !PM.mblurOn; syncTg(); PM.invalidate(); } }, PM.icon('clock'));
-
     body.append(
       selB, handB, zoomB, sep(),
       textB, shapeB, solidB, shdrB, nullB, sep(), camB,
-      h('span', { style: { flex: 1 } }),
-      guidB, mbluB,
     );
 
     function syncTools() {
       [selB, handB, zoomB].forEach(b => b.classList.toggle('on', b.dataset.tool === PM.tool));
     }
-    function syncTg() {
-      guidB.classList.toggle('on', !!PM.guides);
-      mbluB.classList.toggle('on', !!PM.mblurOn);
-    }
     PM.bus.on('tool', syncTools);
-    syncTools(); syncTg();
+    syncTools();
   },
 });
 

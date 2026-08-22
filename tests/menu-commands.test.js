@@ -29,6 +29,8 @@ test('panel options expose only reachable movement, hide, detach, and restoratio
   assert.match(layout, /disabled: dock\.id === 'left'/);
   assert.match(layout, /disabled: dock\.id === 'center'/);
   assert.match(layout, /disabled: dock\.id === 'right'/);
+  assert.match(layout, /label: 'Move up'.*movePanelBy\(w, spec\.id, -1\)/s);
+  assert.match(layout, /label: 'Move down'.*movePanelBy\(w, spec\.id, 1\)/s);
   assert.match(layout, /Restore \$\{PM\.PANELS\[item\.id\]\.title\}/);
   assert.doesNotMatch(layout, /label: 'Hide panel'.*spec\.id === 'viewer'/,
     'Composition is filtered before a destructive menu command can be created');

@@ -62,7 +62,7 @@ PM.WindowCapture = {
 const S = {
   initialized: false, active: false, pressed: false, phase: 'idle',
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
-  root: null, ink: null, path: null, hint: null, card: null, outline: null,
+  root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   hintFrame: 0, hintPoint: null,
@@ -74,7 +74,7 @@ const Spatial = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, hintPosition },
+  math: { motionProfile, shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, hintPosition, clampFloatingPosition },
   lifecycle: { requestAdapter: requestRippleAdapter },
 };
 PM.SpatialAssistant = Spatial;
@@ -238,9 +238,11 @@ function activate(x, y, warmup = null) {
   if (S.active) return;
   S.active = true; S.phase = 'arming'; S.origin = { x, y }; S.points = [];
   const canvas = h('canvas', { 'aria-hidden': 'true' });
+  S.shadePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  S.shadePath.classList.add('spatial-shade');
   S.path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   S.ink = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  S.ink.classList.add('spatial-ink'); S.ink.appendChild(S.path);
+  S.ink.classList.add('spatial-ink'); S.ink.append(S.shadePath, S.path);
   S.hint = h('div.spatial-hint', h('span', 'Circle any part of the interface'));
   S.root = h('div#spatial-assistant', { role: 'dialog', 'aria-label': 'Spatial coding assistant' },
     canvas, h('div.spatial-wash'), S.ink, S.hint);
@@ -299,6 +301,9 @@ function finishCircle(event) {
     return;
   }
   S.path.setAttribute('d', pathData(S.points) + ' Z');
+  S.shadePath.setAttribute('fill-rule', 'evenodd');
+  S.shadePath.setAttribute('d', `M 0 0 H ${innerWidth} V ${innerHeight} H 0 Z ${pathData(S.points)} Z`);
+  S.root.classList.add('target-selected');
   S.region = info.rect;
   S.context = inspectRegion(S.points, S.region);
   S.phase = 'composing';
@@ -333,6 +338,7 @@ function pathData(points) { return points.map((p, i) => `${i ? 'L' : 'M'} ${Math
 
 function resetSelection(message) {
   S.phase = 'selecting'; S.points = []; S.path.setAttribute('d', '');
+  S.shadePath?.setAttribute('d', ''); S.root?.classList.remove('target-selected');
   S.hint.style.display = ''; S.hint.querySelector('span').textContent = message;
   setTimeout(() => {
     if (S.active && S.phase === 'selecting') S.hint.querySelector('span').textContent = 'Circle any part of the interface';
@@ -401,20 +407,62 @@ function cardPosition(card, rect) {
   Object.assign(card.style, { left: Math.round(left) + 'px', top: Math.round(top) + 'px' });
 }
 
+function clampFloatingPosition(x, y, width, height, viewportWidth, viewportHeight, pad = 12) {
+  return {
+    x: Math.round(PM.clamp(x, pad, Math.max(pad, viewportWidth - width - pad))),
+    y: Math.round(PM.clamp(y, pad, Math.max(pad, viewportHeight - height - pad))),
+  };
+}
+
+function moveCardTo(card, x, y) {
+  const p = clampFloatingPosition(x, y, card.offsetWidth || 420, card.offsetHeight || 180, innerWidth, innerHeight);
+  Object.assign(card.style, { left: p.x + 'px', top: p.y + 'px' });
+  return p;
+}
+
+function makeCardMovable(card, handle) {
+  handle.tabIndex = 0; handle.setAttribute('role', 'button');
+  handle.setAttribute('aria-label', 'Move assistant result');
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    const startX = event.clientX, startY = event.clientY;
+    const rect = card.getBoundingClientRect();
+    handle.setPointerCapture?.(event.pointerId);
+    const move = e => moveCardTo(card, rect.left + e.clientX - startX, rect.top + e.clientY - startY);
+    const end = e => {
+      handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
+      handle.releasePointerCapture?.(e.pointerId);
+    };
+    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+  });
+  handle.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const rect = card.getBoundingClientRect(), step = event.shiftKey ? 24 : 8;
+    const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+    const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+    moveCardTo(card, rect.left + dx, rect.top + dy);
+  });
+}
+
 function showComposer() {
   const input = h('textarea', { placeholder: S.context.targetPanelId ? 'How should this section change?' : 'What should be created here?', rows: '3' });
   const status = h('span.spatial-status', 'Enter to send');
   const cancelBtn = h('button.spatial-action', { onclick: cancel }, 'Cancel');
+  const pinBtn = h('button.spatial-action', { onclick: () => cardPosition(S.card, S.region), title: 'Return beside the circled region' }, 'Return to layout');
   const sendBtn = h('button.spatial-action.pri', { onclick: () => sendRequest(input, status, sendBtn, cancelBtn) }, 'Send to Codex');
   input.addEventListener('keydown', e => {
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input, status, sendBtn, cancelBtn); }
   });
+  const handle = h('div.spatial-target', S.context.targetPanelId ? `Selected · ${S.context.targetTitle}` : 'Selected · open interface area');
   S.card = h('div.spatial-compose',
-    h('div.spatial-target', S.context.targetPanelId ? `Selected · ${S.context.targetTitle}` : 'Selected · open interface area'),
+    handle,
     input,
-    h('div.spatial-actions', status, cancelBtn, sendBtn));
+    h('div.spatial-actions', status, cancelBtn, pinBtn, sendBtn));
   S.root.appendChild(S.card);
+  makeCardMovable(S.card, handle);
   requestAnimationFrame(() => { cardPosition(S.card, S.region); input.focus(); });
 }
 
@@ -545,14 +593,21 @@ function slug(value) {
 
 function showPreview() {
   S.phase = 'preview'; S.card.textContent = '';
+  const handle = h('div.spatial-target', { title: 'Drag to move. Arrow keys also move this box.' }, `Proposed change · ${S.context.targetTitle}`);
   const body = h('div.spatial-preview', h('h3', S.plan.section.title), h('p', S.plan.message));
   if (S.plan.section.note) body.appendChild(h('p', S.plan.section.note));
   S.plan.section.controls.forEach(c => body.appendChild(h('div.spatial-preview-control', h('span', c.label), h('span', c.type), c.type === 'slider' ? h('i') : null)));
   if (!S.plan.section.controls.length) body.appendChild(h('div.spatial-preview-control', 'Empty section'));
   const actions = h('div.spatial-actions', h('span.spatial-status', S.plan.operation === 'modify' ? 'Replaces circled section' : 'Adds beside circled section'),
     h('button.spatial-action', { onclick: cancel }, 'Cancel'),
+    h('button.spatial-action', { onclick: () => cardPosition(S.card, S.region), title: 'Return beside the circled region' }, 'Return to layout'),
     h('button.spatial-action.pri', { onclick: applyPlan }, 'Apply section'));
-  S.card.append(body, actions); requestAnimationFrame(() => cardPosition(S.card, S.region));
+  S.card.append(handle, body, actions); makeCardMovable(S.card, handle);
+  requestAnimationFrame(() => {
+    const rect = S.card.getBoundingClientRect();
+    moveCardTo(S.card, rect.left, rect.top);
+    handle.focus();
+  });
 }
 
 function locatePanel(workspace, panelId) {
@@ -621,7 +676,7 @@ function cancel() {
   cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
   S.root?.remove();
-  Object.assign(S, { root: null, ink: null, path: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, renderStop: null, points: [] });
+  Object.assign(S, { root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, renderStop: null, points: [] });
   setTimeout(refreshSceneCache, 80);
 }
 

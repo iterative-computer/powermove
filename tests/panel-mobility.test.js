@@ -47,7 +47,8 @@ test('panel placement preview is an overlay and never reflows the dock under the
 
 test('drag motion is frame-coalesced, uses generous geometry, and animates only the drop', () => {
   assert.match(layout, /requestAnimationFrame\(renderDragFrame\)/);
-  assert.match(layout, /L\.hitTestDockPlacement\(docks, ev\.clientX, ev\.clientY\)/);
+  assert.match(layout, /L\.buildDockDropTargets\(docks, bodyRect\)/);
+  assert.match(layout, /L\.hitTestDockPlacement\(targets, ev\.clientX, ev\.clientY\)/);
   assert.match(layout, /tolerance = 28/, 'drop areas extend beyond visible dock edges');
   assert.match(layout, /capturePanelRects\(\)/);
   assert.match(layout, /node\.animate\(\[/);
@@ -72,16 +73,36 @@ test('every regular panel exposes clear options with recoverable hide and restor
 test('pop out creates a native child window, mirrors one live panel owner, and restores on close', () => {
   const popout = layout.slice(layout.indexOf('PM.Popout ='), layout.lastIndexOf('})();'));
   assert.match(native, /javaScriptCanOpenWindowsAutomatically = true/);
+  assert.match(native, /NSButton\(title: "Return to layout"/);
+  assert.match(native, /target: win, action: #selector\(NSWindow\.performClose/);
   assert.match(native, /createWebViewWith configuration/);
   assert.match(native, /styleMask: \[\.titled, \.closable, \.miniaturizable, \.resizable\]/);
   assert.match(native, /win\.delegate = self/);
   assert.match(popout, /sourceHost\.appendChild\(el\)/, 'the live content has a single authoritative owner');
   assert.match(popout, /MutationObserver/, 'the child reflects authoritative source updates');
   assert.match(popout, /target\.click\(\)/, 'child controls forward to the authoritative panel');
-  assert.match(popout, /detachedPlaceholder/, 'the source layout explains where the panel went');
+  assert.doesNotMatch(popout, /detachedPlaceholder/, 'detached panels reserve no placeholder space');
+  assert.match(layout, /visibleSpecs = dock\.panels\.filter\(spec => !PM\.Popout\?\.isOpen\(spec\.id\)\)/,
+    'detached panels are removed from layout flow so neighboring content reflows');
+  assert.doesNotMatch(popout, /powermove-redock/);
   assert.doesNotMatch(popout, /PM\.WS\.mutate/, 'detaching does not destroy or duplicate the layout manifest');
   assert.match(popout, /w\.closed.*PM\.Popout\.reclaim\(id\)/s);
   assert.match(popout, /if \(L\.ws\) L\.apply\(L\.ws\)/, 'close and redock rebuild from synchronized source state');
+});
+
+test('vertical resize handles are generous, bounded, persistent, and never start panel movement', () => {
+  assert.match(css, /\.splitter\.h::before\{[^}]*inset:-6px 0[^}]*cursor:row-resize/s);
+  assert.match(layout, /L\.clampPanelHeight/);
+  assert.match(layout, /pairHeight/);
+  assert.match(layout, /e\.stopPropagation\(\)/);
+  assert.match(layout, /cancel: \(\) => \{[\s\S]*applyPanelSize/s);
+});
+
+test('custom Sections use the same native pop-out and pin-back path as regular panels', () => {
+  assert.doesNotMatch(layout, /NO_POPOUT[\s\S]*custom/);
+  assert.match(layout, /const def = PM\.PANELS\[id\]/);
+  assert.match(layout, /sourceHost\.appendChild\(el\)/, 'one authoritative editable element is retained');
+  assert.match(native, /NSButton\(title: "Return to layout"/);
 });
 
 test('native detached windows receive packaged styling without broad file access', () => {

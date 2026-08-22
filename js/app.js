@@ -359,15 +359,15 @@ function buildStatus() {
 }
 buildTitlebar(); buildStatus();
 
-/* ── AE-style tool toolbar, mounted as a fixed strip above #body ── */
+/* ── Compact tool strip, integrated with the native macOS titlebar ── */
 function buildToolbar() {
   const def = PM.PANELS.toolbar; if (!def) return;
   const el = document.createElement('div');
   el.id = 'toolbar-strip';
   const body = document.createElement('div');
   el.appendChild(body);
-  const bodyEl = document.getElementById('body');
-  bodyEl.parentNode.insertBefore(el, bodyEl);
+  const bar = document.getElementById('titlebar');
+  bar.insertBefore(el, bar.querySelector('.titlebar-drag'));
   try { def.build(body, {}); } catch (e) { console.error('toolbar', e); }
 }
 buildToolbar();

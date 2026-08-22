@@ -6,9 +6,7 @@ PM.time = 0;
 PM.playing = false;
 PM.quality = 1;          // render scale
 PM.loop = true;
-PM.mblurOn = true;
 PM.snap = true;
-PM.guides = true;
 
 const E = { fps: 0, ms: 0, drops: 0, budget: 1000 / 60, auto: true };
 PM.perf = E;
@@ -130,7 +128,7 @@ function frame(now) {
   needsDraw = false;
   const t0 = performance.now();
   PM.GL.render(PM.time, {
-    mblur: PM.mblurOn, mbSamples: PM.playing ? 6 : 12,
+    mblur: true, mbSamples: PM.playing ? 6 : 12,
     shutter: p.shutter || .5, hideShy: false,
   });
   PM.bus.emit('overlay');
@@ -155,7 +153,7 @@ PM.renderFrameTo = (T, w, h) => {
   const ow = cv.width, oh = cv.height, oq = PM.quality;
   PM.GL.resize(w, h);
   PM.quality = 1;
-  PM.GL.render(T, { mblur: PM.mblurOn, mbSamples: 16, shutter: PM.proj.shutter || .5 });
+  PM.GL.render(T, { mblur: true, mbSamples: 16, shutter: PM.proj.shutter || .5 });
   const out = document.createElement('canvas');
   out.width = w; out.height = h;
   out.getContext('2d').drawImage(cv, 0, 0);

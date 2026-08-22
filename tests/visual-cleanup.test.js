@@ -78,3 +78,18 @@ test('one Library control replaces duplicate global commands without hiding uniq
   assert.doesNotMatch(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /title: 'Snapping \(S\)'/,
     'the global snapping duplicate is removed while the timeline owns its control');
 });
+
+test('obsolete Guides and Motion Blur Preview product controls are completely absent', () => {
+  const read = rel => fs.readFileSync(path.join(root, rel), 'utf8');
+  const toolbar = read('js/ui/toolbar.js');
+  const viewer = read('js/ui/viewer.js');
+  const engine = read('js/core/engine.js');
+  const workspaceSource = read('js/core/workspace.js');
+  for (const text of [toolbar, viewer]) {
+    assert.doesNotMatch(text, /Guides & safe areas/i);
+    assert.doesNotMatch(text, /Motion blur preview/i);
+  }
+  assert.doesNotMatch(engine, /PM\.guides|PM\.mblurOn/);
+  assert.match(workspaceSource, /delete raw\.features\.guides/);
+  assert.match(workspaceSource, /delete raw\.features\.motionBlur/);
+});

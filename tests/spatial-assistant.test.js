@@ -117,8 +117,11 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(source, /dynamicRange = hdr \? 'hdr' : 'sdr'/);
   assert.doesNotMatch(source, /getContext\('webgl2'/);
   assert.match(css, /#spatial-assistant\{position:fixed;inset:0/);
-  assert.match(css, /spatial-wash\{[^}]*rgba\(8,8,12,\.012\)/);
+  assert.match(css, /spatial-wash\{[^}]*rgba\(8,8,12,\.12\)/);
   assert.doesNotMatch(css, /spatial-wash\{[^}]*blur/);
+  assert.match(css, /spatial-shade\{[^}]*rgba\(7,7,10,\.38\)/);
+  assert.match(source, /S\.shadePath\.setAttribute\('fill-rule', 'evenodd'\)/,
+    'the lasso de-emphasizes everything except the circled region');
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)/);
 });
 
@@ -140,4 +143,21 @@ test('instruction pill follows the cursor without intercepting input', () => {
   assert.deepEqual({ ...math.hintPosition(790, 590, 250, 38, 800, 600) }, { x: 538, y: 534 });
   assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Circle any part of the interface'\)\)/);
   assert.match(css, /\.spatial-hint\{[^}]*pointer-events:none[^}]*will-change:transform/s);
+});
+
+test('circled-region prompt, Send, movable result, cancel, Preview, and Apply stay structured', () => {
+  const math = spatialModel().math;
+  assert.deepEqual({ ...math.clampFloatingPosition(-40, 900, 420, 220, 1200, 800) }, { x: 12, y: 568 });
+  assert.match(source, /S\.context = inspectRegion\(S\.points, S\.region\)/, 'the prompt binds to the lasso context');
+  assert.match(source, /sendRequest\(input, status, sendBtn, cancelBtn\)/);
+  assert.match(source, /PM\.CodexBridge\.request\(agentPrompt\(request\), responseSchema\(\)\)/);
+  assert.match(source, /makeCardMovable\(S\.card, handle\)/);
+  assert.match(source, /setPointerCapture/);
+  assert.match(source, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'\]/);
+  assert.match(source, /Return to layout/);
+  assert.match(source, /event\.key === 'Escape'[\s\S]*cancel\(\)/);
+  assert.match(source, /S\.plan = plan; showPreview\(\)/);
+  assert.match(source, /onclick: applyPlan/);
+  assert.match(source, /PM\.WS\.mutate\(workspace =>/,
+    'Apply crosses the validated structured workspace transaction boundary');
 });

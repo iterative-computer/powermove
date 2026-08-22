@@ -69,6 +69,44 @@ test('dock hit testing makes top, bottom, gaps, and left/right placement generou
   assert.equal(hit(docks, 700, 20), null, 'far outside all docks cancels instead of losing a panel');
 });
 
+test('missing side docks get full-height edge targets and are created in stable order', () => {
+  const PM = layoutModel();
+  const rect = (left, top, right, bottom) => ({ left, top, right, bottom, width: right - left, height: bottom - top });
+  const targets = PM.Layout.buildDockDropTargets([
+    { id: 'center', rect: rect(0, 44, 1400, 860), panels: [] },
+  ], rect(0, 44, 1400, 860));
+  assert.deepEqual({ ...PM.Layout.hitTestDockPlacement(targets, 18, 400) }, { dockId: 'left', index: 0 });
+  assert.deepEqual({ ...PM.Layout.hitTestDockPlacement(targets, 1382, 400) }, { dockId: 'right', index: 0 });
+
+  const workspace = { layout: { docks: [{ id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }, { id: 'assets', size: 240 }] }] }, hiddenPanels: [] };
+  assert.equal(PM.Layout.movePanel(workspace, 'assets', 'left'), true);
+  assert.deepEqual([...workspace.layout.docks.map(dock => dock.id)], ['left', 'center']);
+  assert.equal(workspace.layout.docks[0].panels[0].size, 240, 'panel height metadata survives side docking');
+  assert.equal(PM.Layout.movePanel(workspace, 'assets', 'right'), true);
+  assert.deepEqual([...workspace.layout.docks.map(dock => dock.id)], ['left', 'center', 'right']);
+  assert.equal(workspace.layout.docks[2].panels[0].size, 240);
+});
+
+test('context-menu vertical movement reorders without changing panel metadata', () => {
+  const PM = layoutModel();
+  const workspace = { layout: { docks: [{ id: 'center', panels: [
+    { id: 'viewer', flex: true }, { id: 'assets', size: 190 }, { id: 'inspector', size: 260 },
+  ] }] } };
+  assert.equal(PM.Layout.movePanelBy(workspace, 'inspector', -1), true);
+  assert.deepEqual([...workspace.layout.docks[0].panels.map(p => p.id)], ['viewer', 'inspector', 'assets']);
+  assert.equal(workspace.layout.docks[0].panels[1].size, 260);
+  assert.equal(PM.Layout.movePanelBy(workspace, 'viewer', -1), false, 'edge commands are safe no-ops');
+});
+
+test('vertical panel resize geometry clamps both panels and is sampling-rate independent', () => {
+  const PM = layoutModel();
+  const clamp = PM.Layout.clampPanelHeight;
+  assert.equal(clamp(220, 40, 1, 600, 88, 100, 8), 260);
+  assert.equal(clamp(220, -500, 1, 600, 88, 100, 8), 88);
+  assert.equal(clamp(220, 800, 1, 600, 88, 100, 8), 492);
+  assert.equal(clamp(300, 40, -1, 600, 88, 88, 8), 260, 'lower fixed panel uses the inverse direction');
+});
+
 test('panel hiding is recoverable, preserves its slot, and handles the last panel in a dock', () => {
   const PM = layoutModel();
   const workspace = { layout: { docks: [
@@ -113,6 +151,15 @@ test('detached-panel lifecycle has one owner and reapplies the source layout on 
   assert.equal(PM.Popout.open('unknown'), undefined, 'invalid panels do not create windows');
   PM.PANELS.viewer = { id: 'viewer', title: 'Composition' };
   assert.equal(PM.Popout.open('viewer'), undefined, 'unsupported canvas panels remain safely docked');
+});
+
+test('vertical resize is isolated from panel reorder and supports exact cancellation', () => {
+  const layout = fs.readFileSync(path.join(root, 'js/ui/layout.js'), 'utf8');
+  assert.match(layout, /if \(e\.button !== 0\) return;\s*e\.stopPropagation\(\);/s);
+  assert.match(layout, /if \(!changed && Math\.abs\(dy\) < 2\) return/);
+  assert.match(layout, /const saved = \{ size: spec\.size, flex: spec\.flex \}/);
+  assert.match(layout, /cancel: \(\) => \{[\s\S]*otherSaved[\s\S]*applyPanelSize\(node/s);
+  assert.match(layout, /PM\.WS\.save\(\)/, 'committed sizes persist in the workspace manifest');
 });
 
 /* ── util.js harness for PM.drag semantics ──────────────── */

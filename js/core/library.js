@@ -250,11 +250,22 @@ function duplicateSection(id, sourceProjectId, targetProjectId = PM.proj.id) {
 }
 function trashSection(id, sourceProjectId) {
   const found = resolveSection(id, sourceProjectId); if (!found) return false;
-  found.entry.deletedAt = Date.now(); persistLibraryProject(found.project); return true;
+  if (found.entry.deletedAt) return true;
+  const mutate = () => { found.entry.deletedAt = Date.now(); found.entry.at = Date.now(); };
+  if (found.project.id === PM.proj.id && PM.hist?.do) PM.hist.do('Delete section', mutate);
+  else mutate();
+  persistLibraryProject(found.project);
+  PM.toast('Section moved to Library Trash');
+  return true;
 }
 function restoreSection(id, sourceProjectId) {
   const found = resolveSection(id, sourceProjectId); if (!found) return false;
-  found.entry.deletedAt = null; found.entry.at = Date.now(); persistLibraryProject(found.project); return true;
+  const mutate = () => { found.entry.deletedAt = null; found.entry.at = Date.now(); };
+  if (found.project.id === PM.proj.id && PM.hist?.do) PM.hist.do('Restore section', mutate);
+  else mutate();
+  persistLibraryProject(found.project);
+  PM.toast('Section restored');
+  return true;
 }
 
 /** Create a shader layer from a saved Look. */

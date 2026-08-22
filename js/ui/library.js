@@ -1,7 +1,7 @@
 /* Powermove — one compact Library for reusable Sections and Workspaces. */
 (() => {
 const PM = window.PM, h = PM.h;
-const state = { root: null, tab: 'sections', scope: 'project', trash: false };
+const state = { overlay: null, root: null, tab: 'sections', scope: 'project', trash: false, originProjectId: null, lastFocus: null };
 
 const button = (label, run, pri = false) => h('button.btn' + (pri ? '.pri' : ''), { onclick: run }, label);
 const scopeName = () => state.scope === 'project' ? 'This project' : 'My library';
@@ -9,12 +9,37 @@ const scopeName = () => state.scope === 'project' ? 'This project' : 'My library
 function open(tab = state.tab) {
   state.tab = tab;
   if (!state.root) {
-    state.root = h('section#library-screen', { role: 'dialog', 'aria-label': 'Library' });
-    document.body.appendChild(state.root);
+    state.root = h('section#library-screen', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Library', tabindex: '-1' });
+    state.overlay = h('div#library-overlay', state.root);
+    state.overlay.addEventListener('pointerdown', event => { if (event.target === state.overlay) close(); });
+    state.overlay.addEventListener('keydown', trapKeys);
+    document.body.appendChild(state.overlay);
   }
-  paint(); state.root.classList.add('on');
+  state.originProjectId = PM.proj.id;
+  state.lastFocus = document.activeElement;
+  paint();
+  document.getElementById('app').inert = true;
+  state.overlay.classList.add('on'); state.root.classList.add('on');
+  requestAnimationFrame(() => (state.root.querySelector('button:not([disabled])') || state.root).focus());
 }
-function close() { state.root?.classList.remove('on'); }
+function close() {
+  if (!state.overlay?.classList.contains('on')) return;
+  PM.closeMenus?.();
+  state.overlay.classList.remove('on'); state.root.classList.remove('on');
+  document.getElementById('app').inert = false;
+  const restore = state.lastFocus; state.lastFocus = null; state.originProjectId = null;
+  if (restore?.isConnected) requestAnimationFrame(() => restore.focus());
+}
+function trapKeys(event) {
+  if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+  if (event.key !== 'Tab') return;
+  const focusable = [...state.root.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
+    .filter(node => node.offsetParent !== null);
+  if (!focusable.length) { event.preventDefault(); state.root.focus(); return; }
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
 
 function header() {
   const tabs = h('div.library-tabs',
@@ -48,7 +73,7 @@ function sectionMenu(anchor, section) {
     { label: 'Duplicate to this project', run: () => { PM.Library.duplicateSection(section.id, section.sourceProjectId, PM.proj.id); paint(); } },
     { label: 'Rename…', run: () => renameSection(section) },
     '-',
-    { label: 'Move to Trash', run: () => { PM.Library.trashSection(section.id, section.sourceProjectId); paint(); } },
+    { label: 'Delete section', run: () => { if (PM.Library.trashSection(section.id, section.sourceProjectId)) paint(); } },
   ]);
 }
 function renameSection(section) {
@@ -73,6 +98,7 @@ function sectionCard(section) {
     more,
     section.deletedAt ? button('Restore', () => { PM.Library.restoreSection(section.id, section.sourceProjectId); paint(); })
       : h('div.library-card-actions',
+          button('Delete', () => { if (PM.Library.trashSection(section.id, section.sourceProjectId)) paint(); }),
           button('Insert', () => { PM.Library.insertSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); }, true),
           button('Edit', () => { PM.Library.openSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); })));
   return card;
@@ -261,4 +287,7 @@ PM.LibraryUI = { open, close, get isOpen() { return !!state.root?.classList.cont
 PM.WorkspaceEditor = WorkspaceEditor;
 PM.bus.on('library', () => { if (state.root?.classList.contains('on')) paint(); });
 PM.bus.on('workspaces', () => { if (state.root?.classList.contains('on')) paint(); });
+PM.bus.on('project', () => {
+  if (state.overlay?.classList.contains('on') && state.originProjectId !== PM.proj.id) close();
+});
 })();
