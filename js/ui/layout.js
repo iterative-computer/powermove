@@ -118,52 +118,87 @@ function applyPanelSize(el, spec, def) {
 }
 
 /* ── drag to move panels between docks ─────────────────── */
+const DOCK_LABELS = { left: 'Left dock', center: 'Center dock', right: 'Right dock' };
+const dockLabel = (id) => DOCK_LABELS[id] || id.replace(/^\w/, c => c.toUpperCase()) + ' dock';
+
+/** Convert a pre-removal drop index into a post-removal insertion index.
+    The drop target is measured against DOM order that still contains the
+    dragged panel; removing it first shifts every later slot down by one.
+    Returns null when the drop would reproduce the current position (no-op),
+    which keeps stray drops from forking built-in workspaces into "(edited)"
+    copies. */
+L.resolveDropIndex = (fromDockId, fromIndex, toDockId, index) => {
+  if (!Number.isInteger(index)) return null;
+  if (toDockId !== fromDockId) return index;
+  const adj = index > fromIndex ? index - 1 : index;
+  return adj === fromIndex ? null : adj;
+};
+
 let dragState = null;
+
 function startPanelDrag(e, spec, dock, el) {
   const label = h('span.panel-ghost-label', PM.PANELS[spec.id].title);
-  const destination = h('span.panel-ghost-destination', 'Move panel');
+  const destination = h('span.panel-ghost-destination', '');
   const ghost = h('div.panel-ghost', label, destination);
   document.body.appendChild(ghost);
-  dragState = { spec, fromDock: dock.id, ghost, destination, moved: false };
+  const fromIndex = Math.max(0, dock.panels.findIndex(p => p.id === spec.id));
+  dragState = { spec, fromDock: dock.id, fromIndex, ghost, destination, moved: false };
 
-  const move = (dx, dy, ev) => {
-    if (!dragState.moved && Math.hypot(dx, dy) < 5) return;
-    if (!dragState.moved) {
-      dragState.moved = true;
-      document.body.classList.add('panel-dragging');
-    }
-    ghost.classList.add('on');
-    updateDropTarget(ev);
-    ghost.style.left = PM.clamp(ev.clientX + 12, 8, innerWidth - ghost.offsetWidth - 8) + 'px';
-    ghost.style.top = PM.clamp(ev.clientY + 12, 8, innerHeight - ghost.offsetHeight - 8) + 'px';
-  };
-  const up = (dx, dy, ev) => {
+  function finish(wasCancelled) {
+    const state = dragState;
+    if (!state) return;
+    dragState = null;
+    window.removeEventListener('keydown', state.onKey, true);
     ghost.remove();
     document.body.classList.remove('panel-dragging');
-    clearDropHints();
-    const target = dragState.dropTarget;
-    const wasMoved = dragState.moved;
-    dragState = null;
-    if (!wasMoved) return;
-    if (target) {
-      PM.WS.mutate(w => {
-        removePanel(w, spec.id);
-        insertPanel(w, spec, target.dockId, target.index);
-      });
-      PM.toast('Moved ' + PM.PANELS[spec.id].title + ' → ' + target.dockId);
-    }
+    if (!state.moved) return;
+    if (wasCancelled) { PM.toast('Move cancelled'); return; }
+    const target = state.dropTarget;
+    if (!target) { PM.toast('Drop on a panel or dock to move ' + PM.PANELS[spec.id].title); return; }
+    const index = L.resolveDropIndex(state.fromDock, state.fromIndex, target.dockId, target.index);
+    if (index == null) { PM.toast(PM.PANELS[spec.id].title + ' is already here'); return; }
+    PM.WS.mutate(w => {
+      removePanel(w, spec.id);
+      insertPanel(w, spec, target.dockId, index);
+    });
+    PM.toast('Moved ' + PM.PANELS[spec.id].title + ' → ' + dockLabel(target.dockId));
+  }
+
+  const drag = PM.drag(e, {
+    cursor: 'grabbing',
+    move: (dx, dy, ev) => {
+      if (!dragState.moved && Math.hypot(dx, dy) < 5) return;
+      if (!dragState.moved) {
+        dragState.moved = true;
+        destination.textContent = 'Move panel';
+        document.body.classList.add('panel-dragging');
+      }
+      ghost.classList.add('on');
+      updateDropTarget(ev);
+      ghost.style.left = PM.clamp(ev.clientX + 12, 8, innerWidth - ghost.offsetWidth - 8) + 'px';
+      ghost.style.top = PM.clamp(ev.clientY + 12, 8, innerHeight - ghost.offsetHeight - 8) + 'px';
+    },
+    up: () => finish(false),
+    cancel: () => finish(true),
+  });
+  /* Esc aborts an in-flight drag without touching the workspace */
+  dragState.onKey = (ev) => {
+    if (ev.key !== 'Escape') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    drag.cancel();
   };
-  PM.drag(e, { move, up, cursor: 'grabbing' });
+  window.addEventListener('keydown', dragState.onKey, true);
 }
 
 function updateDropTarget(ev) {
-  clearDropHints();
   dragState.dropTarget = null;
-  dragState.destination.textContent = 'Move panel';
   const el = document.elementFromPoint(ev.clientX, ev.clientY);
-  if (!el) return;
-  const dockEl = el.closest('.dock');
-  if (!dockEl) return;
+  const dockEl = el && el.closest('.dock');
+  if (!dockEl) {
+    dragState.destination.textContent = 'Not a drop zone';
+    return;
+  }
   const dockId = dockEl.id.replace('dock-', '');
   /* find insertion index from hovered panel */
   const panelEl = el.closest('.panel');
@@ -178,12 +213,9 @@ function updateDropTarget(ev) {
     dragState.destination.textContent = (before ? 'Before ' : 'After ') + title;
   } else {
     index = dockEl.querySelectorAll(':scope > .panel').length;
-    dragState.destination.textContent = 'End of ' + dockId + ' dock';
+    dragState.destination.textContent = 'End of ' + dockLabel(dockId);
   }
   dragState.dropTarget = { dockId, index };
-}
-function clearDropHints() {
-  PM.$$('.drop-before,.drop-after,.drop-into').forEach(x => x.classList.remove('drop-before', 'drop-after', 'drop-into'));
 }
 
 /* ── panel context menu ────────────────────────────────── */

@@ -199,20 +199,31 @@ PM.menu = (anchor, items, opt = {}) => {
 PM.closeMenus = () => $$('.drop').forEach(e => e.remove());
 
 /* ── drag helper ───────────────────────────────────────── */
-PM.drag = (e, { move, up, cursor }) => {
+/* Returns { cancel }. cancel() and a native pointercancel both end the drag
+   without calling up(), so interrupted gestures can never wedge the cursor
+   or leave ghost UI behind. */
+PM.drag = (e, { move, up, cancel, cursor }) => {
   e.preventDefault();
   const sx = e.clientX, sy = e.clientY;
   const prevCur = document.body.style.cursor;
   if (cursor) document.body.style.cursor = cursor;
-  const mv = (ev) => move && move(ev.clientX - sx, ev.clientY - sy, ev);
-  const fin = (ev) => {
+  let done = false;
+  const stop = () => {
+    if (done) return false;
+    done = true;
     window.removeEventListener('pointermove', mv);
     window.removeEventListener('pointerup', fin);
+    window.removeEventListener('pointercancel', pc);
     document.body.style.cursor = prevCur;
-    up && up(ev.clientX - sx, ev.clientY - sy, ev);
+    return true;
   };
+  const mv = (ev) => { if (!done && move) move(ev.clientX - sx, ev.clientY - sy, ev); };
+  const fin = (ev) => { if (stop() && up) up(ev.clientX - sx, ev.clientY - sy, ev); };
+  const pc = () => { if (stop() && cancel) cancel(); };
   window.addEventListener('pointermove', mv);
   window.addEventListener('pointerup', fin);
+  window.addEventListener('pointercancel', pc);
+  return { cancel: () => { if (stop() && cancel) cancel(); } };
 };
 
 /* ── modal ─────────────────────────────────────────────── */
