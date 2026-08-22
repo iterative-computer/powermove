@@ -8,6 +8,10 @@ MACOS="$CONTENTS/MacOS"
 RES="$CONTENTS/Resources"
 WEB="$RES/web"
 INSTALL=${1:-}
+BUNDLE_ID=${PM_BUNDLE_ID:-com.zellzoi.powermove.dev}
+if [ "$INSTALL" = "--release" ] || [ "$INSTALL" = "--install" ]; then
+  BUNDLE_ID=com.zellzoi.powermove
+fi
 export CLANG_MODULE_CACHE_PATH="$BUILD/.module-cache"
 export SWIFT_MODULECACHE_PATH="$BUILD/.module-cache"
 
@@ -30,13 +34,13 @@ cp "$ROOT/index.html" "$WEB/index.html"
 cp -R "$ROOT/css/." "$WEB/css/"
 cp -R "$ROOT/js/." "$WEB/js/"
 
-cat > "$CONTENTS/Info.plist" <<'PLIST'
+cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleDisplayName</key><string>Powermove</string>
   <key>CFBundleExecutable</key><string>Powermove</string>
-  <key>CFBundleIdentifier</key><string>com.zellzoi.powermove</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleIconFile</key><string>Powermove</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Powermove</string>

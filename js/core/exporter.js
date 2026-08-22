@@ -456,7 +456,14 @@ X.muxWebM = muxWebM;
 X.snapshot = (T, maxW = 480) => {
   const p = PM.proj;
   const s = Math.min(1, maxW / p.w);
-  const cv = PM.renderFrameTo(T, Math.max(2, Math.round(p.w * s)), Math.max(2, Math.round(p.h * s)));
+  /* W/H are composition coordinates, not merely output size. Rendering at
+     thumbnail width crops layers positioned in a larger composition. */
+  const full = PM.renderFrameTo(T, p.w, p.h);
+  if (s === 1) return full.toDataURL('image/jpeg', .74);
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(2, Math.round(p.w * s));
+  cv.height = Math.max(2, Math.round(p.h * s));
+  cv.getContext('2d').drawImage(full, 0, 0, cv.width, cv.height);
   return cv.toDataURL('image/jpeg', .74);
 };
 })();

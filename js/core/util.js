@@ -54,17 +54,28 @@ addEventListener('unhandledrejection', (e) => __pmLog('[rejection]', [String(e.r
 PM.svg = (d, box = 24) => {
   const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   s.setAttribute('viewBox', `0 0 ${box} ${box}`);
+  s.classList.add('pm-icon');
+  s.setAttribute('aria-hidden', 'true');
+  s.setAttribute('focusable', 'false');
   s.innerHTML = d;
   return s;
 };
-PM.icon = (name) => PM.svg(PM.ICONS[name] || PM.ICONS.dot);
+PM.icon = (name) => {
+  const found = PM.ICONS[name];
+  if (!found) console.warn('Unknown Powermove icon:', name);
+  const s = PM.svg(found || PM.ICONS.missing);
+  s.dataset.icon = found ? name : 'missing';
+  return s;
+};
 PM.ICONS = {
   dot: '<circle cx="12" cy="12" r="3"/>',
+  missing: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9.5 9a2.7 2.7 0 0 1 5 1.5c0 2-2.5 2-2.5 4M12 18h.01"/>',
   play: '<path d="M7 4.5v15l12-7.5z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M8 5v14M16 5v14"/>',
   prev: '<path d="M18 5v14L8 12zM6 5v14"/>',
   next: '<path d="M6 5v14l10-7zM18 5v14"/>',
   home: '<path d="M4 11.5 12 4l8 7.5V20H4z"/>',
+  project: '<path d="M5 4h8l2 2h4v14H5z"/><path d="M5 9h14"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
   undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12H9"/>',
@@ -75,6 +86,10 @@ PM.ICONS = {
   up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   export: '<path d="M12 15V3M8 7l4-4 4 4"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
   clock: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1" fill="currentColor" stroke="none"/>',
+  trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/>',
+  more: '<circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
   chev: '<path d="m9 6 6 6-6 6"/>',
   chevD: '<path d="m6 9 6 6 6-6"/>',
   eye: '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/>',

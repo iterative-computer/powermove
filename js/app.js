@@ -32,27 +32,10 @@ PM.theme = (() => {
 
 /* ── project boot / migration ───────────────────────────── */
 function loadBootProject() {
-  /* Prefer the registry: the most recently touched open project. */
-  const tabs = PM.Projects.tabs();
-  for (const id of tabs) {
-    const raw = PM.Projects.get(id);
-    if (!raw) continue;
-    try {
-      return hydrate(raw);
-    } catch (e) { console.warn('Saved project could not be loaded', id, e); }
-  }
-  /* Legacy single-project autosave → migrate into the registry. */
-  const raw = PM.store.get('autosave', null);
-  if (raw && raw.proj && Array.isArray(raw.proj.layers) && raw.proj.layers.length > 0) {
-    try {
-      const proj = hydrate(raw.proj);
-      if (proj.layers.length) return proj;
-    } catch (e) { console.warn('Autosave could not be loaded', e); }
-  } else if (raw) {
-    console.warn('Discarding empty autosave');
-    PM.store.del('autosave');
-  }
-  return demo();
+  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null) });
+  if (!raw) return demo();
+  try { return hydrate(raw); }
+  catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return demo(); }
 }
 function hydrate(p) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
@@ -61,13 +44,36 @@ function hydrate(p) {
   base.assets = p.assets || {};
   base.markers = p.markers || [];
   base.work = p.work && p.work.length === 2 ? p.work : [0, base.dur];
-  base.params = p.params || {};
+  const num = (x, fb) => { const n = Number(x); return Number.isFinite(n) ? n : fb; };
+  const sanitizeParams = (params) => {
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return {};
+    const out = {};
+    Object.entries(params).forEach(([key, src]) => {
+      if (!src || typeof src !== 'object' || Array.isArray(src)) return;
+      const q = { ...src };
+      q.name = typeof q.name === 'string' && q.name ? q.name : key;
+      q.label = typeof q.label === 'string' && q.label ? q.label : q.name;
+      q.control = ['num', 'color', 'toggle', 'select'].includes(q.control) ? q.control : 'num';
+      if (q.control === 'num') {
+        q.min = num(q.min, 0); q.max = num(q.max, Math.max(q.min, 1));
+        if (q.max < q.min) [q.min, q.max] = [q.max, q.min];
+        q.value = PM.clamp(num(q.value, q.min), q.min, q.max);
+      } else if (q.control === 'toggle') q.value = !!q.value;
+      else if (q.control === 'color') q.value = typeof q.value === 'string' && /^#[0-9a-f]{6}$/i.test(q.value) ? q.value : '#FF6B1A';
+      else {
+        q.options = Array.isArray(q.options) ? q.options.filter(o => o && typeof o === 'object' && 'v' in o) : [];
+        if (q.value === undefined) q.value = q.options.length ? q.options[0].v : '';
+      }
+      out[key] = q;
+    });
+    return out;
+  };
+  base.params = sanitizeParams(p.params);
   base.shutter = p.shutter == null ? .5 : p.shutter;
   /* Production rule: a saved project must never poison the renderer. Every channel,
      keyframe, effect and layer field is normalized here so malformed data degrades
      to a static value instead of NaN transforms or a broken keyframe search.
      Applied recursively to nested compositions as well. */
-  const num = (x, fb) => { const n = Number(x); return Number.isFinite(n) ? n : fb; };
   const sanitizeProp = (prop, fresh) => {
     prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
     /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
@@ -122,7 +128,7 @@ function hydrate(p) {
     c.w = Math.max(2, num(c.w, base.w)); c.h = Math.max(2, num(c.h, base.h));
     c.fps = Math.max(1, num(c.fps, base.fps)); c.dur = Math.max(.04, num(c.dur, base.dur));
     c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
-    c.params = c.params && typeof c.params === 'object' ? c.params : {};
+    c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];
     sanitizeLayers(c.layers, c);
   });
@@ -203,14 +209,27 @@ void main(){
 })();
 
 /* Boot hygiene: repeated launches can leave several untouched "Untitled" projects
-   in the registry and the tab strip. Keep the newest; drop only truly empty ones. */
+   in the registry and the tab strip. Keep at most one, and none at all while real
+   projects exist. */
 (function pruneEmptyUntitled() {
-  const empties = PM.Projects.list().filter(m => m.name === 'Untitled');
-  if (empties.length <= 1) return;
-  empties.slice(1).forEach(m => {
+  const metas = PM.Projects.list();
+  const empties = metas.filter(m => m.name === 'Untitled');
+  if (!empties.length) return;
+  const hasReal = metas.some(m => {
+    if (m.name !== 'Untitled') return true;
     const raw = PM.Projects.get(m.id);
-    if (!raw || (Array.isArray(raw.layers) && raw.layers.length === 0)) PM.Projects.remove(m.id);
+    return !!(raw && Array.isArray(raw.layers) && raw.layers.length);
   });
+  empties.forEach((m, i) => {
+    if (hasReal || i > 0) {
+      const raw = PM.Projects.get(m.id);
+      if (!raw || (Array.isArray(raw.layers) && raw.layers.length === 0)) PM.Projects.remove(m.id);
+    }
+  });
+  /* A registry card without a slot is never recoverable from the registry and
+     otherwise lingers as a project that cannot open (for example, an interrupted
+     duplicate). Project files exported by the user are unaffected. */
+  PM.Projects.list().forEach(m => { if (!PM.Projects.get(m.id)) PM.Projects.remove(m.id); });
 })();
 
 PM.proj = loadBootProject();
@@ -241,7 +260,7 @@ function buildTitlebar() {
   const dragBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowDrag;
   bar.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest('button, .tab, input, a, .tb-right')) return;
+    if (e.target.closest('button, #tabs, input, a, .tb-right')) return;
     if (!dragBridge) return;
     e.preventDefault();
     /* Native-feel window drag: pin the arrow cursor, drop any hover state, and
@@ -257,35 +276,57 @@ function buildTitlebar() {
     }, { once: true });
   });
   bar.addEventListener('dblclick', (e) => {
-    if (e.target.closest('button, .tab, input, a, .tb-right')) return;
+    if (e.target.closest('button, #tabs, input, a, .tb-right')) return;
     /* mimic standard macOS titlebar double-click (zoom) */
     const zb = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowZoom;
     if (zb) zb.postMessage({});
   });
   const paintTabs = () => {
     tabs.textContent = '';
-    /* open-project tabs, most recently active last; "+" opens the projects screen */
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', 'Open projects');
+    const homeOpen = !!(PM.ProjectsScreen && PM.ProjectsScreen.isOpen);
+    const home = h('button.project-strip-btn.project-home' + (homeOpen ? '.on' : ''), {
+      title: 'Projects', 'aria-label': 'Projects', 'aria-selected': String(homeOpen),
+      onclick: () => PM.ProjectsScreen.show(),
+    }, PM.icon('home'));
+    tabs.append(home, h('i.project-strip-divider'));
     PM.Projects.tabs().forEach(id => {
       const meta = PM.Projects.list().find(m => m.id === id);
-      const active = id === PM.proj.id;
-      const tab = h('div.tab' + (active ? '.on' : ''), {
-        title: (meta && meta.name) || id,
+      const current = id === PM.proj.id;
+      const active = current && !homeOpen;
+      const dirty = current && APP.dirty;
+      const tab = h('div.project-doc' + (active ? '.on' : '') + (dirty ? '.dirty' : ''), {
+        title: (meta && meta.name) || id, role: 'tab', tabindex: '0',
+        'aria-selected': String(active),
       },
-        h('span', (meta && meta.name) || 'Untitled'),
-        active && APP.dirty ? h('span', { style: { color: 'var(--accent)' } }, '•') : null,
-        h('button.tabx', {
+        h('i.project-doc-state', { 'aria-hidden': 'true' }),
+        h('span.project-doc-label', (meta && meta.name) || 'Untitled'),
+        h('button.project-doc-close', {
           title: 'Close project',
           onclick: (e) => { e.stopPropagation(); closeTab(id); },
         }, PM.icon('x')));
-      tab.onclick = () => { if (!active) openTab(id); };
+      tab.onclick = () => {
+        if (PM.ProjectsScreen && PM.ProjectsScreen.isOpen) PM.ProjectsScreen.hide();
+        if (!active) openTab(id);
+      };
+      tab.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tab.click(); }
+      };
+      tab.onauxclick = (e) => { if (e.button === 1) { e.preventDefault(); closeTab(id); } };
       tabs.appendChild(tab);
     });
-    const plus = h('button.tab.newtab-btn', { title: 'Projects · ⌘P', onclick: () => PM.ProjectsScreen.show() }, PM.icon('plus'));
+    const plus = h('button.project-strip-btn.project-new', { title: 'New project', 'aria-label': 'New project', onclick: () => {
+      if (PM.ProjectsScreen && PM.ProjectsScreen.isOpen) PM.ProjectsScreen.hide();
+      PM.newProject();
+    } }, PM.icon('plus'));
     tabs.appendChild(plus);
-    const ws = h('button.tab', { onpointerdown: e => workspaceMenu(e, ws) }, PM.icon('panel'), PM.WS.current.name, PM.icon('chevD'));
-    tabs.appendChild(ws);
+    requestAnimationFrame(() => {
+      const selected = tabs.querySelector('.project-doc.on');
+      if (selected) selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
   };
-  PM.bus.on('projects:tabs', paintTabs);
+  PM.bus.on('projects:tabs', paintTabs); PM.bus.on('projects:screen', paintTabs);
   right.textContent = '';
   const button = (icon, title, run) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
   right.append(
@@ -304,6 +345,11 @@ function buildTitlebar() {
       return b;
     })(),
     button('export', 'Export', () => PM.Export.dialog()),
+    (() => {
+      const b = button('panel', 'Workspace · ' + PM.WS.current.name, e => workspaceMenu(e, b));
+      PM.bus.on('workspaces', () => { b.title = 'Workspace · ' + PM.WS.current.name; });
+      return b;
+    })(),
     themeButton(button),
     button('gear', 'Workspace definition', () => PM.WS.editJSON()),
   );
@@ -383,12 +429,12 @@ function persistCurrent(withThumb) {
 PM.autosave = () => {
   APP.dirty = true;
   clearTimeout(APP.saveTimer);
-  PM.saveTimer = setTimeout(() => {
+  APP.saveTimer = setTimeout(() => {
     persistCurrent(true);
     PM.invalidate('status'); PM.bus.emit('project:saved'); PM.bus.emit('projects:tabs');
   }, 550);
 };
-['layers','project','assets'].forEach(ev => PM.bus.on(ev, PM.autosave));
+['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
 
 PM.saveProject = async () => {
   const text = PM.serialize();
@@ -516,5 +562,13 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
   PM.invalidate('all');
   PM.invalidate('status');
   if (PM.ChatRail) PM.ChatRail.init();
+  /* A brand-new registry entry has no card preview yet. Capture only after the
+     first real composition frame has painted; capturing during boot produces a
+     black placeholder even though the viewer becomes healthy a moment later. */
+  requestAnimationFrame(() => {
+    lastThumbAt = 0;
+    persistCurrent(true);
+    PM.bus.emit('projects:tabs');
+  });
 }));
 })();

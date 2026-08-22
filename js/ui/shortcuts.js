@@ -168,6 +168,11 @@ const isField = (e) => {
 };
 addEventListener('keydown', (e) => {
   if (isField(e)) {
+    /* The assistant toggle must still work while its own composer has focus. */
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l') {
+      e.preventDefault(); PM.cmd('focusChat');
+      return;
+    }
     if (e.key === 'Escape') e.target.blur();
     return;
   }

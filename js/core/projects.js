@@ -7,6 +7,7 @@ const R = {
   KEY: 'projects',          // [{id, name, at, thumb}]
   SLOT: 'project.',         // + id → serialized project
   openKey: 'openTabs',      // [id] in MRU order
+  trashKey: 'projectTrash', // metadata for recoverable deletion; slots stay intact
 };
 
 R.list = () => {
@@ -16,13 +17,23 @@ R.list = () => {
 
 R.saveList = (list) => PM.store.set(R.KEY, list);
 
+/** Accept both current save envelopes ({v, proj, ws}) and old bare projects. */
+R.unwrap = (raw) => {
+  if (!raw) return null;
+  try { if (typeof raw === 'string') raw = JSON.parse(raw); } catch (e) { return null; }
+  return raw && raw.proj && typeof raw.proj === 'object' ? raw.proj : raw;
+};
+
 /** Upsert registry metadata for a project and persist its data. */
 R.put = (proj, thumb) => {
   if (!proj || !proj.id) return;
   const meta = { id: proj.id, name: proj.name || 'Untitled', at: Date.now() };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
-  try { PM.store.set(R.SLOT + proj.id, PM.serialize()); } catch (e) { /* quota */ }
+  PM.store.set(R.trashKey, R.trashList().filter(x => x.id !== proj.id));
+  /* Serialize the project passed to us, not whichever project happens to be
+     active. This matters for rename/duplicate and keeps every slot canonical. */
+  try { PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }); } catch (e) { /* quota */ }
   return meta;
 };
 
@@ -48,11 +59,57 @@ R.get = (id) => {
     if (auto && auto.proj && auto.proj.id === id) return auto.proj;
     return null;
   }
-  try { return typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { return null; }
+  return R.unwrap(raw);
+};
+
+/** Pure boot choice: content first (open tabs, then registry), then a named
+    empty project. Anonymous empty projects never win over the welcome demo. */
+R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, legacy = null } = {}) => {
+  const ids = [...tabs, ...metas.map(m => m.id).filter(id => !tabs.includes(id))];
+  let namedEmpty = null;
+  for (const id of ids) {
+    const p = R.unwrap(get(id));
+    if (!p || typeof p !== 'object') continue;
+    if (Array.isArray(p.layers) && p.layers.length) return p;
+    if (!namedEmpty && p.name && p.name !== 'Untitled') namedEmpty = p;
+  }
+  const old = R.unwrap(legacy && legacy.proj ? legacy.proj : legacy);
+  if (old && Array.isArray(old.layers) && old.layers.length && !metas.some(m => m.id === old.id)) return old;
+  return namedEmpty;
 };
 
 R.remove = (id) => {
   R.saveList(R.list().filter(x => x.id !== id));
+  PM.store.set(R.trashKey, R.trashList().filter(x => x.id !== id));
+  try { PM.store.del(R.SLOT + id); } catch (e) { }
+};
+
+/* Recoverable project deletion. A trashed project keeps its storage slot until
+   the user explicitly chooses Delete Forever. */
+R.trashList = () => {
+  const list = PM.store.get(R.trashKey, []);
+  return Array.isArray(list) ? list : [];
+};
+R.trash = (id) => {
+  const meta = R.list().find(x => x.id === id);
+  if (!meta) return false;
+  R.saveList(R.list().filter(x => x.id !== id));
+  const trash = R.trashList().filter(x => x.id !== id);
+  trash.unshift({ ...meta, deletedAt: Date.now() });
+  PM.store.set(R.trashKey, trash);
+  R.markClosed(id);
+  return true;
+};
+R.restore = (id) => {
+  const meta = R.trashList().find(x => x.id === id);
+  if (!meta || !R.get(id)) return false;
+  PM.store.set(R.trashKey, R.trashList().filter(x => x.id !== id));
+  const clean = { ...meta, at: Date.now() }; delete clean.deletedAt;
+  R.upsertMeta(clean);
+  return true;
+};
+R.destroy = (id) => {
+  PM.store.set(R.trashKey, R.trashList().filter(x => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
 };
 

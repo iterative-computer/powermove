@@ -59,7 +59,21 @@ test('saveSection snapshots selected layers into the project library', () => {
   assert.equal(entry.name, 'Hero pair');
   assert.equal(entry.thumb.startsWith('data:image'), true, 'thumbnail captured');
   assert.deepEqual([...entry.layers.map(l => l.name)], ['A'], 'only requested layers stored');
+  assert.equal(entry.versions.length, 1, 'first snapshot is version one');
   assert.ok(p.library.sections.includes(entry), 'stored inside proj (persists with saves)');
+});
+
+test('saveVersion promotes the current selection without mutating older versions', () => {
+  const PM = libraryModel();
+  const p = baseProject(PM);
+  const a = PM.mkLayer('shape', { name: 'A' }, p);
+  const b = PM.mkLayer('text', { name: 'B' }, p);
+  p.layers.push(a, b);
+  const entry = PM.Library.saveSection('Hero', [a.id]);
+  PM.Library.saveVersion(entry.id, [b.id]);
+  assert.equal(entry.versions.length, 2);
+  assert.deepEqual([...entry.versions[0].layers.map(l => l.name)], ['A']);
+  assert.deepEqual([...entry.layers.map(l => l.name)], ['B'], 'latest version becomes insert source');
 });
 
 test('insertSection re-inserts with fresh identities, shifted to the playhead', () => {
@@ -160,4 +174,33 @@ test('rail wiring exists end to end', () => {
   assert.match(rail, /mountFloatingPanel\('chat'\)/, 'rail hosts the live chat element');
   assert.match(rail, /PM\.store\.set\('chatRail'/, 'rail state persists across boots');
   assert.match(shortcuts, /Toggle assistant/, '⌘L command toggles the rail');
+});
+
+test('assistant is a hideable left sidebar that pushes wide layouts', () => {
+  const css = utf8('css/app.css');
+  assert.match(css, /#chat-rail\{[\s\S]*left:10px/, 'rail is anchored to the left edge');
+  assert.match(css, /#chat-rail:not\(\.on\) #chat-rail-tab\{display:grid\}/, 'collapsed rail exposes its reopen tab');
+  assert.match(css, /#chat-rail-tab\{[\s\S]*left:-10px;right:auto/, 'reopen handle stays on the actual left window edge');
+  assert.match(css, /body\.chat-rail-open #body\{margin-left:/, 'open rail reserves left-side workspace');
+  assert.doesNotMatch(css, /body\.chat-rail-open #body\{margin-right:/, 'right-side push is gone');
+});
+
+test('assistant can close while its composer has keyboard focus', () => {
+  const shortcuts = utf8('js/ui/shortcuts.js');
+  const rail = utf8('js/ui/chatrail.js');
+  assert.match(shortcuts, /isField\(e\)[\s\S]*metaKey[\s\S]*toLowerCase\(\) === 'l'[\s\S]*focusChat/,
+    'Command-L is handled before focused fields return');
+  assert.match(rail, /onpointerdown:[\s\S]*ChatRail\.close/,
+    'the visible close affordance closes immediately on press');
+});
+
+test('library edits autosave and the agent digest advertises reusable work', () => {
+  assert.match(utf8('js/app.js'), /\['layers','project','assets','library'\]/, 'library mutations enter autosave');
+  assert.match(utf8('js/agent/index.js'), /GENERATIVE LIBRARY:/, 'agent receives a compact library summary');
+});
+
+test('snapshot renders in composition coordinates before thumbnail downscaling', () => {
+  const src = utf8('js/core/exporter.js');
+  assert.match(src, /renderFrameTo\(T, p\.w, p\.h\)/, 'full composition is rendered first');
+  assert.match(src, /drawImage\(full, 0, 0, cv\.width, cv\.height\)/, 'finished frame is downscaled');
 });

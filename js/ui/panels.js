@@ -279,8 +279,9 @@ PM.registerPanel('library', {
       };
 
       const layersInfo = isSection
-        ? h('div.lib-layers', ...(entry.layers || []).map(l =>
-            h('span.lyr-tag', PM.TYPE_META[l.type] ? PM.TYPE_META[l.type].label : l.type, ': ', l.name)))
+        ? h('div.lib-layers',
+            h('span.lyr-tag', `${(entry.versions || []).length || 1} version${((entry.versions || []).length || 1) === 1 ? '' : 's'}`),
+            ...(entry.layers || []).map(l => h('span.lyr-tag', PM.TYPE_META[l.type] ? PM.TYPE_META[l.type].label : l.type, ': ', l.name)))
         : null;
 
       const body = h('div.lib-detail',
@@ -293,9 +294,13 @@ PM.registerPanel('library', {
 
       PM.modal({
         title: entry.name,
-        body, width: 560,
+        body, width: 680,
         actions: [
           { label: 'Delete', run: () => { PM.Library.drop(kind, entry.id); refresh && refresh(); } },
+          ...(isSection ? [{ label: 'Save selection as new version', run: () => {
+            const ids = PM.sel && PM.sel.layers && PM.sel.layers.length ? PM.sel.layers : null;
+            PM.Library.saveVersion(entry.id, ids); refresh && refresh();
+          } }] : []),
           { label: 'Refine with assistant', pri: true, run: refine },
           { label: isSection ? 'Insert at playhead' : 'Apply look', run: () => {
               isSection ? PM.Library.insertSection(entry.id) : PM.Library.applyLook(entry.id);

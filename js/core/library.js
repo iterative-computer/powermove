@@ -5,11 +5,19 @@
 (() => {
 const PM = window.PM;
 const MAX_PER_KIND = 24;
+const MAX_VERSIONS = 12;
+const clone = (value) => JSON.parse(JSON.stringify(value));
 
 const lib = () => {
   if (!PM.proj.library || typeof PM.proj.library !== 'object') PM.proj.library = { sections: [], looks: [] };
   if (!Array.isArray(PM.proj.library.sections)) PM.proj.library.sections = [];
   if (!Array.isArray(PM.proj.library.looks)) PM.proj.library.looks = [];
+  PM.proj.library.sections.forEach(s => {
+    if (!Array.isArray(s.versions)) s.versions = [];
+    if (!s.versions.length && Array.isArray(s.layers)) {
+      s.versions.push({ layers: clone(s.layers), thumb: s.thumb || null, at: s.at || Date.now() });
+    }
+  });
   return PM.proj.library;
 };
 
@@ -26,18 +34,35 @@ function trim(kind) {
 function saveSection(name, ids) {
   const layers = PM.proj.layers.filter(l => !ids || ids.includes(l.id));
   if (!layers.length) { PM.toast('Nothing to save — no layers'); return null; }
+  const at = Date.now(), preview = thumb(), snapshot = clone(layers);
   const entry = {
     id: PM.uid('S'),
     name: name || ('Section ' + (lib().sections.length + 1)),
-    at: Date.now(),
-    thumb: thumb(),
+    at,
+    thumb: preview,
     comments: [],
-    layers: JSON.parse(JSON.stringify(layers)),
+    layers: snapshot,
+    versions: [{ layers: clone(snapshot), thumb: preview, at }],
   };
   lib().sections.unshift(entry);
   trim('sections');
   PM.bus.emit('library');
   return entry;
+}
+
+/** Save the current selection (or full composition) as the newest version. */
+function saveVersion(id, ids) {
+  const s = lib().sections.find(x => x.id === id);
+  if (!s) return null;
+  const layers = PM.proj.layers.filter(l => !ids || ids.includes(l.id));
+  if (!layers.length) { PM.toast('Nothing to save — no layers'); return null; }
+  const at = Date.now(), preview = thumb(), snapshot = clone(layers);
+  s.layers = snapshot; s.thumb = preview; s.at = at;
+  s.versions.push({ layers: clone(snapshot), thumb: preview, at });
+  if (s.versions.length > MAX_VERSIONS) s.versions.splice(0, s.versions.length - MAX_VERSIONS);
+  PM.bus.emit('library');
+  PM.toast(`Saved version ${s.versions.length} of "${s.name}"`);
+  return s;
 }
 
 /** Save a shader layer's code + uniform values as a Look. */
@@ -128,5 +153,5 @@ function comment(kind, id, text) {
   return e.comments;
 }
 
-PM.Library = { all: lib, saveSection, saveLook, insertSection, applyLook, drop, comment };
+PM.Library = { all: lib, saveSection, saveVersion, saveLook, insertSection, applyLook, drop, comment };
 })();

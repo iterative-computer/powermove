@@ -5,7 +5,8 @@
   "description": "A GPU-native, AI-authored motion editor for macOS.",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "build:mac": "./scripts/build-macos-app.sh"
+    "build:mac": "./scripts/build-macos-app.sh",
+    "build:mac:release": "./scripts/build-macos-app.sh --release"
   },
   "engines": {
     "node": ">=20"

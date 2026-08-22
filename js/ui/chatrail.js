@@ -1,4 +1,4 @@
-/* Powermove — assistant rail. A collapsible sidebar that hosts the live chat
+/* Powermove — assistant rail. A collapsible left sidebar that hosts the live chat
    panel outside the dock system, so the AI is always one keystroke away in any
    workspace. The panel element is mounted once and owned by the rail; workspace
    normalization strips docked chat panels so ownership never fights. */
@@ -12,19 +12,23 @@ PM.ChatRail = {
     ensure();
     R.open = true;
     R.el.classList.add('on');
+    document.body.classList.add('chat-rail-open');
     PM.store.set('chatRail', true);
     if (focus !== false) requestAnimationFrame(() => {
       const inp = PM.$('#cinput');
       if (inp) inp.focus();
     });
     PM.bus.emit('chatrail');
+    PM.bus.emit('layout');
   },
   close() {
     R.open = false;
     if (R.el) R.el.classList.remove('on');
+    document.body.classList.remove('chat-rail-open');
     PM.store.set('chatRail', false);
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     PM.bus.emit('chatrail');
+    PM.bus.emit('layout');
   },
   /* boot: restore last state without stealing focus */
   init() {
@@ -43,7 +47,8 @@ function ensure() {
   R.body = h('div.chat-rail-body');
   /* the hosted chat panel carries its own header; only a close affordance overlays */
   const closeBtn = h('button.chat-rail-close', {
-    title: 'Collapse assistant', onclick: () => PM.ChatRail.close(),
+    title: 'Collapse assistant', 'aria-label': 'Collapse assistant',
+    onpointerdown: (e) => { e.preventDefault(); PM.ChatRail.close(); },
   }, PM.icon('x'));
   const inner = h('div.chat-rail-inner', closeBtn, R.body);
   R.el = h('div#chat-rail', tab, inner);

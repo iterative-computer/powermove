@@ -60,6 +60,13 @@ A.digest = (opt = {}) => {
     lines.push(`MEDIA: ${Object.values(p.assets).map(a => `${a.name}(${a.kind}${a.dur ? ' ' + PM.round(a.dur, 1) + 's' : ''})`).join(', ')}`);
   if (p.markers.length) lines.push(`MARKERS: ${p.markers.map(m => `${m.name}@${PM.round(m.t, 2)}s`).join(' ')}`);
   if (p.notes) lines.push(`DIRECTION NOTES: ${p.notes}`);
+  if (p.library && (p.library.sections || p.library.looks)) {
+    const sections = Array.isArray(p.library.sections) ? p.library.sections : [];
+    const looks = Array.isArray(p.library.looks) ? p.library.looks : [];
+    lines.push(`GENERATIVE LIBRARY: ${sections.length} sections, ${looks.length} looks`);
+    if (sections.length) lines.push(`  sections: ${sections.map(s => `"${s.name}" (${(s.layers || []).length} layers, ${(s.versions || []).length || 1} versions)`).join(', ')}`);
+    if (looks.length) lines.push(`  looks: ${looks.map(k => `"${k.name}"`).join(', ')}`);
+  }
   lines.push(`WORKSPACE "${ws.name}" density:${ws.density} accent:${(ws.theme || {}).accent || 'default'}`);
   lines.push(`  docks: ${ws.layout.docks.map(d => `${d.id}[${d.panels.map(x => x.id).join(',')}]`).join(' ')}`);
   lines.push(`  features: ${Object.entries(ws.features || {}).map(([k, v]) => k + '=' + v).join(' ')}`);
