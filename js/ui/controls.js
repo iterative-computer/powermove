@@ -2,6 +2,19 @@
 (() => {
 const PM = window.PM, h = PM.h;
 
+/* Controls may receive `command(value)`. That makes the same visual control
+   usable by the inspector, agent-authored panels, and future generated UI
+   without giving the control a private mutation path. */
+const hasCommand = (opt) => !!(opt && opt.command);
+const sourceCommand = (opt, value) => typeof opt.command === 'function' ? opt.command(value) : { ...opt.command, value };
+const begin = (opt, label) => hasCommand(opt) ? PM.Edit.begin(label, { origin: opt.origin || 'interface' }) : PM.hist.begin(label);
+const write = (set, value, opt) => hasCommand(opt) ? PM.Edit.dispatch(sourceCommand(opt, value)) : set(value);
+const commit = (opt, label) => hasCommand(opt) ? PM.Edit.commit(label) : PM.hist.commit(label);
+const cancel = (opt) => hasCommand(opt) ? PM.Edit.cancel() : PM.hist.cancel();
+const once = (set, value, opt, label) => hasCommand(opt)
+  ? PM.Edit.apply(sourceCommand(opt, value), { label, origin: opt.origin || 'interface' })
+  : PM.hist.do(label, () => set(value));
+
 /** Scrubbable numeric field. opts: {min,max,step,unit,precision,onInput,onCommit,label} */
 PM.numField = (get, set, opt = {}) => {
   const el = h('div.num' + (opt.link ? '.link' : ''), { title: opt.label || '' });
@@ -19,7 +32,7 @@ PM.numField = (get, set, opt = {}) => {
     if (el.classList.contains('editing')) return;
     if (e.button !== 0) return;
     let start = get(), moved = false;
-    PM.hist.begin(opt.label || 'Adjust');
+    begin(opt, opt.label || 'Adjust');
     PM.drag(e, {
       cursor: 'ew-resize',
       move: (dx, dy, ev) => {
@@ -30,11 +43,11 @@ PM.numField = (get, set, opt = {}) => {
         let v = start + dx * step * (opt.speed || .5);
         if (opt.min != null) v = Math.max(opt.min, v);
         if (opt.max != null) v = Math.min(opt.max, v);
-        set(PM.round(v, 3)); sync();
+        write(set, PM.round(v, 3), opt); sync();
       },
       up: () => {
-        if (!moved) { edit(); PM.hist.cancel(); }
-        else PM.hist.commit(opt.label || 'Adjust');
+        if (!moved) { edit(); cancel(opt); }
+        else commit(opt, opt.label || 'Adjust');
       },
     });
   });
@@ -50,7 +63,7 @@ PM.numField = (get, set, opt = {}) => {
         let v = inp.value.trim();
         let n = /^[-+*/]/.test(v) ? evalSafe(get() + v) : evalSafe(v);
         if (isFinite(n)) {
-          PM.hist.do(opt.label || 'Set value', () => set(PM.round(n, 4)));
+          once(set, PM.round(n, 4), opt, opt.label || 'Set value');
         }
       }
       sync();
@@ -84,8 +97,8 @@ PM.colorField = (get, set, opt = {}) => {
   wrap.appendChild(inp);
   wrap.sync = () => { sw.style.background = safe(); val.textContent = safe().toUpperCase(); };
   let live = false;
-  inp.addEventListener('input', () => { if (!live) { PM.hist.begin(opt.label || 'Color'); live = true; } set(inp.value); wrap.sync(); });
-  inp.addEventListener('change', () => { PM.hist.commit(opt.label || 'Color'); live = false; });
+  inp.addEventListener('input', () => { if (!live) { begin(opt, opt.label || 'Color'); live = true; } write(set, inp.value, opt); wrap.sync(); });
+  inp.addEventListener('change', () => { commit(opt, opt.label || 'Color'); live = false; });
   wrap.addEventListener('pointerdown', (e) => { e.stopPropagation(); inp.click(); });
   return wrap;
 };
@@ -95,7 +108,7 @@ PM.toggleField = (get, set, opt = {}) => {
   t.sync = () => t.classList.toggle('on', !!get());
   t.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
-    PM.hist.do(opt.label || 'Toggle', () => set(!get()));
+    once(set, !get(), opt, opt.label || 'Toggle');
     t.sync(); PM.invalidate();
   });
   return t;
@@ -109,7 +122,7 @@ PM.selectField = (get, set, options, opt = {}) => {
     PM.menu(b, options.map(o => {
       const v = typeof o === 'string' ? o : o.v;
       const l = typeof o === 'string' ? o : o.label;
-      return { label: l, on: v === get(), run: () => { PM.hist.do(opt.label || 'Change', () => set(v)); b.sync(); PM.invalidate(); opt.onChange && opt.onChange(v); } };
+      return { label: l, on: v === get(), run: () => { once(set, v, opt, opt.label || 'Change'); b.sync(); PM.invalidate(); opt.onChange && opt.onChange(v); } };
     }), { right: true });
   });
   return b;
@@ -122,9 +135,9 @@ PM.textField = (get, set, opt = {}) => {
   });
   inp.sync = () => { if (document.activeElement !== inp) inp.value = get() == null ? '' : String(get()); };
   let live = false;
-  inp.addEventListener('focus', () => { PM.hist.begin(opt.label || 'Edit text'); live = true; });
-  inp.addEventListener('input', () => { set(inp.value); PM.invalidate('render'); });
-  inp.addEventListener('blur', () => { if (live) { PM.hist.commit(opt.label || 'Edit text'); live = false; } });
+  inp.addEventListener('focus', () => { begin(opt, opt.label || 'Edit text'); live = true; });
+  inp.addEventListener('input', () => { write(set, inp.value, opt); PM.invalidate('render'); });
+  inp.addEventListener('blur', () => { if (live) { commit(opt, opt.label || 'Edit text'); live = false; } });
   inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); });
   return inp;
 };

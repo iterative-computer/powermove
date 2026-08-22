@@ -9,15 +9,14 @@ PM.cmd = (id, ...a) => { const c = C[id]; if (c) return c.run(...a); console.war
 
 const center = () => ({ 'position.x': PM.proj.w / 2, 'position.y': PM.proj.h / 2 });
 function addLayer(type, opts = {}) {
-  return PM.hist.do('New ' + type, () => {
-    const L = PM.mkLayer(type, opts);
-    L.from = PM.snapF(PM.time, PM.proj.fps);
-    L.dur = Math.max(1, PM.proj.dur - L.from);
-    PM.addLayer(L, 0);
-    PM.selectLayers(L.id);
-    PM.invalidate();
-    return L;
-  });
+  const from = opts.from == null ? PM.snapF(PM.time, PM.proj.fps) : opts.from;
+  const result = PM.Edit.apply({
+    type: 'add_layer', layerType: type, name: opts.name,
+    from, duration: opts.dur == null ? Math.max(1, PM.proj.dur - from) : opts.dur,
+    content: opts.d || {}, properties: opts.p || {}, color: opts.color, select: true,
+  }, { label: 'New ' + type, origin: 'command' });
+  const id = result.ok && result.data.results[0].data.id;
+  return id ? PM.L(id) : null;
 }
 PM.addLayerCmd = addLayer;
 
@@ -34,8 +33,11 @@ def('toolZoom', 'Zoom tool', 'Z', () => PM.setTool('zoom'), 'Tool');
 def('addFromAsset', 'Add layer from asset', null, (id) => {
   const a = PM.proj.assets[id]; if (!a) return;
   const type = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
-  const L = addLayer(type, { name: a.name, d: { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h } });
-  if (a.dur) L.dur = Math.min(a.dur, PM.proj.dur - L.from);
+  const from = PM.snapF(PM.time, PM.proj.fps);
+  const L = addLayer(type, {
+    name: a.name, from, dur: a.dur ? Math.min(a.dur, PM.proj.dur - from) : undefined,
+    d: { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h },
+  });
   return L;
 }, 'Create');
 
@@ -46,11 +48,13 @@ def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () =>
   sels.forEach(L => { const c = PM.cloneLayer(L); PM.proj.layers.splice(PM.proj.layers.indexOf(L), 0, c); ids.push(c.id); });
   PM.bus.emit('layers'); PM.selectLayers(ids);
 }), 'Edit');
-def('delete', 'Delete layers', '⌫', () => PM.hist.do('Delete', () => {
-  if (!PM.sel.keys.length) { PM.removeLayers(PM.sel.layers); return; }
+def('delete', 'Delete layers', '⌫', () => {
+  if (!PM.sel.keys.length) return PM.Edit.apply({ type: 'delete_layers', targets: PM.sel.layers }, { label: 'Delete', origin: 'command' });
+  return PM.hist.do('Delete', () => {
   PM.selLayers().forEach(L => PM.allProps(L).forEach(p => { p.prop.kf = p.prop.kf.filter(k => !PM.sel.keys.some(s => s.i === k.i)); }));
   PM.sel.keys = []; PM.touch();
-}), 'Edit');
+  });
+}, 'Edit');
 def('split', 'Split at playhead', '⌘⇧D', () => PM.hist.do('Split', () => {
   PM.selLayers().forEach(L => {
     if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
@@ -104,9 +108,9 @@ def('nextFrame', 'Next frame', '→', () => PM.step(1), 'Transport');
 def('prevFrame', 'Previous frame', '←', () => PM.step(-1), 'Transport');
 def('nextEdge', 'Next edge', '⇧→', () => PM.setTime(PM.TL.nextEdge()), 'Transport');
 def('prevEdge', 'Previous edge', '⇧←', () => PM.setTime(PM.TL.prevEdge()), 'Transport');
-def('workIn', 'Work area in', 'B', () => PM.hist.do('Work area', () => { PM.proj.work[0] = PM.time; PM.invalidate('timeline'); }), 'Transport');
-def('workOut', 'Work area out', 'N', () => PM.hist.do('Work area', () => { PM.proj.work[1] = PM.time; PM.invalidate('timeline'); }), 'Transport');
-def('marker', 'Add marker', '*', () => PM.hist.do('Marker', () => { PM.proj.markers.push({ t: PM.time, name: 'M' + (PM.proj.markers.length + 1) }); PM.invalidate('timeline'); }), 'Transport');
+def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'command' }), 'Transport');
+def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
+def('marker', 'Add marker', '*', () => PM.Edit.apply({ type: 'add_marker', time: PM.time }, { label: 'Marker', origin: 'command' }), 'Transport');
 
 /* ── reveal properties (AE muscle memory) ──────────────── */
 const reveal = (keys) => () => {

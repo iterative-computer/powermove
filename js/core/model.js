@@ -126,6 +126,8 @@ PM.mkProject = (o = {}) => ({
   markers: [],
   work: [0, o.dur || 10],
   params: {},         // agent/workspace-exposed scene parameters
+  revision: 0,
+  edits: [],          // shared UI/agent transaction provenance
   created: Date.now(),
 });
 

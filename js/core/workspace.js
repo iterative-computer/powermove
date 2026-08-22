@@ -346,30 +346,85 @@ function registerCustom(w) {
       size: cp.size || 200,
       build(body) {
         const wrap = h('div.insp');
+        const syncs = [];
+        let offs = [];
+        const sync = () => {
+          if (!body.isConnected) { offs.forEach(off => off()); offs = []; return; }
+          syncs.forEach(sync => { try { sync(); } catch (e) { } });
+        };
+        offs = ['draw:ui', 'project', 'history'].map(event => PM.bus.on(event, sync));
         body.appendChild(wrap);
         if (cp.note) wrap.appendChild(h('div', { style: { color: 'var(--tx-3)', fontSize: '11.5px', lineHeight: 1.6, padding: '2px 4px 8px' } }, cp.note));
         (cp.controls || []).forEach(ct => {
           if (ct.type === 'button') {
             wrap.appendChild(h('button.chip', {
               style: { width: '100%', justifyContent: 'center', height: '28px', marginBottom: '4px' },
-              onclick: () => { if (ct.cmd) PM.cmd(ct.cmd); else if (ct.prompt) PM.Agent.send(ct.prompt); },
+              onclick: () => {
+                if (Array.isArray(ct.commands)) PM.Edit.apply(ct.commands, { label: ct.label, origin: 'generated-ui' });
+                else if (ct.cmd) PM.cmd(ct.cmd);
+                else if (ct.prompt) PM.Agent.send(ct.prompt);
+              },
             }, ct.label));
             return;
           }
-          const param = ensureParam(ct);
-          if (ct.type === 'color') wrap.appendChild(PM.row(ct.label, PM.colorField(() => param.value, v => { param.value = v; applyParam(param); }, { label: ct.label })));
-          else if (ct.type === 'toggle') wrap.appendChild(PM.row(ct.label, PM.toggleField(() => param.value, v => { param.value = v; applyParam(param); }, { label: ct.label })));
-          else if (ct.type === 'select') wrap.appendChild(PM.row(ct.label, PM.selectField(() => param.value, v => { param.value = v; applyParam(param); }, ct.options || [], { label: ct.label })));
+          const binding = sourceBinding(ct);
+          const param = binding ? null : ensureParam(ct);
+          /* History may restore the project object. Resolve generated scene
+             parameters by stable name so the mounted control follows undo,
+             redo, agent edits, and direct edits to the current source. */
+          const currentParam = () => PM.proj.params[param.name] || param;
+          const get = binding ? binding.get : () => currentParam().value;
+          const set = binding ? () => {} : v => { const active = currentParam(); active.value = v; applyParam(active); };
+          const edit = binding ? {
+            label: ct.label, origin: 'generated-ui', command: binding.command,
+          } : {
+            label: ct.label, origin: 'generated-ui',
+            command: (value) => ({ type: 'set_scene_parameter', name: param.name, value }),
+          };
+          let field;
+          if (ct.type === 'color') field = PM.colorField(get, set, edit);
+          else if (ct.type === 'toggle') field = PM.toggleField(get, set, edit);
+          else if (ct.type === 'select') field = PM.selectField(get, set, ct.options || [], edit);
           else {
-            const f = PM.numField(() => param.value, v => { param.value = v; applyParam(param); },
-              { label: ct.label, min: ct.min, max: ct.max, step: ct.step || ((ct.max - ct.min) / 100) || .01, precision: 3, unit: ct.unit });
-            PM.Inspector.syncs.push(f.sync);
-            wrap.appendChild(PM.row(ct.label, f));
+            field = PM.numField(get, set,
+              { ...edit, min: ct.min, max: ct.max, step: ct.step || ((ct.max - ct.min) / 100) || .01, precision: 3, unit: ct.unit });
           }
+          if (field.sync) syncs.push(field.sync);
+          wrap.appendChild(PM.row(ct.label, field));
         });
       },
     });
   });
+}
+function sourceBinding(ct) {
+  const target = ct.target || (ct.binding && ct.binding.target);
+  const path = ct.path || (ct.binding && ct.binding.path);
+  if (!target || !path) return null;
+  const layer = () => target === '$selection' || target === 'selection' ? PM.firstSel() : (PM.L(target) || PM.byName(target));
+  const fallback = ct.def;
+  if (path.startsWith('content.')) {
+    const key = path.slice('content.'.length);
+    return {
+      get: () => { const L = layer(); return L && L.d[key] !== undefined ? L.d[key] : fallback; },
+      command: (value) => ({ type: 'set_content', target, patch: { [key]: value } }),
+    };
+  }
+  if (path.startsWith('properties.') || path.startsWith('transform.')) {
+    const channel = path.replace(/^properties\./, '').replace(/^transform\./, '');
+    return {
+      get: () => { const L = layer(); const p = L && PM.findProp(L, channel); return L && p ? PM.evP(L, p, PM.time, channel) : fallback; },
+      command: (value) => ({ type: 'set_property', target, path: channel, value, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' }),
+    };
+  }
+  if (path.startsWith('layer.')) {
+    const key = path.slice('layer.'.length);
+    const sourceKey = ({ visible: 'on', locked: 'lock', duration: 'dur', motionBlur: 'mblur' })[key] || key;
+    return {
+      get: () => { const L = layer(); return L && L[sourceKey] !== undefined ? L[sourceKey] : fallback; },
+      command: (value) => ({ type: 'set_layer', target, patch: { [key]: value } }),
+    };
+  }
+  return null;
 }
 function ensureParam(ct) {
   const name = ct.param || ct.label;
