@@ -38,7 +38,8 @@ function buildPanel(spec, dock) {
   const hdr = h('header');
   const grip = h('span.grip', { title: 'Drag to move · right-click for options' }, PM.icon('grip'));
   const title = h('span.ptitle', spec.title || def.title);
-  hdr.append(grip, title, h('span.sp'));
+  const options = h('button.panel-options', { title: `${def.title} options`, 'aria-label': `${def.title} panel options` }, PM.icon('more'));
+  hdr.append(grip, title, h('span.sp'), options);
   el.appendChild(hdr);
 
   let body = h('div.body');
@@ -107,6 +108,7 @@ function buildPanel(spec, dock) {
     const current = liveLocation();
     if (current && current.dock && current.spec) panelMenu(e, current.spec, current.dock);
   };
+  options.addEventListener('click', openPanelMenu);
   hdr.addEventListener('contextmenu', (e) => {
     if (spec.id === 'chat') { e.preventDefault(); return; }
     openPanelMenu(e);
@@ -138,6 +140,30 @@ L.resolveDropIndex = (fromDockId, fromIndex, toDockId, index) => {
   if (toDockId !== fromDockId) return index;
   const adj = index > fromIndex ? index - 1 : index;
   return adj === fromIndex ? null : adj;
+};
+
+/** Geometry-only drop targeting. Dock rectangles are expanded equally on all
+    sides, so top/bottom placement is as forgiving as crossing into left/right
+    docks. Panel centers divide the vertical insertion slots; the gaps and dock
+    edges therefore remain large targets instead of precision-only lines. */
+L.hitTestDockPlacement = (docks, x, y, tolerance = 28) => {
+  let best = null;
+  for (const dock of docks || []) {
+    const r = dock.rect;
+    if (!r || x < r.left - tolerance || x > r.right + tolerance || y < r.top - tolerance || y > r.bottom + tolerance) continue;
+    const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+    const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    const distance = dx * dx + dy * dy;
+    if (!best || distance < best.distance) best = { dock, distance };
+  }
+  if (!best) return null;
+  const panels = best.dock.panels || [];
+  let index = panels.length;
+  for (let i = 0; i < panels.length; i++) {
+    const r = panels[i].rect;
+    if (r && y < r.top + r.height / 2) { index = i; break; }
+  }
+  return { dockId: best.dock.id, index };
 };
 
 let dragState = null;
@@ -238,41 +264,28 @@ const dockPanels = (dockEl) =>
 function updateDropTarget(ev) {
   const preview = dragState.preview;
   dragState.dropTarget = null;
-  const el = document.elementFromPoint(ev.clientX, ev.clientY);
-  const dockEl = el && el.closest('.dock');
-  if (!dockEl) {
+  const docks = [...document.querySelectorAll('#body > .dock')].map(el => ({
+    id: el.id.replace('dock-', ''), el, rect: el.getBoundingClientRect(),
+    panels: dockPanels(el).map(panel => ({ el: panel, rect: panel.getBoundingClientRect() })),
+  }));
+  const target = L.hitTestDockPlacement(docks, ev.clientX, ev.clientY);
+  if (!target) {
     preview.classList.remove('on');
     dragState.targetKey = '';
     dragState.hoverPanel = null;
     dragState.destination.textContent = 'Not a drop zone';
     return;
   }
-  const dockId = dockEl.id.replace('dock-', '');
-  /* find insertion index from hovered panel (preview never counts as a panel) */
-  const panelEl = el.closest('.panel');
-  let index = null;
-  if (panelEl && dockEl.contains(panelEl)) {
-    const panels = dockPanels(dockEl);
-    const i = panels.indexOf(panelEl);
-    const r = panelEl.getBoundingClientRect();
-    const midpoint = r.top + r.height / 2;
-    let before = ev.clientY < midpoint;
-    /* Keep the current side inside a narrow midpoint band. Tiny pointer noise
-       should not make the destination flip between before/after every frame. */
-    if (dragState.hoverPanel && dragState.hoverPanel.el === panelEl && Math.abs(ev.clientY - midpoint) < 8) {
-      before = dragState.hoverPanel.before;
-    }
-    dragState.hoverPanel = { el: panelEl, before };
-    index = before ? i : i + 1;
-    const title = PM.PANELS[panelEl.dataset.panel]?.title || 'panel';
-    dragState.destination.textContent = (before ? 'Before ' : 'After ') + title;
-  } else {
-    dragState.hoverPanel = null;
-    index = dockPanels(dockEl).length;
-    dragState.destination.textContent = 'End of ' + dockLabel(dockId);
-  }
-  dragState.dropTarget = { dockId, index };
-  placePreview(preview, dockEl, index);
+  const dock = docks.find(item => item.id === target.dockId);
+  const dockEl = dock.el;
+  const panels = dock.panels;
+  const before = panels[target.index];
+  const after = target.index ? panels[target.index - 1] : null;
+  if (before) dragState.destination.textContent = 'Above ' + (PM.PANELS[before.el.dataset.panel]?.title || 'panel');
+  else if (after) dragState.destination.textContent = 'Below ' + (PM.PANELS[after.el.dataset.panel]?.title || 'panel');
+  else dragState.destination.textContent = 'Place in ' + dockLabel(target.dockId);
+  dragState.dropTarget = target;
+  placePreview(preview, dockEl, target.index);
 }
 
 /** Show a fixed placement bar between panels. It is deliberately outside the
@@ -333,16 +346,19 @@ function panelMenu(e, spec, dock) {
   const items = [
     { header: def.title },
     !NO_POPOUT.has(spec.id) ? { label: 'Pop out to window', run: () => PM.Popout.open(spec.id) } : null,
-    { label: 'Hide panel', run: () => PM.WS.mutate(w => { removePanel(w, spec.id); }) },
+    spec.id !== 'viewer' ? { label: 'Hide panel', run: () => PM.WS.mutate(w => hidePanel(w, spec.id)) } : null,
     '-',
     { header: 'Move to' },
-    { label: 'Left dock', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'left')) },
-    { label: 'Center dock', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'center')) },
-    { label: 'Right dock', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'right')) },
+    { label: 'Left dock', disabled: dock.id === 'left', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'left')) },
+    { label: 'Center dock', disabled: dock.id === 'center', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'center')) },
+    { label: 'Right dock', disabled: dock.id === 'right', run: () => PM.WS.mutate(w => movePanel(w, spec.id, 'right')) },
     '-',
     { header: 'Add panel' },
-    ...Object.values(PM.PANELS).filter(p => !hasPanel(ws, p.id) && p.id !== 'toolbar').map(p => ({
+    ...Object.values(PM.PANELS).filter(p => !hasPanel(ws, p.id) && !(ws.hiddenPanels || []).some(item => item.id === p.id) && p.id !== 'toolbar').map(p => ({
       label: p.title, run: () => PM.WS.mutate(w => addPanel(w, p.id, dock.id)),
+    })),
+    ...(ws.hiddenPanels || []).filter(item => PM.PANELS[item.id]).map(item => ({
+      label: `Restore ${PM.PANELS[item.id].title}`, run: () => PM.WS.mutate(w => restorePanel(w, item.id)),
     })),
   ].filter(Boolean);
   PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
@@ -352,12 +368,42 @@ function panelMenu(e, spec, dock) {
 const eachDock = (ws, fn) => ws.layout.docks.forEach(fn);
 const hasPanel = (ws, id) => ws.layout.docks.some(d => d.panels.some(p => p.id === id));
 function removePanel(ws, id) { eachDock(ws, d => { d.panels = d.panels.filter(p => p.id !== id); }); }
+function hidePanel(ws, id) {
+  if (id === 'viewer') return false;
+  const found = findPanel(ws, id); if (!found) return false;
+  const index = found.dock.panels.indexOf(found.spec);
+  ws.hiddenPanels = (ws.hiddenPanels || []).filter(item => item.id !== id);
+  ws.hiddenPanels.push({
+    id, dockId: found.dock.id, index, dockIndex: ws.layout.docks.indexOf(found.dock), spec: { ...found.spec },
+    dock: { id: found.dock.id, size: found.dock.size, flex: found.dock.flex },
+  });
+  found.dock.panels.splice(index, 1);
+  return true;
+}
+function restorePanel(ws, id) {
+  const hidden = (ws.hiddenPanels || []).find(item => item.id === id);
+  if (!hidden) return false;
+  if (hasPanel(ws, id)) { ws.hiddenPanels = ws.hiddenPanels.filter(item => item.id !== id); return true; }
+  let dock = ws.layout.docks.find(item => item.id === hidden.dockId);
+  if (!dock) {
+    dock = { id: hidden.dockId, panels: [] };
+    if (hidden.dock?.size) dock.size = hidden.dock.size;
+    if (hidden.dock?.flex) dock.flex = true;
+    const dockIndex = Math.max(0, Math.min(hidden.dockIndex ?? ws.layout.docks.length, ws.layout.docks.length));
+    ws.layout.docks.splice(dockIndex, 0, dock);
+  }
+  const index = Math.max(0, Math.min(hidden.index, dock.panels.length));
+  dock.panels.splice(index, 0, { ...hidden.spec, id });
+  ws.hiddenPanels = ws.hiddenPanels.filter(item => item.id !== id);
+  return true;
+}
 function findPanel(ws, id) {
   for (const d of ws.layout.docks) { const s = d.panels.find(p => p.id === id); if (s) return { dock: d, spec: s }; }
   return null;
 }
 function addPanel(ws, id, dockId) {
   removePanel(ws, id);
+  ws.hiddenPanels = (ws.hiddenPanels || []).filter(item => item.id !== id);
   const d = ws.layout.docks.find(d => d.id === (dockId || 'right')) || ws.layout.docks[0];
   d.panels.push({ id, flex: d.panels.length === 0 });
   if (d.hidden) d.hidden = false;
@@ -372,7 +418,8 @@ function insertPanel(ws, spec, dockId, index) {
   if (d.hidden) d.hidden = false;
 }
 function movePanel(ws, id, dockId) { addPanel(ws, id, dockId); }
-L.removePanel = removePanel; L.addPanel = addPanel; L.hasPanel = hasPanel; L.findPanel = findPanel;
+L.removePanel = removePanel; L.hidePanel = hidePanel; L.restorePanel = restorePanel;
+L.addPanel = addPanel; L.hasPanel = hasPanel; L.findPanel = findPanel;
 
 /* ── splitters ─────────────────────────────────────────── */
 /* A splitter always resizes the nearest *fixed* pane and leaves the flex pane
@@ -481,7 +528,7 @@ L.apply = (ws) => {
     else el.style.flex = '0 0 ' + (dock.size || (dock.id === 'right' ? 300 : 250)) + 'px';
     const built = [];
     dock.panels.forEach((spec) => {
-      const p = buildPanel(spec, dock);
+      const p = PM.Popout?.isOpen(spec.id) ? detachedPlaceholder(spec) : buildPanel(spec, dock);
       if (!p) return;
       if (built.length) {
         const prev = built[built.length - 1];
@@ -509,6 +556,13 @@ L.apply = (ws) => {
     requestAnimationFrame(() => { PM.bus.emit('layout:applied'); PM.invalidate(); });
   });
 };
+
+function detachedPlaceholder(spec) {
+  const def = PM.PANELS[spec.id];
+  return h('div.panel.detached-placeholder', { 'data-panel': spec.id },
+    h('div', PM.icon('panelL'), h('b', def?.title || spec.id), h('span', 'Open in a separate window'),
+      h('button.btn', { onclick: () => PM.Popout.dock(spec.id) }, 'Return to layout')));
+}
 
 function applyTheme(t) {
   const r = document.documentElement.style;
@@ -545,25 +599,27 @@ L.refresh = (id) => {
 };
 
 /* ── pop-out panels ────────────────────────────────────── */
-/* Reparents the live panel element into a real child window opened via window.open
-   (WKWebView createWebViewWith). Same JS realm, same element — all listeners, bus
-   subscriptions and build state survive. Styles are inlined because the child webview
-   has no file: read access. Canvas panels (viewer/timeline) stay docked. */
+/* Opens a real child window while retaining one authoritative live panel in the main
+   document. WebKit does not permit adopting DOM nodes across separate WKWebViews, so
+   the child is a synchronized interaction mirror: its controls forward to the hidden
+   source panel and a MutationObserver reflects source updates back into the child.
+   Canvas panels (viewer/timeline) stay docked. */
 PM.Popout = {
   wins: {},
+  isOpen(id) { return !!this.wins[id] && !this.wins[id].window.closed; },
   open(id) {
     const def = PM.PANELS[id]; if (!def) return;
     if (NO_POPOUT.has(id)) { PM.toast(def.title + ' stays docked'); return; }
     const inst = PM.panelInst[id];
     if (!inst || !inst.el) { PM.toast('Panel not mounted'); return; }
-    if (this.wins[id] && !this.wins[id].closed) { this.wins[id].focus(); return; }
+    if (this.isOpen(id)) { this.wins[id].window.focus(); return true; }
 
     const w = window.open('', 'pm-popout-' + id, 'width=480,height=620,left=160,top=120');
-    if (!w) { PM.toast('Pop-out blocked'); return; }
-    this.wins[id] = w;
+    if (!w) { PM.toast('Pop-out blocked'); return false; }
+    this.wins[id] = { window: w, timer: 0 };
     const el = inst.el;
 
-    const setup = () => {
+    const setup = async () => {
       if (w.closed) return;
       const d = w.document;
       if (!d || !d.body) { setTimeout(setup, 30); return; }
@@ -571,49 +627,108 @@ PM.Popout = {
       /* inline every stylesheet rule so the popout needs no file access */
       let css = 'html,body{height:100%;margin:0;overflow:hidden;background:var(--bg-panel)}';
       for (const ss of document.styleSheets) {
+        if (ss.href) {
+          try {
+            const response = await fetch(ss.href);
+            if (response.ok) { css += await response.text(); continue; }
+          } catch (e) { }
+        }
         try { for (const r of ss.cssRules) css += r.cssText + '\n'; } catch (e) { }
       }
       const st = d.createElement('style'); st.textContent = css; d.head.appendChild(st);
       d.documentElement.dataset.density = document.documentElement.dataset.density;
+      d.documentElement.dataset.theme = document.documentElement.dataset.theme;
+      d.documentElement.style.cssText = document.documentElement.style.cssText;
       d.body.style.cssText = 'display:flex;flex-direction:column;background:var(--bg-panel)';
 
       /* popout titlebar with a dock-back button */
-      const bar = h('div.pop-bar',
-        h('span.pop-title', def.title),
-        h('span.sp'),
-        h('button.iconbtn', { title: 'Dock back in main window', onclick: () => PM.Popout.dock(id) }, PM.icon('panelL')));
-      d.body.appendChild(bar);
+      const bar = d.createElement('div'); bar.className = 'pop-bar';
+      const title = d.createElement('span'); title.className = 'pop-title'; title.textContent = def.title;
+      const space = d.createElement('span'); space.className = 'sp';
+      const dock = d.createElement('button'); dock.className = 'btn'; dock.title = 'Dock back in main window';
+      dock.textContent = 'Return to layout'; dock.onclick = () => PM.Popout.dock(id);
+      bar.append(title, space, dock); d.body.appendChild(bar);
 
-      /* move the live panel into the popout */
-      el.classList.add('popped');
-      d.body.appendChild(el);
+      /* Preserve the structured layout and leave an intentional placeholder. The
+         original stays mounted (but hidden) as the single editable owner. */
+      const placeholder = detachedPlaceholder(inst.spec || { id });
+      if (el.isConnected) el.replaceWith(placeholder);
+      const sourceHost = document.createElement('div');
+      sourceHost.hidden = true; sourceHost.setAttribute('aria-hidden', 'true');
+      sourceHost.appendChild(el); document.body.appendChild(sourceHost);
+      const mirrorHost = d.createElement('div'); mirrorHost.className = 'pop-mirror'; d.body.appendChild(mirrorHost);
 
-      /* drop it from the docked model while popped */
-      PM.WS.mutate(ws => removePanel(ws, id));
+      const pathTo = (root, node) => {
+        const path = [];
+        while (node && node !== root) {
+          const parent = node.parentNode; if (!parent) return null;
+          path.unshift(Array.prototype.indexOf.call(parent.childNodes, node)); node = parent;
+        }
+        return node === root ? path : null;
+      };
+      const atPath = (root, path) => path && path.reduce((node, index) => node && node.childNodes[index], root);
+      let syncing = false;
+      const renderMirror = () => {
+        if (syncing || w.closed) return;
+        syncing = true;
+        const clone = el.cloneNode(true); clone.classList.add('popped');
+        mirrorHost.replaceChildren(clone); syncing = false;
+      };
+      const forward = (event) => {
+        const clone = mirrorHost.firstChild;
+        const target = atPath(el, pathTo(clone, event.target));
+        if (!target) return;
+        if ('value' in event.target && 'value' in target) target.value = event.target.value;
+        if ('checked' in event.target && 'checked' in target) target.checked = event.target.checked;
+        if (event.type === 'click' && typeof target.click === 'function') target.click();
+        else target.dispatchEvent(new Event(event.type, { bubbles: true, cancelable: true }));
+      };
+      mirrorHost.addEventListener('click', forward);
+      mirrorHost.addEventListener('input', forward);
+      mirrorHost.addEventListener('change', forward);
+      const observer = new MutationObserver(() => requestAnimationFrame(renderMirror));
+      observer.observe(el, { subtree: true, childList: true, characterData: true, attributes: true });
+      renderMirror();
+      Object.assign(PM.Popout.wins[id], { sourceHost, mirrorHost, observer });
       PM.toast(def.title + ' popped out');
 
       /* watch for the user closing the OS window */
       const timer = setInterval(() => {
         if (w.closed) { clearInterval(timer); PM.Popout.reclaim(id); }
       }, 350);
+      if (PM.Popout.wins[id]) PM.Popout.wins[id].timer = timer;
     };
     setup();
+    return true;
   },
   /* element returns to the docked layout (window already closed or closing) */
   reclaim(id) {
+    const entry = this.wins[id];
+    if (!entry) return false;
+    clearInterval(entry.timer);
     const inst = PM.panelInst[id];
     delete this.wins[id];
+    entry.observer?.disconnect();
+    entry.sourceHost?.remove();
     if (inst && inst.el) inst.el.classList.remove('popped');
-    PM.WS.mutate(ws => addPanel(ws, id, 'right'));
+    if (L.ws) L.apply(L.ws);
+    PM.toast((PM.PANELS[id]?.title || 'Panel') + ' returned to the layout');
+    return true;
   },
   /* user pressed the in-popout dock button */
   dock(id) {
-    const w = this.wins[id];
+    const entry = this.wins[id];
+    if (!entry) return false;
+    const w = entry.window;
+    clearInterval(entry.timer);
     delete this.wins[id];
+    entry.observer?.disconnect();
+    entry.sourceHost?.remove();
     const inst = PM.panelInst[id];
     if (inst && inst.el) inst.el.classList.remove('popped');
-    PM.WS.mutate(ws => addPanel(ws, id, 'right'));
+    if (L.ws) L.apply(L.ws);
     if (w && !w.closed) w.close();
+    return true;
   },
 };
 })();

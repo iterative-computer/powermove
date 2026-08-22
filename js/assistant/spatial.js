@@ -65,7 +65,7 @@ const S = {
   root: null, ink: null, path: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
-  gpuAdapter: null, hintFrame: 0,
+  hintFrame: 0, hintPoint: null,
 };
 
 const Spatial = {
@@ -74,7 +74,8 @@ const Spatial = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, hintPosition },
+  math: { motionProfile, shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, hintPosition },
+  lifecycle: { requestAdapter: requestRippleAdapter },
 };
 PM.SpatialAssistant = Spatial;
 
@@ -85,8 +86,11 @@ function init() {
   addEventListener('pointerup', () => { S.pressed = false; }, true);
   addEventListener('pointercancel', () => { S.pressed = false; }, true);
   addEventListener('pointermove', watchShake, true);
-  S.gpuAdapter = navigator.gpu?.requestAdapter?.() || null;
   refreshSceneCache();
+}
+
+function requestRippleAdapter() {
+  return navigator.gpu?.requestAdapter?.({ powerPreference: 'high-performance' }) || null;
 }
 
 function watchShake(event) {
@@ -95,19 +99,24 @@ function watchShake(event) {
   if (S.active) {
     const live = event.getCoalescedEvents?.().at(-1) || event;
     S.origin.x = live.clientX; S.origin.y = live.clientY;
-    queueHint(live.clientX, live.clientY);
+    scheduleHint(live.clientX, live.clientY);
     return;
   }
   if (S.pressed || event.buttons || performance.now() - S.lastTrigger < 1600) return;
   if (!S.cachePending && performance.now() - S.sceneCacheAt > 1100) refreshSceneCache();
-  const events = event.getCoalescedEvents ? event.getCoalescedEvents() : [event];
+  const events = event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event];
   for (const e of events) {
-    const sample = { x: e.clientX, y: e.clientY, t: performance.now() };
+    /* event.timeStamp preserves the real spacing of coalesced samples. Using
+       performance.now() for every point made fast mice look like zero-time
+       teleports and slow event streams look artificially weak. */
+    const eventTime = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
+    const sample = { x: e.clientX, y: e.clientY, t: eventTime };
     const last = S.samples[S.samples.length - 1];
-    if (!last || Math.hypot(sample.x - last.x, sample.y - last.y) >= 5) S.samples.push(sample);
+    if (!last || sample.t > last.t && Math.hypot(sample.x - last.x, sample.y - last.y) >= 1.5) S.samples.push(sample);
   }
-  const cutoff = performance.now() - 780;
-  S.samples = S.samples.filter(p => p.t >= cutoff).slice(-80);
+  const newest = S.samples.at(-1)?.t ?? performance.now();
+  const cutoff = newest - 900;
+  S.samples = S.samples.filter(p => p.t >= cutoff).slice(-160);
   if (shakeIntent(S.samples) && !S.rippleWarmup) warmRipple();
   if (shakeReady(S.samples)) {
     const p = S.samples[S.samples.length - 1];
@@ -119,24 +128,55 @@ function watchShake(event) {
   }
 }
 
-function shakeIntent(points) {
-  if (!Array.isArray(points) || points.length < 4) return false;
-  let path = 0, reversals = 0, prior = null, minX = points[0].x, maxX = points[0].x;
+function motionProfile(points) {
+  if (!Array.isArray(points) || points.length < 3) return { duration: 0, path: 0, span: 0, net: 0, reversals: 0, oscillation: 0, peakSpeed: 0, energy: 0 };
+  let path = 0, reversals = 0, oscillation = 0, peakSpeed = 0, energy = 0;
+  let minX = points[0].x, maxX = minX, minY = points[0].y, maxY = minY;
+  let priorVelocity = null, distanceSinceTurn = 0;
   for (let i = 1; i < points.length; i++) {
-    const dx = points[i].x - points[i - 1].x, dy = points[i].y - points[i - 1].y;
-    const mag = Math.hypot(dx, dy); path += mag;
-    if (prior && mag >= 8 && prior.mag >= 8 && (dx * prior.dx + dy * prior.dy) / (mag * prior.mag) < -.28) reversals++;
-    if (mag >= 5) prior = { dx, dy, mag };
+    const dt = points[i].t - points[i - 1].t;
+    if (!(dt > 0) || dt > 140) { priorVelocity = null; distanceSinceTurn = 0; continue; }
+    const dx = points[i].x - points[i - 1].x;
+    const dy = points[i].y - points[i - 1].y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < .5) continue;
+    const seconds = Math.max(dt, 4) / 1000;
+    const velocity = { x: dx / seconds, y: dy / seconds };
+    const speed = Math.hypot(velocity.x, velocity.y);
+    path += distance; distanceSinceTurn += distance;
+    peakSpeed = Math.max(peakSpeed, speed);
+    energy += speed * speed * seconds;
+    if (priorVelocity) {
+      const priorSpeed = Math.hypot(priorVelocity.x, priorVelocity.y);
+      const alignment = (velocity.x * priorVelocity.x + velocity.y * priorVelocity.y) / (speed * priorSpeed);
+      /* A reversal needs real momentum and travel on both sides. This rejects
+         hand tremor/high-frequency sensor jitter without penalizing event rate. */
+      if (speed >= 260 && priorSpeed >= 260 && alignment < -.35 && distanceSinceTurn >= 18) {
+        reversals++; oscillation += distanceSinceTurn; distanceSinceTurn = 0;
+      }
+    }
+    if (speed >= 120) priorVelocity = velocity;
     minX = Math.min(minX, points[i].x); maxX = Math.max(maxX, points[i].x);
+    minY = Math.min(minY, points[i].y); maxY = Math.max(maxY, points[i].y);
   }
-  return path >= 150 && maxX - minX >= 55 && reversals >= 2;
+  const duration = Math.max(0, points.at(-1).t - points[0].t);
+  const net = Math.hypot(points.at(-1).x - points[0].x, points.at(-1).y - points[0].y);
+  return { duration, path, span: Math.max(maxX - minX, maxY - minY), net, reversals, oscillation, peakSpeed, energy: duration ? energy / (duration / 1000) : 0 };
+}
+
+function shakeIntent(points) {
+  const m = motionProfile(points);
+  return m.duration <= 900 && m.path >= 72 && m.span >= 32 && m.peakSpeed >= 420 && m.reversals >= 1;
 }
 
 function warmRipple() {
   const warmup = {
     claimed: false,
     capture: S.sceneCache ? null : PM.WindowCapture.request(),
-    adapter: S.gpuAdapter || navigator.gpu?.requestAdapter?.() || null,
+    /* A GPUAdapter is deliberately warmed per gesture. WebKit can invalidate a
+       long-lived adapter after a device is destroyed or lost. Reusing one from
+       app boot made every later Ripple device arrive already lost. */
+    adapter: requestRippleAdapter(),
   };
   S.rippleWarmup = warmup;
   setTimeout(() => {
@@ -160,29 +200,38 @@ function refreshSceneCache() {
 }
 
 function shakeReady(points) {
-  if (!Array.isArray(points) || points.length < 8) return false;
-  let path = 0, reversals = 0, strongSteps = 0;
-  let minX = points[0].x, maxX = minX, minY = points[0].y, maxY = minY;
-  let prior = null;
-  for (let i = 1; i < points.length; i++) {
-    const v = { x: points[i].x - points[i - 1].x, y: points[i].y - points[i - 1].y };
-    const mag = Math.hypot(v.x, v.y);
-    path += mag; if (mag >= 14) strongSteps++;
-    if (prior) {
-      const pm = Math.hypot(prior.x, prior.y);
-      if (mag >= 8 && pm >= 8 && (v.x * prior.x + v.y * prior.y) / (mag * pm) < -.28) reversals++;
-    }
-    if (mag >= 5) prior = v;
-    minX = Math.min(minX, points[i].x); maxX = Math.max(maxX, points[i].x);
-    minY = Math.min(minY, points[i].y); maxY = Math.max(maxY, points[i].y);
-  }
-  const net = Math.hypot(points.at(-1).x - points[0].x, points.at(-1).y - points[0].y);
-  const span = Math.max(maxX - minX, maxY - minY);
-  const elapsed = points.at(-1).t - points[0].t;
-  /* Four decisive reversals feels intentional, while the shorter distance is
-     much closer to macOS's cursor-shake effort. Ordinary travel, tiny jitter,
-     and every pressed/drag gesture still fail the gate. */
-  return elapsed <= 780 && path >= 380 && span >= 72 && strongSteps >= 5 && reversals >= 4 && net < path * .58;
+  const m = motionProfile(points);
+  /* Three momentum reversals over about 180 CSS pixels is a short intentional
+     shake. CSS pixels make the gesture consistent across Retina scale factors;
+     timestamp-normalized speed makes it consistent across mouse event rates. */
+  return m.duration >= 120 && m.duration <= 900
+    && m.path >= 180 && m.span >= 44 && m.oscillation >= 108
+    && m.peakSpeed >= 430 && m.reversals >= 3 && m.net < m.path * .62;
+}
+
+function hintPosition(x, y, width, height, viewportWidth, viewportHeight, offset = 18) {
+  const pad = 12;
+  const left = PM.clamp(x + offset, pad, Math.max(pad, viewportWidth - width - pad));
+  const below = y + offset;
+  const top = below + height + pad <= viewportHeight
+    ? below
+    : PM.clamp(y - height - offset, pad, Math.max(pad, viewportHeight - height - pad));
+  return { x: Math.round(left), y: Math.round(top) };
+}
+
+function scheduleHint(x, y) {
+  S.hintPoint = { x, y };
+  if (!S.hint || S.hintFrame) return;
+  S.hintFrame = requestAnimationFrame(() => {
+    S.hintFrame = 0;
+    if (!S.hint || !S.hintPoint) return;
+    const p = hintPosition(
+      S.hintPoint.x, S.hintPoint.y,
+      S.hint.offsetWidth || 250, S.hint.offsetHeight || 38,
+      innerWidth, innerHeight,
+    );
+    S.hint.style.transform = `translate3d(${p.x}px,${p.y}px,0)`;
+  });
 }
 
 function activate(x, y, warmup = null) {
@@ -204,39 +253,9 @@ function activate(x, y, warmup = null) {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     S.root.addEventListener('pointerdown', beginCircle);
     document.body.appendChild(S.root);
-    placeHint(S.origin.x, S.origin.y);
-    S.renderStop = startRipple(canvas, S.origin, sceneBitmap, warmup?.adapter || S.gpuAdapter || null);
+    scheduleHint(x, y);
+    S.renderStop = startRipple(canvas, S.origin, sceneBitmap, warmup?.adapter || null);
     setTimeout(() => { if (S.active && S.phase === 'arming') S.phase = 'selecting'; }, 340);
-  });
-}
-
-function hintPosition(point, viewport, size, offset = { x: 16, y: 18 }) {
-  const margin = 12;
-  const maxX = Math.max(margin, viewport.width - size.width - margin);
-  const maxY = Math.max(margin, viewport.height - size.height - margin);
-  return {
-    x: PM.clamp(point.x + offset.x, margin, maxX),
-    y: PM.clamp(point.y + offset.y, margin, maxY),
-  };
-}
-
-function placeHint(x, y) {
-  if (!S.hint || S.hint.style.display === 'none') return;
-  const rect = S.hint.getBoundingClientRect();
-  const p = hintPosition(
-    { x, y },
-    { width: innerWidth, height: innerHeight },
-    { width: rect.width || 196, height: rect.height || 38 },
-  );
-  S.hint.style.left = `${Math.round(p.x)}px`;
-  S.hint.style.top = `${Math.round(p.y)}px`;
-}
-
-function queueHint(x, y) {
-  cancelAnimationFrame(S.hintFrame);
-  S.hintFrame = requestAnimationFrame(() => {
-    S.hintFrame = 0;
-    placeHint(x, y);
   });
 }
 
@@ -598,8 +617,8 @@ function onKey(event) {
 function cancel() {
   if (!S.active) return;
   S.active = false; S.phase = 'idle'; S.requestToken++;
-  cancelAnimationFrame(S.hintFrame); S.hintFrame = 0;
   removeEventListener('keydown', onKey, true);
+  cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
   S.root?.remove();
   Object.assign(S, { root: null, ink: null, path: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, renderStop: null, points: [] });
@@ -607,18 +626,22 @@ function cancel() {
 }
 
 function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
-  let stopped = false, failed = false, frame = 0, fallbackTimer = 0, device = null, context = null;
+  let stopped = false, failed = false, frame = 0, fallbackTimer = 0, device = null;
+  let context = null, uniformBuffer = null, sceneTexture = null;
   const fallback = reason => {
     if (stopped || failed) return;
     failed = true; cancelAnimationFrame(frame);
-    /* A lost device can leave an opaque last swapchain frame over the CSS
-       fallback. Detach and clear it before showing the resilient visual. */
+    /* A lost device can leave an opaque swapchain frame over the fallback. */
     try { context?.unconfigure?.(); } catch {}
     canvas.width = 1; canvas.height = 1;
     canvas.dataset.renderer = 'css-fallback';
-    canvas.style.background = `radial-gradient(circle at ${origin.x}px ${origin.y}px,rgba(255,107,26,.38),rgba(31,18,18,.16) 24%,transparent 70%)`;
-    canvas.style.transition = 'opacity .28s ease';
-    fallbackTimer = setTimeout(() => { if (!stopped) canvas.style.opacity = '0'; }, 720);
+    canvas.style.background = `radial-gradient(circle at ${origin.x}px ${origin.y}px,rgba(255,107,26,.34),rgba(76,35,88,.16) 30%,rgba(8,8,12,.05) 64%,transparent 78%)`;
+    canvas.style.opacity = '1';
+    canvas.style.transition = 'opacity .34s ease';
+    /* The selection workflow remains visibly active even without WebGPU. The
+       old fallback faded to zero, which made a recoverable renderer failure
+       look exactly like a dead feature. */
+    fallbackTimer = setTimeout(() => { if (!stopped) canvas.style.opacity = '.24'; }, 900);
     if (reason) console.warn('WebGPU ripple unavailable; using visual fallback', reason);
   };
 
@@ -627,12 +650,8 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
   (async () => {
     if (!navigator.gpu) throw new Error('WebGPU is not supported by this web view');
     canvas.dataset.renderer = 'webgpu-initializing';
-    const adapter = await (adapterPromise || navigator.gpu.requestAdapter());
+    const adapter = await (adapterPromise || requestRippleAdapter());
     if (!adapter) throw new Error('No WebGPU adapter is available');
-    /* Dawn/WebKit adapters may be single-use for requestDevice(). Rotate the
-       prewarm as soon as this activation claims one, so the next shake never
-       retries a consumed adapter. */
-    S.gpuAdapter = navigator.gpu.requestAdapter();
     device = await adapter.requestDevice();
     if (stopped) { device.destroy(); return; }
 
@@ -756,11 +775,11 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
       },
       primitive: { topology: 'triangle-list' },
     });
-    const uniformBuffer = device.createBuffer({
+    uniformBuffer = device.createBuffer({
       label: 'Spatial ripple uniforms', size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    let sceneTexture = device.createTexture({
+    sceneTexture = device.createTexture({
       label: 'Spatial interface snapshot', size: [1, 1], format: 'rgba8unorm',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
     });
@@ -799,9 +818,6 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
       if (stopped) return;
       const reason = info?.reason || 'unknown';
       const message = info?.message || 'The WebGPU device was lost';
-      /* Lost-device resources cannot be reused. Prepare a completely fresh
-         adapter for the next shake while this activation uses visible CSS. */
-      if (reason !== 'destroyed') S.gpuAdapter = navigator.gpu?.requestAdapter?.() || null;
       fallback(new Error(`${message} (reason: ${reason})`));
     });
     const draw = now => {
@@ -838,6 +854,8 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
 
   return () => {
     stopped = true; cancelAnimationFrame(frame); clearTimeout(fallbackTimer);
+    try { sceneTexture?.destroy?.(); } catch {}
+    try { uniformBuffer?.destroy?.(); } catch {}
     if (device) { try { device.destroy(); } catch {} }
   };
 }

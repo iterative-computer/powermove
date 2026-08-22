@@ -7,6 +7,7 @@ const root = path.resolve(__dirname, '..');
 const layout = fs.readFileSync(path.join(root, 'js/ui/layout.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
+const native = fs.readFileSync(path.join(root, 'native/main.swift'), 'utf8');
 
 test('headless preview and timeline panels expose a dedicated move handle', () => {
   assert.match(layout, /button\.panel-move-handle/);
@@ -44,9 +45,10 @@ test('panel placement preview is an overlay and never reflows the dock under the
   assert.match(css, /\.panel-drop-preview\.on/);
 });
 
-test('drag motion is frame-coalesced, stable at panel midpoints, and animates only the drop', () => {
+test('drag motion is frame-coalesced, uses generous geometry, and animates only the drop', () => {
   assert.match(layout, /requestAnimationFrame\(renderDragFrame\)/);
-  assert.match(layout, /Math\.abs\(ev\.clientY - midpoint\) < 8/);
+  assert.match(layout, /L\.hitTestDockPlacement\(docks, ev\.clientX, ev\.clientY\)/);
+  assert.match(layout, /tolerance = 28/, 'drop areas extend beyond visible dock edges');
   assert.match(layout, /capturePanelRects\(\)/);
   assert.match(layout, /node\.animate\(\[/);
   assert.match(layout, /prefers-reduced-motion: reduce/);
@@ -57,4 +59,34 @@ test('timeline section resize never exposes an opaque cleared canvas', () => {
   assert.doesNotMatch(timeline, /getContext\('2d',\s*\{\s*alpha:\s*false\s*\}\)/);
   assert.match(timeline, /const changed = T\.cv\.width !== width \|\| T\.cv\.height !== height/);
   assert.match(timeline, /if \(changed\) draw\(\)/);
+});
+
+test('every regular panel exposes clear options with recoverable hide and restore', () => {
+  assert.match(layout, /button\.panel-options/);
+  assert.match(layout, /label: 'Hide panel'.*hidePanel/s);
+  assert.match(layout, /Restore \$\{PM\.PANELS\[item\.id\]\.title\}/);
+  assert.match(layout, /if \(id === 'viewer'\) return false/);
+  assert.match(css, /\.panel-options\{/);
+});
+
+test('pop out creates a native child window, mirrors one live panel owner, and restores on close', () => {
+  const popout = layout.slice(layout.indexOf('PM.Popout ='), layout.lastIndexOf('})();'));
+  assert.match(native, /javaScriptCanOpenWindowsAutomatically = true/);
+  assert.match(native, /createWebViewWith configuration/);
+  assert.match(native, /styleMask: \[\.titled, \.closable, \.miniaturizable, \.resizable\]/);
+  assert.match(native, /win\.delegate = self/);
+  assert.match(popout, /sourceHost\.appendChild\(el\)/, 'the live content has a single authoritative owner');
+  assert.match(popout, /MutationObserver/, 'the child reflects authoritative source updates');
+  assert.match(popout, /target\.click\(\)/, 'child controls forward to the authoritative panel');
+  assert.match(popout, /detachedPlaceholder/, 'the source layout explains where the panel went');
+  assert.doesNotMatch(popout, /PM\.WS\.mutate/, 'detaching does not destroy or duplicate the layout manifest');
+  assert.match(popout, /w\.closed.*PM\.Popout\.reclaim\(id\)/s);
+  assert.match(popout, /if \(L\.ws\) L\.apply\(L\.ws\)/, 'close and redock rebuild from synchronized source state');
+});
+
+test('native detached windows receive packaged styling without broad file access', () => {
+  assert.match(native, /web\/css/);
+  assert.match(native, /\["tokens\.css", "app\.css"\]/);
+  assert.match(native, /WKUserScript\(source: source, injectionTime: \.atDocumentEnd/);
+  assert.match(native, /location\.href==='about:blank'/);
 });

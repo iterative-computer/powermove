@@ -71,3 +71,18 @@ test('the malformed app-only Gradient layout is narrowly recognized for migratio
   assert.equal(WS.isLegacyGradient({ ...legacy, name: 'My Gradient' }), false);
   assert.equal(WS.isLegacyGradient({ ...legacy, layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] } }), false);
 });
+
+test('hidden panel recovery metadata survives validation while retired Generative metadata does not', () => {
+  const WS = workspaceModel();
+  const workspace = WS.normalize({
+    id: 'custom', name: 'Custom',
+    hiddenPanels: [
+      { id: 'assets', dockId: 'left', dockIndex: 0, index: 1, spec: { id: 'assets', size: 180 } },
+      { id: 'library', dockId: 'left', index: 0, spec: { id: 'library' } },
+    ],
+    layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] },
+  });
+  assert.equal(workspace.hiddenPanels.length, 1);
+  assert.equal(workspace.hiddenPanels[0].id, 'assets');
+  assert.equal(workspace.hiddenPanels[0].spec.size, 180);
+});

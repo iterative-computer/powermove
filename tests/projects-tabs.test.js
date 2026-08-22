@@ -119,19 +119,20 @@ test('get() falls back to the legacy autosave slot for a matching id', () => {
 });
 
 /* ── layout & wiring pins ──────────────────────────────── */
-test('normalization strips removed Layers panels from saved workspaces', () => {
+test('normalization narrowly strips retired Layers and Generative panels from saved workspaces', () => {
   let n = 0;
   const PM = { uid: p => `${p}${++n}`, clamp: (v, a, b) => Math.max(a, Math.min(b, v)), h: () => ({}) };
   vm.runInContext(utf8('js/core/workspace.js'), vm.createContext({ window: { PM }, console }));
   const w = PM.WS.normalize({
     id: 'w1', name: 'Old',
     layout: { docks: [
-      { id: 'left', panels: [{ id: 'layers' }, { id: 'assets' }] },
+      { id: 'left', panels: [{ id: 'layers' }, { id: 'library' }, { id: 'assets' }] },
       { id: 'center', panels: [{ id: 'viewer', flex: true }] },
     ] },
   });
   const ids = w.layout.docks.flatMap(d => d.panels.map(q => q.id));
   assert.equal(ids.includes('layers'), false, 'Layers panel no longer docks');
+  assert.equal(ids.includes('library'), false, 'retired Generative panel no longer docks');
   assert.ok(ids.includes('assets'));
 });
 

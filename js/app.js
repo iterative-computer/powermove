@@ -332,24 +332,11 @@ function buildTitlebar() {
   right.append(
     button('undo', 'Undo', () => PM.hist.undo()),
     button('redo', 'Redo', () => PM.hist.redo()),
-    (() => {
-      const b = button('panel', 'Workspace · ' + PM.WS.current.name, e => workspaceMenu(e, b));
-      PM.bus.on('workspaces', () => { b.title = 'Workspace · ' + PM.WS.current.name; });
-      return b;
-    })(),
+    button('grid', 'Library · Sections and Workspaces', () => PM.LibraryUI.open()),
     themeButton(button),
   );
   PM.bus.on('workspaces', paintTabs); PM.bus.on('project', paintTabs); PM.bus.on('history', paintTabs);
   paintTabs();
-}
-function workspaceMenu(e, anchor) {
-  e.preventDefault();
-  PM.menu(anchor, [
-    { header: 'Workspaces' },
-    ...PM.WS.list().map(w => ({ label: w.name, on: w.id === PM.WS.current.id, run: () => PM.WS.activate(w.id) })),
-    '-', { label: 'Save current as new…', run: () => PM.WS.saveAsNew() },
-    { label: 'Edit workspace JSON…', run: () => PM.WS.editJSON() },
-  ]);
 }
 function buildStatus() {
   const s = $('#status');

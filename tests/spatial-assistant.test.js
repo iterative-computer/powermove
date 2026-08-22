@@ -6,8 +6,9 @@ const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'js/assistant/spatial.js'), 'utf8');
+const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 
-function spatialModel() {
+function spatialModel(adapterFactory) {
   const PM = {
     h() {}, uid: () => 'id',
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
@@ -15,28 +16,42 @@ function spatialModel() {
   };
   const context = vm.createContext({
     window: { PM }, console, Map, Set, Uint8Array, TextDecoder,
+    navigator: { gpu: adapterFactory ? { requestAdapter: adapterFactory } : undefined },
     setTimeout, clearTimeout, atob: value => Buffer.from(value, 'base64').toString('binary'),
   });
   vm.runInContext(source, context);
-  return PM.SpatialAssistant.math;
+  return PM.SpatialAssistant;
 }
 
-test('shake activation requires fast repeated reversals instead of ordinary travel', () => {
-  const math = spatialModel();
-  const shake = Array.from({ length: 10 }, (_, i) => ({ x: i % 2 ? 150 : 0, y: 80, t: i * 60 }));
-  const easierShake = Array.from({ length: 8 }, (_, i) => ({ x: i % 2 ? 85 : 0, y: 80, t: i * 72 }));
-  const tinyJitter = Array.from({ length: 12 }, (_, i) => ({ x: i % 2 ? 10 : 0, y: 80, t: i * 55 }));
-  const travel = Array.from({ length: 10 }, (_, i) => ({ x: i * 40, y: 80, t: i * 60 }));
-  assert.equal(math.shakeReady(shake), true);
-  assert.equal(math.shakeReady(easierShake), true);
-  assert.equal(math.shakeReady(tinyJitter), false);
-  assert.equal(math.shakeReady(travel), false);
-  assert.equal(math.shakeIntent(easierShake.slice(0, 5)), true, 'early deliberate motion prewarms the ripple');
-  assert.equal(math.shakeIntent(tinyJitter), false, 'tiny jitter never starts expensive preparation');
+function sampledShake(step) {
+  const turns = [0, 60, 0, 60, 0];
+  const out = [];
+  for (let t = 0; t <= 480; t += step) {
+    const segment = Math.min(3, Math.floor(t / 120));
+    const f = (t - segment * 120) / 120;
+    out.push({ x: turns[segment] + (turns[segment + 1] - turns[segment]) * f, y: 80, t });
+  }
+  return out;
+}
+
+test('shake activation uses timestamp-normalized inertia and repeated reversals', () => {
+  const math = spatialModel().math;
+  const deliberate60hz = sampledShake(16);
+  const deliberate120hz = sampledShake(8);
+  const slow = sampledShake(80).map(point => ({ ...point, t: point.t * 4 }));
+  const sweep = Array.from({ length: 14 }, (_, i) => ({ x: i * 24, y: 80, t: i * 24 }));
+  const jitter = Array.from({ length: 80 }, (_, i) => ({ x: i % 2 ? 3 : 0, y: 80, t: i * 5 }));
+  assert.equal(math.shakeReady(deliberate60hz), true, 'short deliberate shake activates');
+  assert.equal(math.shakeReady(deliberate120hz), true, 'sampling rate does not change the outcome');
+  assert.equal(math.shakeReady(slow), false, 'slow navigation does not activate');
+  assert.equal(math.shakeReady(sweep), false, 'one fast sweep has no repeated reversals');
+  assert.equal(math.shakeReady(jitter), false, 'high-frequency tiny jitter lacks useful span');
+  assert.ok(math.motionProfile(deliberate60hz).reversals >= 3);
+  assert.equal(math.shakeIntent(deliberate60hz.slice(0, 14)), true, 'early intentional inertia prewarms Ripple');
 });
 
 test('circle selection rejects open scribbles and accepts a closed useful region', () => {
-  const math = spatialModel();
+  const math = spatialModel().math;
   const circle = Array.from({ length: 25 }, (_, i) => {
     const a = (i / 24) * Math.PI * 2;
     return { x: 220 + Math.cos(a) * 90, y: 180 + Math.sin(a) * 60 };
@@ -47,34 +62,14 @@ test('circle selection rejects open scribbles and accepts a closed useful region
 });
 
 test('one click exits while a drag remains a selection gesture', () => {
-  const math = spatialModel();
+  const math = spatialModel().math;
   assert.equal(math.isClickGesture([{ x: 100, y: 100 }, { x: 103, y: 102 }]), true);
   assert.equal(math.isClickGesture([{ x: 100, y: 100 }, { x: 125, y: 102 }]), false);
   assert.match(source, /if \(isClickGesture\(S\.points\)\) \{ cancel\(\); return; \}/);
 });
 
-test('instruction pill follows the cursor with a stable offset and viewport clamping', () => {
-  const math = spatialModel();
-  assert.deepEqual({ ...math.hintPosition({ x: 100, y: 80 }, { width: 800, height: 600 }, { width: 196, height: 38 }) }, { x: 116, y: 98 });
-  assert.deepEqual({ ...math.hintPosition({ x: 790, y: 590 }, { width: 800, height: 600 }, { width: 196, height: 38 }) }, { x: 592, y: 550 });
-  assert.match(source, /S\.origin\.x = live\.clientX; S\.origin\.y = live\.clientY;\s*queueHint\(live\.clientX, live\.clientY\)/);
-  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Circle any part of the interface'\)\)/);
-  assert.doesNotMatch(source, /S\.hint = h\('div\.spatial-hint', h\('i'\)/);
-});
-
-test('device loss clears stale WebGPU pixels and prepares a fresh adapter', () => {
-  assert.match(source, /context\?\.unconfigure\?\.\(\)/);
-  assert.match(source, /canvas\.width = 1; canvas\.height = 1;[\s\S]*canvas\.dataset\.renderer = 'css-fallback'/);
-  assert.match(source, /const reason = info\?\.reason \|\| 'unknown'/);
-  assert.match(source, /reason !== 'destroyed'\) S\.gpuAdapter = navigator\.gpu\?\.requestAdapter\?\.\(\)/);
-  assert.match(source, /addEventListener\?\.\('uncapturederror'/);
-  assert.match(source, /const adapter = await[\s\S]*S\.gpuAdapter = navigator\.gpu\.requestAdapter\(\);\s*device = await adapter\.requestDevice\(\)/,
-    'each claimed adapter is rotated before a device is requested');
-  assert.doesNotMatch(source, /powerPreference: 'high-performance'/);
-});
-
 test('generated section manifests are bounded and discard unsafe button commands', () => {
-  const math = spatialModel();
+  const math = spatialModel().math;
   const plan = math.sanitizePlan({
     operation: 'modify', targetPanelId: 'inspector', placement: 'replace', message: 'Ready',
     section: { id: 'Fresh Controls!', title: 'Fresh Controls', size: 5000, note: 'Useful controls', controls: [
@@ -90,17 +85,15 @@ test('generated section manifests are bounded and discard unsafe button commands
 });
 
 test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe shell', () => {
-  const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
-  assert.match(source, /navigator\.gpu\.requestAdapter/);
+  assert.match(source, /requestRippleAdapter/);
   assert.match(source, /getContext\('webgpu'/);
   assert.match(source, /@fragment[\s\S]*fn fragmentMain/);
   assert.match(source, /device\.createRenderPipeline/);
   assert.match(source, /copyExternalImageToTexture/);
   assert.match(source, /if \(shakeIntent\(S\.samples\) && !S\.rippleWarmup\) warmRipple\(\)/);
-  assert.match(source, /S\.gpuAdapter = navigator\.gpu\?\.requestAdapter[\s\S]*refreshSceneCache\(\)/);
   assert.match(source, /cachedScene \? Promise\.resolve\(cachedScene\)/);
-  assert.match(source, /S\.gpuAdapter = navigator\.gpu\?\.requestAdapter/);
-  assert.match(source, /adapterPromise \|\| navigator\.gpu\.requestAdapter/);
+  assert.doesNotMatch(source, /S\.gpuAdapter/, 'no consumed adapter is cached across activations');
+  assert.match(source, /adapterPromise \|\| requestRippleAdapter\(\)/);
   assert.match(source, /let displacedUV = clamp\(uv - displacement/);
   assert.match(source, /textureSample\(sceneTexture, sceneSampler/);
   assert.match(source, /let crest = exp\(-pow\(\(distanceFromSource - front\) \* 7\.0/);
@@ -127,4 +120,24 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(css, /spatial-wash\{[^}]*rgba\(8,8,12,\.012\)/);
   assert.doesNotMatch(css, /spatial-wash\{[^}]*blur/);
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)/);
+});
+
+test('Ripple adapter acquisition is fresh on every lifecycle request', async () => {
+  let calls = 0;
+  const assistant = spatialModel(() => Promise.resolve({ generation: ++calls }));
+  const first = await assistant.lifecycle.requestAdapter();
+  const second = await assistant.lifecycle.requestAdapter();
+  assert.equal(calls, 2);
+  assert.notEqual(first.generation, second.generation);
+  assert.match(source, /device\.lost\.then/);
+  assert.match(source, /context\?\.unconfigure\?\.\(\)/);
+  assert.match(source, /canvas\.style\.opacity = '\.24'/, 'fallback remains visibly meaningful');
+});
+
+test('instruction pill follows the cursor without intercepting input', () => {
+  const math = spatialModel().math;
+  assert.deepEqual({ ...math.hintPosition(100, 80, 250, 38, 800, 600) }, { x: 118, y: 98 });
+  assert.deepEqual({ ...math.hintPosition(790, 590, 250, 38, 800, 600) }, { x: 538, y: 534 });
+  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Circle any part of the interface'\)\)/);
+  assert.match(css, /\.spatial-hint\{[^}]*pointer-events:none[^}]*will-change:transform/s);
 });

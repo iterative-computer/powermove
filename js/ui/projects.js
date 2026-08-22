@@ -117,7 +117,7 @@ function projectMenu(anchor, m, trashed, x, y) {
     { label: 'Restore', run: () => { PM.Projects.restore(m.id); paint(); PM.bus.emit('projects:tabs'); PM.toast('Project restored'); } },
     '-', { label: 'Delete Forever…', run: () => destroyDialog(m) },
   ] : [
-    { label: 'Open', run: () => { PM.ProjectsScreen.hide(); window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.Projects.get(m.id) })); } },
+    { label: 'Open', disabled: m.id === PM.proj.id, run: () => { PM.ProjectsScreen.hide(); window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.Projects.get(m.id) })); } },
     { label: 'Rename…', run: () => renameDialog(m) }, { label: 'Duplicate', run: () => duplicate(m) },
     '-', { label: 'Move to Trash…', run: () => trashDialog(m) },
   ];

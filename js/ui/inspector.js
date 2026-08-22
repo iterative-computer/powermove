@@ -93,7 +93,7 @@ function chanMenu(e, L, key, p, label) {
     '-',
     { header: 'Easing for all keys' },
     ...['power', 'linear', 'easeInOut', 'expoOut', 'backOut', 'glide', 'snap'].map(n => ({
-      label: n, run: () => PM.hist.do('Ease', () => PM.applyEaseTo(p.kf, n)),
+      label: n, disabled: !p.kf.length, run: () => PM.hist.do('Ease', () => PM.applyEaseTo(p.kf, n)),
     })),
     '-',
     { label: p.expr ? 'Edit expression…' : 'Add expression…', run: () => exprDialog(L, key, p, label) },

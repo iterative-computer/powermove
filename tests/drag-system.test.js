@@ -17,8 +17,9 @@ function layoutModel() {
     bus: { on() {}, emit() {} },
     PANELS: {},
     panelInst: {},
+    toast() {},
   };
-  const context = vm.createContext({ window: { PM }, console, innerWidth: 1440, innerHeight: 900 });
+  const context = vm.createContext({ window: { PM }, console, innerWidth: 1440, innerHeight: 900, clearInterval });
   vm.runInContext(fs.readFileSync(path.join(root, 'js/ui/layout.js'), 'utf8'), context);
   return PM;
 }
@@ -44,6 +45,74 @@ test('malformed drop indices resolve to null rather than corrupting the dock', (
   assert.equal(R('center', 0, 'center', undefined), null);
   assert.equal(R('center', 0, 'center', NaN), null);
   assert.equal(R('center', 0, 'right', NaN), null, 'cross-dock also rejects garbage');
+});
+
+test('dock hit testing makes top, bottom, gaps, and left/right placement generous', () => {
+  const PM = layoutModel();
+  const hit = PM.Layout.hitTestDockPlacement;
+  const rect = (left, top, right, bottom) => ({ left, top, right, bottom, width: right - left, height: bottom - top });
+  const docks = [
+    { id: 'left', rect: rect(20, 80, 260, 760), panels: [
+      { rect: rect(20, 80, 260, 280) }, { rect: rect(20, 292, 260, 520) }, { rect: rect(20, 532, 260, 760) },
+    ] },
+    { id: 'center', rect: rect(272, 80, 1020, 760), panels: [
+      { rect: rect(272, 80, 1020, 440) }, { rect: rect(272, 452, 1020, 760) },
+    ] },
+    { id: 'right', rect: rect(1032, 80, 1320, 760), panels: [{ rect: rect(1032, 80, 1320, 760) }] },
+  ];
+  assert.deepEqual({ ...hit(docks, 120, 84) }, { dockId: 'left', index: 0 }, 'top zone inserts above');
+  assert.deepEqual({ ...hit(docks, 120, 755) }, { dockId: 'left', index: 3 }, 'bottom zone inserts below');
+  assert.deepEqual({ ...hit(docks, 120, 286) }, { dockId: 'left', index: 1 }, 'gap between panels has an exact insertion slot');
+  assert.deepEqual({ ...hit(docks, 30, 400) }, { dockId: 'left', index: 1 }, 'left docking remains easy');
+  assert.deepEqual({ ...hit(docks, 1318, 400) }, { dockId: 'right', index: 0 }, 'right docking remains easy');
+  assert.deepEqual({ ...hit(docks, 266, 400) }, { dockId: 'left', index: 1 }, 'near-edge tolerance keeps a valid target');
+  assert.equal(hit(docks, 700, 20), null, 'far outside all docks cancels instead of losing a panel');
+});
+
+test('panel hiding is recoverable, preserves its slot, and handles the last panel in a dock', () => {
+  const PM = layoutModel();
+  const workspace = { layout: { docks: [
+    { id: 'left', size: 250, panels: [{ id: 'assets', size: 180 }] },
+    { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+  ] }, hiddenPanels: [] };
+  assert.equal(PM.Layout.hidePanel(workspace, 'assets'), true);
+  assert.equal(workspace.layout.docks[0].panels.length, 0, 'the empty dock remains a valid recoverable slot');
+  assert.equal(workspace.hiddenPanels[0].dockId, 'left');
+  assert.equal(workspace.hiddenPanels[0].spec.size, 180, 'panel-specific layout metadata is preserved');
+  assert.equal(PM.Layout.restorePanel(workspace, 'assets'), true);
+  assert.deepEqual({ ...workspace.layout.docks[0].panels[0] }, { id: 'assets', size: 180 });
+  assert.equal(workspace.hiddenPanels.length, 0);
+});
+
+test('Composition cannot be hidden and invalid restore requests are safe no-ops', () => {
+  const PM = layoutModel();
+  const workspace = { layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] }, hiddenPanels: [] };
+  assert.equal(PM.Layout.hidePanel(workspace, 'viewer'), false);
+  assert.equal(PM.Layout.hidePanel(workspace, 'missing'), false);
+  assert.equal(PM.Layout.restorePanel(workspace, 'missing'), false);
+  assert.equal(workspace.layout.docks[0].panels[0].id, 'viewer');
+});
+
+test('detached-panel lifecycle has one owner and reapplies the source layout on close or redock', () => {
+  const PM = layoutModel();
+  let applies = 0, closed = 0;
+  const classes = new Set(['popped']);
+  PM.PANELS.assets = { id: 'assets', title: 'Assets' };
+  PM.panelInst.assets = { el: { classList: { remove: value => classes.delete(value) } } };
+  PM.Layout.ws = { id: 'workspace' };
+  PM.Layout.apply = () => { applies++; };
+  PM.Popout.wins.assets = { window: { closed: true }, timer: 0 };
+  assert.equal(PM.Popout.reclaim('assets'), true);
+  assert.equal(applies, 1);
+  assert.equal(classes.has('popped'), false);
+  PM.Popout.wins.assets = { window: { closed: false, close: () => { closed++; } }, timer: 0 };
+  assert.equal(PM.Popout.dock('assets'), true);
+  assert.equal(applies, 2);
+  assert.equal(closed, 1);
+  assert.equal(PM.Popout.reclaim('assets'), false, 'a later close callback cannot restore twice');
+  assert.equal(PM.Popout.open('unknown'), undefined, 'invalid panels do not create windows');
+  PM.PANELS.viewer = { id: 'viewer', title: 'Composition' };
+  assert.equal(PM.Popout.open('viewer'), undefined, 'unsupported canvas panels remain safely docked');
 });
 
 /* ── util.js harness for PM.drag semantics ──────────────── */
@@ -124,5 +193,6 @@ test('panel drag wiring: Esc cancels and drops resolve before mutation', () => {
   assert.match(layout, /ev\.key !== 'Escape'/, 'Esc cancels an in-flight drag');
   assert.match(layout, /drag\.cancel\(\)/);
   assert.match(layout, /'Not a drop zone'/, 'ghost reports invalid targets');
+  assert.match(layout, /L\.hitTestDockPlacement/, 'drop selection uses the tested geometry seam');
   assert.match(util, /pointercancel/, 'interrupted gestures end drags cleanly');
 });

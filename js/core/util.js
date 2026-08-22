@@ -197,8 +197,9 @@ PM.menu = (anchor, items, opt = {}) => {
   for (const it of items) {
     if (it === '-') { el.appendChild(h('div.sep')); continue; }
     if (it.header) { el.appendChild(h('div.hd', it.header)); continue; }
-    el.appendChild(h('div.di' + (it.on ? '.on' : ''), {
-      onclick: (e) => { e.stopPropagation(); PM.closeMenus(); it.run && it.run(); }
+    el.appendChild(h('div.di' + (it.on ? '.on' : '') + (it.disabled ? '.disabled' : ''), {
+      role: 'menuitem', 'aria-disabled': String(!!it.disabled),
+      onclick: (e) => { e.stopPropagation(); if (it.disabled) return; PM.closeMenus(); it.run && it.run(); }
     }, it.on ? '✓ ' : '', it.label, it.kb ? h('span', { style: { marginLeft: 'auto', fontFamily: 'var(--f-mono)', fontSize: '10.5px', color: 'var(--tx-4)' } }, it.kb) : null));
   }
   document.body.appendChild(el);
@@ -208,10 +209,15 @@ PM.menu = (anchor, items, opt = {}) => {
   let y = opt.y != null ? opt.y : r.bottom + 5;
   el.style.left = clamp(x, 6, innerWidth - w - 6) + 'px';
   el.style.top = clamp(y, 6, innerHeight - ht - 6) + 'px';
-  setTimeout(() => document.addEventListener('pointerdown', PM.closeMenus, { once: true }), 0);
+  PM._menuOutside = (event) => { if (!el.contains(event.target)) PM.closeMenus(); };
+  setTimeout(() => document.addEventListener('pointerdown', PM._menuOutside), 0);
   return el;
 };
-PM.closeMenus = () => $$('.drop').forEach(e => e.remove());
+PM.closeMenus = () => {
+  if (PM._menuOutside) document.removeEventListener('pointerdown', PM._menuOutside);
+  PM._menuOutside = null;
+  $$('.drop').forEach(e => e.remove());
+};
 
 /* ── drag helper ───────────────────────────────────────── */
 /* Returns { cancel }. cancel() and a native pointercancel both end the drag

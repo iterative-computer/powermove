@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.userContentController.add(self, name: "saveFile")
@@ -22,6 +23,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         config.userContentController.add(self, name: "pmTheme")
         config.userContentController.add(self, name: "pmCodex")
         config.userContentController.add(self, name: "pmCaptureWindow")
+        /* about:blank child WebViews do not inherit the file-read grant used by the
+           main app page. Inject the packaged product CSS at document end so detached
+           panels retain Powermove's styling without granting broader file access. */
+        let cssDirectory = Bundle.main.resourceURL?.appendingPathComponent("web/css")
+        let detachedCSS = ["tokens.css", "app.css"].compactMap { name in
+            cssDirectory.flatMap { try? String(contentsOf: $0.appendingPathComponent(name), encoding: .utf8) }
+        }.joined(separator: "\n")
+        if !detachedCSS.isEmpty,
+           let encoded = try? JSONSerialization.data(withJSONObject: detachedCSS, options: .fragmentsAllowed),
+           let cssJSON = String(data: encoded, encoding: .utf8) {
+            let source = "if(location.href==='about:blank'){const s=document.createElement('style');s.dataset.powermove='panel';s.textContent=\(cssJSON);document.head.appendChild(s)}"
+            config.userContentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
@@ -343,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         win.backgroundColor = NSColor(white: 0.953, alpha: 1)
         win.contentView = wv
         win.isReleasedWhenClosed = false
+        win.delegate = self
         let wc = NSWindowController(window: win)
         panelWCs.append(wc)
         win.setFrameOrigin(NSPoint(x: window.frame.midX - w / 2, y: window.frame.midY - h / 2))
@@ -364,6 +379,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSWindow) === window {
             NSApp.terminate(nil)
+        } else if let closed = notification.object as? NSWindow {
+            panelWCs.removeAll { $0.window === closed }
         }
     }
 

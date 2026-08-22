@@ -117,7 +117,7 @@ test('saveLook keeps code and uniform values; applyLook restores them in a new l
   assert.equal(L.d.uniforms.uTint.v, '#123456', 'uniform values restored');
 });
 
-test('drop removes exactly one library entry and trims overflow at 24', () => {
+test('section deletion is recoverable and library storage stays bounded at 24', () => {
   const PM = libraryModel();
   baseProject(PM);
   const a = PM.mkLayer('solid', { name: 'A' }, PM.proj);
@@ -126,10 +126,48 @@ test('drop removes exactly one library entry and trims overflow at 24', () => {
   PM.Library.saveSection('two');
   assert.equal(PM.Library.all().sections.length, 2);
   PM.Library.drop('sections', e1.id);
-  assert.deepEqual([...PM.Library.all().sections.map(s => s.name)], ['two']);
+  assert.deepEqual([...PM.Library.catalog('project').map(s => s.name)], ['two'], 'trashed sections leave the active catalog');
+  assert.equal(PM.Library.catalog('project', true).find(s => s.id === e1.id).deletedAt > 0, true);
+  PM.Library.restoreSection(e1.id);
+  assert.deepEqual([...PM.Library.catalog('project').map(s => s.name)].sort(), ['one', 'two']);
 
   for (let i = 0; i < 30; i++) PM.Library.saveSection('bulk ' + i);
   assert.equal(PM.Library.all().sections.length, 24, 'library stays bounded');
+});
+
+test('inserted sections retain an editable source reference instead of flattening', () => {
+  const PM = libraryModel();
+  const p = baseProject(PM);
+  const layer = PM.mkLayer('shape', { name: 'Editable source' }, p);
+  p.layers.push(layer);
+  const section = PM.Library.saveSection('Reusable', [layer.id]);
+  p.layers.length = 0;
+  const [inserted] = PM.Library.insertSection(section.id);
+  assert.equal(inserted.sectionRef.sectionId, section.id);
+  assert.equal(inserted.sectionRef.sourceProjectId, p.id);
+  assert.equal(typeof inserted.sectionRef.instanceId, 'string');
+  assert.notEqual(inserted.id, layer.id, 'scene layer is a real editable clone with a stable source link');
+});
+
+test('library scope combines sections from multiple projects without parallel storage', () => {
+  const PM = libraryModel();
+  const first = baseProject(PM); first.name = 'Velocity Study';
+  const firstLayer = PM.mkLayer('shape', { name: 'Hero' }, first); first.layers.push(firstLayer);
+  PM.Library.saveSection('Hero block', [firstLayer.id]);
+
+  const second = PM.mkProject({ name: 'Campaign', w: 1920, h: 1080, fps: 30, dur: 10 });
+  const secondLayer = PM.mkLayer('text', { name: 'Title' }, second); second.layers.push(secondLayer);
+  PM.proj = second;
+  PM.Library.saveSection('Campaign title', [secondLayer.id]);
+  PM.proj = first;
+  const projects = new Map([[first.id, first], [second.id, second]]);
+  PM.Projects = {
+    list: () => [...projects.values()].map(project => ({ id: project.id, name: project.name })),
+    get: id => projects.get(id), put: project => projects.set(project.id, project),
+  };
+  const names = PM.Library.catalog('global').map(section => `${section.sourceProjectName}:${section.name}`).sort();
+  assert.deepEqual([...names], ['Campaign:Campaign title', 'Velocity Study:Hero block']);
+  assert.strictEqual(second.library.sections[0].layers[0].name, 'Title', 'catalog reads the project-owned editable source');
 });
 
 /* ── chat rail migration ───────────────────────────────── */
@@ -157,11 +195,15 @@ test('normalization strips legacy docked chat panels', () => {
   assert.ok(panelIds.includes('assets'));
 });
 
-test('no built-in preset docks retired assistant UI; Design keeps the generative library', () => {
+test('obsolete Generative panels migrate out while saved reusable content remains project-owned', () => {
   const src = utf8('js/core/workspace.js');
   const chatDocked = [...src.matchAll(/p\('chat'/g)];
   assert.equal(chatDocked.length, 0, 'presets reference no retired chat panel');
-  assert.match(src, /p\('library', \{ size: 220 \}\)/, 'Design preset includes the Generative panel');
+  assert.doesNotMatch(src, /p\('library'/, 'built-ins no longer dock the retired Generative panel');
+  assert.doesNotMatch(utf8('js/ui/panels.js'), /registerPanel\('library'/, 'old panel registration is gone');
+  assert.match(src, /id === 'library'/, 'saved manifests are narrowly migrated');
+  assert.match(utf8('js/core/library.js'), /project\.library\.sections/, 'saved section data is not deleted');
+  assert.match(utf8('js/core/library.js'), /project\.library\.looks/, 'saved look data is not deleted');
 });
 
 test('the spatial assistant is the only loaded assistant surface', () => {

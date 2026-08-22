@@ -120,10 +120,11 @@ R.tabs = () => {
 };
 R.markOpen = (id) => {
   const t = R.tabs();
-  /* Selecting an existing project must not move its tab. New projects join at
-     the end, matching the visible left-to-right order in the titlebar. */
+  /* Selecting an already-open project must never reshuffle the visible strip.
+     A genuinely new open is the only implicit ordering change, and it appends
+     where the user can predictably find it. */
   if (!t.includes(id)) t.push(id);
-  PM.store.set(R.openKey, t.slice(-8));
+  PM.store.set(R.openKey, t.slice(0, 8));
 };
 R.markClosed = (id) => PM.store.set(R.openKey, R.tabs().filter(x => x !== id));
 

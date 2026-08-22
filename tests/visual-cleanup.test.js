@@ -30,12 +30,13 @@ test('timeline ruler renders composition markers as compact, labeled diamonds', 
   assert.match(timeline, /PM\.proj\.markers\.map\(m => m\.t\)/, 'marker timing data remains editable');
 });
 
-test('Design workspace uses the timeline instead of a redundant Layers panel', () => {
+test('Design workspace uses the timeline and has no retired Generative panel', () => {
   const design = workspace.slice(workspace.indexOf("id: 'design'"), workspace.indexOf("id: 'gradient'"));
   assert.doesNotMatch(design, /p\('layers'/);
-  /* no assistant is docked; the generative library ships in Design */
+  /* no assistant or retired Generative surface is docked */
   assert.doesNotMatch(design, /p\('chat'/);
-  assert.match(design, /p\('assets', \{ size: 150 \}\), p\('library', \{ size: 220 \}\), p\('fxbrowser', \{ flex: true \}\)/);
+  assert.doesNotMatch(design, /p\('library'/);
+  assert.match(design, /p\('assets', \{ size: 190 \}\), p\('fxbrowser', \{ flex: true \}\)/);
 });
 
 test('Gradient is a clean shared preset instead of app-only saved state', () => {
@@ -52,14 +53,24 @@ test('non-editable chrome cannot be selected while text editors remain selectabl
   assert.match(appCss, /textarea,[\s\S]*\[contenteditable\][\s\S]*-webkit-user-select:text;user-select:text/);
 });
 
-test('window corner controls omit actions already reachable in canonical surfaces', () => {
+test('the Composition surface loses only its drop shadow and keeps its edge geometry', () => {
+  const stage = appCss.match(/#stage-inner\{([^}]*)\}/)?.[1] || '';
+  assert.match(stage, /border-radius:var\(--r-md\)/);
+  assert.match(stage, /overflow:hidden/);
+  assert.match(stage, /box-shadow:none/);
+  assert.match(stage, /outline:1px solid/, 'the preview edge remains legible');
+  assert.match(appCss, /#library-screen\{[^}]*box-shadow:var\(--shadow-float\)/s, 'unrelated elevation remains intact');
+});
+
+test('one Library control replaces duplicate global commands without hiding unique actions', () => {
   const titlebar = app.slice(app.indexOf('right.append('), app.indexOf("PM.bus.on('workspaces', paintTabs)"));
+  assert.match(titlebar, /Library · Sections and Workspaces/);
   assert.doesNotMatch(titlebar, /button\('plus', 'New layer'/);
   assert.doesNotMatch(titlebar, /button\('wand', 'New shader layer'/);
   assert.doesNotMatch(titlebar, /button\('export', 'Export'/);
   assert.doesNotMatch(titlebar, /button\('gear', 'Workspace definition'/);
-  assert.match(app, /label: 'Edit workspace JSON…'.*PM\.WS\.editJSON/s,
-    'workspace definition remains reachable from the workspace menu');
+  assert.match(fs.readFileSync(path.join(root, 'js/ui/library.js'), 'utf8'), /Edit validated definition….*PM\.WS\.editJSON/s,
+    'validated workspace definition editing remains reachable from Library');
   assert.match(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /PM\.cmd\('newShader'\)/,
     'shader creation remains reachable from the canonical tool strip');
   assert.match(fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8'), /PM\.Export\.dialog\(\)/,

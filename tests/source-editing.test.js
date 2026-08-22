@@ -114,6 +114,27 @@ test('scene parameter edits preserve generated control bindings', () => {
   assert.equal(parameter.value, 45);
 });
 
+test('section creation and updates cross the same undoable source transaction boundary', () => {
+  const { PM } = editor();
+  const layer = addText(PM);
+  const section = {
+    id: 'section-1', name: 'Title section', layers: [JSON.parse(JSON.stringify(layer))],
+    versions: [], tags: ['text'], schemaVersion: 1,
+  };
+  assert.equal(PM.Edit.apply({ type: 'create_section', section }, { label: 'Save section', origin: 'library' }).ok, true);
+  assert.equal(PM.proj.library.sections[0].id, 'section-1');
+  const replacement = JSON.parse(JSON.stringify(layer)); replacement.name = 'Updated title';
+  assert.equal(PM.Edit.apply({
+    type: 'update_section', sectionId: 'section-1', layers: [replacement],
+    version: { id: 'version-2', layers: [replacement], at: 2 },
+  }, { label: 'Update section', origin: 'library' }).ok, true);
+  assert.equal(PM.proj.library.sections[0].layers[0].name, 'Updated title');
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.proj.library.sections[0].layers[0].name, 'Title');
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.proj.library?.sections?.length || 0, 0);
+});
+
 test('a failed multi-command edit rolls the entire source back', () => {
   const { PM } = editor();
   const layer = addText(PM);

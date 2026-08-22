@@ -854,16 +854,18 @@ function onCtx(e) {
       items.push('-', { label: 'Delete keyframe', run: () => PM.hist.do('Delete keyframe', () => PM.removeKey(r.prop, key)) });
     } else {
       items.push({ label: 'Add keyframe here', run: () => PM.hist.do('Add keyframe', () => PM.setKeyOn(r.prop, x2t(x) - r.L.from, PM.evP(r.L, r.prop, x2t(x), r.key), 'power', PM.proj.fps)) });
-      items.push({ label: 'Clear all keyframes', run: () => PM.hist.do('Clear keys', () => { r.prop.kf = []; PM.touch(); }) });
+      items.push({ label: 'Clear all keyframes', disabled: !r.prop.kf.length, run: () => PM.hist.do('Clear keys', () => { r.prop.kf = []; PM.touch(); }) });
     }
   } else if (hr && hr.row.kind === 'layer') {
     const L = hr.row.L;
+    if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
+    const inside = PM.time > L.from && PM.time < L.from + L.dur;
     items.push({ header: L.name },
       { label: 'Duplicate', kb: '⌘D', run: () => PM.cmd('duplicate') },
       { label: 'Precompose', kb: '⌘⇧C', run: () => PM.cmd('precompose') },
-      { label: 'Split at playhead', kb: '⌘⇧D', run: () => PM.cmd('split') },
-      { label: 'Trim in to playhead', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: PM.time, duration: L.dur - (PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
-      { label: 'Trim out to playhead', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { duration: Math.max(1 / PM.proj.fps, PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
+      { label: 'Split at playhead', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
+      { label: 'Trim in to playhead', disabled: !inside, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: PM.time, duration: L.dur - (PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
+      { label: 'Trim out to playhead', disabled: !inside, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { duration: Math.max(1 / PM.proj.fps, PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
       '-',
       { label: L.mblur ? 'Motion blur off' : 'Motion blur on', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { motionBlur: !L.mblur } }, { label: 'Motion blur', origin: 'timeline' }) },
       { label: 'Fit to composition', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: 0, duration: PM.proj.dur } }, { label: 'Fit', origin: 'timeline' }) },

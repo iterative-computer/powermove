@@ -50,11 +50,14 @@ function normalizeControl(control, index) {
 function normalizeWorkspace(workspace, fallback) {
   const raw = workspace && typeof workspace === 'object' ? copy(workspace) : {};
   const backup = fallback && typeof fallback === 'object' ? copy(fallback) : null;
+  raw.schemaVersion = 1;
   raw.id = text(raw.id, PM.uid('ws'));
   raw.name = text(raw.name, 'Workspace');
   raw.density = ['compact', 'normal', 'comfy'].includes(raw.density) ? raw.density : 'normal';
   raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
   raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
+  raw.scope = raw.scope === 'project' ? 'project' : 'global';
+  raw.projectId = raw.scope === 'project' ? text(raw.projectId, PM.proj?.id || '') : null;
   raw.custom = (Array.isArray(raw.custom) ? raw.custom : []).map((panel, index) => {
     const cp = panel && typeof panel === 'object' ? panel : {};
     return {
@@ -65,6 +68,17 @@ function normalizeWorkspace(workspace, fallback) {
       controls: (Array.isArray(cp.controls) ? cp.controls : []).map(normalizeControl),
     };
   });
+  raw.hiddenPanels = (Array.isArray(raw.hiddenPanels) ? raw.hiddenPanels : []).map(item => {
+    const hidden = item && typeof item === 'object' ? item : {};
+    const spec = hidden.spec && typeof hidden.spec === 'object' ? hidden.spec : { id: hidden.id };
+    return {
+      id: text(hidden.id, text(spec.id)), dockId: text(hidden.dockId, 'right'),
+      index: Math.max(0, Math.floor(finite(hidden.index) ? hidden.index : 0)),
+      dockIndex: Math.max(0, Math.floor(finite(hidden.dockIndex) ? hidden.dockIndex : 0)),
+      spec: { ...spec, id: text(spec.id, text(hidden.id)) },
+      dock: hidden.dock && typeof hidden.dock === 'object' ? hidden.dock : null,
+    };
+  }).filter(item => item.id && item.id !== 'viewer' && item.id !== 'library');
 
   let docks = raw.layout && Array.isArray(raw.layout.docks) ? raw.layout.docks : null;
   if (!docks || !docks.some(d => d && Array.isArray(d.panels) && d.panels.length)) {
@@ -78,8 +92,9 @@ function normalizeWorkspace(workspace, fallback) {
     const panels = (Array.isArray(d.panels) ? d.panels : []).map(spec => {
       const q = typeof spec === 'string' ? { id: spec } : (spec && typeof spec === 'object' ? spec : {});
       const id = text(q.id);
-      /* Strip the legacy chat panel and the redundant Layers panel. */
-      if (!id || id === 'chat' || id === 'layers' || usedPanels.has(id)) return null;
+      /* Narrowly retire obsolete dock panels. Saved Section/Look content lives
+         in project.library and is intentionally untouched by this migration. */
+      if (!id || id === 'chat' || id === 'layers' || id === 'library' || usedPanels.has(id)) return null;
       usedPanels.add(id);
       const clean = { id };
       if (q.flex) clean.flex = true;
@@ -95,6 +110,15 @@ function normalizeWorkspace(workspace, fallback) {
     return out;
   }).filter(d => d.panels.length);
   if (!docks.length) docks = [{ id: 'center', panels: [{ id: 'viewer', flex: true }], flex: true }];
+
+  /* A workspace is never allowed to hide the composition completely. This is
+     the recovery surface for every layout edit and generated panel. */
+  if (!docks.some(d => d.panels.some(panel => panel.id === 'viewer'))) {
+    const target = docks.find(d => d.id === 'center') || docks.find(d => d.flex) || docks[0];
+    target.panels.unshift({ id: 'viewer', flex: true });
+  }
+  const visibleIds = new Set(docks.flatMap(d => d.panels.map(panel => panel.id)));
+  raw.hiddenPanels = raw.hiddenPanels.filter(item => !visibleIds.has(item.id));
 
   /* The layout must always have one dock that consumes unused width. Models often
      call it "main" or "canvas" instead of "center"; the viewer/timeline dock is
@@ -115,9 +139,9 @@ const PRESETS = () => ([
     features: { motionBlur: true, snapping: true, guides: true, autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
-        /* the timeline already owns layer ordering and visibility in Design;
-           use the left rail for project media, the generative library, and effects */
-        dock('left', [p('assets', { size: 150 }), p('library', { size: 220 }), p('fxbrowser', { flex: true })], 250),
+        /* the timeline owns layer ordering; the left rail stays focused on
+           project media and effects while reusable content lives in Library */
+        dock('left', [p('assets', { size: 190 }), p('fxbrowser', { flex: true })], 250),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
         dock('right', [p('inspector', { flex: true })], 300),
       ],
@@ -188,7 +212,7 @@ const PRESETS = () => ([
     layout: {
       docks: [
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 180 })]),
-        dock('right', [p('library', { flex: true }), p('notes', { size: 170 })], 400),
+        dock('right', [p('notes', { flex: true })], 300),
       ],
     },
   },
@@ -203,6 +227,8 @@ const PRESETS = () => ([
 const WS = {
   current: null,
   all: [],
+  editing: null,
+  trashKey: 'workspaceTrash',
   list: () => WS.all,
   get: (id) => WS.all.find(w => w.id === id),
 };
@@ -263,6 +289,15 @@ WS.save = () => {
 
 /** Mutate the active workspace and re-apply. All agent UI edits funnel through here. */
 WS.mutate = (fn, opts = {}) => {
+  if (WS.editing) {
+    const fallback = copy(WS.editing.draft);
+    fn(WS.editing.draft);
+    WS.editing.draft = normalizeWorkspace(WS.editing.draft, fallback);
+    WS.current = WS.editing.draft;
+    registerCustom(WS.current); applyFeatures(WS.current); PM.Layout.apply(WS.current);
+    PM.bus.emit('workspaces');
+    return WS.current;
+  }
   const w = WS.current;
   if (w.builtin && !opts.inPlace) {
     const copy = JSON.parse(JSON.stringify(w));
@@ -297,10 +332,74 @@ WS.create = (spec) => {
 WS.remove = (id) => {
   const w = WS.get(id);
   if (!w || w.builtin) return PM.toast('Built-in workspaces can’t be deleted');
+  const trash = WS.trashList().filter(item => item.id !== id);
+  trash.unshift({ ...copy(w), deletedAt: Date.now() });
+  PM.store.set(WS.trashKey, trash);
   WS.all = WS.all.filter(x => x.id !== id);
   WS.save();
   if (WS.current.id === id) WS.activate('design');
   PM.bus.emit('workspaces');
+};
+
+WS.trashList = () => {
+  const list = PM.store.get(WS.trashKey, []);
+  return Array.isArray(list) ? list : [];
+};
+WS.restore = (id) => {
+  const item = WS.trashList().find(workspace => workspace.id === id);
+  if (!item) return null;
+  const restored = normalizeWorkspace({ ...copy(item), deletedAt: undefined });
+  WS.all.push(restored);
+  PM.store.set(WS.trashKey, WS.trashList().filter(workspace => workspace.id !== id));
+  WS.save(); return restored;
+};
+WS.rename = (id, name) => {
+  const workspace = WS.get(id);
+  if (!workspace || workspace.builtin) return false;
+  workspace.name = text(name, workspace.name); WS.save(); return true;
+};
+WS.duplicate = (id, options = {}) => {
+  const source = WS.get(id); if (!source) return null;
+  const workspace = normalizeWorkspace({
+    ...copy(source), id: PM.uid('ws'), name: options.name || source.name + ' copy', builtin: false,
+    scope: options.scope || source.scope || 'global', projectId: options.projectId || source.projectId || null,
+  }, source);
+  WS.all.push(workspace); WS.save(); return workspace;
+};
+WS.resetBuiltin = (id) => {
+  const preset = PRESETS().find(workspace => workspace.id === id); if (!preset) return false;
+  const index = WS.all.findIndex(workspace => workspace.id === id);
+  if (index >= 0) WS.all[index] = normalizeWorkspace(preset);
+  else WS.all.push(normalizeWorkspace(preset));
+  WS.save(); if (WS.current?.id === id) WS.activate(id, true); return true;
+};
+
+WS.beginEdit = (id = WS.current.id) => {
+  const source = WS.get(id); if (!source || WS.editing) return null;
+  WS.editing = { sourceId: source.id, beforeId: WS.current.id, draft: normalizeWorkspace(copy(source), source) };
+  WS.current = WS.editing.draft;
+  registerCustom(WS.current); applyFeatures(WS.current); PM.Layout.apply(WS.current);
+  PM.bus.emit('workspaces');
+  return WS.editing.draft;
+};
+WS.cancelEdit = () => {
+  if (!WS.editing) return false;
+  const beforeId = WS.editing.beforeId; WS.editing = null;
+  WS.activate(WS.get(beforeId) ? beforeId : 'design', true); return true;
+};
+WS.saveEdit = (asNew = false, name) => {
+  if (!WS.editing) return null;
+  const session = WS.editing;
+  let saved = normalizeWorkspace(copy(session.draft), WS.get(session.sourceId));
+  const source = WS.get(session.sourceId);
+  if (asNew || source?.builtin) {
+    saved.id = PM.uid('ws'); saved.name = text(name, source?.name + ' copy'); saved.builtin = false;
+    WS.all.push(saved);
+  } else {
+    saved.id = source.id; saved.name = text(name, source.name); saved.builtin = false;
+    const index = WS.all.findIndex(workspace => workspace.id === source.id); WS.all[index] = saved;
+  }
+  WS.editing = null; WS.save(); WS.activate(saved.id, true); PM.toast('Workspace saved'); return saved;
 };
 
 WS.saveAsNew = () => {
@@ -329,7 +428,9 @@ WS.editJSON = () => {
           const o = JSON.parse(ta.value);
           const i = WS.all.findIndex(w => w.id === WS.current.id);
           o.id = WS.current.id;
-          WS.all[i] = o; WS.save(); WS.activate(o.id, true);
+          /* Raw definitions still cross the same validator as visual editing;
+             malformed docks can never strand the Composition surface. */
+          WS.all[i] = normalizeWorkspace(o, WS.current); WS.save(); WS.activate(o.id, true);
           PM.toast('Workspace updated');
         } catch (e) { PM.toast('Invalid JSON: ' + e.message, 3200); return false; }
       },

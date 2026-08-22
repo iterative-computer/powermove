@@ -350,6 +350,33 @@ function addMarker(command) {
   return marker;
 }
 
+function createSection(command) {
+  if (!command.section || typeof command.section !== 'object') throw new Error('Section manifest is required');
+  PM.proj.library = PM.proj.library && typeof PM.proj.library === 'object' ? PM.proj.library : { sections: [], looks: [] };
+  PM.proj.library.sections = Array.isArray(PM.proj.library.sections) ? PM.proj.library.sections : [];
+  if (PM.proj.library.sections.some(section => section.id === command.section.id)) throw new Error('Section id already exists');
+  PM.proj.library.sections.unshift(clone(command.section));
+  while (PM.proj.library.sections.length > 24) PM.proj.library.sections.pop();
+  PM.bus.emit('library');
+  return { id: command.section.id };
+}
+
+function updateSection(command) {
+  const sections = PM.proj.library && Array.isArray(PM.proj.library.sections) ? PM.proj.library.sections : [];
+  const section = sections.find(item => item.id === command.sectionId);
+  if (!section) throw new Error('Section not found');
+  if (!Array.isArray(command.layers) || !command.layers.length) throw new Error('Section layers are required');
+  section.layers = clone(command.layers);
+  section.thumb = command.thumb || section.thumb || null;
+  section.at = Number(command.at) || Date.now();
+  section.tags = [...new Set(section.layers.map(layer => layer.type).filter(Boolean))];
+  section.versions = Array.isArray(section.versions) ? section.versions : [];
+  section.versions.push(clone(command.version || { id: PM.uid('SV'), layers: section.layers, thumb: section.thumb, at: section.at }));
+  if (section.versions.length > 12) section.versions.splice(0, section.versions.length - 12);
+  PM.bus.emit('library');
+  return { id: section.id, versions: section.versions.length };
+}
+
 function runOne(command) {
   if (!command || typeof command !== 'object' || Array.isArray(command)) throw new Error('Edit command must be an object');
   switch (command.type) {
@@ -367,6 +394,8 @@ function runOne(command) {
     case 'set_effect': return setEffect(command);
     case 'set_scene_parameter': return setSceneParameter(command);
     case 'add_marker': return addMarker(command);
+    case 'create_section': return createSection(command);
+    case 'update_section': return updateSection(command);
     default: throw new Error(`Unknown source edit: ${command.type}`);
   }
 }
@@ -397,6 +426,8 @@ const Edit = {
     set_effect: { target: 'layer', fields: ['effect', 'patch'] },
     set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
     add_marker: { target: 'project', fields: ['time', 'name'] },
+    create_section: { target: 'project', fields: ['section'] },
+    update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version'] },
   }),
 
   apply(input, meta = {}) {
