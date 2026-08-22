@@ -42,8 +42,9 @@ test('Gradient is a clean shared preset instead of app-only saved state', () => 
   assert.match(gradient, /name: 'Gradient', builtin: true/);
   assert.match(gradient, /dock\('center', \[p\('viewer', \{ flex: true \}\), p\('timeline', \{ size: 300 \}\)\]\)/);
   assert.doesNotMatch(gradient, /p\('layers'/);
-  assert.match(gradient, /label: 'Gradient End'.*def: '#34144F'/);
-  assert.match(gradient, /label: 'Gradient Midpoint'.*def: 50/);
+  assert.match(gradient, /label: 'End color'.*target: '\$composition'.*path: 'composition\.background\.endColor'.*def: '#34144F'/);
+  assert.match(gradient, /label: 'Midpoint'.*target: '\$composition'.*path: 'composition\.background\.midpoint'/);
+  assert.doesNotMatch(gradient, /param: 'Gradient/, 'gradient controls edit real composition source instead of inert parameters');
 });
 
 test('non-editable chrome cannot be selected while text editors remain selectable', () => {
@@ -51,13 +52,14 @@ test('non-editable chrome cannot be selected while text editors remain selectabl
   assert.match(appCss, /textarea,[\s\S]*\[contenteditable\][\s\S]*-webkit-user-select:text;user-select:text/);
 });
 
-test('the Composition surface is square and shadowless while surrounding chrome keeps elevation', () => {
+test('the Composition surface is square, borderless, and shadowless while surrounding chrome keeps elevation', () => {
   const stage = appCss.match(/#stage-inner\{([^}]*)\}/)?.[1] || '';
   assert.match(stage, /border-radius:0/);
   assert.match(stage, /corner-shape:round/, 'the preview opts out of UI superellipse smoothing');
   assert.match(stage, /overflow:hidden/);
   assert.match(stage, /box-shadow:none/);
-  assert.match(stage, /outline:1px solid/, 'the preview edge remains legible');
+  assert.match(stage, /outline:0/, 'the composition color reaches the edge without a dark outline');
+  assert.doesNotMatch(stage, /outline-offset|outline:1px|border:/);
   assert.match(appCss, /#library-screen\{[^}]*box-shadow:var\(--shadow-float\)/s, 'unrelated elevation remains intact');
 });
 
@@ -102,7 +104,7 @@ test('top-level Settings owns appearance while Undo and Redo remain keyboard com
   assert.match(shortcuts, /def\('redo'/);
 });
 
-test('the Composition color picker is reachable and uses concentric geometry', () => {
+test('the Composition color picker is reachable and its color surfaces are borderless', () => {
   const controls = fs.readFileSync(path.join(root, 'js/ui/controls.js'), 'utf8');
   assert.match(controls, /button\.color-field/);
   assert.match(controls, /function openColorPicker\(initial, apply, label\)/);
@@ -111,9 +113,18 @@ test('the Composition color picker is reachable and uses concentric geometry', (
     'Apply crosses the shared undoable edit boundary');
   assert.doesNotMatch(controls, /type: 'color'[^\n]*width: 0|inp\.click\(\)/,
     'the broken zero-size native proxy is gone');
-  assert.match(appCss, /\.sw\{[^}]*border-radius:6px/s);
-  assert.match(appCss, /\.sw::after\{[^}]*inset:2px[^}]*border-radius:4px/s,
-    'outer radius equals inner radius plus the 2px inset');
+  const dialogPreview = appCss.match(/\.color-dialog-preview\{([^}]*)\}/)?.[1] || '';
+  const colorChoice = appCss.match(/\.color-choice\{([^}]*)\}/)?.[1] || '';
+  const inlineSwatch = appCss.match(/\.sw\{([^}]*)\}/)?.[1] || '';
+  for (const surface of [dialogPreview, colorChoice, inlineSwatch]) {
+    assert.doesNotMatch(surface, /padding:|border:|var\(--line-2\)/,
+      'color is painted directly to the edge without a dark frame');
+  }
+  assert.match(dialogPreview, /background:var\(--sw-color\)/);
+  assert.match(colorChoice, /background:var\(--sw-color\)/);
+  assert.match(inlineSwatch, /background:var\(--sw-fill,var\(--sw-color,#808080\)\)/);
+  assert.match(appCss, /\.color-choice\.on\{box-shadow:0 0 0 2px var\(--accent\)\}/,
+    'only the selected preset gets an intentional accent ring');
 });
 
 test('custom fill picker supports solid and gradient editing without a native picker', () => {
@@ -122,20 +133,36 @@ test('custom fill picker supports solid and gradient editing without a native pi
   const model = fs.readFileSync(path.join(root, 'js/core/model.js'), 'utf8');
   const compositor = fs.readFileSync(path.join(root, 'js/gl/compositor.js'), 'utf8');
   assert.match(inspector, /PM\.fillField/);
-  assert.match(controls, /Solid.*Linear gradient.*Radial gradient/s);
+  assert.match(controls, /\['solid', 'Solid'\].*\['linear', 'Linear'\].*\['radial', 'Radial'\].*\['none', 'None'\]/s);
+  assert.match(controls, /role: 'group', 'aria-label': 'Fill type'/);
   assert.match(controls, /Add stop/);
-  assert.match(controls, /Move stop left/);
-  assert.match(controls, /Move stop right/);
   assert.match(controls, /Remove stop/);
   assert.match(controls, /fill-sv/);
   assert.match(controls, /fill-hue/);
   assert.match(controls, /Saturation and brightness/);
   assert.match(controls, /Color swatches/);
-  assert.match(controls, /Clear fill/);
+  assert.match(controls, /button\.fill-channels-toggle/);
+  assert.match(controls, /channelGrid\.hidden = !channelGrid\.hidden/,
+    'advanced color channels stay available without crowding the default picker');
   assert.match(controls, /PM\.Color = \{ normalizeHex, rgbToHex, hexToRgb, rgbToHsv, hsvToRgb \}/,
     'hex, RGB, and HSB fields share one synchronized conversion path');
-  assert.match(appCss, /\.fill-color-main\{height:210px[^}]*grid-template-columns:1fr 22px/,
-    'the picker has a large 2D field and a vertical hue rail');
+  assert.match(appCss, /\.fill-picker\{[^}]*width:400px[^}]*max-height:min\(560px/,
+    'the picker stays compact enough for the editor');
+  assert.match(appCss, /\.fill-color-main\{height:164px[^}]*grid-template-columns:1fr 18px/,
+    'the picker keeps a useful 2D field and a slim vertical hue rail');
+  assert.match(appCss, /\.fill-preview\{height:10px/,
+    'the gradient preview is a quiet rail instead of a second oversized color surface');
+  assert.match(appCss, /\.fill-channels\[hidden\]\{display:none\}/,
+    'RGB and HSB channels are collapsed by default');
+  assert.match(appCss, /\.fill-color-workbench\[hidden\],\.fill-preview\[hidden\],\.fill-stops\[hidden\]\{display:none!important\}/,
+    'mode-specific sections stay hidden even though their normal layout uses flex');
+  assert.match(appCss, /\.fill-picker :is\([^}]*:focus-visible\{outline:2px solid color-mix\(in srgb,var\(--accent\)/,
+    'picker focus uses the app accent instead of the browser black outline');
+  const svIndicator = appCss.match(/\.fill-sv i\{([^}]*)\}/)?.[1] || '';
+  const hueIndicator = appCss.match(/\.fill-hue i\{([^}]*)\}/)?.[1] || '';
+  assert.doesNotMatch(svIndicator + hueIndicator, /0 0 0 1px #000/, 'picker indicators have no hard black ring');
+  assert.match(svIndicator + hueIndicator, /0 0 0 1px var\(--accent\)/,
+    'picker indicators use the same accent edge as keyboard focus');
   assert.match(controls, /if \(event\.key === 'Escape'\)/, 'custom popover is keyboard-cancelable');
   assert.match(controls, /if \(event\.key !== 'Tab'\) return/);
   assert.match(controls, /focusable\.at\(-1\)/, 'keyboard focus is trapped inside the open picker');

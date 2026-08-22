@@ -8,7 +8,7 @@ const PM = window.PM, h = PM.h;
    prompt and a strict JSON schema across WKWebView; no account secret enters JS. */
 const pending = new Map();
 PM.CodexBridge = {
-  request(prompt, schema) {
+  request(prompt, schema, images = []) {
     const bridge = window.webkit?.messageHandlers?.pmCodex;
     if (!bridge) return Promise.reject(new Error('The coding agent is available in the Powermove macOS app'));
     const id = PM.uid('spatial-codex-');
@@ -18,7 +18,7 @@ PM.CodexBridge = {
         reject(new Error('The coding agent took too long to respond'));
       }, 120000);
       pending.set(id, { resolve, reject, timer });
-      bridge.postMessage({ id, prompt, schema });
+      bridge.postMessage({ id, prompt, schema, images: images.slice(0, 6) });
     });
   },
   resolve(id, result) {
@@ -64,6 +64,7 @@ const S = {
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
+  requestText: '', run: null,
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   hintFrame: 0, hintPoint: null,
 };
@@ -71,6 +72,7 @@ const S = {
 const Spatial = {
   init,
   activate,
+  open: () => activate(Math.round(innerWidth / 2), Math.round(innerHeight / 2)),
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
@@ -253,7 +255,7 @@ function activate(x, y, warmup = null) {
   S.path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   S.ink = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   S.ink.classList.add('spatial-ink'); S.ink.append(S.shadePath, S.path);
-  S.hint = h('div.spatial-hint', h('span', 'Circle any part of the interface'));
+  S.hint = h('div.spatial-hint', h('span', 'Type a prompt or circle an area'));
   S.root = h('div#spatial-assistant', { role: 'dialog', 'aria-label': 'Spatial coding assistant' },
     canvas, h('div.spatial-wash'), S.ink, S.hint);
   addEventListener('keydown', onKey, true);
@@ -265,6 +267,12 @@ function activate(x, y, warmup = null) {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     S.root.addEventListener('pointerdown', beginCircle);
     document.body.appendChild(S.root);
+    S.region = { x, y, width: 1, height: 1 };
+    S.context = {
+      targetPanelId: '', targetTitle: 'full composition and workspace',
+      rect: { x: Math.round(x), y: Math.round(y), width: 1, height: 1 }, panels: [], elements: [],
+    };
+    showComposer();
     scheduleHint(x, y);
     S.renderStop = startRipple(canvas, S.origin, sceneBitmap, warmup?.adapter || null);
     setTimeout(() => { if (S.active && S.phase === 'arming') S.phase = 'selecting'; }, 340);
@@ -314,12 +322,13 @@ function finishCircle(event) {
   S.shadePath.setAttribute('fill-rule', 'evenodd');
   S.shadePath.setAttribute('d', `M 0 0 H ${innerWidth} V ${innerHeight} H 0 Z ${pathData(S.points)} Z`);
   S.root.classList.add('target-selected');
+  const draft = S.card?.querySelector('textarea')?.value || '';
   S.region = info.rect;
   S.context = inspectRegion(S.points, S.region);
   S.phase = 'composing';
   S.hint.style.display = 'none';
   showOutline(S.region);
-  showComposer();
+  showComposer(draft);
 }
 
 function isClickGesture(points) {
@@ -351,7 +360,7 @@ function resetSelection(message) {
   S.shadePath?.setAttribute('d', ''); S.root?.classList.remove('target-selected');
   S.hint.style.display = ''; S.hint.querySelector('span').textContent = message;
   setTimeout(() => {
-    if (S.active && S.phase === 'selecting') S.hint.querySelector('span').textContent = 'Circle any part of the interface';
+    if (S.active && S.phase === 'selecting') S.hint.querySelector('span').textContent = 'Type a prompt or circle an area';
   }, 1400);
 }
 
@@ -456,8 +465,13 @@ function makeCardMovable(card, handle) {
   });
 }
 
-function showComposer() {
-  const input = h('textarea', { placeholder: S.context.targetPanelId ? 'How should this section change?' : 'What should be created here?', rows: '3' });
+function showComposer(draft = '') {
+  S.card?.remove();
+  const input = h('textarea', {
+    placeholder: S.context.targetPanelId ? 'How should this area change?' : 'Edit the scene, create a workspace, or make connected controls…',
+    rows: '3',
+  });
+  input.value = draft;
   const status = h('span.spatial-status', 'Enter to send');
   const cancelBtn = h('button.spatial-action', { onclick: cancel }, 'Cancel');
   const sendBtn = h('button.spatial-action.pri', { onclick: () => sendRequest(input, status, sendBtn, cancelBtn) }, 'Send to Codex');
@@ -465,30 +479,45 @@ function showComposer() {
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input, status, sendBtn, cancelBtn); }
   });
-  const handle = h('div.spatial-target', S.context.targetPanelId ? `Selected · ${S.context.targetTitle}` : 'Selected · open interface area');
+  const handle = h('div.spatial-target', S.context.targetPanelId ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition');
   S.card = h('div.spatial-compose',
     handle,
     input,
     h('div.spatial-actions', status, cancelBtn, sendBtn));
   S.root.appendChild(S.card);
   makeCardMovable(S.card, handle);
-  requestAnimationFrame(() => { cardPosition(S.card, S.region); input.focus(); });
+  /* Place and focus immediately as well as on the next frame. A cached window
+     capture can make repeat activations complete inside the click dispatch;
+     waiting only for rAF left the card at an unpositioned static location. */
+  cardPosition(S.card, S.region);
+  input.focus();
+  requestAnimationFrame(() => {
+    if (!S.active || !S.card) return;
+    cardPosition(S.card, S.region);
+    input.focus();
+  });
 }
 
 async function sendRequest(input, status, sendBtn, cancelBtn) {
   const request = input.value.trim();
   if (!request || S.phase === 'working') return;
   S.phase = 'working'; input.disabled = true; sendBtn.disabled = true; cancelBtn.disabled = true;
-  status.textContent = 'Designing section…';
+  status.textContent = 'Looking at the composition…';
   const token = ++S.requestToken;
   try {
-    const raw = await PM.CodexBridge.request(agentPrompt(request), responseSchema());
+    const observation = PM.AgentHarness ? await PM.AgentHarness.observe() : { state: {}, times: [], images: [] };
+    if (!S.active || token !== S.requestToken) return;
+    status.textContent = 'Designing a safe change…';
+    const raw = await PM.CodexBridge.request(agentPrompt(request, observation), responseSchema(), observation.images);
     if (!S.active || token !== S.requestToken) return;
     let decoded;
     try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
-    const plan = sanitizePlan(decoded, S.context);
+    const plan = sanitizePlan(decoded, S.context, request);
     if (plan.operation === 'noop') throw new Error(plan.message || 'No safe interface change was generated');
-    S.plan = plan; showPreview();
+    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'No safe composition edit was generated');
+    if (plan.kind === 'section' && !plan.section.controls.length) throw new Error('The generated section had no controls connected to editable source');
+    if (plan.kind === 'workspace' && !plan.workspaceEdit) throw new Error('The generated workspace was not safe or complete enough to preview');
+    S.requestText = request; S.plan = plan; showPreview();
   } catch (error) {
     if (!S.active || token !== S.requestToken) return;
     S.phase = 'composing'; input.disabled = false; sendBtn.disabled = false; cancelBtn.disabled = false;
@@ -499,9 +528,9 @@ async function sendRequest(input, status, sendBtn, cancelBtn) {
 function responseSchema() {
   return {
     type: 'object', additionalProperties: false,
-    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'chromeEdit', 'section'],
+    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'chromeEdit', 'section', 'sceneEdit', 'workspaceEdit'],
     properties: {
-      kind: { type: 'string', enum: ['section', 'chrome'] },
+      kind: { type: 'string', enum: ['section', 'chrome', 'scene', 'workspace'] },
       operation: { type: 'string', enum: ['create', 'modify', 'noop'] },
       targetPanelId: { type: 'string' }, dockId: { type: 'string' },
       placement: { type: 'string', enum: ['before', 'after', 'replace'] },
@@ -528,23 +557,30 @@ function responseSchema() {
           } },
         },
       },
+      sceneEdit: PM.AgentHarness.sceneSchema(),
+      workspaceEdit: { type: 'string' },
     },
   };
 }
 
-function agentPrompt(request) {
+function agentPrompt(request, observation) {
   const workspace = PM.WS.current;
   const commands = Object.values(PM.commands || {}).map(c => ({ id: c.id, label: c.label })).slice(0, 80);
-  const sourcePaths = ['properties.position.x', 'properties.position.y', 'properties.scale.x', 'properties.scale.y', 'properties.rotation', 'properties.opacity', 'content.text', 'content.color', 'content.size', 'layer.visible', 'layer.locked', 'layer.duration', 'layer.motionBlur'];
-  return `You are the interface coding agent inside Powermove. Design one structured, editable interface section for the circled region. Return only the requested JSON object.
+  const sourcePaths = ['properties.position.x', 'properties.position.y', 'properties.scale.x', 'properties.scale.y', 'properties.rotation', 'properties.opacity', 'content.text', 'content.color', 'content.size', 'layer.visible', 'layer.locked', 'layer.duration', 'layer.motionBlur', 'composition.background.type', 'composition.background.startColor', 'composition.background.endColor', 'composition.background.angle', 'composition.background.midpoint'];
+  return `You are the bounded visual editing agent inside Powermove. Decide whether the request changes the rendered composition or the app interface, then return one structured proposal. Return only the requested JSON object.
 
 RULES
+- kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
+- For scene requests, inspect the live source and attached rendered frames. Preserve locked layers, hand-edited channels, and unrelated work. Set reviewTimes to the most revealing moments. Return neutral section and chromeEdit fields.
+- kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
+- For non-workspace requests return workspaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section.
 - kind=chrome for a supported app-interface style change. The supported editable chrome target is preview.cornerRadius with value square or rounded. Use operation=modify, and return a neutral empty section object.
 - kind=section for editable panels/controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
 - operation=create when adding a section; operation=modify when replacing the selected section; noop only when the request cannot be represented safely.
 - A section is a compact native Powermove panel made from slider, color, toggle, select, and button controls.
-- Controls can bind to the selected composition layer with target="$selection" and one of these paths: ${sourcePaths.join(', ')}.
-- Unbound controls must use a stable parameter name and become editable scene parameters.
+- Every non-button control must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from LIVE COMPOSITION SOURCE, or target="$composition" for composition.background.* paths.
+- Supported control binding paths are: ${sourcePaths.join(', ')}. For exact layers, other primitive content.* fields and real properties.* channels shown in live source are also valid.
+- Do not create decorative or disconnected scene parameters. If no compatible source exists, return operation=noop and explain what must be selected or created.
 - Buttons may use only one of the listed command ids. Never invent commands.
 - Prefer 3–8 focused controls, a short title, and a useful one-sentence note. Avoid decorative filler.
 - For unused control fields, still return schema-safe neutral values: empty string/array, 0, or false.
@@ -560,16 +596,47 @@ ${JSON.stringify(workspace)}
 AVAILABLE COMMANDS
 ${JSON.stringify(commands)}
 
+${PM.AgentHarness.promptContext(observation)}
+
 USER REQUEST
 ${request}`;
 }
 
-function sanitizePlan(raw, context) {
-  const safePaths = new Set(['properties.position.x', 'properties.position.y', 'properties.scale.x', 'properties.scale.y', 'properties.rotation', 'properties.opacity', 'content.text', 'content.color', 'content.size', 'layer.visible', 'layer.locked', 'layer.duration', 'layer.motionBlur']);
+function controlConnection(target, path, controlType) {
+  const compositionPaths = new Set(['composition.background.type', 'composition.background.startColor', 'composition.background.endColor', 'composition.background.angle', 'composition.background.midpoint']);
+  if ((target === '$composition' || target === 'composition') && compositionPaths.has(path)) {
+    const expected = path.endsWith('.type') ? 'select' : path.endsWith('Color') ? 'color' : 'slider';
+    if (controlType !== expected) return null;
+    return { target: '$composition', path, connection: 'Composition background' };
+  }
+  const layer = target === '$selection' || target === 'selection' ? PM.firstSel() : (PM.L(target) || PM.byName(target));
+  if (!layer) return null;
+  if (path.startsWith('properties.')) {
+    const channel = path.slice('properties.'.length);
+    if (!PM.findProp(layer, channel) || controlType !== 'slider') return null;
+  } else if (path.startsWith('content.')) {
+    const key = path.slice('content.'.length);
+    const current = layer.d?.[key];
+    if (!['string', 'number', 'boolean'].includes(typeof current)) return null;
+    const expected = typeof current === 'number' ? 'slider' : typeof current === 'boolean' ? 'toggle'
+      : /^#[0-9a-f]{6}$/i.test(current) ? 'color' : 'select';
+    if (controlType !== expected) return null;
+  } else if (path.startsWith('layer.')) {
+    const key = path.slice('layer.'.length);
+    const expected = ['visible', 'locked', 'motionBlur'].includes(key) ? 'toggle' : key === 'duration' ? 'slider' : key === 'blend' ? 'select' : '';
+    if (!expected || controlType !== expected) return null;
+  } else return null;
+  return { target: target === '$selection' || target === 'selection' ? '$selection' : layer.id, path, connection: `Layer · ${layer.name}` };
+}
+
+function sanitizePlan(raw, context, request = '') {
   const operation = ['create', 'modify', 'noop'].includes(raw?.operation) ? raw.operation : 'noop';
   const chromeTarget = raw?.chromeEdit?.target === 'preview.cornerRadius' ? 'preview.cornerRadius' : '';
   const chromeValue = ['square', 'rounded'].includes(raw?.chromeEdit?.value) ? raw.chromeEdit.value : '';
-  const kind = raw?.kind === 'chrome' && chromeTarget && chromeValue ? 'chrome' : 'section';
+  const requestedKind = raw?.kind;
+  const kind = requestedKind === 'scene' ? 'scene'
+    : requestedKind === 'workspace' ? 'workspace'
+    : requestedKind === 'chrome' && chromeTarget && chromeValue ? 'chrome' : 'section';
   const cleanText = (v, fallback = '', max = 100) => typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : fallback;
   const source = raw?.section && typeof raw.section === 'object' ? raw.section : {};
   const baseId = slug(cleanText(source.id, cleanText(source.title, 'Generated section')));
@@ -583,8 +650,9 @@ function sanitizePlan(raw, context) {
       return out;
     }
     const target = cleanText(c.target, '', 120), path = cleanText(c.path, '', 120);
-    if ((target === '$selection' || target === 'selection') && safePaths.has(path)) { out.target = target; out.path = path; }
-    else out.param = cleanText(c.parameter, label, 80);
+    const connection = controlConnection(target, path, type);
+    if (!connection) return null;
+    Object.assign(out, connection);
     if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(c.defaultValue) ? c.defaultValue : '#FF6B1A';
     else if (type === 'toggle') out.def = !!c.defaultValue;
     else if (type === 'select') {
@@ -598,7 +666,7 @@ function sanitizePlan(raw, context) {
       out.def = Number.isFinite(c.defaultValue) ? PM.clamp(c.defaultValue, out.min, out.max) : out.min;
     }
     return out;
-  }).filter(c => c.type !== 'button' || c.cmd);
+  }).filter(c => c && (c.type !== 'button' || c.cmd));
   return {
     kind,
     operation,
@@ -608,6 +676,71 @@ function sanitizePlan(raw, context) {
     message: cleanText(raw?.message, operation === 'modify' ? 'The redesigned section is ready.' : 'The new section is ready.', 220),
     chromeEdit: kind === 'chrome' ? { target: chromeTarget, value: chromeValue } : null,
     section: { id: baseId, title: cleanText(source.title, 'Generated section', 70), size: PM.clamp(Number(source.size) || 220, 120, 700), note: cleanText(source.note, '', 240), controls },
+    sceneEdit: kind === 'scene' ? PM.AgentHarness.sanitizeProposal(raw?.sceneEdit, request) : null,
+    workspaceEdit: kind === 'workspace' ? sanitizeWorkspaceEdit(raw?.workspaceEdit, context) : null,
+  };
+}
+
+function sanitizeWorkspaceEdit(encoded, context) {
+  let raw;
+  try {
+    if (typeof encoded !== 'string' || encoded.length > 120_000) return null;
+    raw = JSON.parse(encoded);
+  } catch { return null; }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const clean = (value, fallback, max = 80) => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : fallback;
+  const sections = (Array.isArray(raw.sections) ? raw.sections : []).slice(0, 6).map(section => {
+    const plan = sanitizePlan({
+      kind: 'section', operation: 'create', targetPanelId: '', dockId: '', placement: 'after', message: '',
+      chromeEdit: { target: 'preview.cornerRadius', value: 'square' }, section,
+      sceneEdit: { label: '', summary: '', commands: [], reviewTimes: [] }, workspaceEdit: '{}',
+    }, context);
+    return plan.section.controls.length ? plan.section : null;
+  }).filter(Boolean);
+  const customIds = new Set(sections.map(section => section.id));
+  const known = new Set([...Object.keys(PM.PANELS || {}), ...customIds]);
+  const usedDockIds = new Set();
+  const docks = (Array.isArray(raw.docks) ? raw.docks : []).slice(0, 4).map((dock, index) => {
+    const baseId = slug(clean(dock?.id, index === 0 ? 'center' : `dock-${index + 1}`));
+    let id = baseId, suffix = 2; while (usedDockIds.has(id)) id = `${baseId}-${suffix++}`;
+    usedDockIds.add(id);
+    const panels = (Array.isArray(dock?.panels) ? dock.panels : []).slice(0, 10).map(panel => {
+      const spec = typeof panel === 'string' ? { id: panel } : panel;
+      const panelId = clean(spec?.id, '', 80);
+      if (!known.has(panelId)) return null;
+      const out = { id: panelId };
+      if (Number.isFinite(spec?.size)) out.size = PM.clamp(spec.size, 100, 900);
+      if (spec?.flex === true) out.flex = true;
+      return out;
+    }).filter(Boolean);
+    return { id, size: Number.isFinite(dock?.size) ? PM.clamp(dock.size, 180, 700) : undefined, flex: dock?.flex === true, panels };
+  }).filter(dock => dock.panels.length);
+  if (!docks.some(dock => dock.panels.some(panel => panel.id === 'viewer'))) {
+    let center = docks.find(dock => dock.id === 'center');
+    if (!center) {
+      center = { id: 'center', flex: true, panels: [] };
+      if (docks.length >= 4) docks[docks.length - 1] = center;
+      else docks.push(center);
+    }
+    center.panels.unshift({ id: 'viewer', flex: true });
+  }
+  const placed = new Set(docks.flatMap(dock => dock.panels.map(panel => panel.id)));
+  const unplaced = sections.filter(section => !placed.has(section.id));
+  if (unplaced.length) {
+    let side = docks.find(dock => dock.id === 'left' || dock.id === 'right');
+    if (!side) side = docks.find(dock => dock.id !== 'center');
+    if (!side) {
+      side = { id: 'right', size: 300, flex: false, panels: [] };
+      if (docks.length >= 4) docks[docks.length - 1] = side;
+      else docks.push(side);
+    }
+    unplaced.forEach(section => side.panels.push({ id: section.id, size: section.size }));
+  }
+  return {
+    name: clean(raw.name, 'Generated workspace'),
+    density: ['compact', 'normal', 'comfy'].includes(raw.density) ? raw.density : 'normal',
+    accent: /^#[0-9a-f]{6}$/i.test(raw.accent) ? raw.accent.toUpperCase() : '#FF6B1A',
+    docks: docks.slice(0, 4), sections,
   };
 }
 
@@ -630,16 +763,25 @@ function showPreview() {
   S.phase = 'preview'; S.card.textContent = '';
   const handle = h('div.spatial-target', { title: 'Drag to move. Arrow keys also move this box.' }, `Proposed change · ${S.context.targetTitle}`);
   const chrome = S.plan.kind === 'chrome';
-  const body = h('div.spatial-preview', h('h3', chrome ? 'Preview surface' : S.plan.section.title), h('p', S.plan.message));
+  const scene = S.plan.kind === 'scene';
+  const workspace = S.plan.kind === 'workspace';
+  const body = h('div.spatial-preview', h('h3', chrome ? 'Preview surface' : scene ? S.plan.sceneEdit.label : workspace ? S.plan.workspaceEdit.name : S.plan.section.title), h('p', scene ? S.plan.sceneEdit.summary : workspace ? 'A complete validated workspace is ready.' : S.plan.message));
   if (chrome) body.appendChild(h('div.spatial-preview-control', h('span', 'Corner style'), h('span', S.plan.chromeEdit.value)));
+  else if (scene) {
+    S.plan.sceneEdit.commands.forEach(command => body.appendChild(h('div.spatial-preview-control', h('span', PM.AgentHarness.describeCommand(command)))));
+  }
+  else if (workspace) {
+    S.plan.workspaceEdit.docks.forEach(dock => body.appendChild(h('div.spatial-preview-control', h('span', dock.id), h('span', dock.panels.map(panel => panel.id).join(' · ')))));
+    S.plan.workspaceEdit.sections.forEach(section => body.appendChild(h('div.spatial-preview-control', h('span', section.title), h('span', `${section.controls.length} connected controls`))));
+  }
   else {
     if (S.plan.section.note) body.appendChild(h('p', S.plan.section.note));
-    S.plan.section.controls.forEach(c => body.appendChild(h('div.spatial-preview-control', h('span', c.label), h('span', c.type), c.type === 'slider' ? h('i') : null)));
+    S.plan.section.controls.forEach(c => body.appendChild(h('div.spatial-preview-control', h('span', c.label), h('span', c.connection || c.type), c.type === 'slider' ? h('i') : null)));
     if (!S.plan.section.controls.length) body.appendChild(h('div.spatial-preview-control', 'Empty section'));
   }
-  const actions = h('div.spatial-actions', h('span.spatial-status', chrome ? 'Changes Powermove UI only' : S.plan.operation === 'modify' ? 'Replaces circled section' : 'Adds beside circled section'),
+  const actions = h('div.spatial-actions', h('span.spatial-status', chrome ? 'Changes Powermove UI only' : scene ? 'Checkpointed · rendered review follows' : workspace ? 'Creates a new recoverable workspace' : S.plan.operation === 'modify' ? 'Replaces circled section' : 'Adds beside circled section'),
     h('button.spatial-action', { onclick: cancel }, 'Cancel'),
-    h('button.spatial-action.pri', { onclick: applyPlan }, chrome ? 'Apply interface edit' : 'Apply section'));
+    h('button.spatial-action.pri', { onclick: applyPlan }, chrome ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section'));
   S.card.append(handle, body, actions); makeCardMovable(S.card, handle);
   requestAnimationFrame(() => {
     const rect = S.card.getBoundingClientRect();
@@ -666,9 +808,25 @@ function uniqueSectionId(workspace, requested, keepId = '') {
   return `${requested}-${n}`;
 }
 
-function applyPlan() {
+async function applyPlan() {
   if (!S.plan || S.phase !== 'preview') return;
   const plan = S.plan;
+  if (plan.kind === 'scene') {
+    await applyScenePlan(plan);
+    return;
+  }
+  if (plan.kind === 'workspace') {
+    const manifest = plan.workspaceEdit;
+    const created = PM.WS.create({
+      name: manifest.name, base: PM.WS.current.id, density: manifest.density,
+      theme: { ...(PM.WS.current.theme || {}), accent: manifest.accent },
+      custom: manifest.sections,
+      layout: { docks: manifest.docks },
+    });
+    PM.toast(`Created workspace · ${created.name}`);
+    cancel();
+    return;
+  }
   if (plan.kind === 'chrome') {
     let changed = false;
     PM.WS.mutate(workspace => { changed = applyChromeEdit(workspace, plan.chromeEdit); });
@@ -709,9 +867,70 @@ function applyPlan() {
   cancel();
 }
 
+async function applyScenePlan(plan) {
+  S.phase = 'applying';
+  S.card.textContent = '';
+  const handle = h('div.spatial-target', { title: 'The scene remains unchanged until the structured edit begins.' }, `Working · ${plan.sceneEdit.label}`);
+  const message = h('p', 'Applying structured source edit…');
+  const body = h('div.spatial-preview', h('h3', 'Building the scene'), message);
+  const status = h('span.spatial-status', 'Please keep Powermove open');
+  S.card.append(handle, body, h('div.spatial-actions', status));
+  makeCardMovable(S.card, handle);
+  try {
+    const run = await PM.AgentHarness.execute(S.requestText, plan.sceneEdit, value => {
+      message.textContent = value;
+    });
+    if (!S.active) return;
+    S.run = run;
+    showSceneResult(run);
+  } catch (error) {
+    if (!S.active) return;
+    S.phase = 'preview';
+    message.textContent = String(error.message || error).slice(0, 180);
+    status.textContent = 'Nothing was applied';
+    const actions = S.card.querySelector('.spatial-actions');
+    actions.append(h('button.spatial-action', { onclick: cancel }, 'Close'));
+  }
+}
+
+function showSceneResult(run) {
+  S.phase = 'result'; S.card.textContent = '';
+  const handle = h('div.spatial-target', { title: 'Drag to move. Escape undoes this run.' }, 'Rendered result · final approval');
+  const message = run.review?.message || 'The rendered change is ready.';
+  const body = h('div.spatial-preview', h('h3', 'Review the actual result'), h('p', message));
+  if (run.review?.critique) body.appendChild(h('p', run.review.critique));
+  if (run.reviewError) body.appendChild(h('p.spatial-review-warning', `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`));
+  const frames = h('div.spatial-frame-grid');
+  (run.frames?.images || []).forEach((src, index) => frames.appendChild(h('figure',
+    h('img', { src, alt: `Rendered composition at ${run.frames.times[index]} seconds` }),
+    h('figcaption', `${run.frames.times[index]}s`))));
+  if (frames.childElementCount) body.appendChild(frames);
+  const actions = h('div.spatial-actions',
+    h('span.spatial-status', `${run.applied.length} source edits · revision ${run.revision}`),
+    h('button.spatial-action', { onclick: undoSceneRun }, 'Undo change'),
+    h('button.spatial-action.pri', { onclick: () => { PM.toast('Kept agent change'); cancel(); } }, 'Keep change'));
+  S.card.append(handle, body, actions); makeCardMovable(S.card, handle);
+  requestAnimationFrame(() => {
+    const rect = S.card.getBoundingClientRect();
+    moveCardTo(S.card, rect.left, rect.top); handle.focus();
+  });
+}
+
+function undoSceneRun() {
+  if (!S.run) return cancel();
+  const restored = PM.AgentHarness.rollback(S.run.checkpoint);
+  PM.toast(restored ? 'Agent change undone' : 'Could not restore the agent checkpoint');
+  cancel();
+}
+
 function onKey(event) {
   if (!S.active) return;
-  if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+  if (event.key === 'Escape') {
+    event.preventDefault(); event.stopPropagation();
+    if (S.phase === 'applying') return;
+    if (S.phase === 'result') return undoSceneRun();
+    cancel();
+  }
 }
 
 function cancel() {
@@ -721,7 +940,7 @@ function cancel() {
   cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
   S.root?.remove();
-  Object.assign(S, { root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, renderStop: null, points: [] });
+  Object.assign(S, { root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, run: null, requestText: '', renderStop: null, points: [] });
   setTimeout(refreshSceneCache, 80);
 }
 

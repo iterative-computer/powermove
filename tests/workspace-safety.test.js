@@ -20,6 +20,27 @@ function workspaceModel() {
   return PM.WS;
 }
 
+function workspaceRuntime() {
+  let nextId = 0;
+  const PM = {
+    clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+    uid: prefix => `${prefix}${++nextId}`,
+    store: { get: (_key, fallback) => fallback, set() {} },
+    bus: { emit() {} }, registerPanel() {},
+    proj: {
+      bg: '#111111',
+      backgroundFill: { type: 'linear', angle: 15, stops: [
+        { id: 'start', color: '#112233', position: 0 },
+        { id: 'end', color: '#445566', position: 100 },
+      ] },
+    },
+    normalizeFill(value) { return JSON.parse(JSON.stringify(value)); },
+  };
+  const context = vm.createContext({ window: { PM }, console });
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8'), context);
+  return PM;
+}
+
 test('agent-authored workspaces always retain a fluid main dock', () => {
   const WS = workspaceModel();
   const workspace = WS.normalize({
@@ -85,4 +106,26 @@ test('hidden panel recovery metadata survives validation while retired Generativ
   assert.equal(workspace.hiddenPanels.length, 1);
   assert.equal(workspace.hiddenPanels[0].id, 'assets');
   assert.equal(workspace.hiddenPanels[0].spec.size, 180);
+});
+
+test('generated gradient controls read and write the real composition background source', () => {
+  const PM = workspaceRuntime();
+  const binding = PM.WS.sourceBinding({
+    type: 'color', label: 'End color', target: '$composition',
+    path: 'composition.background.endColor', def: '#000000',
+  });
+  assert.ok(binding);
+  assert.equal(binding.get(), '#445566');
+  const command = binding.command('#AABBCC');
+  assert.equal(command.type, 'set_composition');
+  assert.equal(command.patch.backgroundFill.stops[1].color, '#AABBCC');
+  assert.equal(PM.proj.backgroundFill.stops[1].color, '#445566', 'building the command does not mutate source early');
+});
+
+test('boot refreshes stale built-in presets while preserving custom workspaces', () => {
+  const file = fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8');
+  assert.match(file, /workspace\.id === preset\.id && workspace\.builtin/);
+  assert.match(file, /WS\.all\[index\] = normalizeWorkspace\(preset\)/);
+  assert.doesNotMatch(file, /findIndex\(workspace => workspace\.id === preset\.id\)(?! && workspace\.builtin)/,
+    'a custom workspace is never replaced merely because its id resembles a preset');
 });

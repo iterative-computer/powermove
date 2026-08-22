@@ -55,6 +55,15 @@ const H = {
   canUndo: () => idx >= 0,
   canRedo: () => idx < stack.length - 1,
   label: () => (idx >= 0 ? stack[idx].label : null),
+  /** Restore a trusted, previously captured project snapshot as one undoable step.
+      Agent checkpoints use this instead of assigning PM.proj behind history's back. */
+  restoreSnapshot(json, label = 'Restore checkpoint') {
+    let parsed;
+    try { parsed = JSON.parse(json); } catch { return false; }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.layers)) return false;
+    H.do(label, () => restore(JSON.stringify(parsed)));
+    return true;
+  },
   clear() { stack = []; idx = -1; pending = null; depth = 0; PM.bus.emit('history'); },
   list: () => stack.map(s => s.label),
 };

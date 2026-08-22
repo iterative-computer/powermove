@@ -345,6 +345,7 @@ function buildTitlebar() {
   right.textContent = '';
   const button = (icon, title, run) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
   right.append(
+    button('wand', 'Ask Powermove agent (⌘⇧K)', () => PM.SpatialAssistant?.open?.()),
     button('grid', 'Library · Sections and Workspaces', () => PM.LibraryUI.open()),
     button('gear', 'Settings', openSettings),
   );

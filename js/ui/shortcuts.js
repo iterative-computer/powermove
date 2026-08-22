@@ -149,6 +149,7 @@ function allSelKeys() {
 /* ── view / files ──────────────────────────────────────── */
 def('fitView', 'Fit composition in view', '⇧F', () => { PM.Viewer.fit = true; PM.Viewer.layout(); PM.TL.frameView(); }, 'View');
 def('palette', 'Command palette', '⌘K', () => palette(), 'View');
+def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
 def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');
 def('export', 'Export…', '⌘E', () => PM.Export.dialog(), 'File');
@@ -170,7 +171,7 @@ addEventListener('keydown', (e) => {
   const k = e.key;
   const go = (id) => { e.preventDefault(); PM.cmd(id); };
 
-  if (m && k.toLowerCase() === 'k') return go('palette');
+  if (m && k.toLowerCase() === 'k') return go(s ? 'agent' : 'palette');
   if (m && k.toLowerCase() === 'z') return go(s ? 'redo' : 'undo');
   if (m && k.toLowerCase() === 'y' && !s && !a) return go('newSolid');
   if (m && s && k.toLowerCase() === 'y') return go('newShape');

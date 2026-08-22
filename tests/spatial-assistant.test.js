@@ -12,7 +12,16 @@ function spatialModel(adapterFactory) {
   const PM = {
     h() {}, uid: () => 'id',
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+    round: (value, places = 0) => Number(Number(value).toFixed(places)),
     commands: { fitView: { id: 'fitView', label: 'Fit view' } },
+    PANELS: { viewer: { title: 'Composition' }, timeline: { title: 'Timeline' }, inspector: { title: 'Inspector' }, assets: { title: 'Project' } },
+    firstSel: () => null, L: () => null, byName: () => null, findProp: () => null,
+    AgentHarness: {
+      sceneSchema: () => ({ type: 'object' }),
+      sanitizeProposal: value => ({ commands: value?.commands || [] }),
+      promptContext: () => '',
+      describeCommand: command => command.type,
+    },
   };
   const context = vm.createContext({
     window: { PM }, console, Map, Set, Uint8Array, TextDecoder,
@@ -73,15 +82,17 @@ test('generated section manifests are bounded and discard unsafe button commands
   const plan = math.sanitizePlan({
     operation: 'modify', targetPanelId: 'inspector', placement: 'replace', message: 'Ready',
     section: { id: 'Fresh Controls!', title: 'Fresh Controls', size: 5000, note: 'Useful controls', controls: [
-      { type: 'slider', label: 'Opacity', parameter: '', defaultValue: 35, min: 0, max: 100, step: 1, target: '$selection', path: 'properties.opacity' },
+      { type: 'color', label: 'Start color', parameter: '', defaultValue: '#0A84FF', min: 0, max: 100, step: 1, target: '$composition', path: 'composition.background.startColor' },
+      { type: 'slider', label: 'Disconnected', parameter: 'Looks useful', defaultValue: 35, min: 0, max: 100, step: 1, target: '', path: '' },
       { type: 'button', label: 'Unknown', command: 'runAnything' },
       { type: 'button', label: 'Fit', command: 'fitView' },
     ] },
   }, { targetPanelId: 'viewer' });
   assert.equal(plan.section.id, 'fresh-controls');
   assert.equal(plan.section.size, 700);
-  assert.deepEqual([...plan.section.controls.map(c => c.label)], ['Opacity', 'Fit']);
-  assert.equal(plan.section.controls[0].target, '$selection');
+  assert.deepEqual([...plan.section.controls.map(c => c.label)], ['Start color', 'Fit']);
+  assert.equal(plan.section.controls[0].target, '$composition');
+  assert.equal(plan.section.controls[0].connection, 'Composition background');
 });
 
 test('valid preview chrome edits remain reviewable and mutate source only on Apply', () => {
@@ -101,6 +112,35 @@ test('valid preview chrome edits remain reviewable and mutate source only on App
   assert.match(source, /PM\.WS\.mutate\(workspace => \{ changed = applyChromeEdit/);
   assert.match(source, /Apply interface edit/);
   assert.match(source, /Never alter rendered composition shapes or export geometry/);
+});
+
+test('whole-workspace proposals stay reachable and keep only source-connected generated sections', () => {
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'workspace', operation: 'create', message: 'Workspace ready',
+    workspaceEdit: JSON.stringify({
+      name: 'Gradient Focus', density: 'compact', accent: '#0A84FF',
+      docks: [
+        { id: 'left', size: 300, panels: [{ id: 'gradient-tools' }, { id: 'made-up-panel' }] },
+        { id: 'right', size: 320, panels: [{ id: 'inspector' }] },
+      ],
+      sections: [{
+        id: 'gradient-tools', title: 'Gradient tools', size: 240, note: 'Edits the actual background', controls: [
+          { type: 'color', label: 'Start color', target: '$composition', path: 'composition.background.startColor', defaultValue: '#112233', min: 0, max: 0, step: 0, options: [], parameter: '', command: '' },
+          { type: 'slider', label: 'Disconnected', target: '', path: '', defaultValue: 50, min: 0, max: 100, step: 1, options: [], parameter: 'Fake', command: '' },
+        ],
+      }],
+    }),
+    chromeEdit: { target: 'preview.cornerRadius', value: 'square' },
+    section: { id: '', title: '', size: 220, note: '', controls: [] },
+    sceneEdit: { label: '', summary: '', commands: [], reviewTimes: [] },
+  }, { targetPanelId: 'viewer' });
+  assert.equal(plan.kind, 'workspace');
+  assert.equal(plan.workspaceEdit.name, 'Gradient Focus');
+  assert.equal(plan.workspaceEdit.sections[0].controls.length, 1);
+  assert.ok(plan.workspaceEdit.docks.some(dock => dock.panels.some(panel => panel.id === 'viewer')), 'Composition remains reachable');
+  assert.equal(plan.workspaceEdit.docks.some(dock => dock.panels.some(panel => panel.id === 'made-up-panel')), false);
+  assert.match(source, /Create workspace/);
+  assert.match(source, /PM\.WS\.create\(/);
 });
 
 test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe shell', () => {
@@ -165,7 +205,7 @@ test('instruction pill follows the cursor without intercepting input', () => {
   const math = spatialModel().math;
   assert.deepEqual({ ...math.hintPosition(100, 80, 250, 38, 800, 600) }, { x: 118, y: 98 });
   assert.deepEqual({ ...math.hintPosition(790, 590, 250, 38, 800, 600) }, { x: 538, y: 534 });
-  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Circle any part of the interface'\)\)/);
+  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Type a prompt or circle an area'\)\)/);
   assert.match(css, /\.spatial-hint\{[^}]*pointer-events:none[^}]*will-change:transform/s);
 });
 
@@ -173,8 +213,11 @@ test('circled-region prompt, Send, movable result, cancel, Preview, and Apply st
   const math = spatialModel().math;
   assert.deepEqual({ ...math.clampFloatingPosition(-40, 900, 420, 220, 1200, 800) }, { x: 12, y: 568 });
   assert.match(source, /S\.context = inspectRegion\(S\.points, S\.region\)/, 'the prompt binds to the lasso context');
+  assert.match(source, /Powermove agent · full composition/);
+  assert.match(source, /document\.body\.appendChild\(S\.root\);[\s\S]*showComposer\(\)/,
+    'the floating prompt appears immediately after a shake; circling is optional context');
   assert.match(source, /sendRequest\(input, status, sendBtn, cancelBtn\)/);
-  assert.match(source, /PM\.CodexBridge\.request\(agentPrompt\(request\), responseSchema\(\)\)/);
+  assert.match(source, /PM\.CodexBridge\.request\(agentPrompt\(request, observation\), responseSchema\(\), observation\.images\)/);
   assert.match(source, /makeCardMovable\(S\.card, handle\)/);
   assert.match(source, /setPointerCapture/);
   assert.match(source, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'\]/);
@@ -182,6 +225,9 @@ test('circled-region prompt, Send, movable result, cancel, Preview, and Apply st
   assert.match(source, /event\.key === 'Escape'[\s\S]*cancel\(\)/);
   assert.match(source, /S\.plan = plan; showPreview\(\)/);
   assert.match(source, /onclick: applyPlan/);
+  assert.match(source, /Apply scene edit/);
+  assert.match(source, /Undo change/);
+  assert.match(source, /Keep change/);
   assert.match(source, /PM\.WS\.mutate\(workspace =>/,
     'Apply crosses the validated structured workspace transaction boundary');
 });

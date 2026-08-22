@@ -14,6 +14,34 @@ PM.perf = E;
 /* ── audio ─────────────────────────────────────────────── */
 const AU = { ctx: null, nodes: new Map() };
 PM.audio = AU;
+/* HTMLMediaElement.play() settles asynchronously. A pause can happen while a
+   start is still pending, so remember the desired state and reassert pause
+   when a late start completes. The pending flag also prevents a new play()
+   request from being issued on every animation frame. */
+const mediaState = new WeakMap();
+function ensureMediaPlaying(el) {
+  let state = mediaState.get(el);
+  if (!state) { state = { desired: false, pending: false }; mediaState.set(el, state); }
+  state.desired = true;
+  if (state.pending || !el.paused) return;
+  state.pending = true;
+  let started;
+  try { started = el.play(); }
+  catch (e) { state.pending = false; state.desired = false; return; }
+  Promise.resolve(started).then(() => {
+    state.pending = false;
+    if (!state.desired) { try { el.pause(); } catch (e) { } }
+  }, () => {
+    state.pending = false;
+  });
+}
+function ensureMediaPaused(el) {
+  let state = mediaState.get(el);
+  if (!state) { state = { desired: false, pending: false }; mediaState.set(el, state); }
+  const mustStopPendingStart = state.pending;
+  state.desired = false;
+  if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
+}
 function actx() {
   if (!AU.ctx) AU.ctx = new (window.AudioContext || window.webkitAudioContext)();
   if (AU.ctx.state === 'suspended') AU.ctx.resume();
@@ -37,10 +65,10 @@ function startAudio(T) {
     }
     n.gain.gain.value = PM.clamp(L.d.gain == null ? 1 : L.d.gain, 0, 4);
     try { n.el.currentTime = PM.clamp(local + (L.d.trim || 0), 0, a.dur || 0); } catch (e) { }
-    n.el.play().catch(() => { });
+    ensureMediaPlaying(n.el);
   }
 }
-function stopAudio() { AU.nodes.forEach(n => n.el.pause()); }
+function stopAudio() { AU.nodes.forEach(n => ensureMediaPaused(n.el)); }
 /* Evict WebAudio nodes for layers that no longer exist — otherwise deleted/duplicated
    audio layers leak media-element sources and eventually exhaust the audio graph. */
 function evictStaleAudio() {
@@ -63,9 +91,9 @@ function scrubVideos(T) {
     const inRange = PM.active(L, T);
     /* playback position must respect layer speed, matching the compositor's vt math */
     const vt = PM.clamp((T - L.from) * (L.d.speed || 1) + (L.d.trim || 0), 0, Math.max(0, (a.dur || 0) - .04));
-    if (PM.playing && inRange) { if (a.el.paused) { a.el.currentTime = vt; a.el.play().catch(() => { }); } }
-    else if (!PM.playing && !a.el.paused) a.el.pause();
-    else if (!PM.playing && Math.abs(a.el.currentTime - vt) > .02) { try { a.el.currentTime = vt; } catch (e) { } }
+    if (PM.playing && inRange) { if (a.el.paused) { a.el.currentTime = vt; ensureMediaPlaying(a.el); } }
+    else ensureMediaPaused(a.el);
+    if (!PM.playing && Math.abs(a.el.currentTime - vt) > .02) { try { a.el.currentTime = vt; } catch (e) { } }
   }
 }
 
@@ -92,9 +120,10 @@ PM.play = () => {
   PM.invalidate('ui');
 };
 PM.pause = () => {
-  if (!PM.playing) return;
+  const wasPlaying = PM.playing;
   PM.playing = false;
   stopAudio(); scrubVideos(PM.time);
+  if (!wasPlaying) return;
   PM.bus.emit('transport');
   PM.invalidate();
 };

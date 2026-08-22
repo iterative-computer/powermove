@@ -220,7 +220,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                   let requestId = body["id"] as? String,
                   let prompt = body["prompt"] as? String,
                   !prompt.isEmpty, prompt.utf8.count < 400_000 else { return }
-            runCodex(requestId: requestId, prompt: prompt, schema: body["schema"])
+            let images = (body["images"] as? [String] ?? []).prefix(6).filter { $0.utf8.count < 6_000_000 }
+            runCodex(requestId: requestId, prompt: prompt, schema: body["schema"], images: Array(images))
             return
         }
         if message.name == "pmCaptureWindow" {
@@ -269,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return candidates.first(where: { fm.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
     }
 
-    private func runCodex(requestId: String, prompt: String, schema: Any?) {
+    private func runCodex(requestId: String, prompt: String, schema: Any?, images: [String] = []) {
         guard let executable = codexBinaryURL() else {
             sendCodexResult(requestId: requestId, ok: false, text: "Codex is not installed. Install Codex and sign in with ChatGPT first.")
             return
@@ -286,14 +287,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 let schemaData = try JSONSerialization.data(withJSONObject: schemaObject, options: [.prettyPrinted, .sortedKeys])
                 try schemaData.write(to: schemaURL, options: .atomic)
 
+                var imageURLs: [URL] = []
+                for (index, encoded) in images.enumerated() {
+                    guard let comma = encoded.firstIndex(of: ",") else { continue }
+                    let header = String(encoded[..<comma])
+                    let payload = String(encoded[encoded.index(after: comma)...])
+                    guard header.hasPrefix("data:image/"),
+                          let data = Data(base64Encoded: payload),
+                          data.count <= 4_000_000 else { continue }
+                    let ext = header.contains("image/png") ? "png" : "jpg"
+                    let imageURL = directory.appendingPathComponent("frame-\(index).\(ext)")
+                    try data.write(to: imageURL, options: .atomic)
+                    imageURLs.append(imageURL)
+                }
+
                 let process = Process()
                 process.executableURL = executable
                 process.currentDirectoryURL = directory
-                process.arguments = [
+                var arguments = [
                     "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-rules",
                     "--sandbox", "read-only", "--output-schema", schemaURL.path,
-                    "--output-last-message", outputURL.path, prompt
+                    "--output-last-message", outputURL.path,
                 ]
+                /* --image accepts a variadic list. Keep the positional prompt
+                   before it or Codex will consume the prompt as another path
+                   and fall back to an empty stdin prompt. */
+                arguments.append(prompt)
+                for imageURL in imageURLs { arguments.append(contentsOf: ["--image", imageURL.path]) }
+                process.arguments = arguments
                 let errors = Pipe()
                 process.standardOutput = Pipe()
                 process.standardError = errors

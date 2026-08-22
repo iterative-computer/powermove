@@ -169,11 +169,11 @@ const PRESETS = () => ([
     custom: [{
       id: 'gradient-controls', title: 'Gradient Editor', size: 220,
       controls: [
-        { type: 'color', label: 'Gradient Start', param: 'Gradient Start', def: '#FF6B1A' },
-        { type: 'color', label: 'Gradient End', param: 'Gradient End', def: '#34144F' },
-        { type: 'slider', label: 'Gradient Angle', param: 'Gradient Angle', min: 0, max: 360, def: 0, step: 1 },
-        { type: 'slider', label: 'Gradient Midpoint', param: 'Gradient Midpoint', min: 0, max: 100, def: 50, step: 1 },
-        { type: 'slider', label: 'Gradient Softness', param: 'Gradient Softness', min: 0, max: 100, def: 50, step: 1 },
+        { type: 'select', label: 'Type', target: '$composition', path: 'composition.background.type', options: ['linear', 'radial'], def: 'linear' },
+        { type: 'color', label: 'Start color', target: '$composition', path: 'composition.background.startColor', def: '#FF6B1A' },
+        { type: 'color', label: 'End color', target: '$composition', path: 'composition.background.endColor', def: '#34144F' },
+        { type: 'slider', label: 'Angle', target: '$composition', path: 'composition.background.angle', min: -180, max: 180, def: 0, step: 1 },
+        { type: 'slider', label: 'Midpoint', target: '$composition', path: 'composition.background.midpoint', min: 1, max: 100, def: 100, step: 1 },
       ],
     }],
   },
@@ -262,8 +262,14 @@ WS.init = () => {
   const lastSavedId = PM.store.get('workspace', 'design');
   const legacyGradientIds = new Set(WS.all.filter(WS.isLegacyGradient).map(w => w.id));
   if (legacyGradientIds.size) WS.all = WS.all.filter(w => !legacyGradientIds.has(w.id));
-  /* always keep builtins available even if the user saved before they existed */
-  PRESETS().forEach(preset => { if (!WS.all.some(w => w.id === preset.id)) WS.all.push(preset); });
+  /* Built-ins are product source, not user-authored state. Refresh an older saved
+     built-in definition so fixes (including real source bindings) reach existing
+     installs; custom workspaces with different ids remain untouched. */
+  PRESETS().forEach(preset => {
+    const index = WS.all.findIndex(workspace => workspace.id === preset.id && workspace.builtin);
+    if (index >= 0) WS.all[index] = normalizeWorkspace(preset);
+    else if (!WS.all.some(workspace => workspace.id === preset.id)) WS.all.push(normalizeWorkspace(preset));
+  });
   if (legacyGradientIds.size) WS.save();
   const lastId = legacyGradientIds.has(lastSavedId) ? 'gradient' : lastSavedId;
   WS.activate(WS.get(lastId) ? lastId : 'design', true);
@@ -519,6 +525,30 @@ function sourceBinding(ct) {
   const target = ct.target || (ct.binding && ct.binding.target);
   const path = ct.path || (ct.binding && ct.binding.path);
   if (!target || !path) return null;
+  if ((target === '$composition' || target === 'composition') && path.startsWith('composition.background.')) {
+    const key = path.slice('composition.background.'.length);
+    const value = () => {
+      const fill = PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg);
+      if (key === 'type') return fill.type;
+      if (key === 'startColor') return fill.stops[0]?.color || ct.def;
+      if (key === 'endColor') return fill.stops[1]?.color || fill.stops[0]?.color || ct.def;
+      if (key === 'angle') return fill.angle;
+      if (key === 'midpoint') return fill.stops[1]?.position ?? 100;
+      return ct.def;
+    };
+    const command = next => {
+      let fill = PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg);
+      /* Gradient controls always operate on a real two-stop source. */
+      if (!['linear', 'radial'].includes(fill.type)) fill = PM.normalizeFill({ ...fill, type: 'linear' }, PM.proj.bg);
+      if (key === 'type') fill.type = ['linear', 'radial'].includes(next) ? next : 'linear';
+      else if (key === 'startColor') fill.stops[0].color = next;
+      else if (key === 'endColor') fill.stops[1].color = next;
+      else if (key === 'angle') fill.angle = next;
+      else if (key === 'midpoint') fill.stops[1].position = next;
+      return { type: 'set_composition', patch: { backgroundFill: fill } };
+    };
+    return { get: value, command };
+  }
   const layer = () => target === '$selection' || target === 'selection' ? PM.firstSel() : (PM.L(target) || PM.byName(target));
   const fallback = ct.def;
   if (path.startsWith('content.')) {
@@ -556,5 +586,6 @@ function applyParam(param) {
   PM.touch(); PM.invalidate();
 }
 WS.registerCustom = registerCustom;
+WS.sourceBinding = sourceBinding;
 WS.normalize = normalizeWorkspace;
 })();
