@@ -61,6 +61,10 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 xattr -cr "$APP" 2>/dev/null || true
+# File Provider can retain bundle-level metadata even after a recursive clear.
+# Remove those attributes explicitly so strict code-sign verification is reliable.
+xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
 codesign --force --deep --sign - "$APP" >/dev/null
 if [ "$INSTALL" = "--install" ]; then
   rm -rf /Applications/Powermove.app
