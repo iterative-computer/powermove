@@ -434,7 +434,7 @@ function sceneParams(wrap) {
   numRow(wrap, 'Height', () => PM.proj.h, v => { PM.proj.h = Math.round(v); PM.bus.emit('project'); }, compEdit('height', { step: 2, min: 16 }));
   numRow(wrap, 'Duration', () => PM.proj.dur, v => { PM.proj.dur = Math.max(.2, v); PM.proj.work = [0, PM.proj.dur]; PM.bus.emit('project'); }, compEdit('duration', { step: .5, precision: 2, unit: 's' }));
   numRow(wrap, 'Frame rate', () => PM.proj.fps, v => { PM.proj.fps = Math.round(PM.clamp(v, 1, 240)); PM.bus.emit('project'); }, compEdit('fps', { step: 1 }));
-  wrap.appendChild(PM.row('Background', PM.colorField(() => PM.proj.bg, v => { PM.proj.bg = v; PM.invalidate(); }, compEdit('background', { label: 'Background' }))));
+  wrap.appendChild(PM.row('Background', PM.fillField(() => PM.proj.backgroundFill, v => { PM.proj.backgroundFill = v; PM.proj.bg = v.stops[0].color; PM.invalidate(); }, compEdit('backgroundFill', { label: 'Background fill', fallback: PM.proj.bg }))));
   if (ps.length) {
     wrap.appendChild(PM.section('Scene parameters'));
     ps.forEach(p => {

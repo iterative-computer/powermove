@@ -115,11 +115,26 @@ PM.mkLayer = (type, opts = {}, comp) => {
 };
 
 /* ── project factory ───────────────────────────────────── */
+PM.normalizeFill = (value, fallback = '#000000') => {
+  const color = v => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v.toUpperCase() : fallback;
+  const raw = value && typeof value === 'object' ? value : {};
+  const type = ['solid', 'linear', 'radial', 'none'].includes(raw.type) ? raw.type : 'solid';
+  let stops = (Array.isArray(raw.stops) ? raw.stops : []).slice(0, 8).map((stop, index) => ({
+    id: typeof stop?.id === 'string' && stop.id ? stop.id : `stop-${index + 1}`,
+    color: color(stop?.color), position: PM.clamp(Number(stop?.position) || 0, 0, 100),
+  })).sort((a, b) => a.position - b.position);
+  if (!stops.length) stops = [{ id: 'stop-1', color: color(raw.color || fallback), position: 0 }];
+  if (!['solid', 'none'].includes(type) && stops.length < 2) stops.push({ id: 'stop-2', color: stops[0].color, position: 100 });
+  if (['solid', 'none'].includes(type)) stops = [{ ...stops[0], position: 0 }];
+  return { type, angle: PM.clamp(Number(raw.angle) || 0, -180, 180), stops };
+};
+
 PM.mkProject = (o = {}) => ({
   id: uid('P'),
   name: o.name || 'Untitled',
   w: o.w || 1920, h: o.h || 1080, fps: o.fps || 30, dur: o.dur || 10,
   bg: o.bg || '#000000',
+  backgroundFill: PM.normalizeFill(o.backgroundFill, o.bg || '#000000'),
   layers: [],
   comps: {},          // nested compositions, referenced by precomp layers (d.comp = comp id)
   assets: {},

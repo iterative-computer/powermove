@@ -87,21 +87,226 @@ function evalSafe(s) {
   try { return Function('"use strict";return (' + s + ')')(); } catch { return NaN; }
 }
 
+const clampChannel = (value, max = 255) => Math.round(PM.clamp(Number(value) || 0, 0, max));
+const normalizeHex = value => {
+  const raw = String(value || '').trim().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/i.test(raw)) return `#${raw.split('').map(char => char + char).join('').toUpperCase()}`;
+  return /^[0-9a-f]{6}$/i.test(raw) ? `#${raw.toUpperCase()}` : null;
+};
+const rgbToHex = ({ r, g, b }) => `#${[r, g, b].map(value => clampChannel(value).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+const hexToRgb = value => {
+  const hex = normalizeHex(value); if (!hex) return null;
+  return { r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16), b: parseInt(hex.slice(5, 7), 16) };
+};
+const rgbToHsv = ({ r, g, b }) => {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d) h = max === r ? 60 * (((g - b) / d) % 6) : max === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+  if (h < 0) h += 360;
+  return { h: Math.round(h), s: Math.round(max ? d / max * 100 : 0), v: Math.round(max * 100) };
+};
+const hsvToRgb = ({ h, s, v }) => {
+  h = ((Number(h) || 0) % 360 + 360) % 360; s = PM.clamp(Number(s) || 0, 0, 100) / 100; v = PM.clamp(Number(v) || 0, 0, 100) / 100;
+  const c = v * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = v - c;
+  const parts = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return { r: Math.round((parts[0] + m) * 255), g: Math.round((parts[1] + m) * 255), b: Math.round((parts[2] + m) * 255) };
+};
+PM.Color = { normalizeHex, rgbToHex, hexToRgb, rgbToHsv, hsvToRgb };
+
 PM.colorField = (get, set, opt = {}) => {
   /* tolerate undefined/non-string values instead of painting "UNDEFINED" */
   const safe = () => { const v = get(); return typeof v === 'string' && /^#[0-9a-f]{3,8}$/i.test(v) ? v : '#808080'; };
-  const sw = h('div.sw', { style: { background: safe() } });
+  const sw = h('div.sw'); sw.style.setProperty('--sw-color', safe());
   const val = h('span', { style: { fontFamily: 'var(--f-mono)', fontSize: 'var(--fs-md)', color: 'var(--tx)' } }, safe().toUpperCase());
-  const wrap = h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, val, sw);
-  const inp = h('input', { type: 'color', value: safe(), style: { position: 'absolute', width: 0, height: 0, opacity: 0 } });
-  wrap.appendChild(inp);
-  wrap.sync = () => { sw.style.background = safe(); val.textContent = safe().toUpperCase(); };
-  let live = false;
-  inp.addEventListener('input', () => { if (!live) { begin(opt, opt.label || 'Color'); live = true; } write(set, inp.value, opt); wrap.sync(); });
-  inp.addEventListener('change', () => { commit(opt, opt.label || 'Color'); live = false; });
-  wrap.addEventListener('pointerdown', (e) => { e.stopPropagation(); inp.click(); });
+  const wrap = h('button.color-field', { 'aria-label': `${opt.label || 'Color'} · ${safe()}` }, val, sw);
+  wrap.sync = () => {
+    const value = safe(); sw.style.setProperty('--sw-color', value); val.textContent = value.toUpperCase();
+    wrap.setAttribute('aria-label', `${opt.label || 'Color'} · ${value}`);
+  };
+  wrap.addEventListener('pointerdown', e => e.stopPropagation());
+  wrap.addEventListener('click', () => openColorPicker(safe(), value => {
+    once(set, value, opt, opt.label || 'Color'); wrap.sync(); PM.invalidate('render');
+  }, opt.label || 'Color'));
   return wrap;
 };
+
+function openColorPicker(initial, apply, label) {
+  let chosen = initial;
+  const hex = h('input.color-hex', { value: chosen, 'aria-label': `${label} hex value`, spellcheck: 'false' });
+  const preview = h('div.color-dialog-preview'); preview.style.setProperty('--sw-color', chosen);
+  const presets = ['#09090A', '#FFFFFF', '#FF6B1A', '#FFB000', '#34C759', '#0A84FF', '#6E5AE6', '#FF375F'];
+  const grid = h('div.color-grid');
+  const sync = value => {
+    if (!/^#[0-9a-f]{6}$/i.test(value)) return false;
+    chosen = value.toUpperCase(); hex.value = chosen; preview.style.setProperty('--sw-color', chosen);
+    grid.querySelectorAll('button').forEach(button => button.classList.toggle('on', button.dataset.color === chosen));
+    return true;
+  };
+  presets.forEach(color => {
+    const choice = h('button.color-choice', { 'aria-label': color, title: color, onclick: () => sync(color) });
+    choice.dataset.color = color; choice.style.setProperty('--sw-color', color); grid.appendChild(choice);
+  });
+  hex.addEventListener('input', () => sync(hex.value.trim()));
+  hex.addEventListener('keydown', event => event.stopPropagation());
+  sync(chosen);
+  const body = h('div.color-dialog', h('div.color-dialog-value', preview, hex), grid);
+  PM.modal({ title: label, body, width: 360, actions: [
+    { label: 'Cancel' },
+    { label: 'Apply', pri: true, run: () => {
+      if (!sync(hex.value.trim())) { PM.toast('Enter a six-digit hex color'); return false; }
+      apply(chosen);
+    } },
+  ] });
+  setTimeout(() => { hex.focus(); hex.select(); }, 30);
+}
+
+PM.fillField = (get, set, opt = {}) => {
+  const fill = () => PM.normalizeFill(get(), opt.fallback || '#000000');
+  const sw = h('div.sw');
+  const val = h('span', { style: { fontFamily: 'var(--f-mono)', fontSize: 'var(--fs-md)' } });
+  const button = h('button.color-field', { 'aria-label': opt.label || 'Fill' }, val, sw);
+  button.sync = () => {
+    const current = fill(); val.textContent = current.type === 'solid' ? current.stops[0].color : current.type;
+    sw.style.setProperty('--sw-fill', fillCss(current));
+  };
+  button.onclick = () => openFillPicker(button, fill(), next => {
+    once(set, next, opt, opt.label || 'Fill'); button.sync(); PM.invalidate('render');
+  }, opt.label || 'Fill');
+  button.sync(); return button;
+};
+
+function fillCss(fill) {
+  if (fill.type === 'none') return 'transparent';
+  if (fill.type === 'solid') return fill.stops[0].color;
+  const stops = fill.stops.map(stop => `${stop.color} ${stop.position}%`).join(',');
+  return fill.type === 'radial' ? `radial-gradient(circle,${stops})` : `linear-gradient(${fill.angle}deg,${stops})`;
+}
+
+function openFillPicker(anchor, initial, apply, label) {
+  let draft = PM.normalizeFill(initial), selected = draft.stops[0].id;
+  const layer = h('div.fill-picker-layer');
+  const pop = h('section.fill-picker', { role: 'dialog', 'aria-modal': 'true', 'aria-label': label, tabindex: '-1' });
+  const head = h('header', h('b', label), h('button.iconbtn', { 'aria-label': 'Close fill picker' }, PM.icon('x')));
+  const type = h('select.fill-type', { 'aria-label': 'Fill type' },
+    h('option', { value: 'solid' }, 'Solid'), h('option', { value: 'linear' }, 'Linear gradient'), h('option', { value: 'radial' }, 'Radial gradient'), h('option', { value: 'none' }, 'None'));
+  const preview = h('div.fill-preview', { 'aria-label': 'Fill preview' });
+  const colors = ['#FF3B30','#FF9500','#FFCC00','#34C759','#00C7BE','#0A84FF','#5E5CE6','#BF5AF2','#FF2D55','#FFFFFF','#8E8E93','#09090A'];
+  const sv = h('div.fill-sv', { role: 'slider', tabindex: '0', 'aria-label': 'Saturation and brightness', 'aria-valuemin': '0', 'aria-valuemax': '100' }, h('i'));
+  const hue = h('div.fill-hue', { role: 'slider', tabindex: '0', 'aria-label': 'Hue', 'aria-valuemin': '0', 'aria-valuemax': '359' }, h('i'));
+  const current = h('div.fill-current', { 'aria-label': 'Current color' });
+  const channels = {};
+  const channel = (key, label, max) => {
+    const input = h('input', { type: 'number', min: '0', max: String(max), 'aria-label': label }); channels[key] = input;
+    return h('label.fill-channel', h('span', label), input);
+  };
+  const hex = h('input.fill-hex', { 'aria-label': 'Hex color', spellcheck: 'false' });
+  const channelGrid = h('div.fill-channels', channel('h', 'H', 359), channel('s', 'S', 100), channel('v', 'B', 100),
+    channel('r', 'R', 255), channel('g', 'G', 255), channel('b', 'B', 255), h('label.fill-channel.hex', h('span', 'Hex'), hex));
+  const palette = h('div.fill-palette', { role: 'group', 'aria-label': 'Color swatches' });
+  const none = h('button.btn.fill-none', { 'aria-label': 'Clear fill' }, 'None');
+  const colorWorkbench = h('div.fill-color-workbench', h('div.fill-color-main', sv, hue), h('div.fill-color-values', current, channelGrid), h('div.fill-palette-row', palette, none));
+  const stopRail = h('div.fill-stop-rail');
+  const stops = h('div.fill-stops');
+  const angle = h('input', { type: 'range', min: '-180', max: '180', value: draft.angle, 'aria-label': 'Gradient angle' });
+  const angleValue = h('span.mono', `${draft.angle}°`);
+  const angleRow = h('label.fill-angle', h('span', 'Angle'), angle, angleValue);
+  const add = h('button.btn', 'Add stop');
+  const cancelButton = h('button.btn', 'Cancel'), applyButton = h('button.btn.pri', 'Apply');
+  const close = () => { layer.remove(); anchor.focus(); };
+  head.lastChild.onclick = close; cancelButton.onclick = close;
+  layer.addEventListener('pointerdown', event => { if (event.target === layer) close(); });
+  layer.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+    if (event.key !== 'Tab') return;
+    const focusable = [...pop.querySelectorAll('button:not([disabled]):not([hidden]),input:not([disabled]):not([hidden]),select:not([disabled]):not([hidden])')]
+      .filter(node => node.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
+  const selectedStop = () => draft.stops.find(stop => stop.id === selected) || draft.stops[0];
+  let hsv = rgbToHsv(hexToRgb(selectedStop().color));
+  function setSelectedColor(value, redraw = true) {
+    const valid = normalizeHex(value); if (!valid) return false;
+    selectedStop().color = valid; hsv = rgbToHsv(hexToRgb(valid));
+    if (redraw) render(); else syncColorEditor();
+    return true;
+  }
+  function syncColorEditor() {
+    const rgb = hexToRgb(selectedStop().color) || { r: 0, g: 0, b: 0 };
+    hsv = rgbToHsv(rgb);
+    channels.h.value = hsv.h; channels.s.value = hsv.s; channels.v.value = hsv.v;
+    channels.r.value = rgb.r; channels.g.value = rgb.g; channels.b.value = rgb.b; hex.value = rgbToHex(rgb);
+    const pureHue = rgbToHex(hsvToRgb({ h: hsv.h, s: 100, v: 100 }));
+    sv.style.setProperty('--hue-color', pureHue); sv.firstChild.style.left = `${hsv.s}%`; sv.firstChild.style.top = `${100 - hsv.v}%`;
+    hue.firstChild.style.top = `${hsv.h / 359 * 100}%`; current.style.setProperty('--sw-color', selectedStop().color);
+    sv.setAttribute('aria-valuetext', `${hsv.s}% saturation, ${hsv.v}% brightness`); hue.setAttribute('aria-valuenow', hsv.h);
+  }
+  function fromHsv(next) { hsv = { h: clampChannel(next.h, 359), s: clampChannel(next.s, 100), v: clampChannel(next.v, 100) }; setSelectedColor(rgbToHex(hsvToRgb(hsv))); }
+  function pickSv(event) {
+    const rect = sv.getBoundingClientRect();
+    fromHsv({ h: hsv.h, s: (event.clientX - rect.left) / rect.width * 100, v: 100 - (event.clientY - rect.top) / rect.height * 100 });
+  }
+  function pickHue(event) {
+    const rect = hue.getBoundingClientRect(); fromHsv({ ...hsv, h: (event.clientY - rect.top) / rect.height * 359 });
+  }
+  const dragColor = (element, picker) => element.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return; event.preventDefault(); picker(event);
+    PM.drag(event, { move: (dx, dy, next) => picker(next), up: () => {} });
+  });
+  dragColor(sv, pickSv); dragColor(hue, pickHue);
+  sv.addEventListener('keydown', event => {
+    if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) return; event.preventDefault();
+    fromHsv({ h: hsv.h, s: hsv.s + (event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0), v: hsv.v + (event.key === 'ArrowUp' ? 1 : event.key === 'ArrowDown' ? -1 : 0) });
+  });
+  hue.addEventListener('keydown', event => {
+    if (!['ArrowUp','ArrowDown'].includes(event.key)) return; event.preventDefault(); fromHsv({ ...hsv, h: hsv.h + (event.key === 'ArrowDown' ? 1 : -1) });
+  });
+  colors.forEach(color => {
+    const choice = h('button.fill-spectrum-color', { 'aria-label': color, title: color, onclick: () => setSelectedColor(color) });
+    choice.style.setProperty('--sw-color', color); palette.appendChild(choice);
+  });
+  for (const key of ['h','s','v']) channels[key].addEventListener('change', () => fromHsv({ h: channels.h.value, s: channels.s.value, v: channels.v.value }));
+  for (const key of ['r','g','b']) channels[key].addEventListener('change', () => setSelectedColor(rgbToHex({ r: channels.r.value, g: channels.g.value, b: channels.b.value })));
+  hex.addEventListener('change', () => { if (!setSelectedColor(hex.value)) { PM.toast('Enter a three- or six-digit hex color'); syncColorEditor(); } });
+  none.onclick = () => { draft.type = 'none'; type.value = 'none'; render(); };
+  function render() {
+    type.value = draft.type; preview.style.background = fillCss(draft); stopRail.style.background = fillCss(draft);
+    const noColor = draft.type === 'none'; colorWorkbench.hidden = noColor; stopRail.hidden = draft.type === 'solid' || noColor; stops.hidden = noColor;
+    angleRow.hidden = draft.type !== 'linear'; add.hidden = draft.type === 'solid' || noColor; angle.value = draft.angle; angleValue.textContent = `${draft.angle}°`;
+    stops.textContent = '';
+    draft.stops.forEach((stop, index) => {
+      const color = h('input.fill-stop-color', { value: stop.color, 'aria-label': `Stop ${index + 1} color` });
+      const position = h('input', { type: 'range', min: '0', max: '100', value: stop.position, 'aria-label': `Stop ${index + 1} position` });
+      const row = h('div.fill-stop' + (stop.id === selected ? '.on' : ''),
+        h('button.fill-stop-swatch', { 'aria-label': `Select stop ${index + 1}`, onclick: () => { selected = stop.id; render(); } }),
+        color, position, h('span.mono', `${stop.position}%`),
+        h('button.iconbtn', { title: 'Move stop left', disabled: index === 0, onclick: () => { const other = draft.stops[index - 1], position = stop.position; stop.position = other.position; other.position = position; draft.stops.sort((a, b) => a.position - b.position); render(); } }, '←'),
+        h('button.iconbtn', { title: 'Move stop right', disabled: index === draft.stops.length - 1, onclick: () => { const other = draft.stops[index + 1], position = stop.position; stop.position = other.position; other.position = position; draft.stops.sort((a, b) => a.position - b.position); render(); } }, '→'),
+        h('button.iconbtn', { title: 'Remove stop', disabled: draft.stops.length <= (draft.type === 'solid' ? 1 : 2), onclick: () => { draft.stops.splice(index, 1); selected = draft.stops[Math.max(0, index - 1)].id; render(); } }, '−'));
+      row.firstChild.style.setProperty('--sw-color', stop.color);
+      color.oninput = () => { if (/^#[0-9a-f]{6}$/i.test(color.value)) { stop.color = color.value.toUpperCase(); render(); } };
+      position.oninput = () => { stop.position = +position.value; row.querySelector('.mono').textContent = `${stop.position}%`; preview.style.background = fillCss(draft); stopRail.style.background = fillCss(draft); };
+      stops.appendChild(row);
+    });
+    if (!noColor) syncColorEditor();
+  }
+  type.onchange = () => { draft = PM.normalizeFill({ ...draft, type: type.value }); selected = draft.stops[0].id; render(); };
+  angle.oninput = () => { draft.angle = +angle.value; render(); };
+  add.onclick = () => {
+    if (draft.stops.length >= 8) return;
+    const prior = selectedStop(); draft.stops.push({ id: PM.uid('stop'), color: prior.color, position: Math.min(100, prior.position + 10) });
+    selected = draft.stops.at(-1).id; render();
+  };
+  applyButton.onclick = () => { apply(PM.normalizeFill(draft)); close(); };
+  pop.append(head, h('div.fill-picker-body', type, preview, colorWorkbench, stopRail, stops, h('div.fill-picker-tools', angleRow, add)),
+    h('footer', cancelButton, applyButton)); layer.appendChild(pop); document.body.appendChild(layer);
+  const rect = anchor.getBoundingClientRect();
+  Object.assign(pop.style, { left: `${PM.clamp(rect.right - 480, 12, innerWidth - 492)}px`, top: `${PM.clamp(rect.bottom + 6, 52, innerHeight - 650)}px` });
+  render(); requestAnimationFrame(() => type.focus());
+}
 
 PM.toggleField = (get, set, opt = {}) => {
   const t = h('div.toggle' + (get() ? '.on' : ''), h('i'));

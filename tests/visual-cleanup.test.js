@@ -20,14 +20,12 @@ test('major section borders have a dedicated perceptual weight in both themes', 
   assert.match(appCss, /#tl-head\s*\{[^}]*border-bottom:1px solid var\(--section-line\)/s);
 });
 
-test('timeline ruler renders composition markers as compact, labeled diamonds', () => {
+test('timeline annotation markers and labels are absent without affecting keyframes', () => {
   const ruler = timeline.slice(timeline.indexOf('function drawRuler'), timeline.indexOf('function fmtRuler'));
-  /* markers must be visible and clickable — created-but-invisible state is a trap */
-  assert.match(ruler, /markers/);
-  assert.match(ruler, /closePath\(\)\.fill|c\.fill\(\)/);
-  assert.match(ruler, /m\.name/, 'marker names render when there is room');
-  assert.doesNotMatch(ruler, /lineTo\(x \+ 5/);
-  assert.match(timeline, /PM\.proj\.markers\.map\(m => m\.t\)/, 'marker timing data remains editable');
+  assert.doesNotMatch(ruler, /markers|m\.name/);
+  assert.doesNotMatch(timeline, /Add marker at playhead|clicking a marker diamond|proj\.markers\.forEach/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'js/ui/shortcuts.js'), 'utf8'), /def\('marker'|go\('marker'\)/);
+  assert.match(timeline, /p\.prop\.kf\.forEach/, 'real keyframes remain part of timeline navigation');
 });
 
 test('Design workspace uses the timeline and has no retired Generative panel', () => {
@@ -53,9 +51,10 @@ test('non-editable chrome cannot be selected while text editors remain selectabl
   assert.match(appCss, /textarea,[\s\S]*\[contenteditable\][\s\S]*-webkit-user-select:text;user-select:text/);
 });
 
-test('the Composition surface loses only its drop shadow and keeps its edge geometry', () => {
+test('the Composition surface is square and shadowless while surrounding chrome keeps elevation', () => {
   const stage = appCss.match(/#stage-inner\{([^}]*)\}/)?.[1] || '';
-  assert.match(stage, /border-radius:var\(--r-md\)/);
+  assert.match(stage, /border-radius:0/);
+  assert.match(stage, /corner-shape:round/, 'the preview opts out of UI superellipse smoothing');
   assert.match(stage, /overflow:hidden/);
   assert.match(stage, /box-shadow:none/);
   assert.match(stage, /outline:1px solid/, 'the preview edge remains legible');
@@ -77,6 +76,92 @@ test('one Library control replaces duplicate global commands without hiding uniq
     'export remains reachable from the composition surface');
   assert.doesNotMatch(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /title: 'Snapping \(S\)'/,
     'the global snapping duplicate is removed while the timeline owns its control');
+});
+
+test('tool controls sit on the right in a tabs-like smoothed group', () => {
+  assert.match(app, /bar\.insertBefore\(el, bar\.querySelector\('#tb-right'\)\)/);
+  assert.match(appCss, /#toolbar-strip\{[^}]*background:var\(--bg-sunken\)[^}]*border-radius:10px/s);
+  assert.match(appCss, /#toolbar-strip[^}]*-webkit-app-region:no-drag/s);
+  assert.match(app, /el\.hidden = !!\(PM\.ProjectsScreen && PM\.ProjectsScreen\.isOpen\)/,
+    'Home hides editor-only tools');
+  assert.match(appCss, /#toolbar-strip\[hidden\]\{display:none\}/);
+});
+
+test('top-level Settings owns appearance while Undo and Redo remain keyboard commands', () => {
+  const titlebar = app.slice(app.indexOf('right.append('), app.indexOf("PM.bus.on('workspaces', paintTabs)"));
+  assert.match(titlebar, /button\('gear', 'Settings', openSettings\)/);
+  assert.doesNotMatch(titlebar, /button\('undo', 'Undo'/);
+  assert.doesNotMatch(titlebar, /button\('redo', 'Redo'/);
+  assert.doesNotMatch(titlebar, /Toggle light \/ dark appearance|themeButton/);
+  assert.match(app, /PM\.SettingsUI = \{ open: openSettings \}/);
+  assert.match(app, /aria-label': 'Appearance'/);
+  assert.match(app, /appearance\.onchange = \(\) => PM\.theme\.apply\(appearance\.value\)/);
+  assert.match(app, /PM\.store\.set\('theme', t\)/, 'appearance preference stays persisted');
+  const shortcuts = fs.readFileSync(path.join(root, 'js/ui/shortcuts.js'), 'utf8');
+  assert.match(shortcuts, /def\('undo'/);
+  assert.match(shortcuts, /def\('redo'/);
+});
+
+test('the Composition color picker is reachable and uses concentric geometry', () => {
+  const controls = fs.readFileSync(path.join(root, 'js/ui/controls.js'), 'utf8');
+  assert.match(controls, /button\.color-field/);
+  assert.match(controls, /function openColorPicker\(initial, apply, label\)/);
+  assert.match(controls, /input\.color-hex/);
+  assert.match(controls, /once\(set, value, opt, opt\.label \|\| 'Color'\)/,
+    'Apply crosses the shared undoable edit boundary');
+  assert.doesNotMatch(controls, /type: 'color'[^\n]*width: 0|inp\.click\(\)/,
+    'the broken zero-size native proxy is gone');
+  assert.match(appCss, /\.sw\{[^}]*border-radius:6px/s);
+  assert.match(appCss, /\.sw::after\{[^}]*inset:2px[^}]*border-radius:4px/s,
+    'outer radius equals inner radius plus the 2px inset');
+});
+
+test('custom fill picker supports solid and gradient editing without a native picker', () => {
+  const controls = fs.readFileSync(path.join(root, 'js/ui/controls.js'), 'utf8');
+  const inspector = fs.readFileSync(path.join(root, 'js/ui/inspector.js'), 'utf8');
+  const model = fs.readFileSync(path.join(root, 'js/core/model.js'), 'utf8');
+  const compositor = fs.readFileSync(path.join(root, 'js/gl/compositor.js'), 'utf8');
+  assert.match(inspector, /PM\.fillField/);
+  assert.match(controls, /Solid.*Linear gradient.*Radial gradient/s);
+  assert.match(controls, /Add stop/);
+  assert.match(controls, /Move stop left/);
+  assert.match(controls, /Move stop right/);
+  assert.match(controls, /Remove stop/);
+  assert.match(controls, /fill-sv/);
+  assert.match(controls, /fill-hue/);
+  assert.match(controls, /Saturation and brightness/);
+  assert.match(controls, /Color swatches/);
+  assert.match(controls, /Clear fill/);
+  assert.match(controls, /PM\.Color = \{ normalizeHex, rgbToHex, hexToRgb, rgbToHsv, hsvToRgb \}/,
+    'hex, RGB, and HSB fields share one synchronized conversion path');
+  assert.match(appCss, /\.fill-color-main\{height:210px[^}]*grid-template-columns:1fr 22px/,
+    'the picker has a large 2D field and a vertical hue rail');
+  assert.match(controls, /if \(event\.key === 'Escape'\)/, 'custom popover is keyboard-cancelable');
+  assert.match(controls, /if \(event\.key !== 'Tab'\) return/);
+  assert.match(controls, /focusable\.at\(-1\)/, 'keyboard focus is trapped inside the open picker');
+  assert.match(controls, /ArrowLeft.*ArrowRight.*ArrowUp.*ArrowDown/s,
+    'the saturation-value field is keyboard operable');
+  assert.match(controls, /applyButton\.onclick = \(\) => \{ apply\(PM\.normalizeFill\(draft\)\); close\(\); \}/,
+    'draft changes reach source only after Apply');
+  assert.match(model, /PM\.normalizeFill/);
+  assert.match(compositor, /PM\.FRAG_BACKGROUND_FILL/);
+  assert.doesNotMatch(controls, /type: 'color'/, 'the custom fill picker never invokes the native macOS color picker');
+});
+
+test('Section scrollbars are hidden without removing scrolling semantics', () => {
+  assert.match(appCss, /\.panel>\.body,#library-screen>main,\.spatial-preview,\.pop-mirror,\.fill-picker-body\{scrollbar-width:none\}/);
+  assert.match(appCss, /\.panel>\.body::-webkit-scrollbar[^}]*display:none/);
+  assert.match(appCss, /\.panel > \.body\{[^}]*overflow:auto/s);
+  assert.match(appCss, /#library-screen>main\{[^}]*overflow:auto/s);
+  assert.match(appCss, /\.spatial-preview\{[^}]*overflow:auto/s);
+});
+
+test('product chrome keeps readable title casing instead of forced all-caps', () => {
+  assert.doesNotMatch(appCss, /text-transform\s*:\s*uppercase/);
+  const library = fs.readFileSync(path.join(root, 'js/ui/library.js'), 'utf8');
+  assert.match(library, /'Sections'/);
+  assert.match(library, /'Workspaces'/);
+  assert.match(library, /'Looks'/);
 });
 
 test('obsolete Guides and Motion Blur Preview product controls are completely absent', () => {

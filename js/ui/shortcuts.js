@@ -110,7 +110,6 @@ def('nextEdge', 'Next edge', '⇧→', () => PM.setTime(PM.TL.nextEdge()), 'Tran
 def('prevEdge', 'Previous edge', '⇧←', () => PM.setTime(PM.TL.prevEdge()), 'Transport');
 def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
-def('marker', 'Add marker', '*', () => PM.Edit.apply({ type: 'add_marker', time: PM.time }, { label: 'Marker', origin: 'command' }), 'Transport');
 
 /* ── reveal properties (AE muscle memory) ──────────────── */
 const reveal = (keys) => () => {
@@ -213,7 +212,6 @@ addEventListener('keydown', (e) => {
     case 'b': return go('workIn');
     case 'n': return go('workOut');
     case 'f': if (s) return go('fitView'); break;
-    case '*': return go('marker');
     case 'j': e.preventDefault(); return PM.setTime(PM.TL.prevEdge());
     case 'k': e.preventDefault(); return PM.pause();
     case 'l': e.preventDefault(); return PM.play();

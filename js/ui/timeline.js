@@ -288,21 +288,6 @@ function drawRuler(c, W, H) {
   const wa = p.work || [0, p.dur];
   c.fillStyle = INK.sub;
   c.fillRect(t2x(wa[0]) - 1, 2, 3, 8); c.fillRect(t2x(wa[1]) - 1, 2, 3, 8);
-  /* composition markers: visible diamonds + names (clicking the ruler seeks;
-     markers also act as drag-snap targets) */
-  c.font = '500 9px ' + fmono();
-  (p.markers || []).forEach(m => {
-    const x = t2x(m.t);
-    if (x < T.gut - 4 || x > W + 4) return;
-    c.fillStyle = theme.accent;
-    c.beginPath();
-    c.moveTo(x, 3); c.lineTo(x + 4, 8); c.lineTo(x, 13); c.lineTo(x - 4, 8);
-    c.closePath(); c.fill();
-    if (m.name && T.pps > 40) {
-      c.fillStyle = theme.tx3;
-      c.fillText(String(m.name), x + 6, 9);
-    }
-  });
   c.restore();
 }
 function fmtRuler(t, step, fps) {
@@ -586,13 +571,10 @@ function onDown(e) {
   const x = e.offsetX, y = e.offsetY;
   PM.closeMenus();
   if (y < T.ruler && x > T.gut) {
-    /* clicking a marker diamond seeks precisely to it */
     const wa = PM.proj.work || [0, PM.proj.dur];
     const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
     if (Math.abs(x - x0) < 6) return workAreaDrag(e, 0);
     if (Math.abs(x - x1) < 6) return workAreaDrag(e, 1);
-    const mk = (PM.proj.markers || []).find(m => Math.abs(t2x(m.t) - x) < 6);
-    if (mk) return PM.setTime(mk.t, { force: true });
     return scrub(e);
   }
   if (x < T.gut) return gutterDown(e, x, y);
@@ -878,8 +860,7 @@ function onCtx(e) {
       '-',
       { label: 'Delete', run: () => PM.cmd('delete') });
   } else {
-    items.push({ label: 'Add marker at playhead', run: () => PM.Edit.apply({ type: 'add_marker', time: PM.time }, { label: 'Marker', origin: 'timeline' }) },
-      { label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
+    items.push({ label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Reset work area', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Work area', origin: 'timeline' }) });
   }
@@ -893,7 +874,6 @@ function edges() {
     e.add(PM.round(L.from, 4)); e.add(PM.round(L.from + L.dur, 4));
     PM.allProps(L).forEach(p => p.prop.kf.forEach(k => e.add(PM.round(L.from + k.t, 4))));
   });
-  PM.proj.markers.forEach(m => e.add(m.t));
   return [...e].sort((a, b) => a - b);
 }
 function nextEdge() { const e = edges(); return e.find(t => t > PM.time + 1e-4) ?? PM.proj.dur; }

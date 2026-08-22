@@ -37,6 +37,14 @@ test('registry round-trips project data and metadata', () => {
   assert.deepEqual([...back.layers.map(l => l.id)], ['La']);
 });
 
+test('tab-owned editor state round-trips separately for each project', () => {
+  const { PM } = projectsModel();
+  PM.Projects.putState('P1', { time: 1, workspace: { id: 'edit-one' }, detached: ['assets'] });
+  PM.Projects.putState('P2', { time: 7, workspace: { id: 'edit-two' }, detached: ['inspector'] });
+  assert.deepEqual(PM.Projects.getState('P1'), { time: 1, workspace: { id: 'edit-one' }, detached: ['assets'] });
+  assert.deepEqual(PM.Projects.getState('P2'), { time: 7, workspace: { id: 'edit-two' }, detached: ['inspector'] });
+});
+
 test('registry unwraps real save envelopes and boot picks the first project with content', () => {
   const { PM } = projectsModel();
   PM.store.set('project.empty', JSON.stringify({ v: '1.0.0', proj: { id: 'empty', name: 'Untitled', layers: [] } }));
@@ -149,11 +157,21 @@ test('tabs, projects screen, and drag preview are wired end to end', () => {
   assert.match(layout, /panel-drop-preview/, 'drag shows a live placement preview');
   assert.match(layout, /drag-src/, 'the dragged source is dimmed during preview');
   assert.match(shortcuts, /Projects screen/, '⌘P opens the projects screen');
+  assert.match(app, /function captureProjectSession\(\)/);
+  assert.match(app, /workspace: PM\.WS\.snapshot\(\), time: PM\.time/);
+  assert.match(app, /selection: \{ layers: \[\.\.\.PM\.sel\.layers\], keys: \[\.\.\.PM\.sel\.keys\]/);
+  assert.match(app, /timeline: \{ pps: PM\.TL\.pps, scrollT: PM\.TL\.scrollT, scrollY: PM\.TL\.scrollY, graph: PM\.TL\.graph \}/);
+  assert.match(app, /detached: PM\.Popout\?\.openIds/);
+  assert.match(app, /PM\.LibraryUI\?\.close\?\.\(\)/);
+  assert.match(app, /PM\.SpatialAssistant\?\.cancel\?\.\(\)/);
+  assert.match(app, /PM\.Popout\?\.closeAll\?\.\(\)/);
+  assert.match(app, /session\?\.workspace\) PM\.WS\.restoreSnapshot/);
   assert.ok(index.indexOf('js/core/projects.js') > -1 && index.indexOf('js/ui/projects.js') > -1,
     'registry and screen are loaded');
 });
 
 test('projects surface has production library controls and Powermove selection cues', () => {
+  const app = utf8('js/app.js');
   const screen = utf8('js/ui/projects.js');
   const css = utf8('css/app.css');
   assert.match(screen, /Search projects/);
@@ -163,8 +181,11 @@ test('projects surface has production library controls and Powermove selection c
   assert.match(screen, /Delete Forever/);
   assert.match(css, /\.ps-navbtn\.on\{background:var\(--accent-dim\);color:var\(--accent-tx\)\}/,
     'active project navigation uses Powermove orange');
-  assert.match(css, /\.project-doc\.on \.project-doc-state\{background:var\(--accent\)/,
-    'active project tabs retain a compact Powermove orange state mark');
+  assert.doesNotMatch(css, /project-doc-state/,
+    'project tabs do not show an orange dot beside the project name');
+  assert.doesNotMatch(app, /h\('i\.project-doc-state'/);
+  assert.match(app, /'aria-label': tabName \+ \(dirty \? ', unsaved' : ''\)/,
+    'unsaved status remains meaningful to assistive technology');
   assert.match(css, /#tabs\{[\s\S]*background:var\(--bg-sunken\)/,
     'project tabs live in one intentional compact switcher');
   assert.match(css, /#tabs\{[\s\S]*border:0/,

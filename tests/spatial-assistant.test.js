@@ -84,6 +84,25 @@ test('generated section manifests are bounded and discard unsafe button commands
   assert.equal(plan.section.controls[0].target, '$selection');
 });
 
+test('valid preview chrome edits remain reviewable and mutate source only on Apply', () => {
+  const math = spatialModel().math;
+  const workspace = { chrome: { previewCornerRadius: 'rounded' } };
+  const plan = math.sanitizePlan({
+    kind: 'chrome', operation: 'modify', targetPanelId: 'viewer', dockId: 'center', placement: 'replace',
+    message: 'Use square preview corners', chromeEdit: { target: 'preview.cornerRadius', value: 'square' },
+    section: { id: '', title: '', size: 220, note: '', controls: [] },
+  }, { targetPanelId: 'viewer' });
+  assert.equal(plan.kind, 'chrome');
+  assert.equal(workspace.chrome.previewCornerRadius, 'rounded', 'proposal and Preview do not mutate source');
+  assert.equal(math.applyChromeEdit(workspace, plan.chromeEdit), true);
+  assert.equal(workspace.chrome.previewCornerRadius, 'square', 'Apply changes the structured workspace source');
+  assert.equal(math.applyChromeEdit(workspace, { target: 'project.shape', value: 'square' }), false,
+    'unapproved project/render targets are rejected');
+  assert.match(source, /PM\.WS\.mutate\(workspace => \{ changed = applyChromeEdit/);
+  assert.match(source, /Apply interface edit/);
+  assert.match(source, /Never alter rendered composition shapes or export geometry/);
+});
+
 test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe shell', () => {
   assert.match(source, /requestRippleAdapter/);
   assert.match(source, /getContext\('webgpu'/);
@@ -96,7 +115,10 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(source, /adapterPromise \|\| requestRippleAdapter\(\)/);
   assert.match(source, /let displacedUV = clamp\(uv - displacement/);
   assert.match(source, /textureSample\(sceneTexture, sceneSampler/);
-  assert.match(source, /let crest = exp\(-pow\(\(distanceFromSource - front\) \* 7\.0/);
+  assert.match(source, /let crest = exp\(-pow\(\(distanceFromSource - front\) \* 4\.4/);
+  assert.match(source, /distanceFromSource \* 34\.0 - uniforms\.time \* 12\.0/,
+    'shake feedback uses substantially wider-spaced bands across the editor');
+  assert.match(source, /wakeMask = smoothstep\(front \+ 0\.48, front - 0\.2/);
   assert.match(source, /S\.origin\.x = live\.clientX; S\.origin\.y = live\.clientY/);
   assert.match(source, /let cursorRipple = sin\(distanceFromSource \* 38\.0/);
   assert.match(source, /let front = uniforms\.time \* 1\.32/);
@@ -117,6 +139,8 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(source, /dynamicRange = hdr \? 'hdr' : 'sdr'/);
   assert.doesNotMatch(source, /getContext\('webgl2'/);
   assert.match(css, /#spatial-assistant\{position:fixed;inset:0/);
+  assert.match(css, /#spatial-assistant canvas\{[^}]*pointer-events:none/,
+    'expanded shake feedback cannot intercept the editor pointer');
   assert.match(css, /spatial-wash\{[^}]*rgba\(8,8,12,\.12\)/);
   assert.doesNotMatch(css, /spatial-wash\{[^}]*blur/);
   assert.match(css, /spatial-shade\{[^}]*rgba\(7,7,10,\.38\)/);
@@ -154,10 +178,20 @@ test('circled-region prompt, Send, movable result, cancel, Preview, and Apply st
   assert.match(source, /makeCardMovable\(S\.card, handle\)/);
   assert.match(source, /setPointerCapture/);
   assert.match(source, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'\]/);
-  assert.match(source, /Return to layout/);
+  assert.doesNotMatch(source, /Return to layout/, 'Ripple is a floating assistant, not a dockable panel');
   assert.match(source, /event\.key === 'Escape'[\s\S]*cancel\(\)/);
   assert.match(source, /S\.plan = plan; showPreview\(\)/);
   assert.match(source, /onclick: applyPlan/);
   assert.match(source, /PM\.WS\.mutate\(workspace =>/,
     'Apply crosses the validated structured workspace transaction boundary');
+});
+
+test('Ripple activation is limited to the active project editor', () => {
+  assert.match(source, /if \(!isEditorPointer\(event\)\) \{ S\.samples = \[\]; return; \}/);
+  assert.match(source, /window\.opener == null/);
+  assert.match(source, /ProjectsScreen && PM\.ProjectsScreen\.isOpen/);
+  assert.match(source, /LibraryUI && PM\.LibraryUI\.isOpen/);
+  assert.match(source, /document\.querySelector\('#scrim\.on,\.modal'\)/);
+  assert.match(source, /target\?\.closest\?\.\('#body'\)/);
+  assert.match(source, /makeCardMovable\(S\.card, handle\)/, 'the floating prompt and result remain movable');
 });

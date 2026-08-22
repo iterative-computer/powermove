@@ -114,6 +114,54 @@ test('scene parameter edits preserve generated control bindings', () => {
   assert.equal(parameter.value, 45);
 });
 
+test('Composition background color commits through source history and is undoable', () => {
+  const { PM } = editor();
+  const before = PM.proj.bg;
+  const result = PM.Edit.apply({ type: 'set_composition', patch: { background: '#3366CC' } }, {
+    label: 'Background', origin: 'inspector',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(PM.proj.bg, '#3366CC');
+  assert.equal(PM.proj.edits.at(-1).operations[0].patch.background, '#3366CC');
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.proj.bg, before);
+  assert.equal(PM.hist.redo(), true);
+  assert.equal(PM.proj.bg, '#3366CC');
+});
+
+test('Composition gradients preserve editable stops and undo as one source edit', () => {
+  const { PM } = editor();
+  const before = JSON.stringify(PM.proj.backgroundFill);
+  const gradient = PM.normalizeFill({ type: 'linear', angle: 35, stops: [
+    { id: 'a', color: '#FF0000', position: 0 },
+    { id: 'b', color: '#0000FF', position: 100 },
+  ] });
+  assert.equal(PM.Edit.apply({ type: 'set_composition', patch: { backgroundFill: gradient } }, {
+    label: 'Background fill', origin: 'inspector',
+  }).ok, true);
+  assert.equal(PM.proj.backgroundFill.type, 'linear');
+  assert.equal(PM.proj.backgroundFill.angle, 35);
+  assert.deepEqual(PM.proj.backgroundFill.stops.map(stop => [stop.id, stop.color, stop.position]), [
+    ['a', '#FF0000', 0], ['b', '#0000FF', 100],
+  ]);
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(JSON.stringify(PM.proj.backgroundFill), before);
+  assert.equal(PM.hist.redo(), true);
+  assert.equal(PM.proj.backgroundFill.stops[1].position, 100);
+});
+
+test('Composition clear fill remains editable and undoable', () => {
+  const { PM } = editor();
+  const before = JSON.stringify(PM.proj.backgroundFill);
+  const clear = PM.normalizeFill({ type: 'none', stops: PM.proj.backgroundFill.stops });
+  assert.equal(PM.Edit.apply({ type: 'set_composition', patch: { backgroundFill: clear } }, {
+    label: 'Clear background fill', origin: 'inspector',
+  }).ok, true);
+  assert.equal(PM.proj.backgroundFill.type, 'none');
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(JSON.stringify(PM.proj.backgroundFill), before);
+});
+
 test('section creation and updates cross the same undoable source transaction boundary', () => {
   const { PM } = editor();
   const layer = addText(PM);

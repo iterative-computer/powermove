@@ -74,7 +74,7 @@ const Spatial = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, hintPosition, clampFloatingPosition },
+  math: { motionProfile, shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, applyChromeEdit, hintPosition, clampFloatingPosition },
   lifecycle: { requestAdapter: requestRippleAdapter },
 };
 PM.SpatialAssistant = Spatial;
@@ -102,6 +102,7 @@ function watchShake(event) {
     scheduleHint(live.clientX, live.clientY);
     return;
   }
+  if (!isEditorPointer(event)) { S.samples = []; return; }
   if (S.pressed || event.buttons || performance.now() - S.lastTrigger < 1600) return;
   if (!S.cachePending && performance.now() - S.sceneCacheAt > 1100) refreshSceneCache();
   const events = event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event];
@@ -126,6 +127,15 @@ function watchShake(event) {
     S.rippleWarmup = null;
     activate(p.x, p.y, warmup);
   }
+}
+
+function isEditorPointer(event) {
+  const target = event?.target;
+  return window.opener == null
+    && !(PM.ProjectsScreen && PM.ProjectsScreen.isOpen)
+    && !(PM.LibraryUI && PM.LibraryUI.isOpen)
+    && !document.querySelector('#scrim.on,.modal')
+    && !!target?.closest?.('#body');
 }
 
 function motionProfile(points) {
@@ -450,7 +460,6 @@ function showComposer() {
   const input = h('textarea', { placeholder: S.context.targetPanelId ? 'How should this section change?' : 'What should be created here?', rows: '3' });
   const status = h('span.spatial-status', 'Enter to send');
   const cancelBtn = h('button.spatial-action', { onclick: cancel }, 'Cancel');
-  const pinBtn = h('button.spatial-action', { onclick: () => cardPosition(S.card, S.region), title: 'Return beside the circled region' }, 'Return to layout');
   const sendBtn = h('button.spatial-action.pri', { onclick: () => sendRequest(input, status, sendBtn, cancelBtn) }, 'Send to Codex');
   input.addEventListener('keydown', e => {
     e.stopPropagation();
@@ -460,7 +469,7 @@ function showComposer() {
   S.card = h('div.spatial-compose',
     handle,
     input,
-    h('div.spatial-actions', status, cancelBtn, pinBtn, sendBtn));
+    h('div.spatial-actions', status, cancelBtn, sendBtn));
   S.root.appendChild(S.card);
   makeCardMovable(S.card, handle);
   requestAnimationFrame(() => { cardPosition(S.card, S.region); input.focus(); });
@@ -490,12 +499,20 @@ async function sendRequest(input, status, sendBtn, cancelBtn) {
 function responseSchema() {
   return {
     type: 'object', additionalProperties: false,
-    required: ['operation', 'targetPanelId', 'dockId', 'placement', 'message', 'section'],
+    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'chromeEdit', 'section'],
     properties: {
+      kind: { type: 'string', enum: ['section', 'chrome'] },
       operation: { type: 'string', enum: ['create', 'modify', 'noop'] },
       targetPanelId: { type: 'string' }, dockId: { type: 'string' },
       placement: { type: 'string', enum: ['before', 'after', 'replace'] },
       message: { type: 'string' },
+      chromeEdit: {
+        type: 'object', additionalProperties: false, required: ['target', 'value'],
+        properties: {
+          target: { type: 'string', enum: ['preview.cornerRadius'] },
+          value: { type: 'string', enum: ['square', 'rounded'] },
+        },
+      },
       section: {
         type: 'object', additionalProperties: false, required: ['id', 'title', 'size', 'note', 'controls'],
         properties: {
@@ -522,6 +539,8 @@ function agentPrompt(request) {
   return `You are the interface coding agent inside Powermove. Design one structured, editable interface section for the circled region. Return only the requested JSON object.
 
 RULES
+- kind=chrome for a supported app-interface style change. The supported editable chrome target is preview.cornerRadius with value square or rounded. Use operation=modify, and return a neutral empty section object.
+- kind=section for editable panels/controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
 - operation=create when adding a section; operation=modify when replacing the selected section; noop only when the request cannot be represented safely.
 - A section is a compact native Powermove panel made from slider, color, toggle, select, and button controls.
 - Controls can bind to the selected composition layer with target="$selection" and one of these paths: ${sourcePaths.join(', ')}.
@@ -529,7 +548,8 @@ RULES
 - Buttons may use only one of the listed command ids. Never invent commands.
 - Prefer 3–8 focused controls, a short title, and a useful one-sentence note. Avoid decorative filler.
 - For unused control fields, still return schema-safe neutral values: empty string/array, 0, or false.
-- Keep the current interface reachable. Do not remove unrelated docks or panels.
+- App chrome is a valid editable source target when it is in the whitelist above. Never reject preview corner styling merely because it is interface chrome.
+- Keep the current interface reachable. Do not remove unrelated docks or panels. Never alter rendered composition shapes or export geometry for a chrome request.
 
 CIRCLED REGION
 ${JSON.stringify(S.context)}
@@ -547,6 +567,9 @@ ${request}`;
 function sanitizePlan(raw, context) {
   const safePaths = new Set(['properties.position.x', 'properties.position.y', 'properties.scale.x', 'properties.scale.y', 'properties.rotation', 'properties.opacity', 'content.text', 'content.color', 'content.size', 'layer.visible', 'layer.locked', 'layer.duration', 'layer.motionBlur']);
   const operation = ['create', 'modify', 'noop'].includes(raw?.operation) ? raw.operation : 'noop';
+  const chromeTarget = raw?.chromeEdit?.target === 'preview.cornerRadius' ? 'preview.cornerRadius' : '';
+  const chromeValue = ['square', 'rounded'].includes(raw?.chromeEdit?.value) ? raw.chromeEdit.value : '';
+  const kind = raw?.kind === 'chrome' && chromeTarget && chromeValue ? 'chrome' : 'section';
   const cleanText = (v, fallback = '', max = 100) => typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : fallback;
   const source = raw?.section && typeof raw.section === 'object' ? raw.section : {};
   const baseId = slug(cleanText(source.id, cleanText(source.title, 'Generated section')));
@@ -577,13 +600,25 @@ function sanitizePlan(raw, context) {
     return out;
   }).filter(c => c.type !== 'button' || c.cmd);
   return {
+    kind,
     operation,
     targetPanelId: cleanText(raw?.targetPanelId, context?.targetPanelId || '', 100),
     dockId: cleanText(raw?.dockId, '', 100),
     placement: ['before', 'after', 'replace'].includes(raw?.placement) ? raw.placement : (operation === 'modify' ? 'replace' : 'after'),
     message: cleanText(raw?.message, operation === 'modify' ? 'The redesigned section is ready.' : 'The new section is ready.', 220),
+    chromeEdit: kind === 'chrome' ? { target: chromeTarget, value: chromeValue } : null,
     section: { id: baseId, title: cleanText(source.title, 'Generated section', 70), size: PM.clamp(Number(source.size) || 220, 120, 700), note: cleanText(source.note, '', 240), controls },
   };
+}
+
+/* Apply only explicitly supported app-chrome edits to the versioned workspace
+   manifest. This is a pure mutation seam used inside WS.mutate, never a CSS or
+   project-canvas write from model output. */
+function applyChromeEdit(workspace, edit) {
+  if (!workspace || edit?.target !== 'preview.cornerRadius' || !['square', 'rounded'].includes(edit.value)) return false;
+  workspace.chrome = workspace.chrome && typeof workspace.chrome === 'object' ? workspace.chrome : {};
+  workspace.chrome.previewCornerRadius = edit.value;
+  return true;
 }
 
 function slug(value) {
@@ -594,14 +629,17 @@ function slug(value) {
 function showPreview() {
   S.phase = 'preview'; S.card.textContent = '';
   const handle = h('div.spatial-target', { title: 'Drag to move. Arrow keys also move this box.' }, `Proposed change · ${S.context.targetTitle}`);
-  const body = h('div.spatial-preview', h('h3', S.plan.section.title), h('p', S.plan.message));
-  if (S.plan.section.note) body.appendChild(h('p', S.plan.section.note));
-  S.plan.section.controls.forEach(c => body.appendChild(h('div.spatial-preview-control', h('span', c.label), h('span', c.type), c.type === 'slider' ? h('i') : null)));
-  if (!S.plan.section.controls.length) body.appendChild(h('div.spatial-preview-control', 'Empty section'));
-  const actions = h('div.spatial-actions', h('span.spatial-status', S.plan.operation === 'modify' ? 'Replaces circled section' : 'Adds beside circled section'),
+  const chrome = S.plan.kind === 'chrome';
+  const body = h('div.spatial-preview', h('h3', chrome ? 'Preview surface' : S.plan.section.title), h('p', S.plan.message));
+  if (chrome) body.appendChild(h('div.spatial-preview-control', h('span', 'Corner style'), h('span', S.plan.chromeEdit.value)));
+  else {
+    if (S.plan.section.note) body.appendChild(h('p', S.plan.section.note));
+    S.plan.section.controls.forEach(c => body.appendChild(h('div.spatial-preview-control', h('span', c.label), h('span', c.type), c.type === 'slider' ? h('i') : null)));
+    if (!S.plan.section.controls.length) body.appendChild(h('div.spatial-preview-control', 'Empty section'));
+  }
+  const actions = h('div.spatial-actions', h('span.spatial-status', chrome ? 'Changes Powermove UI only' : S.plan.operation === 'modify' ? 'Replaces circled section' : 'Adds beside circled section'),
     h('button.spatial-action', { onclick: cancel }, 'Cancel'),
-    h('button.spatial-action', { onclick: () => cardPosition(S.card, S.region), title: 'Return beside the circled region' }, 'Return to layout'),
-    h('button.spatial-action.pri', { onclick: applyPlan }, 'Apply section'));
+    h('button.spatial-action.pri', { onclick: applyPlan }, chrome ? 'Apply interface edit' : 'Apply section'));
   S.card.append(handle, body, actions); makeCardMovable(S.card, handle);
   requestAnimationFrame(() => {
     const rect = S.card.getBoundingClientRect();
@@ -631,6 +669,13 @@ function uniqueSectionId(workspace, requested, keepId = '') {
 function applyPlan() {
   if (!S.plan || S.phase !== 'preview') return;
   const plan = S.plan;
+  if (plan.kind === 'chrome') {
+    let changed = false;
+    PM.WS.mutate(workspace => { changed = applyChromeEdit(workspace, plan.chromeEdit); });
+    if (changed) PM.toast('Updated preview corner style');
+    cancel();
+    return;
+  }
   const current = PM.WS.current;
   const target = locatePanel(current, plan.targetPanelId || S.context.targetPanelId);
   const targetIsCustom = (current.custom || []).some(p => p.id === target?.dock?.panels?.[target.index]?.id);
@@ -765,13 +810,15 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
         let front = uniforms.time * 1.32;
         let lightIn = smoothstep(0.0, 0.16, uniforms.time);
 
-        // Broad, low-energy bands occupy more of the window without creating
-        // a harsh lens or a conspicuous edge.
-        let crest = exp(-pow((distanceFromSource - front) * 7.0, 2.0)) * propagationFade;
-        let echo = exp(-pow((distanceFromSource - front + 0.18) * 10.5, 2.0)) * propagationFade;
-        let wakeMask = smoothstep(front + 0.32, front - 0.14, distanceFromSource);
-        let wake = (0.5 + 0.5 * sin(distanceFromSource * 76.0 - uniforms.time * 14.0))
-          * wakeMask * exp(-distanceFromSource * 1.8);
+        // Wide, low-energy feedback bands make the deliberate shake legible
+        // across the editor instead of reading as tiny lines near the cursor.
+        // Their alpha remains restrained and the full-screen canvas clips them
+        // to the viewport without ever intercepting pointer input.
+        let crest = exp(-pow((distanceFromSource - front) * 4.4, 2.0)) * propagationFade;
+        let echo = exp(-pow((distanceFromSource - front + 0.28) * 6.2, 2.0)) * propagationFade;
+        let wakeMask = smoothstep(front + 0.48, front - 0.2, distanceFromSource);
+        let wake = (0.5 + 0.5 * sin(distanceFromSource * 34.0 - uniforms.time * 12.0))
+          * wakeMask * exp(-distanceFromSource * 1.2);
         let core = exp(-distanceFromSource * 5.4) * exp(-uniforms.time * 0.74);
         let cursorLens = exp(-pow(distanceFromSource * 3.4, 2.0));
         let cursorRipple = sin(distanceFromSource * 38.0 - uniforms.time * 17.0)

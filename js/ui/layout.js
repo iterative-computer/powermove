@@ -408,7 +408,11 @@ function panelMenu(e, spec, dock) {
 /* ── workspace model ops ───────────────────────────────── */
 const eachDock = (ws, fn) => ws.layout.docks.forEach(fn);
 const hasPanel = (ws, id) => ws.layout.docks.some(d => d.panels.some(p => p.id === id));
-function removePanel(ws, id) { eachDock(ws, d => { d.panels = d.panels.filter(p => p.id !== id); }); }
+function ensureDockFill(dock) {
+  if (dock?.panels?.length && !dock.panels.some(panel => panel.flex)) dock.panels[dock.panels.length - 1].flex = true;
+  return dock;
+}
+function removePanel(ws, id) { eachDock(ws, d => { d.panels = d.panels.filter(p => p.id !== id); ensureDockFill(d); }); }
 function ensureDock(ws, id) {
   let dock = ws.layout.docks.find(item => item.id === id);
   if (dock) return dock;
@@ -430,6 +434,7 @@ function hidePanel(ws, id) {
     dock: { id: found.dock.id, size: found.dock.size, flex: found.dock.flex },
   });
   found.dock.panels.splice(index, 1);
+  ensureDockFill(found.dock);
   return true;
 }
 function restorePanel(ws, id) {
@@ -446,6 +451,7 @@ function restorePanel(ws, id) {
   }
   const index = Math.max(0, Math.min(hidden.index, dock.panels.length));
   dock.panels.splice(index, 0, { ...hidden.spec, id });
+  ensureDockFill(dock);
   ws.hiddenPanels = ws.hiddenPanels.filter(item => item.id !== id);
   return true;
 }
@@ -458,6 +464,7 @@ function addPanel(ws, id, dockId) {
   ws.hiddenPanels = (ws.hiddenPanels || []).filter(item => item.id !== id);
   const d = ensureDock(ws, dockId || 'right');
   d.panels.push({ id, flex: d.panels.length === 0 });
+  ensureDockFill(d);
   if (d.hidden) d.hidden = false;
 }
 function insertPanel(ws, spec, dockId, index) {
@@ -467,6 +474,7 @@ function insertPanel(ws, spec, dockId, index) {
   if (spec.flex) clean.flex = true;
   const i = index == null ? d.panels.length : Math.max(0, Math.min(index, d.panels.length));
   d.panels.splice(i, 0, clean);
+  ensureDockFill(d);
   if (d.hidden) d.hidden = false;
 }
 function movePanel(ws, id, dockId) {
@@ -600,6 +608,10 @@ function hSplit(aboveSpec, aboveEl, belowSpec, belowEl) {
 }
 
 /* ── apply ─────────────────────────────────────────────── */
+L.visibleDockPlan = (ws, isDetached = id => !!PM.Popout?.isOpen(id)) => (ws.layout?.docks || [])
+  .map(dock => ({ dock, specs: (dock.panels || []).filter(spec => !isDetached(spec.id)) }))
+  .filter(item => !item.dock.hidden && item.specs.length);
+
 L.apply = (ws) => {
   L.ws = ws;
   const root = $('#body');
@@ -612,11 +624,8 @@ L.apply = (ws) => {
     if (inst.def && inst.def.persist && inst.el && inst.el.parentNode) park.appendChild(inst.el);
   });
   root.textContent = '';
-  const docks = ws.layout.docks;
   let prevVisible = null;
-  docks.forEach((dock, di) => {
-    const visibleSpecs = dock.panels.filter(spec => !PM.Popout?.isOpen(spec.id));
-    if (dock.hidden || !visibleSpecs.length) return;
+  L.visibleDockPlan(ws).forEach(({ dock, specs: visibleSpecs }) => {
     const el = h('div.dock.col', { id: 'dock-' + dock.id });
     el.dataset.dock = dock.id;
     if (dock.id === 'center' || dock.flex) el.style.flex = '1 1 auto';
@@ -694,6 +703,8 @@ L.refresh = (id) => {
    Canvas panels (viewer/timeline) stay docked. */
 PM.Popout = {
   wins: {},
+  openIds() { return Object.keys(this.wins).filter(id => this.isOpen(id)); },
+  closeAll() { this.openIds().forEach(id => this.dock(id)); },
   isOpen(id) { return !!this.wins[id] && !this.wins[id].window.closed; },
   open(id) {
     const def = PM.PANELS[id]; if (!def) return;

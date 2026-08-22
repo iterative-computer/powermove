@@ -209,7 +209,7 @@ function setLayer(command) {
 
 function setComposition(command) {
   const patch = safePatch(command.patch, 'composition patch');
-  const allowed = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'shutter', 'workArea']);
+  const allowed = new Set(['name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill', 'shutter', 'workArea']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Composition field “${key}” is not editable`);
   const p = PM.proj;
   if (patch.name != null) p.name = String(patch.name).trim() || p.name;
@@ -220,7 +220,14 @@ function setComposition(command) {
     p.dur = Math.max(.1, finite(patch.duration, 'duration'));
     if (!patch.workArea) p.work = [0, p.dur];
   }
-  if (patch.background != null) p.bg = String(patch.background);
+  if (patch.background != null) {
+    p.bg = String(patch.background);
+    p.backgroundFill = PM.normalizeFill({ type: 'solid', color: p.bg }, p.bg);
+  }
+  if (patch.backgroundFill != null) {
+    p.backgroundFill = PM.normalizeFill(patch.backgroundFill, p.bg);
+    p.bg = p.backgroundFill.stops[0].color;
+  }
   if (patch.shutter != null) p.shutter = PM.clamp(finite(patch.shutter, 'shutter'), 0, 2);
   if (patch.workArea != null) {
     if (!Array.isArray(patch.workArea) || patch.workArea.length !== 2) throw new Error('workArea must contain start and end');

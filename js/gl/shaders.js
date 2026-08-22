@@ -89,6 +89,24 @@ void main(){
 PM.FRAG_COPY = PRE + `void main(){ o = texture(u_tex, v_st); }`;
 
 PM.FRAG_SOLID = PRE + `uniform vec4 u_color; void main(){ o = u_color; }`;
+PM.FRAG_BACKGROUND_FILL = PRE + `
+uniform vec4 u_stops[8];
+uniform int u_count;
+uniform int u_type;
+uniform float u_angle;
+void main(){
+  vec2 p=v_st-vec2(.5);
+  float a=radians(u_angle);
+  float t=u_type==2 ? clamp(length(p)*1.4142,0.,1.) : clamp(dot(p,vec2(cos(a),sin(a)))+.5,0.,1.);
+  vec3 color=u_stops[0].rgb;
+  for(int i=0;i<7;i++){
+    if(i>=u_count-1) break;
+    vec4 left=u_stops[i], right=u_stops[i+1];
+    float amount=smoothstep(left.a,right.a,t);
+    color=mix(color,right.rgb,amount);
+  }
+  o=vec4(color,1.);
+}`;
 
 /* ── layer masks: analytic SDF coverage in one fullscreen pass ── */
 PM.FRAG_MASK = PRE + `

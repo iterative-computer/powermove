@@ -40,6 +40,8 @@ function loadBootProject() {
 function hydrate(p) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
+  base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
+  base.bg = base.backgroundFill.stops[0].color;
   base.layers = Array.isArray(p.layers) ? p.layers : [];
   base.assets = p.assets || {};
   base.markers = p.markers || [];
@@ -238,21 +240,34 @@ PM.proj.layers.forEach(L => {
   if ((L.type === 'image' || L.type === 'video' || L.type === 'audio') && L.d.asset && !PM.assets.get(L.d.asset)) L.on = false;
 });
 PM.WS.init();
-PM.selectLayers(PM.proj.layers.find(l => l.name === 'Powermove')?.id || []);
-PM.setTime(.9, { raw: true, force: true });
+const bootSession = PM.Projects.getState(PM.proj.id);
+if (bootSession?.workspace) PM.WS.restoreSnapshot(bootSession.workspace);
+PM.selectLayers((bootSession?.selection?.layers || []).filter(id => PM.L(id)).length
+  ? bootSession.selection.layers.filter(id => PM.L(id))
+  : PM.proj.layers.find(l => l.name === 'Powermove')?.id || []);
+PM.setTime(Number.isFinite(bootSession?.time) ? bootSession.time : .9, { raw: true, force: true });
+if (bootSession?.timeline) {
+  PM.TL.pps = Number.isFinite(bootSession.timeline.pps) ? bootSession.timeline.pps : PM.TL.pps;
+  PM.TL.scrollT = Number.isFinite(bootSession.timeline.scrollT) ? bootSession.timeline.scrollT : PM.TL.scrollT;
+  PM.TL.scrollY = Number.isFinite(bootSession.timeline.scrollY) ? bootSession.timeline.scrollY : PM.TL.scrollY;
+  PM.TL.graph = !!bootSession.timeline.graph;
+}
 PM.hist.clear();
 
 /* ── shell ─────────────────────────────────────────────── */
-function themeButton(button) {
-  const b = button(PM.theme.current === 'dark' ? 'sun' : 'moon', 'Toggle light / dark appearance', () => PM.theme.toggle());
-  PM.bus.on('layout', () => {
-    const dark = PM.theme.current === 'dark';
-    b.textContent = '';
-    b.appendChild(PM.icon(dark ? 'sun' : 'moon'));
-    b.title = dark ? 'Switch to light appearance' : 'Switch to dark appearance';
-  });
-  return b;
+function openSettings() {
+  const appearance = h('select.settings-appearance', { 'aria-label': 'Appearance' },
+    h('option', { value: 'light' }, 'Light'), h('option', { value: 'dark' }, 'Dark'));
+  appearance.value = PM.theme.current;
+  appearance.onchange = () => PM.theme.apply(appearance.value);
+  const body = h('div.settings-view',
+    h('div.settings-row', h('div.settings-copy', h('b', 'Appearance'), h('span', 'Choose how Powermove looks.')), appearance),
+    h('p.settings-note', 'Undo and Redo remain available from the Edit menu and keyboard shortcuts.'));
+  const dialog = PM.modal({ title: 'Settings', body, width: 440, actions: [{ label: 'Done', pri: true }] });
+  setTimeout(() => appearance.focus(), 30);
+  return dialog;
 }
+PM.SettingsUI = { open: openSettings };
 function buildTitlebar() {
   const tabs = $('#tabs'), right = $('#tb-right'), bar = $('#titlebar');
   /* Native window drag: WKWebView ignores -webkit-app-region, so forward pointerdown
@@ -260,7 +275,7 @@ function buildTitlebar() {
   const dragBridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowDrag;
   bar.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
-    if (e.target.closest('button, #tabs, input, a, .tb-right')) return;
+    if (e.target.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
     if (!dragBridge) return;
     e.preventDefault();
     /* Native-feel window drag: pin the arrow cursor, drop any hover state, and
@@ -276,7 +291,7 @@ function buildTitlebar() {
     }, { once: true });
   });
   bar.addEventListener('dblclick', (e) => {
-    if (e.target.closest('button, #tabs, input, a, .tb-right')) return;
+    if (e.target.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
     /* mimic standard macOS titlebar double-click (zoom) */
     const zb = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowZoom;
     if (zb) zb.postMessage({});
@@ -296,12 +311,12 @@ function buildTitlebar() {
       const current = id === PM.proj.id;
       const active = current && !homeOpen;
       const dirty = current && APP.dirty;
+      const tabName = (meta && meta.name) || 'Untitled';
       const tab = h('div.project-doc' + (active ? '.on' : '') + (dirty ? '.dirty' : ''), {
         title: (meta && meta.name) || id, role: 'tab', tabindex: '0',
-        'aria-selected': String(active),
+        'aria-selected': String(active), 'aria-label': tabName + (dirty ? ', unsaved' : ''),
       },
-        h('i.project-doc-state', { 'aria-hidden': 'true' }),
-        h('span.project-doc-label', (meta && meta.name) || 'Untitled'),
+        h('span.project-doc-label', tabName),
         h('button.project-doc-close', {
           title: 'Close project',
           onclick: (e) => { e.stopPropagation(); closeTab(id); },
@@ -330,10 +345,8 @@ function buildTitlebar() {
   right.textContent = '';
   const button = (icon, title, run) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
   right.append(
-    button('undo', 'Undo', () => PM.hist.undo()),
-    button('redo', 'Redo', () => PM.hist.redo()),
     button('grid', 'Library · Sections and Workspaces', () => PM.LibraryUI.open()),
-    themeButton(button),
+    button('gear', 'Settings', openSettings),
   );
   PM.bus.on('workspaces', paintTabs); PM.bus.on('project', paintTabs); PM.bus.on('history', paintTabs);
   paintTabs();
@@ -367,8 +380,13 @@ function buildToolbar() {
   const body = document.createElement('div');
   el.appendChild(body);
   const bar = document.getElementById('titlebar');
-  bar.insertBefore(el, bar.querySelector('.titlebar-drag'));
+  /* The flexible drag region pushes this compact tool group to the right,
+     immediately before the global actions. */
+  bar.insertBefore(el, bar.querySelector('#tb-right'));
   try { def.build(body, {}); } catch (e) { console.error('toolbar', e); }
+  const syncVisibility = () => { el.hidden = !!(PM.ProjectsScreen && PM.ProjectsScreen.isOpen); };
+  PM.bus.on('projects:screen', syncVisibility);
+  syncVisibility();
 }
 buildToolbar();
 
@@ -386,6 +404,25 @@ function persistCurrent(withThumb) {
     PM.Projects.put(PM.proj, withThumb ? projectThumb() : undefined);
     APP.dirty = false;
   } catch (e) { console.warn('Project save failed', e); }
+}
+
+function captureProjectSession() {
+  if (!PM.proj?.id) return;
+  persistCurrent(false);
+  PM.Projects.putState(PM.proj.id, {
+    workspace: PM.WS.snapshot(), time: PM.time,
+    selection: { layers: [...PM.sel.layers], keys: [...PM.sel.keys], chan: PM.sel.chan },
+    timeline: { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph },
+    detached: PM.Popout?.openIds?.() || [],
+  });
+}
+
+function closeProjectTransients() {
+  PM.LibraryUI?.close?.();
+  PM.SpatialAssistant?.cancel?.();
+  PM.closeMenus?.();
+  if (PM.WS.editing) PM.WS.cancelEdit();
+  PM.Popout?.closeAll?.();
 }
 PM.autosave = () => {
   APP.dirty = true;
@@ -436,14 +473,23 @@ PM.newProject = () => {
 };
 function switchProject(p) {
   PM.pause();
+  if (PM.proj?.id && PM.proj.id !== p.id) captureProjectSession();
+  closeProjectTransients();
   PM.proj = hydrate(p);
   PM.Projects.markOpen(PM.proj.id);
+  const session = PM.Projects.getState(PM.proj.id);
+  if (session?.workspace) PM.WS.restoreSnapshot(session.workspace);
+  else PM.WS.activate('design', true);
   persistCurrent(false);
   PM.bus.emit('projects:tabs');
-  PM.time = 0;
-  PM.sel.layers = [];
-  PM.sel.keys = [];
-  PM.sel.chan = null;
+  PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
+  PM.sel.layers = (session?.selection?.layers || []).filter(id => PM.L(id));
+  PM.sel.keys = [...(session?.selection?.keys || [])];
+  PM.sel.chan = session?.selection?.chan || null;
+  PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
+  PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
+  PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
+  PM.TL.graph = !!session?.timeline?.graph;
   PM.hist.clear();
   PM.rasterClear();
   PM.assets.map.clear();
@@ -457,6 +503,7 @@ function switchProject(p) {
   PM.Viewer.layout();
   PM.invalidate('all');
   PM.invalidate('status');
+  requestAnimationFrame(() => (session?.detached || []).forEach(id => PM.Popout.open(id)));
   PM.autosave();
 }
 
@@ -483,7 +530,7 @@ addEventListener('drop', e => {
 function safeName(s) { return String(s || 'powermove').replace(/[\\/:*?"<>|]+/g, '-').trim() || 'powermove'; }
 addEventListener('beforeunload', () => {
   clearTimeout(APP.saveTimer);
-  persistCurrent(false);
+  captureProjectSession();
 });
 
 /* ── open-project tabs ─────────────────────────────────── */

@@ -82,7 +82,7 @@ test('pop out creates a native child window, mirrors one live panel owner, and r
   assert.match(popout, /MutationObserver/, 'the child reflects authoritative source updates');
   assert.match(popout, /target\.click\(\)/, 'child controls forward to the authoritative panel');
   assert.doesNotMatch(popout, /detachedPlaceholder/, 'detached panels reserve no placeholder space');
-  assert.match(layout, /visibleSpecs = dock\.panels\.filter\(spec => !PM\.Popout\?\.isOpen\(spec\.id\)\)/,
+  assert.match(layout, /L\.visibleDockPlan[\s\S]*filter\(item => !item\.dock\.hidden && item\.specs\.length\)/,
     'detached panels are removed from layout flow so neighboring content reflows');
   assert.doesNotMatch(popout, /powermove-redock/);
   assert.doesNotMatch(popout, /PM\.WS\.mutate/, 'detaching does not destroy or duplicate the layout manifest');

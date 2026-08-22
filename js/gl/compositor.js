@@ -410,7 +410,23 @@ GL.renderProject = (proj, T, W, H, opt = {}) => {
   let acc = grab(W, H);
   bind(acc);
   if (opt.transparent) clear(0, 0, 0, 0);
-  else { const bg = PM.hex2rgb(proj.bg); clear(bg[0], bg[1], bg[2], 1); }
+  else {
+    const fill = PM.normalizeFill(proj.backgroundFill, proj.bg);
+    if (fill.type === 'none') clear(0, 0, 0, 0);
+    else if (fill.type === 'solid') { const bg = PM.hex2rgb(fill.stops[0].color); clear(bg[0], bg[1], bg[2], 1); }
+    else {
+      clear(0, 0, 0, 1);
+      const p = program('background-fill', PM.FRAG_BACKGROUND_FILL);
+      if (p) {
+        const g = use(p), packed = [];
+        fill.stops.forEach(stop => packed.push(...PM.hex2rgb(stop.color), stop.position / 100));
+        while (packed.length < 32) packed.push(0, 0, 0, 1);
+        g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+        setI(p, 'u_count', fill.stops.length); setI(p, 'u_type', fill.type === 'radial' ? 2 : 1);
+        g.u('u_angle', fill.angle); g.u('u_stops', packed); draw();
+      }
+    }
+  }
 
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];

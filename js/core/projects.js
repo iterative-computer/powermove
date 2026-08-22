@@ -6,6 +6,7 @@ const PM = window.PM;
 const R = {
   KEY: 'projects',          // [{id, name, at, thumb}]
   SLOT: 'project.',         // + id → serialized project
+  STATE: 'projectState.',   // + id → tab-owned editor/workspace session
   openKey: 'openTabs',      // [id] in stable visible tab order
   trashKey: 'projectTrash', // metadata for recoverable deletion; slots stay intact
 };
@@ -62,6 +63,9 @@ R.get = (id) => {
   return R.unwrap(raw);
 };
 
+R.getState = id => id ? PM.store.get(R.STATE + id, null) : null;
+R.putState = (id, state) => { if (id && state && typeof state === 'object') PM.store.set(R.STATE + id, state); };
+
 /** Pure boot choice: content first (open tabs, then registry), then a named
     empty project. Anonymous empty projects never win over the welcome demo. */
 R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, legacy = null } = {}) => {
@@ -111,6 +115,7 @@ R.restore = (id) => {
 R.destroy = (id) => {
   PM.store.set(R.trashKey, R.trashList().filter(x => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
+  try { PM.store.del(R.STATE + id); } catch (e) { }
 };
 
 /* ── open-tab bookkeeping ──────────────────────────────── */

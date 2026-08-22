@@ -55,6 +55,8 @@ function normalizeWorkspace(workspace, fallback) {
   raw.name = text(raw.name, 'Workspace');
   raw.density = ['compact', 'normal', 'comfy'].includes(raw.density) ? raw.density : 'normal';
   raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
+  raw.chrome = raw.chrome && typeof raw.chrome === 'object' ? raw.chrome : {};
+  raw.chrome.previewCornerRadius = raw.chrome.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
   raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
   delete raw.features.motionBlur;
   delete raw.features.guides;
@@ -106,6 +108,10 @@ function normalizeWorkspace(workspace, fallback) {
       return clean;
     }).filter(Boolean);
     const out = { id: text(d.id, `dock-${index + 1}`), panels };
+    /* A visible dock must consume its full height. Keep the saved pixel size as
+       metadata, but let one panel flex so a short side panel cannot reserve a
+       large blank column beneath itself. */
+    if (panels.length && !panels.some(panel => panel.flex)) panels[panels.length - 1].flex = true;
     if (finite(d.size)) out.size = PM.clamp(d.size, 200, 760);
     if (d.hidden) out.hidden = true;
     if (d.flex) out.flex = true;
@@ -274,11 +280,24 @@ WS.activate = (id, silent) => {
   if (!silent) PM.toast('Workspace · ' + w.name);
 };
 
+WS.snapshot = () => WS.current ? copy(WS.current) : null;
+WS.restoreSnapshot = snapshot => {
+  if (!snapshot || typeof snapshot !== 'object') return WS.activate('design', true);
+  const restored = normalizeWorkspace(snapshot);
+  const index = WS.all.findIndex(item => item.id === restored.id);
+  if (index >= 0) WS.all[index] = restored; else WS.all.push(restored);
+  WS.current = restored;
+  registerCustom(restored); applyFeatures(restored); PM.Layout.apply(restored);
+  PM.bus.emit('workspaces');
+  return restored;
+};
+
 function applyFeatures(w) {
   const f = w.features || {};
   if (f.snapping !== undefined) PM.snap = !!f.snapping;
   if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
   if (f.graphOnOpen !== undefined) PM.TL.graph = !!f.graphOnOpen;
+  document.documentElement.dataset.previewCorners = w.chrome?.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
   PM.invalidate();
 }
 

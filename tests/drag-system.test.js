@@ -87,6 +87,25 @@ test('missing side docks get full-height edge targets and are created in stable 
   assert.equal(workspace.layout.docks[2].panels[0].size, 240);
 });
 
+test('left and right docking never leave an empty reserved track', () => {
+  const PM = layoutModel();
+  const workspace = { layout: { docks: [{ id: 'center', flex: true, panels: [
+    { id: 'viewer', flex: true }, { id: 'assets', size: 180 },
+  ] }] }, hiddenPanels: [] };
+  PM.Layout.movePanel(workspace, 'assets', 'left');
+  assert.deepEqual([...PM.Layout.visibleDockPlan(workspace, () => false).map(item => item.dock.id)], ['left', 'center']);
+  const left = workspace.layout.docks.find(dock => dock.id === 'left');
+  assert.equal(left.panels[0].flex, true, 'the side panel fills its column instead of leaving blank space below');
+  assert.equal(left.panels[0].size, 180, 'its prior vertical height remains available for later stacking');
+
+  PM.Layout.movePanel(workspace, 'assets', 'right');
+  assert.deepEqual([...PM.Layout.visibleDockPlan(workspace, () => false).map(item => item.dock.id)], ['center', 'right'],
+    'the now-empty left dock produces no DOM track or splitter');
+  const right = workspace.layout.docks.find(dock => dock.id === 'right');
+  assert.equal(right.panels[0].flex, true);
+  assert.equal(right.panels[0].size, 180);
+});
+
 test('context-menu vertical movement reorders without changing panel metadata', () => {
   const PM = layoutModel();
   const workspace = { layout: { docks: [{ id: 'center', panels: [
@@ -118,7 +137,7 @@ test('panel hiding is recoverable, preserves its slot, and handles the last pane
   assert.equal(workspace.hiddenPanels[0].dockId, 'left');
   assert.equal(workspace.hiddenPanels[0].spec.size, 180, 'panel-specific layout metadata is preserved');
   assert.equal(PM.Layout.restorePanel(workspace, 'assets'), true);
-  assert.deepEqual({ ...workspace.layout.docks[0].panels[0] }, { id: 'assets', size: 180 });
+  assert.deepEqual({ ...workspace.layout.docks[0].panels[0] }, { id: 'assets', size: 180, flex: true });
   assert.equal(workspace.hiddenPanels.length, 0);
 });
 
