@@ -376,6 +376,10 @@ test('selected-region prompt hands off into the ongoing Agent workspace panel', 
   assert.match(source, /PM\.WS\.mutate\(workspace =>/,
     'Apply crosses the validated structured workspace transaction boundary');
   assert.match(css, /\.agent-composer\{[^}]*background:var\(--bg-float\)/);
+  assert.match(css, /\.spatial-input-row>\.spatial-action\.pri\{[^}]*display:grid;place-items:center/,
+    'the shake-prompt send button centers its icon independently of text baselines');
+  assert.match(css, /\.spatial-send svg\[data-icon="return"\],\.agent-send svg\[data-icon="return"\]\{transform:translate\(-\.35px,\.45px\)\}/,
+    'both Return-key icons share the same optical centering correction');
 });
 
 test('Ripple activation is limited to the active project editor', () => {

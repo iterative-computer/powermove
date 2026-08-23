@@ -382,8 +382,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .spatial-action{height:29px;padding:0 10px;border-radius:8px;color:var(--tx);background:var(--bg-row);cursor:pointer;transition:background .1s,transform .1s var(--ease)}
 .spatial-action:hover{background:var(--bg-row-hi)}
 .spatial-action:active{transform:scale(.96)}
-.spatial-input-row>.spatial-action.pri{width:29px;height:29px;flex:none;padding:0;border:0!important;outline:0;background:var(--accent);color:#fff;border-radius:8px;font-size:18px;line-height:1;font-weight:600;box-shadow:none!important}
+.spatial-input-row>.spatial-action.pri{width:29px;height:29px;flex:none;padding:0;border:0!important;outline:0;display:grid;place-items:center;background:var(--accent);color:#fff;border-radius:8px;font-size:18px;line-height:1;font-weight:600;box-shadow:none!important}
 .spatial-input-row>.spatial-action.pri svg,.agent-send svg{width:14px;height:14px}
+.spatial-send svg[data-icon="return"],.agent-send svg[data-icon="return"]{transform:translate(-.35px,.45px)}
 .spatial-input-row>.spatial-action.pri:hover{background:#ff6a24;transform:translateY(-1px)}
 .spatial-input-row>.spatial-action.pri:active{transform:scale(.93)}
 .spatial-input-row>.spatial-action.pri:focus-visible{box-shadow:0 0 0 3px var(--accent-dim)!important}
