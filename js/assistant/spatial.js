@@ -8,7 +8,7 @@ const PM = window.PM, h = PM.h;
    prompt and a strict JSON schema across WKWebView; no account secret enters JS. */
 const pending = new Map();
 PM.CodexBridge = {
-  request(prompt, schema, images = []) {
+  request(prompt, schema, images = [], options = {}) {
     const bridge = window.webkit?.messageHandlers?.pmCodex;
     if (!bridge) return Promise.reject(new Error('The coding agent is available in the Powermove macOS app'));
     const id = PM.uid('spatial-codex-');
@@ -18,7 +18,10 @@ PM.CodexBridge = {
         reject(new Error('The coding agent took too long to respond'));
       }, 120000);
       pending.set(id, { resolve, reject, timer });
-      bridge.postMessage({ id, prompt, schema, images: images.slice(0, 6) });
+      bridge.postMessage({
+        id, prompt, schema, images: images.slice(0, 6),
+        model: options.model || '', reasoningEffort: options.reasoningEffort || '',
+      });
     });
   },
   resolve(id, result) {
@@ -68,21 +71,40 @@ const S = {
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
+  panelBody: null, attachments: [], requestAttachments: [], steps: [], stepsExpanded: false,
+  panelRun: null, scope: PM.store?.get?.('agentScope', 'workspace') || 'workspace',
+  autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
+  model: PM.store?.get?.('agentModel', 'gpt-5.6-sol') || 'gpt-5.6-sol',
+  reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
 };
+
+const AGENT_MODELS = [
+  { id: 'gpt-5.6-sol', label: '5.6 Sol' },
+  { id: 'gpt-5.6-terra', label: '5.6 Terra' },
+  { id: 'gpt-5.6-luna', label: '5.6 Luna' },
+];
+const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 const Spatial = {
   init,
   activate,
-  open: () => activate(Math.round(innerWidth / 2), Math.round(innerHeight / 2), {
-    claimed: true, capture: PM.WindowCapture.request(), adapter: requestRippleAdapter(),
-  }),
+  open: openAgentPanel,
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, applyChromeEdit, hintPosition, clampFloatingPosition },
+  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition },
   lifecycle: { requestAdapter: requestRippleAdapter },
 };
 PM.SpatialAssistant = Spatial;
+
+PM.registerPanel('agent', {
+  title: 'Powermove agent', size: 350, min: 240, persist: true, noscroll: true,
+  build(body) {
+    S.panelBody = body;
+    body.classList.add('agent-panel-body');
+    renderConversation();
+  },
+});
 
 function init() {
   if (S.initialized) return;
@@ -92,6 +114,25 @@ function init() {
   addEventListener('pointercancel', () => { S.pressed = false; }, true);
   addEventListener('pointermove', watchShake, true);
   refreshSceneCache();
+}
+
+function openAgentPanel() {
+  if (PM.ProjectsScreen?.isOpen) PM.ProjectsScreen.hide();
+  if (PM.LibraryUI?.isOpen) PM.LibraryUI.close?.();
+  const workspace = PM.WS?.current;
+  if (!workspace) return;
+  const visible = PM.Layout.hasPanel(workspace, 'agent');
+  const hidden = (workspace.hiddenPanels || []).some(item => item.id === 'agent');
+  if (!visible) {
+    PM.WS.mutate(draft => {
+      if (hidden) PM.Layout.restorePanel(draft, 'agent');
+      else PM.Layout.addPanel(draft, 'agent', 'right');
+    });
+  }
+  requestAnimationFrame(() => {
+    renderConversation(true);
+    PM.panelInst.agent?.el?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  });
 }
 
 function requestRippleAdapter() {
@@ -367,6 +408,8 @@ function finishSelection(event) {
   const draft = S.card?.querySelector('textarea')?.value || '';
   S.region = rect;
   S.context = inspectRegion(S.points, S.region);
+  S.scope = S.context.targetPanelId ? `panel:${S.context.targetPanelId}` : 'workspace';
+  PM.store.set('agentScope', S.scope);
   const regionCapture = captureRegionImage(S.sceneFrame, S.region);
   S.regionImage = regionCapture?.dataUrl || null;
   S.context.visualReference = regionCapture ? {
@@ -610,7 +653,7 @@ function showComposer(draft = '') {
   input.value = draft;
   const status = h('span.spatial-status', 'Enter to send');
   const cancelBtn = h('button.spatial-action', { onclick: cancel }, 'Cancel');
-  const sendBtn = h('button.spatial-action.pri', { 'aria-label': 'Enter to send', onclick: () => sendRequest(input) }, '↵');
+  const sendBtn = h('button.spatial-action.pri.spatial-send', { 'aria-label': 'Press Enter to send', title: 'Press Enter to send', onclick: () => sendRequest(input) }, PM.icon('return'));
   input.addEventListener('keydown', e => {
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input); }
@@ -636,21 +679,15 @@ function showComposer(draft = '') {
 
 function conversationReply(plan) {
   if (plan.kind === 'scene') return plan.sceneEdit.summary || plan.message || 'I prepared an editable scene change.';
+  if (plan.kind === 'panels') return plan.message || `I prepared ${plan.panelEdit.actions.length} panel changes.`;
   if (plan.kind === 'workspace') return plan.message || `I prepared the ${plan.workspaceEdit.name} workspace.`;
   if (plan.kind === 'chrome') return plan.message || 'I prepared an interface change.';
   return plan.message || `I prepared the ${plan.section.title} section.`;
 }
 
 function promoteToConversation() {
-  if (!S.root || !S.card) return;
-  const rect = S.card.getBoundingClientRect();
-  S.root.classList.add('conversation-mode');
-  S.root.classList.remove('target-selected');
-  S.hint.style.display = 'none';
-  S.path?.setAttribute('d', ''); S.shadePath?.setAttribute('d', '');
-  S.outline?.remove(); S.outline = null;
-  if (S.renderStop) { S.renderStop(); S.renderStop = null; }
-  Object.assign(S.card.style, { left: Math.round(rect.left) + 'px', top: Math.round(rect.top) + 'px' });
+  dismissOverlay(true);
+  openAgentPanel();
 }
 
 function planPreview() {
@@ -659,11 +696,15 @@ function planPreview() {
   const chrome = plan.kind === 'chrome';
   const scene = plan.kind === 'scene';
   const workspace = plan.kind === 'workspace';
-  const title = chrome ? 'Interface edit' : scene ? plan.sceneEdit.label : workspace ? plan.workspaceEdit.name : plan.section.title;
+  const panels = plan.kind === 'panels';
+  const title = panels ? 'Panel arrangement' : chrome ? 'Interface edit' : scene ? plan.sceneEdit.label : workspace ? plan.workspaceEdit.name : plan.section.title;
   const preview = h('div.spatial-proposal',
     h('div.spatial-proposal-kicker', 'Proposed change'),
     h('h3', title));
-  if (chrome) preview.appendChild(h('div.spatial-preview-control', h('span', 'Corner style'), h('span', plan.chromeEdit.value)));
+  if (panels) plan.panelEdit.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control', PM.icon('panel'), h('span', describePanelAction(action)))));
+  else if (chrome) preview.appendChild(h('div.spatial-preview-control',
+    h('span', plan.chromeEdit.target === 'timeline.surfaceOrder' ? 'Timeline surfaces' : 'Corner style'),
+    h('span', plan.chromeEdit.value)));
   else if (scene) plan.sceneEdit.commands.forEach(command => preview.appendChild(h('div.spatial-preview-control', h('span', PM.AgentHarness.describeCommand(command)))));
   else if (workspace) {
     plan.workspaceEdit.docks.forEach(dock => preview.appendChild(h('div.spatial-preview-control', h('span', dock.id), h('span', dock.panels.map(panel => panel.id).join(' · ')))));
@@ -673,11 +714,17 @@ function planPreview() {
   }
   preview.appendChild(h('div.spatial-proposal-actions',
     h('button.spatial-action', { onclick: () => { S.plan = null; renderConversation(true); } }, 'Dismiss'),
-    h('button.spatial-action.pri', { onclick: applyPlan }, chrome ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section')));
+    h('button.spatial-action.pri', { onclick: applyPlan }, panels ? 'Apply panel changes' : chrome ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section')));
   return preview;
 }
 
 function resultPreview() {
+  if (S.panelRun && S.phase === 'result') {
+    const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Panel changes applied'), h('h3', S.panelRun.summary));
+    S.panelRun.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control', PM.icon('panel'), h('span', describePanelAction(action)))));
+    preview.appendChild(h('div.spatial-proposal-actions', h('button.spatial-action', { onclick: undoPanelRun }, 'Undo panel changes'), h('button.spatial-action.pri', { onclick: keepPanelRun }, 'Keep layout')));
+    return preview;
+  }
   const run = S.run;
   if (!run || S.phase !== 'result') return null;
   const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Rendered result'), h('h3', 'Review the actual result'));
@@ -696,38 +743,229 @@ function resultPreview() {
   return preview;
 }
 
+function describePanelAction(action) {
+  const title = PM.PANELS[action.panelId]?.title || action.panelId || action.dockId || 'Dock';
+  if (action.type === 'add') return `Open ${title}${action.dockId ? ` in ${action.dockId}` : ''}`;
+  if (action.type === 'restore') return `Restore ${title}`;
+  if (action.type === 'hide') return `Hide ${title}`;
+  if (action.type === 'move') return `Move ${title} to ${action.dockId}${Number.isInteger(action.position) ? ` · position ${action.position + 1}` : ''}`;
+  if (action.type === 'reorder') return `Place ${title} at position ${(action.position ?? 0) + 1}`;
+  if (action.type === 'resize') return `Resize ${title} to ${Math.round(action.size || 0)} px`;
+  if (action.type === 'resizeDock') return `Resize ${action.dockId} dock to ${Math.round(action.size || 0)} px`;
+  if (action.type === 'rename') return `Rename ${title} to ${action.title}`;
+  if (action.type === 'collapse') return `Collapse ${title}`;
+  if (action.type === 'expand') return `Expand ${title}`;
+  if (action.type === 'popout') return `Pop out ${title}`;
+  if (action.type === 'dock') return `Dock ${title}`;
+  return `${action.type} ${title}`;
+}
+
+function stepProgress() {
+  const complete = S.steps.filter(step => step.status === 'complete').length;
+  const active = S.steps.findIndex(step => step.status === 'active');
+  return { complete, current: active >= 0 ? active + 1 : Math.min(complete + 1, S.steps.length), total: S.steps.length };
+}
+
+function renderSteps() {
+  const needed = S.phase === 'working' || S.phase === 'applying' || !!S.plan;
+  if (!needed || !S.steps.length) return null;
+  const progress = stepProgress();
+  const toggle = h('button.agent-steps-toggle', {
+    type: 'button', 'aria-expanded': String(S.stepsExpanded),
+    onclick: () => { S.stepsExpanded = !S.stepsExpanded; renderConversation(); },
+  }, h('i'), h('span', progress.complete === progress.total ? `Done · ${progress.total} steps` : `Step ${progress.current} / ${progress.total}`), PM.icon('chev'));
+  const block = h('div.agent-steps', toggle);
+  if (S.stepsExpanded) {
+    const list = h('ol.agent-todo');
+    S.steps.forEach(step => list.appendChild(h(`li.${step.status || 'pending'}`, h('i'), h('span', step.title))));
+    block.appendChild(list);
+  }
+  return block;
+}
+
+function modelLabel() {
+  const model = AGENT_MODELS.find(item => item.id === S.model) || AGENT_MODELS[0];
+  const effort = S.reasoningEffort.replace(/^./, value => value.toUpperCase());
+  return `${model.label} · ${effort}`;
+}
+
+function openModelPicker(event) {
+  const setModel = id => {
+    S.model = id; PM.store.set('agentModel', id); renderConversation(true);
+  };
+  const setEffort = effort => {
+    S.reasoningEffort = effort; PM.store.set('agentReasoningEffort', effort); renderConversation(true);
+  };
+  const items = [
+    { header: 'Model' },
+    ...AGENT_MODELS.map(model => ({ label: model.label, on: model.id === S.model, run: () => setModel(model.id) })),
+    '-', { header: 'Reasoning' },
+    ...REASONING_EFFORTS.map(effort => ({ label: effort.replace(/^./, value => value.toUpperCase()), on: effort === S.reasoningEffort, run: () => setEffort(effort) })),
+  ];
+  const rect = event.currentTarget.getBoundingClientRect();
+  PM.menu(document.body, items, { x: rect.right, y: rect.top });
+}
+
+function modelPickerControl() {
+  const select = h('select', { 'aria-label': 'Model and reasoning effort' });
+  for (const model of AGENT_MODELS) for (const effort of REASONING_EFFORTS) {
+    const option = h('option', { value: `${model.id}|${effort}` }, `${model.label} · ${effort.replace(/^./, value => value.toUpperCase())}`);
+    if (model.id === S.model && effort === S.reasoningEffort) option.selected = true;
+    select.appendChild(option);
+  }
+  select.onchange = () => {
+    [S.model, S.reasoningEffort] = select.value.split('|');
+    PM.store.set('agentModel', S.model); PM.store.set('agentReasoningEffort', S.reasoningEffort);
+    renderConversation(true);
+  };
+  return h('label.agent-model', { title: 'Choose model and reasoning' }, select, PM.icon('chev'));
+}
+
+function scopeLabel() {
+  if (S.scope === 'composition') return 'Composition';
+  if (S.scope?.startsWith('panel:')) {
+    const id = S.scope.slice(6);
+    return PM.PANELS[id]?.title || id;
+  }
+  return 'Entire workspace';
+}
+
+function openScopePicker(event) {
+  const workspace = PM.WS.current;
+  const visible = new Set((workspace.layout?.docks || []).flatMap(dock => (dock.panels || []).map(panel => panel.id)));
+  const hidden = new Set((workspace.hiddenPanels || []).map(item => item.id));
+  const choose = scope => {
+    S.scope = scope; PM.store.set('agentScope', scope); renderConversation(true);
+  };
+  const panels = Object.values(PM.PANELS || {}).filter(panel => panel.id !== 'toolbar' && (visible.has(panel.id) || hidden.has(panel.id)));
+  const items = [
+    { header: 'Agent scope' },
+    { label: 'Entire workspace', on: S.scope === 'workspace', run: () => choose('workspace') },
+    { label: 'Composition', on: S.scope === 'composition', run: () => choose('composition') },
+    '-', { header: 'Panel' },
+    ...panels.map(panel => ({
+      label: panel.title + (hidden.has(panel.id) ? ' · hidden' : ''),
+      on: S.scope === `panel:${panel.id}`, run: () => choose(`panel:${panel.id}`),
+    })),
+  ];
+  const rect = event.currentTarget.getBoundingClientRect();
+  PM.menu(document.body, items, { x: rect.left, y: rect.bottom });
+}
+
+function scopePickerControl() {
+  const workspace = PM.WS.current;
+  const visible = new Set((workspace.layout?.docks || []).flatMap(dock => (dock.panels || []).map(panel => panel.id)));
+  const hidden = new Set((workspace.hiddenPanels || []).map(item => item.id));
+  const select = h('select', { 'aria-label': 'Agent scope' },
+    h('option', { value: 'workspace' }, 'Entire workspace'),
+    h('option', { value: 'composition' }, 'Composition'));
+  const group = h('optgroup', { label: 'Panel' });
+  Object.entries(PM.PANELS || {}).filter(([id]) => id !== 'toolbar' && (visible.has(id) || hidden.has(id))).forEach(([id, panel]) => {
+    const title = id === 'viewer' ? 'Composition panel' : panel.title;
+    group.appendChild(h('option', { value: `panel:${id}` }, title + (hidden.has(id) ? ' · hidden' : '')));
+  });
+  select.appendChild(group); select.value = S.scope;
+  if (!select.value) { S.scope = 'workspace'; select.value = S.scope; }
+  select.onchange = () => {
+    S.scope = select.value; PM.store.set('agentScope', S.scope); renderConversation(true);
+  };
+  return h('label.agent-scope', { title: 'Choose what the agent should work on' }, PM.icon('panel'), select, PM.icon('chev'));
+}
+
+function chooseAttachments() {
+  if (S.phase === 'working' || S.phase === 'applying') return;
+  const input = h('input', {
+    type: 'file', multiple: true,
+    accept: 'image/png,image/jpeg,image/webp,image/gif,text/plain,text/markdown,application/json,.js,.css,.html,.svg,.wgsl',
+  });
+  input.onchange = async () => {
+    for (const file of [...input.files].slice(0, 6 - S.attachments.length)) {
+      if (file.size > 4_000_000) { PM.toast(`${file.name} is larger than 4 MB`); continue; }
+      if (file.type.startsWith('image/')) {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
+        });
+        S.attachments.push({ id: PM.uid('attachment-'), name: file.name, type: file.type, dataUrl });
+      } else {
+        const content = (await file.text()).slice(0, 100_000);
+        S.attachments.push({ id: PM.uid('attachment-'), name: file.name, type: file.type || 'text/plain', content });
+      }
+    }
+    renderConversation(true);
+  };
+  input.click();
+}
+
+function removeAttachment(id) {
+  S.attachments = S.attachments.filter(item => item.id !== id);
+  renderConversation(true);
+}
+
 function renderConversation(focusInput = false) {
-  if (!S.card) return;
-  /* CSS pop-out animation uses transform. Read the committed left/top values so
-     progress updates cannot make the floating conversation drift mid-animation. */
-  const rect = cardCoordinates(S.card);
-  S.card.className = 'spatial-compose conversation';
-  S.card.textContent = '';
-  const handle = h('div.spatial-target', { title: 'Drag to move. Arrow keys also move this conversation.' },
-    `Powermove agent · ${S.context?.targetPanelId ? S.context.targetTitle : 'full composition'}`);
-  const close = h('button.spatial-close', { type: 'button', 'aria-label': 'Close agent conversation', title: 'Close', onclick: cancel }, '×');
+  const body = S.panelBody;
+  if (!body) return;
+  body.textContent = '';
+  const shell = h('div.agent-shell');
+  const steps = renderSteps(); if (steps) shell.appendChild(steps);
   const messages = h('div.spatial-conversation-log', { role: 'log', 'aria-live': 'polite' });
-  S.conversation.slice(-30).forEach(message => messages.appendChild(h(`div.spatial-message.${message.role}`, message.text)));
+  let input;
+  if (!S.conversation.length && !S.activity) {
+    const suggestions = h('div.agent-suggestions');
+    [
+      ['Organize for animation', 'Organize my panels into a focused animation workspace'],
+      ['Move Timeline right', 'Move the Timeline to the right dock and give it more room'],
+      ['Open Inspector + Effects', 'Open the Inspector and Effects panels beside the composition'],
+      ['Focus the canvas', 'Focus the composition by hiding panels I do not need right now'],
+    ].forEach(([label, prompt]) => suggestions.appendChild(h('button', { type: 'button', onclick: () => { input.value = prompt; input.focus(); } }, label)));
+    messages.appendChild(h('div.agent-welcome', h('div.agent-welcome-icon', PM.icon('sparkle')), h('b', 'Build or rearrange anything'), h('span', 'Edit the composition, build controls, or tell me exactly how to arrange your panels.'), suggestions));
+  }
+  S.conversation.slice(-30).forEach(message => {
+    const bubble = h(`div.spatial-message.${message.role}`, message.text);
+    if (message.attachments?.length) {
+      const rail = h('div.agent-message-files');
+      message.attachments.forEach(name => rail.appendChild(h('span', name)));
+      bubble.appendChild(rail);
+    }
+    messages.appendChild(bubble);
+  });
   if (S.activity) messages.appendChild(h('div.spatial-message.assistant.pending', h('i'), S.activity));
   const proposal = resultPreview() || planPreview();
   if (proposal) messages.appendChild(proposal);
-  const input = h('textarea.spatial-followup', {
-    rows: '2', placeholder: 'Reply or ask for an adjustment…', 'aria-label': 'Reply to Powermove agent',
+  shell.appendChild(messages);
+
+  input = h('textarea.spatial-followup', {
+    rows: '3', placeholder: 'Describe what you want changed…', 'aria-label': 'Message Powermove agent',
     disabled: S.phase === 'working' || S.phase === 'applying',
   });
-  const send = h('button.spatial-action.pri', {
-    type: 'button', 'aria-label': 'Send reply', disabled: input.disabled,
-    onclick: () => sendRequest(input),
-  }, '↑');
   input.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendRequest(input); }
   });
-  S.card.append(h('div.spatial-conversation-head', handle, close), messages, h('div.spatial-followup-row', input, send));
-  makeCardMovable(S.card, handle);
-  moveCardTo(S.card, rect.left, rect.top);
+  const attachmentRail = h('div.agent-attachment-rail');
+  S.attachments.forEach(item => attachmentRail.appendChild(h('span.agent-attachment',
+    h('span', item.name), h('button', { type: 'button', title: `Remove ${item.name}`, onclick: () => removeAttachment(item.id) }, PM.icon('x')))));
+  const attach = h('button.agent-attach', { type: 'button', title: 'Attach images or text files', 'aria-label': 'Add attachments', onclick: chooseAttachments }, PM.icon('plus'));
+  const scope = scopePickerControl();
+  const approval = h('button.agent-approval', {
+    type: 'button', 'aria-pressed': String(S.autoApplyPanels),
+    title: S.autoApplyPanels ? 'Safe panel changes apply automatically' : 'Review panel changes before applying',
+    onclick: () => {
+      S.autoApplyPanels = !S.autoApplyPanels;
+      PM.store.set('agentAutoApplyPanels', S.autoApplyPanels);
+      renderConversation(true);
+    },
+  }, h('i'), S.autoApplyPanels ? 'Auto-apply panels' : 'Review panel edits');
+  const model = modelPickerControl();
+  const send = h('button.spatial-action.pri.agent-send', {
+    type: 'button', 'aria-label': S.phase === 'working' || S.phase === 'applying' ? 'Agent is working' : 'Send message', disabled: input.disabled,
+    onclick: () => sendRequest(input),
+  }, input.disabled ? h('i') : PM.icon('return'));
+  const composer = h('div.agent-composer', h('div.agent-composer-head', scope, approval), input, attachmentRail,
+    h('div.agent-composer-tools', attach, h('span.sp'), model, send));
+  shell.appendChild(composer);
+  body.appendChild(shell);
   requestAnimationFrame(() => {
-    messages.scrollTop = messages.scrollHeight;
+    messages.scrollTop = S.conversation.length || S.activity || proposal ? messages.scrollHeight : 0;
     if (focusInput && !input.disabled) input.focus();
   });
 }
@@ -736,28 +974,47 @@ async function sendRequest(input) {
   const request = input.value.trim();
   if (!request || S.phase === 'working' || S.phase === 'applying') return;
   S.requestText = request;
-  S.conversation.push({ role: 'user', text: request });
-  S.plan = null; S.phase = 'working'; S.activity = 'Looking at the composition…';
+  S.requestAttachments = S.attachments.splice(0);
+  S.conversation.push({ role: 'user', text: request, attachments: S.requestAttachments.map(item => item.name) });
+  updateSteps([
+    'Understand the request and context',
+    'Design an editable change',
+    'Prepare the source edits',
+    'Review the visible result',
+  ], 0);
+  S.stepsExpanded = false;
+  S.plan = null; S.panelRun = null; S.phase = 'working'; S.activity = 'Looking at the composition and workspace…';
   promoteToConversation(); renderConversation();
   const token = ++S.requestToken;
   try {
     const observation = PM.AgentHarness ? await PM.AgentHarness.observe() : { state: {}, times: [], images: [] };
-    if (!S.active || token !== S.requestToken) return;
-    S.activity = 'Designing a safe change…'; renderConversation();
-    const attachedImages = S.regionImage ? [S.regionImage, ...observation.images] : observation.images;
-    const raw = await PM.CodexBridge.request(agentPrompt(request, observation), responseSchema(), attachedImages);
-    if (!S.active || token !== S.requestToken) return;
+    if (token !== S.requestToken) return;
+    S.steps[0].status = 'complete'; S.steps[1].status = 'active';
+    S.activity = 'Designing an editable change…'; renderConversation();
+    const userImages = S.requestAttachments.filter(item => item.dataUrl).map(item => item.dataUrl);
+    const attachedImages = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
+    const raw = await PM.CodexBridge.request(
+      agentPrompt(request, observation), responseSchema(), attachedImages,
+      { model: S.model, reasoningEffort: S.reasoningEffort },
+    );
+    if (token !== S.requestToken) return;
     let decoded;
     try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
     const plan = sanitizePlan(decoded, S.context, request);
-    if (plan.operation === 'noop') throw new Error(plan.message || 'No safe interface change was generated');
-    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'No safe composition edit was generated');
+    if (plan.operation === 'noop') throw new Error(plan.message || 'I could not turn that into an editable change yet');
+    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'I could not prepare the composition edit');
     if (plan.kind === 'section' && !plan.section.controls.length) throw new Error('The generated section had no controls connected to editable source');
     if (plan.kind === 'workspace' && !plan.workspaceEdit) throw new Error('The generated workspace was not safe or complete enough to preview');
+    if (plan.kind === 'panels' && !plan.panelEdit.actions.length) throw new Error('I could not find a valid panel action to perform');
+    updateSteps(plan.steps);
+    S.stepsExpanded = S.steps.length > 1;
     S.conversation.push({ role: 'assistant', text: conversationReply(plan) });
-    S.activity = ''; S.plan = plan; showPreview();
+    S.activity = ''; S.plan = plan;
+    if (plan.kind === 'panels' && S.autoApplyPanels) await applyPlan();
+    else showPreview();
   } catch (error) {
-    if (!S.active || token !== S.requestToken) return;
+    if (token !== S.requestToken) return;
+    const current = S.steps.find(step => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: String(error.message || error).slice(0, 220) });
     renderConversation(true);
@@ -767,29 +1024,30 @@ async function sendRequest(input) {
 function responseSchema() {
   return {
     type: 'object', additionalProperties: false,
-    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'chromeEdit', 'section', 'sceneEdit', 'workspaceEdit'],
+    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'steps', 'chromeEdit', 'section', 'sceneEdit', 'workspaceEdit', 'panelEdit'],
     properties: {
-      kind: { type: 'string', enum: ['section', 'chrome', 'scene', 'workspace'] },
+      kind: { type: 'string', enum: ['section', 'chrome', 'scene', 'workspace', 'panels'] },
       operation: { type: 'string', enum: ['create', 'modify', 'noop'] },
       targetPanelId: { type: 'string' }, dockId: { type: 'string' },
       placement: { type: 'string', enum: ['before', 'after', 'replace'] },
       message: { type: 'string' },
+      steps: { type: 'array', minItems: 1, maxItems: 6, items: { type: 'string' } },
       chromeEdit: {
         type: 'object', additionalProperties: false, required: ['target', 'value'],
         properties: {
-          target: { type: 'string', enum: ['preview.cornerRadius'] },
-          value: { type: 'string', enum: ['square', 'rounded'] },
+          target: { type: 'string', enum: ['preview.cornerRadius', 'timeline.surfaceOrder'] },
+          value: { type: 'string', enum: ['square', 'rounded', 'normal', 'reversed'] },
         },
       },
       section: {
         type: 'object', additionalProperties: false, required: ['id', 'title', 'size', 'note', 'controls'],
         properties: {
           id: { type: 'string' }, title: { type: 'string' }, size: { type: 'number' }, note: { type: 'string' },
-          controls: { type: 'array', maxItems: 12, items: {
+          controls: { type: 'array', maxItems: 64, items: {
             type: 'object', additionalProperties: false,
             required: ['type', 'label', 'parameter', 'defaultValue', 'min', 'max', 'step', 'options', 'target', 'path', 'command'],
             properties: {
-              type: { type: 'string', enum: ['slider', 'color', 'toggle', 'select', 'button'] }, label: { type: 'string' },
+              type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button'] }, label: { type: 'string' },
               parameter: { type: 'string' }, defaultValue: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] }, min: { type: 'number' }, max: { type: 'number' }, step: { type: 'number' },
               options: { type: 'array', items: { type: 'string' } }, target: { type: 'string' }, path: { type: 'string' }, command: { type: 'string' },
             },
@@ -798,39 +1056,57 @@ function responseSchema() {
       },
       sceneEdit: PM.AgentHarness.sceneSchema(),
       workspaceEdit: { type: 'string' },
+      panelEdit: { type: 'string' },
     },
   };
 }
 
 function agentPrompt(request, observation) {
   const workspace = PM.WS.current;
-  const commands = Object.values(PM.commands || {}).map(c => ({ id: c.id, label: c.label })).slice(0, 80);
-  const sourcePaths = ['properties.position.x', 'properties.position.y', 'properties.scale.x', 'properties.scale.y', 'properties.rotation', 'properties.opacity', 'content.text', 'content.color', 'content.size', 'layer.visible', 'layer.locked', 'layer.duration', 'layer.motionBlur', 'composition.background.type', 'composition.background.startColor', 'composition.background.endColor', 'composition.background.angle', 'composition.background.midpoint'];
-  return `You are the bounded visual editing agent inside Powermove. Decide whether the request changes the rendered composition or the app interface, then return one structured proposal. Return only the requested JSON object.
+  const commands = Object.values(PM.commands || {}).map(c => ({ id: c.id, label: c.label }));
+  const attachedFiles = S.requestAttachments.slice(0, 6).map(item => ({
+    name: item.name, type: item.type, content: item.content ? item.content.slice(0, 30_000) : undefined,
+    image: !!item.dataUrl,
+  }));
+  const editableSource = PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {};
+  return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Return only the requested JSON object.
 
 RULES
+- Act on clear change requests. Prefer a useful executable interpretation over explaining limitations. Use noop only when none of the available scene, section, workspace, or chrome operations can produce a meaningful result.
+- Do not answer with a limitation when the requested target appears in EDITABLE SOURCE CATALOG, AVAILABLE PANELS, AVAILABLE COMMANDS, availableOperations, or the supported chrome targets. Build the executable change.
+- Return 2–6 short steps that describe the actual work you will carry out. Each step must start with a verb and be specific enough to show in the interface as a to-do item.
 - kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
 - For scene requests, inspect the live source and attached rendered frames. Preserve locked layers, hand-edited channels, and unrelated work. Set reviewTimes to the most revealing moments. Return neutral section and chromeEdit fields.
+- kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand|popout|dock","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and popout/dock/collapse/expand for its window state. Never hide or collapse viewer. Never pop out viewer or timeline. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
 - kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
-- For non-workspace requests return workspaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section.
-- kind=chrome for a supported app-interface style change. The supported editable chrome target is preview.cornerRadius with value square or rounded. Use operation=modify, and return a neutral empty section object.
+- For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section.
+- kind=chrome for a supported app-interface style change. Supported targets are preview.cornerRadius with square|rounded and timeline.surfaceOrder with normal|reversed. Use operation=modify, and return a neutral empty section object.
 - kind=section for editable panels/controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
-- operation=create when adding a section; operation=modify when replacing the selected section; noop only when the request cannot be represented safely.
-- A section is a compact native Powermove panel made from slider, color, toggle, select, and button controls.
-- Every non-button control must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from LIVE COMPOSITION SOURCE, or target="$composition" for composition.background.* paths.
-- Supported control binding paths are: ${sourcePaths.join(', ')}. For exact layers, other primitive content.* fields and real properties.* channels shown in live source are also valid.
-- Do not create decorative or disconnected scene parameters. If no compatible source exists, return operation=noop and explain what must be selected or created.
+- operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
+- A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, and button controls.
+- Every non-button control must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths.
+- The EDITABLE SOURCE CATALOG below is authoritative and complete for the current project. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
+- Do not create decorative or disconnected scene parameters. If a requested control has no source yet, prefer a scene or workspace action that creates useful editable source rather than refusing the whole request.
 - Buttons may use only one of the listed command ids. Never invent commands.
-- Prefer 3–8 focused controls, a short title, and a useful one-sentence note. Avoid decorative filler.
+- Include every control the user explicitly requests. For open-ended requests, prefer a focused set unless the user asks for all or everything, in which case include the complete relevant catalog. Use a short title and useful one-sentence note; avoid decorative filler.
 - For unused control fields, still return schema-safe neutral values: empty string/array, 0, or false.
-- App chrome is a valid editable source target when it is in the whitelist above. Never reject preview corner styling merely because it is interface chrome.
+- App chrome is a valid editable source target when it is listed above. In particular, requests to reverse the Timeline's grey surface order map to timeline.surfaceOrder=reversed.
 - Keep the current interface reachable. Do not remove unrelated docks or panels. Never alter rendered composition shapes or export geometry for a chrome request.
+- The active scope is a strong hint, not a restriction. Carry out dependent panel actions elsewhere when needed to satisfy the request.
 
 VISUAL REFERENCES
-${S.regionImage ? '- The FIRST attached image is an exact screenshot of the selected editor region before the Ripple overlay appeared. Treat its geometry and visible controls as the primary visual target.\n- Remaining attached images are rendered composition frames at the times listed below.' : '- No editor region was selected. Attached images are rendered composition frames.'}
+${attachedFiles.some(file => file.image) ? '- User-attached images come first and are direct visual references.' : '- No user image attachment was provided.'}
+${S.regionImage ? '- After user images, the next attached image is an exact screenshot of the selected editor region before the Ripple overlay appeared.' : '- No editor region was selected.'}
+- Remaining attached images are rendered composition frames at the times listed below.
+
+ATTACHED FILES
+${JSON.stringify(attachedFiles)}
 
 SELECTED REGION SEMANTICS
 ${JSON.stringify(S.context)}
+
+ACTIVE PROMPT SCOPE
+${JSON.stringify({ scope: S.scope, label: scopeLabel() })}
 
 CONVERSATION SO FAR
 ${JSON.stringify(S.conversation.slice(0, -1).slice(-12))}
@@ -841,8 +1117,14 @@ ${JSON.stringify(workspaceSemanticContext(workspace))}
 CURRENT WORKSPACE MANIFEST
 ${JSON.stringify(workspace)}
 
+AVAILABLE PANELS
+${JSON.stringify(panelCatalog(workspace))}
+
 AVAILABLE COMMANDS
 ${JSON.stringify(commands)}
+
+EDITABLE SOURCE CATALOG
+${JSON.stringify(editableSource)}
 
 ${PM.AgentHarness.promptContext(observation)}
 
@@ -873,47 +1155,159 @@ function workspaceSemanticContext(workspace) {
   };
 }
 
+function panelCatalog(workspace) {
+  const visible = new Map((workspace?.layout?.docks || []).flatMap(dock => (dock.panels || []).map((spec, index) => [spec.id, {
+    state: 'visible', dockId: dock.id, position: index, size: spec.size || null,
+    collapsed: !!spec.collapsed, poppedOut: !!PM.Popout?.isOpen?.(spec.id),
+  }])));
+  const hidden = new Map((workspace?.hiddenPanels || []).map(item => [item.id, {
+    state: 'hidden', dockId: item.dockId || '', position: item.index ?? 0, size: item.spec?.size || null,
+  }]));
+  return Object.values(PM.PANELS || {}).filter(panel => panel.id !== 'toolbar').map(panel => ({
+    id: panel.id, title: panel.title, ...(visible.get(panel.id) || hidden.get(panel.id) || { state: 'available' }),
+    canPopOut: !['viewer', 'timeline'].includes(panel.id), canHide: panel.id !== 'viewer',
+  }));
+}
+
 function controlConnection(target, path, controlType) {
-  const compositionPaths = new Set(['composition.background.type', 'composition.background.startColor', 'composition.background.endColor', 'composition.background.angle', 'composition.background.midpoint']);
-  if ((target === '$composition' || target === 'composition') && compositionPaths.has(path)) {
-    const expected = path.endsWith('.type') ? 'select' : path.endsWith('Color') ? 'color' : 'slider';
-    if (controlType !== expected) return null;
-    return { target: '$composition', path, connection: 'Composition background' };
+  const catalog = PM.Edit?.sourceCatalog?.();
+  if (target === '$composition' || target === 'composition') {
+    const fallback = {
+      'composition.name': 'text', 'composition.width': 'slider', 'composition.height': 'slider',
+      'composition.fps': 'slider', 'composition.duration': 'slider', 'composition.shutter': 'slider',
+      'composition.workArea.start': 'slider', 'composition.workArea.end': 'slider',
+      'composition.backgroundFill': 'fill', 'composition.background': 'color',
+      'composition.background.type': 'select', 'composition.background.startColor': 'color',
+      'composition.background.endColor': 'color', 'composition.background.angle': 'slider',
+      'composition.background.midpoint': 'slider',
+    };
+    const spec = catalog?.composition?.find(item => item.path === path);
+    const control = spec?.control || fallback[path]; if (!control) return null;
+    return { ...spec, target: '$composition', path, control, connection: path.startsWith('composition.background.') ? 'Composition background' : 'Composition' };
   }
   const layer = target === '$selection' || target === 'selection' ? PM.firstSel() : (PM.L(target) || PM.byName(target));
   if (!layer) return null;
+  const spec = catalog?.layers?.find(item => item.id === layer.id)?.controls?.find(item => item.path === path);
+  if (spec) return { ...spec, target: target === '$selection' || target === 'selection' ? '$selection' : layer.id, path, connection: `Layer · ${layer.name}` };
+  let control = controlType;
   if (path.startsWith('properties.')) {
     const channel = path.slice('properties.'.length);
-    if (!PM.findProp(layer, channel) || controlType !== 'slider') return null;
+    const prop = PM.findProp(layer, channel); if (!prop) return null;
+    const value = PM.evP ? PM.evP(layer, prop, PM.time, channel) : prop.v;
+    control = typeof value === 'number' ? 'slider' : typeof value === 'boolean' ? 'toggle' : /^#[0-9a-f]{6}$/i.test(value) ? 'color' : 'text';
   } else if (path.startsWith('content.')) {
     const key = path.slice('content.'.length);
     const current = layer.d?.[key];
     if (!['string', 'number', 'boolean'].includes(typeof current)) return null;
-    const expected = typeof current === 'number' ? 'slider' : typeof current === 'boolean' ? 'toggle'
-      : /^#[0-9a-f]{6}$/i.test(current) ? 'color' : 'select';
-    if (controlType !== expected) return null;
+    control = typeof current === 'number' ? 'slider' : typeof current === 'boolean' ? 'toggle'
+      : /^#[0-9a-f]{6}$/i.test(current) ? 'color' : 'text';
   } else if (path.startsWith('layer.')) {
     const key = path.slice('layer.'.length);
-    const expected = ['visible', 'locked', 'motionBlur'].includes(key) ? 'toggle' : key === 'duration' ? 'slider' : key === 'blend' ? 'select' : '';
-    if (!expected || controlType !== expected) return null;
+    control = ['visible', 'locked', 'solo', 'shy', 'motionBlur', 'collapsed'].includes(key) ? 'toggle'
+      : ['duration', 'from'].includes(key) ? 'slider'
+        : ['blend', 'parent'].includes(key) ? 'select'
+          : key === 'color' ? 'color' : key === 'name' ? 'text' : '';
+    if (!control) return null;
   } else return null;
-  return { target: target === '$selection' || target === 'selection' ? '$selection' : layer.id, path, connection: `Layer · ${layer.name}` };
+  return { target: target === '$selection' || target === 'selection' ? '$selection' : layer.id, path, control, connection: `Layer · ${layer.name}` };
+}
+
+const PANEL_ACTION_TYPES = new Set(['add', 'restore', 'hide', 'move', 'reorder', 'resize', 'resizeDock', 'rename', 'collapse', 'expand', 'popout', 'dock']);
+
+function sanitizePanelEdit(encoded) {
+  let raw;
+  try {
+    if (typeof encoded !== 'string' || encoded.length > 80_000) return { actions: [] };
+    raw = JSON.parse(encoded);
+  } catch { return { actions: [] }; }
+  const known = new Set(Object.keys(PM.PANELS || {}).filter(id => id !== 'toolbar'));
+  const text = (value, max = 100) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+  const actions = (Array.isArray(raw?.actions) ? raw.actions : []).slice(0, 16).map(value => {
+    const action = value && typeof value === 'object' ? value : {};
+    const type = text(action.type, 20), panelId = text(action.panelId, 100), dockId = text(action.dockId, 80);
+    if (!PANEL_ACTION_TYPES.has(type)) return null;
+    if (type !== 'resizeDock' && (!known.has(panelId) || panelId === 'toolbar')) return null;
+    if (['hide', 'collapse'].includes(type) && panelId === 'viewer') return null;
+    if (type === 'popout' && ['viewer', 'timeline'].includes(panelId)) return null;
+    const out = { type, panelId, dockId };
+    if (Number.isFinite(action.position)) out.position = PM.clamp(Math.floor(action.position), 0, 20);
+    if (Number.isFinite(action.size)) out.size = PM.clamp(action.size, type === 'resizeDock' ? 200 : 56, type === 'resizeDock' ? 760 : 1600);
+    const title = text(action.title, 70); if (title) out.title = title;
+    return out;
+  }).filter(Boolean);
+  return { actions };
+}
+
+function applyPanelEdit(workspace, edit) {
+  const applied = [], runtime = [];
+  const visible = id => PM.Layout.findPanel(workspace, id);
+  const show = (id, dockId = 'right') => {
+    if (visible(id)) return visible(id);
+    const hidden = (workspace.hiddenPanels || []).some(item => item.id === id);
+    if (hidden) PM.Layout.restorePanel(workspace, id);
+    else PM.Layout.addPanel(workspace, id, dockId || 'right');
+    return visible(id);
+  };
+  const place = (id, position) => {
+    const found = visible(id); if (!found || !Number.isInteger(position)) return false;
+    const from = found.dock.panels.indexOf(found.spec);
+    const to = Math.max(0, Math.min(position, found.dock.panels.length - 1));
+    if (from === to) return false;
+    found.dock.panels.splice(from, 1); found.dock.panels.splice(to, 0, found.spec); return true;
+  };
+  for (const action of edit?.actions || []) {
+    let changed = false;
+    if (action.type === 'add') {
+      const existed = !!visible(action.panelId);
+      const found = show(action.panelId, action.dockId || 'right');
+      if (action.dockId && found?.dock.id !== action.dockId) PM.Layout.movePanel(workspace, action.panelId, action.dockId);
+      changed = !existed || !!action.dockId;
+      if (Number.isInteger(action.position)) changed = place(action.panelId, action.position) || changed;
+    } else if (action.type === 'restore') {
+      changed = !!show(action.panelId, action.dockId || 'right');
+      if (action.dockId && visible(action.panelId)?.dock.id !== action.dockId) changed = PM.Layout.movePanel(workspace, action.panelId, action.dockId) || changed;
+      if (Number.isInteger(action.position)) changed = place(action.panelId, action.position) || changed;
+    } else if (action.type === 'hide') changed = PM.Layout.hidePanel(workspace, action.panelId);
+    else if (action.type === 'move') {
+      show(action.panelId, action.dockId || 'right');
+      changed = action.dockId ? PM.Layout.movePanel(workspace, action.panelId, action.dockId) : false;
+      if (Number.isInteger(action.position)) changed = place(action.panelId, action.position) || changed;
+    } else if (action.type === 'reorder') changed = place(action.panelId, action.position);
+    else if (action.type === 'resize') {
+      const found = show(action.panelId, action.dockId || 'right');
+      if (found && Number.isFinite(action.size)) { found.spec.size = action.size; delete found.spec.flex; changed = true; }
+    } else if (action.type === 'resizeDock') {
+      const dock = (workspace.layout?.docks || []).find(item => item.id === action.dockId);
+      if (dock && Number.isFinite(action.size)) { dock.size = action.size; if (dock.id !== 'center') delete dock.flex; changed = true; }
+    } else if (action.type === 'rename') {
+      const found = show(action.panelId, action.dockId || 'right');
+      if (found && action.title) { found.spec.title = action.title; changed = true; }
+    } else runtime.push(action);
+    if (changed) applied.push(action);
+  }
+  return { applied, runtime };
 }
 
 function sanitizePlan(raw, context, request = '') {
   const operation = ['create', 'modify', 'noop'].includes(raw?.operation) ? raw.operation : 'noop';
-  const chromeTarget = raw?.chromeEdit?.target === 'preview.cornerRadius' ? 'preview.cornerRadius' : '';
-  const chromeValue = ['square', 'rounded'].includes(raw?.chromeEdit?.value) ? raw.chromeEdit.value : '';
+  const chromeTarget = ['preview.cornerRadius', 'timeline.surfaceOrder'].includes(raw?.chromeEdit?.target) ? raw.chromeEdit.target : '';
+  const allowedChromeValues = chromeTarget === 'preview.cornerRadius' ? ['square', 'rounded']
+    : chromeTarget === 'timeline.surfaceOrder' ? ['normal', 'reversed'] : [];
+  const chromeValue = allowedChromeValues.includes(raw?.chromeEdit?.value) ? raw.chromeEdit.value : '';
   const requestedKind = raw?.kind;
+  const panelEdit = sanitizePanelEdit(raw?.panelEdit);
   const kind = requestedKind === 'scene' ? 'scene'
     : requestedKind === 'workspace' ? 'workspace'
+    : requestedKind === 'panels' ? 'panels'
     : requestedKind === 'chrome' && chromeTarget && chromeValue ? 'chrome' : 'section';
   const cleanText = (v, fallback = '', max = 100) => typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : fallback;
   const source = raw?.section && typeof raw.section === 'object' ? raw.section : {};
+  const steps = (Array.isArray(raw?.steps) ? raw.steps : []).filter(step => typeof step === 'string' && step.trim())
+    .map(step => step.trim().slice(0, 100)).slice(0, 6);
   const baseId = slug(cleanText(source.id, cleanText(source.title, 'Generated section')));
-  const controls = (Array.isArray(source.controls) ? source.controls : []).slice(0, 12).map((control, index) => {
+  const controls = (Array.isArray(source.controls) ? source.controls : []).slice(0, 64).map((control, index) => {
     const c = control && typeof control === 'object' ? control : {};
-    const type = ['slider', 'color', 'toggle', 'select', 'button'].includes(c.type) ? c.type : 'slider';
+    let type = ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button'].includes(c.type) ? c.type : 'slider';
     const label = cleanText(c.label, `Control ${index + 1}`, 60);
     const out = { type, label };
     if (type === 'button') {
@@ -923,18 +1317,26 @@ function sanitizePlan(raw, context, request = '') {
     const target = cleanText(c.target, '', 120), path = cleanText(c.path, '', 120);
     const connection = controlConnection(target, path, type);
     if (!connection) return null;
+    type = connection.control || type; out.type = type;
     Object.assign(out, connection);
-    if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(c.defaultValue) ? c.defaultValue : '#FF6B1A';
-    else if (type === 'toggle') out.def = !!c.defaultValue;
+    const sourceValue = connection.value !== undefined ? connection.value : c.defaultValue;
+    if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue);
+    else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue : '#FF6B1A';
+    else if (type === 'fill') out.def = sourceValue && typeof sourceValue === 'object' ? sourceValue : null;
+    else if (type === 'toggle') out.def = !!sourceValue;
     else if (type === 'select') {
-      out.options = (Array.isArray(c.options) ? c.options : []).filter(v => typeof v === 'string').slice(0, 12);
-      out.def = out.options.includes(c.defaultValue) ? c.defaultValue : (out.options[0] || 'Default');
+      out.options = (Array.isArray(connection.options) ? connection.options : Array.isArray(c.options) ? c.options : [])
+        .filter(v => typeof v === 'string' || (v && typeof v === 'object' && 'v' in v && typeof v.label === 'string')).slice(0, 160);
+      const values = out.options.map(option => typeof option === 'string' ? option : option.v);
+      out.def = values.includes(sourceValue) ? sourceValue : (values[0] ?? 'Default');
       if (!out.options.length) out.options = [out.def];
     } else {
-      out.min = Number.isFinite(c.min) ? c.min : 0; out.max = Number.isFinite(c.max) ? c.max : 100;
+      out.min = Number.isFinite(connection.min) ? connection.min : Number.isFinite(c.min) ? c.min : 0;
+      out.max = Number.isFinite(connection.max) ? connection.max : Number.isFinite(c.max) ? c.max : 100;
       if (out.max < out.min) [out.min, out.max] = [out.max, out.min];
-      out.step = Number.isFinite(c.step) && c.step > 0 ? c.step : Math.max((out.max - out.min) / 100, .01);
-      out.def = Number.isFinite(c.defaultValue) ? PM.clamp(c.defaultValue, out.min, out.max) : out.min;
+      out.step = Number.isFinite(connection.step) && connection.step > 0 ? connection.step : Number.isFinite(c.step) && c.step > 0 ? c.step : Math.max((out.max - out.min) / 100, .01);
+      out.unit = connection.unit || '';
+      out.def = Number.isFinite(sourceValue) ? PM.clamp(sourceValue, out.min, out.max) : out.min;
     }
     return out;
   }).filter(c => c && (c.type !== 'button' || c.cmd));
@@ -945,10 +1347,12 @@ function sanitizePlan(raw, context, request = '') {
     dockId: cleanText(raw?.dockId, '', 100),
     placement: ['before', 'after', 'replace'].includes(raw?.placement) ? raw.placement : (operation === 'modify' ? 'replace' : 'after'),
     message: cleanText(raw?.message, operation === 'modify' ? 'The redesigned section is ready.' : 'The new section is ready.', 220),
+    steps: steps.length ? steps : ['Prepare the editable change', 'Review the visible result'],
     chromeEdit: kind === 'chrome' ? { target: chromeTarget, value: chromeValue } : null,
     section: { id: baseId, title: cleanText(source.title, 'Generated section', 70), size: PM.clamp(Number(source.size) || 220, 120, 700), note: cleanText(source.note, '', 240), controls },
     sceneEdit: kind === 'scene' ? PM.AgentHarness.sanitizeProposal(raw?.sceneEdit, request) : null,
     workspaceEdit: kind === 'workspace' ? sanitizeWorkspaceEdit(raw?.workspaceEdit, context) : null,
+    panelEdit: kind === 'panels' ? panelEdit : { actions: [] },
   };
 }
 
@@ -1019,10 +1423,15 @@ function sanitizeWorkspaceEdit(encoded, context) {
    manifest. This is a pure mutation seam used inside WS.mutate, never a CSS or
    project-canvas write from model output. */
 function applyChromeEdit(workspace, edit) {
-  if (!workspace || edit?.target !== 'preview.cornerRadius' || !['square', 'rounded'].includes(edit.value)) return false;
+  if (!workspace || !edit) return false;
   workspace.chrome = workspace.chrome && typeof workspace.chrome === 'object' ? workspace.chrome : {};
-  workspace.chrome.previewCornerRadius = edit.value;
-  return true;
+  if (edit.target === 'preview.cornerRadius' && ['square', 'rounded'].includes(edit.value)) {
+    workspace.chrome.previewCornerRadius = edit.value; return true;
+  }
+  if (edit.target === 'timeline.surfaceOrder' && ['normal', 'reversed'].includes(edit.value)) {
+    workspace.chrome.timelineSurfaceOrder = edit.value; return true;
+  }
+  return false;
 }
 
 function slug(value) {
@@ -1033,6 +1442,23 @@ function slug(value) {
 function showPreview() {
   S.phase = 'conversation';
   renderConversation(true);
+}
+
+function setStepProgress(index) {
+  if (!S.steps.length) return;
+  const active = Math.max(0, Math.min(index, S.steps.length - 1));
+  S.steps.forEach((step, i) => { step.status = i < active ? 'complete' : i === active ? 'active' : 'pending'; });
+}
+
+function updateSteps(titles, active = -1) {
+  S.steps = (Array.isArray(titles) ? titles : []).map((title, index) => ({
+    id: `${S.requestToken}-${index}`, title: String(title || '').trim(),
+    status: index < active ? 'complete' : index === active ? 'active' : 'pending',
+  })).filter(step => step.title);
+}
+
+function finishSteps() {
+  S.steps.forEach(step => { step.status = 'complete'; });
 }
 
 function locatePanel(workspace, panelId) {
@@ -1060,6 +1486,12 @@ async function applyPlan() {
     await applyScenePlan(plan);
     return;
   }
+  if (plan.kind === 'panels') {
+    await applyPanelPlan(plan);
+    return;
+  }
+  S.phase = 'applying'; S.activity = 'Applying the editable change…'; setStepProgress(0); renderConversation();
+  await new Promise(resolve => requestAnimationFrame(resolve));
   if (plan.kind === 'workspace') {
     const manifest = plan.workspaceEdit;
     const created = PM.WS.create({
@@ -1069,16 +1501,18 @@ async function applyPlan() {
       layout: { docks: manifest.docks },
     });
     PM.toast(`Created workspace · ${created.name}`);
+    finishSteps();
     S.plan = null; S.conversation.push({ role: 'assistant', text: `Created ${created.name}. You can keep asking me to adjust it.` });
-    S.phase = 'conversation'; renderConversation(true);
+    S.activity = ''; S.phase = 'conversation'; renderConversation(true);
     return;
   }
   if (plan.kind === 'chrome') {
     let changed = false;
     PM.WS.mutate(workspace => { changed = applyChromeEdit(workspace, plan.chromeEdit); });
     if (changed) PM.toast('Updated preview corner style');
+    finishSteps();
     S.plan = null; S.conversation.push({ role: 'assistant', text: changed ? 'Applied the interface edit.' : 'That interface setting was already in place.' });
-    S.phase = 'conversation'; renderConversation(true);
+    S.activity = ''; S.phase = 'conversation'; renderConversation(true);
     return;
   }
   const current = PM.WS.current;
@@ -1111,22 +1545,72 @@ async function applyPlan() {
     }
   });
   PM.toast((replacing ? 'Redesigned ' : 'Added ') + plan.section.title);
+  finishSteps();
   S.plan = null; S.conversation.push({ role: 'assistant', text: `${replacing ? 'Redesigned' : 'Added'} ${plan.section.title}. You can keep refining it here.` });
-  S.phase = 'conversation'; renderConversation(true);
+  S.activity = ''; S.phase = 'conversation'; renderConversation(true);
+}
+
+async function applyPanelPlan(plan) {
+  const checkpoint = PM.WS.snapshot();
+  S.phase = 'applying'; S.activity = 'Applying panel changes…'; setStepProgress(0); renderConversation();
+  let result = { applied: [], runtime: [] };
+  try {
+    PM.WS.mutate(workspace => { result = applyPanelEdit(workspace, plan.panelEdit); });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (const action of result.runtime) {
+      let changed = false;
+      if (action.type === 'collapse') changed = PM.Layout.setCollapsed(action.panelId, true);
+      else if (action.type === 'expand') changed = PM.Layout.setCollapsed(action.panelId, false);
+      else if (action.type === 'popout') changed = PM.Popout.open(action.panelId);
+      else if (action.type === 'dock') changed = PM.Popout.dock(action.panelId);
+      if (changed) result.applied.push(action);
+    }
+    if (!result.applied.length) throw new Error('Those panels were already arranged that way');
+    finishSteps(); S.activity = ''; S.plan = null;
+    S.panelRun = { checkpoint, actions: result.applied, summary: `${result.applied.length} panel change${result.applied.length === 1 ? '' : 's'} applied` };
+    S.conversation.push({ role: 'assistant', text: `${S.panelRun.summary}. You can keep the layout or undo it here.` });
+    S.phase = 'result'; renderConversation();
+    PM.toast(S.panelRun.summary);
+  } catch (error) {
+    PM.WS.restoreSnapshot(checkpoint);
+    const current = S.steps.find(step => step.status === 'active'); if (current) current.status = 'error';
+    S.activity = ''; S.plan = null; S.phase = 'conversation';
+    S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
+    renderConversation(true);
+  }
+}
+
+function undoPanelRun() {
+  if (!S.panelRun) return;
+  S.panelRun.actions.filter(action => action.type === 'popout').forEach(action => PM.Popout.dock(action.panelId));
+  PM.WS.restoreSnapshot(S.panelRun.checkpoint);
+  S.panelRun = null; S.phase = 'conversation';
+  S.conversation.push({ role: 'assistant', text: 'I restored the previous panel layout.' });
+  renderConversation(true); PM.toast('Panel changes undone');
+}
+
+function keepPanelRun() {
+  if (!S.panelRun) return;
+  S.panelRun = null; S.phase = 'conversation';
+  S.conversation.push({ role: 'assistant', text: 'Kept the panel layout. What should I change next?' });
+  renderConversation(true);
 }
 
 async function applyScenePlan(plan) {
   S.phase = 'applying'; S.plan = null; S.activity = 'Applying structured source edit…';
+  setStepProgress(0);
   renderConversation();
   try {
+    let progressIndex = 0;
     const run = await PM.AgentHarness.execute(S.requestText, plan.sceneEdit, value => {
+      setStepProgress(Math.min(progressIndex++, S.steps.length - 1));
       S.activity = value; renderConversation();
     });
-    if (!S.active) return;
+    finishSteps();
     S.activity = ''; S.run = run;
     showSceneResult(run);
   } catch (error) {
-    if (!S.active) return;
+    const current = S.steps.find(step => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
     renderConversation(true);
@@ -1163,15 +1647,28 @@ function onKey(event) {
   }
 }
 
-function cancel() {
+function dismissOverlay(preserveContext) {
   if (!S.active) return;
-  S.active = false; S.phase = 'idle'; S.requestToken++;
+  S.active = false;
   removeEventListener('keydown', onKey, true);
   cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
   S.root?.remove();
-  Object.assign(S, { root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, run: null, requestText: '', renderStop: null, points: [], conversation: [], activity: '', sceneFrame: null, regionImage: null });
+  Object.assign(S, {
+    root: null, ink: null, path: null, shadePath: null, hint: null, card: null,
+    outline: null, renderStop: null, points: [], sceneFrame: null,
+  });
+  if (!preserveContext) {
+    S.region = null; S.context = null; S.regionImage = null;
+    S.phase = S.conversation.length || S.plan || S.run ? 'conversation' : 'idle';
+  }
   setTimeout(refreshSceneCache, 80);
+}
+
+function cancel() {
+  if (!S.active) return;
+  dismissOverlay(false);
+  renderConversation();
 }
 
 function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {

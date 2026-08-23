@@ -53,7 +53,7 @@ function chRow(wrap, L, key, label) {
   const p = L.p[key];
   const meta = PM.CH[key] || {};
   const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), { title: 'Animate ' + label },
-    PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
+    PM.icon('clock'));
   sw.onclick = () => { PM.hist.do('Animate ' + label, () => PM.toggleStopwatch(L, key, PM.time)); I.refresh(); };
   const num = PM.numField(() => PM.ev(L, key, PM.time), (v) => {
     PM.setOrKey(L, key, v, PM.time); PM.invalidate();
@@ -63,7 +63,7 @@ function chRow(wrap, L, key, label) {
     command: (value) => ({ type: 'set_property', target: L.id, path: key, value, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' }),
   });
   I.syncs.push(num.sync);
-  const kd = h('button.stopwatch', { title: 'Keyframe at playhead' }, PM.svg('<path d="M12 5l7 7-7 7-7-7z"/>'));
+  const kd = h('button.stopwatch', { title: 'Keyframe at playhead' }, PM.icon('diamond'));
   const syncKd = () => {
     const on = !!PM.hasKeyAt(L, p, PM.time);
     kd.classList.toggle('on', on);
@@ -187,6 +187,7 @@ function content(wrap, L) {
     wrap.appendChild(PM.row('Source', PM.selectField(
       () => { const a = PM.proj.assets[d.asset]; return a ? a.name : 'none'; },
       (v) => { d.asset = v; }, assets.map(a => ({ v: a.id, label: a.name })), edit('asset', { label: 'Source' }))));
+    numRow(wrap, 'Trim start', get('trim'), set('trim'), edit('trim', { step: .05, precision: 2, min: 0, unit: 's' }));
     numRow(wrap, 'Gain', get('gain'), set('gain'), edit('gain', { step: .05, precision: 2, min: 0, max: 4 }));
     numRow(wrap, 'Fade in', get('fadeIn'), set('fadeIn'), edit('fadeIn', { step: .05, precision: 2, unit: 's' }));
     numRow(wrap, 'Fade out', get('fadeOut'), set('fadeOut'), edit('fadeOut', { step: .05, precision: 2, unit: 's' }));
@@ -242,7 +243,7 @@ function shaderUniforms(wrap, L) {
         command: (value) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, preserveHandEdits: false }),
       })));
     } else {
-      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.icon('clock'));
       sw.onclick = () => {
         PM.hist.do('Animate ' + def.label, () => {
           if (p.kf.length) { p.v = PM.evP(L, p, PM.time, def.name); p.kf = []; }
@@ -308,7 +309,7 @@ function effects(wrap, L) {
         })));
         return;
       }
-      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.icon('clock'));
       sw.onclick = () => {
         PM.hist.do('Animate ' + pd.label, () => {
           if (p.kf.length) { p.v = PM.evP(L, p, PM.time, pd.k); p.kf = []; }
@@ -361,7 +362,7 @@ function masksSection(wrap, L) {
     g.appendChild(PM.row('Mode', PM.selectField(() => m.mode || 'add', v => { m.mode = v; PM.invalidate(); }, ['add', 'subtract'], { label: 'Mode' })));
     MASK_FIELDS.forEach(([k, label, step, unit]) => {
       const p = m.p[k];
-      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.svg('<circle cx="12" cy="12" r="7"/><path d="M12 8v4l2.5 1.5"/>'));
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.icon('clock'));
       sw.onclick = () => {
         PM.hist.do('Animate ' + label, () => {
           if (p.kf.length) { p.v = PM.evP(L, p, PM.time, k); p.kf = []; }

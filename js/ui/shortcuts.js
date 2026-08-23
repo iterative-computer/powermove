@@ -35,7 +35,10 @@ def('addFromAsset', 'Add layer from asset', null, (id) => {
   const type = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
   const from = PM.snapF(PM.time, PM.proj.fps);
   const L = addLayer(type, {
-    name: a.name, from, dur: a.dur ? Math.min(a.dur, PM.proj.dur - from) : undefined,
+    /* Keep the whole source even when it extends beyond the current comp. The
+       composition still clips playback/export, but extending it later reveals
+       the rest instead of permanently discarding the imported media. */
+    name: a.name, from, dur: a.dur || undefined,
     d: { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h },
   });
   return L;
@@ -60,6 +63,7 @@ def('split', 'Split at playhead', '⌘⇧D', () => PM.hist.do('Split', () => {
     if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
     const c = PM.cloneLayer(L);
     c.from = PM.time; c.dur = L.from + L.dur - PM.time;
+    if (PM.MediaTiming.isTimed(L)) c.d.trim = PM.MediaTiming.trimAtStart(L, PM.time);
     L.dur = PM.time - L.from;
     PM.proj.layers.splice(PM.proj.layers.indexOf(L), 0, c);
   });
@@ -216,7 +220,12 @@ addEventListener('keydown', (e) => {
     case 'j': e.preventDefault(); return PM.setTime(PM.TL.prevEdge());
     case 'k': e.preventDefault(); return PM.pause();
     case 'l': e.preventDefault(); return PM.play();
-    case 'i': e.preventDefault(); return PM.hist.do('Trim in', () => PM.selLayers().forEach(L => { const d = PM.time - L.from; L.dur -= d; L.from = PM.time; }));
+    case 'i': e.preventDefault(); return PM.hist.do('Trim in', () => PM.selLayers().forEach(L => {
+      if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
+      const d = PM.time - L.from;
+      if (PM.MediaTiming.isTimed(L)) L.d.trim = PM.MediaTiming.trimAtStart(L, PM.time);
+      L.dur -= d; L.from = PM.time;
+    }));
     case 'o': e.preventDefault(); return PM.hist.do('Trim out', () => PM.selLayers().forEach(L => { L.dur = Math.max(1 / PM.proj.fps, PM.time - L.from); }));
   }
 });

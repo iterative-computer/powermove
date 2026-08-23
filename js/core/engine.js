@@ -125,6 +125,7 @@ function evictStaleAudio() {
   }
 }
 PM.bus.on('layers', () => { evictStaleAudio(); if (PM.playing) syncAudio(PM.time, true); });
+PM.bus.on('assets', () => { if (PM.playing) syncAudio(PM.time, true); });
 PM.bus.on('project', () => { stopAudio(); evictStaleAudio(); });
 function scrubVideos(T) {
   for (const L of PM.proj.layers) {

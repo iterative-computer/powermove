@@ -15,12 +15,49 @@ function spatialModel(adapterFactory) {
     round: (value, places = 0) => Number(Number(value).toFixed(places)),
     commands: { fitView: { id: 'fitView', label: 'Fit view' } },
     PANELS: { viewer: { title: 'Composition' }, timeline: { title: 'Timeline' }, inspector: { title: 'Inspector' }, assets: { title: 'Project' } },
+    registerPanel(id, definition) { this.PANELS[id] = definition; },
     firstSel: () => null, L: () => null, byName: () => null, findProp: () => null,
     AgentHarness: {
       sceneSchema: () => ({ type: 'object' }),
       sanitizeProposal: value => ({ commands: value?.commands || [] }),
       promptContext: () => '',
       describeCommand: command => command.type,
+    },
+  };
+  const findPanel = (workspace, id) => {
+    for (const dock of workspace.layout.docks) {
+      const spec = dock.panels.find(panel => panel.id === id);
+      if (spec) return { dock, spec };
+    }
+    return null;
+  };
+  const ensureDock = (workspace, id) => {
+    let dock = workspace.layout.docks.find(item => item.id === id);
+    if (!dock) { dock = { id, panels: [] }; workspace.layout.docks.push(dock); }
+    return dock;
+  };
+  PM.Layout = {
+    findPanel,
+    hasPanel: (workspace, id) => !!findPanel(workspace, id),
+    addPanel(workspace, id, dockId) {
+      workspace.layout.docks.forEach(dock => { dock.panels = dock.panels.filter(panel => panel.id !== id); });
+      ensureDock(workspace, dockId).panels.push({ id });
+    },
+    hidePanel(workspace, id) {
+      const found = findPanel(workspace, id); if (!found || id === 'viewer') return false;
+      workspace.hiddenPanels ||= [];
+      workspace.hiddenPanels.push({ id, dockId: found.dock.id, index: found.dock.panels.indexOf(found.spec), spec: { ...found.spec } });
+      found.dock.panels = found.dock.panels.filter(panel => panel !== found.spec); return true;
+    },
+    restorePanel(workspace, id) {
+      const hidden = (workspace.hiddenPanels || []).find(item => item.id === id); if (!hidden) return false;
+      ensureDock(workspace, hidden.dockId).panels.splice(hidden.index, 0, hidden.spec);
+      workspace.hiddenPanels = workspace.hiddenPanels.filter(item => item !== hidden); return true;
+    },
+    movePanel(workspace, id, dockId) {
+      const found = findPanel(workspace, id); if (!found || found.dock.id === dockId) return false;
+      found.dock.panels = found.dock.panels.filter(panel => panel !== found.spec);
+      ensureDock(workspace, dockId).panels.push(found.spec); return true;
     },
   };
   const context = vm.createContext({
@@ -80,12 +117,12 @@ test('selected regions become cropped visual attachments with workspace semantic
   ) }, { sx: 0, sy: 0, sw: 2560, sh: 1440, width: 1280, height: 720 });
   assert.match(source, /S\.sceneFrame = snapshotScene\(sceneBitmap\)/,
     'the clean pre-overlay window capture is retained before WebGPU consumes it');
-  assert.match(source, /open: \(\) => activate\([\s\S]*capture: PM\.WindowCapture\.request\(\)/,
-    'toolbar activation also captures fresh pixels before mounting the overlay');
+  assert.match(source, /open: openAgentPanel/,
+    'toolbar activation opens the first-class Agent panel while shake still owns spatial capture');
   assert.match(source, /S\.regionImage = regionCapture\?\.dataUrl \|\| null/);
-  assert.match(source, /S\.regionImage \? \[S\.regionImage, \.\.\.observation\.images\] : observation\.images/,
-    'the selected editor crop is the first image sent to the agent');
-  assert.match(source, /The FIRST attached image is an exact screenshot of the selected editor region/);
+  assert.match(source, /\[\.\.\.userImages, \.\.\.\(S\.regionImage \? \[S\.regionImage\] : \[\]\), \.\.\.observation\.images\]/,
+    'user attachments and the selected editor crop are sent before rendered review frames');
+  assert.match(source, /the next attached image is an exact screenshot of the selected editor region/);
   assert.match(source, /SEMANTIC WORKSPACE MAP[\s\S]*workspaceSemanticContext\(workspace\)/);
   assert.match(source, /SELECTED REGION SEMANTICS[\s\S]*JSON\.stringify\(S\.context\)/);
   assert.match(source, /role: section \? 'generated editable section' : 'native editor panel'/);
@@ -122,6 +159,18 @@ test('generated section manifests are bounded and discard unsafe button commands
   assert.equal(plan.section.controls[0].connection, 'Composition background');
 });
 
+test('composition width and height become working generated controls instead of refusals', () => {
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'section', operation: 'create', message: 'Size controls ready',
+    section: { id: 'composition-size', title: 'Composition size', size: 220, note: '', controls: [
+      { type: 'slider', label: 'Width', target: '$composition', path: 'composition.width', defaultValue: 1920, min: 16, max: 16384, step: 1 },
+      { type: 'slider', label: 'Height', target: '$composition', path: 'composition.height', defaultValue: 1080, min: 16, max: 16384, step: 1 },
+    ] },
+  }, { targetPanelId: 'viewer' });
+  assert.deepEqual([...plan.section.controls.map(control => control.path)], ['composition.width', 'composition.height']);
+  assert.deepEqual([...plan.section.controls.map(control => control.connection)], ['Composition', 'Composition']);
+});
+
 test('valid preview chrome edits remain reviewable and mutate source only on Apply', () => {
   const math = spatialModel().math;
   const workspace = { chrome: { previewCornerRadius: 'rounded' } };
@@ -139,6 +188,51 @@ test('valid preview chrome edits remain reviewable and mutate source only on App
   assert.match(source, /PM\.WS\.mutate\(workspace => \{ changed = applyChromeEdit/);
   assert.match(source, /Apply interface edit/);
   assert.match(source, /Never alter rendered composition shapes or export geometry/);
+});
+
+test('Timeline surface reversal is a validated workspace chrome edit', () => {
+  const math = spatialModel().math;
+  const workspace = { chrome: { timelineSurfaceOrder: 'normal' } };
+  const plan = math.sanitizePlan({
+    kind: 'chrome', operation: 'modify', targetPanelId: 'timeline', dockId: 'center', placement: 'replace',
+    message: 'Reverse the Timeline surfaces', steps: ['Reverse the Timeline surfaces'],
+    chromeEdit: { target: 'timeline.surfaceOrder', value: 'reversed' },
+    section: { id: '', title: '', size: 220, note: '', controls: [] },
+  }, { targetPanelId: 'timeline' });
+  assert.deepEqual({ ...plan.chromeEdit }, { target: 'timeline.surfaceOrder', value: 'reversed' });
+  assert.equal(math.applyChromeEdit(workspace, plan.chromeEdit), true);
+  assert.equal(workspace.chrome.timelineSurfaceOrder, 'reversed');
+});
+
+test('panel plans can safely control the complete panel lifecycle', () => {
+  const math = spatialModel().math;
+  const plan = math.sanitizePlan({
+    kind: 'panels', operation: 'modify', message: 'Panel layout ready',
+    panelEdit: JSON.stringify({ actions: [
+      { type: 'add', panelId: 'inspector', dockId: 'right', position: 0 },
+      { type: 'move', panelId: 'timeline', dockId: 'right', position: 1 },
+      { type: 'resize', panelId: 'timeline', size: 420 },
+      { type: 'hide', panelId: 'assets' },
+      { type: 'hide', panelId: 'viewer' },
+      { type: 'popout', panelId: 'timeline' },
+      { type: 'popout', panelId: 'inspector' },
+    ] }),
+  }, { targetPanelId: '' });
+  assert.equal(plan.kind, 'panels');
+  assert.deepEqual([...plan.panelEdit.actions.map(action => action.type)], ['add', 'move', 'resize', 'hide', 'popout']);
+  const workspace = {
+    layout: { docks: [
+      { id: 'left', panels: [{ id: 'assets' }] },
+      { id: 'center', panels: [{ id: 'viewer' }, { id: 'timeline' }] },
+    ] }, hiddenPanels: [],
+  };
+  const result = math.applyPanelEdit(workspace, plan.panelEdit);
+  assert.deepEqual(workspace.layout.docks.find(dock => dock.id === 'right').panels.map(panel => panel.id), ['inspector', 'timeline']);
+  assert.equal(workspace.layout.docks.find(dock => dock.id === 'right').panels[1].size, 420);
+  assert.equal(workspace.hiddenPanels[0].id, 'assets');
+  assert.deepEqual([...result.runtime.map(action => action.type)], ['popout']);
+  assert.match(source, /Undo panel changes/);
+  assert.match(source, /agentAutoApplyPanels/);
 });
 
 test('whole-workspace proposals stay reachable and keep only source-connected generated sections', () => {
@@ -248,7 +342,7 @@ test('instruction pill follows the cursor without intercepting input', () => {
   assert.match(css, /\.spatial-hint\{[^}]*pointer-events:none[^}]*will-change:transform/s);
 });
 
-test('selected-region prompt pops into a draggable, ongoing agent conversation', () => {
+test('selected-region prompt hands off into the ongoing Agent workspace panel', () => {
   const math = spatialModel().math;
   assert.deepEqual({ ...math.clampFloatingPosition(-40, 900, 420, 220, 1200, 800) }, { x: 12, y: 568 });
   assert.match(source, /S\.context = inspectRegion\(S\.points, S\.region\)/, 'the prompt binds to the rectangular selection context');
@@ -260,31 +354,28 @@ test('selected-region prompt pops into a draggable, ongoing agent conversation',
   assert.match(source, /document\.body\.appendChild\(S\.root\);[\s\S]*showComposer\(\)/,
     'the floating prompt appears immediately after a shake; drag selection is optional context');
   assert.match(source, /sendRequest\(input\)/);
-  assert.match(source, /PM\.CodexBridge\.request\(agentPrompt\(request, observation\), responseSchema\(\), attachedImages\)/,
+  assert.match(source, /PM\.CodexBridge\.request\([\s\S]*agentPrompt\(request, observation\), responseSchema\(\), attachedImages,[\s\S]*model: S\.model/,
     'the agent receives the selected-region image followed by rendered composition frames');
   assert.match(source, /promoteToConversation\(\); renderConversation\(\)/,
-    'Send immediately promotes the compact prompt into the conversation');
-  assert.match(source, /S\.root\.classList\.add\('conversation-mode'\)/);
-  assert.match(css, /#spatial-assistant\.conversation-mode\{[^}]*pointer-events:none/,
-    'the editor remains usable behind the floating conversation');
-  assert.match(css, /#spatial-assistant\.conversation-mode \.spatial-compose\{pointer-events:auto\}/);
-  assert.match(source, /makeCardMovable\(S\.card, handle\)/, 'the popped-out conversation has a drag handle');
-  assert.match(source, /PM\.drag\(event,[\s\S]*move: \(dx, dy\) => moveCardTo/,
-    'the click-through pop-out keeps dragging on window-level pointer movement');
-  assert.match(source, /Reply or ask for an adjustment/);
+    'Send immediately moves the compact spatial prompt into the panel conversation');
+  assert.match(source, /function promoteToConversation\(\)[\s\S]*dismissOverlay\(true\)[\s\S]*openAgentPanel\(\)/);
+  assert.match(source, /registerPanel\('agent'/);
+  assert.match(source, /PM\.Layout\.restorePanel/);
+  assert.match(source, /PM\.Layout\.addPanel/);
+  assert.match(source, /Describe what you want changed/);
   assert.match(source, /CONVERSATION SO FAR/);
   assert.match(source, /setPointerCapture/);
   assert.match(source, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'\]/);
-  assert.doesNotMatch(source, /Return to layout/, 'Ripple is a floating assistant, not a dockable panel');
+  assert.doesNotMatch(source, /Return to layout/, 'native pop-out behavior remains owned by the shared panel system');
   assert.match(source, /event\.key === 'Escape'[\s\S]*cancel\(\)/);
-  assert.match(source, /S\.plan = plan; showPreview\(\)/);
+  assert.match(source, /S\.plan = plan;[\s\S]*plan\.kind === 'panels' && S\.autoApplyPanels[\s\S]*applyPlan\(\)[\s\S]*showPreview\(\)/);
   assert.match(source, /onclick: applyPlan/);
   assert.match(source, /Apply scene edit/);
   assert.match(source, /Undo change/);
   assert.match(source, /Keep change/);
   assert.match(source, /PM\.WS\.mutate\(workspace =>/,
     'Apply crosses the validated structured workspace transaction boundary');
-  assert.doesNotMatch(source, /registerPanel\('agent'/, 'conversation is a floating section, not a docked panel');
+  assert.match(css, /\.agent-composer\{[^}]*background:var\(--bg-float\)/);
 });
 
 test('Ripple activation is limited to the active project editor', () => {
@@ -294,5 +385,5 @@ test('Ripple activation is limited to the active project editor', () => {
   assert.match(source, /LibraryUI && PM\.LibraryUI\.isOpen/);
   assert.match(source, /document\.querySelector\('#scrim\.on,\.modal'\)/);
   assert.match(source, /target\?\.closest\?\.\('#body'\)/);
-  assert.match(source, /makeCardMovable\(S\.card, handle\)/, 'the floating prompt and result remain movable');
+  assert.match(source, /PM\.registerPanel\('agent'/, 'the resulting conversation uses the movable workspace panel');
 });

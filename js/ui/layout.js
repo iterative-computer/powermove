@@ -26,8 +26,8 @@ function buildPanel(spec, dock) {
     inst.spec = spec; inst.dock = dock;
     applyPanelSize(inst.el, spec, def);
     inst.el.style.minHeight = (spec.min || 56) + 'px';
-    inst.el.dataset.collapsed = '0';
-    if (inst.body) inst.body.style.display = '';
+    inst.el.querySelector('.ptitle')?.replaceChildren(spec.title || def.title);
+    setPanelCollapsed(spec.id, !!spec.collapsed, false);
     return inst.el;
   }
   const headless = !!(spec.headless || def.headless);
@@ -95,13 +95,7 @@ function buildPanel(spec, dock) {
    hdr.addEventListener('dblclick', (e) => {
      if (e.target.closest('button')) return;
      if (spec.id === 'chat') return;
-    const current = liveLocation();
-    const liveSpec = current && current.spec ? current.spec : spec;
-    const collapsed = el.dataset.collapsed === '1';
-    el.dataset.collapsed = collapsed ? '0' : '1';
-    body.style.display = collapsed ? '' : 'none';
-    el.style.flex = collapsed ? (liveSpec.flex ? '1 1 auto' : '0 0 ' + (liveSpec.size || def.size) + 'px') : '0 0 var(--hdr-h)';
-    if (!collapsed) PM.bus.emit('layout:applied');
+    setPanelCollapsed(spec.id, el.dataset.collapsed !== '1');
   });
   const openPanelMenu = (e) => {
     e.preventDefault(); e.stopPropagation();
@@ -117,6 +111,7 @@ function buildPanel(spec, dock) {
     moveHandle.addEventListener('pointerdown', beginMove);
     moveHandle.addEventListener('contextmenu', openPanelMenu);
   }
+  if (spec.collapsed) setPanelCollapsed(spec.id, true, false);
   return el;
 }
 
@@ -494,8 +489,23 @@ function movePanelBy(ws, id, delta) {
   found.dock.panels.splice(to, 0, found.spec);
   return true;
 }
+function setPanelCollapsed(id, collapsed, emit = true) {
+  if (id === 'viewer') return false;
+  const inst = PM.panelInst[id];
+  const current = L.ws && findPanel(L.ws, id);
+  if (!inst?.el || !inst.body || !current?.spec) return false;
+  current.spec.collapsed = !!collapsed;
+  inst.el.dataset.collapsed = collapsed ? '1' : '0';
+  inst.body.style.display = collapsed ? 'none' : '';
+  inst.el.style.flex = collapsed
+    ? '0 0 var(--hdr-h)'
+    : (current.spec.flex ? '1 1 auto' : '0 0 ' + (current.spec.size || inst.def.size || 180) + 'px');
+  if (emit) { PM.WS.save(); PM.bus.emit('layout:applied'); }
+  return true;
+}
 L.removePanel = removePanel; L.hidePanel = hidePanel; L.restorePanel = restorePanel;
 L.addPanel = addPanel; L.movePanel = movePanel; L.movePanelBy = movePanelBy; L.ensureDock = ensureDock; L.hasPanel = hasPanel; L.findPanel = findPanel;
+L.setCollapsed = setPanelCollapsed;
 
 /* ── splitters ─────────────────────────────────────────── */
 /* A splitter always resizes the nearest *fixed* pane and leaves the flex pane
@@ -707,6 +717,7 @@ PM.Popout = {
   closeAll() { this.openIds().forEach(id => this.dock(id)); },
   isOpen(id) { return !!this.wins[id] && !this.wins[id].window.closed; },
   open(id) {
+    PM.closeMenus?.();
     const def = PM.PANELS[id]; if (!def) return;
     if (NO_POPOUT.has(id)) { PM.toast(def.title + ' stays docked'); return; }
     const inst = PM.panelInst[id];
@@ -723,6 +734,7 @@ PM.Popout = {
       const d = w.document;
       if (!d || !d.body) { setTimeout(setup, 30); return; }
       d.title = def.title + ' — Powermove';
+      window.webkit?.messageHandlers?.pmPanelTitle?.postMessage(def.title);
       /* inline every stylesheet rule so the popout needs no file access */
       let css = 'html,body{height:100%;margin:0;overflow:hidden;background:var(--bg-panel)}';
       for (const ss of document.styleSheets) {
@@ -739,11 +751,6 @@ PM.Popout = {
       d.documentElement.dataset.theme = document.documentElement.dataset.theme;
       d.documentElement.style.cssText = document.documentElement.style.cssText;
       d.body.style.cssText = 'display:flex;flex-direction:column;background:var(--bg-panel)';
-
-      /* In-panel identity; the native titlebar owns the reliable pin-back action. */
-      const bar = d.createElement('div'); bar.className = 'pop-bar';
-      const title = d.createElement('span'); title.className = 'pop-title'; title.textContent = def.title;
-      bar.append(title); d.body.appendChild(bar);
 
       /* Preserve the structured layout while freeing the panel's entire dock slot.
          The original remains the single hidden owner; L.apply omits detached IDs,

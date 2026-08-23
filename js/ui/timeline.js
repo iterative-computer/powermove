@@ -122,10 +122,12 @@ PM.bus.on('sel', () => PM.invalidate('timeline'));
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 let theme = null;
 const refreshTheme = () => {
+  const reversed = document.documentElement.dataset.timelineSurfaces === 'reversed';
   theme = {
     accent: css('--accent') || '#F0580A', tx: css('--tx') || '#1C1C1F',
     tx2: css('--tx-2') || '#5D5D65', tx3: css('--tx-3') || '#8B8B93',
-    panel: css('--bg-panel') || '#FCFCFD', sunken: css('--bg-sunken') || '#E4E4E7',
+    panel: css(reversed ? '--bg-sunken' : '--bg-panel') || '#FCFCFD',
+    sunken: css(reversed ? '--bg-panel' : '--bg-sunken') || '#E4E4E7',
     line: css('--line') || 'rgba(15,15,20,.09)',
   };
 };
@@ -684,7 +686,7 @@ function snapDelta(start, dt) {
 
 function trim(e, side) {
   const layers = PM.selLayers().filter(l => !l.lock);
-  const start = layers.map(L => ({ L, from: L.from, dur: L.dur }));
+  const start = layers.map(L => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
   PM.Edit.begin('Trim clip', { origin: 'timeline' });
   let moved = false;
   PM.drag(e, {
@@ -694,13 +696,24 @@ function trim(e, side) {
       const dt = PM.snapF(dx / T.pps, PM.proj.fps);
       start.forEach(s => {
         if (side === 'in') {
-          const nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / PM.proj.fps);
+          let nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / PM.proj.fps);
+          if (PM.MediaTiming.isTimed(s.L)) nf = Math.max(nf, PM.MediaTiming.earliestStart({ ...s.L, from: s.from, d: { ...s.L.d, trim: s.trim } }));
           PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: nf, duration: s.dur + (s.from - nf) } });
+          if (PM.MediaTiming.isTimed(s.L)) {
+            const rate = PM.MediaTiming.rate(s.L);
+            PM.Edit.dispatch({ type: 'set_content', target: s.L.id, patch: { trim: Math.max(0, s.trim + (nf - s.from) * rate) } });
+          }
         } else PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { duration: Math.max(1 / PM.proj.fps, s.dur + dt) } });
       });
     },
     up: () => { moved ? PM.Edit.commit('Trim clip') : PM.Edit.cancel(); },
   });
+}
+
+function trimInCommands(L, from) {
+  const commands = [{ type: 'set_layer', target: L.id, patch: { from, duration: L.dur - (from - L.from) } }];
+  if (PM.MediaTiming.isTimed(L)) commands.push({ type: 'set_content', target: L.id, patch: { trim: PM.MediaTiming.trimAtStart(L, from) } });
+  return commands;
 }
 
 function keyDown(e, r, x, y, rowIdx) {
@@ -846,7 +859,7 @@ function onCtx(e) {
       { label: 'Duplicate', kb: '⌘D', run: () => PM.cmd('duplicate') },
       { label: 'Precompose', kb: '⌘⇧C', run: () => PM.cmd('precompose') },
       { label: 'Split at playhead', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
-      { label: 'Trim in to playhead', disabled: !inside, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: PM.time, duration: L.dur - (PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
+      { label: 'Trim in to playhead', disabled: !inside, run: () => PM.Edit.apply(trimInCommands(L, PM.time), { label: 'Trim', origin: 'timeline' }) },
       { label: 'Trim out to playhead', disabled: !inside, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { duration: Math.max(1 / PM.proj.fps, PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
       '-',
       { label: L.mblur ? 'Motion blur off' : 'Motion blur on', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { motionBlur: !L.mblur } }, { label: 'Motion blur', origin: 'timeline' }) },

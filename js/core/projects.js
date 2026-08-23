@@ -50,6 +50,28 @@ R.upsertMeta = (meta) => {
   R.saveList(list);
 };
 
+/** Rename one canonical project without ever writing the active composition
+    into a different project's storage slot. Blank names keep the old name. */
+R.rename = (id, name) => {
+  if (!id) return null;
+  const raw = R.get(id);
+  const active = PM.proj && PM.proj.id === id ? PM.proj : null;
+  const meta = R.list().find(x => x.id === id);
+  const previous = (raw && raw.name) || (active && active.name) || (meta && meta.name) || 'Untitled';
+  const next = String(name == null ? '' : name).trim() || previous;
+  if (raw) {
+    raw.name = next;
+    R.put(raw);
+  } else if (active) {
+    active.name = next;
+    R.put(active);
+  } else if (meta) {
+    R.upsertMeta({ ...meta, name: next, at: Date.now() });
+  } else return null;
+  if (active) active.name = next;
+  return next;
+};
+
 R.get = (id) => {
   if (!id) return null;
   let raw = null;

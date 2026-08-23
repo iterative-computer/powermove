@@ -10,6 +10,7 @@ const tokens = fs.readFileSync(path.join(root, 'css/tokens.css'), 'utf8');
 const appCss = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'js/app.js'), 'utf8');
 const panels = fs.readFileSync(path.join(root, 'js/ui/panels.js'), 'utf8');
+const spatial = fs.readFileSync(path.join(root, 'js/assistant/spatial.js'), 'utf8');
 
 test('major section borders have a dedicated perceptual weight in both themes', () => {
   const light = tokens.slice(tokens.indexOf(':root{'), tokens.indexOf(':root[data-density'));
@@ -21,17 +22,14 @@ test('major section borders have a dedicated perceptual weight in both themes', 
   assert.match(appCss, /#tl-head\s*\{[^}]*border-bottom:1px solid var\(--section-line\)/s);
 });
 
-test('Agent conversation is a themed floating section instead of a docked rail', () => {
-  const composer = appCss.match(/(?:^|\n)\.spatial-compose\{([^}]*)\}/)?.[1] || '';
-  assert.match(composer, /background:var\(--bg-float\)/);
-  assert.match(composer, /border:1px solid var\(--line-2\)/);
-  assert.match(appCss, /\.spatial-conversation-log\{[^}]*background:var\(--bg-panel-2\)/);
+test('Agent conversation is a real themed workspace panel', () => {
+  assert.match(spatial, /registerPanel\('agent'/);
+  assert.match(spatial, /persist: true, noscroll: true/);
+  assert.match(appCss, /#panel-agent>\.body\{[^}]*display:flex[^}]*overflow:hidden/);
+  assert.match(appCss, /\.agent-shell\{[^}]*flex-direction:column[^}]*background:var\(--bg-panel-2\)/);
   assert.match(appCss, /\.spatial-message\.user\{[^}]*background:var\(--accent\)/);
-  assert.match(appCss, /\.spatial-target\{[^}]*font-family:var\(--f-ui\)/,
-    'floating assistant chrome uses the normal UI typeface');
-  assert.doesNotMatch(panels, /registerPanel\('agent'/, 'the conversation does not consume a workspace dock');
   assert.match(app, /PM\.SpatialAssistant\?\.open\?\.\(\)/,
-    'the titlebar opens the spatial prompt directly');
+    'the titlebar opens or restores the real Agent panel');
 });
 
 test('timeline annotation markers and labels are absent without affecting keyframes', () => {
@@ -45,9 +43,10 @@ test('timeline annotation markers and labels are absent without affecting keyfra
 test('Design workspace uses the timeline and has no retired Generative panel', () => {
   const design = workspace.slice(workspace.indexOf("id: 'design'"), workspace.indexOf("id: 'gradient'"));
   assert.doesNotMatch(design, /p\('layers'/);
-  /* no assistant or retired Generative surface is docked */
+  /* the real Agent panel replaces the retired chat rail */
   assert.doesNotMatch(design, /p\('chat'/);
   assert.doesNotMatch(design, /p\('library'/);
+  assert.match(design, /p\('agent', \{ size: 350 \}\)/);
   assert.match(design, /p\('assets', \{ size: 190 \}\), p\('fxbrowser', \{ flex: true \}\)/);
 });
 
@@ -101,6 +100,13 @@ test('tool controls sit on the right in a tabs-like smoothed group', () => {
   assert.match(app, /el\.hidden = !!\(PM\.ProjectsScreen && PM\.ProjectsScreen\.isOpen\)/,
     'Home hides editor-only tools');
   assert.match(appCss, /#toolbar-strip\[hidden\]\{display:none\}/);
+});
+
+test('native titlebar cursor state is released on pointer cancellation', () => {
+  const titlebar = app.slice(app.indexOf('function buildTitlebar()'), app.indexOf('const paintTabs ='));
+  assert.match(titlebar, /const release = \(\) =>/);
+  assert.match(titlebar, /addEventListener\('pointercancel', release, true\)/);
+  assert.match(titlebar, /removeEventListener\('pointercancel', release, true\)/);
 });
 
 test('top-level Settings owns appearance while Undo and Redo remain keyboard commands', () => {

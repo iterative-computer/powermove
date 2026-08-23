@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var webView: WKWebView!
     private var panelWCs: [NSWindowController] = []
     private var dragMonitor: Any?
+    private var dragEndMonitor: Any?
     private var dragOrigin: NSPoint = .zero
     private var dragStart: NSPoint = .zero
 
@@ -23,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         config.userContentController.add(self, name: "pmTheme")
         config.userContentController.add(self, name: "pmCodex")
         config.userContentController.add(self, name: "pmCaptureWindow")
+        config.userContentController.add(self, name: "pmPanelTitle")
         /* about:blank child WebViews do not inherit the file-read grant used by the
            main app page. Inject the packaged product CSS at document end so detached
            panels retain Powermove's styling without granting broader file access. */
@@ -120,21 +122,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
        pointerdown and we drive the window frame from native mouse tracking. */
     private func beginWindowDrag(startScreen: NSPoint) {
         guard let win = window else { return }
+        endWindowDrag()
         dragOrigin = win.frame.origin
         dragStart = startScreen
-        endWindowDrag()
-        dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+        /* A lost mouse-up must never leave the native titlebar tracker armed.
+           A later panel gesture begins with a fresh mouse-down, so use that as
+           an unambiguous boundary before any of its drag events can move the window. */
+        dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self = self else { return event }
-            if event.type == .leftMouseUp { self.endWindowDrag(); return event }
+            if event.type == .leftMouseDown || event.type == .leftMouseUp {
+                self.endWindowDrag()
+                return event
+            }
             let loc = NSEvent.mouseLocation
             let dx = loc.x - self.dragStart.x
             let dy = loc.y - self.dragStart.y
             win.setFrameOrigin(NSPoint(x: self.dragOrigin.x + dx, y: self.dragOrigin.y + dy))
             return event
         }
+        /* Local monitors do not receive a release delivered to another app. */
+        dragEndMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+            self?.endWindowDrag()
+        }
     }
     private func endWindowDrag() {
         if let m = dragMonitor { NSEvent.removeMonitor(m); dragMonitor = nil }
+        if let m = dragEndMonitor { NSEvent.removeMonitor(m); dragEndMonitor = nil }
     }
 
     @objc func webAction(_ sender: NSMenuItem) {
@@ -183,6 +196,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "pmPanelTitle" {
+            guard let title = message.body as? String, !title.isEmpty,
+                  let childWebView = message.webView,
+                  let childWindow = panelWCs.compactMap({ $0.window }).first(where: { $0.contentView === childWebView }) else { return }
+            childWindow.title = String(title.prefix(80))
+            return
+        }
         if message.name == "pmLog" {
             if let body = message.body as? String { FileHandle.standardError.write((body + "\n").data(using: .utf8)!) }
             return
@@ -233,7 +253,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                   let prompt = body["prompt"] as? String,
                   !prompt.isEmpty, prompt.utf8.count < 400_000 else { return }
             let images = (body["images"] as? [String] ?? []).prefix(6).filter { $0.utf8.count < 6_000_000 }
-            runCodex(requestId: requestId, prompt: prompt, schema: body["schema"], images: Array(images))
+            let allowedModels = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+            let allowedEfforts = ["low", "medium", "high", "xhigh", "max"]
+            let requestedModel = body["model"] as? String
+            let requestedEffort = body["reasoningEffort"] as? String
+            let model = requestedModel.flatMap { allowedModels.contains($0) ? $0 : nil }
+            let effort = requestedEffort.flatMap { allowedEfforts.contains($0) ? $0 : nil }
+            runCodex(requestId: requestId, prompt: prompt, schema: body["schema"], images: Array(images), model: model, reasoningEffort: effort)
             return
         }
         if message.name == "pmCaptureWindow" {
@@ -282,7 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return candidates.first(where: { fm.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
     }
 
-    private func runCodex(requestId: String, prompt: String, schema: Any?, images: [String] = []) {
+    private func runCodex(requestId: String, prompt: String, schema: Any?, images: [String] = [], model: String? = nil, reasoningEffort: String? = nil) {
         guard let executable = codexBinaryURL() else {
             sendCodexResult(requestId: requestId, ok: false, text: "Codex is not installed. Install Codex and sign in with ChatGPT first.")
             return
@@ -321,6 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                     "--sandbox", "read-only", "--output-schema", schemaURL.path,
                     "--output-last-message", outputURL.path,
                 ]
+                if let model = model { arguments.append(contentsOf: ["--model", model]) }
+                if let effort = reasoningEffort { arguments.append(contentsOf: ["--config", "model_reasoning_effort=\"\(effort)\""]) }
                 /* --image accepts a variadic list. Keep the positional prompt
                    before it or Codex will consume the prompt as another path
                    and fall back to an empty stdin prompt. */
@@ -385,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             backing: .buffered,
             defer: false
         )
-        win.title = "Panel"
+        win.title = "Powermove agent"
         win.appearance = NSAppearance(named: .aqua)
         win.backgroundColor = NSColor(white: 0.953, alpha: 1)
         win.contentView = wv
@@ -394,11 +422,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         /* Closing the child is the pin-back signal. Target the window directly,
            so this remains reliable even when the accessory is not first responder. */
         let returnButton = NSButton(title: "Return to layout", target: win, action: #selector(NSWindow.performClose(_:)))
-        returnButton.bezelStyle = .rounded
+        returnButton.bezelStyle = .inline
         returnButton.controlSize = .small
+        returnButton.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        returnButton.contentTintColor = .secondaryLabelColor
         returnButton.toolTip = "Pin this panel back into the main Powermove layout"
+        returnButton.translatesAutoresizingMaskIntoConstraints = false
+        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 132, height: 28))
+        accessoryView.addSubview(returnButton)
+        NSLayoutConstraint.activate([
+            returnButton.trailingAnchor.constraint(equalTo: accessoryView.trailingAnchor, constant: -10),
+            returnButton.centerYAnchor.constraint(equalTo: accessoryView.centerYAnchor),
+            returnButton.widthAnchor.constraint(equalToConstant: 116),
+            returnButton.heightAnchor.constraint(equalToConstant: 24),
+        ])
         let accessory = NSTitlebarAccessoryViewController()
-        accessory.view = returnButton
+        accessory.view = accessoryView
         accessory.layoutAttribute = .right
         win.addTitlebarAccessoryViewController(accessory)
         let wc = NSWindowController(window: win)

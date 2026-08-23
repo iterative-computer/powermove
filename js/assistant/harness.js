@@ -4,7 +4,7 @@
    keep or roll back the complete run. */
 (() => {
 const PM = window.PM;
-const MAX_COMMANDS = 24;
+const MAX_COMMANDS = 80;
 const MAX_REPAIRS = 2;
 const MAX_KEYFRAMES = 80;
 const SCENE_OPERATIONS = new Set([
@@ -87,6 +87,7 @@ function projectState() {
     parameters: clone(p.params || {}),
     markers: clone(p.markers || []),
     availableOperations: [...SCENE_OPERATIONS],
+    editableSource: PM.Edit?.sourceCatalog?.() || null,
   };
 }
 

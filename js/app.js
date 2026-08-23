@@ -234,11 +234,22 @@ void main(){
   PM.Projects.list().forEach(m => { if (!PM.Projects.get(m.id)) PM.Projects.remove(m.id); });
 })();
 
+async function restoreProjectAssets(project, warn = true) {
+  const result = await PM.assets.restoreProject(project);
+  if (result.stale || PM.proj !== project) return result;
+  PM.bus.emit('assets');
+  PM.Inspector.refresh();
+  PM.invalidate('all');
+  if (warn && result.missing.length) {
+    const count = result.missing.length;
+    PM.toast(count === 1
+      ? 'One media file is missing · import it again to relink it'
+      : `${count} media files are missing · import them again to relink them`, 5000);
+  }
+  return result;
+}
+
 PM.proj = loadBootProject();
-/* External media blobs cannot survive a browser restart; keep metadata but hide unresolved layers. */
-PM.proj.layers.forEach(L => {
-  if ((L.type === 'image' || L.type === 'video' || L.type === 'audio') && L.d.asset && !PM.assets.get(L.d.asset)) L.on = false;
-});
 PM.WS.init();
 const bootSession = PM.Projects.getState(PM.proj.id);
 if (bootSession?.workspace) PM.WS.restoreSnapshot(bootSession.workspace);
@@ -253,6 +264,7 @@ if (bootSession?.timeline) {
   PM.TL.graph = !!bootSession.timeline.graph;
 }
 PM.hist.clear();
+restoreProjectAssets(PM.proj);
 
 /* ── shell ─────────────────────────────────────────────── */
 function openSettings() {
@@ -283,12 +295,19 @@ function buildTitlebar() {
     document.body.style.cursor = 'default';
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     const pin = () => { document.body.style.cursor = 'default'; };
-    window.addEventListener('pointermove', pin, true);
-    dragBridge.postMessage({ x: e.clientX, y: e.clientY });
-    window.addEventListener('pointerup', () => {
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
       window.removeEventListener('pointermove', pin, true);
+      window.removeEventListener('pointerup', release, true);
+      window.removeEventListener('pointercancel', release, true);
       document.body.style.cursor = '';
-    }, { once: true });
+    };
+    window.addEventListener('pointermove', pin, true);
+    window.addEventListener('pointerup', release, true);
+    window.addEventListener('pointercancel', release, true);
+    dragBridge.postMessage({ x: e.clientX, y: e.clientY });
   });
   bar.addEventListener('dblclick', (e) => {
     if (e.target.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
@@ -296,7 +315,39 @@ function buildTitlebar() {
     const zb = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.windowZoom;
     if (zb) zb.postMessage({});
   });
+  const beginProjectRename = (tab, id, currentName) => {
+    if (tab.classList.contains('renaming')) return;
+    const label = tab.querySelector('.project-doc-label');
+    if (!label) return;
+    const input = h('input.project-doc-input', {
+      value: currentName, maxlength: 120, 'aria-label': 'Rename project', spellcheck: 'false',
+    });
+    let finished = false;
+    const finish = (commit) => {
+      if (finished) return;
+      finished = true;
+      if (commit) PM.Projects.rename(id, input.value);
+      tab.classList.remove('renaming');
+      PM.bus.emit('projects:tabs');
+      if (commit) PM.bus.emit('project');
+    };
+    input.onpointerdown = (e) => e.stopPropagation();
+    input.onclick = (e) => e.stopPropagation();
+    input.onkeydown = (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    };
+    input.onblur = () => finish(true);
+    tab.classList.add('renaming');
+    tab.setAttribute('aria-label', 'Rename ' + currentName);
+    label.replaceWith(input);
+    requestAnimationFrame(() => { input.focus(); input.select(); });
+  };
   const paintTabs = () => {
+    /* Autosave and background project events may refresh the strip. Never tear
+       down a live rename field before the user commits or cancels it. */
+    if (tabs.querySelector('.project-doc.renaming')) return;
     tabs.textContent = '';
     tabs.setAttribute('role', 'tablist');
     tabs.setAttribute('aria-label', 'Open projects');
@@ -321,9 +372,18 @@ function buildTitlebar() {
           title: 'Close project',
           onclick: (e) => { e.stopPropagation(); closeTab(id); },
         }, PM.icon('x')));
-      tab.onclick = () => {
+      tab.onclick = (e) => {
+        if (tab.classList.contains('renaming') || e.target.closest('input')) return;
+        /* The second click is the most reliable cross-WebKit double-click signal,
+           including when the first click activates a previously inactive tab. */
+        if (e.detail > 1) { e.preventDefault(); beginProjectRename(tab, id, tabName); return; }
         if (PM.ProjectsScreen && PM.ProjectsScreen.isOpen) PM.ProjectsScreen.hide();
         if (!active) openTab(id);
+      };
+      tab.ondblclick = (e) => {
+        if (e.target.closest('.project-doc-close')) return;
+        e.preventDefault(); e.stopPropagation();
+        beginProjectRename(tab, id, tabName);
       };
       tab.onkeydown = (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tab.click(); }
@@ -493,7 +553,7 @@ function switchProject(p) {
   PM.TL.graph = !!session?.timeline?.graph;
   PM.hist.clear();
   PM.rasterClear();
-  PM.assets.map.clear();
+  PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = true;
   PM.bus.emit('project');
@@ -504,6 +564,7 @@ function switchProject(p) {
   PM.Viewer.layout();
   PM.invalidate('all');
   PM.invalidate('status');
+  restoreProjectAssets(PM.proj);
   requestAnimationFrame(() => (session?.detached || []).forEach(id => PM.Popout.open(id)));
   PM.autosave();
 }
@@ -524,6 +585,7 @@ PM.importFiles = async (files) => {
       PM.cmd('addFromAsset', a.id);
       imported++;
       importedNames.push(f.name);
+      if (!a.persisted) PM.toast('Imported, but this browser could not save the media for the next launch', 5000);
     } catch (err) { PM.toast(err.message || ('Could not import ' + f.name), 5000); }
   }
   if (imported) {

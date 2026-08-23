@@ -34,6 +34,7 @@ cp "$ROOT/index.html" "$WEB/index.html"
 cp -R "$ROOT/css/." "$WEB/css/"
 cp -R "$ROOT/js/." "$WEB/js/"
 cp -R "$ROOT/assets/fonts/." "$WEB/assets/fonts/"
+cp "$ROOT/assets/PHOSPHOR-LICENSE.txt" "$RES/PHOSPHOR-LICENSE.txt"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,6 +68,10 @@ xattr -cr "$APP" 2>/dev/null || true
 xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
 xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
 codesign --force --deep --sign - "$APP" >/dev/null
+# The workspace File Provider can restore Finder metadata during signing.
+# Clear it once more so the bundle passes a strict verification immediately.
+xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
+xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
 if [ "$INSTALL" = "--install" ]; then
   rm -rf /Applications/Powermove.app
   ditto "$APP" /Applications/Powermove.app

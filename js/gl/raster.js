@@ -168,14 +168,10 @@ function assetKind(file) {
   return null;
 }
 PM.assetKind = assetKind;
-PM.assets = {
-  map: new Map(),
-  async add(file) {
-    const id = PM.uid('a');
-    const url = URL.createObjectURL(file);
-    const kind = assetKind(file);
-    if (!kind) { URL.revokeObjectURL(url); throw new Error('Unsupported media file'); }
-    let el, w = 0, hh = 0, dur = 0;
+async function prepareAsset({ id, name, kind, blob, meta = {} }) {
+  const url = URL.createObjectURL(blob);
+  let el, w = 0, hh = 0, dur = 0;
+  try {
     if (kind === 'image') {
       el = new Image(); el.src = url;
       await el.decode().catch(() => {});
@@ -185,20 +181,63 @@ PM.assets = {
       el.src = url; el.preload = 'auto'; el.muted = kind === 'video'; el.playsInline = true;
       await new Promise(r => { el.onloadedmetadata = r; el.onerror = r; setTimeout(r, 6000); });
       if (el.error || (kind === 'audio' && !(Number.isFinite(el.duration) && el.duration > 0))) {
-        URL.revokeObjectURL(url);
         throw new Error(kind === 'audio'
           ? 'Could not read this audio file · try WAV, MP3, M4A, AAC, OGG, or FLAC'
           : 'Could not read this video file');
       }
       w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
     }
-    const a = { id, name: file.name, kind, url, el, w, h: hh, dur, size: file.size };
+    return {
+      id, name, kind, url, el,
+      w: w || meta.w || 0, h: hh || meta.h || 0,
+      dur: dur || meta.dur || 0, size: blob.size || meta.size || 0,
+    };
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
+  }
+}
+PM.assets = {
+  map: new Map(),
+  async add(file) {
+    const id = PM.uid('a');
+    const kind = assetKind(file);
+    if (!kind) throw new Error('Unsupported media file');
+    const a = await prepareAsset({ id, name: file.name, kind, blob: file });
+    a.persisted = await PM.MediaStore.put(id, file);
     PM.assets.map.set(id, a);
-    PM.proj.assets[id] = { id, name: file.name, kind, w, h: hh, dur };
+    PM.proj.assets[id] = { id, name: file.name, kind, w: a.w, h: a.h, dur: a.dur, size: a.size };
     PM.bus.emit('assets');
     return a;
   },
   get: (id) => PM.assets.map.get(id),
+  clear() {
+    for (const a of PM.assets.map.values()) {
+      try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
+      if (a.url && String(a.url).startsWith('blob:')) URL.revokeObjectURL(a.url);
+    }
+    PM.assets.map.clear();
+  },
+  async restoreProject(project) {
+    const ready = [], missing = [];
+    for (const meta of Object.values(project && project.assets || {})) {
+      if (!meta || !meta.id || !['image', 'video', 'audio'].includes(meta.kind)) continue;
+      const blob = await PM.MediaStore.get(meta.id);
+      if (!blob) { missing.push(meta); continue; }
+      try {
+        const a = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
+        a.persisted = true;
+        ready.push(a);
+      } catch (e) { missing.push(meta); }
+    }
+    if (PM.proj !== project) {
+      ready.forEach(a => URL.revokeObjectURL(a.url));
+      return { restored: [], missing: [], stale: true };
+    }
+    ready.forEach(a => PM.assets.map.set(a.id, a));
+    const restored = ready;
+    return { restored, missing };
+  },
   /** Procedural placeholder so demo projects work with zero imports. */
   gradient(name, c0, c1) {
     const cv = getCanvas(1280, 720);

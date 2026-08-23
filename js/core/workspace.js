@@ -15,10 +15,11 @@ function normalizeControl(control, index) {
   const raw = control && typeof control === 'object' ? control : {};
   const rawDefault = raw.def !== undefined ? raw.def : raw.default !== undefined ? raw.default : raw.value;
   let type = text(raw.type).toLowerCase();
-  if (!['slider', 'color', 'toggle', 'select', 'button'].includes(type)) {
+  if (!['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button'].includes(type)) {
     if (Array.isArray(raw.options)) type = 'select';
     else if (typeof rawDefault === 'boolean') type = 'toggle';
     else if (typeof rawDefault === 'string' && /^#[0-9a-f]{3,8}$/i.test(rawDefault)) type = 'color';
+    else if (typeof rawDefault === 'string') type = 'text';
     else type = 'slider';
   }
   const legacyParam = text(raw.parameter);
@@ -32,10 +33,12 @@ function normalizeControl(control, index) {
   const out = { ...raw, type, label };
   if (type === 'button') return out;
   out.param = text(authoredParam, text(raw.name, label));
-  if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6B1A';
+  if (type === 'text') out.def = rawDefault == null ? '' : String(rawDefault);
+  else if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6B1A';
+  else if (type === 'fill') out.def = rawDefault && typeof rawDefault === 'object' ? copy(rawDefault) : null;
   else if (type === 'toggle') out.def = rawDefault === undefined ? false : !!rawDefault;
   else if (type === 'select') {
-    out.options = Array.isArray(raw.options) ? raw.options.filter(v => typeof v === 'string') : [];
+    out.options = Array.isArray(raw.options) ? raw.options.filter(v => typeof v === 'string' || (v && typeof v === 'object' && 'v' in v && typeof v.label === 'string')).map(v => typeof v === 'string' ? v : ({ v: v.v, label: v.label })) : [];
     out.def = rawDefault !== undefined ? rawDefault : (out.options[0] || '');
   } else {
     out.min = finite(raw.min) ? raw.min : 0;
@@ -57,6 +60,7 @@ function normalizeWorkspace(workspace, fallback) {
   raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
   raw.chrome = raw.chrome && typeof raw.chrome === 'object' ? raw.chrome : {};
   raw.chrome.previewCornerRadius = raw.chrome.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
+  raw.chrome.timelineSurfaceOrder = raw.chrome.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
   raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
   delete raw.features.motionBlur;
   delete raw.features.guides;
@@ -102,6 +106,7 @@ function normalizeWorkspace(workspace, fallback) {
       usedPanels.add(id);
       const clean = { id };
       if (q.flex) clean.flex = true;
+      if (q.collapsed) clean.collapsed = true;
       if (finite(q.size)) clean.size = PM.clamp(q.size, 56, 1600);
       if (finite(q.min)) clean.min = PM.clamp(q.min, 32, 800);
       if (text(q.title)) clean.title = text(q.title);
@@ -151,7 +156,7 @@ const PRESETS = () => ([
            project media and effects while reusable content lives in Library */
         dock('left', [p('assets', { size: 190 }), p('fxbrowser', { flex: true })], 250),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
-        dock('right', [p('inspector', { flex: true })], 300),
+        dock('right', [p('inspector', { flex: true }), p('agent', { size: 350 })], 320),
       ],
     },
   },
@@ -304,6 +309,7 @@ function applyFeatures(w) {
   if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
   if (f.graphOnOpen !== undefined) PM.TL.graph = !!f.graphOnOpen;
   document.documentElement.dataset.previewCorners = w.chrome?.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
+  document.documentElement.dataset.timelineSurfaces = w.chrome?.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
   PM.invalidate();
 }
 
@@ -507,7 +513,9 @@ function registerCustom(w) {
             command: (value) => ({ type: 'set_scene_parameter', name: param.name, value }),
           };
           let field;
-          if (ct.type === 'color') field = PM.colorField(get, set, edit);
+          if (ct.type === 'text') field = PM.textField(get, set, { ...edit, mono: false });
+          else if (ct.type === 'color') field = PM.colorField(get, set, edit);
+          else if (ct.type === 'fill') field = PM.fillField(get, set, { ...edit, fallback: PM.proj.bg });
           else if (ct.type === 'toggle') field = PM.toggleField(get, set, edit);
           else if (ct.type === 'select') field = PM.selectField(get, set, ct.options || [], edit);
           else {
@@ -525,6 +533,33 @@ function sourceBinding(ct) {
   const target = ct.target || (ct.binding && ct.binding.target);
   const path = ct.path || (ct.binding && ct.binding.path);
   if (!target || !path) return null;
+  if (target === '$composition' || target === 'composition') {
+    const direct = {
+      'composition.name': ['name', () => PM.proj.name],
+      'composition.width': ['width', () => PM.proj.w],
+      'composition.height': ['height', () => PM.proj.h],
+      'composition.fps': ['fps', () => PM.proj.fps],
+      'composition.duration': ['duration', () => PM.proj.dur],
+      'composition.shutter': ['shutter', () => PM.proj.shutter ?? .5],
+      'composition.background': ['background', () => PM.proj.bg],
+      'composition.backgroundFill': ['backgroundFill', () => PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg)],
+    }[path];
+    if (direct) return { get: direct[1], command: value => ({ type: 'set_composition', patch: { [direct[0]]: value } }) };
+    if (path === 'composition.workArea.start' || path === 'composition.workArea.end') {
+      const index = path.endsWith('.start') ? 0 : 1;
+      return {
+        get: () => PM.proj.work?.[index] ?? (index ? PM.proj.dur : 0),
+        command: value => {
+          const workArea = [...(PM.proj.work || [0, PM.proj.dur])];
+          const frame = 1 / Math.max(1, PM.proj.fps || 30);
+          workArea[index] = index === 0
+            ? PM.clamp(Number(value), 0, Math.max(0, workArea[1] - frame))
+            : PM.clamp(Number(value), Math.min(PM.proj.dur, workArea[0] + frame), PM.proj.dur);
+          return { type: 'set_composition', patch: { workArea } };
+        },
+      };
+    }
+  }
   if ((target === '$composition' || target === 'composition') && path.startsWith('composition.background.')) {
     const key = path.slice('composition.background.'.length);
     const value = () => {
@@ -538,13 +573,15 @@ function sourceBinding(ct) {
     };
     const command = next => {
       let fill = PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg);
-      /* Gradient controls always operate on a real two-stop source. */
-      if (!['linear', 'radial'].includes(fill.type)) fill = PM.normalizeFill({ ...fill, type: 'linear' }, PM.proj.bg);
-      if (key === 'type') fill.type = ['linear', 'radial'].includes(next) ? next : 'linear';
-      else if (key === 'startColor') fill.stops[0].color = next;
+      if (key === 'type') fill = PM.normalizeFill({ ...fill, type: ['solid', 'linear', 'radial', 'none'].includes(next) ? next : 'solid' }, PM.proj.bg);
+      else {
+        /* Gradient stop controls always operate on a real two-stop source. */
+        if (!['linear', 'radial'].includes(fill.type)) fill = PM.normalizeFill({ ...fill, type: 'linear' }, PM.proj.bg);
+        if (key === 'startColor') fill.stops[0].color = next;
       else if (key === 'endColor') fill.stops[1].color = next;
       else if (key === 'angle') fill.angle = next;
       else if (key === 'midpoint') fill.stops[1].position = next;
+      }
       return { type: 'set_composition', patch: { backgroundFill: fill } };
     };
     return { get: value, command };

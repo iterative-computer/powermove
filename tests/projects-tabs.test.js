@@ -74,6 +74,17 @@ test('upsertMeta changes metadata without overwriting stored data', () => {
   assert.equal(meta.name, 'Hero renamed');
 });
 
+test('rename updates the project slot, registry metadata, and active project together', () => {
+  const { PM } = projectsModel();
+  PM.proj = { id: 'P1', name: 'Hero', layers: [{ id: 'L1' }] };
+  PM.Projects.put(PM.proj);
+  assert.equal(PM.Projects.rename('P1', '  Velocity Study  '), 'Velocity Study');
+  assert.equal(PM.proj.name, 'Velocity Study');
+  assert.equal(PM.Projects.get('P1').name, 'Velocity Study');
+  assert.equal(PM.Projects.list().find(m => m.id === 'P1').name, 'Velocity Study');
+  assert.equal(PM.Projects.rename('P1', '   '), 'Velocity Study', 'a blank rename keeps the current name');
+});
+
 test('remove clears both metadata and the storage slot', () => {
   const { PM, mem } = projectsModel();
   PM.proj = { id: 'P1', name: 'X', layers: [] };
@@ -166,6 +177,14 @@ test('tabs, projects screen, and drag preview are wired end to end', () => {
   assert.match(app, /PM\.SpatialAssistant\?\.cancel\?\.\(\)/);
   assert.match(app, /PM\.Popout\?\.closeAll\?\.\(\)/);
   assert.match(app, /session\?\.workspace\) PM\.WS\.restoreSnapshot/);
+  assert.match(app, /tab\.ondblclick[\s\S]*beginProjectRename/, 'double-clicking a project tab starts inline rename');
+  assert.match(app, /e\.detail > 1[\s\S]*beginProjectRename/,
+    'the second click also starts rename across WebKit double-click variations');
+  assert.match(app, /e\.key === 'Enter'[\s\S]*finish\(true\)/, 'Enter commits the inline name');
+  assert.match(app, /e\.key === 'Escape'[\s\S]*finish\(false\)/, 'Escape cancels the inline name');
+  assert.match(app, /input\.onblur = \(\) => finish\(true\)/, 'clicking away commits the inline name');
+  assert.match(app, /if \(tabs\.querySelector\('\.project-doc\.renaming'\)\) return/,
+    'autosave refreshes cannot tear down a live rename field');
   assert.ok(index.indexOf('js/core/projects.js') > -1 && index.indexOf('js/ui/projects.js') > -1,
     'registry and screen are loaded');
 });
@@ -192,6 +211,8 @@ test('projects surface has production library controls and Powermove selection c
     'project switcher has no outer border');
   assert.match(css, /#tabs\{[\s\S]*width:max-content[\s\S]*flex:0 1 auto/,
     'the switcher wraps its projects instead of leaving an empty trough');
+  assert.match(css, /\.project-doc-input\{[^}]*min-width:0[^}]*width:100%/,
+    'the inline rename field stays inside the compact tab');
   assert.match(screen, /className = 'ps-grid'[\s\S]*' empty'/,
     'empty project sections receive a full-height centered layout');
   assert.match(css, /\.ps-grid\.empty\{[^}]*place-items:center/);
@@ -229,8 +250,15 @@ test('every app icon has a global rendering contract and a registry entry', () =
     assert.ok(icon && defined.has(icon[1]), `${type} model icon is defined`);
   });
   assert.match(util, /classList\.add\('pm-icon'\)/, 'every generated icon receives the shared class');
-  assert.match(css, /\.pm-icon\{[^}]*stroke:currentColor;fill:none/, 'global icon geometry is safe by default');
+  assert.match(util, /dataset\.iconSet = 'phosphor'/, 'every catalog icon identifies the Phosphor source');
+  assert.match(css, /\.pm-icon\{[^}]*fill:currentColor;stroke:none/, 'Phosphor fill geometry is rendered globally');
   assert.match(util, /Unknown Powermove icon/, 'unknown dynamic names are diagnosed instead of silently becoming dots');
+  assert.doesNotMatch(iconBlock, /undefined|<svg/, 'the registry contains valid Phosphor path fragments');
+  const inspector = utf8('js/ui/inspector.js');
+  const assistant = utf8('js/assistant/spatial.js');
+  assert.doesNotMatch(inspector, /PM\.svg\(/, 'inspector one-off drawings use catalog icons');
+  assert.match(assistant, /PM\.icon\('return'\)/, 'assistant send actions use the compact Phosphor Return-key icon');
+  assert.doesNotMatch(assistant, />\s*['"](?:↵|↑|×)['"]/, 'assistant actions do not use text glyphs as icons');
 });
 
 test('development packages cannot write into the installed app storage', () => {

@@ -28,6 +28,7 @@ function workspaceRuntime() {
     store: { get: (_key, fallback) => fallback, set() {} },
     bus: { emit() {} }, registerPanel() {},
     proj: {
+      name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10, shutter: .5, work: [0, 10],
       bg: '#111111',
       backgroundFill: { type: 'linear', angle: 15, stops: [
         { id: 'start', color: '#112233', position: 0 },
@@ -120,6 +121,18 @@ test('generated gradient controls read and write the real composition background
   assert.equal(command.type, 'set_composition');
   assert.equal(command.patch.backgroundFill.stops[1].color, '#AABBCC');
   assert.equal(PM.proj.backgroundFill.stops[1].color, '#445566', 'building the command does not mutate source early');
+});
+
+test('generated composition controls expose real width, height, timing, and work-area source', () => {
+  const PM = workspaceRuntime();
+  const width = PM.WS.sourceBinding({ type: 'slider', target: '$composition', path: 'composition.width', def: 16 });
+  const height = PM.WS.sourceBinding({ type: 'slider', target: '$composition', path: 'composition.height', def: 16 });
+  const start = PM.WS.sourceBinding({ type: 'slider', target: '$composition', path: 'composition.workArea.start', def: 0 });
+  assert.equal(width.get(), 1920); assert.equal(height.get(), 1080);
+  const widthCommand = width.command(2560), heightCommand = height.command(1440), startCommand = start.command(2);
+  assert.equal(widthCommand.type, 'set_composition'); assert.equal(widthCommand.patch.width, 2560);
+  assert.equal(heightCommand.type, 'set_composition'); assert.equal(heightCommand.patch.height, 1440);
+  assert.deepEqual([...startCommand.patch.workArea], [2, 10]);
 });
 
 test('boot refreshes stale built-in presets while preserving custom workspaces', () => {

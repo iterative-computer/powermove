@@ -2,7 +2,7 @@
 (() => {
 const PM = window.PM, h = PM.h, clamp = PM.clamp;
 
-const V = { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null };
+const V = { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, guides: null };
 PM.Viewer = V;
 
 PM.registerPanel('viewer', {
@@ -137,6 +137,8 @@ function drawOverlay() {
   c.save(); c.scale(S, S);
   c.lineWidth = 1 / S;
 
+  drawSnapGuides(c, S, p);
+
   const sels = PM.selLayers().filter(L => PM.active(L, PM.time));
   for (const L of sels) {
     const b = PM.GL.bounds(L, PM.time);
@@ -161,6 +163,98 @@ function drawOverlay() {
   c.restore();
 }
 const HANDLES = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
+
+function drawSnapGuides(c, S, p) {
+  const guides = V.guides;
+  if (!guides || (guides.x == null && guides.y == null)) return;
+  c.save();
+  c.strokeStyle = 'rgba(74,164,255,.96)';
+  c.lineWidth = 1 / S;
+  c.setLineDash([5 / S, 3 / S]);
+  c.beginPath();
+  if (guides.x != null) { c.moveTo(guides.x, 0); c.lineTo(guides.x, p.h); }
+  if (guides.y != null) { c.moveTo(0, guides.y); c.lineTo(p.w, guides.y); }
+  c.stroke();
+  c.restore();
+}
+
+/* Screen-space alignment helpers. Bounds and guide coordinates stay in
+   composition pixels, while the tolerance is converted from a constant
+   on-screen distance by startMove(). */
+function snapAxis(movingMarks, targetMarks, threshold) {
+  let best = null;
+  for (const moving of movingMarks || []) {
+    const movingValue = typeof moving === 'number' ? moving : moving.value;
+    if (!Number.isFinite(movingValue)) continue;
+    for (const target of targetMarks || []) {
+      const targetValue = typeof target === 'number' ? target : target.value;
+      if (!Number.isFinite(targetValue)) continue;
+      const delta = targetValue - movingValue;
+      const distance = Math.abs(delta);
+      if (distance > threshold || (best && distance >= best.distance - 1e-9)) continue;
+      best = { delta, value: targetValue, distance };
+    }
+  }
+  return best;
+}
+
+function worldBounds(L, T) {
+  const b = PM.GL.bounds(L, T); if (!b) return null;
+  const m = PM.worldMatrix(L, T);
+  const points = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]
+    .map(([x, y]) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+  const xs = points.map(point => point[0]), ys = points.map(point => point[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  return { x0, x1, y0, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+}
+
+function unionBounds(layers, T) {
+  const bounds = layers.map(L => worldBounds(L, T)).filter(Boolean);
+  if (!bounds.length) return null;
+  const x0 = Math.min(...bounds.map(b => b.x0)), x1 = Math.max(...bounds.map(b => b.x1));
+  const y0 = Math.min(...bounds.map(b => b.y0)), y1 = Math.max(...bounds.map(b => b.y1));
+  return { x0, x1, y0, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+}
+
+function hasSelectedAncestor(L, selectedIds) {
+  let parentId = L.parent, guard = 0;
+  while (parentId && guard++ < 256) {
+    if (selectedIds.has(parentId)) return true;
+    const parent = PM.L(parentId);
+    parentId = parent && parent.parent;
+  }
+  return false;
+}
+
+function snapshotSnapTargets(T, selectedIds) {
+  const x = [{ value: 0 }, { value: PM.proj.w / 2 }, { value: PM.proj.w }];
+  const y = [{ value: 0 }, { value: PM.proj.h / 2 }, { value: PM.proj.h }];
+  const soloOn = PM.proj.layers.some(L => L.solo);
+  for (const L of PM.proj.layers) {
+    if (selectedIds.has(L.id) || hasSelectedAncestor(L, selectedIds) || !PM.active(L, T) || (soloOn && !L.solo)) continue;
+    const b = worldBounds(L, T); if (!b) continue;
+    x.push({ value: b.x0 }, { value: b.cx }, { value: b.x1 });
+    y.push({ value: b.y0 }, { value: b.cy }, { value: b.y1 });
+  }
+  return { x, y };
+}
+
+function alignmentSnap(bounds, targets, threshold, axes = { x: true, y: true }) {
+  if (!bounds) return { dx: 0, dy: 0, x: null, y: null };
+  const x = axes.x ? snapAxis([bounds.x0, bounds.cx, bounds.x1], targets.x, threshold) : null;
+  const y = axes.y ? snapAxis([bounds.y0, bounds.cy, bounds.y1], targets.y, threshold) : null;
+  return { dx: x ? x.delta : 0, dy: y ? y.delta : 0, x, y };
+}
+
+function worldDeltaToLocal(L, T, dx, dy) {
+  if (!L.parent) return [dx, dy];
+  const parent = PM.L(L.parent); if (!parent) return [dx, dy];
+  const m = PM.worldMatrix(parent, T), det = m[0] * m[3] - m[1] * m[2];
+  if (Math.abs(det) < 1e-9) return [0, 0];
+  return [(dx * m[3] - dy * m[2]) / det, (dy * m[0] - dx * m[1]) / det];
+}
+
+Object.assign(V, { snapAxis, worldBounds, unionBounds, snapshotSnapTargets, alignmentSnap });
 
 /* ── direct manipulation ───────────────────────────────── */
 function bindStage(stage, inner) {
@@ -240,20 +334,39 @@ function handleAt(L, x, y, T) {
 function startMove(e, layers, T) {
   if (!layers.length) return;
   const start = layers.map(L => ({ L, x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T) }));
+  const selectedIds = new Set(layers.map(L => L.id));
+  const correctionRoots = start.filter(s => !hasSelectedAncestor(s.L, selectedIds));
+  const targets = snapshotSnapTargets(T, selectedIds);
+  const clearGuides = () => { V.guides = null; PM.invalidate('render'); };
   PM.Edit.begin('Move layer', { origin: 'canvas' });
   let moved = false;
   PM.drag(e, {
     move: (dx, dy, ev) => {
       moved = true;
       let ddx = dx / V.shown, ddy = dy / V.shown;
-      if (ev.shiftKey) { if (Math.abs(ddx) > Math.abs(ddy)) ddy = 0; else ddx = 0; }
+      const axes = { x: true, y: true };
+      if (ev.shiftKey) {
+        if (Math.abs(ddx) > Math.abs(ddy)) { ddy = 0; axes.y = false; }
+        else { ddx = 0; axes.x = false; }
+      }
       start.forEach(s => {
         setOrKey(s.L, 'position.x', s.x + ddx, T);
         setOrKey(s.L, 'position.y', s.y + ddy, T);
       });
+      let snap = { dx: 0, dy: 0, x: null, y: null };
+      if (PM.snap) snap = alignmentSnap(unionBounds(layers, T), targets, 8 / Math.max(.02, V.shown), axes);
+      correctionRoots.forEach(s => {
+        const [cx, cy] = worldDeltaToLocal(s.L, T, snap.dx, snap.dy);
+        if (cx) setOrKey(s.L, 'position.x', s.x + ddx + cx, T);
+        if (cy) setOrKey(s.L, 'position.y', s.y + ddy + cy, T);
+      });
+      V.guides = PM.snap && (snap.x || snap.y)
+        ? { x: snap.x ? snap.x.value : null, y: snap.y ? snap.y.value : null }
+        : null;
       PM.invalidate();
     },
-    up: () => { moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector.refresh(); },
+    up: () => { clearGuides(); moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector.refresh(); },
+    cancel: () => { clearGuides(); PM.Edit.cancel(); PM.Inspector.refresh(); },
   });
 }
 

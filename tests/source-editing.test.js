@@ -129,6 +129,22 @@ test('Composition background color commits through source history and is undoabl
   assert.equal(PM.proj.bg, '#3366CC');
 });
 
+test('the live editable-source catalog includes complete composition and selected-layer controls', () => {
+  const { PM } = editor();
+  const layer = addText(PM);
+  const catalog = PM.Edit.sourceCatalog();
+  const compositionPaths = new Set(catalog.composition.map(control => control.path));
+  for (const path of ['composition.name', 'composition.width', 'composition.height', 'composition.fps', 'composition.duration', 'composition.workArea.start', 'composition.workArea.end', 'composition.backgroundFill']) {
+    assert.equal(compositionPaths.has(path), true, `${path} is agent-bindable`);
+  }
+  const controls = new Set(catalog.layers.find(item => item.id === layer.id).controls.map(control => control.path));
+  for (const path of ['layer.name', 'layer.visible', 'layer.locked', 'layer.solo', 'layer.blend', 'content.text', 'content.font', 'properties.position.x', 'properties.opacity']) {
+    assert.equal(controls.has(path), true, `${path} is agent-bindable`);
+  }
+  assert.equal(PM.Edit.apply({ type: 'set_composition', patch: { width: 2560, height: 1440 } }, { origin: 'generated-ui' }).ok, true);
+  assert.deepEqual([PM.proj.w, PM.proj.h], [2560, 1440]);
+});
+
 test('Composition gradients preserve editable stops and undo as one source edit', () => {
   const { PM } = editor();
   const before = JSON.stringify(PM.proj.backgroundFill);

@@ -152,9 +152,7 @@ function renameDialog(m) {
   const raw = PM.Projects.get(m.id), name = h('input', { value: raw && raw.name || m.name });
   PM.modal({ title: 'Rename project', body: h('div.field', name), width: 400, actions: [
     { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => {
-      const v = name.value.trim() || m.name;
-      if (raw) { raw.name = v; PM.Projects.put(raw); } else PM.Projects.upsertMeta({ id: m.id, name: v, at: Date.now() });
-      if (m.id === PM.proj.id) PM.proj.name = v;
+      PM.Projects.rename(m.id, name.value);
       paint(); PM.bus.emit('projects:tabs'); PM.bus.emit('project');
     } },
   ] });

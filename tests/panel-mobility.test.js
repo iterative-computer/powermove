@@ -45,6 +45,16 @@ test('panel placement preview is an overlay and never reflows the dock under the
   assert.match(css, /\.panel-drop-preview\.on/);
 });
 
+test('an interrupted titlebar drag cannot hijack a later panel gesture', () => {
+  assert.match(native, /private var dragEndMonitor: Any\?/);
+  assert.match(native, /matching: \[\.leftMouseDown, \.leftMouseDragged, \.leftMouseUp\]/,
+    'a fresh panel mouse-down terminates any stale native window-drag monitor');
+  assert.match(native, /event\.type == \.leftMouseDown \|\| event\.type == \.leftMouseUp[\s\S]*endWindowDrag\(\)/);
+  assert.match(native, /addGlobalMonitorForEvents\(matching: \.leftMouseUp\)/,
+    'a release delivered outside Powermove also ends native window dragging');
+  assert.match(native, /if let m = dragEndMonitor \{ NSEvent\.removeMonitor\(m\); dragEndMonitor = nil \}/);
+});
+
 test('drag motion is frame-coalesced, uses generous geometry, and animates only the drop', () => {
   assert.match(layout, /requestAnimationFrame\(renderDragFrame\)/);
   assert.match(layout, /L\.buildDockDropTargets\(docks, bodyRect\)/);

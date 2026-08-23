@@ -417,6 +417,87 @@ function changed(notify = true) {
   if (notify && PM.Inspector && PM.Inspector.refresh) PM.Inspector.refresh();
 }
 
+const colorValue = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+const primitiveControl = value => typeof value === 'boolean' ? 'toggle'
+  : typeof value === 'number' ? 'slider'
+    : colorValue(value) ? 'color'
+      : typeof value === 'string' ? 'text' : null;
+const numericRange = (value, hint = '') => {
+  const n = Number(value) || 0;
+  if (hint === 'opacity') return { min: 0, max: 100, step: 1 };
+  if (hint.includes('rotation') || hint === 'angle') return { min: -360, max: 360, step: 1 };
+  if (hint.includes('scale')) return { min: 0, max: 1000, step: .5 };
+  if (hint.includes('position') || hint.includes('anchor')) return { min: -Math.max(PM.proj.w, PM.proj.h) * 2, max: Math.max(PM.proj.w, PM.proj.h) * 2, step: 1 };
+  const span = Math.max(1, Math.abs(n) * 2);
+  return { min: n < 0 ? -span : 0, max: span, step: span >= 100 ? 1 : span / 100 };
+};
+
+/* This catalog is the single capability map used by the agent and generated
+   panels. It is derived from the live source, so adding a real editable field
+   automatically makes it available instead of requiring another prompt-only
+   whitelist. */
+function sourceCatalog() {
+  const p = PM.proj;
+  const fill = PM.normalizeFill(p.backgroundFill, p.bg);
+  const composition = [
+    { path: 'composition.name', label: 'Name', control: 'text', value: p.name },
+    { path: 'composition.width', label: 'Width', control: 'slider', value: p.w, min: 16, max: 16384, step: 1, unit: 'px' },
+    { path: 'composition.height', label: 'Height', control: 'slider', value: p.h, min: 16, max: 16384, step: 1, unit: 'px' },
+    { path: 'composition.fps', label: 'Frame rate', control: 'slider', value: p.fps, min: 1, max: 240, step: 1, unit: 'fps' },
+    { path: 'composition.duration', label: 'Duration', control: 'slider', value: p.dur, min: .1, max: Math.max(60, p.dur * 4), step: 1 / Math.max(1, p.fps), unit: 's' },
+    { path: 'composition.shutter', label: 'Shutter', control: 'slider', value: p.shutter ?? .5, min: 0, max: 2, step: .01 },
+    { path: 'composition.workArea.start', label: 'Work area start', control: 'slider', value: p.work?.[0] ?? 0, min: 0, max: p.dur, step: 1 / Math.max(1, p.fps), unit: 's' },
+    { path: 'composition.workArea.end', label: 'Work area end', control: 'slider', value: p.work?.[1] ?? p.dur, min: 0, max: p.dur, step: 1 / Math.max(1, p.fps), unit: 's' },
+    { path: 'composition.backgroundFill', label: 'Background fill', control: 'fill', value: fill },
+    { path: 'composition.background', label: 'Background color', control: 'color', value: p.bg },
+    { path: 'composition.background.type', label: 'Background type', control: 'select', value: fill.type, options: ['solid', 'linear', 'radial', 'none'] },
+    { path: 'composition.background.startColor', label: 'Background start', control: 'color', value: fill.stops[0]?.color || p.bg },
+    { path: 'composition.background.endColor', label: 'Background end', control: 'color', value: fill.stops[1]?.color || fill.stops[0]?.color || p.bg },
+    { path: 'composition.background.angle', label: 'Background angle', control: 'slider', value: fill.angle, min: -180, max: 180, step: 1, unit: '°' },
+    { path: 'composition.background.midpoint', label: 'Background midpoint', control: 'slider', value: fill.stops[1]?.position ?? 100, min: 0, max: 100, step: 1, unit: '%' },
+  ];
+  const parentOptions = [{ v: null, label: 'None' }, ...p.layers.map(layer => ({ v: layer.id, label: layer.name }))];
+  const layers = p.layers.map(layer => {
+    const fields = [
+      { path: 'layer.name', label: 'Layer name', control: 'text', value: layer.name },
+      { path: 'layer.from', label: 'Start time', control: 'slider', value: layer.from, min: 0, max: p.dur, step: 1 / Math.max(1, p.fps), unit: 's' },
+      { path: 'layer.duration', label: 'Duration', control: 'slider', value: layer.dur, min: 1 / Math.max(1, p.fps), max: Math.max(p.dur, layer.dur), step: 1 / Math.max(1, p.fps), unit: 's' },
+      { path: 'layer.visible', label: 'Visible', control: 'toggle', value: layer.on },
+      { path: 'layer.locked', label: 'Locked', control: 'toggle', value: layer.lock },
+      { path: 'layer.solo', label: 'Solo', control: 'toggle', value: layer.solo },
+      { path: 'layer.shy', label: 'Shy', control: 'toggle', value: layer.shy },
+      { path: 'layer.motionBlur', label: 'Motion blur', control: 'toggle', value: layer.mblur },
+      { path: 'layer.collapsed', label: 'Collapsed', control: 'toggle', value: layer.collapsed },
+      { path: 'layer.blend', label: 'Blend mode', control: 'select', value: layer.blend, options: [...PM.BLENDS] },
+      { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, options: parentOptions.filter(option => option.v !== layer.id) },
+      { path: 'layer.color', label: 'Label color', control: 'color', value: layer.color },
+    ];
+    const content = Object.entries(layer.d || {}).map(([key, value]) => {
+      const control = primitiveControl(value); if (!control) return null;
+      return { path: `content.${key}`, label: key, control, value, ...(control === 'slider' ? numericRange(value, key) : {}) };
+    }).filter(Boolean);
+    const properties = PM.allProps(layer).map(item => {
+      const value = PM.evP(layer, item.prop, PM.time, item.key);
+      const control = primitiveControl(value); if (!control) return null;
+      const fxId = item.key.split('.')[0];
+      const fx = (layer.fx || []).find(effect => effect.id === fxId);
+      const fxParam = fx && PM.FX?.[fx.type]?.params?.find(param => param.k === item.key.slice(fxId.length + 1));
+      const shaderDef = layer.type === 'shader' && item.key.startsWith('u.')
+        ? (layer._udefs || PM.parseUniforms?.(layer.d.code) || []).find(def => `u.${def.name}` === item.key) : null;
+      const meta = fxParam || shaderDef || PM.CH?.[item.key] || {};
+      return {
+        path: `properties.${item.key}`, label: meta.label || item.label || item.key,
+        group: item.group, control: meta.type === 'color' ? 'color' : control, value,
+        animatable: true, ...((meta.type === 'color' ? 'color' : control) === 'slider'
+          ? { ...numericRange(value, item.key), ...Object.fromEntries(['min', 'max', 'step', 'unit'].filter(key => meta[key] !== undefined).map(key => [key, meta[key]])) }
+          : {}),
+      };
+    }).filter(Boolean);
+    return { id: layer.id, name: layer.name, type: layer.type, controls: [...fields, ...content, ...properties] };
+  });
+  return { target: '$composition', composition, layers, operations: Object.keys(Edit.operations) };
+}
+
 const Edit = {
   operations: Object.freeze({
     set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
@@ -524,6 +605,8 @@ const Edit = {
       operations: Object.keys(Edit.operations),
     };
   },
+
+  sourceCatalog,
 };
 
 PM.Edit = Edit;
