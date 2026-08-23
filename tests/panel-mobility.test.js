@@ -7,10 +7,12 @@ const root = path.resolve(__dirname, '..');
 const layout = fs.readFileSync(path.join(root, 'js/ui/layout.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
+const viewer = fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8');
 const native = fs.readFileSync(path.join(root, 'native/main.swift'), 'utf8');
 
-test('headless preview and timeline panels expose a dedicated move handle', () => {
+test('headless Composition and Timeline panels expose dedicated move handles', () => {
   assert.match(layout, /button\.panel-move-handle/);
+  assert.match(layout, /headless && !def\.hideMoveHandle/);
   assert.match(layout, /Move \$\{def\.title\} panel/);
   assert.match(layout, /moveHandle\.addEventListener\('pointerdown', beginMove\)/);
   assert.match(css, /\.panel-move-handle\s*\{/);
@@ -18,6 +20,26 @@ test('headless preview and timeline panels expose a dedicated move handle', () =
   assert.match(css, /\.panel-move-handle\.inline/);
   assert.match(css, /\.panel-move-handle\.inline\{[^}]*width:16px[^}]*border:0[^}]*background:transparent[^}]*box-shadow:none/s);
   assert.match(layout, /slot\.insertBefore\(moveHandle, slot\.firstChild\)/);
+  assert.match(timeline, /moveSlot: '#tl-head'/, 'Timeline keeps its drag handle');
+  assert.doesNotMatch(viewer, /hideMoveHandle: true/);
+  assert.match(css, /#panel-viewer > \.panel-move-handle\{[^}]*left:10px[^}]*width:16px[^}]*background:transparent/s,
+    'Composition restores only the compact drag grip, not the retired footer');
+});
+
+test('panel move handles form a soft cursor-proximity opacity field', () => {
+  assert.match(layout, /HANDLE_PROXIMITY_RADIUS = 220/);
+  assert.match(layout, /L\.handleProximity/);
+  assert.match(layout, /Math\.hypot\(dx, dy\)/);
+  assert.match(layout, /requestAnimationFrame\(paintHandleProximity\)/,
+    'pointer sampling is coalesced to one visual update per frame');
+  assert.match(layout, /style\.setProperty\('--handle-proximity'/);
+  assert.match(layout, /pointerleave', resetHandleProximity/);
+  assert.match(layout, /panel-move-handle,\.panel > header \.grip/,
+    'regular panel and headless-panel grips share the same opacity field');
+  assert.match(css, /opacity:calc\(\.22 \+ var\(--handle-proximity,0\) \* \.78\)/,
+    'the resting grip remains discoverable while direct hover reaches full opacity');
+  assert.match(css, /\.panel-move-handle:hover,\.panel-move-handle:focus-visible\{opacity:1/,
+    'mouse and keyboard focus both reveal the grip fully');
 });
 
 test('persisted canvas panels resolve their current dock before moving again', () => {
@@ -98,6 +120,23 @@ test('pop out creates a native child window, mirrors one live panel owner, and r
   assert.doesNotMatch(popout, /PM\.WS\.mutate/, 'detaching does not destroy or duplicate the layout manifest');
   assert.match(popout, /w\.closed.*PM\.Popout\.reclaim\(id\)/s);
   assert.match(popout, /if \(L\.ws\) L\.apply\(L\.ws\)/, 'close and redock rebuild from synchronized source state');
+});
+
+test('detached autosizing prompts keep compact geometry, focus, and caret while typing', () => {
+  const spatial = fs.readFileSync(path.join(root, 'js/assistant/spatial.js'), 'utf8');
+  const popout = layout.slice(layout.indexOf('PM.Popout ='), layout.lastIndexOf('})();'));
+  assert.match(spatial, /data-autosize': 'true'/, 'assistant textareas declare visible-window autosizing');
+  assert.match(spatial, /input\.closest\('\[data-popout-source\]'\)\) return/,
+    'the hidden authoritative textarea is never measured as visible content');
+  assert.match(popout, /sourceHost\.dataset\.popoutSource = id/);
+  assert.match(popout, /resizeMirroredTextarea\(event\.target\)/,
+    'the correctly sized visible textarea grows instead of the hidden source');
+  assert.match(popout, /suppressInputMirror = true[\s\S]*resizeMirroredTextarea\(event\.target\);\s*return/,
+    'typing updates the authoritative value without redispatching the hidden source input event');
+  assert.match(popout, /records\.every\(belongsToAutosizingTextarea\)/,
+    'WebKit textarea mutations do not rebuild and blur the active mirror');
+  assert.match(popout, /focusedPath[\s\S]*selectionStart[\s\S]*nextActive\.focus[\s\S]*setSelectionRange/,
+    'authoritative refreshes restore both focus and the exact caret range');
 });
 
 test('vertical resize handles are generous, bounded, persistent, and never start panel movement', () => {

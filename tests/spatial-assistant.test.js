@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'js/assistant/spatial.js'), 'utf8');
+const capabilitiesSource = fs.readFileSync(path.join(root, 'js/core/capabilities.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 
 function spatialModel(adapterFactory) {
@@ -13,6 +14,8 @@ function spatialModel(adapterFactory) {
     h() {}, uid: () => 'id',
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
     round: (value, places = 0) => Number(Number(value).toFixed(places)),
+    snapF: (time, fps) => Math.round(time * fps) / fps,
+    TYPE_META: { text: {} },
     commands: { fitView: { id: 'fitView', label: 'Fit view' } },
     PANELS: { viewer: { title: 'Composition' }, timeline: { title: 'Timeline' }, inspector: { title: 'Inspector' }, assets: { title: 'Project' } },
     registerPanel(id, definition) { this.PANELS[id] = definition; },
@@ -60,11 +63,25 @@ function spatialModel(adapterFactory) {
       ensureDock(workspace, dockId).panels.push(found.spec); return true;
     },
   };
+  PM.WS = {
+    sanitizeInterfaceEdit(value) {
+      let raw = value;
+      try { if (typeof raw === 'string') raw = JSON.parse(raw); } catch { return null; }
+      if (!raw || raw.target !== 'timeline' || !raw.patch || typeof raw.patch !== 'object') return null;
+      const patch = {};
+      if (Number.isFinite(raw.patch.rowHeight)) patch.rowHeight = PM.clamp(Math.round(raw.patch.rowHeight), 22, 48);
+      if (Number.isFinite(raw.patch.gutterWidth)) patch.gutterWidth = PM.clamp(Math.round(raw.patch.gutterWidth), 160, 360);
+      if (Number.isFinite(raw.patch.clipRadius)) patch.clipRadius = PM.clamp(raw.patch.clipRadius, 0, 12);
+      if (typeof raw.patch.showLayerNumbers === 'boolean') patch.showLayerNumbers = raw.patch.showLayerNumbers;
+      return Object.keys(patch).length ? { target: 'timeline', patch } : null;
+    },
+  };
   const context = vm.createContext({
     window: { PM }, console, Map, Set, Uint8Array, TextDecoder,
     navigator: { gpu: adapterFactory ? { requestAdapter: adapterFactory } : undefined },
     setTimeout, clearTimeout, atob: value => Buffer.from(value, 'base64').toString('binary'),
   });
+  vm.runInContext(capabilitiesSource, context);
   vm.runInContext(source, context);
   return PM.SpatialAssistant;
 }
@@ -159,6 +176,59 @@ test('generated section manifests are bounded and discard unsafe button commands
   assert.equal(plan.section.controls[0].connection, 'Composition background');
 });
 
+test('known generated tools expand into validated selection-aware native panels', () => {
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'section', operation: 'create', message: 'Stagger tool ready',
+    section: { id: 'timing-tool', title: 'Layer Stagger', size: 300, note: '', tool: 'layer-stagger', controls: [] },
+  }, { targetPanelId: 'timeline' });
+  assert.equal(plan.section.tool, 'layer-stagger');
+  assert.deepEqual([...plan.section.controls.map(control => control.label)], [
+    'Selection', 'Offset', 'Order', 'Anchor', 'Preview', 'Apply Stagger', 'Undo last edit',
+  ]);
+  assert.equal(plan.section.controls.find(control => control.label === 'Offset').stateKey, 'offsetFrames');
+  assert.equal(plan.section.controls.find(control => control.label === 'Apply Stagger').action.type, 'transform');
+  assert.equal(plan.section.controls.find(control => control.label === 'Apply Stagger').primary, true);
+});
+
+test('advanced generated tool actions accept bounded transforms and reject executable transform expressions', () => {
+  const action = JSON.stringify({
+    type: 'transform', mode: 'apply', transform: {
+      label: 'Offset layers', selector: { scope: 'selection' }, order: 'selection',
+      edits: [{ path: 'layer.from', value: { op: 'add', args: [{ ref: 'current' }, { op: 'frames', args: [{ state: 'offset' }] }] } }],
+    },
+  });
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'section', operation: 'create', message: 'Timing tool ready',
+    section: { id: 'offset-tool', title: 'Offset', size: 240, note: '', controls: [
+      { type: 'slider', label: 'Offset', stateKey: 'offset', defaultValue: 2, min: -60, max: 60, step: 1 },
+      { type: 'button', label: 'Apply', action, primary: true },
+      { type: 'button', label: 'Unsafe', action: JSON.stringify({ type: 'transform', mode: 'apply', transform: {
+        selector: { scope: 'selection' }, edits: [{ path: 'layer.from', value: { op: 'javascript', args: ['alert(1)'] } }],
+      } }) },
+    ] },
+  }, { targetPanelId: 'timeline' });
+  assert.deepEqual([...plan.section.controls.map(control => control.label)], ['Offset', 'Apply']);
+  assert.equal(plan.section.controls[0].connection, 'Tool setting');
+  assert.equal(plan.section.controls[1].connection, 'Source action');
+});
+
+test('generated sections accept bounded sandbox scripts for procedural source tools', () => {
+  const action = JSON.stringify({
+    type: 'script', mode: 'apply', label: 'Build copies', requiredTypes: ['text'],
+    code: "const source=PM.selectedLayers[0]; PM.assert(source, 'Select text'); return [PM.setContent(source.id,{text:'Safe'})];",
+  });
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'section', operation: 'create', message: 'Procedural tool ready',
+    section: { id: 'procedural', title: 'Procedural', size: 240, note: '', controls: [
+      { type: 'button', label: 'Apply', action, primary: true },
+    ] },
+  }, { targetPanelId: 'timeline' });
+  assert.equal(plan.section.controls.length, 1);
+  assert.equal(plan.section.controls[0].action.type, 'script');
+  assert.equal(plan.section.controls[0].action.mode, 'apply');
+  assert.deepEqual([...plan.section.controls[0].action.requiredTypes], ['text']);
+});
+
 test('composition width and height become working generated controls instead of refusals', () => {
   const plan = spatialModel().math.sanitizePlan({
     kind: 'section', operation: 'create', message: 'Size controls ready',
@@ -202,6 +272,22 @@ test('Timeline surface reversal is a validated workspace chrome edit', () => {
   assert.deepEqual({ ...plan.chromeEdit }, { target: 'timeline.surfaceOrder', value: 'reversed' });
   assert.equal(math.applyChromeEdit(workspace, plan.chromeEdit), true);
   assert.equal(workspace.chrome.timelineSurfaceOrder, 'reversed');
+});
+
+test('Timeline redesigns use a bounded interface manifest without touching project source', () => {
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'interface', operation: 'modify', message: 'Compact Timeline ready',
+    interfaceEdit: JSON.stringify({ target: 'timeline', patch: {
+      rowHeight: 18, gutterWidth: 420, clipRadius: 4, showLayerNumbers: false,
+    } }),
+    section: { id: '', title: '', size: 220, note: '', controls: [] },
+  }, { targetPanelId: 'timeline' });
+  assert.equal(plan.kind, 'interface');
+  assert.deepEqual({ ...plan.interfaceEdit.patch }, {
+    rowHeight: 22, gutterWidth: 360, clipRadius: 4, showLayerNumbers: false,
+  });
+  assert.match(source, /kind=interface for a structured Timeline redesign/);
+  assert.match(source, /PM\.WS\.applyInterfaceEdit/);
 });
 
 test('panel plans can safely control the complete panel lifecycle', () => {
@@ -318,8 +404,8 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)/);
   assert.match(source, /window\.matchMedia\?\.\('\(prefers-reduced-motion: reduce\)'\)\.matches[\s\S]*renderer = 'reduced-motion'/,
     'reduced motion bypasses the WebGPU animation while leaving the assistant usable');
-  assert.match(css, /\.spatial-input-row:focus-within\{[^}]*var\(--accent-dim\)/,
-    'the prompt responds with a restrained token-based focus cue');
+  assert.match(css, /\.spatial-input-row:focus-within\{[^}]*border-color:var\(--line-2\)[^}]*box-shadow:none/,
+    'the focused prompt keeps a neutral border without an orange outline');
 });
 
 test('Ripple adapter acquisition is fresh on every lifecycle request', async () => {
@@ -354,9 +440,9 @@ test('selected-region prompt hands off into the ongoing Agent workspace panel', 
   assert.match(source, /document\.body\.appendChild\(S\.root\);[\s\S]*showComposer\(\)/,
     'the floating prompt appears immediately after a shake; drag selection is optional context');
   assert.match(source, /sendRequest\(input\)/);
-  assert.match(source, /PM\.CodexBridge\.request\([\s\S]*agentPrompt\(request, observation\), responseSchema\(\), attachedImages,[\s\S]*model: S\.model/,
+  assert.match(source, /PM\.CodexBridge\.request\([\s\S]*agentPrompt\(request, observation, steering\), responseSchema\(\), attachedImages,[\s\S]*model: S\.model/,
     'the agent receives the selected-region image followed by rendered composition frames');
-  assert.match(source, /promoteToConversation\(\); renderConversation\(\)/,
+  assert.match(source, /promoteToConversation\(\); renderConversation\(true\)/,
     'Send immediately moves the compact spatial prompt into the panel conversation');
   assert.match(source, /function promoteToConversation\(\)[\s\S]*dismissOverlay\(true\)[\s\S]*openAgentPanel\(\)/);
   assert.match(source, /registerPanel\('agent'/);
@@ -369,6 +455,8 @@ test('selected-region prompt hands off into the ongoing Agent workspace panel', 
   assert.doesNotMatch(source, /Return to layout/, 'native pop-out behavior remains owned by the shared panel system');
   assert.match(source, /event\.key === 'Escape'[\s\S]*cancel\(\)/);
   assert.match(source, /S\.plan = plan;[\s\S]*plan\.kind === 'panels' && S\.autoApplyPanels[\s\S]*applyPlan\(\)[\s\S]*showPreview\(\)/);
+  assert.match(source, /S\.plan = plan; S\.phase = 'conversation';[\s\S]*S\.autoApplyPanels\) await applyPlan\(\)/,
+    'auto-apply enters the phase accepted by applyPlan instead of marooning Step 2');
   assert.match(source, /onclick: applyPlan/);
   assert.match(source, /Apply scene edit/);
   assert.match(source, /Undo change/);
@@ -380,6 +468,61 @@ test('selected-region prompt hands off into the ongoing Agent workspace panel', 
     'the shake-prompt send button centers its icon independently of text baselines');
   assert.match(css, /\.spatial-send svg\[data-icon="return"\],\.agent-send svg\[data-icon="return"\]\{transform:translate\(-\.35px,\.45px\)\}/,
     'both Return-key icons share the same optical centering correction');
+});
+
+test('panel proposal rows keep their icon compact and action text readable', () => {
+  assert.match(source, /spatial-preview-control\.panel-action[^\n]*PM\.icon\('panel'\)/,
+    'review and result rows opt into panel-action layout');
+  assert.match(css, /\.spatial-preview-control>svg\{width:14px;height:14px;flex:none/,
+    'proposal icons cannot expand to fill the card');
+  assert.match(css, /\.spatial-preview-control\.panel-action>span:last-child\{[^}]*max-width:none[^}]*margin-left:0[^}]*white-space:normal/,
+    'panel action labels use the row width instead of the clipped value-column treatment');
+});
+
+test('working agent runs keep a focused steering composer with stop recovery', () => {
+  const math = spatialModel().math;
+  assert.deepEqual({ ...math.composerMode('working') }, {
+    working: true, disabled: false,
+    placeholder: 'Add direction while the agent works…', sendLabel: 'Steer current run',
+  });
+  assert.deepEqual({ ...math.composerMode('applying') }, {
+    working: false, disabled: true,
+    placeholder: 'Describe what you want changed…', sendLabel: 'Send message',
+  });
+  assert.match(source, /S\.composerDraft = input\.value/,
+    'typed steering survives conversation rerenders');
+  assert.match(source, /function stopActiveRequest\(\)[\s\S]*active\?\.abort\(\)/,
+    'a stuck run always has a local recovery path');
+  assert.match(source, /pmCodexCancel\?\.postMessage\(\{ id \}\)/,
+    'browser cancellation reaches the native process owner');
+  assert.match(css, /\.agent-stop\{[^}]*display:grid;place-items:center/);
+});
+
+test('assistant composers grow for multiline prompts and cap only after useful room', () => {
+  const math = spatialModel().math;
+  assert.deepEqual({ ...math.textareaLayout(84, 30, 128) }, { height: 84, overflowY: 'hidden' });
+  assert.deepEqual({ ...math.textareaLayout(180, 30, 128) }, { height: 128, overflowY: 'auto' });
+  assert.deepEqual({ ...math.textareaLayout(12, 30, 128) }, { height: 30, overflowY: 'hidden' });
+  assert.match(source, /function autosizeTextarea\(input, onResize\)[\s\S]*input\.addEventListener\('input', resize\)/);
+  assert.match(source, /h\('textarea', \{[\s\S]*rows: '1'[\s\S]*autosizeTextarea\(input,/,
+    'the floating prompt starts compact and grows as it wraps');
+  assert.match(source, /h\('textarea\.spatial-followup', \{[\s\S]*rows: '1'[\s\S]*autosizeTextarea\(input\);/,
+    'the ongoing agent composer shares the multiline behavior');
+  assert.match(css, /\.spatial-compose textarea\{[^}]*max-height:128px[^}]*overflow-y:hidden/,
+    'scrolling begins only after the floating prompt reaches its cap');
+});
+
+test('sending a message animates the new exchange once', () => {
+  assert.match(source, /entering: true/);
+  assert.match(source, /S\.pendingEntering = true/);
+  assert.match(source, /message\.entering = false/,
+    'later progress renders do not replay the outgoing-message animation');
+  assert.match(css, /\.spatial-message\.user\.is-entering\{[^}]*animation:agent-message-send/);
+  assert.match(css, /\.spatial-message\.pending\.is-entering\{[^}]*animation:agent-pending-enter/);
+  assert.match(css, /@keyframes agent-message-send/);
+  assert.match(source, /const SEND_TRANSITION_MS = 240/);
+  assert.match(source, /const \[observation\] = await Promise\.all\(\[[\s\S]*observationPromise[\s\S]*SEND_TRANSITION_MS/,
+    'useful observation work runs during the short visual handoff instead of the next render interrupting it');
 });
 
 test('Ripple activation is limited to the active project editor', () => {

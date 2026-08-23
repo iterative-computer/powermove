@@ -261,6 +261,20 @@ function addLayer(command) {
     ? Math.max(.1, PM.proj.dur - layer.from)
     : Math.max(1 / PM.proj.fps, finite(command.duration, 'layer duration'));
   PM.addLayer(layer, command.index == null ? 0 : PM.clamp(Math.round(command.index), 0, PM.proj.layers.length));
+  if (command.parent != null) {
+    const parent = findLayer(command.parent);
+    if (!parent || parent.id === layer.id || PM.wouldCycle(layer, parent.id)) throw new Error('Invalid parent layer');
+    layer.parent = parent.id;
+  }
+  if (command.blend != null) {
+    if (!PM.BLENDS.includes(command.blend)) throw new Error(`Unknown blend mode: ${command.blend}`);
+    layer.blend = command.blend;
+  }
+  if (command.motionBlur != null) layer.mblur = !!command.motionBlur;
+  if (command.visible != null) layer.on = !!command.visible;
+  if (command.solo != null) layer.solo = !!command.solo;
+  if (command.shy != null) layer.shy = !!command.shy;
+  if (command.collapsed != null) layer.collapsed = !!command.collapsed;
   if (type === 'shader' && PM.syncShaderUniforms) PM.syncShaderUniforms(layer);
   if (command.select !== false) PM.selectLayers(layer.id);
   return { id: layer.id, name: layer.name, layer };
@@ -498,6 +512,21 @@ function sourceCatalog() {
   return { target: '$composition', composition, layers, operations: Object.keys(Edit.operations) };
 }
 
+/* Higher-order generated tools compile to the same primitive edit language
+   before a transaction starts. History therefore records the real layer/
+   property changes, while one tool activation remains one atomic undo step. */
+function expandCommands(input) {
+  const expanded = [];
+  for (const command of commands(input).filter(Boolean)) {
+    if (command.type !== 'transform_layers') { expanded.push(command); continue; }
+    if (!PM.Capabilities?.compile) throw new Error('Layer transformation capabilities are unavailable');
+    const result = PM.Capabilities.compile(command.transform, command.state || {});
+    if (!result.ok) throw new Error(result.message);
+    expanded.push(...result.commands);
+  }
+  return expanded;
+}
+
 const Edit = {
   operations: Object.freeze({
     set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
@@ -506,7 +535,7 @@ const Edit = {
     set_content: { target: 'layer', fields: ['patch'] },
     set_layer: { target: 'layer', fields: ['patch'] },
     set_composition: { target: 'project', fields: ['patch'] },
-    add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties'] },
+    add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties', 'parent', 'blend', 'motionBlur', 'visible', 'solo', 'shy', 'collapsed'] },
     delete_layers: { target: 'project', fields: ['targets'] },
     reorder_layer: { target: 'layer', fields: ['index'] },
     add_effect: { target: 'layer', fields: ['effect', 'parameters'] },
@@ -516,10 +545,13 @@ const Edit = {
     add_marker: { target: 'project', fields: ['time', 'name'] },
     create_section: { target: 'project', fields: ['section'] },
     update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version'] },
+    transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
   }),
 
   apply(input, meta = {}) {
-    const list = commands(input).filter(Boolean);
+    let list;
+    try { list = expandCommands(input); }
+    catch (error) { return fail(String(error.message || error)); }
     if (!list.length) return fail('No source edits supplied');
     if (meta.baseRevision != null && Number(meta.baseRevision) !== Number(PM.proj.revision || 0)) {
       return fail(`Project changed: expected revision ${meta.baseRevision}, found ${PM.proj.revision || 0}`);

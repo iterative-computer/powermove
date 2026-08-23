@@ -77,6 +77,17 @@ test('text selection bounds hug measured glyphs instead of the padded render tex
   assert.ok(left.x0 < 0 && left.x0 > -12 && left.x1 > 350, 'left-aligned bounds begin at the layer anchor');
   assert.ok(right.x1 > 0 && right.x1 < 12 && right.x0 < -350, 'right-aligned bounds end at the layer anchor');
 
+  const layout = PM.textLayout({
+    text: 'AB\nC', font: 'Geist', weight: 650, size: 100,
+    tracking: 0, leading: 1.1, color: '#fff', align: 'center', italic: false,
+  });
+  assert.deepEqual([...layout.characters.map(piece => piece.text)], ['A', 'B', 'C']);
+  assert.ok(Math.abs(layout.characters[0].x + 48) <= 1 && Math.abs(layout.characters[1].x) <= 1,
+    'the first centered line is decomposed around the same renderer anchor');
+  assert.ok(Math.abs(layout.characters[2].x + 24) <= 1 && Math.abs(layout.characters[2].y - 110) < .001,
+    'later lines retain their centered horizontal offset and leading');
+  assert.deepEqual([...layout.lines.map(piece => piece.text)], ['AB', 'C']);
+
   const compositor = read('js/gl/compositor.js');
   assert.match(compositor, /if \(r\.selection\) return \{ \.\.\.r\.selection, ax: r\.anchorX, ay: r\.anchorY \}/,
     'canvas hit testing and transform handles consume the tight bounds');

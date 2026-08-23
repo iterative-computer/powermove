@@ -24,6 +24,56 @@ function fontStr(d) {
   return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px "${d.font}", "Geist", -apple-system, sans-serif`;
 }
 
+/* Use the exact same canvas text metrics as the rasterizer when a procedural
+   tool needs to reason about glyph placement. The returned offsets are in the
+   source text layer's local coordinate system, before its transform. */
+function textLayout(d) {
+  const size = Math.max(1, Number(d.size) || 16);
+  const meas = getCanvas(8, 8).getContext('2d');
+  const align = d.align === 'center' ? 'center' : d.align === 'right' ? 'right' : 'left';
+  meas.font = fontStr(d);
+  meas.textAlign = align;
+  meas.textBaseline = 'alphabetic';
+  if ('letterSpacing' in meas) meas.letterSpacing = (d.tracking || 0) + 'px';
+  const lines = String(d.text == null ? '' : d.text).split('\n');
+  const lh = size * (d.leading || 1.15);
+  const width = value => meas.measureText(value).width;
+  const graphemes = value => {
+    if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+      return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(item => item.segment);
+    }
+    return Array.from(value);
+  };
+  const output = { characters: [], words: [], lines: [] };
+  /* measureText(prefix) omits kerning between the prefix and the next glyph.
+     Measuring the joined run and subtracting the isolated segment preserves
+     that incoming pair adjustment when the segment becomes its own layer. */
+  const segmentX = (lineStart, prefix, segment) => lineStart + width(prefix + segment) - width(segment);
+  let characterIndex = 0, wordIndex = 0, lineIndex = 0;
+  lines.forEach((line, row) => {
+    const lineWidth = width(line);
+    const startX = align === 'center' ? -lineWidth / 2 : align === 'right' ? -lineWidth : 0;
+    const y = row * lh;
+    if (line.length) output.lines.push({ text: line, x: startX, y, line: row, index: lineIndex++ });
+
+    let prefix = '';
+    for (const segment of graphemes(line)) {
+      const x = segmentX(startX, prefix, segment);
+      if (!/^\s+$/u.test(segment)) output.characters.push({ text: segment, x, y, line: row, index: characterIndex++ });
+      prefix += segment;
+    }
+
+    const matcher = /\S+/gu;
+    let match;
+    while ((match = matcher.exec(line))) {
+      const prefix = line.slice(0, match.index);
+      output.words.push({ text: match[0], x: segmentX(startX, prefix, match[0]), y, line: row, index: wordIndex++ });
+    }
+  });
+  return output;
+}
+PM.textLayout = textLayout;
+
 function rasterText(d, scale) {
   const size = Math.max(1, Number(d.size) || 16);
   const pad = Math.ceil(size * .6) + 24;

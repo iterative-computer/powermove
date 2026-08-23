@@ -9,6 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var dragEndMonitor: Any?
     private var dragOrigin: NSPoint = .zero
     private var dragStart: NSPoint = .zero
+    private let codexStateQueue = DispatchQueue(label: "com.zellzoi.powermove.codex-state")
+    private var codexProcesses: [String: Process] = [:]
+    private var cancelledCodexRequests = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let config = WKWebViewConfiguration()
@@ -23,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         config.userContentController.add(self, name: "pmLog")
         config.userContentController.add(self, name: "pmTheme")
         config.userContentController.add(self, name: "pmCodex")
+        config.userContentController.add(self, name: "pmCodexCancel")
         config.userContentController.add(self, name: "pmCaptureWindow")
         config.userContentController.add(self, name: "pmPanelTitle")
         /* about:blank child WebViews do not inherit the file-read grant used by the
@@ -262,6 +266,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             runCodex(requestId: requestId, prompt: prompt, schema: body["schema"], images: Array(images), model: model, reasoningEffort: effort)
             return
         }
+        if message.name == "pmCodexCancel" {
+            guard let body = message.body as? [String: Any],
+                  let requestId = body["id"] as? String else { return }
+            cancelCodex(requestId: requestId)
+            return
+        }
         if message.name == "pmCaptureWindow" {
             guard let body = message.body as? [String: Any],
                   let requestId = body["id"] as? String else { return }
@@ -308,6 +318,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return candidates.first(where: { fm.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
     }
 
+    private func cancelCodex(requestId: String) {
+        let process = codexStateQueue.sync { () -> Process? in
+            cancelledCodexRequests.insert(requestId)
+            return codexProcesses[requestId]
+        }
+        if process?.isRunning == true { process?.terminate() }
+    }
+
+    private func registerCodexProcess(_ process: Process, requestId: String) -> Bool {
+        codexStateQueue.sync {
+            if cancelledCodexRequests.contains(requestId) { return false }
+            codexProcesses[requestId] = process
+            return true
+        }
+    }
+
+    private func codexWasCancelled(_ requestId: String) -> Bool {
+        codexStateQueue.sync { cancelledCodexRequests.contains(requestId) }
+    }
+
+    private func finishCodexRequest(_ requestId: String) {
+        codexStateQueue.sync {
+            codexProcesses.removeValue(forKey: requestId)
+            cancelledCodexRequests.remove(requestId)
+        }
+    }
+
     private func runCodex(requestId: String, prompt: String, schema: Any?, images: [String] = [], model: String? = nil, reasoningEffort: String? = nil) {
         guard let executable = codexBinaryURL() else {
             sendCodexResult(requestId: requestId, ok: false, text: "Codex is not installed. Install Codex and sign in with ChatGPT first.")
@@ -317,6 +354,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             guard let self = self else { return }
             let fm = FileManager.default
             let directory = fm.temporaryDirectory.appendingPathComponent("powermove-codex-\(UUID().uuidString)", isDirectory: true)
+            defer {
+                self.finishCodexRequest(requestId)
+                try? fm.removeItem(at: directory)
+            }
             do {
                 try fm.createDirectory(at: directory, withIntermediateDirectories: true)
                 let schemaURL = directory.appendingPathComponent("schema.json")
@@ -358,8 +399,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 let errors = Pipe()
                 process.standardOutput = Pipe()
                 process.standardError = errors
+                if self.codexWasCancelled(requestId) { return }
                 try process.run()
+                if !self.registerCodexProcess(process, requestId: requestId), process.isRunning { process.terminate() }
                 process.waitUntilExit()
+                if self.codexWasCancelled(requestId) { return }
                 if process.terminationStatus == 0, fm.fileExists(atPath: outputURL.path) {
                     let text = try String(contentsOf: outputURL, encoding: .utf8)
                     self.sendCodexResult(requestId: requestId, ok: true, text: text)
@@ -369,9 +413,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                     self.sendCodexResult(requestId: requestId, ok: false, text: message?.isEmpty == false ? message! : "ChatGPT generation failed.")
                 }
             } catch {
+                if self.codexWasCancelled(requestId) { return }
                 self.sendCodexResult(requestId: requestId, ok: false, text: error.localizedDescription)
             }
-            try? fm.removeItem(at: directory)
         }
     }
 
@@ -382,7 +426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
               let json = String(data: data, encoding: .utf8) else { return }
         let safeId = requestId.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
         DispatchQueue.main.async { [weak self] in
-            self?.webView.evaluateJavaScript("window.PM && PM.CodexBridge && PM.CodexBridge.resolve('\(safeId)', \(json))")
+            self?.webView.evaluateJavaScript("window.PM && PM.CodexBridge && PM.CodexBridge.resolve('\(safeId)', \(json))") { _, error in
+                if let error = error { print("[codex-native] callback failed: \(error.localizedDescription)") }
+            }
         }
     }
 

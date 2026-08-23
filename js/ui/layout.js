@@ -12,6 +12,45 @@ PM.registerPanel = (id, def) => { PM.PANELS[id] = Object.assign({ id, title: id 
 const L = { root: null, ws: null };
 PM.Layout = L;
 
+/* Panel grips are deliberately quiet until the pointer approaches them. A
+   smoothstep falloff makes the whole set read as one soft opacity field rather
+   than a collection of controls that abruptly blink on and off. */
+const HANDLE_PROXIMITY_RADIUS = 220;
+L.handleProximity = (distance, radius = HANDLE_PROXIMITY_RADIUS) => {
+  const t = 1 - PM.clamp((Number(distance) || 0) / Math.max(1, radius), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+
+let handlePointerFrame = 0;
+let handlePointer = null;
+function paintHandleProximity() {
+  handlePointerFrame = 0;
+  if (!handlePointer) return;
+  PM.$$('.panel-move-handle,.panel > header .grip').forEach(handle => {
+    const rect = handle.getBoundingClientRect();
+    const dx = Math.max(rect.left - handlePointer.x, 0, handlePointer.x - rect.right);
+    const dy = Math.max(rect.top - handlePointer.y, 0, handlePointer.y - rect.bottom);
+    const proximity = L.handleProximity(Math.hypot(dx, dy));
+    handle.style.setProperty('--handle-proximity', proximity.toFixed(3));
+  });
+}
+function queueHandleProximity(e) {
+  if (e.pointerType === 'touch') return;
+  handlePointer = { x: e.clientX, y: e.clientY };
+  if (!handlePointerFrame) handlePointerFrame = requestAnimationFrame(paintHandleProximity);
+}
+function resetHandleProximity() {
+  handlePointer = null;
+  if (handlePointerFrame) cancelAnimationFrame(handlePointerFrame);
+  handlePointerFrame = 0;
+  PM.$$('.panel-move-handle,.panel > header .grip').forEach(handle => handle.style.removeProperty('--handle-proximity'));
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('pointermove', queueHandleProximity, { passive: true });
+  document.documentElement.addEventListener('pointerleave', resetHandleProximity);
+  window.addEventListener('blur', resetHandleProximity);
+}
+
 /* Panels that own live GL/canvas state and cannot be safely re-hosted in a popout. */
 const NO_POPOUT = new Set(['viewer', 'timeline']);
 
@@ -48,7 +87,7 @@ function buildPanel(spec, dock) {
 
   /* Headless canvas panels still need an explicit, non-canvas drag surface.
      Keeping it small prevents panel movement from stealing timeline/stage input. */
-  const moveHandle = headless
+  const moveHandle = headless && !def.hideMoveHandle
     ? h('button.panel-move-handle', {
       title: `Move ${def.title} · right-click for options`,
       'aria-label': `Move ${def.title} panel`,
@@ -757,6 +796,7 @@ PM.Popout = {
          so neighboring content reflows without mutating the saved manifest. */
       const sourceHost = document.createElement('div');
       sourceHost.hidden = true; sourceHost.setAttribute('aria-hidden', 'true');
+      sourceHost.dataset.popoutSource = id;
       if (el.isConnected) sourceHost.appendChild(el);
       document.body.appendChild(sourceHost);
       const mirrorHost = d.createElement('div'); mirrorHost.className = 'pop-mirror'; d.body.appendChild(mirrorHost);
@@ -770,12 +810,42 @@ PM.Popout = {
         return node === root ? path : null;
       };
       const atPath = (root, path) => path && path.reduce((node, index) => node && node.childNodes[index], root);
+      const resizeMirroredTextarea = input => {
+        if (!input?.matches?.('textarea[data-autosize="true"]')) return;
+        input.style.height = 'auto';
+        const style = w.getComputedStyle(input);
+        const min = Math.max(0, Number.parseFloat(style.minHeight) || 0);
+        const maxValue = Number.parseFloat(style.maxHeight);
+        const max = Number.isFinite(maxValue) ? Math.max(min, maxValue) : Number.POSITIVE_INFINITY;
+        const contentHeight = Math.max(0, Math.ceil(input.scrollHeight || 0));
+        const height = Math.min(max, Math.max(min, contentHeight));
+        input.style.height = `${height}px`;
+        input.style.overflowY = contentHeight > height + 1 ? 'auto' : 'hidden';
+      };
       let syncing = false;
+      let suppressInputMirror = false;
+      let releaseInputMirrorFrame = 0;
       const renderMirror = () => {
         if (syncing || w.closed) return;
         syncing = true;
+        const oldClone = mirrorHost.firstChild;
+        const active = d.activeElement;
+        const focusedPath = oldClone && oldClone.contains(active) ? pathTo(oldClone, active) : null;
+        const selection = focusedPath && 'selectionStart' in active
+          ? { start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection, scrollTop: active.scrollTop }
+          : null;
         const clone = el.cloneNode(true); clone.classList.add('popped');
-        mirrorHost.replaceChildren(clone); syncing = false;
+        mirrorHost.replaceChildren(clone);
+        clone.querySelectorAll('textarea[data-autosize="true"]').forEach(resizeMirroredTextarea);
+        const nextActive = focusedPath ? atPath(clone, focusedPath) : null;
+        if (nextActive?.focus) {
+          try { nextActive.focus({ preventScroll: true }); } catch { nextActive.focus(); }
+          if (selection && nextActive.setSelectionRange) {
+            nextActive.setSelectionRange(selection.start, selection.end, selection.direction || 'none');
+            nextActive.scrollTop = selection.scrollTop;
+          }
+        }
+        syncing = false;
       };
       const forward = (event) => {
         const clone = mirrorHost.firstChild;
@@ -783,13 +853,34 @@ PM.Popout = {
         if (!target) return;
         if ('value' in event.target && 'value' in target) target.value = event.target.value;
         if ('checked' in event.target && 'checked' in target) target.checked = event.target.checked;
+        if (event.type === 'input' && event.target.matches?.('textarea[data-autosize="true"]')) {
+          /* The source has the current draft now. Its only input listener sizes
+             the hidden copy, so dispatching another input is unnecessary and
+             lets WebKit rebuild the mirror between individual keystrokes. */
+          suppressInputMirror = true;
+          if (releaseInputMirrorFrame) w.cancelAnimationFrame(releaseInputMirrorFrame);
+          releaseInputMirrorFrame = w.requestAnimationFrame(() => { suppressInputMirror = false; releaseInputMirrorFrame = 0; });
+          resizeMirroredTextarea(event.target);
+          return;
+        }
+        if (event.type === 'input') resizeMirroredTextarea(event.target);
         if (event.type === 'click' && typeof target.click === 'function') target.click();
         else target.dispatchEvent(new Event(event.type, { bubbles: true, cancelable: true }));
       };
       mirrorHost.addEventListener('click', forward);
       mirrorHost.addEventListener('input', forward);
       mirrorHost.addEventListener('change', forward);
-      const observer = new MutationObserver(() => requestAnimationFrame(renderMirror));
+      const belongsToAutosizingTextarea = record => {
+        const node = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
+        return !!node?.closest?.('textarea[data-autosize="true"]');
+      };
+      const observer = new MutationObserver(records => {
+        /* WebKit may expose a forwarded textarea value/style update as a DOM
+           mutation. The visible clone already owns that draft and its height;
+           rebuilding it here would eject the caret after the first character. */
+        if (suppressInputMirror || (records.length && records.every(belongsToAutosizingTextarea))) return;
+        requestAnimationFrame(renderMirror);
+      });
       observer.observe(el, { subtree: true, childList: true, characterData: true, attributes: true });
       renderMirror();
       Object.assign(PM.Popout.wins[id], { sourceHost, mirrorHost, observer });

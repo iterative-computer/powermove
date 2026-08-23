@@ -7,17 +7,28 @@ const PM = window.PM, h = PM.h;
 /* The native Codex client owns ChatGPT authentication. This bridge only moves a
    prompt and a strict JSON schema across WKWebView; no account secret enters JS. */
 const pending = new Map();
+function codexAbortError(message = 'The previous agent run was replaced') {
+  const error = new Error(message); error.name = 'AbortError'; return error;
+}
 PM.CodexBridge = {
   request(prompt, schema, images = [], options = {}) {
     const bridge = window.webkit?.messageHandlers?.pmCodex;
     if (!bridge) return Promise.reject(new Error('The coding agent is available in the Powermove macOS app'));
     const id = PM.uid('spatial-codex-');
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error('The coding agent took too long to respond'));
-      }, 120000);
-      pending.set(id, { resolve, reject, timer });
+      const signal = options.signal;
+      const stopNative = () => window.webkit?.messageHandlers?.pmCodexCancel?.postMessage({ id });
+      const settle = (error) => {
+        const job = pending.get(id); if (!job) return;
+        pending.delete(id); clearTimeout(job.timer);
+        job.signal?.removeEventListener('abort', job.abort);
+        stopNative(); reject(error);
+      };
+      const abort = () => settle(codexAbortError());
+      const timer = setTimeout(() => settle(new Error('The coding agent took too long to respond')), 120000);
+      pending.set(id, { resolve, reject, timer, signal, abort });
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
         id, prompt, schema, images: images.slice(0, 6),
         model: options.model || '', reasoningEffort: options.reasoningEffort || '',
@@ -27,6 +38,7 @@ PM.CodexBridge = {
   resolve(id, result) {
     const job = pending.get(id); if (!job) return;
     pending.delete(id); clearTimeout(job.timer);
+    job.signal?.removeEventListener('abort', job.abort);
     let text = '';
     try {
       const bytes = Uint8Array.from(atob(result.dataBase64 || ''), c => c.charCodeAt(0));
@@ -67,11 +79,12 @@ const S = {
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
-  requestText: '', run: null, conversation: [], activity: '',
+  requestText: '', run: null, conversation: [], activity: '', activeRequest: null, composerDraft: '',
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
   panelBody: null, attachments: [], requestAttachments: [], steps: [], stepsExpanded: false,
+  pendingEntering: false,
   panelRun: null, scope: PM.store?.get?.('agentScope', 'workspace') || 'workspace',
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
   model: PM.store?.get?.('agentModel', 'gpt-5.6-sol') || 'gpt-5.6-sol',
@@ -84,6 +97,7 @@ const AGENT_MODELS = [
   { id: 'gpt-5.6-luna', label: '5.6 Luna' },
 ];
 const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const SEND_TRANSITION_MS = 240;
 
 const Spatial = {
   init,
@@ -92,7 +106,7 @@ const Spatial = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition },
+  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode },
   lifecycle: { requestAdapter: requestRippleAdapter },
 };
 PM.SpatialAssistant = Spatial;
@@ -614,6 +628,41 @@ function moveCardTo(card, x, y) {
   return p;
 }
 
+function textareaLayout(scrollHeight, minHeight, maxHeight) {
+  const contentHeight = Math.max(0, Math.ceil(Number(scrollHeight) || 0));
+  const min = Number.isFinite(minHeight) ? Math.max(0, minHeight) : 0;
+  const max = Number.isFinite(maxHeight) ? Math.max(min, maxHeight) : Number.POSITIVE_INFINITY;
+  const height = Math.min(max, Math.max(min, contentHeight));
+  return { height, overflowY: contentHeight > height + 1 ? 'auto' : 'hidden' };
+}
+
+function composerMode(phase) {
+  const working = phase === 'working';
+  return {
+    working,
+    disabled: phase === 'applying',
+    placeholder: working ? 'Add direction while the agent works…' : 'Describe what you want changed…',
+    sendLabel: working ? 'Steer current run' : 'Send message',
+  };
+}
+
+function autosizeTextarea(input, onResize) {
+  const resize = () => {
+    /* A detached panel keeps its authoritative controls in a hidden source host.
+       Measuring that narrow/offscreen copy reports an enormous scrollHeight and
+       used to make the visible prompt jump to its maximum height on every key. */
+    if (input.closest('[data-popout-source]')) return;
+    input.style.height = 'auto';
+    const style = getComputedStyle(input);
+    const layout = textareaLayout(input.scrollHeight, Number.parseFloat(style.minHeight), Number.parseFloat(style.maxHeight));
+    input.style.height = `${layout.height}px`;
+    input.style.overflowY = layout.overflowY;
+    onResize?.();
+  };
+  input.addEventListener('input', resize);
+  resize();
+}
+
 function cardCoordinates(card) {
   const left = Number.parseFloat(card.style.left), top = Number.parseFloat(card.style.top);
   if (Number.isFinite(left) && Number.isFinite(top)) return { left, top };
@@ -648,7 +697,7 @@ function showComposer(draft = '') {
   S.card?.remove();
   const input = h('textarea', {
     placeholder: S.context.targetPanelId ? 'How should this area change?' : 'Describe a change…',
-    rows: '3',
+    rows: '1', 'data-autosize': 'true',
   });
   input.value = draft;
   const status = h('span.spatial-status', 'Enter to send');
@@ -665,6 +714,11 @@ function showComposer(draft = '') {
     h('div.spatial-input-row', contextLabel, input, sendBtn),
     h('div.spatial-actions', status, cancelBtn));
   S.root.appendChild(S.card);
+  autosizeTextarea(input, () => {
+    if (!S.card || !input.isConnected) return;
+    const position = cardCoordinates(S.card);
+    moveCardTo(S.card, position.left, position.top);
+  });
   /* Place and focus immediately as well as on the next frame. A cached window
      capture can make repeat activations complete inside the click dispatch;
      waiting only for rAF left the card at an unpositioned static location. */
@@ -681,6 +735,7 @@ function conversationReply(plan) {
   if (plan.kind === 'scene') return plan.sceneEdit.summary || plan.message || 'I prepared an editable scene change.';
   if (plan.kind === 'panels') return plan.message || `I prepared ${plan.panelEdit.actions.length} panel changes.`;
   if (plan.kind === 'workspace') return plan.message || `I prepared the ${plan.workspaceEdit.name} workspace.`;
+  if (plan.kind === 'interface') return plan.message || 'I prepared a structured Timeline redesign.';
   if (plan.kind === 'chrome') return plan.message || 'I prepared an interface change.';
   return plan.message || `I prepared the ${plan.section.title} section.`;
 }
@@ -694,14 +749,16 @@ function planPreview() {
   const plan = S.plan;
   if (!plan) return null;
   const chrome = plan.kind === 'chrome';
+  const interfaceChange = plan.kind === 'interface';
   const scene = plan.kind === 'scene';
   const workspace = plan.kind === 'workspace';
   const panels = plan.kind === 'panels';
-  const title = panels ? 'Panel arrangement' : chrome ? 'Interface edit' : scene ? plan.sceneEdit.label : workspace ? plan.workspaceEdit.name : plan.section.title;
+  const title = panels ? 'Panel arrangement' : interfaceChange ? 'Timeline redesign' : chrome ? 'Interface edit' : scene ? plan.sceneEdit.label : workspace ? plan.workspaceEdit.name : plan.section.title;
   const preview = h('div.spatial-proposal',
     h('div.spatial-proposal-kicker', 'Proposed change'),
     h('h3', title));
-  if (panels) plan.panelEdit.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control', PM.icon('panel'), h('span', describePanelAction(action)))));
+  if (panels) plan.panelEdit.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control.panel-action', PM.icon('panel'), h('span', describePanelAction(action)))));
+  else if (interfaceChange) Object.entries(plan.interfaceEdit.patch).forEach(([key, value]) => preview.appendChild(h('div.spatial-preview-control', h('span', key), h('span', String(value)))));
   else if (chrome) preview.appendChild(h('div.spatial-preview-control',
     h('span', plan.chromeEdit.target === 'timeline.surfaceOrder' ? 'Timeline surfaces' : 'Corner style'),
     h('span', plan.chromeEdit.value)));
@@ -714,14 +771,14 @@ function planPreview() {
   }
   preview.appendChild(h('div.spatial-proposal-actions',
     h('button.spatial-action', { onclick: () => { S.plan = null; renderConversation(true); } }, 'Dismiss'),
-    h('button.spatial-action.pri', { onclick: applyPlan }, panels ? 'Apply panel changes' : chrome ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section')));
+    h('button.spatial-action.pri', { onclick: applyPlan }, panels ? 'Apply panel changes' : (chrome || interfaceChange) ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section')));
   return preview;
 }
 
 function resultPreview() {
   if (S.panelRun && S.phase === 'result') {
     const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Panel changes applied'), h('h3', S.panelRun.summary));
-    S.panelRun.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control', PM.icon('panel'), h('span', describePanelAction(action)))));
+    S.panelRun.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control.panel-action', PM.icon('panel'), h('span', describePanelAction(action)))));
     preview.appendChild(h('div.spatial-proposal-actions', h('button.spatial-action', { onclick: undoPanelRun }, 'Undo panel changes'), h('button.spatial-action.pri', { onclick: keepPanelRun }, 'Keep layout')));
     return preview;
   }
@@ -916,27 +973,35 @@ function renderConversation(focusInput = false) {
       ['Move Timeline right', 'Move the Timeline to the right dock and give it more room'],
       ['Open Inspector + Effects', 'Open the Inspector and Effects panels beside the composition'],
       ['Focus the canvas', 'Focus the composition by hiding panels I do not need right now'],
-    ].forEach(([label, prompt]) => suggestions.appendChild(h('button', { type: 'button', onclick: () => { input.value = prompt; input.focus(); } }, label)));
+    ].forEach(([label, prompt]) => suggestions.appendChild(h('button', { type: 'button', onclick: () => { S.composerDraft = prompt; input.value = prompt; input.focus(); } }, label)));
     messages.appendChild(h('div.agent-welcome', h('div.agent-welcome-icon', PM.icon('sparkle')), h('b', 'Build or rearrange anything'), h('span', 'Edit the composition, build controls, or tell me exactly how to arrange your panels.'), suggestions));
   }
   S.conversation.slice(-30).forEach(message => {
-    const bubble = h(`div.spatial-message.${message.role}`, message.text);
+    const bubble = h(`div.spatial-message.${message.role}${message.entering ? '.is-entering' : ''}`, message.text);
     if (message.attachments?.length) {
       const rail = h('div.agent-message-files');
       message.attachments.forEach(name => rail.appendChild(h('span', name)));
       bubble.appendChild(rail);
     }
     messages.appendChild(bubble);
+    message.entering = false;
   });
-  if (S.activity) messages.appendChild(h('div.spatial-message.assistant.pending', h('i'), S.activity));
+  if (S.activity) {
+    messages.appendChild(h(`div.spatial-message.assistant.pending${S.pendingEntering ? '.is-entering' : ''}`, h('i'), S.activity));
+    S.pendingEntering = false;
+  }
   const proposal = resultPreview() || planPreview();
   if (proposal) messages.appendChild(proposal);
   shell.appendChild(messages);
 
+  const mode = composerMode(S.phase);
   input = h('textarea.spatial-followup', {
-    rows: '3', placeholder: 'Describe what you want changed…', 'aria-label': 'Message Powermove agent',
-    disabled: S.phase === 'working' || S.phase === 'applying',
+    rows: '1', placeholder: mode.placeholder, 'aria-label': 'Message Powermove agent',
+    'data-autosize': 'true',
+    disabled: mode.disabled,
   });
+  input.value = S.composerDraft;
+  input.addEventListener('input', () => { S.composerDraft = input.value; });
   input.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendRequest(input); }
@@ -956,46 +1021,81 @@ function renderConversation(focusInput = false) {
     },
   }, h('i'), S.autoApplyPanels ? 'Auto-apply panels' : 'Review panel edits');
   const model = modelPickerControl();
+  const stop = mode.working ? h('button.agent-stop', {
+    type: 'button', 'aria-label': 'Stop current run', title: 'Stop current run', onclick: stopActiveRequest,
+  }, PM.icon('x')) : null;
   const send = h('button.spatial-action.pri.agent-send', {
-    type: 'button', 'aria-label': S.phase === 'working' || S.phase === 'applying' ? 'Agent is working' : 'Send message', disabled: input.disabled,
+    type: 'button', 'aria-label': mode.sendLabel, title: mode.sendLabel, disabled: mode.disabled,
     onclick: () => sendRequest(input),
-  }, input.disabled ? h('i') : PM.icon('return'));
+  }, mode.disabled ? h('i') : PM.icon('return'));
   const composer = h('div.agent-composer', h('div.agent-composer-head', scope, approval), input, attachmentRail,
-    h('div.agent-composer-tools', attach, h('span.sp'), model, send));
+    h('div.agent-composer-tools', attach, h('span.sp'), model, stop, send));
   shell.appendChild(composer);
   body.appendChild(shell);
+  autosizeTextarea(input);
   requestAnimationFrame(() => {
     messages.scrollTop = S.conversation.length || S.activity || proposal ? messages.scrollHeight : 0;
     if (focusInput && !input.disabled) input.focus();
   });
 }
 
+function stopActiveRequest() {
+  if (S.phase !== 'working') return;
+  const active = S.activeRequest;
+  S.activeRequest = null;
+  ++S.requestToken;
+  active?.abort();
+  S.steps = []; S.activity = ''; S.plan = null; S.phase = 'conversation';
+  S.conversation.push({ role: 'assistant', text: 'Stopped. Add direction whenever you are ready.' });
+  renderConversation(true);
+}
+
 async function sendRequest(input) {
   const request = input.value.trim();
-  if (!request || S.phase === 'working' || S.phase === 'applying') return;
+  if (!request || S.phase === 'applying') return;
+  const steering = S.phase === 'working';
+  const previousRequest = S.activeRequest;
+  const token = ++S.requestToken;
+  const controller = new AbortController();
+  S.activeRequest = controller;
+  previousRequest?.abort();
   S.requestText = request;
   S.requestAttachments = S.attachments.splice(0);
-  S.conversation.push({ role: 'user', text: request, attachments: S.requestAttachments.map(item => item.name) });
-  updateSteps([
+  S.composerDraft = '';
+  S.conversation.push({ role: 'user', text: request, attachments: S.requestAttachments.map(item => item.name), entering: true });
+  updateSteps(steering ? [
+    'Review the new direction',
+    'Revise the editable change',
+    'Prepare the updated source edits',
+    'Review the visible result',
+  ] : [
     'Understand the request and context',
     'Design an editable change',
     'Prepare the source edits',
     'Review the visible result',
   ], 0);
   S.stepsExpanded = false;
-  S.plan = null; S.panelRun = null; S.phase = 'working'; S.activity = 'Looking at the composition and workspace…';
-  promoteToConversation(); renderConversation();
-  const token = ++S.requestToken;
+  S.plan = null; S.panelRun = null; S.phase = 'working';
+  S.activity = steering ? 'Updating the run with your direction…' : 'Looking at the composition and workspace…';
+  S.pendingEntering = true;
+  promoteToConversation(); renderConversation(true);
   try {
-    const observation = PM.AgentHarness ? await PM.AgentHarness.observe() : { state: {}, times: [], images: [] };
+    /* Let the send handoff finish before the next progress render replaces the
+       message DOM. Observation still runs immediately, so the beat adds only
+       the portion of the 240 ms transition that useful work did not consume. */
+    const observationPromise = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
+    const [observation] = await Promise.all([
+      observationPromise,
+      new Promise(resolve => setTimeout(resolve, SEND_TRANSITION_MS)),
+    ]);
     if (token !== S.requestToken) return;
     S.steps[0].status = 'complete'; S.steps[1].status = 'active';
-    S.activity = 'Designing an editable change…'; renderConversation();
+    S.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; renderConversation(true);
     const userImages = S.requestAttachments.filter(item => item.dataUrl).map(item => item.dataUrl);
     const attachedImages = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
     const raw = await PM.CodexBridge.request(
-      agentPrompt(request, observation), responseSchema(), attachedImages,
-      { model: S.model, reasoningEffort: S.reasoningEffort },
+      agentPrompt(request, observation, steering), responseSchema(), attachedImages,
+      { model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal },
     );
     if (token !== S.requestToken) return;
     let decoded;
@@ -1009,24 +1109,27 @@ async function sendRequest(input) {
     updateSteps(plan.steps);
     S.stepsExpanded = S.steps.length > 1;
     S.conversation.push({ role: 'assistant', text: conversationReply(plan) });
-    S.activity = ''; S.plan = plan;
+    S.activity = ''; S.plan = plan; S.phase = 'conversation';
     if (plan.kind === 'panels' && S.autoApplyPanels) await applyPlan();
     else showPreview();
   } catch (error) {
     if (token !== S.requestToken) return;
+    if (error?.name === 'AbortError') return;
     const current = S.steps.find(step => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: String(error.message || error).slice(0, 220) });
     renderConversation(true);
+  } finally {
+    if (token === S.requestToken && S.activeRequest === controller) S.activeRequest = null;
   }
 }
 
 function responseSchema() {
   return {
     type: 'object', additionalProperties: false,
-    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'steps', 'chromeEdit', 'section', 'sceneEdit', 'workspaceEdit', 'panelEdit'],
+    required: ['kind', 'operation', 'targetPanelId', 'dockId', 'placement', 'message', 'steps', 'chromeEdit', 'interfaceEdit', 'section', 'sceneEdit', 'workspaceEdit', 'panelEdit'],
     properties: {
-      kind: { type: 'string', enum: ['section', 'chrome', 'scene', 'workspace', 'panels'] },
+      kind: { type: 'string', enum: ['section', 'chrome', 'interface', 'scene', 'workspace', 'panels'] },
       operation: { type: 'string', enum: ['create', 'modify', 'noop'] },
       targetPanelId: { type: 'string' }, dockId: { type: 'string' },
       placement: { type: 'string', enum: ['before', 'after', 'replace'] },
@@ -1039,17 +1142,19 @@ function responseSchema() {
           value: { type: 'string', enum: ['square', 'rounded', 'normal', 'reversed'] },
         },
       },
+      interfaceEdit: { type: 'string' },
       section: {
-        type: 'object', additionalProperties: false, required: ['id', 'title', 'size', 'note', 'controls'],
+        type: 'object', additionalProperties: false, required: ['id', 'title', 'size', 'note', 'tool', 'controls'],
         properties: {
-          id: { type: 'string' }, title: { type: 'string' }, size: { type: 'number' }, note: { type: 'string' },
+          id: { type: 'string' }, title: { type: 'string' }, size: { type: 'number' }, note: { type: 'string' }, tool: { type: 'string' },
           controls: { type: 'array', maxItems: 64, items: {
             type: 'object', additionalProperties: false,
-            required: ['type', 'label', 'parameter', 'defaultValue', 'min', 'max', 'step', 'options', 'target', 'path', 'command'],
+            required: ['type', 'label', 'parameter', 'defaultValue', 'min', 'max', 'step', 'options', 'target', 'path', 'command', 'stateKey', 'source', 'action', 'primary'],
             properties: {
-              type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button'] }, label: { type: 'string' },
+              type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout'] }, label: { type: 'string' },
               parameter: { type: 'string' }, defaultValue: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] }, min: { type: 'number' }, max: { type: 'number' }, step: { type: 'number' },
               options: { type: 'array', items: { type: 'string' } }, target: { type: 'string' }, path: { type: 'string' }, command: { type: 'string' },
+              stateKey: { type: 'string' }, source: { type: 'string' }, action: { type: 'string' }, primary: { type: 'boolean' },
             },
           } },
         },
@@ -1061,7 +1166,7 @@ function responseSchema() {
   };
 }
 
-function agentPrompt(request, observation) {
+function agentPrompt(request, observation, steering = false) {
   const workspace = PM.WS.current;
   const commands = Object.values(PM.commands || {}).map(c => ({ id: c.id, label: c.label }));
   const attachedFiles = S.requestAttachments.slice(0, 6).map(item => ({
@@ -1069,9 +1174,11 @@ function agentPrompt(request, observation) {
     image: !!item.dataUrl,
   }));
   const editableSource = PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {};
+  const capabilities = PM.Capabilities?.catalog?.() || {};
   return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Return only the requested JSON object.
 
 RULES
+- ${steering ? 'This is steering for an active run. Replace the unfinished plan with one updated plan that honors the earlier request and the newest direction.' : 'This is a new run. Build one complete editable plan for the latest request.'}
 - Act on clear change requests. Prefer a useful executable interpretation over explaining limitations. Use noop only when none of the available scene, section, workspace, or chrome operations can produce a meaningful result.
 - Do not answer with a limitation when the requested target appears in EDITABLE SOURCE CATALOG, AVAILABLE PANELS, AVAILABLE COMMANDS, availableOperations, or the supported chrome targets. Build the executable change.
 - Return 2–6 short steps that describe the actual work you will carry out. Each step must start with a verb and be specific enough to show in the interface as a to-do item.
@@ -1079,15 +1186,18 @@ RULES
 - For scene requests, inspect the live source and attached rendered frames. Preserve locked layers, hand-edited channels, and unrelated work. Set reviewTimes to the most revealing moments. Return neutral section and chromeEdit fields.
 - kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand|popout|dock","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and popout/dock/collapse/expand for its window state. Never hide or collapse viewer. Never pop out viewer or timeline. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
 - kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
-- For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section.
+- For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-interface requests return interfaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section with tool="".
 - kind=chrome for a supported app-interface style change. Supported targets are preview.cornerRadius with square|rounded and timeline.surfaceOrder with normal|reversed. Use operation=modify, and return a neutral empty section object.
-- kind=section for editable panels/controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
+- kind=interface for a structured Timeline redesign. interfaceEdit must be one JSON-encoded manifest shaped like {"target":"timeline","patch":{"rowHeight":22..48,"gutterWidth":160..360,"rulerHeight":20..42,"clipRadius":0..12,"keyframeSize":4..12,"showLayerNumbers":boolean,"showTypeBadges":boolean,"toolbarDensity":"compact|normal","surfaceOrder":"normal|reversed"}}. Include only fields requested or clearly useful. This edits the Timeline view over the existing source; never rewrite layers or keyframes for an interface request.
+- kind=section for editable panels/controls. For a known reusable generated tool, set section.tool to an id from GENERATED TOOL CAPABILITIES and leave controls empty. The tool recipe supplies validated selection state, settings, Preview, Apply, and Undo controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
 - operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
 - A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, and button controls.
 - Every non-button control must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths.
 - The EDITABLE SOURCE CATALOG below is authoritative and complete for the current project. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
 - Do not create decorative or disconnected scene parameters. If a requested control has no source yet, prefer a scene or workspace action that creates useful editable source rather than refusing the whole request.
 - Buttons may use only one of the listed command ids. Never invent commands.
+- Advanced generated tools may use local settings with stateKey plus buttons whose action is a JSON-encoded safe transform action. A transform action is {"type":"transform","mode":"preview|apply","transform":{"label":"...","selector":{"scope":"selection|all|visible","types":[]},"order":"stack|reverseStack|selection|reverseSelection|start|reverseStart|name|random","edits":[{"path":"layer.from|layer.duration|layer.*|properties.*|content.*","value":EXPRESSION}]}}. Expressions are constants or objects using state, ref, aggregate, and bounded math ops from GENERATED TOOL CAPABILITIES. Prefer this declarative form when it can express the tool.
+- When a generated tool genuinely needs loops, branching, computed layer counts, or create-many behavior, a button may instead use a JSON-encoded sandboxed script action: {"type":"script","mode":"preview|apply","label":"...","requiredTypes":["text"],"code":"JAVASCRIPT_FUNCTION_BODY"}. The function body receives a frozen PM SDK with project, composition, input, layers, selectedLayers, uid, clone, assert, emit, and typed command builders. It must return one command or an array of commands. It has no app DOM, storage, network, native bridge, or direct mutation access; its output is validated and applied atomically. Use PM.input for stateKey values. Pair an apply button with a preview button using the same code. Never attempt to escape the sandbox or access unavailable globals.
 - Include every control the user explicitly requests. For open-ended requests, prefer a focused set unless the user asks for all or everything, in which case include the complete relevant catalog. Use a short title and useful one-sentence note; avoid decorative filler.
 - For unused control fields, still return schema-safe neutral values: empty string/array, 0, or false.
 - App chrome is a valid editable source target when it is listed above. In particular, requests to reverse the Timeline's grey surface order map to timeline.surfaceOrder=reversed.
@@ -1125,6 +1235,9 @@ ${JSON.stringify(commands)}
 
 EDITABLE SOURCE CATALOG
 ${JSON.stringify(editableSource)}
+
+GENERATED TOOL CAPABILITIES
+${JSON.stringify(capabilities)}
 
 ${PM.AgentHarness.promptContext(observation)}
 
@@ -1294,24 +1407,64 @@ function sanitizePlan(raw, context, request = '') {
   const allowedChromeValues = chromeTarget === 'preview.cornerRadius' ? ['square', 'rounded']
     : chromeTarget === 'timeline.surfaceOrder' ? ['normal', 'reversed'] : [];
   const chromeValue = allowedChromeValues.includes(raw?.chromeEdit?.value) ? raw.chromeEdit.value : '';
+  const interfaceEdit = PM.WS?.sanitizeInterfaceEdit?.(raw?.interfaceEdit) || null;
   const requestedKind = raw?.kind;
   const panelEdit = sanitizePanelEdit(raw?.panelEdit);
   const kind = requestedKind === 'scene' ? 'scene'
     : requestedKind === 'workspace' ? 'workspace'
     : requestedKind === 'panels' ? 'panels'
+    : requestedKind === 'interface' && interfaceEdit ? 'interface'
     : requestedKind === 'chrome' && chromeTarget && chromeValue ? 'chrome' : 'section';
   const cleanText = (v, fallback = '', max = 100) => typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : fallback;
   const source = raw?.section && typeof raw.section === 'object' ? raw.section : {};
+  const recipe = PM.Capabilities?.panelRecipe?.(cleanText(source.tool, '', 80)) || null;
+  const sectionSource = recipe ? {
+    ...recipe,
+    id: cleanText(source.id, recipe.id, 80), title: cleanText(source.title, recipe.title, 70),
+    size: Number(source.size) || recipe.size, note: cleanText(source.note, recipe.note, 240),
+  } : source;
   const steps = (Array.isArray(raw?.steps) ? raw.steps : []).filter(step => typeof step === 'string' && step.trim())
     .map(step => step.trim().slice(0, 100)).slice(0, 6);
-  const baseId = slug(cleanText(source.id, cleanText(source.title, 'Generated section')));
-  const controls = (Array.isArray(source.controls) ? source.controls : []).slice(0, 64).map((control, index) => {
+  const baseId = slug(cleanText(sectionSource.id, cleanText(sectionSource.title, 'Generated section')));
+  const controls = (Array.isArray(sectionSource.controls) ? sectionSource.controls : []).slice(0, 64).map((control, index) => {
     const c = control && typeof control === 'object' ? control : {};
-    let type = ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button'].includes(c.type) ? c.type : 'slider';
+    let type = ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout'].includes(c.type) ? c.type : 'slider';
     const label = cleanText(c.label, `Control ${index + 1}`, 60);
     const out = { type, label };
+    if (type === 'readout') {
+      out.source = ['selection.summary', 'selection.count'].includes(c.source) ? c.source : 'selection.summary';
+      out.connection = 'Live selection';
+      return out;
+    }
     if (type === 'button') {
       if (c.command && PM.commands?.[c.command]) out.cmd = c.command;
+      else if (c.cmd && PM.commands?.[c.cmd]) out.cmd = c.cmd;
+      const action = PM.Capabilities?.sanitizeControlAction?.(c.action);
+      if (action) out.action = action;
+      out.primary = c.primary === true;
+      out.connection = action ? 'Source action' : 'Command';
+      return out;
+    }
+    const localKey = cleanText(c.stateKey, '', 80);
+    if (localKey && /^[a-z][a-z0-9_.-]{0,79}$/i.test(localKey)) {
+      out.stateKey = localKey; out.connection = 'Tool setting';
+      const sourceValue = c.def !== undefined ? c.def : c.defaultValue;
+      if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue).slice(0, 500);
+      else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue.toUpperCase() : '#FF6B1A';
+      else if (type === 'toggle') out.def = !!sourceValue;
+      else if (type === 'select') {
+        out.options = (Array.isArray(c.options) ? c.options : [])
+          .filter(v => typeof v === 'string' || (v && typeof v === 'object' && ['string', 'number', 'boolean'].includes(typeof v.v) && typeof v.label === 'string'))
+          .map(v => typeof v === 'string' ? v : ({ v: v.v, label: v.label.slice(0, 80) })).slice(0, 80);
+        const values = out.options.map(option => typeof option === 'string' ? option : option.v);
+        out.def = values.includes(sourceValue) ? sourceValue : (values[0] ?? 'Default');
+      } else {
+        out.min = Number.isFinite(c.min) ? c.min : 0; out.max = Number.isFinite(c.max) ? c.max : 100;
+        if (out.max < out.min) [out.min, out.max] = [out.max, out.min];
+        out.step = Number.isFinite(c.step) && c.step > 0 ? c.step : Math.max((out.max - out.min) / 100, .01);
+        out.unit = cleanText(c.unit, '', 12);
+        out.def = Number.isFinite(sourceValue) ? PM.clamp(sourceValue, out.min, out.max) : out.min;
+      }
       return out;
     }
     const target = cleanText(c.target, '', 120), path = cleanText(c.path, '', 120);
@@ -1339,7 +1492,11 @@ function sanitizePlan(raw, context, request = '') {
       out.def = Number.isFinite(sourceValue) ? PM.clamp(sourceValue, out.min, out.max) : out.min;
     }
     return out;
-  }).filter(c => c && (c.type !== 'button' || c.cmd));
+  }).filter(c => c && (c.type !== 'button' || c.cmd || c.action));
+  const state = { ...(recipe?.state || {}) };
+  controls.filter(control => control.stateKey).forEach(control => {
+    if (state[control.stateKey] === undefined) state[control.stateKey] = control.def;
+  });
   return {
     kind,
     operation,
@@ -1349,7 +1506,12 @@ function sanitizePlan(raw, context, request = '') {
     message: cleanText(raw?.message, operation === 'modify' ? 'The redesigned section is ready.' : 'The new section is ready.', 220),
     steps: steps.length ? steps : ['Prepare the editable change', 'Review the visible result'],
     chromeEdit: kind === 'chrome' ? { target: chromeTarget, value: chromeValue } : null,
-    section: { id: baseId, title: cleanText(source.title, 'Generated section', 70), size: PM.clamp(Number(source.size) || 220, 120, 700), note: cleanText(source.note, '', 240), controls },
+    interfaceEdit: kind === 'interface' ? interfaceEdit : null,
+    section: {
+      id: baseId, title: cleanText(sectionSource.title, 'Generated section', 70),
+      size: PM.clamp(Number(sectionSource.size) || 220, 120, 700), note: cleanText(sectionSource.note, '', 240),
+      tool: recipe?.id || '', state, controls,
+    },
     sceneEdit: kind === 'scene' ? PM.AgentHarness.sanitizeProposal(raw?.sceneEdit, request) : null,
     workspaceEdit: kind === 'workspace' ? sanitizeWorkspaceEdit(raw?.workspaceEdit, context) : null,
     panelEdit: kind === 'panels' ? panelEdit : { actions: [] },
@@ -1512,6 +1674,15 @@ async function applyPlan() {
     if (changed) PM.toast('Updated preview corner style');
     finishSteps();
     S.plan = null; S.conversation.push({ role: 'assistant', text: changed ? 'Applied the interface edit.' : 'That interface setting was already in place.' });
+    S.activity = ''; S.phase = 'conversation'; renderConversation(true);
+    return;
+  }
+  if (plan.kind === 'interface') {
+    let changed = false;
+    PM.WS.mutate(workspace => { changed = PM.WS.applyInterfaceEdit(workspace, plan.interfaceEdit); });
+    if (changed) PM.toast('Updated Timeline design');
+    finishSteps();
+    S.plan = null; S.conversation.push({ role: 'assistant', text: changed ? 'Applied the Timeline redesign without changing project source.' : 'Those Timeline settings were already in place.' });
     S.activity = ''; S.phase = 'conversation'; renderConversation(true);
     return;
   }

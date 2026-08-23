@@ -6,7 +6,7 @@ const V = { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inn
 PM.Viewer = V;
 
 PM.registerPanel('viewer', {
-  title: 'Composition', flush: true, noscroll: true, persist: true, headless: true, moveSlot: '#viewer-foot',
+  title: 'Composition', flush: true, noscroll: true, persist: true, headless: true,
   build(body) {
     const stage = h('div#stage');
     const inner = h('div#stage-inner');
@@ -14,72 +14,14 @@ PM.registerPanel('viewer', {
     const ov = h('canvas#overlay');
     inner.append(gl, ov);
     stage.appendChild(inner);
-    const foot = h('div#viewer-foot');
-    body.append(stage, foot);
+    body.appendChild(stage);
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     if (!PM.GL.gl) PM.GL.init(gl);
-    buildFoot(foot);
     bindStage(stage, inner);
     requestAnimationFrame(() => V.layout());
     new ResizeObserver(() => V.layout()).observe(stage);
   },
 });
-
-function buildFoot(foot) {
-  const p = PM.proj;
-  const aspect = h('button.chip', { onpointerdown: (e) => compMenu(e) });
-  const zoom = h('button.chip', { onpointerdown: (e) => zoomMenu(e) });
-  const q = h('button.chip', { onpointerdown: (e) => qualityMenu(e) });
-  const tc = h('span.mono');
-  const cmt = h('button.iconbtn', { title: 'Notes' }, PM.icon('code'));
-  const exp = h('button.chip.solid', { onclick: () => PM.Export.dialog() }, PM.icon('export'), 'Export');
-  foot.append(aspect, zoom, q, h('span', { style: { flex: 1 } }), cmt, tc, exp);
-  const sync = () => {
-    const p = PM.proj;
-    const g = gcd(p.w, p.h);
-    aspect.textContent = `${p.w / g}:${p.h / g}`;
-    zoom.textContent = V.fit ? 'Fit' : Math.round(V.zoom * 100) + '%';
-    q.textContent = PM.quality === 1 ? 'Full' : PM.quality === .5 ? 'Half' : PM.quality === .25 ? 'Quarter' : Math.round(PM.quality * 100) + '%';
-    tc.textContent = PM.tc(PM.time, p.fps) + '  /  ' + PM.tc(p.dur, p.fps);
-  };
-  PM.bus.on('time', sync); PM.bus.on('project', sync); PM.bus.on('quality', sync);
-  PM.bus.on('draw:ui', sync); PM.bus.on('draw:status', sync);
-  sync();
-}
-const gcd = (a, b) => (b ? gcd(b, a % b) : a);
-
-function compMenu(e) {
-  e.preventDefault();
-  const presets = [[1920, 1080, '1080p 16:9'], [3840, 2160, '4K UHD'], [1080, 1080, 'Square 1:1'], [1080, 1920, 'Vertical 9:16'], [1280, 720, '720p'], [2560, 1080, 'Cinemascope']];
-  PM.menu(e.target, [
-    { header: 'Composition size' },
-    ...presets.map(([w, hh, l]) => ({
-      label: l, on: PM.proj.w === w && PM.proj.h === hh,
-      run: () => PM.hist.do('Comp size', () => { PM.proj.w = w; PM.proj.h = hh; PM.bus.emit('project'); V.layout(); }),
-    })),
-    '-',
-    { header: 'Frame rate' },
-    ...[24, 25, 30, 50, 60].map(f => ({
-      label: f + ' fps', on: PM.proj.fps === f,
-      run: () => PM.hist.do('Frame rate', () => { PM.proj.fps = f; PM.bus.emit('project'); }),
-    })),
-  ]);
-}
-function zoomMenu(e) {
-  e.preventDefault();
-  PM.menu(e.target, [{ label: 'Fit', on: V.fit, run: () => { V.fit = true; V.layout(); } },
-  ...[.25, .5, 1, 2].map(z => ({ label: z * 100 + '%', on: !V.fit && V.zoom === z, run: () => { V.fit = false; V.zoom = z; V.layout(); } }))]);
-}
-function qualityMenu(e) {
-  e.preventDefault();
-  PM.menu(e.target, [
-    { header: 'Preview resolution' },
-    ...[[1, 'Full'], [.5, 'Half'], [.25, 'Quarter']].map(([q, l]) => ({
-      label: l, on: PM.quality === q, run: () => { PM.perf.auto = false; PM.quality = q; V.layout(); PM.bus.emit('quality'); },
-    })),
-    { label: 'Adaptive', on: PM.perf.auto, run: () => { PM.perf.auto = true; PM.bus.emit('quality'); } },
-  ]);
-}
 
 /* ── layout / sizing ───────────────────────────────────── */
 V.layout = () => {
@@ -275,12 +217,12 @@ function bindStage(stage, inner) {
 }
 
 function startPan(e) {
-  const sx = e.clientX, sy = e.clientY, start = [V.pan[0], V.pan[1]];
+  const start = [V.pan[0], V.pan[1]];
   V.fit = false;
-  const move = (ev) => { V.pan = [start[0] + (ev.clientX - sx), start[1] + (ev.clientY - sy)]; V.layout(); };
-  const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
-  window.addEventListener('pointermove', move);
-  window.addEventListener('pointerup', up);
+  PM.drag(e, {
+    cursor: 'grabbing',
+    move: (dx, dy) => { V.pan = [start[0] + dx, start[1] + dy]; V.layout(); },
+  });
 }
 
 function onDown(e) {
@@ -401,6 +343,7 @@ function startTransform(e, L, hit, T) {
       PM.invalidate();
     },
     up: () => { moved ? PM.Edit.commit() : PM.Edit.cancel(); PM.Inspector.refresh(); },
+    cancel: () => { PM.Edit.cancel(); PM.Inspector.refresh(); },
   });
 }
 

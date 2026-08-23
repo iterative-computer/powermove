@@ -1,0 +1,162 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+const vm = require('node:vm');
+
+const root = path.resolve(__dirname, '..');
+const source = name => fs.readFileSync(path.join(root, name), 'utf8');
+
+function runtime() {
+  let id = 0;
+  const PM = {
+    uid: prefix => `${prefix}${++id}`,
+    clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
+    round: (value, places = 0) => Number(Number(value).toFixed(places)),
+    snapF: (time, fps) => Math.round(time * fps) / fps,
+    Ease: {
+      handles: () => ({ eo: [.33, 0], ei: [.67, 1] }),
+      bezier: () => value => value, spring: value => value, nameOf: () => 'power',
+    },
+    SHADER_TEMPLATE: 'void main(){}', FX: {}, GL: { dropProgram() {} },
+    bus: { emit() {}, on: () => () => {} }, invalidate() {}, toast() {},
+    store: { get: (_key, fallback) => fallback, set() {} },
+  };
+  const context = vm.createContext({ window: { PM }, console, Date, JSON, Object, Set, Map, Math });
+  for (const file of ['js/core/model.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
+  PM.proj = PM.mkProject({ name: 'Transforms', w: 1920, h: 1080, fps: 30, dur: 10 });
+  PM.time = 2; PM.syncShaderUniforms = () => {}; PM.mkEffect = () => null;
+  vm.runInContext(source('js/core/history.js'), context, { filename: 'js/core/history.js' });
+  vm.runInContext(source('js/core/editing.js'), context, { filename: 'js/core/editing.js' });
+  vm.runInContext(source('js/core/capabilities.js'), context, { filename: 'js/core/capabilities.js' });
+  return PM;
+}
+
+function addLayers(PM, starts = [1, 1, 1]) {
+  const layers = starts.map((from, index) => {
+    const layer = PM.mkLayer('text', { name: `Layer ${index + 1}`, from, dur: 4 });
+    layer.id = `layer-${index + 1}`; layer.from = from; layer.dur = 4;
+    PM.addLayer(layer, PM.proj.layers.length); return layer;
+  });
+  PM.selectLayers(layers.map(layer => layer.id));
+  return layers;
+}
+
+function staggerAction(PM, mode = 'apply') {
+  return PM.Capabilities.panelRecipe('layer-stagger').controls
+    .find(control => control.action?.mode === mode).action;
+}
+
+test('Layer Stagger previews exact source changes without mutating the project', () => {
+  const PM = runtime();
+  const layers = addLayers(PM);
+  const preview = PM.Capabilities.preview(staggerAction(PM, 'preview').transform, {
+    offsetFrames: 2, order: 'stack', anchor: 'earliest',
+  });
+  assert.equal(preview.ok, true);
+  assert.deepEqual(layers.map(layer => layer.from), [1, 1, 1], 'preview is read-only');
+  assert.deepEqual([...preview.changes.map(change => Math.round(change.after * 30))], [32, 34]);
+  assert.deepEqual([...preview.changes.map(change => change.target)], ['layer-2', 'layer-3']);
+});
+
+test('a collection transform applies as one source transaction and one undo step', () => {
+  const PM = runtime();
+  addLayers(PM);
+  const action = staggerAction(PM, 'apply');
+  const result = PM.Capabilities.apply(action.transform, {
+    offsetFrames: 2, order: 'stack', anchor: 'earliest',
+  }, { label: 'Apply Stagger' });
+  assert.equal(result.ok, true);
+  assert.deepEqual([...PM.proj.layers.map(layer => Math.round(layer.from * 30))], [30, 32, 34]);
+  assert.equal(PM.proj.revision, 1);
+  assert.equal(PM.hist.list().at(-1), 'Apply Stagger');
+  assert.equal(PM.hist.undo(), true);
+  assert.deepEqual([...PM.proj.layers.map(layer => Math.round(layer.from * 30))], [30, 30, 30]);
+  assert.equal(PM.hist.redo(), true);
+  assert.deepEqual([...PM.proj.layers.map(layer => Math.round(layer.from * 30))], [30, 32, 34]);
+});
+
+test('transform_layers is a higher-order PM.Edit command that expands to primitive source edits', () => {
+  const PM = runtime();
+  addLayers(PM);
+  const action = staggerAction(PM, 'apply');
+  const result = PM.Edit.apply({
+    type: 'transform_layers', transform: action.transform,
+    state: { offsetFrames: 3, order: 'reverseStack', anchor: 'playhead' },
+  }, { label: 'Reverse stagger', origin: 'agent' });
+  assert.equal(result.ok, true);
+  assert.deepEqual([...PM.proj.layers.map(layer => Math.round(layer.from * 30))], [66, 63, 60]);
+  assert.equal(PM.proj.edits[0].operations.every(operation => operation.type === 'set_layer'), true,
+    'history records the real primitive edits, not an opaque tool program');
+});
+
+test('generated transforms skip locked layers and report live selection state', () => {
+  const PM = runtime();
+  const layers = addLayers(PM); layers[1].lock = true;
+  const action = staggerAction(PM, 'preview');
+  const preview = PM.Capabilities.preview(action.transform, {
+    offsetFrames: 2, order: 'stack', anchor: 'earliest',
+  });
+  assert.equal(preview.targets.length, 2);
+  assert.equal(PM.Capabilities.selectionSummary(), '2 of 3 layers editable');
+  assert.deepEqual([...preview.changes.map(change => change.target)], ['layer-3']);
+});
+
+test('the transform language supports state, current values, aggregates, and frame math', () => {
+  const PM = runtime();
+  addLayers(PM, [1, 2, 3]);
+  const transform = {
+    label: 'Compress timing', selector: { scope: 'selection' }, order: 'stack', edits: [{
+      path: 'layer.from', value: { op: 'add', args: [
+        { aggregate: 'min', path: 'layer.from' },
+        { op: 'multiply', args: [{ ref: 'index' }, { op: 'frames', args: [{ state: 'spacing' }] }] },
+      ] },
+    }, {
+      path: 'layer.duration', value: { op: 'multiply', args: [{ ref: 'current' }, { state: 'durationScale' }] },
+    }],
+  };
+  const result = PM.Capabilities.apply(transform, { spacing: 4, durationScale: .5 });
+  assert.equal(result.ok, true);
+  assert.deepEqual([...PM.proj.layers.map(layer => Math.round(layer.from * 30))], [30, 34, 38]);
+  assert.deepEqual([...PM.proj.layers.map(layer => layer.dur)], [2, 2, 2]);
+});
+
+test('unsafe or unbounded generated actions are rejected', () => {
+  const PM = runtime(); addLayers(PM);
+  assert.equal(PM.Capabilities.sanitizeTransform({ selector: { scope: 'selection' }, edits: [
+    { path: '__proto__.polluted', value: 1 },
+  ] }), null);
+  assert.equal(PM.Capabilities.sanitizeControlAction({ type: 'transform', mode: 'apply', transform: {
+    selector: { scope: 'selection' }, edits: [{ path: 'layer.from', value: { op: 'runJavaScript', args: ['alert(1)'] } }],
+  } }), null);
+  assert.equal(PM.Capabilities.sanitizeControlAction({ type: 'history', command: 'deleteAll' }), null);
+});
+
+test('the reusable Layer Stagger recipe exposes selection, settings, preview, apply, and undo', () => {
+  const PM = runtime();
+  const panel = PM.Capabilities.panelRecipe('layer-stagger');
+  assert.equal(panel.state.offsetFrames, 2);
+  assert.deepEqual([...panel.controls.map(control => control.label)], [
+    'Selection', 'Offset', 'Order', 'Anchor', 'Preview', 'Apply Stagger', 'Undo last edit',
+  ]);
+  assert.equal(panel.controls.find(control => control.label === 'Apply Stagger').primary, true);
+  assert.equal(panel.controls.find(control => control.label === 'Apply Stagger').action.type, 'transform');
+});
+
+test('Decompose Text is a reusable sandboxed tool rather than a panel of generic shortcuts', () => {
+  const PM = runtime();
+  const panel = PM.Capabilities.panelRecipe('decompose-text');
+  assert.deepEqual([...panel.controls.map(control => control.label)], [
+    'Selection', 'Split into', 'Original', 'Preview', 'Decompose', 'Undo last edit',
+  ]);
+  const action = panel.controls.find(control => control.label === 'Decompose').action;
+  assert.equal(action.type, 'script');
+  assert.equal(action.mode, 'apply');
+  assert.deepEqual([...action.requiredTypes], ['text']);
+  assert.match(action.code, /source\.textLayout/);
+  assert.match(action.code, /PM\.addLayer/);
+  assert.doesNotMatch(action.code, /document|window|fetch/);
+  const sanitized = PM.Capabilities.sanitizeControlAction(action);
+  assert.equal(sanitized.type, 'script');
+  assert.equal(PM.Capabilities.sanitizeControlAction({ type: 'script', mode: 'apply', code: '' }), null);
+});

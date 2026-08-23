@@ -11,7 +11,7 @@ const SCENE_OPERATIONS = new Set([
   'set_property', 'replace_keyframes', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
   'reorder_layer', 'add_effect', 'remove_effect', 'set_effect',
-  'set_scene_parameter', 'add_marker',
+  'set_scene_parameter', 'add_marker', 'transform_layers',
 ]);
 const FIELDS = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold'],
@@ -20,7 +20,7 @@ const FIELDS = {
   set_content: ['type', 'target', 'patch'],
   set_layer: ['type', 'target', 'patch'],
   set_composition: ['type', 'patch'],
-  add_layer: ['type', 'id', 'layerType', 'name', 'from', 'duration', 'content', 'properties', 'color', 'index', 'select'],
+  add_layer: ['type', 'id', 'layerType', 'name', 'from', 'duration', 'content', 'properties', 'color', 'index', 'select', 'parent', 'blend', 'motionBlur', 'visible', 'solo', 'shy', 'collapsed'],
   delete_layers: ['type', 'target', 'targets'],
   reorder_layer: ['type', 'target', 'index'],
   add_effect: ['type', 'target', 'effect', 'parameters', 'open'],
@@ -28,6 +28,7 @@ const FIELDS = {
   set_effect: ['type', 'target', 'effect', 'patch'],
   set_scene_parameter: ['type', 'name', 'label', 'control', 'value', 'min', 'max', 'options'],
   add_marker: ['type', 'id', 'time', 'name'],
+  transform_layers: ['type', 'transform', 'state'],
 };
 
 const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -66,6 +67,7 @@ function propertyDigest(layer) {
 
 function projectState() {
   const p = PM.proj;
+  const selectedIds = new Set(PM.sel?.layers || []);
   return {
     composition: {
       id: p.id, name: p.name, width: p.w, height: p.h, fps: p.fps,
@@ -76,17 +78,20 @@ function projectState() {
     layers: p.layers.slice(0, 120).map((layer, index) => ({
       index, id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent,
-      blend: layer.blend, motionBlur: layer.mblur,
+      blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
       content: Object.fromEntries(Object.entries(layer.d || {}).map(([key, value]) => [
         key,
         typeof value === 'string' ? value.slice(0, key === 'code' ? 8000 : 500) : clone(value),
       ])),
       properties: propertyDigest(layer),
       effects: (layer.fx || []).map(effect => ({ id: effect.id, type: effect.type, enabled: effect.on })),
+      textLayout: layer.type === 'text' && selectedIds.has(layer.id) && PM.textLayout
+        ? PM.textLayout(layer.d) : null,
     })),
     parameters: clone(p.params || {}),
     markers: clone(p.markers || []),
     availableOperations: [...SCENE_OPERATIONS],
+    availableCapabilities: PM.Capabilities?.catalog?.() || null,
     editableSource: PM.Edit?.sourceCatalog?.() || null,
   };
 }
@@ -147,6 +152,7 @@ function describeCommand(command) {
     add_layer: 'Add layer', delete_layers: 'Delete', reorder_layer: 'Reorder layer',
     add_effect: 'Add effect', remove_effect: 'Remove effect', set_effect: 'Edit effect',
     set_scene_parameter: 'Set scene control', add_marker: 'Add marker',
+    transform_layers: 'Transform layers',
   };
   return [labels[command.type] || command.type, target, detail].filter(Boolean).join(' · ').slice(0, 150);
 }
@@ -251,7 +257,7 @@ function rollback(checkpoint) {
 
 PM.AgentHarness = {
   MAX_REPAIRS, projectState, defaultTimes, observe, capture, sanitizeProposal,
-  describeCommand, sceneSchema, promptContext, execute, rollback,
+  describeCommand, sceneSchema, promptContext, execute, rollback, cleanCommand,
   test: { cleanCommand, safeTimes, reviewSchema },
 };
 })();

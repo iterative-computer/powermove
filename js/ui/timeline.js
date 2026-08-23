@@ -6,6 +6,7 @@ const T = {
   gut: 214, row: 30, ruler: 26, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null,
+  style: { clipRadius: 6, keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'normal' },
 };
 PM.TL = T;
 
@@ -22,6 +23,7 @@ PM.registerPanel('timeline', {
        which made the whole timeline flash/stick black while a section was
        being adjusted. The timeline still paints its own solid background. */
     T.cv = cv; T.ctx = cv.getContext('2d');
+    refreshTimelineManifest();
     buildHead(head);
     bind(cv, wrap);
     new ResizeObserver(() => resize(wrap)).observe(wrap);
@@ -61,6 +63,19 @@ function buildHead(head) {
   time.addEventListener('pointerdown', (e) => {
     PM.drag(e, { cursor: 'ew-resize', move: (dx) => PM.setTime(PM.time + dx / 12 / PM.proj.fps) });
   });
+}
+
+function refreshTimelineManifest() {
+  const raw = PM.WS?.current?.chrome?.timeline || {};
+  const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
+    rowHeight: 30, gutterWidth: 214, rulerHeight: 26, clipRadius: 6,
+    keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'normal',
+  };
+  T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
+  T.style = config;
+  const head = PM.$('#tl-head');
+  if (head) head.dataset.density = config.toolbarDensity;
+  return config;
 }
 
 function resize(wrap) {
@@ -131,7 +146,7 @@ const refreshTheme = () => {
     line: css('--line') || 'rgba(15,15,20,.09)',
   };
 };
-PM.bus.on('layout', () => { refreshTheme(); refreshInk(); PM.invalidate('timeline'); });
+PM.bus.on('layout', () => { refreshTimelineManifest(); refreshTheme(); refreshInk(); PM.invalidate('timeline'); });
 
 /* Ink-on-paper colors for canvas chrome. Light theme uses black alpha;
    dark theme uses white alpha — resolved on every theme refresh. */
@@ -152,6 +167,7 @@ function draw() {
   try { drawInner(); } catch (e) { console.error('[timeline draw]', e, e.stack); }
 }
 function drawInner() {
+  refreshTimelineManifest();
   /* Re-resolve the live canvas every frame: workspace rebuilds can replace the
      panel element, and drawing into a detached canvas is the root cause of
      gutter/clip misalignment after layout changes. */
@@ -315,7 +331,7 @@ function drawClips(c, W, H) {
 function rgba(hex, a) { const [r, g, b] = PM.hex2rgb(hex); return `rgba(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0},${a})`; }
 
 const BADGE = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
-const layerLabel = (L) => (BADGE[L.type] ? BADGE[L.type] + ' ' : '') + L.name;
+const layerLabel = (L) => (T.style.showTypeBadges && BADGE[L.type] ? BADGE[L.type] + ' ' : '') + L.name;
 
 function drawClip(c, L, y) {
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
@@ -323,7 +339,7 @@ function drawClip(c, L, y) {
   const hh = T.row - 7;
   const yy = y + 3.5;
   const sel = PM.sel.layers.includes(L.id);
-  const r = 6;
+  const r = T.style.clipRadius;
   /* Label contrast from actual chip luminance, so it works in both themes:
      dark text on light chips (cream/sand/yellow/gray), white text on dark chips. */
   const [cr, cg, cb] = PM.hex2rgb(L.color);
@@ -358,14 +374,15 @@ function drawPropKeys(c, r, y) {
   c.strokeStyle = INK.grid;
   c.beginPath(); c.moveTo(T.gut, cy); c.lineTo(T.w, cy); c.stroke();
   const kf = r.prop.kf;
+  const keyRadius = T.style.keyframeSize / 2;
   for (const k of kf) {
     const x = t2x(L.from + k.t);
     if (x < T.gut - 6 || x > T.w + 6) continue;
     const sel = PM.sel.keys.some(s => s.i === k.i);
   c.fillStyle = sel ? theme.accent : INK.key;
-    if (k.hold) { c.fillRect(x - 3.4, cy - 3.4, 6.8, 6.8); }
+    if (k.hold) { c.fillRect(x - keyRadius, cy - keyRadius, keyRadius * 2, keyRadius * 2); }
     else {
-      c.beginPath(); c.moveTo(x, cy - 4.4); c.lineTo(x + 4.4, cy); c.lineTo(x, cy + 4.4); c.lineTo(x - 4.4, cy); c.fill();
+      c.beginPath(); c.moveTo(x, cy - keyRadius); c.lineTo(x + keyRadius, cy); c.lineTo(x, cy + keyRadius); c.lineTo(x - keyRadius, cy); c.fill();
     }
   }
 }
@@ -385,7 +402,7 @@ function drawGutter(c, W, H) {
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
       c.font = '500 11px ' + fmono();
       c.fillStyle = theme.tx3; c.textBaseline = 'middle';
-      c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
+      if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
       /* eye / lock */
       icoEye(c, 30, y + T.row / 2, L.on);
       icoLock(c, 48, y + T.row / 2, L.lock);
@@ -609,6 +626,7 @@ function workAreaDrag(e, idx) {
       if (wa[1] > wa[0]) PM.Edit.dispatch({ type: 'set_composition', patch: { workArea: wa } });
     },
     up: () => PM.Edit.commit('Work area'),
+    cancel: () => PM.Edit.cancel(),
   });
 }
 
@@ -654,6 +672,7 @@ function gutterDown(e, x, y) {
       }
     },
     up: () => { if (done) PM.Edit.commit('Reorder layer'); },
+    cancel: () => { if (done) PM.Edit.cancel(); },
   });
 }
 
@@ -671,6 +690,7 @@ function slide(e) {
       start.forEach(s => PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: Math.max(0, PM.snapF(s.from + dt, PM.proj.fps)) } }));
     },
     up: () => { moved ? PM.Edit.commit('Move clip') : PM.Edit.cancel(); },
+    cancel: () => PM.Edit.cancel(),
   });
 }
 function snapDelta(start, dt) {
@@ -707,6 +727,7 @@ function trim(e, side) {
       });
     },
     up: () => { moved ? PM.Edit.commit('Trim clip') : PM.Edit.cancel(); },
+    cancel: () => PM.Edit.cancel(),
   });
 }
 
@@ -736,6 +757,7 @@ function keyDown(e, r, x, y, rowIdx) {
       PM.touch(); PM.invalidate();
     },
     up: () => { moved ? PM.hist.commit('Move keyframe') : PM.hist.cancel(); PM.invalidate('timeline'); },
+    cancel: () => { PM.hist.cancel(); PM.invalidate('timeline'); },
   });
 }
 
@@ -759,6 +781,7 @@ function graphDown(e, x, y) {
       PM.touch(); PM.invalidate();
     },
     up: () => PM.hist.commit('Edit curve'),
+    cancel: () => PM.hist.cancel(),
   });
 }
 function dragHandle(e, k, which, g, kf, L) {
@@ -777,6 +800,7 @@ function dragHandle(e, k, which, g, kf, L) {
       PM.touch(); PM.invalidate();
     },
     up: () => PM.hist.commit('Adjust easing'),
+    cancel: () => PM.hist.cancel(),
   });
 }
 
@@ -804,6 +828,7 @@ function marquee(e) {
       }
       T.marquee = null; PM.invalidate('timeline');
     },
+    cancel: () => { T.marquee = null; PM.invalidate('timeline'); },
   });
 }
 

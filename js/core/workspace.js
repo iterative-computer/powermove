@@ -8,6 +8,55 @@ const p = (id, o = {}) => ({ id, ...o });
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const text = (value, fallback = '') => typeof value === 'string' && value.trim() ? value.trim() : fallback;
+const TIMELINE_DEFAULTS = Object.freeze({
+  rowHeight: 30, gutterWidth: 214, rulerHeight: 26, clipRadius: 6,
+  keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true,
+  toolbarDensity: 'normal',
+});
+
+function normalizeTimelineChrome(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  return {
+    rowHeight: PM.clamp(Math.round(finite(raw.rowHeight) ? raw.rowHeight : TIMELINE_DEFAULTS.rowHeight), 22, 48),
+    gutterWidth: PM.clamp(Math.round(finite(raw.gutterWidth) ? raw.gutterWidth : TIMELINE_DEFAULTS.gutterWidth), 160, 360),
+    rulerHeight: PM.clamp(Math.round(finite(raw.rulerHeight) ? raw.rulerHeight : TIMELINE_DEFAULTS.rulerHeight), 20, 42),
+    clipRadius: PM.clamp(finite(raw.clipRadius) ? raw.clipRadius : TIMELINE_DEFAULTS.clipRadius, 0, 12),
+    keyframeSize: PM.clamp(finite(raw.keyframeSize) ? raw.keyframeSize : TIMELINE_DEFAULTS.keyframeSize, 4, 12),
+    showLayerNumbers: raw.showLayerNumbers !== false,
+    showTypeBadges: raw.showTypeBadges !== false,
+    toolbarDensity: raw.toolbarDensity === 'compact' ? 'compact' : 'normal',
+  };
+}
+
+function sanitizeInterfaceEdit(value) {
+  let raw = value;
+  if (typeof raw === 'string') {
+    if (raw.length > 30_000) return null;
+    try { raw = JSON.parse(raw); } catch { return null; }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.target !== 'timeline') return null;
+  const patch = raw.patch && typeof raw.patch === 'object' && !Array.isArray(raw.patch) ? raw.patch : {};
+  const out = {};
+  if (finite(patch.rowHeight)) out.rowHeight = PM.clamp(Math.round(patch.rowHeight), 22, 48);
+  if (finite(patch.gutterWidth)) out.gutterWidth = PM.clamp(Math.round(patch.gutterWidth), 160, 360);
+  if (finite(patch.rulerHeight)) out.rulerHeight = PM.clamp(Math.round(patch.rulerHeight), 20, 42);
+  if (finite(patch.clipRadius)) out.clipRadius = PM.clamp(patch.clipRadius, 0, 12);
+  if (finite(patch.keyframeSize)) out.keyframeSize = PM.clamp(patch.keyframeSize, 4, 12);
+  if (typeof patch.showLayerNumbers === 'boolean') out.showLayerNumbers = patch.showLayerNumbers;
+  if (typeof patch.showTypeBadges === 'boolean') out.showTypeBadges = patch.showTypeBadges;
+  if (['compact', 'normal'].includes(patch.toolbarDensity)) out.toolbarDensity = patch.toolbarDensity;
+  if (['normal', 'reversed'].includes(patch.surfaceOrder)) out.surfaceOrder = patch.surfaceOrder;
+  return Object.keys(out).length ? { target: 'timeline', patch: out } : null;
+}
+
+function applyInterfaceEdit(workspace, edit) {
+  const clean = sanitizeInterfaceEdit(edit);
+  if (!workspace || !clean) return false;
+  workspace.chrome = workspace.chrome && typeof workspace.chrome === 'object' ? workspace.chrome : {};
+  workspace.chrome.timeline = { ...normalizeTimelineChrome(workspace.chrome.timeline), ...clean.patch };
+  if (clean.patch.surfaceOrder) workspace.chrome.timelineSurfaceOrder = clean.patch.surfaceOrder;
+  return true;
+}
 
 /* Agent-authored workspace JSON is persisted, so tolerate common model aliases and
    repair older malformed workspaces before they reach the layout or controls UI. */
@@ -15,7 +64,7 @@ function normalizeControl(control, index) {
   const raw = control && typeof control === 'object' ? control : {};
   const rawDefault = raw.def !== undefined ? raw.def : raw.default !== undefined ? raw.default : raw.value;
   let type = text(raw.type).toLowerCase();
-  if (!['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button'].includes(type)) {
+  if (!['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout'].includes(type)) {
     if (Array.isArray(raw.options)) type = 'select';
     else if (typeof rawDefault === 'boolean') type = 'toggle';
     else if (typeof rawDefault === 'string' && /^#[0-9a-f]{3,8}$/i.test(rawDefault)) type = 'color';
@@ -31,7 +80,17 @@ function normalizeControl(control, index) {
     ? legacyParam
     : text(savedLabel, text(raw.name, text(authoredParam, `Control ${index + 1}`)));
   const out = { ...raw, type, label };
-  if (type === 'button') return out;
+  if (type === 'readout') {
+    out.source = ['selection.summary', 'selection.count'].includes(raw.source) ? raw.source : 'selection.summary';
+    return out;
+  }
+  if (type === 'button') {
+    out.primary = raw.primary === true;
+    out.action = PM.Capabilities?.sanitizeControlAction?.(raw.action) || null;
+    out.cmd = text(raw.cmd, text(raw.command));
+    return out;
+  }
+  out.stateKey = /^[a-z][a-z0-9_.-]{0,79}$/i.test(raw.stateKey || '') ? raw.stateKey : '';
   out.param = text(authoredParam, text(raw.name, label));
   if (type === 'text') out.def = rawDefault == null ? '' : String(rawDefault);
   else if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6B1A';
@@ -50,6 +109,21 @@ function normalizeControl(control, index) {
   return out;
 }
 
+function isLegacyBrokenStagger(panel) {
+  if (!panel || panel.id !== 'layer-stagger-tools' || panel.title !== 'Layer Stagger') return false;
+  const controls = Array.isArray(panel.controls) ? panel.controls : [];
+  const commands = controls.map(control => control?.cmd || control?.command || '');
+  return commands.length === 7 && commands.join('|') === 'selectAll|deselect|prevEdge|nextEdge|prevFrame|nextFrame|split';
+}
+
+function isLegacyBrokenTextSplitter(panel) {
+  if (!panel || panel.title !== 'Text Splitter') return false;
+  const labels = (Array.isArray(panel.controls) ? panel.controls : []).map(control => control?.label || '');
+  return labels.includes('Duplicate source layer')
+    && labels.includes('Add text layer')
+    && labels.includes('Undo last split step');
+}
+
 function normalizeWorkspace(workspace, fallback) {
   const raw = workspace && typeof workspace === 'object' ? copy(workspace) : {};
   const backup = fallback && typeof fallback === 'object' ? copy(fallback) : null;
@@ -61,18 +135,36 @@ function normalizeWorkspace(workspace, fallback) {
   raw.chrome = raw.chrome && typeof raw.chrome === 'object' ? raw.chrome : {};
   raw.chrome.previewCornerRadius = raw.chrome.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
   raw.chrome.timelineSurfaceOrder = raw.chrome.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
+  raw.chrome.timeline = normalizeTimelineChrome(raw.chrome.timeline);
   raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
   delete raw.features.motionBlur;
   delete raw.features.guides;
   raw.scope = raw.scope === 'project' ? 'project' : 'global';
   raw.projectId = raw.scope === 'project' ? text(raw.projectId, PM.proj?.id || '') : null;
   raw.custom = (Array.isArray(raw.custom) ? raw.custom : []).map((panel, index) => {
-    const cp = panel && typeof panel === 'object' ? panel : {};
+    const source = panel && typeof panel === 'object' ? panel : {};
+    const legacyStagger = isLegacyBrokenStagger(source);
+    const legacyTextSplitter = isLegacyBrokenTextSplitter(source);
+    const recipeId = legacyStagger ? 'layer-stagger' : legacyTextSplitter ? 'decompose-text' : text(source.tool);
+    const recipe = PM.Capabilities?.panelRecipe?.(recipeId) || null;
+    const cp = recipe ? {
+      ...recipe, ...source,
+      tool: recipe.id,
+      note: legacyStagger || legacyTextSplitter ? recipe.note : text(source.note, recipe.note),
+      state: { ...(recipe.state || {}), ...(source.state && typeof source.state === 'object' ? source.state : {}) },
+      controls: legacyStagger || legacyTextSplitter
+        ? recipe.controls
+        : Array.isArray(source.controls) && source.controls.length ? source.controls : recipe.controls,
+    } : source;
+    const state = Object.fromEntries(Object.entries(cp.state && typeof cp.state === 'object' ? cp.state : {})
+      .filter(([key, value]) => /^[a-z][a-z0-9_.-]{0,79}$/i.test(key) && (value === null || ['string', 'number', 'boolean'].includes(typeof value)))
+      .slice(0, 64));
     return {
       ...cp,
       id: text(cp.id, `custom-${raw.id}-${index + 1}`),
       title: text(cp.title, text(cp.name, 'Controls')),
       size: finite(cp.size) ? PM.clamp(cp.size, 72, 1200) : 220,
+      state,
       controls: (Array.isArray(cp.controls) ? cp.controls : []).map(normalizeControl),
     };
   });
@@ -477,36 +569,114 @@ function registerCustom(w) {
       size: cp.size || 200,
       build(body) {
         const wrap = h('div.insp');
+        const toolState = { ...(cp.state || {}) };
+        const defaults = { ...toolState };
         const syncs = [];
-        let offs = [];
+        let offs = [], saveTimer = 0;
+        const preview = h('div.generated-tool-preview', { hidden: true });
+        const persistState = () => {
+          cp.state = { ...toolState };
+          clearTimeout(saveTimer);
+          saveTimer = setTimeout(() => WS.save(), 140);
+        };
+        const fmt = (path, value) => {
+          if (typeof value !== 'number') return String(value);
+          if (path === 'layer.from' || path === 'layer.duration') return `${Math.round(value * Math.max(1, PM.proj.fps || 30))}fr`;
+          return String(PM.round(value, 3));
+        };
+        const showPreview = (result, applied = false) => {
+          preview.textContent = ''; preview.hidden = false;
+          preview.classList.toggle('error', !result?.ok);
+          preview.appendChild(h('strong', result?.ok ? (applied ? 'Applied to source' : 'Preview') : 'Nothing changed'));
+          preview.appendChild(h('p', result?.message || 'The tool could not produce a valid source change.'));
+          if (result?.ok) {
+            const list = h('ol');
+            (result.changes || result.preview?.changes || []).slice(0, 8).forEach(change => {
+              if (change.description) list.appendChild(h('li', h('span', change.description)));
+              else list.appendChild(h('li', h('span', change.name), h('code', `${fmt(change.path, change.before)} → ${fmt(change.path, change.after)}`)));
+            });
+            const total = (result.changes || result.preview?.changes || []).length;
+            if (total > 8) list.appendChild(h('li.more', `${total - 8} more changes`));
+            preview.appendChild(list);
+          }
+        };
         const sync = () => {
           if (!body.isConnected) { offs.forEach(off => off()); offs = []; return; }
           syncs.forEach(sync => { try { sync(); } catch (e) { } });
         };
-        offs = ['draw:ui', 'project', 'history'].map(event => PM.bus.on(event, sync));
+        offs = ['draw:ui', 'project', 'history', 'sel', 'layers'].map(event => PM.bus.on(event, sync));
         body.appendChild(wrap);
         if (cp.note) wrap.appendChild(h('div', { style: { color: 'var(--tx-3)', fontSize: '11.5px', lineHeight: 1.6, padding: '2px 4px 8px' } }, cp.note));
         (cp.controls || []).forEach(ct => {
+          if (ct.type === 'readout') {
+            const value = h('span.generated-tool-readout');
+            value.sync = () => {
+              const selected = PM.selLayers?.() || [];
+              value.textContent = ct.source === 'selection.count'
+                ? String(selected.length)
+                : (PM.Capabilities?.selectionSummary?.() || `${selected.length} selected`);
+            };
+            value.sync(); syncs.push(value.sync); wrap.appendChild(PM.row(ct.label, value));
+            return;
+          }
           if (ct.type === 'button') {
-            wrap.appendChild(h('button.chip', {
+            let busy = false;
+            const button = h('button.chip' + (ct.primary ? '.solid' : ''), {
               style: { width: '100%', justifyContent: 'center', height: '28px', marginBottom: '4px' },
-              onclick: () => {
-                if (Array.isArray(ct.commands)) PM.Edit.apply(ct.commands, { label: ct.label, origin: 'generated-ui' });
+              onclick: async () => {
+                if (busy) return;
+                if (ct.action?.type === 'transform') {
+                  const result = ct.action.mode === 'apply'
+                    ? PM.Capabilities.apply(ct.action.transform, toolState, { label: ct.label, origin: 'generated-tool' })
+                    : PM.Capabilities.preview(ct.action.transform, toolState);
+                  showPreview(result, ct.action.mode === 'apply' && !!result.ok);
+                  PM.toast(result.ok ? (ct.action.mode === 'apply' ? `${ct.label} applied` : 'Preview ready') : result.message);
+                } else if (ct.action?.type === 'script') {
+                  busy = true; button.disabled = true;
+                  preview.hidden = false; preview.textContent = '';
+                  preview.appendChild(h('strong', ct.action.mode === 'apply' ? 'Running isolated tool…' : 'Preparing preview…'));
+                  let result;
+                  try {
+                    result = ct.action.mode === 'apply'
+                      ? await PM.Script.apply(ct.action.code, toolState, { label: ct.action.label || ct.label, origin: 'generated-script' })
+                      : await PM.Script.preview(ct.action.code, toolState, { label: ct.action.label || ct.label });
+                  } catch (error) {
+                    result = { ok: false, message: String(error.message || error), changes: [] };
+                  } finally { busy = false; }
+                  showPreview(result, ct.action.mode === 'apply' && !!result.ok); sync();
+                  PM.toast(result.ok ? (ct.action.mode === 'apply' ? `${ct.label} applied` : 'Preview ready') : result.message);
+                } else if (ct.action?.type === 'history') {
+                  const changed = PM.hist.undo();
+                  showPreview({ ok: changed, message: changed ? 'Restored the previous editable source.' : 'There is no edit to undo.', changes: [] });
+                } else if (ct.action?.type === 'reset') {
+                  Object.keys(toolState).forEach(key => delete toolState[key]); Object.assign(toolState, defaults); persistState(); preview.hidden = true; sync();
+                } else if (Array.isArray(ct.commands)) PM.Edit.apply(ct.commands, { label: ct.label, origin: 'generated-ui' });
                 else if (ct.cmd) PM.cmd(ct.cmd);
                 else if (ct.prompt) PM.toast('Shake the pointer and drag across this section to change it');
               },
-            }, ct.label));
+            }, ct.label);
+            button.sync = () => {
+              if (busy) { button.disabled = true; return; }
+              if (ct.action?.type === 'transform') {
+                const selector = ct.action.transform.selector || { scope: 'selection', types: [] };
+                button.disabled = !(PM.Capabilities?.resolveTargets?.(selector)?.length);
+              } else if (ct.action?.type === 'script') button.disabled = !PM.Script?.canRun?.(ct.action);
+            };
+            button.sync(); syncs.push(button.sync); wrap.appendChild(button);
             return;
           }
           const binding = sourceBinding(ct);
-          const param = binding ? null : ensureParam(ct);
+          const local = !!ct.stateKey;
+          const param = binding || local ? null : ensureParam(ct);
           /* History may restore the project object. Resolve generated scene
              parameters by stable name so the mounted control follows undo,
              redo, agent edits, and direct edits to the current source. */
-          const currentParam = () => PM.proj.params[param.name] || param;
-          const get = binding ? binding.get : () => currentParam().value;
-          const set = binding ? () => {} : v => { const active = currentParam(); active.value = v; applyParam(active); };
-          const edit = binding ? {
+          const currentParam = () => param && (PM.proj.params[param.name] || param);
+          const get = binding ? binding.get : local ? () => toolState[ct.stateKey] ?? ct.def : () => currentParam().value;
+          const set = binding ? () => {} : local
+            ? v => { toolState[ct.stateKey] = v; persistState(); preview.hidden = true; }
+            : v => { const active = currentParam(); active.value = v; applyParam(active); };
+          const edit = local ? { label: ct.label, local: true } : binding ? {
             label: ct.label, origin: 'generated-ui', command: binding.command,
           } : {
             label: ct.label, origin: 'generated-ui',
@@ -525,6 +695,7 @@ function registerCustom(w) {
           if (field.sync) syncs.push(field.sync);
           wrap.appendChild(PM.row(ct.label, field));
         });
+        wrap.appendChild(preview);
       },
     });
   });
@@ -625,4 +796,9 @@ function applyParam(param) {
 WS.registerCustom = registerCustom;
 WS.sourceBinding = sourceBinding;
 WS.normalize = normalizeWorkspace;
+WS.isLegacyBrokenStagger = isLegacyBrokenStagger;
+WS.timelineDefaults = TIMELINE_DEFAULTS;
+WS.normalizeTimelineChrome = normalizeTimelineChrome;
+WS.sanitizeInterfaceEdit = sanitizeInterfaceEdit;
+WS.applyInterfaceEdit = applyInterfaceEdit;
 })();

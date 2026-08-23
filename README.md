@@ -38,7 +38,8 @@ The ChatGPT subscription provider requires the Codex CLI to be installed and sig
 ## Architecture
 
 - `js/ui/layout.js` renders the compact docked workspace.
-- `js/core/workspace.js` owns workspace state and custom controls.
+- `js/core/workspace.js` owns workspace state, generated tools, and structured interface manifests.
+- `js/core/capabilities.js` compiles bounded multi-layer transforms into normal editable source commands.
 - `js/core/editing.js` is the shared, typed source-edit boundary used by canvas gestures, inspectors, the timeline, agents, and generated controls.
 - `js/assistant/harness.js` runs bounded composition observation, source edits, rendered review, repairs, and checkpoints.
 - `js/assistant/spatial.js` owns Ripple selection, generated-section proposals, preview, and final user approval.
@@ -62,6 +63,10 @@ Generated interfaces never own a second copy of composition state. A custom cont
 ```
 
 Supported layer binding paths are `properties.*`, `content.*`, and `layer.*`. Composition background controls use `target: "$composition"` with `composition.background.*` paths. Generated sections reject disconnected controls instead of creating inert parameters. Generated buttons can submit a `commands` array. Those controls call the same atomic transactions as direct manipulation and agent source edits, so undo, validation, hand-edit preservation, revision checks, and provenance stay consistent.
+
+Generated tools can also use safe multi-layer transforms. A tool keeps settings such as offset, order, or anchor locally, previews the exact source changes without mutating the project, and applies the compiled primitive edits as one undoable transaction. The transform language supports selection/all/visible scopes, type filters, deterministic ordering, bounded math, state references, and aggregates; it never executes generated JavaScript.
+
+Timeline redesigns use a separate structured interface manifest for row height, gutter and ruler geometry, clip and keyframe size, labels, badges, toolbar density, and surface order. This changes the Timeline view while preserving the existing layers, clips, and keyframes underneath it.
 
 A single prompt can also create a complete workspace manifest with multiple docks, built-in panels, and generated sections. The manifest is bounded and normalized before preview: unknown panels are removed, Composition remains reachable, generated sections are placed into a dock, and every non-button control must resolve to real editable source.
 

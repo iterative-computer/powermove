@@ -65,6 +65,30 @@ test('canvas, agent, and generated UI origins use the same source command', () =
   assert.deepEqual(outcomes, outcomes.map(() => outcomes[0]));
 });
 
+test('procedural scripts can add parented styled layers atomically and undo them', () => {
+  const { PM } = editor();
+  const sourceLayer = addText(PM);
+  sourceLayer.blend = 'screen';
+  const result = PM.Edit.apply([{
+    type: 'add_layer', id: 'piece-a', layerType: 'text', name: 'A',
+    content: { ...sourceLayer.d, text: 'A', align: 'left' },
+    properties: { 'position.x': -40, 'position.y': 0 },
+    parent: sourceLayer.id, blend: sourceLayer.blend, motionBlur: true,
+    from: sourceLayer.from, duration: sourceLayer.dur, select: false,
+  }, {
+    type: 'set_layer', target: sourceLayer.id, patch: { visible: false },
+  }], { label: 'Decompose text', origin: 'generated-script' });
+  assert.equal(result.ok, true);
+  assert.equal(PM.L('piece-a').parent, sourceLayer.id);
+  assert.equal(PM.L('piece-a').blend, 'screen');
+  assert.equal(PM.L('piece-a').mblur, true);
+  assert.equal(PM.L(sourceLayer.id).on, false);
+  assert.equal(PM.proj.revision, 1);
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.L('piece-a'), null);
+  assert.equal(PM.L(sourceLayer.id).on, true);
+});
+
 test('a live gesture becomes one coalesced source transaction and one undo step', () => {
   const { PM } = editor();
   const layer = addText(PM);
@@ -98,6 +122,23 @@ test('cancelling an empty control gesture preserves live source object bindings'
   const result = PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'position.x', value: 1110, mode: 'static', preserveHandEdits: false }, { origin: 'generated-ui' });
   assert.equal(result.ok, true);
   assert.equal(property.v, 1110);
+});
+
+test('an interrupted source gesture restores its edits and the next canvas gesture still works', () => {
+  const { PM } = editor();
+  const layer = addText(PM);
+  const before = layer.p['position.x'].v;
+
+  PM.Edit.begin('Interrupted resize', { origin: 'canvas' });
+  PM.Edit.dispatch({ type: 'set_property', target: layer.id, path: 'position.x', value: before + 80, mode: 'static', preserveHandEdits: false });
+  assert.equal(PM.Edit.cancel(), true);
+  assert.equal(PM.L(layer.id).p['position.x'].v, before, 'the partial gesture is rolled back');
+
+  PM.Edit.begin('Move after interruption', { origin: 'canvas' });
+  const moved = PM.Edit.dispatch({ type: 'set_property', target: layer.id, path: 'position.x', value: before + 40, mode: 'static', preserveHandEdits: false });
+  assert.equal(moved.ok, true);
+  assert.equal(PM.Edit.commit().ok, true);
+  assert.equal(PM.L(layer.id).p['position.x'].v, before + 40, 'later manipulation is not wedged');
 });
 
 test('scene parameter edits preserve generated control bindings', () => {
@@ -261,8 +302,12 @@ test('all editing surfaces are wired to the shared source command boundary', () 
   const shortcuts = source('js/ui/shortcuts.js');
   const controls = source('js/ui/controls.js');
   const workspace = source('js/core/workspace.js');
+  const capabilities = source('js/core/capabilities.js');
   const spatial = source('js/assistant/spatial.js');
   assert.match(index, /js\/core\/editing\.js/);
+  assert.match(index, /js\/core\/capabilities\.js/);
+  assert.match(capabilities, /PM\.Edit\.apply/);
+  assert.match(capabilities, /sanitizeTransform/);
   assert.match(viewer, /PM\.Edit\.dispatch/);
   assert.match(timeline, /origin: 'timeline'/);
   assert.match(inspector, /origin: 'inspector'/);
@@ -273,7 +318,7 @@ test('all editing surfaces are wired to the shared source command boundary', () 
   assert.match(workspace, /origin: 'generated-ui'/);
   assert.match(workspace, /path\.startsWith\('properties\.'\)/);
   assert.match(workspace, /PM\.proj\.params\[param\.name\]/);
-  assert.match(workspace, /\['draw:ui', 'project', 'history'\]/);
+  assert.match(workspace, /\['draw:ui', 'project', 'history', 'sel', 'layers'\]/);
   assert.match(spatial, /workspace\.custom\.push/, 'generated sections enter the validated workspace model');
   assert.match(spatial, /PM\.WS\.mutate/, 'spatial changes use the shared workspace mutation boundary');
 });

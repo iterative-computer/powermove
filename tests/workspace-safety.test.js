@@ -16,6 +16,7 @@ function workspaceModel() {
     registerPanel() {},
   };
   const context = vm.createContext({ window: { PM }, console });
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/core/capabilities.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8'), context);
   return PM.WS;
 }
@@ -38,6 +39,7 @@ function workspaceRuntime() {
     normalizeFill(value) { return JSON.parse(JSON.stringify(value)); },
   };
   const context = vm.createContext({ window: { PM }, console });
+  vm.runInContext(fs.readFileSync(path.join(root, 'js/core/capabilities.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8'), context);
   return PM;
 }
@@ -141,4 +143,81 @@ test('boot refreshes stale built-in presets while preserving custom workspaces',
   assert.match(file, /WS\.all\[index\] = normalizeWorkspace\(preset\)/);
   assert.doesNotMatch(file, /findIndex\(workspace => workspace\.id === preset\.id\)(?! && workspace\.builtin)/,
     'a custom workspace is never replaced merely because its id resembles a preset');
+});
+
+test('the exact broken shortcut-only Layer Stagger panel migrates to the real generated tool', () => {
+  const WS = workspaceModel();
+  const controls = ['selectAll', 'deselect', 'prevEdge', 'nextEdge', 'prevFrame', 'nextFrame', 'split']
+    .map((cmd, index) => ({ type: 'button', label: `Legacy ${index}`, cmd }));
+  const workspace = WS.normalize({
+    id: 'custom', name: 'Custom', layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }, { id: 'layer-stagger-tools' }] }] },
+    custom: [{ id: 'layer-stagger-tools', title: 'Layer Stagger', controls }],
+  });
+  const panel = workspace.custom[0];
+  assert.equal(panel.id, 'layer-stagger-tools', 'the saved panel remains in the same layout slot');
+  assert.equal(panel.tool, 'layer-stagger');
+  assert.deepEqual([...panel.controls.map(control => control.label)], [
+    'Selection', 'Offset', 'Order', 'Anchor', 'Preview', 'Apply Stagger', 'Undo last edit',
+  ]);
+  assert.equal(panel.controls.some(control => control.cmd === 'split'), false);
+  assert.equal(panel.controls.find(control => control.label === 'Apply Stagger').action.type, 'transform');
+  assert.doesNotMatch(panel.note, /split|frame navigation/i);
+});
+
+test('unrelated custom command panels are never rewritten by the stagger migration', () => {
+  const WS = workspaceModel();
+  const workspace = WS.normalize({
+    id: 'custom', name: 'Custom', layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }, { id: 'my-tools' }] }] },
+    custom: [{ id: 'my-tools', title: 'My Tools', controls: [{ type: 'button', label: 'Split', cmd: 'split' }] }],
+  });
+  assert.equal(workspace.custom[0].tool, undefined);
+  assert.equal(workspace.custom[0].controls[0].cmd, 'split');
+});
+
+test('the exact broken Text Splitter panel migrates to the working Decompose Text script', () => {
+  const WS = workspaceModel();
+  const workspace = WS.normalize({
+    id: 'custom', name: 'Custom', layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }, { id: 'text-splitter' }] }] },
+    custom: [{ id: 'text-splitter', title: 'Text Splitter', controls: [
+      { type: 'text', label: 'text', def: 'Powermove' },
+      { type: 'button', label: 'Duplicate source layer', cmd: 'duplicate' },
+      { type: 'button', label: 'Add text layer', cmd: 'addText' },
+      { type: 'button', label: 'Undo last split step', cmd: 'undo' },
+    ] }],
+  });
+  const panel = workspace.custom[0];
+  assert.equal(panel.id, 'text-splitter', 'the existing panel keeps its layout identity');
+  assert.equal(panel.tool, 'decompose-text');
+  assert.equal(panel.title, 'Text Splitter', 'the saved user-facing title is preserved');
+  assert.deepEqual([...panel.controls.map(control => control.label)], [
+    'Selection', 'Split into', 'Original', 'Preview', 'Decompose', 'Undo last edit',
+  ]);
+  assert.equal(panel.controls.find(control => control.label === 'Decompose').action.type, 'script');
+  assert.equal(panel.controls.some(control => control.cmd === 'duplicate'), false);
+});
+
+test('Timeline interface manifests are clamped, persisted, and limited to visual configuration', () => {
+  const WS = workspaceModel();
+  const edit = WS.sanitizeInterfaceEdit(JSON.stringify({ target: 'timeline', patch: {
+    rowHeight: 12, gutterWidth: 900, rulerHeight: 30, clipRadius: 5, keyframeSize: 20,
+    showLayerNumbers: false, showTypeBadges: false, toolbarDensity: 'compact', projectLayers: [],
+  } }));
+  assert.deepEqual({ ...edit.patch }, {
+    rowHeight: 22, gutterWidth: 360, rulerHeight: 30, clipRadius: 5, keyframeSize: 12,
+    showLayerNumbers: false, showTypeBadges: false, toolbarDensity: 'compact',
+  });
+  const workspace = WS.normalize({ id: 'w', name: 'W', layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] } });
+  assert.equal(WS.applyInterfaceEdit(workspace, edit), true);
+  assert.equal(workspace.chrome.timeline.rowHeight, 22);
+  assert.equal(workspace.chrome.timeline.gutterWidth, 360);
+  assert.equal('projectLayers' in workspace.chrome.timeline, false);
+});
+
+test('workspace action menus render above the Library but below modal dialogs', () => {
+  const css = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
+  const drop = Number(css.match(/\.drop\{position:absolute;z-index:(\d+)/)?.[1]);
+  const library = Number(css.match(/#library-screen\{[^}]*z-index:(\d+)/)?.[1]);
+  const modal = Number(css.match(/\.modal\{position:fixed;z-index:(\d+)/)?.[1]);
+  assert.ok(drop > library, `menu z-index ${drop} must clear Library z-index ${library}`);
+  assert.ok(drop < modal, `menu z-index ${drop} must stay below modal z-index ${modal}`);
 });

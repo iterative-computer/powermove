@@ -63,6 +63,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 xattr -cr "$APP" 2>/dev/null || true
+# File Provider may preserve provenance on copied files even when `xattr -cr`
+# reports success. Codesign rejects that metadata as bundle detritus.
+xattr -dr com.apple.provenance "$APP" 2>/dev/null || true
 # File Provider can retain bundle-level metadata even after a recursive clear.
 # Remove those attributes explicitly so strict code-sign verification is reliable.
 xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true

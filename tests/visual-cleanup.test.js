@@ -76,7 +76,7 @@ test('the Composition surface is square, borderless, and shadowless while surrou
   assert.match(appCss, /#library-screen\{[^}]*box-shadow:var\(--shadow-float\)/s, 'unrelated elevation remains intact');
 });
 
-test('one Library control replaces duplicate global commands without hiding unique actions', () => {
+test('one Library control replaces duplicate global commands and the Composition footer stays absent', () => {
   const titlebar = app.slice(app.indexOf('right.append('), app.indexOf("PM.bus.on('workspaces', paintTabs)"));
   assert.match(titlebar, /Library · Sections and Workspaces/);
   assert.doesNotMatch(titlebar, /button\('plus', 'New layer'/);
@@ -87,8 +87,13 @@ test('one Library control replaces duplicate global commands without hiding uniq
     'validated workspace definition editing remains reachable from Library');
   assert.match(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /PM\.cmd\('newShader'\)/,
     'shader creation remains reachable from the canonical tool strip');
-  assert.match(fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8'), /PM\.Export\.dialog\(\)/,
-    'export remains reachable from the composition surface');
+  const viewer = fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8');
+  assert.doesNotMatch(viewer, /viewer-foot|PM\.Export\.dialog\(\)|Composition size|Preview resolution/,
+    'aspect, zoom, quality, notes, timecode, export, and their footer are removed from Composition');
+  assert.doesNotMatch(viewer, /hideMoveHandle: true/,
+    'Composition keeps one compact panel grip without restoring the footer');
+  assert.match(fs.readFileSync(path.join(root, 'js/ui/shortcuts.js'), 'utf8'), /def\('export'.*PM\.Export\.dialog\(\)/,
+    'export remains reachable from the canonical command');
   assert.doesNotMatch(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /title: 'Snapping \(S\)'/,
     'the global snapping duplicate is removed while the timeline owns its control');
 });

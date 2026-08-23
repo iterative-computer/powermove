@@ -250,6 +250,28 @@ test('a native pointercancel aborts the drag instead of wedging it', () => {
   assert.equal(ups, 0);
 });
 
+test('every transaction-backed editor drag cancels cleanly when the pointer is interrupted', () => {
+  const controls = fs.readFileSync(path.join(root, 'js/ui/controls.js'), 'utf8');
+  const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
+  const viewer = fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8');
+
+  assert.match(controls, /PM\.drag\(e, \{[\s\S]*?cancel: \(\) => cancel\(opt\),[\s\S]*?\}\);/,
+    'interrupted inspector scrubs release their source transaction');
+  for (const name of ['workAreaDrag', 'slide', 'trim']) {
+    const start = timeline.indexOf(`function ${name}`);
+    const next = timeline.indexOf('\nfunction ', start + 1);
+    const body = timeline.slice(start, next < 0 ? undefined : next);
+    assert.match(body, /cancel: \(\) => PM\.Edit\.cancel\(\)/, `${name} releases its source transaction`);
+  }
+  const reorderStart = timeline.indexOf('function gutterDown');
+  const reorderEnd = timeline.indexOf('\nfunction slide', reorderStart);
+  assert.match(timeline.slice(reorderStart, reorderEnd), /cancel: \(\) => \{ if \(done\) PM\.Edit\.cancel\(\); \}/,
+    'interrupted layer reordering releases a transaction only when one began');
+  const transformStart = viewer.indexOf('function startTransform');
+  assert.match(viewer.slice(transformStart), /cancel: \(\) => \{ PM\.Edit\.cancel\(\); PM\.Inspector\.refresh\(\); \}/,
+    'interrupted canvas transforms release the shared edit transaction');
+});
+
 test('panel drag wiring: Esc cancels and drops resolve before mutation', () => {
   const layout = fs.readFileSync(path.join(root, 'js/ui/layout.js'), 'utf8');
   const util = fs.readFileSync(path.join(root, 'js/core/util.js'), 'utf8');

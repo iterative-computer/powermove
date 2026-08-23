@@ -25,9 +25,23 @@ test('model and reasoning picker are persisted and reach the local Codex client'
   }
   assert.match(spatial, /agentModel/);
   assert.match(spatial, /agentReasoningEffort/);
-  assert.match(spatial, /\{ model: S\.model, reasoningEffort: S\.reasoningEffort \}/);
+  assert.match(spatial, /\{ model: S\.model, reasoningEffort: S\.reasoningEffort, signal: controller\.signal \}/);
   assert.match(native, /arguments\.append\(contentsOf: \["--model", model\]\)/);
   assert.match(native, /model_reasoning_effort=/);
+});
+
+test('active agent runs remain steerable and are natively cancellable', () => {
+  assert.match(spatial, /function composerMode\(phase\)/);
+  assert.match(spatial, /placeholder: working \? 'Add direction while the agent works/);
+  assert.match(spatial, /'aria-label': 'Stop current run'/);
+  assert.match(spatial, /previousRequest\?\.abort\(\)/,
+    'sending steering replaces the unfinished request');
+  assert.match(spatial, /This is steering for an active run/,
+    'the replacement plan receives explicit steering semantics');
+  assert.match(native, /add\(self, name: "pmCodexCancel"\)/);
+  assert.match(native, /cancelCodex\(requestId: requestId\)/);
+  assert.match(native, /process\?\.terminate\(\)/,
+    'stopped or superseded jobs do not keep consuming the native Codex client');
 });
 
 test('attachments support image context and bounded text context', () => {
@@ -71,4 +85,19 @@ test('elevated prompt UI exposes scope, suggestions, and direct panel authority'
   assert.match(spatial, /PM\.WS\.restoreSnapshot\(S\.panelRun\.checkpoint\)/);
   assert.match(css, /\.agent-composer-head/);
   assert.match(css, /\.agent-suggestions/);
+});
+
+test('Agent welcome actions use borderless surfaces while retaining focus behavior', () => {
+  const iconRule = css.match(/\.agent-welcome-icon\{[^}]*\}/)?.[0] || '';
+  const suggestionRule = css.match(/\.agent-suggestions button\{[^}]*\}/)?.[0] || '';
+  const suggestionHover = css.match(/\.agent-suggestions button:hover\{[^}]*\}/)?.[0] || '';
+  assert.doesNotMatch(iconRule, /border:/);
+  assert.doesNotMatch(suggestionRule, /border:/);
+  assert.doesNotMatch(suggestionHover, /border-color:/);
+  assert.match(suggestionRule, /background:color-mix\(in srgb,var\(--tx\) 4%,var\(--bg-panel-2\)\)/,
+    'the borderless tiles retain a quiet resting fill in both themes');
+  assert.match(suggestionHover, /background:color-mix\(in srgb,var\(--tx\) 7%,var\(--bg-panel-2\)\)/,
+    'hover remains one subtle step stronger');
+  assert.match(css, /button:focus-visible\{outline:2px solid color-mix\(in srgb,var\(--accent\)/,
+    'keyboard users retain the shared focus indicator');
 });

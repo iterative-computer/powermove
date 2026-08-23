@@ -7,11 +7,13 @@ const PM = window.PM, h = PM.h;
    without giving the control a private mutation path. */
 const hasCommand = (opt) => !!(opt && opt.command);
 const sourceCommand = (opt, value) => typeof opt.command === 'function' ? opt.command(value) : { ...opt.command, value };
-const begin = (opt, label) => hasCommand(opt) ? PM.Edit.begin(label, { origin: opt.origin || 'interface' }) : PM.hist.begin(label);
-const write = (set, value, opt) => hasCommand(opt) ? PM.Edit.dispatch(sourceCommand(opt, value)) : set(value);
-const commit = (opt, label) => hasCommand(opt) ? PM.Edit.commit(label) : PM.hist.commit(label);
-const cancel = (opt) => hasCommand(opt) ? PM.Edit.cancel() : PM.hist.cancel();
-const once = (set, value, opt, label) => hasCommand(opt)
+const begin = (opt, label) => opt.local ? true : hasCommand(opt) ? PM.Edit.begin(label, { origin: opt.origin || 'interface' }) : PM.hist.begin(label);
+const write = (set, value, opt) => opt.local ? set(value) : hasCommand(opt) ? PM.Edit.dispatch(sourceCommand(opt, value)) : set(value);
+const commit = (opt, label) => opt.local ? true : hasCommand(opt) ? PM.Edit.commit(label) : PM.hist.commit(label);
+const cancel = (opt) => opt.local ? true : hasCommand(opt) ? PM.Edit.cancel() : PM.hist.cancel();
+const once = (set, value, opt, label) => opt.local
+  ? set(value)
+  : hasCommand(opt)
   ? PM.Edit.apply(sourceCommand(opt, value), { label, origin: opt.origin || 'interface' })
   : PM.hist.do(label, () => set(value));
 
@@ -49,6 +51,7 @@ PM.numField = (get, set, opt = {}) => {
         if (!moved) { edit(); cancel(opt); }
         else commit(opt, opt.label || 'Adjust');
       },
+      cancel: () => cancel(opt),
     });
   });
 
@@ -333,8 +336,12 @@ PM.toggleField = (get, set, opt = {}) => {
 };
 
 PM.selectField = (get, set, options, opt = {}) => {
-  const b = h('button.sel', String(get()));
-  b.sync = () => { b.textContent = String(get()); };
+  const labelFor = value => {
+    const option = options.find(item => (typeof item === 'string' ? item : item.v) === value);
+    return String(option && typeof option === 'object' ? option.label : option ?? value);
+  };
+  const b = h('button.sel', labelFor(get()));
+  b.sync = () => { b.textContent = labelFor(get()); };
   b.addEventListener('pointerdown', (e) => {
     e.stopPropagation(); e.preventDefault();
     PM.menu(b, options.map(o => {
