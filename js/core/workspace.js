@@ -487,7 +487,7 @@ function registerCustom(w) {
               onclick: () => {
                 if (Array.isArray(ct.commands)) PM.Edit.apply(ct.commands, { label: ct.label, origin: 'generated-ui' });
                 else if (ct.cmd) PM.cmd(ct.cmd);
-                else if (ct.prompt) PM.toast('Shake the pointer and circle this section to change it');
+                else if (ct.prompt) PM.toast('Shake the pointer and drag across this section to change it');
               },
             }, ct.label));
             return;

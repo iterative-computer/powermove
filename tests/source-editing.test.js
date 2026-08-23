@@ -162,6 +162,24 @@ test('Composition clear fill remains editable and undoable', () => {
   assert.equal(JSON.stringify(PM.proj.backgroundFill), before);
 });
 
+test('effect addition is one source transaction and one undo step', () => {
+  const { PM } = editor();
+  const layer = addText(PM);
+  PM.mkEffect = (type) => ({ id: PM.uid('f'), type, on: true, open: false, p: { amount: PM.P(24) } });
+
+  const result = PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: 'blur' }, {
+    label: 'Add Gaussian Blur', origin: 'effects-panel',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(PM.L(layer.id).fx.length, 1);
+  assert.equal(PM.hist.list().at(-1), 'Add Gaussian Blur');
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.L(layer.id).fx.length, 0);
+  assert.equal(PM.hist.redo(), true);
+  assert.equal(PM.L(layer.id).fx.length, 1);
+});
+
 test('section creation and updates cross the same undoable source transaction boundary', () => {
   const { PM } = editor();
   const layer = addText(PM);
@@ -223,6 +241,8 @@ test('all editing surfaces are wired to the shared source command boundary', () 
   const viewer = source('js/ui/viewer.js');
   const timeline = source('js/ui/timeline.js');
   const inspector = source('js/ui/inspector.js');
+  const panels = source('js/ui/panels.js');
+  const shortcuts = source('js/ui/shortcuts.js');
   const controls = source('js/ui/controls.js');
   const workspace = source('js/core/workspace.js');
   const spatial = source('js/assistant/spatial.js');
@@ -230,6 +250,9 @@ test('all editing surfaces are wired to the shared source command boundary', () 
   assert.match(viewer, /PM\.Edit\.dispatch/);
   assert.match(timeline, /origin: 'timeline'/);
   assert.match(inspector, /origin: 'inspector'/);
+  assert.match(panels, /if \(event\.detail > 1\) return;/, 'double-click follow-up cannot add duplicate effects');
+  assert.doesNotMatch(panels, /row\.ondblclick = row\.onclick/, 'effect rows have only one activation path');
+  assert.match(shortcuts, /origin: 'command-palette'/, 'palette effects use source transactions');
   assert.match(controls, /opt\.command/);
   assert.match(workspace, /origin: 'generated-ui'/);
   assert.match(workspace, /path\.startsWith\('properties\.'\)/);

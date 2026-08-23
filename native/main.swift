@@ -155,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.evaluateJavaScript("document.documentElement.classList.add('native-app')")
+        publishAvailableFonts()
         positionTrafficLights()
         /* Boot self-check: surfaces renderer state on stderr for support/diagnostics. */
         webView.evaluateJavaScript("""
@@ -168,6 +169,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
           } catch (e) {}
         }, 1200);
         """)
+    }
+
+    /* Canvas can render every macOS font, but JavaScript cannot enumerate those
+       families reliably. Publish AppKit's real catalog after the editor boots. */
+    private func publishAvailableFonts() {
+        let families = NSFontManager.shared.availableFontFamilies.sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: families),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.PM && PM.Fonts && PM.Fonts.setSystemFamilies(\(json))")
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {

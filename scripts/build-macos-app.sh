@@ -16,7 +16,7 @@ export CLANG_MODULE_CACHE_PATH="$BUILD/.module-cache"
 export SWIFT_MODULECACHE_PATH="$BUILD/.module-cache"
 
 rm -rf "$APP"
-mkdir -p "$MACOS" "$WEB/css" "$WEB/js" "$BUILD/Powermove.iconset" "$BUILD/.module-cache"
+mkdir -p "$MACOS" "$WEB/css" "$WEB/js" "$WEB/assets/fonts" "$BUILD/Powermove.iconset" "$BUILD/.module-cache"
 
 xcrun swiftc -O -framework Cocoa -framework WebKit "$ROOT/native/main.swift" -o "$MACOS/Powermove"
 if [ -f "$ROOT/assets/Powermove.icns" ]; then
@@ -33,6 +33,7 @@ fi
 cp "$ROOT/index.html" "$WEB/index.html"
 cp -R "$ROOT/css/." "$WEB/css/"
 cp -R "$ROOT/js/." "$WEB/js/"
+cp -R "$ROOT/assets/fonts/." "$WEB/assets/fonts/"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -25,14 +25,22 @@ function fontStr(d) {
 }
 
 function rasterText(d, scale) {
-  const pad = Math.ceil(d.size * .6) + 24;
+  const size = Math.max(1, Number(d.size) || 16);
+  const pad = Math.ceil(size * .6) + 24;
   const meas = getCanvas(8, 8).getContext('2d');
+  const align = d.align === 'center' ? 'center' : d.align === 'right' ? 'right' : 'left';
   meas.font = fontStr(d);
+  meas.textAlign = align;
+  meas.textBaseline = 'alphabetic';
   if ('letterSpacing' in meas) meas.letterSpacing = (d.tracking || 0) + 'px';
   const lines = String(d.text == null ? '' : d.text).split('\n');
   let wMax = 1;
-  for (const l of lines) wMax = Math.max(wMax, meas.measureText(l).width);
-  const lh = d.size * (d.leading || 1.15);
+  const metrics = lines.map(line => {
+    const measured = meas.measureText(line);
+    wMax = Math.max(wMax, measured.width);
+    return measured;
+  });
+  const lh = size * (d.leading || 1.15);
   const w = Math.ceil(wMax) + pad * 2;
   const hh = Math.ceil(lh * lines.length) + pad * 2;
   const cv = getCanvas(w * scale, hh * scale);
@@ -41,11 +49,45 @@ function rasterText(d, scale) {
   c.font = fontStr(d);
   if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
   c.textBaseline = 'alphabetic';
-  c.textAlign = d.align === 'center' ? 'center' : d.align === 'right' ? 'right' : 'left';
+  c.textAlign = align;
   c.fillStyle = d.color || '#fff';
   const x = d.align === 'center' ? w / 2 : d.align === 'right' ? w - pad : pad;
-  lines.forEach((l, i) => c.fillText(l, x, pad + lh * i + d.size * .82));
-  return { cv, w, h: hh, anchorX: d.align === 'center' ? w / 2 : d.align === 'right' ? w - pad : pad, anchorY: pad };
+  const anchorX = d.align === 'center' ? w / 2 : d.align === 'right' ? w - pad : pad;
+  const anchorY = pad;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  lines.forEach((line, i) => {
+    const baseline = pad + lh * i + size * .82;
+    const measured = metrics[i];
+    c.fillText(line, x, baseline);
+
+    const fallbackLeft = d.align === 'center' ? x - measured.width / 2 : d.align === 'right' ? x - measured.width : x;
+    const fallbackRight = fallbackLeft + measured.width;
+    const leftMetric = Number(measured.actualBoundingBoxLeft);
+    const rightMetric = Number(measured.actualBoundingBoxRight);
+    const ascentMetric = Number(measured.actualBoundingBoxAscent);
+    const descentMetric = Number(measured.actualBoundingBoxDescent);
+    const left = Number.isFinite(leftMetric) && Number.isFinite(rightMetric) && (leftMetric || rightMetric)
+      ? x - leftMetric : fallbackLeft;
+    const right = Number.isFinite(leftMetric) && Number.isFinite(rightMetric) && (leftMetric || rightMetric)
+      ? x + rightMetric : fallbackRight;
+    const top = Number.isFinite(ascentMetric) && ascentMetric > 0 ? baseline - ascentMetric : baseline - size * .8;
+    const bottom = Number.isFinite(descentMetric) && descentMetric >= 0 ? baseline + descentMetric : baseline + size * .2;
+    minX = Math.min(minX, left); maxX = Math.max(maxX, right);
+    minY = Math.min(minY, top); maxY = Math.max(maxY, bottom);
+  });
+
+  if (!Number.isFinite(minX) || maxX <= minX) { minX = x - .5; maxX = x + .5; }
+  if (!Number.isFinite(minY) || maxY <= minY) { minY = pad; maxY = pad + size; }
+  const interactionPad = PM.clamp(size * .055, 3, 12);
+  const selection = {
+    x0: minX - anchorX - interactionPad,
+    y0: minY - anchorY - interactionPad,
+    x1: maxX - anchorX + interactionPad,
+    y1: maxY - anchorY + interactionPad,
+  };
+  selection.w = selection.x1 - selection.x0;
+  selection.h = selection.y1 - selection.y0;
+  return { cv, w, h: hh, anchorX, anchorY, selection };
 }
 
 /* ── shapes ────────────────────────────────────────────── */
@@ -108,15 +150,31 @@ PM.raster = (L, scale = 1) => {
   return e;
 };
 PM.rasterStats = () => ({ size: cache.size });
-PM.rasterClear = () => cache.clear();
+PM.rasterClear = () => {
+  cache.clear();
+  PM.GL && PM.GL.dropTextures && PM.GL.dropTextures('r:');
+};
 
 /* ── assets ────────────────────────────────────────────── */
+function assetKind(file) {
+  const mime = String(file.type || '').toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  const ext = String(file.name || '').split('.').pop().toLowerCase();
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp'].includes(ext)) return 'image';
+  if (['mp4', 'mov', 'm4v', 'webm'].includes(ext)) return 'video';
+  if (['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'aif', 'aiff'].includes(ext)) return 'audio';
+  return null;
+}
+PM.assetKind = assetKind;
 PM.assets = {
   map: new Map(),
   async add(file) {
     const id = PM.uid('a');
     const url = URL.createObjectURL(file);
-    const kind = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : 'image';
+    const kind = assetKind(file);
+    if (!kind) { URL.revokeObjectURL(url); throw new Error('Unsupported media file'); }
     let el, w = 0, hh = 0, dur = 0;
     if (kind === 'image') {
       el = new Image(); el.src = url;
@@ -126,6 +184,12 @@ PM.assets = {
       el = document.createElement(kind === 'video' ? 'video' : 'audio');
       el.src = url; el.preload = 'auto'; el.muted = kind === 'video'; el.playsInline = true;
       await new Promise(r => { el.onloadedmetadata = r; el.onerror = r; setTimeout(r, 6000); });
+      if (el.error || (kind === 'audio' && !(Number.isFinite(el.duration) && el.duration > 0))) {
+        URL.revokeObjectURL(url);
+        throw new Error(kind === 'audio'
+          ? 'Could not read this audio file · try WAV, MP3, M4A, AAC, OGG, or FLAC'
+          : 'Could not read this video file');
+      }
       w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
     }
     const a = { id, name: file.name, kind, url, el, w, h: hh, dur, size: file.size };

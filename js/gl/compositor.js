@@ -134,6 +134,13 @@ function texFor(key, source, opts = {}) {
   t.v = opts.version === undefined ? t.v : opts.version;
   return t.tex;
 }
+GL.dropTextures = (prefix = '') => {
+  for (const [key, entry] of GL.texes) {
+    if (!key.startsWith(prefix)) continue;
+    if (GL.gl && entry.tex) GL.gl.deleteTexture(entry.tex);
+    GL.texes.delete(key);
+  }
+};
 function bindTex(unit, tex) {
   const gl = GL.gl;
   gl.activeTexture(gl.TEXTURE0 + unit);
@@ -556,10 +563,15 @@ GL.bounds = (L, T) => {
   let w, h, ax, ay;
   if (L.type === 'solid' || L.type === 'shader') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
-  else if (L.type === 'text' || L.type === 'shape') {
+  else if (L.type === 'text') {
+    const r = PM.raster(L, 1);
+    if (r.selection) return { ...r.selection, ax: r.anchorX, ay: r.anchorY };
+    w = r.w; h = r.h; ax = r.anchorX; ay = r.anchorY;
+  }
+  else if (L.type === 'shape') {
     const r = PM.raster(L, 1);
     w = r.w; h = r.h;
-    ax = L.type === 'shape' ? w / 2 : r.anchorX; ay = L.type === 'shape' ? h / 2 : r.anchorY;
+    ax = w / 2; ay = h / 2;
   } else if (L.type === 'image' || L.type === 'video') {
     w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = w / 2; ay = h / 2;
   } else return null;

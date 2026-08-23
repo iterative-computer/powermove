@@ -9,6 +9,7 @@ const workspace = fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8
 const tokens = fs.readFileSync(path.join(root, 'css/tokens.css'), 'utf8');
 const appCss = fs.readFileSync(path.join(root, 'css/app.css'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'js/app.js'), 'utf8');
+const panels = fs.readFileSync(path.join(root, 'js/ui/panels.js'), 'utf8');
 
 test('major section borders have a dedicated perceptual weight in both themes', () => {
   const light = tokens.slice(tokens.indexOf(':root{'), tokens.indexOf(':root[data-density'));
@@ -18,6 +19,19 @@ test('major section borders have a dedicated perceptual weight in both themes', 
   assert.match(appCss, /\.panel\s*\{[^}]*border:1px solid var\(--section-line\)/s);
   assert.match(appCss, /\.panel > header\s*\{[^}]*border-bottom:1px solid var\(--section-line\)/s);
   assert.match(appCss, /#tl-head\s*\{[^}]*border-bottom:1px solid var\(--section-line\)/s);
+});
+
+test('Agent conversation is a themed floating section instead of a docked rail', () => {
+  const composer = appCss.match(/(?:^|\n)\.spatial-compose\{([^}]*)\}/)?.[1] || '';
+  assert.match(composer, /background:var\(--bg-float\)/);
+  assert.match(composer, /border:1px solid var\(--line-2\)/);
+  assert.match(appCss, /\.spatial-conversation-log\{[^}]*background:var\(--bg-panel-2\)/);
+  assert.match(appCss, /\.spatial-message\.user\{[^}]*background:var\(--accent\)/);
+  assert.match(appCss, /\.spatial-target\{[^}]*font-family:var\(--f-ui\)/,
+    'floating assistant chrome uses the normal UI typeface');
+  assert.doesNotMatch(panels, /registerPanel\('agent'/, 'the conversation does not consume a workspace dock');
+  assert.match(app, /PM\.SpatialAssistant\?\.open\?\.\(\)/,
+    'the titlebar opens the spatial prompt directly');
 });
 
 test('timeline annotation markers and labels are absent without affecting keyframes', () => {
@@ -176,10 +190,10 @@ test('custom fill picker supports solid and gradient editing without a native pi
 });
 
 test('Section scrollbars are hidden without removing scrolling semantics', () => {
-  assert.match(appCss, /\.panel>\.body,#library-screen>main,\.spatial-preview,\.pop-mirror,\.fill-picker-body\{scrollbar-width:none\}/);
+  assert.match(appCss, /\.panel>\.body,\.library-content,\.spatial-preview,\.pop-mirror,\.fill-picker-body\{scrollbar-width:none\}/);
   assert.match(appCss, /\.panel>\.body::-webkit-scrollbar[^}]*display:none/);
   assert.match(appCss, /\.panel > \.body\{[^}]*overflow:auto/s);
-  assert.match(appCss, /#library-screen>main\{[^}]*overflow:auto/s);
+  assert.match(appCss, /\.library-content\{[^}]*overflow:auto/s);
   assert.match(appCss, /\.spatial-preview\{[^}]*overflow:auto/s);
 });
 

@@ -514,13 +514,22 @@ PM.pickFiles = () => {
   inp.onchange = () => PM.importFiles([...inp.files]); inp.click();
 };
 PM.importFiles = async (files) => {
+  let imported = 0;
+  const importedNames = [];
   for (const f of files) {
     if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
-    if (!/^(image|video|audio)\//.test(f.type)) { PM.toast('Unsupported file · ' + f.name); continue; }
-    const a = await PM.assets.add(f);
-    PM.cmd('addFromAsset', a.id);
+    if (!PM.assetKind(f)) { PM.toast('Unsupported file · ' + f.name); continue; }
+    try {
+      const a = await PM.assets.add(f);
+      PM.cmd('addFromAsset', a.id);
+      imported++;
+      importedNames.push(f.name);
+    } catch (err) { PM.toast(err.message || ('Could not import ' + f.name), 5000); }
   }
-  PM.autosave(); PM.toast(files.length === 1 ? 'Imported ' + files[0].name : `Imported ${files.length} files`);
+  if (imported) {
+    PM.autosave();
+    PM.toast(imported === 1 ? 'Imported ' + importedNames[0] : `Imported ${imported} files`);
+  }
 };
 addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
 addEventListener('drop', e => {

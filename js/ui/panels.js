@@ -43,7 +43,12 @@ PM.registerPanel('fxbrowser', {
       wrap.appendChild(h('div.sec', { style: { margin: '8px 6px 4px' } }, g));
       list.forEach(([k, d]) => {
         const row = h('div.lyr', h('span.nm', d.label), h('span.idx', '+'));
-        row.ondblclick = row.onclick = () => {
+        row.onclick = (event) => {
+          /* A native double-click emits click, click, then dblclick. The old
+             shared click/dblclick handler therefore added three effects, so
+             one Undo appeared to do nothing. Treat the first click as the one
+             activation and ignore the follow-up click. */
+          if (event.detail > 1) return;
           const L = PM.firstSel();
           if (!L) return PM.toast('Select a layer first');
           PM.Edit.apply({ type: 'add_effect', target: L.id, effect: k }, { label: 'Add ' + d.label, origin: 'effects-panel' });
@@ -141,7 +146,7 @@ PM.registerPanel('workspaces', {
         h('button.chip', { onclick: () => PM.WS.saveAsNew() }, PM.icon('plus'), 'Save current'),
         h('button.chip', { onclick: () => PM.WS.editJSON() }, PM.icon('code'), 'JSON')));
       wrap.appendChild(h('div.empty', { style: { padding: '10px 8px', textAlign: 'left' } },
-        'Shake the pointer, then circle a panel to redesign or add an interface section.'));
+        'Shake the pointer, then drag across a panel to redesign or add an interface section.'));
     };
     paint(); PM.bus.on('workspaces', paint); PM.bus.on('layout', paint);
   },

@@ -346,6 +346,70 @@ PM.selectField = (get, set, options, opt = {}) => {
   return b;
 };
 
+PM.fontField = (get, set, opt = {}) => {
+  const familyStyle = value => `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const b = h('button.sel.font-select', String(get()));
+  b.sync = () => {
+    b.textContent = String(get());
+    b.style.fontFamily = familyStyle(get());
+    b.title = String(get());
+  };
+  b.sync();
+
+  b.addEventListener('pointerdown', (event) => {
+    event.stopPropagation(); event.preventDefault();
+    PM.closeMenus();
+    const menu = h('div.drop.font-drop');
+    const search = h('input.font-search', { placeholder: 'Search fonts', 'aria-label': 'Search fonts', autocomplete: 'off', spellcheck: 'false' });
+    const results = h('div.font-results');
+    menu.append(search, results);
+    document.body.appendChild(menu);
+
+    const render = () => {
+      const query = search.value.trim().toLocaleLowerCase();
+      const all = (PM.Fonts ? PM.Fonts.options(get()) : [get()]);
+      const matches = all.filter(name => !query || name.toLocaleLowerCase().includes(query));
+      results.textContent = '';
+      for (const name of matches.slice(0, 180)) {
+        const item = h('button.di.font-item' + (name === get() ? '.on' : ''), {
+          type: 'button', role: 'menuitem', title: name,
+          style: { fontFamily: familyStyle(name) },
+          onclick: (e) => {
+            e.stopPropagation();
+            once(set, name, opt, opt.label || 'Change font');
+            b.sync(); PM.closeMenus(); PM.invalidate();
+            PM.Fonts && PM.Fonts.ensure(name, opt.weight ? opt.weight() : 400);
+            opt.onChange && opt.onChange(name);
+          },
+        }, name === get() ? '✓ ' : '', name);
+        results.appendChild(item);
+      }
+      if (!matches.length) results.appendChild(h('div.font-empty', 'No matching fonts'));
+      else if (matches.length > 180) results.appendChild(h('div.font-empty', `${matches.length - 180} more · keep typing to narrow`));
+    };
+    search.addEventListener('input', render);
+    search.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); PM.closeMenus(); b.focus(); }
+      if (e.key === 'Enter') {
+        const first = results.querySelector('.font-item');
+        if (first) { e.preventDefault(); first.click(); }
+      }
+    });
+    render();
+
+    const rect = b.getBoundingClientRect();
+    const width = Math.max(230, Math.min(310, rect.width + 120));
+    menu.style.width = width + 'px';
+    menu.style.left = PM.clamp(rect.right - width, 6, innerWidth - width - 6) + 'px';
+    menu.style.top = PM.clamp(rect.bottom + 5, 6, innerHeight - menu.offsetHeight - 6) + 'px';
+    PM._menuOutside = e => { if (!menu.contains(e.target)) PM.closeMenus(); };
+    setTimeout(() => document.addEventListener('pointerdown', PM._menuOutside), 0);
+    requestAnimationFrame(() => search.focus());
+  });
+  return b;
+};
+
 PM.textField = (get, set, opt = {}) => {
   const inp = h('input', {
     value: get() == null ? '' : String(get()),

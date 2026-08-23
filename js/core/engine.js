@@ -47,42 +47,84 @@ function actx() {
   if (AU.ctx.state === 'suspended') AU.ctx.resume();
   return AU.ctx;
 }
-function audioLayers() { return PM.proj.layers.filter(l => l.type === 'audio' && l.on && l.d.asset); }
-
-function startAudio(T) {
-  actx();
-  for (const L of audioLayers()) {
-    const a = PM.assets.get(L.d.asset); if (!a) continue;
-    const local = T - L.from;
-    if (local < -.05 || local >= L.dur) continue;
+function audioLayers() { return PM.proj.layers.filter(l => l.type === 'audio'); }
+function disposeAudioNode(id, n) {
+  try { n.el.pause(); n.el.src = ''; } catch (e) { }
+  try { n.gain.disconnect(); } catch (e) { }
+  try { n.src.disconnect(); } catch (e) { }
+  AU.nodes.delete(id);
+}
+function audioNode(L, a) {
+  let n = AU.nodes.get(L.id);
+  /* Changing an existing layer's Source must change what is heard too. A
+     MediaElementSource cannot be repointed safely, so rebuild just that node. */
+  if (n && n.assetId !== L.d.asset) { disposeAudioNode(L.id, n); n = null; }
+  if (n) return n;
+  const el = a.el.cloneNode();
+  if (!el.src && a.url) el.src = a.url;
+  el.preload = 'auto'; el.playsInline = true; el.muted = false;
+  const src = AU.ctx.createMediaElementSource(el);
+  const gain = AU.ctx.createGain();
+  src.connect(gain).connect(AU.ctx.destination);
+  n = { el, gain, src, assetId: L.d.asset, active: false };
+  AU.nodes.set(L.id, n);
+  return n;
+}
+function gainAt(L, local) {
+  const base = PM.clamp(L.d.gain == null ? 1 : L.d.gain, 0, 4);
+  const fi = Math.max(0, Number(L.d.fadeIn) || 0);
+  const fo = Math.max(0, Number(L.d.fadeOut) || 0);
+  let envelope = 1;
+  if (fi > 0) envelope = Math.min(envelope, PM.clamp(local / fi, 0, 1));
+  if (fo > 0) envelope = Math.min(envelope, PM.clamp((L.dur - local) / fo, 0, 1));
+  return base * envelope;
+}
+/* Keep timeline audio declaratively synchronized. This runs with the playback
+   clock so a clip starts when the playhead enters it, stops at its out point,
+   follows seeks/trim changes, and makes the inspector fades audible. */
+function syncAudio(T, seek = false) {
+  const layers = audioLayers();
+  const soloOn = PM.proj.layers.some(L => L.on && L.solo);
+  for (const L of layers) {
     let n = AU.nodes.get(L.id);
-    if (!n) {
-      const el = a.el.cloneNode();
-      const src = AU.ctx.createMediaElementSource(el);
-      const gain = AU.ctx.createGain();
-      src.connect(gain).connect(AU.ctx.destination);
-      n = { el, gain, src }; AU.nodes.set(L.id, n);
+    const a = L.d.asset && PM.assets.get(L.d.asset);
+    const local = T - L.from;
+    const sourceTime = local + (Number(L.d.trim) || 0);
+    const beforeAssetEnd = !a || !(a.dur > 0) || sourceTime < a.dur - 1e-3;
+    const active = !!(PM.playing && L.on && L.d.asset && a && (!soloOn || L.solo)
+      && local >= -1e-6 && local < L.dur - 1e-6 && sourceTime >= 0 && beforeAssetEnd);
+    if (!active) {
+      if (n) { n.active = false; ensureMediaPaused(n.el); }
+      continue;
     }
-    n.gain.gain.value = PM.clamp(L.d.gain == null ? 1 : L.d.gain, 0, 4);
-    try { n.el.currentTime = PM.clamp(local + (L.d.trim || 0), 0, a.dur || 0); } catch (e) { }
+    if (!AU.ctx) actx();
+    n = audioNode(L, a);
+    const maxTime = a.dur > 0 ? Math.max(0, a.dur - .001) : Math.max(0, sourceTime);
+    const targetTime = PM.clamp(sourceTime, 0, maxTime);
+    const drifted = Math.abs((Number(n.el.currentTime) || 0) - targetTime) > .12;
+    if (!n.active || seek || drifted) {
+      try { n.el.currentTime = targetTime; } catch (e) { }
+    }
+    n.active = true;
+    n.gain.gain.value = gainAt(L, local);
     ensureMediaPlaying(n.el);
   }
+  /* Disabled, deleted, or newly-soloed layers may no longer be in the active
+     set, but their media element still needs an explicit pause. */
+  const layerIds = new Set(layers.map(L => L.id));
+  for (const [id, n] of AU.nodes) if (!layerIds.has(id)) ensureMediaPaused(n.el);
 }
-function stopAudio() { AU.nodes.forEach(n => ensureMediaPaused(n.el)); }
+function startAudio(T) { actx(); syncAudio(T, true); }
+function stopAudio() { AU.nodes.forEach(n => { n.active = false; ensureMediaPaused(n.el); }); }
 /* Evict WebAudio nodes for layers that no longer exist — otherwise deleted/duplicated
    audio layers leak media-element sources and eventually exhaust the audio graph. */
 function evictStaleAudio() {
   const live = new Set(PM.proj.layers.map(l => l.id));
   for (const [id, n] of AU.nodes) {
-    if (!live.has(id)) {
-      try { n.el.pause(); n.el.src = ''; } catch (e) { }
-      try { n.gain.disconnect(); } catch (e) { }
-      try { n.src.disconnect(); } catch (e) { }
-      AU.nodes.delete(id);
-    }
+    if (!live.has(id)) disposeAudioNode(id, n);
   }
 }
-PM.bus.on('layers', evictStaleAudio);
+PM.bus.on('layers', () => { evictStaleAudio(); if (PM.playing) syncAudio(PM.time, true); });
 PM.bus.on('project', () => { stopAudio(); evictStaleAudio(); });
 function scrubVideos(T) {
   for (const L of PM.proj.layers) {
@@ -104,6 +146,7 @@ PM.setTime = (t, opt = {}) => {
   if (!opt.raw) t = PM.snapF(t, p.fps);
   if (t === PM.time && !opt.force) return;
   PM.time = t;
+  if (PM.playing) syncAudio(t, true);
   PM.bus.emit('time', t);
   PM.invalidate('render'); PM.invalidate('timeline'); PM.invalidate('status');
   if (!PM.playing) PM.invalidate('ui');
@@ -148,6 +191,7 @@ function frame(now) {
       else { PM.setTime(we); PM.pause(); return; }
     }
     PM.time = t;
+    syncAudio(t);
     PM.bus.emit('time', t);
     needsDraw = true;
     PM.invalidate('timeline');

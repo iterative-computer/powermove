@@ -239,7 +239,7 @@ function palette() {
     Object.values(C).forEach(c => { if (!q || c.label.toLowerCase().includes(q)) items.push({ label: c.label, cat: c.cat, kb: c.kb, run: () => PM.cmd(c.id) }); });
     PM.proj.layers.forEach(L => { if (q && L.name.toLowerCase().includes(q)) items.push({ label: L.name, cat: 'Layer', run: () => PM.selectLayers(L.id) }); });
     PM.WS.list().forEach(w => { if (!q || w.name.toLowerCase().includes(q)) items.push({ label: 'Workspace · ' + w.name, cat: 'Workspace', run: () => PM.WS.activate(w.id) }); });
-    Object.entries(PM.FX).forEach(([k, d]) => { if (q && d.label.toLowerCase().includes(q)) items.push({ label: 'Effect · ' + d.label, cat: 'Effect', run: () => { const L = PM.firstSel(); if (L) { PM.hist.do('Add effect', () => L.fx.push(PM.mkEffect(k))); PM.Inspector.refresh(); PM.invalidate(); } } }); });
+    Object.entries(PM.FX).forEach(([k, d]) => { if (q && d.label.toLowerCase().includes(q)) items.push({ label: 'Effect · ' + d.label, cat: 'Effect', run: () => { const L = PM.firstSel(); if (L) PM.Edit.apply({ type: 'add_effect', target: L.id, effect: k }, { label: 'Add ' + d.label, origin: 'command-palette' }); } }); });
     items = items.slice(0, 60);
     sel = 0; paint();
   };

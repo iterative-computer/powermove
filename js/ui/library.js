@@ -1,26 +1,67 @@
-/* Powermove — one compact Library for reusable Sections and Workspaces. */
+/* Powermove — a simple, searchable home for editable Sections, Looks and Workspaces. */
 (() => {
 const PM = window.PM, h = PM.h;
-const state = { overlay: null, root: null, tab: 'sections', scope: 'project', trash: false, originProjectId: null, lastFocus: null };
+const state = {
+  overlay: null, root: null, nav: null, content: null, title: null, count: null,
+  search: null, action: null, view: 'sections', scope: 'project', query: '',
+  originProjectId: null, lastFocus: null,
+};
 
-const button = (label, run, pri = false) => h('button.btn' + (pri ? '.pri' : ''), { onclick: run }, label);
-const scopeName = () => state.scope === 'project' ? 'This project' : 'My library';
+const VIEWS = {
+  sections: { label: 'Sections', icon: 'layers', copy: 'Editable layer groups you can drop into any composition.' },
+  looks: { label: 'Looks', icon: 'wand', copy: 'Shader styles you can apply in one click.' },
+  workspaces: { label: 'Workspaces', icon: 'panel', copy: 'Panel layouts for different ways of working.' },
+  trash: { label: 'Trash', icon: 'trash', copy: 'Restore anything you removed.' },
+};
 
-function open(tab = state.tab) {
-  state.tab = tab;
-  if (!state.root) {
-    state.root = h('section#library-screen', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Library', tabindex: '-1' });
-    state.overlay = h('div#library-overlay', state.root);
-    state.overlay.addEventListener('pointerdown', event => { if (event.target === state.overlay) close(); });
-    state.overlay.addEventListener('keydown', trapKeys);
-    document.body.appendChild(state.overlay);
-  }
+const button = (label, run, pri = false, icon = null, attrs = {}) => h('button.btn' + (pri ? '.pri' : ''), { ...attrs, onclick: run }, icon ? PM.icon(icon) : null, label);
+const selectedLayers = () => (PM.sel?.layers || []).map(id => PM.L?.(id)).filter(Boolean);
+const scopeName = () => state.scope === 'project' ? 'this project' : 'all projects';
+const matches = (...values) => !state.query || values.some(value => String(value || '').toLowerCase().includes(state.query));
+
+function ensure() {
+  if (state.root) return;
+  state.search = h('input', { type: 'search', placeholder: 'Search library', 'aria-label': 'Search library' });
+  state.search.addEventListener('input', () => {
+    state.query = state.search.value.trim().toLowerCase();
+    paintMain();
+  });
+  state.nav = h('nav.library-nav', { 'aria-label': 'Library categories' });
+  const scope = h('div.library-browse', h('span', 'Browse'),
+    h('div.library-scope', { role: 'group', 'aria-label': 'Library scope' },
+      h('button', { data: { scope: 'project' }, onclick: () => setScope('project') }, 'This project'),
+      h('button', { data: { scope: 'global' }, onclick: () => setScope('global') }, 'All projects')));
+  const sidebar = h('aside.library-sidebar',
+    h('label.library-search', PM.icon('search'), state.search),
+    scope,
+    state.nav,
+    h('p.library-sidefoot', 'Everything stays editable: real layers, shader code, keyframes, and panel layouts.'));
+
+  state.title = h('div.library-page-title', h('b'), h('span'));
+  state.count = h('span.library-count');
+  state.action = h('div.library-top-action');
+  const top = h('div.library-top', state.title, state.count, state.action);
+  state.content = h('div.library-content');
+  const main = h('main.library-main', top, state.content);
+  const head = h('header.library-head',
+    h('div.library-title', h('b', 'Library'), h('span', 'Reuse your best work. Keep editing it.')),
+    h('button.iconbtn', { title: 'Close Library', 'aria-label': 'Close Library', onclick: close }, PM.icon('x')));
+  state.root = h('section#library-screen', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Library', tabindex: '-1' }, head, h('div.library-shell', sidebar, main));
+  state.overlay = h('div#library-overlay', state.root);
+  state.overlay.addEventListener('pointerdown', event => { if (event.target === state.overlay) close(); });
+  state.overlay.addEventListener('keydown', trapKeys);
+  document.body.appendChild(state.overlay);
+}
+
+function open(view = state.view) {
+  ensure();
+  if (VIEWS[view]) state.view = view;
   state.originProjectId = PM.proj.id;
   state.lastFocus = document.activeElement;
   paint();
   document.getElementById('app').inert = true;
   state.overlay.classList.add('on'); state.root.classList.add('on');
-  requestAnimationFrame(() => (state.root.querySelector('button:not([disabled])') || state.root).focus());
+  requestAnimationFrame(() => state.search.focus());
 }
 function close() {
   if (!state.overlay?.classList.contains('on')) return;
@@ -32,6 +73,9 @@ function close() {
 }
 function trapKeys(event) {
   if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+  if ((event.key === '/' || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f')) && document.activeElement !== state.search) {
+    event.preventDefault(); state.search.focus(); state.search.select(); return;
+  }
   if (event.key !== 'Tab') return;
   const focusable = [...state.root.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
     .filter(node => node.offsetParent !== null);
@@ -40,206 +84,297 @@ function trapKeys(event) {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
+function setScope(scope) { state.scope = scope; paint(); }
+function setView(view) { state.view = view; paint(); }
 
-function header() {
-  const tabs = h('div.library-tabs',
-    h('button' + (state.tab === 'sections' ? '.on' : ''), { onclick: () => { state.tab = 'sections'; state.trash = false; paint(); } }, 'Sections'),
-    h('button' + (state.tab === 'workspaces' ? '.on' : ''), { onclick: () => { state.tab = 'workspaces'; state.trash = false; paint(); } }, 'Workspaces'));
-  const scope = h('div.library-scope',
-    h('button' + (state.scope === 'project' ? '.on' : ''), { onclick: () => { state.scope = 'project'; paint(); } }, 'This project'),
-    h('button' + (state.scope === 'global' ? '.on' : ''), { onclick: () => { state.scope = 'global'; paint(); } }, 'My library'));
-  return h('header.library-head',
-    h('div.library-title', h('b', 'Library'), h('span', 'Reusable, editable building blocks')),
-    tabs, scope,
-    h('button.iconbtn', { title: state.trash ? 'Show Library' : 'Show recoverable Trash', onclick: () => { state.trash = !state.trash; paint(); } }, PM.icon('trash')),
-    h('button.iconbtn', { title: 'Close Library', onclick: close }, PM.icon('x')));
+function catalogs() {
+  return {
+    sections: PM.Library.catalog(state.scope, true),
+    looks: PM.Library.lookCatalog(state.scope, true),
+    workspaces: workspaceList(false),
+    trashedWorkspaces: workspaceList(true),
+  };
+}
+function workspaceList(trashed) {
+  const source = trashed ? PM.WS.trashList() : PM.WS.list();
+  return source.filter(workspace => {
+    if (trashed !== !!workspace.deletedAt) return false;
+    if (state.scope === 'global') return true;
+    if (trashed) return workspace.scope === 'project' && workspace.projectId === PM.proj.id;
+    return workspace.id === PM.WS.current.id || (workspace.scope === 'project' && workspace.projectId === PM.proj.id);
+  });
+}
+function counts(catalog) {
+  return {
+    sections: catalog.sections.filter(item => !item.deletedAt).length,
+    looks: catalog.looks.filter(item => !item.deletedAt).length,
+    workspaces: catalog.workspaces.length,
+    trash: catalog.sections.filter(item => item.deletedAt).length + catalog.looks.filter(item => item.deletedAt).length + catalog.trashedWorkspaces.length,
+  };
+}
+function navButton(view, count) {
+  return h('button.library-navbtn' + (state.view === view ? '.on' : ''), {
+    'aria-current': state.view === view ? 'page' : null,
+    onclick: () => setView(view),
+  }, PM.icon(VIEWS[view].icon), h('span', VIEWS[view].label), h('span.count', String(count)));
+}
+function paint() {
+  if (!state.root) return;
+  const catalog = catalogs(), total = counts(catalog);
+  state.nav.textContent = '';
+  state.nav.append(
+    h('span.library-nav-label', 'Reusable'), navButton('sections', total.sections), navButton('looks', total.looks),
+    h('span.library-nav-label', 'Layout'), navButton('workspaces', total.workspaces),
+    h('div.library-nav-spacer'), navButton('trash', total.trash));
+  state.root.querySelectorAll('.library-scope button').forEach(item => item.classList.toggle('on', item.dataset.scope === state.scope));
+  paintMain(catalog);
+}
+function paintMain(catalog = catalogs()) {
+  const def = VIEWS[state.view];
+  state.title.querySelector('b').textContent = def.label;
+  state.title.querySelector('span').textContent = def.copy;
+  state.action.textContent = '';
+  state.content.textContent = '';
+  let items = [];
+  if (state.view === 'sections') items = catalog.sections.filter(item => !item.deletedAt && matches(item.name, item.sourceProjectName, ...(item.tags || [])));
+  if (state.view === 'looks') items = catalog.looks.filter(item => !item.deletedAt && matches(item.name, item.sourceProjectName, 'shader look'));
+  if (state.view === 'workspaces') items = catalog.workspaces.filter(item => matches(item.name, workspacePanelNames(item)));
+  if (state.view === 'trash') items = [
+    ...catalog.sections.filter(item => item.deletedAt && matches(item.name, item.sourceProjectName, 'section')).map(item => ({ kind: 'section', item })),
+    ...catalog.looks.filter(item => item.deletedAt && matches(item.name, item.sourceProjectName, 'look')).map(item => ({ kind: 'look', item })),
+    ...catalog.trashedWorkspaces.filter(item => matches(item.name, 'workspace')).map(item => ({ kind: 'workspace', item })),
+  ];
+  state.count.textContent = resultLabel(items.length);
+  paintTopAction();
+  const editing = state.view === 'sections' && PM.Library.currentEdit();
+  if (editing) state.content.appendChild(editingBanner(editing));
+  if (items.length) {
+    const grid = h('div.library-grid');
+    if (state.view === 'sections') items.forEach(item => grid.appendChild(sectionCard(item)));
+    if (state.view === 'looks') items.forEach(item => grid.appendChild(lookCard(item)));
+    if (state.view === 'workspaces') items.forEach(item => grid.appendChild(workspaceCard(item)));
+    if (state.view === 'trash') items.forEach(({ kind, item }) => grid.appendChild(kind === 'section' ? sectionCard(item) : kind === 'look' ? lookCard(item) : workspaceCard(item)));
+    state.content.appendChild(grid);
+  } else state.content.appendChild(emptyState());
+}
+function resultLabel(count) {
+  if (state.query) return `${count} ${count === 1 ? 'match' : 'matches'}`;
+  if (state.view === 'trash') return `${count} ${count === 1 ? 'item' : 'items'}`;
+  const noun = { sections: 'section', looks: 'look', workspaces: 'workspace' }[state.view];
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+function paintTopAction() {
+  if (state.view === 'trash') return;
+  if (state.view === 'sections') {
+    const edit = PM.Library.currentEdit();
+    if (edit) {
+      const found = PM.Library.resolveSection(edit.sectionId, edit.sourceProjectId);
+      state.action.append(button(`Update ${found?.entry?.name || 'section'}`, () => confirmSectionUpdate(PM.Library.usage(edit.sectionId, edit.sourceProjectId)), true));
+    } else {
+      const count = selectedLayers().length;
+      state.action.append(button(count ? `Save ${count} selected` : 'Save composition', saveSectionDialog, true, 'plus'));
+    }
+  } else if (state.view === 'looks') state.action.append(button('Save selected look', saveLookDialog, true, 'plus'));
+  else state.action.append(button('Save current layout', saveWorkspaceDialog, true, 'plus'));
+}
+
+function saveSectionDialog() {
+  const layers = selectedLayers();
+  const fallback = layers.length === 1 ? layers[0].name : layers.length > 1 ? `${layers.length}-layer section` : `${PM.proj.name || 'Composition'} section`;
+  const input = h('input', { value: fallback });
+  PM.modal({ title: layers.length ? 'Save selected layers' : 'Save entire composition', width: 430,
+    body: h('div.library-save-dialog', h('p', layers.length
+      ? `${layers.length} editable layer${layers.length === 1 ? '' : 's'} will be saved together.`
+      : 'Every layer in this composition will be saved as one reusable section.'), h('label.library-field-label', 'Name'), h('div.field', input)),
+    actions: [{ label: 'Cancel' }, { label: 'Save section', pri: true, run: () => { PM.Library.saveSection(input.value.trim() || fallback, layers.length ? layers.map(layer => layer.id) : null); paint(); } }],
+  });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+function saveLookDialog() {
+  const layer = PM.firstSel?.();
+  if (!layer || layer.type !== 'shader') { PM.toast('Select a shader layer to save its look'); return; }
+  const input = h('input', { value: layer.name || 'Shader look' });
+  PM.modal({ title: 'Save shader look', width: 420,
+    body: h('div.library-save-dialog', h('p', 'Saves the shader source and every current control value.'), h('label.library-field-label', 'Name'), h('div.field', input)),
+    actions: [{ label: 'Cancel' }, { label: 'Save look', pri: true, run: () => { PM.Library.saveLook(input.value.trim() || layer.name, layer); paint(); } }],
+  });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+function saveWorkspaceDialog() {
+  const input = h('input', { value: `${PM.WS.current.name.replace(' (edited)', '')} copy` });
+  PM.modal({ title: 'Save current layout', width: 420,
+    body: h('div.library-save-dialog', h('p', `Saves the current panel arrangement to ${scopeName()}. Your project content is not copied.`), h('label.library-field-label', 'Name'), h('div.field', input)),
+    actions: [{ label: 'Cancel' }, { label: 'Save workspace', pri: true, run: () => {
+      PM.WS.duplicate(PM.WS.current.id, { name: input.value.trim() || 'Workspace', scope: state.scope, projectId: state.scope === 'project' ? PM.proj.id : null }); paint();
+    } }],
+  });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
 }
 
 function sectionMeta(section) {
   const types = (section.tags?.length ? section.tags : [...new Set((section.layers || []).map(layer => layer.type))]).slice(0, 3);
-  return [
-    `${(section.layers || []).length} layer${(section.layers || []).length === 1 ? '' : 's'}`,
-    types.join(' · ') || 'section',
-    section.sourceProjectName || 'Untitled',
-  ];
+  return `${(section.layers || []).length} layer${(section.layers || []).length === 1 ? '' : 's'}${types.length ? ' · ' + types.join(', ') : ''}`;
+}
+function sectionPreview(section) {
+  return h('div.library-thumb', section.thumb
+    ? h('img', { src: section.thumb, alt: '' })
+    : h('div.library-section-map', ...(section.layers || []).slice(0, 6).map((layer, index) =>
+      h('i', { style: { left: `${10 + index * 8}%`, top: `${12 + (index % 3) * 18}%`, width: `${72 - index * 5}%` } }))));
+}
+function sectionCard(section) {
+  const deleted = !!section.deletedAt;
+  const more = h('button.library-more', { title: 'Section actions', 'aria-label': `Actions for ${section.name}` }, PM.icon('more'));
+  more.onclick = event => { event.stopPropagation(); sectionMenu(more, section); };
+  const action = deleted
+    ? button('Restore', () => { PM.Library.restoreSection(section.id, section.sourceProjectId); paint(); }, true)
+    : button('Insert', () => { PM.Library.insertSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); }, true);
+  const card = h('article.library-card' + (deleted ? '.deleted' : ''),
+    sectionPreview(section),
+    h('div.library-card-body', h('div.library-card-copy', h('b', section.name), h('span', sectionMeta(section)), h('small', `From ${section.sourceProjectName || 'Untitled'}`)), more),
+    h('div.library-card-actions', action));
+  card.oncontextmenu = event => { event.preventDefault(); sectionMenu(card, section); };
+  return card;
 }
 function sectionMenu(anchor, section) {
-  if (section.deletedAt) {
-    PM.menu(anchor, [{ label: 'Restore', run: () => { PM.Library.restoreSection(section.id, section.sourceProjectId); paint(); } }]);
-    return;
-  }
+  if (section.deletedAt) { PM.menu(anchor, [{ label: 'Restore', run: () => { PM.Library.restoreSection(section.id, section.sourceProjectId); paint(); } }]); return; }
   PM.menu(anchor, [
-    { label: 'Open as editable layers', run: () => { close(); PM.Library.openSection(section.id, { sourceProjectId: section.sourceProjectId }); } },
+    { label: 'Insert into composition', run: () => { PM.Library.insertSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); } },
+    { label: 'Open layers to edit', run: () => { PM.Library.openSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); } },
     { label: 'Duplicate to this project', run: () => { PM.Library.duplicateSection(section.id, section.sourceProjectId, PM.proj.id); paint(); } },
-    { label: 'Rename…', run: () => renameSection(section) },
-    '-',
-    { label: 'Delete section', run: () => { if (PM.Library.trashSection(section.id, section.sourceProjectId)) paint(); } },
+    { label: 'Rename…', run: () => renameSection(section) }, '-',
+    { label: 'Move to Trash', run: () => { if (PM.Library.trashSection(section.id, section.sourceProjectId)) paint(); } },
   ]);
 }
 function renameSection(section) {
   const input = h('input', { value: section.name });
   PM.modal({ title: 'Rename section', body: h('div.field', input), actions: [
-    { label: 'Cancel' },
-    { label: 'Rename', pri: true, run: () => { PM.Library.renameSection(section.id, input.value, section.sourceProjectId); paint(); } },
+    { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => { PM.Library.renameSection(section.id, input.value, section.sourceProjectId); paint(); } },
   ] });
   setTimeout(() => { input.focus(); input.select(); }, 30);
 }
-function sectionCard(section) {
-  const more = h('button.library-more', { title: 'Section actions' }, PM.icon('more'));
-  more.onclick = e => { e.stopPropagation(); sectionMenu(more, section); };
-  const thumb = h('div.library-thumb', section.thumb
-    ? h('img', { src: section.thumb, alt: '' })
-    : h('div.library-section-map', ...(section.layers || []).slice(0, 6).map((layer, index) =>
-      h('i', { style: { left: `${10 + index * 8}%`, top: `${12 + (index % 3) * 18}%`, width: `${72 - index * 5}%` } }))));
-  const meta = sectionMeta(section);
-  const card = h('article.library-card' + (section.deletedAt ? '.deleted' : ''),
-    thumb,
-    h('div.library-card-copy', h('b', section.name), h('span', meta[0] + ' · ' + meta[1]), h('small', 'From ' + meta[2])),
-    more,
-    section.deletedAt ? button('Restore', () => { PM.Library.restoreSection(section.id, section.sourceProjectId); paint(); })
-      : h('div.library-card-actions',
-          button('Delete', () => { if (PM.Library.trashSection(section.id, section.sourceProjectId)) paint(); }),
-          button('Insert', () => { PM.Library.insertSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); }, true),
-          button('Edit', () => { PM.Library.openSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); })));
+
+function lookCard(look) {
+  const deleted = !!look.deletedAt;
+  const more = h('button.library-more', { title: 'Look actions', 'aria-label': `Actions for ${look.name}` }, PM.icon('more'));
+  more.onclick = event => { event.stopPropagation(); lookMenu(more, look); };
+  const card = h('article.library-card.look' + (deleted ? '.deleted' : ''),
+    h('div.library-thumb', look.thumb ? h('img', { src: look.thumb, alt: '' }) : h('div.library-look-swatch')),
+    h('div.library-card-body', h('div.library-card-copy', h('b', look.name), h('span', 'Shader look'), h('small', `From ${look.sourceProjectName || 'Untitled'}`)), more),
+    h('div.library-card-actions', deleted
+      ? button('Restore', () => { PM.Library.restoreLook(look.id, look.sourceProjectId); paint(); }, true)
+      : button('Apply', () => { PM.Library.applyLook(look.id, { sourceProjectId: look.sourceProjectId }); close(); }, true)));
+  card.oncontextmenu = event => { event.preventDefault(); lookMenu(card, look); };
   return card;
 }
-
-function saveSectionBar() {
-  const session = PM.Library.currentEdit();
-  if (!session) return h('div.library-create',
-    h('div', h('b', 'Save the current selection'), h('span', 'Keeps real layers, properties, and keyframes editable.')),
-    button('Save shader look', () => { PM.Library.saveLook(); paint(); }),
-    button('Save section', () => {
-      const ids = PM.sel?.layers?.length ? PM.sel.layers : null;
-      PM.Library.saveSection(null, ids); paint();
-    }, true));
-  const found = PM.Library.resolveSection(session.sectionId, session.sourceProjectId);
-  const uses = PM.Library.usage(session.sectionId, session.sourceProjectId);
-  return h('div.library-create.editing',
-    h('div', h('b', `Editing ${found?.entry?.name || 'section'}`),
-      h('span', uses ? `${uses} placed layer${uses === 1 ? '' : 's'} stay unchanged unless you replace them deliberately.` : 'Save these real composition layers back to the section.')),
-    button('Save as new', () => saveSectionCopy()),
-    button('Update section', () => confirmSectionUpdate(uses), true));
-}
-
 function lookMenu(anchor, look) {
-  if (look.deletedAt) {
-    PM.menu(anchor, [{ label: 'Restore', run: () => { PM.Library.restoreLook(look.id, look.sourceProjectId); paint(); } }]); return;
-  }
+  if (look.deletedAt) { PM.menu(anchor, [{ label: 'Restore', run: () => { PM.Library.restoreLook(look.id, look.sourceProjectId); paint(); } }]); return; }
   PM.menu(anchor, [
-    { label: 'Apply look', run: () => { PM.Library.applyLook(look.id, { sourceProjectId: look.sourceProjectId }); close(); } },
-    { label: 'Rename…', run: () => {
-      const input = h('input', { value: look.name });
-      PM.modal({ title: 'Rename look', body: h('div.field', input), actions: [
-        { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => { PM.Library.renameLook(look.id, input.value, look.sourceProjectId); paint(); } },
-      ] }); setTimeout(() => { input.focus(); input.select(); }, 30);
-    } },
-    '-', { label: 'Move to Trash', run: () => { PM.Library.trashLook(look.id, look.sourceProjectId); paint(); } },
+    { label: 'Apply to new shader layer', run: () => { PM.Library.applyLook(look.id, { sourceProjectId: look.sourceProjectId }); close(); } },
+    { label: 'Rename…', run: () => renameLook(look) }, '-',
+    { label: 'Move to Trash', run: () => { PM.Library.trashLook(look.id, look.sourceProjectId); paint(); } },
   ]);
 }
-function lookCard(look) {
-  const more = h('button.library-more', { title: 'Look actions' }, PM.icon('more'));
-  more.onclick = event => { event.stopPropagation(); lookMenu(more, look); };
-  return h('article.library-card.look' + (look.deletedAt ? '.deleted' : ''),
-    h('div.library-thumb', look.thumb ? h('img', { src: look.thumb, alt: '' }) : h('div.library-look-swatch')),
-    h('div.library-card-copy', h('b', look.name), h('span', 'Shader look'), h('small', 'From ' + (look.sourceProjectName || 'Untitled'))),
-    more,
-    look.deletedAt ? button('Restore', () => { PM.Library.restoreLook(look.id, look.sourceProjectId); paint(); })
-      : h('div.library-card-actions', button('Apply', () => { PM.Library.applyLook(look.id, { sourceProjectId: look.sourceProjectId }); close(); }, true)));
-}
-function saveSectionCopy() {
-  const input = h('input', { value: 'Section copy' });
-  PM.modal({ title: 'Save as new section', body: h('div.field', input), actions: [
-    { label: 'Cancel' }, { label: 'Save as new', pri: true, run: () => { PM.Library.saveEditSession(true, input.value); paint(); } },
+function renameLook(look) {
+  const input = h('input', { value: look.name });
+  PM.modal({ title: 'Rename look', body: h('div.field', input), actions: [
+    { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => { PM.Library.renameLook(look.id, input.value, look.sourceProjectId); paint(); } },
   ] });
-}
-function confirmSectionUpdate(uses) {
-  if (!uses) { PM.Library.saveEditSession(false); paint(); return; }
-  PM.modal({
-    title: 'Update section?', width: 500,
-    body: h('div.library-decision',
-      h('b', `${uses} placed layer${uses === 1 ? '' : 's'} use this section.`),
-      h('p', 'The reusable section will be updated. Existing placed layers remain exactly as edited; Powermove will not silently overwrite them.')),
-    actions: [{ label: 'Cancel' }, { label: 'Update section only', pri: true, run: () => { PM.Library.saveEditSession(false); paint(); } }],
-  });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
 }
 
-function sectionsView() {
-  const sections = PM.Library.catalog(state.scope, true).filter(section => state.trash ? !!section.deletedAt : !section.deletedAt);
-  const looks = PM.Library.lookCatalog(state.scope, true).filter(look => state.trash ? !!look.deletedAt : !look.deletedAt);
-  return h('div.library-view',
-    state.trash ? null : saveSectionBar(),
-    sections.length ? h('section.library-group', h('h2', 'Sections'), h('div.library-grid', ...sections.map(sectionCard))) : looks.length ? null : empty(
-      state.trash ? 'Trash is empty' : `No sections in ${scopeName().toLowerCase()}`,
-      state.trash ? 'Deleted items remain recoverable here.' : 'Select layers and save them as a reusable editable section.'),
-    looks.length ? h('section.library-group', h('h2', 'Looks'), h('div.library-grid', ...looks.map(lookCard))) : null);
+function workspacePanelNames(workspace) {
+  return (workspace.layout?.docks || []).flatMap(dock => dock.panels || []).map(panel => PM.PANELS[panel.id]?.title || panel.id).join(' ');
 }
-
 function workspaceMap(workspace) {
-  const docks = (workspace.layout?.docks || []).map(dock => {
-    const panels = (dock.panels || []).map(panel =>
-      h('i', { title: PM.PANELS[panel.id]?.title || panel.id }));
-    return h('div.workspace-map-dock' + (dock.flex ? '.flex' : ''), ...panels);
-  });
+  const docks = (workspace.layout?.docks || []).map(dock => h('div.workspace-map-dock' + (dock.flex ? '.flex' : ''),
+    ...(dock.panels || []).map(panel => h('i', { title: PM.PANELS[panel.id]?.title || panel.id }))));
   return h('div.workspace-map', ...docks);
 }
-function workspaceList() {
-  if (state.trash) return PM.WS.trashList();
-  return PM.WS.list().filter(workspace => state.scope === 'global'
-    ? workspace.builtin || workspace.scope !== 'project'
-    : workspace.id === PM.WS.current.id || (workspace.scope === 'project' && workspace.projectId === PM.proj.id));
+function workspaceCard(workspace) {
+  const deleted = !!workspace.deletedAt, active = !deleted && workspace.id === PM.WS.current.id;
+  const more = h('button.library-more', { title: 'Workspace actions', 'aria-label': `Actions for ${workspace.name}` }, PM.icon('more'));
+  more.onclick = event => { event.stopPropagation(); workspaceMenu(more, workspace); };
+  const panelCount = (workspace.layout?.docks || []).flatMap(dock => dock.panels || []).length;
+  const action = deleted
+    ? button('Restore', () => { PM.WS.restore(workspace.id); paint(); }, true)
+    : button(active ? 'Active' : 'Apply', () => previewWorkspace(workspace), !active, null, active ? { disabled: true } : {});
+  const card = h('article.library-card.workspace' + (active ? '.active' : '') + (deleted ? '.deleted' : ''),
+    workspaceMap(workspace), active ? h('span.library-card-badge', 'Current') : null,
+    h('div.library-card-body', h('div.library-card-copy', h('b', workspace.name), h('span', workspace.builtin ? 'Built-in workspace' : 'Custom workspace'), h('small', `${panelCount} panel${panelCount === 1 ? '' : 's'}`)), more),
+    h('div.library-card-actions', action));
+  card.oncontextmenu = event => { event.preventDefault(); workspaceMenu(card, workspace); };
+  return card;
 }
 function workspaceMenu(anchor, workspace) {
-  if (workspace.deletedAt) {
-    PM.menu(anchor, [{ label: 'Restore', run: () => { PM.WS.restore(workspace.id); paint(); } }]); return;
-  }
+  if (workspace.deletedAt) { PM.menu(anchor, [{ label: 'Restore', run: () => { PM.WS.restore(workspace.id); paint(); } }]); return; }
   const items = [
-    { label: 'Apply with preview…', run: () => previewWorkspace(workspace) },
-    { label: 'Edit layout', run: () => beginWorkspaceEdit(workspace) },
+    { label: 'Preview and apply…', run: () => previewWorkspace(workspace) },
+    { label: 'Edit panel layout', run: () => beginWorkspaceEdit(workspace) },
     { label: 'Duplicate', run: () => { PM.WS.duplicate(workspace.id, { scope: state.scope, projectId: state.scope === 'project' ? PM.proj.id : null }); paint(); } },
   ];
+  items[0].disabled = workspace.id === PM.WS.current.id;
   if (workspace.builtin) items.push('-', { label: 'Reset built-in', run: () => { PM.WS.resetBuiltin(workspace.id); paint(); } });
   else items.push({ label: 'Rename…', run: () => renameWorkspace(workspace) }, '-', { label: 'Move to Trash', run: () => { PM.WS.remove(workspace.id); paint(); } });
   items.push('-', { label: 'Edit validated definition…', run: () => { PM.WS.activate(workspace.id, true); PM.WS.editJSON(); } });
-  items[0].disabled = workspace.id === PM.WS.current.id;
   PM.menu(anchor, items);
-}
-function workspaceCard(workspace) {
-  const more = h('button.library-more', { title: 'Workspace actions' }, PM.icon('more'));
-  more.onclick = e => { e.stopPropagation(); workspaceMenu(more, workspace); };
-  return h('article.library-card.workspace' + (workspace.id === PM.WS.current.id ? '.active' : '') + (workspace.deletedAt ? '.deleted' : ''),
-    workspaceMap(workspace),
-    h('div.library-card-copy', h('b', workspace.name), h('span', workspace.builtin ? 'Built-in workspace' : 'Custom workspace'),
-      h('small', `${workspace.layout?.docks?.length || 0} docks · ${(workspace.layout?.docks || []).flatMap(d => d.panels || []).length} panels`)),
-    more,
-    workspace.deletedAt ? button('Restore', () => { PM.WS.restore(workspace.id); paint(); })
-      : h('div.library-card-actions',
-          button(workspace.id === PM.WS.current.id ? 'Active' : 'Apply', () => previewWorkspace(workspace), workspace.id !== PM.WS.current.id),
-          button('Edit layout', () => beginWorkspaceEdit(workspace))));
-}
-function workspacesView() {
-  const workspaces = workspaceList();
-  return h('div.library-view',
-    h('div.library-create', h('div', h('b', state.scope === 'project' ? 'Project workspaces' : 'Workspace library'),
-      h('span', 'Structured layouts stay editable, validated, and recoverable.')),
-      state.trash ? null : button('Save current as new', () => { PM.WS.duplicate(PM.WS.current.id, { scope: state.scope, projectId: state.scope === 'project' ? PM.proj.id : null }); paint(); }, true)),
-    workspaces.length ? h('div.library-grid', ...workspaces.map(workspaceCard)) : empty(state.trash ? 'Trash is empty' : 'No workspaces here', 'Save the current layout as a new workspace.'));
 }
 function previewWorkspace(workspace) {
   PM.modal({ title: 'Apply workspace?', width: 520,
-    body: h('div.workspace-preview', workspaceMap(workspace), h('b', workspace.name), h('p', 'This changes panel arrangement only. Your project, layers, and timeline remain untouched.')),
-    actions: [{ label: 'Cancel' }, { label: 'Apply', pri: true, run: () => { PM.WS.activate(workspace.id); close(); } }],
+    body: h('div.workspace-preview', workspaceMap(workspace), h('b', workspace.name), h('p', 'Only the panel arrangement changes. Your composition, layers, and timeline stay untouched.')),
+    actions: [{ label: 'Cancel' }, { label: 'Apply workspace', pri: true, run: () => { PM.WS.activate(workspace.id); close(); } }],
   });
 }
 function renameWorkspace(workspace) {
   const input = h('input', { value: workspace.name });
   PM.modal({ title: 'Rename workspace', body: h('div.field', input), actions: [
     { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => { PM.WS.rename(workspace.id, input.value); paint(); } },
-  ] }); setTimeout(() => { input.focus(); input.select(); }, 30);
+  ] });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
 }
 function beginWorkspaceEdit(workspace) {
   if (!PM.WS.beginEdit(workspace.id)) return;
   close(); WorkspaceEditor.show();
+}
+
+function editingBanner(session) {
+  const found = PM.Library.resolveSection(session.sectionId, session.sourceProjectId);
+  const uses = PM.Library.usage(session.sectionId, session.sourceProjectId);
+  return h('div.library-editing',
+    h('div', h('span.library-editing-kicker', 'Editing section'), h('b', found?.entry?.name || 'Section'),
+      h('span', uses ? `${uses} placed layer${uses === 1 ? '' : 's'} will stay unchanged until you replace them.` : 'Save these composition layers back to the reusable section.')),
+    button('Save as new', saveSectionCopy), button('Update section', () => confirmSectionUpdate(uses), true));
+}
+function saveSectionCopy() {
+  const input = h('input', { value: 'Section copy' });
+  PM.modal({ title: 'Save as new section', body: h('div.field', input), actions: [
+    { label: 'Cancel' }, { label: 'Save as new', pri: true, run: () => { PM.Library.saveEditSession(true, input.value); paint(); } },
+  ] });
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+function confirmSectionUpdate(uses) {
+  if (!uses) { PM.Library.saveEditSession(false); paint(); return; }
+  PM.modal({ title: 'Update section?', width: 500,
+    body: h('div.library-decision', h('b', `${uses} placed layer${uses === 1 ? '' : 's'} use this section.`),
+      h('p', 'The reusable section will be updated. Existing placed layers remain exactly as edited; Powermove will not silently overwrite them.')),
+    actions: [{ label: 'Cancel' }, { label: 'Update section only', pri: true, run: () => { PM.Library.saveEditSession(false); paint(); } }],
+  });
+}
+
+function emptyState() {
+  if (state.query) return empty('search', 'No matches', `Nothing in ${VIEWS[state.view].label.toLowerCase()} matches “${state.search.value.trim()}”.`);
+  if (state.view === 'trash') return empty('trash', 'Trash is empty', `Removed items from ${scopeName()} will appear here.`);
+  if (state.view === 'sections') {
+    const count = selectedLayers().length;
+    return empty('layers', 'Build your reusable kit', count
+      ? `Save the ${count} selected layer${count === 1 ? '' : 's'}, then insert ${count === 1 ? 'it' : 'them'} into any composition without flattening.`
+      : 'Select a few layers to save them together, or save the entire composition as one editable section.',
+      count ? `Save ${count} selected` : 'Save composition', saveSectionDialog);
+  }
+  if (state.view === 'looks') return empty('wand', 'Save a shader look', 'Select a shader layer to keep its source and control values ready to reuse.', 'Save selected look', saveLookDialog);
+  return empty('panel', 'Save a workspace', 'Keep a panel arrangement for editing, animation, review, or any setup you use often.', 'Save current layout', saveWorkspaceDialog);
+}
+function empty(icon, title, copy, actionLabel, run) {
+  return h('div.library-empty', PM.icon(icon), h('b', title), h('span', copy), actionLabel ? button(actionLabel, run, false, 'plus') : null);
 }
 
 const WorkspaceEditor = {
@@ -275,13 +410,6 @@ const WorkspaceEditor = {
   },
   hide() { this.el?.remove(); this.el = null; },
 };
-
-function empty(title, copy) { return h('div.library-empty', PM.icon(state.trash ? 'trash' : state.tab === 'sections' ? 'layers' : 'panel'), h('b', title), h('span', copy)); }
-function paint() {
-  if (!state.root) return;
-  state.root.textContent = '';
-  state.root.append(header(), h('main', state.tab === 'sections' ? sectionsView() : workspacesView()));
-}
 
 PM.LibraryUI = { open, close, get isOpen() { return !!state.root?.classList.contains('on'); } };
 PM.WorkspaceEditor = WorkspaceEditor;

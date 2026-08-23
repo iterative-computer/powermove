@@ -28,6 +28,7 @@ function refreshHeader() {
 PM.bus.on('sel', I.refresh);
 PM.bus.on('layers', I.refresh);
 PM.bus.on('history', I.refresh);
+PM.bus.on('fonts', I.refresh);
 PM.bus.on('draw:ui', () => I.syncs.forEach(f => { try { f(); } catch (e) { } }));
 
 function render() {
@@ -144,10 +145,11 @@ function content(wrap, L) {
     ta.addEventListener('keydown', e => e.stopPropagation());
     I.textArea = ta;
     wrap.appendChild(ta);
-    wrap.appendChild(PM.row('Font', PM.selectField(get('font'), set('font'),
-      ['Geist', 'Geist Mono', 'Helvetica Neue', 'Georgia', 'Times New Roman', 'Courier New', 'Impact', 'Futura', 'Avenir Next', 'SF Pro Display'], edit('font', { label: 'Font' }))));
+    wrap.appendChild(PM.row('Font', PM.fontField(get('font'), set('font'), edit('font', { label: 'Font', weight: get('weight') }))));
+    const standardWeights = [100, 200, 300, 400, 500, 600, 700, 800, 900];
+    const weights = [...new Set([Number(get('weight')) || 400, ...standardWeights])].sort((a, b) => a - b);
     wrap.appendChild(PM.row('Weight', PM.selectField(get('weight'), set('weight'),
-      [{ v: 300, label: '300' }, { v: 400, label: '400' }, { v: 500, label: '500' }, { v: 600, label: '600' }, { v: 700, label: '700' }, { v: 800, label: '800' }], edit('weight', { label: 'Weight' }))));
+      weights.map(v => ({ v, label: String(v) })), edit('weight', { label: 'Weight', onChange: v => PM.Fonts.ensure(get('font'), v) }))));
     numRow(wrap, 'Size', get('size'), set('size'), edit('size', { step: 1, min: 4, unit: 'px' }));
     numRow(wrap, 'Tracking', get('tracking'), set('tracking'), edit('tracking', { step: .5, unit: 'px' }));
     numRow(wrap, 'Leading', get('leading'), set('leading'), edit('leading', { step: .02, precision: 2 }));

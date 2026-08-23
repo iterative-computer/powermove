@@ -23,17 +23,23 @@ function workspaceModel() {
   return { PM, memory };
 }
 
-test('Library exposes Sections, Workspaces, scope, previews, and explicit save decisions', () => {
+test('Library exposes an intuitive searchable map, scope, previews, and explicit save decisions', () => {
   assert.match(index, /js\/ui\/library\.js/);
   assert.match(ui, />?Sections|['"]Sections['"]/);
+  assert.match(ui, />?Looks|['"]Looks['"]/);
   assert.match(ui, />?Workspaces|['"]Workspaces['"]/);
+  assert.match(ui, />?Trash|['"]Trash['"]/);
+  assert.match(ui, /Search library/);
   assert.match(ui, /This project/);
-  assert.match(ui, /My library/);
+  assert.match(ui, /All projects/);
+  assert.match(ui, /Save composition/);
+  assert.match(ui, /Save selected look/);
+  assert.match(ui, /Save current layout/);
   assert.match(ui, /Update section/);
   assert.match(ui, /Save as new/);
   assert.match(ui, /Existing placed layers remain exactly as edited/);
   assert.match(ui, /Apply workspace\?/);
-  assert.match(ui, /Delete section/);
+  assert.match(ui, /Move to Trash/);
 });
 
 test('Library is a focus-trapped modal with a full scrim and safe close paths', () => {
@@ -45,7 +51,8 @@ test('Library is a focus-trapped modal with a full scrim and safe close paths', 
   assert.match(ui, /event\.key === 'Escape'/);
   assert.match(ui, /event\.key !== 'Tab'/);
   assert.match(css, /#library-overlay\{[^}]*position:fixed[^}]*inset:0[^}]*background:rgba\(12,12,15,\.48\)/s);
-  assert.match(css, /#library-screen\{[^}]*position:relative[^}]*width:min\(1120px,calc\(100vw - 36px\)\)/s);
+  assert.match(css, /#library-screen\{[^}]*position:relative[^}]*width:min\(1160px,calc\(100vw - 32px\)\)/s);
+  assert.match(css, /\.library-sidebar\{[^}]*width:210px/s);
 });
 
 test('Library belongs only to the project tab where it opened', () => {

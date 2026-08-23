@@ -1,5 +1,5 @@
 /* Powermove — spatial coding assistant.
-   Shake the pointer to summon a full-window shader, circle interface, describe
+   Shake the pointer to summon a full-window shader, drag over interface, describe
    the change, preview the generated section manifest, then apply it safely. */
 (() => {
 const PM = window.PM, h = PM.h;
@@ -64,19 +64,22 @@ const S = {
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
-  requestText: '', run: null,
+  requestText: '', run: null, conversation: [], activity: '',
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
+  sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
 };
 
 const Spatial = {
   init,
   activate,
-  open: () => activate(Math.round(innerWidth / 2), Math.round(innerHeight / 2)),
+  open: () => activate(Math.round(innerWidth / 2), Math.round(innerHeight / 2), {
+    claimed: true, capture: PM.WindowCapture.request(), adapter: requestRippleAdapter(),
+  }),
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, loopInfo, isClickGesture, pointInPolygon, sanitizePlan, applyChromeEdit, hintPosition, clampFloatingPosition },
+  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, applyChromeEdit, hintPosition, clampFloatingPosition },
   lifecycle: { requestAdapter: requestRippleAdapter },
 };
 PM.SpatialAssistant = Spatial;
@@ -184,7 +187,9 @@ function shakeIntent(points) {
 function warmRipple() {
   const warmup = {
     claimed: false,
-    capture: S.sceneCache ? null : PM.WindowCapture.request(),
+    /* A selected-region attachment must represent this gesture, not an older
+       idle cache. Start a fresh native snapshot as soon as shake intent is clear. */
+    capture: PM.WindowCapture.request(),
     /* A GPUAdapter is deliberately warmed per gesture. WebKit can invalidate a
        long-lived adapter after a device is destroyed or lost. Reusing one from
        app boot made every later Ripple device arrive already lost. */
@@ -237,6 +242,18 @@ function scheduleHint(x, y) {
   S.hintFrame = requestAnimationFrame(() => {
     S.hintFrame = 0;
     if (!S.hint || !S.hintPoint) return;
+    /* The prompt replaces the instruction pill while the assistant is waiting
+       for a gesture. Keep the editable surface attached to the live cursor. */
+    if (S.card && !S.context?.targetPanelId && ['arming', 'selecting', 'composing'].includes(S.phase)) {
+      S.hint.style.display = 'none';
+      const p = hintPosition(
+        S.hintPoint.x, S.hintPoint.y,
+        S.card.offsetWidth || 390, S.card.offsetHeight || 52,
+        innerWidth, innerHeight,
+      );
+      Object.assign(S.card.style, { left: p.x + 'px', top: p.y + 'px' });
+      return;
+    }
     const p = hintPosition(
       S.hintPoint.x, S.hintPoint.y,
       S.hint.offsetWidth || 250, S.hint.offsetHeight || 38,
@@ -255,7 +272,7 @@ function activate(x, y, warmup = null) {
   S.path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   S.ink = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   S.ink.classList.add('spatial-ink'); S.ink.append(S.shadePath, S.path);
-  S.hint = h('div.spatial-hint', h('span', 'Type a prompt or circle an area'));
+  S.hint = h('div.spatial-hint', h('span', 'Type a prompt or drag to select an area'));
   S.root = h('div#spatial-assistant', { role: 'dialog', 'aria-label': 'Spatial coding assistant' },
     canvas, h('div.spatial-wash'), S.ink, S.hint);
   addEventListener('keydown', onKey, true);
@@ -263,9 +280,18 @@ function activate(x, y, warmup = null) {
      WGSL pass genuinely displaces instead of merely painting over the UI. */
   const cachedScene = S.sceneCache;
   if (cachedScene) { S.sceneCache = null; S.sceneCacheAt = 0; }
-  (cachedScene ? Promise.resolve(cachedScene) : warmup?.capture || PM.WindowCapture.request()).then(sceneBitmap => {
+  const sceneRequest = warmup?.capture
+    ? warmup.capture.then(fresh => {
+      if (fresh) { cachedScene?.close?.(); return fresh; }
+      return cachedScene;
+    })
+    : cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request();
+  sceneRequest.then(sceneBitmap => {
     if (!S.active) { sceneBitmap?.close?.(); return; }
-    S.root.addEventListener('pointerdown', beginCircle);
+    /* Preserve clean pre-overlay pixels for the eventual selected-region
+       attachment before WebGPU uploads and closes the ImageBitmap. */
+    S.sceneFrame = snapshotScene(sceneBitmap);
+    S.root.addEventListener('pointerdown', onOverlayPointerDown);
     document.body.appendChild(S.root);
     S.region = { x, y, width: 1, height: 1 };
     S.context = {
@@ -279,55 +305,77 @@ function activate(x, y, warmup = null) {
   });
 }
 
-function beginCircle(event) {
-  if (S.phase !== 'selecting' || event.button !== 0 || event.target.closest('.spatial-compose')) return;
+function overlayPointerAction(phase, button, insideComposer) {
+  if (button !== 0 || insideComposer) return 'ignore';
+  if (phase === 'selecting') return 'select';
+  if (phase === 'arming' || phase === 'composing') return 'cancel';
+  return 'ignore';
+}
+
+function onOverlayPointerDown(event) {
+  const action = overlayPointerAction(S.phase, event.button, !!event.target?.closest?.('.spatial-compose'));
+  if (action === 'cancel') {
+    event.preventDefault();
+    cancel();
+    return;
+  }
+  if (action === 'select') beginSelection(event);
+}
+
+function beginSelection(event) {
   event.preventDefault();
   S.phase = 'drawing'; S.points = [{ x: event.clientX, y: event.clientY }];
-  S.path.setAttribute('d', `M ${event.clientX} ${event.clientY}`);
+  showOutline({ x: event.clientX, y: event.clientY, width: 1, height: 1 }, true);
   S.root.setPointerCapture?.(event.pointerId);
   const move = e => {
     const p = { x: e.clientX, y: e.clientY };
-    const last = S.points.at(-1);
-    if (Math.hypot(p.x - last.x, p.y - last.y) < 3) return;
-    S.points.push(p);
-    S.path.setAttribute('d', pathData(S.points));
+    S.points[1] = p;
+    updateOutline(selectionRect(S.points[0], p));
   };
   const finish = e => {
     S.root.removeEventListener('pointermove', move);
     S.root.removeEventListener('pointerup', finish);
     S.root.removeEventListener('pointercancel', abort);
     S.root.releasePointerCapture?.(event.pointerId);
-    finishCircle(e);
+    finishSelection(e);
   };
   const abort = () => {
     S.root.removeEventListener('pointermove', move);
     S.root.removeEventListener('pointerup', finish);
     S.root.removeEventListener('pointercancel', abort);
-    resetSelection('Circle any part of the interface');
+    S.outline?.remove(); S.outline = null;
+    resetSelection('Drag across any part of the interface');
   };
   S.root.addEventListener('pointermove', move);
   S.root.addEventListener('pointerup', finish);
   S.root.addEventListener('pointercancel', abort);
 }
 
-function finishCircle(event) {
-  if (event) S.points.push({ x: event.clientX, y: event.clientY });
+function finishSelection(event) {
+  if (event) S.points[1] = { x: event.clientX, y: event.clientY };
   if (isClickGesture(S.points)) { cancel(); return; }
-  const info = loopInfo(S.points);
-  if (!info.closed) {
-    resetSelection(info.reason || 'Close the loop around a section');
+  const rect = selectionRect(S.points[0], S.points[1]);
+  if (rect.width < 34 || rect.height < 34) {
+    S.outline?.remove(); S.outline = null;
+    resetSelection('Drag across a larger interface area');
     return;
   }
-  S.path.setAttribute('d', pathData(S.points) + ' Z');
+  S.points = rectanglePolygon(rect);
   S.shadePath.setAttribute('fill-rule', 'evenodd');
-  S.shadePath.setAttribute('d', `M 0 0 H ${innerWidth} V ${innerHeight} H 0 Z ${pathData(S.points)} Z`);
+  S.shadePath.setAttribute('d', `M 0 0 H ${innerWidth} V ${innerHeight} H 0 Z M ${rect.x} ${rect.y} H ${rect.x + rect.width} V ${rect.y + rect.height} H ${rect.x} Z`);
   S.root.classList.add('target-selected');
   const draft = S.card?.querySelector('textarea')?.value || '';
-  S.region = info.rect;
+  S.region = rect;
   S.context = inspectRegion(S.points, S.region);
+  const regionCapture = captureRegionImage(S.sceneFrame, S.region);
+  S.regionImage = regionCapture?.dataUrl || null;
+  S.context.visualReference = regionCapture ? {
+    attachment: 'image-1', width: regionCapture.width, height: regionCapture.height,
+    sourceRect: regionCapture.sourceRect,
+  } : { attachment: '', unavailable: true };
   S.phase = 'composing';
   S.hint.style.display = 'none';
-  showOutline(S.region);
+  S.outline?.classList.remove('selecting'); S.outline?.classList.add('confirmed');
   showComposer(draft);
 }
 
@@ -337,30 +385,92 @@ function isClickGesture(points) {
   return points.every(p => Math.hypot(p.x - start.x, p.y - start.y) <= 7);
 }
 
-function loopInfo(points) {
-  if (!Array.isArray(points) || points.length < 12) return { closed: false, reason: 'Draw a fuller loop around a section' };
-  let length = 0, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  points.forEach((p, i) => {
-    if (i) length += Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y);
-    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-  });
-  const width = maxX - minX, height = maxY - minY;
-  const gap = Math.hypot(points.at(-1).x - points[0].x, points.at(-1).y - points[0].y);
-  const closeLimit = Math.max(34, Math.min(74, Math.hypot(width, height) * .25));
-  if (length < 150 || width < 34 || height < 34) return { closed: false, reason: 'Circle a larger interface area' };
-  if (gap > closeLimit) return { closed: false, reason: 'Close the loop to select that area' };
-  return { closed: true, rect: { x: minX, y: minY, width, height }, length, gap };
+function selectionRect(start, end) {
+  if (!start || !end) return { x: 0, y: 0, width: 0, height: 0 };
+  return {
+    x: Math.round(Math.min(start.x, end.x)), y: Math.round(Math.min(start.y, end.y)),
+    width: Math.round(Math.abs(end.x - start.x)), height: Math.round(Math.abs(end.y - start.y)),
+  };
 }
 
-function pathData(points) { return points.map((p, i) => `${i ? 'L' : 'M'} ${Math.round(p.x)} ${Math.round(p.y)}`).join(' '); }
+function bitmapCropRect(rect, bitmapWidth, bitmapHeight, viewportWidth, viewportHeight, maxEdge = 1280) {
+  const scaleX = bitmapWidth / Math.max(1, viewportWidth);
+  const scaleY = bitmapHeight / Math.max(1, viewportHeight);
+  const sx = Math.max(0, Math.min(bitmapWidth - 1, Math.round(rect.x * scaleX)));
+  const sy = Math.max(0, Math.min(bitmapHeight - 1, Math.round(rect.y * scaleY)));
+  const sw = Math.max(1, Math.min(bitmapWidth - sx, Math.round(rect.width * scaleX)));
+  const sh = Math.max(1, Math.min(bitmapHeight - sy, Math.round(rect.height * scaleY)));
+  const outputScale = Math.min(1, maxEdge / Math.max(sw, sh));
+  return {
+    sx, sy, sw, sh,
+    width: Math.max(1, Math.round(sw * outputScale)),
+    height: Math.max(1, Math.round(sh * outputScale)),
+  };
+}
+
+function snapshotScene(bitmap) {
+  if (!bitmap?.width || !bitmap?.height) return null;
+  try {
+    const scale = Math.min(1, 2400 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  } catch (error) {
+    console.warn('Could not retain the interface snapshot for selected-region context', error);
+    return null;
+  }
+}
+
+function captureRegionImage(sceneFrame, rect) {
+  if (!sceneFrame?.width || !sceneFrame?.height || !rect?.width || !rect?.height) return null;
+  try {
+    const crop = bitmapCropRect(rect, sceneFrame.width, sceneFrame.height, innerWidth, innerHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = crop.width; canvas.height = crop.height;
+    const context = canvas.getContext('2d', { alpha: false });
+    if (!context) return null;
+    context.drawImage(
+      sceneFrame, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.width, crop.height,
+    );
+    return {
+      dataUrl: canvas.toDataURL('image/jpeg', .92), width: crop.width, height: crop.height,
+      sourceRect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+    };
+  } catch (error) {
+    console.warn('Could not crop the selected interface region', error);
+    return null;
+  }
+}
+
+function rectanglePolygon(rect) {
+  return [
+    { x: rect.x, y: rect.y }, { x: rect.x + rect.width, y: rect.y },
+    { x: rect.x + rect.width, y: rect.y + rect.height }, { x: rect.x, y: rect.y + rect.height },
+  ];
+}
 
 function resetSelection(message) {
   S.phase = 'selecting'; S.points = []; S.path.setAttribute('d', '');
+  S.regionImage = null;
   S.shadePath?.setAttribute('d', ''); S.root?.classList.remove('target-selected');
+  if (S.card && !S.context?.targetPanelId) {
+    const input = S.card.querySelector('textarea');
+    if (input) {
+      const original = 'Full composition';
+      input.placeholder = message;
+      setTimeout(() => { if (S.active && S.phase === 'selecting' && input) input.placeholder = original; }, 1400);
+    }
+    S.hint.style.display = 'none';
+    scheduleHint(S.hintPoint?.x ?? S.origin.x, S.hintPoint?.y ?? S.origin.y);
+    return;
+  }
   S.hint.style.display = ''; S.hint.querySelector('span').textContent = message;
   setTimeout(() => {
-    if (S.active && S.phase === 'selecting') S.hint.querySelector('span').textContent = 'Type a prompt or circle an area';
+    if (S.active && S.phase === 'selecting') S.hint.querySelector('span').textContent = 'Type a prompt or drag to select an area';
   }, 1400);
 }
 
@@ -411,11 +521,22 @@ function describeElement(el) {
   };
 }
 
-function showOutline(rect) {
+function updateOutline(rect) {
+  if (!S.outline) return;
+  Object.assign(S.outline.style, {
+    left: Math.max(4, rect.x) + 'px', top: Math.max(4, rect.y) + 'px',
+    width: Math.max(1, Math.min(innerWidth - Math.max(4, rect.x) - 4, rect.width)) + 'px',
+    height: Math.max(1, Math.min(innerHeight - Math.max(4, rect.y) - 4, rect.height)) + 'px',
+  });
+}
+
+function showOutline(rect, selecting = false) {
+  S.outline?.remove();
   S.outline = h('div.spatial-outline', { style: {
-    left: Math.max(4, rect.x - 5) + 'px', top: Math.max(4, rect.y - 5) + 'px',
-    width: Math.min(innerWidth - 8, rect.width + 10) + 'px', height: Math.min(innerHeight - 8, rect.height + 10) + 'px',
+    left: Math.max(4, rect.x) + 'px', top: Math.max(4, rect.y) + 'px',
+    width: Math.max(1, rect.width) + 'px', height: Math.max(1, rect.height) + 'px',
   } });
+  if (selecting) S.outline.classList.add('selecting');
   S.root.appendChild(S.outline);
 }
 
@@ -424,6 +545,17 @@ function cardPosition(card, rect) {
   let top = PM.clamp(rect.y, 60, innerHeight - card.offsetHeight - 14);
   if (left < rect.x + rect.width && rect.y + rect.height + 14 + card.offsetHeight < innerHeight) top = rect.y + rect.height + 14;
   Object.assign(card.style, { left: Math.round(left) + 'px', top: Math.round(top) + 'px' });
+}
+
+function composerPosition(card) {
+  /* Full-composition prompts belong to the visible canvas, not the pointer's
+     activation point. Selected-area edits remain spatially anchored to their region. */
+  if (S.context?.targetPanelId) { cardPosition(card, S.region); return; }
+  const canvas = document.querySelector('#stage-inner')?.getBoundingClientRect();
+  if (!canvas || !canvas.width || !canvas.height) { cardPosition(card, S.region); return; }
+  const width = card.offsetWidth || 390;
+  const p = clampFloatingPosition(canvas.left + 22, canvas.top + 18, width, card.offsetHeight || 92, innerWidth, innerHeight, 14);
+  Object.assign(card.style, { left: p.x + 'px', top: p.y + 'px' });
 }
 
 function clampFloatingPosition(x, y, width, height, viewportWidth, viewportHeight, pad = 12) {
@@ -439,21 +571,25 @@ function moveCardTo(card, x, y) {
   return p;
 }
 
+function cardCoordinates(card) {
+  const left = Number.parseFloat(card.style.left), top = Number.parseFloat(card.style.top);
+  if (Number.isFinite(left) && Number.isFinite(top)) return { left, top };
+  return card.getBoundingClientRect();
+}
+
 function makeCardMovable(card, handle) {
   handle.tabIndex = 0; handle.setAttribute('role', 'button');
   handle.setAttribute('aria-label', 'Move assistant result');
   handle.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
-    event.preventDefault(); event.stopPropagation();
-    const startX = event.clientX, startY = event.clientY;
-    const rect = card.getBoundingClientRect();
-    handle.setPointerCapture?.(event.pointerId);
-    const move = e => moveCardTo(card, rect.left + e.clientX - startX, rect.top + e.clientY - startY);
-    const end = e => {
-      handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
-      handle.releasePointerCapture?.(e.pointerId);
-    };
-    handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
+    event.stopPropagation();
+    const rect = cardCoordinates(card);
+    /* The conversation's parent is deliberately click-through. Use the shared
+       window-level drag helper so movement continues after leaving the header. */
+    PM.drag(event, {
+      cursor: 'grabbing',
+      move: (dx, dy) => moveCardTo(card, rect.left + dx, rect.top + dy),
+    });
   });
   handle.addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -468,47 +604,148 @@ function makeCardMovable(card, handle) {
 function showComposer(draft = '') {
   S.card?.remove();
   const input = h('textarea', {
-    placeholder: S.context.targetPanelId ? 'How should this area change?' : 'Edit the scene, create a workspace, or make connected controls…',
+    placeholder: S.context.targetPanelId ? 'How should this area change?' : 'Describe a change…',
     rows: '3',
   });
   input.value = draft;
   const status = h('span.spatial-status', 'Enter to send');
   const cancelBtn = h('button.spatial-action', { onclick: cancel }, 'Cancel');
-  const sendBtn = h('button.spatial-action.pri', { onclick: () => sendRequest(input, status, sendBtn, cancelBtn) }, 'Send to Codex');
+  const sendBtn = h('button.spatial-action.pri', { 'aria-label': 'Enter to send', onclick: () => sendRequest(input) }, '↵');
   input.addEventListener('keydown', e => {
     e.stopPropagation();
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input, status, sendBtn, cancelBtn); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input); }
   });
   const handle = h('div.spatial-target', S.context.targetPanelId ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition');
-  S.card = h('div.spatial-compose',
+  const contextLabel = h('span.spatial-context-label', S.context.targetPanelId ? `Selected ${S.context.targetTitle}` : 'Full composition');
+  S.card = h('div.spatial-compose.compact.full',
     handle,
-    input,
-    h('div.spatial-actions', status, cancelBtn, sendBtn));
+    h('div.spatial-input-row', contextLabel, input, sendBtn),
+    h('div.spatial-actions', status, cancelBtn));
   S.root.appendChild(S.card);
-  makeCardMovable(S.card, handle);
   /* Place and focus immediately as well as on the next frame. A cached window
      capture can make repeat activations complete inside the click dispatch;
      waiting only for rAF left the card at an unpositioned static location. */
-  cardPosition(S.card, S.region);
+  composerPosition(S.card);
   input.focus();
   requestAnimationFrame(() => {
     if (!S.active || !S.card) return;
-    cardPosition(S.card, S.region);
+    composerPosition(S.card);
     input.focus();
   });
 }
 
-async function sendRequest(input, status, sendBtn, cancelBtn) {
+function conversationReply(plan) {
+  if (plan.kind === 'scene') return plan.sceneEdit.summary || plan.message || 'I prepared an editable scene change.';
+  if (plan.kind === 'workspace') return plan.message || `I prepared the ${plan.workspaceEdit.name} workspace.`;
+  if (plan.kind === 'chrome') return plan.message || 'I prepared an interface change.';
+  return plan.message || `I prepared the ${plan.section.title} section.`;
+}
+
+function promoteToConversation() {
+  if (!S.root || !S.card) return;
+  const rect = S.card.getBoundingClientRect();
+  S.root.classList.add('conversation-mode');
+  S.root.classList.remove('target-selected');
+  S.hint.style.display = 'none';
+  S.path?.setAttribute('d', ''); S.shadePath?.setAttribute('d', '');
+  S.outline?.remove(); S.outline = null;
+  if (S.renderStop) { S.renderStop(); S.renderStop = null; }
+  Object.assign(S.card.style, { left: Math.round(rect.left) + 'px', top: Math.round(rect.top) + 'px' });
+}
+
+function planPreview() {
+  const plan = S.plan;
+  if (!plan) return null;
+  const chrome = plan.kind === 'chrome';
+  const scene = plan.kind === 'scene';
+  const workspace = plan.kind === 'workspace';
+  const title = chrome ? 'Interface edit' : scene ? plan.sceneEdit.label : workspace ? plan.workspaceEdit.name : plan.section.title;
+  const preview = h('div.spatial-proposal',
+    h('div.spatial-proposal-kicker', 'Proposed change'),
+    h('h3', title));
+  if (chrome) preview.appendChild(h('div.spatial-preview-control', h('span', 'Corner style'), h('span', plan.chromeEdit.value)));
+  else if (scene) plan.sceneEdit.commands.forEach(command => preview.appendChild(h('div.spatial-preview-control', h('span', PM.AgentHarness.describeCommand(command)))));
+  else if (workspace) {
+    plan.workspaceEdit.docks.forEach(dock => preview.appendChild(h('div.spatial-preview-control', h('span', dock.id), h('span', dock.panels.map(panel => panel.id).join(' · ')))));
+    plan.workspaceEdit.sections.forEach(section => preview.appendChild(h('div.spatial-preview-control', h('span', section.title), h('span', `${section.controls.length} connected controls`))));
+  } else {
+    plan.section.controls.forEach(control => preview.appendChild(h('div.spatial-preview-control', h('span', control.label), h('span', control.connection || control.type), control.type === 'slider' ? h('i') : null)));
+  }
+  preview.appendChild(h('div.spatial-proposal-actions',
+    h('button.spatial-action', { onclick: () => { S.plan = null; renderConversation(true); } }, 'Dismiss'),
+    h('button.spatial-action.pri', { onclick: applyPlan }, chrome ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section')));
+  return preview;
+}
+
+function resultPreview() {
+  const run = S.run;
+  if (!run || S.phase !== 'result') return null;
+  const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Rendered result'), h('h3', 'Review the actual result'));
+  const message = run.review?.message || 'The rendered change is ready.';
+  preview.appendChild(h('p', message));
+  if (run.review?.critique) preview.appendChild(h('p', run.review.critique));
+  if (run.reviewError) preview.appendChild(h('p.spatial-review-warning', `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`));
+  const frames = h('div.spatial-frame-grid');
+  (run.frames?.images || []).forEach((src, index) => frames.appendChild(h('figure',
+    h('img', { src, alt: `Rendered composition at ${run.frames.times[index]} seconds` }),
+    h('figcaption', `${run.frames.times[index]}s`))));
+  if (frames.childElementCount) preview.appendChild(frames);
+  preview.appendChild(h('div.spatial-proposal-actions',
+    h('button.spatial-action', { onclick: undoSceneRun }, 'Undo change'),
+    h('button.spatial-action.pri', { onclick: keepSceneRun }, 'Keep change')));
+  return preview;
+}
+
+function renderConversation(focusInput = false) {
+  if (!S.card) return;
+  /* CSS pop-out animation uses transform. Read the committed left/top values so
+     progress updates cannot make the floating conversation drift mid-animation. */
+  const rect = cardCoordinates(S.card);
+  S.card.className = 'spatial-compose conversation';
+  S.card.textContent = '';
+  const handle = h('div.spatial-target', { title: 'Drag to move. Arrow keys also move this conversation.' },
+    `Powermove agent · ${S.context?.targetPanelId ? S.context.targetTitle : 'full composition'}`);
+  const close = h('button.spatial-close', { type: 'button', 'aria-label': 'Close agent conversation', title: 'Close', onclick: cancel }, '×');
+  const messages = h('div.spatial-conversation-log', { role: 'log', 'aria-live': 'polite' });
+  S.conversation.slice(-30).forEach(message => messages.appendChild(h(`div.spatial-message.${message.role}`, message.text)));
+  if (S.activity) messages.appendChild(h('div.spatial-message.assistant.pending', h('i'), S.activity));
+  const proposal = resultPreview() || planPreview();
+  if (proposal) messages.appendChild(proposal);
+  const input = h('textarea.spatial-followup', {
+    rows: '2', placeholder: 'Reply or ask for an adjustment…', 'aria-label': 'Reply to Powermove agent',
+    disabled: S.phase === 'working' || S.phase === 'applying',
+  });
+  const send = h('button.spatial-action.pri', {
+    type: 'button', 'aria-label': 'Send reply', disabled: input.disabled,
+    onclick: () => sendRequest(input),
+  }, '↑');
+  input.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendRequest(input); }
+  });
+  S.card.append(h('div.spatial-conversation-head', handle, close), messages, h('div.spatial-followup-row', input, send));
+  makeCardMovable(S.card, handle);
+  moveCardTo(S.card, rect.left, rect.top);
+  requestAnimationFrame(() => {
+    messages.scrollTop = messages.scrollHeight;
+    if (focusInput && !input.disabled) input.focus();
+  });
+}
+
+async function sendRequest(input) {
   const request = input.value.trim();
-  if (!request || S.phase === 'working') return;
-  S.phase = 'working'; input.disabled = true; sendBtn.disabled = true; cancelBtn.disabled = true;
-  status.textContent = 'Looking at the composition…';
+  if (!request || S.phase === 'working' || S.phase === 'applying') return;
+  S.requestText = request;
+  S.conversation.push({ role: 'user', text: request });
+  S.plan = null; S.phase = 'working'; S.activity = 'Looking at the composition…';
+  promoteToConversation(); renderConversation();
   const token = ++S.requestToken;
   try {
     const observation = PM.AgentHarness ? await PM.AgentHarness.observe() : { state: {}, times: [], images: [] };
     if (!S.active || token !== S.requestToken) return;
-    status.textContent = 'Designing a safe change…';
-    const raw = await PM.CodexBridge.request(agentPrompt(request, observation), responseSchema(), observation.images);
+    S.activity = 'Designing a safe change…'; renderConversation();
+    const attachedImages = S.regionImage ? [S.regionImage, ...observation.images] : observation.images;
+    const raw = await PM.CodexBridge.request(agentPrompt(request, observation), responseSchema(), attachedImages);
     if (!S.active || token !== S.requestToken) return;
     let decoded;
     try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
@@ -517,11 +754,13 @@ async function sendRequest(input, status, sendBtn, cancelBtn) {
     if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'No safe composition edit was generated');
     if (plan.kind === 'section' && !plan.section.controls.length) throw new Error('The generated section had no controls connected to editable source');
     if (plan.kind === 'workspace' && !plan.workspaceEdit) throw new Error('The generated workspace was not safe or complete enough to preview');
-    S.requestText = request; S.plan = plan; showPreview();
+    S.conversation.push({ role: 'assistant', text: conversationReply(plan) });
+    S.activity = ''; S.plan = plan; showPreview();
   } catch (error) {
     if (!S.active || token !== S.requestToken) return;
-    S.phase = 'composing'; input.disabled = false; sendBtn.disabled = false; cancelBtn.disabled = false;
-    status.textContent = String(error.message || error).slice(0, 110); input.focus();
+    S.activity = ''; S.phase = 'conversation';
+    S.conversation.push({ role: 'assistant', text: String(error.message || error).slice(0, 220) });
+    renderConversation(true);
   }
 }
 
@@ -587,10 +826,19 @@ RULES
 - App chrome is a valid editable source target when it is in the whitelist above. Never reject preview corner styling merely because it is interface chrome.
 - Keep the current interface reachable. Do not remove unrelated docks or panels. Never alter rendered composition shapes or export geometry for a chrome request.
 
-CIRCLED REGION
+VISUAL REFERENCES
+${S.regionImage ? '- The FIRST attached image is an exact screenshot of the selected editor region before the Ripple overlay appeared. Treat its geometry and visible controls as the primary visual target.\n- Remaining attached images are rendered composition frames at the times listed below.' : '- No editor region was selected. Attached images are rendered composition frames.'}
+
+SELECTED REGION SEMANTICS
 ${JSON.stringify(S.context)}
 
-CURRENT WORKSPACE
+CONVERSATION SO FAR
+${JSON.stringify(S.conversation.slice(0, -1).slice(-12))}
+
+SEMANTIC WORKSPACE MAP
+${JSON.stringify(workspaceSemanticContext(workspace))}
+
+CURRENT WORKSPACE MANIFEST
 ${JSON.stringify(workspace)}
 
 AVAILABLE COMMANDS
@@ -600,6 +848,29 @@ ${PM.AgentHarness.promptContext(observation)}
 
 USER REQUEST
 ${request}`;
+}
+
+function workspaceSemanticContext(workspace) {
+  const custom = new Map((workspace?.custom || []).map(section => [section.id, section]));
+  return {
+    id: workspace?.id || '', name: workspace?.name || '', density: workspace?.density || '',
+    theme: workspace?.theme || {}, chrome: workspace?.chrome || {},
+    docks: (workspace?.layout?.docks || []).map(dock => ({
+      id: dock.id, size: dock.size, flex: !!dock.flex,
+      panels: (dock.panels || []).map(spec => {
+        const section = custom.get(spec.id);
+        return {
+          id: spec.id, title: section?.title || PM.PANELS?.[spec.id]?.title || spec.id,
+          role: section ? 'generated editable section' : 'native editor panel',
+          size: spec.size, flex: !!spec.flex,
+          bindings: (section?.controls || []).map(control => ({
+            label: control.label, type: control.type, target: control.target || '',
+            path: control.path || '', command: control.cmd || control.command || '',
+          })),
+        };
+      }),
+    })),
+  };
 }
 
 function controlConnection(target, path, controlType) {
@@ -760,34 +1031,8 @@ function slug(value) {
 }
 
 function showPreview() {
-  S.phase = 'preview'; S.card.textContent = '';
-  const handle = h('div.spatial-target', { title: 'Drag to move. Arrow keys also move this box.' }, `Proposed change · ${S.context.targetTitle}`);
-  const chrome = S.plan.kind === 'chrome';
-  const scene = S.plan.kind === 'scene';
-  const workspace = S.plan.kind === 'workspace';
-  const body = h('div.spatial-preview', h('h3', chrome ? 'Preview surface' : scene ? S.plan.sceneEdit.label : workspace ? S.plan.workspaceEdit.name : S.plan.section.title), h('p', scene ? S.plan.sceneEdit.summary : workspace ? 'A complete validated workspace is ready.' : S.plan.message));
-  if (chrome) body.appendChild(h('div.spatial-preview-control', h('span', 'Corner style'), h('span', S.plan.chromeEdit.value)));
-  else if (scene) {
-    S.plan.sceneEdit.commands.forEach(command => body.appendChild(h('div.spatial-preview-control', h('span', PM.AgentHarness.describeCommand(command)))));
-  }
-  else if (workspace) {
-    S.plan.workspaceEdit.docks.forEach(dock => body.appendChild(h('div.spatial-preview-control', h('span', dock.id), h('span', dock.panels.map(panel => panel.id).join(' · ')))));
-    S.plan.workspaceEdit.sections.forEach(section => body.appendChild(h('div.spatial-preview-control', h('span', section.title), h('span', `${section.controls.length} connected controls`))));
-  }
-  else {
-    if (S.plan.section.note) body.appendChild(h('p', S.plan.section.note));
-    S.plan.section.controls.forEach(c => body.appendChild(h('div.spatial-preview-control', h('span', c.label), h('span', c.connection || c.type), c.type === 'slider' ? h('i') : null)));
-    if (!S.plan.section.controls.length) body.appendChild(h('div.spatial-preview-control', 'Empty section'));
-  }
-  const actions = h('div.spatial-actions', h('span.spatial-status', chrome ? 'Changes Powermove UI only' : scene ? 'Checkpointed · rendered review follows' : workspace ? 'Creates a new recoverable workspace' : S.plan.operation === 'modify' ? 'Replaces circled section' : 'Adds beside circled section'),
-    h('button.spatial-action', { onclick: cancel }, 'Cancel'),
-    h('button.spatial-action.pri', { onclick: applyPlan }, chrome ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section'));
-  S.card.append(handle, body, actions); makeCardMovable(S.card, handle);
-  requestAnimationFrame(() => {
-    const rect = S.card.getBoundingClientRect();
-    moveCardTo(S.card, rect.left, rect.top);
-    handle.focus();
-  });
+  S.phase = 'conversation';
+  renderConversation(true);
 }
 
 function locatePanel(workspace, panelId) {
@@ -809,7 +1054,7 @@ function uniqueSectionId(workspace, requested, keepId = '') {
 }
 
 async function applyPlan() {
-  if (!S.plan || S.phase !== 'preview') return;
+  if (!S.plan || !['conversation', 'preview'].includes(S.phase)) return;
   const plan = S.plan;
   if (plan.kind === 'scene') {
     await applyScenePlan(plan);
@@ -824,14 +1069,16 @@ async function applyPlan() {
       layout: { docks: manifest.docks },
     });
     PM.toast(`Created workspace · ${created.name}`);
-    cancel();
+    S.plan = null; S.conversation.push({ role: 'assistant', text: `Created ${created.name}. You can keep asking me to adjust it.` });
+    S.phase = 'conversation'; renderConversation(true);
     return;
   }
   if (plan.kind === 'chrome') {
     let changed = false;
     PM.WS.mutate(workspace => { changed = applyChromeEdit(workspace, plan.chromeEdit); });
     if (changed) PM.toast('Updated preview corner style');
-    cancel();
+    S.plan = null; S.conversation.push({ role: 'assistant', text: changed ? 'Applied the interface edit.' : 'That interface setting was already in place.' });
+    S.phase = 'conversation'; renderConversation(true);
     return;
   }
   const current = PM.WS.current;
@@ -864,63 +1111,46 @@ async function applyPlan() {
     }
   });
   PM.toast((replacing ? 'Redesigned ' : 'Added ') + plan.section.title);
-  cancel();
+  S.plan = null; S.conversation.push({ role: 'assistant', text: `${replacing ? 'Redesigned' : 'Added'} ${plan.section.title}. You can keep refining it here.` });
+  S.phase = 'conversation'; renderConversation(true);
 }
 
 async function applyScenePlan(plan) {
-  S.phase = 'applying';
-  S.card.textContent = '';
-  const handle = h('div.spatial-target', { title: 'The scene remains unchanged until the structured edit begins.' }, `Working · ${plan.sceneEdit.label}`);
-  const message = h('p', 'Applying structured source edit…');
-  const body = h('div.spatial-preview', h('h3', 'Building the scene'), message);
-  const status = h('span.spatial-status', 'Please keep Powermove open');
-  S.card.append(handle, body, h('div.spatial-actions', status));
-  makeCardMovable(S.card, handle);
+  S.phase = 'applying'; S.plan = null; S.activity = 'Applying structured source edit…';
+  renderConversation();
   try {
     const run = await PM.AgentHarness.execute(S.requestText, plan.sceneEdit, value => {
-      message.textContent = value;
+      S.activity = value; renderConversation();
     });
     if (!S.active) return;
-    S.run = run;
+    S.activity = ''; S.run = run;
     showSceneResult(run);
   } catch (error) {
     if (!S.active) return;
-    S.phase = 'preview';
-    message.textContent = String(error.message || error).slice(0, 180);
-    status.textContent = 'Nothing was applied';
-    const actions = S.card.querySelector('.spatial-actions');
-    actions.append(h('button.spatial-action', { onclick: cancel }, 'Close'));
+    S.activity = ''; S.phase = 'conversation';
+    S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
+    renderConversation(true);
   }
 }
 
 function showSceneResult(run) {
-  S.phase = 'result'; S.card.textContent = '';
-  const handle = h('div.spatial-target', { title: 'Drag to move. Escape undoes this run.' }, 'Rendered result · final approval');
-  const message = run.review?.message || 'The rendered change is ready.';
-  const body = h('div.spatial-preview', h('h3', 'Review the actual result'), h('p', message));
-  if (run.review?.critique) body.appendChild(h('p', run.review.critique));
-  if (run.reviewError) body.appendChild(h('p.spatial-review-warning', `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`));
-  const frames = h('div.spatial-frame-grid');
-  (run.frames?.images || []).forEach((src, index) => frames.appendChild(h('figure',
-    h('img', { src, alt: `Rendered composition at ${run.frames.times[index]} seconds` }),
-    h('figcaption', `${run.frames.times[index]}s`))));
-  if (frames.childElementCount) body.appendChild(frames);
-  const actions = h('div.spatial-actions',
-    h('span.spatial-status', `${run.applied.length} source edits · revision ${run.revision}`),
-    h('button.spatial-action', { onclick: undoSceneRun }, 'Undo change'),
-    h('button.spatial-action.pri', { onclick: () => { PM.toast('Kept agent change'); cancel(); } }, 'Keep change'));
-  S.card.append(handle, body, actions); makeCardMovable(S.card, handle);
-  requestAnimationFrame(() => {
-    const rect = S.card.getBoundingClientRect();
-    moveCardTo(S.card, rect.left, rect.top); handle.focus();
-  });
+  S.phase = 'result'; S.run = run;
+  renderConversation();
+}
+
+function keepSceneRun() {
+  if (!S.run) return;
+  PM.toast('Kept agent change');
+  S.conversation.push({ role: 'assistant', text: `Kept ${S.run.applied.length} editable source changes. What should we adjust next?` });
+  S.run = null; S.phase = 'conversation'; renderConversation(true);
 }
 
 function undoSceneRun() {
-  if (!S.run) return cancel();
+  if (!S.run) return;
   const restored = PM.AgentHarness.rollback(S.run.checkpoint);
   PM.toast(restored ? 'Agent change undone' : 'Could not restore the agent checkpoint');
-  cancel();
+  S.conversation.push({ role: 'assistant', text: restored ? 'I restored the checkpoint. Tell me what to try differently.' : 'I could not restore that checkpoint.' });
+  S.run = null; S.phase = 'conversation'; renderConversation(true);
 }
 
 function onKey(event) {
@@ -940,11 +1170,16 @@ function cancel() {
   cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
   S.root?.remove();
-  Object.assign(S, { root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, run: null, requestText: '', renderStop: null, points: [] });
+  Object.assign(S, { root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null, region: null, context: null, plan: null, run: null, requestText: '', renderStop: null, points: [], conversation: [], activity: '', sceneFrame: null, regionImage: null });
   setTimeout(refreshSceneCache, 80);
 }
 
 function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    sceneBitmap?.close?.();
+    canvas.dataset.renderer = 'reduced-motion';
+    return () => {};
+  }
   let stopped = false, failed = false, frame = 0, fallbackTimer = 0, device = null;
   let context = null, uniformBuffer = null, sceneTexture = null;
   const fallback = reason => {
@@ -1025,9 +1260,9 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
         let distanceFromSource = length(delta);
         // The cursor remains the emitter, while the wavefront is free to carry
         // beyond it and across the full window before the animation settles.
+        let entrance = smoothstep(0.0, 0.11, uniforms.time);
         let propagationFade = exp(-uniforms.time * 0.38);
         let front = uniforms.time * 1.32;
-        let lightIn = smoothstep(0.0, 0.16, uniforms.time);
 
         // Wide, low-energy feedback bands make the deliberate shake legible
         // across the editor instead of reading as tiny lines near the cursor.
@@ -1045,7 +1280,7 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
         let shimmer = 0.5 + 0.5 * cos(atan2(delta.y, delta.x) * 3.0 - uniforms.time * 2.0);
 
         let ringAlpha = clamp((crest * 0.24 + echo * 0.08 + wake * 0.04 + core * 0.13)
-          * uniforms.intensity * lightIn, 0.0, 0.42);
+          * uniforms.intensity * entrance, 0.0, 0.42);
         let violet = vec3f(0.34, 0.18, 0.55);
         let hot = clamp(crest + core + shimmer * echo * 0.35, 0.0, 1.0);
         // Keep the defined displacement edge neutral; orange belongs only to
@@ -1056,7 +1291,7 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
         // offset coordinates around the wave crest, with a restrained RGB split.
         let radialDirection = delta / max(distanceFromSource, 0.0001);
         let displacementStrength = (crest * 0.018 - echo * 0.006 + wake * 0.0015 + cursorRipple)
-          * uniforms.intensity;
+          * uniforms.intensity * entrance;
         let displacement = radialDirection * displacementStrength;
         let displacedUV = clamp(uv - displacement, vec2f(0.001), vec2f(0.999));
         let red = textureSample(sceneTexture, sceneSampler, clamp(displacedUV - displacement * 0.08, vec2f(0.001), vec2f(0.999))).r;
@@ -1070,7 +1305,7 @@ function startRipple(canvas, origin, sceneBitmap, adapterPromise = null) {
         let hdrBloomNear = exp(-pow((distanceFromSource - front) * 1.15, 2.0));
         let hdrBloomFar = exp(-pow((distanceFromSource - front) * 0.52, 2.0));
         let hdrCrest = (hdrBloomNear * 0.18 + hdrBloomFar * 0.045)
-          * propagationFade * uniforms.intensity * lightIn;
+          * propagationFade * uniforms.intensity * entrance;
         let hdrColor = vec3f(1.0, 0.72, 0.52);
         let composited = sceneColor + ringColor * ringAlpha + hdrColor * hdrCrest;
         let outputAlpha = mix(ringAlpha, 1.0, uniforms.hasScene);

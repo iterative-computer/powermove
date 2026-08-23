@@ -102,8 +102,9 @@ function muxWebM(frames, { width, height, fps, codecId = 'V_VP9', audio }) {
 /* ── audio mixdown + opus encode ───────────────────────── */
 async function mixAudio(t0, t1) {
   const spans = [];
+  const soloOn = PM.proj.layers.some(L => L.on && L.solo);
   for (const L of PM.proj.layers) {
-    if (L.type !== 'audio' || !L.on || !L.d.asset) continue;
+    if (L.type !== 'audio' || !L.on || !L.d.asset || (soloOn && !L.solo)) continue;
     const s = Math.max(L.from, t0), e = Math.min(L.from + L.dur, t1);
     if (e - s <= .01) continue;
     const a = PM.assets.get(L.d.asset); if (!a) continue;

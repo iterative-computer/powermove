@@ -59,21 +59,48 @@ test('shake activation uses timestamp-normalized inertia and repeated reversals'
   assert.equal(math.shakeIntent(deliberate60hz.slice(0, 14)), true, 'early intentional inertia prewarms Ripple');
 });
 
-test('circle selection rejects open scribbles and accepts a closed useful region', () => {
+test('drag selection resolves a clean rectangle in either direction', () => {
   const math = spatialModel().math;
-  const circle = Array.from({ length: 25 }, (_, i) => {
-    const a = (i / 24) * Math.PI * 2;
-    return { x: 220 + Math.cos(a) * 90, y: 180 + Math.sin(a) * 60 };
-  });
-  const open = circle.slice(0, 17);
-  assert.equal(math.loopInfo(circle).closed, true);
-  assert.equal(math.loopInfo(open).closed, false);
+  assert.deepEqual({ ...math.selectionRect({ x: 310, y: 260 }, { x: 120, y: 80 }) },
+    { x: 120, y: 80, width: 190, height: 180 });
+  assert.deepEqual({ ...math.selectionRect({ x: 40, y: 50 }, { x: 40, y: 50 }) },
+    { x: 40, y: 50, width: 0, height: 0 });
+  assert.match(source, /updateOutline\(selectionRect\(S\.points\[0\], p\)\)/,
+    'the rectangular marquee follows the pointer without drawing a freehand loop');
+  assert.doesNotMatch(source, /loopInfo|Close the loop|pathData\(S\.points\)/);
+});
+
+test('selected regions become cropped visual attachments with workspace semantics', () => {
+  const math = spatialModel().math;
+  assert.deepEqual({ ...math.bitmapCropRect(
+    { x: 100, y: 50, width: 200, height: 100 }, 2560, 1440, 1280, 720,
+  ) }, { sx: 200, sy: 100, sw: 400, sh: 200, width: 400, height: 200 });
+  assert.deepEqual({ ...math.bitmapCropRect(
+    { x: 0, y: 0, width: 1280, height: 720 }, 2560, 1440, 1280, 720, 1280,
+  ) }, { sx: 0, sy: 0, sw: 2560, sh: 1440, width: 1280, height: 720 });
+  assert.match(source, /S\.sceneFrame = snapshotScene\(sceneBitmap\)/,
+    'the clean pre-overlay window capture is retained before WebGPU consumes it');
+  assert.match(source, /open: \(\) => activate\([\s\S]*capture: PM\.WindowCapture\.request\(\)/,
+    'toolbar activation also captures fresh pixels before mounting the overlay');
+  assert.match(source, /S\.regionImage = regionCapture\?\.dataUrl \|\| null/);
+  assert.match(source, /S\.regionImage \? \[S\.regionImage, \.\.\.observation\.images\] : observation\.images/,
+    'the selected editor crop is the first image sent to the agent');
+  assert.match(source, /The FIRST attached image is an exact screenshot of the selected editor region/);
+  assert.match(source, /SEMANTIC WORKSPACE MAP[\s\S]*workspaceSemanticContext\(workspace\)/);
+  assert.match(source, /SELECTED REGION SEMANTICS[\s\S]*JSON\.stringify\(S\.context\)/);
+  assert.match(source, /role: section \? 'generated editable section' : 'native editor panel'/);
 });
 
 test('one click exits while a drag remains a selection gesture', () => {
   const math = spatialModel().math;
   assert.equal(math.isClickGesture([{ x: 100, y: 100 }, { x: 103, y: 102 }]), true);
   assert.equal(math.isClickGesture([{ x: 100, y: 100 }, { x: 125, y: 102 }]), false);
+  assert.equal(math.overlayPointerAction('arming', 0, false), 'cancel', 'clicking off the initial prompt dismisses it immediately');
+  assert.equal(math.overlayPointerAction('selecting', 0, false), 'select', 'the selection phase still begins a drag');
+  assert.equal(math.overlayPointerAction('composing', 0, false), 'cancel', 'clicking off a selected-area prompt dismisses the overlay');
+  assert.equal(math.overlayPointerAction('composing', 0, true), 'ignore', 'clicking in the prompt remains interactive');
+  assert.equal(math.overlayPointerAction('composing', 2, false), 'ignore', 'secondary clicks are left alone');
+  assert.match(source, /S\.root\.addEventListener\('pointerdown', onOverlayPointerDown\)/);
   assert.match(source, /if \(isClickGesture\(S\.points\)\) \{ cancel\(\); return; \}/);
 });
 
@@ -150,7 +177,9 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(source, /device\.createRenderPipeline/);
   assert.match(source, /copyExternalImageToTexture/);
   assert.match(source, /if \(shakeIntent\(S\.samples\) && !S\.rippleWarmup\) warmRipple\(\)/);
-  assert.match(source, /cachedScene \? Promise\.resolve\(cachedScene\)/);
+  assert.match(source, /capture: PM\.WindowCapture\.request\(\)/,
+    'shake intent starts a fresh clean screenshot for the current selection');
+  assert.match(source, /const sceneRequest = warmup\?\.capture[\s\S]*warmup\.capture\.then\(fresh =>/);
   assert.doesNotMatch(source, /S\.gpuAdapter/, 'no consumed adapter is cached across activations');
   assert.match(source, /adapterPromise \|\| requestRippleAdapter\(\)/);
   assert.match(source, /let displacedUV = clamp\(uv - displacement/);
@@ -161,9 +190,15 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(source, /wakeMask = smoothstep\(front \+ 0\.48, front - 0\.2/);
   assert.match(source, /S\.origin\.x = live\.clientX; S\.origin\.y = live\.clientY/);
   assert.match(source, /let cursorRipple = sin\(distanceFromSource \* 38\.0/);
-  assert.match(source, /let front = uniforms\.time \* 1\.32/);
   assert.match(source, /let propagationFade = exp\(-uniforms\.time \* 0\.38\)/);
-  assert.match(source, /let lightIn = smoothstep\(0\.0, 0\.16, uniforms\.time\)/);
+  assert.match(source, /let entrance = smoothstep\(0\.0, 0\.11, uniforms\.time\)/,
+    'the ripple eases into view over a tenth of a second');
+  assert.match(source, /let front = uniforms\.time \* 1\.32/,
+    'the wavefront still advances from time zero without a gesture delay');
+  assert.doesNotMatch(source, /setTimeout\([^)]*startRipple|uniforms\.time\s*-\s*0\.11/,
+    'the entrance ramp never pauses ripple playback');
+  assert.match(source, /displacementStrength[\s\S]*uniforms\.intensity \* entrance/,
+    'displacement and light fade in together instead of popping');
   assert.match(source, /trackedOrigin\.x \+= \(origin\.x - trackedOrigin\.x\) \* follow/);
   assert.match(source, /fadeProgress \* fadeProgress \* \(3 - 2 \* fadeProgress\)/);
   assert.match(source, /const fadeStartsAt = 0\.48/);
@@ -185,8 +220,12 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.doesNotMatch(css, /spatial-wash\{[^}]*blur/);
   assert.match(css, /spatial-shade\{[^}]*rgba\(7,7,10,\.38\)/);
   assert.match(source, /S\.shadePath\.setAttribute\('fill-rule', 'evenodd'\)/,
-    'the lasso de-emphasizes everything except the circled region');
+    'the rectangular selection de-emphasizes everything except the selected region');
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)/);
+  assert.match(source, /window\.matchMedia\?\.\('\(prefers-reduced-motion: reduce\)'\)\.matches[\s\S]*renderer = 'reduced-motion'/,
+    'reduced motion bypasses the WebGPU animation while leaving the assistant usable');
+  assert.match(css, /\.spatial-input-row:focus-within\{[^}]*var\(--accent-dim\)/,
+    'the prompt responds with a restrained token-based focus cue');
 });
 
 test('Ripple adapter acquisition is fresh on every lifecycle request', async () => {
@@ -205,20 +244,35 @@ test('instruction pill follows the cursor without intercepting input', () => {
   const math = spatialModel().math;
   assert.deepEqual({ ...math.hintPosition(100, 80, 250, 38, 800, 600) }, { x: 118, y: 98 });
   assert.deepEqual({ ...math.hintPosition(790, 590, 250, 38, 800, 600) }, { x: 538, y: 534 });
-  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Type a prompt or circle an area'\)\)/);
+  assert.match(source, /S\.hint = h\('div\.spatial-hint', h\('span', 'Type a prompt or drag to select an area'\)\)/);
   assert.match(css, /\.spatial-hint\{[^}]*pointer-events:none[^}]*will-change:transform/s);
 });
 
-test('circled-region prompt, Send, movable result, cancel, Preview, and Apply stay structured', () => {
+test('selected-region prompt pops into a draggable, ongoing agent conversation', () => {
   const math = spatialModel().math;
   assert.deepEqual({ ...math.clampFloatingPosition(-40, 900, 420, 220, 1200, 800) }, { x: 12, y: 568 });
-  assert.match(source, /S\.context = inspectRegion\(S\.points, S\.region\)/, 'the prompt binds to the lasso context');
+  assert.match(source, /S\.context = inspectRegion\(S\.points, S\.region\)/, 'the prompt binds to the rectangular selection context');
+  assert.match(source, /`Selected \$\{S\.context\.targetTitle\}`/,
+    'Selected Timeline is displayed inside the prompt surface');
+  assert.match(css, /\.spatial-context-label\{[^}]*font-family:var\(--f-ui\)/,
+    'selection context uses the normal interface typeface');
   assert.match(source, /Powermove agent · full composition/);
   assert.match(source, /document\.body\.appendChild\(S\.root\);[\s\S]*showComposer\(\)/,
-    'the floating prompt appears immediately after a shake; circling is optional context');
-  assert.match(source, /sendRequest\(input, status, sendBtn, cancelBtn\)/);
-  assert.match(source, /PM\.CodexBridge\.request\(agentPrompt\(request, observation\), responseSchema\(\), observation\.images\)/);
-  assert.match(source, /makeCardMovable\(S\.card, handle\)/);
+    'the floating prompt appears immediately after a shake; drag selection is optional context');
+  assert.match(source, /sendRequest\(input\)/);
+  assert.match(source, /PM\.CodexBridge\.request\(agentPrompt\(request, observation\), responseSchema\(\), attachedImages\)/,
+    'the agent receives the selected-region image followed by rendered composition frames');
+  assert.match(source, /promoteToConversation\(\); renderConversation\(\)/,
+    'Send immediately promotes the compact prompt into the conversation');
+  assert.match(source, /S\.root\.classList\.add\('conversation-mode'\)/);
+  assert.match(css, /#spatial-assistant\.conversation-mode\{[^}]*pointer-events:none/,
+    'the editor remains usable behind the floating conversation');
+  assert.match(css, /#spatial-assistant\.conversation-mode \.spatial-compose\{pointer-events:auto\}/);
+  assert.match(source, /makeCardMovable\(S\.card, handle\)/, 'the popped-out conversation has a drag handle');
+  assert.match(source, /PM\.drag\(event,[\s\S]*move: \(dx, dy\) => moveCardTo/,
+    'the click-through pop-out keeps dragging on window-level pointer movement');
+  assert.match(source, /Reply or ask for an adjustment/);
+  assert.match(source, /CONVERSATION SO FAR/);
   assert.match(source, /setPointerCapture/);
   assert.match(source, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'\]/);
   assert.doesNotMatch(source, /Return to layout/, 'Ripple is a floating assistant, not a dockable panel');
@@ -230,6 +284,7 @@ test('circled-region prompt, Send, movable result, cancel, Preview, and Apply st
   assert.match(source, /Keep change/);
   assert.match(source, /PM\.WS\.mutate\(workspace =>/,
     'Apply crosses the validated structured workspace transaction boundary');
+  assert.doesNotMatch(source, /registerPanel\('agent'/, 'conversation is a floating section, not a docked panel');
 });
 
 test('Ripple activation is limited to the active project editor', () => {
