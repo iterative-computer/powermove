@@ -28,6 +28,7 @@ class FakeAudioParam {
     this.cancellations = [];
     this.curves = [];
     this.values = [];
+    this.ramps = [];
   }
 
   cancelScheduledValues(at) {
@@ -42,6 +43,11 @@ class FakeAudioParam {
 
   setValueAtTime(value, at) {
     this.values.push({ value, at });
+    this.value = value;
+  }
+
+  linearRampToValueAtTime(value, at) {
+    this.ramps.push({ value, at });
     this.value = value;
   }
 }
@@ -157,6 +163,17 @@ function audioHarness({ decodedBuffer, decode } = {}) {
       const gain = new FakeGainNode(this);
       this.gains.push(gain);
       return gain;
+    }
+
+    createMediaStreamDestination() {
+      const track = { stopped: false, stop() { this.stopped = true; } };
+      return {
+        track,
+        stream: {
+          getAudioTracks: () => [track],
+          getTracks: () => [track],
+        },
+      };
     }
 
     resume() {
@@ -352,13 +369,14 @@ test('buffer-source playback starts once, restarts at exact seeks, pauses, and c
     layerId: 'audio-1', assetId: 'asset-1', sourceOffset: 2, duration: 4,
   }]);
 
+  context.currentTime += .5;
   harness.PM.Audio.tick(3.5);
   assert.equal(context.sources.length, 1, 'normal clock ticks do not churn buffer sources');
 
   harness.PM.Audio.seek(5);
   assert.equal(context.sources[0].stopCalls, 1);
   assert.equal(context.sources.length, 2);
-  assert.deepEqual(context.sources[1].starts[0], { when: 0.25, offset: 4, duration: 2 });
+  assert.deepEqual(context.sources[1].starts[0], { when: 0.75, offset: 4, duration: 2 });
 
   harness.PM.Audio.pause();
   assert.equal(context.sources[1].stopCalls, 1);
@@ -367,7 +385,7 @@ test('buffer-source playback starts once, restarts at exact seeks, pauses, and c
 
   harness.PM.Audio.start(4);
   assert.equal(context.sources.length, 3);
-  assert.deepEqual(context.sources[2].starts[0], { when: 0.25, offset: 3, duration: 3 });
+  assert.deepEqual(context.sources[2].starts[0], { when: 0.75, offset: 3, duration: 3 });
   harness.PM.Audio.tick(7);
   assert.equal(context.sources[2].stopCalls, 1, 'the clip is stopped exactly at its out-point');
   assert.equal(harness.PM.Audio.inspect().voices.length, 0);
@@ -377,7 +395,7 @@ test('a future clip is scheduled at its in-point instead of sounding at transpor
   const buffer = new FakeAudioBuffer([new Float32Array(40)], 4); // ten seconds
   const harness = audioHarness();
   const asset = audioAsset(buffer);
-  const layer = audioLayer({ from: 3, dur: 4, d: { trim: 1 } });
+  const layer = audioLayer({ from: 1.5, dur: 4, d: { trim: 1 } });
   harness.assets.set(asset.id, asset);
   harness.PM.proj.layers = [layer];
 
@@ -385,11 +403,11 @@ test('a future clip is scheduled at its in-point instead of sounding at transpor
 
   const source = harness.contexts[0].sources[0];
   assert.deepEqual(source.starts[0], {
-    when: 2.25,
+    when: 0.75,
     offset: 1,
     duration: 4,
   });
-  assert.equal(source.connectedTo.gain.curves[0].at, 2.25,
+  assert.equal(source.connectedTo.gain.values[0].at, 0.75,
     'the gain envelope begins on the same audio-clock instant as the source');
 });
 
@@ -440,6 +458,26 @@ test('a decode finishing after Pause cannot resurrect a stale playback generatio
   assert.deepEqual(harness.contexts[0].sources[0].starts[0], { when: 0.25, offset: 1, duration: 3 });
 });
 
+test('a failed lazy decode backs off instead of retrying and toasting every frame', async () => {
+  const harness = audioHarness({ decode: () => { throw new Error('decoder failed'); } });
+  const buffer = new FakeAudioBuffer([new Float32Array(16)], 4);
+  const asset = { ...audioAsset(buffer), audioBuffer: null, peaks: null, dur: 4 };
+  harness.assets.set(asset.id, asset);
+  harness.PM.proj.layers = [audioLayer({ dur: 4 })];
+
+  harness.PM.Audio.start(0);
+  harness.PM.Audio.tick(.05);
+  await flush();
+  await flush();
+  harness.PM.Audio.tick(.1);
+  harness.PM.Audio.tick(.15);
+  await flush();
+
+  assert.equal(harness.decodeCalls.length, 1);
+  assert.equal(harness.toasts.length, 1);
+  assert.ok(asset.audioRetryAt > Date.now());
+});
+
 test('disposing an asset invalidates a decode that is still in flight', async () => {
   const pending = deferred();
   const buffer = new FakeAudioBuffer([new Float32Array(8)], 4);
@@ -478,7 +516,8 @@ test('offline export schedules the same source offset and fade envelope as previ
   const offline = harness.offlineContexts[0];
   const source = offline.sources[0];
   const scheduled = source.starts[0];
-  const curve = source.connectedTo.gain.curves[0];
+  const gain = source.connectedTo.gain;
+  const points = harness.PM.Audio.envelopePoints(layer, preview.localStart, preview.duration, preview.audibleDuration);
 
   assert.equal(rendered, offline.rendered);
   assert.equal(offline.length, 5 * 48000);
@@ -487,7 +526,57 @@ test('offline export schedules the same source offset and fade envelope as previ
     offset: preview.sourceOffset,
     duration: preview.duration,
   });
-  assert.equal(curve.at, preview.start - 1);
-  assert.equal(curve.duration, preview.duration);
-  assert.deepEqual(curve.values, Array.from(harness.PM.Audio.envelope(layer, preview.localStart, preview.duration)));
+  assert.deepEqual(gain.values[0], { value: points[0].value, at: preview.start - 1 });
+  assert.deepEqual(JSON.parse(JSON.stringify(gain.ramps)), Array.from(points.slice(1), point => ({
+    value: point.value,
+    at: preview.start - 1 + point.local - preview.localStart,
+  })));
+});
+
+test('offline export pins earlier decoded tracks while later tracks decode and preserves waveform peaks on eviction', async () => {
+  const decoded = new FakeAudioBuffer([new Float32Array(16)], 16);
+  const harness = audioHarness({ decodedBuffer: decoded });
+  const huge = {
+    numberOfChannels: 2,
+    length: 50_000_000,
+    sampleRate: 48_000,
+    duration: 50_000_000 / 48_000,
+    getChannelData() { return new Float32Array(0); },
+  };
+  const first = { ...audioAsset(decoded, 'asset-1'), audioBuffer: huge, dur: huge.duration, peaks: new Float32Array([.2, .8]) };
+  const second = { ...audioAsset(decoded, 'asset-2'), audioBuffer: null, dur: decoded.duration, peaks: null };
+  harness.assets.set(first.id, first);
+  harness.assets.set(second.id, second);
+  harness.PM.proj.layers = [
+    audioLayer({ id: 'audio-1', dur: 1, d: { asset: first.id } }),
+    audioLayer({ id: 'audio-2', dur: 1, d: { asset: second.id } }),
+  ];
+
+  await harness.PM.Audio.renderOffline(0, 1);
+
+  const buffers = harness.offlineContexts[0].sources.map(source => source.buffer);
+  assert.ok(buffers.includes(huge), 'the first buffer survives until its offline source owns it');
+  assert.ok(buffers.includes(decoded), 'the later decoded track is also scheduled');
+  assert.equal(first.audioBuffer, null, 'the large sample buffer may be evicted after export releases its pin');
+  assert.deepEqual(Array.from(first.peaks, value => Number(value.toFixed(3))), [.2, .8], 'small waveform peaks survive decoded-sample eviction');
+});
+
+test('realtime export schedules the shared clip plan into an isolated audio stream and cleans it up', async () => {
+  const buffer = new FakeAudioBuffer([new Float32Array(40)], 4);
+  const harness = audioHarness();
+  const asset = audioAsset(buffer);
+  const layer = audioLayer({ from: 2, dur: 4, d: { trim: 1, fadeIn: .1, fadeOut: .2 } });
+  harness.assets.set(asset.id, asset);
+  harness.PM.proj.layers = [layer];
+
+  const mix = await harness.PM.Audio.createRealtimeMix(1, 6);
+  assert.ok(mix);
+  assert.equal(mix.stream.getAudioTracks().length, 1);
+  assert.equal(mix.start(.1), .1);
+  const source = harness.contexts[0].sources[0];
+  assert.deepEqual(source.starts[0], { when: 1.35, offset: 1, duration: 4 });
+  assert.equal(source.connectedTo.connectedTo.stream, mix.stream, 'the mix is routed to the recorder stream, not the speaker master');
+  mix.stop();
+  assert.equal(source.stopCalls, 1);
+  assert.equal(mix.stream.getAudioTracks()[0].stopped, true);
 });

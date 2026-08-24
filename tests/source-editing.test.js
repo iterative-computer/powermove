@@ -65,6 +65,29 @@ test('canvas, agent, and generated UI origins use the same source command', () =
   assert.deepEqual(outcomes, outcomes.map(() => outcomes[0]));
 });
 
+test('audio source edits enforce the canonical nonvisual schema', () => {
+  const { PM } = editor();
+  const audio = PM.mkLayer('audio', { name: 'Track', d: { asset: 'asset-1' } });
+  audio.id = 'audio-1';
+  PM.addLayer(audio, 0);
+
+  const changed = PM.Edit.apply({
+    type: 'set_content', target: audio.id,
+    patch: { trim: 1.25, gain: 9, fadeIn: .1, fadeOut: .2 },
+  }, { origin: 'inspector' });
+  assert.equal(changed.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(PM.L(audio.id).d)), {
+    asset: 'asset-1', trim: 1.25, gain: 4, fadeIn: .1, fadeOut: .2,
+  });
+
+  assert.equal(PM.Edit.apply({ type: 'set_content', target: audio.id, patch: { width: 500 } }).ok, false);
+  assert.equal(PM.Edit.apply({ type: 'set_layer', target: audio.id, patch: { motionBlur: true } }).ok, false);
+  assert.equal(PM.Edit.apply({ type: 'set_layer', target: audio.id, patch: { parent: 'something' } }).ok, false);
+  const paths = new Set(PM.Edit.sourceCatalog().layers.find(layer => layer.id === audio.id).controls.map(control => control.path));
+  for (const path of ['layer.motionBlur', 'layer.blend', 'layer.parent']) assert.equal(paths.has(path), false);
+  for (const path of ['content.asset', 'content.trim', 'content.gain', 'content.fadeIn', 'content.fadeOut']) assert.equal(paths.has(path), true);
+});
+
 test('procedural scripts can add parented styled layers atomically and undo them', () => {
   const { PM } = editor();
   const sourceLayer = addText(PM);

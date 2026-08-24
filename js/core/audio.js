@@ -4,18 +4,60 @@ const PM = window.PM;
 
 const AUDIO_EXTENSIONS = new Set(['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'aif', 'aiff']);
 const MAX_DECODED_BYTES = 320 * 1024 * 1024;
+const MAX_PRECOMP_DEPTH = 8;
+const LIVE_LOOKAHEAD = 1;
+const DRIFT_TOLERANCE = .075;
+const DECODE_RETRY_MS = 5000;
 const state = {
   context: null,
   master: null,
   voices: new Map(),
+  decodeRequests: new Map(),
+  pinnedAssets: new Set(),
+  project: null,
   running: false,
   generation: 0,
 };
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
-const audioLayers = (project = PM.proj) => Array.isArray(project && project.layers)
-  ? project.layers.filter(layer => layer && layer.type === 'audio') : [];
+/* Flatten audio through the same precomp time mapping used by the compositor.
+   A lightweight wrapper keeps the original source/fade timing while recording
+   every ancestor's visible window. Path-based IDs let one nested comp be used
+   more than once without its voices colliding. */
+function audioLayers(project = PM.proj) {
+  if (!project || !Array.isArray(project.layers)) return [];
+  const output = [];
+  const root = project;
+  const visit = (comp, offset, windowStart, windowEnd, path, depth) => {
+    if (!comp || !Array.isArray(comp.layers) || depth > MAX_PRECOMP_DEPTH) return;
+    const solo = comp.layers.some(layer => layer && layer.solo);
+    for (const layer of comp.layers) {
+      if (!layer || layer.on === false || (solo && !layer.solo)) continue;
+      const naturalStart = offset + Math.max(0, finite(layer.from));
+      const start = Math.max(windowStart, naturalStart);
+      const end = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
+      if (end - start <= 1e-4) continue;
+      const itemPath = path ? `${path}/${layer.id}` : layer.id;
+      if (layer.type === 'audio') {
+        output.push({
+          ...layer,
+          id: itemPath,
+          from: naturalStart,
+          _audioSourceId: layer.id,
+          _audioWindowStart: start,
+          _audioWindowEnd: end,
+        });
+        continue;
+      }
+      if (layer.type !== 'precomp' || !layer.d || !layer.d.comp) continue;
+      const nested = root.comps && root.comps[layer.d.comp];
+      visit(nested, naturalStart, start, end, itemPath, depth + 1);
+    }
+  };
+  visit(project, 0, 0, Infinity, '', 0);
+  return output;
+}
 
 function accepts(file) {
   const mime = String(file && file.type || '').toLowerCase();
@@ -97,7 +139,10 @@ function decodedBytes(buffer) {
 }
 
 function activeAssetIds() {
-  return new Set([...state.voices.values()].map(voice => voice.assetId));
+  return new Set([
+    ...state.pinnedAssets,
+    ...[...state.voices.values()].map(voice => voice.assetId),
+  ]);
 }
 
 function trimDecodedCache() {
@@ -112,7 +157,9 @@ function trimDecodedCache() {
     if (active.has(asset.id) || asset.audioDecoding) continue;
     total -= decodedBytes(asset.audioBuffer);
     asset.audioBuffer = null;
-    asset.peaks = null;
+    /* Peak envelopes are tiny and remain useful after decoded samples are
+       evicted. Keeping them prevents a visible timeline from decoding the same
+       large file again just to repaint its waveform. */
   }
 }
 
@@ -124,6 +171,7 @@ async function decodeAsset(asset) {
   }
   if (asset.audioDecoding) return asset.audioDecoding;
   if (!asset.audioBlob) throw new Error('Audio media is missing · import it again to relink it');
+  if (asset.audioRetryAt > Date.now() && asset.audioDecodeError) throw asset.audioDecodeError;
   const token = asset.audioToken;
   asset.audioDecoding = (async () => {
     try {
@@ -137,13 +185,19 @@ async function decodeAsset(asset) {
       asset.sampleRate = buffer.sampleRate || 0;
       asset.peaks = peakEnvelope(buffer);
       asset.audioUsedAt = Date.now();
+      asset.audioDecodeError = null;
+      asset.audioRetryAt = 0;
       trimDecodedCache();
       PM.bus && PM.bus.emit('audio:decoded', asset.id);
       PM.invalidate && PM.invalidate('timeline');
       return buffer;
     } catch (error) {
-      if (error && /missing|decoder|supported/i.test(error.message || '')) throw error;
-      throw new Error('Could not decode this audio file · try WAV, MP3, M4A, AAC, OGG, FLAC, or AIFF');
+      const failure = error && /missing|decoder|supported/i.test(error.message || '')
+        ? error
+        : new Error('Could not decode this audio file · try WAV, MP3, M4A, AAC, OGG, FLAC, or AIFF');
+      asset.audioDecodeError = failure;
+      asset.audioRetryAt = Date.now() + DECODE_RETRY_MS;
+      throw failure;
     } finally {
       asset.audioDecoding = null;
     }
@@ -169,6 +223,8 @@ async function prepareAsset({ id, name, blob, meta = {} }) {
     audioDecoding: null,
     audioDisposed: false,
     audioToken: Symbol('audio-asset'),
+    audioDecodeError: null,
+    audioRetryAt: 0,
     peaks: null,
   };
   /* Imports are decoded before they can mutate project source. Restores already
@@ -185,12 +241,13 @@ function disposeAsset(asset) {
   asset.audioBuffer = null;
   asset.peaks = null;
   asset.audioBlob = null;
+  for (const [id, request] of state.decodeRequests) if (request.asset === asset) state.decodeRequests.delete(id);
 }
 
-function gainAt(layer, localTime) {
+function gainAt(layer, localTime, audibleDuration) {
   const data = layer && layer.d || {};
   const base = clamp(finite(data.gain, 1), 0, 4);
-  const duration = Math.max(0, finite(layer && layer.dur));
+  const duration = Math.max(0, finite(audibleDuration, finite(layer && layer.dur)));
   const local = clamp(finite(localTime), 0, duration);
   const fadeIn = Math.max(0, finite(data.fadeIn));
   const fadeOut = Math.max(0, finite(data.fadeOut));
@@ -199,34 +256,59 @@ function gainAt(layer, localTime) {
   return base * Math.min(entering, leaving);
 }
 
-function envelope(layer, localStart, duration, samples = 96) {
+function envelope(layer, localStart, duration, samples = 96, audibleDuration) {
   const count = Math.max(2, Math.floor(samples));
   const values = new Float32Array(count);
   for (let index = 0; index < count; index++) {
-    values[index] = gainAt(layer, localStart + duration * index / (count - 1));
+    values[index] = gainAt(layer, localStart + duration * index / (count - 1), audibleDuration);
   }
   return values;
 }
 
-function soloActive(project = PM.proj) {
-  return !!(project && Array.isArray(project.layers) && project.layers.some(layer => layer && layer.on !== false && layer.solo));
+/* gainAt() is piecewise linear. Scheduling only the exact slope changes keeps a
+   100 ms fade at 100 ms even when the clip lasts for minutes. */
+function envelopePoints(layer, localStart, duration, audibleDuration) {
+  const data = layer && layer.d || {};
+  const full = Math.max(0, finite(audibleDuration, finite(layer && layer.dur)));
+  const start = clamp(finite(localStart), 0, full);
+  const end = clamp(start + Math.max(0, finite(duration)), start, full);
+  const fadeIn = Math.max(0, finite(data.fadeIn));
+  const fadeOut = Math.max(0, finite(data.fadeOut));
+  const times = [start, end];
+  if (fadeIn > start + 1e-6 && fadeIn < end - 1e-6) times.push(fadeIn);
+  const fadeOutStart = full - fadeOut;
+  if (fadeOut > 0 && fadeOutStart > start + 1e-6 && fadeOutStart < end - 1e-6) times.push(fadeOutStart);
+  if (fadeIn > 0 && fadeOut > 0 && fadeIn > fadeOutStart) {
+    const crossing = full * fadeIn / (fadeIn + fadeOut);
+    if (crossing > start + 1e-6 && crossing < end - 1e-6) times.push(crossing);
+  }
+  return [...new Set(times)].sort((a, b) => a - b).map(local => ({
+    local,
+    value: gainAt(layer, local, full),
+  }));
 }
 
 function plan(layer, asset, rangeStart, rangeEnd, options = {}) {
   if (!layer || layer.type !== 'audio' || layer.on === false || !layer.d || !layer.d.asset || !asset) return null;
   if (options.solo && !layer.solo) return null;
-  const clipStart = Math.max(0, finite(layer.from));
-  const clipEnd = clipStart + Math.max(0, finite(layer.dur));
+  const layerStart = Math.max(0, finite(layer.from));
+  const layerDuration = Math.max(0, finite(layer.dur));
+  const windowStart = Math.max(layerStart, finite(layer._audioWindowStart, layerStart));
+  const windowEnd = Math.min(layerStart + layerDuration, finite(layer._audioWindowEnd, layerStart + layerDuration));
+  const sourceDuration = asset.audioBuffer ? asset.audioBuffer.duration : finite(asset.dur);
+  const trim = Math.max(0, finite(layer.d.trim));
+  const audibleDuration = Math.min(layerDuration, Math.max(0, sourceDuration - trim));
+  const clipStart = windowStart;
+  const clipEnd = Math.min(windowEnd, layerStart + audibleDuration);
   const start = Math.max(clipStart, finite(rangeStart));
   const end = Math.min(clipEnd, finite(rangeEnd, clipEnd));
   if (end - start <= 1e-4) return null;
-  const localStart = start - clipStart;
-  const sourceOffset = Math.max(0, finite(layer.d.trim) + localStart);
-  const sourceDuration = asset.audioBuffer ? asset.audioBuffer.duration : finite(asset.dur);
+  const localStart = start - layerStart;
+  const sourceOffset = trim + localStart;
   if (!(sourceDuration > 0) || sourceOffset >= sourceDuration - 1e-4) return null;
   const duration = Math.min(end - start, sourceDuration - sourceOffset);
   if (duration <= 1e-4) return null;
-  return { layer, asset, start, end: start + duration, duration, localStart, sourceOffset };
+  return { layer, asset, start, end: start + duration, duration, localStart, sourceOffset, audibleDuration };
 }
 
 function voiceSignature(layer, asset) {
@@ -262,14 +344,20 @@ function stopAll() {
   publishState();
 }
 
-function applyEnvelope(param, layer, localStart, duration, at) {
-  const curve = envelope(layer, localStart, duration);
+function applyEnvelope(param, layer, localStart, duration, at, audibleDuration) {
+  const points = envelopePoints(layer, localStart, duration, audibleDuration);
   try {
     param.cancelScheduledValues(at);
-    if (duration > .002 && typeof param.setValueCurveAtTime === 'function') param.setValueCurveAtTime(curve, at, duration);
-    else param.setValueAtTime(curve[0], at);
-  } catch (error) { param.value = curve[0]; }
-  return curve;
+    param.setValueAtTime(points[0].value, at);
+    if (duration > .002 && typeof param.linearRampToValueAtTime === 'function') {
+      for (let index = 1; index < points.length; index++) {
+        param.linearRampToValueAtTime(points[index].value, at + points[index].local - localStart);
+      }
+    } else if (duration > .002 && typeof param.setValueCurveAtTime === 'function') {
+      param.setValueCurveAtTime(envelope(layer, localStart, duration, 256, audibleDuration), at, duration);
+    }
+  } catch (error) { param.value = points[0].value; }
+  return points;
 }
 
 function startVoice(clip, transportTime) {
@@ -282,7 +370,7 @@ function startVoice(clip, transportTime) {
      the audio clock, not started early. Once the playhead is inside the clip,
      plan() sets clip.start to transportTime and this delay naturally becomes 0. */
   const at = ctx.currentTime + Math.max(0, clip.start - finite(transportTime));
-  const curve = applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at);
+  const curve = applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at, clip.audibleDuration);
   const voice = {
     source,
     gain,
@@ -292,6 +380,8 @@ function startVoice(clip, transportTime) {
     sourceOffset: clip.sourceOffset,
     duration: clip.duration,
     curve,
+    scheduledAt: at,
+    transportStart: clip.start,
     ended: false,
   };
   state.voices.set(clip.layer.id, voice);
@@ -310,24 +400,44 @@ function startVoice(clip, transportTime) {
 }
 
 function requestDecode(layer, asset, generation) {
+  if (asset.audioRetryAt > Date.now()) return;
+  const existing = state.decodeRequests.get(layer.id);
+  if (existing && existing.asset === asset && existing.generation === generation) return;
+  const request = { asset, generation };
+  state.decodeRequests.set(layer.id, request);
   decodeAsset(asset).then(buffer => {
     if (!buffer || !state.running || generation !== state.generation) return;
-    const current = PM.proj && PM.proj.layers && PM.proj.layers.find(item => item.id === layer.id);
+    const current = audioLayers().find(item => item.id === layer.id);
     if (!current || current.d.asset !== asset.id || !PM.assets || PM.assets.get(asset.id) !== asset) return;
     sync(PM.time, true);
   }).catch(error => {
     if (generation === state.generation && PM.toast) PM.toast(error.message || 'Could not decode audio', 5000);
+  }).finally(() => {
+    if (state.decodeRequests.get(layer.id) === request) state.decodeRequests.delete(layer.id);
   });
+}
+
+function voiceDrift(voice, layer, time, ctx) {
+  if (!voice || !ctx) return Infinity;
+  const audioUntilStart = voice.scheduledAt - ctx.currentTime;
+  const transportUntilStart = voice.transportStart - time;
+  if (audioUntilStart > 0 || transportUntilStart > 0) {
+    return Math.abs(audioUntilStart - transportUntilStart);
+  }
+  const audioSourceTime = voice.sourceOffset + Math.max(0, ctx.currentTime - voice.scheduledAt);
+  const transportSourceTime = Math.max(0, finite(layer.d && layer.d.trim) + time - finite(layer.from));
+  return Math.abs(audioSourceTime - transportSourceTime);
 }
 
 function sync(time, force = false) {
   if (!state.running || !PM.proj) { stopAll(); return; }
   const generation = state.generation;
   const desired = new Set();
-  const solo = soloActive(PM.proj);
   for (const layer of audioLayers()) {
+    const audibleStart = Math.max(finite(layer.from), finite(layer._audioWindowStart, finite(layer.from)));
+    if (audibleStart - time > LIVE_LOOKAHEAD) continue;
     const asset = layer.d && layer.d.asset && PM.assets && PM.assets.get(layer.d.asset);
-    const clip = plan(layer, asset, time, layer.from + layer.dur, { solo });
+    const clip = plan(layer, asset, time, layer.from + layer.dur);
     if (!clip) continue;
     desired.add(layer.id);
     if (!asset.audioBuffer) {
@@ -337,7 +447,8 @@ function sync(time, force = false) {
     }
     const voice = state.voices.get(layer.id);
     const signature = voiceSignature(layer, asset);
-    if (force || !voice || voice.signature !== signature) {
+    const drifted = voice && voiceDrift(voice, layer, time, state.context) > DRIFT_TOLERANCE;
+    if (force || !voice || voice.signature !== signature || drifted) {
       stopVoice(layer.id);
       startVoice(clip, time);
     }
@@ -348,6 +459,7 @@ function sync(time, force = false) {
 
 function start(time) {
   state.running = true;
+  state.project = PM.proj || null;
   const generation = ++state.generation;
   let ctx;
   try { ctx = context(); }
@@ -375,9 +487,17 @@ function seek(time) {
 function tick(time) { sync(time, false); }
 
 function reconcile() {
+  state.project = PM.proj || null;
   if (!PM.playing) { pause(); return; }
   state.generation++;
   sync(PM.time, true);
+}
+
+function reconcileProject() {
+  const changed = state.project !== PM.proj;
+  state.project = PM.proj || null;
+  if (!changed) return;
+  reconcile();
 }
 
 function drawWaveform(ctx, layer, options = {}) {
@@ -391,7 +511,9 @@ function drawWaveform(ctx, layer, options = {}) {
   const right = x + width;
   if (!(right > left && height > 2)) return false;
   if (!asset || !asset.peaks || !asset.peaks.length) {
-    if (asset && asset.kind === 'audio') decodeAsset(asset).catch(() => {});
+    if (asset && asset.kind === 'audio' && !asset.audioDecoding && !(asset.audioRetryAt > Date.now())) {
+      decodeAsset(asset).catch(() => {});
+    }
     ctx.fillStyle = options.placeholderColor || 'rgba(255,255,255,.22)';
     ctx.fillRect(left, y + height / 2, right - left, 1);
     return false;
@@ -411,39 +533,113 @@ function drawWaveform(ctx, layer, options = {}) {
   return true;
 }
 
-async function renderOffline(t0, t1) {
+async function collectDecodedClips(t0, t1) {
   const from = Math.max(0, finite(t0));
   const to = Math.max(from, finite(t1, from));
-  if (to - from <= 1e-4 || !PM.proj) return null;
-  const solo = soloActive(PM.proj);
+  if (to - from <= 1e-4 || !PM.proj) return { from, to, clips: [], pinned: new Set() };
   const clips = [];
+  const pinned = new Set();
   for (const layer of audioLayers()) {
     const asset = layer.d && layer.d.asset && PM.assets && PM.assets.get(layer.d.asset);
     if (!asset) continue;
-    try { await decodeAsset(asset); } catch (error) { console.warn('Audio layer skipped during export', error); continue; }
-    const clip = plan(layer, asset, from, to, { solo });
+    state.pinnedAssets.add(asset.id);
+    pinned.add(asset.id);
+    try { await decodeAsset(asset); }
+    catch (error) { console.warn('Audio layer skipped during export', error); continue; }
+    const clip = plan(layer, asset, from, to);
     if (clip) clips.push(clip);
   }
-  if (!clips.length) return null;
-  const Offline = window.OfflineAudioContext;
-  if (!Offline) return null;
-  const sampleRate = 48000;
-  let offline;
-  try { offline = new Offline(2, Math.ceil((to - from) * sampleRate), sampleRate); }
-  catch (error) { return null; }
-  for (const clip of clips) {
-    try {
-      const source = offline.createBufferSource();
-      const gain = offline.createGain();
-      source.buffer = clip.asset.audioBuffer;
-      source.connect(gain).connect(offline.destination);
-      const at = clip.start - from;
-      applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at);
-      source.start(at, clip.sourceOffset, clip.duration);
-    } catch (error) { console.warn('Audio layer skipped during export', error); }
+  return { from, to, clips, pinned };
+}
+
+function releasePins(pinned) {
+  for (const id of pinned || []) state.pinnedAssets.delete(id);
+  trimDecodedCache();
+}
+
+async function renderOffline(t0, t1) {
+  const prepared = await collectDecodedClips(t0, t1);
+  try {
+    const { from, to, clips } = prepared;
+    if (!clips.length) return null;
+    const Offline = window.OfflineAudioContext;
+    if (!Offline) return null;
+    const sampleRate = 48000;
+    let offline;
+    try { offline = new Offline(2, Math.ceil((to - from) * sampleRate), sampleRate); }
+    catch (error) { return null; }
+    for (const clip of clips) {
+      try {
+        const source = offline.createBufferSource();
+        const gain = offline.createGain();
+        source.buffer = clip.asset.audioBuffer;
+        source.connect(gain).connect(offline.destination);
+        const at = clip.start - from;
+        applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at, clip.audibleDuration);
+        source.start(at, clip.sourceOffset, clip.duration);
+      } catch (error) { console.warn('Audio layer skipped during export', error); }
+    }
+    try { return await offline.startRendering(); }
+    catch (error) { console.warn('Audio mixdown failed', error); return null; }
+  } finally {
+    releasePins(prepared.pinned);
   }
-  try { return await offline.startRendering(); }
-  catch (error) { console.warn('Audio mixdown failed', error); return null; }
+}
+
+/* MediaRecorder needs a real audio MediaStream. This path schedules the same
+   decoded clips and exact envelope points as preview/offline export, but routes
+   them to an isolated stream destination instead of the speakers. */
+async function createRealtimeMix(t0, t1) {
+  const prepared = await collectDecodedClips(t0, t1);
+  try {
+    const { from, clips } = prepared;
+    if (!clips.length) return null;
+    const ctx = context();
+    if (typeof ctx.createMediaStreamDestination !== 'function') {
+      throw new Error('Realtime audio export is not supported on this system');
+    }
+    if (ctx.state === 'suspended' && typeof ctx.resume === 'function') await ctx.resume();
+    const destination = ctx.createMediaStreamDestination();
+    const nodes = [];
+    for (const clip of clips) {
+      const source = ctx.createBufferSource();
+      const gain = ctx.createGain();
+      source.buffer = clip.asset.audioBuffer;
+      source.connect(gain).connect(destination);
+      nodes.push({ source, gain, clip });
+    }
+    let started = false;
+    let stopped = false;
+    return {
+      stream: destination.stream,
+      start(leadSeconds = .06) {
+        if (started || stopped) return 0;
+        started = true;
+        const lead = Math.max(.02, finite(leadSeconds, .06));
+        const base = ctx.currentTime + lead;
+        for (const { source, gain, clip } of nodes) {
+          const at = base + clip.start - from;
+          applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at, clip.audibleDuration);
+          source.start(at, clip.sourceOffset, clip.duration);
+        }
+        return lead;
+      },
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        for (const { source, gain } of nodes) {
+          try { source.stop(); } catch (error) { }
+          try { source.disconnect(); } catch (error) { }
+          try { gain.disconnect(); } catch (error) { }
+        }
+        for (const track of destination.stream.getTracks ? destination.stream.getTracks() : []) {
+          try { track.stop(); } catch (error) { }
+        }
+      },
+    };
+  } finally {
+    releasePins(prepared.pinned);
+  }
 }
 
 function opusHead(channels, sampleRate) {
@@ -455,6 +651,15 @@ function opusHead(channels, sampleRate) {
   new DataView(out.buffer).setUint32(12, sampleRate, true);
   out[18] = 0;
   return out;
+}
+
+async function supportsOpus() {
+  const Encoder = window.AudioEncoder;
+  const Data = window.AudioData;
+  if (!Encoder || !Data || typeof Encoder.isConfigSupported !== 'function') return false;
+  const config = { codec: 'opus', sampleRate: 48000, numberOfChannels: 2, bitrate: 160000 };
+  const support = await Encoder.isConfigSupported(config).catch(() => null);
+  return !!(support && support.supported);
 }
 
 async function encodeOpus(buffer) {
@@ -516,6 +721,7 @@ const Audio = PM.Audio = {
   plan,
   gainAt,
   envelope,
+  envelopePoints,
   start,
   pause,
   seek,
@@ -523,6 +729,8 @@ const Audio = PM.Audio = {
   reconcile,
   drawWaveform,
   renderOffline,
+  createRealtimeMix,
+  supportsOpus,
   encodeOpus,
   hasAudibleLayers,
   inspect: () => ({
@@ -541,6 +749,6 @@ const Audio = PM.Audio = {
 
 PM.bus.on('layers', reconcile);
 PM.bus.on('assets', reconcile);
-PM.bus.on('project', () => { pause(); if (PM.playing) start(PM.time); });
+PM.bus.on('project', reconcileProject);
 publishState();
 })();

@@ -197,7 +197,9 @@ async function run(opts) {
   const t = performance.now();
 
   try {
-    if (opts.format === 'rec' || (opts.format === 'webm' && typeof VideoEncoder === 'undefined')) {
+    const wantsAudio = opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj);
+    const needsRecorderAudio = opts.format === 'webm' && wantsAudio && !(await PM.Audio.supportsOpus());
+    if (opts.format === 'rec' || (opts.format === 'webm' && (typeof VideoEncoder === 'undefined' || needsRecorderAudio))) {
       await exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     } else if (opts.format === 'png') {
       await exportPNGs({ opts, W, H, t0, total, ui, pctx });
@@ -316,27 +318,48 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }) 
   PM.GL.resize(W, H);
   const stream = PM.GL.canvas.captureStream(0);
   const track = stream.getVideoTracks()[0];
-  const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m));
+  const audioMix = opts.audio !== false ? await PM.Audio.createRealtimeMix(t0, t1) : null;
+  if (audioMix) {
+    const audioTrack = audioMix.stream && audioMix.stream.getAudioTracks && audioMix.stream.getAudioTracks()[0];
+    if (!audioTrack) { audioMix.stop(); throw new Error('Realtime audio export could not create an audio track'); }
+    stream.addTrack(audioTrack);
+  }
+  const types = audioMix
+    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const mime = types.find(m => MediaRecorder.isTypeSupported(m));
+  if (!mime) { audioMix && audioMix.stop(); throw new Error('No supported realtime WebM recorder'); }
   const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
   const chunks = [];
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   const done = new Promise(r => (rec.onstop = r));
-  rec.start();
-  const frameDur = 1000 / opts.fps;
-  const start = performance.now();
-  for (let i = 0; i < total; i++) {
-    if (X.cancel) break;
-    const T = t0 + i / opts.fps;
-    const cv = renderInto(T, W, H, opts.mblur);
-    if (track.requestFrame) track.requestFrame();
-    const target = start + i * frameDur;
-    const wait = target - performance.now();
-    if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    if (i % 3 === 0) { pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height); ui.set(i + 1, 'realtime'); }
+  let recorderStopped = false;
+  try {
+    rec.start();
+    const lead = audioMix ? audioMix.start(.06) : 0;
+    if (lead > 0) await new Promise(r => setTimeout(r, lead * 1000));
+    const frameDur = 1000 / opts.fps;
+    const start = performance.now();
+    for (let i = 0; i < total; i++) {
+      if (X.cancel) break;
+      const T = t0 + i / opts.fps;
+      const cv = renderInto(T, W, H, opts.mblur);
+      if (track.requestFrame) track.requestFrame();
+      const target = start + i * frameDur;
+      const wait = target - performance.now();
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      if (i % 3 === 0) { pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height); ui.set(i + 1, audioMix ? 'realtime · audio' : 'realtime'); }
+    }
+    await new Promise(r => setTimeout(r, 120));
+    rec.stop();
+    await done;
+    recorderStopped = true;
+  } finally {
+    if (!recorderStopped) {
+      try { rec.stop(); await done; } catch (error) { }
+    }
+    audioMix && audioMix.stop();
   }
-  await new Promise(r => setTimeout(r, 120));
-  rec.stop();
-  await done;
   if (X.cancel) return;
   PM.download(new Blob(chunks, { type: 'video/webm' }), `${PM.proj.name || 'powermove'}.webm`);
 }

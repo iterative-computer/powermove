@@ -1066,16 +1066,19 @@ function onCtx(e) {
       { label: 'Trim in to playhead', disabled: !inside, run: () => PM.Edit.apply(trimInCommands(L, PM.time), { label: 'Trim', origin: 'timeline' }) },
       { label: 'Trim out to playhead', disabled: !inside, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { duration: Math.max(1 / PM.proj.fps, PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
       '-',
-      { label: L.mblur ? 'Motion blur off' : 'Motion blur on', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { motionBlur: !L.mblur } }, { label: 'Motion blur', origin: 'timeline' }) },
-      { label: 'Fit to composition', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: 0, duration: PM.proj.dur } }, { label: 'Fit', origin: 'timeline' }) },
-      '-',
-      { header: 'Parent to' },
-      { label: 'None', on: !L.parent, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: null } }, { label: 'Parent', origin: 'timeline' }) },
-      ...PM.proj.layers.filter(o => o.id !== L.id && !PM.wouldCycle(L, o.id)).map(o => ({
-        label: o.name, on: L.parent === o.id, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: o.id } }, { label: 'Parent', origin: 'timeline' }),
-      })),
-      '-',
-      { label: 'Delete', run: () => PM.cmd('delete') });
+      { label: 'Fit to composition', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: 0, duration: PM.proj.dur } }, { label: 'Fit', origin: 'timeline' }) });
+    if (L.type !== 'audio') {
+      items.push(
+        { label: L.mblur ? 'Motion blur off' : 'Motion blur on', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { motionBlur: !L.mblur } }, { label: 'Motion blur', origin: 'timeline' }) },
+        '-',
+        { header: 'Parent to' },
+        { label: 'None', on: !L.parent, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: null } }, { label: 'Parent', origin: 'timeline' }) },
+        ...PM.proj.layers.filter(o => o.id !== L.id && !PM.wouldCycle(L, o.id)).map(o => ({
+          label: o.name, on: L.parent === o.id, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: o.id } }, { label: 'Parent', origin: 'timeline' }),
+        })),
+      );
+    }
+    items.push('-', { label: 'Delete', run: () => PM.cmd('delete') });
   } else {
     items.push({ label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },

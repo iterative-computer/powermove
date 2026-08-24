@@ -4,6 +4,7 @@ const PM = window.PM;
 
 const MAX_EDITS = 200;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const AUDIO_CONTENT_FIELDS = new Set(['asset', 'trim', 'gain', 'fadeIn', 'fadeOut']);
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
   'motionBlur', 'parent', 'color', 'collapsed',
@@ -200,7 +201,8 @@ function setContent(command) {
   if (!layer) throw new Error('Layer not found');
   if (layer.lock && command.overrideLock !== true) throw new Error(`Layer “${layer.name}” is locked`);
   const patch = safePatch(command.patch, 'content patch');
-  Object.assign(layer.d, patch);
+  if (layer.type === 'audio') setAudioContent(layer, patch);
+  else Object.assign(layer.d, patch);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     PM.syncShaderUniforms && PM.syncShaderUniforms(layer);
     if (layer._shaderKey && PM.GL) PM.GL.dropProgram(layer._shaderKey);
@@ -209,11 +211,42 @@ function setContent(command) {
   return { id: layer.id, keys: Object.keys(patch) };
 }
 
+function setAudioContent(layer, patch) {
+  for (const key of Object.keys(patch)) {
+    if (!AUDIO_CONTENT_FIELDS.has(key)) throw new Error(`Audio content field “${key}” is not editable`);
+  }
+  const current = layer.d && typeof layer.d === 'object' ? layer.d : {};
+  const next = { ...current, ...patch };
+  if (next.asset != null && (typeof next.asset !== 'string' || !next.asset)) throw new Error('Audio source must be a media asset ID or null');
+  const number = (key, fallback, min, max = Infinity) => {
+    const value = next[key] == null ? fallback : finite(next[key], key);
+    return PM.clamp(value, min, max);
+  };
+  layer.d = {
+    asset: next.asset || null,
+    trim: number('trim', 0, 0),
+    gain: number('gain', 1, 0, 4),
+    fadeIn: number('fadeIn', 0, 0),
+    fadeOut: number('fadeOut', 0, 0),
+  };
+  layer.p = {};
+  layer.fx = [];
+  layer.masks = [];
+  layer.parent = null;
+  layer.blend = 'normal';
+  layer.mblur = false;
+}
+
 function setLayer(command) {
   const layer = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch = safePatch(command.patch, 'layer patch');
   for (const key of Object.keys(patch)) if (!LAYER_FIELDS.has(key)) throw new Error(`Layer field “${key}” is not editable`);
+  if (layer.type === 'audio') {
+    if (patch.parent !== undefined && patch.parent !== null) throw new Error('Audio layers do not support parenting');
+    if (patch.blend !== undefined && patch.blend !== 'normal') throw new Error('Audio layers do not support blend modes');
+    if (patch.motionBlur !== undefined && patch.motionBlur !== false) throw new Error('Audio layers do not support motion blur');
+  }
   if (patch.name != null) layer.name = String(patch.name).trim() || layer.name;
   if (patch.from != null) layer.from = Math.max(0, finite(patch.from, 'layer start'));
   if (patch.duration != null) layer.dur = Math.max(1 / PM.proj.fps, finite(patch.duration, 'layer duration'));
@@ -274,6 +307,9 @@ function setComposition(command) {
 function addLayer(command) {
   const type = command.layerType || command.kind;
   if (!PM.TYPE_META[type]) throw new Error(`Unknown layer type: ${type}`);
+  if (type === 'audio' && (command.parent != null || (command.blend != null && command.blend !== 'normal') || command.motionBlur === true)) {
+    throw new Error('Audio layers do not support parenting, blend modes, or motion blur');
+  }
   const opts = {
     name: command.name,
     from: command.from,
@@ -283,6 +319,7 @@ function addLayer(command) {
     color: command.color,
   };
   const layer = PM.mkLayer(type, opts);
+  if (type === 'audio') setAudioContent(layer, opts.d);
   if (command.id != null) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
@@ -515,12 +552,13 @@ function sourceCatalog() {
       { path: 'layer.locked', label: 'Locked', control: 'toggle', value: layer.lock },
       { path: 'layer.solo', label: 'Solo', control: 'toggle', value: layer.solo },
       { path: 'layer.shy', label: 'Shy', control: 'toggle', value: layer.shy },
-      { path: 'layer.motionBlur', label: 'Motion blur', control: 'toggle', value: layer.mblur },
       { path: 'layer.collapsed', label: 'Collapsed', control: 'toggle', value: layer.collapsed },
-      { path: 'layer.blend', label: 'Blend mode', control: 'select', value: layer.blend, options: [...PM.BLENDS] },
-      { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, options: parentOptions.filter(option => option.v !== layer.id) },
       { path: 'layer.color', label: 'Label color', control: 'color', value: layer.color },
     ];
+    if (layer.type !== 'audio') fields.splice(fields.length - 1, 0,
+      { path: 'layer.motionBlur', label: 'Motion blur', control: 'toggle', value: layer.mblur },
+      { path: 'layer.blend', label: 'Blend mode', control: 'select', value: layer.blend, options: [...PM.BLENDS] },
+      { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, options: parentOptions.filter(option => option.v !== layer.id) });
     const content = Object.entries(layer.d || {}).map(([key, value]) => {
       const control = primitiveControl(value); if (!control) return null;
       return { path: `content.${key}`, label: key, control, value, ...(control === 'slider' ? numericRange(value, key) : {}) };
