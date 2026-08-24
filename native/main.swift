@@ -1,5 +1,6 @@
 import Cocoa
 import WebKit
+import UniformTypeIdentifiers
 
 private final class CodexLineBuffer {
     private var data = Data()
@@ -48,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         config.userContentController.add(self, name: "pmTheme")
         config.userContentController.add(self, name: "pmCodex")
         config.userContentController.add(self, name: "pmCodexCancel")
+        config.userContentController.add(self, name: "pmAgentArtifact")
+        config.userContentController.add(self, name: "pmAgentReveal")
         config.userContentController.add(self, name: "pmCaptureWindow")
         config.userContentController.add(self, name: "pmPanelTitle")
         /* about:blank child WebViews do not inherit the file-read grant used by the
@@ -284,13 +287,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let requestedEffort = body["reasoningEffort"] as? String
             let model = requestedModel.flatMap { allowedModels.contains($0) ? $0 : nil }
             let effort = requestedEffort.flatMap { allowedEfforts.contains($0) ? $0 : nil }
-            runCodex(requestId: requestId, prompt: prompt, schema: body["schema"], images: Array(images), model: model, reasoningEffort: effort)
+            if (body["mode"] as? String) == "autonomous" {
+                guard let projectId = body["projectId"] as? String,
+                      let projectName = body["projectName"] as? String,
+                      let projectJSON = body["projectJSON"] as? String,
+                      !projectId.isEmpty, projectId.utf8.count <= 160,
+                      projectName.utf8.count <= 240,
+                      projectJSON.utf8.count <= 24_000_000 else { return }
+                let access = (body["access"] as? String) == "computer" ? "computer" : "project"
+                let attachments = (body["attachments"] as? [[String: Any]] ?? []).prefix(6)
+                runAutonomousCodex(
+                    requestId: requestId, prompt: prompt, projectId: projectId,
+                    projectName: projectName, projectJSON: projectJSON,
+                    access: access, attachments: Array(attachments), images: Array(images),
+                    model: model, reasoningEffort: effort)
+            } else {
+                runCodex(requestId: requestId, prompt: prompt, schema: body["schema"], images: Array(images), model: model, reasoningEffort: effort)
+            }
             return
         }
         if message.name == "pmCodexCancel" {
             guard let body = message.body as? [String: Any],
                   let requestId = body["id"] as? String else { return }
             cancelCodex(requestId: requestId)
+            return
+        }
+        if message.name == "pmAgentArtifact" {
+            guard let body = message.body as? [String: Any],
+                  let requestId = body["id"] as? String,
+                  let projectId = body["projectId"] as? String,
+                  let path = body["path"] as? String else { return }
+            loadAgentArtifact(requestId: requestId, projectId: projectId, relativePath: path)
+            return
+        }
+        if message.name == "pmAgentReveal" {
+            guard let body = message.body as? [String: Any],
+                  let projectId = body["projectId"] as? String else { return }
+            revealAgentArtifact(projectId: projectId, relativePath: body["path"] as? String)
             return
         }
         if message.name == "pmCaptureWindow" {
@@ -337,6 +370,306 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
         ].compactMap { $0 }
         return candidates.first(where: { fm.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
+    }
+
+    /* ── autonomous project agent ──────────────────────── */
+    private func safeAgentComponent(_ value: String, fallback: String = "project") -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let cleaned = value.unicodeScalars.map { allowed.contains($0) ? Character(String($0)) : "-" }
+        let result = String(cleaned).replacingOccurrences(of: "-+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String((result.isEmpty ? fallback : result).prefix(120))
+    }
+
+    private func agentWorkspaceURL(projectId: String) throws -> URL {
+        let fm = FileManager.default
+        let support = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let root = support.appendingPathComponent("Powermove", isDirectory: true)
+            .appendingPathComponent("Agent Workspaces", isDirectory: true)
+        let workspace = root.appendingPathComponent(safeAgentComponent(projectId), isDirectory: true)
+        try fm.createDirectory(at: workspace, withIntermediateDirectories: true)
+        return workspace
+    }
+
+    private func agentResultSchema() -> [String: Any] {
+        [
+            "type": "object", "additionalProperties": false,
+            "required": ["summary", "commands", "artifacts", "externalActions", "notes"],
+            "properties": [
+                "summary": ["type": "string"],
+                "commands": ["type": "array", "maxItems": 80, "items": ["type": "string"]],
+                "artifacts": [
+                    "type": "array", "maxItems": 80,
+                    "items": [
+                        "type": "object", "additionalProperties": false,
+                        "required": ["path", "importToTimeline"],
+                        "properties": [
+                            "path": ["type": "string"],
+                            "importToTimeline": ["type": "boolean"],
+                        ],
+                    ],
+                ],
+                "externalActions": ["type": "array", "maxItems": 80, "items": ["type": "string"]],
+                "notes": ["type": "array", "maxItems": 80, "items": ["type": "string"]],
+            ],
+        ]
+    }
+
+    private func agentInstructions(projectName: String, artifactRelativePath: String, access: String) -> String {
+        """
+        You are the general production agent working beside Powermove. Complete the user's request end to end, using web search, shell tools, installed creative applications, and reusable integrations when useful. The current editable Powermove project snapshot is inputs/powermove-project.json. Treat it as read-only reference; return Powermove edits through typed commands instead of rewriting that file.
+
+        Place every deliverable file under the artifacts directory for this run: \(artifactRelativePath). Do not leave deliverables elsewhere. You may create project-local scripts, notes, and adapters in this workspace when they help finish the task.
+
+        Supported Powermove command types are: set_property, replace_keyframes, set_easing, set_expression, set_content, set_layer, set_composition, add_layer, delete_layers, reorder_layer, add_effect, remove_effect, set_effect, set_scene_parameter, add_marker, create_section, update_section, transform_layers. Return each command as one JSON-encoded string. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.
+
+        Record uploads, messages, publications, remote changes, application launches, or other outside-world side effects in externalActions. Never claim an external action succeeded unless a tool result proves it. The active authority is \(access). Project authority limits writes to this project workspace; computer authority was explicitly granted for this run and may operate outside it when required by the user's request.
+
+        Project: \(projectName)
+        """
+    }
+
+    private func captureCodexSession(from data: Data, sessionURL: URL) {
+        guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              event["type"] as? String == "thread.started",
+              let threadId = event["thread_id"] as? String,
+              !threadId.isEmpty else { return }
+        try? threadId.write(to: sessionURL, atomically: true, encoding: .utf8)
+    }
+
+    private func mimeType(for url: URL) -> String {
+        UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+    }
+
+    private func collectAgentArtifacts(
+        workspace: URL, runDirectory: URL, runId: String,
+        requested: [[String: Any]]) -> [[String: Any]] {
+        let fm = FileManager.default
+        let requestedImports = Set(requested.compactMap { item -> String? in
+            guard (item["importToTimeline"] as? Bool) == true,
+                  let path = item["path"] as? String else { return nil }
+            return path
+        })
+        guard let enumerator = fm.enumerator(
+            at: runDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        var artifacts: [[String: Any]] = []
+        for case let url as URL in enumerator {
+            guard artifacts.count < 80,
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true else { continue }
+            let local = url.path.replacingOccurrences(of: runDirectory.path + "/", with: "")
+            let path = runId + "/" + local
+            let requestedImport = requestedImports.contains(path) || requestedImports.contains(local)
+                || requestedImports.contains(url.lastPathComponent)
+            artifacts.append([
+                "path": path,
+                "name": url.lastPathComponent,
+                "size": values.fileSize ?? 0,
+                "mime": mimeType(for: url),
+                "importToTimeline": requestedImport,
+            ])
+        }
+        return artifacts.sorted { (($0["path"] as? String) ?? "") < (($1["path"] as? String) ?? "") }
+    }
+
+    private func runAutonomousCodex(
+        requestId: String, prompt: String, projectId: String, projectName: String,
+        projectJSON: String, access: String, attachments: [[String: Any]],
+        images: [String], model: String?, reasoningEffort: String?) {
+        guard let executable = codexBinaryURL() else {
+            sendCodexResult(requestId: requestId, ok: false, text: "Codex is not installed. Install Codex and sign in with ChatGPT first.")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            defer { self.finishCodexRequest(requestId) }
+            do {
+                let workspace = try self.agentWorkspaceURL(projectId: projectId)
+                let inputs = workspace.appendingPathComponent("inputs", isDirectory: true)
+                let internalDir = workspace.appendingPathComponent(".powermove", isDirectory: true)
+                let artifactRoot = workspace.appendingPathComponent("artifacts", isDirectory: true)
+                let runId = self.safeAgentComponent("\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString)", fallback: "run")
+                let runDirectory = artifactRoot.appendingPathComponent(runId, isDirectory: true)
+                try fm.createDirectory(at: inputs, withIntermediateDirectories: true)
+                try fm.createDirectory(at: internalDir, withIntermediateDirectories: true)
+                try fm.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+                try projectJSON.write(
+                    to: inputs.appendingPathComponent("powermove-project.json"),
+                    atomically: true, encoding: .utf8)
+
+                let attachmentDir = inputs.appendingPathComponent("attachments", isDirectory: true)
+                try fm.createDirectory(at: attachmentDir, withIntermediateDirectories: true)
+                for (index, item) in attachments.enumerated() {
+                    guard let content = item["content"] as? String, content.utf8.count <= 100_000 else { continue }
+                    let name = self.safeAgentComponent(item["name"] as? String ?? "attachment-\(index).txt", fallback: "attachment-\(index).txt")
+                    try content.write(to: attachmentDir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+                }
+
+                var imageURLs: [URL] = []
+                let referenceDir = inputs.appendingPathComponent("references", isDirectory: true)
+                try fm.createDirectory(at: referenceDir, withIntermediateDirectories: true)
+                for (index, encoded) in images.enumerated() {
+                    guard let comma = encoded.firstIndex(of: ",") else { continue }
+                    let header = String(encoded[..<comma])
+                    let payload = String(encoded[encoded.index(after: comma)...])
+                    guard header.hasPrefix("data:image/"),
+                          let data = Data(base64Encoded: payload), data.count <= 4_000_000 else { continue }
+                    let ext = header.contains("image/png") ? "png" : "jpg"
+                    let url = referenceDir.appendingPathComponent("reference-\(index).\(ext)")
+                    try data.write(to: url, options: .atomic)
+                    imageURLs.append(url)
+                }
+
+                let schemaURL = internalDir.appendingPathComponent("powermove-result-schema.json")
+                let outputURL = internalDir.appendingPathComponent("result-\(runId).json")
+                let schemaData = try JSONSerialization.data(withJSONObject: self.agentResultSchema(), options: [.prettyPrinted, .sortedKeys])
+                try schemaData.write(to: schemaURL, options: .atomic)
+                let sessionURL = internalDir.appendingPathComponent(access == "computer" ? "session-computer.txt" : "session-project.txt")
+                let sessionId = (try? String(contentsOf: sessionURL, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let instructions = self.agentInstructions(
+                    projectName: projectName,
+                    artifactRelativePath: "artifacts/\(runId)", access: access)
+                let fullPrompt = instructions + "\n\nUSER REQUEST\n" + prompt
+
+                let process = Process()
+                process.executableURL = executable
+                process.currentDirectoryURL = workspace
+                var arguments: [String]
+                if let sessionId = sessionId, !sessionId.isEmpty {
+                    arguments = ["--search"]
+                    if access == "computer" {
+                        arguments.append("--dangerously-bypass-approvals-and-sandbox")
+                    } else {
+                        arguments.append(contentsOf: ["--sandbox", "workspace-write", "--approve-for-me"])
+                    }
+                    arguments.append(contentsOf: [
+                        "exec", "resume", "--skip-git-repo-check",
+                        "--output-schema", schemaURL.path,
+                        "--output-last-message", outputURL.path, "--json",
+                    ])
+                    if let model = model { arguments.append(contentsOf: ["--model", model]) }
+                    if let effort = reasoningEffort { arguments.append(contentsOf: ["--config", "model_reasoning_effort=\"\(effort)\""]) }
+                    arguments.append(sessionId)
+                } else {
+                    arguments = ["--search"]
+                    if access == "computer" {
+                        arguments.append("--dangerously-bypass-approvals-and-sandbox")
+                    } else {
+                        arguments.append(contentsOf: ["--sandbox", "workspace-write", "--approve-for-me"])
+                    }
+                    arguments.append(contentsOf: [
+                        "exec",
+                        "--skip-git-repo-check",
+                        "--output-schema", schemaURL.path,
+                        "--output-last-message", outputURL.path, "--json",
+                    ])
+                    if let model = model { arguments.append(contentsOf: ["--model", model]) }
+                    if let effort = reasoningEffort { arguments.append(contentsOf: ["--config", "model_reasoning_effort=\"\(effort)\""]) }
+                }
+                arguments.append(fullPrompt)
+                for imageURL in imageURLs {
+                    arguments.append("--image")
+                    arguments.append(imageURL.path)
+                }
+                process.arguments = arguments
+
+                let events = Pipe()
+                let errors = Pipe()
+                let eventBuffer = CodexLineBuffer { [weak self] line in
+                    self?.captureCodexSession(from: line, sessionURL: sessionURL)
+                    self?.forwardCodexEvent(requestId: requestId, data: line)
+                }
+                events.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty { handle.readabilityHandler = nil; return }
+                    eventBuffer.append(data)
+                }
+                process.standardOutput = events
+                process.standardError = errors
+                if self.codexWasCancelled(requestId) { return }
+                try process.run()
+                if !self.registerCodexProcess(process, requestId: requestId), process.isRunning { process.terminate() }
+                process.waitUntilExit()
+                events.fileHandleForReading.readabilityHandler = nil
+                eventBuffer.append(events.fileHandleForReading.readDataToEndOfFile(), flush: true)
+                if self.codexWasCancelled(requestId) { return }
+                guard process.terminationStatus == 0, fm.fileExists(atPath: outputURL.path) else {
+                    let data = errors.fileHandleForReading.readDataToEndOfFile()
+                    let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.sendCodexResult(requestId: requestId, ok: false, text: message?.isEmpty == false ? message! : "The autonomous agent failed.")
+                    return
+                }
+                let resultData = try Data(contentsOf: outputURL)
+                guard var result = try JSONSerialization.jsonObject(with: resultData) as? [String: Any] else {
+                    throw NSError(domain: "PowermoveAgent", code: 1, userInfo: [NSLocalizedDescriptionKey: "The autonomous agent returned an invalid result."])
+                }
+                let requested = result["artifacts"] as? [[String: Any]] ?? []
+                result["artifacts"] = self.collectAgentArtifacts(
+                    workspace: workspace, runDirectory: runDirectory, runId: runId, requested: requested)
+                result["projectId"] = projectId
+                result["access"] = access
+                let normalized = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+                self.sendCodexResult(requestId: requestId, ok: true, text: String(data: normalized, encoding: .utf8) ?? "{}")
+            } catch {
+                if !self.codexWasCancelled(requestId) {
+                    self.sendCodexResult(requestId: requestId, ok: false, text: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func validatedAgentArtifactURL(projectId: String, relativePath: String) -> URL? {
+        guard !relativePath.isEmpty, !relativePath.hasPrefix("/"), !relativePath.contains("..") else { return nil }
+        guard let workspace = try? agentWorkspaceURL(projectId: projectId) else { return nil }
+        let root = workspace.appendingPathComponent("artifacts", isDirectory: true).resolvingSymlinksInPath().standardizedFileURL
+        let candidate = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.path.hasPrefix(root.path + "/") else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        return candidate
+    }
+
+    private func loadAgentArtifact(requestId: String, projectId: String, relativePath: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self,
+                  let url = self.validatedAgentArtifactURL(projectId: projectId, relativePath: relativePath),
+                  let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+                  let size = values.fileSize, size <= 64 * 1024 * 1024,
+                  let data = try? Data(contentsOf: url) else {
+                self?.sendAgentArtifact(requestId: requestId, ok: false, payload: ["message": "This artifact is unavailable or larger than 64 MB. Reveal it in Finder and import it normally."])
+                return
+            }
+            self.sendAgentArtifact(requestId: requestId, ok: true, payload: [
+                "name": url.lastPathComponent,
+                "mime": self.mimeType(for: url),
+                "dataBase64": data.base64EncodedString(),
+            ])
+        }
+    }
+
+    private func sendAgentArtifact(requestId: String, ok: Bool, payload: [String: Any]) {
+        var result = payload
+        result["ok"] = ok
+        guard let data = try? JSONSerialization.data(withJSONObject: result),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let safeId = requestId.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript("window.PM && PM.AgentArtifacts && PM.AgentArtifacts.resolve('\(safeId)', \(json))")
+        }
+    }
+
+    private func revealAgentArtifact(projectId: String, relativePath: String?) {
+        guard let workspace = try? agentWorkspaceURL(projectId: projectId) else { return }
+        let artifactRoot = workspace.appendingPathComponent("artifacts", isDirectory: true)
+        let target = relativePath.flatMap { validatedAgentArtifactURL(projectId: projectId, relativePath: $0) }
+        DispatchQueue.main.async {
+            if let target = target { NSWorkspace.shared.activateFileViewerSelecting([target]) }
+            else { NSWorkspace.shared.open(artifactRoot) }
+        }
     }
 
     private func cancelCodex(requestId: String) {
@@ -453,9 +786,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func forwardCodexEvent(requestId: String, data: Data) {
         guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              event["type"] as? String == "item.completed",
+              let eventType = event["type"] as? String,
               let item = event["item"] as? [String: Any],
-              let type = item["type"] as? String,
+              let type = item["type"] as? String else { return }
+        if eventType == "item.started" {
+            let activity: String?
+            switch type {
+            case "command_execution": activity = "Working with project files and shell tools…"
+            case "web_search": activity = "Researching on the web…"
+            case "mcp_tool_call":
+                let tool = (item["tool"] as? String) ?? (item["name"] as? String) ?? "integration"
+                activity = "Using the installed \(String(tool.prefix(80))) integration…"
+            case "computer_use": activity = "Operating an application on this Mac…"
+            case "image_generation": activity = "Generating a visual deliverable…"
+            case "file_change": activity = "Preparing project files…"
+            default: activity = nil
+            }
+            if let activity = activity { sendCodexProgress(requestId: requestId, text: activity) }
+            return
+        }
+        guard eventType == "item.completed",
               ["reasoning", "agent_message"].contains(type),
               var raw = item["text"] as? String else { return }
         /* Current Codex versions expose user-facing reasoning summaries as an

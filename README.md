@@ -6,8 +6,21 @@ Powermove is an AI-native motion and video editor for macOS. This main branch ke
 
 - WebGL composition preview, editable layers, keyframes, effects, shaders, media, timeline, inspector, export, and takes
 - Prompt-driven composition, motion, shader, and workspace edits
+- A persistent production agent that can research on the web, use project files and shell tools, create deliverables, and bring supported media back into the editable timeline
 - Compact docked workspaces with editable panels and custom parameter controls
 - ChatGPT subscription generation through the signed-in local Codex client; account tokens never enter the web interface
+
+## Agent access
+
+The Agent panel has three simple authority levels:
+
+- **Editor** works only through Powermove's validated source-edit commands. This is the safest choice for normal composition work.
+- **Project + web** gives the signed-in Codex client a persistent folder, shell tools, live web research, and the user's installed Codex skills, plugins, and integrations. Writes stay inside that project's agent workspace.
+- **Computer** gives Codex unrestricted Mac access for one run. Powermove asks for confirmation each time, resets to Project access afterward, and clearly reports outside-world actions. Files and remote actions outside Powermove cannot be undone.
+
+Each Powermove project gets a private working folder at `~/Library/Application Support/Powermove/Agent Workspaces/<project-id>`. The current editable project is supplied as a read-only JSON snapshot. Deliverables are collected under a run-specific `artifacts` folder, shown in the Agent result, and can be revealed in Finder. Supported images, video, and audio up to 64 MB can be added to the timeline directly; larger files remain available through Finder.
+
+Agent-authored composition changes still go through the same typed source transaction as direct editing. They receive a revision check, a saved take, one-step Undo, and a visible result review. A project changed during a long agent run is never silently overwritten.
 
 ### Production branch additions (`production`)
 

@@ -72,9 +72,11 @@ xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
 xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
 codesign --force --deep --sign - "$APP" >/dev/null
 # The workspace File Provider can restore Finder metadata during signing.
-# Clear it once more so the bundle passes a strict verification immediately.
-xattr -d com.apple.FinderInfo "$APP" 2>/dev/null || true
-xattr -d 'com.apple.fileprovider.fpfs#P' "$APP" 2>/dev/null || true
+# Clear all regenerated metadata once more. Extended attributes are not part of
+# the code signature, while Finder/provenance detritus makes strict validation
+# reject an otherwise valid app bundle.
+xattr -cr "$APP" 2>/dev/null || true
+codesign --verify --deep --strict "$APP"
 if [ "$INSTALL" = "--install" ]; then
   rm -rf /Applications/Powermove.app
   ditto "$APP" /Applications/Powermove.app

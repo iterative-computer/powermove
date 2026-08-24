@@ -25,13 +25,17 @@ PM.CodexBridge = {
         stopNative(); reject(error);
       };
       const abort = () => settle(codexAbortError());
-      const timer = setTimeout(() => settle(new Error('The coding agent took too long to respond')), 120000);
+      const timeout = Math.max(30_000, Math.min(Number(options.timeoutMs) || 120_000, 3_600_000));
+      const timer = setTimeout(() => settle(new Error('The coding agent took too long to respond')), timeout);
       pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress });
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
         id, prompt, schema, images: images.slice(0, 6),
         model: options.model || '', reasoningEffort: options.reasoningEffort || '',
+        mode: options.mode || 'editor', access: options.access || 'editor',
+        projectId: options.projectId || '', projectName: options.projectName || '',
+        projectJSON: options.projectJSON || '', attachments: (options.attachments || []).slice(0, 6),
       });
     });
   },
@@ -53,6 +57,34 @@ PM.CodexBridge = {
       const summary = new TextDecoder().decode(bytes).replace(/\s+/g, ' ').trim().slice(0, 320);
       if (summary) job.onProgress(summary);
     } catch { /* Ignore malformed progress without interrupting the real run. */ }
+  },
+};
+
+const artifactPending = new Map();
+PM.AgentArtifacts = {
+  load(artifact) {
+    const bridge = window.webkit?.messageHandlers?.pmAgentArtifact;
+    if (!bridge) return Promise.reject(new Error('Agent artifacts are available in the Powermove macOS app'));
+    const id = PM.uid('agent-artifact-');
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { artifactPending.delete(id); reject(new Error('The artifact took too long to load')); }, 120_000);
+      artifactPending.set(id, { resolve, reject, timer });
+      bridge.postMessage({ id, projectId: artifact.projectId, path: artifact.path });
+    });
+  },
+  resolve(id, result) {
+    const job = artifactPending.get(id); if (!job) return;
+    artifactPending.delete(id); clearTimeout(job.timer);
+    if (!result?.ok) { job.reject(new Error(result?.message || 'The artifact could not be loaded')); return; }
+    try {
+      const bytes = Uint8Array.from(atob(result.dataBase64 || ''), character => character.charCodeAt(0));
+      job.resolve(new File([bytes], result.name || 'agent-artifact', { type: result.mime || 'application/octet-stream' }));
+    } catch { job.reject(new Error('The artifact could not be decoded')); }
+  },
+  reveal(artifact) {
+    const bridge = window.webkit?.messageHandlers?.pmAgentReveal;
+    if (!bridge) return PM.toast('Agent artifacts are available in the Powermove macOS app');
+    bridge.postMessage({ projectId: artifact.projectId, path: artifact.path || '' });
   },
 };
 
@@ -82,6 +114,7 @@ PM.WindowCapture = {
   },
 };
 
+const storedAccessMode = PM.store?.get?.('agentAccessMode', 'editor');
 const S = {
   initialized: false, active: false, pressed: false, phase: 'idle',
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
@@ -97,6 +130,7 @@ const S = {
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
   model: PM.store?.get?.('agentModel', 'gpt-5.6-sol') || 'gpt-5.6-sol',
   reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
+  accessMode: ['editor', 'project'].includes(storedAccessMode) ? storedAccessMode : 'editor',
 };
 
 const AGENT_MODELS = [
@@ -105,6 +139,11 @@ const AGENT_MODELS = [
   { id: 'gpt-5.6-luna', label: '5.6 Luna' },
 ];
 const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const AGENT_ACCESS_MODES = [
+  { id: 'editor', label: 'Editor', detail: 'Powermove source only' },
+  { id: 'project', label: 'Project + web', detail: 'Files, shell, web, and integrations inside this project' },
+  { id: 'computer', label: 'Computer', detail: 'Full Mac access for one explicitly approved run' },
+];
 const SEND_TRANSITION_MS = 240;
 
 const Spatial = {
@@ -794,11 +833,24 @@ function resultPreview() {
   }
   const run = S.run;
   if (!run || S.phase !== 'result') return null;
-  const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Rendered result'), h('h3', 'Review the actual result'));
+  const reversible = run.autonomous ? !!run.changed : true;
+  const preview = h('div.spatial-proposal',
+    h('div.spatial-proposal-kicker', run.autonomous ? 'Autonomous result' : 'Rendered result'),
+    h('h3', run.autonomous ? (run.summary || 'Agent work is ready') : 'Review the actual result'));
   const message = run.review?.message || 'The rendered change is ready.';
   preview.appendChild(h('p', message));
   if (run.review?.critique) preview.appendChild(h('p', run.review.critique));
-  preview.appendChild(h('p', 'The complete agent run is one Command-Z Undo step.'));
+  if (reversible) preview.appendChild(h('p', 'Powermove source changes from this run are one Command-Z Undo step.'));
+  if (run.externalActions?.length) {
+    const actions = h('div.agent-external-actions', h('b', 'External activity'));
+    run.externalActions.forEach(action => actions.appendChild(h('span', action)));
+    preview.appendChild(actions);
+  }
+  if (run.artifacts?.length) {
+    const artifacts = h('div.agent-artifacts');
+    run.artifacts.forEach(artifact => artifacts.appendChild(agentArtifactView(artifact)));
+    preview.appendChild(artifacts);
+  }
   if (run.reviewError) preview.appendChild(h('p.spatial-review-warning', `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`));
   const frames = h('div.spatial-frame-grid');
   (run.frames?.images || []).forEach((src, index) => frames.appendChild(h('figure',
@@ -806,8 +858,8 @@ function resultPreview() {
     h('figcaption', `${run.frames.times[index]}s`))));
   if (frames.childElementCount) preview.appendChild(frames);
   preview.appendChild(h('div.spatial-proposal-actions',
-    h('button.spatial-action', { onclick: undoSceneRun }, 'Undo change'),
-    h('button.spatial-action.pri', { onclick: keepSceneRun }, 'Keep change')));
+    reversible ? h('button.spatial-action', { onclick: undoSceneRun }, 'Undo change') : null,
+    h('button.spatial-action.pri', { onclick: keepSceneRun }, reversible ? 'Keep change' : 'Done')));
   return preview;
 }
 
@@ -887,6 +939,39 @@ function modelPickerControl() {
     renderConversation(true);
   };
   return h('label.agent-model', { title: 'Choose model and reasoning' }, select, PM.icon('chev'));
+}
+
+function setAgentAccessMode(mode) {
+  if (!AGENT_ACCESS_MODES.some(item => item.id === mode)) return;
+  if (mode !== 'computer') {
+    S.accessMode = mode;
+    PM.store.set('agentAccessMode', mode);
+    renderConversation(true);
+    return;
+  }
+  PM.modal({
+    title: 'Allow computer access for this run?', width: 460,
+    body: h('div.agent-access-warning',
+      h('p', 'Codex can read or change files outside this project, launch applications, and use services already signed in on this Mac.'),
+      h('p', 'External actions cannot be undone. Computer access resets when this run finishes or Powermove quits.')),
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Allow for one run', pri: true, run: () => { S.accessMode = 'computer'; renderConversation(true); } },
+    ],
+  });
+}
+
+function accessPickerControl() {
+  const select = h('select', { 'aria-label': 'Agent authority' });
+  AGENT_ACCESS_MODES.forEach(mode => select.appendChild(h('option', { value: mode.id }, mode.label)));
+  select.value = S.accessMode;
+  select.onchange = () => {
+    const next = select.value;
+    select.value = S.accessMode;
+    setAgentAccessMode(next);
+  };
+  const current = AGENT_ACCESS_MODES.find(mode => mode.id === S.accessMode) || AGENT_ACCESS_MODES[0];
+  return h('label.agent-access', { title: current.detail }, PM.icon(S.accessMode === 'editor' ? 'panel' : 'sparkle'), select, PM.icon('chev'));
 }
 
 function scopeLabel() {
@@ -980,6 +1065,42 @@ function attachmentView(item, removable = false) {
   return card;
 }
 
+function artifactSize(bytes) {
+  const size = Math.max(0, Number(bytes) || 0);
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+}
+
+async function importAutonomousArtifact(artifact) {
+  if (!artifact || artifact.importing || artifact.imported) return;
+  artifact.importing = true; renderConversation();
+  try {
+    const file = await PM.AgentArtifacts.load(artifact);
+    if (!PM.assetKind(file)) throw new Error('This artifact is not a supported image, video, or audio file');
+    await PM.importFiles([file]);
+    artifact.imported = true;
+    PM.toast(`Added ${artifact.name} to the timeline`);
+  } catch (error) {
+    PM.toast(String(error.message || error), 6000);
+  } finally {
+    artifact.importing = false; renderConversation();
+  }
+}
+
+function agentArtifactView(artifact) {
+  const copy = h('span.agent-artifact-copy', h('b', artifact.name || artifact.path),
+    h('small', [artifact.mime || '', artifactSize(artifact.size)].filter(Boolean).join(' · ')));
+  const add = PM.assetKind({ name: artifact.name, type: artifact.mime }) ? h('button', {
+    type: 'button', disabled: artifact.importing || artifact.imported,
+    title: artifact.imported ? 'Already added to the timeline' : 'Add to timeline',
+    onclick: () => importAutonomousArtifact(artifact),
+  }, artifact.importing ? h('i') : PM.icon(artifact.imported ? 'link' : 'plus')) : null;
+  const reveal = h('button', {
+    type: 'button', title: 'Reveal in Finder', onclick: () => PM.AgentArtifacts.reveal(artifact),
+  }, PM.icon('project'));
+  return h('div.agent-artifact', PM.icon(artifact.mime?.startsWith('video/') ? 'cam' : artifact.mime?.startsWith('audio/') ? 'clock' : 'frame'), copy, add, reveal);
+}
+
 function activityWords(value) {
   return String(value || '').split(/\s+/).filter(Boolean).map((word, index) => h('span.agent-thinking-word', {
     style: `--word-index:${Math.min(index, 28)}`,
@@ -1010,13 +1131,23 @@ function renderConversation(focusInput = false) {
   let input;
   if (!S.conversation.length && !S.activity) {
     const suggestions = h('div.agent-suggestions');
-    [
+    const prompts = S.accessMode === 'editor' ? [
       ['Organize for animation', 'Organize my panels into a focused animation workspace'],
       ['Move Timeline right', 'Move the Timeline to the right dock and give it more room'],
       ['Open Inspector + Effects', 'Open the Inspector and Effects panels beside the composition'],
       ['Focus the canvas', 'Focus the composition by hiding panels I do not need right now'],
-    ].forEach(([label, prompt]) => suggestions.appendChild(h('button', { type: 'button', onclick: () => { S.composerDraft = prompt; input.value = prompt; input.focus(); } }, label)));
-    messages.appendChild(h('div.agent-welcome', h('div.agent-welcome-icon', PM.icon('sparkle')), h('b', 'Build or rearrange anything'), h('span', 'Edit the composition, build controls, or tell me exactly how to arrange your panels.'), suggestions));
+    ] : [
+      ['Find useful footage', 'Research and download useful licensed footage for this composition, then import the strongest choices'],
+      ['Build an integration', 'Build and test the project-local integration needed to complete this project'],
+      ['Use Blender', 'Create the missing 3D asset in Blender, render it, and bring the result into this composition'],
+      ['Finish the project', 'Use any useful project tools and web research to finish this composition end to end'],
+    ];
+    prompts.forEach(([label, prompt]) => suggestions.appendChild(h('button', { type: 'button', onclick: () => { S.composerDraft = prompt; input.value = prompt; input.focus(); } }, label)));
+    messages.appendChild(h('div.agent-welcome', h('div.agent-welcome-icon', PM.icon('sparkle')),
+      h('b', S.accessMode === 'editor' ? 'Build or rearrange anything' : 'Work across the whole project'),
+      h('span', S.accessMode === 'editor'
+        ? 'Edit the composition, build controls, or tell me exactly how to arrange your panels.'
+        : 'Research, create files, run tools, build integrations, and return editable results to Powermove.'), suggestions));
   }
   S.conversation.slice(-30).forEach(message => {
     const bubble = h(`div.spatial-message.${message.role}${message.entering ? '.is-entering' : ''}`, message.text);
@@ -1059,6 +1190,7 @@ function renderConversation(focusInput = false) {
   S.attachments.forEach(item => attachmentRail.appendChild(attachmentView(item, true)));
   const attach = h('button.agent-attach', { type: 'button', title: 'Attach images or text files', 'aria-label': 'Add attachments', onclick: chooseAttachments }, PM.icon('plus'));
   const scope = scopePickerControl();
+  const access = accessPickerControl();
   const approval = h('button.agent-approval', {
     type: 'button', 'aria-pressed': String(S.autoApplyPanels),
     title: S.autoApplyPanels ? 'Safe panel changes apply automatically' : 'Review panel changes before applying',
@@ -1076,7 +1208,7 @@ function renderConversation(focusInput = false) {
     type: 'button', 'aria-label': mode.sendLabel, title: mode.sendLabel, disabled: mode.disabled,
     onclick: () => sendRequest(input),
   }, mode.disabled ? h('i') : PM.icon('return'));
-  const composer = h('div.agent-composer', h('div.agent-composer-head', scope, approval), input, attachmentRail,
+  const composer = h('div.agent-composer', h('div.agent-composer-head', scope, access, S.accessMode === 'editor' ? approval : null), input, attachmentRail,
     h('div.agent-composer-tools', attach, h('span.sp'), model, stop, send));
   shell.appendChild(composer);
   body.appendChild(shell);
@@ -1098,6 +1230,105 @@ function stopActiveRequest() {
   renderConversation(true);
 }
 
+function normalizeAutonomousResult(raw) {
+  const text = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const projectId = text(raw?.projectId || PM.proj.id).slice(0, 160);
+  return {
+    summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 800),
+    commands: (Array.isArray(raw?.commands) ? raw.commands : [])
+      .slice(0, 80).map(PM.AgentHarness.cleanCommand).filter(Boolean),
+    artifacts: (Array.isArray(raw?.artifacts) ? raw.artifacts : []).slice(0, 80).map(item => ({
+      projectId,
+      path: text(item?.path).slice(0, 600),
+      name: text(item?.name || String(item?.path || '').split('/').pop() || 'Agent artifact').slice(0, 240),
+      mime: text(item?.mime || 'application/octet-stream').slice(0, 120),
+      size: Math.max(0, Number(item?.size) || 0),
+      importToTimeline: item?.importToTimeline === true,
+      imported: false,
+    })).filter(item => item.path),
+    externalActions: (Array.isArray(raw?.externalActions) ? raw.externalActions : []).slice(0, 80).map(text).filter(Boolean),
+    notes: (Array.isArray(raw?.notes) ? raw.notes : []).slice(0, 80).map(text).filter(Boolean),
+  };
+}
+
+async function runAutonomousRequest({ request, token, controller, access }) {
+  const baseRevision = Number(PM.proj.revision) || 0;
+  const checkpoint = {
+    id: PM.uid('agent-checkpoint'),
+    label: `Before autonomous agent · ${request.slice(0, 42)}`,
+    json: JSON.stringify(PM.proj),
+  };
+  try { checkpoint.takeId = PM.takes?.save(`Before autonomous agent · ${request.slice(0, 42)}`)?.id || null; }
+  catch { checkpoint.takeId = null; }
+  const historyMark = PM.hist.mark();
+  const observationPromise = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
+  const [observation] = await Promise.all([
+    observationPromise,
+    new Promise(resolve => setTimeout(resolve, SEND_TRANSITION_MS)),
+  ]);
+  if (token !== S.requestToken) return;
+  S.steps[0].status = 'complete'; S.steps[1].status = 'active';
+  S.activity = access === 'computer' ? 'Working across Powermove and this Mac…' : 'Researching and working inside the project workspace…';
+  renderConversation();
+  const userImages = S.requestAttachments.filter(item => item.dataUrl).map(item => item.dataUrl);
+  const attachedImages = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
+  const raw = await PM.CodexBridge.request(request, null, attachedImages, {
+    mode: 'autonomous', access,
+    projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
+    projectJSON: JSON.stringify(PM.proj),
+    attachments: S.requestAttachments.filter(item => item.content).map(item => ({ name: item.name, type: item.type, content: item.content })),
+    model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
+    timeoutMs: 3_600_000,
+    onProgress: summary => {
+      if (token !== S.requestToken || !summary) return;
+      S.activity = summary; renderConversation();
+    },
+  });
+  if (token !== S.requestToken) return;
+  let decoded;
+  try { decoded = JSON.parse(raw); }
+  catch { throw new Error('The autonomous agent returned an invalid result'); }
+  const result = normalizeAutonomousResult(decoded);
+  S.steps[1].status = 'complete'; S.steps[2].status = 'active';
+  S.activity = 'Bringing the result back into Powermove…'; renderConversation();
+  let changed = false;
+  let reviewError = '';
+  if ((Number(PM.proj.revision) || 0) !== baseRevision) {
+    reviewError = 'Project changed while the autonomous agent was working, so its proposed source edits and automatic imports were left unapplied.';
+  } else {
+    const commands = result.commands;
+    if (commands.length) {
+      const applied = PM.Edit.apply(commands, {
+        label: 'Autonomous agent', origin: 'agent', baseRevision,
+      });
+      if (!applied.ok) throw new Error(applied.message);
+      changed = true;
+    }
+    for (const artifact of result.artifacts.filter(item => item.importToTimeline)) {
+      try {
+        const file = await PM.AgentArtifacts.load(artifact);
+        if (!PM.assetKind(file)) throw new Error(`${artifact.name} is not supported project media`);
+        await PM.importFiles([file]);
+        artifact.imported = true; changed = true;
+      } catch (error) {
+        reviewError += `${reviewError ? ' ' : ''}${String(error.message || error)}`;
+      }
+    }
+  }
+  checkpoint.historyId = changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null;
+  const finalFrames = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
+  finishSteps();
+  S.conversation.push({ role: 'assistant', text: result.summary });
+  S.run = {
+    autonomous: true, summary: result.summary, checkpoint,
+    applied: result.commands, changed, artifacts: result.artifacts,
+    externalActions: result.externalActions,
+    review: { message: result.notes.join(' ') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
+    frames: finalFrames, reviewError,
+  };
+  S.activity = ''; S.phase = 'result'; renderConversation();
+}
+
 async function sendRequest(input) {
   const typedRequest = input.value.trim();
   if ((!typedRequest && !S.attachments.length) || S.phase === 'applying') return;
@@ -1115,7 +1346,14 @@ async function sendRequest(input) {
     role: 'user', text: typedRequest || `Attached ${S.requestAttachments.length} file${S.requestAttachments.length === 1 ? '' : 's'}`,
     attachments: S.requestAttachments.map(item => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })), entering: true,
   });
-  updateSteps(steering ? [
+  const accessAtStart = S.accessMode;
+  const autonomous = accessAtStart !== 'editor';
+  updateSteps(autonomous ? [
+    'Understand the request and project',
+    'Research and operate the required tools',
+    'Bring artifacts and edits into Powermove',
+    'Review the result and external activity',
+  ] : steering ? [
     'Review the new direction',
     'Revise the editable change',
     'Prepare the updated source edits',
@@ -1132,6 +1370,10 @@ async function sendRequest(input) {
   S.pendingEntering = true;
   promoteToConversation(); renderConversation(true);
   try {
+    if (autonomous) {
+      await runAutonomousRequest({ request, token, controller, access: accessAtStart });
+      return;
+    }
     /* Let the send handoff finish before the next progress render replaces the
        message DOM. Observation still runs immediately, so the beat adds only
        the portion of the 240 ms transition that useful work did not consume. */
@@ -1179,6 +1421,10 @@ async function sendRequest(input) {
     renderConversation(true);
   } finally {
     if (token === S.requestToken && S.activeRequest === controller) S.activeRequest = null;
+    if (accessAtStart === 'computer') {
+      S.accessMode = 'project';
+      if (token === S.requestToken && S.phase !== 'working') renderConversation();
+    }
   }
 }
 
@@ -1380,6 +1626,7 @@ function controlConnection(target, path, controlType) {
       : /^#[0-9a-f]{6}$/i.test(current) ? 'color' : 'text';
   } else if (path.startsWith('layer.')) {
     const key = path.slice('layer.'.length);
+    if (layer.type === 'audio' && ['motionBlur', 'blend', 'parent'].includes(key)) return null;
     control = ['visible', 'locked', 'solo', 'shy', 'motionBlur', 'collapsed'].includes(key) ? 'toggle'
       : ['duration', 'from'].includes(key) ? 'slider'
         : ['blend', 'parent'].includes(key) ? 'select'
@@ -1886,7 +2133,9 @@ function showSceneResult(run) {
 function keepSceneRun() {
   if (!S.run) return;
   PM.toast('Kept agent change');
-  S.conversation.push({ role: 'assistant', text: `Kept ${S.run.applied.length} editable source changes. Command-Z can still reverse the complete run.` });
+  S.conversation.push({ role: 'assistant', text: S.run.autonomous
+    ? (S.run.changed ? 'Kept the autonomous result. Command-Z can still reverse its Powermove changes.' : 'Closed the completed autonomous run. Its artifacts remain available in the project workspace.')
+    : `Kept ${S.run.applied.length} editable source changes. Command-Z can still reverse the complete run.` });
   S.run = null; S.phase = 'conversation'; renderConversation(true);
 }
 
