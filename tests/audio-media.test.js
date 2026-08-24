@@ -43,30 +43,28 @@ function fakeIndexedDB() {
 
 function loadMedia(PM = {}, indexedDB = fakeIndexedDB()) {
   const window = { PM, indexedDB };
-  vm.runInContext(mediaSource, vm.createContext({ window, Blob, Date, Promise, setImmediate }));
+  vm.runInContext(mediaSource, vm.createContext({ window, Blob, Date, Promise, setImmediate, setTimeout, clearTimeout }));
   return PM;
 }
 
-test('imported media blobs survive a MediaStore round trip', async () => {
+test('generic imported media blobs survive a MediaStore round trip', async () => {
   const PM = loadMedia();
-  const original = new Blob(['exact mp3 bytes'], { type: 'audio/mpeg' });
+  const original = new Blob(['exact media bytes'], { type: 'video/mp4' });
 
-  assert.equal(await PM.MediaStore.put('audio-1', original), true);
-  const restored = await PM.MediaStore.get('audio-1');
+  assert.equal(await PM.MediaStore.put('media-1', original), true);
+  const restored = await PM.MediaStore.get('media-1');
 
   assert.ok(restored instanceof Blob);
-  assert.equal(restored.type, 'audio/mpeg');
-  assert.equal(await restored.text(), 'exact mp3 bytes');
+  assert.equal(restored.type, 'video/mp4');
+  assert.equal(await restored.text(), 'exact media bytes');
 });
 
-test('audio and video trim-ins preserve their source time', () => {
+test('video trim timing preserves source time at playback speed', () => {
   const PM = loadMedia({}, null);
-  const audio = { type: 'audio', from: 2, d: { trim: 1 } };
   const video = { type: 'video', from: 2, d: { trim: 1, speed: 2 } };
 
-  assert.equal(PM.MediaTiming.trimAtStart(audio, 5), 4);
   assert.equal(PM.MediaTiming.trimAtStart(video, 5), 7);
-  assert.equal(PM.MediaTiming.earliestStart(audio), 1);
+  assert.equal(PM.MediaTiming.earliestStart(video), 1.5);
 });
 
 function shortcutHarness(layer, asset) {
@@ -95,17 +93,21 @@ function shortcutHarness(layer, asset) {
   return { PM, added: () => added };
 }
 
-test('adding the supplied-length audio keeps the complete source duration', () => {
+test('the audio layer command keeps complete source duration and canonical editable content', () => {
   const asset = { id: 'asset-1', name: 'Diamonds.mp3', kind: 'audio', dur: 29.58, w: 0, h: 0 };
   const { PM, added } = shortcutHarness(null, asset);
 
   PM.cmd('addFromAsset', asset.id);
 
+  assert.equal(added().layerType, 'audio');
   assert.equal(added().duration, 29.58);
   assert.equal(added().from, .9);
+  assert.deepEqual(JSON.parse(JSON.stringify(added().content)), {
+    asset: 'asset-1', trim: 0, gain: 1, fadeIn: 0, fadeOut: 0,
+  });
 });
 
-test('splitting audio continues from the cut instead of restarting', () => {
+test('splitting an audio layer preserves source continuity without playback-engine internals', () => {
   const layer = { id: 'audio-1', type: 'audio', from: 2, dur: 10, d: { asset: 'asset-1', trim: 1 } };
   const { PM } = shortcutHarness(layer, null);
 
@@ -116,4 +118,6 @@ test('splitting audio continues from the cut instead of restarting', () => {
   assert.equal(right.from, 5);
   assert.equal(right.dur, 7);
   assert.equal(right.d.trim, 4);
+  assert.equal(layer.d.trim, 1);
+  assert.notEqual(right.d, layer.d, 'split layers keep independently editable source settings');
 });

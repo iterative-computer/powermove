@@ -62,6 +62,15 @@ test('Library belongs only to the project tab where it opened', () => {
   assert.doesNotMatch(ui, /openTabs|splice|sort/, 'modal scoping never mutates tab order');
 });
 
+test('Library category buttons stay mounted while catalogs repaint', () => {
+  assert.match(ui, /navButtons:\s*\{\}/);
+  assert.match(ui, /state\.nav\.append\([\s\S]*navButton\('sections'\)[\s\S]*navButton\('workspaces'\)/);
+  assert.match(ui, /Object\.entries\(state\.navButtons\)\.forEach/);
+  assert.doesNotMatch(ui, /state\.nav\.textContent\s*=\s*['"]['"]/, 'refreshing counts must not replace a button during a click');
+  assert.match(ui, /item\.element\.classList\.toggle\('on', active\)/);
+  assert.match(ui, /item\.count\.textContent = String\(total\[view\]\)/);
+});
+
 test('workspace manifests always preserve Composition and are versioned', () => {
   const { PM } = workspaceModel();
   const repaired = PM.WS.normalize({
@@ -72,6 +81,32 @@ test('workspace manifests always preserve Composition and are versioned', () => 
   assert.equal(repaired.scope, 'project');
   assert.equal(repaired.projectId, 'project-1');
   assert.equal(repaired.layout.docks.some(dock => dock.panels.some(panel => panel.id === 'viewer')), true);
+});
+
+test('Timeline defaults to a darker gutter and lighter track surface', () => {
+  const { PM } = workspaceModel();
+  const base = { id: 'custom', name: 'Custom', layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] } };
+  assert.equal(PM.WS.normalize(base).chrome.timelineSurfaceOrder, 'reversed');
+  assert.equal(PM.WS.normalize({ ...base, chrome: { timelineSurfaceOrder: 'normal' } }).chrome.timelineSurfaceOrder, 'reversed',
+    'the previous default migrates in an existing workspace');
+  assert.equal(PM.WS.normalize({ ...base, chrome: { timelineSurfaceOrder: 'normal', timelineSurfaceSchema: 2 } }).chrome.timelineSurfaceOrder, 'normal',
+    'a customization made after the migration remains intact');
+});
+
+test('the old stock Timeline migrates to the compact layout without overwriting custom layouts', () => {
+  const { PM } = workspaceModel();
+  const base = { id: 'compact', name: 'Compact', layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] } };
+  const compact = PM.WS.normalize(base).chrome;
+  assert.deepEqual({ ...compact.timeline }, {
+    rowHeight: 26, gutterWidth: 192, rulerHeight: 22, clipRadius: 5,
+    keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
+  });
+  assert.equal(compact.timelineChromeSchema, 2);
+
+  const customized = PM.WS.normalize({ ...base, chrome: { timeline: { rowHeight: 34, gutterWidth: 240 } } }).chrome.timeline;
+  assert.equal(customized.rowHeight, 34);
+  assert.equal(customized.gutterWidth, 240);
+  assert.equal(customized.toolbarDensity, 'compact', 'missing custom fields adopt the new compact defaults');
 });
 
 test('custom workspace deletion is recoverable', () => {

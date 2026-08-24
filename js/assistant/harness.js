@@ -207,6 +207,9 @@ REVIEW CONTRACT
 }
 
 async function execute(request, proposal, progress = () => {}) {
+  const historyMark = PM.hist.mark?.() || null;
+  const historyGroup = PM.uid('agent-history');
+  const editStart = Array.isArray(PM.proj.edits) ? PM.proj.edits.length : 0;
   const checkpoint = {
     id: PM.uid('agent-checkpoint'),
     label: `Before agent · ${text(request, 'composition edit', 42)}`,
@@ -215,7 +218,7 @@ async function execute(request, proposal, progress = () => {}) {
   try { checkpoint.takeId = PM.takes?.save(checkpoint.label)?.id || null; } catch { checkpoint.takeId = null; }
   progress('Applying structured source edit…');
   const first = PM.Edit.apply(proposal.commands, {
-    label: proposal.label, origin: 'agent', baseRevision: proposal.baseRevision,
+    label: proposal.label, origin: 'agent', baseRevision: proposal.baseRevision, historyGroup,
   });
   if (!first.ok) throw new Error(first.message);
   const applied = proposal.commands.slice();
@@ -226,13 +229,16 @@ async function execute(request, proposal, progress = () => {}) {
     for (let pass = 0; pass <= MAX_REPAIRS; pass++) {
       progress(pass ? `Reviewing repair ${pass} of ${MAX_REPAIRS}…` : 'Reviewing rendered frames…');
       frames = await observe(proposal.reviewTimes);
-      const raw = await PM.CodexBridge.request(reviewPrompt(request, applied, pass, frames), reviewSchema(), frames.images);
+      const raw = await PM.CodexBridge.request(
+        reviewPrompt(request, applied, pass, frames), reviewSchema(), frames.images,
+        { onProgress: summary => progress(summary) },
+      );
       review = JSON.parse(raw);
       const repair = sanitizeProposal(review);
       if (review.status !== 'repair' || !repair.commands.length || pass >= MAX_REPAIRS) break;
       progress(`Applying repair ${pass + 1} of ${MAX_REPAIRS}…`);
       const result = PM.Edit.apply(repair.commands, {
-        label: `Agent repair ${pass + 1}`, origin: 'agent', baseRevision: Number(PM.proj.revision) || 0,
+        label: `Agent repair ${pass + 1}`, origin: 'agent', baseRevision: Number(PM.proj.revision) || 0, historyGroup,
       });
       if (!result.ok) { reviewError = result.message; break; }
       applied.push(...repair.commands);
@@ -247,11 +253,18 @@ async function execute(request, proposal, progress = () => {}) {
     reviewError = reviewError || String(error.message || error);
     frames = frames || { state: projectState(), times: proposal.reviewTimes, images: [] };
   }
-  return { checkpoint, applied, review, frames, reviewError, revision: Number(PM.proj.revision) || 0 };
+  const newEdits = (PM.proj.edits || []).slice(editStart);
+  const agentOnly = newEdits.length > 0 && newEdits.every(edit => edit.origin === 'agent');
+  const historyId = agentOnly
+    ? PM.hist.squash?.(historyMark, `Agent · ${proposal.label}`, historyGroup) || null
+    : null;
+  checkpoint.historyId = historyId;
+  return { checkpoint, applied, review, frames, reviewError, historyId, revision: Number(PM.proj.revision) || 0 };
 }
 
 function rollback(checkpoint) {
   if (!checkpoint?.json) return false;
+  if (checkpoint.historyId && PM.hist.undoIfTop?.(checkpoint.historyId)) return true;
   return !!PM.hist.restoreSnapshot(checkpoint.json, 'Undo agent run');
 }
 

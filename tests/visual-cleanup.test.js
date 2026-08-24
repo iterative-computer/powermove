@@ -90,8 +90,8 @@ test('one Library control replaces duplicate global commands and the Composition
   const viewer = fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8');
   assert.doesNotMatch(viewer, /viewer-foot|PM\.Export\.dialog\(\)|Composition size|Preview resolution/,
     'aspect, zoom, quality, notes, timecode, export, and their footer are removed from Composition');
-  assert.doesNotMatch(viewer, /hideMoveHandle: true/,
-    'Composition keeps one compact panel grip without restoring the footer');
+  assert.match(viewer, /hideMoveHandle: true/,
+    'the footer drag grip is removed along with the footer');
   assert.match(fs.readFileSync(path.join(root, 'js/ui/shortcuts.js'), 'utf8'), /def\('export'.*PM\.Export\.dialog\(\)/,
     'export remains reachable from the canonical command');
   assert.doesNotMatch(fs.readFileSync(path.join(root, 'js/ui/toolbar.js'), 'utf8'), /title: 'Snapping \(S\)'/,
@@ -201,9 +201,13 @@ test('custom fill picker supports solid and gradient editing without a native pi
 });
 
 test('Section scrollbars are hidden without removing scrolling semantics', () => {
-  assert.match(appCss, /\.panel>\.body,\.library-content,\.spatial-preview,\.pop-mirror,\.fill-picker-body\{scrollbar-width:none\}/);
-  assert.match(appCss, /\.panel>\.body::-webkit-scrollbar[^}]*display:none/);
+  assert.match(appCss, /\.panel,\.panel \*,\.library-content,\.spatial-preview,\.pop-mirror,\.pop-mirror \*,\.fill-picker-body\{scrollbar-width:none\}/,
+    'every current or future nested panel scroller hides Firefox scrollbar chrome');
+  assert.match(appCss, /\.panel::-webkit-scrollbar,\.panel \*::-webkit-scrollbar[^}]*display:none/,
+    'every current or future nested panel scroller hides WebKit scrollbar chrome');
   assert.match(appCss, /\.panel > \.body\{[^}]*overflow:auto/s);
+  assert.match(appCss, /\.asset-list\{[^}]*overflow:auto/s,
+    'the nested Project media list keeps scrolling even though its bar is hidden');
   assert.match(appCss, /\.library-content\{[^}]*overflow:auto/s);
   assert.match(appCss, /\.spatial-preview\{[^}]*overflow:auto/s);
 });
@@ -229,4 +233,14 @@ test('obsolete Guides and Motion Blur Preview product controls are completely ab
   assert.doesNotMatch(engine, /PM\.guides|PM\.mblurOn/);
   assert.match(workspaceSource, /delete raw\.features\.guides/);
   assert.match(workspaceSource, /delete raw\.features\.motionBlur/);
+});
+
+test('agent-authored visual curves have compact themed controls and keyboard focus', () => {
+  const workspace = fs.readFileSync(path.join(root, 'js/core/workspace.js'), 'utf8');
+  assert.match(workspace, /canvas\.generated-curve-canvas/);
+  assert.match(workspace, /Drag either handle to shape the curve/);
+  assert.match(workspace, /event\.key === 'Enter'.*event\.key === ' '/s);
+  assert.match(appCss, /\.generated-curve-canvas\{[^}]*aspect-ratio:2\/1[^}]*touch-action:none/);
+  assert.match(appCss, /\.generated-curve-canvas:focus-visible\{[^}]*outline:1px solid var\(--accent\)/);
+  assert.match(appCss, /\.generated-curve-presets\{[^}]*grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
 });

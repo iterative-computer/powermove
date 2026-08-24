@@ -13,8 +13,8 @@ Powermove is an AI-native motion and video editor for macOS. This main branch ke
 
 - **Precomps** — nested compositions with scoped evaluation (⌘⇧C), recursion-capped rendering, comp-aware parenting/expressions/params
 - **Layer masks** — animatable rect/ellipse masks with feather, add/subtract modes, applied before effects (AE semantics)
-- **Delivery** — Opus audio mixdown muxed into WebM; transparent-background PNG sequence/still export via FBO readback
-- **Robustness** — full project-load sanitization (corrupt files degrade instead of NaN-ing the renderer), cycle-safe parenting, audio-node lifecycle fixes, video speed desync fix
+- **Delivery** — decoded-buffer audio preview and Opus/WebM mixdown share one trim/fade planner; transparent-background PNG sequence/still export uses FBO readback
+- **Robustness** — full project-load sanitization (corrupt files degrade instead of NaN-ing the renderer), cycle-safe parenting, generation-safe audio scheduling, and video speed synchronization
 - **Performance** — per-frame hierarchy memoization (1000-layer scene: ~17s → ~77ms per second of playback)
 - **Diagnostics** — uncaught errors/rejections captured with real stacks to stderr; native boot self-check
 

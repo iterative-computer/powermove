@@ -26,7 +26,7 @@ PM.CodexBridge = {
       };
       const abort = () => settle(codexAbortError());
       const timer = setTimeout(() => settle(new Error('The coding agent took too long to respond')), 120000);
-      pending.set(id, { resolve, reject, timer, signal, abort });
+      pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress });
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
@@ -45,6 +45,14 @@ PM.CodexBridge = {
       text = new TextDecoder().decode(bytes);
     } catch { text = 'The coding-agent response could not be decoded'; }
     if (result.ok) job.resolve(text); else job.reject(new Error(text));
+  },
+  progress(id, result) {
+    const job = pending.get(id); if (!job || typeof job.onProgress !== 'function') return;
+    try {
+      const bytes = Uint8Array.from(atob(result.dataBase64 || ''), c => c.charCodeAt(0));
+      const summary = new TextDecoder().decode(bytes).replace(/\s+/g, ' ').trim().slice(0, 320);
+      if (summary) job.onProgress(summary);
+    } catch { /* Ignore malformed progress without interrupting the real run. */ }
   },
 };
 
@@ -695,8 +703,9 @@ function makeCardMovable(card, handle) {
 
 function showComposer(draft = '') {
   S.card?.remove();
+  const selectedContext = !!S.context.targetPanelId;
   const input = h('textarea', {
-    placeholder: S.context.targetPanelId ? 'How should this area change?' : 'Describe a change…',
+    placeholder: selectedContext ? 'How should this area change?' : 'Full composition',
     rows: '1', 'data-autosize': 'true',
   });
   input.value = draft;
@@ -707,8 +716,8 @@ function showComposer(draft = '') {
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input); }
   });
-  const handle = h('div.spatial-target', S.context.targetPanelId ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition');
-  const contextLabel = h('span.spatial-context-label', S.context.targetPanelId ? `Selected ${S.context.targetTitle}` : 'Full composition');
+  const handle = h('div.spatial-target', selectedContext ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition');
+  const contextLabel = selectedContext ? h('span.spatial-context-label', `Selected ${S.context.targetTitle}`) : null;
   S.card = h('div.spatial-compose.compact.full',
     handle,
     h('div.spatial-input-row', contextLabel, input, sendBtn),
@@ -767,7 +776,7 @@ function planPreview() {
     plan.workspaceEdit.docks.forEach(dock => preview.appendChild(h('div.spatial-preview-control', h('span', dock.id), h('span', dock.panels.map(panel => panel.id).join(' · ')))));
     plan.workspaceEdit.sections.forEach(section => preview.appendChild(h('div.spatial-preview-control', h('span', section.title), h('span', `${section.controls.length} connected controls`))));
   } else {
-    plan.section.controls.forEach(control => preview.appendChild(h('div.spatial-preview-control', h('span', control.label), h('span', control.connection || control.type), control.type === 'slider' ? h('i') : null)));
+    plan.section.controls.forEach(control => preview.appendChild(h('div.spatial-preview-control', h('span', control.label), h('span', control.connection || control.type), ['slider', 'curve'].includes(control.type) ? h('i', { class: control.type }) : null)));
   }
   preview.appendChild(h('div.spatial-proposal-actions',
     h('button.spatial-action', { onclick: () => { S.plan = null; renderConversation(true); } }, 'Dismiss'),
@@ -777,9 +786,10 @@ function planPreview() {
 
 function resultPreview() {
   if (S.panelRun && S.phase === 'result') {
-    const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Panel changes applied'), h('h3', S.panelRun.summary));
+    const preview = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Reversible agent change'), h('h3', S.panelRun.summary));
     S.panelRun.actions.forEach(action => preview.appendChild(h('div.spatial-preview-control.panel-action', PM.icon('panel'), h('span', describePanelAction(action)))));
-    preview.appendChild(h('div.spatial-proposal-actions', h('button.spatial-action', { onclick: undoPanelRun }, 'Undo panel changes'), h('button.spatial-action.pri', { onclick: keepPanelRun }, 'Keep layout')));
+    preview.appendChild(h('p', 'This is also in the normal Command-Z Undo history.'));
+    preview.appendChild(h('div.spatial-proposal-actions', h('button.spatial-action', { onclick: undoPanelRun }, 'Undo change'), h('button.spatial-action.pri', { onclick: keepPanelRun }, 'Keep change')));
     return preview;
   }
   const run = S.run;
@@ -788,6 +798,7 @@ function resultPreview() {
   const message = run.review?.message || 'The rendered change is ready.';
   preview.appendChild(h('p', message));
   if (run.review?.critique) preview.appendChild(h('p', run.review.critique));
+  preview.appendChild(h('p', 'The complete agent run is one Command-Z Undo step.'));
   if (run.reviewError) preview.appendChild(h('p.spatial-review-warning', `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`));
   const frames = h('div.spatial-frame-grid');
   (run.frames?.images || []).forEach((src, index) => frames.appendChild(h('figure',
@@ -929,27 +940,58 @@ function scopePickerControl() {
   return h('label.agent-scope', { title: 'Choose what the agent should work on' }, PM.icon('panel'), select, PM.icon('chev'));
 }
 
+const TEXT_ATTACHMENT_TYPES = new Set([
+  'application/json', 'application/javascript', 'application/xml', 'image/svg+xml',
+]);
+
+function filesFromTransfer(transfer) {
+  const direct = [...(transfer?.files || [])].filter(file => file instanceof File);
+  if (direct.length) return direct;
+  return [...(transfer?.items || [])]
+    .filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean);
+}
+
+function isTextAttachment(file) {
+  return file.type.startsWith('text/') || TEXT_ATTACHMENT_TYPES.has(file.type)
+    || /\.(?:txt|md|json|js|mjs|cjs|ts|tsx|jsx|css|html?|svg|xml|wgsl|glsl|csv|log)$/i.test(file.name);
+}
+
+async function addAttachmentFiles(files) {
+  const available = Math.max(0, 6 - S.attachments.length);
+  for (const file of [...files].slice(0, available)) {
+    if (file.size > 4_000_000) { PM.toast(`${file.name} is larger than 4 MB`); continue; }
+    const item = { id: PM.uid('attachment-'), name: file.name || 'Pasted attachment', type: file.type || 'application/octet-stream', size: file.size };
+    if (/^image\/(?:png|jpeg|webp|gif)$/i.test(file.type)) {
+      item.dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
+      });
+    } else if (isTextAttachment(file)) item.content = (await file.text()).slice(0, 100_000);
+    S.attachments.push(item);
+  }
+  renderConversation(true);
+}
+
+function attachmentView(item, removable = false) {
+  const preview = item.dataUrl
+    ? h('img', { src: item.dataUrl, alt: '' })
+    : h('span.agent-attachment-type', (item.name.split('.').pop() || 'file').slice(0, 5).toUpperCase());
+  const card = h('span.agent-attachment', preview, h('span.agent-attachment-name', item.name));
+  if (removable) card.appendChild(h('button', { type: 'button', title: `Remove ${item.name}`, onclick: () => removeAttachment(item.id) }, PM.icon('x')));
+  return card;
+}
+
+function activityWords(value) {
+  return String(value || '').split(/\s+/).filter(Boolean).map((word, index) => h('span.agent-thinking-word', {
+    style: `--word-index:${Math.min(index, 28)}`,
+  }, word + (index < String(value || '').trim().split(/\s+/).length - 1 ? ' ' : '')));
+}
+
 function chooseAttachments() {
-  if (S.phase === 'working' || S.phase === 'applying') return;
+  if (S.phase === 'applying') return;
   const input = h('input', {
     type: 'file', multiple: true,
-    accept: 'image/png,image/jpeg,image/webp,image/gif,text/plain,text/markdown,application/json,.js,.css,.html,.svg,.wgsl',
   });
-  input.onchange = async () => {
-    for (const file of [...input.files].slice(0, 6 - S.attachments.length)) {
-      if (file.size > 4_000_000) { PM.toast(`${file.name} is larger than 4 MB`); continue; }
-      if (file.type.startsWith('image/')) {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
-        });
-        S.attachments.push({ id: PM.uid('attachment-'), name: file.name, type: file.type, dataUrl });
-      } else {
-        const content = (await file.text()).slice(0, 100_000);
-        S.attachments.push({ id: PM.uid('attachment-'), name: file.name, type: file.type || 'text/plain', content });
-      }
-    }
-    renderConversation(true);
-  };
+  input.onchange = () => addAttachmentFiles(input.files);
   input.click();
 }
 
@@ -980,14 +1022,15 @@ function renderConversation(focusInput = false) {
     const bubble = h(`div.spatial-message.${message.role}${message.entering ? '.is-entering' : ''}`, message.text);
     if (message.attachments?.length) {
       const rail = h('div.agent-message-files');
-      message.attachments.forEach(name => rail.appendChild(h('span', name)));
+      message.attachments.forEach(item => rail.appendChild(attachmentView(typeof item === 'string' ? { name: item } : item)));
       bubble.appendChild(rail);
     }
     messages.appendChild(bubble);
     message.entering = false;
   });
   if (S.activity) {
-    messages.appendChild(h(`div.spatial-message.assistant.pending${S.pendingEntering ? '.is-entering' : ''}`, h('i'), S.activity));
+    messages.appendChild(h(`div.spatial-message.assistant.pending${S.pendingEntering ? '.is-entering' : ''}`,
+      h('i'), h('span.agent-thinking-copy', ...activityWords(S.activity))));
     S.pendingEntering = false;
   }
   const proposal = resultPreview() || planPreview();
@@ -1002,13 +1045,18 @@ function renderConversation(focusInput = false) {
   });
   input.value = S.composerDraft;
   input.addEventListener('input', () => { S.composerDraft = input.value; });
+  input.addEventListener('paste', event => {
+    const files = filesFromTransfer(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    addAttachmentFiles(files).catch(error => PM.toast(String(error.message || error)));
+  });
   input.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendRequest(input); }
   });
   const attachmentRail = h('div.agent-attachment-rail');
-  S.attachments.forEach(item => attachmentRail.appendChild(h('span.agent-attachment',
-    h('span', item.name), h('button', { type: 'button', title: `Remove ${item.name}`, onclick: () => removeAttachment(item.id) }, PM.icon('x')))));
+  S.attachments.forEach(item => attachmentRail.appendChild(attachmentView(item, true)));
   const attach = h('button.agent-attach', { type: 'button', title: 'Attach images or text files', 'aria-label': 'Add attachments', onclick: chooseAttachments }, PM.icon('plus'));
   const scope = scopePickerControl();
   const approval = h('button.agent-approval', {
@@ -1051,8 +1099,9 @@ function stopActiveRequest() {
 }
 
 async function sendRequest(input) {
-  const request = input.value.trim();
-  if (!request || S.phase === 'applying') return;
+  const typedRequest = input.value.trim();
+  if ((!typedRequest && !S.attachments.length) || S.phase === 'applying') return;
+  const request = typedRequest || 'Review the attached files and make the relevant editable change.';
   const steering = S.phase === 'working';
   const previousRequest = S.activeRequest;
   const token = ++S.requestToken;
@@ -1062,7 +1111,10 @@ async function sendRequest(input) {
   S.requestText = request;
   S.requestAttachments = S.attachments.splice(0);
   S.composerDraft = '';
-  S.conversation.push({ role: 'user', text: request, attachments: S.requestAttachments.map(item => item.name), entering: true });
+  S.conversation.push({
+    role: 'user', text: typedRequest || `Attached ${S.requestAttachments.length} file${S.requestAttachments.length === 1 ? '' : 's'}`,
+    attachments: S.requestAttachments.map(item => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })), entering: true,
+  });
   updateSteps(steering ? [
     'Review the new direction',
     'Revise the editable change',
@@ -1095,7 +1147,13 @@ async function sendRequest(input) {
     const attachedImages = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
     const raw = await PM.CodexBridge.request(
       agentPrompt(request, observation, steering), responseSchema(), attachedImages,
-      { model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal },
+      {
+        model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
+        onProgress: summary => {
+          if (token !== S.requestToken || !summary) return;
+          S.activity = summary; renderConversation();
+        },
+      },
     );
     if (token !== S.requestToken) return;
     let decoded;
@@ -1151,7 +1209,7 @@ function responseSchema() {
             type: 'object', additionalProperties: false,
             required: ['type', 'label', 'parameter', 'defaultValue', 'min', 'max', 'step', 'options', 'target', 'path', 'command', 'stateKey', 'source', 'action', 'primary'],
             properties: {
-              type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout'] }, label: { type: 'string' },
+              type: { type: 'string', enum: ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout', 'curve'] }, label: { type: 'string' },
               parameter: { type: 'string' }, defaultValue: { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }] }, min: { type: 'number' }, max: { type: 'number' }, step: { type: 'number' },
               options: { type: 'array', items: { type: 'string' } }, target: { type: 'string' }, path: { type: 'string' }, command: { type: 'string' },
               stateKey: { type: 'string' }, source: { type: 'string' }, action: { type: 'string' }, primary: { type: 'boolean' },
@@ -1175,6 +1233,10 @@ function agentPrompt(request, observation, steering = false) {
   }));
   const editableSource = PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {};
   const capabilities = PM.Capabilities?.catalog?.() || {};
+  const conversation = S.conversation.slice(0, -1).slice(-12).map(message => ({
+    role: message.role, text: message.text,
+    attachments: (message.attachments || []).map(item => typeof item === 'string' ? item : item.name),
+  }));
   return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Return only the requested JSON object.
 
 RULES
@@ -1182,6 +1244,7 @@ RULES
 - Act on clear change requests. Prefer a useful executable interpretation over explaining limitations. Use noop only when none of the available scene, section, workspace, or chrome operations can produce a meaningful result.
 - Do not answer with a limitation when the requested target appears in EDITABLE SOURCE CATALOG, AVAILABLE PANELS, AVAILABLE COMMANDS, availableOperations, or the supported chrome targets. Build the executable change.
 - Return 2–6 short steps that describe the actual work you will carry out. Each step must start with a verb and be specific enough to show in the interface as a to-do item.
+- While working, emit concise user-visible reasoning summaries about what you are inspecting, deciding, or validating. Do not expose private chain-of-thought.
 - kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
 - For scene requests, inspect the live source and attached rendered frames. Preserve locked layers, hand-edited channels, and unrelated work. Set reviewTimes to the most revealing moments. Return neutral section and chromeEdit fields.
 - kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand|popout|dock","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and popout/dock/collapse/expand for its window state. Never hide or collapse viewer. Never pop out viewer or timeline. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
@@ -1191,12 +1254,13 @@ RULES
 - kind=interface for a structured Timeline redesign. interfaceEdit must be one JSON-encoded manifest shaped like {"target":"timeline","patch":{"rowHeight":22..48,"gutterWidth":160..360,"rulerHeight":20..42,"clipRadius":0..12,"keyframeSize":4..12,"showLayerNumbers":boolean,"showTypeBadges":boolean,"toolbarDensity":"compact|normal","surfaceOrder":"normal|reversed"}}. Include only fields requested or clearly useful. This edits the Timeline view over the existing source; never rewrite layers or keyframes for an interface request.
 - kind=section for editable panels/controls. For a known reusable generated tool, set section.tool to an id from GENERATED TOOL CAPABILITIES and leave controls empty. The tool recipe supplies validated selection state, settings, Preview, Apply, and Undo controls. Return a neutral chromeEdit of {"target":"preview.cornerRadius","value":"square"}.
 - operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
-- A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, and button controls.
-- Every non-button control must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths.
+- A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, button, readout, and visual curve controls.
+- Every non-button control that edits project data must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths. A visual tool control may instead use stateKey only when a validated source-action button consumes that state.
 - The EDITABLE SOURCE CATALOG below is authoritative and complete for the current project. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
 - Do not create decorative or disconnected scene parameters. If a requested control has no source yet, prefer a scene or workspace action that creates useful editable source rather than refusing the whole request.
 - Buttons may use only one of the listed command ids. Never invent commands.
 - Advanced generated tools may use local settings with stateKey plus buttons whose action is a JSON-encoded safe transform action. A transform action is {"type":"transform","mode":"preview|apply","transform":{"label":"...","selector":{"scope":"selection|all|visible","types":[]},"order":"stack|reverseStack|selection|reverseSelection|start|reverseStart|name|random","edits":[{"path":"layer.from|layer.duration|layer.*|properties.*|content.*","value":EXPRESSION}]}}. Expressions are constants or objects using state, ref, aggregate, and bounded math ops from GENERATED TOOL CAPABILITIES. Prefer this declarative form when it can express the tool.
+- For a Flow-style easing tool, prefer section.tool="easing-flow". To author a custom version, use a curve control with stateKey="curve", defaultValue="[0.62,0.05,0,1]", min=-1, max=2, and preset names in options. Pair it with a JSON-encoded easing button action shaped like {"type":"easing","mode":"preview|apply","scope":"selected-keyframes","curveState":"curve","defaultCurve":[0.62,0.05,0,1]}. Curve handles are visual, draggable, keyboard-accessible tool state; the action applies them to real selected keyframes through one undoable source transaction.
 - When a generated tool genuinely needs loops, branching, computed layer counts, or create-many behavior, a button may instead use a JSON-encoded sandboxed script action: {"type":"script","mode":"preview|apply","label":"...","requiredTypes":["text"],"code":"JAVASCRIPT_FUNCTION_BODY"}. The function body receives a frozen PM SDK with project, composition, input, layers, selectedLayers, uid, clone, assert, emit, and typed command builders. It must return one command or an array of commands. It has no app DOM, storage, network, native bridge, or direct mutation access; its output is validated and applied atomically. Use PM.input for stateKey values. Pair an apply button with a preview button using the same code. Never attempt to escape the sandbox or access unavailable globals.
 - Include every control the user explicitly requests. For open-ended requests, prefer a focused set unless the user asks for all or everything, in which case include the complete relevant catalog. Use a short title and useful one-sentence note; avoid decorative filler.
 - For unused control fields, still return schema-safe neutral values: empty string/array, 0, or false.
@@ -1219,7 +1283,7 @@ ACTIVE PROMPT SCOPE
 ${JSON.stringify({ scope: S.scope, label: scopeLabel() })}
 
 CONVERSATION SO FAR
-${JSON.stringify(S.conversation.slice(0, -1).slice(-12))}
+${JSON.stringify(conversation)}
 
 SEMANTIC WORKSPACE MAP
 ${JSON.stringify(workspaceSemanticContext(workspace))}
@@ -1428,12 +1492,12 @@ function sanitizePlan(raw, context, request = '') {
   const baseId = slug(cleanText(sectionSource.id, cleanText(sectionSource.title, 'Generated section')));
   const controls = (Array.isArray(sectionSource.controls) ? sectionSource.controls : []).slice(0, 64).map((control, index) => {
     const c = control && typeof control === 'object' ? control : {};
-    let type = ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout'].includes(c.type) ? c.type : 'slider';
+    let type = ['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout', 'curve'].includes(c.type) ? c.type : 'slider';
     const label = cleanText(c.label, `Control ${index + 1}`, 60);
     const out = { type, label };
     if (type === 'readout') {
-      out.source = ['selection.summary', 'selection.count'].includes(c.source) ? c.source : 'selection.summary';
-      out.connection = 'Live selection';
+      out.source = ['selection.summary', 'selection.count', 'keyframes.summary', 'keyframes.count'].includes(c.source) ? c.source : 'selection.summary';
+      out.connection = out.source.startsWith('keyframes.') ? 'Live keyframes' : 'Live selection';
       return out;
     }
     if (type === 'button') {
@@ -1449,7 +1513,13 @@ function sanitizePlan(raw, context, request = '') {
     if (localKey && /^[a-z][a-z0-9_.-]{0,79}$/i.test(localKey)) {
       out.stateKey = localKey; out.connection = 'Tool setting';
       const sourceValue = c.def !== undefined ? c.def : c.defaultValue;
-      if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue).slice(0, 500);
+      if (type === 'curve') {
+        out.def = PM.Capabilities?.sanitizeCurve?.(sourceValue, [.62, .05, 0, 1]) || [.62, .05, 0, 1];
+        out.minY = PM.clamp(Number.isFinite(c.minY) ? c.minY : Number.isFinite(c.min) ? c.min : -1, -4, 0);
+        out.maxY = PM.clamp(Number.isFinite(c.maxY) ? c.maxY : Number.isFinite(c.max) ? c.max : 2, 1, 4);
+        out.presets = (Array.isArray(c.presets) ? c.presets : Array.isArray(c.options) ? c.options : [])
+          .filter(name => typeof name === 'string' && PM.Ease?.PRESETS?.[name]).slice(0, 16);
+      } else if (type === 'text') out.def = sourceValue == null ? '' : String(sourceValue).slice(0, 500);
       else if (type === 'color') out.def = /^#[0-9a-f]{6}$/i.test(sourceValue) ? sourceValue.toUpperCase() : '#FF6B1A';
       else if (type === 'toggle') out.def = !!sourceValue;
       else if (type === 'select') {
@@ -1641,6 +1711,20 @@ function uniqueSectionId(workspace, requested, keepId = '') {
   return `${requested}-${n}`;
 }
 
+function finishWorkspaceRun(checkpoint, summary, actions = []) {
+  const after = PM.WS.historySnapshot();
+  const historyId = PM.hist.external(
+    `Agent · ${summary}`,
+    () => PM.WS.restoreHistorySnapshot(checkpoint),
+    () => PM.WS.restoreHistorySnapshot(after),
+  );
+  finishSteps();
+  S.activity = ''; S.plan = null;
+  S.panelRun = { checkpoint, after, historyId, actions, summary };
+  S.conversation.push({ role: 'assistant', text: `${summary}. This change is in Undo history.` });
+  S.phase = 'result'; renderConversation();
+}
+
 async function applyPlan() {
   if (!S.plan || !['conversation', 'preview'].includes(S.phase)) return;
   const plan = S.plan;
@@ -1654,6 +1738,7 @@ async function applyPlan() {
   }
   S.phase = 'applying'; S.activity = 'Applying the editable change…'; setStepProgress(0); renderConversation();
   await new Promise(resolve => requestAnimationFrame(resolve));
+  const checkpoint = PM.WS.historySnapshot();
   if (plan.kind === 'workspace') {
     const manifest = plan.workspaceEdit;
     const created = PM.WS.create({
@@ -1663,27 +1748,29 @@ async function applyPlan() {
       layout: { docks: manifest.docks },
     });
     PM.toast(`Created workspace · ${created.name}`);
-    finishSteps();
-    S.plan = null; S.conversation.push({ role: 'assistant', text: `Created ${created.name}. You can keep asking me to adjust it.` });
-    S.activity = ''; S.phase = 'conversation'; renderConversation(true);
+    finishWorkspaceRun(checkpoint, `Created ${created.name}`);
     return;
   }
   if (plan.kind === 'chrome') {
     let changed = false;
     PM.WS.mutate(workspace => { changed = applyChromeEdit(workspace, plan.chromeEdit); });
     if (changed) PM.toast('Updated preview corner style');
-    finishSteps();
-    S.plan = null; S.conversation.push({ role: 'assistant', text: changed ? 'Applied the interface edit.' : 'That interface setting was already in place.' });
-    S.activity = ''; S.phase = 'conversation'; renderConversation(true);
+    if (changed) finishWorkspaceRun(checkpoint, 'Applied the interface edit');
+    else {
+      finishSteps(); S.plan = null; S.activity = ''; S.phase = 'conversation';
+      S.conversation.push({ role: 'assistant', text: 'That interface setting was already in place.' }); renderConversation(true);
+    }
     return;
   }
   if (plan.kind === 'interface') {
     let changed = false;
     PM.WS.mutate(workspace => { changed = PM.WS.applyInterfaceEdit(workspace, plan.interfaceEdit); });
     if (changed) PM.toast('Updated Timeline design');
-    finishSteps();
-    S.plan = null; S.conversation.push({ role: 'assistant', text: changed ? 'Applied the Timeline redesign without changing project source.' : 'Those Timeline settings were already in place.' });
-    S.activity = ''; S.phase = 'conversation'; renderConversation(true);
+    if (changed) finishWorkspaceRun(checkpoint, 'Applied the Timeline redesign');
+    else {
+      finishSteps(); S.plan = null; S.activity = ''; S.phase = 'conversation';
+      S.conversation.push({ role: 'assistant', text: 'Those Timeline settings were already in place.' }); renderConversation(true);
+    }
     return;
   }
   const current = PM.WS.current;
@@ -1716,13 +1803,11 @@ async function applyPlan() {
     }
   });
   PM.toast((replacing ? 'Redesigned ' : 'Added ') + plan.section.title);
-  finishSteps();
-  S.plan = null; S.conversation.push({ role: 'assistant', text: `${replacing ? 'Redesigned' : 'Added'} ${plan.section.title}. You can keep refining it here.` });
-  S.activity = ''; S.phase = 'conversation'; renderConversation(true);
+  finishWorkspaceRun(checkpoint, `${replacing ? 'Redesigned' : 'Added'} ${plan.section.title}`);
 }
 
 async function applyPanelPlan(plan) {
-  const checkpoint = PM.WS.snapshot();
+  const checkpoint = PM.WS.historySnapshot();
   S.phase = 'applying'; S.activity = 'Applying panel changes…'; setStepProgress(0); renderConversation();
   let result = { applied: [], runtime: [] };
   try {
@@ -1737,13 +1822,11 @@ async function applyPanelPlan(plan) {
       if (changed) result.applied.push(action);
     }
     if (!result.applied.length) throw new Error('Those panels were already arranged that way');
-    finishSteps(); S.activity = ''; S.plan = null;
-    S.panelRun = { checkpoint, actions: result.applied, summary: `${result.applied.length} panel change${result.applied.length === 1 ? '' : 's'} applied` };
-    S.conversation.push({ role: 'assistant', text: `${S.panelRun.summary}. You can keep the layout or undo it here.` });
-    S.phase = 'result'; renderConversation();
-    PM.toast(S.panelRun.summary);
+    const summary = `${result.applied.length} panel change${result.applied.length === 1 ? '' : 's'} applied`;
+    finishWorkspaceRun(checkpoint, summary, result.applied);
+    PM.toast(summary);
   } catch (error) {
-    PM.WS.restoreSnapshot(checkpoint);
+    PM.WS.restoreHistorySnapshot(checkpoint);
     const current = S.steps.find(step => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.plan = null; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
@@ -1753,8 +1836,15 @@ async function applyPanelPlan(plan) {
 
 function undoPanelRun() {
   if (!S.panelRun) return;
+  const checkpoint = S.panelRun.checkpoint;
   S.panelRun.actions.filter(action => action.type === 'popout').forEach(action => PM.Popout.dock(action.panelId));
-  PM.WS.restoreSnapshot(S.panelRun.checkpoint);
+  if (!PM.hist.undoIfTop(S.panelRun.historyId)) {
+    const current = PM.WS.historySnapshot();
+    PM.WS.restoreHistorySnapshot(checkpoint);
+    PM.hist.external('Restore before agent change',
+      () => PM.WS.restoreHistorySnapshot(current),
+      () => PM.WS.restoreHistorySnapshot(checkpoint));
+  }
   S.panelRun = null; S.phase = 'conversation';
   S.conversation.push({ role: 'assistant', text: 'I restored the previous panel layout.' });
   renderConversation(true); PM.toast('Panel changes undone');
@@ -1763,7 +1853,7 @@ function undoPanelRun() {
 function keepPanelRun() {
   if (!S.panelRun) return;
   S.panelRun = null; S.phase = 'conversation';
-  S.conversation.push({ role: 'assistant', text: 'Kept the panel layout. What should I change next?' });
+  S.conversation.push({ role: 'assistant', text: 'Kept the agent change. Command-Z can still reverse it.' });
   renderConversation(true);
 }
 
@@ -1796,7 +1886,7 @@ function showSceneResult(run) {
 function keepSceneRun() {
   if (!S.run) return;
   PM.toast('Kept agent change');
-  S.conversation.push({ role: 'assistant', text: `Kept ${S.run.applied.length} editable source changes. What should we adjust next?` });
+  S.conversation.push({ role: 'assistant', text: `Kept ${S.run.applied.length} editable source changes. Command-Z can still reverse the complete run.` });
   S.run = null; S.phase = 'conversation'; renderConversation(true);
 }
 

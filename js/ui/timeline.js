@@ -3,12 +3,36 @@
 const PM = window.PM, h = PM.h, clamp = PM.clamp;
 
 const T = {
-  gut: 214, row: 30, ruler: 26, pps: 90, scrollT: 0, scrollY: 0,
+  gut: 192, row: 26, ruler: 22, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null,
-  style: { clipRadius: 6, keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'normal' },
+  style: { clipRadius: 5, keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
 PM.TL = T;
+
+/* After Effects keeps the work area inside the composition. Powermove keeps
+   those same editing rules, with one useful extension: pulling the out marker
+   past the current composition end grows the composition instead of making the
+   handle appear stuck. These helpers stay pure so the gestures are testable. */
+const WORK_BAR = { top: 2, height: 8, hit: 9 };
+const WorkArea = PM.TimelineWorkArea = {
+  resize(work, idx, time, duration, frame) {
+    const span = Array.isArray(work) ? work : [0, duration];
+    const start = Math.max(0, Number(span[0]) || 0);
+    const end = Math.max(start + frame, Number(span[1]) || duration);
+    const t = Math.max(0, Number(time) || 0);
+    if (idx === 0) return { duration, workArea: [clamp(t, 0, end - frame), end] };
+    const nextEnd = Math.max(start + frame, t);
+    return { duration: Math.max(duration, nextEnd), workArea: [start, nextEnd] };
+  },
+  move(work, delta, duration, frame) {
+    const start = Math.max(0, Number(work[0]) || 0);
+    const end = Math.max(start + frame, Number(work[1]) || duration);
+    const span = Math.min(duration, end - start);
+    const nextStart = clamp(start + delta, 0, Math.max(0, duration - span));
+    return { workArea: [nextStart, nextStart + span] };
+  },
+};
 
 PM.registerPanel('timeline', {
   title: 'Timeline', flush: true, noscroll: true, persist: true, headless: true, size: 300, moveSlot: '#tl-head',
@@ -35,7 +59,7 @@ function buildHead(head) {
   const btn = (icon, fn, title) => h('button.iconbtn', { title, onclick: fn }, PM.icon(icon));
   const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
-  const zoom = h('input', { type: 'range', min: 8, max: 900, value: T.pps, step: 1 });
+  const zoom = h('input', { type: 'range', min: 8, max: 900, value: T.pps, step: 1, title: 'Timeline zoom', 'aria-label': 'Timeline zoom' });
   zoom.addEventListener('input', () => { T.pps = +zoom.value; PM.invalidate('timeline'); });
   const snap = h('button.iconbtn' + (PM.snap ? '.on' : ''), { title: 'Snapping (S)' }, PM.icon('magnet'));
   snap.onclick = () => { PM.snap = !PM.snap; snap.classList.toggle('on', PM.snap); };
@@ -44,16 +68,18 @@ function buildHead(head) {
   const loop = h('button.iconbtn' + (PM.loop ? '.on' : ''), { title: 'Loop' }, PM.icon('undo'));
   loop.onclick = () => { PM.loop = !PM.loop; loop.classList.toggle('on', PM.loop); };
 
-  head.append(
+  const transport = h('div.tl-group.tl-transport',
     btn('prev', () => PM.setTime(prevEdge()), 'Previous edge'),
     playBtn,
     btn('next', () => PM.setTime(nextEdge()), 'Next edge'),
     time,
-    h('span', { style: { flex: 1 } }),
-    h('div.zoomrow', h('span', '−'), zoom, h('span', '+')),
+  );
+  const view = h('div.tl-group.tl-view',
+    h('div.zoomrow', zoom),
     btn('frame', () => T.frameView(), 'Frame entire composition (⇧F)'),
     loop, snap, graph,
   );
+  head.append(transport, view);
   const sync = () => {
     time.textContent = PM.tc(PM.time, PM.proj.fps);
     playBtn.textContent = '';
@@ -68,8 +94,8 @@ function buildHead(head) {
 function refreshTimelineManifest() {
   const raw = PM.WS?.current?.chrome?.timeline || {};
   const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
-    rowHeight: 30, gutterWidth: 214, rulerHeight: 26, clipRadius: 6,
-    keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'normal',
+    rowHeight: 26, gutterWidth: 192, rulerHeight: 22, clipRadius: 5,
+    keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
   };
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
   T.style = config;
@@ -219,10 +245,10 @@ function drawInner() {
     console.log(msg);
   }
   if (T.marquee) {
-    c.strokeStyle = theme.accent; c.fillStyle = 'rgba(255,107,26,.10)';
+    c.save(); c.strokeStyle = theme.accent; c.fillStyle = 'rgba(255,107,26,.10)'; c.lineWidth = 1; c.setLineDash([4, 3]);
     const m = T.marquee;
     c.fillRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0);
-    c.strokeRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0);
+    c.strokeRect(m.x0 + .5, m.y0 + .5, m.x1 - m.x0 - 1, m.y1 - m.y0 - 1); c.restore();
   }
 }
 
@@ -252,11 +278,13 @@ function keepRowsVisible(rowIdx, childCount) {
 function drawTracksBg(c, W, H) {
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
   c.fillStyle = theme.sunken; c.fillRect(T.gut, T.ruler, W - T.gut, H - T.ruler);
-  /* work area */
+  /* Keep the active work area clear and shade only the range outside it. */
   const p = PM.proj;
   const wa = p.work || [0, p.dur];
+  const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
   c.fillStyle = INK.over;
-  c.fillRect(t2x(wa[0]), T.ruler, (wa[1] - wa[0]) * T.pps, H - T.ruler);
+  c.fillRect(T.gut, T.ruler, Math.max(0, x0 - T.gut), H - T.ruler);
+  c.fillRect(x1, T.ruler, Math.max(0, W - x1), H - T.ruler);
   /* second gridlines */
   const step = niceStep(T.pps);
   c.strokeStyle = INK.grid; c.lineWidth = 1;
@@ -291,7 +319,7 @@ function drawRuler(c, W, H) {
   c.strokeStyle = theme.line; c.beginPath(); c.moveTo(0, T.ruler - .5); c.lineTo(W, T.ruler - .5); c.stroke();
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, T.ruler); c.clip();
   const step = niceStep(T.pps);
-  c.font = '500 10px ' + fmono();
+  c.font = '500 10px ' + fui();
   c.fillStyle = theme.tx3; c.textBaseline = 'middle';
   c.strokeStyle = INK.tick;
   c.beginPath();
@@ -302,11 +330,24 @@ function drawRuler(c, W, H) {
     c.fillText(fmtRuler(t, step, p.fps), x + 4, T.ruler / 2 - 1);
   }
   c.stroke();
-  /* work area handles */
+  /* Work-area brackets stay visible without drawing a line across the ruler. */
   const wa = p.work || [0, p.dur];
-  c.fillStyle = INK.sub;
-  c.fillRect(t2x(wa[0]) - 1, 2, 3, 8); c.fillRect(t2x(wa[1]) - 1, 2, 3, 8);
+  const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
+  drawWorkBracket(c, x0, 0); drawWorkBracket(c, x1, 1);
   c.restore();
+}
+function drawWorkBracket(c, x, idx) {
+  const y = WORK_BAR.top, h = WORK_BAR.height, wing = 6;
+  c.fillStyle = INK.sub;
+  c.beginPath();
+  if (idx === 0) {
+    c.moveTo(x, y); c.lineTo(x + wing, y); c.lineTo(x + wing, y + 3);
+    c.lineTo(x + 2, y + 3); c.lineTo(x + 2, y + h); c.lineTo(x, y + h);
+  } else {
+    c.moveTo(x, y); c.lineTo(x - wing, y); c.lineTo(x - wing, y + 3);
+    c.lineTo(x - 2, y + 3); c.lineTo(x - 2, y + h); c.lineTo(x, y + h);
+  }
+  c.closePath(); c.fill();
 }
 function fmtRuler(t, step, fps) {
   if (step < 1) return PM.tc(t, fps).slice(-5);
@@ -314,7 +355,6 @@ function fmtRuler(t, step, fps) {
   return (m ? m + ':' : '0:') + String(s).padStart(2, '0');
 }
 const fui = () => '"Geist",-apple-system,system-ui,sans-serif';
-const fmono = () => '"Geist Mono",ui-monospace,Menlo,monospace';
 
 function drawClips(c, W, H) {
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
@@ -332,6 +372,28 @@ function rgba(hex, a) { const [r, g, b] = PM.hex2rgb(hex); return `rgba(${r * 25
 
 const BADGE = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
 const layerLabel = (L) => (T.style.showTypeBadges && BADGE[L.type] ? BADGE[L.type] + ' ' : '') + L.name;
+
+function drawAudioClipWaveform(c, L, { x, y, width, height }, darkText) {
+  const clipLeft = Math.max(x, T.gut);
+  c.save();
+  if (PM.Audio && typeof PM.Audio.drawWaveform === 'function') {
+    try {
+      PM.Audio.drawWaveform(c, L, { x, y, width, height, clipLeft });
+      c.restore();
+      return;
+    } catch (error) { /* Keep the timeline usable while waveform data is unavailable. */ }
+  }
+  const right = Math.min(x + width, T.w);
+  if (right > clipLeft) {
+    c.strokeStyle = darkText ? 'rgba(20,20,24,.24)' : 'rgba(255,255,255,.36)';
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(clipLeft, Math.round(y + height / 2) + .5);
+    c.lineTo(right, Math.round(y + height / 2) + .5);
+    c.stroke();
+  }
+  c.restore();
+}
 
 function drawClip(c, L, y) {
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
@@ -351,16 +413,9 @@ function drawClip(c, L, y) {
   c.fill();
   if (sel) { c.strokeStyle = INK.inv; c.lineWidth = 1.4; c.stroke(); }
   c.clip();
-  /* waveform-ish texture for audio */
-  if (L.type === 'audio') {
-    c.fillStyle = 'rgba(255,255,255,.4)';
-    const step = 3;
-    for (let x = Math.max(x0, T.gut); x < x1; x += step) {
-      const n = Math.abs(Math.sin(x * .21) * Math.sin(x * .073) * Math.sin(x * .0131));
-      const bh = 3 + n * (hh - 8);
-      c.fillRect(x, yy + (hh - bh) / 2, 1.4, bh);
-    }
-  }
+  if (L.type === 'audio') drawAudioClipWaveform(c, L, {
+    x: x0, y: yy, width: Math.max(4, x1 - x0), height: hh,
+  }, darkText);
   c.fillStyle = darkText ? 'rgba(20,20,24,.92)' : 'rgba(255,255,255,.96)';
   c.font = '560 11.5px ' + fui();
   c.textBaseline = 'middle';
@@ -400,7 +455,7 @@ function drawGutter(c, W, H) {
     if (r.kind === 'layer') {
       const L = r.L, sel = PM.sel.layers.includes(L.id);
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
-      c.font = '500 11px ' + fmono();
+      c.font = '500 11px ' + fui();
       c.fillStyle = theme.tx3; c.textBaseline = 'middle';
       if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
       /* eye / lock */
@@ -418,8 +473,8 @@ function drawGutter(c, W, H) {
       c.font = (sel ? '560 ' : '450 ') + '11.5px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
       clipText(c, L.name, 96, y + T.row / 2, T.gut - 130);
-      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fmono(); c.fillText('↳', T.gut - 24, y + T.row / 2); }
-      if (L.mblur) { c.fillStyle = theme.accent; c.font = '500 8.5px ' + fmono(); c.fillText('MB', T.gut - 15, y + T.row / 2); }
+      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fui(); c.fillText('↳', T.gut - 24, y + T.row / 2); }
+      if (L.mblur) { c.fillStyle = theme.accent; c.font = '500 8.5px ' + fui(); c.fillText('MB', T.gut - 15, y + T.row / 2); }
     } else {
       const L = r.L;
       c.font = '450 11px ' + fui();
@@ -427,7 +482,7 @@ function drawGutter(c, W, H) {
       clipText(c, r.label, 112, y + T.row / 2, T.gut - 150);
       /* value at playhead */
       const v = PM.evP(L, r.prop, PM.time, r.key);
-      c.font = '400 10px ' + fmono();
+      c.font = '400 10px ' + fui();
       c.fillStyle = INK.sub;
       c.textAlign = 'right';
       c.fillText(typeof v === 'number' ? PM.round(v, 1) : String(v).slice(0, 8), T.gut - 8, y + T.row / 2);
@@ -495,7 +550,7 @@ function drawGraph(c, W, H) {
   T._graph = { target, vmin, vmax, v2y, y2v: (y) => vmin + (bot - y) / (bot - top) * (vmax - vmin) };
 
   /* value gridlines */
-  c.strokeStyle = INK.grid; c.font = '400 9.5px ' + fmono(); c.fillStyle = theme.tx3;
+  c.strokeStyle = INK.grid; c.font = '400 9.5px ' + fui(); c.fillStyle = theme.tx3;
   for (let i = 0; i <= 4; i++) {
     const v = vmin + (vmax - vmin) * i / 4, y = Math.round(v2y(v)) + .5;
     c.beginPath(); c.moveTo(T.gut, y); c.lineTo(W, y); c.stroke();
@@ -574,58 +629,100 @@ function onMove(e) {
   const x = e.offsetX, y = e.offsetY;
   let cur = 'default';
   if (x > T.gut) {
+    const workHit = workAreaHit(x, y);
+    if (workHit) cur = workHit.kind === 'handle' ? 'ew-resize' : 'grab';
     const hr = hitRow(y);
-    if (hr && hr.row.kind === 'layer') {
+    if (!workHit && hr && hr.row.kind === 'layer') {
       const L = hr.row.L;
       const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
       if (Math.abs(x - x0) < 5 || Math.abs(x - x1) < 5) cur = 'ew-resize';
       else if (x > x0 && x < x1) cur = 'grab';
+    } else if (!workHit && hr && hr.row.kind === 'prop') {
+      const nearKey = hr.row.prop.kf.some(key => Math.abs(t2x(hr.row.L.from + key.t) - x) < 6);
+      cur = nearKey ? 'pointer' : 'crosshair';
     }
-    if (y < T.ruler) cur = 'ew-resize';
   }
   T.cv.style.cursor = cur;
+}
+
+function workAreaHit(x, y) {
+  if (y < WORK_BAR.top - 1 || y > WORK_BAR.top + WORK_BAR.height + 2) return null;
+  const wa = PM.proj.work || [0, PM.proj.dur];
+  const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
+  const d0 = Math.abs(x - x0), d1 = Math.abs(x - x1);
+  if (Math.min(d0, d1) <= WORK_BAR.hit) return { kind: 'handle', idx: d0 <= d1 ? 0 : 1 };
+  if (x > x0 && x < x1) return { kind: 'bar' };
+  return null;
 }
 
 function onDown(e) {
   const x = e.offsetX, y = e.offsetY;
   PM.closeMenus();
   if (y < T.ruler && x > T.gut) {
-    const wa = PM.proj.work || [0, PM.proj.dur];
-    const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
-    if (Math.abs(x - x0) < 6) return workAreaDrag(e, 0);
-    if (Math.abs(x - x1) < 6) return workAreaDrag(e, 1);
+    const hit = workAreaHit(x, y);
+    if (hit?.kind === 'handle') return workAreaDrag(e, hit.idx);
+    if (hit?.kind === 'bar') return workAreaMove(e);
     return scrub(e);
   }
   if (x < T.gut) return gutterDown(e, x, y);
   if (T.graph) return graphDown(e, x, y);
   const hr = hitRow(y);
-  if (!hr) { PM.selectLayers([]); return marquee(e); }
+  if (!hr) return marquee(e, { additive: e.shiftKey || e.metaKey });
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
   const L = r.L;
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
-  if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id, e.shiftKey || e.metaKey);
-  else if (e.shiftKey) PM.selectLayers(L.id, true);
-  if (L.lock) return;
+  const onClip = x >= x0 - 5 && x <= x1 + 5;
+  if (!onClip) return marquee(e, { clickTime: true, additive: e.shiftKey || e.metaKey });
+  if (!selectLayerForPointer(L, e.shiftKey || e.metaKey) || L.lock) return;
   if (Math.abs(x - x0) < 5) return trim(e, 'in');
   if (Math.abs(x - x1) < 5) return trim(e, 'out');
   if (x > x0 && x < x1) return slide(e);
-  scrub(e);
+}
+
+function selectLayerForPointer(L, additive) {
+  const selected = PM.sel.layers.includes(L.id);
+  if (!additive) {
+    if (!selected) PM.selectLayers(L.id);
+    return true;
+  }
+  PM.selectLayers(selected ? PM.sel.layers.filter(id => id !== L.id) : [...PM.sel.layers, L.id]);
+  return !selected;
 }
 
 function workAreaDrag(e, idx) {
+  const startWork = [...(PM.proj.work || [0, PM.proj.dur])];
+  const startDuration = PM.proj.dur;
+  const frame = 1 / Math.max(1, PM.proj.fps);
   PM.Edit.begin('Work area', { origin: 'timeline' });
   PM.drag(e, {
     cursor: 'ew-resize',
     move: (dx, dy, ev) => {
       const r = T.cv.getBoundingClientRect();
-      let t = Math.max(0, PM.snapF(x2t(ev.clientX - r.left), PM.proj.fps));
-      const wa = [...PM.proj.work];
-      wa[idx] = t;
-      if (wa[0] > wa[1]) { const o = wa[0]; wa[0] = wa[1]; wa[1] = o; idx = 1 - idx; }
-      if (wa[1] > wa[0]) PM.Edit.dispatch({ type: 'set_composition', patch: { workArea: wa } });
+      const t = Math.max(0, PM.snapF(x2t(ev.clientX - r.left), PM.proj.fps));
+      const patch = WorkArea.resize(startWork, idx, t, Math.max(startDuration, PM.proj.dur), frame);
+      PM.Edit.dispatch({ type: 'set_composition', patch });
     },
     up: () => PM.Edit.commit('Work area'),
+    cancel: () => PM.Edit.cancel(),
+  });
+}
+
+function workAreaMove(e) {
+  const startWork = [...(PM.proj.work || [0, PM.proj.dur])];
+  const duration = PM.proj.dur;
+  const frame = 1 / Math.max(1, PM.proj.fps);
+  PM.Edit.begin('Move work area', { origin: 'timeline' });
+  let moved = false;
+  PM.drag(e, {
+    cursor: 'grabbing',
+    move: (dx) => {
+      if (!moved && Math.abs(dx) < 2) return;
+      moved = true;
+      const delta = PM.snapF(dx / T.pps, PM.proj.fps);
+      PM.Edit.dispatch({ type: 'set_composition', patch: WorkArea.move(startWork, delta, duration, frame) });
+    },
+    up: () => moved ? PM.Edit.commit('Move work area') : PM.Edit.cancel(),
     cancel: () => PM.Edit.cancel(),
   });
 }
@@ -658,7 +755,7 @@ function gutterDown(e, x, y) {
     PM.invalidate('timeline');
     return;
   }
-  PM.selectLayers(L.id, e.shiftKey || e.metaKey);
+  if (!selectLayerForPointer(L, e.shiftKey || e.metaKey)) return;
   /* drag to reorder */
   const startIdx = PM.proj.layers.indexOf(L);
   let done = false;
@@ -738,22 +835,27 @@ function trimInCommands(L, from) {
 }
 
 function keyDown(e, r, x, y, rowIdx) {
+  const additive = e.shiftKey || e.metaKey;
   PM.sel.chan = r.key;
-  PM.selectLayers(r.L.id);
   const hit = r.prop.kf.find(k => Math.abs(t2x(r.L.from + k.t) - x) < 6);
-  if (!hit) { PM.sel.keys = []; PM.invalidate('timeline'); return scrub(e); }
-  if (e.shiftKey) PM.sel.keys.push(hit);
-  else if (!PM.sel.keys.some(k => k.i === hit.i)) PM.sel.keys = [hit];
-  const keys = PM.sel.keys.length ? PM.sel.keys : [hit];
-  const start = keys.map(k => ({ k, t: k.t }));
+  if (!hit) return marquee(e, { clickTime: true, additive });
+  const wasSelected = keySelected(hit);
+  if (additive) PM.selectLayers(r.L.id, true);
+  else if (!PM.sel.layers.includes(r.L.id)) PM.selectLayers(r.L.id);
+  if (additive) {
+    setSelectedKeys(wasSelected ? PM.sel.keys.filter(k => k.i !== hit.i) : [...PM.sel.keys, hit]);
+    if (wasSelected) return;
+  } else if (!wasSelected) setSelectedKeys([hit]);
+  const entries = selectedKeyEntries();
+  const start = entries.map(entry => ({ ...entry, t: entry.key.t }));
   PM.hist.begin('Move keyframe');
   let moved = false;
   PM.drag(e, {
     move: (dx) => {
       moved = true;
       const dt = PM.snapF(dx / T.pps, PM.proj.fps);
-      start.forEach(s => { s.k.t = Math.max(0, s.t + dt); });
-      r.prop.kf.sort((a, b) => a.t - b.t);
+      start.forEach(s => { s.key.t = Math.max(0, s.t + dt); });
+      [...new Set(start.map(s => s.prop))].forEach(prop => prop.kf.sort((a, b) => a.t - b.t));
       PM.touch(); PM.invalidate();
     },
     up: () => { moved ? PM.hist.commit('Move keyframe') : PM.hist.cancel(); PM.invalidate('timeline'); },
@@ -769,14 +871,25 @@ function graphDown(e, x, y) {
     if (k._hi && Math.hypot(x - k._hi[0], y - k._hi[1]) < 7) return dragHandle(e, k, 'ei', g, kf, L);
   }
   const hit = kf.find(k => k._pt && Math.hypot(x - k._pt[0], y - k._pt[1]) < 8);
-  if (!hit) return scrub(e);
-  PM.sel.keys = e.shiftKey ? [...PM.sel.keys, hit] : [hit];
-  const start = { t: hit.t, v: hit.v };
+  if (!hit) return marquee(e, { clickTime: true, additive: e.shiftKey || e.metaKey, graph: true });
+  const additive = e.shiftKey || e.metaKey;
+  const wasSelected = keySelected(hit);
+  if (additive) PM.selectLayers(L.id, true);
+  else if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
+  if (additive) {
+    setSelectedKeys(wasSelected ? PM.sel.keys.filter(k => k.i !== hit.i) : [...PM.sel.keys, hit]);
+    if (wasSelected) return;
+  } else if (!wasSelected) setSelectedKeys([hit]);
+  const selected = kf.filter(keySelected);
+  const start = selected.map(key => ({ key, t: key.t, v: key.v }));
   PM.hist.begin('Edit curve');
   PM.drag(e, {
     move: (dx, dy) => {
-      hit.t = Math.max(0, PM.snapF(start.t + dx / T.pps, PM.proj.fps));
-      hit.v = PM.round(start.v + (g.y2v(0) - g.y2v(dy)) * -1, 3);
+      const dv = (g.y2v(0) - g.y2v(dy)) * -1;
+      start.forEach(item => {
+        item.key.t = Math.max(0, PM.snapF(item.t + dx / T.pps, PM.proj.fps));
+        item.key.v = PM.round(item.v + dv, 3);
+      });
       kf.sort((a, b) => a.t - b.t);
       PM.touch(); PM.invalidate();
     },
@@ -804,16 +917,77 @@ function dragHandle(e, k, which, g, kf, L) {
   });
 }
 
-function marquee(e) {
+function keySelected(key) { return PM.sel.keys.some(item => item.i === key.i); }
+function uniqueKeys(keys) {
+  const seen = new Set();
+  return keys.filter(key => key && key.i && !seen.has(key.i) && seen.add(key.i));
+}
+function setSelectedKeys(keys, layerIds) {
+  PM.sel.keys = uniqueKeys(keys);
+  if (layerIds) PM.sel.layers = [...new Set(layerIds)];
+  PM.bus.emit('sel');
+  PM.invalidate();
+}
+function selectedKeyEntries() {
+  const ids = new Set(PM.sel.keys.map(key => key.i));
+  const entries = [];
+  PM.proj.layers.forEach(L => PM.allProps(L).forEach(({ prop }) => prop.kf.forEach(key => {
+    if (ids.has(key.i)) entries.push({ key, prop, L });
+  })));
+  return entries;
+}
+function keysInMarquee(m, graph = false) {
+  const picked = [];
+  if (graph) {
+    const target = T._graph && T._graph.target;
+    (target ? target.prop.kf : []).forEach(key => {
+      if (key._pt && key._pt[0] >= m.x0 && key._pt[0] <= m.x1 && key._pt[1] >= m.y0 && key._pt[1] <= m.y1) picked.push(key);
+    });
+    return picked;
+  }
+  T.rows.forEach((row, i) => {
+    if (row.kind !== 'prop') return;
+    const cy = rowY(i) + T.row / 2;
+    if (cy < m.y0 || cy > m.y1) return;
+    row.prop.kf.forEach(key => {
+      const x = t2x(row.L.from + key.t);
+      if (x >= m.x0 && x <= m.x1) picked.push(key);
+    });
+  });
+  return picked;
+}
+function layersForKeys(keys) {
+  const ids = new Set(keys.map(key => key.i)), layers = [];
+  PM.proj.layers.forEach(L => {
+    if (PM.allProps(L).some(({ prop }) => prop.kf.some(key => ids.has(key.i)))) layers.push(L.id);
+  });
+  return layers;
+}
+
+function marquee(e, opt = {}) {
   const r = T.cv.getBoundingClientRect();
   const x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+  const additive = !!opt.additive;
+  const baseKeys = additive ? [...PM.sel.keys] : [];
+  const baseLayers = additive ? [...PM.sel.layers] : [];
+  let dragged = false;
   PM.drag(e, {
     move: (dx, dy) => {
+      if (!dragged && Math.hypot(dx, dy) < 3) return;
+      dragged = true;
       T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
+      const picked = keysInMarquee(T.marquee, !!opt.graph);
+      setSelectedKeys([...baseKeys, ...picked], [...baseLayers, ...layersForKeys([...baseKeys, ...picked])]);
       PM.invalidate('timeline');
     },
     up: () => {
-      if (T.marquee) {
+      if (!dragged) {
+        if (opt.clickTime) {
+          if (!additive) setSelectedKeys([], []);
+          PM.setTime(x2t(x0));
+        }
+        else { PM.selectLayers([]); setSelectedKeys([]); }
+      } else if (T.marquee && !PM.sel.keys.length) {
         const m = T.marquee;
         const picked = [];
         T.rows.forEach((row, i) => {
@@ -824,7 +998,7 @@ function marquee(e) {
             if (b > m.x0 && a < m.x1) picked.push(row.L.id);
           }
         });
-        if (picked.length) PM.selectLayers(picked);
+        PM.selectLayers([...baseLayers, ...picked]);
       }
       T.marquee = null; PM.invalidate('timeline');
     },
@@ -834,6 +1008,11 @@ function marquee(e) {
 
 function onDbl(e) {
   const x = e.offsetX, y = e.offsetY;
+  const workHit = x > T.gut && workAreaHit(x, y);
+  if (workHit?.kind === 'bar') {
+    PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Reset work area', origin: 'timeline' });
+    return;
+  }
   if (x < T.gut && y > T.ruler) {
     const hr = hitRow(y);
     if (hr && hr.row.kind === 'layer' && x > 90) renameLayer(hr.row.L, hr.i);

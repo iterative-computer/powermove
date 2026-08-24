@@ -25,6 +25,7 @@ const OP_ARITY = Object.freeze({
 });
 const REFS = new Set(['current', 'index', 'count', 'fps', 'playhead', 'composition.duration']);
 const AGGREGATES = new Set(['min', 'max', 'first', 'last', 'sum', 'average']);
+const DEFAULT_CURVE = Object.freeze([.62, .05, 0, 1]);
 
 const clone = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const cleanText = (value, fallback = '', max = 100) => typeof value === 'string' && value.trim()
@@ -34,6 +35,18 @@ const stateKey = value => typeof value === 'string' && SAFE_KEY.test(value) ? va
 const pathAllowed = path => LAYER_PATHS.has(path)
   || (/^properties\.[a-z0-9_.-]{1,120}$/i.test(path))
   || (/^content\.[a-z0-9_.-]{1,120}$/i.test(path));
+
+function sanitizeCurve(value, fallback = null) {
+  let source = value;
+  if (typeof source === 'string') {
+    source = PM.Ease?.PRESETS?.[source] || (() => { try { return JSON.parse(source); } catch { return null; } })();
+  }
+  if (!Array.isArray(source) || source.length !== 4 || !source.every(finite)) return fallback ? [...fallback] : null;
+  return [
+    PM.clamp(source[0], 0, 1), PM.clamp(source[1], -4, 4),
+    PM.clamp(source[2], 0, 1), PM.clamp(source[3], -4, 4),
+  ].map(value => PM.round(value, 3));
+}
 
 function sanitizeExpression(value, budget = { nodes: 0 }, depth = 0) {
   budget.nodes++;
@@ -117,6 +130,14 @@ function sanitizeControlAction(raw) {
   }
   if (source.type === 'history' && source.command === 'undo') return { type: 'history', command: 'undo' };
   if (source.type === 'reset') return { type: 'reset' };
+  if (source.type === 'easing' && ['preview', 'apply'].includes(source.mode)) {
+    const curveState = stateKey(source.curveState);
+    if (!curveState || (source.scope && source.scope !== 'selected-keyframes')) return null;
+    return {
+      type: 'easing', mode: source.mode, scope: 'selected-keyframes', curveState,
+      defaultCurve: sanitizeCurve(source.defaultCurve, DEFAULT_CURVE),
+    };
+  }
   if (source.type === 'script' && ['preview', 'apply'].includes(source.mode)) {
     const code = typeof source.code === 'string' && source.code.trim().length <= 40_000 ? source.code.trim() : '';
     if (!code) return null;
@@ -288,6 +309,44 @@ function selectionSummary() {
   return `${selected.length} layer${selected.length === 1 ? '' : 's'} selected`;
 }
 
+function selectedKeyframes() {
+  const seen = new Set();
+  return (PM.sel?.keys || []).filter(key => {
+    if (!key?.i || seen.has(key.i)) return false;
+    seen.add(key.i); return true;
+  });
+}
+
+function keyframeSummary() {
+  const count = selectedKeyframes().length;
+  return count ? `${count} keyframe${count === 1 ? '' : 's'} selected` : 'No keyframes selected';
+}
+
+function easingResult(action, state = {}) {
+  const keys = selectedKeyframes();
+  if (!keys.length) return { ok: false, message: 'Select at least one keyframe', commands: [], changes: [] };
+  const curve = sanitizeCurve(state[action.curveState], action.defaultCurve || DEFAULT_CURVE);
+  const name = PM.Ease?.nameOf?.([curve[0], curve[1]], [curve[2], curve[3]]) || 'custom';
+  const changes = keys.map(key => ({
+    target: key.i, name: 'Keyframe', path: 'easing',
+    before: PM.Ease?.nameOf?.(key.eo || [0, 0], key.ei || [1, 1]) || 'custom', after: name,
+  }));
+  return {
+    ok: true, message: `${keys.length} keyframe${keys.length === 1 ? '' : 's'} ready`,
+    curve, changes, commands: [{ type: 'set_easing', keyframes: keys.map(key => key.i), curve }],
+  };
+}
+
+function previewEasing(action, state) { return easingResult(action, state); }
+function applyEasing(action, state, meta = {}) {
+  const result = easingResult(action, state);
+  if (!result.ok) return result;
+  const applied = PM.Edit.apply(result.commands, {
+    label: meta.label || 'Apply easing', origin: meta.origin || 'generated-tool',
+  });
+  return { ...result, ...applied, changes: result.changes };
+}
+
 function staggerTransform(mode = 'apply') {
   return {
     type: 'transform', mode,
@@ -348,6 +407,19 @@ function decomposeTextAction(mode = 'apply') {
 }
 
 function panelRecipe(id) {
+  if (id === 'easing-flow') return {
+    id: 'easing-flow', title: 'Easing Flow', size: 430,
+    note: 'Shape a reusable timing curve, then apply it to the selected keyframes as one editable source change.',
+    state: { curve: [...DEFAULT_CURVE] },
+    controls: [
+      { type: 'readout', label: 'Target', source: 'keyframes.summary' },
+      { type: 'curve', label: 'Easing curve', stateKey: 'curve', def: [...DEFAULT_CURVE], minY: -1, maxY: 2,
+        presets: ['linear', 'easeIn', 'easeOut', 'easeInOut', 'power', 'snap', 'glide', 'backOut'] },
+      { type: 'button', label: 'Preview', action: { type: 'easing', mode: 'preview', scope: 'selected-keyframes', curveState: 'curve', defaultCurve: [...DEFAULT_CURVE] } },
+      { type: 'button', label: 'Apply easing', primary: true, action: { type: 'easing', mode: 'apply', scope: 'selected-keyframes', curveState: 'curve', defaultCurve: [...DEFAULT_CURVE] } },
+      { type: 'button', label: 'Undo last edit', action: { type: 'history', command: 'undo' } },
+    ],
+  };
   if (id === 'layer-stagger') return {
     id: 'layer-stagger', title: 'Layer Stagger', size: 300,
     note: 'Offset complete selected layers while preserving their duration and editable source.',
@@ -391,19 +463,21 @@ function panelRecipe(id) {
 function catalog() {
   return {
     version: 1,
-    generatedTools: ['layer-stagger', 'decompose-text'],
+    generatedTools: ['easing-flow', 'layer-stagger', 'decompose-text'],
     scripting: PM.Script?.catalog?.() || { language: 'sandboxed-javascript', status: 'loads after capabilities' },
     selectors: [...SCOPES],
     orders: [...ORDERS],
     paths: ['layer.*', 'properties.*', 'content.*'],
     expressions: [...OPS],
+    visualControls: ['curve'],
+    sourceActions: ['easing', 'transform', 'script'],
     guarantees: ['locked layers skipped', 'dry-run preview', 'validated source commands', 'one-step undo'],
   };
 }
 
 PM.Capabilities = {
-  sanitizeTransform, sanitizeControlAction, resolveTargets, compile, preview, apply,
-  panelRecipe, selectionSummary, catalog,
+  sanitizeTransform, sanitizeControlAction, sanitizeCurve, resolveTargets, compile, preview, apply,
+  previewEasing, applyEasing, selectedKeyframes, panelRecipe, selectionSummary, keyframeSummary, catalog,
   test: { sanitizeExpression, evaluate, orderedTargets, getPath },
 };
 })();

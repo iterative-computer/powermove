@@ -143,6 +143,31 @@ test('the reusable Layer Stagger recipe exposes selection, settings, preview, ap
   assert.equal(panel.controls.find(control => control.label === 'Apply Stagger').action.type, 'transform');
 });
 
+test('Flow-style generated tools get a visual curve and apply it through source history', () => {
+  const PM = runtime();
+  const [layer] = addLayers(PM, [0]);
+  const first = PM.setKeyOn(layer.p.opacity, 0, 0, 'linear', PM.proj.fps);
+  const second = PM.setKeyOn(layer.p.opacity, 1, 100, 'linear', PM.proj.fps);
+  PM.sel.keys = [first, second];
+  const panel = PM.Capabilities.panelRecipe('easing-flow');
+  const curve = panel.controls.find(control => control.type === 'curve');
+  const apply = panel.controls.find(control => control.action?.type === 'easing' && control.action.mode === 'apply');
+  const original = [...first.eo, ...first.ei];
+
+  assert.equal(curve.stateKey, 'curve');
+  assert.ok(curve.presets.includes('easeInOut'));
+  assert.equal(PM.Capabilities.keyframeSummary(), '2 keyframes selected');
+  const preview = PM.Capabilities.previewEasing(apply.action, { curve: [.2, .8, .3, 1] });
+  assert.equal(preview.ok, true);
+  assert.deepEqual([...first.eo, ...first.ei], original, 'preview never mutates keyframes');
+  const result = PM.Capabilities.applyEasing(apply.action, { curve: [.2, .8, .3, 1] });
+  assert.equal(result.ok, true);
+  assert.deepEqual([...first.eo, ...first.ei], [.2, .8, .3, 1]);
+  assert.equal(PM.proj.edits.at(-1).origin, 'generated-tool');
+  assert.equal(PM.hist.undo(), true);
+  assert.deepEqual([...PM.L(layer.id).p.opacity.kf[0].eo, ...PM.L(layer.id).p.opacity.kf[0].ei], original);
+});
+
 test('Decompose Text is a reusable sandboxed tool rather than a panel of generic shortcuts', () => {
   const PM = runtime();
   const panel = PM.Capabilities.panelRecipe('decompose-text');

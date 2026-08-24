@@ -210,82 +210,194 @@ function assetKind(file) {
   const mime = String(file.type || '').toLowerCase();
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
-  if (mime.startsWith('audio/')) return 'audio';
+  if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = String(file.name || '').split('.').pop().toLowerCase();
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp'].includes(ext)) return 'image';
   if (['mp4', 'mov', 'm4v', 'webm'].includes(ext)) return 'video';
-  if (['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'aif', 'aiff'].includes(ext)) return 'audio';
   return null;
 }
 PM.assetKind = assetKind;
+function disposeAsset(a) {
+  if (!a) return;
+  if (a.kind === 'audio' && PM.Audio) PM.Audio.disposeAsset(a);
+  try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
+  try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
+  if (a.url && String(a.url).startsWith('blob:')) URL.revokeObjectURL(a.url);
+}
+function waitForVideoMetadata(el, timeout = 15000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      el.removeEventListener('loadedmetadata', loaded);
+      el.removeEventListener('durationchange', loaded);
+      el.removeEventListener('error', failed);
+      error ? reject(error) : resolve();
+    };
+    const loaded = () => {
+      const duration = Number(el.duration);
+      if (Number.isFinite(duration) && duration > 0) finish();
+    };
+    const failed = () => finish(new Error('Could not read this video file'));
+    const timer = setTimeout(() => finish(new Error('Timed out reading video metadata')), timeout);
+    el.addEventListener('loadedmetadata', loaded);
+    el.addEventListener('durationchange', loaded);
+    el.addEventListener('error', failed);
+    loaded();
+  });
+}
 async function prepareAsset({ id, name, kind, blob, meta = {} }) {
+  if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   const url = URL.createObjectURL(blob);
   let el, w = 0, hh = 0, dur = 0;
   try {
     if (kind === 'image') {
-      el = new Image(); el.src = url;
-      await el.decode().catch(() => {});
-      w = el.naturalWidth; hh = el.naturalHeight;
-    } else {
-      el = document.createElement(kind === 'video' ? 'video' : 'audio');
-      el.src = url; el.preload = 'auto'; el.muted = kind === 'video'; el.playsInline = true;
-      await new Promise(r => { el.onloadedmetadata = r; el.onerror = r; setTimeout(r, 6000); });
-      if (el.error || (kind === 'audio' && !(Number.isFinite(el.duration) && el.duration > 0))) {
-        throw new Error(kind === 'audio'
-          ? 'Could not read this audio file · try WAV, MP3, M4A, AAC, OGG, or FLAC'
-          : 'Could not read this video file');
+      if (window.createImageBitmap) {
+        try { el = await window.createImageBitmap(blob); } catch (e) { }
+        if (el) { w = el.width; hh = el.height; }
       }
+      if (!el) {
+        el = new Image(); el.src = url;
+        await el.decode();
+        w = el.naturalWidth; hh = el.naturalHeight;
+      }
+      if (!(w > 0 && hh > 0)) throw new Error('Could not read this image file');
+    } else if (kind === 'video') {
+      el = document.createElement('video');
+      el.preload = 'metadata'; el.muted = true; el.playsInline = true;
+      const ready = waitForVideoMetadata(el);
+      el.src = url;
+      try { el.load(); } catch (e) { }
+      await ready;
       w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
-    }
+    } else throw new Error('Unsupported media kind');
     return {
       id, name, kind, url, el,
       w: w || meta.w || 0, h: hh || meta.h || 0,
       dur: dur || meta.dur || 0, size: blob.size || meta.size || 0,
     };
   } catch (error) {
+    try { if (el && el.close) el.close(); } catch (e) { }
     URL.revokeObjectURL(url);
     throw error;
   }
 }
+let assetEpoch = 0;
+async function ingestAsset(file, { silent = false } = {}) {
+  const kind = assetKind(file);
+  if (!kind) throw new Error('Unsupported media file');
+  const fingerprint = await PM.MediaImport.fingerprint(file);
+  const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
+  const provisionalId = PM.uid('a');
+  /* Persistence and metadata decoding are independent. Starting both together
+     removes a full-file wait from the critical import path. */
+  const persist = PM.MediaStore.put(storageKey, file, { storageKey, fingerprint, type: file.type });
+  const prepared = await prepareAsset({ id: provisionalId, name: file.name, kind, blob: file });
+  const persisted = await persist;
+  const identity = {
+    name: file.name, kind, fingerprint, storageKey,
+    size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
+    channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
+  };
+  const plan = PM.MediaImport.match(PM.proj, PM.assets.map, identity);
+  const existingMeta = plan.canonicalId && PM.proj.assets[plan.canonicalId];
+  const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
+  const wasMissing = !!(existingMeta && !existingLive);
+  const id = plan.canonicalId || provisionalId;
+  let asset = prepared;
+  if (existingLive) {
+    disposeAsset(prepared);
+    asset = existingLive;
+  } else {
+    asset.id = id;
+    PM.assets.map.set(id, asset);
+  }
+  Object.assign(asset, identity, { id, persisted });
+  PM.proj.assets[id] = { id, ...identity, persisted };
+  const relinkedLayers = PM.MediaImport.coalesce(PM.proj, id, plan.aliases);
+  plan.aliases.forEach(alias => {
+    const duplicate = PM.assets.map.get(alias);
+    if (duplicate && duplicate !== asset) disposeAsset(duplicate);
+    PM.assets.map.delete(alias);
+  });
+  const relinked = wasMissing || plan.aliases.length > 0;
+  const result = {
+    asset,
+    status: relinked ? 'relinked' : existingLive ? 'reused' : 'created',
+    relinkedLayers,
+    retiredAssets: plan.aliases.length,
+    persisted,
+  };
+  if (!silent) {
+    PM.touch();
+    PM.bus.emit('assets');
+    if (relinkedLayers) PM.bus.emit('layers');
+  }
+  return result;
+}
 PM.assets = {
   map: new Map(),
-  async add(file) {
-    const id = PM.uid('a');
-    const kind = assetKind(file);
-    if (!kind) throw new Error('Unsupported media file');
-    const a = await prepareAsset({ id, name: file.name, kind, blob: file });
-    a.persisted = await PM.MediaStore.put(id, file);
-    PM.assets.map.set(id, a);
-    PM.proj.assets[id] = { id, name: file.name, kind, w: a.w, h: a.h, dur: a.dur, size: a.size };
-    PM.bus.emit('assets');
-    return a;
+  async add(file, options) {
+    const result = await ingestAsset(file, options);
+    result.asset.importResult = result;
+    return result.asset;
+  },
+  async importBatch(files, { concurrency, onProgress } = {}) {
+    const list = Array.from(files || []);
+    const cores = Math.max(1, Number(window.navigator && window.navigator.hardwareConcurrency) || 4);
+    const limit = concurrency == null ? Math.max(1, Math.min(3, Math.floor(cores / 2))) : concurrency;
+    let completed = 0;
+    const results = await PM.MediaImport.mapBounded(list, limit, async (file, index) => {
+      let result;
+      try { result = await ingestAsset(file, { silent: true }); }
+      catch (error) { result = { file, status: 'failed', error }; }
+      completed++;
+      if (onProgress) onProgress({ completed, total: list.length, index, file, result });
+      return result;
+    });
+    if (results.some(result => result.status !== 'failed')) {
+      PM.touch();
+      PM.bus.emit('assets');
+      if (results.some(result => result.relinkedLayers)) PM.bus.emit('layers');
+    }
+    return results;
   },
   get: (id) => PM.assets.map.get(id),
   clear() {
-    for (const a of PM.assets.map.values()) {
-      try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
-      if (a.url && String(a.url).startsWith('blob:')) URL.revokeObjectURL(a.url);
-    }
+    assetEpoch++;
+    for (const a of PM.assets.map.values()) disposeAsset(a);
     PM.assets.map.clear();
   },
   async restoreProject(project) {
-    const ready = [], missing = [];
-    for (const meta of Object.values(project && project.assets || {})) {
-      if (!meta || !meta.id || !['image', 'video', 'audio'].includes(meta.kind)) continue;
-      const blob = await PM.MediaStore.get(meta.id);
-      if (!blob) { missing.push(meta); continue; }
+    const epoch = assetEpoch;
+    const metas = Object.values(project && project.assets || {})
+      .filter(meta => meta && meta.id && ['image', 'video', 'audio'].includes(meta.kind));
+    const restored = [], missing = [];
+    const results = await PM.MediaImport.mapBounded(metas, 3, async meta => {
+      if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
+      const blob = await PM.MediaStore.get(meta);
+      if (!blob) return { meta, missing: true };
       try {
-        const a = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
-        a.persisted = true;
-        ready.push(a);
-      } catch (e) { missing.push(meta); }
-    }
-    if (PM.proj !== project) {
-      ready.forEach(a => URL.revokeObjectURL(a.url));
+        const asset = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
+        Object.assign(asset, {
+          fingerprint: meta.fingerprint, storageKey: meta.storageKey, persisted: true,
+          channels: asset.channels || meta.channels || 0,
+          sampleRate: asset.sampleRate || meta.sampleRate || 0,
+        });
+        return { asset };
+      } catch (error) { return { meta, missing: true, error }; }
+    });
+    results.forEach(result => {
+      if (result.asset) restored.push(result.asset);
+      else if (result.missing) missing.push(result.meta);
+    });
+    if (epoch !== assetEpoch || PM.proj !== project) {
+      restored.forEach(disposeAsset);
       return { restored: [], missing: [], stale: true };
     }
-    ready.forEach(a => PM.assets.map.set(a.id, a));
-    const restored = ready;
+    restored.forEach(a => PM.assets.map.set(a.id, a));
     return { restored, missing };
   },
   /** Procedural placeholder so demo projects work with zero imports. */

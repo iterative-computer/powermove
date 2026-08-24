@@ -1,7 +1,7 @@
 /* Powermove — application bootstrap, project I/O, shell, autosave. */
 (() => {
 const PM = window.PM, h = PM.h, $ = PM.$;
-const APP = { fileHandle: null, dirty: false, saveTimer: 0 };
+const APP = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
 PM.app = APP;
 
 /* ── appearance (light default, dark alternate) ────────── */
@@ -96,6 +96,7 @@ function hydrate(p) {
       L.on = L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
       L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
       L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
+      if (L.type === 'audio') PM.Audio.normalizeLayer(L);
       if (L.parent === L.id || (typeof L.parent === 'string' && !container.layers.some(o => o.id === L.parent))) L.parent = null;
       const fresh = PM.mkLayer(L.type || 'null', {}, container);
       Object.keys(fresh.p).forEach(k => {
@@ -105,6 +106,7 @@ function hydrate(p) {
       Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
       L.fx = L.fx.filter(f => f && typeof f === 'object' && PM.FX && PM.FX[f.type]);
       L.fx.forEach(f => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
+      if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].effects === false) L.fx = [];
       /* masks: validate shape/mode and every animatable channel */
       L.masks = Array.isArray(L.masks) ? L.masks.filter(m => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
       L.masks.forEach(m => {
@@ -119,6 +121,7 @@ function hydrate(p) {
         });
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
+      if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
       if (L.type === 'shader') PM.syncShaderUniforms(L);
     });
   };
@@ -571,27 +574,61 @@ function switchProject(p) {
 
 /* ── media import ──────────────────────────────────────── */
 PM.pickFiles = () => {
-  const inp = h('input', { type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.pmv' });
-  inp.onchange = () => PM.importFiles([...inp.files]); inp.click();
+  const inp = h('input', {
+    type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.pmv',
+    style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
+  });
+  const cleanup = () => { inp.onchange = null; inp.remove(); };
+  inp.onchange = async () => {
+    const files = [...inp.files];
+    try { if (files.length) await PM.importFiles(files); }
+    finally { cleanup(); }
+  };
+  inp.addEventListener('cancel', cleanup, { once: true });
+  document.body.appendChild(inp);
+  inp.click();
 };
-PM.importFiles = async (files) => {
-  let imported = 0;
-  const importedNames = [];
+async function importFiles(files) {
+  const mediaFiles = [];
   for (const f of files) {
     if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
     if (!PM.assetKind(f)) { PM.toast('Unsupported file · ' + f.name); continue; }
-    try {
-      const a = await PM.assets.add(f);
-      PM.cmd('addFromAsset', a.id);
-      imported++;
-      importedNames.push(f.name);
-      if (!a.persisted) PM.toast('Imported, but this browser could not save the media for the next launch', 5000);
-    } catch (err) { PM.toast(err.message || ('Could not import ' + f.name), 5000); }
+    mediaFiles.push(f);
   }
-  if (imported) {
+  if (!mediaFiles.length) return;
+  const importAt = PM.time;
+  if (mediaFiles.length > 1) PM.toast(`Preparing ${mediaFiles.length} media files…`, 2400);
+  const results = await PM.assets.importBatch(mediaFiles, {
+    onProgress: progress => PM.bus.emit('import:progress', progress),
+  });
+  const failures = results.filter(result => result.status === 'failed');
+  failures.forEach(result => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000));
+  const layerResults = results.filter(result => result.status === 'created' || result.status === 'reused');
+  const commands = layerResults.map(result => PM.commandForAsset(result.asset.id, importAt)).filter(Boolean);
+  if (commands.length) {
+    PM.Edit.apply(commands, {
+      label: commands.length === 1 ? 'Import media' : `Import ${commands.length} media files`,
+      origin: 'import',
+    });
+  }
+  const relinked = results.filter(result => result.status === 'relinked');
+  const volatile = results.filter(result => result.status !== 'failed' && !result.persisted);
+  if (commands.length || relinked.length) {
     PM.autosave();
-    PM.toast(imported === 1 ? 'Imported ' + importedNames[0] : `Imported ${imported} files`);
+    const parts = [];
+    if (commands.length) parts.push(commands.length === 1 ? `Imported ${layerResults[0].asset.name}` : `Imported ${commands.length} files`);
+    if (relinked.length) parts.push(`relinked ${relinked.length} missing ${relinked.length === 1 ? 'asset' : 'assets'}`);
+    if (volatile.length) parts.push('durable storage unavailable');
+    PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400);
   }
+}
+/* File pickers and drag/drop can fire while an earlier batch is still decoding.
+   Preserve user order and project identity by serializing batches; each batch
+   still performs its expensive work through the bounded parallel pool. */
+PM.importFiles = files => {
+  const run = () => importFiles(Array.from(files || []));
+  APP.importQueue = APP.importQueue.then(run, run);
+  return APP.importQueue;
 };
 addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
 addEventListener('drop', e => {

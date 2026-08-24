@@ -25,7 +25,8 @@ test('model and reasoning picker are persisted and reach the local Codex client'
   }
   assert.match(spatial, /agentModel/);
   assert.match(spatial, /agentReasoningEffort/);
-  assert.match(spatial, /\{ model: S\.model, reasoningEffort: S\.reasoningEffort, signal: controller\.signal \}/);
+  assert.match(spatial, /model: S\.model, reasoningEffort: S\.reasoningEffort, signal: controller\.signal/);
+  assert.match(spatial, /onProgress: summary =>/);
   assert.match(native, /arguments\.append\(contentsOf: \["--model", model\]\)/);
   assert.match(native, /model_reasoning_effort=/);
 });
@@ -45,12 +46,28 @@ test('active agent runs remain steerable and are natively cancellable', () => {
 });
 
 test('attachments support image context and bounded text context', () => {
-  assert.match(spatial, /accept: 'image\/png,image\/jpeg,image\/webp,image\/gif,text\/plain/);
+  assert.match(spatial, /function filesFromTransfer/);
+  assert.match(spatial, /addEventListener\('paste'/);
+  assert.match(spatial, /addAttachmentFiles\(files\)/);
   assert.match(spatial, /file\.size > 4_000_000/);
   assert.match(spatial, /reader\.readAsDataURL\(file\)/);
   assert.match(spatial, /\(await file\.text\(\)\)\.slice\(0, 100_000\)/);
+  assert.match(spatial, /function attachmentView/);
+  assert.match(spatial, /h\('img', \{ src: item\.dataUrl/);
   assert.match(spatial, /const userImages = S\.requestAttachments\.filter\(item => item\.dataUrl\)/);
   assert.match(spatial, /ATTACHED FILES/);
+});
+
+test('real model progress replaces the placeholder and reveals word by word', () => {
+  assert.match(native, /"--json"/);
+  assert.match(native, /forwardCodexEvent/);
+  assert.match(native, /\["reasoning", "agent_message"\]\.contains\(type\)/);
+  assert.match(native, /never stream edit commands or the full response/);
+  assert.match(spatial, /progress\(id, result\)/);
+  assert.match(spatial, /job\.onProgress\(summary\)/);
+  assert.match(spatial, /agent-thinking-word/);
+  assert.match(css, /\.agent-thinking-word\{[^}]*filter:blur\(5px\)[^}]*animation:agent-thinking-word/);
+  assert.match(css, /animation-delay:calc\(var\(--word-index\) \* 34ms\)/);
 });
 
 test('model-authored steps render as an expandable live to-do list', () => {
@@ -82,7 +99,8 @@ test('elevated prompt UI exposes scope, suggestions, and direct panel authority'
   assert.match(spatial, /Auto-apply panels/);
   assert.match(spatial, /add\|restore\|hide\|move\|reorder\|resize\|resizeDock\|rename\|collapse\|expand\|popout\|dock/);
   assert.match(spatial, /function applyPanelPlan\(plan\)/);
-  assert.match(spatial, /PM\.WS\.restoreSnapshot\(S\.panelRun\.checkpoint\)/);
+  assert.match(spatial, /PM\.WS\.restoreHistorySnapshot\(checkpoint\)/);
+  assert.match(spatial, /PM\.hist\.external/);
   assert.match(css, /\.agent-composer-head/);
   assert.match(css, /\.agent-suggestions/);
 });

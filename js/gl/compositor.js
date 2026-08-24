@@ -437,7 +437,7 @@ GL.renderProject = (proj, T, W, H, opt = {}) => {
 
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
-    if (L.type === 'audio' || L.type === 'null') continue;
+    if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (soloOn && !L.solo) continue;
     if (!PM.active(L, T)) continue;
     if (L.shy && opt.hideShy) continue;
@@ -544,7 +544,7 @@ GL.renderToPixels = (T, W, H, opt = {}) => {
 GL.pick = (x, y, T) => {
   const layers = PM.proj.layers;
   for (const L of layers) {
-    if (!PM.active(L, T) || L.lock || L.type === 'audio' || L.type === 'null') continue;
+    if (!PM.active(L, T) || L.lock || (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].pickable === false)) continue;
     const b = GL.bounds(L, T);
     if (!b) continue;
     const m = PM.worldMatrix(L, T);

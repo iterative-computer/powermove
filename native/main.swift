@@ -1,6 +1,27 @@
 import Cocoa
 import WebKit
 
+private final class CodexLineBuffer {
+    private var data = Data()
+    private let lock = NSLock()
+    private let receive: (Data) -> Void
+
+    init(receive: @escaping (Data) -> Void) { self.receive = receive }
+
+    func append(_ chunk: Data, flush: Bool = false) {
+        lock.lock()
+        data.append(chunk)
+        var lines: [Data] = []
+        while let newline = data.firstIndex(of: 0x0A) {
+            lines.append(data.prefix(upTo: newline))
+            data.removeSubrange(...newline)
+        }
+        if flush && !data.isEmpty { lines.append(data); data.removeAll() }
+        lock.unlock()
+        lines.filter { !$0.isEmpty }.forEach(receive)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, NSWindowDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
@@ -386,7 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 var arguments = [
                     "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-rules",
                     "--sandbox", "read-only", "--output-schema", schemaURL.path,
-                    "--output-last-message", outputURL.path,
+                    "--output-last-message", outputURL.path, "--json",
                 ]
                 if let model = model { arguments.append(contentsOf: ["--model", model]) }
                 if let effort = reasoningEffort { arguments.append(contentsOf: ["--config", "model_reasoning_effort=\"\(effort)\""]) }
@@ -396,13 +417,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 arguments.append(prompt)
                 for imageURL in imageURLs { arguments.append(contentsOf: ["--image", imageURL.path]) }
                 process.arguments = arguments
+                let events = Pipe()
                 let errors = Pipe()
-                process.standardOutput = Pipe()
+                let eventBuffer = CodexLineBuffer { [weak self] line in
+                    self?.forwardCodexEvent(requestId: requestId, data: line)
+                }
+                events.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty { handle.readabilityHandler = nil; return }
+                    eventBuffer.append(data)
+                }
+                process.standardOutput = events
                 process.standardError = errors
                 if self.codexWasCancelled(requestId) { return }
                 try process.run()
                 if !self.registerCodexProcess(process, requestId: requestId), process.isRunning { process.terminate() }
                 process.waitUntilExit()
+                events.fileHandleForReading.readabilityHandler = nil
+                eventBuffer.append(events.fileHandleForReading.readDataToEndOfFile(), flush: true)
                 if self.codexWasCancelled(requestId) { return }
                 if process.terminationStatus == 0, fm.fileExists(atPath: outputURL.path) {
                     let text = try String(contentsOf: outputURL, encoding: .utf8)
@@ -416,6 +448,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 if self.codexWasCancelled(requestId) { return }
                 self.sendCodexResult(requestId: requestId, ok: false, text: error.localizedDescription)
             }
+        }
+    }
+
+    private func forwardCodexEvent(requestId: String, data: Data) {
+        guard let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              event["type"] as? String == "item.completed",
+              let item = event["item"] as? [String: Any],
+              let type = item["type"] as? String,
+              ["reasoning", "agent_message"].contains(type),
+              var raw = item["text"] as? String else { return }
+        /* Current Codex versions expose user-facing reasoning summaries as an
+           intermediate agent_message. Extract only a short display field from
+           structured JSON; never stream edit commands or the full response. */
+        if type == "agent_message", let encoded = raw.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any] {
+            let fields = ["message", "summary", "critique", "status"]
+            raw = fields.compactMap { object[$0] as? String }.first { $0.count > 8 } ?? ""
+        }
+        let summary = raw.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !summary.isEmpty else { return }
+        sendCodexProgress(requestId: requestId, text: String(summary.prefix(320)))
+    }
+
+    private func sendCodexProgress(requestId: String, text: String) {
+        let encoded = Data(text.utf8).base64EncodedString()
+        let payload: [String: Any] = ["dataBase64": encoded]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        let safeId = requestId.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        DispatchQueue.main.async { [weak self] in
+            self?.webView.evaluateJavaScript("window.PM && PM.CodexBridge && PM.CodexBridge.progress('\(safeId)', \(json))")
         }
     }
 

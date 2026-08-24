@@ -84,10 +84,40 @@ test('harness observes source and real frames, applies one revision, and rolls t
   assert.ok(bridgeCalls[0].images.length >= 3, 'rendered frames are attached to visual review');
   assert.match(bridgeCalls[0].prompt, /visual review stage/);
   assert.ok(run.frames.images.length >= 3, 'final approval receives rendered pixels');
+  assert.equal(PM.hist.list().length, 1, 'the complete agent run occupies one history entry');
   assert.equal(PM.AgentHarness.rollback(run.checkpoint), true);
   assert.equal(PM.L('agent-title'), null, 'rollback restores the pre-run project');
-  assert.equal(PM.hist.undo(), true, 'checkpoint rollback is itself undoable');
+  assert.equal(PM.hist.redo(), true, 'the standard history can restore an undone agent run');
   assert.ok(PM.L('agent-title'));
+});
+
+test('initial edits and visual-review repairs collapse into one reversible agent step', async () => {
+  const PM = harnessEditor();
+  let review = 0;
+  PM.CodexBridge = {
+    async request(_prompt, _schema, _images, options) {
+      options?.onProgress?.('Checking title placement against the rendered frame');
+      if (review++ === 0) return JSON.stringify({
+        status: 'repair', message: 'Move it right', critique: 'The title is too far left', reviewTimes: [1],
+        commands: [JSON.stringify({ type: 'set_property', target: 'agent-title', path: 'position.x', value: 800 })],
+      });
+      return JSON.stringify({ status: 'pass', message: 'Looks correct', critique: '', commands: [], reviewTimes: [1] });
+    },
+  };
+  const proposal = PM.AgentHarness.sanitizeProposal({
+    label: 'Add and place title', summary: 'Add a title', reviewTimes: [1],
+    commands: [JSON.stringify({
+      type: 'add_layer', id: 'agent-title', layerType: 'text', name: 'Agent title',
+      content: { text: 'Reversible' }, properties: { 'position.x': 300, 'position.y': 300 },
+    })],
+  });
+  await PM.AgentHarness.execute('Add a title', proposal);
+  assert.equal(PM.hist.list().length, 1);
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.L('agent-title'), null, 'one undo reverses the initial edit and its repair');
+  assert.equal(PM.hist.redo(), true);
+  const title = PM.L('agent-title');
+  assert.equal(PM.evP(title, PM.findProp(title, 'position.x'), 1, 'position.x'), 800);
 });
 
 test('native Codex bridge attaches temporary rendered frames without writable agent access', () => {
@@ -97,5 +127,9 @@ test('native Codex bridge attaches temporary rendered frames without writable ag
   assert.ok(native.indexOf('arguments.append(prompt)') < native.indexOf('arguments.append(contentsOf: ["--image", imageURL.path])'),
     'the prompt must precede variadic --image arguments');
   assert.match(native, /"--sandbox", "read-only"/);
+  assert.match(native, /"--json"/);
+  assert.match(native, /\["reasoning", "agent_message"\]\.contains\(type\)/);
+  assert.match(native, /\["message", "summary", "critique", "status"\]/);
+  assert.match(native, /sendCodexProgress/);
   assert.match(native, /data\.count <= 4_000_000/);
 });

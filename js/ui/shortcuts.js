@@ -30,18 +30,29 @@ def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
 def('toolHand', 'Hand tool', 'H', () => PM.setTool('hand'), 'Tool');
 def('toolZoom', 'Zoom tool', 'Z', () => PM.setTool('zoom'), 'Tool');
-def('addFromAsset', 'Add layer from asset', null, (id) => {
+PM.commandForAsset = (id, at = PM.time) => {
   const a = PM.proj.assets[id]; if (!a) return;
   const type = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
-  const from = PM.snapF(PM.time, PM.proj.fps);
-  const L = addLayer(type, {
+  const content = type === 'audio'
+    ? { asset: id, trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 }
+    : { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h };
+  return {
+    type: 'add_layer', layerType: type, name: a.name,
+    from: PM.snapF(at, PM.proj.fps),
     /* Keep the whole source even when it extends beyond the current comp. The
        composition still clips playback/export, but extending it later reveals
        the rest instead of permanently discarding the imported media. */
-    name: a.name, from, dur: a.dur || undefined,
-    d: { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h },
-  });
-  return L;
+    duration: a.dur || Math.max(1 / PM.proj.fps, PM.proj.dur - at),
+    content,
+    select: true,
+  };
+};
+def('addFromAsset', 'Add layer from asset', null, (id) => {
+  const command = PM.commandForAsset(id);
+  if (!command) return;
+  const result = PM.Edit.apply(command, { label: 'New ' + command.layerType, origin: 'command' });
+  const layerId = result.ok && result.data.results[0].data.id;
+  return layerId ? PM.L(layerId) : null;
 }, 'Create');
 
 /* ── editing ───────────────────────────────────────────── */

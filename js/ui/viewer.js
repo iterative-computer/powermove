@@ -6,7 +6,7 @@ const V = { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inn
 PM.Viewer = V;
 
 PM.registerPanel('viewer', {
-  title: 'Composition', flush: true, noscroll: true, persist: true, headless: true,
+  title: 'Composition', flush: true, noscroll: true, persist: true, headless: true, hideMoveHandle: true,
   build(body) {
     const stage = h('div#stage');
     const inner = h('div#stage-inner');

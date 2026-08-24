@@ -8,11 +8,22 @@ const p = (id, o = {}) => ({ id, ...o });
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const text = (value, fallback = '') => typeof value === 'string' && value.trim() ? value.trim() : fallback;
-const TIMELINE_DEFAULTS = Object.freeze({
+const LEGACY_TIMELINE_DEFAULTS = Object.freeze({
   rowHeight: 30, gutterWidth: 214, rulerHeight: 26, clipRadius: 6,
-  keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true,
-  toolbarDensity: 'normal',
+  keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'normal',
 });
+const TIMELINE_DEFAULTS = Object.freeze({
+  rowHeight: 26, gutterWidth: 192, rulerHeight: 22, clipRadius: 5,
+  keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true,
+  toolbarDensity: 'compact',
+});
+const TIMELINE_CHROME_SCHEMA = 2;
+
+function isLegacyTimelineChrome(value) {
+  if (!value || typeof value !== 'object') return true;
+  return Object.entries(LEGACY_TIMELINE_DEFAULTS)
+    .every(([key, expected]) => value[key] === undefined || value[key] === expected);
+}
 
 function normalizeTimelineChrome(value) {
   const raw = value && typeof value === 'object' ? value : {};
@@ -24,7 +35,7 @@ function normalizeTimelineChrome(value) {
     keyframeSize: PM.clamp(finite(raw.keyframeSize) ? raw.keyframeSize : TIMELINE_DEFAULTS.keyframeSize, 4, 12),
     showLayerNumbers: raw.showLayerNumbers !== false,
     showTypeBadges: raw.showTypeBadges !== false,
-    toolbarDensity: raw.toolbarDensity === 'compact' ? 'compact' : 'normal',
+    toolbarDensity: ['compact', 'normal'].includes(raw.toolbarDensity) ? raw.toolbarDensity : TIMELINE_DEFAULTS.toolbarDensity,
   };
 }
 
@@ -64,7 +75,7 @@ function normalizeControl(control, index) {
   const raw = control && typeof control === 'object' ? control : {};
   const rawDefault = raw.def !== undefined ? raw.def : raw.default !== undefined ? raw.default : raw.value;
   let type = text(raw.type).toLowerCase();
-  if (!['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout'].includes(type)) {
+  if (!['slider', 'text', 'color', 'fill', 'toggle', 'select', 'button', 'readout', 'curve'].includes(type)) {
     if (Array.isArray(raw.options)) type = 'select';
     else if (typeof rawDefault === 'boolean') type = 'toggle';
     else if (typeof rawDefault === 'string' && /^#[0-9a-f]{3,8}$/i.test(rawDefault)) type = 'color';
@@ -81,7 +92,7 @@ function normalizeControl(control, index) {
     : text(savedLabel, text(raw.name, text(authoredParam, `Control ${index + 1}`)));
   const out = { ...raw, type, label };
   if (type === 'readout') {
-    out.source = ['selection.summary', 'selection.count'].includes(raw.source) ? raw.source : 'selection.summary';
+    out.source = ['selection.summary', 'selection.count', 'keyframes.summary', 'keyframes.count'].includes(raw.source) ? raw.source : 'selection.summary';
     return out;
   }
   if (type === 'button') {
@@ -91,6 +102,15 @@ function normalizeControl(control, index) {
     return out;
   }
   out.stateKey = /^[a-z][a-z0-9_.-]{0,79}$/i.test(raw.stateKey || '') ? raw.stateKey : '';
+  if (type === 'curve') {
+    out.stateKey ||= `curve${index + 1}`;
+    out.def = PM.Capabilities?.sanitizeCurve?.(rawDefault, [.62, .05, 0, 1]) || [.62, .05, 0, 1];
+    out.minY = PM.clamp(finite(raw.minY) ? raw.minY : -1, -4, 0);
+    out.maxY = PM.clamp(finite(raw.maxY) ? raw.maxY : 2, 1, 4);
+    out.presets = (Array.isArray(raw.presets) ? raw.presets : Array.isArray(raw.options) ? raw.options : [])
+      .filter(name => typeof name === 'string' && PM.Ease?.PRESETS?.[name]).slice(0, 16);
+    return out;
+  }
   out.param = text(authoredParam, text(raw.name, label));
   if (type === 'text') out.def = rawDefault == null ? '' : String(rawDefault);
   else if (type === 'color') out.def = typeof rawDefault === 'string' ? rawDefault : '#FF6B1A';
@@ -134,7 +154,18 @@ function normalizeWorkspace(workspace, fallback) {
   raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
   raw.chrome = raw.chrome && typeof raw.chrome === 'object' ? raw.chrome : {};
   raw.chrome.previewCornerRadius = raw.chrome.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
-  raw.chrome.timelineSurfaceOrder = raw.chrome.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
+  /* Surface schema 2 flips the original default to the intended hierarchy:
+     darker gutter, lighter tracks. Existing workspaces migrate once; choices
+     made after this version continue to round-trip normally. */
+  if (raw.chrome.timelineSurfaceSchema !== 2) raw.chrome.timelineSurfaceOrder = 'reversed';
+  else raw.chrome.timelineSurfaceOrder = raw.chrome.timelineSurfaceOrder === 'normal' ? 'normal' : 'reversed';
+  raw.chrome.timelineSurfaceSchema = 2;
+  /* Compact the old stock Timeline once, while preserving any authored or
+     agent-authored Timeline configuration that differs from the old default. */
+  if (raw.chrome.timelineChromeSchema !== TIMELINE_CHROME_SCHEMA && isLegacyTimelineChrome(raw.chrome.timeline)) {
+    raw.chrome.timeline = copy(TIMELINE_DEFAULTS);
+  }
+  raw.chrome.timelineChromeSchema = TIMELINE_CHROME_SCHEMA;
   raw.chrome.timeline = normalizeTimelineChrome(raw.chrome.timeline);
   raw.features = raw.features && typeof raw.features === 'object' ? raw.features : {};
   delete raw.features.motionBlur;
@@ -384,6 +415,21 @@ WS.activate = (id, silent) => {
 };
 
 WS.snapshot = () => WS.current ? copy(WS.current) : null;
+/** Full workspace state for Undo/Redo. This includes newly created workspaces,
+    so undoing an agent-created workspace does not leave an orphan behind. */
+WS.historySnapshot = () => ({
+  currentId: WS.current?.id || 'design',
+  all: copy(WS.all),
+});
+WS.restoreHistorySnapshot = snapshot => {
+  if (!snapshot || !Array.isArray(snapshot.all)) return false;
+  WS.all = snapshot.all.map(workspace => normalizeWorkspace(workspace));
+  WS.save();
+  const target = WS.get(snapshot.currentId) || WS.get('design') || WS.all[0];
+  if (!target) return false;
+  WS.activate(target.id, true);
+  return true;
+};
 WS.restoreSnapshot = snapshot => {
   if (!snapshot || typeof snapshot !== 'object') return WS.activate('design', true);
   const restored = normalizeWorkspace(snapshot);
@@ -561,6 +607,99 @@ WS.editJSON = () => {
   });
 };
 
+function curveControl(ct, get, set) {
+  const field = h('section.generated-curve-field');
+  const head = h('div.generated-curve-head', h('span', ct.label), h('code'));
+  const canvas = h('canvas.generated-curve-canvas', {
+    width: 600, height: 300, tabindex: 0, role: 'group',
+    'aria-label': `${ct.label}. Drag either handle to shape the curve. Press Enter to switch handles.`,
+  });
+  const minY = Number.isFinite(ct.minY) ? ct.minY : -1;
+  const maxY = Number.isFinite(ct.maxY) ? ct.maxY : 2;
+  let curve = PM.Capabilities?.sanitizeCurve?.(get(), [.62, .05, 0, 1]) || [.62, .05, 0, 1];
+  let active = 0, dragging = false;
+  const pad = { x: 34, y: 24 };
+  const x = value => pad.x + value * (canvas.width - pad.x * 2);
+  const y = value => canvas.height - pad.y - (value - minY) / (maxY - minY) * (canvas.height - pad.y * 2);
+  const point = event => {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * canvas.width / Math.max(1, rect.width),
+      y: (event.clientY - rect.top) * canvas.height / Math.max(1, rect.height),
+    };
+  };
+  const draw = () => {
+    const context = canvas.getContext('2d'); if (!context) return;
+    const style = getComputedStyle(canvas);
+    const ink = style.getPropertyValue('--tx').trim() || '#222';
+    const sub = style.getPropertyValue('--tx-3').trim() || '#888';
+    const line = style.getPropertyValue('--line').trim() || 'rgba(127,127,127,.2)';
+    const accent = style.getPropertyValue('--accent').trim() || '#ff6b1a';
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.lineWidth = 1; context.strokeStyle = line;
+    for (let column = 0; column <= 4; column++) {
+      const gx = x(column / 4); context.beginPath(); context.moveTo(gx, pad.y); context.lineTo(gx, canvas.height - pad.y); context.stroke();
+    }
+    for (const value of [minY, 0, .5, 1, maxY]) {
+      if (value < minY || value > maxY) continue;
+      const gy = y(value); context.beginPath(); context.moveTo(pad.x, gy); context.lineTo(canvas.width - pad.x, gy); context.stroke();
+    }
+    const points = [[x(curve[0]), y(curve[1])], [x(curve[2]), y(curve[3])]];
+    context.strokeStyle = sub; context.lineWidth = 2;
+    context.beginPath(); context.moveTo(x(0), y(0)); context.lineTo(...points[0]); context.moveTo(x(1), y(1)); context.lineTo(...points[1]); context.stroke();
+    const easing = PM.Ease?.bezier?.(...curve) || (value => value);
+    context.strokeStyle = accent; context.lineWidth = 4; context.beginPath();
+    for (let index = 0; index <= 120; index++) {
+      const t = index / 120, px = x(t), py = y(easing(t));
+      index ? context.lineTo(px, py) : context.moveTo(px, py);
+    }
+    context.stroke();
+    points.forEach((handle, index) => {
+      context.fillStyle = index === active ? accent : ink;
+      context.beginPath(); context.arc(handle[0], handle[1], index === active ? 9 : 7, 0, Math.PI * 2); context.fill();
+      context.strokeStyle = style.getPropertyValue('--bg-panel').trim() || '#fff'; context.lineWidth = 3; context.stroke();
+    });
+    const name = PM.Ease?.nameOf?.([curve[0], curve[1]], [curve[2], curve[3]]) || 'custom';
+    head.querySelector('code').textContent = name === 'custom' ? curve.map(value => PM.round(value, 2)).join('  ') : name;
+    canvas.setAttribute('aria-valuetext', `${name}: ${curve.join(', ')}`);
+  };
+  const update = (next, commit = true) => {
+    curve = PM.Capabilities?.sanitizeCurve?.(next, curve) || curve;
+    if (commit) set([...curve]);
+    draw();
+  };
+  const moveHandle = event => {
+    const p = point(event);
+    const nx = PM.clamp((p.x - pad.x) / (canvas.width - pad.x * 2), 0, 1);
+    const ny = PM.clamp(minY + (canvas.height - pad.y - p.y) / (canvas.height - pad.y * 2) * (maxY - minY), minY, maxY);
+    const next = [...curve]; next[active * 2] = PM.round(nx, 3); next[active * 2 + 1] = PM.round(ny, 3); update(next);
+  };
+  canvas.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    const p = point(event), handles = [[x(curve[0]), y(curve[1])], [x(curve[2]), y(curve[3])]];
+    active = Math.hypot(p.x - handles[1][0], p.y - handles[1][1]) < Math.hypot(p.x - handles[0][0], p.y - handles[0][1]) ? 1 : 0;
+    dragging = true; canvas.setPointerCapture?.(event.pointerId); canvas.focus(); moveHandle(event); event.preventDefault();
+  });
+  canvas.addEventListener('pointermove', event => { if (dragging) moveHandle(event); });
+  const release = event => { dragging = false; canvas.releasePointerCapture?.(event.pointerId); };
+  canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', release);
+  canvas.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') { active = active ? 0 : 1; draw(); event.preventDefault(); return; }
+    const axis = ['ArrowLeft', 'ArrowRight'].includes(event.key) ? 0 : ['ArrowUp', 'ArrowDown'].includes(event.key) ? 1 : -1;
+    if (axis < 0) return;
+    const next = [...curve], direction = ['ArrowLeft', 'ArrowDown'].includes(event.key) ? -1 : 1;
+    next[active * 2 + axis] += direction * (event.shiftKey ? .1 : .01); update(next); event.preventDefault();
+  });
+  const presets = h('div.generated-curve-presets');
+  (ct.presets || []).forEach(name => presets.appendChild(h('button', {
+    title: `Use ${name} easing`, onclick: () => update(PM.Ease.PRESETS[name]),
+  }, h('i'), h('span', name))));
+  field.append(head, canvas, presets);
+  field.sync = () => { curve = PM.Capabilities?.sanitizeCurve?.(get(), curve) || curve; draw(); };
+  field.sync();
+  return field;
+}
+
 /* ── custom panels authored by prompt ──────────────────── */
 function registerCustom(w) {
   (w.custom || []).forEach(cp => {
@@ -612,9 +751,10 @@ function registerCustom(w) {
             const value = h('span.generated-tool-readout');
             value.sync = () => {
               const selected = PM.selLayers?.() || [];
-              value.textContent = ct.source === 'selection.count'
-                ? String(selected.length)
-                : (PM.Capabilities?.selectionSummary?.() || `${selected.length} selected`);
+              value.textContent = ct.source === 'selection.count' ? String(selected.length)
+                : ct.source === 'keyframes.count' ? String(PM.Capabilities?.selectedKeyframes?.().length || 0)
+                  : ct.source === 'keyframes.summary' ? (PM.Capabilities?.keyframeSummary?.() || 'No keyframes selected')
+                    : (PM.Capabilities?.selectionSummary?.() || `${selected.length} selected`);
             };
             value.sync(); syncs.push(value.sync); wrap.appendChild(PM.row(ct.label, value));
             return;
@@ -630,6 +770,12 @@ function registerCustom(w) {
                     ? PM.Capabilities.apply(ct.action.transform, toolState, { label: ct.label, origin: 'generated-tool' })
                     : PM.Capabilities.preview(ct.action.transform, toolState);
                   showPreview(result, ct.action.mode === 'apply' && !!result.ok);
+                  PM.toast(result.ok ? (ct.action.mode === 'apply' ? `${ct.label} applied` : 'Preview ready') : result.message);
+                } else if (ct.action?.type === 'easing') {
+                  const result = ct.action.mode === 'apply'
+                    ? PM.Capabilities.applyEasing(ct.action, toolState, { label: ct.label, origin: 'generated-tool' })
+                    : PM.Capabilities.previewEasing(ct.action, toolState);
+                  showPreview(result, ct.action.mode === 'apply' && !!result.ok); sync();
                   PM.toast(result.ok ? (ct.action.mode === 'apply' ? `${ct.label} applied` : 'Preview ready') : result.message);
                 } else if (ct.action?.type === 'script') {
                   busy = true; button.disabled = true;
@@ -661,6 +807,7 @@ function registerCustom(w) {
                 const selector = ct.action.transform.selector || { scope: 'selection', types: [] };
                 button.disabled = !(PM.Capabilities?.resolveTargets?.(selector)?.length);
               } else if (ct.action?.type === 'script') button.disabled = !PM.Script?.canRun?.(ct.action);
+              else if (ct.action?.type === 'easing') button.disabled = !(PM.Capabilities?.selectedKeyframes?.().length);
             };
             button.sync(); syncs.push(button.sync); wrap.appendChild(button);
             return;
@@ -683,6 +830,9 @@ function registerCustom(w) {
             command: (value) => ({ type: 'set_scene_parameter', name: param.name, value }),
           };
           let field;
+          if (ct.type === 'curve') {
+            field = curveControl(ct, get, set); if (field.sync) syncs.push(field.sync); wrap.appendChild(field); return;
+          }
           if (ct.type === 'text') field = PM.textField(get, set, { ...edit, mono: false });
           else if (ct.type === 'color') field = PM.colorField(get, set, edit);
           else if (ct.type === 'fill') field = PM.fillField(get, set, { ...edit, fallback: PM.proj.bg });

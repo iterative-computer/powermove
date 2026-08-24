@@ -9,14 +9,14 @@ const restore = (json) => {
   PM.proj = JSON.parse(json);
   PM.sel.layers = PM.sel.layers.filter(id => PM.L(id));
   PM.touch();
-  PM.bus.emit('layers'); PM.bus.emit('sel'); PM.bus.emit('project');
+  PM.bus.emit('layers'); PM.bus.emit('sel'); PM.bus.emit('assets'); PM.bus.emit('project');
   PM.invalidate();
 };
 
 const H = {
-  begin(label) {
+  begin(label, group = null) {
     if (depth++ > 0) return;
-    pending = { label, before: snap() };
+    pending = { label, before: snap(), group };
   },
   commit(label) {
     if (--depth > 0) return;
@@ -24,7 +24,7 @@ const H = {
     const after = snap();
     if (after === pending.before) { pending = null; return; }
     stack = stack.slice(0, idx + 1);
-    stack.push({ label: label || pending.label, before: pending.before, after });
+    stack.push({ id: PM.uid('history'), label: label || pending.label, before: pending.before, after, group: pending.group });
     if (stack.length > MAX) stack.shift();
     idx = stack.length - 1;
     pending = null;
@@ -39,7 +39,8 @@ const H = {
   undo() {
     if (idx < 0) return false;
     const e = stack[idx--];
-    restore(e.before);
+    if (e.undo) e.undo();
+    else restore(e.before);
     PM.toast('Undo · ' + e.label);
     PM.bus.emit('history');
     return true;
@@ -47,7 +48,8 @@ const H = {
   redo() {
     if (idx >= stack.length - 1) return false;
     const e = stack[++idx];
-    restore(e.after);
+    if (e.redo) e.redo();
+    else restore(e.after);
     PM.toast('Redo · ' + e.label);
     PM.bus.emit('history');
     return true;
@@ -55,6 +57,43 @@ const H = {
   canUndo: () => idx >= 0,
   canRedo: () => idx < stack.length - 1,
   label: () => (idx >= 0 ? stack[idx].label : null),
+  /** Capture the current project-history position before a bounded async run. */
+  mark() { return { index: idx, topId: stack[idx]?.id || null, before: snap() }; },
+  /** Replace all project entries created after a mark with one atomic step.
+      Agent review/repair passes use this so one run is always one Undo. */
+  squash(mark, label = 'Agent change', group = null) {
+    if (!mark || !Number.isInteger(mark.index) || typeof mark.before !== 'string') return null;
+    const baseIndex = mark.topId ? stack.findIndex(entry => entry.id === mark.topId) : -1;
+    if (mark.topId && baseIndex < 0) return null;
+    if (mark.index < -1 || baseIndex > idx || idx !== stack.length - 1) return null;
+    const entries = stack.slice(baseIndex + 1);
+    if (!entries.length || entries.some(entry => entry.undo || entry.redo || group && entry.group !== group)) return null;
+    const after = snap();
+    if (after === mark.before) return null;
+    stack = stack.slice(0, baseIndex + 1);
+    const entry = { id: PM.uid('history'), label, before: mark.before, after };
+    stack.push(entry);
+    if (stack.length > MAX) stack.shift();
+    idx = stack.length - 1;
+    PM.bus.emit('history');
+    return entry.id;
+  },
+  /** Add a non-project change (workspace, panels, or interface chrome) to the
+      same Undo/Redo stack without pretending it changed composition source. */
+  external(label, undo, redo) {
+    if (typeof undo !== 'function' || typeof redo !== 'function') return null;
+    stack = stack.slice(0, idx + 1);
+    const entry = { id: PM.uid('history'), label: label || 'Interface change', undo, redo };
+    stack.push(entry);
+    if (stack.length > MAX) stack.shift();
+    idx = stack.length - 1;
+    PM.bus.emit('history');
+    return entry.id;
+  },
+  undoIfTop(id) {
+    if (!id || stack[idx]?.id !== id) return false;
+    return H.undo();
+  },
   /** Restore a trusted, previously captured project snapshot as one undoable step.
       Agent checkpoints use this instead of assigning PM.proj behind history's back. */
   restoreSnapshot(json, label = 'Restore checkpoint') {

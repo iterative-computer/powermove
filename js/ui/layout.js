@@ -12,45 +12,6 @@ PM.registerPanel = (id, def) => { PM.PANELS[id] = Object.assign({ id, title: id 
 const L = { root: null, ws: null };
 PM.Layout = L;
 
-/* Panel grips are deliberately quiet until the pointer approaches them. A
-   smoothstep falloff makes the whole set read as one soft opacity field rather
-   than a collection of controls that abruptly blink on and off. */
-const HANDLE_PROXIMITY_RADIUS = 220;
-L.handleProximity = (distance, radius = HANDLE_PROXIMITY_RADIUS) => {
-  const t = 1 - PM.clamp((Number(distance) || 0) / Math.max(1, radius), 0, 1);
-  return t * t * (3 - 2 * t);
-};
-
-let handlePointerFrame = 0;
-let handlePointer = null;
-function paintHandleProximity() {
-  handlePointerFrame = 0;
-  if (!handlePointer) return;
-  PM.$$('.panel-move-handle,.panel > header .grip').forEach(handle => {
-    const rect = handle.getBoundingClientRect();
-    const dx = Math.max(rect.left - handlePointer.x, 0, handlePointer.x - rect.right);
-    const dy = Math.max(rect.top - handlePointer.y, 0, handlePointer.y - rect.bottom);
-    const proximity = L.handleProximity(Math.hypot(dx, dy));
-    handle.style.setProperty('--handle-proximity', proximity.toFixed(3));
-  });
-}
-function queueHandleProximity(e) {
-  if (e.pointerType === 'touch') return;
-  handlePointer = { x: e.clientX, y: e.clientY };
-  if (!handlePointerFrame) handlePointerFrame = requestAnimationFrame(paintHandleProximity);
-}
-function resetHandleProximity() {
-  handlePointer = null;
-  if (handlePointerFrame) cancelAnimationFrame(handlePointerFrame);
-  handlePointerFrame = 0;
-  PM.$$('.panel-move-handle,.panel > header .grip').forEach(handle => handle.style.removeProperty('--handle-proximity'));
-}
-if (typeof document !== 'undefined') {
-  document.addEventListener('pointermove', queueHandleProximity, { passive: true });
-  document.documentElement.addEventListener('pointerleave', resetHandleProximity);
-  window.addEventListener('blur', resetHandleProximity);
-}
-
 /* Panels that own live GL/canvas state and cannot be safely re-hosted in a popout. */
 const NO_POPOUT = new Set(['viewer', 'timeline']);
 
@@ -556,6 +517,36 @@ function isFlexPanel(spec) {
   const def = PM.PANELS[spec.id] || {};
   return !!(spec.flex || (!spec.size && !def.size));
 }
+function attachSplitterHover(s, axis) {
+  const property = axis === 'x' ? '--splitter-hover-x' : '--splitter-hover-y';
+  let current = null;
+  let target = null;
+  let raf = 0;
+  const positionFromEvent = (e) => {
+    const rect = s.getBoundingClientRect();
+    const length = axis === 'x' ? rect.width : rect.height;
+    const pointer = axis === 'x' ? e.clientX - rect.left : e.clientY - rect.top;
+    return PM.clamp(pointer, 0, length);
+  };
+  const paint = () => {
+    current += (target - current) * .36;
+    if (Math.abs(target - current) < .1) current = target;
+    s.style.setProperty(property, current.toFixed(2) + 'px');
+    raf = current === target ? 0 : requestAnimationFrame(paint);
+  };
+  const track = (e) => {
+    target = positionFromEvent(e);
+    if (current == null) {
+      current = target;
+      s.style.setProperty(property, current.toFixed(2) + 'px');
+      return;
+    }
+    if (!raf) raf = requestAnimationFrame(paint);
+  };
+  s.addEventListener('pointerenter', track, { passive: true });
+  s.addEventListener('pointermove', track, { passive: true });
+  return track;
+}
 L.clampPanelHeight = (start, delta, sign, pairHeight, minHeight = 88, otherMinHeight = 88, gap = 8) => {
   const min = Math.max(72, Number(minHeight) || 88);
   const max = Math.max(min, (Number(pairHeight) || min * 2 + gap) - Math.max(72, Number(otherMinHeight) || 88) - gap);
@@ -563,6 +554,7 @@ L.clampPanelHeight = (start, delta, sign, pairHeight, minHeight = 88, otherMinHe
 };
 function vSplit(prev, next) {
   const s = h('div.splitter');
+  const trackPointer = attachSplitterHover(s, 'y');
   /* Prefer the side dock. Dragging right grows the left dock / shrinks the right dock. */
   const useLeft = !isFlexDock(prev);
   const target = useLeft ? prev : next;
@@ -570,12 +562,14 @@ function vSplit(prev, next) {
   s.addEventListener('pointerdown', (e) => {
     const el = document.getElementById('dock-' + target.id);
     if (!el) return;
+    trackPointer(e);
     const start = el.getBoundingClientRect().width;
     s.classList.add('drag');
     let raf = 0;
     PM.drag(e, {
       cursor: 'col-resize',
-      move: (dx) => {
+      move: (dx, dy, ev) => {
+        trackPointer(ev);
         const w = PM.clamp(start + sign * dx, 200, 760);
         el.style.flex = '0 0 ' + w + 'px';
         target.size = Math.round(w);
@@ -601,6 +595,7 @@ function vSplit(prev, next) {
 }
 function hSplit(aboveSpec, aboveEl, belowSpec, belowEl) {
   const s = h('div.splitter.h');
+  const trackPointer = attachSplitterHover(s, 'x');
   const useAbove = !isFlexPanel(aboveSpec);
   const spec = useAbove ? aboveSpec : belowSpec;
   const node = useAbove ? aboveEl : belowEl;
@@ -610,6 +605,7 @@ function hSplit(aboveSpec, aboveEl, belowSpec, belowEl) {
   s.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    trackPointer(e);
     const start = node.getBoundingClientRect().height;
     const otherStart = otherEl.getBoundingClientRect().height;
     const pairHeight = start + otherStart;
@@ -622,7 +618,8 @@ function hSplit(aboveSpec, aboveEl, belowSpec, belowEl) {
     let raf = 0;
     PM.drag(e, {
       cursor: 'row-resize',
-      move: (dx, dy) => {
+      move: (dx, dy, ev) => {
+        trackPointer(ev);
         if (!changed && Math.abs(dy) < 2) return;
         changed = true;
         const hh = L.clampPanelHeight(start, dy, sign, pairHeight, min, otherMin, parseFloat(getComputedStyle(s).height) || 8);

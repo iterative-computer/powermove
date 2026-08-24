@@ -4,7 +4,7 @@ const PM = window.PM, h = PM.h;
 const state = {
   overlay: null, root: null, nav: null, content: null, title: null, count: null,
   search: null, action: null, view: 'sections', scope: 'project', query: '',
-  originProjectId: null, lastFocus: null,
+  originProjectId: null, lastFocus: null, navButtons: {},
 };
 
 const VIEWS = {
@@ -27,6 +27,10 @@ function ensure() {
     paintMain();
   });
   state.nav = h('nav.library-nav', { 'aria-label': 'Library categories' });
+  state.nav.append(
+    h('span.library-nav-label', 'Reusable'), navButton('sections'), navButton('looks'),
+    h('span.library-nav-label', 'Layout'), navButton('workspaces'),
+    h('div.library-nav-spacer'), navButton('trash'));
   const scope = h('div.library-browse', h('span', 'Browse'),
     h('div.library-scope', { role: 'group', 'aria-label': 'Library scope' },
       h('button', { data: { scope: 'project' }, onclick: () => setScope('project') }, 'This project'),
@@ -85,7 +89,11 @@ function trapKeys(event) {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
 function setScope(scope) { state.scope = scope; paint(); }
-function setView(view) { state.view = view; paint(); }
+function setView(view) {
+  if (!VIEWS[view]) return;
+  state.view = view;
+  paint();
+}
 
 function catalogs() {
   return {
@@ -112,20 +120,25 @@ function counts(catalog) {
     trash: catalog.sections.filter(item => item.deletedAt).length + catalog.looks.filter(item => item.deletedAt).length + catalog.trashedWorkspaces.length,
   };
 }
-function navButton(view, count) {
-  return h('button.library-navbtn' + (state.view === view ? '.on' : ''), {
-    'aria-current': state.view === view ? 'page' : null,
+function navButton(view) {
+  const count = h('span.count', '0');
+  const element = h('button.library-navbtn', {
+    type: 'button',
     onclick: () => setView(view),
-  }, PM.icon(VIEWS[view].icon), h('span', VIEWS[view].label), h('span.count', String(count)));
+  }, PM.icon(VIEWS[view].icon), h('span', VIEWS[view].label), count);
+  state.navButtons[view] = { element, count };
+  return element;
 }
 function paint() {
   if (!state.root) return;
   const catalog = catalogs(), total = counts(catalog);
-  state.nav.textContent = '';
-  state.nav.append(
-    h('span.library-nav-label', 'Reusable'), navButton('sections', total.sections), navButton('looks', total.looks),
-    h('span.library-nav-label', 'Layout'), navButton('workspaces', total.workspaces),
-    h('div.library-nav-spacer'), navButton('trash', total.trash));
+  Object.entries(state.navButtons).forEach(([view, item]) => {
+    const active = state.view === view;
+    item.element.classList.toggle('on', active);
+    if (active) item.element.setAttribute('aria-current', 'page');
+    else item.element.removeAttribute('aria-current');
+    item.count.textContent = String(total[view]);
+  });
   state.root.querySelectorAll('.library-scope button').forEach(item => item.classList.toggle('on', item.dataset.scope === state.scope));
   paintMain(catalog);
 }

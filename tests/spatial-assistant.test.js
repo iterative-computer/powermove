@@ -16,6 +16,10 @@ function spatialModel(adapterFactory) {
     round: (value, places = 0) => Number(Number(value).toFixed(places)),
     snapF: (time, fps) => Math.round(time * fps) / fps,
     TYPE_META: { text: {} },
+    Ease: {
+      PRESETS: { linear: [0, 0, 1, 1], easeInOut: [.42, 0, .58, 1], power: [.62, .05, 0, 1], backOut: [.34, 1.56, .64, 1] },
+      bezier: () => value => value, nameOf: () => 'custom',
+    },
     commands: { fitView: { id: 'fitView', label: 'Fit view' } },
     PANELS: { viewer: { title: 'Composition' }, timeline: { title: 'Timeline' }, inspector: { title: 'Inspector' }, assets: { title: 'Project' } },
     registerPanel(id, definition) { this.PANELS[id] = definition; },
@@ -190,6 +194,39 @@ test('known generated tools expand into validated selection-aware native panels'
   assert.equal(plan.section.controls.find(control => control.label === 'Apply Stagger').primary, true);
 });
 
+test('agents can author bounded visual curves and source-connected easing actions', () => {
+  const action = JSON.stringify({
+    type: 'easing', mode: 'apply', scope: 'selected-keyframes', curveState: 'curve', defaultCurve: [.62, .05, 0, 1],
+  });
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'section', operation: 'create', message: 'Flow controls ready',
+    section: { id: 'flow-tool', title: 'Flow', size: 420, note: '', controls: [
+      { type: 'readout', label: 'Target', source: 'keyframes.summary' },
+      { type: 'curve', label: 'Curve', stateKey: 'curve', defaultValue: '[0.42,0,0.58,1]', min: -1, max: 2, options: ['linear', 'easeInOut', 'unknown'] },
+      { type: 'button', label: 'Apply', action, primary: true },
+      { type: 'button', label: 'Unsafe', action: JSON.stringify({ type: 'easing', mode: 'apply', scope: 'all-project-keyframes', curveState: 'curve' }) },
+    ] },
+  }, { targetPanelId: 'timeline' });
+
+  assert.deepEqual([...plan.section.controls.map(control => control.label)], ['Target', 'Curve', 'Apply']);
+  assert.equal(plan.section.controls[0].connection, 'Live keyframes');
+  assert.equal(plan.section.controls[1].type, 'curve');
+  assert.deepEqual([...plan.section.controls[1].def], [.42, 0, .58, 1]);
+  assert.deepEqual([...plan.section.controls[1].presets], ['linear', 'easeInOut']);
+  assert.equal(plan.section.controls[2].action.type, 'easing');
+  assert.equal(plan.section.controls[2].connection, 'Source action');
+});
+
+test('the reusable easing tool expands into a complete Flow-style native panel', () => {
+  const plan = spatialModel().math.sanitizePlan({
+    kind: 'section', operation: 'create', message: 'Easing tool ready',
+    section: { id: 'flow', title: 'Flow', size: 430, note: '', tool: 'easing-flow', controls: [] },
+  }, { targetPanelId: 'timeline' });
+  assert.equal(plan.section.tool, 'easing-flow');
+  assert.deepEqual([...plan.section.controls.map(control => control.type)], ['readout', 'curve', 'button', 'button', 'button']);
+  assert.equal(plan.section.controls.find(control => control.label === 'Apply easing').action.type, 'easing');
+});
+
 test('advanced generated tool actions accept bounded transforms and reject executable transform expressions', () => {
   const action = JSON.stringify({
     type: 'transform', mode: 'apply', transform: {
@@ -317,7 +354,8 @@ test('panel plans can safely control the complete panel lifecycle', () => {
   assert.equal(workspace.layout.docks.find(dock => dock.id === 'right').panels[1].size, 420);
   assert.equal(workspace.hiddenPanels[0].id, 'assets');
   assert.deepEqual([...result.runtime.map(action => action.type)], ['popout']);
-  assert.match(source, /Undo panel changes/);
+  assert.match(source, /Reversible agent change/);
+  assert.match(source, /PM\.hist\.external/);
   assert.match(source, /agentAutoApplyPanels/);
 });
 
@@ -404,8 +442,16 @@ test('full-window effect is a true WebGPU WGSL ripple with a reduced-motion-safe
   assert.match(css, /@media \(prefers-reduced-motion:reduce\)/);
   assert.match(source, /window\.matchMedia\?\.\('\(prefers-reduced-motion: reduce\)'\)\.matches[\s\S]*renderer = 'reduced-motion'/,
     'reduced motion bypasses the WebGPU animation while leaving the assistant usable');
-  assert.match(css, /\.spatial-input-row:focus-within\{[^}]*border-color:var\(--line-2\)[^}]*box-shadow:none/,
-    'the focused prompt keeps a neutral border without an orange outline');
+  assert.match(css, /\.spatial-input-row\{[^}]*border:0/,
+    'the prompt row has no inner outline');
+  assert.match(css, /\.spatial-input-row:focus-within\{[^}]*box-shadow:none/,
+    'focusing the prompt does not add an orange or neutral outline');
+  assert.match(css, /\.spatial-compose\{[^}]*border:0[^}]*border-radius:calc\(var\(--spatial-input-radius\) \+ var\(--spatial-frame-inset\)\)/,
+    'the floating prompt has no outer outline and its nested radii follow the frame inset');
+  assert.match(css, /\.spatial-compose\.conversation\{[^}]*border:1px solid var\(--line-2\)/,
+    'the established conversation panel border remains unchanged');
+  assert.match(css, /\.spatial-input-row>\.spatial-action\.pri\{[^}]*border-radius:calc\(var\(--spatial-input-radius\) - var\(--spatial-control-inset\)\)/,
+    'the Enter button radius follows the input-row inset formula');
 });
 
 test('Ripple adapter acquisition is fresh on every lifecycle request', async () => {
@@ -432,10 +478,20 @@ test('selected-region prompt hands off into the ongoing Agent workspace panel', 
   const math = spatialModel().math;
   assert.deepEqual({ ...math.clampFloatingPosition(-40, 900, 420, 220, 1200, 800) }, { x: 12, y: 568 });
   assert.match(source, /S\.context = inspectRegion\(S\.points, S\.region\)/, 'the prompt binds to the rectangular selection context');
+  assert.match(source, /placeholder: selectedContext \? 'How should this area change\?' : 'Full composition'/,
+    'the default scope is placeholder text that clears naturally when typing');
+  assert.match(source, /contextLabel = selectedContext \? h\('span\.spatial-context-label'/,
+    'only an explicit selected-area scope remains as a persistent label');
   assert.match(source, /`Selected \$\{S\.context\.targetTitle\}`/,
     'Selected Timeline is displayed inside the prompt surface');
   assert.match(css, /\.spatial-context-label\{[^}]*font-family:var\(--f-ui\)/,
     'selection context uses the normal interface typeface');
+  assert.match(css, /\.spatial-context-label\{[^}]*align-self:center/,
+    'selection context is vertically centered in the prompt row');
+  assert.doesNotMatch(css, /\.spatial-context-label\{[^}]*(?:border-right|margin-top)/,
+    'selection context has no divider or manual vertical offset');
+  assert.match(css, /\.spatial-compose textarea\{[^}]*align-self:center/,
+    'prompt text is vertically centered independently of the bottom-aligned send button');
   assert.match(source, /Powermove agent · full composition/);
   assert.match(source, /document\.body\.appendChild\(S\.root\);[\s\S]*showComposer\(\)/,
     'the floating prompt appears immediately after a shake; drag selection is optional context');

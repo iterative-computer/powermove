@@ -219,6 +219,29 @@ test('Composition clear fill remains editable and undoable', () => {
   assert.equal(JSON.stringify(PM.proj.backgroundFill), before);
 });
 
+test('generated visual easing applies to real keyframes as one undoable source edit', () => {
+  const { PM } = editor();
+  const layer = addText(PM);
+  const property = layer.p.opacity;
+  const first = PM.setKeyOn(property, 0, 0, 'linear', PM.proj.fps);
+  const second = PM.setKeyOn(property, 1, 100, 'linear', PM.proj.fps);
+  PM.sel.keys = [first, second];
+  const before = first.eo.join(',') + '|' + first.ei.join(',');
+  const curve = [.62, .05, 0, 1];
+
+  const result = PM.Edit.apply({
+    type: 'set_easing', keyframes: PM.sel.keys.map(key => key.i), curve,
+  }, { label: 'Apply easing', origin: 'generated-tool' });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual([...first.eo, ...first.ei], curve);
+  assert.deepEqual([...second.eo, ...second.ei], curve);
+  assert.equal(PM.proj.edits.at(-1).operations[0].type, 'set_easing');
+  assert.equal(PM.hist.undo(), true);
+  const restored = PM.L(layer.id).p.opacity.kf[0];
+  assert.equal(restored.eo.join(',') + '|' + restored.ei.join(','), before);
+});
+
 test('effect addition is one source transaction and one undo step', () => {
   const { PM } = editor();
   const layer = addText(PM);

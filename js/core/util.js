@@ -233,24 +233,36 @@ PM.closeMenus = () => {
 PM.drag = (e, { move, up, cancel, cursor }) => {
   e.preventDefault();
   const sx = e.clientX, sy = e.clientY;
+  const pointerId = e.pointerId;
+  const captureEl = e.currentTarget && typeof e.currentTarget.setPointerCapture === 'function'
+    ? e.currentTarget : null;
   const prevCur = document.body.style.cursor;
   if (cursor) document.body.style.cursor = cursor;
   let done = false;
   const stop = () => {
     if (done) return false;
     done = true;
-    window.removeEventListener('pointermove', mv);
-    window.removeEventListener('pointerup', fin);
-    window.removeEventListener('pointercancel', pc);
+    window.removeEventListener('pointermove', mv, true);
+    window.removeEventListener('pointerup', fin, true);
+    window.removeEventListener('pointercancel', pc, true);
+    captureEl?.removeEventListener?.('lostpointercapture', pc);
+    try {
+      if (captureEl?.hasPointerCapture?.(pointerId)) captureEl.releasePointerCapture(pointerId);
+    } catch { }
     document.body.style.cursor = prevCur;
     return true;
   };
   const mv = (ev) => { if (!done && move) move(ev.clientX - sx, ev.clientY - sy, ev); };
   const fin = (ev) => { if (stop() && up) up(ev.clientX - sx, ev.clientY - sy, ev); };
   const pc = () => { if (stop() && cancel) cancel(); };
-  window.addEventListener('pointermove', mv);
-  window.addEventListener('pointerup', fin);
-  window.addEventListener('pointercancel', pc);
+  try { captureEl?.setPointerCapture(pointerId); } catch { }
+  captureEl?.addEventListener?.('lostpointercapture', pc);
+  /* WKWebView can stop bubbling pointer movement while a canvas owns the
+     gesture. Capture-phase listeners plus explicit pointer capture keep direct
+     manipulation alive until the matching up/cancel event. */
+  window.addEventListener('pointermove', mv, true);
+  window.addEventListener('pointerup', fin, true);
+  window.addEventListener('pointercancel', pc, true);
   return { cancel: () => { if (stop() && cancel) cancel(); } };
 };
 

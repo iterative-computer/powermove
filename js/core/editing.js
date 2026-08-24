@@ -154,6 +154,37 @@ function replaceKeyframes(command) {
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
 
+function easingCurve(value) {
+  const preset = typeof value === 'string' ? PM.Ease?.PRESETS?.[value] : null;
+  const source = preset || value;
+  if (!Array.isArray(source) || source.length !== 4) throw new Error('Easing curve must contain four handles');
+  const curve = source.map((part, index) => finite(part, `easing handle ${index + 1}`));
+  curve[0] = PM.clamp(curve[0], 0, 1); curve[2] = PM.clamp(curve[2], 0, 1);
+  curve[1] = PM.clamp(curve[1], -4, 4); curve[3] = PM.clamp(curve[3], -4, 4);
+  return curve;
+}
+
+function setEasing(command) {
+  const ids = new Set((Array.isArray(command.keyframes) ? command.keyframes : [])
+    .filter(id => typeof id === 'string' && id).slice(0, 1000));
+  if (!ids.size) throw new Error('Select at least one keyframe');
+  const curve = easingCurve(command.curve);
+  const found = [];
+  for (const layer of PM.proj.layers) {
+    for (const item of PM.allProps(layer)) {
+      for (const key of item.prop.kf) if (ids.has(key.i)) found.push(key);
+    }
+  }
+  if (!found.length) throw new Error('The selected keyframes are no longer available');
+  found.forEach(key => {
+    key.eo = [curve[0], curve[1]];
+    key.ei = [curve[2], curve[3]];
+    key.hold = false;
+  });
+  PM.touch();
+  return { keyframes: found.length, curve };
+}
+
 function setExpression(command) {
   const layer = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
@@ -304,6 +335,7 @@ function reorderLayer(command) {
 function addEffect(command) {
   const layer = findLayer(command.target || command.layer);
   if (!layer) throw new Error('Layer not found');
+  if (PM.TYPE_META[layer.type] && PM.TYPE_META[layer.type].effects === false) throw new Error(`${PM.TYPE_META[layer.type].label} layers do not support visual effects`);
   const effect = PM.mkEffect(command.effect);
   if (!effect) throw new Error(`Unknown effect: ${command.effect}`);
   effect.open = command.open !== false;
@@ -316,6 +348,7 @@ function addEffect(command) {
 function removeEffect(command) {
   const layer = findLayer(command.target || command.layer);
   if (!layer) throw new Error('Layer not found');
+  if (PM.TYPE_META[layer.type] && PM.TYPE_META[layer.type].effects === false) throw new Error(`${PM.TYPE_META[layer.type].label} layers do not support visual effects`);
   const before = layer.fx.length;
   layer.fx = layer.fx.filter(effect => effect.id !== command.effect && effect.type !== command.effect);
   if (before === layer.fx.length) throw new Error(`Effect not found: ${command.effect}`);
@@ -326,6 +359,7 @@ function removeEffect(command) {
 function setEffect(command) {
   const layer = findLayer(command.target || command.layer);
   if (!layer) throw new Error('Layer not found');
+  if (PM.TYPE_META[layer.type] && PM.TYPE_META[layer.type].effects === false) throw new Error(`${PM.TYPE_META[layer.type].label} layers do not support visual effects`);
   const effect = layer.fx.find(item => item.id === command.effect || item.type === command.effect);
   if (!effect) throw new Error(`Effect not found: ${command.effect}`);
   const patch = safePatch(command.patch, 'effect patch');
@@ -403,6 +437,7 @@ function runOne(command) {
   switch (command.type) {
     case 'set_property': return setProperty(command);
     case 'replace_keyframes': return replaceKeyframes(command);
+    case 'set_easing': return setEasing(command);
     case 'set_expression': return setExpression(command);
     case 'set_content': return setContent(command);
     case 'set_layer': return setLayer(command);
@@ -531,6 +566,7 @@ const Edit = {
   operations: Object.freeze({
     set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
     replace_keyframes: { target: 'layer', fields: ['path', 'keyframes', 'replace', 'expression'] },
+    set_easing: { target: 'keyframes', fields: ['keyframes', 'curve'] },
     set_expression: { target: 'layer', fields: ['path', 'expression'] },
     set_content: { target: 'layer', fields: ['patch'] },
     set_layer: { target: 'layer', fields: ['patch'] },
@@ -566,7 +602,7 @@ const Edit = {
     }
     const before = JSON.stringify(PM.proj);
     const selection = clone(PM.sel);
-    PM.hist.begin(meta.label || 'Edit source');
+    PM.hist.begin(meta.label || 'Edit source', meta.historyGroup || null);
     try {
       const results = list.map(command => ({ command: clone(command), data: runOne(command) }));
       record(meta.label, meta.origin, list);

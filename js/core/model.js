@@ -44,9 +44,9 @@ const TYPE_META = {
   shape:  { icon: 'grid',   color: '#6C7BE8', label: 'Shape' },
   image:  { icon: 'layers', color: '#A9A9AE', label: 'Image' },
   video:  { icon: 'cam',    color: '#3B62E8', label: 'Video' },
-  audio:  { icon: 'clock',  color: '#4C8DFF', label: 'Audio' },
+  audio:  { icon: 'clock',  color: '#4C8DFF', label: 'Audio', visual: false, transform: false, effects: false, masks: false, pickable: false },
   shader: { icon: 'wand',   color: '#FF6B1A', label: 'Shader' },
-  null:   { icon: 'dot',    color: '#6a6a70', label: 'Null' },
+  null:   { icon: 'dot',    color: '#6a6a70', label: 'Null', visual: false, pickable: false },
   precomp:{ icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
 };
 PM.TYPE_META = TYPE_META;
@@ -67,17 +67,18 @@ PM.mkMask = (shape = 'rect', comp) => {
 /* ── layer factory ─────────────────────────────────────── */
 function baseLayer(type, name, comp) {
   const w = comp ? comp.w : 1920, hgt = comp ? comp.h : 1080;
+  const transformable = TYPE_META[type].transform !== false;
   const L = {
     id: uid('L'), type, name,
     from: 0, dur: comp ? comp.dur : 5,
     on: true, lock: false, solo: false, shy: false, collapsed: true,
     color: TYPE_META[type].color, blend: 'normal', mblur: false, parent: null,
-    p: {
+    p: transformable ? {
       'anchor.x': P(0), 'anchor.y': P(0),
       'position.x': P(w / 2), 'position.y': P(hgt / 2),
       'scale.x': P(100), 'scale.y': P(100),
       'rotation': P(0), 'opacity': P(100), 'skew': P(0),
-    },
+    } : {},
     fx: [],
     masks: [],
     d: {},

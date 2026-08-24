@@ -99,88 +99,6 @@ function muxWebM(frames, { width, height, fps, codecId = 'V_VP9', audio }) {
   return new Blob([header, segment], { type: 'video/webm' });
 }
 
-/* ── audio mixdown + opus encode ───────────────────────── */
-async function mixAudio(t0, t1) {
-  const spans = [];
-  const soloOn = PM.proj.layers.some(L => L.on && L.solo);
-  for (const L of PM.proj.layers) {
-    if (L.type !== 'audio' || !L.on || !L.d.asset || (soloOn && !L.solo)) continue;
-    const s = Math.max(L.from, t0), e = Math.min(L.from + L.dur, t1);
-    if (e - s <= .01) continue;
-    const a = PM.assets.get(L.d.asset); if (!a) continue;
-    spans.push({ L, a, s, e });
-  }
-  if (!spans.length) return null;
-  const SR = 48000;
-  let ctx;
-  try { ctx = new OfflineAudioContext(2, Math.ceil((t1 - t0) * SR), SR); } catch (e) { return null; }
-  for (const { L, a, s, e } of spans) {
-    try {
-      const buf = await ctx.decodeAudioData(await (await fetch(a.url)).arrayBuffer());
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      const g = ctx.createGain();
-      src.connect(g).connect(ctx.destination);
-      const gain = PM.clamp(L.d.gain == null ? 1 : L.d.gain, 0, 4);
-      const fi = Math.max(0, L.d.fadeIn || 0), fo = Math.max(0, L.d.fadeOut || 0);
-      const sRel = s - t0, eRel = e - t0;
-      if (fi > .01) {
-        g.gain.setValueAtTime(.0001, sRel);
-        g.gain.exponentialRampToValueAtTime(Math.max(gain, .0001), sRel + Math.min(fi, eRel - sRel));
-      } else g.gain.setValueAtTime(gain, sRel);
-      if (fo > .01 && eRel - fo > sRel) {
-        g.gain.setValueAtTime(gain, eRel - fo);
-        g.gain.linearRampToValueAtTime(.0001, eRel);
-      }
-      /* comp time → source time: playback starts where the layer window begins */
-      src.start(sRel, Math.max(0, (s - L.from) + (L.d.trim || 0)), e - s);
-    } catch (err) { console.warn('Audio layer skipped during export', err); }
-  }
-  try { return await ctx.startRendering(); } catch (e) { console.warn('Audio mixdown failed', e); return null; }
-}
-
-async function encodeOpus(buffer) {
-  if (!buffer || typeof AudioEncoder === 'undefined') return null;
-  const cfg = { codec: 'opus', sampleRate: buffer.sampleRate, numberOfChannels: Math.min(2, buffer.numberOfChannels), bitrate: 160000 };
-  const sup = await AudioEncoder.isConfigSupported(cfg).catch(() => null);
-  if (!sup || !sup.supported) return null;
-  const chunks = [];
-  let priv = null;
-  const enc = new AudioEncoder({
-    output: (chunk, meta) => {
-      /* first output carries the OpusHead needed for WebM CodecPrivate */
-      if (!priv && meta && meta.decoderConfig && meta.decoderConfig.description) {
-        priv = new Uint8Array(meta.decoderConfig.description);
-      }
-      const data = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(data);
-      chunks.push({ ts: chunk.timestamp, data });
-    },
-    error: (e) => console.warn('audio encode error', e),
-  });
-  enc.configure(cfg);
-  const ch = cfg.numberOfChannels;
-  const chan = [];
-  for (let c = 0; c < ch; c++) chan.push(buffer.getChannelData(c));
-  const slice = Math.floor(buffer.sampleRate * .02); // 20ms frames
-  for (let off = 0; off < buffer.length; off += slice) {
-    const n = Math.min(slice, buffer.length - off);
-    const planar = new Float32Array(n * ch);
-    for (let c = 0; c < ch; c++) planar.set(chan[c].subarray(off, off + n), c * n);
-    const ad = new AudioData({
-      format: 'f32-planar', sampleRate: buffer.sampleRate,
-      numberOfFrames: n, numberOfChannels: ch,
-      timestamp: Math.round(off / buffer.sampleRate * 1e6),
-      data: planar,
-    });
-    enc.encode(ad); ad.close();
-    if (enc.encodeQueueSize > 16) await new Promise(r => setTimeout(r, 4));
-  }
-  await enc.flush();
-  enc.close();
-  return chunks.length ? { chunks, priv, rate: buffer.sampleRate, channels: ch } : null;
-}
-
 /* ── export core ───────────────────────────────────────── */
 const X = { busy: false, cancel: false };
 PM.Export = X;
@@ -209,10 +127,10 @@ X.dialog = () => {
   mk('Quality', PM.selectField(() => opts.quality, v => { opts.quality = v; info(); },
     [{ v: 'draft', label: 'Draft · 4 Mbps' }, { v: 'high', label: 'High · 16 Mbps' }, { v: 'max', label: 'Max · 40 Mbps' }]));
   mk('Motion blur', PM.toggleField(() => opts.mblur, v => { opts.mblur = v; }));
-  const hasAudio = p.layers.some(l => l.type === 'audio' && l.on && l.d.asset);
+  const hasAudio = PM.Audio.hasAudibleLayers(p);
   mk('Include audio', PM.toggleField(() => opts.audio !== false, v => { opts.audio = v; }, { label: hasAudio ? 'Mixes composition audio (WebM)' : 'No audio layers in this project' }));
   mk('Transparent background', PM.toggleField(() => !!opts.alpha, v => { opts.alpha = v; }, { label: 'PNG / still only' }));
-  const nfo = h('div', { style: { fontFamily: 'var(--f-mono)', fontSize: '11px', color: 'var(--tx-3)', padding: '10px 4px 0', lineHeight: 1.7 } });
+  const nfo = h('div', { style: { fontSize: '11px', color: 'var(--tx-3)', padding: '10px 4px 0', lineHeight: 1.7, fontVariantNumeric: 'tabular-nums' } });
   body.appendChild(nfo);
   function info() {
     const [a, b] = range(opts);
@@ -235,7 +153,7 @@ function range(opts) {
 
 function progressUI(total) {
   const bar = h('i', { style: { width: '0%' } });
-  const label = h('div', { style: { fontFamily: 'var(--f-mono)', fontSize: '11.5px', color: 'var(--tx-2)' } }, 'Preparing…');
+  const label = h('div', { style: { fontSize: '11.5px', color: 'var(--tx-2)', fontVariantNumeric: 'tabular-nums' } }, 'Preparing…');
   const prev = h('canvas', { style: { width: '100%', borderRadius: '8px', background: '#000', display: 'block' } });
   const body = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
     prev, h('div.bar', { style: { height: '4px' } }, bar), label);
@@ -284,7 +202,7 @@ async function run(opts) {
     } else if (opts.format === 'png') {
       await exportPNGs({ opts, W, H, t0, total, ui, pctx });
     } else {
-      await exportWebCodecs({ opts, W, H, t0, total, ui, pctx, bitrate });
+      await exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     }
     if (!X.cancel) PM.toast(`Export finished in ${((performance.now() - t) / 1000).toFixed(1)}s`, 3400);
   } catch (e) {
@@ -337,7 +255,7 @@ function alphaFrame(T, W, H, mblur) {
   return cv;
 }
 
-async function exportWebCodecs({ opts, W, H, t0, total, ui, pctx, bitrate }) {
+async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }) {
   const frames = [];
   let configured = false;
   const enc = new VideoEncoder({
@@ -383,9 +301,9 @@ async function exportWebCodecs({ opts, W, H, t0, total, ui, pctx, bitrate }) {
   if (opts.audio !== false) {
     ui.set(total, 'mixing audio…');
     await new Promise(r => setTimeout(r, 16));
-    const mix = await mixAudio(t0, t1);
+    const mix = await PM.Audio.renderOffline(t0, t1);
     if (mix) {
-      audioPayload = await encodeOpus(mix);
+      audioPayload = await PM.Audio.encodeOpus(mix);
       if (!audioPayload) audioNote = ' · no system opus encoder';
     }
   }

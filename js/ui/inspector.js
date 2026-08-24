@@ -11,12 +11,16 @@ PM.registerPanel('inspector', {
     hdr.textContent = '';
     const L = PM.firstSel();
     const type = L && PM.TYPE_META[L.type];
+    const actions = [
+      h('button.iconbtn', { title: 'New layer', onpointerdown: (e) => { e.preventDefault(); newLayerMenu(e.target); } }, PM.icon('layers')),
+    ];
+    if (!L || L.type !== 'audio') actions.push(
+      h('button.iconbtn', { title: 'Add effect', onpointerdown: (e) => { e.preventDefault(); fxMenu(e.target); } }, PM.icon('plus')));
     hdr.append(
       h('span', L ? L.name : 'Properties'),
       type ? h('span.sub', ' · ' + type.label) : h('span'),
       h('span.sp'),
-      h('button.iconbtn', { title: 'New layer', onpointerdown: (e) => { e.preventDefault(); newLayerMenu(e.target); } }, PM.icon('layers')),
-      h('button.iconbtn', { title: 'Add effect', onpointerdown: (e) => { e.preventDefault(); fxMenu(e.target); } }, PM.icon('plus')));
+      ...actions);
   },
 });
 
@@ -41,10 +45,12 @@ function render() {
   if (!L) { sceneParams(wrap); return; }
   refreshHeader();
   content(wrap, L);
-  transform(wrap, L);
-  if (L.type === 'shader') shaderUniforms(wrap, L);
-  effects(wrap, L);
-  masksSection(wrap, L);
+  if (L.type !== 'audio') {
+    transform(wrap, L);
+    if (L.type === 'shader') shaderUniforms(wrap, L);
+    effects(wrap, L);
+    masksSection(wrap, L);
+  }
   layerOptions(wrap, L);
 }
 
@@ -105,7 +111,7 @@ function chanMenu(e, L, key, p, label) {
 
 function exprDialog(L, key, p, label) {
   const ta = h('textarea.code', { style: { height: '150px', borderRadius: '8px' } }, p.expr || 'value + wiggle(2, 20)');
-  const hint = h('div', { style: { fontSize: '11px', color: 'var(--tx-3)', lineHeight: 1.6, fontFamily: 'var(--f-mono)' } },
+  const hint = h('div', { style: { fontSize: '11px', color: 'var(--tx-3)', lineHeight: 1.6 } },
     't · layer-local seconds   T · comp seconds   value · keyframed value',
     h('br'), 'wiggle(f,a) random(s) linear(x,x0,x1,y0,y1) ease(...) loop(d,x) param("name")');
   PM.modal({
@@ -125,6 +131,7 @@ function exprDialog(L, key, p, label) {
 function content(wrap, L) {
   const d = L.d;
   wrap.appendChild(PM.section('Content'));
+  if (L.type === 'audio') { audioContent(wrap, L); return; }
   const set = (k) => (v) => { d[k] = v; PM.touch(); PM.invalidate(); };
   const get = (k) => () => d[k];
   const edit = (k, opt = {}) => ({
@@ -182,24 +189,37 @@ function content(wrap, L) {
       numRow(wrap, 'Speed', get('speed'), set('speed'), edit('speed', { step: .05, precision: 2, min: .05 }));
     }
   }
-  else if (L.type === 'audio') {
-    const assets = Object.values(PM.proj.assets).filter(a => a.kind === 'audio');
-    wrap.appendChild(PM.row('Source', PM.selectField(
-      () => { const a = PM.proj.assets[d.asset]; return a ? a.name : 'none'; },
-      (v) => { d.asset = v; }, assets.map(a => ({ v: a.id, label: a.name })), edit('asset', { label: 'Source' }))));
-    numRow(wrap, 'Trim start', get('trim'), set('trim'), edit('trim', { step: .05, precision: 2, min: 0, unit: 's' }));
-    numRow(wrap, 'Gain', get('gain'), set('gain'), edit('gain', { step: .05, precision: 2, min: 0, max: 4 }));
-    numRow(wrap, 'Fade in', get('fadeIn'), set('fadeIn'), edit('fadeIn', { step: .05, precision: 2, unit: 's' }));
-    numRow(wrap, 'Fade out', get('fadeOut'), set('fadeOut'), edit('fadeOut', { step: .05, precision: 2, unit: 's' }));
-  }
   else if (L.type === 'shader') {
     const b = h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '30px' }, onclick: () => PM.openShaderEditor(L) }, PM.icon('code'), 'Edit shader source');
     wrap.appendChild(b);
     const err = PM.GL.compileError(L._shaderKey);
-    if (err) wrap.appendChild(h('div', { style: { fontFamily: 'var(--f-mono)', fontSize: '10.5px', color: 'var(--red)', padding: '6px 4px', whiteSpace: 'pre-wrap', maxHeight: '90px', overflow: 'auto' } }, err));
+    if (err) wrap.appendChild(h('div', { style: { fontSize: '10.5px', color: 'var(--red)', padding: '6px 4px', whiteSpace: 'pre-wrap', maxHeight: '90px', overflow: 'auto' } }, err));
     numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
     numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
   }
+}
+
+/* Audio content has one intentionally small source model. The controls receive
+   no direct setter: their only write path is the shared set_content command. */
+function audioContent(wrap, L) {
+  const d = L.d || {};
+  const assets = Object.values(PM.proj.assets).filter(asset => asset.kind === 'audio');
+  const get = (key, fallback) => () => d[key] == null ? fallback : d[key];
+  const command = (key, label, opt = {}) => ({
+    ...opt,
+    label,
+    origin: 'inspector',
+    command: value => ({ type: 'set_content', target: L.id, patch: { [key]: value } }),
+  });
+  const commandOnly = () => {};
+  const sources = [{ v: null, label: 'None' }, ...assets.map(asset => ({ v: asset.id, label: asset.name }))];
+
+  wrap.appendChild(PM.row('Source', PM.selectField(
+    get('asset', null), commandOnly, sources, command('asset', 'Audio source'))));
+  numRow(wrap, 'Trim start', get('trim', 0), commandOnly, command('trim', 'Trim start', { step: .05, precision: 2, min: 0, unit: 's' }));
+  numRow(wrap, 'Gain', get('gain', 1), commandOnly, command('gain', 'Gain', { step: .05, precision: 2, min: 0, max: 4 }));
+  numRow(wrap, 'Fade in', get('fadeIn', 0), commandOnly, command('fadeIn', 'Fade in', { step: .05, precision: 2, min: 0, max: L.dur, unit: 's' }));
+  numRow(wrap, 'Fade out', get('fadeOut', 0), commandOnly, command('fadeOut', 'Fade out', { step: .05, precision: 2, min: 0, max: L.dur, unit: 's' }));
 }
 
 function numRow(wrap, label, get, set, opt = {}) {
@@ -416,6 +436,13 @@ PM.fxMenu = fxMenu;
 function layerOptions(wrap, L) {
   wrap.appendChild(PM.section('Layer'));
   const layerEdit = (key, opt = {}) => ({ ...opt, origin: 'inspector', command: (value) => ({ type: 'set_layer', target: L.id, patch: { [key]: value } }) });
+  if (L.type === 'audio') {
+    wrap.appendChild(PM.row('Visible', PM.toggleField(() => L.on, () => {}, layerEdit('visible', { label: 'Visibility' }))));
+    wrap.appendChild(PM.row('Color', PM.colorField(() => L.color, () => {}, layerEdit('color', { label: 'Label color' }))));
+    numRow(wrap, 'Start', () => L.from, () => {}, layerEdit('from', { step: .05, precision: 2, unit: 's' }));
+    numRow(wrap, 'Duration', () => L.dur, () => {}, layerEdit('duration', { step: .05, precision: 2, unit: 's' }));
+    return;
+  }
   wrap.appendChild(PM.row('Blend mode', PM.selectField(() => L.blend, v => { L.blend = v; PM.invalidate(); }, PM.BLENDS, layerEdit('blend', { label: 'Blend' }))));
   wrap.appendChild(PM.row('Motion blur', PM.toggleField(() => L.mblur, v => { L.mblur = v; PM.invalidate(); }, layerEdit('motionBlur', { label: 'Motion blur' }))));
   wrap.appendChild(PM.row('Parent', PM.selectField(

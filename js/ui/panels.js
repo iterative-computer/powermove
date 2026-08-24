@@ -4,31 +4,100 @@
 const PM = window.PM, h = PM.h;
 
 /* ── Assets ────────────────────────────────────────────── */
+function mediaDuration(seconds) {
+  if (!(Number(seconds) > 0)) return '';
+  const whole = Math.round(Number(seconds));
+  const minutes = Math.floor(whole / 60);
+  return minutes + ':' + String(whole % 60).padStart(2, '0');
+}
+function mediaSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (!value) return '';
+  if (value < 1024 * 1024) return Math.max(1, Math.round(value / 1024)) + ' KB';
+  return (value / (1024 * 1024)).toFixed(value < 10 * 1024 * 1024 ? 1 : 0) + ' MB';
+}
+function mediaDetails(asset) {
+  const parts = [];
+  if (asset.kind !== 'audio' && asset.w && asset.h) parts.push(asset.w + '×' + asset.h);
+  if (asset.dur) parts.push(mediaDuration(asset.dur));
+  if (asset.size) parts.push(mediaSize(asset.size));
+  return parts.join(' · ') || 'Ready to use';
+}
+function assetIcon(kind) { return kind === 'audio' ? 'clock' : kind === 'video' ? 'cam' : 'frame'; }
+
 PM.registerPanel('assets', {
-  title: 'Project', size: 200,
+  title: 'Media', size: 200,
   build(body) {
-    const list = h('div', { style: { padding: '6px' } });
-    const drop = h('div', {
-      style: { margin: '6px', padding: '14px', border: '1px dashed var(--line-2)', borderRadius: '10px', textAlign: 'center', color: 'var(--tx-3)', fontSize: '11.5px' },
-    }, 'Drop media here');
-    body.append(list, drop);
+    body.classList.add('assets-panel-body');
+    const importButton = h('button.asset-import', { type: 'button', title: 'Import media (⌘I)', onclick: () => PM.pickFiles() }, PM.icon('plus'), h('span', 'Import'));
+    const top = h('div.assets-top', importButton);
+    const list = h('div.asset-list', { role: 'listbox', 'aria-label': 'Project media' });
+    body.append(top, list);
+    let selectedAssetId = null;
+    const syncSelection = () => {
+      list.querySelectorAll('.asset-card').forEach(row => {
+        const selected = row.dataset.assetId === selectedAssetId;
+        row.setAttribute('aria-selected', String(selected));
+        row.tabIndex = selected ? 0 : -1;
+      });
+    };
+    const selectAsset = (id, row) => {
+      selectedAssetId = id;
+      syncSelection();
+      row && row.focus();
+    };
+    const deleteAsset = as => {
+      const result = PM.hist.do('Delete media', () => PM.MediaImport.removeAsset(PM.proj, as.id));
+      selectedAssetId = null;
+      PM.sel.layers = PM.sel.layers.filter(id => !result.removedLayerIds.includes(id));
+      PM.bus.emit('assets'); PM.bus.emit('layers'); PM.bus.emit('sel'); PM.bus.emit('project');
+      PM.toast(result.removedLayers
+        ? `Deleted ${as.name} and ${result.removedLayers} ${result.removedLayers === 1 ? 'layer' : 'layers'}`
+        : `Deleted ${as.name}`);
+    };
+    const requestDelete = as => {
+      const references = PM.MediaImport.referenceCount(PM.proj, as.id);
+      if (!references) return deleteAsset(as);
+      PM.modal({
+        title: `Delete “${as.name}”?`, width: 420,
+        body: h('div', { style: { color: 'var(--tx-2)', fontSize: '12.5px', lineHeight: 1.6 } },
+          `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`),
+        actions: [{ label: 'Cancel' }, { label: 'Delete', pri: true, run: () => deleteAsset(as) }],
+      });
+    };
     const paint = () => {
       list.textContent = '';
       const a = Object.values(PM.proj.assets);
+      if (selectedAssetId && !PM.proj.assets[selectedAssetId]) selectedAssetId = null;
       a.forEach(as => {
-        const row = h('div.lyr', h('span.sw2', { style: { background: as.kind === 'audio' ? 'var(--blue)' : as.kind === 'video' ? 'var(--blue-deep)' : 'var(--gray)' } }),
-          h('span.nm', as.name), h('span.idx', as.kind[0].toUpperCase()));
-        row.ondblclick = () => PM.cmd('addFromAsset', as.id);
+        const live = PM.assets.get(as.id);
+        const preview = h('span.asset-preview.' + as.kind, PM.icon(assetIcon(as.kind)));
+        if (as.kind === 'image' && live && live.url) preview.appendChild(h('img', { src: live.url, alt: '' }));
+        const add = h('button.asset-add', {
+          type: 'button', title: 'Add to timeline', 'aria-label': 'Add ' + as.name + ' to timeline',
+          onclick: event => { event.stopPropagation(); PM.cmd('addFromAsset', as.id); },
+        }, PM.icon('plus'));
+        const remove = h('button.asset-delete', {
+          type: 'button', title: 'Delete media', 'aria-label': 'Delete ' + as.name,
+          onclick: event => { event.stopPropagation(); selectAsset(as.id); requestDelete(as); },
+        }, PM.icon('trash'));
+        const actions = h('span.asset-actions', add, remove);
+        const row = h('div.asset-card', {
+          role: 'option', tabindex: selectedAssetId === as.id ? '0' : '-1', 'aria-selected': String(selectedAssetId === as.id),
+          'data-asset-id': as.id, title: 'Select media · double-click to add to the timeline',
+          onclick: event => { if (!event.target.closest('button')) selectAsset(as.id, row); },
+          ondblclick: event => { if (!event.target.closest('button')) PM.cmd('addFromAsset', as.id); },
+          onkeydown: event => {
+            if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); event.stopPropagation(); requestDelete(as); }
+            else if (event.key === 'Enter') { event.preventDefault(); PM.cmd('addFromAsset', as.id); }
+            else if (event.key === ' ') { event.preventDefault(); selectAsset(as.id, row); }
+          },
+        }, preview, h('span.asset-copy', h('b', as.name), h('small', mediaDetails(as))), actions);
         list.appendChild(row);
       });
-      if (!a.length) list.appendChild(h('div.empty', 'No media imported.'));
+      if (!a.length) list.appendChild(h('div.asset-empty', PM.icon('project'), h('b', 'No imported media'), h('span', 'Images, video, and audio stay with this project.')));
     };
     paint(); PM.bus.on('assets', paint);
-    ['dragover', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => {
-      e.preventDefault();
-      if (ev === 'drop') PM.importFiles([...e.dataTransfer.files]);
-    }));
-    drop.onclick = () => PM.pickFiles();
   },
 });
 
@@ -182,7 +251,7 @@ PM.registerPanel('perf', {
     const wrap = h('div.insp');
     body.appendChild(wrap);
     const rows = {};
-    const add = (k) => { const v = h('span', { style: { fontFamily: 'var(--f-mono)', fontSize: '11.5px' } }, '—'); rows[k] = v; wrap.appendChild(PM.row(k, v)); };
+    const add = (k) => { const v = h('span', { style: { fontSize: '11.5px', fontVariantNumeric: 'tabular-nums' } }, '—'); rows[k] = v; wrap.appendChild(PM.row(k, v)); };
     ['FPS', 'Frame ms', 'GL draws', 'FX passes', 'Programs', 'Raster cache', 'Layers', 'Keyframes'].forEach(add);
     const sync = () => {
       const s = PM.GL.stats;

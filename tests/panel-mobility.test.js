@@ -10,7 +10,7 @@ const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
 const viewer = fs.readFileSync(path.join(root, 'js/ui/viewer.js'), 'utf8');
 const native = fs.readFileSync(path.join(root, 'native/main.swift'), 'utf8');
 
-test('headless Composition and Timeline panels expose dedicated move handles', () => {
+test('headless panels expose a dedicated move handle unless the surface intentionally hides it', () => {
   assert.match(layout, /button\.panel-move-handle/);
   assert.match(layout, /headless && !def\.hideMoveHandle/);
   assert.match(layout, /Move \$\{def\.title\} panel/);
@@ -21,25 +21,31 @@ test('headless Composition and Timeline panels expose dedicated move handles', (
   assert.match(css, /\.panel-move-handle\.inline\{[^}]*width:16px[^}]*border:0[^}]*background:transparent[^}]*box-shadow:none/s);
   assert.match(layout, /slot\.insertBefore\(moveHandle, slot\.firstChild\)/);
   assert.match(timeline, /moveSlot: '#tl-head'/, 'Timeline keeps its drag handle');
-  assert.doesNotMatch(viewer, /hideMoveHandle: true/);
-  assert.match(css, /#panel-viewer > \.panel-move-handle\{[^}]*left:10px[^}]*width:16px[^}]*background:transparent/s,
-    'Composition restores only the compact drag grip, not the retired footer');
+  assert.match(viewer, /hideMoveHandle: true/, 'Composition removes its footer drag grip');
 });
 
-test('panel move handles form a soft cursor-proximity opacity field', () => {
-  assert.match(layout, /HANDLE_PROXIMITY_RADIUS = 220/);
-  assert.match(layout, /L\.handleProximity/);
-  assert.match(layout, /Math\.hypot\(dx, dy\)/);
-  assert.match(layout, /requestAnimationFrame\(paintHandleProximity\)/,
-    'pointer sampling is coalesced to one visual update per frame');
-  assert.match(layout, /style\.setProperty\('--handle-proximity'/);
-  assert.match(layout, /pointerleave', resetHandleProximity/);
-  assert.match(layout, /panel-move-handle,\.panel > header \.grip/,
-    'regular panel and headless-panel grips share the same opacity field');
-  assert.match(css, /opacity:calc\(\.22 \+ var\(--handle-proximity,0\) \* \.78\)/,
-    'the resting grip remains discoverable while direct hover reaches full opacity');
-  assert.match(css, /\.panel-move-handle:hover,\.panel-move-handle:focus-visible\{opacity:1/,
-    'mouse and keyboard focus both reveal the grip fully');
+test('every resize grip smoothly follows the cursor and fades toward both ends', () => {
+  assert.match(layout, /attachSplitterHover/);
+  assert.match(layout, /--splitter-hover-x/);
+  assert.match(layout, /--splitter-hover-y/);
+  assert.match(layout, /current \+= \(target - current\) \* \.36/,
+    'cursor motion is eased continuously instead of snapping between pointer events');
+  assert.match(layout, /attachSplitterHover\(s, 'x'\)/, 'horizontal grips track the cursor x position');
+  assert.match(layout, /attachSplitterHover\(s, 'y'\)/, 'vertical grips track the cursor y position');
+  assert.match(layout, /move: \(dx, dy, ev\)[\s\S]*trackPointer\(ev\)/,
+    'the hotspot keeps following the cursor during drag');
+  assert.match(css, /\.splitter::after\{[^}]*opacity:0[^}]*transition:opacity \.18s/s,
+    'every resize grip is completely invisible at rest');
+  assert.match(css, /\.splitter:hover::after,\.splitter\.drag::after\{opacity:1;transition-duration:\.12s\}/,
+    'every grip fades in on hover or drag and fades out after leaving');
+  assert.match(css, /radial-gradient\(12px 180px[\s\S]*transparent 100%/,
+    'the hover glow fades fully away outside the vertical cursor hotspot');
+  assert.match(css, /radial-gradient\(180px 12px[\s\S]*transparent 100%/,
+    'the hover glow fades fully away outside the horizontal cursor hotspot');
+  assert.match(css, /radial-gradient\(180px 12px at var\(--splitter-hover-x,50%\) 50%/,
+    'horizontal opacity peaks locally beneath the cursor');
+  assert.match(css, /radial-gradient\(12px 180px at 50% var\(--splitter-hover-y,50%\)/,
+    'vertical opacity peaks locally beneath the cursor');
 });
 
 test('persisted canvas panels resolve their current dock before moving again', () => {
@@ -56,7 +62,7 @@ test('panel dragging uses one compact destination label without workspace lines'
   assert.doesNotMatch(layout, /dockEl\.classList\.add\('drop-into'\)/);
   assert.doesNotMatch(css, /\.dock\.drop-into\s*\{/);
   assert.doesNotMatch(css, /\.panel\.drop-(?:before|after)\s*\{/);
-  assert.match(css, /\.panel-dragging \.splitter::after\{background:transparent\}/);
+  assert.match(css, /\.panel-dragging \.splitter::after\{opacity:0\}/);
   assert.match(css, /\.panel-ghost\s*\{[^}]*height:32px/s);
 });
 

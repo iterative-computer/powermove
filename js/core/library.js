@@ -185,6 +185,7 @@ function insertSection(id, options = {}) {
   if (!Number.isFinite(base)) base = 0;
   const clones = s.layers.map(src => {
     const c = PM.cloneLayer(JSON.parse(JSON.stringify(src)));
+    if (c.type === 'audio' && PM.Audio) PM.Audio.normalizeLayer(c);
     c.from = Math.max(0, c.from + (start - base));
     return c;
   });
@@ -192,7 +193,8 @@ function insertSection(id, options = {}) {
   const map = new Map(s.layers.map((src, i) => [src.id, clones[i]]));
   clones.forEach((c, i) => {
     const src = s.layers[i];
-    c.parent = src.parent && map.has(src.parent) ? map.get(src.parent).id : null;
+    c.parent = PM.TYPE_META[c.type] && PM.TYPE_META[c.type].transform === false
+      ? null : src.parent && map.has(src.parent) ? map.get(src.parent).id : null;
     c.sectionRef = {
       schemaVersion: SCHEMA_VERSION, sectionId: s.id, sourceProjectId: found.project.id,
       sourceVersionId: s.versions.at(-1)?.id || null, instanceId, sourceLayerId: src.id,

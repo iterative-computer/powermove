@@ -184,12 +184,19 @@ test('vertical resize is isolated from panel reorder and supports exact cancella
 /* ── util.js harness for PM.drag semantics ──────────────── */
 function dragModel() {
   const listeners = {};
+  const listenerOptions = {};
   const windowObj = {
-    addEventListener: (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); },
-    removeEventListener: (t, fn) => {
+    addEventListener: (t, fn, options) => {
+      (listeners[t] = listeners[t] || []).push(fn);
+      (listenerOptions[t] = listenerOptions[t] || []).push(options);
+    },
+    removeEventListener: (t, fn, options) => {
       const l = listeners[t] || [];
       const i = l.indexOf(fn);
-      if (i >= 0) l.splice(i, 1);
+      if (i >= 0) {
+        l.splice(i, 1);
+        (listenerOptions[t] || []).splice(i, 1);
+      }
     },
     style: {},
   };
@@ -204,7 +211,7 @@ function dragModel() {
     setTimeout,
   });
   vm.runInContext(fs.readFileSync(path.join(root, 'js/core/util.js'), 'utf8'), context);
-  return { PM: windowObj.PM, listeners };
+  return { PM: windowObj.PM, listeners, listenerOptions };
 }
 
 function fire(listeners, type, ev = { clientX: 0, clientY: 0 }) {
@@ -248,6 +255,29 @@ test('a native pointercancel aborts the drag instead of wedging it', () => {
   fire(listeners, 'pointerup', { clientX: 30, clientY: 30 });
   assert.equal(cancels, 1);
   assert.equal(ups, 0);
+});
+
+test('PM.drag captures the originating pointer for WKWebView canvas gestures', () => {
+  const { PM, listeners, listenerOptions } = dragModel();
+  const targetListeners = {};
+  const calls = [];
+  const target = {
+    setPointerCapture: id => calls.push(['capture', id]),
+    hasPointerCapture: id => (calls.push(['has', id]), true),
+    releasePointerCapture: id => calls.push(['release', id]),
+    addEventListener: (type, fn) => { targetListeners[type] = fn; },
+    removeEventListener: type => { delete targetListeners[type]; },
+  };
+  let cancels = 0;
+  PM.drag({ clientX: 5, clientY: 5, pointerId: 17, currentTarget: target, preventDefault() {} }, {
+    cancel: () => cancels++,
+  });
+  assert.deepEqual(calls[0], ['capture', 17]);
+  assert.equal(listenerOptions.pointermove[0], true, 'movement is observed before WebKit can stop bubbling it');
+  targetListeners.lostpointercapture();
+  assert.equal(cancels, 1);
+  assert.deepEqual(calls.at(-1), ['release', 17]);
+  assert.equal((listeners.pointermove || []).length, 0, 'capture loss removes global drag listeners');
 });
 
 test('every transaction-backed editor drag cancels cleanly when the pointer is interrupted', () => {
