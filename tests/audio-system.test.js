@@ -331,6 +331,37 @@ test('preparing an import decodes actual channel samples and derives reusable wa
   assert.ok(bars.some(([, y, , height]) => height > 1 && y < 6), 'decoded peaks, not a synthetic texture, determine bar height');
 });
 
+test('oversized decoded audio is rejected before it can remain in the project cache', async () => {
+  const huge = {
+    numberOfChannels: 2,
+    length: 42_000_000,
+    sampleRate: 48_000,
+    duration: 875,
+    getChannelData() { throw new Error('peak generation must not run for an oversized buffer'); },
+  };
+  const harness = audioHarness({ decodedBuffer: huge });
+  const blob = new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'audio/wav' });
+
+  await assert.rejects(
+    harness.PM.Audio.prepareAsset({ id: 'asset-huge', name: 'too-long.wav', blob }),
+    /too long to decode safely/,
+  );
+});
+
+test('waveforms stop at source EOF instead of painting repeated terminal samples', () => {
+  const buffer = new FakeAudioBuffer([[.2, .4, .8, .1]], 2); // two seconds
+  const harness = audioHarness();
+  const asset = { ...audioAsset(buffer), peaks: new Float32Array([.2, .4, .8, .1]) };
+  harness.assets.set(asset.id, asset);
+  const bars = [];
+
+  harness.PM.Audio.drawWaveform({ fillRect: (...args) => bars.push(args) }, audioLayer({ dur: 4 }), {
+    x: 0, y: 0, width: 40, height: 12, clipLeft: 0, step: 10,
+  });
+
+  assert.equal(bars.length, 2, 'only the audible first half of the extended layer is painted');
+});
+
 test('the clip planner shares trim, requested range, source bounds, enablement, and solo rules', () => {
   const buffer = new FakeAudioBuffer([new Float32Array(20)], 4); // five seconds
   const { PM } = audioHarness();
@@ -531,6 +562,27 @@ test('offline export schedules the same source offset and fade envelope as previ
     value: point.value,
     at: preview.start - 1 + point.local - preview.localStart,
   })));
+});
+
+test('requested audio export fails visibly instead of silently dropping a missing or broken track', async () => {
+  const decoded = new FakeAudioBuffer([new Float32Array(16)], 4);
+  const missingHarness = audioHarness({ decodedBuffer: decoded });
+  missingHarness.PM.proj.layers = [audioLayer({ name: 'Missing narration', dur: 4 })];
+
+  await assert.rejects(
+    missingHarness.PM.Audio.renderOffline(0, 4),
+    /Audio media is missing for “Missing narration”/,
+  );
+
+  const brokenHarness = audioHarness({ decode: () => { throw new Error('decoder failed'); } });
+  const broken = { ...audioAsset(decoded), audioBuffer: null, peaks: null, dur: 4 };
+  brokenHarness.assets.set(broken.id, broken);
+  brokenHarness.PM.proj.layers = [audioLayer({ name: 'Broken narration', dur: 4 })];
+
+  await assert.rejects(
+    brokenHarness.PM.Audio.renderOffline(0, 4),
+    /Could not include “Broken narration” in the export/,
+  );
 });
 
 test('offline export pins earlier decoded tracks while later tracks decode and preserves waveform peaks on eviction', async () => {

@@ -299,19 +299,18 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate })
   if (X.cancel) return;
   ui.set(total, 'muxing…');
   await new Promise(r => setTimeout(r, 16));
-  let audioPayload = null, audioNote = '';
+  let audioPayload = null;
   if (opts.audio !== false) {
     ui.set(total, 'mixing audio…');
     await new Promise(r => setTimeout(r, 16));
     const mix = await PM.Audio.renderOffline(t0, t1);
     if (mix) {
       audioPayload = await PM.Audio.encodeOpus(mix);
-      if (!audioPayload) audioNote = ' · no system opus encoder';
+      if (!audioPayload) throw new Error('Could not encode the audio track · use realtime capture');
     }
   }
   const blob = muxWebM(frames, { width: W, height: H, fps: opts.fps, codecId: chosen.id, audio: audioPayload });
   PM.download(blob, `${PM.proj.name || 'powermove'}.webm`);
-  if (audioNote) PM.toast(audioNote, 4000);
 }
 
 async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }) {

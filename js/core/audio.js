@@ -178,6 +178,11 @@ async function decodeAsset(asset) {
       const bytes = await asset.audioBlob.arrayBuffer();
       const buffer = await decodeArrayBuffer(context(), bytes.slice(0));
       if (!buffer || !(buffer.duration > 0)) throw new Error('The decoder returned an empty audio file');
+      if (decodedBytes(buffer) > MAX_DECODED_BYTES) {
+        const error = new Error('This audio file is too long to decode safely · use a shorter edit or split it first');
+        error.audioUserFacing = true;
+        throw error;
+      }
       if (asset.audioDisposed || asset.audioToken !== token) return null;
       asset.audioBuffer = buffer;
       asset.dur = buffer.duration;
@@ -192,7 +197,7 @@ async function decodeAsset(asset) {
       PM.invalidate && PM.invalidate('timeline');
       return buffer;
     } catch (error) {
-      const failure = error && /missing|decoder|supported/i.test(error.message || '')
+      const failure = error && (error.audioUserFacing || /missing|decoder|supported/i.test(error.message || ''))
         ? error
         : new Error('Could not decode this audio file · try WAV, MP3, M4A, AAC, OGG, FLAC, or AIFF');
       asset.audioDecodeError = failure;
@@ -525,7 +530,9 @@ function drawWaveform(ctx, layer, options = {}) {
   ctx.fillStyle = options.color || 'rgba(255,255,255,.52)';
   for (let px = left; px < right; px += step) {
     const local = (px - x) / Math.max(1, width) * Math.max(0, finite(layer.dur));
-    const sourceRatio = clamp((trim + local) / duration, 0, 1);
+    const sourceTime = trim + local;
+    if (sourceTime >= duration) continue;
+    const sourceRatio = clamp(sourceTime / duration, 0, 1);
     const peak = peaks[Math.min(peaks.length - 1, Math.floor(sourceRatio * peaks.length))] || 0;
     const bar = Math.max(1, peak * (height - 4));
     ctx.fillRect(px, y + (height - bar) / 2, Math.max(1, step - 1), bar);
@@ -539,17 +546,31 @@ async function collectDecodedClips(t0, t1) {
   if (to - from <= 1e-4 || !PM.proj) return { from, to, clips: [], pinned: new Set() };
   const clips = [];
   const pinned = new Set();
-  for (const layer of audioLayers()) {
-    const asset = layer.d && layer.d.asset && PM.assets && PM.assets.get(layer.d.asset);
-    if (!asset) continue;
-    state.pinnedAssets.add(asset.id);
-    pinned.add(asset.id);
-    try { await decodeAsset(asset); }
-    catch (error) { console.warn('Audio layer skipped during export', error); continue; }
-    const clip = plan(layer, asset, from, to);
-    if (clip) clips.push(clip);
+  try {
+    for (const layer of audioLayers()) {
+      const layerStart = Math.max(finite(layer.from), finite(layer._audioWindowStart, finite(layer.from)));
+      const layerEnd = Math.min(finite(layer.from) + Math.max(0, finite(layer.dur)),
+        finite(layer._audioWindowEnd, finite(layer.from) + Math.max(0, finite(layer.dur))));
+      if (Math.min(to, layerEnd) - Math.max(from, layerStart) <= 1e-4) continue;
+      const asset = layer.d && layer.d.asset && PM.assets && PM.assets.get(layer.d.asset);
+      if (!asset) throw new Error(`Audio media is missing for “${layer.name || 'Audio'}” · import it again before exporting`);
+      /* Known metadata lets us skip out-of-range or fully trimmed clips without
+         decoding an unrelated file just because it exists in the project. */
+      if (asset.dur > 0 && !plan(layer, asset, from, to)) continue;
+      state.pinnedAssets.add(asset.id);
+      pinned.add(asset.id);
+      try { await decodeAsset(asset); }
+      catch (error) {
+        throw new Error(`Could not include “${layer.name || asset.name || 'Audio'}” in the export · ${error.message || 'decode failed'}`);
+      }
+      const clip = plan(layer, asset, from, to);
+      if (clip) clips.push(clip);
+    }
+    return { from, to, clips, pinned };
+  } catch (error) {
+    releasePins(pinned);
+    throw error;
   }
-  return { from, to, clips, pinned };
 }
 
 function releasePins(pinned) {
@@ -563,11 +584,11 @@ async function renderOffline(t0, t1) {
     const { from, to, clips } = prepared;
     if (!clips.length) return null;
     const Offline = window.OfflineAudioContext;
-    if (!Offline) return null;
+    if (!Offline) throw new Error('Offline audio rendering is not supported on this system');
     const sampleRate = 48000;
     let offline;
     try { offline = new Offline(2, Math.ceil((to - from) * sampleRate), sampleRate); }
-    catch (error) { return null; }
+    catch (error) { throw new Error('Could not create the audio export mix'); }
     for (const clip of clips) {
       try {
         const source = offline.createBufferSource();
@@ -577,10 +598,10 @@ async function renderOffline(t0, t1) {
         const at = clip.start - from;
         applyEnvelope(gain.gain, clip.layer, clip.localStart, clip.duration, at, clip.audibleDuration);
         source.start(at, clip.sourceOffset, clip.duration);
-      } catch (error) { console.warn('Audio layer skipped during export', error); }
+      } catch (error) { throw new Error(`Could not mix “${clip.layer.name || clip.asset.name || 'Audio'}” for export`); }
     }
     try { return await offline.startRendering(); }
-    catch (error) { console.warn('Audio mixdown failed', error); return null; }
+    catch (error) { throw new Error('Audio mixdown failed · try realtime capture'); }
   } finally {
     releasePins(prepared.pinned);
   }
@@ -718,6 +739,7 @@ const Audio = PM.Audio = {
   prepareAsset,
   disposeAsset,
   decodeAsset,
+  rebalanceCache: trimDecodedCache,
   plan,
   gainAt,
   envelope,

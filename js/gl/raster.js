@@ -286,16 +286,34 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }) {
 }
 let assetEpoch = 0;
 async function ingestAsset(file, { silent = false } = {}) {
+  const targetProject = PM.proj;
+  const targetEpoch = assetEpoch;
+  const assertCurrentProject = () => {
+    if (PM.proj !== targetProject || assetEpoch !== targetEpoch) {
+      const error = new Error('Import stopped because you switched projects · import the file again in the intended project');
+      error.code = 'STALE_MEDIA_IMPORT';
+      throw error;
+    }
+  };
   const kind = assetKind(file);
   if (!kind) throw new Error('Unsupported media file');
   const fingerprint = await PM.MediaImport.fingerprint(file);
+  assertCurrentProject();
   const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
   const provisionalId = PM.uid('a');
   /* Persistence and metadata decoding are independent. Starting both together
      removes a full-file wait from the critical import path. */
   const persist = PM.MediaStore.put(storageKey, file, { storageKey, fingerprint, type: file.type });
-  const prepared = await prepareAsset({ id: provisionalId, name: file.name, kind, blob: file });
-  const persisted = await persist;
+  const preparation = prepareAsset({ id: provisionalId, name: file.name, kind, blob: file });
+  const [preparedResult, persistedResult] = await Promise.allSettled([preparation, persist]);
+  const prepared = preparedResult.status === 'fulfilled' ? preparedResult.value : null;
+  if (preparedResult.status === 'rejected' || persistedResult.status === 'rejected') {
+    if (prepared) disposeAsset(prepared);
+    throw preparedResult.status === 'rejected' ? preparedResult.reason : persistedResult.reason;
+  }
+  try { assertCurrentProject(); }
+  catch (error) { disposeAsset(prepared); throw error; }
+  const persisted = persistedResult.value;
   const identity = {
     name: file.name, kind, fingerprint, storageKey,
     size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
@@ -313,6 +331,7 @@ async function ingestAsset(file, { silent = false } = {}) {
   } else {
     asset.id = id;
     PM.assets.map.set(id, asset);
+    if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
   }
   Object.assign(asset, identity, { id, persisted });
   PM.proj.assets[id] = { id, ...identity, persisted };

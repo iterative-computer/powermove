@@ -574,6 +574,7 @@ function switchProject(p) {
 
 /* ── media import ──────────────────────────────────────── */
 PM.pickFiles = () => {
+  const targetProject = PM.proj;
   const inp = h('input', {
     type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.pmv',
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
@@ -581,7 +582,7 @@ PM.pickFiles = () => {
   const cleanup = () => { inp.onchange = null; inp.remove(); };
   inp.onchange = async () => {
     const files = [...inp.files];
-    try { if (files.length) await PM.importFiles(files); }
+    try { if (files.length) await PM.importFiles(files, { project: targetProject }); }
     finally { cleanup(); }
   };
   inp.addEventListener('cancel', cleanup, { once: true });
@@ -625,8 +626,14 @@ async function importFiles(files) {
 /* File pickers and drag/drop can fire while an earlier batch is still decoding.
    Preserve user order and project identity by serializing batches; each batch
    still performs its expensive work through the bounded parallel pool. */
-PM.importFiles = files => {
-  const run = () => importFiles(Array.from(files || []));
+PM.importFiles = (files, { project = PM.proj } = {}) => {
+  const run = () => {
+    if (PM.proj !== project) {
+      PM.toast('Import stopped because you switched projects · import again in the intended project', 5000);
+      return [];
+    }
+    return importFiles(Array.from(files || []));
+  };
   APP.importQueue = APP.importQueue.then(run, run);
   return APP.importQueue;
 };
