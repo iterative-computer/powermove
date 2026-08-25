@@ -11,10 +11,12 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "test:e2e": "playwright test",
     "typecheck": "svelte-check --tsconfig ./tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "test:unit": "vitest run"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@sveltejs/vite-plugin-svelte": "6.2.4",
     "@types/node": "26.3.0",
     "electron": "44.0.0",

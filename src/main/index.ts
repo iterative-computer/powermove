@@ -11,10 +11,18 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { IPC } from '../shared/ipc';
+import { registerCaptureIpc } from './capture';
+import { registerCodexIpc } from './codex';
+import { registerLogIpc } from './log';
+import { installMenu } from './menu';
+import { registerSaveIpc } from './save';
+import { registerShellIpc } from './shell';
+import { createStore, installQuitFlush, registerStoreIpc } from './storage';
+import { registerThemeIpc } from './theme';
 
 const APP_ORIGIN = 'app://powermove';
 const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; frame-src about: blob:";
+  "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' about: blob:";
 // Served with X-Content-Type-Options: nosniff, so anything not listed here is
 // rejected by <video>/<audio>/WebAssembly rather than sniffed.
 const MIME_TYPES: Readonly<Record<string, string>> = {
@@ -63,6 +71,12 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
+// e2e runs point this at a temp dir so tests never touch real user data.
+const userDataOverride = process.env['POWERMOVE_USER_DATA'];
+if (userDataOverride && path.isAbsolute(userDataOverride)) {
+  app.setPath('userData', userDataOverride);
+}
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | null = null;
 
@@ -88,6 +102,9 @@ const RENDERER = process.env['POWERMOVE_RENDERER'] === 'svelte' ? 'svelte' : 'le
 // The generated-script sandbox document is served with its own policy: Chromium
 // inherits the parent CSP into srcdoc/blob frames, so it must be a real URL.
 const SANDBOX_PATH = 'host/sandbox.html';
+// In legacy mode the renderer root is the repo root; only the app's own
+// directories are reachable (never .git, node_modules, src, tests, ...).
+const LEGACY_ALLOWED = new Set(['index.html', 'js', 'css', 'assets', 'host']);
 const SANDBOX_CSP =
   "default-src 'none'; script-src app://powermove/host/sandbox.js 'unsafe-eval'; worker-src blob:; connect-src 'none'";
 
@@ -113,6 +130,10 @@ function registerAppProtocol(): void {
         path.isAbsolute(relativePath)
       ) {
         return errorResponse(403, 'Forbidden');
+      }
+      const firstSegment = relativePath.split(path.sep)[0] ?? '';
+      if (RENDERER === 'legacy' && !LEGACY_ALLOWED.has(firstSegment)) {
+        return errorResponse(404, 'Not found');
       }
 
       const contents = await readFile(filePath);
@@ -187,7 +208,9 @@ function installPermissionHandlers(): void {
 // A packaged build must never load a renderer URL inherited from the environment.
 const devRendererUrl = app.isPackaged ? undefined : process.env['ELECTRON_RENDERER_URL'];
 
-function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
+// Only the app document's main frame may use privileged IPC (never the
+// sandbox iframe, never a stray WebContents).
+function isTrustedSender(event: { sender: WebContents; senderFrame: Electron.WebFrameMain | null }): boolean {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed() || event.senderFrame === null) {
     return false;
@@ -196,6 +219,11 @@ function isTrustedSender(event: Electron.IpcMainInvokeEvent): boolean {
     event.senderFrame === win.webContents.mainFrame &&
     isAllowedNavigation(event.senderFrame.url, devRendererUrl)
   );
+}
+
+function isTrustedSenderContents(sender: WebContents): boolean {
+  const win = BrowserWindow.fromWebContents(sender);
+  return !!win && !win.isDestroyed() && isAllowedNavigation(sender.getURL(), devRendererUrl);
 }
 
 function createWindow(): BrowserWindow {
@@ -230,7 +258,9 @@ function createWindow(): BrowserWindow {
     void window.loadURL(`${APP_ORIGIN}/`);
   }
 
-  if (!app.isPackaged) {
+  // Opt out with POWERMOVE_DEVTOOLS=0 (e2e: the DevTools window would otherwise
+  // be the "first window" Playwright attaches to).
+  if (!app.isPackaged && process.env['POWERMOVE_DEVTOOLS'] !== '0') {
     window.webContents.openDevTools({ mode: 'detach' });
   }
 
@@ -266,9 +296,31 @@ if (!hasSingleInstanceLock) {
     return 'pong';
   });
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     registerAppProtocol();
     installPermissionHandlers();
+
+    // Boot barrier: the legacy renderer reads PM.store synchronously while its
+    // scripts load, so the store must be in memory before the window exists.
+    const store = createStore(path.join(app.getPath('userData'), 'store'));
+    await store.load();
+    registerStoreIpc(ipcMain, store, { isTrustedSender });
+    installQuitFlush(app, store);
+
+    const ctx = { isTrustedSender, isTrustedSenderContents };
+    registerSaveIpc(ipcMain, ctx);
+    registerCaptureIpc(ipcMain, ctx);
+    registerShellIpc(ipcMain, ctx);
+    registerThemeIpc(ipcMain, ctx);
+    registerLogIpc(ipcMain, ctx);
+    registerCodexIpc(ipcMain, {
+      getWindow: () => mainWindow,
+      userData: app.getPath('userData'),
+      isTrustedSender,
+      codexBinaryPref: () => null // a user-facing preference lands with the settings UI
+    });
+    installMenu(() => mainWindow);
+
     createWindow();
 
     app.on('activate', () => {

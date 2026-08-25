@@ -752,7 +752,11 @@ PM.Popout = {
   openIds() { return Object.keys(this.wins).filter(id => this.isOpen(id)); },
   closeAll() { this.openIds().forEach(id => this.dock(id)); },
   isOpen(id) { return !!this.wins[id] && !this.wins[id].window.closed; },
-  open(id) {
+  open(id, { silent = false } = {}) {
+    if (window.powermove) {
+      if (!silent) PM.toast('Pop-out windows are not available in this build');
+      return;
+    }
     PM.closeMenus?.();
     const def = PM.PANELS[id]; if (!def) return;
     if (NO_POPOUT.has(id)) { PM.toast(def.title + ' stays docked'); return; }

@@ -1,0 +1,114 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { IPC, type CodexRunRequest, type PowermoveBridge } from '../shared/ipc';
+
+const electronMocks = vi.hoisted(() => ({
+  bridge: undefined as PowermoveBridge | undefined,
+  invoke: vi.fn(),
+  on: vi.fn(),
+  removeListener: vi.fn(),
+  send: vi.fn(),
+  sendSync: vi.fn()
+}));
+
+vi.mock('electron', () => ({
+  contextBridge: {
+    exposeInMainWorld: vi.fn((_name: string, bridge: PowermoveBridge) => {
+      electronMocks.bridge = bridge;
+    })
+  },
+  ipcRenderer: {
+    invoke: electronMocks.invoke,
+    on: electronMocks.on,
+    removeListener: electronMocks.removeListener,
+    send: electronMocks.send,
+    sendSync: electronMocks.sendSync
+  }
+}));
+
+await import('./index');
+
+function bridge(): PowermoveBridge {
+  if (!electronMocks.bridge) throw new Error('Preload bridge was not exposed');
+  return electronMocks.bridge;
+}
+
+function request(): CodexRunRequest {
+  return {
+    id: 'request-1234',
+    mode: 'editor',
+    prompt: 'Make it move',
+    schema: null,
+    images: [],
+    model: null,
+    reasoningEffort: null,
+    access: 'editor',
+    projectId: 'editor',
+    projectName: 'Untitled',
+    projectJSON: null,
+    attachments: [],
+    consentToken: null
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+describe('preload bridge', () => {
+  it('isolates progress by request and removes its one listener after resolve', async () => {
+    const result = { ok: true as const, text: 'done', access: 'editor' as const };
+    electronMocks.invoke.mockResolvedValue(result);
+    const onProgress = vi.fn();
+
+    const pending = bridge().codex.run(request(), onProgress);
+    expect(electronMocks.on).toHaveBeenCalledOnce();
+    expect(electronMocks.on).toHaveBeenCalledWith(IPC.codexEvent, expect.any(Function));
+
+    const listener = electronMocks.on.mock.calls[0]?.[1] as (
+      event: object,
+      progress: { id: string; kind: string; text: string }
+    ) => void;
+    listener({ sender: 'must-not-leak' }, { id: 'another-id', kind: 'progress', text: 'wrong' });
+    listener({ sender: 'must-not-leak' }, { id: request().id, kind: 'progress', text: 'right' });
+
+    await expect(pending).resolves.toEqual(result);
+    expect(onProgress).toHaveBeenCalledExactlyOnceWith('right');
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(IPC.codexEvent, listener);
+  });
+
+  it('removes the progress listener when invoke rejects', async () => {
+    electronMocks.invoke.mockRejectedValue(new Error('main failed'));
+
+    const pending = bridge().codex.run(request());
+    const listener = electronMocks.on.mock.calls[0]?.[1];
+
+    await expect(pending).rejects.toThrow('main failed');
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(IPC.codexEvent, listener);
+  });
+
+  it('strips Electron event objects and returns working unsubscribes', () => {
+    const onStoreError = vi.fn();
+    const stopStore = bridge().store.onError(onStoreError);
+    const storeListener = electronMocks.on.mock.calls[0]?.[1] as (...args: unknown[]) => void;
+    const storeError = { key: 'theme', error: 'disk full' };
+    storeListener({ sender: 'must-not-leak' }, storeError);
+    expect(onStoreError).toHaveBeenCalledExactlyOnceWith(storeError);
+    stopStore();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.storeError, storeListener);
+
+    const onCommand = vi.fn();
+    const stopMenu = bridge().onMenuCommand(onCommand);
+    const menuListener = electronMocks.on.mock.calls[1]?.[1] as (...args: unknown[]) => void;
+    menuListener({ sender: 'must-not-leak' }, 'save');
+    expect(onCommand).toHaveBeenCalledExactlyOnceWith('save');
+    stopMenu();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.menuCommand, menuListener);
+  });
+
+  it('uses the synchronous store snapshot boot barrier', () => {
+    electronMocks.sendSync.mockReturnValue({ theme: 'dark' });
+    expect(bridge().store.snapshotSync()).toEqual({ theme: 'dark' });
+    expect(electronMocks.sendSync).toHaveBeenCalledExactlyOnceWith(IPC.storeSnapshotSync);
+  });
+});

@@ -151,7 +151,8 @@ function runIsolated(code, project, input = {}) {
     frame.addEventListener('load', () => frame.contentWindow.postMessage({
       channel: CHANNEL, token, code, project, input: clone(input), runId, runtime: LIMITS.runtime,
     }, '*'), { once: true });
-    frame.srcdoc = frameDocument();
+    if (window.powermove) frame.src = 'host/sandbox.html';
+    else frame.srcdoc = frameDocument();
     document.body.appendChild(frame);
   });
 }

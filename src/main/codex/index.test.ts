@@ -1,0 +1,141 @@
+import { EventEmitter } from 'node:events';
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { IPC, type CodexRunRequest } from '../../shared/ipc';
+
+const mocks = vi.hoisted(() => {
+  const cancel = vi.fn(async () => true);
+  const cancelAll = vi.fn(async () => undefined);
+  let resolveRun: ((value: unknown) => void) | null = null;
+  const run = vi.fn(async (_req: unknown, options: { onProgress?: (text: string) => void }) => {
+    options.onProgress?.('Working…');
+    return await new Promise((resolve) => { resolveRun = resolve; });
+  });
+  return {
+    appOnce: vi.fn(),
+    cancel,
+    cancelAll,
+    run,
+    resolve(value: unknown) {
+      resolveRun?.(value);
+      resolveRun = null;
+    }
+  };
+});
+
+vi.mock('electron', () => ({ app: { once: mocks.appOnce } }));
+vi.mock('./runner', () => ({
+  CodexRunner: class {
+    run = mocks.run;
+    cancel = mocks.cancel;
+    cancelAll = mocks.cancelAll;
+  },
+  isCodexRunRequest: () => true
+}));
+
+import { registerCodexIpc } from './index';
+
+class Sender extends EventEmitter {
+  readonly send = vi.fn();
+  private destroyed = false;
+
+  isDestroyed(): boolean { return this.destroyed; }
+  destroy(): void {
+    this.destroyed = true;
+    this.emit('destroyed');
+  }
+}
+
+function runRequest(): CodexRunRequest {
+  return {
+    id: 'ipc-run-1234',
+    mode: 'editor',
+    prompt: 'Polish it',
+    schema: null,
+    images: [],
+    model: null,
+    reasoningEffort: null,
+    access: 'editor',
+    projectId: 'ipc-project',
+    projectName: 'IPC Project',
+    projectJSON: null,
+    attachments: [],
+    consentToken: null
+  };
+}
+
+describe('registerCodexIpc', () => {
+  const handlers = new Map<string, (event: { sender: Sender }, request: unknown) => Promise<unknown>>();
+  const ipcMain = {
+    handle: vi.fn((channel: string, handler: (event: { sender: Sender }, request: unknown) => Promise<unknown>) => {
+      handlers.set(channel, handler);
+    })
+  };
+
+  beforeEach(() => {
+    handlers.clear();
+    vi.clearAllMocks();
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null,
+      userData: '/tmp/powermove-index-test',
+      isTrustedSender: () => true,
+      codexBinaryPref: () => null
+    });
+  });
+
+  it('registers every frozen Codex, consent, and artifact channel', () => {
+    expect([...handlers.keys()]).toEqual([
+      IPC.codexRun,
+      IPC.codexCancel,
+      IPC.consentComputer,
+      IPC.artifactRead,
+      IPC.artifactReveal
+    ]);
+    expect(mocks.appOnce).toHaveBeenCalledWith('before-quit', expect.any(Function));
+    const beforeQuit = mocks.appOnce.mock.calls.at(-1)?.[1] as (() => void) | undefined;
+    beforeQuit?.();
+    expect(mocks.cancelAll).toHaveBeenCalledOnce();
+  });
+
+  it('streams progress and only allows the owning WebContents to cancel', async () => {
+    const owner = new Sender();
+    const stranger = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+
+    await handlers.get(IPC.codexCancel)!({ sender: stranger }, { id: 'ipc-run-1234' });
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    await handlers.get(IPC.codexCancel)!({ sender: owner }, { id: 'ipc-run-1234' });
+    expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
+    expect(owner.send).toHaveBeenCalledWith(IPC.codexEvent, {
+      id: 'ipc-run-1234',
+      kind: 'progress',
+      text: 'Working…'
+    });
+
+    mocks.resolve({ ok: true, text: '{}', access: 'editor' });
+    await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+  });
+
+  it('cancels a run when its renderer is destroyed', async () => {
+    const owner = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+    owner.destroy();
+    expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
+    mocks.resolve({ ok: false, error: 'cancelled', cancelled: true });
+    await pending;
+  });
+
+  it('rejects an untrusted sender before handling payloads', async () => {
+    handlers.clear();
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null,
+      userData: '/tmp/powermove-index-test',
+      isTrustedSender: () => false,
+      codexBinaryPref: () => null
+    });
+    await expect(
+      handlers.get(IPC.codexCancel)!({ sender: new Sender() }, { id: 'ipc-run-1234' })
+    ).rejects.toThrow('Unauthorized IPC sender');
+  });
+});

@@ -39,7 +39,7 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
 #titlebar{
   height:44px;flex:0 0 44px;display:flex;align-items:center;gap:7px;
   padding:6px 10px 6px 78px;
-  position:relative;z-index:40;
+  position:relative;z-index:40;-webkit-app-region:drag;
 }
 #tabs{
   height:32px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:30%;min-width:0;
@@ -48,6 +48,7 @@ input,textarea{font:inherit;color:inherit;background:none;border:0;outline:0}
 }
 #tabs::-webkit-scrollbar{display:none}
 .titlebar-drag{flex:1;align-self:stretch;min-width:24px}
+#titlebar button,#titlebar input,#titlebar a{-webkit-app-region:no-drag}
 .project-strip-btn{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:7px;color:var(--tx-3);transition:background .1s,color .1s,transform .1s var(--ease)}
 .project-strip-btn:hover{background:var(--bg-row-hi);color:var(--tx)}
 .project-strip-btn:active{transform:scale(.94)}
