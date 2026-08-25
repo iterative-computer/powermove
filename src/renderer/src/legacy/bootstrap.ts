@@ -8,6 +8,7 @@ import { installLegacyRuntime } from '../runtime/install-legacy';
 import { installSveltePanels } from '../panels/install';
 import { installShell } from '../shell/install';
 import { installSvelteLayout } from '../layout/install';
+import { installSvelteOverlays } from '../overlays/install';
 
 import { install as installDiag } from './core/diag';
 import { install as installUtil } from './core/util';
@@ -97,6 +98,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   // boots and applies the workspace layout.
   ['shell', installShell],
   ['layout/svelte', installSvelteLayout],
+  ['overlays/svelte', installSvelteOverlays],
   ['runtime/bridge', installLegacyRuntime],
   ['panels/svelte', installSveltePanels],
   ['app', installApp]
@@ -110,4 +112,3 @@ for (const [name, install] of INSTALLS) {
     console.error(`[legacy] install failed: ${name}`, error);
   }
 }
-
