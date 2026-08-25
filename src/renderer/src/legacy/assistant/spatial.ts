@@ -1,5 +1,7 @@
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
+import { registerAgentPanel } from '../../panels/register-agent';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -124,7 +126,7 @@ const S: any = {
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
-  panelBody: null, attachments: [], requestAttachments: [], steps: [], stepsExpanded: false,
+  attachments: [], requestAttachments: [], steps: [], stepsExpanded: false,
   pendingEntering: false,
   panelRun: null, scope: PM.store?.get?.('agentScope', 'workspace') || 'workspace',
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
@@ -158,13 +160,72 @@ const Spatial: any = {
 };
 PM.SpatialAssistant = Spatial;
 
-PM.registerPanel('agent', {
-  title: 'Powermove agent', size: 350, min: 240, persist: true, noscroll: true,
-  build(body: any) {
-    S.panelBody = body;
-    body.classList.add('agent-panel-body');
-    renderConversation();
+function agentUISnapshot(): AgentSnapshot {
+  const snapshot: AgentSnapshot = {
+    legacyPhase: S.phase,
+    requestToken: S.requestToken,
+    conversation: S.conversation.map((message: any) => ({ ...message })),
+    activity: S.activity,
+    plan: S.plan,
+    run: S.run,
+    panelRun: S.panelRun,
+    attachments: S.attachments,
+    steps: S.steps,
+    stepsExpanded: S.stepsExpanded,
+    scope: S.scope,
+    autoApplyPanels: S.autoApplyPanels,
+    model: S.model,
+    reasoningEffort: S.reasoningEffort,
+    accessMode: S.accessMode,
+    composerDraft: S.composerDraft,
+    pendingEntering: S.pendingEntering,
+    models: AGENT_MODELS,
+    reasoningEfforts: REASONING_EFFORTS,
+    accessModes: AGENT_ACCESS_MODES,
+  };
+  S.conversation.forEach((message: any) => { message.entering = false; });
+  S.pendingEntering = false;
+  return snapshot;
+}
+
+registerAgentPanel(PM, {
+  snapshot: agentUISnapshot,
+  submit: (value: string) => { void sendRequest({ value }); },
+  stop: stopActiveRequest,
+  setDraft: (value: string) => { S.composerDraft = value; },
+  setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
+  setModel: (model: string, effort: string) => {
+    if (!AGENT_MODELS.some((item: any) => item.id === model) || !REASONING_EFFORTS.includes(effort)) return;
+    S.model = model; S.reasoningEffort = effort;
+    PM.store.set('agentModel', model); PM.store.set('agentReasoningEffort', effort);
+    PM.AgentUI?.update({ focusComposer: true });
   },
+  setAccess: setAgentAccessMode,
+  confirmComputerAccess: () => {
+    S.accessMode = 'computer';
+    PM.AgentUI?.update({ focusComposer: true });
+  },
+  setScope: (scope: string) => {
+    S.scope = scope || 'workspace'; PM.store.set('agentScope', S.scope);
+    PM.AgentUI?.update({ focusComposer: true });
+  },
+  toggleAutoApplyPanels: () => {
+    S.autoApplyPanels = !S.autoApplyPanels;
+    PM.store.set('agentAutoApplyPanels', S.autoApplyPanels);
+    PM.AgentUI?.update({ focusComposer: true });
+  },
+  dismissPlan: () => { S.plan = null; PM.AgentUI?.update({ focusComposer: true }); },
+  applyPlan: () => { void applyPlan(); },
+  addAttachments: addAttachmentFiles,
+  removeAttachment,
+  importArtifact: (artifact: any) => importAutonomousArtifact(
+    S.run?.artifacts?.find((item: any) => item.path === artifact.path) || artifact,
+  ),
+  revealArtifact: (artifact: any) => PM.AgentArtifacts.reveal(artifact),
+  undoPanelRun,
+  keepPanelRun,
+  undoSceneRun,
+  keepSceneRun,
 });
 
 function init() {
@@ -191,7 +252,7 @@ function openAgentPanel() {
     });
   }
   window.requestAnimationFrame(() => {
-    renderConversation(true);
+    PM.AgentUI?.update({ focusComposer: true });
     PM.panelInst.agent?.el?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   });
 }
@@ -683,16 +744,6 @@ function textareaLayout(scrollHeight: any, minHeight: any, maxHeight: any) {
   return { height, overflowY: contentHeight > height + 1 ? 'auto' : 'hidden' };
 }
 
-function composerMode(phase: any) {
-  const working: any = phase === 'working';
-  return {
-    working,
-    disabled: phase === 'applying',
-    placeholder: working ? 'Add direction while the agent works…' : 'Describe what you want changed…',
-    sendLabel: working ? 'Steer current run' : 'Send message',
-  };
-}
-
 function autosizeTextarea(input: any, onResize?: any) {
   const resize: any = () => {
     /* A detached panel keeps its authoritative controls in a hidden source host.
@@ -793,185 +844,11 @@ function promoteToConversation() {
   openAgentPanel();
 }
 
-function planPreview() {
-  const plan: any = S.plan;
-  if (!plan) return null;
-  const chrome: any = plan.kind === 'chrome';
-  const interfaceChange: any = plan.kind === 'interface';
-  const scene: any = plan.kind === 'scene';
-  const workspace: any = plan.kind === 'workspace';
-  const panels: any = plan.kind === 'panels';
-  const title: any = panels ? 'Panel arrangement' : interfaceChange ? 'Timeline redesign' : chrome ? 'Interface edit' : scene ? plan.sceneEdit.label : workspace ? plan.workspaceEdit.name : plan.section.title;
-  const preview: any = h('div.spatial-proposal',
-    h('div.spatial-proposal-kicker', 'Proposed change'),
-    h('h3', title));
-  if (panels) plan.panelEdit.actions.forEach((action: any) => preview.appendChild(h('div.spatial-preview-control.panel-action', PM.icon('panel'), h('span', describePanelAction(action)))));
-  else if (interfaceChange) Object.entries(plan.interfaceEdit.patch).forEach(([key, value]: any) => preview.appendChild(h('div.spatial-preview-control', h('span', key), h('span', String(value)))));
-  else if (chrome) preview.appendChild(h('div.spatial-preview-control',
-    h('span', plan.chromeEdit.target === 'timeline.surfaceOrder' ? 'Timeline surfaces' : 'Corner style'),
-    h('span', plan.chromeEdit.value)));
-  else if (scene) plan.sceneEdit.commands.forEach((command: any) => preview.appendChild(h('div.spatial-preview-control', h('span', PM.AgentHarness.describeCommand(command)))));
-  else if (workspace) {
-    plan.workspaceEdit.docks.forEach((dock: any) => preview.appendChild(h('div.spatial-preview-control', h('span', dock.id), h('span', dock.panels.map((panel: any) => panel.id).join(' · ')))));
-    plan.workspaceEdit.sections.forEach((section: any) => preview.appendChild(h('div.spatial-preview-control', h('span', section.title), h('span', `${section.controls.length} connected controls`))));
-  } else {
-    plan.section.controls.forEach((control: any) => preview.appendChild(h('div.spatial-preview-control', h('span', control.label), h('span', control.connection || control.type), ['slider', 'curve'].includes(control.type) ? h('i', { class: control.type }) : null)));
-  }
-  preview.appendChild(h('div.spatial-proposal-actions',
-    h('button.spatial-action', { onclick: () => { S.plan = null; renderConversation(true); } }, 'Dismiss'),
-    h('button.spatial-action.pri', { onclick: applyPlan }, panels ? 'Apply panel changes' : (chrome || interfaceChange) ? 'Apply interface edit' : scene ? 'Apply scene edit' : workspace ? 'Create workspace' : 'Apply section')));
-  return preview;
-}
-
-function resultPreview() {
-  if (S.panelRun && S.phase === 'result') {
-    const preview: any = h('div.spatial-proposal', h('div.spatial-proposal-kicker', 'Reversible agent change'), h('h3', S.panelRun.summary));
-    S.panelRun.actions.forEach((action: any) => preview.appendChild(h('div.spatial-preview-control.panel-action', PM.icon('panel'), h('span', describePanelAction(action)))));
-    preview.appendChild(h('p', 'This is also in the normal Command-Z Undo history.'));
-    preview.appendChild(h('div.spatial-proposal-actions', h('button.spatial-action', { onclick: undoPanelRun }, 'Undo change'), h('button.spatial-action.pri', { onclick: keepPanelRun }, 'Keep change')));
-    return preview;
-  }
-  const run: any = S.run;
-  if (!run || S.phase !== 'result') return null;
-  const reversible: any = run.autonomous ? !!run.changed : true;
-  const preview: any = h('div.spatial-proposal',
-    h('div.spatial-proposal-kicker', run.autonomous ? 'Autonomous result' : 'Rendered result'),
-    h('h3', run.autonomous ? (run.summary || 'Agent work is ready') : 'Review the actual result'));
-  const message: any = run.review?.message || 'The rendered change is ready.';
-  preview.appendChild(h('p', message));
-  if (run.review?.critique) preview.appendChild(h('p', run.review.critique));
-  if (reversible) preview.appendChild(h('p', 'Powermove source changes from this run are one Command-Z Undo step.'));
-  if (run.externalActions?.length) {
-    const actions: any = h('div.agent-external-actions', h('b', 'External activity'));
-    run.externalActions.forEach((action: any) => actions.appendChild(h('span', action)));
-    preview.appendChild(actions);
-  }
-  if (run.artifacts?.length) {
-    const artifacts: any = h('div.agent-artifacts');
-    run.artifacts.forEach((artifact: any) => artifacts.appendChild(agentArtifactView(artifact)));
-    preview.appendChild(artifacts);
-  }
-  if (run.reviewError) preview.appendChild(h('p.spatial-review-warning', `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`));
-  const frames: any = h('div.spatial-frame-grid');
-  (run.frames?.images || []).forEach((src: any, index: any) => frames.appendChild(h('figure',
-    h('img', { src, alt: `Rendered composition at ${run.frames.times[index]} seconds` }),
-    h('figcaption', `${run.frames.times[index]}s`))));
-  if (frames.childElementCount) preview.appendChild(frames);
-  preview.appendChild(h('div.spatial-proposal-actions',
-    reversible ? h('button.spatial-action', { onclick: undoSceneRun }, 'Undo change') : null,
-    h('button.spatial-action.pri', { onclick: keepSceneRun }, reversible ? 'Keep change' : 'Done')));
-  return preview;
-}
-
-function describePanelAction(action: any) {
-  const title: any = PM.PANELS[action.panelId]?.title || action.panelId || action.dockId || 'Dock';
-  if (action.type === 'add') return `Open ${title}${action.dockId ? ` in ${action.dockId}` : ''}`;
-  if (action.type === 'restore') return `Restore ${title}`;
-  if (action.type === 'hide') return `Hide ${title}`;
-  if (action.type === 'move') return `Move ${title} to ${action.dockId}${Number.isInteger(action.position) ? ` · position ${action.position + 1}` : ''}`;
-  if (action.type === 'reorder') return `Place ${title} at position ${(action.position ?? 0) + 1}`;
-  if (action.type === 'resize') return `Resize ${title} to ${Math.round(action.size || 0)} px`;
-  if (action.type === 'resizeDock') return `Resize ${action.dockId} dock to ${Math.round(action.size || 0)} px`;
-  if (action.type === 'rename') return `Rename ${title} to ${action.title}`;
-  if (action.type === 'collapse') return `Collapse ${title}`;
-  if (action.type === 'expand') return `Expand ${title}`;
-  if (action.type === 'popout') return `Pop out ${title}`;
-  if (action.type === 'dock') return `Dock ${title}`;
-  return `${action.type} ${title}`;
-}
-
-function stepProgress() {
-  const complete: any = S.steps.filter((step: any) => step.status === 'complete').length;
-  const active: any = S.steps.findIndex((step: any) => step.status === 'active');
-  return { complete, current: active >= 0 ? active + 1 : Math.min(complete + 1, S.steps.length), total: S.steps.length };
-}
-
-function renderSteps() {
-  const needed: any = S.phase === 'working' || S.phase === 'applying' || !!S.plan;
-  if (!needed || !S.steps.length) return null;
-  const progress: any = stepProgress();
-  const toggle: any = h('button.agent-steps-toggle', {
-    type: 'button', 'aria-expanded': String(S.stepsExpanded),
-    onclick: () => { S.stepsExpanded = !S.stepsExpanded; renderConversation(); },
-  }, h('i'), h('span', progress.complete === progress.total ? `Done · ${progress.total} steps` : `Step ${progress.current} / ${progress.total}`), PM.icon('chev'));
-  const block: any = h('div.agent-steps', toggle);
-  if (S.stepsExpanded) {
-    const list: any = h('ol.agent-todo');
-    S.steps.forEach((step: any) => list.appendChild(h(`li.${step.status || 'pending'}`, h('i'), h('span', step.title))));
-    block.appendChild(list);
-  }
-  return block;
-}
-
-function modelLabel() {
-  const model: any = AGENT_MODELS.find((item: any) => item.id === S.model) || AGENT_MODELS[0];
-  const effort: any = S.reasoningEffort.replace(/^./, (value: any) => value.toUpperCase());
-  return `${model.label} · ${effort}`;
-}
-
-function openModelPicker(event: any) {
-  const setModel: any = (id: any) => {
-    S.model = id; PM.store.set('agentModel', id); renderConversation(true);
-  };
-  const setEffort: any = (effort: any) => {
-    S.reasoningEffort = effort; PM.store.set('agentReasoningEffort', effort); renderConversation(true);
-  };
-  const items: any = [
-    { header: 'Model' },
-    ...AGENT_MODELS.map((model: any) => ({ label: model.label, on: model.id === S.model, run: () => setModel(model.id) })),
-    '-', { header: 'Reasoning' },
-    ...REASONING_EFFORTS.map((effort: any) => ({ label: effort.replace(/^./, (value: any) => value.toUpperCase()), on: effort === S.reasoningEffort, run: () => setEffort(effort) })),
-  ];
-  const rect: any = event.currentTarget.getBoundingClientRect();
-  PM.menu(window.document.body, items, { x: rect.right, y: rect.top });
-}
-
-function modelPickerControl() {
-  const select: any = h('select', { 'aria-label': 'Model and reasoning effort' });
-  for (const model of AGENT_MODELS) for (const effort of REASONING_EFFORTS) {
-    const option: any = h('option', { value: `${model.id}|${effort}` }, `${model.label} · ${effort.replace(/^./, (value: any) => value.toUpperCase())}`);
-    if (model.id === S.model && effort === S.reasoningEffort) option.selected = true;
-    select.appendChild(option);
-  }
-  select.onchange = () => {
-    [S.model, S.reasoningEffort] = select.value.split('|');
-    PM.store.set('agentModel', S.model); PM.store.set('agentReasoningEffort', S.reasoningEffort);
-    renderConversation(true);
-  };
-  return h('label.agent-model', { title: 'Choose model and reasoning' }, select, PM.icon('chev'));
-}
-
 function setAgentAccessMode(mode: any) {
-  if (!AGENT_ACCESS_MODES.some((item: any) => item.id === mode)) return;
-  if (mode !== 'computer') {
-    S.accessMode = mode;
-    PM.store.set('agentAccessMode', mode);
-    renderConversation(true);
-    return;
-  }
-  PM.modal({
-    title: 'Allow computer access for this run?', width: 460,
-    body: h('div.agent-access-warning',
-      h('p', 'Codex can read or change files outside this project, launch applications, and use services already signed in on this Mac.'),
-      h('p', 'External actions cannot be undone. Computer access resets when this run finishes or Powermove quits.')),
-    actions: [
-      { label: 'Cancel' },
-      { label: 'Allow for one run', pri: true, run: () => { S.accessMode = 'computer'; renderConversation(true); } },
-    ],
-  });
-}
-
-function accessPickerControl() {
-  const select: any = h('select', { 'aria-label': 'Agent authority' });
-  AGENT_ACCESS_MODES.forEach((mode: any) => select.appendChild(h('option', { value: mode.id }, mode.label)));
-  select.value = S.accessMode;
-  select.onchange = () => {
-    const next: any = select.value;
-    select.value = S.accessMode;
-    setAgentAccessMode(next);
-  };
-  const current: any = AGENT_ACCESS_MODES.find((mode: any) => mode.id === S.accessMode) || AGENT_ACCESS_MODES[0];
-  return h('label.agent-access', { title: current.detail }, PM.icon(S.accessMode === 'editor' ? 'panel' : 'sparkle'), select, PM.icon('chev'));
+  if (mode === 'computer' || !AGENT_ACCESS_MODES.some((item: any) => item.id === mode)) return;
+  S.accessMode = mode;
+  PM.store.set('agentAccessMode', mode);
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 function scopeLabel() {
@@ -983,58 +860,9 @@ function scopeLabel() {
   return 'Entire workspace';
 }
 
-function openScopePicker(event: any) {
-  const workspace: any = PM.WS.current;
-  const visible: any = new Set((workspace.layout?.docks || []).flatMap((dock: any) => (dock.panels || []).map((panel: any) => panel.id)));
-  const hidden: any = new Set((workspace.hiddenPanels || []).map((item: any) => item.id));
-  const choose: any = (scope: any) => {
-    S.scope = scope; PM.store.set('agentScope', scope); renderConversation(true);
-  };
-  const panels: any = Object.values(PM.PANELS || {}).filter((panel: any) => panel.id !== 'toolbar' && (visible.has(panel.id) || hidden.has(panel.id)));
-  const items: any = [
-    { header: 'Agent scope' },
-    { label: 'Entire workspace', on: S.scope === 'workspace', run: () => choose('workspace') },
-    { label: 'Composition', on: S.scope === 'composition', run: () => choose('composition') },
-    '-', { header: 'Panel' },
-    ...panels.map((panel: any) => ({
-      label: panel.title + (hidden.has(panel.id) ? ' · hidden' : ''),
-      on: S.scope === `panel:${panel.id}`, run: () => choose(`panel:${panel.id}`),
-    })),
-  ];
-  const rect: any = event.currentTarget.getBoundingClientRect();
-  PM.menu(window.document.body, items, { x: rect.left, y: rect.bottom });
-}
-
-function scopePickerControl() {
-  const workspace: any = PM.WS.current;
-  const visible: any = new Set((workspace.layout?.docks || []).flatMap((dock: any) => (dock.panels || []).map((panel: any) => panel.id)));
-  const hidden: any = new Set((workspace.hiddenPanels || []).map((item: any) => item.id));
-  const select: any = h('select', { 'aria-label': 'Agent scope' },
-    h('option', { value: 'workspace' }, 'Entire workspace'),
-    h('option', { value: 'composition' }, 'Composition'));
-  const group: any = h('optgroup', { label: 'Panel' });
-  Object.entries(PM.PANELS || {}).filter(([id]: any) => id !== 'toolbar' && (visible.has(id) || hidden.has(id))).forEach(([id, panel]: any) => {
-    const title: any = id === 'viewer' ? 'Composition panel' : panel.title;
-    group.appendChild(h('option', { value: `panel:${id}` }, title + (hidden.has(id) ? ' · hidden' : '')));
-  });
-  select.appendChild(group); select.value = S.scope;
-  if (!select.value) { S.scope = 'workspace'; select.value = S.scope; }
-  select.onchange = () => {
-    S.scope = select.value; PM.store.set('agentScope', S.scope); renderConversation(true);
-  };
-  return h('label.agent-scope', { title: 'Choose what the agent should work on' }, PM.icon('panel'), select, PM.icon('chev'));
-}
-
 const TEXT_ATTACHMENT_TYPES: any = new Set([
   'application/json', 'application/javascript', 'application/xml', 'image/svg+xml',
 ]);
-
-function filesFromTransfer(transfer: any) {
-  const direct: any = [...(transfer?.files || [])].filter((file: any) => file instanceof window.File);
-  if (direct.length) return direct;
-  return [...(transfer?.items || [])]
-    .filter((item: any) => item.kind === 'file').map((item: any) => item.getAsFile()).filter(Boolean);
-}
 
 function isTextAttachment(file: any) {
   return file.type.startsWith('text/') || TEXT_ATTACHMENT_TYPES.has(file.type)
@@ -1053,27 +881,12 @@ async function addAttachmentFiles(files: any) {
     } else if (isTextAttachment(file)) item.content = (await file.text()).slice(0, 100_000);
     S.attachments.push(item);
   }
-  renderConversation(true);
-}
-
-function attachmentView(item: any, removable: any = false) {
-  const preview: any = item.dataUrl
-    ? h('img', { src: item.dataUrl, alt: '' })
-    : h('span.agent-attachment-type', (item.name.split('.').pop() || 'file').slice(0, 5).toUpperCase());
-  const card: any = h('span.agent-attachment', preview, h('span.agent-attachment-name', item.name));
-  if (removable) card.appendChild(h('button', { type: 'button', title: `Remove ${item.name}`, onclick: () => removeAttachment(item.id) }, PM.icon('x')));
-  return card;
-}
-
-function artifactSize(bytes: any) {
-  const size: any = Math.max(0, Number(bytes) || 0);
-  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
-  return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 async function importAutonomousArtifact(artifact: any) {
   if (!artifact || artifact.importing || artifact.imported) return;
-  artifact.importing = true; renderConversation();
+  artifact.importing = true; PM.AgentUI?.update();
   try {
     const file: any = await PM.AgentArtifacts.load(artifact);
     if (!PM.assetKind(file)) throw new Error('This artifact is not a supported image, video, or audio file');
@@ -1083,140 +896,13 @@ async function importAutonomousArtifact(artifact: any) {
   } catch (error: any) {
     PM.toast(String(error.message || error), 6000);
   } finally {
-    artifact.importing = false; renderConversation();
+    artifact.importing = false; PM.AgentUI?.update();
   }
-}
-
-function agentArtifactView(artifact: any) {
-  const copy: any = h('span.agent-artifact-copy', h('b', artifact.name || artifact.path),
-    h('small', [artifact.mime || '', artifactSize(artifact.size)].filter(Boolean).join(' · ')));
-  const add: any = PM.assetKind({ name: artifact.name, type: artifact.mime }) ? h('button', {
-    type: 'button', disabled: artifact.importing || artifact.imported,
-    title: artifact.imported ? 'Already added to the timeline' : 'Add to timeline',
-    onclick: () => importAutonomousArtifact(artifact),
-  }, artifact.importing ? h('i') : PM.icon(artifact.imported ? 'link' : 'plus')) : null;
-  const reveal: any = h('button', {
-    type: 'button', title: 'Reveal in Finder', onclick: () => PM.AgentArtifacts.reveal(artifact),
-  }, PM.icon('project'));
-  return h('div.agent-artifact', PM.icon(artifact.mime?.startsWith('video/') ? 'cam' : artifact.mime?.startsWith('audio/') ? 'clock' : 'frame'), copy, add, reveal);
-}
-
-function activityWords(value: any) {
-  return String(value || '').split(/\s+/).filter(Boolean).map((word: any, index: any) => h('span.agent-thinking-word', {
-    style: `--word-index:${Math.min(index, 28)}`,
-  }, word + (index < String(value || '').trim().split(/\s+/).length - 1 ? ' ' : '')));
-}
-
-function chooseAttachments() {
-  if (S.phase === 'applying') return;
-  const input: any = h('input', {
-    type: 'file', multiple: true,
-  });
-  input.onchange = () => addAttachmentFiles(input.files);
-  input.click();
 }
 
 function removeAttachment(id: any) {
   S.attachments = S.attachments.filter((item: any) => item.id !== id);
-  renderConversation(true);
-}
-
-function renderConversation(focusInput: any = false) {
-  const body: any = S.panelBody;
-  if (!body) return;
-  body.textContent = '';
-  const shell: any = h('div.agent-shell');
-  const steps: any = renderSteps(); if (steps) shell.appendChild(steps);
-  const messages: any = h('div.spatial-conversation-log', { role: 'log', 'aria-live': 'polite' });
-  let input: any;
-  if (!S.conversation.length && !S.activity) {
-    const suggestions: any = h('div.agent-suggestions');
-    const prompts: any = S.accessMode === 'editor' ? [
-      ['Organize for animation', 'Organize my panels into a focused animation workspace'],
-      ['Move Timeline right', 'Move the Timeline to the right dock and give it more room'],
-      ['Open Inspector + Effects', 'Open the Inspector and Effects panels beside the composition'],
-      ['Focus the canvas', 'Focus the composition by hiding panels I do not need right now'],
-    ] : [
-      ['Find useful footage', 'Research and download useful licensed footage for this composition, then import the strongest choices'],
-      ['Build an integration', 'Build and test the project-local integration needed to complete this project'],
-      ['Use Blender', 'Create the missing 3D asset in Blender, render it, and bring the result into this composition'],
-      ['Finish the project', 'Use any useful project tools and web research to finish this composition end to end'],
-    ];
-    prompts.forEach(([label, prompt]: any) => suggestions.appendChild(h('button', { type: 'button', onclick: () => { S.composerDraft = prompt; input.value = prompt; input.focus(); } }, label)));
-    messages.appendChild(h('div.agent-welcome', h('div.agent-welcome-icon', PM.icon('sparkle')),
-      h('b', S.accessMode === 'editor' ? 'Build or rearrange anything' : 'Work across the whole project'),
-      h('span', S.accessMode === 'editor'
-        ? 'Edit the composition, build controls, or tell me exactly how to arrange your panels.'
-        : 'Research, create files, run tools, build integrations, and return editable results to Powermove.'), suggestions));
-  }
-  S.conversation.slice(-30).forEach((message: any) => {
-    const bubble: any = h(`div.spatial-message.${message.role}${message.entering ? '.is-entering' : ''}`, message.text);
-    if (message.attachments?.length) {
-      const rail: any = h('div.agent-message-files');
-      message.attachments.forEach((item: any) => rail.appendChild(attachmentView(typeof item === 'string' ? { name: item } : item)));
-      bubble.appendChild(rail);
-    }
-    messages.appendChild(bubble);
-    message.entering = false;
-  });
-  if (S.activity) {
-    messages.appendChild(h(`div.spatial-message.assistant.pending${S.pendingEntering ? '.is-entering' : ''}`,
-      h('i'), h('span.agent-thinking-copy', ...activityWords(S.activity))));
-    S.pendingEntering = false;
-  }
-  const proposal: any = resultPreview() || planPreview();
-  if (proposal) messages.appendChild(proposal);
-  shell.appendChild(messages);
-
-  const mode: any = composerMode(S.phase);
-  input = h('textarea.spatial-followup', {
-    rows: '1', placeholder: mode.placeholder, 'aria-label': 'Message Powermove agent',
-    'data-autosize': 'true',
-    disabled: mode.disabled,
-  });
-  input.value = S.composerDraft;
-  input.addEventListener('input', () => { S.composerDraft = input.value; });
-  input.addEventListener('paste', (event: any) => {
-    const files: any = filesFromTransfer(event.clipboardData);
-    if (!files.length) return;
-    event.preventDefault();
-    addAttachmentFiles(files).catch((error: any) => PM.toast(String(error.message || error)));
-  });
-  input.addEventListener('keydown', (event: any) => {
-    event.stopPropagation();
-    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendRequest(input); }
-  });
-  const attachmentRail: any = h('div.agent-attachment-rail');
-  S.attachments.forEach((item: any) => attachmentRail.appendChild(attachmentView(item, true)));
-  const attach: any = h('button.agent-attach', { type: 'button', title: 'Attach images or text files', 'aria-label': 'Add attachments', onclick: chooseAttachments }, PM.icon('plus'));
-  const scope: any = scopePickerControl();
-  const access: any = accessPickerControl();
-  const approval: any = h('button.agent-approval', {
-    type: 'button', 'aria-pressed': String(S.autoApplyPanels),
-    title: S.autoApplyPanels ? 'Safe panel changes apply automatically' : 'Review panel changes before applying',
-    onclick: () => {
-      S.autoApplyPanels = !S.autoApplyPanels;
-      PM.store.set('agentAutoApplyPanels', S.autoApplyPanels);
-      renderConversation(true);
-    },
-  }, h('i'), S.autoApplyPanels ? 'Auto-apply panels' : 'Review panel edits');
-  const model: any = modelPickerControl();
-  const stop: any = mode.working ? h('button.agent-stop', {
-    type: 'button', 'aria-label': 'Stop current run', title: 'Stop current run', onclick: stopActiveRequest,
-  }, PM.icon('x')) : null;
-  const send: any = h('button.spatial-action.pri.agent-send', {
-    type: 'button', 'aria-label': mode.sendLabel, title: mode.sendLabel, disabled: mode.disabled,
-    onclick: () => sendRequest(input),
-  }, mode.disabled ? h('i') : PM.icon('return'));
-  const composer: any = h('div.agent-composer', h('div.agent-composer-head', scope, access, S.accessMode === 'editor' ? approval : null), input, attachmentRail,
-    h('div.agent-composer-tools', attach, h('span.sp'), model, stop, send));
-  shell.appendChild(composer);
-  body.appendChild(shell);
-  autosizeTextarea(input);
-  window.requestAnimationFrame(() => {
-    messages.scrollTop = S.conversation.length || S.activity || proposal ? messages.scrollHeight : 0;
-    if (focusInput && !input.disabled) input.focus();
-  });
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 function stopActiveRequest() {
@@ -1227,7 +913,7 @@ function stopActiveRequest() {
   active?.abort();
   S.steps = []; S.activity = ''; S.plan = null; S.phase = 'conversation';
   S.conversation.push({ role: 'assistant', text: 'Stopped. Add direction whenever you are ready.' });
-  renderConversation(true);
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 function normalizeAutonomousResult(raw: any) {
@@ -1269,7 +955,7 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
   if (token !== S.requestToken) return;
   S.steps[0].status = 'complete'; S.steps[1].status = 'active';
   S.activity = access === 'computer' ? 'Working across Powermove and this Mac…' : 'Researching and working inside the project workspace…';
-  renderConversation();
+  PM.AgentUI?.update();
   const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
   const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
   const raw: any = await PM.CodexBridge.request(request, null, attachedImages, {
@@ -1281,7 +967,7 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
     timeoutMs: 3_600_000,
     onProgress: (summary: any) => {
       if (token !== S.requestToken || !summary) return;
-      S.activity = summary; renderConversation();
+      S.activity = summary; PM.AgentUI?.update();
     },
   });
   if (token !== S.requestToken) return;
@@ -1290,7 +976,7 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
   catch { throw new Error('The autonomous agent returned an invalid result'); }
   const result: any = normalizeAutonomousResult(decoded);
   S.steps[1].status = 'complete'; S.steps[2].status = 'active';
-  S.activity = 'Bringing the result back into Powermove…'; renderConversation();
+  S.activity = 'Bringing the result back into Powermove…'; PM.AgentUI?.update();
   let changed: any = false;
   let reviewError: any = '';
   if ((Number(PM.proj.revision) || 0) !== baseRevision) {
@@ -1326,7 +1012,9 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
     review: { message: result.notes.join(' ') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
     frames: finalFrames, reviewError,
   };
-  S.activity = ''; S.phase = 'result'; renderConversation();
+  /* Deliberate Svelte deviation from HEAD: result transitions restore the
+     persistent composer's focus instead of relying on a DOM rebuild. */
+  S.activity = ''; S.phase = 'result'; PM.AgentUI?.update({ focusComposer: true });
 }
 
 async function sendRequest(input: any) {
@@ -1368,7 +1056,7 @@ async function sendRequest(input: any) {
   S.plan = null; S.panelRun = null; S.phase = 'working';
   S.activity = steering ? 'Updating the run with your direction…' : 'Looking at the composition and workspace…';
   S.pendingEntering = true;
-  promoteToConversation(); renderConversation(true);
+  promoteToConversation(); PM.AgentUI?.update({ focusComposer: true });
   try {
     if (autonomous) {
       await runAutonomousRequest({ request, token, controller, access: accessAtStart });
@@ -1384,7 +1072,7 @@ async function sendRequest(input: any) {
     ]);
     if (token !== S.requestToken) return;
     S.steps[0].status = 'complete'; S.steps[1].status = 'active';
-    S.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; renderConversation(true);
+    S.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; PM.AgentUI?.update({ focusComposer: true });
     const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
     const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
     const raw: any = await PM.CodexBridge.request(
@@ -1393,7 +1081,7 @@ async function sendRequest(input: any) {
         model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
         onProgress: (summary: any) => {
           if (token !== S.requestToken || !summary) return;
-          S.activity = summary; renderConversation();
+          S.activity = summary; PM.AgentUI?.update();
         },
       },
     );
@@ -1418,12 +1106,12 @@ async function sendRequest(input: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: String(error.message || error).slice(0, 220) });
-    renderConversation(true);
+    PM.AgentUI?.update({ focusComposer: true });
   } finally {
     if (token === S.requestToken && S.activeRequest === controller) S.activeRequest = null;
     if (accessAtStart === 'computer') {
       S.accessMode = 'project';
-      if (token === S.requestToken && S.phase !== 'working') renderConversation();
+      if (token === S.requestToken && S.phase !== 'working') PM.AgentUI?.update();
     }
   }
 }
@@ -1920,7 +1608,7 @@ function slug(value: any) {
 
 function showPreview() {
   S.phase = 'conversation';
-  renderConversation(true);
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 function setStepProgress(index: any) {
@@ -1969,7 +1657,9 @@ function finishWorkspaceRun(checkpoint: any, summary: any, actions: any = []) {
   S.activity = ''; S.plan = null;
   S.panelRun = { checkpoint, after, historyId, actions, summary };
   S.conversation.push({ role: 'assistant', text: `${summary}. This change is in Undo history.` });
-  S.phase = 'result'; renderConversation();
+  /* Deliberate Svelte deviation from HEAD: result transitions restore the
+     persistent composer's focus instead of relying on a DOM rebuild. */
+  S.phase = 'result'; PM.AgentUI?.update({ focusComposer: true });
 }
 
 async function applyPlan() {
@@ -1983,7 +1673,7 @@ async function applyPlan() {
     await applyPanelPlan(plan);
     return;
   }
-  S.phase = 'applying'; S.activity = 'Applying the editable change…'; setStepProgress(0); renderConversation();
+  S.phase = 'applying'; S.activity = 'Applying the editable change…'; setStepProgress(0); PM.AgentUI?.update();
   await new Promise((resolve: any) => window.requestAnimationFrame(resolve));
   const checkpoint: any = PM.WS.historySnapshot();
   if (plan.kind === 'workspace') {
@@ -2005,7 +1695,7 @@ async function applyPlan() {
     if (changed) finishWorkspaceRun(checkpoint, 'Applied the interface edit');
     else {
       finishSteps(); S.plan = null; S.activity = ''; S.phase = 'conversation';
-      S.conversation.push({ role: 'assistant', text: 'That interface setting was already in place.' }); renderConversation(true);
+      S.conversation.push({ role: 'assistant', text: 'That interface setting was already in place.' }); PM.AgentUI?.update({ focusComposer: true });
     }
     return;
   }
@@ -2016,7 +1706,7 @@ async function applyPlan() {
     if (changed) finishWorkspaceRun(checkpoint, 'Applied the Timeline redesign');
     else {
       finishSteps(); S.plan = null; S.activity = ''; S.phase = 'conversation';
-      S.conversation.push({ role: 'assistant', text: 'Those Timeline settings were already in place.' }); renderConversation(true);
+      S.conversation.push({ role: 'assistant', text: 'Those Timeline settings were already in place.' }); PM.AgentUI?.update({ focusComposer: true });
     }
     return;
   }
@@ -2055,7 +1745,7 @@ async function applyPlan() {
 
 async function applyPanelPlan(plan: any) {
   const checkpoint: any = PM.WS.historySnapshot();
-  S.phase = 'applying'; S.activity = 'Applying panel changes…'; setStepProgress(0); renderConversation();
+  S.phase = 'applying'; S.activity = 'Applying panel changes…'; setStepProgress(0); PM.AgentUI?.update();
   let result: any = { applied: [], runtime: [] };
   try {
     PM.WS.mutate((workspace: any) => { result = applyPanelEdit(workspace, plan.panelEdit); });
@@ -2077,7 +1767,7 @@ async function applyPanelPlan(plan: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.plan = null; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
-    renderConversation(true);
+    PM.AgentUI?.update({ focusComposer: true });
   }
 }
 
@@ -2094,25 +1784,25 @@ function undoPanelRun() {
   }
   S.panelRun = null; S.phase = 'conversation';
   S.conversation.push({ role: 'assistant', text: 'I restored the previous panel layout.' });
-  renderConversation(true); PM.toast('Panel changes undone');
+  PM.AgentUI?.update({ focusComposer: true }); PM.toast('Panel changes undone');
 }
 
 function keepPanelRun() {
   if (!S.panelRun) return;
   S.panelRun = null; S.phase = 'conversation';
   S.conversation.push({ role: 'assistant', text: 'Kept the agent change. Command-Z can still reverse it.' });
-  renderConversation(true);
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 async function applyScenePlan(plan: any) {
   S.phase = 'applying'; S.plan = null; S.activity = 'Applying structured source edit…';
   setStepProgress(0);
-  renderConversation();
+  PM.AgentUI?.update();
   try {
     let progressIndex: any = 0;
     const run: any = await PM.AgentHarness.execute(S.requestText, plan.sceneEdit, (value: any) => {
       setStepProgress(Math.min(progressIndex++, S.steps.length - 1));
-      S.activity = value; renderConversation();
+      S.activity = value; PM.AgentUI?.update();
     });
     finishSteps();
     S.activity = ''; S.run = run;
@@ -2121,13 +1811,15 @@ async function applyScenePlan(plan: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
     S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
-    renderConversation(true);
+    PM.AgentUI?.update({ focusComposer: true });
   }
 }
 
 function showSceneResult(run: any) {
   S.phase = 'result'; S.run = run;
-  renderConversation();
+  /* Deliberate Svelte deviation from HEAD: result transitions restore the
+     persistent composer's focus instead of relying on a DOM rebuild. */
+  PM.AgentUI?.update({ focusComposer: true });
 }
 
 function keepSceneRun() {
@@ -2136,7 +1828,7 @@ function keepSceneRun() {
   S.conversation.push({ role: 'assistant', text: S.run.autonomous
     ? (S.run.changed ? 'Kept the autonomous result. Command-Z can still reverse its Powermove changes.' : 'Closed the completed autonomous run. Its artifacts remain available in the project workspace.')
     : `Kept ${S.run.applied.length} editable source changes. Command-Z can still reverse the complete run.` });
-  S.run = null; S.phase = 'conversation'; renderConversation(true);
+  S.run = null; S.phase = 'conversation'; PM.AgentUI?.update({ focusComposer: true });
 }
 
 function undoSceneRun() {
@@ -2144,7 +1836,7 @@ function undoSceneRun() {
   const restored: any = PM.AgentHarness.rollback(S.run.checkpoint);
   PM.toast(restored ? 'Agent change undone' : 'Could not restore the agent checkpoint');
   S.conversation.push({ role: 'assistant', text: restored ? 'I restored the checkpoint. Tell me what to try differently.' : 'I could not restore that checkpoint.' });
-  S.run = null; S.phase = 'conversation'; renderConversation(true);
+  S.run = null; S.phase = 'conversation'; PM.AgentUI?.update({ focusComposer: true });
 }
 
 function onKey(event: any) {
@@ -2178,7 +1870,7 @@ function dismissOverlay(preserveContext: any) {
 function cancel() {
   if (!S.active) return;
   dismissOverlay(false);
-  renderConversation();
+  PM.AgentUI?.update();
 }
 
 function startRipple(canvas: any, origin: any, sceneBitmap: any, adapterPromise: any = null) {

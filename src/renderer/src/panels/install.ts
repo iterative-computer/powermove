@@ -2,6 +2,7 @@
    the legacy ui/* installs (so PM.registerPanel exists) and before the app
    boots (so the workspace layout builds the Svelte version). */
 import PerfPanel from './PerfPanel.svelte';
+import { registerCanvasPanels } from './register-canvas';
 import { installGeneratedPanels } from './register-generated';
 import { registerInspectorPanel } from './register-inspector';
 import { registerShaderPanel } from './register-shader';
@@ -15,5 +16,7 @@ export function installSveltePanels(PM: LegacyPM): void {
   registerSimplePanels(PM); // notes, takes, workspaces, assets, fxbrowser
   registerInspectorPanel(PM);
   registerShaderPanel(PM);
+  registerCanvasPanels(PM); // viewer + timeline Svelte hosts over the imperative canvases
   installGeneratedPanels(PM); // patches PM.WS.registerCustom → GeneratedPanel
+  // The agent panel self-registers from legacy/assistant/spatial.ts (it owns the bridge).
 }

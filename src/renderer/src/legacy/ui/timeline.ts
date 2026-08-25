@@ -2,6 +2,15 @@
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
+createTimeline(PM);
+}
+
+export const timelinePanelOptions = {
+  title: 'Timeline', flush: true, noscroll: true, headless: true, size: 300, moveSlot: '#tl-head',
+} as const;
+
+export function createTimeline(PM: PMRegistry): any {
+if (PM.TL?.attachHead && PM.TL?.attachCanvas) return PM.TL;
 const h = PM.h, clamp = PM.clamp;
 
 const T: any = {
@@ -36,26 +45,33 @@ const WorkArea = PM.TimelineWorkArea = {
   },
 };
 
-PM.registerPanel('timeline', {
-  title: 'Timeline', flush: true, noscroll: true, persist: true, headless: true, size: 300, moveSlot: '#tl-head',
-  build(body: any) {
-    const head = h('div#tl-head');
-    const wrap = h('div#tl-canvas-wrap');
-    const cv = h('canvas#tl-canvas');
-    wrap.appendChild(cv);
-    body.append(head, wrap);
+let attachedHead: HTMLElement | null = null;
+let attachedWrap: HTMLElement | null = null;
+
+T.attachHead = (head: HTMLElement) => {
+    if (attachedHead === head) return;
+    /* Re-bindable: buildHead constructs fresh controls on the new host, so a
+       replacement head (HMR) simply rebinds. */
+    attachedHead = head;
+    buildHead(head);
+};
+
+T.attachCanvas = (wrap: HTMLElement) => {
+    if (attachedWrap === wrap) return;
+    const cv = wrap.querySelector<HTMLCanvasElement>(':scope > #tl-canvas');
+    if (!cv) throw new Error('Timeline host is missing the legacy canvas skeleton');
+    /* Re-bindable: the 2D canvas has no cross-host state; rebind on a new host. */
+    attachedWrap = wrap;
     /* Keep the backing store transparent while a host resize is in flight.
        An opaque 2D canvas is cleared to black as soon as its bitmap changes,
        which made the whole timeline flash/stick black while a section was
        being adjusted. The timeline still paints its own solid background. */
     T.cv = cv; T.ctx = cv.getContext('2d');
     refreshTimelineManifest();
-    buildHead(head);
     bind(cv, wrap);
     new window.ResizeObserver(() => resize(wrap)).observe(wrap);
     window.requestAnimationFrame(() => resize(wrap));
-  },
-});
+};
 
 function buildHead(head: any) {
   const btn = (icon: any, fn: any, title: any) => h('button.iconbtn', { title, onclick: fn }, PM.icon(icon));
@@ -1121,4 +1137,5 @@ T.reveal = (L: any, keys: any) => {
   }
   PM.invalidate('timeline');
 };
+return T;
 }

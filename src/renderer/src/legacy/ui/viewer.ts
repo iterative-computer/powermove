@@ -2,28 +2,40 @@
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
-const h = PM.h, clamp = PM.clamp;
+createViewer(PM);
+}
+
+export const viewerPanelOptions = {
+  title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: true,
+} as const;
+
+export function createViewer(PM: PMRegistry): any {
+if (PM.Viewer?.attach) return PM.Viewer;
+const clamp = PM.clamp;
 
 const V: any = { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, guides: null };
 PM.Viewer = V;
 
-PM.registerPanel('viewer', {
-  title: 'Composition', flush: true, noscroll: true, persist: true, headless: true, hideMoveHandle: true,
-  build(body: any) {
-    const stage = h('div#stage');
-    const inner = h('div#stage-inner');
-    const gl = h('canvas#gl');
-    const ov = h('canvas#overlay');
-    inner.append(gl, ov);
-    stage.appendChild(inner);
-    body.appendChild(stage);
+V.attach = (stage: HTMLElement) => {
+    if (V.stage === stage) return;
+    if (V.stage) {
+      /* The WebGL context is bound to the original #gl canvas and cannot move
+         hosts; persist panels re-parent the same element in production, so a
+         second attach only happens under HMR — keep the old wiring alive
+         instead of leaving a dead panel behind a thrown build. */
+      console.warn('[viewer] attach ignored: already bound to a stage (HMR requires a full reload)');
+      return;
+    }
+    const inner = stage.querySelector<HTMLElement>(':scope > #stage-inner');
+    const gl = inner?.querySelector<HTMLCanvasElement>(':scope > #gl');
+    const ov = inner?.querySelector<HTMLCanvasElement>(':scope > #overlay');
+    if (!inner || !gl || !ov) throw new Error('Viewer host is missing the legacy canvas skeleton');
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     if (!PM.GL.gl) PM.GL.init(gl);
     bindStage(stage, inner);
     window.requestAnimationFrame(() => V.layout());
     new window.ResizeObserver(() => V.layout()).observe(stage);
-  },
-});
+};
 
 /* ── layout / sizing ───────────────────────────────────── */
 V.layout = () => {
@@ -357,4 +369,5 @@ function setOrKey(L: any, key: any, v: any, T: any) {
   });
 }
 PM.setOrKey = setOrKey;
+return V;
 }

@@ -7,7 +7,7 @@
  * The DOM contract (.panel[data-panel], #panel-<id>, .ptitle) stays owned by
  * the legacy layout until Phase 5 replaces it with DockLayout + PanelPool.
  */
-import { mount, unmount, type Component } from 'svelte';
+import { flushSync, mount, unmount, type Component } from 'svelte';
 
 export interface PanelProps {
   panelId: string;
@@ -41,6 +41,10 @@ export function registerSveltePanel(PM: LegacyPM, id: string, def: SveltePanelDe
     build(body: HTMLElement, inst: Record<string, any>) {
       mounted.get(id)?.unmount();
       const instance = mount(component, { target: body, props: { panelId: id, spec: inst.spec ?? {} } });
+      /* Legacy build() ran synchronously; flush effects (onMount → canvas
+         attach, GL init) so post-build steps like moveSlot injection and the
+         boot status paint see the same world legacy gave them. */
+      flushSync();
       mounted.set(id, { unmount: () => void unmount(instance) });
     }
   });
