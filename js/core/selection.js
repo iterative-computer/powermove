@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/selection.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — stable selection ids and whole-project replacement. */
 (() => {
 const PM = window.PM;

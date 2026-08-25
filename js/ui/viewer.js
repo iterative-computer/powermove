@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/viewer.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — viewer panel: GL stage, overlays, direct manipulation. */
 (() => {
 const PM = window.PM, h = PM.h, clamp = PM.clamp;

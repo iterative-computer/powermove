@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/audio.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — decoded-buffer audio. One planner powers preview, waveforms, and export. */
 (() => {
 const PM = window.PM;

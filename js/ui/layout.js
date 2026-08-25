@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/layout.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — dock layout engine. The workspace JSON is the single source of UI truth.
    Panels are resizable (splitters), movable (drag header between docks), and can be
    popped out into their own native window via the panelWindow bridge. */

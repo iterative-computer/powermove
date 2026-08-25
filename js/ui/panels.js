@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/panels.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — auxiliary panels: assets, shader editor, workspaces, takes, perf.
    The timeline owns layer ordering/visibility, so there is no separate Layers panel. */
 (() => {

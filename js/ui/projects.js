@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/projects.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — production project library. Persistent project chrome stays
    visible while this Home surface owns search, layouts and recoverable Trash. */
 (() => {

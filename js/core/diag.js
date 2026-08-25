@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/diag.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — boot diagnostics. On file:// origins, uncaught errors arrive at
    window.onerror as cross-origin-masked "Script error." with no stack, which
    makes them undebuggable. Wrapping the async entry points (timers, rAF) lets

@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/assistant/harness.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — bounded composition-agent harness.
    Observe semantic source + rendered pixels, propose typed source edits, apply
    behind a checkpoint, visually review, repair at most twice, then let the user

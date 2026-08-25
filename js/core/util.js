@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/util.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — util: dom, bus, math, time, persistence. */
 const PM = (window.PM = window.PM || {});
 

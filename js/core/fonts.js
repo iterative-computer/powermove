@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/fonts.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — bundled and native system-font catalog. */
 (() => {
 const PM = window.PM;

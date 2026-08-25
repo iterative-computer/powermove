@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/media.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — high-performance durable media identity, storage, and timing. */
 (() => {
 const PM = window.PM;

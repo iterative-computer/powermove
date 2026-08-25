@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/library.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — a simple, searchable home for editable Sections, Looks and Workspaces. */
 (() => {
 const PM = window.PM, h = PM.h;

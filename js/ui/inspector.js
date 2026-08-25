@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/inspector.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — inspector: content, transform, effects, shader uniforms, scene params. */
 (() => {
 const PM = window.PM, h = PM.h;

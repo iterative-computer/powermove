@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/model.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — project model. Time is SECONDS. Channels are flat, dot-keyed, animatable. */
 (() => {
 const PM = window.PM, uid = PM.uid;

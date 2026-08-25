@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/host/electron-shim.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — Electron host compatibility for the legacy renderer. */
 (() => {
   'use strict';

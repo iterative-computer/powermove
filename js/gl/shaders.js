@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/gl/shaders.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — GLSL library: quad vertex shader, effect passes, shader-layer runtime. */
 (() => {
 const PM = window.PM;

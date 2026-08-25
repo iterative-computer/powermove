@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/gl/compositor.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — WebGL2 compositor. Premultiplied alpha, FBO pool, program cache.
    One draw per layer on the fast path; ping-pong only for exotic blends & effects. */
 (() => {

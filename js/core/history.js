@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/history.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — undo/redo. Snapshot based, cheap because projects are small JSON. */
 (() => {
 const PM = window.PM;

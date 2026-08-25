@@ -1,0 +1,492 @@
+/* Ported from js/ui/inspector.js — behavior-preserving. */
+import type { PMRegistry } from '../registry';
+
+export function install(PM: PMRegistry): void {
+const h = PM.h;
+const I: any = { syncs: [] };
+PM.Inspector = I;
+
+PM.registerPanel('inspector', {
+  title: 'Properties',
+  build(body: any, inst: any) { I.body = body; render(); },
+  header(hdr: any) {
+    hdr.textContent = '';
+    const L = PM.firstSel();
+    const type = L && PM.TYPE_META[L.type];
+    const actions = [
+      h('button.iconbtn', { title: 'New layer', onpointerdown: (e: any) => { e.preventDefault(); newLayerMenu(e.target); } }, PM.icon('layers')),
+    ];
+    if (!L || L.type !== 'audio') actions.push(
+      h('button.iconbtn', { title: 'Add effect', onpointerdown: (e: any) => { e.preventDefault(); fxMenu(e.target); } }, PM.icon('plus')));
+    hdr.append(
+      h('span', L ? L.name : 'Properties'),
+      type ? h('span.sub', ' · ' + type.label) : h('span'),
+      h('span.sp'),
+      ...actions);
+  },
+});
+
+I.refresh = () => { if (I.body && I.body.isConnected) render(); PM.Layout.refresh && refreshHeader(); };
+function refreshHeader() {
+  const inst = PM.panelInst.inspector;
+  if (inst && inst.header && inst.header.isConnected) PM.PANELS.inspector.header(inst.header, inst);
+}
+PM.bus.on('sel', I.refresh);
+PM.bus.on('layers', I.refresh);
+PM.bus.on('history', I.refresh);
+PM.bus.on('fonts', I.refresh);
+PM.bus.on('draw:ui', () => I.syncs.forEach((f: any) => { try { f(); } catch (e) { } }));
+
+function render() {
+  const body = I.body; if (!body) return;
+  body.textContent = '';
+  I.syncs = [];
+  const wrap = h('div.insp');
+  body.appendChild(wrap);
+  const L = PM.firstSel();
+  if (!L) { sceneParams(wrap); return; }
+  refreshHeader();
+  content(wrap, L);
+  if (L.type !== 'audio') {
+    transform(wrap, L);
+    if (L.type === 'shader') shaderUniforms(wrap, L);
+    effects(wrap, L);
+    masksSection(wrap, L);
+  }
+  layerOptions(wrap, L);
+}
+
+/* ── rows ──────────────────────────────────────────────── */
+function chRow(wrap: any, L: any, key: any, label: any) {
+  const p = L.p[key];
+  const meta = PM.CH[key] || {};
+  const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), { title: 'Animate ' + label },
+    PM.icon('clock'));
+  sw.onclick = () => { PM.hist.do('Animate ' + label, () => PM.toggleStopwatch(L, key, PM.time)); I.refresh(); };
+  const num = PM.numField(() => PM.ev(L, key, PM.time), (v: any) => {
+    PM.setOrKey(L, key, v, PM.time); PM.invalidate();
+  }, {
+    label, step: meta.step || 1, unit: meta.unit, min: meta.min, max: meta.max, link: !!p.expr,
+    origin: 'inspector',
+    command: (value: any) => ({ type: 'set_property', target: L.id, path: key, value, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' }),
+  });
+  I.syncs.push(num.sync);
+  const kd = h('button.stopwatch', { title: 'Keyframe at playhead' }, PM.icon('diamond'));
+  const syncKd = () => {
+    const on = !!PM.hasKeyAt(L, p, PM.time);
+    kd.classList.toggle('on', on);
+    kd.style.display = p.kf.length ? '' : 'none';
+  };
+  syncKd(); I.syncs.push(syncKd);
+  kd.onclick = () => {
+    PM.hist.do('Keyframe', () => {
+      const at = PM.hasKeyAt(L, p, PM.time);
+      if (at) PM.removeKey(p, at); else PM.setKeyOn(p, PM.time - L.from, PM.ev(L, key, PM.time), 'power', PM.proj.fps);
+    });
+    syncKd(); PM.invalidate();
+  };
+  const r = PM.row(label, h('div', { style: { display: 'flex', alignItems: 'center', gap: '4px' } }, num, kd), { left: sw });
+  r.insertBefore(sw, r.firstChild);
+  sw.style.marginRight = '2px';
+  r.addEventListener('contextmenu', (e: any) => { e.preventDefault(); chanMenu(e, L, key, p, label); });
+  r.addEventListener('pointerdown', () => { PM.sel.chan = key; PM.TL.reveal(L, [key]); });
+  wrap.appendChild(r);
+  return r;
+}
+
+function chanMenu(e: any, L: any, key: any, p: any, label: any) {
+  PM.menu(window.document.body, [
+    { header: label },
+    { label: 'Add keyframe at playhead', run: () => PM.hist.do('Keyframe', () => PM.setKeyOn(p, PM.time - L.from, PM.evP(L, p, PM.time, key), 'power', PM.proj.fps)) },
+    { label: 'Show in graph editor', run: () => { PM.sel.chan = key; PM.TL.graph = true; PM.TL.reveal(L, [key]); } },
+    '-',
+    { header: 'Easing for all keys' },
+    ...['power', 'linear', 'easeInOut', 'expoOut', 'backOut', 'glide', 'snap'].map((n: any) => ({
+      label: n, disabled: !p.kf.length, run: () => PM.hist.do('Ease', () => PM.applyEaseTo(p.kf, n)),
+    })),
+    '-',
+    { label: p.expr ? 'Edit expression…' : 'Add expression…', run: () => exprDialog(L, key, p, label) },
+    p.expr ? { label: 'Remove expression', run: () => PM.hist.do('Remove expression', () => { p.expr = null; PM.touch(); I.refresh(); }) } : null,
+    { label: 'Reset', run: () => PM.hist.do('Reset', () => { p.kf = []; p.expr = null; PM.touch(); I.refresh(); }) },
+  ].filter(Boolean), { x: e.clientX, y: e.clientY });
+}
+
+function exprDialog(L: any, key: any, p: any, label: any) {
+  const ta = h('textarea.code', { style: { height: '150px', borderRadius: '8px' } }, p.expr || 'value + wiggle(2, 20)');
+  const hint = h('div', { style: { fontSize: '11px', color: 'var(--tx-3)', lineHeight: 1.6 } },
+    't · layer-local seconds   T · comp seconds   value · keyframed value',
+    h('br'), 'wiggle(f,a) random(s) linear(x,x0,x1,y0,y1) ease(...) loop(d,x) param("name")');
+  PM.modal({
+    title: 'Expression · ' + L.name + ' · ' + label,
+    body: h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, ta, hint),
+    width: 540,
+    actions: [{ label: 'Cancel' }, {
+      label: 'Apply', pri: true, run: () => {
+        PM.hist.do('Expression', () => { p.expr = ta.value.trim() || null; PM.touch(); });
+        I.refresh(); PM.invalidate();
+      },
+    }],
+  });
+}
+
+/* ── content ───────────────────────────────────────────── */
+function content(wrap: any, L: any) {
+  const d = L.d;
+  wrap.appendChild(PM.section('Content'));
+  if (L.type === 'audio') { audioContent(wrap, L); return; }
+  const set = (k: any) => (v: any) => { d[k] = v; PM.touch(); PM.invalidate(); };
+  const get = (k: any) => () => d[k];
+  const edit = (k: any, opt: any = {}) => ({
+    ...opt, origin: 'inspector',
+    command: (value: any) => ({ type: 'set_content', target: L.id, patch: { [k]: value } }),
+  });
+
+  if (L.type === 'text') {
+    const ta = h('textarea', {
+      style: {
+        width: '100%', minHeight: '54px', background: 'var(--bg-row)', borderRadius: 'var(--r-sm)',
+        padding: '8px 10px', fontSize: '12.5px', lineHeight: 1.5, resize: 'vertical', color: 'var(--tx)',
+      },
+    }, d.text);
+    ta.addEventListener('focus', () => PM.Edit.begin('Edit text', { origin: 'inspector' }));
+    ta.addEventListener('input', () => PM.Edit.dispatch({ type: 'set_content', target: L.id, patch: { text: ta.value } }));
+    ta.addEventListener('blur', () => PM.Edit.commit('Edit text'));
+    ta.addEventListener('keydown', (e: any) => e.stopPropagation());
+    I.textArea = ta;
+    wrap.appendChild(ta);
+    wrap.appendChild(PM.row('Font', PM.fontField(get('font'), set('font'), edit('font', { label: 'Font', weight: get('weight') }))));
+    const standardWeights = [100, 200, 300, 400, 500, 600, 700, 800, 900];
+    const weights = [...new Set([Number(get('weight')) || 400, ...standardWeights])].sort((a: any, b: any) => a - b);
+    wrap.appendChild(PM.row('Weight', PM.selectField(get('weight'), set('weight'),
+      weights.map((v: any) => ({ v, label: String(v) })), edit('weight', { label: 'Weight', onChange: (v: any) => PM.Fonts.ensure(get('font'), v) }))));
+    numRow(wrap, 'Size', get('size'), set('size'), edit('size', { step: 1, min: 4, unit: 'px' }));
+    numRow(wrap, 'Tracking', get('tracking'), set('tracking'), edit('tracking', { step: .5, unit: 'px' }));
+    numRow(wrap, 'Leading', get('leading'), set('leading'), edit('leading', { step: .02, precision: 2 }));
+    wrap.appendChild(PM.row('Align', PM.selectField(get('align'), set('align'), ['left', 'center', 'right'], edit('align', { label: 'Align' }))));
+    wrap.appendChild(PM.row('Color', PM.colorField(get('color'), set('color'), edit('color', { label: 'Text color' }))));
+  }
+  else if (L.type === 'solid' || L.type === 'shape') {
+    wrap.appendChild(PM.row('Fill', PM.colorField(get('color'), set('color'), edit('color', { label: 'Fill' }))));
+    if (L.type === 'shape') wrap.appendChild(PM.row('Shape', PM.selectField(get('shape'), set('shape'), ['rect', 'ellipse', 'polygon', 'star', 'line'], edit('shape', { label: 'Shape' }))));
+    numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Corner radius', get('radius'), set('radius'), edit('radius', { step: 1, min: 0, unit: 'px' }));
+    if (L.type === 'shape') {
+      numRow(wrap, 'Stroke', get('stroke'), set('stroke'), edit('stroke', { step: .5, min: 0, unit: 'px' }));
+      wrap.appendChild(PM.row('Stroke color', PM.colorField(get('strokeColor'), set('strokeColor'), edit('strokeColor', { label: 'Stroke' }))));
+      if (d.shape === 'polygon' || d.shape === 'star') numRow(wrap, 'Points', get('points'), set('points'), edit('points', { step: 1, min: 3, max: 24 }));
+    }
+  }
+  else if (L.type === 'image' || L.type === 'video') {
+    const assets = Object.values(PM.proj.assets).filter((a: any) => a.kind === (L.type === 'video' ? 'video' : 'image'));
+    wrap.appendChild(PM.row('Source', PM.selectField(
+      () => { const a = PM.proj.assets[d.asset]; return a ? a.name : 'none'; },
+      (v: any) => { d.asset = v; PM.invalidate(); },
+      assets.map((a: any) => ({ v: a.id, label: a.name })).concat([{ v: null, label: 'none' }]), edit('asset', { label: 'Source' }))));
+    wrap.appendChild(PM.row('Fit', PM.selectField(get('fit'), set('fit'), ['cover', 'contain', 'stretch'], edit('fit', { label: 'Fit' }))));
+    numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
+    if (L.type === 'video') {
+      numRow(wrap, 'Trim start', get('trim'), set('trim'), edit('trim', { step: .05, precision: 2, unit: 's' }));
+      numRow(wrap, 'Speed', get('speed'), set('speed'), edit('speed', { step: .05, precision: 2, min: .05 }));
+    }
+  }
+  else if (L.type === 'shader') {
+    const b = h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '30px' }, onclick: () => PM.openShaderEditor(L) }, PM.icon('code'), 'Edit shader source');
+    wrap.appendChild(b);
+    const err = PM.GL.compileError(PM.UIState.getShaderMeta(L).shaderKey);
+    if (err) wrap.appendChild(h('div', { style: { fontSize: '10.5px', color: 'var(--red)', padding: '6px 4px', whiteSpace: 'pre-wrap', maxHeight: '90px', overflow: 'auto' } }, err));
+    numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
+    numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
+  }
+}
+
+/* Audio content has one intentionally small source model. The controls receive
+   no direct setter: their only write path is the shared set_content command. */
+function audioContent(wrap: any, L: any) {
+  const d = L.d || {};
+  const assets = Object.values(PM.proj.assets).filter((asset: any) => asset.kind === 'audio');
+  const get = (key: any, fallback: any) => () => d[key] == null ? fallback : d[key];
+  const command = (key: any, label: any, opt: any = {}) => ({
+    ...opt,
+    label,
+    origin: 'inspector',
+    command: (value: any) => ({ type: 'set_content', target: L.id, patch: { [key]: value } }),
+  });
+  const commandOnly = () => {};
+  const sources = [{ v: null, label: 'None' }, ...assets.map((asset: any) => ({ v: asset.id, label: asset.name }))];
+
+  wrap.appendChild(PM.row('Source', PM.selectField(
+    get('asset', null), commandOnly, sources, command('asset', 'Audio source'))));
+  numRow(wrap, 'Trim start', get('trim', 0), commandOnly, command('trim', 'Trim start', { step: .05, precision: 2, min: 0, unit: 's' }));
+  numRow(wrap, 'Gain', get('gain', 1), commandOnly, command('gain', 'Gain', { step: .05, precision: 2, min: 0, max: 4 }));
+  numRow(wrap, 'Fade in', get('fadeIn', 0), commandOnly, command('fadeIn', 'Fade in', { step: .05, precision: 2, min: 0, max: L.dur, unit: 's' }));
+  numRow(wrap, 'Fade out', get('fadeOut', 0), commandOnly, command('fadeOut', 'Fade out', { step: .05, precision: 2, min: 0, max: L.dur, unit: 's' }));
+}
+
+function numRow(wrap: any, label: any, get: any, set: any, opt: any = {}) {
+  const f = PM.numField(get, (v: any) => { set(v); }, { label, ...opt });
+  I.syncs.push(f.sync);
+  wrap.appendChild(PM.row(label, f));
+  return f;
+}
+
+/* ── transform ─────────────────────────────────────────── */
+function transform(wrap: any, L: any) {
+  wrap.appendChild(PM.section('Transform'));
+  chRow(wrap, L, 'position.x', 'Position X');
+  chRow(wrap, L, 'position.y', 'Position Y');
+  chRow(wrap, L, 'scale.x', 'Scale X');
+  chRow(wrap, L, 'scale.y', 'Scale Y');
+  chRow(wrap, L, 'rotation', 'Rotation');
+  chRow(wrap, L, 'opacity', 'Opacity');
+  chRow(wrap, L, 'anchor.x', 'Anchor X');
+  chRow(wrap, L, 'anchor.y', 'Anchor Y');
+  chRow(wrap, L, 'skew', 'Skew');
+}
+
+/* ── shader uniforms ───────────────────────────────────── */
+function shaderUniforms(wrap: any, L: any) {
+  PM.syncShaderUniforms(L);
+  const defs = PM.UIState.getShaderMeta(L).udefs;
+  if (!defs.length) return;
+  wrap.appendChild(PM.section('Shader'));
+  defs.forEach((def: any) => {
+    const p = L.d.uniforms[def.name];
+    if (!p) return;
+    if (def.control === 'color') {
+      wrap.appendChild(PM.row(def.label, PM.colorField(() => p.v, (v: any) => { p.v = v; PM.invalidate(); }, {
+        label: def.label, origin: 'inspector',
+        command: (value: any) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, preserveHandEdits: false }),
+      })));
+    } else if (def.control === 'toggle') {
+      wrap.appendChild(PM.row(def.label, PM.toggleField(() => p.v, (v: any) => { p.v = v; PM.invalidate(); }, {
+        label: def.label, origin: 'inspector',
+        command: (value: any) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, preserveHandEdits: false }),
+      })));
+    } else {
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.icon('clock'));
+      sw.onclick = () => {
+        PM.hist.do('Animate ' + def.label, () => {
+          if (p.kf.length) { p.v = PM.evP(L, p, PM.time, def.name); p.kf = []; }
+          else PM.setKeyOn(p, PM.time - L.from, p.v, 'power', PM.proj.fps);
+        });
+        I.refresh();
+      };
+      const f = PM.numField(() => PM.evP(L, p, PM.time, def.name), (v: any) => {
+        if (p.kf.length) PM.setKeyOn(p, PM.time - L.from, v, 'power', PM.proj.fps); else p.v = v;
+        PM.touch(); PM.invalidate();
+      }, {
+        label: def.label, step: (def.max - def.min) / 200 || .01, min: def.min, max: def.max, precision: 3,
+        origin: 'inspector',
+        command: (value: any) => ({ type: 'set_property', target: L.id, path: 'u.' + def.name, value, time: PM.time, mode: 'auto', preserveHandEdits: false }),
+      });
+      I.syncs.push(f.sync);
+      const r = PM.row(def.label, f, { left: sw });
+      r.insertBefore(sw, r.firstChild);
+      r.addEventListener('contextmenu', (e: any) => { e.preventDefault(); chanMenu(e, L, 'u.' + def.name, p, def.label); });
+      wrap.appendChild(r);
+    }
+  });
+}
+
+PM.syncShaderUniforms = (L: any) => {
+  const defs = PM.parseUniforms(L.d.code);
+  PM.UIState.setShaderMeta(L, { udefs: defs });
+  const u = L.d.uniforms;
+  defs.forEach((d: any) => { if (!u[d.name]) u[d.name] = PM.P(d.def); });
+  for (const k in u) if (!defs.some((d: any) => d.name === k)) delete u[k];
+};
+
+/* ── effects ───────────────────────────────────────────── */
+function effects(wrap: any, L: any) {
+  const sec = PM.section('Effects');
+  wrap.appendChild(sec);
+  if (!L.fx.length) {
+    const b = h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '28px' }, onpointerdown: (e: any) => { e.preventDefault(); fxMenu(e.target); } }, PM.icon('plus'), 'Add effect');
+    wrap.appendChild(b);
+  }
+  L.fx.forEach((fx: any, i: any) => {
+    const def = PM.FX[fx.type]; if (!def) return;
+    const tw = h('span.twirl' + (PM.UIState.getFxOpen(fx) ? '.open' : ''), PM.icon('chev'));
+    const onBtn = h('button.stopwatch' + (fx.on ? '.on' : ''), PM.icon('eye'));
+    onBtn.onclick = (e: any) => {
+      e.stopPropagation();
+      PM.Edit.apply({ type: 'set_effect', target: L.id, effect: fx.id, patch: { enabled: !fx.on } }, { label: 'Toggle effect', origin: 'inspector' });
+      I.refresh(); PM.invalidate();
+    };
+    const head = h('div.row', { style: { marginTop: '4px', background: 'rgba(128,128,136,.08)' } },
+      tw, h('div.k', { style: { color: 'var(--tx)', fontWeight: 500 } }, def.label), onBtn,
+      h('button.stopwatch', { onclick: (e: any) => { e.stopPropagation(); PM.Edit.apply({ type: 'remove_effect', target: L.id, effect: fx.id }, { label: 'Remove effect', origin: 'inspector' }); I.refresh(); PM.invalidate(); } }, PM.icon('x')));
+    head.onclick = () => { PM.UIState.setFxOpen(fx, !PM.UIState.getFxOpen(fx)); I.refresh(); };
+    wrap.appendChild(head);
+    if (!PM.UIState.getFxOpen(fx)) return;
+    const g = h('div.grp');
+    def.params.forEach((pd: any) => {
+      const p = fx.p[pd.k];
+      if (pd.type === 'color') {
+        g.appendChild(PM.row(pd.label, PM.colorField(() => p.v, (v: any) => { p.v = v; PM.invalidate(); }, {
+          label: pd.label, origin: 'inspector',
+          command: (value: any) => ({ type: 'set_property', target: L.id, path: fx.id + '.' + pd.k, value, time: PM.time, preserveHandEdits: false }),
+        })));
+        return;
+      }
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.icon('clock'));
+      sw.onclick = () => {
+        PM.hist.do('Animate ' + pd.label, () => {
+          if (p.kf.length) { p.v = PM.evP(L, p, PM.time, pd.k); p.kf = []; }
+          else PM.setKeyOn(p, PM.time - L.from, p.v, 'power', PM.proj.fps);
+        });
+        I.refresh();
+      };
+      const f = PM.numField(() => PM.evP(L, p, PM.time, pd.k), (v: any) => {
+        if (p.kf.length) PM.setKeyOn(p, PM.time - L.from, v, 'power', PM.proj.fps); else p.v = v;
+        PM.touch(); PM.invalidate();
+      }, {
+        label: pd.label, step: pd.step, min: pd.min, max: pd.max, unit: pd.unit,
+        origin: 'inspector',
+        command: (value: any) => ({ type: 'set_property', target: L.id, path: fx.id + '.' + pd.k, value, time: PM.time, mode: 'auto', preserveHandEdits: false }),
+      });
+      I.syncs.push(f.sync);
+      const r = PM.row(pd.label, f, { left: sw });
+      r.insertBefore(sw, r.firstChild);
+      r.addEventListener('contextmenu', (e: any) => { e.preventDefault(); chanMenu(e, L, fx.id + '.' + pd.k, p, pd.label); });
+      g.appendChild(r);
+    });
+    wrap.appendChild(g);
+  });
+}
+
+/* ── masks ─────────────────────────────────────────────── */
+const MASK_FIELDS = [
+  ['x', 'X', 1, 'px'], ['y', 'Y', 1, 'px'],
+  ['w', 'Width', 1, 'px'], ['h', 'Height', 1, 'px'],
+  ['rotation', 'Rotation', 1, '°'], ['feather', 'Feather', .5, 'px'],
+];
+function masksSection(wrap: any, L: any) {
+  const sec = PM.section('Masks');
+  wrap.appendChild(sec);
+  if (!(L.masks || []).length) {
+    wrap.appendChild(h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '28px' }, onclick: () => PM.hist.do('Add mask', () => { L.masks.push(PM.mkMask('rect', PM.curComp())); I.refresh(); PM.invalidate(); }) }, PM.icon('plus'), 'Add mask'));
+    return;
+  }
+  L.masks.forEach((m: any, i: any) => {
+    const tw = h('span.twirl.open', PM.icon('chev'));
+    const onBtn = h('button.stopwatch' + (m.on !== false ? '.on' : ''), PM.icon('eye'));
+    onBtn.onclick = (e: any) => { e.stopPropagation(); PM.hist.do('Toggle mask', () => { m.on = m.on === false; }); I.refresh(); PM.invalidate(); };
+    const head = h('div.row', { style: { marginTop: '4px', background: 'rgba(128,128,136,.08)' } },
+      tw,
+      h('div.k', { style: { color: 'var(--tx)', fontWeight: 500 } }, `Mask ${i + 1}`),
+      h('button.stopwatch', { title: 'Delete mask', onclick: (e: any) => { e.stopPropagation(); PM.hist.do('Remove mask', () => { L.masks.splice(i, 1); }); I.refresh(); PM.invalidate(); } }, PM.icon('x')));
+    wrap.appendChild(head);
+    const g = h('div.grp');
+    g.appendChild(PM.row('Shape', PM.selectField(() => m.shape, (v: any) => { m.shape = v; PM.invalidate(); }, PM.MASK_SHAPES, { label: 'Shape' })));
+    g.appendChild(PM.row('Mode', PM.selectField(() => m.mode || 'add', (v: any) => { m.mode = v; PM.invalidate(); }, ['add', 'subtract'], { label: 'Mode' })));
+    MASK_FIELDS.forEach(([k, label, step, unit]: any) => {
+      const p = m.p[k];
+      const sw = h('button.stopwatch' + (p.kf.length ? '.on' : ''), PM.icon('clock'));
+      sw.onclick = () => {
+        PM.hist.do('Animate ' + label, () => {
+          if (p.kf.length) { p.v = PM.evP(L, p, PM.time, k); p.kf = []; }
+          else PM.setKeyOn(p, PM.time - L.from, p.v, 'power', PM.proj.fps);
+        });
+        I.refresh();
+      };
+      const f = PM.numField(() => PM.evP(L, p, PM.time, k), (v: any) => {
+        if (p.kf.length) PM.setKeyOn(p, PM.time - L.from, v, 'power', PM.proj.fps); else p.v = v;
+        PM.touch(); PM.invalidate();
+      }, { label, step });
+      I.syncs.push(f.sync);
+      const r = PM.row(label, f, { left: sw });
+      r.insertBefore(sw, r.firstChild);
+      g.appendChild(r);
+    });
+    wrap.appendChild(g);
+  });
+  wrap.appendChild(h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '28px', marginTop: '2px' }, onclick: () => PM.hist.do('Add mask', () => { L.masks.push(PM.mkMask('rect', PM.curComp())); I.refresh(); PM.invalidate(); }) }, PM.icon('plus'), 'Add mask'));
+}
+
+function newLayerMenu(anchor: any) {
+  PM.menu(anchor, [
+    { header: 'New layer' },
+    { label: 'Text', kb: '⌘T', run: () => PM.cmd('newText') },
+    { label: 'Shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
+    { label: 'Solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
+    { label: 'Shader', kb: '⌘⇧G', run: () => PM.cmd('newShader') },
+    { label: 'Null', run: () => PM.cmd('newNull') },
+    '-', { label: 'Import media…', kb: '⌘I', run: () => PM.cmd('import') },
+  ], { right: true });
+}
+
+function fxMenu(anchor: any) {
+  const L = PM.firstSel();
+  if (!L) return PM.toast('Select a layer first');
+  const groups: any = {};
+  Object.entries(PM.FX).forEach(([k, d]: any) => (groups[d.group] = groups[d.group] || []).push([k, d]));
+  const items: any[] = [];
+  Object.entries(groups).forEach(([g, list]: any) => {
+    items.push({ header: g });
+    list.forEach(([k, d]: any) => items.push({
+      label: d.label, run: () => { PM.Edit.apply({ type: 'add_effect', target: L.id, effect: k }, { label: 'Add ' + d.label, origin: 'inspector' }); I.refresh(); PM.invalidate(); },
+    }));
+  });
+  PM.menu(anchor, items, { right: true });
+}
+PM.fxMenu = fxMenu;
+
+/* ── layer options ─────────────────────────────────────── */
+function layerOptions(wrap: any, L: any) {
+  wrap.appendChild(PM.section('Layer'));
+  const layerEdit = (key: any, opt: any = {}) => ({ ...opt, origin: 'inspector', command: (value: any) => ({ type: 'set_layer', target: L.id, patch: { [key]: value } }) });
+  if (L.type === 'audio') {
+    wrap.appendChild(PM.row('Visible', PM.toggleField(() => L.on, () => {}, layerEdit('visible', { label: 'Visibility' }))));
+    wrap.appendChild(PM.row('Color', PM.colorField(() => L.color, () => {}, layerEdit('color', { label: 'Label color' }))));
+    numRow(wrap, 'Start', () => L.from, () => {}, layerEdit('from', { step: .05, precision: 2, unit: 's' }));
+    numRow(wrap, 'Duration', () => L.dur, () => {}, layerEdit('duration', { step: .05, precision: 2, unit: 's' }));
+    return;
+  }
+  wrap.appendChild(PM.row('Blend mode', PM.selectField(() => L.blend, (v: any) => { L.blend = v; PM.invalidate(); }, PM.BLENDS, layerEdit('blend', { label: 'Blend' }))));
+  wrap.appendChild(PM.row('Motion blur', PM.toggleField(() => L.mblur, (v: any) => { L.mblur = v; PM.invalidate(); }, layerEdit('motionBlur', { label: 'Motion blur' }))));
+  wrap.appendChild(PM.row('Parent', PM.selectField(
+    () => { const p = PM.L(L.parent); return p ? p.name : 'none'; },
+    (v: any) => { L.parent = v; PM.invalidate(); },
+    [{ v: null, label: 'none' }, ...PM.proj.layers.filter((o: any) => o.id !== L.id && !PM.wouldCycle(L, o.id)).map((o: any) => ({ v: o.id, label: o.name }))], layerEdit('parent', { label: 'Parent' }))));
+  wrap.appendChild(PM.row('Color', PM.colorField(() => L.color, (v: any) => { L.color = v; PM.invalidate(); }, layerEdit('color', { label: 'Label color' }))));
+  numRow(wrap, 'Start', () => L.from, (v: any) => { L.from = Math.max(0, v); PM.invalidate(); }, layerEdit('from', { step: .05, precision: 2, unit: 's' }));
+  numRow(wrap, 'Duration', () => L.dur, (v: any) => { L.dur = Math.max(.02, v); PM.invalidate(); }, layerEdit('duration', { step: .05, precision: 2, unit: 's' }));
+}
+
+/* ── scene params (project level, agent-authored) ──────── */
+function sceneParams(wrap: any) {
+  const ps = Object.values(PM.proj.params || {});
+  const compEdit = (key: any, opt: any = {}) => ({ ...opt, origin: 'inspector', command: (value: any) => ({ type: 'set_composition', patch: { [key]: value } }) });
+  const paramEdit = (p: any, opt: any = {}) => ({ ...opt, origin: 'inspector', command: (value: any) => ({ type: 'set_scene_parameter', name: p.name, value }) });
+  wrap.appendChild(PM.section('Composition'));
+  numRow(wrap, 'Width', () => PM.proj.w, (v: any) => { PM.proj.w = Math.round(v); PM.bus.emit('project'); }, compEdit('width', { step: 2, min: 16 }));
+  numRow(wrap, 'Height', () => PM.proj.h, (v: any) => { PM.proj.h = Math.round(v); PM.bus.emit('project'); }, compEdit('height', { step: 2, min: 16 }));
+  numRow(wrap, 'Duration', () => PM.proj.dur, (v: any) => { PM.proj.dur = Math.max(.2, v); PM.proj.work = [0, PM.proj.dur]; PM.bus.emit('project'); }, compEdit('duration', { step: .5, precision: 2, unit: 's' }));
+  numRow(wrap, 'Frame rate', () => PM.proj.fps, (v: any) => { PM.proj.fps = Math.round(PM.clamp(v, 1, 240)); PM.bus.emit('project'); }, compEdit('fps', { step: 1 }));
+  wrap.appendChild(PM.row('Background', PM.fillField(() => PM.proj.backgroundFill, (v: any) => { PM.proj.backgroundFill = v; PM.proj.bg = v.stops[0].color; PM.invalidate(); }, compEdit('backgroundFill', { label: 'Background fill', fallback: PM.proj.bg }))));
+  if (ps.length) {
+    wrap.appendChild(PM.section('Scene parameters'));
+    ps.forEach((p: any) => {
+      /* params come from models and hand-edited JSON — coerce before rendering */
+      if (!p || !p.label && !p.name) return;
+      p.control = ['color', 'toggle', 'select'].includes(p.control) ? p.control : 'num';
+      if (p.value === undefined || (p.control === 'num' && !Number.isFinite(Number(p.value)))) {
+        p.value = p.control === 'color' ? '#FF6B1A' : p.control === 'toggle' ? false : Number(p.min) || 0;
+      }
+      if (p.control === 'color') wrap.appendChild(PM.row(p.label, PM.colorField(() => p.value, (v: any) => { p.value = v; PM.touch(); PM.invalidate(); }, paramEdit(p, { label: p.label }))));
+      else if (p.control === 'toggle') wrap.appendChild(PM.row(p.label, PM.toggleField(() => p.value, (v: any) => { p.value = v; PM.touch(); PM.invalidate(); }, paramEdit(p, { label: p.label }))));
+      else if (p.control === 'select') wrap.appendChild(PM.row(p.label, PM.selectField(() => p.value, (v: any) => { p.value = v; PM.touch(); PM.invalidate(); }, p.options || [], paramEdit(p, { label: p.label }))));
+      else numRow(wrap, p.label, () => p.value, (v: any) => { p.value = v; PM.touch(); PM.invalidate(); }, paramEdit(p, { step: (p.max - p.min) / 200 || .01, min: p.min, max: p.max, precision: 3 }));
+    });
+  }
+  wrap.appendChild(h('div.empty', 'Select a layer to edit its properties.'));
+}
+
+I.focusText = (L: any) => {
+  PM.selectLayers(L.id);
+  window.requestAnimationFrame(() => { if (I.textArea) { I.textArea.focus(); I.textArea.select(); } });
+};
+}

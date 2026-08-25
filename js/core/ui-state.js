@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/ui-state.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — transient interface state kept outside serializable projects. */
 (() => {
 const PM = window.PM;

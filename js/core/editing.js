@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/editing.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — one source-edit language shared by UI, agents, and generated controls. */
 (() => {
 const PM = window.PM;

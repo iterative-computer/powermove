@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/controls.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — inspector controls: scrub numbers, colors, toggles, selects. */
 (() => {
 const PM = window.PM, h = PM.h;

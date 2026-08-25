@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/assistant/spatial.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — spatial coding assistant.
    Shake the pointer to summon a full-window shader, drag over interface, describe
    the change, preview the generated section manifest, then apply it safely. */

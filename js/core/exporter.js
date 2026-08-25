@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/exporter.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — export. WebCodecs VP9 → WebM (deterministic, frame-exact),
    MediaRecorder fallback, PNG sequence, stills, project JSON. */
 (() => {

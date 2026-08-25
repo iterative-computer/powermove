@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/gl/raster.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — CPU rasterizer for text & vector content, plus the asset store.
    Everything is cached by a content key so scrubbing never re-rasterizes. */
 (() => {

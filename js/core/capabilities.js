@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/capabilities.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — safe, composable capabilities for generated tools.
    Tool manifests never execute arbitrary JavaScript. They resolve a bounded
    selector + expression graph into ordinary PM.Edit source commands, which

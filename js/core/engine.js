@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/engine.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — playback transport. One rAF loop, adaptive quality, video sync. */
 (() => {
 const PM = window.PM;

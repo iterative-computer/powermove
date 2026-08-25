@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/ui/toolbar.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — After Effects-style tool toolbar + Preview panel. */
 (() => {
 const PM = window.PM, h = PM.h;

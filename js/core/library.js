@@ -1,3 +1,4 @@
+/* No longer loaded — superseded by src/renderer/src/legacy/core/library.ts; kept for the legacy test oracle until Phase 6. */
 /* Powermove — generative library. Sections (saved layer groups) and Looks (saved
    shader presets) with live thumbnails, so AI-generated work is browsable and
    reusable instead of living only in the undo stack. Stored inside the project,
