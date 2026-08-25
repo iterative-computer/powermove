@@ -1,0 +1,26 @@
+appId: com.zellzoi.powermove
+productName: Powermove
+
+directories:
+  output: dist
+
+asar: true
+files:
+  - out/**
+extraMetadata:
+  main: out/main/index.js
+
+afterPack: ./scripts/after-pack.mjs
+artifactName: ${productName}-${version}-mac-${arch}.${ext}
+
+mac:
+  identity: null
+  hardenedRuntime: false
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
