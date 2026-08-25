@@ -18,9 +18,20 @@ export default defineConfig({
   },
   renderer: {
     root: 'src/renderer',
+    publicDir: 'public',
     plugins: [svelte()],
     build: {
-      outDir: 'out/renderer'
+      outDir: 'out/renderer',
+      rollupOptions: {
+        output: {
+          assetFileNames: (assetInfo) => {
+            const name = assetInfo.names[0] ?? '';
+            return /\.(?:otf|ttf|woff2?)$/i.test(name)
+              ? 'assets/fonts/[name]-[hash][extname]'
+              : 'assets/[name]-[hash][extname]';
+          }
+        }
+      }
     }
   }
 });

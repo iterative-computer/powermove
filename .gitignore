@@ -4,6 +4,5 @@ build/
 node_modules/
 out/
 dist/
-host/legacy-bundle.js
 e2e/test-results/
 e2e/playwright-report/

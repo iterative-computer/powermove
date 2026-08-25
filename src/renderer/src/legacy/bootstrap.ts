@@ -4,6 +4,8 @@
    classic host/legacy-bundle.js tag executes. The preload bridge
    (window.powermove) already exists at that point. */
 import type { PMRegistry } from './registry';
+import { installLegacyRuntime } from '../runtime/install-legacy';
+import { installSveltePanels } from '../panels/install';
 
 import { install as installDiag } from './core/diag';
 import { install as installUtil } from './core/util';
@@ -88,6 +90,11 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['assistant/spatial', installSpatial],
   ['ui/projects', installProjectsUi],
   ['ui/toolbar', installToolbar],
+  // Phase 4: Svelte stores mirror the legacy document (legacy → runes only),
+  // then Svelte panels register over their legacy counterparts BEFORE the app
+  // boots and applies the workspace layout.
+  ['runtime/bridge', installLegacyRuntime],
+  ['panels/svelte', installSveltePanels],
   ['app', installApp]
 ];
 
@@ -99,3 +106,4 @@ for (const [name, install] of INSTALLS) {
     console.error(`[legacy] install failed: ${name}`, error);
   }
 }
+

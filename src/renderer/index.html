@@ -1,12 +1,23 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Powermove</title>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
-  </body>
+<html lang="en" data-density="normal">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Powermove</title>
+</head>
+<body>
+<div id="app">
+  <div id="titlebar">
+    <div id="tabs"></div>
+    <div class="titlebar-drag"></div>
+    <div class="tb-right" id="tb-right"></div>
+  </div>
+  <div id="body"></div>
+  <div id="status"></div>
+</div>
+<div id="scrim"></div>
+<div class="toastwrap" id="toasts"></div>
+
+<script type="module" src="./src/main.ts"></script>
+</body>
 </html>

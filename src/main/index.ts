@@ -95,22 +95,17 @@ function errorResponse(status: number, message: string): Response {
   });
 }
 
-// Phase 1 hosts the legacy vanilla renderer (index.html + js/ + css/ + host/ at
-// the repo root). The Svelte renderer in out/renderer takes over in Phase 4.
-const RENDERER = process.env['POWERMOVE_RENDERER'] === 'svelte' ? 'svelte' : 'legacy';
+// The renderer is the Vite-built bundle in out/renderer (the legacy app runs
+// from src/renderer/src/legacy/* modules since Phase 4).
 
 // The generated-script sandbox document is served with its own policy: Chromium
 // inherits the parent CSP into srcdoc/blob frames, so it must be a real URL.
 const SANDBOX_PATH = 'host/sandbox.html';
-// In legacy mode the renderer root is the repo root; only the app's own
-// directories are reachable (never .git, node_modules, src, tests, ...).
-const LEGACY_ALLOWED = new Set(['index.html', 'js', 'css', 'assets', 'host']);
 const SANDBOX_CSP =
   "default-src 'none'; script-src app://powermove/host/sandbox.js 'unsafe-eval'; worker-src blob:; connect-src 'none'";
 
 function registerAppProtocol(): void {
-  const rendererRoot =
-    RENDERER === 'svelte' ? path.resolve(__dirname, '../renderer') : path.resolve(__dirname, '../..');
+  const rendererRoot = path.resolve(__dirname, '../renderer');
 
   protocol.handle('app', async (request) => {
     try {
@@ -130,10 +125,6 @@ function registerAppProtocol(): void {
         path.isAbsolute(relativePath)
       ) {
         return errorResponse(403, 'Forbidden');
-      }
-      const firstSegment = relativePath.split(path.sep)[0] ?? '';
-      if (RENDERER === 'legacy' && !LEGACY_ALLOWED.has(firstSegment)) {
-        return errorResponse(404, 'Not found');
       }
 
       const contents = await readFile(filePath);
@@ -252,7 +243,7 @@ function createWindow(): BrowserWindow {
     }
   });
 
-  if (devRendererUrl && RENDERER === 'svelte') {
+  if (devRendererUrl) {
     void window.loadURL(devRendererUrl);
   } else {
     void window.loadURL(`${APP_ORIGIN}/`);

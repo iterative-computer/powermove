@@ -73,7 +73,7 @@ async function startElectron(
       ...process.env,
       ...env,
       POWERMOVE_USER_DATA: userData,
-      POWERMOVE_DEVTOOLS: '0'
+      POWERMOVE_DEVTOOLS: '0',
     }
   });
   const instrumented = new WeakSet<Page>();

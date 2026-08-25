@@ -1,11 +1,16 @@
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vitest/config';
 
 // The legacy suite under tests/ runs with `node --test` (npm test); vitest only
-// owns the new TypeScript modules under src/.
+// owns the new TypeScript modules under src/. The svelte plugin compiles
+// *.svelte.ts rune modules and components for unit tests.
 export default defineConfig({
+  plugins: [svelte({ hot: false })],
+  resolve: { conditions: ['browser'] },
   test: {
     include: ['src/**/*.{test,spec}.ts'],
     exclude: ['**/node_modules/**', 'out/**', 'tests/**', 'spikes/**'],
     passWithNoTests: true
+    // Renderer tests that need a DOM declare `// @vitest-environment happy-dom`.
   }
 });
