@@ -6,6 +6,7 @@
 import type { PMRegistry } from './registry';
 import { installLegacyRuntime } from '../runtime/install-legacy';
 import { installSveltePanels } from '../panels/install';
+import { installShell } from '../shell/install';
 
 import { install as installDiag } from './core/diag';
 import { install as installUtil } from './core/util';
@@ -93,6 +94,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   // Phase 4: Svelte stores mirror the legacy document (legacy → runes only),
   // then Svelte panels register over their legacy counterparts BEFORE the app
   // boots and applies the workspace layout.
+  ['shell', installShell],
   ['runtime/bridge', installLegacyRuntime],
   ['panels/svelte', installSveltePanels],
   ['app', installApp]

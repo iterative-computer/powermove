@@ -24,7 +24,8 @@ export const STATIC_KEYS = [
   'agentModel',
   'agentReasoningEffort',
   'agentAccessMode',
-  'agentAutoApplyPanels'
+  'agentAutoApplyPanels',
+  'shellSvelte' // Phase 5 shell cutover switch
 ] as const;
 
 export type StaticKey = (typeof STATIC_KEYS)[number];

@@ -438,7 +438,7 @@ function buildStatus() {
   window.setInterval(() => PM.invalidate('status'), 1000);
   paint();
 }
-buildTitlebar(); buildStatus();
+if (!(PM as any).SvelteShell) { buildTitlebar(); buildStatus(); }
 
 /* ── Compact tool strip, integrated with the native macOS titlebar ── */
 function buildToolbar() {
@@ -456,7 +456,7 @@ function buildToolbar() {
   PM.bus.on('projects:screen', syncVisibility);
   syncVisibility();
 }
-buildToolbar();
+if (!(PM as any).SvelteShell) buildToolbar();
 
 /* ── persistence ───────────────────────────────────────── */
 /* Thumbnails are captured at most once per 5s so autosave never janks. */
