@@ -25,13 +25,14 @@
 <script src="js/core/ui-state.js"></script>
 <script src="host/electron-shim.js"></script>
 <script src="js/core/fonts.js"></script>
-<script src="js/core/easing.js"></script>
+<!-- Installs converted modules synchronously at this exact point in legacy script order. -->
+<script src="host/legacy-bundle.js"></script>
 <script src="js/core/model.js"></script>
 <script src="js/core/selection.js"></script>
 <script src="js/core/anim.js"></script>
 <script src="js/core/history.js"></script>
 <script src="js/core/library.js"></script>
-<script src="js/core/projects.js"></script>
+<!-- js/core/projects.js is installed by host/legacy-bundle.js above. -->
 <script src="js/core/editing.js"></script>
 <script src="js/core/capabilities.js"></script>
 <script src="js/core/media.js"></script>

@@ -1,21 +1,20 @@
-/* No longer loaded — superseded by src/renderer/src/legacy/core/easing.ts; kept for the legacy test oracle until Phase 6. */
-/* Powermove — easing: bezier solver, presets, springs. Time is SECONDS everywhere. */
-(() => {
-const PM = window.PM;
+/* Ported from js/core/easing.js — behavior-preserving. */
+import type { PMRegistry } from '../registry';
 
+export function install(PM: PMRegistry): void {
 /** Newton + bisect cubic-bezier solver, cached per curve. */
-const cache = new Map();
-function bezier(x1, y1, x2, y2) {
+const cache = new Map<string, any>();
+function bezier(x1: number, y1: number, x2: number, y2: number): any {
   const key = x1 + ',' + y1 + ',' + x2 + ',' + y2;
   let f = cache.get(key);
   if (f) return f;
-  if (x1 === y1 && x2 === y2) { f = (t) => t; cache.set(key, f); return f; }
+  if (x1 === y1 && x2 === y2) { f = (t: number) => t; cache.set(key, f); return f; }
   const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx;
   const cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
-  const sx = (t) => ((ax * t + bx) * t + cx) * t;
-  const sy = (t) => ((ay * t + by) * t + cy) * t;
-  const dx = (t) => (3 * ax * t + 2 * bx) * t + cx;
-  f = (x) => {
+  const sx = (t: number) => ((ax * t + bx) * t + cx) * t;
+  const sy = (t: number) => ((ay * t + by) * t + cy) * t;
+  const dx = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+  f = (x: number) => {
     if (x <= 0) return 0; if (x >= 1) return 1;
     let t = x;
     for (let i = 0; i < 6; i++) {
@@ -39,7 +38,7 @@ function bezier(x1, y1, x2, y2) {
 }
 
 /* Presets are stored as bezier handle pairs so the graph editor can show them. */
-const PRESETS = {
+const PRESETS: Record<string, number[]> = {
   linear:      [0, 0, 1, 1],
   ease:        [.25, .1, .25, 1],
   easeIn:      [.42, 0, 1, 1],
@@ -57,27 +56,27 @@ const PRESETS = {
   glide:       [.16, .84, .24, 1],
 };
 
-const Ease = {
+const Ease: any = {
   bezier,
   PRESETS,
   names: Object.keys(PRESETS),
-  fn(name) { const p = PRESETS[name] || PRESETS.linear; return bezier(p[0], p[1], p[2], p[3]); },
+  fn(name: string) { const p = PRESETS[name] || PRESETS.linear!; return bezier(p[0]!, p[1]!, p[2]!, p[3]!); },
   /** Match a handle pair to the closest preset name (for UI display). */
-  nameOf(eo, ei) {
+  nameOf(eo: number[], ei: number[]) {
     for (const k in PRESETS) {
-      const p = PRESETS[k];
-      if (Math.abs(p[0] - eo[0]) < .02 && Math.abs(p[1] - eo[1]) < .02 &&
-          Math.abs(p[2] - ei[0]) < .02 && Math.abs(p[3] - ei[1]) < .02) return k;
+      const p = PRESETS[k]!;
+      if (Math.abs(p[0]! - eo[0]!) < .02 && Math.abs(p[1]! - eo[1]!) < .02 &&
+          Math.abs(p[2]! - ei[0]!) < .02 && Math.abs(p[3]! - ei[1]!) < .02) return k;
     }
     return 'custom';
   },
-  handles(name) { const p = PRESETS[name] || PRESETS.linear; return { eo: [p[0], p[1]], ei: [p[2], p[3]] }; },
+  handles(name: string) { const p = PRESETS[name] || PRESETS.linear!; return { eo: [p[0], p[1]], ei: [p[2], p[3]] }; },
 };
 
 /* Springs simulate at a fixed internal timestep so the trajectory is identical at any fps. */
 const SDT = 1 / 480;
-const springCache = new Map();
-Ease.spring = (t, { damping = 18, stiffness = 180, mass = 1 } = {}) => {
+const springCache = new Map<string, Float32Array>();
+Ease.spring = (t: number, { damping = 18, stiffness = 180, mass = 1 }: any = {}) => {
   if (t <= 0) return 0;
   const key = damping + '|' + stiffness + '|' + mass;
   let tbl = springCache.get(key);
@@ -93,7 +92,7 @@ Ease.spring = (t, { damping = 18, stiffness = 180, mass = 1 } = {}) => {
   const i = Math.min(tbl.length - 1, Math.floor(t / SDT));
   return tbl[i];
 };
-Ease.springDuration = (cfg) => {
+Ease.springDuration = (cfg: any) => {
   const { damping = 18, stiffness = 180, mass = 1 } = cfg || {};
   let x = 0, v = 0;
   for (let i = 1; i < 10 / SDT; i++) {
@@ -105,4 +104,4 @@ Ease.springDuration = (cfg) => {
 };
 
 PM.Ease = Ease;
-})();
+}
