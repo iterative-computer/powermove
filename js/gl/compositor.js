@@ -86,12 +86,13 @@ function grab(w, h) {
     if (!f.busy && f.w === w && f.h === h) { f.busy = true; return f; }
   }
   const tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
+  bindTex(0, tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  bindTex(0, null);
   const fb = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
@@ -100,10 +101,17 @@ function grab(w, h) {
   return f;
 }
 const free = (f) => { if (f) f.busy = false; };
+/* Texture units that still reference a pooled texture from an earlier pass
+   would form a framebuffer/texture feedback loop once that FBO is bound again
+   (Chromium rejects the draw; WebKit silently tolerated it). */
+const boundTex = [];
+let boundFbo = null;
 function bind(f) {
   const gl = GL.gl;
+  if (f) for (let u = 0; u < boundTex.length; u++) if (boundTex[u] === f.tex) bindTex(u, null);
   gl.bindFramebuffer(gl.FRAMEBUFFER, f ? f.fb : null);
   gl.viewport(0, 0, f ? f.w : GL.canvas.width, f ? f.h : GL.canvas.height);
+  boundFbo = f || null;
 }
 function clear(r = 0, g = 0, b = 0, a = 0) {
   const gl = GL.gl; gl.clearColor(r, g, b, a); gl.clear(gl.COLOR_BUFFER_BIT);
@@ -118,7 +126,7 @@ function texFor(key, source, opts = {}) {
   let t = GL.texes.get(key);
   if (!t) {
     t = { tex: gl.createTexture(), v: -1 };
-    gl.bindTexture(gl.TEXTURE_2D, t.tex);
+    bindTex(0, t.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -126,7 +134,7 @@ function texFor(key, source, opts = {}) {
     GL.texes.set(key, t);
   }
   if (opts.version !== undefined && t.v === opts.version) return t.tex;
-  gl.bindTexture(gl.TEXTURE_2D, t.tex);
+  bindTex(0, t.tex);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch (e) { }
@@ -145,6 +153,7 @@ function bindTex(unit, tex) {
   const gl = GL.gl;
   gl.activeTexture(gl.TEXTURE0 + unit);
   gl.bindTexture(gl.TEXTURE_2D, tex);
+  boundTex[unit] = tex;
 }
 const draw = () => { GL.gl.drawArrays(GL.gl.TRIANGLE_STRIP, 0, 4); GL.stats.draws++; };
 
@@ -222,6 +231,10 @@ function contentQuad(L, T, W, H) {
     const p = program(codeKey, PM.SHADER_HEADER + '\n' + d.code, PM.VERT);
     L._shaderKey = codeKey;
     if (!p) return null;
+    /* nested content renders into its own FBO; the caller's target is restored
+       before drawContent samples the result (otherwise the draw reads and writes
+       the same texture) */
+    const target = boundFbo;
     const f = grab(Math.max(2, Math.round(w)), Math.max(2, Math.round(hh)));
     bind(f); clear(0, 0, 0, 0);
     const g = use(p);
@@ -241,12 +254,14 @@ function contentQuad(L, T, W, H) {
     GL.gl.disable(GL.gl.BLEND);
     draw();
     GL.gl.enable(GL.gl.BLEND);
+    bind(target);
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
   }
   if (L.type === 'precomp') {
     const sub = PM.compOf(L);
     if (!sub || pcDepth >= PC_MAX_DEPTH) return null;
     const w = Math.max(2, Math.round(d.w || W)), hh = Math.max(2, Math.round(d.h || H));
+    const target = boundFbo;
     const f = grab(w, hh);
     bind(f); clear(0, 0, 0, 0);
     pmScopePush(sub);
@@ -263,6 +278,7 @@ function contentQuad(L, T, W, H) {
       free(inner);
     } finally {
       pmScopePop();
+      bind(target);
     }
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
   }

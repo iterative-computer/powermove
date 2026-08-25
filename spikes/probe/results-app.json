@@ -1,0 +1,2349 @@
+{
+  "meta": {
+    "mode": "app",
+    "generatedAt": "2026-08-25T04:44:12.324Z",
+    "elapsedMs": 24514,
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "node": "24.18.1",
+    "platform": "darwin",
+    "arch": "arm64",
+    "finalReason": "completed",
+    "permissionsAsked": [
+      {
+        "kind": "check",
+        "permission": "media",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:43:47.927Z"
+      },
+      {
+        "kind": "check",
+        "permission": "media",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:43:47.927Z"
+      },
+      {
+        "kind": "check",
+        "permission": "web-app-installation",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:43:47.927Z"
+      },
+      {
+        "kind": "check",
+        "permission": "geolocation",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:43:47.927Z"
+      },
+      {
+        "kind": "check",
+        "permission": "media",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:00.011Z"
+      },
+      {
+        "kind": "check",
+        "permission": "media",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:00.011Z"
+      },
+      {
+        "kind": "check",
+        "permission": "web-app-installation",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:00.011Z"
+      },
+      {
+        "kind": "check",
+        "permission": "geolocation",
+        "granted": false,
+        "url": "",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:00.011Z"
+      },
+      {
+        "kind": "check",
+        "permission": "background-sync",
+        "granted": false,
+        "url": "app://probe/index.html",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:02.578Z"
+      },
+      {
+        "kind": "check",
+        "permission": "background-sync",
+        "granted": false,
+        "url": "app://probe/index.html",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:02.598Z"
+      },
+      {
+        "kind": "check",
+        "permission": "background-sync",
+        "granted": false,
+        "url": "app://probe/index.html",
+        "requestingOrigin": "",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:06.148Z"
+      },
+      {
+        "kind": "check",
+        "permission": "local-fonts",
+        "granted": true,
+        "url": "app://probe/index.html",
+        "requestingOrigin": "app://probe/",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:09.777Z"
+      },
+      {
+        "kind": "check",
+        "permission": "local-fonts",
+        "granted": true,
+        "url": "app://probe/index.html",
+        "requestingOrigin": "app://probe/",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:10.590Z"
+      },
+      {
+        "kind": "check",
+        "permission": "media",
+        "granted": false,
+        "url": "app://probe/index.html",
+        "requestingOrigin": "app://probe/",
+        "embeddingOrigin": "app://probe/",
+        "at": "2026-08-25T04:44:10.734Z"
+      }
+    ]
+  },
+  "a": {
+    "ok": true,
+    "ms": 278.4,
+    "detail": {
+      "static": {
+        "mediaSource": {
+          "avc1.42E01E": {
+            "mime": "video/mp4; codecs=\"avc1.42E01E\"",
+            "supported": true
+          },
+          "avc1.640028": {
+            "mime": "video/mp4; codecs=\"avc1.640028\"",
+            "supported": true
+          },
+          "hvc1.1.6.L93.B0": {
+            "mime": "video/mp4; codecs=\"hvc1.1.6.L93.B0\"",
+            "supported": true
+          },
+          "hev1.1.6.L93.B0": {
+            "mime": "video/mp4; codecs=\"hev1.1.6.L93.B0\"",
+            "supported": true
+          },
+          "vp09.00.31.08": {
+            "mime": "video/webm; codecs=\"vp09.00.31.08\"",
+            "supported": true
+          },
+          "vp8": {
+            "mime": "video/webm; codecs=\"vp8\"",
+            "supported": true
+          },
+          "av01.0.04M.08": {
+            "mime": "video/webm; codecs=\"av01.0.04M.08\"",
+            "supported": true
+          }
+        },
+        "videoDecoder": {
+          "avc1.42E01E": {
+            "supported": true,
+            "config": {
+              "codec": "avc1.42E01E",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          },
+          "avc1.640028": {
+            "supported": true,
+            "config": {
+              "codec": "avc1.640028",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          },
+          "hvc1.1.6.L93.B0": {
+            "supported": true,
+            "config": {
+              "codec": "hvc1.1.6.L93.B0",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          },
+          "hev1.1.6.L93.B0": {
+            "supported": true,
+            "config": {
+              "codec": "hev1.1.6.L93.B0",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          },
+          "vp09.00.31.08": {
+            "supported": true,
+            "config": {
+              "codec": "vp09.00.31.08",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          },
+          "vp8": {
+            "supported": true,
+            "config": {
+              "codec": "vp8",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          },
+          "av01.0.04M.08": {
+            "supported": true,
+            "config": {
+              "codec": "av01.0.04M.08",
+              "codedHeight": 1080,
+              "codedWidth": 1920,
+              "flip": false,
+              "hardwareAcceleration": "no-preference",
+              "rotation": 0
+            }
+          }
+        },
+        "audioDecoder": {
+          "mp4a.40.2": {
+            "supported": true,
+            "config": {
+              "codec": "mp4a.40.2",
+              "numberOfChannels": 2,
+              "sampleRate": 48000
+            }
+          },
+          "opus": {
+            "supported": true,
+            "config": {
+              "codec": "opus",
+              "numberOfChannels": 2,
+              "sampleRate": 48000
+            }
+          },
+          "mp3": {
+            "supported": true,
+            "config": {
+              "codec": "mp3",
+              "numberOfChannels": 2,
+              "sampleRate": 48000
+            }
+          }
+        }
+      },
+      "dynamic": {
+        "manifest": {
+          "ok": true,
+          "path": "/Users/judekim/Developer/powermove/spikes/fixtures/fixtures.json",
+          "count": 20
+        },
+        "fixtures": [
+          {
+            "ok": true,
+            "file": "h264-aac.mp4",
+            "container": "mp4",
+            "video": "avc1",
+            "audio": "aac",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                0,
+                255,
+                1
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": true
+            }
+          },
+          {
+            "ok": true,
+            "file": "h264-aac.mov",
+            "container": "mov",
+            "video": "avc1",
+            "audio": "aac",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                0,
+                255,
+                1
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": true
+            }
+          },
+          {
+            "ok": true,
+            "file": "hevc.mov",
+            "container": "mov",
+            "video": "hvc1",
+            "audio": "aac",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                0,
+                255,
+                1
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": true
+            }
+          },
+          {
+            "ok": true,
+            "file": "hevc.mp4",
+            "container": "mp4",
+            "video": "hvc1",
+            "audio": "aac",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                0,
+                255,
+                1
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": true
+            }
+          },
+          {
+            "ok": true,
+            "file": "hevc-alpha.mov",
+            "container": "mov",
+            "video": "hvc1",
+            "audio": null,
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 320,
+            "videoHeight": 180,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                19,
+                255,
+                9
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": true
+            },
+            "alpha": {
+              "point": {
+                "x": 239,
+                "y": 89,
+                "source": "right-half-transparent"
+              },
+              "transparentCanvasRgba": [
+                0,
+                0,
+                0,
+                0
+              ],
+              "magentaCanvasRgba": [
+                255,
+                0,
+                255,
+                255
+              ],
+              "survived": true
+            }
+          },
+          {
+            "ok": false,
+            "file": "prores422.mov",
+            "error": "Error: metadata loaded without a decodable video track (0x0)\n    at decodeFixture (app://probe/renderer.js:75:13)\n    at async probeCodecs (app://probe/renderer.js:175:60)\n    at async measured (app://probe/renderer.js:23:20)\n    at async run (app://probe/renderer.js:784:20)\n    at async mainEntry (app://probe/renderer.js:791:3)",
+            "mediaError": null
+          },
+          {
+            "ok": false,
+            "file": "prores4444-alpha.mov",
+            "error": "Error: code 4: PipelineStatus::DEMUXER_ERROR_NO_SUPPORTED_STREAMS: FFmpegDemuxer: no supported streams\n    at HTMLVideoElement.failure (app://probe/renderer.js:55:12)",
+            "mediaError": {
+              "code": 4,
+              "message": "PipelineStatus::DEMUXER_ERROR_NO_SUPPORTED_STREAMS: FFmpegDemuxer: no supported streams"
+            }
+          },
+          {
+            "ok": true,
+            "file": "vp9-opus.webm",
+            "container": "webm",
+            "video": "vp09",
+            "audio": "opus",
+            "ffprobeColor": {
+              "executable": "/opt/homebrew/bin/ffprobe",
+              "args": [
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_range,color_space,color_primaries,color_transfer",
+                "-of",
+                "json",
+                "vp9-opus.webm"
+              ],
+              "ok": true,
+              "stdout": "{\n    \"programs\": [\n\n    ],\n    \"stream_groups\": [\n\n    ],\n    \"streams\": [\n        {\n            \"color_range\": \"tv\"\n        }\n    ]\n}\n",
+              "stderr": "",
+              "parsed": {
+                "programs": [],
+                "stream_groups": [],
+                "streams": [
+                  {
+                    "color_range": "tv"
+                  }
+                ]
+              },
+              "stream": {
+                "color_range": "tv",
+                "color_space": null,
+                "color_primaries": null,
+                "color_transfer": null
+              }
+            },
+            "duration": 2.008,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                0,
+                216,
+                0
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": false,
+              "decoderColorSpace": {
+                "fullRange": false,
+                "matrix": "bt709",
+                "primaries": "bt709",
+                "transfer": "bt709"
+              }
+            }
+          },
+          {
+            "ok": true,
+            "file": "vp8-opus.webm",
+            "container": "webm",
+            "video": "vp08",
+            "audio": "opus",
+            "ffprobeColor": null,
+            "duration": 2.008,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                3,
+                253,
+                5
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": true
+            }
+          },
+          {
+            "ok": true,
+            "file": "av1.mp4",
+            "container": "mp4",
+            "video": "av01",
+            "audio": "aac",
+            "ffprobeColor": {
+              "executable": "/opt/homebrew/bin/ffprobe",
+              "args": [
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_range,color_space,color_primaries,color_transfer",
+                "-of",
+                "json",
+                "av1.mp4"
+              ],
+              "ok": true,
+              "stdout": "{\n    \"programs\": [\n\n    ],\n    \"stream_groups\": [\n\n    ],\n    \"streams\": [\n        {\n            \"color_range\": \"tv\"\n        }\n    ]\n}\n",
+              "stderr": "",
+              "parsed": {
+                "programs": [],
+                "stream_groups": [],
+                "streams": [
+                  {
+                    "color_range": "tv"
+                  }
+                ]
+              },
+              "stream": {
+                "color_range": "tv",
+                "color_space": null,
+                "color_primaries": null,
+                "color_transfer": null
+              }
+            },
+            "duration": 2,
+            "videoWidth": 160,
+            "videoHeight": 90,
+            "sample": {
+              "t": 1.5,
+              "rgb": [
+                0,
+                216,
+                0
+              ],
+              "expected": [
+                0,
+                255,
+                0
+              ],
+              "matches": false,
+              "decoderColorSpace": {
+                "fullRange": false,
+                "matrix": "bt709",
+                "primaries": "bt709",
+                "transfer": "bt709"
+              }
+            }
+          },
+          {
+            "ok": true,
+            "file": "tone.wav",
+            "container": "wav",
+            "audio": "pcm_s16le",
+            "ffprobeColor": null,
+            "duration": 1.5,
+            "videoWidth": 0,
+            "videoHeight": 0
+          },
+          {
+            "ok": true,
+            "file": "tone.m4a",
+            "container": "ipod",
+            "audio": "aac",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 0,
+            "videoHeight": 0
+          },
+          {
+            "ok": true,
+            "file": "tone.mp3",
+            "container": "mp3",
+            "audio": "mp3",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 0,
+            "videoHeight": 0
+          },
+          {
+            "ok": true,
+            "file": "tone.opus",
+            "container": "ogg",
+            "audio": "opus",
+            "ffprobeColor": null,
+            "duration": 2.0065,
+            "videoWidth": 0,
+            "videoHeight": 0
+          },
+          {
+            "ok": true,
+            "file": "tone.flac",
+            "container": "flac",
+            "audio": "flac",
+            "ffprobeColor": null,
+            "duration": 2,
+            "videoWidth": 0,
+            "videoHeight": 0
+          },
+          {
+            "ok": false,
+            "file": "still-red.png",
+            "error": "Error: code 4: PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed\n    at HTMLVideoElement.failure (app://probe/renderer.js:55:12)",
+            "mediaError": {
+              "code": 4,
+              "message": "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed"
+            }
+          },
+          {
+            "ok": false,
+            "file": "still-alpha.png",
+            "error": "Error: code 4: PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed\n    at HTMLVideoElement.failure (app://probe/renderer.js:55:12)",
+            "mediaError": {
+              "code": 4,
+              "message": "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed"
+            }
+          },
+          {
+            "ok": false,
+            "file": "still.webp",
+            "error": "Error: code 4: PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed\n    at HTMLVideoElement.failure (app://probe/renderer.js:55:12)",
+            "mediaError": {
+              "code": 4,
+              "message": "PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed"
+            }
+          },
+          {
+            "ok": true,
+            "file": "still.avif",
+            "container": "avif",
+            "video": "av1",
+            "ffprobeColor": null,
+            "duration": null,
+            "videoWidth": 160,
+            "videoHeight": 90
+          },
+          {
+            "file": "still.heic",
+            "skipped": "fixture missing"
+          }
+        ]
+      }
+    }
+  },
+  "b": {
+    "ok": true,
+    "ms": 7.1,
+    "detail": {
+      "adapterInfo": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "",
+        "description": "",
+        "subgroupMinSize": 32,
+        "subgroupMaxSize": 32,
+        "isFallbackAdapter": false
+      },
+      "copyMs": 6.9,
+      "texture": {
+        "width": 256,
+        "height": 256,
+        "format": "rgba8unorm"
+      }
+    }
+  },
+  "c": {
+    "ok": true,
+    "ms": 117.3,
+    "detail": {
+      "support": {
+        "video": {
+          "vp09.00.31.08": {
+            "supported": true,
+            "config": {
+              "alpha": "discard",
+              "bitrate": 16000000,
+              "bitrateMode": "variable",
+              "codec": "vp09.00.31.08",
+              "contentHint": "",
+              "framerate": 30,
+              "hardwareAcceleration": "no-preference",
+              "height": 1080,
+              "latencyMode": "quality",
+              "width": 1920
+            }
+          },
+          "vp8": {
+            "supported": true,
+            "config": {
+              "alpha": "discard",
+              "bitrate": 16000000,
+              "bitrateMode": "variable",
+              "codec": "vp8",
+              "contentHint": "",
+              "framerate": 30,
+              "hardwareAcceleration": "no-preference",
+              "height": 1080,
+              "latencyMode": "quality",
+              "width": 1920
+            }
+          },
+          "avc1.42E01E": {
+            "supported": false,
+            "config": {
+              "alpha": "discard",
+              "bitrate": 16000000,
+              "bitrateMode": "variable",
+              "codec": "avc1.42E01E",
+              "contentHint": "",
+              "framerate": 30,
+              "hardwareAcceleration": "no-preference",
+              "height": 1080,
+              "latencyMode": "quality",
+              "width": 1920
+            }
+          }
+        },
+        "audio": {
+          "opus": {
+            "supported": true,
+            "config": {
+              "bitrate": 160000,
+              "bitrateMode": "variable",
+              "codec": "opus",
+              "numberOfChannels": 2,
+              "sampleRate": 48000
+            }
+          }
+        }
+      },
+      "actual": {
+        "video": {
+          "ok": true,
+          "codec": "vp09.00.31.08",
+          "frames": 30,
+          "chunkCount": 30,
+          "totalBytes": 833346,
+          "ms": 89.5
+        },
+        "audio": {
+          "ok": true,
+          "codec": "opus",
+          "seconds": 1,
+          "chunkCount": 51,
+          "totalBytes": 20851,
+          "decoderDescriptionProvided": true,
+          "ms": 7.4
+        }
+      }
+    }
+  },
+  "d": {
+    "ok": true,
+    "ms": 5079.8,
+    "detail": {
+      "normal": {
+        "ok": true,
+        "ms": 2502.1,
+        "detail": {
+          "answer42": false,
+          "worker": null,
+          "fetchBlocked": null,
+          "parentProbeType": null,
+          "parentProbeAccessThrows": null,
+          "childParentDocumentThrows": null,
+          "parentDocumentThrows": true,
+          "opaqueCrossOrigin": true,
+          "parentEval": 2,
+          "parentEvalWorks": true,
+          "parentEvalError": null,
+          "iframeMessageReceived": false,
+          "inlineScriptBlockedByParentCsp": true,
+          "error": "srcdoc inline script was blocked by the parent page's script-src (unsafe-inline is absent)"
+        }
+      },
+      "strict": {
+        "ok": true,
+        "ms": 2503.1,
+        "detail": {
+          "answer42": false,
+          "worker": null,
+          "fetchBlocked": null,
+          "parentProbeType": null,
+          "parentProbeAccessThrows": null,
+          "childParentDocumentThrows": null,
+          "parentDocumentThrows": true,
+          "opaqueCrossOrigin": true,
+          "parentEval": null,
+          "parentEvalWorks": false,
+          "parentEvalError": {
+            "name": "EvalError",
+            "message": "Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self'\".\n"
+          },
+          "iframeMessageReceived": false,
+          "inlineScriptBlockedByParentCsp": true,
+          "error": "srcdoc inline script was blocked by the parent page's script-src (unsafe-inline is absent)"
+        }
+      }
+    }
+  },
+  "e": {
+    "ok": true,
+    "ms": 822.7,
+    "detail": {
+      "main": {
+        "ok": true,
+        "ms": 9262.5,
+        "detail": {
+          "systemProfiler": {
+            "ok": true,
+            "ms": 9262.5,
+            "familyCount": 379
+          },
+          "fallback": {
+            "ms": 0.6,
+            "fileCount": 679,
+            "directories": [
+              {
+                "directory": "/System/Library/Fonts",
+                "count": 83
+              },
+              {
+                "directory": "/Library/Fonts",
+                "count": 1
+              },
+              {
+                "directory": "/Users/judekim/Library/Fonts",
+                "count": 595
+              }
+            ]
+          }
+        }
+      },
+      "renderer": {
+        "withoutActivation": {
+          "ok": true,
+          "ms": 811.4,
+          "fontCount": 975,
+          "familyCount": 284
+        },
+        "withSyntheticActivation": {
+          "ok": true,
+          "ms": 9.3,
+          "fontCount": 975,
+          "familyCount": 284
+        }
+      },
+      "permissionsAsked": [
+        {
+          "kind": "check",
+          "permission": "media",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:43:47.927Z"
+        },
+        {
+          "kind": "check",
+          "permission": "media",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:43:47.927Z"
+        },
+        {
+          "kind": "check",
+          "permission": "web-app-installation",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:43:47.927Z"
+        },
+        {
+          "kind": "check",
+          "permission": "geolocation",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:43:47.927Z"
+        },
+        {
+          "kind": "check",
+          "permission": "media",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:00.011Z"
+        },
+        {
+          "kind": "check",
+          "permission": "media",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:00.011Z"
+        },
+        {
+          "kind": "check",
+          "permission": "web-app-installation",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:00.011Z"
+        },
+        {
+          "kind": "check",
+          "permission": "geolocation",
+          "granted": false,
+          "url": "",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:00.011Z"
+        },
+        {
+          "kind": "check",
+          "permission": "background-sync",
+          "granted": false,
+          "url": "app://probe/index.html",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:02.578Z"
+        },
+        {
+          "kind": "check",
+          "permission": "background-sync",
+          "granted": false,
+          "url": "app://probe/index.html",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:02.598Z"
+        },
+        {
+          "kind": "check",
+          "permission": "background-sync",
+          "granted": false,
+          "url": "app://probe/index.html",
+          "requestingOrigin": "",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:06.148Z"
+        },
+        {
+          "kind": "check",
+          "permission": "local-fonts",
+          "granted": true,
+          "url": "app://probe/index.html",
+          "requestingOrigin": "app://probe/",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:09.777Z"
+        },
+        {
+          "kind": "check",
+          "permission": "local-fonts",
+          "granted": true,
+          "url": "app://probe/index.html",
+          "requestingOrigin": "app://probe/",
+          "embeddingOrigin": "app://probe/",
+          "at": "2026-08-25T04:44:10.590Z"
+        }
+      ]
+    }
+  },
+  "f": {
+    "ok": true,
+    "ms": 128,
+    "detail": {
+      "samples": [
+        {
+          "index": 0,
+          "ms": 28.4,
+          "pngBytes": 41934,
+          "width": 2880,
+          "height": 1736
+        },
+        {
+          "index": 1,
+          "ms": 24.9,
+          "pngBytes": 42113,
+          "width": 2880,
+          "height": 1736
+        },
+        {
+          "index": 2,
+          "ms": 24.9,
+          "pngBytes": 42113,
+          "width": 2880,
+          "height": 1736
+        },
+        {
+          "index": 3,
+          "ms": 24.6,
+          "pngBytes": 42113,
+          "width": 2880,
+          "height": 1736
+        },
+        {
+          "index": 4,
+          "ms": 24.9,
+          "pngBytes": 42113,
+          "width": 2880,
+          "height": 1736
+        }
+      ],
+      "minMs": 24.6,
+      "medianMs": 24.9
+    }
+  },
+  "g": {
+    "ok": true,
+    "ms": 0.1,
+    "detail": {
+      "g1": {
+        "showSaveFilePicker": "function",
+        "showOpenFilePicker": "function",
+        "showDirectoryPicker": "function",
+        "storageGetDirectory": true
+      },
+      "g2": {
+        "skipped": "interactive mode only"
+      }
+    }
+  },
+  "h": {
+    "ok": true,
+    "ms": 0,
+    "detail": {
+      "ok": true,
+      "ms": 166.8,
+      "detail": {
+        "path": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/Users/judekim/.vite-plus/bin:/opt/homebrew/Caskroom/codex/0.147.0/codex-path:/Users/judekim/.codex/tmp/arg0/codex-arg018z2wD:/Users/judekim/.local/bin:/Users/judekim/.opencode/bin:/Users/judekim/.local/share/fnm/node-versions/v24.18.0/installation/bin:/Users/judekim/.local/state/fnm_multishells/61455_1787617678345/bin:/Users/judekim/.orbstack/bin:/Users/judekim/.lmstudio/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/clangd-lsp/1.0.0/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/swift-lsp/1.0.0/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/expo/1.12.0/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/figma/2.2.96/bin:/Users/judekim/.claude/plugins/cache/paper/paper-desktop/0.1.0/bin:/Users/judekim/.claude/plugins/cache/wonder/wonder/0.1.0/bin:/Users/judekim/.orbstack/bin",
+        "codexBinary": null,
+        "currentPathResolution": "/opt/homebrew/bin/codex",
+        "hardcoded": [
+          {
+            "path": "/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+            "exists": false,
+            "executable": false
+          },
+          {
+            "path": "/usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+            "exists": false,
+            "executable": false
+          }
+        ],
+        "loginShell": {
+          "ok": true,
+          "ms": 166.7,
+          "stdout": "/opt/homebrew/bin/codex\nPATH=/Users/judekim/.opencode/bin:/Users/judekim/.vite-plus/bin:/Users/judekim/.local/bin:/Users/judekim/.local/share/fnm/node-versions/v24.18.0/installation/bin:/Users/judekim/.local/state/fnm_multishells/45567_1787633027878/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/opt/homebrew/Caskroom/codex/0.147.0/codex-path:/Users/judekim/.codex/tmp/arg0/codex-arg018z2wD:/Users/judekim/.local/bin:/Users/judekim/.opencode/bin:/Users/judekim/.local/share/fnm/node-versions/v24.18.0/installation/bin:/Users/judekim/.local/state/fnm_multishells/61455_1787617678345/bin:/Users/judekim/.orbstack/bin:/Users/judekim/.lmstudio/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/clangd-lsp/1.0.0/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/swift-lsp/1.0.0/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/expo/1.12.0/bin:/Users/judekim/.claude/plugins/cache/claude-plugins-official/figma/2.2.96/bin:/Users/judekim/.claude/plugins/cache/paper/paper-desktop/0.1.0/bin:/Users/judekim/.claude/plugins/cache/wonder/wonder/0.1.0/bin:/Users/judekim/.orbstack/bin:/Users/judekim/.lmstudio/bin\n",
+          "stderr": "[\u001b[31mERROR\u001b[0m] - (starship::print): Under a 'dumb' terminal (TERM=dumb).\n"
+        }
+      }
+    }
+  },
+  "i": {
+    "ok": true,
+    "ms": 421.9,
+    "detail": {
+      "moves": 50,
+      "inputValueRetained": true,
+      "inputValue": "retained-value",
+      "focusRetained": true,
+      "buttonHandlerRetained": true,
+      "buttonClicks": 1,
+      "webglContextLost": false,
+      "webglPixel": [
+        26,
+        153,
+        230,
+        255
+      ],
+      "webglExpected": [
+        26,
+        153,
+        230,
+        255
+      ],
+      "webglPixelMatches": true,
+      "uploadedTextureStillValid": true,
+      "resizeObserverCount": 3,
+      "resizeObserverFired": true,
+      "mutationObserverCount": 3,
+      "mutationObserverFired": true,
+      "transitionProperty": "transform",
+      "transitionPresent": true,
+      "videoSetupError": null,
+      "videoCurrentTimeBefore": 0.046923,
+      "videoCurrentTimeAfter": 0.34757,
+      "videoKeptPlaying": true,
+      "i2": {
+        "mainWindowFocused": false,
+        "documentFocusedBeforeMoves": true,
+        "focusRestored": true,
+        "losses": 50,
+        "restorationAttempts": 50,
+        "selectionBefore": {
+          "start": 2,
+          "end": 4
+        },
+        "selectionAfter": {
+          "start": 2,
+          "end": 4
+        },
+        "selectionSurvived": true,
+        "blurEvents": 50,
+        "focusEvents": 50,
+        "movesWithBlur": 50,
+        "movesWithFocus": 50,
+        "perMove": [
+          {
+            "move": 1,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 2,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 3,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 4,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 5,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 6,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 7,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 8,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 9,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 10,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 11,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 12,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 13,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 14,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 15,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 16,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 17,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 18,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 19,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 20,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 21,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 22,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 23,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 24,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 25,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 26,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 27,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 28,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 29,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 30,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 31,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 32,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 33,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 34,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 35,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 36,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 37,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 38,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 39,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 40,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 41,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 42,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 43,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 44,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 45,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 46,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 47,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 48,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 49,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          },
+          {
+            "move": 50,
+            "focusLost": true,
+            "restored": true,
+            "blurEvents": 1,
+            "focusEvents": 1,
+            "selectionStart": 2,
+            "selectionEnd": 4
+          }
+        ]
+      }
+    }
+  },
+  "j": {
+    "ok": true,
+    "ms": 7.3,
+    "detail": {
+      "locationOrigin": "app://probe",
+      "isSecureContext": true,
+      "cryptoSubtle": "object",
+      "indexedDbOpen": true,
+      "bootBarrier": {
+        "ms": 0.2,
+        "jsonBytes": 204826
+      }
+    }
+  },
+  "k": {
+    "ok": true,
+    "ms": 1159.8,
+    "detail": {
+      "forward": [
+        {
+          "ok": true,
+          "sizeMiB": 64,
+          "byteLength": 67108864,
+          "roundTripMs": 37.3,
+          "main": {
+            "byteLength": 67108864,
+            "receiptMs": 37,
+            "handlerMs": 0,
+            "before": {
+              "rss": 402866176,
+              "heapTotal": 10747904,
+              "heapUsed": 6261760,
+              "external": 71320080,
+              "arrayBuffers": 0
+            },
+            "after": {
+              "rss": 402866176,
+              "heapTotal": 10747904,
+              "heapUsed": 6265596,
+              "external": 71320120,
+              "arrayBuffers": 0
+            }
+          },
+          "rendererMemory": {
+            "before": {
+              "jsHeapSizeLimit": 4395630592,
+              "totalJSHeapSize": 4389783,
+              "usedJSHeapSize": 3036491
+            },
+            "after": {
+              "jsHeapSizeLimit": 4395630592,
+              "totalJSHeapSize": 4389783,
+              "usedJSHeapSize": 3036491
+            }
+          }
+        },
+        {
+          "ok": true,
+          "sizeMiB": 256,
+          "byteLength": 268435456,
+          "roundTripMs": 147.8,
+          "main": {
+            "byteLength": 268435456,
+            "receiptMs": 147,
+            "handlerMs": 0,
+            "before": {
+              "rss": 812859392,
+              "heapTotal": 9437184,
+              "heapUsed": 5625932,
+              "external": 339629237,
+              "arrayBuffers": 0
+            },
+            "after": {
+              "rss": 812859392,
+              "heapTotal": 9437184,
+              "heapUsed": 5627068,
+              "external": 339629237,
+              "arrayBuffers": 0
+            }
+          },
+          "rendererMemory": {
+            "before": {
+              "jsHeapSizeLimit": 4395630592,
+              "totalJSHeapSize": 138865385,
+              "usedJSHeapSize": 136800417
+            },
+            "after": {
+              "jsHeapSizeLimit": 4395630592,
+              "totalJSHeapSize": 674885200,
+              "usedJSHeapSize": 673066656
+            }
+          }
+        },
+        {
+          "ok": true,
+          "sizeMiB": 1024,
+          "byteLength": 1073741824,
+          "roundTripMs": 551.7,
+          "main": {
+            "byteLength": 1073741824,
+            "receiptMs": 551,
+            "handlerMs": 0,
+            "before": {
+              "rss": 2624782336,
+              "heapTotal": 8650752,
+              "heapUsed": 5625196,
+              "external": 1346262197,
+              "arrayBuffers": 0
+            },
+            "after": {
+              "rss": 2624782336,
+              "heapTotal": 8650752,
+              "heapUsed": 5628184,
+              "external": 1346262197,
+              "arrayBuffers": 0
+            }
+          },
+          "rendererMemory": {
+            "before": {
+              "jsHeapSizeLimit": 4395630592,
+              "totalJSHeapSize": 674885200,
+              "usedJSHeapSize": 673066948
+            },
+            "after": {
+              "jsHeapSizeLimit": 4395630592,
+              "totalJSHeapSize": 2687626832,
+              "usedJSHeapSize": 2686333752
+            }
+          }
+        }
+      ],
+      "reverse": {
+        "ok": true,
+        "sizeMiB": 256,
+        "byteLength": 268435456,
+        "endpoints": [
+          17,
+          29
+        ],
+        "roundTripMs": 119,
+        "main": {
+          "byteLength": 268435456,
+          "before": {
+            "rss": 1269956608,
+            "heapTotal": 7602176,
+            "heapUsed": 5625272,
+            "external": 1346262197,
+            "arrayBuffers": 0
+          },
+          "afterAllocation": {
+            "rss": 1270005760,
+            "heapTotal": 7602176,
+            "heapUsed": 5626508,
+            "external": 1346262197,
+            "arrayBuffers": 0
+          }
+        },
+        "rendererMemory": {
+          "before": {
+            "jsHeapSizeLimit": 4395630592,
+            "totalJSHeapSize": 2687626832,
+            "usedJSHeapSize": 2686335052
+          },
+          "after": {
+            "jsHeapSizeLimit": 4395630592,
+            "totalJSHeapSize": 2687741520,
+            "usedJSHeapSize": 2686377900
+          }
+        }
+      }
+    }
+  },
+  "d2": {
+    "ok": true,
+    "ms": 7209.9,
+    "detail": {
+      "V1": {
+        "answer42": true,
+        "opaqueOrigin": true,
+        "fetchBlocked": true,
+        "parentReachable": false,
+        "error": null,
+        "fetchError": "Failed to fetch"
+      },
+      "V1b": {
+        "answer42": true,
+        "opaqueOrigin": true,
+        "fetchBlocked": true,
+        "parentReachable": false,
+        "error": null,
+        "fetchError": "Failed to fetch"
+      },
+      "V2": {
+        "answer42": false,
+        "opaqueOrigin": true,
+        "fetchBlocked": false,
+        "parentReachable": false,
+        "error": "V2 sandbox did not execute its bootstrap or return a result"
+      },
+      "V3": {
+        "answer42": true,
+        "opaqueOrigin": true,
+        "fetchBlocked": true,
+        "parentReachable": false,
+        "error": null,
+        "fetchError": "Failed to fetch"
+      },
+      "V4": {
+        "answer42": false,
+        "opaqueOrigin": true,
+        "fetchBlocked": false,
+        "parentReachable": false,
+        "error": "V4 sandbox did not execute its bootstrap or return a result; Executing inline script violates the following Content Security Policy directive 'script-src 'self' 'unsafe-eval' 'sha256-5E7go0oDRQFdIHnVl4OMlf8X7Y3HKlN1+FitlqAk9A8=''. Either the 'unsafe-inline' keyword, a hash ('sha256-Mc6VltzLUcgcUfveGBtl7OEhqhsgJjbcoOrwdRt9yWM='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked.",
+        "cspViolation": "Executing inline script violates the following Content Security Policy directive 'script-src 'self' 'unsafe-eval' 'sha256-5E7go0oDRQFdIHnVl4OMlf8X7Y3HKlN1+FitlqAk9A8=''. Either the 'unsafe-inline' keyword, a hash ('sha256-Mc6VltzLUcgcUfveGBtl7OEhqhsgJjbcoOrwdRt9yWM='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked."
+      }
+    },
+    "V1": {
+      "answer42": true,
+      "opaqueOrigin": true,
+      "fetchBlocked": true,
+      "parentReachable": false,
+      "error": null,
+      "fetchError": "Failed to fetch"
+    },
+    "V1b": {
+      "answer42": true,
+      "opaqueOrigin": true,
+      "fetchBlocked": true,
+      "parentReachable": false,
+      "error": null,
+      "fetchError": "Failed to fetch"
+    },
+    "V2": {
+      "answer42": false,
+      "opaqueOrigin": true,
+      "fetchBlocked": false,
+      "parentReachable": false,
+      "error": "V2 sandbox did not execute its bootstrap or return a result"
+    },
+    "V3": {
+      "answer42": true,
+      "opaqueOrigin": true,
+      "fetchBlocked": true,
+      "parentReachable": false,
+      "error": null,
+      "fetchError": "Failed to fetch"
+    },
+    "V4": {
+      "answer42": false,
+      "opaqueOrigin": true,
+      "fetchBlocked": false,
+      "parentReachable": false,
+      "error": "V4 sandbox did not execute its bootstrap or return a result; Executing inline script violates the following Content Security Policy directive 'script-src 'self' 'unsafe-eval' 'sha256-5E7go0oDRQFdIHnVl4OMlf8X7Y3HKlN1+FitlqAk9A8=''. Either the 'unsafe-inline' keyword, a hash ('sha256-Mc6VltzLUcgcUfveGBtl7OEhqhsgJjbcoOrwdRt9yWM='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked.",
+      "cspViolation": "Executing inline script violates the following Content Security Policy directive 'script-src 'self' 'unsafe-eval' 'sha256-5E7go0oDRQFdIHnVl4OMlf8X7Y3HKlN1+FitlqAk9A8=''. Either the 'unsafe-inline' keyword, a hash ('sha256-Mc6VltzLUcgcUfveGBtl7OEhqhsgJjbcoOrwdRt9yWM='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked."
+    }
+  },
+  "i2": {
+    "ok": true,
+    "ms": 0,
+    "detail": {
+      "mainWindowFocused": false,
+      "documentFocusedBeforeMoves": true,
+      "focusRestored": true,
+      "losses": 50,
+      "restorationAttempts": 50,
+      "selectionBefore": {
+        "start": 2,
+        "end": 4
+      },
+      "selectionAfter": {
+        "start": 2,
+        "end": 4
+      },
+      "selectionSurvived": true,
+      "blurEvents": 50,
+      "focusEvents": 50,
+      "movesWithBlur": 50,
+      "movesWithFocus": 50,
+      "perMove": [
+        {
+          "move": 1,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 2,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 3,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 4,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 5,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 6,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 7,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 8,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 9,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 10,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 11,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 12,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 13,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 14,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 15,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 16,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 17,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 18,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 19,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 20,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 21,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 22,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 23,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 24,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 25,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 26,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 27,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 28,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 29,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 30,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 31,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 32,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 33,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 34,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 35,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 36,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 37,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 38,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 39,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 40,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 41,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 42,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 43,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 44,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 45,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 46,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 47,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 48,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 49,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        },
+        {
+          "move": 50,
+          "focusLost": true,
+          "restored": true,
+          "blurEvents": 1,
+          "focusEvents": 1,
+          "selectionStart": 2,
+          "selectionEnd": 4
+        }
+      ]
+    }
+  }
+}

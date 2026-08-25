@@ -3,10 +3,27 @@
   "version": "1.0.0",
   "private": true,
   "description": "A GPU-native, AI-authored motion editor for macOS.",
+  "main": "out/main/index.js",
   "scripts": {
     "test": "node --test tests/*.test.js",
     "build:mac": "./scripts/build-macos-app.sh",
-    "build:mac:release": "./scripts/build-macos-app.sh --release"
+    "build:mac:release": "./scripts/build-macos-app.sh --release",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "svelte-check --tsconfig ./tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "test:unit": "vitest run"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "6.2.4",
+    "@types/node": "26.3.0",
+    "electron": "44.0.0",
+    "electron-vite": "5.0.0",
+    "svelte": "5.56.10",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
   },
   "engines": {
     "node": ">=20"
