@@ -1,4 +1,4 @@
-// Documents CURRENT behavior as of the legacy app; the policy matrix will be revised deliberately in Phase 3a.
+// Documents the locked-layer policy matrix (Phase 3a).
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -32,7 +32,7 @@ function fixture() {
     GL: { dropProgram() {} },
   };
   const context = vm.createContext({ window: { PM }, console, Date, JSON, Object, Set, Map });
-  for (const file of ['js/core/model.js', 'js/core/anim.js', 'js/gl/shaders.js']) {
+  for (const file of ['js/core/model.js', 'js/core/selection.js', 'js/core/anim.js', 'js/gl/shaders.js']) {
     vm.runInContext(source(file), context, { filename: file });
   }
   PM.proj = PM.mkProject({ name: 'Lock fixture', w: 1920, h: 1080, fps: 30, dur: 10 });
@@ -78,54 +78,62 @@ const lockedCases = {
   add_effect: ({ layer }) => ({ type: 'add_effect', target: layer.id, effect: 'blur' }),
   remove_effect: ({ layer, effect }) => ({ type: 'remove_effect', target: layer.id, effect: effect.id }),
   set_effect: ({ layer, effect }) => ({ type: 'set_effect', target: layer.id, effect: effect.id, patch: { enabled: false } }),
+  set_composition: () => ({ type: 'set_composition', patch: { name: 'Allowed composition edit' } }),
+  add_layer: () => ({ type: 'add_layer', id: 'allowed-layer', layerType: 'solid', name: 'Allowed layer', select: false }),
+  set_scene_parameter: () => ({ type: 'set_scene_parameter', name: 'Allowed parameter', value: 42 }),
+  add_marker: () => ({ type: 'add_marker', id: 'allowed-marker', time: 2, name: 'Allowed marker' }),
+  create_section: ({ layer }) => ({
+    type: 'create_section',
+    section: { id: 'allowed-section', layers: [JSON.parse(JSON.stringify(layer))], versions: [] },
+  }),
+  update_section: ({ PM, layer }) => {
+    PM.proj.library = { sections: [{ id: 'existing-section', layers: [], versions: [] }], looks: [] };
+    return { type: 'update_section', sectionId: 'existing-section', layers: [JSON.parse(JSON.stringify(layer))] };
+  },
+  transform_layers: ({ PM, layer }) => {
+    PM.Capabilities.compile = () => ({
+      ok: true,
+      commands: [{
+        type: 'set_property', target: layer.id, path: 'opacity', value: 60,
+        mode: 'static', preserveHandEdits: false,
+      }],
+    });
+    return { type: 'transform_layers', transform: { version: 1 } };
+  },
 };
 
-const successfulMutation = {
-  set_expression: ({ layer }) => assert.equal(layer.p.opacity.expr, 'value + 1'),
-  set_layer: ({ layer }) => assert.equal(layer.name, 'Renamed while locked'),
-  delete_layers: ({ PM, layer }) => assert.equal(PM.proj.layers.some(item => item.id === layer.id), false),
-  reorder_layer: ({ PM, layer }) => assert.equal(PM.proj.layers.findIndex(item => item.id === layer.id), 1),
-  add_effect: ({ PM, layer }) => {
-    assert.equal(layer.fx.length, 2);
-    assert.deepEqual(Object.keys(layer.fx.at(-1).p), Array.from(PM.FX.blur.params, parameter => parameter.k));
-  },
-  remove_effect: ({ layer }) => assert.equal(layer.fx.length, 0),
-  set_effect: ({ PM, effect }) => {
-    assert.deepEqual(Object.keys(effect.p), Array.from(PM.FX.blur.params, parameter => parameter.k));
-    assert.equal(effect.on, false);
-  },
-  set_easing: ({ layer }) => {
-    for (const key of layer.p.opacity.kf) {
-      assert.deepEqual([...key.eo, ...key.ei], [.2, .1, .8, .9]);
-      assert.equal(key.hold, false);
-    }
-  },
-};
-
-test('the legacy locked-layer operation matrix is frozen', () => {
+test('the Phase 3a locked-layer operation matrix is frozen for all 18 operations', () => {
   const outcomes = {
-    set_property: 'throws',
-    replace_keyframes: 'throws',
-    set_easing: 'succeeds',
-    set_expression: 'succeeds',
-    set_content: 'throws',
-    set_layer: 'succeeds',
-    delete_layers: 'succeeds',
-    reorder_layer: 'succeeds',
-    add_effect: 'succeeds',
-    remove_effect: 'succeeds',
-    set_effect: 'succeeds',
+    set_property: 'blocked',
+    replace_keyframes: 'blocked',
+    set_easing: 'blocked',
+    set_expression: 'blocked',
+    set_content: 'blocked',
+    set_layer: 'blocked',
+    set_composition: 'allowed',
+    add_layer: 'allowed',
+    delete_layers: 'blocked',
+    reorder_layer: 'blocked',
+    add_effect: 'blocked',
+    remove_effect: 'blocked',
+    set_effect: 'blocked',
+    set_scene_parameter: 'allowed',
+    add_marker: 'allowed',
+    create_section: 'allowed',
+    update_section: 'allowed',
+    transform_layers: 'blocked',
   };
+  assert.deepEqual(Object.keys(outcomes).sort(), Object.keys(fixture().PM.Edit.operations).sort());
 
   for (const [operation, expected] of Object.entries(outcomes)) {
     const state = fixture();
     const result = state.PM.Edit.apply([lockedCases[operation](state)]);
-    if (expected === 'throws') {
+    if (expected === 'blocked') {
       assert.equal(result.ok, false, `${operation} unexpectedly succeeded`);
-      assert.match(result.message, /Layer “Locked title” is locked/);
+      assert.match(result.message, /locked/i, operation);
+      assert.match(result.message, /Locked title/, operation);
     } else {
       assert.equal(result.ok, true, `${operation}: ${result.message}`);
-      successfulMutation[operation](state);
     }
   }
 });
@@ -151,14 +159,122 @@ test('transform_layers rolls back unlocked edits when a compiled property edit r
   assert.equal(PM.L(other.id).p.opacity.v, otherBefore, 'the earlier unlocked edit is rolled back atomically');
 });
 
-test('overrideLock true permits a property edit on a locked layer', () => {
+test('set_layer allows the explicit locked:false unlock for HUMAN origins only', () => {
   const { PM, layer } = fixture();
-  const result = PM.Edit.apply([{
-    type: 'set_property', target: layer.id, path: 'position.x', value: 333,
-    mode: 'static', preserveHandEdits: false, overrideLock: true,
+  /* Agent unlock is blocked — otherwise a two-command batch [unlock, edit]
+     defeats the entire lock matrix. */
+  const agentUnlock = PM.Edit.apply([{
+    type: 'set_layer', target: layer.id, patch: { locked: false },
+  }], { origin: 'agent' });
+  assert.equal(agentUnlock.ok, false);
+  assert.equal(PM.L(layer.id).lock, true);
+
+  const humanUnlock = PM.Edit.apply([{
+    type: 'set_layer', target: layer.id, patch: { locked: false },
+  }], { origin: 'interface' });
+  assert.equal(humanUnlock.ok, true, humanUnlock.message);
+  assert.equal(PM.L(layer.id).lock, false);
+
+  PM.L(layer.id).lock = true;
+  const combined = PM.Edit.apply([{
+    type: 'set_layer', target: layer.id, patch: { locked: false, name: 'Also rename' },
+  }], { origin: 'interface' });
+  assert.equal(combined.ok, false);
+  assert.equal(combined.message, 'Layer “Locked title” is locked');
+  assert.equal(PM.L(layer.id).lock, true);
+  assert.equal(PM.L(layer.id).name, 'Locked title');
+});
+
+test('an agent batch cannot unlock-then-edit a locked layer', () => {
+  const { PM, layer } = fixture();
+  const batch = PM.Edit.apply([
+    { type: 'set_layer', target: layer.id, patch: { locked: false } },
+    { type: 'set_property', target: layer.id, path: 'opacity', value: 5, mode: 'static' },
+    { type: 'delete_layers', targets: [layer.id] },
+  ], { origin: 'agent' });
+  assert.equal(batch.ok, false);
+  assert.equal(PM.L(layer.id).lock, true, 'the layer stays locked');
+  assert.notEqual(PM.L(layer.id).p.opacity.v, 5, 'the property edit did not land');
+  assert.ok(PM.L(layer.id), 'the layer was not deleted');
+});
+
+test('the live-transaction path enforces the same lock policy', () => {
+  const { PM, layer } = fixture();
+  PM.Edit.begin('Agent drag', { origin: 'agent' });
+  const blocked = PM.Edit.dispatch({ type: 'set_property', target: layer.id, path: 'opacity', value: 9, mode: 'static' });
+  PM.Edit.cancel();
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.message, /locked/);
+});
+
+test('overrideLock requires an explicitly trusted human origin', () => {
+  const { PM, layer } = fixture();
+  /* Unset origin fails closed even though provenance defaults to interface. */
+  const unset = PM.Edit.apply([{
+    type: 'set_property', target: layer.id, path: 'opacity', value: 7, mode: 'static', overrideLock: true,
   }]);
-  assert.equal(result.ok, true);
-  assert.equal(layer.p['position.x'].v, 333);
+  assert.equal(unset.ok, false);
+  /* canvas and timeline are real human surfaces and keep the privilege. */
+  for (const origin of ['canvas', 'timeline', 'interface', 'inspector']) {
+    const state = fixture();
+    const allowed = state.PM.Edit.apply([{
+      type: 'set_property', target: state.layer.id, path: 'opacity', value: 7, mode: 'static', overrideLock: true,
+    }], { origin });
+    assert.equal(allowed.ok, true, `${origin}: ${allowed.message}`);
+    assert.equal(state.PM.L(state.layer.id).p.opacity.v, 7);
+  }
+});
+
+test('delete_layers skips locked targets, lists them, and fails when all targets are locked', () => {
+  const { PM, layer, other } = fixture();
+  const partial = PM.Edit.apply([{
+    type: 'delete_layers', targets: [layer.id, other.id],
+  }], { origin: 'agent' });
+  assert.equal(partial.ok, true, partial.message);
+  assert.match(partial.message, /Skipped locked layers: “Locked title”/);
+  assert.ok(PM.L(layer.id));
+  assert.equal(PM.L(other.id), null);
+  assert.deepEqual(partial.data.results[0].data.skippedLocked, [layer.id]);
+
+  const allLocked = PM.Edit.apply([{
+    type: 'delete_layers', targets: [layer.id],
+  }], { origin: 'agent' });
+  assert.equal(allLocked.ok, false);
+  assert.equal(allLocked.message, 'All targeted layers are locked: “Locked title”');
+  assert.ok(PM.L(layer.id));
+});
+
+test('overrideLock is honored only for interface and inspector origins', () => {
+  for (const origin of ['interface', 'inspector']) {
+    const { PM, layer } = fixture();
+    const result = PM.Edit.apply([{
+      type: 'set_property', target: layer.id, path: 'position.x', value: 333,
+      mode: 'static', preserveHandEdits: false, overrideLock: true,
+    }], { origin });
+    assert.equal(result.ok, true, `${origin}: ${result.message}`);
+    assert.equal(layer.p['position.x'].v, 333);
+    assert.equal(PM.proj.edits.at(-1).operations[0].overrideLock, true);
+  }
+
+  for (const origin of ['agent', 'generated-ui', 'generated-tool', 'generated-script']) {
+    const { PM, layer, other } = fixture();
+    const blocked = PM.Edit.apply([{
+      type: 'set_property', target: layer.id, path: 'position.x', value: 333,
+      mode: 'static', preserveHandEdits: false, overrideLock: true,
+    }], { origin });
+    assert.equal(blocked.ok, false, `${origin} unexpectedly bypassed the lock`);
+    assert.equal(blocked.message, 'Layer “Locked title” is locked');
+
+    const sanitized = PM.Edit.apply([{
+      type: 'set_property', target: other.id, path: 'position.x', value: 222,
+      mode: 'static', preserveHandEdits: false, overrideLock: true,
+    }], { origin });
+    assert.equal(sanitized.ok, true, `${origin}: ${sanitized.message}`);
+    const recorded = PM.proj.edits.at(-1).operations[0];
+    assert.equal(Object.hasOwn(recorded, 'overrideLock'), false);
+    assert.equal(recorded.preserveHandEdits, false, 'provenance keeps the submitted overwrite request');
+    assert.equal(sanitized.data.results[0].command.preserveHandEdits, true, 'dispatch uses the forced policy');
+  }
 });
 
 test('agent edits preserve the exact human-edited channel but not its sibling', () => {
@@ -176,12 +292,12 @@ test('agent edits preserve the exact human-edited channel but not its sibling', 
   assert.equal(blocked.ok, false);
   assert.equal(blocked.message, 'Preserved hand-edited position.x; explicitly allow overwrite to change it');
 
-  const explicitOverwrite = PM.Edit.apply([{
+  const rejectedOverride = PM.Edit.apply([{
     type: 'set_property', target: layer.id, path: 'position.x', value: 250,
     mode: 'static', preserveHandEdits: false,
   }], { origin: 'agent' });
-  assert.equal(explicitOverwrite.ok, true);
-  assert.equal(PM.L(layer.id).p['position.x'].v, 250);
+  assert.equal(rejectedOverride.ok, false);
+  assert.equal(rejectedOverride.message, 'Preserved hand-edited position.x; explicitly allow overwrite to change it');
 
   const sibling = PM.Edit.apply([{
     type: 'set_property', target: layer.id, path: 'position.y', value: 300, mode: 'static',
@@ -189,6 +305,30 @@ test('agent edits preserve the exact human-edited channel but not its sibling', 
   assert.equal(sibling.ok, true);
   // A rejected apply restores from its snapshot, so reacquire the live layer.
   assert.equal(PM.L(layer.id).p['position.y'].v, 300);
+});
+
+test('a generated-ui human gesture can overwrite locked_intent but cannot override layer.lock', () => {
+  const unlockedState = fixture();
+  unlockedState.layer.lock = false;
+  unlockedState.layer.locked_intent['position.x'] = { by: 'human', at: 1, t: 0 };
+  const overwrite = unlockedState.PM.Edit.apply([{
+    type: 'set_property', target: unlockedState.layer.id, path: 'position.x', value: 500,
+    mode: 'static', preserveHandEdits: false, markIntent: 'human', overrideLock: true,
+  }], { origin: 'generated-ui' });
+  assert.equal(overwrite.ok, true, overwrite.message);
+  assert.equal(unlockedState.layer.p['position.x'].v, 500);
+  const recorded = unlockedState.PM.proj.edits.at(-1).operations[0];
+  assert.equal(recorded.preserveHandEdits, false);
+  assert.equal(recorded.markIntent, 'human');
+  assert.equal(Object.hasOwn(recorded, 'overrideLock'), false);
+
+  const lockedState = fixture();
+  const blocked = lockedState.PM.Edit.apply([{
+    type: 'set_property', target: lockedState.layer.id, path: 'position.x', value: 500,
+    mode: 'static', preserveHandEdits: false, markIntent: 'human', overrideLock: true,
+  }], { origin: 'generated-ui' });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.message, 'Layer “Locked title” is locked');
 });
 
 test('a root locked_intent entry blocks a child property channel', () => {

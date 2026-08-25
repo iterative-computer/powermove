@@ -310,11 +310,7 @@ function selectionSummary() {
 }
 
 function selectedKeyframes() {
-  const seen = new Set();
-  return (PM.sel?.keys || []).filter(key => {
-    if (!key?.i || seen.has(key.i)) return false;
-    seen.add(key.i); return true;
-  });
+  return PM.resolveSelectedKeys?.() || [];
 }
 
 function keyframeSummary() {

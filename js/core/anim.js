@@ -5,7 +5,6 @@ const PM = window.PM, Ease = PM.Ease, clamp = PM.clamp;
 let version = 0;
 PM.touch = () => {
   version++;
-  PM.exprCache.clear();
   /* hierarchy memos must never outlive an edit */
   woMemo.clear(); wmMemo.clear(); memoT = null;
 };
@@ -33,6 +32,7 @@ PM.evalKfs = evalKfs;
 
 /* ── expressions ───────────────────────────────────────── */
 PM.exprCache = new Map();
+const EXPR_CACHE_MAX = 256;
 const HELPERS = `
 const PI=Math.PI, sin=Math.sin, cos=Math.cos, tan=Math.tan, abs=Math.abs, pow=Math.pow,
  sqrt=Math.sqrt, floor=Math.floor, ceil=Math.ceil, round=Math.round, min=Math.min, max=Math.max,
@@ -58,6 +58,7 @@ function compile(src) {
       HELPERS + '\nreturn (' + src + ');');
     c = { f, needsIdx };
   } catch (e) { c = null; }
+  if (PM.exprCache.size >= EXPR_CACHE_MAX) PM.exprCache.delete(PM.exprCache.keys().next().value);
   PM.exprCache.set(src, c);
   return c;
 }

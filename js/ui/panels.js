@@ -158,15 +158,16 @@ PM.registerPanel('shader', {
       showErr(L);
     };
     function showErr(L) {
-      const err = PM.GL.compileError(L._shaderKey);
+      const meta = PM.UIState.getShaderMeta(L);
+      const err = PM.GL.compileError(meta.shaderKey);
       status.className = err ? 'bad' : 'ok';
-      status.textContent = err ? err.split('\n')[0].slice(0, 90) : '✓ compiled · ' + (L._udefs || []).length + ' uniforms';
+      status.textContent = err ? err.split('\n')[0].slice(0, 90) : '✓ compiled · ' + meta.udefs.length + ' uniforms';
     }
     function apply(label = 'Edit shader') {
       const L = target(); if (!L) return;
       PM.Edit.apply({ type: 'set_content', target: L.id, patch: { code: ta.value } }, { label, origin: 'shader-panel' });
       PM.syncShaderUniforms(L);
-      PM.GL.dropProgram(L._shaderKey);
+      PM.GL.dropProgram(PM.UIState.getShaderMeta(L).shaderKey);
       PM.invalidate();
       requestAnimationFrame(() => { showErr(L); PM.Inspector.refresh(); });
     }

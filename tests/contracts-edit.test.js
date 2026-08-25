@@ -32,7 +32,7 @@ const OPERATION_CONTRACT = {
   set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
   add_marker: { target: 'project', fields: ['time', 'name'] },
   create_section: { target: 'project', fields: ['section'] },
-  update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version'] },
+  update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
   transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
 };
 
@@ -60,7 +60,7 @@ function editor() {
     GL: { dropProgram() {} },
   };
   const context = vm.createContext({ window: { PM }, console, Date, JSON, Object, Set, Map });
-  for (const file of ['js/core/model.js', 'js/core/anim.js', 'js/gl/shaders.js']) {
+  for (const file of ['js/core/model.js', 'js/core/selection.js', 'js/core/anim.js', 'js/gl/shaders.js']) {
     vm.runInContext(source(file), context, { filename: file });
   }
   PM.proj = PM.mkProject({ name: 'Contract fixture', w: 1920, h: 1080, fps: 30, dur: 10 });

@@ -23,7 +23,7 @@ function runtime() {
     store: { get: (_key, fallback) => fallback, set() {} },
   };
   const context = vm.createContext({ window: { PM }, console, Date, JSON, Object, Set, Map, Math });
-  for (const file of ['js/core/model.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
+  for (const file of ['js/core/model.js', 'js/core/selection.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
   PM.proj = PM.mkProject({ name: 'Transforms', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 2; PM.syncShaderUniforms = () => {}; PM.mkEffect = () => null;
   vm.runInContext(source('js/core/history.js'), context, { filename: 'js/core/history.js' });
@@ -148,7 +148,7 @@ test('Flow-style generated tools get a visual curve and apply it through source 
   const [layer] = addLayers(PM, [0]);
   const first = PM.setKeyOn(layer.p.opacity, 0, 0, 'linear', PM.proj.fps);
   const second = PM.setKeyOn(layer.p.opacity, 1, 100, 'linear', PM.proj.fps);
-  PM.sel.keys = [first, second];
+  PM.sel.keys = [first.i, second.i];
   const panel = PM.Capabilities.panelRecipe('easing-flow');
   const curve = panel.controls.find(control => control.type === 'curve');
   const apply = panel.controls.find(control => control.action?.type === 'easing' && control.action.mode === 'apply');

@@ -65,7 +65,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () =>
 def('delete', 'Delete layers', '⌫', () => {
   if (!PM.sel.keys.length) return PM.Edit.apply({ type: 'delete_layers', targets: PM.sel.layers }, { label: 'Delete', origin: 'command' });
   return PM.hist.do('Delete', () => {
-  PM.selLayers().forEach(L => PM.allProps(L).forEach(p => { p.prop.kf = p.prop.kf.filter(k => !PM.sel.keys.some(s => s.i === k.i)); }));
+  PM.selLayers().forEach(L => PM.allProps(L).forEach(p => { p.prop.kf = p.prop.kf.filter(k => !PM.sel.keys.includes(k.i)); }));
   PM.sel.keys = []; PM.touch();
   });
 }, 'Edit');
@@ -145,15 +145,16 @@ def('revealKeys', 'Reveal animated properties', 'U', () => {
 def('graph', 'Toggle graph editor', 'G', () => { PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
+/* sel.keys holds keyframe ids (Phase 3a); easing needs the live objects */
+const easeTargets = () => PM.sel.keys.length ? PM.resolveSelectedKeys() : allSelKeys();
 def('easeOut', 'Easy ease keys', 'F9', () => PM.hist.do('Easy ease', () => {
-  const keys = PM.sel.keys.length ? PM.sel.keys : allSelKeys();
-  PM.applyEaseTo(keys, 'easeInOut'); PM.invalidate();
+  PM.applyEaseTo(easeTargets(), 'easeInOut'); PM.invalidate();
 }), 'Keyframes');
 def('easePower', 'Powermove curve', '⇧F9', () => PM.hist.do('Power ease', () => {
-  PM.applyEaseTo(PM.sel.keys.length ? PM.sel.keys : allSelKeys(), 'power'); PM.invalidate();
+  PM.applyEaseTo(easeTargets(), 'power'); PM.invalidate();
 }), 'Keyframes');
 def('easeLinear', 'Linear keys', '⌘⇧F9', () => PM.hist.do('Linear', () => {
-  PM.applyEaseTo(PM.sel.keys.length ? PM.sel.keys : allSelKeys(), 'linear'); PM.invalidate();
+  PM.applyEaseTo(easeTargets(), 'linear'); PM.invalidate();
 }), 'Keyframes');
 function allSelKeys() {
   const out = [];

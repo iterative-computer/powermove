@@ -8,14 +8,16 @@ const MAX_COMMANDS = 80;
 const MAX_REPAIRS = 2;
 const MAX_KEYFRAMES = 80;
 const SCENE_OPERATIONS = new Set([
-  'set_property', 'replace_keyframes', 'set_expression', 'set_content',
+  'set_property', 'replace_keyframes', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
   'reorder_layer', 'add_effect', 'remove_effect', 'set_effect',
-  'set_scene_parameter', 'add_marker', 'transform_layers',
+  'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
+  'transform_layers',
 ]);
 const FIELDS = {
   set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold'],
   replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression'],
+  set_easing: ['type', 'keyframes', 'curve'],
   set_expression: ['type', 'target', 'path', 'expression'],
   set_content: ['type', 'target', 'patch'],
   set_layer: ['type', 'target', 'patch'],
@@ -28,6 +30,8 @@ const FIELDS = {
   set_effect: ['type', 'target', 'effect', 'patch'],
   set_scene_parameter: ['type', 'name', 'label', 'control', 'value', 'min', 'max', 'options'],
   add_marker: ['type', 'id', 'time', 'name'],
+  create_section: ['type', 'section'],
+  update_section: ['type', 'sectionId', 'layers', 'thumb', 'at', 'version'],
   transform_layers: ['type', 'transform', 'state'],
 };
 
@@ -125,6 +129,21 @@ function cleanCommand(raw) {
     if (!Array.isArray(out.keyframes)) return null;
     out.keyframes = out.keyframes.slice(0, MAX_KEYFRAMES);
   }
+  if (out.type === 'set_easing') {
+    if (!Array.isArray(out.keyframes)) return null;
+    out.keyframes = out.keyframes.slice(0, MAX_KEYFRAMES);
+  }
+  if (out.type === 'create_section') {
+    if (!out.section || !Array.isArray(out.section.layers)) return null;
+    /* Bound the section like every other list, and never persist proto keys. */
+    out.section = Object.fromEntries(Object.entries(out.section)
+      .filter(([key]) => !['__proto__', 'prototype', 'constructor'].includes(key)));
+    out.section.layers = out.section.layers.slice(0, 200);
+  }
+  if (out.type === 'update_section') {
+    if (!out.sectionId || !Array.isArray(out.layers) || !out.layers.length) return null;
+    out.layers = out.layers.slice(0, 200);
+  }
   if (out.type === 'delete_layers' && Array.isArray(out.targets)) out.targets = out.targets.slice(0, 20);
   /* Model-authored edits never bypass layer locks or hand-authored intent. */
   if (out.type === 'set_property' || out.type === 'replace_keyframes') out.preserveHandEdits = true;
@@ -147,11 +166,12 @@ function describeCommand(command) {
   const target = command.target || (Array.isArray(command.targets) ? `${command.targets.length} layers` : '') || command.name || '';
   const detail = command.path || command.layerType || command.effect || Object.keys(command.patch || {}).join(', ');
   const labels = {
-    set_property: 'Set property', replace_keyframes: 'Animate', set_expression: 'Set expression',
+    set_property: 'Set property', replace_keyframes: 'Animate', set_easing: 'Set easing', set_expression: 'Set expression',
     set_content: 'Edit content', set_layer: 'Edit layer', set_composition: 'Edit composition',
     add_layer: 'Add layer', delete_layers: 'Delete', reorder_layer: 'Reorder layer',
     add_effect: 'Add effect', remove_effect: 'Remove effect', set_effect: 'Edit effect',
     set_scene_parameter: 'Set scene control', add_marker: 'Add marker',
+    create_section: 'Create section', update_section: 'Update section',
     transform_layers: 'Transform layers',
   };
   return [labels[command.type] || command.type, target, detail].filter(Boolean).join(' · ').slice(0, 150);
@@ -221,7 +241,12 @@ async function execute(request, proposal, progress = () => {}) {
     label: proposal.label, origin: 'agent', baseRevision: proposal.baseRevision, historyGroup,
   });
   if (!first.ok) throw new Error(first.message);
-  const applied = proposal.commands.slice();
+  /* Review passes must see what the policy actually executed (locked layers
+     may have been skipped), not the raw proposal. Surface skips to the user. */
+  const results = Array.isArray(first.data?.results) ? first.data.results : null;
+  const applied = results ? results.map(item => item.command) : proposal.commands.slice();
+  const skipped = (results || []).flatMap(item => item.data?.skippedLocked || []);
+  if (skipped.length && first.message) progress(first.message.split('. ').find(part => part.startsWith('Skipped locked')) || first.message);
   let review = { status: 'pass', message: 'The rendered change is ready.', critique: '' };
   let frames = null;
   let reviewError = '';

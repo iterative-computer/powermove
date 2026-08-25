@@ -796,7 +796,16 @@ function registerCustom(w) {
                   showPreview({ ok: changed, message: changed ? 'Restored the previous editable source.' : 'There is no edit to undo.', changes: [] });
                 } else if (ct.action?.type === 'reset') {
                   Object.keys(toolState).forEach(key => delete toolState[key]); Object.assign(toolState, defaults); persistState(); preview.hidden = true; sync();
-                } else if (Array.isArray(ct.commands)) PM.Edit.apply(ct.commands, { label: ct.label, origin: 'generated-ui' });
+                } else if (Array.isArray(ct.commands)) {
+                  /* Manifest command arrays are agent-authored data — they never
+                     carry trust-bearing fields, whatever the manifest claims. */
+                  const cmds = ct.commands.map(c => {
+                    const s = { ...c };
+                    delete s.overrideLock; delete s.preserveHandEdits; delete s.markIntent;
+                    return s;
+                  });
+                  PM.Edit.apply(cmds, { label: ct.label, origin: 'generated-ui' });
+                }
                 else if (ct.cmd) PM.cmd(ct.cmd);
                 else if (ct.prompt) PM.toast('Shake the pointer and drag across this section to change it');
               },

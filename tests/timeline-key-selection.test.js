@@ -8,8 +8,8 @@ const timeline = fs.readFileSync(path.join(root, 'js/ui/timeline.js'), 'utf8');
 
 test('Shift and Command both add or remove exact keyframes without duplicates', () => {
   assert.match(timeline, /const additive = e\.shiftKey \|\| e\.metaKey/);
-  assert.match(timeline, /wasSelected \? PM\.sel\.keys\.filter\(k => k\.i !== hit\.i\) : \[\.\.\.PM\.sel\.keys, hit\]/);
-  assert.match(timeline, /function uniqueKeys\(keys\)/);
+  assert.match(timeline, /wasSelected \? PM\.sel\.keys\.filter\(id => id !== hit\.i\) : \[\.\.\.PM\.sel\.keys, hit\.i\]/);
+  assert.match(timeline, /function uniqueKeyIds\(keys\)/);
   assert.match(timeline, /PM\.selectLayers\(r\.L\.id, true\)/,
     'modifier-selecting another property must not clear the existing key selection');
 });

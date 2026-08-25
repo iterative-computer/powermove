@@ -170,7 +170,8 @@ test('tabs, projects screen, and drag preview are wired end to end', () => {
   assert.match(shortcuts, /Projects screen/, '⌘P opens the projects screen');
   assert.match(app, /function captureProjectSession\(\)/);
   assert.match(app, /workspace: PM\.WS\.snapshot\(\), time: PM\.time/);
-  assert.match(app, /selection: \{ layers: \[\.\.\.PM\.sel\.layers\], keys: \[\.\.\.PM\.sel\.keys\]/);
+  assert.match(app, /selection: \{ layers: \[\.\.\.PM\.sel\.layers\], keys: PM\.sel\.keys\.filter\(key => typeof key === 'string'\)/,
+    'project sessions persist keyframe ids only');
   assert.match(app, /timeline: \{ pps: PM\.TL\.pps, scrollT: PM\.TL\.scrollT, scrollY: PM\.TL\.scrollY, graph: PM\.TL\.graph \}/);
   assert.match(app, /detached: PM\.Popout\?\.openIds/);
   assert.match(app, /PM\.LibraryUI\?\.close\?\.\(\)/);

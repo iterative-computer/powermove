@@ -1,0 +1,241 @@
+/* Powermove — transient interface state kept outside serializable projects. */
+(() => {
+const PM = window.PM;
+
+const keyHandles = new Map();
+const reveal = new Map();
+const shaderMeta = new Map();
+const fxOpen = new Map();
+const layerCollapsed = new Map();
+const layerCollapsedBase = new Map();
+let activeProject = null;
+
+const idOf = (value) => typeof value === 'string' ? value : value && (value.i || value.id);
+const emptyShaderMeta = () => ({ udefs: [], shaderKey: null });
+const clear = () => {
+  keyHandles.clear();
+  reveal.clear();
+  shaderMeta.clear();
+  fxOpen.clear();
+  layerCollapsed.clear();
+  layerCollapsedBase.clear();
+};
+
+function setKeyPatch(id, patch) {
+  if (!id) return null;
+  const next = { ...(keyHandles.get(id) || {}), ...(patch || {}) };
+  keyHandles.set(id, next);
+  return next;
+}
+
+function setRevealValue(id, keys) {
+  if (!id) return null;
+  if (!Array.isArray(keys)) {
+    reveal.delete(id);
+    return null;
+  }
+  const next = [...keys];
+  reveal.set(id, next);
+  return next;
+}
+
+function setShaderPatch(id, patch) {
+  if (!id) return null;
+  const next = { ...(shaderMeta.get(id) || emptyShaderMeta()), ...(patch || {}) };
+  shaderMeta.set(id, next);
+  return next;
+}
+
+function defineCompat(object, key, get, set) {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key);
+  if (descriptor && !descriptor.enumerable && descriptor.get && descriptor.set) return;
+  /* A few boundary-locked legacy modules still use these old properties.
+     Accessors preserve that contract while keeping the values out of JSON. */
+  Object.defineProperty(object, key, { configurable: true, enumerable: false, get, set });
+}
+
+function installKeyCompat(key) {
+  const id = idOf(key);
+  if (!id) return;
+  const legacy = {};
+  for (const [name, field] of [['_ho', 'ho'], ['_hi', 'hi'], ['_pt', 'pt']]) {
+    const descriptor = Object.getOwnPropertyDescriptor(key, name);
+    if (descriptor && descriptor.enumerable && descriptor.value != null) legacy[field] = descriptor.value;
+    defineCompat(key, name,
+      () => keyHandles.get(id)?.[field],
+      value => setKeyPatch(id, { [field]: value }));
+  }
+  if (Object.keys(legacy).length) setKeyPatch(id, legacy);
+}
+
+function installEffectCompat(effect) {
+  const id = idOf(effect);
+  if (!id) return;
+  const descriptor = Object.getOwnPropertyDescriptor(effect, 'open');
+  if (descriptor && descriptor.enumerable && typeof descriptor.value === 'boolean') fxOpen.set(id, descriptor.value);
+  defineCompat(effect, 'open', () => !!fxOpen.get(id), value => fxOpen.set(id, !!value));
+}
+
+function syncLayerCollapsed(layer) {
+  const id = idOf(layer);
+  if (!id) return;
+  const persistent = layer.collapsed !== false;
+  if (!layerCollapsedBase.has(id)) {
+    layerCollapsedBase.set(id, persistent);
+    if (!layerCollapsed.has(id)) layerCollapsed.set(id, persistent);
+  } else if (layerCollapsedBase.get(id) !== persistent) {
+    layerCollapsedBase.set(id, persistent);
+    layerCollapsed.set(id, persistent);
+  }
+}
+
+function installLayerCompat(layer) {
+  const id = idOf(layer);
+  if (!id) return;
+  const revealDescriptor = Object.getOwnPropertyDescriptor(layer, '_reveal');
+  const shaderKeyDescriptor = Object.getOwnPropertyDescriptor(layer, '_shaderKey');
+  const udefsDescriptor = Object.getOwnPropertyDescriptor(layer, '_udefs');
+  if (revealDescriptor?.enumerable) setRevealValue(id, revealDescriptor.value);
+  if (shaderKeyDescriptor?.enumerable && shaderKeyDescriptor.value != null) setShaderPatch(id, { shaderKey: shaderKeyDescriptor.value });
+  if (udefsDescriptor?.enumerable && Array.isArray(udefsDescriptor.value)) setShaderPatch(id, { udefs: udefsDescriptor.value });
+  defineCompat(layer, '_reveal', () => reveal.get(id) || null, value => {
+    setRevealValue(id, value);
+    /* Boundary-locked reveal shortcuts update the persistent field first. */
+    syncLayerCollapsed(layer);
+  });
+  defineCompat(layer, '_shaderKey', () => shaderMeta.get(id)?.shaderKey, value => setShaderPatch(id, { shaderKey: value }));
+  defineCompat(layer, '_udefs', () => shaderMeta.get(id)?.udefs, value => setShaderPatch(id, { udefs: value }));
+}
+
+function collectProject(proj) {
+  const ids = { keys: new Set(), layers: new Set(), effects: new Set() };
+  const visitProps = (props) => Object.values(props || {}).forEach(prop => {
+    if (!prop || !Array.isArray(prop.kf)) return;
+    prop.kf.forEach(key => {
+      const id = idOf(key);
+      if (!id) return;
+      ids.keys.add(id);
+      installKeyCompat(key);
+    });
+  });
+  const visitLayers = (layers) => (layers || []).forEach(layer => {
+    const id = idOf(layer);
+    if (!id) return;
+    ids.layers.add(id);
+    syncLayerCollapsed(layer);
+    installLayerCompat(layer);
+    visitProps(layer.p);
+    (layer.fx || []).forEach(effect => {
+      const effectId = idOf(effect);
+      if (effectId) ids.effects.add(effectId);
+      installEffectCompat(effect);
+      visitProps(effect && effect.p);
+    });
+    (layer.masks || []).forEach(mask => visitProps(mask && mask.p));
+  });
+  const visitProject = (project) => {
+    if (!project || typeof project !== 'object') return;
+    visitLayers(project.layers);
+    Object.values(project.comps || {}).forEach(visitProject);
+  };
+  visitProject(proj);
+  return ids;
+}
+
+function prune(proj) {
+  if (activeProject && activeProject !== proj) clear();
+  activeProject = proj || null;
+  const ids = collectProject(proj);
+  for (const id of keyHandles.keys()) if (!ids.keys.has(id)) keyHandles.delete(id);
+  for (const id of reveal.keys()) if (!ids.layers.has(id)) reveal.delete(id);
+  for (const id of shaderMeta.keys()) if (!ids.layers.has(id)) shaderMeta.delete(id);
+  for (const id of fxOpen.keys()) if (!ids.effects.has(id)) fxOpen.delete(id);
+  for (const id of layerCollapsed.keys()) if (!ids.layers.has(id)) layerCollapsed.delete(id);
+  for (const id of layerCollapsedBase.keys()) if (!ids.layers.has(id)) layerCollapsedBase.delete(id);
+  return UIState;
+}
+
+function current() {
+  if (PM.proj !== activeProject) prune(PM.proj);
+}
+
+const UIState = PM.UIState = {
+  keyHandles,
+  reveal,
+  shaderMeta,
+  fxOpen,
+  layerCollapsed,
+  prune,
+
+  getKeyHandles(key) {
+    current();
+    if (key && typeof key === 'object') installKeyCompat(key);
+    return keyHandles.get(idOf(key)) || null;
+  },
+  setKeyHandles(key, patch) {
+    current();
+    if (key && typeof key === 'object') installKeyCompat(key);
+    return setKeyPatch(idOf(key), patch);
+  },
+
+  getReveal(layer) {
+    current();
+    if (layer && typeof layer === 'object') installLayerCompat(layer);
+    return reveal.get(idOf(layer)) || null;
+  },
+  setReveal(layer, keys) {
+    current();
+    if (layer && typeof layer === 'object') installLayerCompat(layer);
+    return setRevealValue(idOf(layer), keys);
+  },
+
+  getShaderMeta(layer) {
+    current();
+    if (layer && typeof layer === 'object') installLayerCompat(layer);
+    return shaderMeta.get(idOf(layer)) || emptyShaderMeta();
+  },
+  setShaderMeta(layer, patch) {
+    current();
+    if (layer && typeof layer === 'object') installLayerCompat(layer);
+    return setShaderPatch(idOf(layer), patch);
+  },
+
+  getFxOpen(effect) {
+    current();
+    if (effect && typeof effect === 'object') installEffectCompat(effect);
+    return !!fxOpen.get(idOf(effect));
+  },
+  setFxOpen(effect, open) {
+    current();
+    if (effect && typeof effect === 'object') installEffectCompat(effect);
+    const id = idOf(effect);
+    if (!id) return false;
+    fxOpen.set(id, !!open);
+    return !!open;
+  },
+
+  getLayerCollapsed(layer) {
+    current();
+    const id = idOf(layer);
+    if (!id) return true;
+    if (layer && typeof layer === 'object') syncLayerCollapsed(layer);
+    if (!layerCollapsed.has(id)) layerCollapsed.set(id, true);
+    return layerCollapsed.get(id);
+  },
+  setLayerCollapsed(layer, collapsed) {
+    current();
+    const id = idOf(layer);
+    if (!id) return true;
+    const next = !!collapsed;
+    if (layer && typeof layer === 'object') {
+      if (!layerCollapsedBase.has(id)) layerCollapsedBase.set(id, layer.collapsed !== false);
+      if ((layer.collapsed !== false) === next) layerCollapsedBase.set(id, next);
+    }
+    layerCollapsed.set(id, next);
+    return next;
+  },
+};
+
+PM.bus.on('project', () => prune(PM.proj));
+PM.bus.on('layers', () => { if (PM.proj) prune(PM.proj); });
+})();

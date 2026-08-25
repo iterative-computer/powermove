@@ -229,7 +229,7 @@ function contentQuad(L, T, W, H) {
     const key = 'sh:' + L.id;
     const codeKey = key + ':' + hashStr(d.code);
     const p = program(codeKey, PM.SHADER_HEADER + '\n' + d.code, PM.VERT);
-    L._shaderKey = codeKey;
+    PM.UIState.setShaderMeta(L, { shaderKey: codeKey });
     if (!p) return null;
     /* nested content renders into its own FBO; the caller's target is restored
        before drawContent samples the result (otherwise the draw reads and writes
@@ -245,7 +245,7 @@ function contentQuad(L, T, W, H) {
     setI(p, 'iFrame', Math.round(T * PM.proj.fps));
     setU(p, 'iMouse', [0, 0]);
     for (const un in d.uniforms) {
-      const def = (L._udefs || []).find(u => u.name === un);
+      const def = PM.UIState.getShaderMeta(L).udefs.find(u => u.name === un);
       const val = PM.evP(L, d.uniforms[un], T, un);
       if (def && def.control === 'color') setU(p, un, PM.hex2rgb(String(val)));
       else if (def && def.control === 'toggle') setI(p, un, val ? 1 : 0);

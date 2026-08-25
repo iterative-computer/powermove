@@ -141,7 +141,7 @@ function buildRows() {
     const L = layers[i];
     if (L.shy) continue;
     rows.push({ kind: 'layer', L, i });
-    if (!L.collapsed) {
+    if (!PM.UIState.getLayerCollapsed(L)) {
       const props = PM.allProps(L).filter(p => p.prop.kf.length || p.prop.expr || PM.sel.chan === p.key || alwaysShow(L, p.key));
       props.forEach(p => rows.push({ kind: 'prop', L, ...p }));
     }
@@ -149,7 +149,7 @@ function buildRows() {
   T.rows = rows;
   return rows;
 }
-function alwaysShow(L, key) { return L._reveal && L._reveal.includes(key); }
+function alwaysShow(L, key) { return (PM.UIState.getReveal(L) || []).includes(key); }
 
 const x2t = (x) => (x - T.gut) / T.pps + T.scrollT;
 const t2x = (t) => T.gut + (t - T.scrollT) * T.pps;
@@ -433,7 +433,7 @@ function drawPropKeys(c, r, y) {
   for (const k of kf) {
     const x = t2x(L.from + k.t);
     if (x < T.gut - 6 || x > T.w + 6) continue;
-    const sel = PM.sel.keys.some(s => s.i === k.i);
+    const sel = PM.sel.keys.includes(k.i);
   c.fillStyle = sel ? theme.accent : INK.key;
     if (k.hold) { c.fillRect(x - keyRadius, cy - keyRadius, keyRadius * 2, keyRadius * 2); }
     else {
@@ -464,7 +464,7 @@ function drawGutter(c, W, H) {
       if (L.solo) { c.fillStyle = theme.accent; c.beginPath(); c.arc(64, y + T.row / 2, 3, 0, 7); c.fill(); }
       /* twirl */
       c.save();
-      c.translate(76, y + T.row / 2); c.rotate(L.collapsed ? 0 : Math.PI / 2);
+      c.translate(76, y + T.row / 2); c.rotate(PM.UIState.getLayerCollapsed(L) ? 0 : Math.PI / 2);
       c.strokeStyle = theme.tx3; c.lineWidth = 1.4; c.beginPath();
       c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
       c.restore();
@@ -577,19 +577,19 @@ function drawGraph(c, W, H) {
       const hy = y + (v2y(nx.v) - y) * k.eo[1];
       c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
       c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
-      k._ho = [hx, hy];
+      PM.UIState.setKeyHandles(k, { ho: [hx, hy] });
     }
     if (pv) {
       const px = t2x(L.from + pv.t), py = v2y(pv.v);
       const hx = px + (x - px) * k.ei[0], hy = py + (y - py) * k.ei[1];
       c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
       c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
-      k._hi = [hx, hy];
+      PM.UIState.setKeyHandles(k, { hi: [hx, hy] });
     }
-    const sel = PM.sel.keys.some(s => s.i === k.i);
+    const sel = PM.sel.keys.includes(k.i);
     c.fillStyle = sel ? theme.accent : INK.inv;
     c.beginPath(); c.arc(x, y, 4.2, 0, 7); c.fill();
-    k._pt = [x, y];
+    PM.UIState.setKeyHandles(k, { pt: [x, y] });
   });
   c.fillStyle = theme.tx2; c.font = '500 11px ' + fui();
   c.fillText(L.name + ' · ' + target.label, T.gut + 10, T.ruler + 12);
@@ -747,8 +747,10 @@ function gutterDown(e, x, y) {
   else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
   else if (x < 72) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { solo: !L.solo } }, { label: 'Toggle solo', origin: 'timeline' }); return; }
   else if (x < 86) {
-    L.collapsed = !L.collapsed;
-    if (!L.collapsed) {
+    const collapsed = !PM.UIState.getLayerCollapsed(L);
+    L.collapsed = collapsed;
+    PM.UIState.setLayerCollapsed(L, collapsed);
+    if (!collapsed) {
       const kids = PM.allProps(L).filter(pp => pp.prop.kf.length || pp.prop.expr || PM.sel.chan === pp.key || alwaysShow(L, pp.key)).length;
       keepRowsVisible(hr.i, kids);
     }
@@ -843,7 +845,7 @@ function keyDown(e, r, x, y, rowIdx) {
   if (additive) PM.selectLayers(r.L.id, true);
   else if (!PM.sel.layers.includes(r.L.id)) PM.selectLayers(r.L.id);
   if (additive) {
-    setSelectedKeys(wasSelected ? PM.sel.keys.filter(k => k.i !== hit.i) : [...PM.sel.keys, hit]);
+    setSelectedKeys(wasSelected ? PM.sel.keys.filter(id => id !== hit.i) : [...PM.sel.keys, hit.i]);
     if (wasSelected) return;
   } else if (!wasSelected) setSelectedKeys([hit]);
   const entries = selectedKeyEntries();
@@ -867,17 +869,21 @@ function graphDown(e, x, y) {
   const g = T._graph; if (!g) return;
   const kf = g.target.prop.kf, L = g.target.L;
   for (const k of kf) {
-    if (k._ho && Math.hypot(x - k._ho[0], y - k._ho[1]) < 7) return dragHandle(e, k, 'eo', g, kf, L);
-    if (k._hi && Math.hypot(x - k._hi[0], y - k._hi[1]) < 7) return dragHandle(e, k, 'ei', g, kf, L);
+    const handles = PM.UIState.getKeyHandles(k);
+    if (handles?.ho && Math.hypot(x - handles.ho[0], y - handles.ho[1]) < 7) return dragHandle(e, k, 'eo', g, kf, L);
+    if (handles?.hi && Math.hypot(x - handles.hi[0], y - handles.hi[1]) < 7) return dragHandle(e, k, 'ei', g, kf, L);
   }
-  const hit = kf.find(k => k._pt && Math.hypot(x - k._pt[0], y - k._pt[1]) < 8);
+  const hit = kf.find(k => {
+    const pt = PM.UIState.getKeyHandles(k)?.pt;
+    return pt && Math.hypot(x - pt[0], y - pt[1]) < 8;
+  });
   if (!hit) return marquee(e, { clickTime: true, additive: e.shiftKey || e.metaKey, graph: true });
   const additive = e.shiftKey || e.metaKey;
   const wasSelected = keySelected(hit);
   if (additive) PM.selectLayers(L.id, true);
   else if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
   if (additive) {
-    setSelectedKeys(wasSelected ? PM.sel.keys.filter(k => k.i !== hit.i) : [...PM.sel.keys, hit]);
+    setSelectedKeys(wasSelected ? PM.sel.keys.filter(id => id !== hit.i) : [...PM.sel.keys, hit.i]);
     if (wasSelected) return;
   } else if (!wasSelected) setSelectedKeys([hit]);
   const selected = kf.filter(keySelected);
@@ -917,22 +923,23 @@ function dragHandle(e, k, which, g, kf, L) {
   });
 }
 
-function keySelected(key) { return PM.sel.keys.some(item => item.i === key.i); }
-function uniqueKeys(keys) {
+function keySelected(key) { return PM.sel.keys.includes(key.i); }
+function uniqueKeyIds(keys) {
   const seen = new Set();
-  return keys.filter(key => key && key.i && !seen.has(key.i) && seen.add(key.i));
+  return keys.map(key => typeof key === 'string' ? key : key?.i)
+    .filter(id => id && !seen.has(id) && seen.add(id));
 }
 function setSelectedKeys(keys, layerIds) {
-  PM.sel.keys = uniqueKeys(keys);
+  PM.sel.keys = uniqueKeyIds(keys);
   if (layerIds) PM.sel.layers = [...new Set(layerIds)];
   PM.bus.emit('sel');
   PM.invalidate();
 }
 function selectedKeyEntries() {
-  const ids = new Set(PM.sel.keys.map(key => key.i));
+  const selected = new Set(PM.resolveSelectedKeys());
   const entries = [];
   PM.proj.layers.forEach(L => PM.allProps(L).forEach(({ prop }) => prop.kf.forEach(key => {
-    if (ids.has(key.i)) entries.push({ key, prop, L });
+    if (selected.has(key)) entries.push({ key, prop, L });
   })));
   return entries;
 }
@@ -941,7 +948,8 @@ function keysInMarquee(m, graph = false) {
   if (graph) {
     const target = T._graph && T._graph.target;
     (target ? target.prop.kf : []).forEach(key => {
-      if (key._pt && key._pt[0] >= m.x0 && key._pt[0] <= m.x1 && key._pt[1] >= m.y0 && key._pt[1] <= m.y1) picked.push(key);
+      const pt = PM.UIState.getKeyHandles(key)?.pt;
+      if (pt && pt[0] >= m.x0 && pt[0] <= m.x1 && pt[1] >= m.y0 && pt[1] <= m.y1) picked.push(key);
     });
     return picked;
   }
@@ -957,7 +965,7 @@ function keysInMarquee(m, graph = false) {
   return picked;
 }
 function layersForKeys(keys) {
-  const ids = new Set(keys.map(key => key.i)), layers = [];
+  const ids = new Set(uniqueKeyIds(keys)), layers = [];
   PM.proj.layers.forEach(L => {
     if (PM.allProps(L).some(({ prop }) => prop.kf.some(key => ids.has(key.i)))) layers.push(L.id);
   });
@@ -1101,7 +1109,8 @@ function prevEdge() { const e = edges(); return [...e].reverse().find(t => t < P
 T.nextEdge = nextEdge; T.prevEdge = prevEdge;
 T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, PM.proj.dur), 4, 4000); PM.invalidate('timeline'); };
 T.reveal = (L, keys) => {
-  L.collapsed = false; L._reveal = keys;
+  PM.UIState.setLayerCollapsed(L, false);
+  PM.UIState.setReveal(L, keys);
   buildRows();
   const idx = T.rows.findIndex(r => r.kind === 'layer' && r.L === L);
   if (idx >= 0) {

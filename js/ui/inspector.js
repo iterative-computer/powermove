@@ -192,7 +192,7 @@ function content(wrap, L) {
   else if (L.type === 'shader') {
     const b = h('button.chip', { style: { width: '100%', justifyContent: 'center', height: '30px' }, onclick: () => PM.openShaderEditor(L) }, PM.icon('code'), 'Edit shader source');
     wrap.appendChild(b);
-    const err = PM.GL.compileError(L._shaderKey);
+    const err = PM.GL.compileError(PM.UIState.getShaderMeta(L).shaderKey);
     if (err) wrap.appendChild(h('div', { style: { fontSize: '10.5px', color: 'var(--red)', padding: '6px 4px', whiteSpace: 'pre-wrap', maxHeight: '90px', overflow: 'auto' } }, err));
     numRow(wrap, 'Width', get('w'), set('w'), edit('w', { step: 1, min: 1, unit: 'px' }));
     numRow(wrap, 'Height', get('h'), set('h'), edit('h', { step: 1, min: 1, unit: 'px' }));
@@ -246,7 +246,7 @@ function transform(wrap, L) {
 /* ── shader uniforms ───────────────────────────────────── */
 function shaderUniforms(wrap, L) {
   PM.syncShaderUniforms(L);
-  const defs = L._udefs || [];
+  const defs = PM.UIState.getShaderMeta(L).udefs;
   if (!defs.length) return;
   wrap.appendChild(PM.section('Shader'));
   defs.forEach(def => {
@@ -290,7 +290,7 @@ function shaderUniforms(wrap, L) {
 
 PM.syncShaderUniforms = (L) => {
   const defs = PM.parseUniforms(L.d.code);
-  L._udefs = defs;
+  PM.UIState.setShaderMeta(L, { udefs: defs });
   const u = L.d.uniforms;
   defs.forEach(d => { if (!u[d.name]) u[d.name] = PM.P(d.def); });
   for (const k in u) if (!defs.some(d => d.name === k)) delete u[k];
@@ -306,7 +306,7 @@ function effects(wrap, L) {
   }
   L.fx.forEach((fx, i) => {
     const def = PM.FX[fx.type]; if (!def) return;
-    const tw = h('span.twirl' + (fx.open ? '.open' : ''), PM.icon('chev'));
+    const tw = h('span.twirl' + (PM.UIState.getFxOpen(fx) ? '.open' : ''), PM.icon('chev'));
     const onBtn = h('button.stopwatch' + (fx.on ? '.on' : ''), PM.icon('eye'));
     onBtn.onclick = (e) => {
       e.stopPropagation();
@@ -316,9 +316,9 @@ function effects(wrap, L) {
     const head = h('div.row', { style: { marginTop: '4px', background: 'rgba(128,128,136,.08)' } },
       tw, h('div.k', { style: { color: 'var(--tx)', fontWeight: 500 } }, def.label), onBtn,
       h('button.stopwatch', { onclick: (e) => { e.stopPropagation(); PM.Edit.apply({ type: 'remove_effect', target: L.id, effect: fx.id }, { label: 'Remove effect', origin: 'inspector' }); I.refresh(); PM.invalidate(); } }, PM.icon('x')));
-    head.onclick = () => { fx.open = !fx.open; I.refresh(); };
+    head.onclick = () => { PM.UIState.setFxOpen(fx, !PM.UIState.getFxOpen(fx)); I.refresh(); };
     wrap.appendChild(head);
-    if (!fx.open) return;
+    if (!PM.UIState.getFxOpen(fx)) return;
     const g = h('div.grp');
     def.params.forEach(pd => {
       const p = fx.p[pd.k];

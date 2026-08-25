@@ -31,7 +31,7 @@ function editor() {
     GL: { dropProgram() {} },
   };
   const context = vm.createContext({ window: { PM }, console, Date, JSON, Object, Set, Map });
-  for (const file of ['js/core/model.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
+  for (const file of ['js/core/model.js', 'js/core/selection.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
   PM.proj = PM.mkProject({ name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
   PM.syncShaderUniforms = () => {};
@@ -248,12 +248,12 @@ test('generated visual easing applies to real keyframes as one undoable source e
   const property = layer.p.opacity;
   const first = PM.setKeyOn(property, 0, 0, 'linear', PM.proj.fps);
   const second = PM.setKeyOn(property, 1, 100, 'linear', PM.proj.fps);
-  PM.sel.keys = [first, second];
+  PM.sel.keys = [first.i, second.i];
   const before = first.eo.join(',') + '|' + first.ei.join(',');
   const curve = [.62, .05, 0, 1];
 
   const result = PM.Edit.apply({
-    type: 'set_easing', keyframes: PM.sel.keys.map(key => key.i), curve,
+    type: 'set_easing', keyframes: PM.sel.keys, curve,
   }, { label: 'Apply easing', origin: 'generated-tool' });
 
   assert.equal(result.ok, true);
@@ -331,11 +331,20 @@ test('hand-authored property intent is preserved unless overwrite is explicit', 
   }, { label: 'Agent move', origin: 'agent' });
   assert.equal(preserved.ok, false);
   assert.equal(PM.L(layer.id).p['position.x'].v, 1000);
-  const explicit = PM.Edit.apply({
+  /* Phase 3a policy matrix: agent/generated origins can never send
+     preserveHandEdits:false — Edit strips it centrally. Only human surfaces
+     may overwrite hand-authored intent. */
+  const agentExplicit = PM.Edit.apply({
     type: 'set_property', target: layer.id, path: 'position.x', value: 1200,
     mode: 'static', preserveHandEdits: false,
   }, { label: 'Explicit move', origin: 'agent' });
-  assert.equal(explicit.ok, true);
+  assert.equal(agentExplicit.ok, false);
+  assert.equal(PM.L(layer.id).p['position.x'].v, 1000);
+  const humanExplicit = PM.Edit.apply({
+    type: 'set_property', target: layer.id, path: 'position.x', value: 1200,
+    mode: 'static', preserveHandEdits: false,
+  }, { label: 'Explicit move', origin: 'interface' });
+  assert.equal(humanExplicit.ok, true);
   assert.equal(PM.L(layer.id).p['position.x'].v, 1200);
 });
 

@@ -106,6 +106,7 @@ test('evaluation medians stay within the recorded legacy performance envelope', 
     recordedAt: new Date().toISOString(),
     node: process.version,
   };
+  console.log(`scale metrics: evalMedian=${evalMedianMs.toFixed(2)}ms exprMedian=${exprMedianMs.toFixed(2)}ms calibration=${calibrationMs.toFixed(2)}ms`);
 
   if (process.env.PM_RECORD_BASELINE === '1') {
     fs.mkdirSync(path.dirname(baselinePath), { recursive: true });

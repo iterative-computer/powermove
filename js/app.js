@@ -259,6 +259,8 @@ if (bootSession?.workspace) PM.WS.restoreSnapshot(bootSession.workspace);
 PM.selectLayers((bootSession?.selection?.layers || []).filter(id => PM.L(id)).length
   ? bootSession.selection.layers.filter(id => PM.L(id))
   : PM.proj.layers.find(l => l.name === 'Powermove')?.id || []);
+PM.sel.keys = [...new Set((bootSession?.selection?.keys || []).filter(key => typeof key === 'string'))];
+PM.sel.keys = PM.resolveSelectedKeys().map(key => key.i);
 PM.setTime(Number.isFinite(bootSession?.time) ? bootSession.time : .9, { raw: true, force: true });
 if (bootSession?.timeline) {
   PM.TL.pps = Number.isFinite(bootSession.timeline.pps) ? bootSession.timeline.pps : PM.TL.pps;
@@ -475,7 +477,7 @@ function captureProjectSession() {
   persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
     workspace: PM.WS.snapshot(), time: PM.time,
-    selection: { layers: [...PM.sel.layers], keys: [...PM.sel.keys], chan: PM.sel.chan },
+    selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter(key => typeof key === 'string'), chan: PM.sel.chan },
     timeline: { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph },
     detached: PM.Popout?.openIds?.() || [],
   });
@@ -548,7 +550,8 @@ function switchProject(p) {
   PM.bus.emit('projects:tabs');
   PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
   PM.sel.layers = (session?.selection?.layers || []).filter(id => PM.L(id));
-  PM.sel.keys = [...(session?.selection?.keys || [])];
+  PM.sel.keys = [...new Set((session?.selection?.keys || []).filter(key => typeof key === 'string'))];
+  PM.sel.keys = PM.resolveSelectedKeys().map(key => key.i);
   PM.sel.chan = session?.selection?.chan || null;
   PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
   PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;

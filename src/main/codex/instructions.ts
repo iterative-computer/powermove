@@ -1,25 +1,5 @@
 import type { CodexAccess } from '../../shared/ipc';
-
-export const POWERMOVE_COMMAND_TYPES = [
-  'set_property',
-  'replace_keyframes',
-  'set_easing',
-  'set_expression',
-  'set_content',
-  'set_layer',
-  'set_composition',
-  'add_layer',
-  'delete_layers',
-  'reorder_layer',
-  'add_effect',
-  'remove_effect',
-  'set_effect',
-  'set_scene_parameter',
-  'add_marker',
-  'create_section',
-  'update_section',
-  'transform_layers'
-] as const;
+import { AGENT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
 
 export interface AgentInstructionsOptions {
   projectName: string;
@@ -32,7 +12,7 @@ export function agentInstructions({ projectName, artifactPath, access }: AgentIn
 
 Place every deliverable file under the artifacts directory for this run: ${artifactPath}. Do not leave deliverables elsewhere. You may create project-local scripts, notes, and adapters in this workspace when they help finish the task.
 
-Supported Powermove command types are: ${POWERMOVE_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.
+Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.
 
 Record uploads, messages, publications, remote changes, application launches, or other outside-world side effects in externalActions. Never claim an external action succeeded unless a tool result proves it. The active authority is ${access}. Project authority limits writes to this project workspace; computer authority was explicitly granted for this run and may operate outside it when required by the user's request.
 

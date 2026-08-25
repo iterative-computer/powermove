@@ -28,7 +28,7 @@ function harnessEditor() {
     window: { PM }, console, Date, JSON, Object, Set, Map, Promise,
     requestAnimationFrame: resolve => resolve(),
   });
-  for (const file of ['js/core/model.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
+  for (const file of ['js/core/model.js', 'js/core/selection.js', 'js/core/anim.js']) vm.runInContext(source(file), context, { filename: file });
   PM.proj = PM.mkProject({ name: 'Harness test', w: 1920, h: 1080, fps: 30, dur: 6 });
   PM.time = 1;
   PM.syncShaderUniforms = () => {};

@@ -8,6 +8,8 @@ const root = path.resolve(__dirname, '..');
 const read = name => fs.readFileSync(path.join(root, name), 'utf8');
 const nativeSource = read('native/main.swift');
 const harnessSource = read('js/assistant/harness.js');
+const editingSource = read('js/core/editing.js');
+const vocabularySource = read('src/shared/edit-vocabulary.ts');
 
 function functionBody(source, name) {
   const signature = source.indexOf(`func ${name}(`);
@@ -182,6 +184,20 @@ function sceneOperations() {
   return [...match[1].matchAll(/'([^']+)'/g)].map(result => result[1]);
 }
 
+function editOperations() {
+  const match = editingSource.match(/operations: Object\.freeze\(\{([\s\S]*?)\n  \}\),/);
+  assert.ok(match, 'Edit.operations must remain a static object');
+  return [...match[1].matchAll(/^    ([a-z_]+):/gm)].map(result => result[1]);
+}
+
+function editVocabulary(name) {
+  const literal = vocabularySource.match(new RegExp(`export const ${name} = \\[((?:.|\\n)*?)\\] as const;`));
+  if (literal) return [...literal[1].matchAll(/'([^']+)'/g)].map(result => result[1]);
+  const alias = vocabularySource.match(new RegExp(`export const ${name} = ([A-Z_]+);`));
+  assert.ok(alias, `${name} must remain a static literal or vocabulary alias`);
+  return editVocabulary(alias[1]);
+}
+
 test('native agent instructions and result schema match their committed goldens', () => {
   const instructionsGolden = normalizeText(read('tests/fixtures/agent-instructions.golden.txt'));
   const schemaGolden = JSON.parse(read('tests/fixtures/agent-result-schema.golden.json'));
@@ -206,20 +222,35 @@ test('agent command cleaning preserves hand edits and rejects unknown operations
   assert.equal(replaced.preserveHandEdits, true);
   assert.equal(replaced.keyframes.length, 80);
   assert.equal(Object.hasOwn(replaced, 'unknownField'), false);
+
+  const easing = PM.AgentHarness.cleanCommand({
+    type: 'set_easing',
+    keyframes: Array.from({ length: 85 }, (_, index) => `key-${index}`),
+    curve: [.2, .1, .8, .9], overrideLock: true,
+  });
+  assert.equal(easing.keyframes.length, 80);
+  assert.equal(Object.hasOwn(easing, 'overrideLock'), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(PM.AgentHarness.cleanCommand({
+    type: 'create_section', section: { id: 'section-1', layers: [{ id: 'layer-1' }] },
+  }))), { type: 'create_section', section: { id: 'section-1', layers: [{ id: 'layer-1' }] } });
+  assert.deepEqual(JSON.parse(JSON.stringify(PM.AgentHarness.cleanCommand({
+    type: 'update_section', sectionId: 'section-1', layers: [{ id: 'layer-1' }], at: 123,
+  }))), { type: 'update_section', sectionId: 'section-1', layers: [{ id: 'layer-1' }], at: 123 });
   assert.equal(PM.AgentHarness.cleanCommand({ type: 'run_shell', command: 'whoami' }), null);
 });
 
-test('the native prompt explicitly freezes the current harness vocabulary discrepancy', () => {
+test('the prompt, harness, and shared agent vocabulary expose the same 18 commands', () => {
   const match = agentInstructions().match(/Supported Powermove command types are:\s*([^.]+)\./);
   assert.ok(match, 'native instructions must list the supported command vocabulary');
   const promptOperations = match[1].split(',').map(value => value.trim());
-  assert.equal(promptOperations.length, 18);
-  const harnessOperations = new Set(sceneOperations());
-  const promptOnly = promptOperations.filter(operation => !harnessOperations.has(operation)).sort();
-  const harnessOnly = [...harnessOperations].filter(operation => !promptOperations.includes(operation)).sort();
+  const harnessOperations = sceneOperations();
+  const runtimeEditOperations = editOperations();
+  const sharedEditOperations = editVocabulary('EDIT_COMMAND_TYPES');
+  const agentOperations = editVocabulary('AGENT_COMMAND_TYPES');
 
-  /* Phase 3a will generate the prompt from Edit.operations; flip this assertion then. */
-  assert.equal(harnessOperations.size, 15);
-  assert.deepEqual(harnessOnly, []);
-  assert.deepEqual(promptOnly, ['create_section', 'set_easing', 'update_section']);
+  assert.equal(new Set(promptOperations).size, 18);
+  assert.deepEqual(promptOperations, harnessOperations);
+  assert.deepEqual(harnessOperations, agentOperations);
+  assert.deepEqual(agentOperations, sharedEditOperations);
+  assert.deepEqual(sharedEditOperations, runtimeEditOperations);
 });

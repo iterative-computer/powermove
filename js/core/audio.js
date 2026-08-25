@@ -499,8 +499,8 @@ function reconcile() {
 }
 
 function reconcileProject() {
-  const changed = state.project !== PM.proj;
-  state.project = PM.proj || null;
+  const changed = state.projectGeneration !== PM.projGeneration;
+  state.projectGeneration = PM.projGeneration;
   if (!changed) return;
   reconcile();
 }

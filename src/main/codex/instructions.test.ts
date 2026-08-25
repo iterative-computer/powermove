@@ -1,16 +1,18 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { POWERMOVE_COMMAND_TYPES, agentInstructions, agentResultSchema } from './instructions';
+import { AGENT_COMMAND_TYPES, EDIT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
+import { agentInstructions, agentResultSchema } from './instructions';
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/gu, ' ').trim();
 }
 
 describe('autonomous agent contract', () => {
-  it('keeps the Phase 1 list of 18 Powermove commands', () => {
-    expect(POWERMOVE_COMMAND_TYPES).toHaveLength(18);
-    expect(new Set(POWERMOVE_COMMAND_TYPES).size).toBe(18);
+  it('keeps all 18 edit commands reachable by the agent', () => {
+    expect(EDIT_COMMAND_TYPES).toHaveLength(18);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(18);
+    expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
   });
 
   it('matches the normalized Swift instruction golden with template values substituted', async () => {

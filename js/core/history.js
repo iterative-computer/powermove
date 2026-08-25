@@ -6,11 +6,7 @@ let stack = [], idx = -1, pending = null, depth = 0;
 
 const snap = () => JSON.stringify(PM.proj);
 const restore = (json) => {
-  PM.proj = JSON.parse(json);
-  PM.sel.layers = PM.sel.layers.filter(id => PM.L(id));
-  PM.touch();
-  PM.bus.emit('layers'); PM.bus.emit('sel'); PM.bus.emit('assets'); PM.bus.emit('project');
-  PM.invalidate();
+  PM.replaceProject(JSON.parse(json));
 };
 
 const H = {

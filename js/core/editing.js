@@ -5,6 +5,24 @@ const PM = window.PM;
 const MAX_EDITS = 200;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const AUDIO_CONTENT_FIELDS = new Set(['asset', 'trim', 'gain', 'fadeIn', 'fadeOut']);
+/* Trust classification for every command origin. Trust decisions use the RAW
+   meta.origin — an unset or unknown origin gets no privileges (no overrideLock,
+   no unlock exception) while keeping its own preserveHandEdits semantics.
+   Provenance recording still defaults to 'interface' elsewhere. */
+const ORIGIN_TRUST = Object.freeze({
+  interface: 'human', inspector: 'human', canvas: 'human', timeline: 'human',
+  command: 'human', 'command-palette': 'human', 'effects-panel': 'human',
+  'shader-panel': 'human', library: 'human', import: 'human',
+  agent: 'generated', 'generated-ui': 'generated',
+  'generated-tool': 'generated', 'generated-script': 'generated',
+});
+const isHumanOrigin = (origin) => ORIGIN_TRUST[origin] === 'human';
+const isGeneratedOrigin = (origin) => ORIGIN_TRUST[origin] === 'generated';
+/* Derived from Edit.operations so a new layer-targeted op is lock-checked by
+   construction instead of relying on a second hand-maintained list. */
+let lockedLayerOpsCache = null;
+const lockedLayerOps = () => lockedLayerOpsCache || (lockedLayerOpsCache = new Set(
+  Object.entries(Edit.operations).filter(([, def]) => def.target === 'layer').map(([type]) => type)));
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
   'motionBlur', 'parent', 'color', 'collapsed',
@@ -49,15 +67,7 @@ const lockedIntent = (layer, channel) => {
 };
 
 function restore(json, selection) {
-  PM.proj = JSON.parse(json);
-  if (selection) {
-    PM.sel.layers = (selection.layers || []).filter(id => PM.L(id));
-    PM.sel.keys = selection.keys || [];
-    PM.sel.chan = selection.chan || null;
-  } else PM.sel.layers = PM.sel.layers.filter(id => PM.L(id));
-  PM.touch();
-  PM.bus.emit('layers'); PM.bus.emit('sel'); PM.bus.emit('project');
-  PM.invalidate();
+  PM.replaceProject(JSON.parse(json), selection ? { selection } : {});
 }
 
 function summarize(command) {
@@ -100,7 +110,6 @@ function record(label, origin, applied) {
 function setProperty(command) {
   const layer = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
-  if (layer.lock && command.overrideLock !== true) throw new Error(`Layer “${layer.name}” is locked`);
   const { channel, prop } = property(layer, command.path || command.channel);
   if (!prop) throw new Error(`Property “${channel}” was not found on “${layer.name}”`);
   if (command.preserveHandEdits !== false && lockedIntent(layer, channel)) {
@@ -132,7 +141,6 @@ function setProperty(command) {
 function replaceKeyframes(command) {
   const layer = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
-  if (layer.lock && command.overrideLock !== true) throw new Error(`Layer “${layer.name}” is locked`);
   const { channel, prop } = property(layer, command.path || command.channel);
   if (!prop) throw new Error(`Property “${channel}” was not found on “${layer.name}”`);
   if (command.preserveHandEdits !== false && lockedIntent(layer, channel)) {
@@ -199,7 +207,6 @@ function setExpression(command) {
 function setContent(command) {
   const layer = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
-  if (layer.lock && command.overrideLock !== true) throw new Error(`Layer “${layer.name}” is locked`);
   const patch = safePatch(command.patch, 'content patch');
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else Object.assign(layer.d, patch);
@@ -469,28 +476,109 @@ function updateSection(command) {
   return { id: section.id, versions: section.versions.length };
 }
 
-function runOne(command) {
-  if (!command || typeof command !== 'object' || Array.isArray(command)) throw new Error('Edit command must be an object');
+function keyframeLayers(command) {
+  const ids = new Set((Array.isArray(command.keyframes) ? command.keyframes : [])
+    .filter(id => typeof id === 'string' && id));
+  if (!ids.size) return [];
+  return PM.proj.layers.filter(layer => PM.allProps(layer)
+    .some(item => item.prop.kf.some(key => ids.has(key.i))));
+}
+
+function lockedMessage(layer) {
+  return `Layer “${layer.name}” is locked`;
+}
+
+function policyCommand(sourceCommand, meta = {}) {
+  if (!sourceCommand || typeof sourceCommand !== 'object' || Array.isArray(sourceCommand)) {
+    throw new Error('Edit command must be an object');
+  }
+  const command = clone(sourceCommand);
+  const origin = meta.origin; // raw — unset/unknown origins are untrusted
+  if (!isHumanOrigin(origin)) delete command.overrideLock;
+  /* A generated panel control can carry an explicit human gesture (its command
+     is constructed by trusted binding code, not by the manifest — the manifest
+     button path strips these fields in workspace.js). That gesture may
+     overwrite hand-intent, but it still cannot bypass the layer lock. */
+  if (isGeneratedOrigin(origin) && !(origin === 'generated-ui' && command.markIntent === 'human')) {
+    command.preserveHandEdits = true;
+  }
+
+  if (command.type === 'delete_layers') {
+    const refs = Array.isArray(command.targets) ? command.targets : [command.target || command.layer].filter(Boolean);
+    const layers = refs.length ? refs.map(findLayer).filter(Boolean) : PM.selLayers();
+    if (!layers.length) return { command };
+    if (command.overrideLock === true) return { command };
+    const locked = layers.filter(layer => layer.lock);
+    if (!locked.length) return { command };
+    const editable = layers.filter(layer => !layer.lock);
+    const names = locked.map(layer => `“${layer.name}”`).join(', ');
+    if (!editable.length) throw new Error(`All targeted layers are locked: ${names}`);
+    command.targets = editable.map(layer => layer.id);
+    delete command.target;
+    delete command.layer;
+    return {
+      command,
+      message: `Skipped locked layers: ${names}`,
+      skippedLocked: locked.map(layer => layer.id),
+    };
+  }
+
+  if (command.type === 'set_easing') {
+    if (command.overrideLock !== true) {
+      const locked = keyframeLayers(command).find(layer => layer.lock);
+      if (locked) throw new Error(lockedMessage(locked));
+    }
+    return { command };
+  }
+
+  if (lockedLayerOps().has(command.type)) {
+    const layer = findLayer(command.target || command.layer || command.targetId);
+    /* The bare {locked:false} unlock is a HUMAN affordance. Agent/generated/
+       unknown origins must not unlock — otherwise a two-command batch
+       [unlock, edit] defeats the whole matrix. */
+    const unlockOnly = isHumanOrigin(origin)
+      && command.type === 'set_layer'
+      && command.patch && typeof command.patch === 'object' && !Array.isArray(command.patch)
+      && Object.keys(command.patch).length === 1 && command.patch.locked === false;
+    if (layer?.lock && command.overrideLock !== true && !unlockOnly) throw new Error(lockedMessage(layer));
+  }
+  return { command };
+}
+
+function runOne(sourceCommand, meta = {}) {
+  const policy = policyCommand(sourceCommand, meta);
+  const command = policy.command;
+  let data;
   switch (command.type) {
-    case 'set_property': return setProperty(command);
-    case 'replace_keyframes': return replaceKeyframes(command);
-    case 'set_easing': return setEasing(command);
-    case 'set_expression': return setExpression(command);
-    case 'set_content': return setContent(command);
-    case 'set_layer': return setLayer(command);
-    case 'set_composition': return setComposition(command);
-    case 'add_layer': return addLayer(command);
-    case 'delete_layers': return deleteLayers(command);
-    case 'reorder_layer': return reorderLayer(command);
-    case 'add_effect': return addEffect(command);
-    case 'remove_effect': return removeEffect(command);
-    case 'set_effect': return setEffect(command);
-    case 'set_scene_parameter': return setSceneParameter(command);
-    case 'add_marker': return addMarker(command);
-    case 'create_section': return createSection(command);
-    case 'update_section': return updateSection(command);
+    case 'set_property': data = setProperty(command); break;
+    case 'replace_keyframes': data = replaceKeyframes(command); break;
+    case 'set_easing': data = setEasing(command); break;
+    case 'set_expression': data = setExpression(command); break;
+    case 'set_content': data = setContent(command); break;
+    case 'set_layer': data = setLayer(command); break;
+    case 'set_composition': data = setComposition(command); break;
+    case 'add_layer': data = addLayer(command); break;
+    case 'delete_layers': data = deleteLayers(command); break;
+    case 'reorder_layer': data = reorderLayer(command); break;
+    case 'add_effect': data = addEffect(command); break;
+    case 'remove_effect': data = removeEffect(command); break;
+    case 'set_effect': data = setEffect(command); break;
+    case 'set_scene_parameter': data = setSceneParameter(command); break;
+    case 'add_marker': data = addMarker(command); break;
+    case 'create_section': data = createSection(command); break;
+    case 'update_section': data = updateSection(command); break;
     default: throw new Error(`Unknown source edit: ${command.type}`);
   }
+  if (policy.message) data = { ...data, message: policy.message, skippedLocked: policy.skippedLocked };
+  return { command, data, message: policy.message };
+}
+
+function recordedCommand(command, submitted) {
+  const recorded = clone(command);
+  /* Preserve the caller's overwrite request in provenance while the command
+     dispatched above uses the stricter origin-derived policy. */
+  if (submitted?.preserveHandEdits === false) recorded.preserveHandEdits = false;
+  return recorded;
 }
 
 function changed(notify = true) {
@@ -618,7 +706,7 @@ const Edit = {
     set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
     add_marker: { target: 'project', fields: ['time', 'name'] },
     create_section: { target: 'project', fields: ['section'] },
-    update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version'] },
+    update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
     transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },
   }),
 
@@ -632,21 +720,26 @@ const Edit = {
     }
     if (live) {
       try {
-        const results = list.map(command => ({ command: clone(command), data: runOne(command) }));
-        list.forEach(rememberLive);
+        const executed = list.map(command => runOne(command, meta));
+        const results = executed.map(({ command, data }) => ({ command: clone(command), data }));
+        executed.forEach(({ command }) => rememberLive(command));
         changed(false);
-        return pass('Source updated', { results, revision: PM.proj.revision || 0 });
+        const notices = executed.map(item => item.message).filter(Boolean);
+        return pass(['Source updated', ...notices].join('. '), { results, revision: PM.proj.revision || 0 });
       } catch (error) { return fail(String(error.message || error)); }
     }
     const before = JSON.stringify(PM.proj);
     const selection = clone(PM.sel);
     PM.hist.begin(meta.label || 'Edit source', meta.historyGroup || null);
     try {
-      const results = list.map(command => ({ command: clone(command), data: runOne(command) }));
-      record(meta.label, meta.origin, list);
+      const executed = list.map(command => runOne(command, meta));
+      const applied = executed.map((item, index) => recordedCommand(item.command, list[index]));
+      const results = executed.map(({ command, data }) => ({ command: clone(command), data }));
+      record(meta.label, meta.origin, applied);
       changed();
       PM.hist.commit(meta.label || 'Edit source');
-      return pass(meta.label || 'Source updated', { results, revision: PM.proj.revision });
+      const notices = executed.map(item => item.message).filter(Boolean);
+      return pass([meta.label || 'Source updated', ...notices].join('. '), { results, revision: PM.proj.revision });
     } catch (error) {
       PM.hist.cancel();
       restore(before, selection);
