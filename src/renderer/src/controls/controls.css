@@ -1,0 +1,56 @@
+.pm-control-input:focus-visible,
+.num:focus-visible,
+.sel:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
+}
+
+input.num:not([type=range]):not([type=color]):not([type=file]) {
+  width: auto;
+  flex: 0 1 auto;
+  field-sizing: content;
+  cursor: ew-resize;
+}
+
+input.num.editing:not([type=range]):not([type=color]):not([type=file]) {
+  cursor: text;
+}
+
+select.sel {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  font-family: var(--f-mono);
+  color: inherit;
+}
+
+/* Shared by controls and every panel family; panel entry points import this
+   stylesheet explicitly instead of depending on simple-panel registration. */
+.panel-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.color-picker {
+  width: 360px;
+}
+
+.pm-control-font-drop {
+  position: fixed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle,
+  .toggle i,
+  .fill-spectrum-color {
+    transition: none;
+  }
+}

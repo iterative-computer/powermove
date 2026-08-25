@@ -24,6 +24,9 @@ export interface SveltePanelDef {
   headless?: boolean;
   hideMoveHandle?: boolean;
   moveSlot?: string;
+  /** Legacy layout header hook. Panels that replace a legacy def whose bus
+      listeners still call PANELS.<id>.header must keep it callable. */
+  header?: (hdr: HTMLElement, inst: Record<string, any>) => void;
 }
 
 type LegacyPM = Record<string, any>;

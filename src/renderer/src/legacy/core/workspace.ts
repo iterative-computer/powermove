@@ -408,7 +408,8 @@ WS.init = () => {
 WS.activate = (id: any, silent: any) => {
   const w: any = WS.get(id); if (!w) return;
   WS.current = w;
-  registerCustom(w);
+  /* Phase 4: routes through the patched public property */
+  WS.registerCustom(w);
   applyFeatures(w);
   PM.Layout.apply(w);
   PM.store.set('workspace', id);
@@ -438,7 +439,8 @@ WS.restoreSnapshot = (snapshot: any) => {
   const index: any = WS.all.findIndex((item: any) => item.id === restored.id);
   if (index >= 0) WS.all[index] = restored; else WS.all.push(restored);
   WS.current = restored;
-  registerCustom(restored); applyFeatures(restored); PM.Layout.apply(restored);
+  /* Phase 4: routes through the patched public property */
+  WS.registerCustom(restored); applyFeatures(restored); PM.Layout.apply(restored);
   PM.bus.emit('workspaces');
   return restored;
 };
@@ -465,7 +467,8 @@ WS.mutate = (fn: any, opts: any = {}) => {
     fn(WS.editing.draft);
     WS.editing.draft = normalizeWorkspace(WS.editing.draft, fallback);
     WS.current = WS.editing.draft;
-    registerCustom(WS.current); applyFeatures(WS.current); PM.Layout.apply(WS.current);
+    /* Phase 4: routes through the patched public property */
+    WS.registerCustom(WS.current); applyFeatures(WS.current); PM.Layout.apply(WS.current);
     PM.bus.emit('workspaces');
     return WS.current;
   }
@@ -549,7 +552,8 @@ WS.beginEdit = (id: any = WS.current.id) => {
   const source: any = WS.get(id); if (!source || WS.editing) return null;
   WS.editing = { sourceId: source.id, beforeId: WS.current.id, draft: normalizeWorkspace(copy(source), source) };
   WS.current = WS.editing.draft;
-  registerCustom(WS.current); applyFeatures(WS.current); PM.Layout.apply(WS.current);
+  /* Phase 4: routes through the patched public property */
+  WS.registerCustom(WS.current); applyFeatures(WS.current); PM.Layout.apply(WS.current);
   PM.bus.emit('workspaces');
   return WS.editing.draft;
 };
