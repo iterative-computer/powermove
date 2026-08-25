@@ -210,14 +210,14 @@ describe('Svelte shell', () => {
     expect(target.querySelector<HTMLElement>('[data-tab-id="home"]')?.tabIndex).toBe(0);
   });
 
-  it('sets the shell flag only when the store or query switch is enabled', () => {
+  it('defaults ON and honors the shellLegacy escape hatch (Phase 5.4)', () => {
     const off = fakePM().PM;
+    off.store.get = vi.fn((key: string, fallback: unknown) => (key === 'shellLegacy' ? true : fallback));
     installShell(off as any);
     expect(off.SvelteShell).toBeUndefined();
     expect(document.getElementById('titlebar')?.dataset.svelteShell).toBeUndefined();
 
-    const stored = fakePM().PM;
-    stored.store.get = vi.fn((key: string, fallback: unknown) => key === 'shellSvelte' ? true : fallback);
+    const stored = fakePM().PM; // fresh store → Svelte chrome by default
     installShell(stored as any);
     expect(stored.SvelteShell).toBe(true);
     expect(document.getElementById('titlebar')?.dataset.svelteShell).toBe('true');

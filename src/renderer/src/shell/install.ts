@@ -5,9 +5,15 @@ import Shell from './Shell.svelte';
 
 let mounted: Array<ReturnType<typeof mount>> = [];
 
+/* Phase 5.4: the Svelte chrome is the DEFAULT. The legacy engines remain one
+   release behind an escape hatch (?legacy-shell or the shellLegacy store key)
+   and are deleted in Phase 6. */
 export function wantsSvelteShell(PM: PMRegistry): boolean {
-  const queryEnabled = new URLSearchParams(window.location.search).has('svelte-shell');
-  return queryEnabled || PM.store?.get?.('shellSvelte', false) === true;
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('svelte-shell')) return true; // explicit opt-in always wins
+  if (params.has('legacy-shell')) return false;
+  if (PM.store?.get?.('shellLegacy', false) === true) return false;
+  return true;
 }
 
 export function installShell(PM: PMRegistry): void {
