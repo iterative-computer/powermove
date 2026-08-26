@@ -1,0 +1,26 @@
+import path from 'node:path';
+
+import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses';
+
+export default async function afterPack(context) {
+  if (context.electronPlatformName !== 'darwin') return;
+
+  const appPath = path.join(
+    context.appOutDir,
+    `${context.packager.appInfo.productFilename}.app`
+  );
+
+  await flipFuses(appPath, {
+    version: FuseVersion.V1,
+    // The arm64 build is not Developer ID signed. Refresh the ad-hoc signature
+    // after changing the Electron executable so macOS can still launch it.
+    resetAdHocDarwinSignature: true,
+    [FuseV1Options.RunAsNode]: false,
+    [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+    [FuseV1Options.EnableNodeCliInspectArguments]: false,
+    [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
+    [FuseV1Options.OnlyLoadAppFromAsar]: true
+  });
+
+  console.log(`[fuses] Applied production fuse policy to ${appPath}`);
+}

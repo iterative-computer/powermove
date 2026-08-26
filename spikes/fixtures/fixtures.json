@@ -1,0 +1,449 @@
+[
+  {
+    "file": "h264-aac.mp4",
+    "kind": "video",
+    "container": "mp4",
+    "video": "avc1",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 20554,
+    "generatedBy": "ffmpeg libx264 + aac",
+    "skipped": null
+  },
+  {
+    "file": "h264-aac.mov",
+    "kind": "video",
+    "container": "mov",
+    "video": "avc1",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 21284,
+    "generatedBy": "ffmpeg libx264 + aac",
+    "skipped": null
+  },
+  {
+    "file": "hevc.mov",
+    "kind": "video",
+    "container": "mov",
+    "video": "hvc1",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 23330,
+    "generatedBy": "ffmpeg libx265 + aac",
+    "skipped": null
+  },
+  {
+    "file": "hevc.mp4",
+    "kind": "video",
+    "container": "mp4",
+    "video": "hvc1",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 23275,
+    "generatedBy": "ffmpeg libx265 + aac",
+    "skipped": null
+  },
+  {
+    "file": "hevc-alpha.mov",
+    "kind": "video",
+    "container": "mov",
+    "video": "hvc1",
+    "audio": null,
+    "hasAlpha": true,
+    "alphaLayout": "right-half-transparent",
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 8388,
+    "generatedBy": "ffmpeg hevc_videotoolbox -pix_fmt bgra -alpha_quality 0.9 -tag:v hvc1 (320x180; VideoToolbox rejects 160x90)",
+    "skipped": null,
+    "width": 320,
+    "height": 180
+  },
+  {
+    "file": "prores422.mov",
+    "kind": "video",
+    "container": "mov",
+    "video": "apch",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 43612,
+    "generatedBy": "ffmpeg prores_ks profile 3 + aac",
+    "skipped": null
+  },
+  {
+    "file": "prores4444-alpha.mov",
+    "kind": "video",
+    "container": "mov",
+    "video": "ap4h",
+    "audio": null,
+    "hasAlpha": true,
+    "alphaLayout": "right-half-transparent",
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 64582,
+    "generatedBy": "ffmpeg prores_ks profile 4",
+    "skipped": null
+  },
+  {
+    "file": "vp9-opus.webm",
+    "kind": "video",
+    "container": "webm",
+    "video": "vp09",
+    "audio": "opus",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 20148,
+    "generatedBy": "ffmpeg libvpx-vp9 + libopus",
+    "skipped": null
+  },
+  {
+    "file": "vp8-opus.webm",
+    "kind": "video",
+    "container": "webm",
+    "video": "vp08",
+    "audio": "opus",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 21692,
+    "generatedBy": "ffmpeg libvpx VP8 + libopus",
+    "skipped": null
+  },
+  {
+    "file": "av1.mp4",
+    "kind": "video",
+    "container": "mp4",
+    "video": "av01",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 20596,
+    "generatedBy": "ffmpeg libsvtav1 + aac",
+    "skipped": null
+  },
+  {
+    "file": "tone.wav",
+    "kind": "audio",
+    "container": "wav",
+    "audio": "pcm_s16le",
+    "expectedToneHz": 440,
+    "sampleRate": 48000,
+    "channels": 2,
+    "duration": 1.5,
+    "bytes": 288078,
+    "generatedBy": "ffmpeg pcm_s16le (1.5 s size-capped)",
+    "skipped": null
+  },
+  {
+    "file": "tone.m4a",
+    "kind": "audio",
+    "container": "ipod",
+    "audio": "aac",
+    "expectedToneHz": 440,
+    "sampleRate": 48000,
+    "channels": 2,
+    "duration": 2,
+    "bytes": 17244,
+    "generatedBy": "ffmpeg aac",
+    "skipped": null
+  },
+  {
+    "file": "tone.mp3",
+    "kind": "audio",
+    "container": "mp3",
+    "audio": "mp3",
+    "expectedToneHz": 440,
+    "sampleRate": 48000,
+    "channels": 2,
+    "duration": 2,
+    "bytes": 16557,
+    "generatedBy": "ffmpeg libmp3lame",
+    "skipped": null
+  },
+  {
+    "file": "tone.opus",
+    "kind": "audio",
+    "container": "ogg",
+    "audio": "opus",
+    "expectedToneHz": 440,
+    "sampleRate": 48000,
+    "channels": 2,
+    "duration": 2,
+    "bytes": 17584,
+    "generatedBy": "ffmpeg libopus in Ogg",
+    "skipped": null
+  },
+  {
+    "file": "tone.flac",
+    "kind": "audio",
+    "container": "flac",
+    "audio": "flac",
+    "expectedToneHz": 440,
+    "sampleRate": 48000,
+    "channels": 2,
+    "duration": 2,
+    "bytes": 34603,
+    "generatedBy": "ffmpeg flac",
+    "skipped": null
+  },
+  {
+    "file": "still-red.png",
+    "kind": "image",
+    "container": "png",
+    "video": "png",
+    "width": 160,
+    "height": 90,
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColor": {
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 310,
+    "generatedBy": "ffmpeg png",
+    "skipped": null
+  },
+  {
+    "file": "still-alpha.png",
+    "kind": "image",
+    "container": "png",
+    "video": "png",
+    "width": 160,
+    "height": 90,
+    "hasAlpha": true,
+    "alphaLayout": "right-half-transparent",
+    "expectedColor": {
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "bytes": 340,
+    "generatedBy": "ffmpeg png rgba",
+    "skipped": null
+  },
+  {
+    "file": "still.webp",
+    "kind": "image",
+    "container": "webp",
+    "video": "webp",
+    "width": 160,
+    "height": 90,
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColor": {
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 116,
+    "generatedBy": "cwebp -q 80",
+    "skipped": null
+  },
+  {
+    "file": "still.avif",
+    "kind": "image",
+    "container": "avif",
+    "video": "av1",
+    "width": 160,
+    "height": 90,
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColor": {
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 329,
+    "generatedBy": "ffmpeg libsvtav1 AVIF",
+    "skipped": null
+  },
+  {
+    "file": "still.heic",
+    "kind": "image",
+    "container": "heic",
+    "video": "hevc",
+    "width": 160,
+    "height": 90,
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColor": {
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": null,
+    "generatedBy": null,
+    "skipped": "sips advertised HEIC output but conversion failed"
+  }
+]

@@ -1,47 +1,51 @@
-/* Powermove — design tokens. Default theme is light; dark is the alternate. */
+/* Powermove — design tokens. Default theme is light; dark is the alternate.
+
+   The palette is small on purpose: three surfaces, one text color that every
+   hairline, wash, and muted tone is an alpha step of, one accent, three
+   semantic status hues. Everything else in the app derives from these. */
 :root{color-scheme:light}
 :root[data-theme="dark"]{color-scheme:dark}
-@font-face{
-  font-family:"Geist";
-  src:url("../assets/fonts/Geist-Variable.ttf") format("truetype");
-  font-style:normal;
-  font-weight:100 900;
-  font-display:swap;
-}
-@font-face{
-  font-family:"Geist Mono";
-  src:url("../assets/fonts/GeistMono-Variable.ttf") format("truetype");
-  font-style:normal;
-  font-weight:100 900;
-  font-display:swap;
-}
-
 :root{
-  --bg-window:#EDEDEF;
-  --bg-rail:#F4F4F6;
-  --bg-panel:#FCFCFD;
-  --bg-panel-2:#F3F3F5;
-  --bg-sunken:#E4E4E7;
-  --bg-row:#F1F1F4;
-  --bg-row-hi:#E9E9ED;
-  --bg-field:#F1F1F4;
-  --bg-float:#FFFFFF;
+  /* ── ink: the one color everything neutral is derived from ── */
+  --ink-rgb:20 22 28;
+  --paper-rgb:255 255 255;
 
-  --line:rgba(15,15,20,.09);
-  --line-2:rgba(15,15,20,.14);
-  --line-strong:rgba(15,15,20,.22);
-  /* Major section outlines need more contrast than internal hairlines in
-     light mode, where the panel and window surfaces are both near-white. */
-  --section-line:rgba(15,15,20,.13);
+  /* ── surfaces (canvas → surface → elevated) ── */
+  --bg-window:#EEEEF1;   /* canvas */
+  --bg-rail:#F3F3F6;
+  --bg-panel:#FBFBFC;    /* surface */
+  --bg-panel-2:#F5F5F7;
+  --bg-sunken:#E6E6EA;
+  --bg-row:#F3F3F6;
+  --bg-row-hi:#EBEBEF;
+  --bg-field:#F3F3F6;
+  --bg-float:#FFFFFF;    /* elevated */
 
-  --tx:#1C1C1F;
-  --tx-2:#5D5D65;
-  --tx-3:#8B8B93;
-  --tx-4:#B4B4BB;
+  /* ── alpha ladder of ink: 4 / 7 / 12 / 20 ── */
+  --ink-1:rgb(var(--ink-rgb) / .045);
+  --ink-2:rgb(var(--ink-rgb) / .08);
+  --ink-3:rgb(var(--ink-rgb) / .16);
+
+  --line:rgb(var(--ink-rgb) / .07);
+  --line-2:rgb(var(--ink-rgb) / .11);
+  --line-strong:rgb(var(--ink-rgb) / .2);
+  --section-line:rgb(var(--ink-rgb) / .09);
+
+  /* ── text: primary, then alpha steps of primary ── */
+  --tx:#1B1D23;
+  --tx-2:rgb(var(--ink-rgb) / .66);
+  --tx-3:rgb(var(--ink-rgb) / .48);
+  --tx-4:rgb(var(--ink-rgb) / .32);
 
   --accent:#F0580A;
-  --accent-dim:rgba(240,88,10,.13);
+  --accent-hover:#FF6A24;
+  --accent-dim:rgba(240,88,10,.12);
   --accent-tx:#D84E06;
+  --on-accent:#FFFFFF;
+
+  --danger:#D93025;
+  --warning:#A15C00;
+  --success:#148F5E;
 
   --blue:#2B6FE3;
   --blue-deep:#2B4FD8;
@@ -49,55 +53,103 @@
   --sand:#8D8163;
   --violet:#4C5BD8;
   --gray:#6E6E76;
-  --green:#149A66;
-  --red:#E23B3B;
-  --yellow:#A87B00;
+  --green:var(--success);
+  --red:var(--danger);
+  --yellow:var(--warning);
 
-  --r-xs:5px; --r-sm:7px; --r-md:9px; --r-lg:12px; --r-xl:16px;
+  /* ── radius: one base, multiplied ── */
+  --r-base:4px;
+  --r-xs:var(--r-base);
+  --r-sm:calc(var(--r-base) * 1.5);  /* 6  */
+  --r-md:calc(var(--r-base) * 2);    /* 8  */
+  --r-lg:calc(var(--r-base) * 3);    /* 12 */
+  --r-xl:calc(var(--r-base) * 4);    /* 16 */
+  --r-pill:999px;
 
+  --fw-regular:400; --fw-medium:500; --fw-semibold:600;
+
+  /* ── metrics ── */
   --row-h:30px;
-  --hdr-h:36px;
-  --gut:8px;
-  --pad:10px;  /* uniform outer padding for the whole shell */
-  --gap:8px;   /* uniform gap between docks/panels */
+  --hdr-h:38px;
+  --ctl-h:28px;   /* default control height: buttons, chips, fields inline */
+  --gut:10px;
+  --pad:12px;     /* uniform outer padding for the whole shell */
+  --gap:10px;     /* uniform gap between docks/panels */
+  --hit:28px;     /* minimum interactive target */
 
-  --f-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter",system-ui,sans-serif;
-  --f-mono:"Geist Mono","SF Mono","JetBrains Mono",ui-monospace,Menlo,monospace;
+  --f-ui:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;
+  --f-mono:"SF Mono",ui-monospace,Menlo,monospace;
 
-  --fs-xs:10.5px; --fs-sm:11.5px; --fs-md:12.5px; --fs-lg:14px; --fs-xl:17px;
+  --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:18px;
+  --lh:1.45;
+  --lh-tight:1.3;
 
-  --shadow-float:0 12px 40px rgba(0,0,0,.18),0 1px 0 rgba(255,255,255,.55) inset;
+  /* ── control material: a hairline top highlight + soft depth, no borders ── */
+  --hairline:0.5px;
+  --ctl-edge:
+    inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .9),
+    inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
+    0 1px 1px -.5px rgb(var(--ink-rgb) / .06),
+    0 3px 3px -1.5px rgb(var(--ink-rgb) / .06);
+  --ctl-edge-inset:
+    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
+    inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 60%,transparent);
+
+  --shadow-raise:0 1px 2px rgb(var(--ink-rgb) / .06),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --shadow-lift:0 4px 12px -2px rgb(var(--ink-rgb) / .1),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --shadow-float:0 16px 40px -8px rgb(var(--ink-rgb) / .22),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .7);
+
+  /* ── motion: two durations, one curve ── */
+  --dur-1:75ms;    /* interaction: hover, press, selection */
+  --dur-2:100ms;   /* surface: menus, popovers, sheets */
+  --dur-3:160ms;   /* reveal: modals, large surfaces */
   --ease:cubic-bezier(.22,1,.36,1);
+  --ease-io:cubic-bezier(.45,0,.2,1);
+
+  --disabled:.5;
 }
-:root[data-density="compact"]{ --row-h:26px; --hdr-h:30px; --fs-md:11.5px; --gut:6px; --pad:8px; --gap:6px; }
-:root[data-density="comfy"]{ --row-h:34px; --hdr-h:40px; --fs-md:13px; --gut:10px; --pad:12px; --gap:10px; }
+:root[data-density="compact"]{ --row-h:26px; --hdr-h:32px; --ctl-h:24px; --fs-md:12px; --gut:7px; --pad:9px; --gap:8px; }
+:root[data-density="comfy"]{ --row-h:34px; --hdr-h:42px; --ctl-h:30px; --fs-md:14px; --gut:12px; --pad:14px; --gap:12px; }
 
 /* ── dark theme (alternate) ────────────────────────────── */
 :root[data-theme="dark"]{
-  --bg-window:#0b0b0c;
-  --bg-rail:#0e0e0f;
-  --bg-panel:#141416;
-  --bg-panel-2:#101012;
-  --bg-sunken:#0a0a0b;
-  --bg-row:#1a1a1d;
-  --bg-row-hi:#212125;
-  --bg-field:#131316;
-  --bg-float:#1c1c20;
+  --ink-rgb:245 245 244;
+  --paper-rgb:255 255 255;
 
-  --line:rgba(255,255,255,.07);
-  --line-2:rgba(255,255,255,.11);
-  --line-strong:rgba(255,255,255,.18);
-  /* Match the perceived weight of the light outline without bright halos. */
-  --section-line:rgba(255,255,255,.08);
+  /* Tailwind Stone, kept close to 950 so the dark theme stays truly dark. */
+  --bg-window:#0C0A09;
+  --bg-rail:#100E0D;
+  --bg-panel:#1C1917;
+  --bg-panel-2:#151311;
+  --bg-sunken:#090807;
+  --bg-row:#211E1C;
+  --bg-row-hi:#292524;
+  --bg-field:#171412;
+  --bg-float:#292524;
 
-  --tx:#ededee;
-  --tx-2:#9b9ba1;
-  --tx-3:#6a6a70;
-  --tx-4:#48484e;
+  --ink-1:rgb(var(--ink-rgb) / .05);
+  --ink-2:rgb(var(--ink-rgb) / .09);
+  --ink-3:rgb(var(--ink-rgb) / .18);
+
+  --line:rgb(var(--ink-rgb) / .07);
+  --line-2:rgb(var(--ink-rgb) / .11);
+  --line-strong:rgb(var(--ink-rgb) / .2);
+  --section-line:rgb(var(--ink-rgb) / .08);
+
+  --tx:#F5F5F4;
+  --tx-2:rgb(var(--ink-rgb) / .62);
+  --tx-3:rgb(var(--ink-rgb) / .44);
+  --tx-4:rgb(var(--ink-rgb) / .28);
 
   --accent:#FF6B1A;
-  --accent-dim:rgba(255,107,26,.16);
-  --accent-tx:#ff8b4d;
+  --accent-hover:#FF7B33;
+  --accent-dim:rgba(255,107,26,.15);
+  --accent-tx:#FF8B4D;
+
+  --danger:#F36357;
+  --warning:#F59E0B;
+  --success:#3FCF8E;
 
   --blue:#4C8DFF;
   --blue-deep:#3B62E8;
@@ -105,9 +157,16 @@
   --sand:#D8CFAF;
   --violet:#6C7BE8;
   --gray:#A9A9AE;
-  --green:#3FCF8E;
-  --red:#FF5C5C;
-  --yellow:#FFD66B;
 
-  --shadow-float:0 12px 40px rgba(0,0,0,.6),0 1px 0 rgba(255,255,255,.06) inset;
+  --ctl-edge:
+    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .14),
+    inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .06);
+  --ctl-edge-inset:
+    inset 0 var(--hairline) 0 rgb(0 0 0 / .3),
+    inset 0 calc(var(--hairline) * -1) 0 rgb(var(--ink-rgb) / .08);
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 65%,transparent);
+
+  --shadow-raise:0 1px 2px rgb(0 0 0 / .4),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --shadow-lift:0 4px 14px -2px rgb(0 0 0 / .5),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09);
+  --shadow-float:0 20px 48px -8px rgb(0 0 0 / .65),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .12),inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .1);
 }

@@ -1,0 +1,434 @@
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import {
+  LIMITS,
+  PROJECT_ID,
+  REQUEST_ID,
+  type CodexRunRequest,
+  type CodexRunResult
+} from '../../shared/ipc';
+import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
+import { buildAutonomousArgv, buildEditorArgv } from './adapter';
+import { collectArtifacts } from './artifacts';
+import { consumeToken } from './consent';
+import { discoverCodexBinary } from './env';
+import { CodexEventParser } from './events';
+import { agentInstructions, agentResultSchema } from './instructions';
+import {
+  agentWorkspaceRoot,
+  clearSession,
+  discardPartialRun,
+  prepareAgentWorkspace,
+  readSession,
+  sessionPathFor,
+  writeSession,
+  type AgentWorkspace,
+  type CodexAuthority
+} from './workspace';
+
+const MODES = ['editor', 'autonomous'] as const;
+const ACCESS = ['editor', 'project', 'computer'] as const;
+const EFFORTS = ['low', 'medium', 'high'] as const;
+const DEFAULT_TIMEOUT_MS = 3_600_000;
+const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
+
+type SpawnLike = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions
+) => ChildProcess;
+
+export interface CodexRunOptions {
+  userData: string;
+  codexBinaryPref?: string | null;
+  binary?: string;
+  timeoutMs?: number;
+  onProgress?: (text: string) => void;
+  onWarning?: (text: string) => void;
+  spawnProcess?: SpawnLike;
+  consumeConsentToken?: (token: string) => boolean;
+}
+
+interface ActiveRun {
+  request: CodexRunRequest;
+  child: ChildProcess | null;
+  layout: AgentWorkspace | null;
+  killTimer: NodeJS.Timeout | null;
+  userData: string;
+  sessionWrite: Promise<void>;
+}
+
+interface AttemptResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+  stdout: string;
+  spawnError: Error | null;
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+function authorityForAccess(access: CodexRunRequest['access']): CodexAuthority {
+  return access === 'computer' ? 'computer' : 'project';
+}
+
+export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
+  if (!isRecord(value)) return false;
+  if (!isString(value.id) || !REQUEST_ID.test(value.id)) return false;
+  if (!isOneOf(value.mode, MODES)) return false;
+  if (!isString(value.prompt, LIMITS.codexPromptChars) || value.prompt.length === 0) return false;
+  if (!(value.schema === null || isRecord(value.schema))) return false;
+  if (!isArrayOf(value.images, LIMITS.codexImages, (image): image is Uint8Array =>
+    isBytes(image, LIMITS.codexImageBytes))) return false;
+  if (!(value.model === null || isString(value.model))) return false;
+  if (!(value.reasoningEffort === null || isOneOf(value.reasoningEffort, EFFORTS))) return false;
+  if (!isOneOf(value.access, ACCESS)) return false;
+  if (!isString(value.projectId) || !PROJECT_ID.test(value.projectId)) return false;
+  if (!isString(value.projectName)) return false;
+  if (!(value.projectJSON === null || (isString(value.projectJSON) &&
+    utf8Bytes(value.projectJSON) <= LIMITS.codexProjectJsonBytes))) return false;
+  if (!isArrayOf(value.attachments, LIMITS.codexAttachments, (attachment): attachment is { name: string; data: Uint8Array } =>
+    isRecord(attachment) && isString(attachment.name) &&
+    isBytes(attachment.data, LIMITS.codexAttachmentBytes))) return false;
+  if (!(value.consentToken === null || isString(value.consentToken))) return false;
+
+  return value.mode === 'editor' || value.projectJSON !== null;
+}
+
+function failure(error: string, cancelled = false): CodexRunResult {
+  return { ok: false, error, cancelled };
+}
+
+function diagnosticText(attempt: AttemptResult, fallback: string): string {
+  return attempt.stderr.trim() || attempt.spawnError?.message || fallback;
+}
+
+function attemptOutput(attempt: AttemptResult): string {
+  return `${attempt.stderr}\n${attempt.stdout}`.trim();
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, sortJsonValue(value[key])])
+  );
+}
+
+function isUnknownSession(text: string): boolean {
+  return /(?:unknown|invalid|missing|not found|does not exist|could not find).{0,80}(?:session|thread|rollout)|(?:session|thread|rollout).{0,80}(?:unknown|invalid|missing|not found|does not exist|could not find)|no rollout found/i.test(text);
+}
+
+function appendDiagnostic(chunks: Buffer[], chunk: Buffer): void {
+  let current = 0;
+  for (const item of chunks) current += item.byteLength;
+  if (current >= MAX_DIAGNOSTIC_BYTES) return;
+  chunks.push(chunk.subarray(0, MAX_DIAGNOSTIC_BYTES - current));
+}
+
+async function writeEditorInputs(req: CodexRunRequest): Promise<{
+  directory: string;
+  schemaPath: string;
+  outputPath: string;
+  imagePaths: string[];
+}> {
+  const directory = await mkdtemp(path.join(tmpdir(), 'powermove-codex-'));
+  const schemaPath = path.join(directory, 'schema.json');
+  const outputPath = path.join(directory, 'result.json');
+  await writeFile(schemaPath, JSON.stringify(req.schema ?? { type: 'object' }, null, 2));
+  const imagePaths: string[] = [];
+  for (const [index, image] of req.images.entries()) {
+    const extension = image[0] === 0x89 && image[1] === 0x50 ? 'png' : 'jpg';
+    const imagePath = path.join(directory, `frame-${index}.${extension}`);
+    await writeFile(imagePath, image);
+    imagePaths.push(imagePath);
+  }
+  return { directory, schemaPath, outputPath, imagePaths };
+}
+
+export class CodexRunner {
+  private readonly active = new Map<string, ActiveRun>();
+  private readonly cancelled = new Set<string>();
+
+  async run(rawRequest: CodexRunRequest, options: CodexRunOptions): Promise<CodexRunResult> {
+    if (!isCodexRunRequest(rawRequest)) return failure('Invalid Codex run request.');
+    const req = rawRequest;
+    if (this.active.has(req.id)) return failure(`A Codex run with id ${req.id} is already active.`);
+
+    if (req.access === 'computer') {
+      const consume = options.consumeConsentToken ?? consumeToken;
+      if (req.consentToken === null || !consume(req.consentToken)) {
+        return failure('Computer access requires fresh approval for this run.');
+      }
+    }
+
+    const state: ActiveRun = {
+      request: req,
+      child: null,
+      layout: null,
+      killTimer: null,
+      userData: options.userData,
+      sessionWrite: Promise.resolve()
+    };
+    this.active.set(req.id, state);
+    let editorDirectory: string | null = null;
+    let timeout: NodeJS.Timeout | null = null;
+
+    try {
+      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+
+      const binary = options.binary ?? await discoverCodexBinary(options.codexBinaryPref ?? null);
+      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+
+      if (req.mode === 'editor') {
+        const input = await writeEditorInputs(req);
+        editorDirectory = input.directory;
+        const argv = buildEditorArgv({
+          schemaPath: input.schemaPath,
+          outputPath: input.outputPath,
+          prompt: req.prompt,
+          imagePaths: input.imagePaths,
+          model: req.model,
+          reasoningEffort: req.reasoningEffort
+        });
+        const attempt = await this.execute(req, state, binary, argv, input.directory, null, options, (timer) => {
+          timeout = timer;
+        });
+        if (this.cancelled.has(req.id)) {
+          await this.cleanupCancelled(state);
+          return failure('The Codex run was cancelled.', true);
+        }
+        if (attempt.code !== 0) return failure(diagnosticText(attempt, 'ChatGPT generation failed.'));
+        try {
+          return { ok: true, text: await readFile(input.outputPath, 'utf8'), access: 'editor' };
+        } catch {
+          return failure('ChatGPT generation completed without a result.');
+        }
+      }
+
+      const authority = authorityForAccess(req.access);
+      const layout = await prepareAgentWorkspace(
+        req,
+        options.userData,
+        authority,
+        agentResultSchema()
+      );
+      state.layout = layout;
+      if (this.cancelled.has(req.id)) {
+        await this.cleanupCancelled(state, options.userData);
+        return failure('The Codex run was cancelled.', true);
+      }
+
+      let resumeId = await readSession(layout.sessionPath);
+      let attempt: AttemptResult | null = null;
+      for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+        const argv = buildAutonomousArgv({
+          schemaPath: layout.schemaPath,
+          outputPath: layout.outputPath,
+          instructions: agentInstructions({
+            projectName: req.projectName,
+            artifactPath: `artifacts/${layout.runId}`,
+            access: authority
+          }),
+          prompt: req.prompt,
+          imagePaths: layout.imagePaths,
+          model: req.model,
+          reasoningEffort: req.reasoningEffort,
+          access: authority,
+          sessionId: resumeId
+        });
+        attempt = await this.execute(req, state, binary, argv, layout.root, layout, options, (timer) => {
+          timeout = timer;
+        });
+        if (this.cancelled.has(req.id)) {
+          await this.cleanupCancelled(state, options.userData);
+          return failure('The Codex run was cancelled.', true);
+        }
+        const diagnostic = attemptOutput(attempt);
+        if (tryIndex === 0 && resumeId && attempt.code !== 0 && isUnknownSession(diagnostic)) {
+          await state.sessionWrite;
+          await clearSession(layout.sessionPath);
+          await rm(layout.outputPath, { force: true });
+          resumeId = null;
+          continue;
+        }
+        break;
+      }
+
+      if (attempt === null || attempt.code !== 0) {
+        return failure(attempt ? diagnosticText(attempt, 'The autonomous agent failed.') : 'The autonomous agent failed.');
+      }
+
+      let parsed: Record<string, unknown>;
+      try {
+        const value: unknown = JSON.parse(await readFile(layout.outputPath, 'utf8'));
+        if (!isRecord(value)) throw new Error('not an object');
+        parsed = value;
+      } catch {
+        return failure('The autonomous agent returned an invalid result.');
+      }
+      const requested = Array.isArray(parsed.artifacts) ? parsed.artifacts : [];
+      parsed.artifacts = await collectArtifacts(layout.runDirectory, layout.runId, requested);
+      parsed.projectId = req.projectId;
+      parsed.access = authorityForAccess(req.access);
+      return { ok: true, text: JSON.stringify(sortJsonValue(parsed)), access: authority };
+    } catch (error) {
+      if (this.cancelled.has(req.id)) {
+        await this.cleanupCancelled(state, options.userData);
+        return failure('The Codex run was cancelled.', true);
+      }
+      return failure(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (state.killTimer) clearTimeout(state.killTimer);
+      state.child = null;
+      this.active.delete(req.id);
+      this.cancelled.delete(req.id);
+      if (editorDirectory) await rm(editorDirectory, { recursive: true, force: true });
+    }
+  }
+
+  async cancel(id: string): Promise<boolean> {
+    this.cancelled.add(id);
+    const state = this.active.get(id);
+    if (!state) return false;
+    this.terminate(state);
+    await this.cleanupCancelled(state);
+    return true;
+  }
+
+  async cancelAll(): Promise<void> {
+    await Promise.all([...this.active.keys()].map((id) => this.cancel(id)));
+  }
+
+  private async execute(
+    req: CodexRunRequest,
+    state: ActiveRun,
+    binary: string,
+    argv: string[],
+    cwd: string,
+    layout: AgentWorkspace | null,
+    options: CodexRunOptions,
+    setTimeoutHandle: (timer: NodeJS.Timeout) => void
+  ): Promise<AttemptResult> {
+    if (this.cancelled.has(req.id)) {
+      return { code: null, signal: null, stderr: '', stdout: '', spawnError: null };
+    }
+
+    const spawnProcess = options.spawnProcess ?? ((command, args, spawnOptions) =>
+      spawn(command, args, spawnOptions));
+    let child: ChildProcess;
+    try {
+      child = spawnProcess(binary, argv, {
+        cwd,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } catch (error) {
+      return {
+        code: null,
+        signal: null,
+        stderr: '',
+        stdout: '',
+        spawnError: error instanceof Error ? error : new Error(String(error))
+      };
+    }
+    state.child = child;
+    if (this.cancelled.has(req.id)) this.terminate(state);
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const parser = new CodexEventParser({
+      onProgress: (text) => options.onProgress?.(text),
+      onThreadId: (threadId) => {
+        if (layout) {
+          state.sessionWrite = state.sessionWrite
+            .then(() => writeSession(layout.sessionPath, threadId))
+            .catch(() => undefined);
+        }
+      },
+      onWarning: (warning) => {
+        if (options.onWarning) options.onWarning(warning);
+        else console.warn(`[codex] ${warning}`);
+      }
+    });
+    child.stdout?.on('data', (data: Buffer) => {
+      appendDiagnostic(stdoutChunks, data);
+      parser.push(data);
+    });
+    child.stderr?.on('data', (data: Buffer) => appendDiagnostic(stderrChunks, data));
+
+    const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      this.cancelled.add(req.id);
+      this.terminate(state);
+    }, timeoutMs);
+    timer.unref();
+    setTimeoutHandle(timer);
+
+    return await new Promise((resolve) => {
+      let settled = false;
+      const settle = (result: AttemptResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        parser.finish();
+        void state.sessionWrite.then(() => resolve(result));
+      };
+      child.once('error', (error) => settle({
+        code: null,
+        signal: null,
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        spawnError: error
+      }));
+      child.once('close', (code, signal) => settle({
+        code,
+        signal,
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        spawnError: null
+      }));
+    });
+  }
+
+  private terminate(state: ActiveRun): void {
+    const pid = state.child?.pid;
+    if (!pid) return;
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      try { state.child?.kill('SIGTERM'); } catch { /* already exited */ }
+    }
+    if (state.killTimer) clearTimeout(state.killTimer);
+    state.killTimer = setTimeout(() => {
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* already exited */ }
+    }, 3_000);
+    state.killTimer.unref();
+  }
+
+  private async cleanupCancelled(state: ActiveRun, userData = state.userData): Promise<void> {
+    const authority = authorityForAccess(state.request.access);
+    const targetSession = state.layout?.sessionPath ?? sessionPathFor(
+      agentWorkspaceRoot(userData, state.request.projectId),
+      authority
+    );
+    await state.sessionWrite;
+    await Promise.all([
+      clearSession(targetSession),
+      state.layout ? discardPartialRun(state.layout) : Promise.resolve()
+    ]);
+  }
+}
+
+const defaultRunner = new CodexRunner();
+
+export const run = (req: CodexRunRequest, options: CodexRunOptions): Promise<CodexRunResult> =>
+  defaultRunner.run(req, options);
+export const cancel = (id: string): Promise<boolean> => defaultRunner.cancel(id);
+export const cancelAll = (): Promise<void> => defaultRunner.cancelAll();

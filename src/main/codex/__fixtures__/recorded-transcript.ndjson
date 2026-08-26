@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"thread-recorded-1"}
+{"type":"item.started","item":{"id":"0","type":"command_execution","command":"pwd"}}
+this line is deliberately malformed
+{"type":"item.completed","item":{"id":"1","type":"reasoning","text":"Reviewing the café timeline"}}
+{"type":"thread.started","thread_id":"thread-recorded-duplicate"}
+{"type":"item.completed","item":{"id":"2","type":"agent_message","text":"{\"command\":\"never expose this\",\"summary\":\"Preparing the final animation\"}"}}

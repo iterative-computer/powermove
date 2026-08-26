@@ -1,0 +1,37 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import type { PMRegistry } from '../registry';
+import { install } from './history';
+
+function historyRegistry(): PMRegistry {
+  let nextId = 0;
+  const PM: PMRegistry = {
+    proj: { value: 1, layers: [] },
+    uid: (prefix: any) => `${prefix}-${++nextId}`,
+    replaceProject(project: any) { PM.proj = project; },
+    touch: vi.fn(),
+    bus: { emit: vi.fn() },
+    invalidate: vi.fn(),
+    toast: vi.fn(),
+    autosave: vi.fn(),
+    store: { get: (_key: any, fallback: any) => fallback, set: vi.fn() },
+  };
+  install(PM);
+  return PM;
+}
+
+describe('legacy history install', () => {
+  it('records one source transaction and reverses and reapplies it', () => {
+    const PM = historyRegistry();
+
+    PM.hist.do('Set value', () => { PM.proj.value = 2; });
+
+    expect(PM.hist.list()).toEqual(['Set value']);
+    expect(PM.hist.canUndo()).toBe(true);
+    expect(PM.hist.label()).toBe('Set value');
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.value).toBe(1);
+    expect(PM.hist.redo()).toBe(true);
+    expect(PM.proj.value).toBe(2);
+  });
+});

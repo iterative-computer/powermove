@@ -1,0 +1,13 @@
+{
+  "name": "@powermove/macos-haptics",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal macOS alignment haptics for Powermove.",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "scripts": {
+    "install": "node scripts/build.cjs"
+  },
+  "gypfile": true,
+  "license": "UNLICENSED"
+}

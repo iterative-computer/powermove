@@ -1,0 +1,172 @@
+<script lang="ts">
+  import { tick } from 'svelte';
+  import { doc } from '../state/document.svelte';
+  import { transport } from '../state/transport.svelte';
+  import { parseArithmetic } from './arith';
+  import { EditGesture, type EditBinding } from './gesture';
+  import { rowLabelId } from './context';
+  import { round } from './control-utils';
+  import './controls.css';
+
+  let {
+    PM,
+    get,
+    edit,
+    min,
+    max,
+    step,
+    speed,
+    unit = '',
+    precision,
+    label,
+    link = false,
+    onInput,
+    onCommit
+  }: {
+    PM: Record<string, any>;
+    get: () => unknown;
+    edit: EditBinding;
+    min?: number;
+    max?: number;
+    step?: number;
+    speed?: number;
+    unit?: string;
+    precision?: number;
+    label?: string;
+    link?: boolean;
+    onInput?: (value: number) => void;
+    onCommit?: (value: number) => void;
+  } = $props();
+
+  const labelledBy = rowLabelId();
+  const value = $derived((doc.tick.values, doc.proj, transport.time, get()));
+  const numeric = $derived(typeof value === 'number' ? value : Number(value));
+  const gesture = $derived(new EditGesture(PM, edit));
+  let input: HTMLInputElement;
+  let editing = $state(false);
+  let draft = $state('');
+  const effectiveStep = $derived(step || 1);
+  const effectiveSpeed = $derived(speed || 0.5);
+
+  const format = (inputValue: unknown): string => {
+    if (typeof inputValue !== 'number' || !Number.isFinite(inputValue)) return String(inputValue);
+    const places = precision ?? (step && step < 1 ? 2 : (Math.abs(inputValue) < 10 ? 1 : 0));
+    let result = inputValue.toFixed(places);
+    if (places > 0) result = result.replace(/\.?0+$/, '');
+    return result + unit;
+  };
+
+  const shown = $derived(editing ? draft : format(value));
+
+  function openEditor(): void {
+    draft = String(round(PM, Number(get()), 3));
+    editing = true;
+    void tick().then(() => { input.focus(); input.select(); });
+  }
+
+  function parseDraft(): number {
+    const raw = draft.trim();
+    return parseArithmetic(/^[-+*/]/.test(raw) ? `${Number(get())}${raw}` : raw);
+  }
+
+  function clampValue(next: number): number {
+    if (min != null) next = Math.max(min, next);
+    if (max != null) next = Math.min(max, next);
+    return round(PM, next, 4);
+  }
+
+  function finish(commit: boolean): void {
+    if (!editing) return;
+    if (commit) {
+      const next = parseDraft();
+      if (Number.isFinite(next)) {
+        const rounded = round(PM, next, 4);
+        gesture.once(rounded);
+        onCommit?.(rounded);
+      }
+    }
+    editing = false;
+    draft = '';
+  }
+
+  function pointerdown(event: PointerEvent): void {
+    if (editing || event.button !== 0) return;
+    event.preventDefault();
+    const start = Number(get());
+    let moved = false;
+    gesture.begin();
+    PM.drag(event, {
+      cursor: 'ew-resize',
+      move: (dx: number, _dy: number, nextEvent: PointerEvent) => {
+        if (!moved && Math.abs(dx) < 3) return;
+        moved = true;
+        const multiplier = nextEvent.shiftKey ? 10 : nextEvent.altKey ? 0.1 : 1;
+        let next = start + dx * effectiveStep * multiplier * effectiveSpeed;
+        if (min != null) next = Math.max(min, next);
+        if (max != null) next = Math.min(max, next);
+        next = round(PM, next, 3);
+        gesture.write(next);
+        onInput?.(next);
+      },
+      up: () => {
+        if (!moved) { openEditor(); gesture.cancel(); }
+        else { gesture.commit(); onCommit?.(Number(get())); }
+      },
+      cancel: () => gesture.cancel()
+    });
+  }
+
+  function keydown(event: KeyboardEvent): void {
+    event.stopPropagation();
+    if (!editing) {
+      if (event.key === 'Enter' || event.key === 'F2') {
+        event.preventDefault();
+        openEditor();
+      } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault();
+        const direction = event.key === 'ArrowUp' ? 1 : -1;
+        const next = clampValue((Number.isFinite(numeric) ? numeric : 0) + direction * effectiveStep * (event.shiftKey ? 10 : 1));
+        gesture.once(next);
+        onCommit?.(next);
+      }
+      return;
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+      input.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowUp' ? 1 : -1;
+      const parsed = Number.parseFloat(draft || '0');
+      const next = (Number.isFinite(parsed) ? parsed : 0) + direction * effectiveStep * (event.shiftKey ? 10 : 1);
+      draft = String(round(PM, next, 4));
+    }
+  }
+</script>
+
+<input
+  bind:this={input}
+  class="num"
+  class:editing
+  class:link
+  type="text"
+  inputmode="decimal"
+  role="spinbutton"
+  readonly={!editing}
+  value={shown}
+  title={label || ''}
+  aria-labelledby={labelledBy}
+  aria-label={labelledBy ? undefined : (label ?? edit.label)}
+  aria-valuenow={Number.isFinite(numeric) ? numeric : undefined}
+  aria-valuemin={min}
+  aria-valuemax={max}
+  onpointerdown={pointerdown}
+  onfocus={() => { if (!editing) openEditor(); }}
+  oninput={(event) => { if (editing) draft = event.currentTarget.value; }}
+  onblur={() => finish(true)}
+  onkeydown={keydown}
+/>

@@ -1,0 +1,13 @@
+{
+  "panel": {
+    "class": "panel",
+    "dataAttr": "data-panel",
+    "idPrefix": "panel-",
+    "title": ".ptitle",
+    "moveHandle": ".panel-move-handle"
+  },
+  "documentDataset": {
+    "previewCorners": ["rounded", "square"],
+    "timelineSurfaces": ["reversed", "normal"]
+  }
+}
