@@ -37,29 +37,29 @@ describe('legacy workspace library behavior survivors', () => {
 
   it('migrates the old Timeline surface order without overwriting later customization', () => {
     const PM = workspaceModel();
-    expect(PM.WS.normalize(manifest()).chrome.timelineSurfaceOrder).toBe('reversed');
+    expect(PM.WS.normalize(manifest()).chrome.timelineSurfaceOrder).toBe('normal');
     expect(PM.WS.normalize(manifest({
-      chrome: { timelineSurfaceOrder: 'normal' },
-    })).chrome.timelineSurfaceOrder).toBe('reversed');
-    expect(PM.WS.normalize(manifest({
-      chrome: { timelineSurfaceOrder: 'normal', timelineSurfaceSchema: 2 },
+      chrome: { timelineSurfaceOrder: 'reversed' },
     })).chrome.timelineSurfaceOrder).toBe('normal');
+    expect(PM.WS.normalize(manifest({
+      chrome: { timelineSurfaceOrder: 'reversed', timelineSurfaceSchema: 3 },
+    })).chrome.timelineSurfaceOrder).toBe('reversed');
   });
 
   it('migrates the stock Timeline to compact defaults while preserving custom dimensions', () => {
     const PM = workspaceModel();
     const compact = PM.WS.normalize(manifest()).chrome;
     expect({ ...compact.timeline }).toEqual({
-      rowHeight: 26,
-      gutterWidth: 192,
-      rulerHeight: 22,
+      rowHeight: 32,
+      gutterWidth: 224,
+      rulerHeight: 28,
       clipRadius: 5,
-      keyframeSize: 7.5,
+      keyframeSize: 8,
       showLayerNumbers: true,
       showTypeBadges: true,
       toolbarDensity: 'compact',
     });
-    expect(compact.timelineChromeSchema).toBe(2);
+    expect(compact.timelineChromeSchema).toBe(3);
 
     const customized = PM.WS.normalize(manifest({
       chrome: { timeline: { rowHeight: 34, gutterWidth: 240 } },

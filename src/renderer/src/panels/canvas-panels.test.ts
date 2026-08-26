@@ -171,7 +171,7 @@ describe('registerCanvasPanels', () => {
     expect(PM.PANELS.viewer.moveSlot).toBeUndefined();
     expect(PM.PANELS.timeline).toMatchObject({
       id: 'timeline', title: 'Timeline', flush: true, noscroll: true, persist: true,
-      headless: true, size: 300, moveSlot: '#tl-head',
+      headless: true, size: 340, moveSlot: '#tl-head',
     });
     expect(PM.PANELS.timeline.hideMoveHandle).toBeUndefined();
   });

@@ -14,17 +14,22 @@ const LEGACY_TIMELINE_DEFAULTS: any = Object.freeze({
   rowHeight: 30, gutterWidth: 214, rulerHeight: 26, clipRadius: 6,
   keyframeSize: 8.8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'normal',
 });
-const TIMELINE_DEFAULTS: any = Object.freeze({
+const V2_TIMELINE_DEFAULTS: any = Object.freeze({
   rowHeight: 26, gutterWidth: 192, rulerHeight: 22, clipRadius: 5,
   keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true,
   toolbarDensity: 'compact',
 });
-const TIMELINE_CHROME_SCHEMA: any = 2;
+const TIMELINE_DEFAULTS: any = Object.freeze({
+  rowHeight: 32, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
+  keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true,
+  toolbarDensity: 'compact',
+});
+const TIMELINE_CHROME_SCHEMA: any = 3;
 
 function isLegacyTimelineChrome(value: any) {
   if (!value || typeof value !== 'object') return true;
-  return Object.entries(LEGACY_TIMELINE_DEFAULTS)
-    .every(([key, expected]: any) => value[key] === undefined || value[key] === expected);
+  return [LEGACY_TIMELINE_DEFAULTS, V2_TIMELINE_DEFAULTS].some((defaults: any) =>
+    Object.entries(defaults).every(([key, expected]: any) => value[key] === undefined || value[key] === expected));
 }
 
 function normalizeTimelineChrome(value: any) {
@@ -156,12 +161,14 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
   raw.theme = raw.theme && typeof raw.theme === 'object' ? raw.theme : {};
   raw.chrome = raw.chrome && typeof raw.chrome === 'object' ? raw.chrome : {};
   raw.chrome.previewCornerRadius = raw.chrome.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
-  /* Surface schema 2 flips the original default to the intended hierarchy:
-     darker gutter, lighter tracks. Existing workspaces migrate once; choices
+  /* Surface schema 3 restores the panel-first hierarchy: gutter/ruler on the
+     panel surface, tracks one step down. (Schema 2's reversed default made the
+     dark-theme gutter sit below the window color and dissolve into the app
+     background.) Existing workspaces migrate once; choices
      made after this version continue to round-trip normally. */
-  if (raw.chrome.timelineSurfaceSchema !== 2) raw.chrome.timelineSurfaceOrder = 'reversed';
-  else raw.chrome.timelineSurfaceOrder = raw.chrome.timelineSurfaceOrder === 'normal' ? 'normal' : 'reversed';
-  raw.chrome.timelineSurfaceSchema = 2;
+  if (raw.chrome.timelineSurfaceSchema !== 3) raw.chrome.timelineSurfaceOrder = 'normal';
+  else raw.chrome.timelineSurfaceOrder = raw.chrome.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
+  raw.chrome.timelineSurfaceSchema = 3;
   /* Compact the old stock Timeline once, while preserving any authored or
      agent-authored Timeline configuration that differs from the old default. */
   if (raw.chrome.timelineChromeSchema !== TIMELINE_CHROME_SCHEMA && isLegacyTimelineChrome(raw.chrome.timeline)) {
@@ -277,11 +284,12 @@ const PRESETS: any = () => ([
     features: { snapping: true, autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
-        /* the timeline owns layer ordering; the left rail stays focused on
-           project media and effects while reusable content lives in Library */
-        dock('left', [p('assets', { size: 190 }), p('fxbrowser', { flex: true })], 250),
-        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 300 })]),
-        dock('right', [p('inspector', { flex: true }), p('agent', { size: 350 })], 320),
+        /* Default shape: project media above a tall agent on the left, the
+           composition + timeline in the middle, and properties over effects
+           on the right — the agent is a primary surface, not a footnote. */
+        dock('left', [p('assets', { size: 220 }), p('agent', { flex: true })], 300),
+        dock('center', [p('viewer', { flex: true }), p('timeline', { size: 340 })]),
+        dock('right', [p('inspector', { flex: true }), p('fxbrowser', { size: 380 })], 320),
       ],
     },
   },

@@ -6,7 +6,7 @@ createTimeline(PM);
 }
 
 export const timelinePanelOptions = {
-  title: 'Timeline', flush: true, noscroll: true, headless: true, size: 300, moveSlot: '#tl-head',
+  title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
 } as const;
 
 export function createTimeline(PM: PMRegistry): any {
@@ -14,10 +14,10 @@ if (PM.TL?.attachHead && PM.TL?.attachCanvas) return PM.TL;
 const h = PM.h, clamp = PM.clamp;
 
 const T: any = {
-  gut: 192, row: 26, ruler: 22, pps: 90, scrollT: 0, scrollY: 0,
+  gut: 224, row: 32, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null,
-  style: { clipRadius: 5, keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
+  style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
 PM.TL = T;
 
@@ -25,7 +25,9 @@ PM.TL = T;
    those same editing rules, with one useful extension: pulling the out marker
    past the current composition end grows the composition instead of making the
    handle appear stuck. These helpers stay pure so the gestures are testable. */
-const WORK_BAR = { top: 2, height: 8, hit: 9 };
+/* The work bar owns only a thin strip at the very top of the ruler; the rest
+   of the ruler is a scrub surface (click anywhere to move the playhead). */
+const WORK_BAR = { top: 0, height: 5, hit: 7 };
 const WorkArea = PM.TimelineWorkArea = {
   resize(work: any, idx: any, time: any, duration: any, frame: any) {
     const span = Array.isArray(work) ? work : [0, duration];
@@ -112,8 +114,8 @@ function buildHead(head: any) {
 function refreshTimelineManifest() {
   const raw = PM.WS?.current?.chrome?.timeline || {};
   const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
-    rowHeight: 26, gutterWidth: 192, rulerHeight: 22, clipRadius: 5,
-    keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
+    rowHeight: 32, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
+    keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
   };
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
   T.style = config;
@@ -185,8 +187,14 @@ const refreshTheme = () => {
   theme = {
     accent: css('--accent') || '#F0580A', tx: css('--tx') || '#1C1C1F',
     tx2: css('--tx-2') || '#5D5D65', tx3: css('--tx-3') || '#8B8B93',
-    panel: css(reversed ? '--bg-sunken' : '--bg-panel') || '#FCFCFD',
-    sunken: css(reversed ? '--bg-panel' : '--bg-sunken') || '#E4E4E7',
+    tx4: css('--tx-4') || '#A9A9AE',
+    /* Both timeline surfaces stay in the panel family: chrome (gutter/ruler)
+       on --bg-panel, tracks one step down on --bg-panel-2. Never --bg-sunken:
+       in dark themes it sits below the window color, so the gutter would
+       dissolve into the app background instead of reading as a panel. */
+    panel: css(reversed ? '--bg-panel-2' : '--bg-panel') || '#FCFCFD',
+    float: css('--bg-float') || '#FFFFFF',
+    sunken: css(reversed ? '--bg-panel' : '--bg-panel-2') || '#F0F0F3',
     line: css('--line') || 'rgba(15,15,20,.09)',
   };
 };
@@ -313,13 +321,17 @@ function drawTracksBg(c: any, W: any, H: any) {
     c.moveTo(x, T.ruler); c.lineTo(x, H);
   }
   c.stroke();
-  /* row stripes */
+  /* row stripes + lane hairlines */
   for (let i = 0; i < T.rows.length; i++) {
     const y = rowY(i);
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
     if (r.kind === 'layer' && PM.sel.layers.includes(r.L.id)) {
       c.fillStyle = INK.over; c.fillRect(T.gut, y, W - T.gut, T.row);
+    }
+    if (r.kind === 'layer') {
+      c.strokeStyle = INK.grid; c.beginPath();
+      c.moveTo(T.gut, y + T.row - .5); c.lineTo(W, y + T.row - .5); c.stroke();
     }
   }
   c.restore();
@@ -337,15 +349,20 @@ function drawRuler(c: any, W: any, H: any) {
   c.strokeStyle = theme.line; c.beginPath(); c.moveTo(0, T.ruler - .5); c.lineTo(W, T.ruler - .5); c.stroke();
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, T.ruler); c.clip();
   const step = niceStep(T.pps);
-  c.font = '500 10px ' + fui();
+  c.font = '400 10px ' + fui();
   c.fillStyle = theme.tx3; c.textBaseline = 'middle';
   c.strokeStyle = INK.tick;
   c.beginPath();
   for (let t = Math.floor(T.scrollT / step) * step; t2x(t) < W; t += step) {
     const x = Math.round(t2x(t)) + .5;
     if (x < T.gut - 1) continue;
-    c.moveTo(x, T.ruler - 6); c.lineTo(x, T.ruler);
-    c.fillText(fmtRuler(t, step, p.fps), x + 4, T.ruler / 2 - 1);
+    c.moveTo(x, T.ruler - 7); c.lineTo(x, T.ruler);
+    c.fillText(fmtRuler(t, step, p.fps), x + 5, T.ruler - 11);
+    /* minor ticks between labeled steps */
+    for (let m = 1; m < 4; m++) {
+      const mx = Math.round(t2x(t + step * m / 4)) + .5;
+      if (mx > T.gut && mx < W) { c.moveTo(mx, T.ruler - 3.5); c.lineTo(mx, T.ruler); }
+    }
   }
   c.stroke();
   /* Work-area brackets stay visible without drawing a line across the ruler. */
@@ -372,7 +389,7 @@ function fmtRuler(t: any, step: any, fps: any) {
   const m = Math.floor(t / 60), s = Math.round(t % 60);
   return (m ? m + ':' : '0:') + String(s).padStart(2, '0');
 }
-const fui = () => '"Geist",-apple-system,system-ui,sans-serif';
+const fui = () => '"SF Pro Text",-apple-system,BlinkMacSystemFont,sans-serif';
 
 function drawClips(c: any, W: any, H: any) {
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
@@ -389,7 +406,6 @@ function drawClips(c: any, W: any, H: any) {
 function rgba(hex: any, a: any) { const [r, g, b] = PM.hex2rgb(hex); return `rgba(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0},${a})`; }
 
 const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
-const layerLabel = (L: any) => (T.style.showTypeBadges && BADGE[L.type] ? BADGE[L.type] + ' ' : '') + L.name;
 
 function drawAudioClipWaveform(c: any, L: any, { x, y, width, height }: any, darkText: any) {
   const clipLeft = Math.max(x, T.gut);
@@ -416,30 +432,74 @@ function drawAudioClipWaveform(c: any, L: any, { x, y, width, height }: any, dar
 function drawClip(c: any, L: any, y: any) {
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
   if (x1 < T.gut || x0 > T.w) return;
-  const hh = T.row - 7;
-  const yy = y + 3.5;
+  const hh = T.row - 8;
+  const yy = y + 4;
   const sel = PM.sel.layers.includes(L.id);
   const r = T.style.clipRadius;
-  /* Label contrast from actual chip luminance, so it works in both themes:
-     dark text on light chips (cream/sand/yellow/gray), white text on dark chips. */
-  const [cr, cg, cb] = PM.hex2rgb(L.color);
-  const lum = .2126 * cr + .7152 * cg + .0722 * cb;   /* 0..1 */
-  const darkText = lum > .55;
+  const w = Math.max(4, x1 - x0);
+  /* Tactile chip material, matching the reference panels exactly:
+     vertical gradient body + inner top highlight (white 33%, y1) + hairline
+     ring in a darker shade (spread-1 analog) + soft drop shadow (y3 blur4),
+     color-tinted when the body is colored. Rest = neutral recipe with a color
+     swatch; selected = the colored recipe built from the layer color. */
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const off = !L.on;
   c.save();
-  roundRect(c, x0, yy, Math.max(4, x1 - x0), hh, r);
-  c.fillStyle = L.on ? L.color : rgba(L.color, .38);
-  c.fill();
-  if (sel) { c.strokeStyle = INK.inv; c.lineWidth = 1.4; c.stroke(); }
+  if (off) c.globalAlpha = .45;
+  /* drop shadow pass — felt, not seen */
+  c.shadowColor = sel ? rgba(L.color, .28) : (dark ? 'rgba(0,0,0,.3)' : 'rgba(15,15,20,.07)');
+  c.shadowBlur = 3; c.shadowOffsetY = 1;
+  roundRect(c, x0, yy, w, hh, r);
+  const g = c.createLinearGradient(0, yy, 0, yy + hh);
+  if (sel) { g.addColorStop(0, shade(L.color, 1.03)); g.addColorStop(1, shade(L.color, .93)); }
+  else if (dark) { g.addColorStop(0, '#292623'); g.addColorStop(1, '#232020'); }
+  else { g.addColorStop(0, '#FCFCFD'); g.addColorStop(1, '#F4F4F6'); }
+  c.fillStyle = g; c.fill();
+  c.shadowColor = 'transparent'; c.shadowBlur = 0; c.shadowOffsetY = 0;
+  /* hairline ring, a shade under the body */
+  c.strokeStyle = sel ? shade(L.color, .8) : ink(dark ? '.14' : '.1');
+  c.lineWidth = 1; c.stroke();
+  c.save();
   c.clip();
+  /* inner top highlight — a hint, not a stripe */
+  c.strokeStyle = sel ? 'rgba(255,255,255,.22)' : (dark ? 'rgba(255,255,255,.05)' : 'rgba(255,255,255,.65)');
+  c.lineWidth = 1;
+  c.beginPath(); c.moveTo(x0 + r * .7, yy + 1.5); c.lineTo(x0 + w - r * .7, yy + 1.5); c.stroke();
+  /* Label contrast from body luminance when the body is colored. */
+  const [cr, cg, cb] = PM.hex2rgb(L.color);
+  const lum = .2126 * cr + .7152 * cg + .0722 * cb;
+  const darkText = sel ? lum > .55 : !dark;
   if (L.type === 'audio') drawAudioClipWaveform(c, L, {
-    x: x0, y: yy, width: Math.max(4, x1 - x0), height: hh,
+    x: x0, y: yy, width: w, height: hh,
   }, darkText);
-  c.fillStyle = darkText ? 'rgba(20,20,24,.92)' : 'rgba(255,255,255,.96)';
-  c.font = '560 11.5px ' + fui();
   c.textBaseline = 'middle';
-  const label = layerLabel(L);
-  c.fillText(label, Math.max(x0, T.gut) + 9, yy + hh / 2);
+  let lx = Math.max(x0, T.gut) + 8;
+  if (!sel) {
+    /* color swatch, itself a miniature of the chip material */
+    const sw = 9;
+    c.fillStyle = L.color;
+    roundRect(c, lx, yy + hh / 2 - sw / 2, sw, sw, 2.5); c.fill();
+    c.strokeStyle = shade(L.color, .84); c.lineWidth = 1; c.stroke();
+    lx += sw + 7;
+  }
+  if (T.style.showTypeBadges && BADGE[L.type]) {
+    c.font = '500 9px ' + fui();
+    c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.55)' : 'rgba(255,255,255,.6)') : theme.tx3;
+    const b = BADGE[L.type].toUpperCase();
+    c.fillText(b, lx, yy + hh / 2 + .5);
+    lx += c.measureText(b).width + 6;
+  }
+  c.font = '500 11px ' + fui();
+  c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.92)' : 'rgba(255,255,255,.97)') : theme.tx2;
+  c.fillText(L.name, lx, yy + hh / 2 + .5);
   c.restore();
+  c.restore();
+}
+/* Multiply a hex color's channels — cheap lighten/darken for chip gradients. */
+function shade(hex: any, f: any) {
+  const [r, g, b] = PM.hex2rgb(hex);
+  const ch = (v: any) => Math.max(0, Math.min(255, Math.round(v * f * 255)));
+  return `rgb(${ch(r)},${ch(g)},${ch(b)})`;
 }
 
 function drawPropKeys(c: any, r: any, y: any) {
@@ -473,8 +533,8 @@ function drawGutter(c: any, W: any, H: any) {
     if (r.kind === 'layer') {
       const L = r.L, sel = PM.sel.layers.includes(L.id);
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
-      c.font = '500 11px ' + fui();
-      c.fillStyle = theme.tx3; c.textBaseline = 'middle';
+      c.font = '400 10px ' + fui();
+      c.fillStyle = theme.tx4 || theme.tx3; c.textBaseline = 'middle';
       if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
       /* eye / lock */
       icoEye(c, 30, y + T.row / 2, L.on);
@@ -486,16 +546,16 @@ function drawGutter(c: any, W: any, H: any) {
       c.strokeStyle = theme.tx3; c.lineWidth = 1.4; c.beginPath();
       c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
       c.restore();
-      /* color chip + name */
-      c.fillStyle = L.color; roundRect(c, 86, y + T.row / 2 - 6, 3, 12, 1.5); c.fill();
-      c.font = (sel ? '560 ' : '450 ') + '11.5px ' + fui();
+      /* color swatch + name (same swatch language as the clip strips) */
+      c.fillStyle = L.color; roundRect(c, 86, y + T.row / 2 - 4.5, 9, 9, 2.5); c.fill();
+      c.font = (sel ? '500 ' : '400 ') + '11.5px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      clipText(c, L.name, 96, y + T.row / 2, T.gut - 130);
+      clipText(c, L.name, 101, y + T.row / 2, T.gut - 135);
       if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fui(); c.fillText('↳', T.gut - 24, y + T.row / 2); }
       if (L.mblur) { c.fillStyle = theme.accent; c.font = '500 8.5px ' + fui(); c.fillText('MB', T.gut - 15, y + T.row / 2); }
     } else {
       const L = r.L;
-      c.font = '450 11px ' + fui();
+      c.font = '400 11px ' + fui();
       c.fillStyle = PM.sel.chan === r.key ? theme.accent : theme.tx3;
       clipText(c, r.label, 112, y + T.row / 2, T.gut - 150);
       /* value at playhead */
@@ -536,13 +596,18 @@ function roundRect(c: any, x: any, y: any, w: any, hh: any, r: any) {
 }
 
 function drawPlayhead(c: any, W: any, H: any) {
-  const x = t2x(PM.time);
+  const x = Math.round(t2x(PM.time)) + .5;
   if (x < T.gut) return;
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, H); c.clip();
-  c.strokeStyle = '#3E7BFA'; c.lineWidth = 1.5;
-  c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke();
-  c.fillStyle = '#3E7BFA';
-  roundRect(c, x - 5, 0, 10, 9, 2); c.fill();
+  /* App accent, 1px crisp stem, tapered grip in the ruler. */
+  c.strokeStyle = theme.accent; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(x, WORK_BAR.height + 2); c.lineTo(x, H); c.stroke();
+  c.fillStyle = theme.accent;
+  const gy = WORK_BAR.height + 2, gw = 9, gh = 11;
+  c.beginPath();
+  c.moveTo(x - gw / 2, gy); c.lineTo(x + gw / 2, gy);
+  c.lineTo(x + gw / 2, gy + gh - 4); c.lineTo(x, gy + gh);
+  c.lineTo(x - gw / 2, gy + gh - 4); c.closePath(); c.fill();
   c.restore();
 }
 
@@ -649,6 +714,7 @@ function onMove(e: any) {
   if (x > T.gut) {
     const workHit = workAreaHit(x, y);
     if (workHit) cur = workHit.kind === 'handle' ? 'ew-resize' : 'grab';
+    else if (y < T.ruler) cur = 'ew-resize';
     const hr = hitRow(y);
     if (!workHit && hr && hr.row.kind === 'layer') {
       const L = hr.row.L;
@@ -664,12 +730,13 @@ function onMove(e: any) {
 }
 
 function workAreaHit(x: any, y: any) {
-  if (y < WORK_BAR.top - 1 || y > WORK_BAR.top + WORK_BAR.height + 2) return null;
   const wa = PM.proj.work || [0, PM.proj.dur];
   const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
   const d0 = Math.abs(x - x0), d1 = Math.abs(x - x1);
-  if (Math.min(d0, d1) <= WORK_BAR.hit) return { kind: 'handle', idx: d0 <= d1 ? 0 : 1 };
-  if (x > x0 && x < x1) return { kind: 'bar' };
+  /* Handles get a little vertical grace; the bar itself only owns its thin
+     strip so the ruler below it stays a scrub surface. */
+  if (y <= WORK_BAR.height + 5 && Math.min(d0, d1) <= WORK_BAR.hit) return { kind: 'handle', idx: d0 <= d1 ? 0 : 1 };
+  if (y <= WORK_BAR.height + 1 && x > x0 && x < x1) return { kind: 'bar' };
   return null;
 }
 
