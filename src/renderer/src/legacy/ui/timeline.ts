@@ -76,7 +76,7 @@ T.attachCanvas = (wrap: HTMLElement) => {
 };
 
 function buildHead(head: any) {
-  const btn = (icon: any, fn: any, title: any) => h('button.iconbtn', { title, onclick: fn }, PM.icon(icon));
+  const btn = (icon: any, fn: any, title: any) => h('button.iconbtn', { type: 'button', title, onclick: fn }, PM.icon(icon));
   const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
   const zoom = h('input', { type: 'range', min: 8, max: 900, value: T.pps, step: 1, title: 'Timeline zoom', 'aria-label': 'Timeline zoom' });
@@ -100,12 +100,19 @@ function buildHead(head: any) {
     loop, snap, graph,
   );
   head.append(transport, view);
-  const sync = () => {
+  const syncTime = () => {
     time.textContent = PM.tc(PM.time, PM.proj.fps);
-    playBtn.textContent = '';
-    playBtn.appendChild(PM.icon(PM.playing ? 'pause' : 'play'));
   };
-  PM.bus.on('time', sync); PM.bus.on('transport', sync); sync();
+  const syncTransport = () => {
+    /* Keep the icon node stable while playback frames update the timecode.
+       Replacing it between pointerdown and pointerup cancels a human-speed
+       click in Chromium, which made the visible Pause control unresponsive. */
+    const icon = PM.playing ? 'pause' : 'play';
+    if (playBtn.querySelector(`[data-icon="${icon}"]`)) return;
+    playBtn.replaceChildren(PM.icon(icon));
+  };
+  PM.bus.on('time', syncTime); PM.bus.on('transport', syncTransport);
+  syncTime(); syncTransport();
   time.addEventListener('pointerdown', (e: any) => {
     PM.drag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(PM.time + dx / 12 / PM.proj.fps) });
   });
