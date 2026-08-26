@@ -6,27 +6,36 @@ const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
 PM.app = APP;
 
-/* ── appearance (light default, dark alternate) ────────── */
+/* ── appearance (system default; light/dark are explicit overrides) ── */
 PM.theme = (() => {
   const root = window.document.documentElement;
+  const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+  let mode: any = 'system';
+  const resolved = () => (mode === 'system' ? (media?.matches ? 'dark' : 'light') : mode);
   const syncNative = () => {
     try {
-      (window as any).webkit && (window as any).webkit.messageHandlers.pmTheme &&
-        (window as any).webkit.messageHandlers.pmTheme.postMessage(root.dataset.theme || 'light');
+      (window as any).webkit?.messageHandlers?.pmTheme?.postMessage(mode);
     } catch (e) { }
   };
-  const apply = (t: any) => {
-    if (t === 'dark') root.dataset.theme = 'dark'; else delete root.dataset.theme;
-    PM.store.set('theme', t);
-    syncNative();
+  const render = () => {
+    if (resolved() === 'dark') root.dataset.theme = 'dark'; else delete root.dataset.theme;
     /* layout event re-resolves CSS-token caches (timeline canvas) */
     PM.bus.emit('layout');
     PM.invalidate();
   };
-  const saved = PM.store.get('theme', 'light');
-  apply(saved === 'dark' ? 'dark' : 'light');
+  const apply = (t: any) => {
+    mode = ['light', 'dark', 'system'].includes(t) ? t : 'system';
+    PM.store.set('themeMode', mode);
+    PM.store.set('theme', mode);
+    syncNative();
+    render();
+  };
+  /* Follow OS appearance changes live while in system mode. */
+  media?.addEventListener?.('change', () => { if (mode === 'system') render(); });
+  apply(PM.store.get('themeMode', 'system'));
   return {
     get current() { return root.dataset.theme === 'dark' ? 'dark' : 'light'; },
+    get mode() { return mode; },
     apply,
     toggle() { apply(this.current === 'dark' ? 'light' : 'dark'); },
   };
@@ -276,8 +285,9 @@ restoreProjectAssets(PM.proj);
 /* ── shell ─────────────────────────────────────────────── */
 function openSettings() {
   const appearance = h('select.settings-appearance', { 'aria-label': 'Appearance' },
+    h('option', { value: 'system' }, 'Default'),
     h('option', { value: 'light' }, 'Light'), h('option', { value: 'dark' }, 'Dark'));
-  appearance.value = PM.theme.current;
+  appearance.value = PM.theme.mode;
   appearance.onchange = () => PM.theme.apply(appearance.value);
   const body = h('div.settings-view',
     h('div.settings-row', h('div.settings-copy', h('b', 'Appearance'), h('span', 'Choose how Powermove looks.')), appearance),
