@@ -112,7 +112,35 @@ function failure(error: string, cancelled = false): CodexRunResult {
 }
 
 function diagnosticText(attempt: AttemptResult, fallback: string): string {
-  return attempt.stderr.trim() || attempt.spawnError?.message || fallback;
+  return humanizeCodexFailure(attempt.stderr.trim() || attempt.spawnError?.message || '', fallback);
+}
+
+/* Raw CLI stderr must never reach the conversation: it is log noise (timestamps,
+   rust module paths, auth headers). Map known failure classes to actionable
+   sentences and reduce everything else to its last meaningful line. The full
+   diagnostic stays in the main-process log. */
+export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT generation failed.'): string {
+  const text = diagnostic.trim();
+  if (!text) return fallback;
+  console.error('[codex] run failed:', text.slice(0, 4_000));
+  if (/AuthRequired|www_authenticate|Unauthorized|\b401\b/i.test(text) && /rmcp|mcp/i.test(text)) {
+    return 'One of your Codex integrations (an MCP server) needs to be signed in again. Run `codex` in a terminal, re-authenticate it, then retry.';
+  }
+  if (/not logged in|login required|please run codex login|invalid api key|credentials/i.test(text)) {
+    return 'Codex CLI is not signed in. Run `codex login` in a terminal, then retry.';
+  }
+  if (/ENOENT|command not found|No such file/i.test(text)) {
+    return 'The Codex CLI could not be launched. Check that `codex` is installed and on your PATH.';
+  }
+  if (/rate.?limit|\b429\b|overloaded/i.test(text)) {
+    return 'The model is rate-limited right now. Wait a moment and retry.';
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\d{4}-\d{2}-\d{2}T\S+\s+(ERROR|WARN|INFO)\s+\S*:?\s*/i, '').trim())
+    .filter(Boolean);
+  const last = lines.at(-1) ?? fallback;
+  return `The agent failed: ${last.slice(0, 240)}`;
 }
 
 function attemptOutput(attempt: AttemptResult): string {

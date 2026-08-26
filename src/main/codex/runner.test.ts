@@ -281,3 +281,32 @@ describe('CodexRunner lifecycle', () => {
     ]);
   });
 });
+
+describe('humanizeCodexFailure', () => {
+  it('maps MCP auth failures to an actionable sentence', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    const raw = '2026-08-26T22:35:35.620618Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\\"OAuth\\"" })';
+    const text = humanizeCodexFailure(raw);
+    expect(text).toContain('MCP server');
+    expect(text).toContain('codex');
+    expect(text).not.toContain('rmcp::');
+    expect(text).not.toContain('www_authenticate');
+  });
+
+  it('maps login failures and missing binary', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    expect(humanizeCodexFailure('Error: not logged in. Please run codex login.')).toContain('codex login');
+    expect(humanizeCodexFailure('spawn codex ENOENT')).toContain('installed');
+  });
+
+  it('reduces unknown stderr to its last meaningful line without log noise', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    const text = humanizeCodexFailure('2026-08-26T10:00:00Z WARN codex::something: first\n2026-08-26T10:00:01Z ERROR codex::other: everything exploded badly');
+    expect(text).toBe('The agent failed: everything exploded badly');
+  });
+
+  it('falls back cleanly on empty diagnostics', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    expect(humanizeCodexFailure('', 'The autonomous agent failed.')).toBe('The autonomous agent failed.');
+  });
+});

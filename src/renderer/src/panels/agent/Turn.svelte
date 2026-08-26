@@ -39,7 +39,7 @@
     <div class="agent-bubble">{message.text}</div>
   </div>
 {:else}
-  <div class="agent-msg assistant">
+  <div class="agent-msg assistant" class:is-error={message.error}>
     {#if words}
       <p>{#each words as word, index}<span class="agent-word" style={`--word-index:${Math.min(index, 40)}`}>{word}</span>{/each}</p>
     {:else}

@@ -562,6 +562,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    invisible text on a pill — restore a solid color for chips only. */
 .shimmer-text .agent-trace-code{-webkit-background-clip:border-box;background-clip:border-box;color:var(--tx-2)}
 .agent-trace.is-archived{margin:2px 0 6px}
+.agent-msg.assistant.is-error p{color:var(--danger)}
 /* Live row — a slow left-to-right sweep of light across the text itself. */
 .shimmer-text{background:linear-gradient(100deg,var(--tx-3) 30%,var(--tx) 50%,var(--tx-3) 70%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer-sweep 1.6s linear infinite}
 @keyframes shimmer-sweep{to{background-position:-200% 0}}

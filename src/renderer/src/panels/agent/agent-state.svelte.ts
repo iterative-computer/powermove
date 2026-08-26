@@ -13,6 +13,8 @@ export interface AgentMessage {
   steps?: TraceStep[];
   attachments?: Array<Record<string, any> | string>;
   entering?: boolean;
+  /** Run failures render with the error treatment. */
+  error?: boolean;
   fixExtensionId?: string;
 }
 

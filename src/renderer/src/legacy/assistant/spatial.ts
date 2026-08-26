@@ -1284,8 +1284,9 @@ async function sendRequest(input: any) {
     if (token !== S.requestToken) return;
     if (error?.name === 'AbortError') return;
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
+    archiveTrace();
     S.activity = ''; S.phase = 'conversation';
-    S.conversation.push({ role: 'assistant', text: String(error.message || error).slice(0, 220) });
+    S.conversation.push({ role: 'assistant', error: true, text: String(error.message || error).slice(0, 300) });
     PM.AgentUI?.update({ focusComposer: true });
   } finally {
     if (token === S.requestToken) {
@@ -1947,7 +1948,7 @@ async function applyPanelPlan(plan: any) {
     PM.WS.restoreHistorySnapshot(checkpoint);
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.plan = null; S.phase = 'conversation';
-    S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
+    S.conversation.push({ role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
     PM.AgentUI?.update({ focusComposer: true });
   }
 }
@@ -1990,7 +1991,7 @@ async function applyScenePlan(plan: any) {
   } catch (error: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
-    S.conversation.push({ role: 'assistant', text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
+    S.conversation.push({ role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
     PM.AgentUI?.update({ focusComposer: true });
   }
 }
