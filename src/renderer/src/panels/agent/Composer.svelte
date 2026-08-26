@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Icon from '../Icon.svelte';
-  import AccessPicker from './AccessPicker.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { agentState, composerMode } from './agent-state.svelte';
   import ModelPicker from './ModelPicker.svelte';
@@ -10,6 +9,7 @@
   let textarea: HTMLTextAreaElement;
   let fileInput: HTMLInputElement;
   let draft = $state('');
+  let dragDepth = $state(0);
   let lastFocusVersion = 0;
   const mode = $derived(composerMode(agentState.legacyPhase));
   const textareaId = $derived(`agent-composer-${panelId}`);
@@ -54,7 +54,11 @@
 
   function autosize(): void {
     if (!textarea) return;
-    textarea.style.height = 'auto';
+    /* Blank the placeholder before measuring: Chromium counts the wrapped
+       placeholder in scrollHeight, which locks an empty box open. */
+    const placeholder = textarea.placeholder;
+    if (!textarea.value) textarea.placeholder = '';
+    textarea.style.height = '24px';
     const style = window.getComputedStyle(textarea);
     const layout = PM.SpatialAssistant.math.textareaLayout(
       textarea.scrollHeight,
@@ -63,6 +67,7 @@
     );
     textarea.style.height = `${layout.height}px`;
     textarea.style.overflowY = layout.overflowY;
+    textarea.placeholder = placeholder;
   }
 
   function input(): void {
@@ -98,73 +103,68 @@
     void PM.AgentUI?.addAttachments(files);
   }
 
-  function scopeChange(event: Event): void {
-    PM.AgentUI?.setScope((event.currentTarget as HTMLSelectElement).value);
+  function drop(event: DragEvent): void {
+    event.preventDefault();
+    dragDepth = 0;
+    const files = filesFromTransfer(event.dataTransfer);
+    if (files.length) void PM.AgentUI?.addAttachments(files);
   }
 
   onMount(() => queueMicrotask(autosize));
 </script>
 
-<div class="agent-composer">
-  <div class="agent-composer-head">
-    <label class="agent-scope" title="Choose what the agent should work on">
-      <Icon {PM} name="panel" />
-      <select aria-label="Agent scope" value={agentState.scope} onchange={scopeChange} onkeydown={(event) => { event.stopPropagation(); if (event.key === 'Escape') (event.currentTarget as HTMLSelectElement).blur(); }}>
-        <option value="workspace">Entire workspace</option>
-        <option value="composition">Composition</option>
-        <optgroup label="Panel">
-          {#each visiblePanels as panel (panel.id)}
-            <option value={`panel:${panel.id}`}>{panel.title}{panel.hidden ? ' · hidden' : ''}</option>
-          {/each}
-        </optgroup>
-      </select>
-      <Icon {PM} name="chev" />
-    </label>
-    <AccessPicker {PM} />
-    {#if agentState.accessMode === 'editor'}
-      <button
-        class="agent-approval"
-        type="button"
-        aria-pressed={agentState.autoApplyPanels}
-        title={agentState.autoApplyPanels ? 'Safe panel changes apply automatically' : 'Review panel changes before applying'}
-        onclick={() => PM.AgentUI?.toggleAutoApplyPanels()}
-      ><i aria-hidden="true"></i>{agentState.autoApplyPanels ? 'Auto-apply panels' : 'Review panel edits'}</button>
-    {/if}
-  </div>
-  <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
-  <textarea
-    id={textareaId}
-    class="spatial-followup"
-    rows="1"
-    placeholder={mode.placeholder}
-    aria-label="Message Powermove agent"
-    data-autosize="true"
-    disabled={mode.disabled}
-    bind:this={textarea}
-    value={draft}
-    oninput={input}
-    onpaste={paste}
-    onkeydown={keydown}
-  ></textarea>
-  <div class="agent-attachment-rail">
-    <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
-  </div>
-  <div class="agent-composer-tools">
+<div
+  class="agent-composer"
+  class:is-dropping={dragDepth > 0}
+  role="group"
+  aria-label="Message composer"
+  ondragenter={(event) => { event.preventDefault(); dragDepth += 1; }}
+  ondragover={(event) => event.preventDefault()}
+  ondragleave={() => { dragDepth = Math.max(0, dragDepth - 1); }}
+  ondrop={drop}
+>
+  {#if agentState.attachments.length}
+    <div class="agent-attachment-rail">
+      <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
+    </div>
+  {/if}
+  <div class="agent-input-row">
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
-    <button class="agent-attach" type="button" title="Attach images or text files" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
-    <span class="sp"></span>
-    <ModelPicker {PM} />
+    <button class="agent-round agent-attach" type="button" title="Attach images or text files" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
+    <textarea
+      id={textareaId}
+      rows="1"
+      placeholder={mode.placeholder}
+      aria-label="Message Powermove agent"
+      data-autosize="true"
+      disabled={mode.disabled}
+      bind:this={textarea}
+      value={draft}
+      oninput={input}
+      onpaste={paste}
+      onkeydown={keydown}
+    ></textarea>
     {#if mode.working}
-      <button class="agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><Icon {PM} name="x" /></button>
+      <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>
+    {:else}
+      <button
+        class="agent-round agent-send"
+        class:is-sendable={draft.trim().length > 0 || agentState.attachments.length > 0}
+        type="button"
+        aria-label={mode.sendLabel}
+        title={mode.sendLabel}
+        disabled={mode.disabled}
+        onclick={submit}
+      >
+        {#if mode.disabled}<i class="agent-spin" aria-hidden="true"></i>{:else}<Icon {PM} name="return" />{/if}
+      </button>
     {/if}
-    <button class="spatial-action pri agent-send" type="button" aria-label={mode.sendLabel} title={mode.sendLabel} disabled={mode.disabled} onclick={submit}>
-      {#if mode.disabled}<i aria-hidden="true"></i>{:else}<Icon {PM} name="return" />{/if}
-    </button>
   </div>
 </div>
-
-<style>
-  .agent-composer {
-    position: relative;
-  }
-</style>
+<!-- Model bar: outside the card, bare on the panel — single line, never wraps.
+     No scope picker (the agent infers its target) and no permission toggle. -->
+<div class="agent-option-bar">
+  <span class="sp"></span>
+  <ModelPicker {PM} />
+</div>

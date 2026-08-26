@@ -197,29 +197,20 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
   });
 
-  it('routes computer access through the modal confirmed setter and restores focus', () => {
+  it('separates the model and effort triggers and keeps no scope or authority pickers', () => {
     renderPanel();
-    const select = target.querySelector<HTMLSelectElement>('select[aria-label="Agent authority"]')!;
-    select.value = 'project';
-    flushSync(() => select.dispatchEvent(new Event('change', { bubbles: true })));
-    expect(PM.AgentUI.setAccess).toHaveBeenCalledWith('project');
+    expect(target.querySelector('select[aria-label="Agent authority"]')).toBeNull();
+    expect(target.querySelector('select[aria-label="Agent scope"]')).toBeNull();
 
-    select.value = 'computer';
-    flushSync(() => select.dispatchEvent(new Event('change', { bubbles: true })));
-    const dialog = document.querySelector<HTMLElement>('.modal[role="alertdialog"]')!;
-    expect(dialog.textContent).toContain('Allow computer access for this run?');
-    expect(document.querySelector('#scrim')?.classList.contains('on')).toBe(true);
-    flushSync(() => dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
-    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(PM.AgentUI.confirmComputerAccess).not.toHaveBeenCalled();
+    const model = target.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!;
+    model.value = 'gpt-5.6-terra';
+    flushSync(() => model.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(PM.AgentUI.setModel).toHaveBeenCalledWith('gpt-5.6-terra', 'high');
 
-    select.value = 'computer';
-    flushSync(() => select.dispatchEvent(new Event('change', { bubbles: true })));
-    const allow = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
-      .find((button) => button.textContent === 'Allow for one run')!;
-    flushSync(() => allow.click());
-    expect(PM.AgentUI.confirmComputerAccess).toHaveBeenCalledOnce();
-    expect(PM.AgentUI.setAccess).not.toHaveBeenCalledWith('computer');
+    const effort = target.querySelector<HTMLSelectElement>('select[aria-label="Reasoning effort"]')!;
+    effort.value = 'low';
+    flushSync(() => effort.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(PM.AgentUI.setModel).toHaveBeenCalledWith('gpt-5.6-sol', 'low');
   });
 
   it('accumulates progress in state while rendering only the newest word-staggered line', () => {

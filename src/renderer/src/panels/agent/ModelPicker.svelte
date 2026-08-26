@@ -1,13 +1,16 @@
 <script lang="ts">
-  import Icon from '../Icon.svelte';
   import { agentState } from './agent-state.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
-  const value = $derived(`${agentState.model}|${agentState.reasoningEffort}`);
 
-  function change(event: Event): void {
-    const [model, effort] = (event.currentTarget as HTMLSelectElement).value.split('|');
-    PM.AgentUI?.setModel(model, effort);
+  /* One trigger, two controls (supermove model menu): the model reads as the
+     choice, the effort as its dimmer modifier two pixels away. */
+  function changeModel(event: Event): void {
+    PM.AgentUI?.setModel((event.currentTarget as HTMLSelectElement).value, agentState.reasoningEffort);
+  }
+
+  function changeEffort(event: Event): void {
+    PM.AgentUI?.setModel(agentState.model, (event.currentTarget as HTMLSelectElement).value);
   }
 
   function keydown(event: KeyboardEvent): void {
@@ -16,13 +19,15 @@
   }
 </script>
 
-<label class="agent-model" title="Choose model and reasoning">
-  <select aria-label="Model and reasoning effort" {value} onchange={change} onkeydown={keydown}>
+<div class="agent-modelbar" title="Model and reasoning effort">
+  <select aria-label="Model" value={agentState.model} onchange={changeModel} onkeydown={keydown}>
     {#each agentState.models as model (model.id)}
-      {#each agentState.reasoningEfforts as effort (effort)}
-        <option value={`${model.id}|${effort}`}>{model.label} · {effort.replace(/^./, (letter) => letter.toUpperCase())}</option>
-      {/each}
+      <option value={model.id}>{model.label}</option>
     {/each}
   </select>
-  <Icon {PM} name="chev" />
-</label>
+  <select class="effort" aria-label="Reasoning effort" value={agentState.reasoningEffort} onchange={changeEffort} onkeydown={keydown}>
+    {#each agentState.reasoningEfforts as effort (effort)}
+      <option value={effort}>{effort}</option>
+    {/each}
+  </select>
+</div>

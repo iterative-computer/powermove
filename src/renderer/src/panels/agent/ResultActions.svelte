@@ -19,21 +19,21 @@
 </script>
 
 {#if panelRun}
-  <div class="spatial-proposal">
-    <div class="spatial-proposal-kicker">Reversible agent change</div>
+  <div class="agent-card">
+    <div class="agent-card-kicker">Reversible agent change</div>
     <h3>{panelRun.summary}</h3>
     {#each panelRun.actions as action}
       <div class="spatial-preview-control panel-action"><Icon {PM} name="panel" /><span>{describePanelAction(PM, action)}</span></div>
     {/each}
     <p>This is also in the normal Command-Z Undo history.</p>
-    <div class="spatial-proposal-actions">
-      <button class="spatial-action" type="button" onclick={() => PM.AgentUI?.undoPanelRun()}>Undo change</button>
-      <button class="spatial-action pri" type="button" onclick={() => PM.AgentUI?.keepPanelRun()}>Keep change</button>
+    <div class="agent-card-actions">
+      <button class="agent-btn" type="button" onclick={() => PM.AgentUI?.undoPanelRun()}>Undo change</button>
+      <button class="agent-btn pri" type="button" onclick={() => PM.AgentUI?.keepPanelRun()}>Keep change</button>
     </div>
   </div>
 {:else if run}
-  <div class="spatial-proposal">
-    <div class="spatial-proposal-kicker">{run.autonomous ? 'Autonomous result' : 'Rendered result'}</div>
+  <div class="agent-card">
+    <div class="agent-card-kicker">{run.autonomous ? 'Autonomous result' : 'Rendered result'}</div>
     <h3>{run.autonomous ? (run.summary || 'Agent work is ready') : 'Review the actual result'}</h3>
     <p>{run.review?.message || 'The rendered change is ready.'}</p>
     {#if run.review?.critique}<p>{run.review.critique}</p>{/if}
@@ -44,9 +44,10 @@
     {#if run.artifacts?.length}
       <div class="agent-artifacts">
         {#each run.artifacts as artifact}
+          {@const artifactMeta = [artifact.mime || '', artifactSize(artifact.size)].filter(Boolean).join(' · ')}
           <div class="agent-artifact">
             <Icon {PM} name={artifactIcon(artifact)} />
-            <span class="agent-artifact-copy"><b>{artifact.name || artifact.path}</b><small>{[artifact.mime || '', artifactSize(artifact.size)].filter(Boolean).join(' · ')}</small></span>
+            <span class="agent-artifact-copy"><b title={artifact.name || artifact.path}>{artifact.name || artifact.path}</b><small title={artifactMeta}>{artifactMeta}</small></span>
             {#if PM.assetKind({ name: artifact.name, type: artifact.mime })}
               <button type="button" disabled={artifact.importing || artifact.imported} aria-label={artifact.imported ? `${artifact.name} is already on the timeline` : `Add ${artifact.name} to timeline`} title={artifact.imported ? 'Already added to the timeline' : 'Add to timeline'} onclick={() => PM.AgentUI?.importArtifact(artifact)}>
                 {#if artifact.importing}<i aria-hidden="true"></i>{:else}<Icon {PM} name={artifact.imported ? 'link' : 'plus'} />{/if}
@@ -65,9 +66,9 @@
         {/each}
       </div>
     {/if}
-    <div class="spatial-proposal-actions">
-      {#if reversible}<button class="spatial-action" type="button" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
-      <button class="spatial-action pri" type="button" onclick={() => PM.AgentUI?.keepSceneRun()}>{reversible ? 'Keep change' : 'Done'}</button>
+    <div class="agent-card-actions">
+      {#if reversible}<button class="agent-btn" type="button" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
+      <button class="agent-btn pri" type="button" onclick={() => PM.AgentUI?.keepSceneRun()}>{reversible ? 'Keep change' : 'Done'}</button>
     </div>
   </div>
 {/if}

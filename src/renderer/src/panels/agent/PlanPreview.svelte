@@ -23,8 +23,8 @@
 </script>
 
 {#if plan}
-  <div class="spatial-proposal">
-    <div class="spatial-proposal-kicker">Proposed change</div>
+  <div class="agent-card">
+    <div class="agent-card-kicker">Proposed change</div>
     <h3>{title}</h3>
     {#if plan.kind === 'panels'}
       {#each plan.panelEdit.actions as action}
@@ -58,9 +58,19 @@
         </div>
       {/each}
     {/if}
-    <div class="spatial-proposal-actions">
-      <button class="spatial-action" type="button" onclick={() => PM.AgentUI?.dismissPlan()}>Dismiss</button>
-      <button class="spatial-action pri" type="button" onclick={() => PM.AgentUI?.applyPlan()}>{applyLabel}</button>
+    <div class="agent-card-actions">
+      {#if plan.kind === 'panels' && agentState.accessMode === 'editor'}
+        <button
+          class="agent-approval"
+          type="button"
+          aria-pressed={agentState.autoApplyPanels}
+          title={agentState.autoApplyPanels ? 'Safe panel changes apply automatically' : 'Review panel changes before applying'}
+          onclick={() => PM.AgentUI?.toggleAutoApplyPanels()}
+        >{agentState.autoApplyPanels ? 'Auto-apply' : 'Review edits'}</button>
+        <span class="sp"></span>
+      {/if}
+      <button class="agent-btn" type="button" onclick={() => PM.AgentUI?.dismissPlan()}>Dismiss</button>
+      <button class="agent-btn pri" type="button" onclick={() => PM.AgentUI?.applyPlan()}>{applyLabel}</button>
     </div>
   </div>
 {/if}

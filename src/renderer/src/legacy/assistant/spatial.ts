@@ -117,7 +117,9 @@ PM.WindowCapture = {
   },
 };
 
-const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'editor');
+/* Broad access is the default: the agent can use project tools and the web
+   without a picker. Computer access still requires its per-run confirmation. */
+const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'project');
 const S: any = {
   initialized: false, active: false, pressed: false, phase: 'idle',
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
@@ -133,7 +135,7 @@ const S: any = {
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
   model: PM.store?.get?.('agentModel', 'gpt-5.6-sol') || 'gpt-5.6-sol',
   reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
-  accessMode: ['editor', 'project'].includes(storedAccessMode) ? storedAccessMode : 'editor',
+  accessMode: ['editor', 'project'].includes(storedAccessMode) ? storedAccessMode : 'project',
 };
 
 const AGENT_MODELS: any = [
@@ -803,7 +805,8 @@ function showComposer(draft: any = '') {
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input); }
   });
-  const handle: any = h('div.spatial-target', selectedContext ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition');
+  const targetLabel: any = selectedContext ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition';
+  const handle: any = h('div.spatial-target', { title: targetLabel }, targetLabel);
   const contextLabel: any = selectedContext ? h('span.spatial-context-label', `Selected ${S.context.targetTitle}`) : null;
   S.card = h('div.spatial-compose.compact.full',
     handle,
