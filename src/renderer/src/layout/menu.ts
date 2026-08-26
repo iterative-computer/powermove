@@ -20,6 +20,25 @@ type MenuItem =
 
 const menuCleanups = new WeakMap<PMRegistry, () => void>();
 
+/** `menus.contribute('panel:context', …)` entries, translated to menu rows. */
+function panelContextContributions(PM: PMRegistry, panelId: string, dockId: string): MenuItem[] {
+  const contributions = PM.Kernel?.collectMenu?.('panel:context', { panelId, dockId }) ?? [];
+  const items: MenuItem[] = [];
+  for (const contribution of contributions as Array<any>) {
+    if (contribution === '-') items.push({ kind: 'separator' });
+    else if (contribution && typeof contribution.header === 'string') items.push({ kind: 'header', label: contribution.header });
+    else if (contribution && typeof contribution.label === 'string') {
+      items.push({
+        kind: 'action',
+        label: contribution.label,
+        disabled: contribution.disabled === true,
+        run: () => void contribution.run?.()
+      });
+    }
+  }
+  return items.length ? [{ kind: 'separator' }, ...items] : [];
+}
+
 export function openPanelMenu(
   PM: PMRegistry,
   event: MouseEvent,
@@ -69,7 +88,10 @@ export function openPanelMenu(
         kind: 'action' as const,
         label: `Restore ${PM.PANELS[item.id].title}`,
         run: () => PM.WS.mutate((w: Workspace) => restorePanel(w, item.id))
-      }))
+      })),
+    /* Extension contributions land at the end so they never shift the
+       positions a user has learned for the built-in rows. */
+    ...panelContextContributions(PM, spec.id, dock.id)
   ];
 
   const menu = document.createElement('div');

@@ -7,9 +7,11 @@ import {
   LIMITS,
   PROJECT_ID,
   REQUEST_ID,
+  type AgentExtensionChange,
   type CodexRunRequest,
   type CodexRunResult
 } from '../../shared/ipc';
+import { EXTENSION_ID } from '../../shared/extensions';
 import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
 import { buildAutonomousArgv, buildEditorArgv } from './adapter';
 import { collectArtifacts } from './artifacts';
@@ -26,6 +28,7 @@ import {
   sessionPathFor,
   writeSession,
   type AgentWorkspace,
+  type AgentApiPackFile,
   type CodexAuthority
 } from './workspace';
 
@@ -43,6 +46,8 @@ type SpawnLike = (
 
 export interface CodexRunOptions {
   userData: string;
+  extensionsDir: string;
+  apiPackFiles: () => Promise<AgentApiPackFile[]>;
   codexBinaryPref?: string | null;
   binary?: string;
   timeoutMs?: number;
@@ -118,6 +123,24 @@ function sortJsonValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.keys(value).sort().map((key) => [key, sortJsonValue(value[key])])
   );
+}
+
+export function parseAgentExtensionChanges(value: unknown): AgentExtensionChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const changes: AgentExtensionChange[] = [];
+  for (const item of value) {
+    if (changes.length >= 32) break;
+    if (
+      !isRecord(item) ||
+      !isString(item.id) ||
+      !EXTENSION_ID.test(item.id) ||
+      !isOneOf(item.action, ['created', 'updated', 'removed'] as const)
+    ) continue;
+    const change: AgentExtensionChange = { id: item.id, action: item.action };
+    if (isString(item.summary)) change.summary = item.summary;
+    changes.push(change);
+  }
+  return changes;
 }
 
 function isUnknownSession(text: string): boolean {
@@ -212,11 +235,18 @@ export class CodexRunner {
       }
 
       const authority = authorityForAccess(req.access);
+      let apiPackFiles: AgentApiPackFile[] = [];
+      try {
+        apiPackFiles = await options.apiPackFiles();
+      } catch (error) {
+        options.onWarning?.(`API pack unavailable: ${String(error)}`);
+      }
       const layout = await prepareAgentWorkspace(
         req,
         options.userData,
         authority,
-        agentResultSchema()
+        agentResultSchema(),
+        { extensionsDir: options.extensionsDir, apiPackFiles }
       );
       state.layout = layout;
       if (this.cancelled.has(req.id)) {
@@ -233,13 +263,15 @@ export class CodexRunner {
           instructions: agentInstructions({
             projectName: req.projectName,
             artifactPath: `artifacts/${layout.runId}`,
-            access: authority
+            access: authority,
+            extensionsDir: layout.extensionsDir
           }),
           prompt: req.prompt,
           imagePaths: layout.imagePaths,
           model: req.model,
           reasoningEffort: req.reasoningEffort,
           access: authority,
+          extensionsDir: layout.extensionsDir,
           sessionId: resumeId
         });
         attempt = await this.execute(req, state, binary, argv, layout.root, layout, options, (timer) => {
@@ -276,7 +308,13 @@ export class CodexRunner {
       parsed.artifacts = await collectArtifacts(layout.runDirectory, layout.runId, requested);
       parsed.projectId = req.projectId;
       parsed.access = authorityForAccess(req.access);
-      return { ok: true, text: JSON.stringify(sortJsonValue(parsed)), access: authority };
+      const extensions = parseAgentExtensionChanges(parsed.extensions);
+      return {
+        ok: true,
+        text: JSON.stringify(sortJsonValue(parsed)),
+        access: authority,
+        ...(extensions === undefined ? {} : { extensions })
+      };
     } catch (error) {
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);

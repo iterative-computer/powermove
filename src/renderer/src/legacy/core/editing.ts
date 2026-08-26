@@ -58,6 +58,11 @@ const channelPath: any = (path: any) => String(path || '')
   .replace(/^transform\./, '');
 const property: any = (layer: any, path: any) => {
   const channel: any = channelPath(path);
+  const transitionMatch: any = /^(transitionIn|transitionOut)\.p\.([a-zA-Z][a-zA-Z0-9]*)$/.exec(channel);
+  if (transitionMatch) {
+    const transition: any = layer[transitionMatch[1]];
+    return { channel, prop: transition?.p?.[transitionMatch[2]] || null };
+  }
   return { channel, prop: PM.findProp(layer, channel) || layer.p[channel] || null };
 };
 const lockedIntent: any = (layer: any, channel: any) => {
@@ -415,6 +420,53 @@ function setEffect(command: any) {
   return { id: layer.id, effectId: effect.id };
 }
 
+function setTransition(command: any) {
+  const layer: any = findLayer(command.layer || command.target || command.targetId);
+  if (!layer) throw new Error('Layer not found');
+  if (command.edge !== 'in' && command.edge !== 'out') throw new Error('Transition edge must be “in” or “out”');
+  const field: any = command.edge === 'in' ? 'transitionIn' : 'transitionOut';
+  if (command.transition == null) {
+    layer[field] = null;
+    PM.touch();
+    return { id: layer.id, edge: command.edge, transition: null };
+  }
+  if (!command.transition || typeof command.transition !== 'object' || Array.isArray(command.transition)) {
+    throw new Error('Transition must be an object or null');
+  }
+  const type: any = command.transition.type;
+  if (typeof type !== 'string' || !type) throw new Error('Transition type is required');
+  const definition: any = PM.transitionDef?.(type);
+  if (!definition) throw new Error(`Unknown transition: ${type}`);
+  const duration: any = command.transition.dur == null ? 0.5 : finite(command.transition.dur, 'transition duration');
+  if (duration < 0.02 || duration > 600) throw new Error('Transition duration must be between 0.02 and 600 seconds');
+  const values: any = command.transition.p == null ? {} : safePatch(command.transition.p, 'transition parameters');
+  const params: any = new Map(definition.params.map((param: any) => [param.k, param]));
+  for (const [key, value] of Object.entries(values)) {
+    const param: any = params.get(key);
+    if (!param) throw new Error(`Unknown transition parameter: ${key}`);
+    if (param.type === 'color') {
+      if (!colorValue(value)) throw new Error(`Transition parameter “${key}” must be a hex color`);
+    } else if (param.type === 'toggle') {
+      if (typeof value !== 'boolean') throw new Error(`Transition parameter “${key}” must be a boolean`);
+    } else if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`Transition parameter “${key}” must be a finite number`);
+    }
+  }
+  const transition: any = PM.mkTransition(type);
+  if (!transition) throw new Error(`Unknown transition: ${type}`);
+  transition.dur = duration;
+  /* Same type: keep the existing channels so keyframes/expressions survive a
+     duration or single-value edit (the inspector re-emits the whole command). */
+  const existing: any = layer[field];
+  if (existing && existing.type === type && !existing.missing && existing.p) {
+    for (const key of Object.keys(transition.p)) if (existing.p[key]) transition.p[key] = existing.p[key];
+  }
+  for (const [key, value] of Object.entries(values)) transition.p[key].v = value;
+  layer[field] = transition;
+  PM.touch();
+  return { id: layer.id, edge: command.edge, transition: type };
+}
+
 function setSceneParameter(command: any) {
   const name: any = String(command.name || '').trim();
   if (!name) throw new Error('Scene parameter name is required');
@@ -563,6 +615,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'add_effect': data = addEffect(command); break;
     case 'remove_effect': data = removeEffect(command); break;
     case 'set_effect': data = setEffect(command); break;
+    case 'set_transition': data = setTransition(command); break;
     case 'set_scene_parameter': data = setSceneParameter(command); break;
     case 'add_marker': data = addMarker(command); break;
     case 'create_section': data = createSection(command); break;
@@ -668,6 +721,22 @@ function sourceCatalog() {
           : {}),
       };
     }).filter(Boolean);
+    for (const [field, label] of [['transitionIn', 'Transition in'], ['transitionOut', 'Transition out']] as any) {
+      const transition: any = layer[field];
+      const definition: any = transition && PM.transitionDef?.(transition.type);
+      if (!definition || transition.missing) continue;
+      for (const param of definition.params) {
+        const prop: any = transition.p?.[param.k];
+        if (!prop) continue;
+        const value: any = PM.evP(layer, prop, PM.time, `${field}.p.${param.k}`);
+        const control: any = param.type === 'color' ? 'color' : param.type === 'toggle' ? 'toggle' : 'slider';
+        properties.push({
+          path: `${field}.p.${param.k}`, label: param.label || param.k, group: label,
+          control, value, animatable: true,
+          ...(control === 'slider' ? { ...numericRange(value, param.k), ...Object.fromEntries(['min', 'max', 'step', 'unit'].filter((key: any) => param[key] !== undefined).map((key: any) => [key, param[key]])) } : {}),
+        });
+      }
+    }
     return { id: layer.id, name: layer.name, type: layer.type, controls: [...fields, ...content, ...properties] };
   });
   return { target: '$composition', composition, layers, operations: Object.keys(Edit.operations) };
@@ -703,6 +772,7 @@ const Edit: any = {
     add_effect: { target: 'layer', fields: ['effect', 'parameters'] },
     remove_effect: { target: 'layer', fields: ['effect'] },
     set_effect: { target: 'layer', fields: ['effect', 'patch'] },
+    set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },
     set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
     add_marker: { target: 'project', fields: ['time', 'name'] },
     create_section: { target: 'project', fields: ['section'] },
@@ -800,6 +870,19 @@ const Edit: any = {
         path: `properties.${item.key}`, label: item.label, group: item.group,
         value: PM.evP(layer, item.prop, PM.time, item.key), animatable: true,
         command: { type: 'set_property', target: layer.id, path: item.key, value: PM.evP(layer, item.prop, PM.time, item.key) },
+      })).concat((['transitionIn', 'transitionOut'] as any).flatMap((field: any) => {
+        const transition: any = layer[field];
+        const definition: any = transition && PM.transitionDef?.(transition.type);
+        if (!definition || transition.missing) return [];
+        return definition.params.filter((param: any) => transition.p?.[param.k]).map((param: any) => ({
+          path: `${field}.p.${param.k}`, label: param.label || param.k,
+          group: field === 'transitionIn' ? 'Transition in' : 'Transition out',
+          value: PM.evP(layer, transition.p[param.k], PM.time, `${field}.p.${param.k}`), animatable: true,
+          command: {
+            type: 'set_property', target: layer.id, path: `${field}.p.${param.k}`,
+            value: PM.evP(layer, transition.p[param.k], PM.time, `${field}.p.${param.k}`),
+          },
+        }));
       })),
       operations: Object.keys(Edit.operations),
     };

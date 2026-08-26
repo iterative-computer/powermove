@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import { afterEach, it, vi } from 'vitest';
 
 import { makePM } from './make-pm';
+import { install as installElectronShim } from '../host/electron-shim';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
-function spatialModel(adapterFactory) {
+function spatialHarness(adapterFactory) {
   vi.stubGlobal('window', {
     navigator: {
       gpu: adapterFactory ? { requestAdapter: adapterFactory } : undefined,
@@ -14,6 +18,7 @@ function spatialModel(adapterFactory) {
     console,
     setTimeout,
     clearTimeout,
+    AbortController,
     atob: value => Buffer.from(value, 'base64').toString('binary'),
     TextDecoder,
     addEventListener() {},
@@ -39,7 +44,11 @@ function spatialModel(adapterFactory) {
   PM.L = () => null;
   PM.byName = () => null;
   PM.findProp = () => null;
-  return PM.SpatialAssistant;
+  return { PM, assistant: PM.SpatialAssistant };
+}
+
+function spatialModel(adapterFactory) {
+  return spatialHarness(adapterFactory).assistant;
 }
 
 function sampledShake(step) {
@@ -302,4 +311,165 @@ it('Ripple adapter acquisition is fresh on every lifecycle request', async () =>
   const second = await assistant.lifecycle.requestAdapter();
   assert.equal(calls, 2);
   assert.notEqual(first.generation, second.generation);
+});
+
+it('normalizes only valid typed extension changes', () => {
+  const { PM, assistant } = spatialHarness();
+  PM.proj = { id: 'project-1' };
+  const summary = 's'.repeat(200);
+  const result = assistant.math.normalizeAutonomousResult({ summary: 'Done' }, [
+      { id: 'new-mod', action: 'created', summary },
+      { id: 'updated-mod', action: 'updated' },
+      { id: 'removed-mod', action: 'removed' },
+      { id: 'x', action: 'created' },
+      { id: 'Uppercase-mod', action: 'updated' },
+      { id: 'bad-action', action: 'changed' },
+      { id: 'long-summary', action: 'created', summary: 's'.repeat(201) },
+      { id: 'wrong-summary', action: 'created', summary: 12 },
+  ]);
+
+  assert.deepEqual(result.extensions, [
+    { id: 'new-mod', action: 'created', summary },
+    { id: 'updated-mod', action: 'updated' },
+    { id: 'removed-mod', action: 'removed' },
+  ]);
+});
+
+it('caps normalized extension changes at 32 entries', () => {
+  const { PM, assistant } = spatialHarness();
+  PM.proj = { id: 'project-1' };
+  const extensions = Array.from({ length: 40 }, (_, index) => ({ id: `mod-${index}`, action: 'updated' }));
+  assert.equal(assistant.math.normalizeAutonomousResult({}, extensions).extensions.length, 32);
+});
+
+it('reloads created and updated mods while leaving removals to the watcher', async () => {
+  const { PM, assistant } = spatialHarness();
+  const reload = vi.fn(async () => {});
+  PM.Kernel = { loader: { reload, records: () => [
+    { id: 'new-mod', manifest: { name: 'New Mod' }, health: { state: 'ok' } },
+    { id: 'updated-mod', manifest: { name: 'Updated Mod' }, health: { state: 'ok' } },
+  ] } };
+
+  const turns = await assistant.lifecycle.applyExtensionChanges([
+    { id: 'new-mod', action: 'created' },
+    { id: 'updated-mod', action: 'updated' },
+    { id: 'removed-mod', action: 'removed' },
+  ]);
+
+  assert.deepEqual(reload.mock.calls, [['new-mod'], ['updated-mod']]);
+  assert.deepEqual(turns.map(turn => turn.text), [
+    'Added mod New Mod',
+    'Updated mod Updated Mod',
+    'Removed mod removed-mod',
+  ]);
+});
+
+it('reloads typed extension changes during the autonomous request flow', async () => {
+  const { PM } = spatialHarness();
+  const reload = vi.fn(async () => {});
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn((command) => command),
+  };
+  PM.Kernel = { loader: {
+    reload,
+    records: () => [{ id: 'new-mod', manifest: { name: 'New Mod' }, health: { state: 'ok' } }],
+  } };
+  PM.CodexBridge.request = vi.fn(async () => ({
+    text: JSON.stringify({ summary: 'Built the mod', commands: [], artifacts: [], externalActions: [], notes: [] }),
+    extensions: [{ id: 'new-mod', action: 'created' }],
+  }));
+
+  PM.AgentUI.submit('Build a mod');
+  await vi.waitFor(() => assert.notEqual(PM.AgentUI.state.phase, 'running'), { timeout: 1_500 });
+  assert.equal(PM.AgentUI.state.phase, 'result', JSON.stringify(PM.AgentUI.state.conversation));
+
+  assert.deepEqual(reload.mock.calls, [['new-mod']]);
+  assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Added mod New Mod'));
+});
+
+it('offers Fix it when a reloaded mod is unhealthy', async () => {
+  const { PM, assistant } = spatialHarness();
+  PM.Kernel = { loader: {
+    reload: vi.fn(async () => {}),
+    records: () => [{
+      id: 'broken-mod', manifest: { name: 'Broken Mod' },
+      health: { state: 'activation-error', error: 'Unexpected token\nindex.ts:12' },
+    }],
+  } };
+
+  const turns = await assistant.lifecycle.applyExtensionChanges([{ id: 'broken-mod', action: 'updated' }]);
+  assert.deepEqual(turns, [
+    { role: 'assistant', text: 'Updated mod Broken Mod' },
+    { role: 'assistant', text: "Broken Mod didn't load: Unexpected token", fixExtensionId: 'broken-mod' },
+  ]);
+});
+
+it('builds and automatically submits an extension Fix-it prompt in project mode', async () => {
+  const { PM, assistant } = spatialHarness();
+  const files = [{ path: 'index.ts', text: 'throw new Error()' }];
+  const readSource = vi.fn(async () => files);
+  const fixPrompt = vi.fn(async () => 'Fix broken-mod without changing its public id.');
+  (window as any).powermove = { extensions: { readSource }, codex: { fixPrompt } };
+  PM.Kernel = { loader: { records: () => [{
+    id: 'broken-mod', manifest: { name: 'Broken Mod' },
+    health: { state: 'build-error', error: 'Build failed\nstack' },
+  }] } };
+  PM.AgentUI = { setDraft: vi.fn(), submit: vi.fn(), update: vi.fn() };
+
+  await assistant.requestFix('broken-mod');
+
+  assert.deepEqual(readSource.mock.calls, [[{ id: 'broken-mod' }]]);
+  assert.deepEqual(fixPrompt.mock.calls, [[{ id: 'broken-mod', error: 'Build failed\nstack', files }]]);
+  assert.equal(PM.store.get('agentAccessMode', ''), 'project');
+  assert.deepEqual(PM.AgentUI.setDraft.mock.calls, [['Fix broken-mod without changing its public id.', true]]);
+  assert.deepEqual(PM.AgentUI.submit.mock.calls, [['Fix broken-mod without changing its public id.']]);
+});
+
+it('warns and no-ops when the Fix-it bridge is absent', async () => {
+  const { assistant } = spatialHarness();
+  const warn = vi.spyOn(window.console, 'warn').mockImplementation(() => {});
+  await assistant.requestFix('missing-mod');
+  assert.equal(warn.mock.calls.length, 1);
+  assert.match(warn.mock.calls[0][0], /Fix it is unavailable/);
+});
+
+it('forwards typed extension changes through the Electron shim payload', async () => {
+  const extensions = [{ id: 'new-mod', action: 'created', summary: 'Adds a panel' }];
+  const resolve = vi.fn();
+  const nativeBridge = {
+    codex: {
+      run: vi.fn(async () => ({ ok: true, text: '{"summary":"Done"}', access: 'project', extensions })),
+      requestComputerConsent: vi.fn(),
+      cancel: vi.fn(async () => {}),
+    },
+    store: { snapshotSync: () => ({}), set: vi.fn(), delete: vi.fn(), onError: vi.fn() },
+    log: vi.fn(),
+    onMenuCommand: vi.fn(),
+  };
+  vi.stubGlobal('window', {
+    powermove: nativeBridge,
+    TextEncoder,
+    atob: value => Buffer.from(value, 'base64').toString('binary'),
+    btoa: value => Buffer.from(value, 'binary').toString('base64'),
+    structuredClone,
+    console,
+    setTimeout,
+    addEventListener() {},
+    document: {
+      readyState: 'loading',
+      addEventListener() {},
+      documentElement: { classList: { add() {} } },
+    },
+  });
+  const PM = { CodexBridge: { resolve, progress: vi.fn() }, toast: vi.fn() };
+  installElectronShim(PM as any);
+
+  (window as any).webkit.messageHandlers.pmCodex.postMessage({
+    id: 'run-1', mode: 'autonomous', access: 'project', prompt: 'Build a mod', projectId: 'project-1',
+  });
+  await vi.waitFor(() => assert.equal(resolve.mock.calls.length, 1));
+  assert.deepEqual(resolve.mock.calls[0][1].extensions, extensions);
 });

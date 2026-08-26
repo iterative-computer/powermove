@@ -29,6 +29,8 @@ type LayoutInstance = ReturnType<typeof mount> & {
 };
 
 let mounted: LayoutInstance | null = null;
+let themeSubscription: { dispose(): void } | null = null;
+let workspaceThemeKeys = new Set<string>();
 
 function applyTheme(PM: PMRegistry, theme: Record<string, any>): void {
   const root = document.documentElement.style;
@@ -41,9 +43,14 @@ function applyTheme(PM: PMRegistry, theme: Record<string, any>): void {
     font: '--f-ui',
     mono: '--f-mono'
   };
+  for (const key of workspaceThemeKeys) root.removeProperty(key);
+  workspaceThemeKeys = new Set();
+
   for (const key of ['accent', 'bg', 'panel', 'text', 'line', 'font', 'mono']) {
-    if (theme[key]) root.setProperty(map[key]!, theme[key]);
-    else root.removeProperty(map[key]!);
+    if (!theme[key]) continue;
+    const property = map[key]!;
+    root.setProperty(property, theme[key]);
+    workspaceThemeKeys.add(property);
   }
   if (theme.accent) {
     /* Derive the accent family from the brand color instead of flattening it:
@@ -51,16 +58,14 @@ function applyTheme(PM: PMRegistry, theme: Record<string, any>): void {
        stays at the token's 12% so accent never reads hotter than designed. */
     root.setProperty('--accent-dim', `color-mix(in srgb, ${theme.accent} 12%, transparent)`);
     root.setProperty('--accent-tx', `color-mix(in oklab, ${theme.accent} 82%, var(--tx))`);
-  } else {
-    root.removeProperty('--accent-dim');
-    root.removeProperty('--accent-tx');
+    workspaceThemeKeys.add('--accent-dim');
+    workspaceThemeKeys.add('--accent-tx');
   }
   if (theme.radius != null) {
     /* Scale the whole radius family from one base so nested corners stay
        concentric (outer = inner + padding) at any project radius. */
     root.setProperty('--r-base', `${Math.max(2, theme.radius) / 3}px`);
-  } else {
-    root.removeProperty('--r-base');
+    workspaceThemeKeys.add('--r-base');
   }
 }
 
@@ -126,12 +131,21 @@ export function installSvelteLayout(PM: PMRegistry): void {
   layout.applyTheme = (theme: Record<string, any>): void => applyTheme(PM, theme);
   layout.setCollapsed = (id: string, collapsed: boolean, emit = true) => setPanelCollapsed(PM, id, collapsed, emit);
 
+  /* The kernel theme writes its tokens as inline custom properties on <html>,
+     and so does the workspace theme. A kernel theme switch clears its own keys,
+     which would take the workspace's values for the same tokens with it — so
+     re-layer the workspace on top whenever the kernel repaints. */
+  themeSubscription?.dispose();
+  themeSubscription = PM.Kernel?.events?.on?.('theme:changed', () => applyTheme(PM, (layout.ws as Workspace | null)?.theme || {})) ?? null;
+
   mounted = mount(DockLayout, { target: root, props: { PM } }) as LayoutInstance;
   flushSync();
 }
 
 /** Test/HMR seam. Workspace state remains untouched. */
 export async function unmountSvelteLayout(): Promise<void> {
+  themeSubscription?.dispose();
+  themeSubscription = null;
   if (mounted) await unmount(mounted);
   mounted = null;
 }

@@ -11,6 +11,7 @@ export interface AgentMessage {
   text: string;
   attachments?: Array<Record<string, any> | string>;
   entering?: boolean;
+  fixExtensionId?: string;
 }
 
 export interface AgentStep {

@@ -8,7 +8,7 @@ const MAX_KEYFRAMES = 80;
 const SCENE_OPERATIONS = new Set([
   'set_property', 'replace_keyframes', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
-  'reorder_layer', 'add_effect', 'remove_effect', 'set_effect',
+  'reorder_layer', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
   'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
   'transform_layers',
 ]);
@@ -26,6 +26,7 @@ const FIELDS: any = {
   add_effect: ['type', 'target', 'effect', 'parameters', 'open'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],
+  set_transition: ['type', 'layer', 'edge', 'transition'],
   set_scene_parameter: ['type', 'name', 'label', 'control', 'value', 'min', 'max', 'options'],
   add_marker: ['type', 'id', 'time', 'name'],
   create_section: ['type', 'section'],

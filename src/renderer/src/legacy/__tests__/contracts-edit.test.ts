@@ -2,13 +2,16 @@
 import assert from 'node:assert/strict';
 import { it } from 'vitest';
 
+import { EFFECTS } from '../../../../extensions/effects-basic/effects';
+import { BUILTIN_TRANSITIONS } from '../../../../extensions/transitions-basic/transitions';
 import { makePM } from './make-pm';
+import { install as installTransitions } from '../gl/transitions';
 
 const OPERATIONS = [
   'set_property', 'replace_keyframes', 'set_easing', 'set_expression',
   'set_content', 'set_layer', 'set_composition', 'add_layer',
   'delete_layers', 'reorder_layer', 'add_effect', 'remove_effect',
-  'set_effect', 'set_scene_parameter', 'add_marker', 'create_section',
+  'set_effect', 'set_transition', 'set_scene_parameter', 'add_marker', 'create_section',
   'update_section', 'transform_layers',
 ];
 
@@ -26,6 +29,7 @@ const OPERATION_CONTRACT = {
   add_effect: { target: 'layer', fields: ['effect', 'parameters'] },
   remove_effect: { target: 'layer', fields: ['effect'] },
   set_effect: { target: 'layer', fields: ['effect', 'patch'] },
+  set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },
   set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
   add_marker: { target: 'project', fields: ['time', 'name'] },
   create_section: { target: 'project', fields: ['section'] },
@@ -44,6 +48,9 @@ function editor() {
     'core/capabilities',
     'gl/shaders',
   );
+  for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
+  installTransitions(PM);
+  for (const definition of BUILTIN_TRANSITIONS) PM.Kernel.registerTransition('transitions-basic', definition);
   PM.proj = PM.mkProject({ name: 'Contract fixture', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
   PM.syncShaderUniforms = () => {};
@@ -79,7 +86,7 @@ it('Edit.operations freezes the complete source-edit vocabulary', () => {
   assert.deepEqual(Object.keys(OPERATION_CONTRACT).sort(), [...OPERATIONS].sort());
 });
 
-it('all 18 source operations apply successfully and have an observable effect', () => {
+it('all 19 source operations apply successfully and have an observable effect', () => {
   const { PM, text, solid } = fixture();
 
   applyOne(PM, {
@@ -145,6 +152,13 @@ it('all 18 source operations apply successfully and have an observable effect', 
   applyOne(PM, { type: 'set_effect', target: text.id, effect: toggleEffect.id, patch: { enabled: false } });
   assert.deepEqual(Object.keys(toggleEffect.p), Array.from(PM.FX.blur.params, parameter => parameter.k));
   assert.equal(toggleEffect.on, false);
+
+  applyOne(PM, {
+    type: 'set_transition', layer: text.id, edge: 'in',
+    transition: { type: 'crossfade', dur: .4 },
+  });
+  assert.equal(text.transitionIn.type, 'crossfade');
+  assert.equal(text.transitionIn.dur, .4);
 
   const parameter = PM.proj.params.Intensity = {
     name: 'Intensity', label: 'Intensity', control: 'num', value: 10,
@@ -263,4 +277,3 @@ it('the source-edit provenance log is capped at 200 entries', () => {
   assert.equal(PM.proj.edits.length, 200);
   assert.equal(PM.proj.edits.at(-1).revision, 205);
 });
-

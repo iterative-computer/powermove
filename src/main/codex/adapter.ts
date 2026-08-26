@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { discoverCodexBinary } from './env';
 
-export const ADAPTER_VERSION = '1';
+export const ADAPTER_VERSION = '2';
 
 export const REQUIRED_CODEX_FLAGS = [
   '--ephemeral',
@@ -16,6 +16,7 @@ export const REQUIRED_CODEX_FLAGS = [
   '--config',
   '--image',
   '--search',
+  '--add-dir',
   '--approve-for-me',
   '--dangerously-bypass-approvals-and-sandbox'
 ] as const;
@@ -33,6 +34,7 @@ export interface EditorArgvOptions extends CommonArgvOptions {}
 
 export interface AutonomousArgvOptions extends CommonArgvOptions {
   access: Exclude<CodexAccess, 'editor'>;
+  extensionsDir: string;
   sessionId: string | null;
   instructions: string;
 }
@@ -82,6 +84,7 @@ export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
     // sandbox (the Swift shell's flag pair predates that change).
     argv.push('--approve-for-me');
   }
+  argv.push('--add-dir', options.extensionsDir);
 
   argv.push('exec');
   if (options.sessionId !== null && options.sessionId.trim() !== '') argv.push('resume');

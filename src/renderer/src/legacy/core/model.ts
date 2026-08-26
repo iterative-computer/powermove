@@ -82,6 +82,8 @@ function baseLayer(type: any, name: any, comp: any) {
       'rotation': P(0), 'opacity': P(100), 'skew': P(0),
     } : {},
     fx: [],
+    transitionIn: null,
+    transitionOut: null,
     masks: [],
     d: {},
     locked_intent: {},   // hand edits the agent must preserve

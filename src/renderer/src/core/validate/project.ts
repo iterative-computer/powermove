@@ -15,6 +15,7 @@ import {
   type Project,
   type ProjectJsonValue,
   type SceneParam,
+  type Transition,
   type TransformChannels
 } from '../types/project';
 
@@ -193,6 +194,54 @@ function sanitizeEffect(raw: unknown): Effect | null {
   };
   if ('open' in raw) effect.open = !!raw.open;
   return effect;
+}
+
+function isTransitionParamValue(value: unknown): value is ChannelValue {
+  return typeof value === 'number' && Number.isFinite(value)
+    || typeof value === 'boolean'
+    || typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+}
+
+function sanitizeTransitionChannel(raw: unknown): Channel {
+  const prop = copyRecord(raw);
+  const staticValue = isTransitionParamValue(prop.v) ? prop.v : 0;
+  const keys = (Array.isArray(prop.kf) ? prop.kf : [])
+    .filter((item): item is UnknownRecord => isRecord(item)
+      && Number.isFinite(Number(item.t))
+      && isTransitionParamValue(item.v))
+    .map(item => ({
+      t: Number(item.t),
+      v: item.v as ChannelValue,
+      eo: validHandle(item.eo, [0.62, 0.05]),
+      ei: validHandle(item.ei, [0, 1]),
+      i: typeof item.i === 'string' && item.i ? item.i : uid('k'),
+      hold: !!item.hold
+    }))
+    .sort((a, b) => a.t - b.t)
+    .filter((item, index, all) => index === 0 || item.t - all[index - 1]!.t > 1e-6);
+  return {
+    v: staticValue,
+    kf: keys,
+    expr: typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null
+  };
+}
+
+function sanitizeTransition(raw: unknown): Transition | null {
+  if (!isRecord(raw) || typeof raw.type !== 'string' || !raw.type) return null;
+  const parameters: Record<string, Channel> = {};
+  if (isRecord(raw.p)) {
+    for (const [name, value] of Object.entries(raw.p)) {
+      if (FORBIDDEN_KEYS.has(name) || !isRecord(value)) continue;
+      parameters[name] = sanitizeTransitionChannel(value);
+    }
+  }
+  const transition: Transition = {
+    type: raw.type,
+    dur: clamp(finite(raw.dur, 0.5), 0.02, 600),
+    p: parameters
+  };
+  if (raw.missing === true) transition.missing = true;
+  return transition;
 }
 
 function sanitizeMask(raw: unknown, comp: Pick<Comp, 'w' | 'h'>): Mask | null {
@@ -390,6 +439,8 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     parent: type === 'audio' ? null : (typeof source.parent === 'string' && source.parent !== id ? source.parent : null),
     p: transformable ? sanitizeTransformChannels(source.p, type, comp) : {},
     fx: noEffects ? [] : (Array.isArray(source.fx) ? source.fx.map(sanitizeEffect).filter((item): item is Effect => item !== null) : []),
+    transitionIn: sanitizeTransition(source.transitionIn),
+    transitionOut: sanitizeTransition(source.transitionOut),
     masks: noMasks ? [] : (Array.isArray(source.masks)
       ? source.masks.map(mask => sanitizeMask(mask, comp)).filter((item): item is Mask => item !== null)
       : []),

@@ -15,6 +15,7 @@ export const COMMAND_TYPES = [
   'add_effect',
   'remove_effect',
   'set_effect',
+  'set_transition',
   'set_scene_parameter',
   'add_marker',
   'create_section',
@@ -179,6 +180,17 @@ export interface SetEffectCommand extends LayerTargetedCommand {
   };
 }
 
+export interface SetTransitionCommand {
+  type: 'set_transition';
+  layer: LayerTarget;
+  edge: 'in' | 'out';
+  transition: {
+    type: string;
+    dur?: number;
+    p?: Record<string, number | string | boolean>;
+  } | null;
+}
+
 export interface SetSceneParameterCommand {
   type: 'set_scene_parameter';
   name: string;
@@ -255,6 +267,7 @@ export type EditCommand =
   | AddEffectCommand
   | RemoveEffectCommand
   | SetEffectCommand
+  | SetTransitionCommand
   | SetSceneParameterCommand
   | AddMarkerCommand
   | CreateSectionCommand

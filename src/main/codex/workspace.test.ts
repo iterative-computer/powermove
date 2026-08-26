@@ -12,7 +12,8 @@ import {
   readSession,
   safeAgentComponent,
   sessionPathFor,
-  writeSession
+  writeSession,
+  type PrepareAgentWorkspaceOptions
 } from './workspace';
 
 const temporaryDirectories: string[] = [];
@@ -47,6 +48,20 @@ function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
   };
 }
 
+function workspaceOptions(overrides: Partial<PrepareAgentWorkspaceOptions> = {}): PrepareAgentWorkspaceOptions {
+  return {
+    extensionsDir: path.join(os.tmpdir(), 'powermove-user-extensions'),
+    apiPackFiles: [
+      { name: 'EXTENSIONS.md', text: '# Extensions\n' },
+      { name: 'api.ts', text: 'export interface PowermoveAPI {}\n' },
+      { name: 'extensions.ts', text: 'export interface ExtensionManifest {}\n' },
+      { name: 'project.ts', text: 'export interface Project {}\n' },
+      { name: 'commands.ts', text: 'export type EditCommand = never;\n' }
+    ],
+    ...overrides
+  };
+}
+
 describe('safeAgentComponent', () => {
   it('replaces unsafe runs, trims hyphens, preserves the allowlist, and caps length', () => {
     expect(safeAgentComponent(' --hello !@# world__- ')).toBe('hello-world__');
@@ -63,18 +78,25 @@ describe('safeAgentComponent', () => {
 describe('prepareAgentWorkspace', () => {
   it('creates the complete per-run layout with binary inputs', async () => {
     const userData = await temporaryDirectory();
-    const layout = await prepareAgentWorkspace(request(), userData, 'project', agentResultSchema(), 'run-123');
+    const options = workspaceOptions();
+    const layout = await prepareAgentWorkspace(request(), userData, 'project', agentResultSchema(), options, 'run-123');
 
     expect(layout.runId).toBe('run-123');
     expect(layout.root).toBe(path.join(userData, 'Agent Workspaces', 'Project_123'));
     expect(layout.runDirectory).toBe(path.join(layout.root, 'artifacts', 'run-123'));
     expect(layout.outputPath).toBe(path.join(layout.root, '.powermove', 'result-run-123.json'));
     expect(layout.sessionPath).toBe(path.join(layout.root, '.powermove', 'session-project.txt'));
+    expect(layout.apiPackDirectory).toBe(path.join(layout.root, 'powermove-api'));
+    expect(layout.extensionsDir).toBe(options.extensionsDir);
     expect(layout.imagePaths).toEqual([path.join(layout.root, 'inputs', 'references', 'reference-0.png')]);
 
     await expect(readFile(path.join(layout.inputsDirectory, 'powermove-project.json'), 'utf8'))
       .resolves.toBe('{"layers":[]}');
     await expect(readFile(path.join(layout.attachmentsDirectory, 'brief-txt'), 'utf8')).resolves.toBe('hello');
+    await expect(readFile(path.join(layout.apiPackDirectory, 'EXTENSIONS.md'), 'utf8'))
+      .resolves.toBe('# Extensions\n');
+    await expect(readFile(path.join(layout.apiPackDirectory, 'commands.ts'), 'utf8'))
+      .resolves.toBe('export type EditCommand = never;\n');
     await expect(readFile(layout.schemaPath, 'utf8')).resolves.toSatisfy((contents: string) =>
       JSON.stringify(JSON.parse(contents)) === JSON.stringify(agentResultSchema())
     );
@@ -87,6 +109,7 @@ describe('prepareAgentWorkspace', () => {
       await temporaryDirectory(),
       'computer',
       agentResultSchema(),
+      workspaceOptions(),
       'computer-run'
     );
     expect(layout.sessionPath).toBe(sessionPathFor(layout.root, 'computer'));
@@ -95,15 +118,85 @@ describe('prepareAgentWorkspace', () => {
 
   it('rejects a missing project and omits over-limit inputs', async () => {
     const userData = await temporaryDirectory();
-    await expect(prepareAgentWorkspace(request({ projectJSON: null }), userData, 'project', agentResultSchema()))
+    await expect(prepareAgentWorkspace(
+      request({ projectJSON: null }),
+      userData,
+      'project',
+      agentResultSchema(),
+      workspaceOptions()
+    ))
       .rejects.toThrow(/project snapshot/i);
     const layout = await prepareAgentWorkspace(request({
       attachments: [{ name: 'too-big', data: new Uint8Array(100 * 1024 + 1) }],
       images: [new Uint8Array(4 * 1024 * 1024 + 1)]
-    }), userData, 'project', agentResultSchema(), 'limited-run');
+    }), userData, 'project', agentResultSchema(), workspaceOptions(), 'limited-run');
     const { readdir } = await import('node:fs/promises');
     await expect(readdir(layout.attachmentsDirectory)).resolves.toEqual([]);
     await expect(readdir(layout.referencesDirectory)).resolves.toEqual([]);
+  });
+
+  it('refreshes API pack files on every preparation', async () => {
+    const userData = await temporaryDirectory();
+    const first = await prepareAgentWorkspace(
+      request(),
+      userData,
+      'project',
+      agentResultSchema(),
+      workspaceOptions({ apiPackFiles: [{ name: 'EXTENSIONS.md', text: 'old' }] }),
+      'first-run'
+    );
+    await expect(readFile(path.join(first.apiPackDirectory, 'EXTENSIONS.md'), 'utf8')).resolves.toBe('old');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(path.join(first.apiPackDirectory, 'stale.ts'), 'stale');
+
+    const second = await prepareAgentWorkspace(
+      request(),
+      userData,
+      'project',
+      agentResultSchema(),
+      workspaceOptions({ apiPackFiles: [{ name: 'EXTENSIONS.md', text: 'new' }] }),
+      'second-run'
+    );
+    await expect(readFile(path.join(second.apiPackDirectory, 'EXTENSIONS.md'), 'utf8')).resolves.toBe('new');
+    await expect(readFile(path.join(second.apiPackDirectory, 'stale.ts'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('skips API pack names that can escape or collide without failing the run', async () => {
+    const userData = await temporaryDirectory();
+    const escaped = await prepareAgentWorkspace(
+      request(),
+      userData,
+      'project',
+      agentResultSchema(),
+      workspaceOptions({ apiPackFiles: [{ name: '../outside.ts', text: 'nope' }, { name: 'ok.ts', text: 'ok' }] })
+    );
+    await expect(readFile(path.join(escaped.apiPackDirectory, 'ok.ts'), 'utf8')).resolves.toBe('ok');
+    await expect(readFile(path.join(escaped.apiPackDirectory, '..', 'outside.ts'), 'utf8')).rejects.toThrow();
+
+    const collided = await prepareAgentWorkspace(
+      request(),
+      userData,
+      'project',
+      agentResultSchema(),
+      workspaceOptions({
+        apiPackFiles: [
+          { name: 'api.ts', text: 'first' },
+          { name: 'api.ts', text: 'second' }
+        ]
+      })
+    );
+    await expect(readFile(path.join(collided.apiPackDirectory, 'api.ts'), 'utf8')).resolves.toBe('first');
+  });
+
+  it('requires the writable extensions directory to be absolute', async () => {
+    await expect(prepareAgentWorkspace(
+      request(),
+      await temporaryDirectory(),
+      'project',
+      agentResultSchema(),
+      workspaceOptions({ extensionsDir: 'relative/extensions' })
+    )).rejects.toThrow(/absolute path/i);
   });
 });
 

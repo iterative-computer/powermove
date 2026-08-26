@@ -30,7 +30,7 @@ PM.CodexBridge = {
       const abort: any = () => settle(codexAbortError());
       const timeout: any = Math.max(30_000, Math.min(Number(options.timeoutMs) || 120_000, 3_600_000));
       const timer: any = window.setTimeout(() => settle(new Error('The coding agent took too long to respond')), timeout);
-      pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress });
+      pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress, mode: options.mode });
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
@@ -51,7 +51,9 @@ PM.CodexBridge = {
       const bytes: any = Uint8Array.from(window.atob(result.dataBase64 || ''), (c: any) => c.charCodeAt(0));
       text = new window.TextDecoder().decode(bytes);
     } catch { text = 'The coding-agent response could not be decoded'; }
-    if (result.ok) job.resolve(text); else job.reject(new Error(text));
+    if (result.ok) {
+      job.resolve(job.mode === 'autonomous' ? { text, extensions: result.extensions } : text);
+    } else job.reject(new Error(text));
   },
   progress(id: any, result: any) {
     const job: any = pending.get(id); if (!job || typeof job.onProgress !== 'function') return;
@@ -145,8 +147,8 @@ const AGENT_MODELS: any = [
 ];
 const REASONING_EFFORTS: any = ['low', 'medium', 'high', 'xhigh', 'max'];
 const AGENT_ACCESS_MODES: any = [
-  { id: 'editor', label: 'Editor', detail: 'Powermove source only' },
-  { id: 'project', label: 'Project + web', detail: 'Files, shell, web, and integrations inside this project' },
+  { id: 'editor', label: 'Edit project', detail: 'Edit the current composition' },
+  { id: 'project', label: 'Change Powermove (project)', detail: 'Create or edit mods with files, shell, web, and integrations' },
   { id: 'computer', label: 'Computer', detail: 'Full Mac access for one explicitly approved run' },
 ];
 const SEND_TRANSITION_MS: any = 240;
@@ -155,13 +157,15 @@ const Spatial: any = {
   init,
   activate,
   open: openAgentPanel,
+  requestFix,
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode },
-  lifecycle: { requestAdapter: requestRippleAdapter },
+  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult },
+  lifecycle: { requestAdapter: requestRippleAdapter, applyExtensionChanges },
 };
 PM.SpatialAssistant = Spatial;
+PM.requestExtensionFix = requestFix;
 
 function agentUISnapshot(): AgentSnapshot {
   const snapshot: AgentSnapshot = {
@@ -258,6 +262,44 @@ function openAgentPanel() {
     PM.AgentUI?.update({ focusComposer: true });
     PM.panelInst.agent?.el?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   });
+}
+
+function extensionRecords(): any[] {
+  const candidates: any[] = [
+    PM.Kernel?.loader?.records?.(),
+    PM.Kernel?.extensions?.records?.(),
+    PM.Kernel?.deps?.extensions?.list?.(),
+  ];
+  return candidates.find(Array.isArray) || [];
+}
+
+function extensionRecord(id: any, records: any[] = extensionRecords()) {
+  return records.find((record: any) => record?.id === id);
+}
+
+function extensionHealthError(record: any) {
+  const error: any = record?.health?.error;
+  return typeof error === 'string' && error.trim() ? error.trim() : '';
+}
+
+async function requestFix(id: any) {
+  const native: any = (window as any).powermove;
+  if (typeof native?.extensions?.readSource !== 'function' || typeof native?.codex?.fixPrompt !== 'function') {
+    window.console.warn(`[agent] Fix it is unavailable for extension "${String(id)}"`);
+    return;
+  }
+  try {
+    const record: any = extensionRecord(id);
+    const error: any = extensionHealthError(record);
+    const files: any = await native.extensions.readSource({ id });
+    const prompt: any = await native.codex.fixPrompt({ id, error, files });
+    openAgentPanel();
+    setAgentAccessMode('project');
+    PM.AgentUI?.setDraft?.(String(prompt), true);
+    PM.AgentUI?.submit?.(String(prompt));
+  } catch (error: any) {
+    window.console.warn(`[agent] Could not prepare Fix it for extension "${String(id)}"`, error);
+  }
 }
 
 function requestRippleAdapter() {
@@ -916,9 +958,20 @@ function stopActiveRequest() {
   PM.AgentUI?.update({ focusComposer: true });
 }
 
-function normalizeAutonomousResult(raw: any) {
+function normalizeAutonomousResult(raw: any, rawExtensions: any) {
   const text: any = (value: any) => String(value || '').replace(/\s+/g, ' ').trim();
-  const projectId: any = text(raw?.projectId || PM.proj.id).slice(0, 160);
+  const projectId: any = text(raw?.projectId || PM.proj?.id).slice(0, 160);
+  const extensionActions: any = new Set(['created', 'updated', 'removed']);
+  const extensions: any = (Array.isArray(rawExtensions) ? rawExtensions : []).filter((item: any) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    if (typeof item.id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(item.id)) return false;
+    if (!extensionActions.has(item.action)) return false;
+    return item.summary === undefined || (typeof item.summary === 'string' && item.summary.length <= 200);
+  }).slice(0, 32).map((item: any) => ({
+    id: item.id,
+    action: item.action,
+    ...(item.summary === undefined ? {} : { summary: item.summary }),
+  }));
   return {
     summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 800),
     commands: (Array.isArray(raw?.commands) ? raw.commands : [])
@@ -934,7 +987,47 @@ function normalizeAutonomousResult(raw: any) {
     })).filter((item: any) => item.path),
     externalActions: (Array.isArray(raw?.externalActions) ? raw.externalActions : []).slice(0, 80).map(text).filter(Boolean),
     notes: (Array.isArray(raw?.notes) ? raw.notes : []).slice(0, 80).map(text).filter(Boolean),
+    extensions,
   };
+}
+
+async function applyExtensionChanges(extensions: any) {
+  const turns: any[] = [];
+  for (const change of Array.isArray(extensions) ? extensions : []) {
+    let loadError: any = '';
+    let record: any;
+    if (change.action === 'created' || change.action === 'updated') {
+      const loader: any = PM.Kernel?.loader;
+      try {
+        if (typeof loader?.reload === 'function') await loader.reload(change.id);
+      } catch (error: any) {
+        loadError = String(error?.message || error || 'Unknown extension error');
+      }
+      /* A freshly created mod reaches the loader through main's file watcher
+         (debounced + compiled), so the record may not exist yet: drain the
+         loader queue and wait briefly for it before judging health. */
+      const deadline: any = Date.now() + 4_000;
+      for (;;) {
+        if (typeof loader?.whenIdle === 'function') { try { await loader.whenIdle(); } catch { /* ignore */ } }
+        record = extensionRecord(change.id, extensionRecords());
+        if (record || Date.now() >= deadline) break;
+        await new Promise(r => setTimeout(r, 150));
+      }
+      if (!record && !loadError) loadError = 'Powermove could not find this mod after the agent finished.';
+    } else {
+      record = extensionRecord(change.id, extensionRecords());
+    }
+    const name: any = record?.manifest?.name || change.id;
+    const verb: any = change.action === 'created' ? 'Added' : change.action === 'updated' ? 'Updated' : 'Removed';
+    turns.push({ role: 'assistant', text: `${verb} mod ${change.action === 'removed' ? change.id : name}` });
+
+    const error: any = loadError || extensionHealthError(record);
+    if ((change.action === 'created' || change.action === 'updated') && error) {
+      const firstLine: any = (String(error).split(/\r?\n/, 1)[0] || '').slice(0, 400);
+      turns.push({ role: 'assistant', text: `${name} didn't load: ${firstLine}`, fixExtensionId: change.id });
+    }
+  }
+  return turns;
 }
 
 async function runAutonomousRequest({ request, token, controller, access }: any) {
@@ -971,10 +1064,11 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
     },
   });
   if (token !== S.requestToken) return;
+  const responseText: any = typeof raw === 'string' ? raw : raw?.text;
   let decoded: any;
-  try { decoded = JSON.parse(raw); }
+  try { decoded = JSON.parse(responseText); }
   catch { throw new Error('The autonomous agent returned an invalid result'); }
-  const result: any = normalizeAutonomousResult(decoded);
+  const result: any = normalizeAutonomousResult(decoded, typeof raw === 'object' ? raw?.extensions : []);
   S.steps[1].status = 'complete'; S.steps[2].status = 'active';
   S.activity = 'Bringing the result back into Powermove…'; PM.AgentUI?.update();
   let changed: any = false;
@@ -1001,14 +1095,17 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
       }
     }
   }
+  const extensionTurns: any = await applyExtensionChanges(result.extensions);
+  if (token !== S.requestToken) return;
   checkpoint.historyId = changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null;
   const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
   finishSteps();
   S.conversation.push({ role: 'assistant', text: result.summary });
+  S.conversation.push(...extensionTurns);
   S.run = {
     autonomous: true, summary: result.summary, checkpoint,
     applied: result.commands, changed, artifacts: result.artifacts,
-    externalActions: result.externalActions,
+    externalActions: result.externalActions, extensions: result.extensions,
     review: { message: result.notes.join(' ') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
     frames: finalFrames, reviewError,
   };

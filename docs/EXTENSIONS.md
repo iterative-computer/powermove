@@ -1,0 +1,136 @@
+# Writing Powermove extensions
+
+Powermove is a kernel plus extensions. The built-in editor (timeline, effects,
+theme, keymap, panels) is itself a set of extensions. You extend or replace any
+of them by writing a new extension — never by editing the app bundle.
+
+## Where extensions live
+
+| Location | Scope |
+|---|---|
+| `~/Library/Application Support/Powermove/extensions/<id>/` | user (all projects) |
+| `<project>/.powermove/extensions/<id>/` | project |
+| app bundle `resources/builtin-extensions/<id>/` | built-in, **read-only** — copy to fork |
+
+The folder name must equal the manifest `id`. The app watches the user directory:
+saving a file rebuilds and hot-reloads the extension.
+
+## Minimal extension
+
+`~/…/extensions/hello/manifest.json`
+```json
+{
+  "id": "hello",
+  "name": "Hello",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Adds a greeting command.",
+  "contributes": ["commands", "keybindings"],
+  "author": "agent"
+}
+```
+
+`~/…/extensions/hello/index.ts`
+```ts
+import type { PowermoveAPI } from 'powermove';
+
+export default function activate(api: PowermoveAPI) {
+  api.commands.register({
+    id: 'hello.greet',
+    label: 'Say hello',
+    category: 'Fun',
+    run: () => api.ui.toast('Hello from an extension')
+  });
+  api.keybindings.bind({ key: 'cmd+shift+h', command: 'hello.greet' });
+}
+```
+
+Everything you register is released automatically when the extension is disabled,
+reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything else
+(timers, DOM outside panels).
+
+## Manifest fields
+
+| Field | Required | Notes |
+|---|---|---|
+| `id` | yes | `a-z 0-9 -`, 2–64 chars, equals folder name |
+| `name`, `version` (`x.y.z`), `apiVersion` (`1`) | yes | |
+| `description` | recommended | shown in the Mods list; one sentence |
+| `entry` | no | default `index.ts`; `.ts` `.js` `.mjs`; may import relative `.ts`, `.js`, `.svelte`, `.css` |
+| `contributes` | recommended | subset of `panels commands keybindings effects transitions themes palette menus status hooks` |
+| `replaces` | no | ids of extensions to deactivate while this one is enabled (e.g. `["timeline"]`) |
+| `dependsOn` | no | ids that must be enabled and load first |
+| `forkedFrom` | no | `"<id>@<version>"` when copied from a built-in |
+| `author` | no | `powermove` \| `user` \| `agent` |
+
+Imports allowed: `powermove` (types only), `svelte`, `svelte/store`, relative files
+inside the extension folder. No npm packages, no `..` escapes.
+
+## The API (apiVersion 1)
+
+Full types: `powermove.d.ts` (next to this file). Summary:
+
+- **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)`, `close`, `isOpen`, `refresh`, `list`.
+  `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.
+- **commands** — `register({ id, label, category, run, when? })`, `run(id, …args)`, `has`, `list`. Commands appear in the palette (⌘K).
+- **keybindings** — `bind({ key, command, args?, inFields?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through.
+- **effects** — `register({ id, label, group, params, frag, passes?, keepOrig? })`.
+  Write only the body of `main()`. Available: `v_st` (uv), `u_tex`, `u_res`, `u_texel`, `u_time`, `u_pass`, helpers `src() luma() noise() fbm() hash() rgb2hsv() hsv2rgb()`. Each param `k` is a uniform `u_<k>` (float, or vec3 for `type:'color'`). Output `o` (vec4).
+  Params are keyframable automatically and appear in the Effects browser + inspector.
+- **transitions** — `register({ id, label, params, frag })`. Inputs `u_from` (frame so far), `u_to` (incoming layer), `u_prog` 0→1. Output `o`. Applied on a layer via its `transition` property (inspector or `set_layer` command with `{ transition: { type, dur, p } }`).
+- **theme** — `register({ id, name, scheme, tokens, darkTokens?, css?, rootAttributes? })`, `activate(id)`. Tokens are CSS custom properties (see "Theme tokens"). `css` may restyle anything.
+- **palette** — `registerProvider(query => entries[])`.
+- **menus** — `contribute(location, ctx => items[])`; locations: `titlebar:right`, `panel:context`, `layer:context`, `timeline:context`, `viewer:context`.
+- **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
+- **project** — `get()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`.
+  `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
+- **ui** — `toast`, `confirm`, `menu`, `modal`, `icon`.
+- **storage** — per-extension `get/set/delete` (persisted).
+- **events / on** — `project:changed`, `selection`, `time`, `transport`, `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
+- **extensions** — introspection: `list`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
+- **host.pm** — UNSTABLE escape hatch to the legacy `PM` object. Use when the typed surface genuinely lacks something; prefer typed APIs.
+
+## Patterns
+
+**Add an effect**
+```ts
+api.effects.register({
+  id: 'vhs', label: 'VHS', group: 'Stylize',
+  params: [
+    { k: 'tracking', label: 'Tracking', def: 0.3, min: 0, max: 1, step: 0.01 },
+    { k: 'tint', label: 'Tint', def: '#ff88cc', type: 'color' }
+  ],
+  frag: `
+    float band = step(0.98, fract(v_st.y * 40.0 + u_time * 2.0)) * u_tracking;
+    vec2 uv = v_st + vec2(band * 0.02 * (noise(vec2(u_time, v_st.y * 10.0)) - 0.5), 0.0);
+    vec4 c = texture(u_tex, uv);
+    o = vec4(mix(c.rgb, c.rgb * u_tint, 0.15), c.a);`
+});
+```
+
+**Add a panel (Svelte)** — `Counter.svelte` + `api.panels.register({ id:'counter', title:'Counter', component: Counter, size: 160 })`, then `api.panels.open('counter','right')`.
+
+**Change the look** — a theme extension with `tokens` only (accent, backgrounds, radius) or with `css` for a full reskin. Windows 98 is `css` plus `rootAttributes`.
+
+**Replace a built-in** — copy `resources/builtin-extensions/timeline` to `~/…/extensions/my-timeline`, set `"replaces": ["timeline"]` and `"forkedFrom": "timeline@<version>"` in the manifest, then edit. Turning your mod off brings the built-in back.
+
+**Override just a piece** — don't fork; register the same panel/command/effect `id`. The latest registration wins; disabling yours restores the original.
+
+## Theme tokens (subset; see css/tokens.css)
+
+`--accent --bg-window --bg-panel --bg-panel-2 --bg-sunken --bg-field --tx --tx-2 --line --r-base --f-ui --f-mono --row-h --ctl-h --fs-md --dur-2 --ease`
+
+## Rules the kernel enforces
+
+- Errors in `activate` → extension is disabled with the message shown in Mods; the app keeps running.
+- Two runtime errors within 10 s → auto-disabled.
+- `apiVersion` newer than the app → not loaded (“needs update”).
+- Edits go through the typed boundary: locked layers and hand-edited channels are respected.
+
+## For the agent
+
+When asked to change Powermove itself: create or edit an extension under the user
+extensions directory (your working directory). Prefer the smallest shape —
+contribute → override by id → fork with `replaces`. Return the ids you created or
+changed in `extensions` so the app reloads them. If the app reports a build or
+activation error, fix the extension; do not work around by touching the app bundle.

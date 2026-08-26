@@ -6,7 +6,7 @@ if [ "$1" = "--version" ]; then
 fi
 
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf '%s\n' '--ephemeral --skip-git-repo-check --ignore-rules --sandbox --output-schema --output-last-message --json --model --config --image --search --approve-for-me --dangerously-bypass-approvals-and-sandbox'
+  printf '%s\n' '--ephemeral --skip-git-repo-check --ignore-rules --sandbox --output-schema --output-last-message --json --model --config --image --search --add-dir --approve-for-me --dangerously-bypass-approvals-and-sandbox'
   exit 0
 fi
 
@@ -50,7 +50,11 @@ if [ -d 'inputs' ]; then
     if [ -d "$candidate" ]; then artifact_directory="$candidate"; break; fi
   done
   if [ -n "$artifact_directory" ]; then printf '%s\n' 'rendered output' > "$artifact_directory/deliverable.txt"; fi
-  printf '%s\n' '{"summary":"done","commands":[],"artifacts":[{"path":"deliverable.txt","importToTimeline":true}],"externalActions":[],"notes":[]}' > "$output_path"
+  if [ -n "${FAKE_CODEX_RESULT:-}" ]; then
+    printf '%s\n' "$FAKE_CODEX_RESULT" > "$output_path"
+  else
+    printf '%s\n' '{"summary":"done","commands":[],"artifacts":[{"path":"deliverable.txt","importToTimeline":true}],"externalActions":[],"notes":[]}' > "$output_path"
+  fi
 else
   printf '%s\n' '{"message":"editor done"}' > "$output_path"
 fi

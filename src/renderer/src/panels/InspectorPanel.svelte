@@ -10,6 +10,7 @@
   import MasksSection from './inspector/MasksSection.svelte';
   import ShaderUniforms from './inspector/ShaderUniforms.svelte';
   import TransformSection from './inspector/TransformSection.svelte';
+  import TransitionsSection from './inspector/TransitionsSection.svelte';
   import { getInspectorRegistry, inspectorRefresh } from './inspector/refresh.svelte';
 
   let { panelId }: PanelProps = $props();
@@ -47,6 +48,7 @@
         <TransformSection {PM} layer={firstLayer} />
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
         <EffectsSection {PM} layer={firstLayer} />
+        <TransitionsSection {PM} layer={firstLayer} />
         <MasksSection {PM} layer={firstLayer} />
       {/if}
       <LayerOptions {PM} layer={firstLayer} />

@@ -13,6 +13,7 @@ export const IPC = {
 
   codexRun: 'codex:run',
   codexCancel: 'codex:cancel',
+  codexFixPrompt: 'codex:fix-prompt',
   codexEvent: 'codex:event', // main → renderer
   consentComputer: 'consent:computer',
 
@@ -88,12 +89,34 @@ export interface CodexRunRequest {
   consentToken: string | null; // required when access === 'computer'
 }
 
+export interface AgentExtensionChange {
+  id: string;
+  action: 'created' | 'updated' | 'removed';
+  summary?: string;
+}
+
 export type CodexRunResult =
-  | { ok: true; text: string; access: Exclude<CodexAccess, 'editor'> | 'editor' }
+  | {
+      ok: true;
+      text: string;
+      access: Exclude<CodexAccess, 'editor'> | 'editor';
+      extensions?: AgentExtensionChange[];
+    }
   | { ok: false; error: string; cancelled: boolean };
 
 export interface CodexCancelRequest {
   id: string;
+}
+
+export interface CodexFixPromptFile {
+  path: string;
+  text: string;
+}
+
+export interface CodexFixPromptRequest {
+  id: string;
+  error: string;
+  files: CodexFixPromptFile[];
 }
 
 export interface CodexProgressEvent {
@@ -148,6 +171,8 @@ export interface LogRequest {
 export type MenuCommand = 'newProject' | 'save' | 'open' | 'export' | 'undo' | 'redo' | 'settings';
 
 /* ── the preload surface ─────────────────────────────────── */
+import type { ExtensionsBridge } from './extensions';
+
 export interface PowermoveBridge {
   ping(): Promise<string>;
   versions: { electron: string; chrome: string; node: string };
@@ -157,6 +182,7 @@ export interface PowermoveBridge {
   codex: {
     run(req: CodexRunRequest, onProgress?: (text: string) => void): Promise<CodexRunResult>;
     cancel(id: string): Promise<void>;
+    fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
   };
 
@@ -184,4 +210,6 @@ export interface PowermoveBridge {
   log(level: LogLevel, text: string): void;
   openExternal(url: string): Promise<void>;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;
+
+  extensions: ExtensionsBridge;
 }

@@ -6,7 +6,12 @@ import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CodexRunRequest } from '../../shared/ipc';
-import { CodexRunner, isCodexRunRequest, type CodexRunOptions } from './runner';
+import {
+  CodexRunner,
+  isCodexRunRequest,
+  parseAgentExtensionChanges,
+  type CodexRunOptions
+} from './runner';
 import { agentWorkspaceRoot, sessionPathFor } from './workspace';
 
 const fakeCodex = path.join(__dirname, '__fixtures__', 'fake-codex.sh');
@@ -48,6 +53,14 @@ function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
 function fakeOptions(userData: string, environment: Record<string, string>): CodexRunOptions {
   return {
     userData,
+    extensionsDir: path.join(userData, 'extensions'),
+    apiPackFiles: async () => [
+      { name: 'EXTENSIONS.md', text: '# Extensions' },
+      { name: 'api.ts', text: 'export interface PowermoveAPI {}' },
+      { name: 'extensions.ts', text: 'export const EXTENSION_ID = /x/;' },
+      { name: 'project.ts', text: 'export interface Project {}' },
+      { name: 'commands.ts', text: 'export type EditCommand = never;' }
+    ],
     binary: fakeCodex,
     timeoutMs: 10_000,
     spawnProcess: (command, args, options) => spawn(command, args, {
@@ -70,6 +83,46 @@ async function waitForFile(file: string): Promise<void> {
 }
 
 describe('CodexRunner validation and authority', () => {
+  it('drops invalid extension changes and caps the typed result at 32 items', () => {
+    const valid = Array.from({ length: 35 }, (_, index) => ({
+      id: `extension-${index}`,
+      action: index % 2 === 0 ? 'created' : 'updated',
+      summary: `Change ${index}`
+    }));
+    expect(parseAgentExtensionChanges([
+      { id: '../escape', action: 'removed' },
+      { id: 'valid-extension', action: 'invalid' },
+      ...valid
+    ])).toEqual(valid.slice(0, 32));
+    expect(parseAgentExtensionChanges(null)).toBeUndefined();
+  });
+
+  it('returns validated extension changes separately while preserving result text', async () => {
+    const result = await new CodexRunner().run(request({ id: 'extensions-run-1234' }), fakeOptions(
+      await temporaryDirectory('runner-extensions'),
+      {
+        FAKE_CODEX_RESULT: JSON.stringify({
+          summary: 'done',
+          commands: [],
+          artifacts: [],
+          externalActions: [],
+          notes: [],
+          extensions: [
+            { id: 'valid-extension', action: 'created', summary: 'Adds a command' },
+            { id: '../invalid', action: 'removed' }
+          ]
+        })
+      }
+    ));
+
+    expect(result).toMatchObject({
+      ok: true,
+      extensions: [{ id: 'valid-extension', action: 'created', summary: 'Adds a command' }]
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(JSON.parse(result.text).extensions).toHaveLength(2);
+  });
+
   it('validates the frozen request shape and collapses autonomous editor access to project', async () => {
     const req = request({ access: 'editor' });
     expect(isCodexRunRequest(req)).toBe(true);
@@ -110,7 +163,13 @@ describe('CodexRunner lifecycle', () => {
       mode: 'editor',
       access: 'editor',
       projectJSON: null
-    }), { userData, binary: fakeCodex, spawnProcess });
+    }), {
+      userData,
+      extensionsDir: path.join(userData, 'extensions'),
+      apiPackFiles: async () => [],
+      binary: fakeCodex,
+      spawnProcess
+    });
     await runner.cancel('editor-cancel-1234');
 
     await expect(pending).resolves.toEqual({

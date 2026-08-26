@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createKernel } from '../kernel/registries';
+import { installThemeApply } from '../kernel/theme-apply';
 import type { PMRegistry } from '../legacy/registry';
 import { install as installLegacyLayout } from '../legacy/ui/layout';
 import { installSvelteLayout, unmountSvelteLayout } from './install';
@@ -144,6 +146,48 @@ describe('installSvelteLayout', () => {
     expect(style.getPropertyValue('--r-base')).toBe(`${8 / 3}px`);
     expect(style.getPropertyValue('--r-lg')).toBe('');
     expect(document.documentElement.dataset.density).toBe('compact');
+  });
+
+  it('keeps kernel tokens under the workspace layer across active theme replacement and disposal', () => {
+    const kernel = createKernel();
+    const themeApply = installThemeApply(kernel);
+    (PM as any).Kernel = kernel;
+    const base = kernel.themes.register('theme:base', {
+      id: 'high-contrast',
+      name: 'High Contrast',
+      scheme: 'dark',
+      tokens: { '--accent': '#ffff00', '--bg-window': '#000000', '--tx': '#ffffff' }
+    });
+
+    installSvelteLayout(PM);
+    PM.Layout.apply(workspace({ theme: { accent: '#123456' } }));
+    kernel.activateTheme('high-contrast');
+
+    const style = document.documentElement.style;
+    expect(style.getPropertyValue('--accent')).toBe('#123456');
+    expect(style.getPropertyValue('--bg-window')).toBe('#000000');
+    expect(style.getPropertyValue('--tx')).toBe('#ffffff');
+
+    const override = kernel.themes.register('theme:override', {
+      id: 'high-contrast',
+      name: 'High Contrast Reloaded',
+      scheme: 'dark',
+      tokens: { '--accent': '#ff00ff', '--bg-window': '#101010', '--tx': '#eeeeee' }
+    });
+    expect(style.getPropertyValue('--accent')).toBe('#123456');
+    expect(style.getPropertyValue('--bg-window')).toBe('#101010');
+    expect(style.getPropertyValue('--tx')).toBe('#eeeeee');
+
+    override.dispose();
+    expect(style.getPropertyValue('--accent')).toBe('#123456');
+    expect(style.getPropertyValue('--bg-window')).toBe('#000000');
+    expect(style.getPropertyValue('--tx')).toBe('#ffffff');
+
+    base.dispose();
+    expect(style.getPropertyValue('--accent')).toBe('#123456');
+    expect(style.getPropertyValue('--bg-window')).toBe('');
+    expect(style.getPropertyValue('--tx')).toBe('');
+    themeApply.dispose();
   });
 
   it('emits layout synchronously and layout:applied across two animation frames', () => {

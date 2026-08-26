@@ -55,12 +55,15 @@ describe('Codex CLI adapter', () => {
         model: null,
         reasoningEffort: null,
         access: 'project',
+        extensionsDir: '/user-data/extensions',
         sessionId: null,
         instructions: 'AGENT INSTRUCTIONS'
       })
     ).toEqual([
       '--search',
       '--approve-for-me',
+      '--add-dir',
+      '/user-data/extensions',
       'exec',
       '--skip-git-repo-check',
       '--output-schema',
@@ -84,12 +87,15 @@ describe('Codex CLI adapter', () => {
         model: 'gpt-5-codex',
         reasoningEffort: 'medium',
         access: 'computer',
+        extensionsDir: '/user-data/extensions',
         sessionId: ' thread-123\n',
         instructions: 'AGENT INSTRUCTIONS'
       })
     ).toEqual([
       '--search',
       '--dangerously-bypass-approvals-and-sandbox',
+      '--add-dir',
+      '/user-data/extensions',
       'exec',
       'resume',
       '--skip-git-repo-check',

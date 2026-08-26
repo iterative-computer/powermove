@@ -25,6 +25,11 @@
     {:else}
       <p>{message.text}</p>
     {/if}
+    {#if message.fixExtensionId}
+      <div class="agent-card-actions">
+        <button class="agent-btn" type="button" onclick={() => PM.SpatialAssistant?.requestFix?.(message.fixExtensionId)}>Fix it</button>
+      </div>
+    {/if}
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}

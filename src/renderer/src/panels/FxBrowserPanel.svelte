@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { kernelSignals } from '../kernel/signals.svelte';
   import type { PanelProps } from './registerSveltePanel';
 
   interface EffectDefinition {
@@ -9,13 +10,18 @@
   let { panelId }: PanelProps = $props();
 
   const PM = window.PM as Record<string, any>;
-  const groups = Object.entries(PM.FX as Record<string, EffectDefinition>).reduce(
-    (result, [id, definition]) => {
-      (result[definition.group] ||= []).push([id, definition]);
-      return result;
-    },
-    {} as Record<string, Array<[string, EffectDefinition]>>
-  );
+  /* Derived over the kernel's effects signal, so an effect registered (or
+     replaced, or removed) by an extension shows up without remounting. */
+  const groups = $derived.by(() => {
+    kernelSignals.effects;
+    return Object.entries(PM.FX as Record<string, EffectDefinition>).reduce(
+      (result, [id, definition]) => {
+        (result[definition.group] ||= []).push([id, definition]);
+        return result;
+      },
+      {} as Record<string, Array<[string, EffectDefinition]>>
+    );
+  });
   let status = $state('');
 
   function addEffect(event: MouseEvent, effect: string, label: string): void {

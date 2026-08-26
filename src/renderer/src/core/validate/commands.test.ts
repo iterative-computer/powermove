@@ -58,6 +58,10 @@ const validCommands: unknown[] = [
   { type: 'add_effect', target: 'a', effect: 'blur', parameters: { amount: 12 }, open: true },
   { type: 'remove_effect', target: 'a', effect: 'blur' },
   { type: 'set_effect', target: 'a', effect: 'blur', patch: { enabled: 0, open: 1 } },
+  {
+    type: 'set_transition', layer: 'a', edge: 'in',
+    transition: { type: 'wipe', dur: '0.5', p: { angle: 45, tint: '#112233', reverse: false } }
+  },
   { type: 'set_scene_parameter', name: 'Intensity', value: 42, min: '0', max: '100' },
   { type: 'add_marker', id: 'm1', time: '2.5', name: 'Beat' },
   { type: 'create_section', section: { id: 'section-1', layers: [], versions: [] } },
@@ -91,6 +95,7 @@ const invalidCommands: unknown[] = [
   { type: 'add_effect', effect: '' },
   { type: 'remove_effect' },
   { type: 'set_effect', effect: 'blur', patch: { amount: 12 } },
+  { type: 'set_transition', layer: 'a', edge: 'middle', transition: null },
   { type: 'set_scene_parameter', name: '', value: 1 },
   { type: 'add_marker', time: Number.POSITIVE_INFINITY },
   { type: 'create_section', section: {} },
@@ -113,6 +118,7 @@ const oversizedCommands: unknown[] = [
   { type: 'add_effect', effect: 'blur', parameters: { label: huge } },
   { type: 'remove_effect', effect: huge },
   { type: 'set_effect', effect: huge, patch: {} },
+  { type: 'set_transition', layer: 'a', edge: 'in', transition: { type: huge } },
   { type: 'set_scene_parameter', name: 'Value', value: huge },
   { type: 'add_marker', name: huge },
   { type: 'create_section', section: { id: 'section', note: huge } },
@@ -138,6 +144,7 @@ function exhaustivelyName(command: EditCommand): string {
     case 'add_effect': return command.type;
     case 'remove_effect': return command.type;
     case 'set_effect': return command.type;
+    case 'set_transition': return command.type;
     case 'set_scene_parameter': return command.type;
     case 'add_marker': return command.type;
     case 'create_section': return command.type;
@@ -148,7 +155,7 @@ function exhaustivelyName(command: EditCommand): string {
 }
 
 describe('EditCommand contract', () => {
-  it('matches the frozen 18-operation vocabulary in contract order', () => {
+  it('matches the shared operation vocabulary in contract order', () => {
     expect(COMMAND_TYPES).toEqual(legacyGoldenCommandTypes());
   });
 
@@ -239,6 +246,27 @@ describe('parseEditCommand', () => {
     });
     expect(parseAgentEditCommand({ type: 'create_section', section: { id: 'section-1' } }))
       .toBeInstanceOf(ValidationError);
+    expect(parseAgentEditCommand({
+      type: 'set_transition', layer: 'L-1', edge: 'out', transition: null
+    })).toEqual({ type: 'set_transition', layer: 'L-1', edge: 'out', transition: null });
+  });
+
+  it('validates transition duration and static parameter values', () => {
+    expect(parseEditCommand(validCommands[13])).toEqual({
+      type: 'set_transition', layer: 'a', edge: 'in',
+      transition: { type: 'wipe', dur: 0.5, p: { angle: 45, tint: '#112233', reverse: false } }
+    });
+    for (const transition of [
+      { type: 'wipe', dur: 0.019 },
+      { type: 'wipe', dur: 601 },
+      { type: 'wipe', dur: Number.NaN },
+      { type: 'wipe', p: { tint: 'red' } },
+      { type: 'wipe', p: { amount: Number.POSITIVE_INFINITY } },
+      { type: 'wipe', p: { nested: { nope: true } } }
+    ]) {
+      expect(parseEditCommand({ type: 'set_transition', layer: null, edge: 'in', transition }))
+        .toBeInstanceOf(ValidationError);
+    }
   });
 
   it('caps model-authored keyframes and delete targets', () => {
@@ -291,7 +319,8 @@ describe('parseEditCommand', () => {
       ['add_layer', 'content'],
       ['add_layer', 'properties'],
       ['add_effect', 'parameters'],
-      ['set_effect', 'patch']
+      ['set_effect', 'patch'],
+      ['set_transition', 'transition.p']
     ] as const;
     for (const [type, field] of patchCommands) {
       for (const unsafe of ['__proto__', 'prototype', 'constructor']) {
@@ -299,8 +328,11 @@ describe('parseEditCommand', () => {
         const base = type === 'add_layer' ? { type, layerType: 'solid' }
           : type === 'add_effect' ? { type, effect: 'blur' }
             : type === 'set_effect' ? { type, effect: 'blur' }
+              : type === 'set_transition'
+                ? { type, layer: 'a', edge: 'in', transition: { type: 'wipe', p: patch } }
               : { type };
-        expect(parseEditCommand({ ...base, [field]: patch })).toBeInstanceOf(ValidationError);
+        const command = type === 'set_transition' ? base : { ...base, [field]: patch };
+        expect(parseEditCommand(command)).toBeInstanceOf(ValidationError);
         expect((Object.prototype as { polluted?: boolean }).polluted).toBeUndefined();
       }
     }

@@ -472,6 +472,30 @@ function drawClip(c: any, L: any, y: any) {
   c.strokeStyle = sel ? 'rgba(255,255,255,.22)' : (dark ? 'rgba(255,255,255,.05)' : 'rgba(255,255,255,.65)');
   c.lineWidth = 1;
   c.beginPath(); c.moveTo(x0 + r * .7, yy + 1.5); c.lineTo(x0 + w - r * .7, yy + 1.5); c.stroke();
+  /* Transition windows read as wedges inside the clip instead of timeline
+     handles: they communicate timing without adding another hit target. */
+  c.save();
+  c.globalAlpha *= .6;
+  c.fillStyle = theme.accent;
+  const inWidth = Math.min(w, Math.max(0, Number(L.transitionIn?.dur) || 0) * T.pps);
+  if (L.transitionIn && inWidth > 0) {
+    c.beginPath();
+    c.moveTo(x0, yy);
+    c.lineTo(x0 + inWidth, yy);
+    c.lineTo(x0, yy + hh);
+    c.closePath();
+    c.fill();
+  }
+  const outWidth = Math.min(w, Math.max(0, Number(L.transitionOut?.dur) || 0) * T.pps);
+  if (L.transitionOut && outWidth > 0) {
+    c.beginPath();
+    c.moveTo(x0 + w, yy);
+    c.lineTo(x0 + w - outWidth, yy);
+    c.lineTo(x0 + w, yy + hh);
+    c.closePath();
+    c.fill();
+  }
+  c.restore();
   /* Label contrast from body luminance when the body is colored. */
   const [cr, cg, cb] = PM.hex2rgb(L.color);
   const lum = .2126 * cr + .7152 * cg + .0722 * cb;
@@ -1184,6 +1208,16 @@ function onCtx(e: any) {
       { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Reset work area', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Work area', origin: 'timeline' }) });
   }
+  /* Extension contributions land at the end, so the positions a user has
+     learned for the built-in rows never move. `layer:context` only fires over a
+     layer row; `timeline:context` fires for every row kind. */
+  const rowKind = hr ? hr.row.kind : 'empty';
+  const layerId = hr && hr.row.kind === 'layer' ? hr.row.L.id : null;
+  const contributed = [
+    ...(layerId ? PM.Kernel?.collectMenu?.('layer:context', { layerId }) ?? [] : []),
+    ...(PM.Kernel?.collectMenu?.('timeline:context', { kind: rowKind, layerId, time: x2t(x) }) ?? []),
+  ];
+  if (contributed.length) items.push('-' as any, ...contributed);
   PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
 }
 

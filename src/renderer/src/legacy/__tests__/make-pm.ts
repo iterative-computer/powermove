@@ -32,7 +32,6 @@ import { install as installHarness } from '../assistant/harness';
 import { install as installScripting } from '../core/scripting';
 import { install as installSpatial } from '../assistant/spatial';
 import { install as installProjectsUi } from '../ui/projects';
-import { install as installToolbar } from '../ui/toolbar';
 import { install as installApp } from '../app';
 
 const INSTALLS = [
@@ -68,7 +67,6 @@ const INSTALLS = [
   ['core/scripting', installScripting],
   ['assistant/spatial', installSpatial],
   ['ui/projects', installProjectsUi],
-  ['ui/toolbar', installToolbar],
   ['app', installApp],
 ] as const;
 

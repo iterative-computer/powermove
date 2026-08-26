@@ -169,7 +169,8 @@ export function install(PM: PMRegistry): void {
             });
             PM.CodexBridge.resolve(id, {
               ok: result.ok,
-              dataBase64: textToBase64(result.ok ? result.text : result.error)
+              dataBase64: textToBase64(result.ok ? result.text : result.error),
+              extensions: result.ok ? result.extensions : undefined
             });
           })().catch(error => {
             PM.CodexBridge.resolve(id, {

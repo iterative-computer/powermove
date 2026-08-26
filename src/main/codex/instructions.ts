@@ -1,20 +1,37 @@
-import type { CodexAccess } from '../../shared/ipc';
+import { LIMITS } from '../../shared/ipc';
+import type { AgentExtensionChange, CodexAccess } from '../../shared/ipc';
 import { AGENT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
+import { EXTENSION_ID } from '../../shared/extensions';
 
 export interface AgentInstructionsOptions {
   projectName: string;
   artifactPath: string;
   access: Exclude<CodexAccess, 'editor'>;
+  extensionsDir: string;
 }
 
-export function agentInstructions({ projectName, artifactPath, access }: AgentInstructionsOptions): string {
-  return `You are the general production agent working beside Powermove. Complete the user's request end to end, using web search, shell tools, installed creative applications, and reusable integrations when useful. The current editable Powermove project snapshot is inputs/powermove-project.json. Treat it as read-only reference; return Powermove edits through typed commands instead of rewriting that file.
+export function agentInstructions({
+  projectName,
+  artifactPath,
+  access,
+  extensionsDir
+}: AgentInstructionsOptions): string {
+  return `You are the general production agent working beside Powermove. Complete the user's request end to end, using web search, shell tools, installed creative applications, and reusable integrations when useful.
 
-Place every deliverable file under the artifacts directory for this run: ${artifactPath}. Do not leave deliverables elsewhere. You may create project-local scripts, notes, and adapters in this workspace when they help finish the task.
+PROJECT EDITING
+The current Powermove project snapshot is inputs/powermove-project.json. Treat it as read-only reference; never rewrite it. For scene edits such as layers, properties, effects, keyframes, easing, expressions, composition settings, markers, or sections, return typed commands even if you also create or change an extension.
 
-Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.
+Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
 
-Record uploads, messages, publications, remote changes, application launches, or other outside-world side effects in externalActions. Never claim an external action succeeded unless a tool result proves it. The active authority is ${access}. Project authority limits writes to this project workspace; computer authority was explicitly granted for this run and may operate outside it when required by the user's request.
+EXTENDING POWERMOVE
+The writable user extensions directory is ${extensionsDir}. When the user asks to change or add Powermove functionality, create or edit extensions only under that directory. The folder name must equal the extension manifest id. Never edit the app bundle.
+
+The extension API pack is in powermove-api/. Read powermove-api/EXTENSIONS.md first, then use the included TypeScript API, manifest, project, and command types as needed. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in by copying its folder from the app's builtin extensions directory (packaged: Resources/builtin-extensions/<id>; dev: src/extensions/<id>) into the extensions directory with manifest \`replaces\` and \`forkedFrom\` ("<id>@<version>") entries. After creating, updating, or removing extensions, list each id and action in the result's extensions array so Powermove can reload it.
+
+DELIVERABLES AND SIDE EFFECTS
+Place every non-extension deliverable file under the artifacts directory for this run: ${artifactPath}. Do not leave deliverables elsewhere. You may create project-local scripts, notes, and adapters in this workspace when they help finish the task. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.
+
+Record uploads, messages, publications, remote changes, application launches, or other outside-world side effects in externalActions. Never claim an external action succeeded unless a tool result proves it. The active authority is ${access}. Project authority limits writes to this project workspace and the user extensions directory above; computer authority was explicitly granted for this run and may operate outside them when required by the user's request.
 
 Project: ${projectName}`;
 }
@@ -30,6 +47,28 @@ export interface AgentResult {
   artifacts: AgentArtifactResult[];
   externalActions: string[];
   notes: string[];
+  extensions?: AgentExtensionChange[];
+}
+
+export interface ExtensionFixFile {
+  path: string;
+  text: string;
+}
+
+export interface BuildFixPromptOptions {
+  id: string;
+  error: string;
+  files: readonly ExtensionFixFile[];
+}
+
+export function buildFixPrompt({ id, error, files }: BuildFixPromptOptions): string {
+  const renderedFiles = files.length === 0
+    ? '(none)'
+    : files.map((file) => `<file path=${JSON.stringify(file.path)}>\n${file.text}\n</file>`).join('\n\n');
+  const prompt = `The extension \`${id}\` fails: ${error}. Files:\n\n${renderedFiles}`;
+  // Must fit the codex:run prompt limit or the follow-up run is rejected.
+  const budget = LIMITS.codexPromptChars - 200;
+  return prompt.length > budget ? `${prompt.slice(0, budget)}\n/* …truncated… */` : prompt;
 }
 
 export function agentResultSchema(): Record<string, unknown> {
@@ -54,7 +93,21 @@ export function agentResultSchema(): Record<string, unknown> {
         }
       },
       externalActions: { type: 'array', maxItems: 80, items: { type: 'string' } },
-      notes: { type: 'array', maxItems: 80, items: { type: 'string' } }
+      notes: { type: 'array', maxItems: 80, items: { type: 'string' } },
+      extensions: {
+        type: 'array',
+        maxItems: 32,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id', 'action'],
+          properties: {
+            id: { type: 'string', pattern: EXTENSION_ID.source },
+            action: { type: 'string', enum: ['created', 'updated', 'removed'] },
+            summary: { type: 'string' }
+          }
+        }
+      }
     }
   };
 }

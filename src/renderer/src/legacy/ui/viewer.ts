@@ -1,4 +1,10 @@
 /* Ported from js/ui/viewer.js — behavior-preserving. */
+/* TODO(extensions): `menus.contribute('viewer:context', …)` has no host here.
+   src/renderer/src/legacy/ui/viewer.ts never opens a context menu — the canvas
+   has no `contextmenu` listener — so there is no single obvious place to append
+   contributions. Wire it when the viewer grows a right-click menu of its own.
+   (`timeline:context` and `layer:context` are hosted in ui/timeline.ts;
+   `panel:context` in layout/menu.ts; `titlebar:right` in shell/Titlebar.svelte.) */
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {

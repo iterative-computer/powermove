@@ -106,6 +106,7 @@ beforeEach(() => {
     WS: { current: { layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] }, hiddenPanels: [] } },
     AgentHarness: { describeCommand: vi.fn(() => 'Set layer opacity') },
     SpatialAssistant: {
+      requestFix: vi.fn(),
       math: {
         textareaLayout: (scrollHeight: number, minHeight: number, maxHeight: number) => {
           const min = Number.isFinite(minHeight) ? Math.max(0, minHeight) : 0;
@@ -253,6 +254,22 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.undoPanelRun).toHaveBeenCalledOnce();
     expect(PM.AgentUI.keepPanelRun).toHaveBeenCalledOnce();
   });
+
+  it('renders an extension recovery action inside the failing result turn', () => {
+    renderPanel(snapshot({
+      legacyPhase: 'conversation',
+      conversation: [{
+        role: 'assistant',
+        text: "Broken Mod didn't load: Unexpected token",
+        fixExtensionId: 'broken-mod'
+      }]
+    }));
+
+    const button = [...target.querySelectorAll<HTMLButtonElement>('button')]
+      .find((candidate) => candidate.textContent === 'Fix it')!;
+    button.click();
+    expect(PM.SpatialAssistant.requestFix).toHaveBeenCalledExactlyOnceWith('broken-mod');
+  });
 });
 
 describe('agent bridge', () => {
@@ -308,5 +325,18 @@ describe('agent bridge', () => {
     registry.AgentUI.confirmComputerAccess();
     expect(agentState.accessMode).toBe('computer');
     expect(store.set).not.toHaveBeenCalledWith('agentAccessMode', 'computer');
+  });
+
+  it('labels the two persistent agent authorities by what they change', () => {
+    const registry: Record<string, any> = {
+      store: { get: vi.fn((_key: string, fallback: unknown) => fallback), set: vi.fn() },
+      registerPanel: vi.fn()
+    };
+    installSpatial(registry);
+
+    expect(agentState.accessModes.slice(0, 2).map(({ id, label }) => ({ id, label }))).toEqual([
+      { id: 'editor', label: 'Edit project' },
+      { id: 'project', label: 'Change Powermove (project)' }
+    ]);
   });
 });

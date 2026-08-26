@@ -7,12 +7,15 @@ import {
   shell,
   type WebContents
 } from 'electron';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
 import { IPC } from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
+import { registerExtensionsIpc, serveExtensionAsset } from './extensions';
+import { createExtensionRegistry } from './extensions/registry';
+import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
 import { installMenu } from './menu';
@@ -117,6 +120,13 @@ function registerAppProtocol(): void {
 
       const pathname = decodeURIComponent(requestUrl.pathname);
       const requestedPath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+      if (requestedPath.startsWith('ext/')) {
+        const asset = await serveExtensionAsset(requestedPath);
+        if (asset === null) return errorResponse(404, 'Not found');
+        const headers = responseHeaders('text/javascript; charset=utf-8');
+        headers['Cache-Control'] = 'no-store';
+        return new Response(asset.body, { status: asset.status, headers });
+      }
       const filePath = path.resolve(rendererRoot, requestedPath);
       const relativePath = path.relative(rendererRoot, filePath);
 
@@ -299,6 +309,41 @@ if (!hasSingleInstanceLock) {
     registerStoreIpc(ipcMain, store, { isTrustedSender });
     installQuitFlush(app, store);
 
+    const userDir = path.join(app.getPath('userData'), 'extensions');
+    const buildDir = path.join(app.getPath('userData'), 'extensions-build');
+    const builtinResourcesDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'builtin-extensions')
+      : path.resolve(app.getAppPath(), 'src/extensions');
+    // Extension boot must never prevent the window from appearing: a bad
+    // directory or a slow compile degrades to "no user extensions" instead.
+    try {
+      await mkdir(userDir, { recursive: true });
+      let builtinIds: string[] = [];
+      try {
+        builtinIds = (await readdir(builtinResourcesDir, { withFileTypes: true }))
+          .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+          .map((entry) => entry.name)
+          .sort();
+      } catch {
+        // No built-in directory (tests / partial checkouts): kernel still boots.
+      }
+      const extensionRegistry = createExtensionRegistry({
+        store,
+        userDir,
+        buildDir,
+        builtinIds,
+        resourcesDir: builtinResourcesDir
+      });
+      registerExtensionsIpc(ipcMain, { registry: extensionRegistry, isTrusted: isTrustedSender });
+      // Compile in the background; the renderer receives ext:changed when done.
+      void extensionRegistry
+        .refresh()
+        .then(() => startExtensionWatcher({ userDir, buildDir, registry: extensionRegistry }))
+        .catch((error) => console.error('[extensions] initial refresh failed', error));
+    } catch (error) {
+      console.error('[extensions] boot skipped', error);
+    }
+
     const ctx = { isTrustedSender, isTrustedSenderContents };
     registerSaveIpc(ipcMain, ctx);
     registerCaptureIpc(ipcMain, ctx);
@@ -306,9 +351,36 @@ if (!hasSingleInstanceLock) {
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
+    // API pack handed to the agent every autonomous run: the extension guide
+    // plus the frozen kernel/shared/type contracts.
+    const apiPackDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'api-pack')
+      : app.getAppPath();
+    const apiPackEntries: Array<[name: string, devPath: string]> = [
+      ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
+      ['api.ts', 'src/renderer/src/kernel/api.ts'],
+      ['extensions.ts', 'src/shared/extensions.ts'],
+      ['project.ts', 'src/renderer/src/core/types/project.ts'],
+      ['commands.ts', 'src/renderer/src/core/types/commands.ts']
+    ];
+    const apiPackFiles = async (): Promise<Array<{ name: string; text: string }>> => {
+      const files: Array<{ name: string; text: string }> = [];
+      for (const [name, devPath] of apiPackEntries) {
+        const file = app.isPackaged ? path.join(apiPackDir, name) : path.join(apiPackDir, devPath);
+        try {
+          files.push({ name, text: await readFile(file, 'utf8') });
+        } catch (error) {
+          console.warn(`[api-pack] missing ${name}: ${String(error)}`);
+        }
+      }
+      return files;
+    };
+
     registerCodexIpc(ipcMain, {
       getWindow: () => mainWindow,
       userData: app.getPath('userData'),
+      extensionsDir: userDir,
+      apiPackFiles,
       isTrustedSender,
       codexBinaryPref: () => null // a user-facing preference lands with the settings UI
     });
