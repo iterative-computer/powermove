@@ -147,6 +147,12 @@ function attemptOutput(attempt: AttemptResult): string {
   return `${attempt.stderr}\n${attempt.stdout}`.trim();
 }
 
+/* Codex connects to every configured MCP server at startup; one broken server
+   (expired OAuth, dead transport) can kill a run that never needed it. */
+export function isMcpStartupFailure(diagnostic: string): boolean {
+  return /rmcp|mcp/i.test(diagnostic) && /AuthRequired|Transport channel closed|worker quit|connection refused|handshake/i.test(diagnostic);
+}
+
 function sortJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortJsonValue);
   if (!isRecord(value)) return value;
@@ -286,7 +292,9 @@ export class CodexRunner {
 
       let resumeId = await readSession(layout.sessionPath);
       let attempt: AttemptResult | null = null;
-      for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+      let disableMcp = false;
+      let mcpFallback = false;
+      for (let tryIndex = 0; tryIndex < 3; tryIndex += 1) {
         const argv = buildAutonomousArgv({
           schemaPath: layout.schemaPath,
           outputPath: layout.outputPath,
@@ -302,7 +310,8 @@ export class CodexRunner {
           reasoningEffort: req.reasoningEffort,
           access: authority,
           extensionsDir: layout.extensionsDir,
-          sessionId: resumeId
+          sessionId: resumeId,
+          disableMcp
         });
         attempt = await this.execute(req, state, binary, argv, layout.root, layout, options, (timer) => {
           timeout = timer;
@@ -317,6 +326,14 @@ export class CodexRunner {
           await clearSession(layout.sessionPath);
           await rm(layout.outputPath, { force: true });
           resumeId = null;
+          continue;
+        }
+        if (!disableMcp && attempt.code !== 0 && isMcpStartupFailure(diagnostic)) {
+          console.error('[codex] MCP startup failure; retrying without MCP servers:', diagnostic.slice(0, 1_000));
+          options.onProgress?.('One of your Codex integrations failed to start — retrying without integrations…');
+          await rm(layout.outputPath, { force: true });
+          disableMcp = true;
+          mcpFallback = true;
           continue;
         }
         break;
@@ -339,6 +356,9 @@ export class CodexRunner {
       parsed.projectId = req.projectId;
       parsed.access = authorityForAccess(req.access);
       const extensions = parseAgentExtensionChanges(parsed.extensions);
+      if (mcpFallback && Array.isArray(parsed.notes)) {
+        parsed.notes = ['This run skipped your Codex integrations: one of them failed to start (it likely needs to be signed in again).', ...parsed.notes].slice(0, 80);
+      }
       return {
         ok: true,
         text: JSON.stringify(sortJsonValue(parsed)),

@@ -310,3 +310,13 @@ describe('humanizeCodexFailure', () => {
     expect(humanizeCodexFailure('', 'The autonomous agent failed.')).toBe('The autonomous agent failed.');
   });
 });
+
+describe('isMcpStartupFailure', () => {
+  it('matches the rmcp AuthRequired fatal and transport closures', async () => {
+    const { isMcpStartupFailure } = await import('./runner');
+    expect(isMcpStartupFailure('ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(...)')).toBe(true);
+    expect(isMcpStartupFailure('mcp handshake failed: connection refused')).toBe(true);
+    expect(isMcpStartupFailure('The model produced invalid JSON')).toBe(false);
+    expect(isMcpStartupFailure('AuthRequired without any emcee context')).toBe(false);
+  });
+});

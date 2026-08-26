@@ -37,6 +37,9 @@ export interface AutonomousArgvOptions extends CommonArgvOptions {
   extensionsDir: string;
   sessionId: string | null;
   instructions: string;
+  /** Retry path: strip the user's global MCP servers so a broken one (expired
+      OAuth, dead transport) cannot take the whole run down with it. */
+  disableMcp?: boolean;
 }
 
 function appendModelOptions(
@@ -76,6 +79,7 @@ export function buildEditorArgv(options: EditorArgvOptions): string[] {
 
 export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
   const argv = ['--search'];
+  if (options.disableMcp) argv.push('--config', 'mcp_servers={}');
   if (options.access === 'computer') {
     argv.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
