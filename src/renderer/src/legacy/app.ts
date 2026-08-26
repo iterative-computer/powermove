@@ -285,8 +285,9 @@ restoreProjectAssets(PM.proj);
 /* ── shell ─────────────────────────────────────────────── */
 function openSettings() {
   const appearance = h('select.settings-appearance', { 'aria-label': 'Appearance' },
+    h('option', { value: 'system' }, 'Default'),
     h('option', { value: 'light' }, 'Light'), h('option', { value: 'dark' }, 'Dark'));
-  appearance.value = PM.theme.current;
+  appearance.value = PM.theme.mode;
   appearance.onchange = () => PM.theme.apply(appearance.value);
   const body = h('div.settings-view',
     h('div.settings-row', h('div.settings-copy', h('b', 'Appearance'), h('span', 'Choose how Powermove looks.')), appearance),
