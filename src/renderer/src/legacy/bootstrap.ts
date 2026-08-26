@@ -1,8 +1,5 @@
-/* Legacy application bootstrap.
-   Every former <script> tag in index.html is now an install(PM) module; they
-   run here synchronously, in the exact original script order, when the
-   classic host/legacy-bundle.js tag executes. The preload bridge
-   (window.powermove) already exists at that point. */
+/* Application-engine bootstrap. The remaining imperative engines install into
+   one PM registry before the Svelte chrome mounts and boots the project. */
 import type { PMRegistry } from './registry';
 import { installLegacyRuntime } from '../runtime/install-legacy';
 import { installSveltePanels } from '../panels/install';
@@ -34,8 +31,6 @@ import { install as installControls } from './ui/controls';
 import { install as installLayout } from './ui/layout';
 import { install as installViewer } from './ui/viewer';
 import { install as installTimeline } from './ui/timeline';
-import { install as installInspector } from './ui/inspector';
-import { install as installPanels } from './ui/panels';
 import { install as installLibraryUi } from './ui/library';
 import { install as installShortcuts } from './ui/shortcuts';
 import { install as installWorkspace } from './core/workspace';
@@ -53,10 +48,10 @@ declare global {
   }
 }
 
-// Match js/core/util.js: reuse the registry when present, otherwise create it.
+// Reuse the registry when present, otherwise create it.
 const PM: PMRegistry = (window.PM = window.PM || {});
 
-// Original index.html script order — do not reorder.
+// Engine dependency order — do not reorder.
 const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/diag', installDiag],
   ['core/util', installUtil],
@@ -82,8 +77,6 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/layout', installLayout],
   ['ui/viewer', installViewer],
   ['ui/timeline', installTimeline],
-  ['ui/inspector', installInspector],
-  ['ui/panels', installPanels],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],
   ['core/workspace', installWorkspace],
@@ -93,9 +86,8 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['assistant/spatial', installSpatial],
   ['ui/projects', installProjectsUi],
   ['ui/toolbar', installToolbar],
-  // Phase 4: Svelte stores mirror the legacy document (legacy → runes only),
-  // then Svelte panels register over their legacy counterparts BEFORE the app
-  // boots and applies the workspace layout.
+  // Install the Svelte-owned chrome before the app boots and applies the
+  // workspace layout.
   ['shell', installShell],
   ['layout/svelte', installSvelteLayout],
   ['overlays/svelte', installSvelteOverlays],
@@ -108,7 +100,7 @@ for (const [name, install] of INSTALLS) {
   try {
     install(PM);
   } catch (error) {
-    // A classic script tag would have logged and continued; do the same.
+    // Keep independent engine failures isolated while the registry boots.
     console.error(`[legacy] install failed: ${name}`, error);
   }
 }

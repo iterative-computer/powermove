@@ -166,7 +166,7 @@ function allSelKeys() {
 
 /* ── view / files ──────────────────────────────────────── */
 def('fitView', 'Fit composition in view', '⇧F', () => { PM.Viewer.fit = true; PM.Viewer.layout(); PM.TL.frameView(); }, 'View');
-def('palette', 'Command palette', '⌘K', () => palette(), 'View');
+def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
 def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');
@@ -244,47 +244,4 @@ window.addEventListener('keydown', (e?: any) => {
   }
 });
 
-/* ── command palette ───────────────────────────────────── */
-function palette() {
-  PM.closeMenus();
-  const scrim: any = PM.$('#scrim'); scrim.classList.add('on');
-  const inp: any = h('input', { placeholder: 'Search commands, layers, workspaces…' });
-  const list: any = h('div.plist');
-  const el: any = h('div.modal#palette', h('div.field', inp), list);
-  window.document.body.appendChild(el);
-  const close: any = () => { el.remove(); scrim.classList.remove('on'); scrim.onclick = null; };
-  scrim.onclick = close;
-
-  let items: any = [], sel: any = 0;
-  const build: any = (q?: any) => {
-    q = q.toLowerCase().trim();
-    items = [];
-    Object.values(C).forEach((c: any) => { if (!q || c.label.toLowerCase().includes(q)) items.push({ label: c.label, cat: c.cat, kb: c.kb, run: () => PM.cmd(c.id) }); });
-    PM.proj.layers.forEach((L: any) => { if (q && L.name.toLowerCase().includes(q)) items.push({ label: L.name, cat: 'Layer', run: () => PM.selectLayers(L.id) }); });
-    PM.WS.list().forEach((w: any) => { if (!q || w.name.toLowerCase().includes(q)) items.push({ label: 'Workspace · ' + w.name, cat: 'Workspace', run: () => PM.WS.activate(w.id) }); });
-    Object.entries(PM.FX).forEach(([k, d]: any) => { if (q && d.label.toLowerCase().includes(q)) items.push({ label: 'Effect · ' + d.label, cat: 'Effect', run: () => { const L: any = PM.firstSel(); if (L) PM.Edit.apply({ type: 'add_effect', target: L.id, effect: k }, { label: 'Add ' + d.label, origin: 'command-palette' }); } }); });
-    items = items.slice(0, 60);
-    sel = 0; paint();
-  };
-  const paint: any = () => {
-    list.textContent = '';
-    items.forEach((it?: any, i?: any) => {
-      const row: any = h('div.pitem' + (i === sel ? '.on' : ''), h('span.cat', it.cat), h('span', it.label), it.kb ? h('span.kb', it.kb) : null);
-      row.onclick = () => { close(); it.run(); };
-      list.appendChild(row);
-    });
-    if (!items.length) list.appendChild(h('div.empty', 'No matches'));
-  };
-  inp.addEventListener('input', () => build(inp.value));
-  inp.addEventListener('keydown', (e?: any) => {
-    e.stopPropagation();
-    if (e.key === 'ArrowDown') { sel = Math.min(items.length - 1, sel + 1); paint(); e.preventDefault(); }
-    if (e.key === 'ArrowUp') { sel = Math.max(0, sel - 1); paint(); e.preventDefault(); }
-    if (e.key === 'Enter') { const it: any = items[sel]; close(); it && it.run(); }
-    if (e.key === 'Escape') close();
-  });
-  build('');
-  inp.focus();
-}
-PM.palette = palette;
 }

@@ -1,6 +1,9 @@
 # Phase 0 — spike results and decisions
 
-Evidence: `spikes/probe/results-{file,app,finder}.json` (Electron 44.0.0, Chromium per `meta`), fixtures in `spikes/fixtures/`. Each row is a go/no-go for the Electron platform layer (Phase 1).
+The Phase 0 probe implementation and captured result files were retired in
+Phase 6 after their decisions were incorporated. The media fixtures remain in
+`spikes/fixtures/` for end-to-end coverage. Each row records the original
+go/no-go decision for the Electron platform layer (Phase 1).
 
 | # | Question | Result | Decision |
 |---|---|---|---|

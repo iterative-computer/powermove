@@ -1,5 +1,9 @@
 # Phase 3b legacy-module conversion recipe
 
+Historical note: this recipe records the migration that converted the classic
+renderer into TypeScript modules. Phase 6 subsequently deleted its source
+oracle; path names below describe migration inputs and are not live dependencies.
+
 1. Find `js/<dir>/<name>.js` in `index.html`; record its exact script position.
 2. Create `src/renderer/src/legacy/<dir>/<name>.ts` with this shell:
    ```ts

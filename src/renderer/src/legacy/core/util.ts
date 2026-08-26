@@ -193,42 +193,6 @@ PM.store = {
   del(k: any) { window.localStorage.removeItem('pm.' + k); },
 };
 
-/* ── toasts ────────────────────────────────────────────── */
-PM.toast = (msg: any, ms = 2200) => {
-  const el = h('div.toast', msg);
-  $('#toasts').appendChild(el);
-  window.setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .25s'; window.setTimeout(() => el.remove(), 260); }, ms);
-};
-
-/* ── floating menus ────────────────────────────────────── */
-PM.menu = (anchor: any, items: any, opt: any = {}) => {
-  PM.closeMenus();
-  const el = h('div.drop');
-  for (const it of items) {
-    if (it === '-') { el.appendChild(h('div.sep')); continue; }
-    if (it.header) { el.appendChild(h('div.hd', it.header)); continue; }
-    el.appendChild(h('div.di' + (it.on ? '.on' : '') + (it.disabled ? '.disabled' : ''), {
-      role: 'menuitem', 'aria-disabled': String(!!it.disabled),
-      onclick: (e: any) => { e.stopPropagation(); if (it.disabled) return; PM.closeMenus(); it.run && it.run(); }
-    }, it.on ? '✓ ' : '', it.label, it.kb ? h('span', { style: { marginLeft: 'auto', fontFamily: 'var(--f-mono)', fontSize: '10.5px', color: 'var(--tx-4)' } }, it.kb) : null));
-  }
-  window.document.body.appendChild(el);
-  const r = anchor.getBoundingClientRect();
-  const w = el.offsetWidth, ht = el.offsetHeight;
-  let x = opt.x != null ? opt.x : (opt.right ? r.right - w : r.left);
-  let y = opt.y != null ? opt.y : r.bottom + 5;
-  el.style.left = clamp(x, 6, window.innerWidth - w - 6) + 'px';
-  el.style.top = clamp(y, 6, window.innerHeight - ht - 6) + 'px';
-  PM._menuOutside = (event: any) => { if (!el.contains(event.target)) PM.closeMenus(); };
-  window.setTimeout(() => window.document.addEventListener('pointerdown', PM._menuOutside), 0);
-  return el;
-};
-PM.closeMenus = () => {
-  if (PM._menuOutside) window.document.removeEventListener('pointerdown', PM._menuOutside);
-  PM._menuOutside = null;
-  $$('.drop').forEach((e: any) => e.remove());
-};
-
 /* ── drag helper ───────────────────────────────────────── */
 /* Returns { cancel }. cancel() and a native pointercancel both end the drag
    without calling up(), so interrupted gestures can never wedge the cursor
@@ -267,22 +231,6 @@ PM.drag = (e: any, { move, up, cancel, cursor }: any) => {
   window.addEventListener('pointerup', fin, true);
   window.addEventListener('pointercancel', pc, true);
   return { cancel: () => { if (stop() && cancel) cancel(); } };
-};
-
-/* ── modal ─────────────────────────────────────────────── */
-PM.modal = ({ title, body, actions = [], width = 460, onClose }: any) => {
-  const scrim = $('#scrim'); scrim.classList.add('on');
-  const el = h('div.modal', { style: { width: width + 'px', left: '50%', top: '18vh', transform: 'translateX(-50%)', maxHeight: '68vh' } });
-  if (title) el.appendChild(h('h3', title));
-  const mb = h('div.mb'); if (body) mb.appendChild(body); el.appendChild(mb);
-  const close = () => { el.remove(); scrim.classList.remove('on'); scrim.onclick = null; onClose && onClose(); };
-  if (actions.length) {
-    el.appendChild(h('div.mf', ...actions.map((a: any) =>
-      h('button.btn' + (a.pri ? '.pri' : ''), { onclick: () => { if (a.run && a.run() === false) return; close(); } }, a.label))));
-  }
-  scrim.onclick = close;
-  window.document.body.appendChild(el);
-  return { el, close, body: mb };
 };
 
 PM.download = (blob: any, name: any) => {

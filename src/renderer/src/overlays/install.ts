@@ -41,7 +41,6 @@ type OverlayMembers = {
 let installed: InstalledOverlays | null = null;
 
 export function installSvelteOverlays(PM: PMRegistry): void {
-  if (!PM.SvelteShell) return;
   const target = document.getElementById('toasts');
   if (!target) return;
 
@@ -116,7 +115,7 @@ function restoreAttribute(target: HTMLElement, name: string, value: string | nul
   else target.setAttribute(name, value);
 }
 
-/** Test/HMR seam. The persisted switch and legacy functions are not changed. */
+/** Test/HMR seam. */
 export async function unmountSvelteOverlays(): Promise<void> {
   if (installed) await dispose(installed);
 }

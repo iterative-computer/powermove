@@ -15,18 +15,15 @@ interface LegacyPM {
   KF(time: number, value: number, ease?: string): Record<string, unknown>;
 }
 
+// The js/ oracle is gone (Phase 6); build the fixture through the shipped TS
+// module installs instead — same factories, same shapes.
+import { makePM } from '../../legacy/__tests__/make-pm';
+
 function legacyModel(): LegacyPM {
   let sequence = 0;
-  const PM = {
-    uid: (prefix: string) => `${prefix}-fixture-${++sequence}`,
-    clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-    SHADER_TEMPLATE: 'uniform float uSpeed; // @param 1 0 4\nvoid main(){}'
-  } as unknown as LegacyPM;
-  const context = createContext({ window: { PM }, Date, JSON, Object, Set, Map });
-  const easing = readFileSync(new URL('../../../../../js/core/easing.js', import.meta.url), 'utf8');
-  const source = readFileSync(new URL('../../../../../js/core/model.js', import.meta.url), 'utf8');
-  runInContext(easing, context, { filename: 'js/core/easing.js' });
-  runInContext(source, context, { filename: 'js/core/model.js' });
+  const PM = makePM('core/easing', 'core/model') as unknown as LegacyPM;
+  (PM as any).uid = (prefix: string) => `${prefix}-fixture-${++sequence}`;
+  (PM as any).SHADER_TEMPLATE = 'uniform float uSpeed; // @param 1 0 4\nvoid main(){}';
   return PM;
 }
 

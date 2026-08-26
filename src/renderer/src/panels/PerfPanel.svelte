@@ -1,8 +1,7 @@
 <script lang="ts">
-  /* Pilot Svelte panel (replaces legacy ui/panels.js 'perf'). Same rows and
-     the same .row.split markup PM.row() produced, so css/app.css applies
-     unchanged — but no manual DOM sync and no bus listener: the perf store is
-     written ≤2 Hz by the runtime bridge, the counts derive from the ticks. */
+  /* Performance panel with the same .row.split markup used by the shared CSS.
+     The perf store is written ≤2 Hz by the runtime bridge and the counts
+     derive from those ticks, with no manual DOM sync or bus listener. */
   import { doc } from '../state/document.svelte';
   import { perf } from '../state/transport.svelte';
   import type { PanelProps } from './registerSveltePanel';

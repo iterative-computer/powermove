@@ -50,11 +50,9 @@ function registry(): PMRegistry {
     invalidate: vi.fn(),
     toast: vi.fn(),
     closeMenus: vi.fn(),
-    drag: vi.fn(),
-    Popout: { isOpen: () => false }
+    drag: vi.fn()
   };
   installLegacyLayout(PM);
-  PM.SvelteShell = true;
   PM.WS = {
     current: workspace(),
     save: vi.fn(),

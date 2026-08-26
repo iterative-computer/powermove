@@ -53,7 +53,7 @@
   });
 
   function autosize(): void {
-    if (!textarea || textarea.closest('[data-popout-source]')) return;
+    if (!textarea) return;
     textarea.style.height = 'auto';
     const style = window.getComputedStyle(textarea);
     const layout = PM.SpatialAssistant.math.textareaLayout(

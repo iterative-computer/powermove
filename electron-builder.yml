@@ -16,7 +16,7 @@ artifactName: ${productName}-${version}-mac-${arch}.${ext}
 mac:
   identity: null
   hardenedRuntime: false
-  icon: build/icon.icns
+  icon: resources/icon.icns
   target:
     - target: dmg
       arch:

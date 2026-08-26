@@ -1,5 +1,6 @@
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
 
@@ -746,10 +747,6 @@ function textareaLayout(scrollHeight: any, minHeight: any, maxHeight: any) {
 
 function autosizeTextarea(input: any, onResize?: any) {
   const resize: any = () => {
-    /* A detached panel keeps its authoritative controls in a hidden source host.
-       Measuring that narrow/offscreen copy reports an enormous scrollHeight and
-       used to make the visible prompt jump to its maximum height on every key. */
-    if (input.closest('[data-popout-source]')) return;
     input.style.height = 'auto';
     const style: any = window.getComputedStyle(input);
     const layout: any = textareaLayout(input.scrollHeight, Number.parseFloat(style.minHeight), Number.parseFloat(style.maxHeight));
@@ -1181,7 +1178,7 @@ RULES
 - While working, emit concise user-visible reasoning summaries about what you are inspecting, deciding, or validating. Do not expose private chain-of-thought.
 - kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
 - For scene requests, inspect the live source and attached rendered frames. Preserve locked layers, hand-edited channels, and unrelated work. Set reviewTimes to the most revealing moments. Return neutral section and chromeEdit fields.
-- kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand|popout|dock","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and popout/dock/collapse/expand for its window state. Never hide or collapse viewer. Never pop out viewer or timeline. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
+- kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and collapse/expand for its collapsed state. Never hide or collapse viewer. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
 - kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
 - For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-interface requests return interfaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section with tool="".
 - kind=chrome for a supported app-interface style change. Supported targets are preview.cornerRadius with square|rounded and timeline.surfaceOrder with normal|reversed. Use operation=modify, and return a neutral empty section object.
@@ -1269,14 +1266,14 @@ function workspaceSemanticContext(workspace: any) {
 function panelCatalog(workspace: any) {
   const visible: any = new Map((workspace?.layout?.docks || []).flatMap((dock: any) => (dock.panels || []).map((spec: any, index: any) => [spec.id, {
     state: 'visible', dockId: dock.id, position: index, size: spec.size || null,
-    collapsed: !!spec.collapsed, poppedOut: !!PM.Popout?.isOpen?.(spec.id),
+    collapsed: !!spec.collapsed,
   }])));
   const hidden: any = new Map((workspace?.hiddenPanels || []).map((item: any) => [item.id, {
     state: 'hidden', dockId: item.dockId || '', position: item.index ?? 0, size: item.spec?.size || null,
   }]));
   return Object.values(PM.PANELS || {}).filter((panel: any) => panel.id !== 'toolbar').map((panel: any) => ({
     id: panel.id, title: panel.title, ...(visible.get(panel.id) || hidden.get(panel.id) || { state: 'available' }),
-    canPopOut: !['viewer', 'timeline'].includes(panel.id), canHide: panel.id !== 'viewer',
+    canHide: panel.id !== 'viewer',
   }));
 }
 
@@ -1324,7 +1321,7 @@ function controlConnection(target: any, path: any, controlType: any) {
   return { target: target === '$selection' || target === 'selection' ? '$selection' : layer.id, path, control, connection: `Layer · ${layer.name}` };
 }
 
-const PANEL_ACTION_TYPES: any = new Set(['add', 'restore', 'hide', 'move', 'reorder', 'resize', 'resizeDock', 'rename', 'collapse', 'expand', 'popout', 'dock']);
+const PANEL_ACTION_TYPES: any = new Set(['add', 'restore', 'hide', 'move', 'reorder', 'resize', 'resizeDock', 'rename', 'collapse', 'expand']);
 
 function sanitizePanelEdit(encoded: any) {
   let raw: any;
@@ -1340,7 +1337,6 @@ function sanitizePanelEdit(encoded: any) {
     if (!PANEL_ACTION_TYPES.has(type)) return null;
     if (type !== 'resizeDock' && (!known.has(panelId) || panelId === 'toolbar')) return null;
     if (['hide', 'collapse'].includes(type) && panelId === 'viewer') return null;
-    if (type === 'popout' && ['viewer', 'timeline'].includes(panelId)) return null;
     const out: any = { type, panelId, dockId };
     if (Number.isFinite(action.position)) out.position = PM.clamp(Math.floor(action.position), 0, 20);
     if (Number.isFinite(action.size)) out.size = PM.clamp(action.size, type === 'resizeDock' ? 200 : 56, type === 'resizeDock' ? 760 : 1600);
@@ -1352,12 +1348,12 @@ function sanitizePanelEdit(encoded: any) {
 
 function applyPanelEdit(workspace: any, edit: any) {
   const applied: any = [], runtime: any = [];
-  const visible: any = (id: any) => PM.Layout.findPanel(workspace, id);
+  const visible: any = (id: any) => findPanel(workspace, id);
   const show: any = (id: any, dockId: any = 'right') => {
     if (visible(id)) return visible(id);
     const hidden: any = (workspace.hiddenPanels || []).some((item: any) => item.id === id);
-    if (hidden) PM.Layout.restorePanel(workspace, id);
-    else PM.Layout.addPanel(workspace, id, dockId || 'right');
+    if (hidden) restorePanel(workspace, id);
+    else addPanel(workspace, id, dockId || 'right');
     return visible(id);
   };
   const place: any = (id: any, position: any) => {
@@ -1372,17 +1368,17 @@ function applyPanelEdit(workspace: any, edit: any) {
     if (action.type === 'add') {
       const existed: any = !!visible(action.panelId);
       const found: any = show(action.panelId, action.dockId || 'right');
-      if (action.dockId && found?.dock.id !== action.dockId) PM.Layout.movePanel(workspace, action.panelId, action.dockId);
+      if (action.dockId && found?.dock.id !== action.dockId) movePanel(workspace, action.panelId, action.dockId);
       changed = !existed || !!action.dockId;
       if (Number.isInteger(action.position)) changed = place(action.panelId, action.position) || changed;
     } else if (action.type === 'restore') {
       changed = !!show(action.panelId, action.dockId || 'right');
-      if (action.dockId && visible(action.panelId)?.dock.id !== action.dockId) changed = PM.Layout.movePanel(workspace, action.panelId, action.dockId) || changed;
+      if (action.dockId && visible(action.panelId)?.dock.id !== action.dockId) changed = movePanel(workspace, action.panelId, action.dockId) || changed;
       if (Number.isInteger(action.position)) changed = place(action.panelId, action.position) || changed;
-    } else if (action.type === 'hide') changed = PM.Layout.hidePanel(workspace, action.panelId);
+    } else if (action.type === 'hide') changed = hidePanel(workspace, action.panelId);
     else if (action.type === 'move') {
       show(action.panelId, action.dockId || 'right');
-      changed = action.dockId ? PM.Layout.movePanel(workspace, action.panelId, action.dockId) : false;
+      changed = action.dockId ? movePanel(workspace, action.panelId, action.dockId) : false;
       if (Number.isInteger(action.position)) changed = place(action.panelId, action.position) || changed;
     } else if (action.type === 'reorder') changed = place(action.panelId, action.position);
     else if (action.type === 'resize') {
@@ -1754,8 +1750,6 @@ async function applyPanelPlan(plan: any) {
       let changed: any = false;
       if (action.type === 'collapse') changed = PM.Layout.setCollapsed(action.panelId, true);
       else if (action.type === 'expand') changed = PM.Layout.setCollapsed(action.panelId, false);
-      else if (action.type === 'popout') changed = PM.Popout.open(action.panelId);
-      else if (action.type === 'dock') changed = PM.Popout.dock(action.panelId);
       if (changed) result.applied.push(action);
     }
     if (!result.applied.length) throw new Error('Those panels were already arranged that way');
@@ -1774,7 +1768,6 @@ async function applyPanelPlan(plan: any) {
 function undoPanelRun() {
   if (!S.panelRun) return;
   const checkpoint: any = S.panelRun.checkpoint;
-  S.panelRun.actions.filter((action: any) => action.type === 'popout').forEach((action: any) => PM.Popout.dock(action.panelId));
   if (!PM.hist.undoIfTop(S.panelRun.historyId)) {
     const current: any = PM.WS.historySnapshot();
     PM.WS.restoreHistorySnapshot(checkpoint);

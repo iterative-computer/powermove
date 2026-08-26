@@ -6,7 +6,7 @@ import type { PMRegistry } from '../legacy/registry';
 import { install as installLegacyLayout } from '../legacy/ui/layout';
 import { installSvelteLayout, unmountSvelteLayout } from './install';
 import type { Workspace } from './model';
-import contractText from '../../../../tests/fixtures/dom-contract.json?raw';
+import contractText from '../../../../tests-vitest/fixtures/dom-contract.json?raw';
 
 const domContract = JSON.parse(contractText) as {
   panel: { class: string; dataAttr: string; idPrefix: string; title: string; moveHandle: string };
@@ -74,11 +74,9 @@ function registry(): PMRegistry {
     invalidate: vi.fn(),
     toast: vi.fn(),
     closeMenus: vi.fn(() => document.querySelectorAll('.drop').forEach((menu) => menu.remove())),
-    drag: vi.fn(),
-    Popout: { isOpen: () => false }
+    drag: vi.fn()
   };
   installLegacyLayout(PM);
-  PM.SvelteShell = true;
   const current = workspace();
   PM.WS = {
     current,
@@ -124,15 +122,9 @@ afterEach(async () => {
 });
 
 describe('Svelte DockLayout panel pool', () => {
-  it('does nothing with the switch off and retains the legacy pure helper identities when on', () => {
-    const legacyApply = PM.Layout.apply;
+  it('installs unconditionally as the complete layout definition while retaining pure helper identities', () => {
     const marker = document.createElement('span');
     document.getElementById('body')!.appendChild(marker);
-    PM.SvelteShell = false;
-    installSvelteLayout(PM);
-    expect(PM.Layout.apply).toBe(legacyApply);
-    expect(document.getElementById('body')?.firstChild).toBe(marker);
-
     const helpers = {
       resolveDropIndex: PM.Layout.resolveDropIndex,
       hitTestDockPlacement: PM.Layout.hitTestDockPlacement,
@@ -140,9 +132,27 @@ describe('Svelte DockLayout panel pool', () => {
       clampPanelHeight: PM.Layout.clampPanelHeight,
       visibleDockPlan: PM.Layout.visibleDockPlan
     };
-    PM.SvelteShell = true;
     installSvelteLayout(PM);
+
+    expect(marker.isConnected).toBe(false);
     for (const [name, helper] of Object.entries(helpers)) expect(PM.Layout[name]).toBe(helper);
+    expect(PM.Layout).toEqual(expect.objectContaining({
+      root: document.getElementById('body'),
+      ws: null,
+      apply: expect.any(Function),
+      refresh: expect.any(Function),
+      applyTheme: expect.any(Function),
+      removePanel: expect.any(Function),
+      hidePanel: expect.any(Function),
+      restorePanel: expect.any(Function),
+      addPanel: expect.any(Function),
+      movePanel: expect.any(Function),
+      movePanelBy: expect.any(Function),
+      ensureDock: expect.any(Function),
+      hasPanel: expect.any(Function),
+      findPanel: expect.any(Function),
+      setCollapsed: expect.any(Function)
+    }));
   });
 
   it('builds once per id and preserves element identity while re-parenting on apply', () => {
@@ -341,6 +351,38 @@ describe('Svelte DockLayout panel pool', () => {
     expect(PM.WS.current.layout.docks[1].panels[1]?.size).toBe(88);
     expect(beta.style.flex).toBe('0 0 88px');
     expect(splitter.getAttribute('aria-valuenow')).toBe('88');
+  });
+
+  it('restores both panel specs when a horizontal resize is cancelled', () => {
+    register(PM, 'alpha');
+    register(PM, 'viewer', { headless: true, hideMoveHandle: true });
+    register(PM, 'beta', { size: 140 });
+    installSvelteLayout(PM);
+    PM.Layout.apply(PM.WS.current);
+    const viewer = document.getElementById('panel-viewer')!;
+    const beta = document.getElementById('panel-beta')!;
+    viewer.getBoundingClientRect = () => ({ width: 500, height: 380, left: 0, right: 500, top: 0, bottom: 380, x: 0, y: 0, toJSON() {} });
+    beta.getBoundingClientRect = () => ({ width: 500, height: 140, left: 0, right: 500, top: 388, bottom: 528, x: 0, y: 388, toJSON() {} });
+    const splitter = document.querySelector<HTMLElement>('#dock-center [role="separator"][aria-orientation="horizontal"]')!;
+    let dragOptions: any;
+    vi.mocked(PM.drag).mockImplementation(((_event: PointerEvent, options: any) => {
+      dragOptions = options;
+      return { cancel: vi.fn() };
+    }) as any);
+    vi.mocked(PM.WS.save).mockClear();
+
+    splitter.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 250, clientY: 384 }) as unknown as PointerEvent);
+    dragOptions.move(0, 80, new MouseEvent('pointermove', { clientX: 250, clientY: 464 }) as unknown as PointerEvent);
+    expect(PM.WS.current.layout.docks[1].panels[1]).toEqual(expect.objectContaining({ id: 'beta', size: 88 }));
+    expect(PM.WS.current.layout.docks[1].panels[0]).toEqual(expect.objectContaining({ id: 'viewer', flex: true }));
+
+    dragOptions.cancel();
+
+    expect(PM.WS.current.layout.docks[1].panels[1]).toEqual(expect.objectContaining({ id: 'beta', size: 140 }));
+    expect(PM.WS.current.layout.docks[1].panels[0]).toEqual(expect.objectContaining({ id: 'viewer', flex: true }));
+    expect(beta.style.flex).toBe('0 0 140px');
+    expect(viewer.style.flex).toBe('1 1 auto');
+    expect(PM.WS.save).not.toHaveBeenCalled();
   });
 
   it('lerps splitter hover glow and throttles drag layout emissions to animation frames', () => {

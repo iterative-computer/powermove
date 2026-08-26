@@ -1,5 +1,4 @@
-/* Reactive compatibility seam for legacy callers that still invoke
-   PM.Inspector.refresh(). Phase 5 can delete this together with the bus bridge. */
+/* Reactive bridge for imperative engines that invoke PM.Inspector.refresh(). */
 class InspectorRefresh {
   version = $state(0);
 

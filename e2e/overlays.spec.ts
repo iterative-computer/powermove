@@ -1,14 +1,8 @@
 import { expect, test } from './helpers/app';
 
-test.describe('@overlays Svelte overlays behind the shell switch', () => {
+test.describe('@overlays Svelte overlays', () => {
   test('runs a palette command and manages modal focus and toast lifetime', async ({ session }) => {
     test.setTimeout(20_000);
-    await session.page.evaluate(async () => {
-      (window as any).PM.store.set('shellSvelte', true);
-      await (window as any).powermove.store.flush();
-    });
-    await session.relaunch();
-
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     const before = await page.evaluate(() => (window as any).PM.proj.layers.length as number);

@@ -34,7 +34,7 @@ Then replace the current `mac.identity`/`mac.hardenedRuntime` settings in `elect
 mac:
   hardenedRuntime: true
   notarize: true
-  icon: build/icon.icns
+  icon: resources/icon.icns
   target:
     - target: dmg
       arch: [arm64]

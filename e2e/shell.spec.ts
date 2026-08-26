@@ -1,13 +1,7 @@
 import { expect, test } from './helpers/app';
 
-test.describe('@shell Svelte shell behind the persisted/query switch', () => {
-  test('boots the Svelte chrome while the legacy dock panels stay live', async ({ session }) => {
-    await session.page.evaluate(async () => {
-      (window as any).PM.store.set('shellSvelte', true);
-      await (window as any).powermove.store.flush();
-    });
-    await session.relaunch();
-
+test.describe('@shell Svelte shell', () => {
+  test('boots the Svelte chrome while the dock panels stay live', async ({ session }) => {
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     const titlebar = page.locator('#titlebar[data-svelte-shell="true"]');
@@ -31,11 +25,6 @@ test.describe('@shell Svelte shell behind the persisted/query switch', () => {
     await expect(secondTab).toHaveAttribute('aria-selected', 'true');
     await page.waitForFunction((id) => (window as any).PM.proj.id === id, secondId);
 
-    const state = await page.evaluate(() => ({
-      svelte: (window as any).PM.SvelteShell === true,
-      webgl: Boolean((window as any).PM.GL.gl)
-    }));
-    expect(state).toEqual({ svelte: true, webgl: true });
     expect(diagnostics.pageErrors).toEqual([]);
   });
 });

@@ -171,7 +171,6 @@ function appRegistry(): {
     round: (value: number) => value,
     PANELS: {},
     Export: { snapshot: () => 'data:image/jpeg;base64,thumb' },
-    Popout: { openIds: () => [] },
     serialize: () => JSON.stringify(PM.proj),
     toast(message: string) { toasts.push(message); },
   };

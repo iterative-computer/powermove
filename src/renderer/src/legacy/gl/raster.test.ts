@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
-import { install } from './raster';
+import { install, videoImportFailureMessage } from './raster';
 
 function rasterRegistry(): PMRegistry {
   const context2d: any = {
@@ -36,6 +36,28 @@ function rasterRegistry(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('legacy raster install', () => {
+  it('selects actionable codec warnings for mov and mp4 decode failures', () => {
+    const mov = videoImportFailureMessage('prores-4444.MOV', {
+      code: 4,
+      message: ''
+    });
+    expect(mov).toContain("file's codec is not supported by this build");
+    expect(mov).toMatch(/ProRes.*transcod/i);
+
+    const mp4 = videoImportFailureMessage('unsupported.mp4', { code: 3, message: '' });
+    expect(mp4).toContain("file's codec is not supported by this build");
+    expect(mp4).toMatch(/transcode.*H\.264/i);
+    expect(videoImportFailureMessage('unsupported.mp4', new Error('DEMUXER_ERROR_NO_SUPPORTED_STREAMS')))
+      .toBe(mp4);
+  });
+
+  it('keeps the generic video failure for other formats and non-codec errors', () => {
+    expect(videoImportFailureMessage('clip.webm', { code: 3, message: 'decode failed' }))
+      .toBe('Could not read this video file');
+    expect(videoImportFailureMessage('clip.mov', { code: 2, message: 'network error' }))
+      .toBe('Could not read this video file');
+  });
+
   it('keeps padded raster textures and tight text selection bounds', () => {
     const PM = rasterRegistry();
     const text = { text: 'Powermove', font: 'Geist', weight: 650, size: 100, tracking: 0, leading: 1, color: '#fff', align: 'center', italic: false };

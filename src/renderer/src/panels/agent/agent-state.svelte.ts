@@ -181,7 +181,5 @@ export function describePanelAction(PM: Record<string, any>, action: Record<stri
   if (action.type === 'rename') return `Rename ${title} to ${action.title}`;
   if (action.type === 'collapse') return `Collapse ${title}`;
   if (action.type === 'expand') return `Expand ${title}`;
-  if (action.type === 'popout') return `Pop out ${title}`;
-  if (action.type === 'dock') return `Dock ${title}`;
   return `${action.type} ${title}`;
 }

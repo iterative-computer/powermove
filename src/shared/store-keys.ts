@@ -24,9 +24,7 @@ export const STATIC_KEYS = [
   'agentModel',
   'agentReasoningEffort',
   'agentAccessMode',
-  'agentAutoApplyPanels',
-  'shellSvelte', // Phase 5 opt-in switch (now default-on; kept for old stores)
-  'shellLegacy' // Phase 5.4 escape hatch — removed with the legacy engines in Phase 6
+  'agentAutoApplyPanels'
 ] as const;
 
 export type StaticKey = (typeof STATIC_KEYS)[number];

@@ -7,14 +7,13 @@ import { paletteEntries, scorePaletteMatch } from './palette';
 
 let PM: Record<string, any>;
 
-function registry(svelte = true): Record<string, any> {
+function registry(): Record<string, any> {
   const commands = {
     palette: { id: 'palette', label: 'Command palette', kb: '⌘K', cat: 'View', run: vi.fn() },
     newSolid: { id: 'newSolid', label: 'New solid', kb: '⌘Y', cat: 'Create', run: vi.fn() },
     newText: { id: 'newText', label: 'New text layer', kb: '⌘T', cat: 'Create', run: vi.fn() }
   };
   const current: Record<string, any> = {
-    SvelteShell: svelte,
     clamp: (value: number, minimum: number, maximum: number) => Math.min(Math.max(value, minimum), maximum),
     commands,
     proj: { layers: [{ id: 'layer-1', name: 'Hero title' }] },
@@ -54,30 +53,6 @@ afterEach(async () => {
 });
 
 describe('installSvelteOverlays', () => {
-  it('is a strict no-op while the Svelte shell switch is off', async () => {
-    await unmountSvelteOverlays();
-    const legacyToast = vi.fn();
-    const legacyMenu = vi.fn();
-    const legacyCloseMenus = vi.fn();
-    const legacyModal = vi.fn();
-    const legacyPalette = vi.fn();
-    const off = registry(false);
-    off.toast = legacyToast;
-    off.menu = legacyMenu;
-    off.closeMenus = legacyCloseMenus;
-    off.modal = legacyModal;
-    off.palette = legacyPalette;
-
-    installSvelteOverlays(off);
-
-    expect(off.toast).toBe(legacyToast);
-    expect(off.menu).toBe(legacyMenu);
-    expect(off.closeMenus).toBe(legacyCloseMenus);
-    expect(off.modal).toBe(legacyModal);
-    expect(off.palette).toBe(legacyPalette);
-    expect(document.querySelector('[data-svelte-overlay-menu]')).toBeNull();
-  });
-
   it('keeps the shared toast live region intact across consecutive installs', async () => {
     installSvelteOverlays(PM);
     flushSync();

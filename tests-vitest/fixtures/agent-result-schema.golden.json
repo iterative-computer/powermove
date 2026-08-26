@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "commands",
+    "artifacts",
+    "externalActions",
+    "notes"
+  ],
+  "properties": {
+    "summary": { "type": "string" },
+    "commands": { "type": "array", "maxItems": 80, "items": { "type": "string" } },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 80,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "importToTimeline"],
+        "properties": {
+          "path": { "type": "string" },
+          "importToTimeline": { "type": "boolean" }
+        }
+      }
+    },
+    "externalActions": { "type": "array", "maxItems": 80, "items": { "type": "string" } },
+    "notes": { "type": "array", "maxItems": 80, "items": { "type": "string" } }
+  }
+}

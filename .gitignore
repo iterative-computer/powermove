@@ -1,5 +1,4 @@
 .DS_Store
-build/
 *.log
 node_modules/
 out/

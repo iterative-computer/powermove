@@ -1,6 +1,31 @@
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
+const VIDEO_READ_FAILURE = 'Could not read this video file';
+
+/** Selects user-facing copy for video metadata failures without depending on DOM APIs. */
+export function videoImportFailureMessage(fileName: unknown, failure: unknown): string {
+  const name = String(fileName || '');
+  const extension = /\.([^.]+)$/.exec(name)?.[1]?.toLowerCase();
+  if (extension !== 'mov' && extension !== 'mp4') return VIDEO_READ_FAILURE;
+
+  const detail = typeof failure === 'string'
+    ? failure
+    : failure && typeof failure === 'object' && 'message' in failure
+      ? String((failure as { message?: unknown }).message || '')
+      : '';
+  const rawCode = failure && typeof failure === 'object' && 'code' in failure
+    ? Number((failure as { code?: unknown }).code)
+    : Number.NaN;
+  const unsupportedCodec = rawCode === 3 || rawCode === 4
+    || /codec|decod(?:e|er|ing)|demux|no[_\s-]*supported[_\s-]*streams|src[_\s-]*not[_\s-]*supported|format error/i.test(detail);
+  if (!unsupportedCodec) return VIDEO_READ_FAILURE;
+
+  return extension === 'mov'
+    ? "This file's codec is not supported by this build · ProRes .mov files need transcoding before import"
+    : "This file's codec is not supported by this build · transcode it to H.264, HEVC, VP9, or AV1 and import it again";
+}
+
 export function install(PM: PMRegistry): void {
 
 const cache = new Map<any, any>();       // key -> {cv, w, h, used}
@@ -224,7 +249,7 @@ function disposeAsset(a: any) {
   try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
   if (a.url && String(a.url).startsWith('blob:')) window.URL.revokeObjectURL(a.url);
 }
-function waitForVideoMetadata(el: any, timeout: any = 15000) {
+function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
   return new Promise((resolve: any, reject: any) => {
     let settled = false;
     const finish: any = (error: any) => {
@@ -240,7 +265,7 @@ function waitForVideoMetadata(el: any, timeout: any = 15000) {
       const duration = Number(el.duration);
       if (Number.isFinite(duration) && duration > 0) finish();
     };
-    const failed = () => finish(new Error('Could not read this video file'));
+    const failed = () => finish(new Error(videoImportFailureMessage(fileName, el.error)));
     const timer = window.setTimeout(() => finish(new Error('Timed out reading video metadata')), timeout);
     el.addEventListener('loadedmetadata', loaded);
     el.addEventListener('durationchange', loaded);
@@ -267,7 +292,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
     } else if (kind === 'video') {
       el = window.document.createElement('video');
       el.preload = 'metadata'; el.muted = true; el.playsInline = true;
-      const ready = waitForVideoMetadata(el);
+      const ready = waitForVideoMetadata(el, name);
       el.src = url;
       try { el.load(); } catch (e) { }
       await ready;

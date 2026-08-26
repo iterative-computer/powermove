@@ -3,6 +3,13 @@ import { flushSync, mount, unmount } from 'svelte';
 import type { PMRegistry } from '../legacy/registry';
 import DockLayout from './DockLayout.svelte';
 import {
+  buildDockDropTargets,
+  clampPanelHeight,
+  hitTestDockPlacement,
+  resolveDropIndex,
+  visibleDockPlan
+} from './geometry';
+import {
   addPanel,
   ensureDock,
   findPanel,
@@ -58,19 +65,32 @@ function applyTheme(PM: PMRegistry, theme: Record<string, any>): void {
 }
 
 export function installSvelteLayout(PM: PMRegistry): void {
-  if (!PM.SvelteShell) return;
   const root = document.getElementById('body');
-  if (!root || !PM.Layout) return;
+  if (!root) return;
 
   if (mounted) void unmount(mounted);
   root.replaceChildren();
-  mounted = mount(DockLayout, { target: root, props: { PM } }) as LayoutInstance;
-  flushSync();
 
-  const layout = PM.Layout;
+  const layout: Record<string, any> = {
+    root,
+    ws: null,
+    buildDockDropTargets,
+    clampPanelHeight,
+    hitTestDockPlacement,
+    resolveDropIndex,
+    visibleDockPlan,
+    removePanel,
+    hidePanel,
+    restorePanel,
+    addPanel,
+    movePanel,
+    movePanelBy,
+    ensureDock,
+    hasPanel,
+    findPanel
+  };
+  PM.Layout = layout;
   let applying = false;
-  layout.root = root;
-  layout.ws = null;
   layout.apply = (workspace: Workspace): void => {
     // A synchronous layout listener may request another apply; the active pass owns this render.
     if (applying) return;
@@ -104,19 +124,13 @@ export function installSvelteLayout(PM: PMRegistry): void {
     inst.def.header?.(inst.header, inst);
   };
   layout.applyTheme = (theme: Record<string, any>): void => applyTheme(PM, theme);
-  layout.removePanel = removePanel;
-  layout.hidePanel = hidePanel;
-  layout.restorePanel = restorePanel;
-  layout.addPanel = addPanel;
-  layout.movePanel = movePanel;
-  layout.movePanelBy = movePanelBy;
-  layout.ensureDock = ensureDock;
-  layout.hasPanel = hasPanel;
-  layout.findPanel = findPanel;
   layout.setCollapsed = (id: string, collapsed: boolean, emit = true) => setPanelCollapsed(PM, id, collapsed, emit);
+
+  mounted = mount(DockLayout, { target: root, props: { PM } }) as LayoutInstance;
+  flushSync();
 }
 
-/** Test/HMR seam. The feature switch and workspace state remain untouched. */
+/** Test/HMR seam. Workspace state remains untouched. */
 export async function unmountSvelteLayout(): Promise<void> {
   if (mounted) await unmount(mounted);
   mounted = null;

@@ -14,14 +14,13 @@ import {
   parseEditCommands
 } from './commands';
 
+// The legacy oracle file is gone (Phase 6); the shared vocabulary is now the
+// canonical source, itself pinned against Edit.operations by the transplanted
+// contracts suite (src/renderer/src/legacy/__tests__).
+import { EDIT_COMMAND_TYPES } from '../../../../shared/edit-vocabulary';
+
 function legacyGoldenCommandTypes(): string[] {
-  const source = readFileSync(
-    new URL('../../../../../tests/contracts-edit.test.js', import.meta.url),
-    'utf8'
-  );
-  const declaration = /const OPERATIONS = \[([\s\S]*?)\];/.exec(source)?.[1];
-  if (!declaration) throw new Error('Could not find OPERATIONS in tests/contracts-edit.test.js');
-  return [...declaration.matchAll(/'([^']+)'/g)].map(match => match[1]!);
+  return [...EDIT_COMMAND_TYPES];
 }
 
 const channel = (value: number) => ({ v: value, kf: [], expr: null });

@@ -1,86 +1,55 @@
 # Powermove
 
-Powermove is an AI-native motion and video editor for macOS. This main branch keeps the original compact editing interface and adds ChatGPT subscription access through the signed-in local Codex client.
+Powermove is an AI-native motion and video editor for macOS. It combines a GPU-backed editing engine with a dockable Svelte interface and an agent that can propose typed, undoable project edits through the locally installed Codex CLI.
 
-## What works
-
-- WebGL composition preview, editable layers, keyframes, effects, shaders, media, timeline, inspector, export, and takes
-- Prompt-driven composition, motion, shader, and workspace edits
-- A persistent production agent that can research on the web, use project files and shell tools, create deliverables, and bring supported media back into the editable timeline
-- Compact docked workspaces with editable panels and custom parameter controls
-- ChatGPT subscription generation through the signed-in local Codex client; account tokens never enter the web interface
-
-## Agent access
-
-The Agent panel has three simple authority levels:
-
-- **Editor** works only through Powermove's validated source-edit commands. This is the safest choice for normal composition work.
-- **Project + web** gives the signed-in Codex client a persistent folder, shell tools, live web research, and the user's installed Codex skills, plugins, and integrations. Writes stay inside that project's agent workspace.
-- **Computer** gives Codex unrestricted Mac access for one run. Powermove asks for confirmation each time, resets to Project access afterward, and clearly reports outside-world actions. Files and remote actions outside Powermove cannot be undone.
-
-Each Powermove project gets a private working folder at `~/Library/Application Support/Powermove/Agent Workspaces/<project-id>`. The current editable project is supplied as a read-only JSON snapshot. Deliverables are collected under a run-specific `artifacts` folder, shown in the Agent result, and can be revealed in Finder. Supported images, video, and audio up to 64 MB can be added to the timeline directly; larger files remain available through Finder.
-
-Agent-authored composition changes still go through the same typed source transaction as direct editing. They receive a revision check, a saved take, one-step Undo, and a visible result review. A project changed during a long agent run is never silently overwritten.
-
-### Production branch additions (`production`)
-
-- **Precomps** — nested compositions with scoped evaluation (⌘⇧C), recursion-capped rendering, comp-aware parenting/expressions/params
-- **Layer masks** — animatable rect/ellipse masks with feather, add/subtract modes, applied before effects (AE semantics)
-- **Delivery** — decoded-buffer audio preview and Opus/WebM mixdown share one trim/fade planner; transparent-background PNG sequence/still export uses FBO readback
-- **Robustness** — full project-load sanitization (corrupt files degrade instead of NaN-ing the renderer), cycle-safe parenting, generation-safe audio scheduling, and video speed synchronization
-- **Performance** — per-frame hierarchy memoization (1000-layer scene: ~17s → ~77ms per second of playback)
-- **Diagnostics** — uncaught errors/rejections captured with real stacks to stderr; native boot self-check
-
-## Build
-
-Requirements: macOS 13 or newer and Apple Command Line Tools.
-
-```sh
-npm test
-npm run build:mac
-```
-
-The app is created at `build/Powermove.app`. To replace the installed app:
-
-```sh
-./scripts/build-macos-app.sh --install
-```
-
-The ChatGPT subscription provider requires the Codex CLI to be installed and signed in with ChatGPT.
+The refactored Electron application is the only supported app. The earlier root-page/WKWebView implementation and its separate test oracle were retired after parity coverage moved to Vitest.
 
 ## Architecture
 
-- `js/ui/layout.js` renders the compact docked workspace.
-- `js/core/workspace.js` owns workspace state, generated tools, and structured interface manifests.
-- `js/core/capabilities.js` compiles bounded multi-layer transforms into normal editable source commands.
-- `js/core/editing.js` is the shared, typed source-edit boundary used by canvas gestures, inspectors, the timeline, agents, and generated controls.
-- `js/assistant/harness.js` runs bounded composition observation, source edits, rendered review, repairs, and checkpoints.
-- `js/assistant/spatial.js` owns Ripple selection, generated-section proposals, preview, and final user approval.
-- Shake opens its floating agent prompt immediately; `Command-Shift-K` opens the same prompt as a keyboard fallback. Circling remains optional context.
-- `native/main.swift` packages the editor as a lightweight WKWebView macOS app and brokers native-only capabilities.
+- `src/main/` owns the Electron lifecycle, windows, menus, storage, native file operations, the private `app://powermove` protocol, and Codex CLI processes.
+- `src/preload/` exposes a narrow typed IPC bridge. The renderer is context-isolated and has no Node.js access.
+- `src/shared/` defines IPC contracts, limits, guards, and the shared edit vocabulary.
+- `src/renderer/` is a Svelte 5 runes shell over the typed editor core: project state, editing commands, layout, panels, playback, WebGL composition, and export.
+- Agent requests run through the Codex CLI in the main process. Agent-authored project changes return through the same validated, revision-checked, undoable edit boundary as direct manipulation.
+- Production assets load from `app://powermove` under CSP. Generated JavaScript runs in a separate sandboxed host with an opaque origin, no network or native bridge, bounded inputs, and validated command output.
 
-Large projects stay responsive by keeping project state semantic and rendering the composition on the GPU. The earlier recursive-layout architecture is preserved on the `experimental-architecture` branch for future work; it is not the interface shipped by this branch.
+The application CSP still permits `unsafe-eval` for the legacy expression evaluator. Removing it depends on the post-parity expression-interpreter work described below; the generated-script host remains separately sandboxed.
 
-Generated interfaces never own a second copy of composition state. A custom control can bind to a scene parameter as before, or directly to editable source:
+## Development
 
-```json
-{
-  "type": "slider",
-  "label": "Selected opacity",
-  "target": "$selection",
-  "path": "properties.opacity",
-  "min": 0,
-  "max": 100,
-  "def": 100
-}
+Requirements: macOS, Node.js 22 or newer, and npm. Agent features additionally require the Codex CLI to be installed and signed in.
+
+```sh
+npm ci
+npm run dev       # Electron + renderer hot reload
+npm run build     # production bundles in out/
+npm run test      # Vitest suite
+npm run test:e2e  # Playwright Electron coverage
+npm run dist:mac  # arm64 DMG, ZIP, and app in dist/
 ```
 
-Supported layer binding paths are `properties.*`, `content.*`, and `layer.*`. Composition background controls use `target: "$composition"` with `composition.background.*` paths. Generated sections reject disconnected controls instead of creating inert parameters. Generated buttons can submit a `commands` array. Those controls call the same atomic transactions as direct manipulation and agent source edits, so undo, validation, hand-edit preservation, revision checks, and provenance stay consistent.
+`npm run typecheck` runs Svelte and TypeScript checks. `npm run preview` launches the built application. macOS packaging is currently ad-hoc signed for development distribution; see the release notes before sharing builds.
 
-Generated tools can also use safe multi-layer transforms. A tool keeps settings such as offset, order, or anchor locally, previews the exact source changes without mutating the project, and applies the compiled primitive edits as one undoable transaction. The transform language supports selection/all/visible scopes, type filters, deterministic ordering, bounded math, state references, and aggregates; it never executes generated JavaScript.
+## Retired escape hatches
 
-Timeline redesigns use a separate structured interface manifest for row height, gutter and ruler geometry, clip and keyframe size, labels, badges, toolbar density, and surface order. This changes the Timeline view while preserving the existing layers, clips, and keyframes underneath it.
+- There is no root `index.html` or standalone classic-script application.
+- There is no Swift/WKWebView launcher or `build:mac` shell-script path.
+- There is no separate Node `tests/` oracle; `vitest run` is authoritative.
+- The renderer cannot bypass preload to reach Node, files, or Codex directly.
+- Generated scripts cannot run in the application document or return unvalidated mutations.
 
-A single prompt can also create a complete workspace manifest with multiple docks, built-in panels, and generated sections. The manifest is bounded and normalized before preview: unknown panels are removed, Composition remains reachable, generated sections are placed into a dock, and every non-button control must resolve to real editable source.
+## Post-parity backlog
 
-For composition work, the harness observes semantic project state and real rendered frames, proposes only typed source edits, creates a rollback checkpoint, applies with a revision check, visually reviews the rendered result, performs at most two bounded repair passes, and finishes with explicit **Keep change** or **Undo change** controls.
+- Replace the expression evaluator with an interpreter and remove application-level `unsafe-eval`.
+- Add a supported ProRes import/transcode path.
+- Add H.264/MP4 export; current delivery is WebM/VP9/Opus plus still/PNG-sequence paths.
+- Restore safe panel pop-outs where the new shell intentionally omits them.
+- Add Developer ID signing, hardened runtime, and notarization for public distribution.
+
+## Design and migration notes
+
+- [Electron scaffold](docs/scaffold.md)
+- [Phase 0 platform decisions](docs/phase0-decisions.md)
+- [Phase 3b conversion pattern](docs/phase3b-pattern.md)
+- [macOS release process](docs/release.md)
+- [Phase 6 deletion manifest](docs/phase6-deletions.md)

@@ -31,9 +31,6 @@ jobs:
         run: npm run typecheck
       - name: Vitest
         run: npx vitest run
-      - name: Legacy oracle
-        # Remove this step in the final Phase 6 legacy-retirement commit.
-        run: npm test
 
   e2e:
     name: Electron end-to-end tests

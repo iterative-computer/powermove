@@ -210,30 +210,18 @@ describe('Svelte shell', () => {
     expect(target.querySelector<HTMLElement>('[data-tab-id="home"]')?.tabIndex).toBe(0);
   });
 
-  it('defaults ON and honors the shellLegacy escape hatch (Phase 5.4)', () => {
-    const off = fakePM().PM;
-    off.store.get = vi.fn((key: string, fallback: unknown) => (key === 'shellLegacy' ? true : fallback));
-    installShell(off as any);
-    expect(off.SvelteShell).toBeUndefined();
-    expect(document.getElementById('titlebar')?.dataset.svelteShell).toBeUndefined();
-
-    const stored = fakePM().PM; // fresh store → Svelte chrome by default
+  it('installs unconditionally when both shell mount targets exist', () => {
+    const stored = fakePM().PM;
+    stored.store.get = vi.fn(() => true);
     installShell(stored as any);
-    expect(stored.SvelteShell).toBe(true);
     expect(document.getElementById('titlebar')?.dataset.svelteShell).toBe('true');
+    expect(document.getElementById('status')?.dataset.svelteShell).toBe('true');
+    expect(stored.store.get).not.toHaveBeenCalled();
     unmountShell();
 
-    document.getElementById('status')!.remove();
+    document.body.innerHTML = '<div id="app"><div id="titlebar"></div><div id="body"></div></div>';
     const missingGuard = fakePM().PM;
-    missingGuard.store.get = vi.fn((key: string, fallback: unknown) => key === 'shellSvelte' ? true : fallback);
     installShell(missingGuard as any);
-    expect(missingGuard.SvelteShell).toBeUndefined();
-
-    document.getElementById('titlebar')!.replaceChildren();
-    document.body.insertAdjacentHTML('beforeend', '<div id="status"></div>');
-    window.history.replaceState({}, '', '/?svelte-shell');
-    const queried = fakePM().PM;
-    installShell(queried as any);
-    expect(queried.SvelteShell).toBe(true);
+    expect(document.getElementById('titlebar')?.dataset.svelteShell).toBeUndefined();
   });
 });

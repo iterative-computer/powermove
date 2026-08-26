@@ -11,8 +11,7 @@ type LegacyPM = Record<string, any>;
 export function registerInspectorPanel(PM: LegacyPM): void {
   configureInspectorRegistry(PM);
 
-  /* This helper used to be installed as a side effect of legacy inspector.ts.
-     Keep the public runtime hook with the panel that now owns uniform UI. */
+  /* Keep the public runtime hook with the panel that owns uniform UI. */
   PM.syncShaderUniforms = (layer: any): void => {
     const definitions = PM.parseUniforms(layer.d.code);
     PM.UIState.setShaderMeta(layer, { udefs: definitions });
@@ -44,8 +43,5 @@ export function registerInspectorPanel(PM: LegacyPM): void {
   };
 
   PM.fxMenu = (anchor: HTMLElement) => showFxMenu(PM, anchor);
-  /* The legacy inspector module's bus listeners still call
-     PANELS.inspector.header on sel/layers/history/fonts; keep it a no-op so
-     they stay harmless until Phase 5 removes them. */
   registerSveltePanel(PM, 'inspector', { title: 'Properties', component: InspectorPanel, header: () => {} });
 }

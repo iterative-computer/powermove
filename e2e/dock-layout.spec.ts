@@ -1,13 +1,7 @@
 import { expect, test } from './helpers/app';
 
-test.describe('@dock-layout Svelte DockLayout behind the shell switch', () => {
+test.describe('@dock-layout Svelte DockLayout', () => {
   test('keeps panel and viewer hosts alive across layout and workspace moves', async ({ session }) => {
-    await session.page.evaluate(async () => {
-      (window as any).PM.store.set('shellSvelte', true);
-      await (window as any).powermove.store.flush();
-    });
-    await session.relaunch();
-
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     await expect(page.locator('#body > .dock .panel[data-panel]')).not.toHaveCount(0);

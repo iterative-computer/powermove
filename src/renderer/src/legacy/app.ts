@@ -2,7 +2,7 @@
 import type { PMRegistry } from './registry';
 
 export function install(PM: PMRegistry): void {
-const h = PM.h, $ = PM.$;
+const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
 PM.app = APP;
 
@@ -287,176 +287,6 @@ function openSettings() {
   return dialog;
 }
 PM.SettingsUI = { open: openSettings };
-function buildTitlebar() {
-  const tabs = $('#tabs'), right = $('#tb-right'), bar = $('#titlebar');
-  /* Native window drag: WKWebView ignores -webkit-app-region, so forward pointerdown
-     on empty titlebar regions to the AppKit drag bridge. Interactive children opt out. */
-  const dragBridge = (window as any).webkit && (window as any).webkit.messageHandlers && (window as any).webkit.messageHandlers.windowDrag;
-  bar.addEventListener('pointerdown', (e: any) => {
-    if (e.button !== 0) return;
-    if (e.target.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
-    if (!dragBridge) return;
-    e.preventDefault();
-    /* Native-feel window drag: pin the arrow cursor, drop any hover state, and
-       swallow the gesture so the web content never shows grab/hand feedback. */
-    window.document.body.style.cursor = 'default';
-    if (window.document.activeElement && (window.document.activeElement as any).blur) (window.document.activeElement as any).blur();
-    const pin = () => { window.document.body.style.cursor = 'default'; };
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      window.removeEventListener('pointermove', pin, true);
-      window.removeEventListener('pointerup', release, true);
-      window.removeEventListener('pointercancel', release, true);
-      window.document.body.style.cursor = '';
-    };
-    window.addEventListener('pointermove', pin, true);
-    window.addEventListener('pointerup', release, true);
-    window.addEventListener('pointercancel', release, true);
-    dragBridge.postMessage({ x: e.clientX, y: e.clientY });
-  });
-  bar.addEventListener('dblclick', (e: any) => {
-    if (e.target.closest('button, #tabs, #toolbar-strip, input, a, .tb-right')) return;
-    /* mimic standard macOS titlebar double-click (zoom) */
-    const zb = (window as any).webkit && (window as any).webkit.messageHandlers && (window as any).webkit.messageHandlers.windowZoom;
-    if (zb) zb.postMessage({});
-  });
-  const beginProjectRename = (tab: any, id: any, currentName: any) => {
-    if (tab.classList.contains('renaming')) return;
-    const label = tab.querySelector('.project-doc-label');
-    if (!label) return;
-    const input = h('input.project-doc-input', {
-      value: currentName, maxlength: 120, 'aria-label': 'Rename project', spellcheck: 'false',
-    });
-    let finished = false;
-    const finish = (commit: any) => {
-      if (finished) return;
-      finished = true;
-      if (commit) PM.Projects.rename(id, input.value);
-      tab.classList.remove('renaming');
-      PM.bus.emit('projects:tabs');
-      if (commit) PM.bus.emit('project');
-    };
-    input.onpointerdown = (e: any) => e.stopPropagation();
-    input.onclick = (e: any) => e.stopPropagation();
-    input.onkeydown = (e: any) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
-      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
-    };
-    input.onblur = () => finish(true);
-    tab.classList.add('renaming');
-    tab.setAttribute('aria-label', 'Rename ' + currentName);
-    label.replaceWith(input);
-    window.requestAnimationFrame(() => { input.focus(); input.select(); });
-  };
-  const paintTabs = () => {
-    /* Autosave and background project events may refresh the strip. Never tear
-       down a live rename field before the user commits or cancels it. */
-    if (tabs.querySelector('.project-doc.renaming')) return;
-    tabs.textContent = '';
-    tabs.setAttribute('role', 'tablist');
-    tabs.setAttribute('aria-label', 'Open projects');
-    const homeOpen = !!(PM.ProjectsScreen && PM.ProjectsScreen.isOpen);
-    const home = h('button.project-strip-btn.project-home' + (homeOpen ? '.on' : ''), {
-      title: 'Projects', 'aria-label': 'Projects', 'aria-selected': String(homeOpen),
-      onclick: () => PM.ProjectsScreen.show(),
-    }, PM.icon('home'));
-    tabs.append(home, h('i.project-strip-divider'));
-    PM.Projects.tabs().forEach((id: any) => {
-      const meta = PM.Projects.list().find((m: any) => m.id === id);
-      const current = id === PM.proj.id;
-      const active = current && !homeOpen;
-      const dirty = current && APP.dirty;
-      const tabName = (meta && meta.name) || 'Untitled';
-      const tab = h('div.project-doc' + (active ? '.on' : '') + (dirty ? '.dirty' : ''), {
-        title: (meta && meta.name) || id, role: 'tab', tabindex: '0',
-        'aria-selected': String(active), 'aria-label': tabName + (dirty ? ', unsaved' : ''),
-      },
-        h('span.project-doc-label', tabName),
-        h('button.project-doc-close', {
-          title: 'Close project',
-          onclick: (e: any) => { e.stopPropagation(); closeTab(id); },
-        }, PM.icon('x')));
-      tab.onclick = (e: any) => {
-        if (tab.classList.contains('renaming') || e.target.closest('input')) return;
-        /* The second click is the most reliable cross-WebKit double-click signal,
-           including when the first click activates a previously inactive tab. */
-        if (e.detail > 1) { e.preventDefault(); beginProjectRename(tab, id, tabName); return; }
-        if (PM.ProjectsScreen && PM.ProjectsScreen.isOpen) PM.ProjectsScreen.hide();
-        if (!active) openTab(id);
-      };
-      tab.ondblclick = (e: any) => {
-        if (e.target.closest('.project-doc-close')) return;
-        e.preventDefault(); e.stopPropagation();
-        beginProjectRename(tab, id, tabName);
-      };
-      tab.onkeydown = (e: any) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tab.click(); }
-      };
-      tab.onauxclick = (e: any) => { if (e.button === 1) { e.preventDefault(); closeTab(id); } };
-      tabs.appendChild(tab);
-    });
-    const plus = h('button.project-strip-btn.project-new', { title: 'New project', 'aria-label': 'New project', onclick: () => {
-      if (PM.ProjectsScreen && PM.ProjectsScreen.isOpen) PM.ProjectsScreen.hide();
-      PM.newProject();
-    } }, PM.icon('plus'));
-    tabs.appendChild(plus);
-    window.requestAnimationFrame(() => {
-      const selected = tabs.querySelector('.project-doc.on');
-      if (selected) selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    });
-  };
-  PM.bus.on('projects:tabs', paintTabs); PM.bus.on('projects:screen', paintTabs);
-  right.textContent = '';
-  const button = (icon: any, title: any, run: any) => h('button.iconbtn', { title, onclick: run }, PM.icon(icon));
-  right.append(
-    button('wand', 'Ask Powermove agent (⌘⇧K)', () => PM.SpatialAssistant?.open?.()),
-    button('grid', 'Library · Sections and Workspaces', () => PM.LibraryUI.open()),
-    button('gear', 'Settings', openSettings),
-  );
-  PM.bus.on('workspaces', paintTabs); PM.bus.on('project', paintTabs); PM.bus.on('history', paintTabs);
-  paintTabs();
-}
-function buildStatus() {
-  const s = $('#status');
-  const paint = () => {
-    const keys = PM.proj.layers.reduce((n: any,L: any) => n + PM.allProps(L).reduce((m: any,x: any) => m + x.prop.kf.length, 0), 0);
-    s.textContent = '';
-    s.append(
-      h('span', APP.dirty ? 'UNSAVED' : 'SAVED'),
-      h('span', `${PM.proj.layers.length} layers`), h('span', `${keys} keys`),
-      h('span.sp'),
-      h('span', PM.GL.gl ? [h('b.live', '●'), ' WebGL2'] : 'WebGL unavailable'),
-      h('span', `${PM.perf.fps || '—'} fps`),
-      h('span', `${PM.round(PM.perf.ms || 0, 1)} ms`),
-      h('span', `${PM.proj.w}×${PM.proj.h} · ${PM.proj.fps} fps`),
-    );
-  };
-  ['draw:status','layers','project','history','assets'].forEach(ev => PM.bus.on(ev, paint));
-  window.setInterval(() => PM.invalidate('status'), 1000);
-  paint();
-}
-if (!(PM as any).SvelteShell) { buildTitlebar(); buildStatus(); }
-
-/* ── Compact tool strip, integrated with the native macOS titlebar ── */
-function buildToolbar() {
-  const def = PM.PANELS.toolbar; if (!def) return;
-  const el = window.document.createElement('div');
-  el.id = 'toolbar-strip';
-  const body = window.document.createElement('div');
-  el.appendChild(body);
-  const bar = window.document.getElementById('titlebar');
-  /* The flexible drag region pushes this compact tool group to the right,
-     immediately before the global actions. */
-  (bar as any).insertBefore(el, (bar as any).querySelector('#tb-right'));
-  try { def.build(body, {}); } catch (e) { console.error('toolbar', e); }
-  const syncVisibility = () => { el.hidden = !!(PM.ProjectsScreen && PM.ProjectsScreen.isOpen); };
-  PM.bus.on('projects:screen', syncVisibility);
-  syncVisibility();
-}
-if (!(PM as any).SvelteShell) buildToolbar();
 
 /* ── persistence ───────────────────────────────────────── */
 /* Thumbnails are captured at most once per 5s so autosave never janks. */
@@ -481,7 +311,6 @@ function captureProjectSession() {
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
     timeline: { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph },
-    detached: PM.Popout?.openIds?.() || [],
   });
 }
 
@@ -490,7 +319,6 @@ function closeProjectTransients() {
   PM.SpatialAssistant?.cancel?.();
   PM.closeMenus?.();
   if (PM.WS.editing) PM.WS.cancelEdit();
-  PM.Popout?.closeAll?.();
 }
 PM.autosave = () => {
   APP.dirty = true;
@@ -573,7 +401,6 @@ function switchProject(p: any) {
   PM.invalidate('all');
   PM.invalidate('status');
   restoreProjectAssets(PM.proj);
-  window.requestAnimationFrame(() => (session?.detached || []).forEach((id: any) => PM.Popout.open(id)));
   PM.autosave();
 }
 
@@ -654,23 +481,6 @@ window.addEventListener('beforeunload', () => {
   captureProjectSession();
 });
 
-/* ── open-project tabs ─────────────────────────────────── */
-function openTab(id: any) {
-  if (!id || id === PM.proj.id) return;
-  const raw = PM.Projects.get(id);
-  if (!raw) { PM.toast('That project could not be found'); PM.Projects.markClosed(id); PM.bus.emit('projects:tabs'); return; }
-  switchProject(raw);
-}
-function closeTab(id: any) {
-  if (id === PM.proj.id) persistCurrent(false);
-  PM.Projects.markClosed(id);
-  const rest = PM.Projects.tabs();
-  if (id === PM.proj.id) {
-    if (rest.length) openTab(rest[0]);
-    else switchProject(PM.mkProject({ name: 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' }));
-  }
-  PM.bus.emit('projects:tabs');
-}
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
   if (p && typeof p === 'object') switchProject(p);

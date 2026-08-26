@@ -27,8 +27,8 @@ function dispose(PM: LegacyPM, id: string): void {
     void unmount(mounted.instance);
     current.delete(id);
   }
-  // Legacy Layout caches persistent panels by this entry. Removing it is what
-  // makes the next apply rebuild the panel with the new section manifest.
+  // The panel pool caches persistent panels by this entry. Removing it makes
+  // the next apply rebuild the panel with the new section manifest.
   if (PM.panelInst) delete PM.panelInst[id];
 }
 
@@ -73,7 +73,7 @@ export function registerGeneratedPanels(
   generatedIds.set(PM, nextIds);
 }
 
-/** Phase integration seam; the installer calls this after legacy workspace. */
+/** Integration seam installed after the workspace engine. */
 export function installGeneratedPanels(PM: LegacyPM): void {
   PM.WS.registerCustom = (workspace: Pick<WorkspaceManifest, 'custom'>) =>
     registerGeneratedPanels(PM, workspace);
