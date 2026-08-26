@@ -245,7 +245,7 @@ function sectionCard(section?: any) {
     : button('Insert', () => { PM.Library.insertSection(section.id, { sourceProjectId: section.sourceProjectId }); close(); }, true);
   const card: any = h('article.library-card' + (deleted ? '.deleted' : ''),
     sectionPreview(section),
-    h('div.library-card-body', h('div.library-card-copy', h('b', section.name), h('span', sectionMeta(section)), h('small', `From ${section.sourceProjectName || 'Untitled'}`)), more),
+    h('div.library-card-body', h('div.library-card-copy', h('b', { title: section.name }, section.name), h('span', { title: sectionMeta(section) }, sectionMeta(section)), h('small', { title: `From ${section.sourceProjectName || 'Untitled'}` }, `From ${section.sourceProjectName || 'Untitled'}`)), more),
     h('div.library-card-actions', action));
   card.oncontextmenu = (event: any) => { event.preventDefault(); sectionMenu(card, section); };
   return card;
@@ -274,7 +274,7 @@ function lookCard(look?: any) {
   more.onclick = (event: any) => { event.stopPropagation(); lookMenu(more, look); };
   const card: any = h('article.library-card.look' + (deleted ? '.deleted' : ''),
     h('div.library-thumb', look.thumb ? h('img', { src: look.thumb, alt: '' }) : h('div.library-look-swatch')),
-    h('div.library-card-body', h('div.library-card-copy', h('b', look.name), h('span', 'Shader look'), h('small', `From ${look.sourceProjectName || 'Untitled'}`)), more),
+    h('div.library-card-body', h('div.library-card-copy', h('b', { title: look.name }, look.name), h('span', 'Shader look'), h('small', { title: `From ${look.sourceProjectName || 'Untitled'}` }, `From ${look.sourceProjectName || 'Untitled'}`)), more),
     h('div.library-card-actions', deleted
       ? button('Restore', () => { PM.Library.restoreLook(look.id, look.sourceProjectId); paint(); }, true)
       : button('Apply', () => { PM.Library.applyLook(look.id, { sourceProjectId: look.sourceProjectId }); close(); }, true)));
@@ -315,7 +315,7 @@ function workspaceCard(workspace?: any) {
     : button(active ? 'Active' : 'Apply', () => previewWorkspace(workspace), !active, null, active ? { disabled: true } : {});
   const card: any = h('article.library-card.workspace' + (active ? '.active' : '') + (deleted ? '.deleted' : ''),
     workspaceMap(workspace), active ? h('span.library-card-badge', 'Current') : null,
-    h('div.library-card-body', h('div.library-card-copy', h('b', workspace.name), h('span', workspace.builtin ? 'Built-in workspace' : 'Custom workspace'), h('small', `${panelCount} panel${panelCount === 1 ? '' : 's'}`)), more),
+    h('div.library-card-body', h('div.library-card-copy', h('b', { title: workspace.name }, workspace.name), h('span', workspace.builtin ? 'Built-in workspace' : 'Custom workspace'), h('small', `${panelCount} panel${panelCount === 1 ? '' : 's'}`)), more),
     h('div.library-card-actions', action));
   card.oncontextmenu = (event: any) => { event.preventDefault(); workspaceMenu(card, workspace); };
   return card;

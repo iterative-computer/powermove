@@ -58,7 +58,7 @@
   .inspector-layer {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
   }
 
   .inspector-layer > :global(.sec:first-child) {
@@ -68,6 +68,6 @@
   .inspector-selection-note {
     padding: 4px 6px;
     color: var(--tx-3);
-    font-size: 10.5px;
+    font-size: var(--fs-xs);
   }
 </style>

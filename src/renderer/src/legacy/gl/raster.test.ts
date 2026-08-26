@@ -60,7 +60,7 @@ describe('legacy raster install', () => {
 
   it('keeps padded raster textures and tight text selection bounds', () => {
     const PM = rasterRegistry();
-    const text = { text: 'Powermove', font: 'Geist', weight: 650, size: 100, tracking: 0, leading: 1, color: '#fff', align: 'center', italic: false };
+    const text = { text: 'Powermove', font: 'SF Pro Display', weight: 650, size: 100, tracking: 0, leading: 1, color: '#fff', align: 'center', italic: false };
     const raster = PM.raster({ type: 'text', d: text });
 
     expect(raster.h).toBeGreaterThan(250);

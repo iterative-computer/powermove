@@ -4,7 +4,7 @@ import { isOneOf } from '../shared/guards';
 import { IPC, type ThemeSource } from '../shared/ipc';
 
 const THEME_SOURCES = ['light', 'dark', 'system'] as const;
-const DARK_BACKGROUND = '#0b0b0c';
+const DARK_BACKGROUND = '#0c0a09';
 const LIGHT_BACKGROUND = '#ededef';
 
 export interface ThemeIpcContext {

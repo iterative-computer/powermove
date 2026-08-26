@@ -36,7 +36,7 @@ const serializedTextLayer = {
   },
   fx: [], masks: [], locked_intent: {},
   d: {
-    text: 'Powermove', font: 'Geist', weight: 600, size: 128, tracking: -2,
+    text: 'Powermove', font: 'SF Pro Display', weight: 600, size: 128, tracking: -2,
     leading: 1.1, color: '#F2F2F2', align: 'center', italic: false
   }
 };

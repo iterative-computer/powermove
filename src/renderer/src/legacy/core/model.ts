@@ -92,7 +92,7 @@ function baseLayer(type: any, name: any, comp: any) {
 const DEFAULTS: any = {
   solid:  (L: any, c: any) => { L.d = { color: '#1b1b1f', w: c.w, h: c.h, radius: 0 }; L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0; },
   shape:  (L: any, c: any) => { L.d = { shape: 'rect', color: '#E8E2CF', w: 480, h: 480, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }; },
-  text:   (L: any, c: any) => { L.d = { text: 'Powermove', font: 'Geist', weight: 600, size: 128, tracking: -2, leading: 1.1, color: '#F2F2F2', align: 'center', italic: false }; },
+  text:   (L: any, c: any) => { L.d = { text: 'Powermove', font: 'SF Pro Display', weight: 600, size: 128, tracking: -2, leading: 1.1, color: '#F2F2F2', align: 'center', italic: false }; },
   image:  (L: any) => { L.d = { asset: null, fit: 'cover', w: 1920, h: 1080 }; },
   video:  (L: any) => { L.d = { asset: null, fit: 'cover', trim: 0, speed: 1, w: 1920, h: 1080 }; },
   audio:  (L: any) => { L.d = { asset: null, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 }; L.color = '#4C8DFF'; },

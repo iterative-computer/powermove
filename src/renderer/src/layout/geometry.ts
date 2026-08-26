@@ -101,6 +101,41 @@ export function clampPanelHeight(
   return Math.max(min, Math.min(max, start + sign * delta));
 }
 
+/* A horizontal splitter sits between two panels. Which one it resizes depends
+   on which of them flex-fill the dock:
+   - one sized, one flex  → drag the sized one; the flex one absorbs the delta
+   - both sized           → transfer height between them; nothing else moves
+   - both flex            → pin the panel after the splitter to a size
+   The old model assumed exactly one flex neighbour and silently converted the
+   other to flex, which threw away its size and let a third panel absorb the
+   drag instead. */
+export type PairResize =
+  | { mode: 'single'; target: 'before' | 'after'; sign: 1 | -1 }
+  | { mode: 'transfer' };
+
+export function resolvePairResize(beforeFlex: boolean, afterFlex: boolean): PairResize {
+  if (!beforeFlex && !afterFlex) return { mode: 'transfer' };
+  if (!beforeFlex) return { mode: 'single', target: 'before', sign: 1 };
+  return { mode: 'single', target: 'after', sign: -1 };
+}
+
+/* Moves `delta` px from the panel after the splitter to the one before it
+   (dragging down), honoring both minimums. The pair's combined height is
+   invariant, so a third panel can never absorb the change. */
+export function transferPanelHeights(
+  beforeStart: number,
+  afterStart: number,
+  delta: number,
+  beforeMin = 88,
+  afterMin = 88
+): { before: number; after: number } {
+  const total = beforeStart + afterStart;
+  const minBefore = Math.max(72, Number(beforeMin) || 88);
+  const minAfter = Math.max(72, Number(afterMin) || 88);
+  const before = Math.max(minBefore, Math.min(total - minAfter, beforeStart + delta));
+  return { before, after: total - before };
+}
+
 export function visibleDockPlan(
   workspace: Workspace
 ): Array<{ dock: Workspace['layout']['docks'][number]; specs: Workspace['layout']['docks'][number]['panels'] }> {

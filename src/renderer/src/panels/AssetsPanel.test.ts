@@ -133,15 +133,12 @@ describe('AssetsPanel', () => {
     const icon = target.querySelector<SVGElement>('svg.pm-icon')!;
     expect(icon.style.fill).toBe('currentColor');
     expect(icon.style.stroke).toBe('none');
-    expect(icon.dataset.icon).toBe('plus');
+    expect(icon.dataset.icon).toBe('frame');
 
-    const importButton = [...target.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Import');
-    expect(importButton?.title).toBe('Import media (⌘I)');
+    /* Import lives in the panel header (register-simple), not in the body. */
+    expect([...target.querySelectorAll('button')].some((button) => button.textContent?.trim() === 'Import')).toBe(false);
     expect(target.querySelector('button[aria-label="Add Backdrop.png to timeline"]')).not.toBeNull();
     expect(target.querySelector('button[aria-label="Delete Backdrop.png"]')).not.toBeNull();
-
-    importButton?.click();
-    expect(PM.pickFiles).toHaveBeenCalledOnce();
   });
 
   it('adds media from its button and double-click', () => {

@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 
 import { installSveltePanels } from './install';
@@ -39,6 +40,24 @@ describe('unconditional Svelte panel install', () => {
     expect(PM.PANELS.assets).toMatchObject({ title: 'Media', size: 200, persist: true });
     expect(PM.PANELS.inspector).toMatchObject({ title: 'Properties', persist: true });
     expect(PM.PANELS.shader).toMatchObject({ title: 'Shader', size: 320, persist: true });
+  });
+
+  it('puts the Media import action in the panel header beside the options button', () => {
+    const PM = registry();
+    PM.pickFiles = vi.fn();
+    PM.icon = vi.fn(() => document.createElement('svg'));
+    const header = document.createElement('header');
+    const options = document.createElement('button');
+    options.className = 'panel-options';
+    header.appendChild(options);
+
+    PM.PANELS.assets.header(header, {});
+
+    const action = header.querySelector<HTMLButtonElement>('button.panel-action')!;
+    expect(action.getAttribute('aria-label')).toBe('Import media (⌘I)');
+    expect(action.nextElementSibling).toBe(options);
+    action.click();
+    expect(PM.pickFiles).toHaveBeenCalledOnce();
   });
 
   it('owns the inspector and shader runtime hooks needed by the application engines', () => {

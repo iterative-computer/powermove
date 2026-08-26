@@ -46,21 +46,21 @@ function applyTheme(PM: PMRegistry, theme: Record<string, any>): void {
     else root.removeProperty(map[key]!);
   }
   if (theme.accent) {
-    const [red, green, blue] = PM.hex2rgb(theme.accent);
-    root.setProperty('--accent-dim', `rgba(${Math.round(red * 255)},${Math.round(green * 255)},${Math.round(blue * 255)},0.16)`);
-    root.setProperty('--accent-tx', theme.accent);
+    /* Derive the accent family from the brand color instead of flattening it:
+       text needs to pull toward the theme's ink for contrast, and the wash
+       stays at the token's 12% so accent never reads hotter than designed. */
+    root.setProperty('--accent-dim', `color-mix(in srgb, ${theme.accent} 12%, transparent)`);
+    root.setProperty('--accent-tx', `color-mix(in oklab, ${theme.accent} 82%, var(--tx))`);
   } else {
     root.removeProperty('--accent-dim');
     root.removeProperty('--accent-tx');
   }
   if (theme.radius != null) {
-    root.setProperty('--r-lg', `${theme.radius}px`);
-    root.setProperty('--r-md', `${Math.max(2, theme.radius - 3)}px`);
-    root.setProperty('--r-sm', `${Math.max(2, theme.radius - 5)}px`);
+    /* Scale the whole radius family from one base so nested corners stay
+       concentric (outer = inner + padding) at any project radius. */
+    root.setProperty('--r-base', `${Math.max(2, theme.radius) / 3}px`);
   } else {
-    root.removeProperty('--r-lg');
-    root.removeProperty('--r-md');
-    root.removeProperty('--r-sm');
+    root.removeProperty('--r-base');
   }
 }
 

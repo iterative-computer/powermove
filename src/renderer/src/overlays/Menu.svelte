@@ -40,15 +40,15 @@
 
   function keydown(event: KeyboardEvent): void {
     if (!menu?.isConnected) return;
-    if (event.key === 'ArrowDown') focusAt(active + 1);
-    else if (event.key === 'ArrowUp') focusAt(active - 1);
+    const onItem = buttons.includes(document.activeElement as HTMLButtonElement);
+    if (event.key === 'ArrowDown') focusAt(onItem ? active + 1 : 0);
+    else if (event.key === 'ArrowUp') focusAt(onItem ? active - 1 : buttons.length - 1);
     else if (event.key === 'Home') focusAt(0);
     else if (event.key === 'End') focusAt(buttons.length - 1);
     else if (event.key === 'Escape') onclose(true);
     else if (event.key === 'Tab') onclose(false);
     else if (event.key === 'Enter' || event.key === ' ') {
-      const focused = buttons.find((button) => button === document.activeElement) ?? buttons[active];
-      focused?.click();
+      buttons.find((button) => button === document.activeElement)?.click();
     }
     else return;
     if (event.key !== 'Tab') event.preventDefault();
@@ -62,7 +62,8 @@
     left = Math.min(Math.max(x, 6), window.innerWidth - width - 6);
     top = Math.min(Math.max(y, 6), window.innerHeight - height - 6);
     buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')];
-    focusAt(0);
+    for (const button of buttons) button.tabIndex = -1;
+    menu.focus({ preventScroll: true });
     window.addEventListener('keydown', keydown, true);
     return () => window.removeEventListener('keydown', keydown, true);
   });
@@ -72,6 +73,7 @@
   bind:this={menu}
   class="drop"
   role="menu"
+  tabindex="-1"
   aria-label={label}
   style:left={`${left}px`}
   style:top={`${top}px`}
@@ -96,9 +98,9 @@
           if (!item.disabled) onrun(item);
         }}
       >
-        <span>{item.on ? '✓ ' : ''}{item.label}</span>
+        <span>{item.label}</span>
         {#if item.kb}
-          <span style="margin-left:auto;font-family:var(--f-mono);font-size:10.5px;color:var(--tx-4)">{item.kb}</span>
+          <span class="kb">{item.kb}</span>
         {/if}
       </button>
     {/if}

@@ -111,4 +111,9 @@ describe('preload bridge', () => {
     expect(bridge().store.snapshotSync()).toEqual({ theme: 'dark' });
     expect(electronMocks.sendSync).toHaveBeenCalledExactlyOnceWith(IPC.storeSnapshotSync);
   });
+
+  it('exposes alignment haptics as one-way IPC', () => {
+    bridge().haptic.alignment();
+    expect(electronMocks.send).toHaveBeenCalledExactlyOnceWith(IPC.hapticAlignment);
+  });
 });

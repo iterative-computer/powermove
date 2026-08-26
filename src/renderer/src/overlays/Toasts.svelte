@@ -12,6 +12,8 @@
     removal: number;
   };
 
+  const LEAVE_MS = 160;
+
   let queue = $state<ToastItem[]>([]);
   let nextId = 1;
 
@@ -52,7 +54,7 @@
     const item = queue.find((candidate) => candidate.id === id);
     if (!item) return;
     item.fading = true;
-    item.removal = window.setTimeout(() => dismiss(id), 260);
+    item.removal = window.setTimeout(() => dismiss(id), LEAVE_MS);
   }
 
   export function isErrorToast(message: unknown): boolean {
@@ -63,13 +65,10 @@
 {#each queue as item (item.id)}
   <div
     class="toast"
+    class:leaving={item.fading}
+    role={item.error ? 'alert' : 'status'}
     data-toast-id={item.id}
     data-toast-error={item.error ? 'true' : undefined}
-    style:display="flex"
-    style:align-items="center"
-    style:gap="8px"
-    style:opacity={item.fading ? '0' : undefined}
-    style:transition={item.fading ? 'opacity .25s' : undefined}
   >
     <span>{item.message}</span>
     {#if item.dismissible}

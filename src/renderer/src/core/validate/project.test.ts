@@ -238,7 +238,7 @@ describe('sanitizeProject', () => {
 
     expect(layer.d).toMatchObject({
       text: 'Hello', customBrandField: 'keep-me', nested: { safe: true },
-      font: 'Geist', size: 128
+      font: 'SF Pro Display', size: 128
     });
     expect(Object.hasOwn(layer.d, 'constructor')).toBe(false);
     expect(Object.hasOwn(layer.d, 'runtimeOnly')).toBe(false);

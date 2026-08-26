@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { PMRegistry } from '../legacy/registry';
-  import { applyPanelSize, type DockSpec, type PanelSpec } from './model';
+  import { clampPanelHeight, resolvePairResize, transferPanelHeights } from './geometry';
+  import { applyPanelSize, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
 
   let {
     PM,
@@ -37,13 +38,14 @@
     const useBefore = !isFlexDock(beforeDock);
     return { target: useBefore ? beforeDock! : afterDock!, sign: useBefore ? 1 : -1 };
   };
-  const horizontalTarget = () => {
-    const useBefore = !isFlexPanel(beforeSpec);
-    return {
-      spec: useBefore ? beforeSpec! : afterSpec!,
-      other: useBefore ? afterSpec! : beforeSpec!,
-      sign: useBefore ? 1 : -1
-    };
+  const horizontalPair = () => {
+    const before = beforeSpec!;
+    const after = afterSpec!;
+    const resize = resolvePairResize(isFlexPanel(before), isFlexPanel(after));
+    if (resize.mode === 'transfer') return { resize, spec: before, other: after, sign: 1 as const };
+    const spec = resize.target === 'before' ? before : after;
+    const other = resize.target === 'before' ? after : before;
+    return { resize, spec, other, sign: resize.sign };
   };
   const panelElement = (spec: PanelSpec): HTMLElement | null => PM.panelInst[spec.id]?.el ?? null;
   const readValue = (): number => {
@@ -51,7 +53,7 @@
       const { target } = verticalTarget();
       return Math.round(document.getElementById(`dock-${target.id}`)?.getBoundingClientRect().width || target.size || (target.id === 'right' ? 300 : 250));
     }
-    const { spec } = horizontalTarget();
+    const { spec } = horizontalPair();
     return Math.round(panelElement(spec)?.getBoundingClientRect().height || spec.size || PM.PANELS[spec.id]?.size || 180);
   };
 
@@ -90,39 +92,43 @@
     minimum = 200;
     maximum = 760;
   };
+  const panelMin = (spec: PanelSpec): number => Math.max(72, Number(spec.min || PM.PANELS[spec.id]?.min) || 88);
   const horizontalGeometry = () => {
-    const { spec, other, sign } = horizontalTarget();
+    const { resize, spec, other, sign } = horizontalPair();
     const element = panelElement(spec);
     const otherElement = panelElement(other);
     if (!element || !otherElement) return null;
     const start = element.getBoundingClientRect().height;
     const otherStart = otherElement.getBoundingClientRect().height;
     const gap = Number.parseFloat(window.getComputedStyle(splitter).height) || 8;
-    const min = spec.min || PM.PANELS[spec.id]?.min || 88;
-    const otherMin = other.min || PM.PANELS[other.id]?.min || 88;
-    return { spec, other, sign, element, otherElement, start, pairHeight: start + otherStart, gap, min, otherMin };
+    return {
+      resize, spec, other, sign, element, otherElement, start, otherStart,
+      pairHeight: start + otherStart, gap, min: panelMin(spec), otherMin: panelMin(other)
+    };
+  };
+  const pin = (element: HTMLElement, spec: PanelSpec, height: number): void => {
+    element.style.flex = `0 0 ${height}px`;
+    spec.size = Math.round(height);
+    delete spec.flex;
   };
   const setHorizontal = (geometry: NonNullable<ReturnType<typeof horizontalGeometry>>, delta: number): void => {
-    const height = PM.Layout.clampPanelHeight(
-      geometry.start,
-      delta,
-      geometry.sign,
-      geometry.pairHeight,
-      geometry.min,
-      geometry.otherMin,
-      geometry.gap
-    );
-    geometry.element.style.flex = `0 0 ${height}px`;
-    geometry.spec.size = Math.round(height);
-    delete geometry.spec.flex;
-    geometry.other.flex = true;
-    delete geometry.other.size;
-    geometry.otherElement.style.flex = '1 1 auto';
+    let height: number;
+    if (geometry.resize.mode === 'transfer') {
+      const next = transferPanelHeights(geometry.start, geometry.otherStart, delta, geometry.min, geometry.otherMin);
+      pin(geometry.element, geometry.spec, next.before);
+      pin(geometry.otherElement, geometry.other, next.after);
+      height = next.before;
+    } else {
+      height = clampPanelHeight(geometry.start, delta, geometry.sign, geometry.pairHeight, geometry.min, geometry.otherMin, geometry.gap);
+      pin(geometry.element, geometry.spec, height);
+      geometry.other.flex = true;
+      delete geometry.other.size;
+      geometry.otherElement.style.flex = '1 1 auto';
+    }
     value = Math.round(height);
     splitter?.setAttribute('aria-valuenow', String(value));
-    const min = Math.max(72, Number(geometry.min) || 88);
-    minimum = min;
-    maximum = Math.max(min, geometry.pairHeight - Math.max(72, Number(geometry.otherMin) || 88) - geometry.gap);
+    minimum = geometry.min;
+    maximum = Math.max(geometry.min, geometry.pairHeight - geometry.otherMin - geometry.gap);
   };
 
   let hoverCurrent: number | null = null;
@@ -162,9 +168,16 @@
     }
     const geometry = horizontalGeometry();
     if (!geometry) return;
-    const min = Math.max(72, Number(geometry.min) || 88);
-    minimum = min;
-    maximum = Math.max(min, geometry.pairHeight - Math.max(72, Number(geometry.otherMin) || 88) - geometry.gap);
+    minimum = geometry.min;
+    maximum = Math.max(geometry.min, geometry.pairHeight - geometry.otherMin - geometry.gap);
+  }
+
+  /* Dragging a splitter next to a collapsed panel means "give me that panel
+     back": expand it first so the drag has real geometry to work with. */
+  function expandCollapsedNeighbours(): void {
+    for (const spec of [beforeSpec, afterSpec]) {
+      if (spec?.collapsed) setPanelCollapsed(PM, spec.id, false, false);
+    }
   }
 
   function onPointerDown(event: PointerEvent): void {
@@ -204,6 +217,7 @@
       return;
     }
 
+    expandCollapsedNeighbours();
     const geometry = horizontalGeometry();
     if (!geometry) {
       splitter.classList.remove('drag');
@@ -268,6 +282,7 @@
       const { sign } = verticalTarget();
       setVertical(value + sign * delta);
     } else {
+      expandCollapsedNeighbours();
       const geometry = horizontalGeometry();
       if (!geometry) return;
       setHorizontal(geometry, delta);

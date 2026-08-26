@@ -151,13 +151,13 @@ function demo() {
   const key = (L: any, ch: any, list: any) => { const prop = L.p[ch]; list.forEach(([t,v,e='power']: any) => prop.kf.push(PM.KF(t,v,e))); };
 
   const eyebrow = add(PM.mkLayer('text', { name: 'Kicker', from: .35, dur: 6.1, d: {
-    text: 'DESIGN  /  MOTION  /  SYSTEM', font: 'Geist Mono', weight: 560, size: 28, tracking: 8, leading: 1, color: '#FF8A47', align: 'center',
+    text: 'DESIGN  /  MOTION  /  SYSTEM', font: 'SF Mono', weight: 560, size: 28, tracking: 8, leading: 1, color: '#FF8A47', align: 'center',
   }, p: { 'position.x': 960, 'position.y': 404 } }, p));
   key(eyebrow, 'opacity', [[0,0,'power'],[.45,100,'power'],[5.3,100,'easeIn'],[5.8,0,'easeIn']]);
   key(eyebrow, 'position.y', [[0,430,'power'],[.58,404,'power']]);
 
   const title = add(PM.mkLayer('text', { name: 'Powermove', from: .45, dur: 6, d: {
-    text: 'Make the move.', font: 'Geist', weight: 650, size: 164, tracking: -7, leading: 1, color: '#F1F0EC', align: 'center',
+    text: 'Make the move.', font: 'SF Pro Display', weight: 650, size: 164, tracking: -7, leading: 1, color: '#F1F0EC', align: 'center',
   }, p: { 'position.x': 960, 'position.y': 535 } }, p));
   key(title, 'opacity', [[0,0,'power'],[.6,100,'power'],[5.05,100,'easeIn'],[5.62,0,'easeIn']]);
   key(title, 'position.y', [[0,630,'power'],[.72,535,'power'],[5.05,535,'easeIn'],[5.62,475,'easeIn']]);
@@ -165,7 +165,7 @@ function demo() {
   key(title, 'scale.y', [[0,94,'glide'],[.8,100,'glide']]);
 
   const sub = add(PM.mkLayer('text', { name: 'Descriptor', from: 1.1, dur: 5, d: {
-    text: 'A design-aware motion instrument.', font: 'Geist', weight: 430, size: 42, tracking: -.4, leading: 1.1, color: '#9C9A97', align: 'center',
+    text: 'A design-aware motion instrument.', font: 'SF Pro Display', weight: 430, size: 42, tracking: -.4, leading: 1.1, color: '#9C9A97', align: 'center',
   }, p: { 'position.x': 960, 'position.y': 660 } }, p));
   key(sub, 'opacity', [[0,0,'glide'],[.65,100,'glide'],[4.3,100,'easeIn'],[4.85,0,'easeIn']]);
 

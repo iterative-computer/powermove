@@ -47,6 +47,25 @@ describe('legacy viewer install', () => {
       .toEqual({ dx: -3, dy: 0, x: { delta: -3, value: 200, distance: 3 }, y: null });
   });
 
+  it('detects guide entry and target changes without repeating while a guide stays visible', () => {
+    const V = viewerRegistry().Viewer;
+
+    expect(V.alignmentGuideChanged(null, { x: 100, y: null })).toBe(true);
+    expect(V.alignmentGuideChanged({ x: 100, y: null }, { x: 100, y: null })).toBe(false);
+    expect(V.alignmentGuideChanged({ x: 100, y: null }, { x: 200, y: null })).toBe(true);
+    expect(V.alignmentGuideChanged({ x: 100, y: null }, { x: 100, y: 300 })).toBe(true);
+    expect(V.alignmentGuideChanged({ x: 100, y: null }, null)).toBe(false);
+  });
+
+  it('keeps click jitter below the move-drag threshold', () => {
+    const V = viewerRegistry().Viewer;
+
+    expect(V.passedMoveDragThreshold(0, 0)).toBe(false);
+    expect(V.passedMoveDragThreshold(1, 1)).toBe(false);
+    expect(V.passedMoveDragThreshold(2, 2)).toBe(false);
+    expect(V.passedMoveDragThreshold(3, 0)).toBe(true);
+  });
+
   it('measures rotated layer bounds in composition space', () => {
     const PM = viewerRegistry();
     PM.GL.bounds = () => ({ x0: -10, y0: -20, x1: 10, y1: 20 });

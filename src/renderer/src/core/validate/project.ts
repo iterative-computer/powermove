@@ -286,7 +286,7 @@ function contentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>):
     case 'text':
       return {
         ...source,
-        text: stringOr(source.text, 'Powermove'), font: stringOr(source.font, 'Geist'),
+        text: stringOr(source.text, 'Powermove'), font: stringOr(source.font, 'SF Pro Display'),
         weight: finite(source.weight, 600), size: finite(source.size, 128),
         tracking: finite(source.tracking, -2), leading: finite(source.leading, 1.1),
         color: stringOr(source.color, '#F2F2F2'),

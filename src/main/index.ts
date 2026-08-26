@@ -14,11 +14,12 @@ import { IPC } from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
 import { registerLogIpc } from './log';
+import { registerHapticsIpc } from './haptics';
 import { installMenu } from './menu';
 import { registerSaveIpc } from './save';
 import { registerShellIpc } from './shell';
 import { createStore, installQuitFlush, registerStoreIpc } from './storage';
-import { registerThemeIpc } from './theme';
+import { DARK_BACKGROUND, registerThemeIpc } from './theme';
 
 const APP_ORIGIN = 'app://powermove';
 const CONTENT_SECURITY_POLICY =
@@ -224,8 +225,8 @@ function createWindow(): BrowserWindow {
     minWidth: 980,
     minHeight: 640,
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 12 },
-    backgroundColor: '#0b0b0c',
+    trafficLightPosition: { x: 14, y: 15 },
+    backgroundColor: DARK_BACKGROUND,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -303,6 +304,7 @@ if (!hasSingleInstanceLock) {
     registerCaptureIpc(ipcMain, ctx);
     registerShellIpc(ipcMain, ctx);
     registerThemeIpc(ipcMain, ctx);
+    registerHapticsIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     registerCodexIpc(ipcMain, {
       getWindow: () => mainWindow,

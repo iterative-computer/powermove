@@ -25,9 +25,9 @@ describe('legacy fonts install', () => {
 
     PM.Fonts.setSystemFamilies(['Zapfino', 'Arial', ' Zapfino ', '\u0000Menlo']);
 
-    expect(PM.Fonts.bundled).toEqual(['Geist', 'Geist Mono']);
+    expect(PM.Fonts.bundled).toEqual([]);
     expect(PM.Fonts.system).toEqual(['Arial', 'Menlo', 'Zapfino']);
-    expect(PM.Fonts.families.slice(0, 5)).toEqual(['Geist', 'Geist Mono', 'Arial', 'Menlo', 'Zapfino']);
+    expect(PM.Fonts.families.slice(0, 6)).toEqual(['SF Pro Text', 'SF Pro Display', 'SF Mono', 'Arial', 'Menlo', 'Zapfino']);
     expect(PM.Fonts.options(' Zapfino ')[0]).toBe('Zapfino');
     expect(events).toEqual([['fonts', PM.Fonts.families]]);
   });

@@ -1,4 +1,5 @@
 import type { PMRegistry } from '../legacy/registry';
+import { markMenuDismissal } from '../overlays/dismissal';
 import {
   addPanel,
   dockLabel,
@@ -125,12 +126,16 @@ export function openPanelMenu(
     buttons.forEach((button, buttonIndex) => { button.tabIndex = buttonIndex === active ? 0 : -1; });
     buttons[active]!.focus({ preventScroll: true });
   };
-  focusAt(0);
+  /* Pointer-opened menus must not paint a row as focused: park focus on the
+     menu itself and let the arrow keys move it onto an item. */
+  menu.tabIndex = -1;
+  menu.focus({ preventScroll: true });
 
   const onKeyDown = (keyEvent: KeyboardEvent): void => {
     if (!menu.isConnected) return;
-    if (keyEvent.key === 'ArrowDown') focusAt(active + 1);
-    else if (keyEvent.key === 'ArrowUp') focusAt(active - 1);
+    const onItem = buttons.includes(document.activeElement as HTMLButtonElement);
+    if (keyEvent.key === 'ArrowDown') focusAt(onItem ? active + 1 : 0);
+    else if (keyEvent.key === 'ArrowUp') focusAt(onItem ? active - 1 : buttons.length - 1);
     else if (keyEvent.key === 'Home') focusAt(0);
     else if (keyEvent.key === 'End') focusAt(buttons.length - 1);
     else if (keyEvent.key === 'Escape') closeMenu();
@@ -141,16 +146,18 @@ export function openPanelMenu(
   };
   window.addEventListener('keydown', onKeyDown, true);
   PM._menuOutside = (outsideEvent: PointerEvent) => {
-    if (!menu.contains(outsideEvent.target as Node)) closeMenu(false);
+    if (menu.contains(outsideEvent.target as Node)) return;
+    markMenuDismissal(outsideEvent);
+    closeMenu(false);
   };
   const outside = PM._menuOutside;
   const outsideTimer = window.setTimeout(() => {
-    if (menu.isConnected) document.addEventListener('pointerdown', outside);
+    if (menu.isConnected) document.addEventListener('pointerdown', outside, true);
   }, 0);
   dispose = (): void => {
     window.clearTimeout(outsideTimer);
     window.removeEventListener('keydown', onKeyDown, true);
-    document.removeEventListener('pointerdown', outside);
+    document.removeEventListener('pointerdown', outside, true);
     if (menuCleanups.get(PM) === dispose) menuCleanups.delete(PM);
   };
   menuCleanups.set(PM, dispose);

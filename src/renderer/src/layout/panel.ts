@@ -1,6 +1,7 @@
 import type { PMRegistry } from '../legacy/registry';
 import { beginPanelDrag } from './drag';
 import { openPanelMenu } from './menu';
+import { dismissedMenu } from '../overlays/dismissal';
 import { applyPanelSize, findPanel, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
 import { movePreservingFocus, parkPanel, stagePanelMove } from './portal';
 
@@ -113,6 +114,7 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
     beginPanelDrag(PM, event, current.spec, current.dock, element);
   };
   header.addEventListener('pointerdown', (event) => {
+    if (dismissedMenu(event)) return;
     if ((event.target as Element | null)?.closest('button')) return;
     beginMove(event);
   });
@@ -120,13 +122,30 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
     if ((event.target as Element | null)?.closest('button')) return;
     setPanelCollapsed(PM, spec.id, element.dataset.collapsed !== '1');
   });
+  let openMenu: HTMLElement | null = null;
+  let dismissedByPress = false;
   const showMenu = (event: MouseEvent): void => {
     event.preventDefault();
     event.stopPropagation();
     const current = liveLocation();
-    if (current?.dock && current.spec) openPanelMenu(PM, event, current.spec, current.dock, options);
+    if (current?.dock && current.spec) openMenu = openPanelMenu(PM, event, current.spec, current.dock, options);
   };
-  options.addEventListener('click', showMenu);
+  /* The menu's outside-pointerdown handler already closes it when the options
+     button is pressed again; remember that so the following click toggles the
+     menu shut instead of immediately reopening it. */
+  options.addEventListener('pointerdown', () => {
+    dismissedByPress = Boolean(openMenu?.isConnected);
+  });
+  options.addEventListener('click', (event) => {
+    if (dismissedByPress) {
+      dismissedByPress = false;
+      openMenu = null;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    showMenu(event);
+  });
   header.addEventListener('contextmenu', showMenu);
   if (moveHandle) {
     moveHandle.addEventListener('pointerdown', beginMove);

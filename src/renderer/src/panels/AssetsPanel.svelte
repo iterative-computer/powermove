@@ -159,19 +159,9 @@
     }
   }
 
-  function importMedia(): void {
-    PM.pickFiles();
-    status = 'Import media dialog opened';
-  }
 </script>
 
 <div class="assets-panel-body" style="height:100%" data-svelte-panel={panelId} bind:this={rootElement}>
-  <div class="assets-top">
-    <button class="asset-import" type="button" title="Import media (⌘I)" onclick={importMedia}>
-      <Icon {PM} name="plus" />
-      <span>Import</span>
-    </button>
-  </div>
   <div class="asset-list" role="listbox" aria-label="Project media" bind:this={listElement}>
     {#each assets as asset, index (asset.id)}
       {@const currentAsset = liveAsset(asset)}
@@ -193,8 +183,8 @@
           {/if}
         </span>
         <span class="asset-copy">
-          <b>{asset.name}</b>
-          <small>{mediaDetails(asset)}</small>
+          <b title={asset.name}>{asset.name}</b>
+          <small title={mediaDetails(asset)}>{mediaDetails(asset)}</small>
         </span>
         <span class="asset-actions">
           <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>

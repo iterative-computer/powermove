@@ -23,6 +23,7 @@ vi.mock('electron', () => ({
 
 import { registerCaptureIpc } from './capture';
 import { registerLogIpc } from './log';
+import { MIN_HAPTIC_INTERVAL_MS, registerHapticsIpc } from './haptics';
 import {
   MAX_SAVE_NAME_CHARS,
   registerSaveIpc,
@@ -269,6 +270,40 @@ describe('theme and log IPC', () => {
     } finally {
       write.mockRestore();
     }
+  });
+});
+
+describe('haptics IPC', () => {
+  it('accepts trusted alignment feedback and rate-limits pointer jitter', () => {
+    const triggerAlignment = vi.fn();
+    let time = 1000;
+    const { ipcMain, listeners } = fakeIpcMain();
+    registerHapticsIpc(ipcMain, {
+      isTrustedSenderContents: () => true,
+      triggerAlignment,
+      now: () => time
+    });
+    const listener = listeners.get(IPC.hapticAlignment);
+
+    listener?.(onEvent());
+    time += MIN_HAPTIC_INTERVAL_MS - 1;
+    listener?.(onEvent());
+    time += 1;
+    listener?.(onEvent());
+
+    expect(triggerAlignment).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores alignment feedback from an untrusted sender', () => {
+    const triggerAlignment = vi.fn();
+    const { ipcMain, listeners } = fakeIpcMain();
+    registerHapticsIpc(ipcMain, {
+      isTrustedSenderContents: () => false,
+      triggerAlignment
+    });
+
+    listeners.get(IPC.hapticAlignment)?.(onEvent());
+    expect(triggerAlignment).not.toHaveBeenCalled();
   });
 });
 

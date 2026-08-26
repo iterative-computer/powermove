@@ -133,16 +133,16 @@ describe('installSvelteLayout', () => {
 
     const style = document.documentElement.style;
     expect(style.getPropertyValue('--accent')).toBe('#336699');
-    expect(style.getPropertyValue('--accent-dim')).toBe('rgba(51,102,153,0.16)');
-    expect(style.getPropertyValue('--accent-tx')).toBe('#336699');
+    expect(style.getPropertyValue('--accent-dim')).toBe('color-mix(in srgb, #336699 12%, transparent)');
+    expect(style.getPropertyValue('--accent-tx')).toBe('color-mix(in oklab, #336699 82%, var(--tx))');
     expect(style.getPropertyValue('--bg-window')).toBe('#101112');
     expect(style.getPropertyValue('--bg-panel')).toBe('#202122');
     expect(style.getPropertyValue('--tx')).toBe('#f0f1f2');
     expect(style.getPropertyValue('--line')).toBe('#303132');
     expect(style.getPropertyValue('--f-ui')).toBe('Inter');
     expect(style.getPropertyValue('--f-mono')).toBe('Monaco');
-    expect([style.getPropertyValue('--r-lg'), style.getPropertyValue('--r-md'), style.getPropertyValue('--r-sm')])
-      .toEqual(['8px', '5px', '3px']);
+    expect(style.getPropertyValue('--r-base')).toBe(`${8 / 3}px`);
+    expect(style.getPropertyValue('--r-lg')).toBe('');
     expect(document.documentElement.dataset.density).toBe('compact');
   });
 

@@ -31,7 +31,7 @@
   {#each rows as [label, value] (label)}
     <div class="row split">
       <div class="k">{label}</div>
-      <div class="vwrap"><span style="font-size:11.5px;font-variant-numeric:tabular-nums">{value}</span></div>
+      <div class="vwrap"><span style="font-size:var(--fs-sm);font-variant-numeric:tabular-nums">{value}</span></div>
     </div>
   {/each}
 </div>

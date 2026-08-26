@@ -40,7 +40,7 @@
 
 <div class="simple-panel-list" data-svelte-panel={panelId}>
   {#each Object.entries(groups) as [group, effects] (group)}
-    <div class="sec simple-panel-section" style="margin:8px 6px 4px">{group}</div>
+    <div class="sec simple-panel-section">{group}</div>
     {#each effects as [effect, definition] (effect)}
       <button class="lyr simple-effect-row" type="button" onclick={(event) => addEffect(event, effect, definition.label)}>
         <span class="nm">{definition.label}</span>

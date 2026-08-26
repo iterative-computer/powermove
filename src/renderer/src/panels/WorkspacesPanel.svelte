@@ -71,7 +71,7 @@
         onclick={() => activate(workspace)}
       >
         <span class="sw2" style:background={workspace.theme?.accent || 'var(--accent)'}></span>
-        <span class="nm">{workspace.name}</span>
+        <span class="nm" title={workspace.name}>{workspace.name}</span>
       </button>
       {#if !workspace.builtin}
         <button class="stopwatch" type="button" aria-label={`Delete ${workspace.name}`} onclick={(event) => remove(event, workspace)}>

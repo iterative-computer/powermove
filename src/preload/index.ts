@@ -72,6 +72,11 @@ const bridge: PowermoveBridge = {
   setTheme: (theme) => {
     ipcRenderer.send(IPC.themeSet, theme);
   },
+  haptic: {
+    alignment: () => {
+      ipcRenderer.send(IPC.hapticAlignment);
+    }
+  },
   log: (level, text) => {
     ipcRenderer.send(IPC.log, { level, text });
   },

@@ -31,5 +31,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "@powermove/macos-haptics": "file:native/macos-haptics"
   }
 }

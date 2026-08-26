@@ -2,7 +2,7 @@
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
-const BUNDLED = ['Geist', 'Geist Mono'];
+const NATIVE = ['SF Pro Text', 'SF Pro Display', 'SF Mono'];
 const WEB_FALLBACKS = [
   'Helvetica Neue', 'Helvetica', 'Arial', 'Arial Black', 'Arial Narrow',
   'Avenir', 'Avenir Next', 'Futura', 'Gill Sans', 'Optima',
@@ -14,14 +14,14 @@ const clean = (value: any) => String(value || '').replace(/[\u0000-\u001f\u007f]
 const unique = (values: any[]) => [...new Set(values.map(clean).filter(Boolean))];
 
 const Fonts: any = {
-  bundled: [...BUNDLED],
+  bundled: [],
   system: [],
-  families: unique([...BUNDLED, ...WEB_FALLBACKS]),
+  families: unique([...NATIVE, ...WEB_FALLBACKS]),
 
   setSystemFamilies(values: any) {
     const system = unique(Array.isArray(values) ? values : []).sort((a, b) => a.localeCompare(b));
     this.system = system;
-    this.families = unique([...BUNDLED, ...system, ...WEB_FALLBACKS]);
+    this.families = unique([...NATIVE, ...system, ...WEB_FALLBACKS]);
     PM.bus.emit('fonts', this.families);
   },
 
@@ -49,6 +49,6 @@ const Fonts: any = {
 
 PM.Fonts = Fonts;
 window.document.fonts && window.document.fonts.ready && window.document.fonts.ready.then(() => {
-  BUNDLED.forEach(name => Fonts.ensure(name));
+  NATIVE.forEach(name => Fonts.ensure(name));
 });
 }

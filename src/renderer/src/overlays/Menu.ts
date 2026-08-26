@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
+import { markMenuDismissal } from './dismissal';
 
 type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement };
 
@@ -50,21 +51,23 @@ export class MenuController {
       this.menu.style.left = `${this.clamp(rect.right - width, 6, window.innerWidth - width - 6)}px`;
     }
     this.outside = (event: PointerEvent) => {
-      if (this.menu && !this.menu.contains(event.target as Node)) this.close(true);
+      if (!this.menu || this.menu.contains(event.target as Node)) return;
+      markMenuDismissal(event);
+      this.close(true);
     };
     this.PM._menuOutside = this.outside;
     this.outsideTimer = window.setTimeout(() => {
-      if (this.outside && this.menu?.isConnected) document.addEventListener('pointerdown', this.outside);
+      if (this.outside && this.menu?.isConnected) document.addEventListener('pointerdown', this.outside, true);
     }, 0);
     return this.menu;
   }
 
   close(restoreFocus = false): void {
     window.clearTimeout(this.outsideTimer);
-    if (this.outside) document.removeEventListener('pointerdown', this.outside);
+    if (this.outside) document.removeEventListener('pointerdown', this.outside, true);
     const registeredOutside = this.PM._menuOutside as ((event: PointerEvent) => void) | null | undefined;
     if (registeredOutside && registeredOutside !== this.outside) {
-      document.removeEventListener('pointerdown', registeredOutside);
+      document.removeEventListener('pointerdown', registeredOutside, true);
     }
     this.PM._menuOutside = null;
     this.outside = null;
@@ -84,7 +87,7 @@ export class MenuController {
 
   private removeForeignMenus(): void {
     const outside = this.PM._menuOutside as ((event: PointerEvent) => void) | null | undefined;
-    if (outside && outside !== this.outside) document.removeEventListener('pointerdown', outside);
+    if (outside && outside !== this.outside) document.removeEventListener('pointerdown', outside, true);
     this.PM._menuOutside = null;
     document.querySelectorAll('.drop').forEach((element) => element.remove());
   }

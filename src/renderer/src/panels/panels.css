@@ -1,5 +1,5 @@
 [data-svelte-panel].simple-panel-list {
-  padding: 6px;
+  padding: 8px;
 }
 
 .simple-panel-row .simple-row-action {
@@ -45,17 +45,11 @@
   resize: none;
   color: var(--tx-2);
   background: transparent;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   line-height: 1.6;
 }
 
 .notes-panel textarea:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
   outline-offset: -2px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-svelte-panel] :is(.chip, .lyr, .asset-card, .asset-actions) {
-    transition: none;
-  }
 }

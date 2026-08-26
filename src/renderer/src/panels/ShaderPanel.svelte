@@ -108,13 +108,13 @@
 
   .shader-empty b {
     color: var(--tx-3);
-    font-size: 11px;
+    font-size: var(--fs-sm);
     font-weight: 560;
   }
 
   .shader-empty span {
     max-width: 220px;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     line-height: 1.45;
   }
 
@@ -127,6 +127,6 @@
   }
 
   .compile-button {
-    height: 20px;
+    height: 24px;
   }
 </style>

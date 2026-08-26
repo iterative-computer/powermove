@@ -58,9 +58,9 @@
 
 <button
   type="button"
-  class="chip"
+  class="chip wide"
   class:solid={control.primary}
-  style="width:100%;justify-content:center;height:28px;margin-bottom:4px"
+  style="margin-bottom:4px"
   {disabled}
   aria-busy={busy}
   onclick={run}

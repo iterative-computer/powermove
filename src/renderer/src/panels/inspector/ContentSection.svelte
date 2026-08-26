@@ -77,7 +77,7 @@
     data-inspector-text-layer={layer.id}
     aria-label="Text"
     value={String(content.text ?? '')}
-    style="width:100%;min-height:54px;background:var(--bg-row);border-radius:var(--r-sm);padding:8px 10px;font-size:12.5px;line-height:1.5;resize:vertical;color:var(--tx)"
+    style="width:100%;min-height:54px;background:var(--bg-row);border-radius:var(--r-sm);padding:8px 10px;font-size:var(--fs-md);line-height:1.5;resize:vertical;color:var(--tx)"
     onfocus={beginText}
     oninput={inputText}
     onblur={commitText}
@@ -148,7 +148,7 @@
     onclick={() => PM.openShaderEditor?.(layer)}
   >Edit shader source</button>
   {#if shaderError}
-    <div role="status" style="font-size:10.5px;color:var(--red);padding:6px 4px;white-space:pre-wrap;max-height:90px;overflow:auto">{shaderError}</div>
+    <div role="status" style="font-size:var(--fs-xs);color:var(--red);padding:6px 4px;white-space:pre-wrap;max-height:90px;overflow:auto">{shaderError}</div>
   {/if}
   <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
   <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>

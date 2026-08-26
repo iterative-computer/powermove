@@ -108,7 +108,7 @@
 
 <div class="insp" data-svelte-panel={panelId}>
   {#if section.note}
-    <div style="color:var(--tx-3);font-size:11.5px;line-height:1.6;padding:2px 4px 8px">{section.note}</div>
+    <div style="color:var(--tx-3);font-size:var(--fs-sm);line-height:1.6;padding:2px 4px 8px">{section.note}</div>
   {/if}
   {#each controls as prepared (prepared.key)}
     <GeneratedControlView

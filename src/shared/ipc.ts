@@ -29,6 +29,7 @@ export const IPC = {
   storeError: 'store:error', // main → renderer
 
   themeSet: 'theme:set',
+  hapticAlignment: 'haptic:alignment',
   log: 'log',
   openExternal: 'shell:open-external',
   menuCommand: 'menu:command' // main → renderer
@@ -177,6 +178,9 @@ export interface PowermoveBridge {
   };
 
   setTheme(theme: ThemeSource): void;
+  haptic: {
+    alignment(): void;
+  };
   log(level: LogLevel, text: string): void;
   openExternal(url: string): Promise<void>;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;

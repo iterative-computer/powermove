@@ -64,8 +64,7 @@
 {#if effects.length === 0}
   <button
     type="button"
-    class="chip"
-    style="width:100%;justify-content:center;height:28px"
+    class="chip wide"
     onpointerdown={(event) => {
       event.preventDefault();
       showFxMenu(PM, event.currentTarget, layer);
@@ -80,7 +79,7 @@
     {@const paramsId = `fx-params-${layer.id}-${effect.id}`}
     <div
       class="row fx-head"
-      style="margin-top:4px;background:rgba(128,128,136,.08)"
+      style="margin-top:4px;background:var(--ink-1)"
       data-effect-id={effect.id}
     >
       <button

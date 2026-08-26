@@ -159,7 +159,7 @@
     textarea.style.cssText = 'height:150px;border-radius:8px';
 
     const hint = window.document.createElement('div');
-    hint.style.cssText = 'font-size:11px;color:var(--tx-3);line-height:1.6';
+    hint.style.cssText = 'font-size:var(--fs-sm);color:var(--tx-3);line-height:1.6';
     hint.append(
       't · layer-local seconds   T · comp seconds   value · keyframed value',
       window.document.createElement('br'),

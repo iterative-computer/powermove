@@ -97,8 +97,9 @@ function card(m: any, trashed: any) {
   if (m.thumb) inner.appendChild(h('img', { src: m.thumb, alt: '' }));
   const thumb = h('div.ps-thumb', inner, active ? h('span.ps-card-badge', 'Open') : null);
   const more = h('button.ps-more', { title: 'Project actions', 'aria-label': 'Project actions' }, PM.icon('more'));
-  const meta = h('div.ps-meta', h('div.ps-meta-copy', h('div.ps-name', m.name || 'Untitled'),
-    h('div.ps-sub', projectSub(m, raw, trashed))), more);
+  const sub = projectSub(m, raw, trashed);
+  const meta = h('div.ps-meta', h('div.ps-meta-copy', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'),
+    h('div.ps-sub', { title: sub }, sub)), more);
   const c = h('article.ps-card' + (active ? '.active' : ''), thumb, meta);
   c.onclick = () => {
     if (trashed) return;

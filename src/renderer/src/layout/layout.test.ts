@@ -266,6 +266,9 @@ describe('Svelte DockLayout panel pool', () => {
     expect(buttons.some((button) => button.getAttribute('aria-disabled') === 'true')).toBe(true);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
     expect(buttons.every((button) => button.style.background === '')).toBe(true);
+    // Pointer-opened: focus parks on the menu, no row is painted; arrows enter the list.
+    expect(document.activeElement).toBe(menu);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(document.activeElement).toBe(buttons[0]);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(document.activeElement).toBe(buttons[1]);

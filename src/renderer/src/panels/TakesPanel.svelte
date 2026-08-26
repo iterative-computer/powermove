@@ -62,7 +62,7 @@
   {:else}
     <div class="empty">Save a take before exploring a new motion direction.</div>
   {/each}
-  <button class="chip" style="margin:6px" type="button" onclick={saveTake}>
+  <button class="chip wide" style="margin:6px;width:calc(100% - 12px)" type="button" onclick={saveTake}>
     <Icon {PM} name="plus" />
     Save take
   </button>

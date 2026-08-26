@@ -115,8 +115,11 @@ describe('installSvelteOverlays', () => {
     expect(menu.querySelector('.sep[role="separator"]')).toBeTruthy();
     expect(items[0]?.classList.contains('on')).toBe(true);
     expect(items[1]?.getAttribute('aria-disabled')).toBe('true');
-    expect(document.activeElement).toBe(items[0]);
+    // Pointer-opened: focus parks on the menu, no row is painted; arrows enter the list.
+    expect(document.activeElement).toBe(menu);
 
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(items[0]);
     menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
     expect(document.activeElement).toBe(items[1]);
     items[1]?.click();
@@ -377,15 +380,15 @@ describe('installSvelteOverlays', () => {
     expect(target.getAttribute('aria-live')).toBe('polite');
     expect((target as HTMLElement).style.zIndex).toBe('402');
     expect(document.querySelectorAll('.toast')).toHaveLength(2);
-    expect(document.querySelector<HTMLElement>('.toast')?.style.display).toBe('flex');
+    expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(false);
     document.querySelector<HTMLButtonElement>('.toast[data-toast-error="true"] button')?.click();
     flushSync();
     expect(document.querySelectorAll('.toast')).toHaveLength(1);
 
     vi.advanceTimersByTime(100);
     flushSync();
-    expect(document.querySelector<HTMLElement>('.toast')?.style.opacity).toBe('0');
-    vi.advanceTimersByTime(260);
+    expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(true);
+    vi.advanceTimersByTime(160);
     flushSync();
     expect(document.querySelector('.toast')).toBeNull();
   });

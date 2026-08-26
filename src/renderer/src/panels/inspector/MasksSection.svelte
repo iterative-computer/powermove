@@ -75,13 +75,13 @@
 
 <Section title="Masks" />
 {#if masks.length === 0}
-  <button type="button" class="chip" aria-label="Add mask" style="width:100%;justify-content:center;height:28px" onclick={addMask}>
+  <button type="button" class="chip wide" aria-label="Add mask"  onclick={addMask}>
     <LegacyIcon {PM} name="plus" />Add mask
   </button>
 {:else}
   {#each masks as mask, index (mask.id ?? index)}
     {@const maskId = mask.id ?? index}
-    <div class="row mask-head" style="margin-top:4px;background:rgba(128,128,136,.08)" data-mask-id={maskId}>
+    <div class="row mask-head" style="margin-top:4px;background:var(--ink-1)" data-mask-id={maskId}>
       <span class="twirl open" aria-hidden="true"><LegacyIcon {PM} name="chev" /></span>
       <div class="k" style="color:var(--tx);font-weight:500">Mask {index + 1}</div>
       <button
@@ -143,7 +143,7 @@
       {/each}
     </div>
   {/each}
-  <button type="button" class="chip" aria-label="Add mask" style="width:100%;justify-content:center;height:28px;margin-top:2px" onclick={addMask}>
+  <button type="button" class="chip wide" aria-label="Add mask" onclick={addMask}>
     <LegacyIcon {PM} name="plus" />Add mask
   </button>
 {/if}

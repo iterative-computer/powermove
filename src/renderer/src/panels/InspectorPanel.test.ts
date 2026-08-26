@@ -415,7 +415,7 @@ describe('InspectorPanel', () => {
   it('keeps the legacy Edit begin/dispatch/commit sequence for text', () => {
     const candidate = layer('A');
     candidate.type = 'text';
-    candidate.d = { text: 'Hello', font: 'Geist', weight: 400, size: 64, tracking: 0, leading: 1.2, align: 'center', color: '#FFFFFF' };
+    candidate.d = { text: 'Hello', font: 'SF Pro Display', weight: 400, size: 64, tracking: 0, leading: 1.2, align: 'center', color: '#FFFFFF' };
     const { PM } = setup([candidate], ['A']);
     const textarea = target.querySelector<HTMLTextAreaElement>('[data-inspector-text-layer="A"]')!;
 

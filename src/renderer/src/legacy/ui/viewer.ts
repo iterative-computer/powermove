@@ -119,6 +119,7 @@ function drawOverlay() {
   c.restore();
 }
 const HANDLES: any = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
+const MOVE_DRAG_THRESHOLD_PX = 3;
 
 function drawSnapGuides(c: any, S: any, p: any) {
   const guides = V.guides;
@@ -202,6 +203,21 @@ function alignmentSnap(bounds: any, targets: any, threshold: any, axes: any = { 
   return { dx: x ? x.delta : 0, dy: y ? y.delta : 0, x, y };
 }
 
+function guideValue(guide: any) {
+  return guide ? guide.value : null;
+}
+
+function alignmentGuideChanged(previous: any, next: any) {
+  if (!next || (next.x == null && next.y == null)) return false;
+  if (!previous) return true;
+  return (next.x != null && next.x !== previous.x) ||
+    (next.y != null && next.y !== previous.y);
+}
+
+function passedMoveDragThreshold(dx: any, dy: any) {
+  return Math.hypot(dx, dy) >= MOVE_DRAG_THRESHOLD_PX;
+}
+
 function worldDeltaToLocal(L: any, T: any, dx: any, dy: any) {
   if (!L.parent) return [dx, dy];
   const parent = PM.L(L.parent); if (!parent) return [dx, dy];
@@ -210,7 +226,10 @@ function worldDeltaToLocal(L: any, T: any, dx: any, dy: any) {
   return [(dx * m[3] - dy * m[2]) / det, (dy * m[0] - dx * m[1]) / det];
 }
 
-Object.assign(V, { snapAxis, worldBounds, unionBounds, snapshotSnapTargets, alignmentSnap });
+Object.assign(V, {
+  snapAxis, worldBounds, unionBounds, snapshotSnapTargets, alignmentSnap,
+  alignmentGuideChanged, passedMoveDragThreshold,
+});
 
 /* ── direct manipulation ───────────────────────────────── */
 function bindStage(stage: any, inner: any) {
@@ -298,6 +317,7 @@ function startMove(e: any, layers: any, T: any) {
   let moved = false;
   PM.drag(e, {
     move: (dx: any, dy: any, ev: any) => {
+      if (!moved && !passedMoveDragThreshold(dx, dy)) return;
       moved = true;
       let ddx = dx / V.shown, ddy = dy / V.shown;
       const axes = { x: true, y: true };
@@ -316,9 +336,13 @@ function startMove(e: any, layers: any, T: any) {
         if (cx) setOrKey(s.L, 'position.x', s.x + ddx + cx, T);
         if (cy) setOrKey(s.L, 'position.y', s.y + ddy + cy, T);
       });
-      V.guides = PM.snap && (snap.x || snap.y)
-        ? { x: snap.x ? snap.x.value : null, y: snap.y ? snap.y.value : null }
+      const nextGuides = PM.snap && (snap.x || snap.y)
+        ? { x: guideValue(snap.x), y: guideValue(snap.y) }
         : null;
+      if (alignmentGuideChanged(V.guides, nextGuides)) {
+        window.powermove?.haptic.alignment();
+      }
+      V.guides = nextGuides;
       PM.invalidate();
     },
     up: () => { clearGuides(); moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector.refresh(); },

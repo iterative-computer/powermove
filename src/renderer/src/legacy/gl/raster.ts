@@ -46,7 +46,7 @@ function evict() {
 
 /* ── text ──────────────────────────────────────────────── */
 function fontStr(d: any) {
-  return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px "${d.font}", "Geist", -apple-system, sans-serif`;
+  return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px "${d.font}", "SF Pro Display", -apple-system, sans-serif`;
 }
 
 /* Use the exact same canvas text metrics as the rasterizer when a procedural
