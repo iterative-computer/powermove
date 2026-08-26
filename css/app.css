@@ -538,6 +538,37 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-thinking-copy{display:block;min-width:0;white-space:normal;color:var(--tx-2);animation:agent-live-pulse 1.6s ease-in-out .8s infinite}
 @keyframes agent-live-pulse{50%{opacity:.55}}
 @keyframes agent-spin{to{transform:rotate(360deg)}}
+/* thinking feed — the flat activity trail the agent writes while it works.
+   No cards, no borders, no timestamps: thinking is muted prose, model text is
+   primary prose, tool work is one wrench row. Exactly one row carries motion. */
+.agent-trace{display:flex;flex-direction:column;gap:14px;min-width:0;padding-left:2px}
+.agent-trace p{margin:0}
+.agent-trace-thought{white-space:pre-wrap;font-size:13px;line-height:1.55;color:var(--tx-3)}
+/* A thought that contains bold reads as an ACTION the model is narrating, not
+   as musing — it holds its weight and pulses instead of shimmering, because a
+   gradient sweep over mixed weights smears. */
+.agent-trace-thought.is-action{font-weight:var(--fw-medium)}
+.agent-trace-text{white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--tx)}
+.agent-trace-tool{display:flex;align-items:center;gap:10px;min-width:0;font-size:13px;font-weight:var(--fw-medium);line-height:1.4;color:var(--tx-3);user-select:none;-webkit-user-select:none}
+.agent-trace-tool>svg{width:16px;height:16px;flex:none;fill:currentColor;color:var(--tx-4)}
+.agent-trace-tool>span{min-width:0;flex:1}
+.agent-trace-tool>em{flex:none;font-size:11px;font-style:normal;opacity:.8}
+.agent-trace-tool.is-error{color:var(--danger)}
+.agent-trace-tool.is-error>svg{color:var(--danger)}
+.agent-trace .is-pulsing{animation:agent-live-pulse 1.6s ease-in-out infinite}
+.agent-trace-code{border-radius:var(--r-xs);padding:0 4px;background:var(--bg-field);font-family:var(--f-mono);font-size:12px}
+/* Inside a shimmering line the parent clips its gradient to the text and sets
+   color:transparent; a code chip's own background breaks that clip and leaves
+   invisible text on a pill — restore a solid color for chips only. */
+.shimmer-text .agent-trace-code{-webkit-background-clip:border-box;background-clip:border-box;color:var(--tx-2)}
+.agent-trace.is-archived{margin:2px 0 6px}
+/* Live row — a slow left-to-right sweep of light across the text itself. */
+.shimmer-text{background:linear-gradient(100deg,var(--tx-3) 30%,var(--tx) 50%,var(--tx-3) 70%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer-sweep 1.6s linear infinite}
+@keyframes shimmer-sweep{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){
+  .shimmer-text{animation:none;background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--tx-2)}
+  .agent-trace .is-pulsing{animation:none}
+}
 /* welcome */
 .agent-welcome{max-width:300px;width:100%;margin:auto;padding:10px 4px;text-align:left;color:var(--tx-3)}
 .agent-welcome b{display:block;margin-bottom:4px;color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}

@@ -60,6 +60,7 @@ function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
     requestToken: 0,
     conversation: [],
     activity: '',
+    trace: [],
     plan: null,
     run: null,
     panelRun: null,
@@ -214,7 +215,7 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.setModel).toHaveBeenCalledWith('gpt-5.6-sol', 'low');
   });
 
-  it('accumulates progress in state while rendering only the newest word-staggered line', () => {
+  it('accumulates progress in state while rendering only the newest shimmer line', () => {
     renderPanel(snapshot({ legacyPhase: 'working', requestToken: 4, activity: 'Inspecting source…' }));
     flushSync(() => setAgentSnapshot(snapshot({ legacyPhase: 'working', requestToken: 4, activity: 'Designing the edit…' })));
 
@@ -225,8 +226,10 @@ describe('AgentPanel', () => {
       'Inspecting source…',
       'Designing the edit…'
     ]);
-    expect([...log.querySelectorAll('.agent-thinking-word')].map((word) => word.textContent).join('')).toBe('Designing the edit…');
-    expect(log.querySelector('.agent-thinking-word')?.getAttribute('style')).toMatch(/--word-index:\s*0/);
+    // Before the trace arrives the activity string is one shimmering line —
+    // no per-word stagger, which fought the shimmer's own text clip.
+    expect(log.querySelector('.agent-trace .shimmer-text')?.textContent).toBe('Designing the edit…');
+    expect(log.querySelector('.agent-thinking-word')).toBeNull();
   });
 
   it('self-heals a stale panel scope to the workspace', async () => {
@@ -273,6 +276,61 @@ describe('AgentPanel', () => {
 });
 
 describe('agent bridge', () => {
+  it('coalesces active-run updates on a 32 ms trailing timer and flushes final state', () => {
+    vi.useFakeTimers();
+    try {
+      const legacyState = snapshot({ legacyPhase: 'working', activity: 'Starting' });
+      const registry: Record<string, any> = { registerPanel: vi.fn() };
+      const action = vi.fn();
+      registerAgentPanel(registry, {
+        snapshot: () => legacyState,
+        submit: action,
+        stop: action,
+        setDraft: action,
+        setStepsExpanded: action,
+        setModel: action,
+        setAccess: action,
+        confirmComputerAccess: action,
+        setScope: action,
+        toggleAutoApplyPanels: action,
+        dismissPlan: action,
+        applyPlan: action,
+        addAttachments: async () => {},
+        removeAttachment: action,
+        importArtifact: async () => {},
+        revealArtifact: action,
+        undoPanelRun: action,
+        keepPanelRun: action,
+        undoSceneRun: action,
+        keepSceneRun: action
+      });
+      const initialRevision = agentState.revision;
+
+      legacyState.activity = 'Inspecting';
+      registry.AgentUI.update();
+      legacyState.activity = 'Editing';
+      registry.AgentUI.update();
+      expect(agentState.revision).toBe(initialRevision);
+
+      vi.advanceTimersByTime(32);
+      expect(agentState.revision).toBe(initialRevision + 1);
+      expect(agentState.activity).toBe('Editing');
+
+      legacyState.activity = 'Finishing';
+      registry.AgentUI.update();
+      legacyState.activity = '';
+      legacyState.legacyPhase = 'conversation';
+      registry.AgentUI.update({ flush: true });
+      expect(agentState.phase).toBe('prompt');
+      expect(agentState.activity).toBe('');
+      const finalRevision = agentState.revision;
+      vi.advanceTimersByTime(32);
+      expect(agentState.revision).toBe(finalRevision);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('maps bridge snapshots to view phases, including a panel run result', () => {
     const legacyState = snapshot({ legacyPhase: 'conversation' });
     const registry: Record<string, any> = { registerPanel: vi.fn() };

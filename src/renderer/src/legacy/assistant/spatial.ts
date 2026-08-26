@@ -1,5 +1,6 @@
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import type { CodexTraceEvent } from '../../../../shared/ipc';
 import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
@@ -30,7 +31,7 @@ PM.CodexBridge = {
       const abort: any = () => settle(codexAbortError());
       const timeout: any = Math.max(30_000, Math.min(Number(options.timeoutMs) || 120_000, 3_600_000));
       const timer: any = window.setTimeout(() => settle(new Error('The coding agent took too long to respond')), timeout);
-      pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress, mode: options.mode });
+      pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress, onTrace: options.onTrace, mode: options.mode });
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
@@ -62,6 +63,10 @@ PM.CodexBridge = {
       const summary: any = new window.TextDecoder().decode(bytes).replace(/\s+/g, ' ').trim().slice(0, 320);
       if (summary) job.onProgress(summary);
     } catch { /* Ignore malformed progress without interrupting the real run. */ }
+  },
+  trace(id: any, step: any) {
+    const job: any = pending.get(id); if (!job || typeof job.onTrace !== 'function') return;
+    job.onTrace(step);
   },
 };
 
@@ -127,7 +132,7 @@ const S: any = {
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
-  requestText: '', run: null, conversation: [], activity: '', activeRequest: null, composerDraft: '',
+  requestText: '', run: null, conversation: [], activity: '', trace: [], activeRequest: null, composerDraft: '',
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
@@ -162,7 +167,7 @@ const Spatial: any = {
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
   math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult },
-  lifecycle: { requestAdapter: requestRippleAdapter, applyExtensionChanges },
+  lifecycle: { requestAdapter: requestRippleAdapter, applyExtensionChanges, reduceTrace, sealTrace },
 };
 PM.SpatialAssistant = Spatial;
 PM.requestExtensionFix = requestFix;
@@ -173,6 +178,7 @@ function agentUISnapshot(): AgentSnapshot {
     requestToken: S.requestToken,
     conversation: S.conversation.map((message: any) => ({ ...message })),
     activity: S.activity,
+    trace: S.trace,
     plan: S.plan,
     run: S.run,
     panelRun: S.panelRun,
@@ -953,9 +959,75 @@ function stopActiveRequest() {
   S.activeRequest = null;
   ++S.requestToken;
   active?.abort();
+  sealTrace();
   S.steps = []; S.activity = ''; S.plan = null; S.phase = 'conversation';
+  archiveTrace();
   S.conversation.push({ role: 'assistant', text: 'Stopped. Add direction whenever you are ready.' });
   PM.AgentUI?.update({ focusComposer: true });
+}
+
+const TRACE_STEP_LIMIT: any = 200;
+const TRACE_TEXT_LIMIT: any = 2_000;
+
+function finishTraceThought() {
+  const last: any = S.trace.at(-1);
+  if (last?.kind === 'thought' && last.live) last.live = false;
+}
+
+function trimTrace() {
+  while (S.trace.length > TRACE_STEP_LIMIT) {
+    const removable: any = S.trace.findIndex((step: any) => step.kind !== 'text');
+    S.trace.splice(removable >= 0 ? removable : 0, 1);
+  }
+}
+
+function reduceTrace(step: CodexTraceEvent) {
+  if (!step || typeof step !== 'object') return;
+  if (step.kind === 'thought') {
+    if (!step.text) return;
+    let thought: any = S.trace.at(-1);
+    if (thought?.kind !== 'thought' || !thought.live) {
+      thought = { kind: 'thought', id: PM.uid('trace-thought-'), label: '', live: true };
+      S.trace.push(thought);
+    }
+    thought.label = `${thought.label}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
+  } else if (step.kind === 'answer') {
+    if (!step.text) return;
+    finishTraceThought();
+    let text: any = S.trace.at(-1);
+    if (text?.kind !== 'text') {
+      text = { kind: 'text', id: PM.uid('trace-text-'), text: '' };
+      S.trace.push(text);
+    }
+    text.text = `${text.text}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
+  } else if (step.kind === 'tool-start') {
+    finishTraceThought();
+    S.trace.push({
+      kind: 'tool', id: step.itemId, toolName: step.toolName,
+      label: step.label, status: 'running',
+    });
+  } else if (step.kind === 'tool-end') {
+    const tool: any = [...S.trace].reverse().find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
+    if (tool) tool.status = step.isError ? 'error' : 'done';
+  }
+  trimTrace();
+}
+
+function sealTrace() {
+  finishTraceThought();
+  S.trace.forEach((step: any) => {
+    if (step.kind === 'tool' && step.status === 'running') step.status = 'continued';
+  });
+}
+
+/* Move the finished run's trace into the conversation so the activity trail
+   stays visible above its summary (supermove keeps per-message steps). Text
+   rows are dropped — the final answer lands in its own conversation turn. */
+function archiveTrace() {
+  sealTrace();
+  const steps: any = S.trace.filter((step: any) => step.kind !== 'text');
+  S.trace = [];
+  if (steps.length) S.conversation.push({ role: 'trace', steps });
 }
 
 function normalizeAutonomousResult(raw: any, rawExtensions: any) {
@@ -1062,6 +1134,10 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
       if (token !== S.requestToken || !summary) return;
       S.activity = summary; PM.AgentUI?.update();
     },
+    onTrace: (step: CodexTraceEvent) => {
+      if (token !== S.requestToken) return;
+      reduceTrace(step); PM.AgentUI?.update();
+    },
   });
   if (token !== S.requestToken) return;
   const responseText: any = typeof raw === 'string' ? raw : raw?.text;
@@ -1100,6 +1176,7 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
   checkpoint.historyId = changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null;
   const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
   finishSteps();
+  archiveTrace();
   S.conversation.push({ role: 'assistant', text: result.summary });
   S.conversation.push(...extensionTurns);
   S.run = {
@@ -1125,6 +1202,7 @@ async function sendRequest(input: any) {
   S.activeRequest = controller;
   previousRequest?.abort();
   S.requestText = request;
+  S.trace = [];
   S.requestAttachments = S.attachments.splice(0);
   S.composerDraft = '';
   S.conversation.push({
@@ -1180,6 +1258,10 @@ async function sendRequest(input: any) {
           if (token !== S.requestToken || !summary) return;
           S.activity = summary; PM.AgentUI?.update();
         },
+        onTrace: (step: CodexTraceEvent) => {
+          if (token !== S.requestToken) return;
+          reduceTrace(step); PM.AgentUI?.update();
+        },
       },
     );
     if (token !== S.requestToken) return;
@@ -1192,6 +1274,7 @@ async function sendRequest(input: any) {
     if (plan.kind === 'workspace' && !plan.workspaceEdit) throw new Error('The generated workspace was not safe or complete enough to preview');
     if (plan.kind === 'panels' && !plan.panelEdit.actions.length) throw new Error('I could not find a valid panel action to perform');
     updateSteps(plan.steps);
+    archiveTrace();
     S.stepsExpanded = S.steps.length > 1;
     S.conversation.push({ role: 'assistant', text: conversationReply(plan) });
     S.activity = ''; S.plan = plan; S.phase = 'conversation';
@@ -1205,7 +1288,11 @@ async function sendRequest(input: any) {
     S.conversation.push({ role: 'assistant', text: String(error.message || error).slice(0, 220) });
     PM.AgentUI?.update({ focusComposer: true });
   } finally {
-    if (token === S.requestToken && S.activeRequest === controller) S.activeRequest = null;
+    if (token === S.requestToken) {
+      sealTrace();
+      if (S.activeRequest === controller) S.activeRequest = null;
+      PM.AgentUI?.update({ flush: true });
+    }
     if (accessAtStart === 'computer') {
       S.accessMode = 'project';
       if (token === S.requestToken && S.phase !== 'working') PM.AgentUI?.update();

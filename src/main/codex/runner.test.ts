@@ -154,6 +154,27 @@ describe('CodexRunner validation and authority', () => {
 });
 
 describe('CodexRunner lifecycle', () => {
+  it('forwards structured traces from editor-mode stdout', async () => {
+    const trace: unknown[] = [];
+    const result = await new CodexRunner().run(request({
+      id: 'editor-trace-1234',
+      mode: 'editor',
+      access: 'editor',
+      projectJSON: null
+    }), {
+      ...fakeOptions(await temporaryDirectory('runner-editor-trace'), {}),
+      onTrace: (step) => trace.push(step)
+    });
+
+    expect(result.ok).toBe(true);
+    expect(trace).toEqual([
+      { kind: 'tool-start', itemId: '0', toolName: 'bash', label: 'bash · pwd' },
+      { kind: 'tool-end', itemId: '0', isError: false },
+      { kind: 'thought', text: 'Reviewing the café timeline' },
+      { kind: 'answer', text: 'Preparing the final animation' }
+    ]);
+  });
+
   it('guards the cancel-before-spawn race', async () => {
     const userData = await temporaryDirectory('runner-before-spawn');
     const runner = new CodexRunner();

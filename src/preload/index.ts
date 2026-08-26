@@ -32,10 +32,13 @@ const bridge: PowermoveBridge = {
   saveFile: (req) => ipcRenderer.invoke(IPC.fileSave, req) as Promise<FileSaveResult>,
 
   codex: {
-    async run(req, onProgress) {
+    async run(req, onProgress, onTrace) {
       const listener = (_event: IpcRendererEvent, progress: CodexProgressEvent): void => {
-        if (progress.id === req.id && progress.kind === 'progress') {
+        if (progress.id !== req.id) return;
+        if (progress.kind === 'progress') {
           onProgress?.(progress.text);
+        } else {
+          onTrace?.(progress.step);
         }
       };
 

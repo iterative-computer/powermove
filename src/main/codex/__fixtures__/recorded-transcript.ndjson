@@ -1,5 +1,6 @@
 {"type":"thread.started","thread_id":"thread-recorded-1"}
 {"type":"item.started","item":{"id":"0","type":"command_execution","command":"pwd"}}
+{"type":"item.completed","item":{"id":"0","type":"command_execution","command":"pwd","status":"completed"}}
 this line is deliberately malformed
 {"type":"item.completed","item":{"id":"1","type":"reasoning","text":"Reviewing the café timeline"}}
 {"type":"thread.started","thread_id":"thread-recorded-duplicate"}

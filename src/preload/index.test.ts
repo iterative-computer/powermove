@@ -56,24 +56,31 @@ beforeEach(() => {
 });
 
 describe('preload bridge', () => {
-  it('isolates progress by request and removes its one listener after resolve', async () => {
+  it('isolates progress and trace by request and removes its one listener after resolve', async () => {
     const result = { ok: true as const, text: 'done', access: 'editor' as const };
     electronMocks.invoke.mockResolvedValue(result);
     const onProgress = vi.fn();
+    const onTrace = vi.fn();
 
-    const pending = bridge().codex.run(request(), onProgress);
+    const pending = bridge().codex.run(request(), onProgress, onTrace);
     expect(electronMocks.on).toHaveBeenCalledOnce();
     expect(electronMocks.on).toHaveBeenCalledWith(IPC.codexEvent, expect.any(Function));
 
     const listener = electronMocks.on.mock.calls[0]?.[1] as (
       event: object,
-      progress: { id: string; kind: string; text: string }
+      progress: { id: string; kind: string; text?: string; step?: unknown }
     ) => void;
     listener({ sender: 'must-not-leak' }, { id: 'another-id', kind: 'progress', text: 'wrong' });
     listener({ sender: 'must-not-leak' }, { id: request().id, kind: 'progress', text: 'right' });
+    listener({ sender: 'must-not-leak' }, {
+      id: request().id,
+      kind: 'trace',
+      step: { kind: 'thought', text: 'Inspecting' }
+    });
 
     await expect(pending).resolves.toEqual(result);
     expect(onProgress).toHaveBeenCalledExactlyOnceWith('right');
+    expect(onTrace).toHaveBeenCalledExactlyOnceWith({ kind: 'thought', text: 'Inspecting' });
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(IPC.codexEvent, listener);
   });
 

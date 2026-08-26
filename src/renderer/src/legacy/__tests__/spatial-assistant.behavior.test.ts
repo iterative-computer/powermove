@@ -436,6 +436,92 @@ it('warns and no-ops when the Fix-it bridge is absent', async () => {
   assert.match(warn.mock.calls[0][0], /Fix it is unavailable/);
 });
 
+it('accretes adjacent thoughts and seals them before tool and text steps', () => {
+  const { PM, assistant } = spatialHarness();
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Reading ' });
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'the source' });
+  assistant.lifecycle.reduceTrace({
+    kind: 'tool-start', itemId: 'tool-1', toolName: 'bash', label: 'bash · rg trace'
+  });
+  assistant.lifecycle.reduceTrace({ kind: 'tool-end', itemId: 'tool-1', isError: false });
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Verified.' });
+  assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'Done.' });
+  PM.AgentUI.update({ flush: true });
+
+  assert.deepEqual(PM.AgentUI.state.trace.map(step => ({
+    kind: step.kind,
+    ...(step.kind === 'thought' ? { label: step.label, live: step.live } : {}),
+    ...(step.kind === 'tool' ? { id: step.id, status: step.status } : {}),
+    ...(step.kind === 'text' ? { text: step.text } : {}),
+  })), [
+    { kind: 'thought', label: 'Reading the source', live: false },
+    { kind: 'tool', id: 'tool-1', status: 'done' },
+    { kind: 'thought', label: 'Verified.', live: false },
+    { kind: 'text', text: 'Done.' },
+  ]);
+});
+
+it('correlates tool completion by item id and records failures on the same row', () => {
+  const { PM, assistant } = spatialHarness();
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'first', toolName: 'bash', label: 'bash · one' });
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'second', toolName: 'search', label: 'search · two' });
+  assistant.lifecycle.reduceTrace({ kind: 'tool-end', itemId: 'first', isError: true });
+  assistant.lifecycle.reduceTrace({ kind: 'tool-end', itemId: 'missing', isError: false });
+  PM.AgentUI.update({ flush: true });
+
+  assert.deepEqual(PM.AgentUI.state.trace.map(step => [step.id, step.status]), [
+    ['first', 'error'],
+    ['second', 'running'],
+  ]);
+});
+
+it('seals live thoughts and marks running tools continued when stopped', () => {
+  const { PM, assistant } = spatialHarness();
+  PM.AgentUI.submit('Inspect this');
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Inspecting' });
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'live-tool', toolName: 'edit', label: 'edit · app.ts' });
+  PM.AgentUI.update({ flush: true });
+
+  PM.AgentUI.stop();
+
+  /* Stop archives the sealed trail into the conversation so it stays visible. */
+  assert.equal(PM.AgentUI.state.trace.length, 0);
+  const archived = [...PM.AgentUI.state.conversation].reverse().find(message => message.role === 'trace');
+  assert.ok(archived, 'stop archives the trace as a conversation entry');
+  assert.equal(archived.steps.find(step => step.kind === 'thought')?.live, false);
+  assert.equal(archived.steps.find(step => step.kind === 'tool')?.status, 'continued');
+});
+
+it('caps traces at 200 steps by dropping old thought and tool rows before text', () => {
+  const { PM, assistant } = spatialHarness();
+  assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'Keep this answer' });
+  for (let index = 0; index < 205; index += 1) {
+    assistant.lifecycle.reduceTrace({
+      kind: 'tool-start', itemId: `tool-${index}`, toolName: 'bash', label: `bash · ${index}`
+    });
+  }
+  PM.AgentUI.update({ flush: true });
+
+  assert.equal(PM.AgentUI.state.trace.length, 200);
+  assert.equal(PM.AgentUI.state.trace[0].kind, 'text');
+  assert.equal(PM.AgentUI.state.trace[0].text, 'Keep this answer');
+  assert.equal(PM.AgentUI.state.trace.at(-1).id, 'tool-204');
+});
+
+it('replaces the trace array in snapshots and clears it for a new request', () => {
+  const { PM, assistant } = spatialHarness();
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Old run' });
+  PM.AgentUI.update({ flush: true });
+  const priorSnapshot = PM.AgentUI.state.trace;
+  assert.equal(priorSnapshot.length, 1);
+
+  PM.AgentUI.update({ flush: true });
+  assert.notEqual(PM.AgentUI.state.trace, priorSnapshot);
+  PM.AgentUI.submit('New run');
+  assert.deepEqual(PM.AgentUI.state.trace, []);
+  PM.AgentUI.stop();
+});
+
 it('forwards typed extension changes through the Electron shim payload', async () => {
   const extensions = [{ id: 'new-mod', action: 'created', summary: 'Adds a panel' }];
   const resolve = vi.fn();

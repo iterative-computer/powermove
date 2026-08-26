@@ -49,6 +49,7 @@ export const LIMITS = {
   codexPromptChars: 200_000,
   codexProjectJsonBytes: 24 * 1024 * 1024,
   codexProgressChars: 320,
+  codexTraceChars: 2_000,
   storeValueBytes: 32 * 1024 * 1024,
   logChars: 8_000
 } as const;
@@ -119,11 +120,23 @@ export interface CodexFixPromptRequest {
   files: CodexFixPromptFile[];
 }
 
-export interface CodexProgressEvent {
-  id: string;
-  kind: 'progress';
-  text: string; // already humanised, ≤ LIMITS.codexProgressChars
-}
+export type CodexTraceEvent =
+  | { kind: 'thought'; text: string }
+  | { kind: 'answer'; text: string }
+  | { kind: 'tool-start'; itemId: string; toolName: string; label: string }
+  | { kind: 'tool-end'; itemId: string; isError: boolean };
+
+export type CodexProgressEvent =
+  | {
+      id: string;
+      kind: 'progress';
+      text: string; // already humanised, ≤ LIMITS.codexProgressChars
+    }
+  | {
+      id: string;
+      kind: 'trace';
+      step: CodexTraceEvent; // main-vetted structured activity
+    };
 
 /* Computer authority: main shows a native confirmation and mints a one-use,
    short-lived token. It is never persisted. */
@@ -180,7 +193,11 @@ export interface PowermoveBridge {
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
 
   codex: {
-    run(req: CodexRunRequest, onProgress?: (text: string) => void): Promise<CodexRunResult>;
+    run(
+      req: CodexRunRequest,
+      onProgress?: (text: string) => void,
+      onTrace?: (step: CodexTraceEvent) => void
+    ): Promise<CodexRunResult>;
     cancel(id: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;

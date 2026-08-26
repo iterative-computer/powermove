@@ -130,6 +130,11 @@ export function registerCodexIpc(ipcMain: IpcMain, ctx: CodexIpcContext): void {
           if (!owner.isDestroyed()) {
             owner.send(IPC.codexEvent, { id: req.id, kind: 'progress', text });
           }
+        },
+        onTrace: (step) => {
+          if (!owner.isDestroyed()) {
+            owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step });
+          }
         }
       });
     } finally {

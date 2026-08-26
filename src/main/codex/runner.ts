@@ -8,6 +8,7 @@ import {
   PROJECT_ID,
   REQUEST_ID,
   type AgentExtensionChange,
+  type CodexTraceEvent,
   type CodexRunRequest,
   type CodexRunResult
 } from '../../shared/ipc';
@@ -52,6 +53,7 @@ export interface CodexRunOptions {
   binary?: string;
   timeoutMs?: number;
   onProgress?: (text: string) => void;
+  onTrace?: (step: CodexTraceEvent) => void;
   onWarning?: (text: string) => void;
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
@@ -383,6 +385,7 @@ export class CodexRunner {
     const stderrChunks: Buffer[] = [];
     const parser = new CodexEventParser({
       onProgress: (text) => options.onProgress?.(text),
+      onTrace: (step) => options.onTrace?.(step),
       onThreadId: (threadId) => {
         if (layout) {
           state.sessionWrite = state.sessionWrite

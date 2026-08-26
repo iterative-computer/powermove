@@ -8,8 +8,12 @@ const mocks = vi.hoisted(() => {
   const cancel = vi.fn(async () => true);
   const cancelAll = vi.fn(async () => undefined);
   let resolveRun: ((value: unknown) => void) | null = null;
-  const run = vi.fn(async (_req: unknown, options: { onProgress?: (text: string) => void }) => {
+  const run = vi.fn(async (_req: unknown, options: {
+    onProgress?: (text: string) => void;
+    onTrace?: (step: unknown) => void;
+  }) => {
     options.onProgress?.('Working…');
+    options.onTrace?.({ kind: 'thought', text: 'Inspecting source' });
     return await new Promise((resolve) => { resolveRun = resolve; });
   });
   return {
@@ -124,6 +128,11 @@ describe('registerCodexIpc', () => {
       id: 'ipc-run-1234',
       kind: 'progress',
       text: 'Working…'
+    });
+    expect(owner.send).toHaveBeenCalledWith(IPC.codexEvent, {
+      id: 'ipc-run-1234',
+      kind: 'trace',
+      step: { kind: 'thought', text: 'Inspecting source' }
     });
 
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
