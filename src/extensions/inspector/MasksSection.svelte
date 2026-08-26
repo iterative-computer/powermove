@@ -1,13 +1,10 @@
 <script lang="ts">
-  import { doc } from '../../state/document.svelte';
-  import { transport } from '../../state/transport.svelte';
-  import NumField from '../../controls/NumField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import SelectField from '../../controls/SelectField.svelte';
-  import type { EditBinding } from '../../controls/gesture';
-  import LegacyIcon from './LegacyIcon.svelte';
-  import { inspectorRefresh } from './refresh.svelte';
+  import { inspectorContext, type EditBinding } from './context';
+  import Icon from './Icon.svelte';
+  import { inspectorRefresh } from './refresh.svelte.js';
+
+  const { api, doc, transport } = inspectorContext();
+  const { NumField, Row, Section, SelectField } = api.ui.controls;
 
   let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
 
@@ -76,13 +73,13 @@
 <Section title="Masks" />
 {#if masks.length === 0}
   <button type="button" class="chip wide" aria-label="Add mask"  onclick={addMask}>
-    <LegacyIcon {PM} name="plus" />Add mask
+    <Icon name="plus" />Add mask
   </button>
 {:else}
   {#each masks as mask, index (mask.id ?? index)}
     {@const maskId = mask.id ?? index}
     <div class="row mask-head" style="margin-top:4px;background:var(--ink-1)" data-mask-id={maskId}>
-      <span class="twirl open" aria-hidden="true"><LegacyIcon {PM} name="chev" /></span>
+      <span class="twirl open" aria-hidden="true"><Icon name="chev" /></span>
       <div class="k" style="color:var(--tx);font-weight:500">Mask {index + 1}</div>
       <button
         type="button"
@@ -91,14 +88,14 @@
         aria-label={`${mask.on === false ? 'Enable' : 'Disable'} mask ${index + 1}`}
         aria-pressed={mask.on !== false}
         onclick={() => mutate('Toggle mask', () => { mask.on = mask.on === false; })}
-      ><LegacyIcon {PM} name="eye" /></button>
+      ><Icon name="eye" /></button>
       <button
         type="button"
         class="stopwatch"
         title="Delete mask"
         aria-label={`Delete mask ${index + 1}`}
         onclick={() => mutate('Remove mask', () => { layer.masks.splice(index, 1); })}
-      ><LegacyIcon {PM} name="x" /></button>
+      ><Icon name="x" /></button>
     </div>
     <div class="grp mask-params">
       <Row label="Shape">
@@ -130,7 +127,7 @@
               aria-label={`Animate ${label}`}
               aria-pressed={property.kf.length > 0}
               onclick={() => toggleKeys(property, key, label)}
-            ><LegacyIcon {PM} name="clock" /></button>
+            ><Icon name="clock" /></button>
           {/snippet}
           <NumField
             {PM}
@@ -144,6 +141,6 @@
     </div>
   {/each}
   <button type="button" class="chip wide" aria-label="Add mask" onclick={addMask}>
-    <LegacyIcon {PM} name="plus" />Add mask
+    <Icon name="plus" />Add mask
   </button>
 {/if}

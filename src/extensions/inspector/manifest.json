@@ -1,0 +1,10 @@
+{
+  "id": "inspector",
+  "name": "Inspector",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Provides the property inspector for compositions and layers.",
+  "entry": "index.ts",
+  "contributes": ["panels"],
+  "author": "powermove"
+}

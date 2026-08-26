@@ -52,7 +52,9 @@ function harness(kernel: Kernel = createKernel()) {
 
   const deps: HostDeps = {
     pm: { legacy: true },
+    state: { doc: {}, sel: {}, transport: {}, perf: {} },
     ui: {
+      controls: {} as HostDeps['ui']['controls'],
       toast: (text) => void toasts.push(text),
       confirm: async () => true,
       menu: vi.fn(),
@@ -85,6 +87,8 @@ describe('createExtensionAPI', () => {
     expect(api.apiVersion).toBe(1);
     expect(api.manifest.name).toBe('VHS effect');
     expect(api.host.pm).toEqual({ legacy: true });
+    expect(api.host.state).toBe(deps.state);
+    expect(api.ui.controls).toBe(deps.ui.controls);
     expect(api.ui.icon('play')).toContain('data-icon="play"');
     expect(api.keybindings.chordOf(new KeyboardEvent('keydown', { key: 'k', metaKey: true }))).toBe('cmd+k');
   });

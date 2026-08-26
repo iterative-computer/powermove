@@ -1,11 +1,9 @@
 <script lang="ts">
-  import { doc } from '../../state/document.svelte';
-  import ColorField from '../../controls/ColorField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import ToggleField from '../../controls/ToggleField.svelte';
-  import type { EditBinding } from '../../controls/binding';
+  import { inspectorContext, type EditBinding } from './context';
   import ChannelRow from './ChannelRow.svelte';
+
+  const { api, doc } = inspectorContext();
+  const { ColorField, Row, Section, ToggleField } = api.ui.controls;
 
   let { PM, layer }: {
     PM: Record<string, any>;

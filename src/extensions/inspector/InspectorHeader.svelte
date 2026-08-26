@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { doc } from '../../state/document.svelte';
-  import LegacyIcon from './LegacyIcon.svelte';
+  import Icon from './Icon.svelte';
+  import { inspectorContext } from './context';
   import { showFxMenu, showNewLayerMenu } from './actions';
+
+  const { doc } = inspectorContext();
 
   let {
     PM,
@@ -31,7 +33,7 @@
       event.preventDefault();
       showNewLayerMenu(PM, event.currentTarget);
     }}
-  ><LegacyIcon {PM} name="layers" /></button>
+  ><Icon name="layers" /></button>
   {#if layer?.type !== 'audio'}
     <button
       type="button"
@@ -42,6 +44,6 @@
         event.preventDefault();
         showFxMenu(PM, event.currentTarget, layer);
       }}
-    ><LegacyIcon {PM} name="plus" /></button>
+    ><Icon name="plus" /></button>
   {/if}
 </div>

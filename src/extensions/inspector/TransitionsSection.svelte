@@ -1,16 +1,12 @@
 <script lang="ts">
-  import { doc } from '../../state/document.svelte';
-  import { transport } from '../../state/transport.svelte';
-  import ColorField from '../../controls/ColorField.svelte';
-  import NumField from '../../controls/NumField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import SelectField, { type SelectOption } from '../../controls/SelectField.svelte';
-  import ToggleField from '../../controls/ToggleField.svelte';
-  import { channelBinding, type EditBinding } from '../../controls/binding';
+  import { inspectorContext, type EditBinding, type SelectOption } from './context';
   import ChannelRow from './ChannelRow.svelte';
-  import LegacyIcon from './LegacyIcon.svelte';
-  import { inspectorRefresh } from './refresh.svelte';
+  import Icon from './Icon.svelte';
+  import { inspectorRefresh } from './refresh.svelte.js';
+
+  const { api, doc, transport } = inspectorContext();
+  const { ColorField, NumField, Row, Section, SelectField, ToggleField } = api.ui.controls;
+  const { channelBinding } = api.ui.controls.binding;
 
   let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
 
@@ -139,7 +135,7 @@
               title={`Remove ${edge.label.toLowerCase()} transition`}
               aria-label={`Remove ${edge.label.toLowerCase()} transition`}
               onclick={() => setTransition(edge.id, null, `Remove ${edge.label.toLowerCase()} transition`)}
-            ><LegacyIcon {PM} name="x" /></button>
+            ><Icon name="x" /></button>
           {/if}
         </div>
       </Row>

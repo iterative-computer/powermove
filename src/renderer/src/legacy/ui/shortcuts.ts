@@ -70,7 +70,7 @@ PM.addLayerCmd = addLayer;
 def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headline', p: center() }), 'Create');
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
-def('newShader', 'New shader layer', '⌘⇧G', () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms(L); PM.openShaderEditor(L); return L; }, 'Create');
+def('newShader', 'New shader layer', '⌘⇧G', () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms?.(L); PM.openShaderEditor(L); return L; }, 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
@@ -167,8 +167,8 @@ def('gotoStart', 'Go to start', '⇱', () => PM.setTime(0), 'Transport');
 def('gotoEnd', 'Go to end', '⇲', () => PM.setTime(PM.proj.dur), 'Transport');
 def('nextFrame', 'Next frame', '→', () => PM.step(1), 'Transport');
 def('prevFrame', 'Previous frame', '←', () => PM.step(-1), 'Transport');
-def('nextEdge', 'Next edge', '⇧→', () => PM.setTime(PM.TL.nextEdge()), 'Transport');
-def('prevEdge', 'Previous edge', '⇧←', () => PM.setTime(PM.TL.prevEdge()), 'Transport');
+def('nextEdge', 'Next edge', '⇧→', () => { const edge = PM.TL?.nextEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
+def('prevEdge', 'Previous edge', '⇧←', () => { const edge = PM.TL?.prevEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 
@@ -188,7 +188,7 @@ def('revealKeys', 'Reveal animated properties', 'U', () => {
   PM.selLayers().forEach((L: any) => { L.collapsed = false; L._reveal = null; });
   PM.invalidate('timeline');
 }, 'Reveal');
-def('graph', 'Toggle graph editor', 'G', () => { PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
+def('graph', 'Toggle graph editor', 'G', () => { if (!PM.TL) return; PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
 /* sel.keys holds keyframe ids (Phase 3a); easing needs the live objects */
@@ -209,7 +209,7 @@ function allSelKeys() {
 }
 
 /* ── view / files ──────────────────────────────────────── */
-def('fitView', 'Fit composition in view', '⇧F', () => { PM.Viewer.fit = true; PM.Viewer.layout(); PM.TL.frameView(); }, 'View');
+def('fitView', 'Fit composition in view', '⇧F', () => { if (PM.Viewer) { PM.Viewer.fit = true; PM.Viewer.layout?.(); } PM.TL?.frameView?.(); }, 'View');
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');

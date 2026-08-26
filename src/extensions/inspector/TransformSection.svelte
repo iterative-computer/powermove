@@ -1,6 +1,8 @@
 <script lang="ts">
-  import Section from '../../controls/Section.svelte';
+  import { inspectorContext } from './context';
   import ChannelRow from './ChannelRow.svelte';
+
+  const { Section } = inspectorContext().api.ui.controls;
 
   let { PM, layer }: {
     PM: Record<string, any>;

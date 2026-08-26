@@ -84,11 +84,14 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
 - **project** — `get()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`.
   `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
-- **ui** — `toast`, `confirm`, `menu`, `modal`, `icon`.
+- **ui** — `toast`, `confirm`, `menu`, `modal`, `icon`; `ui.controls` exposes
+  the kernel's versioned field/row/section components and built-in binding helpers.
 - **storage** — per-extension `get/set/delete` (persisted).
 - **events / on** — `project:changed`, `selection`, `time`, `transport`, `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
 - **extensions** — introspection: `list`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
 - **host.pm** — UNSTABLE escape hatch to the legacy `PM` object. Use when the typed surface genuinely lacks something; prefer typed APIs.
+- **host.state** — UNSTABLE escape hatch to the renderer's `doc`, `sel`,
+  `transport`, and `perf` rune stores for built-in UI migrations.
 
 ## Patterns
 

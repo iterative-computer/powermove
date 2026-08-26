@@ -74,7 +74,9 @@ function fakeDeps(): { deps: Omit<HostDeps, 'reportRuntimeError'>; toasts: strin
     toasts,
     deps: {
       pm: {},
+      state: { doc: {}, sel: {}, transport: {}, perf: {} },
       ui: {
+        controls: {} as HostDeps['ui']['controls'],
         toast: (text) => void toasts.push(text),
         confirm: async () => true,
         menu: () => {},

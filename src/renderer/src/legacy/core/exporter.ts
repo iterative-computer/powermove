@@ -216,7 +216,7 @@ async function run(opts: any) {
     ui.mod.close();
     PM.quality = oldQ;
     PM.setTime(oldT, { force: true });
-    PM.Viewer.layout();
+    PM.Viewer?.layout?.();
     if (wasPlaying) PM.play();
   }
 }

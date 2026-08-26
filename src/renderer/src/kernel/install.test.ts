@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetExtensionsStore } from './extensions.svelte';
 import { bootExtensions, installKernel, type InstalledKernel } from './install';
 import { RUNTIME_GLOBAL, runtimeGlobals } from './runtime-globals';
+import { doc } from '../state/document.svelte';
+import { sel } from '../state/selection.svelte';
+import { perf, transport } from '../state/transport.svelte';
 
 type LegacyPM = Record<string, any>;
 
@@ -131,6 +134,17 @@ describe('installKernel', () => {
     options.actions[1].run();
     await expect(confirmed).resolves.toBe(true);
     expect(api.ui.icon('play')).toContain('data-icon="play"');
+    expect(Object.keys(api.ui.controls)).toEqual([
+      'NumField', 'ColorField', 'FillField', 'FontField', 'SelectField',
+      'TextField', 'ToggleField', 'Row', 'Section', 'binding'
+    ]);
+    expect(api.ui.controls.binding).toEqual(expect.objectContaining({
+      channelBinding: expect.any(Function),
+      layerFieldBinding: expect.any(Function),
+      contentBinding: expect.any(Function),
+      compositionBinding: expect.any(Function)
+    }));
+    expect(api.host.state).toEqual({ doc, sel, transport, perf });
   });
 
   it('opens and closes panels through Layout + WS', () => {
@@ -255,6 +269,8 @@ describe('installKernel', () => {
     vi.useFakeTimers();
     const PM = fakePM();
     const emit = vi.spyOn(PM.bus, 'emit');
+    PM.Layout.ws = PM.WS.current;
+    PM.Layout.apply = vi.fn(() => PM.bus.emit('layout'));
     const slowModule = encodeURIComponent('export default function(){ return new Promise(() => {}) }');
     PM.extensionsBridge = {
       list: vi.fn(async () => [
@@ -302,10 +318,12 @@ describe('installKernel', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(emit).toHaveBeenCalledWith('layout');
+    expect(PM.Layout.apply).toHaveBeenCalledWith(PM.WS.current);
     expect(settled).toBe(false);
 
     await vi.advanceTimersByTimeAsync(10_000);
     await booting;
     expect(emit.mock.calls.filter((call) => call[0] === 'layout')).toHaveLength(2);
+    expect(PM.Layout.apply).toHaveBeenCalledTimes(2);
   });
 });

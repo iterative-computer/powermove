@@ -1,15 +1,9 @@
 <script lang="ts">
-  import ColorField from '../../controls/ColorField.svelte';
-  import FillField from '../../controls/FillField.svelte';
-  import NumField from '../../controls/NumField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import SelectField, { type SelectOption } from '../../controls/SelectField.svelte';
-  import ToggleField from '../../controls/ToggleField.svelte';
-  import { compositionBinding } from '../../controls/binding';
-  import type { EditBinding } from '../../controls/gesture';
-  import type { JsonValue } from '../../core/types/commands';
-  import { doc } from '../../state/document.svelte';
+  import { inspectorContext, type EditBinding, type SelectOption } from './context';
+
+  const { api, doc } = inspectorContext();
+  const { ColorField, FillField, NumField, Row, Section, SelectField, ToggleField } = api.ui.controls;
+  const { compositionBinding } = api.ui.controls.binding;
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -32,7 +26,7 @@
     command: (value) => ({
       type: 'set_scene_parameter',
       name: param.name,
-      value: value as JsonValue
+      value: value as any
     })
   });
 

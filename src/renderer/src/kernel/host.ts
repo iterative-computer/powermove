@@ -59,7 +59,14 @@ export interface PanelsBackend {
 export interface HostDeps {
   /** The legacy PM registry, surfaced as `api.host.pm` (documented unstable). */
   pm: unknown;
+  state: {
+    doc: unknown;
+    sel: unknown;
+    transport: unknown;
+    perf: unknown;
+  };
   ui: {
+    controls: UIAPI['controls'];
     toast: UIAPI['toast'];
     confirm: UIAPI['confirm'];
     menu: UIAPI['menu'];
@@ -311,6 +318,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     extensions: deps.extensions,
     host: {
       pm: deps.pm,
+      state: deps.state,
       mount: mountComponent
     },
     on: events.on,

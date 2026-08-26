@@ -1,13 +1,23 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ControlsAPI, PowermoveAPI } from 'powermove';
 
-import { doc } from '../state/document.svelte';
-import { setSelection } from '../state/selection.svelte';
-import { transport } from '../state/transport.svelte';
+import ColorField from '../../renderer/src/controls/ColorField.svelte';
+import FillField from '../../renderer/src/controls/FillField.svelte';
+import FontField from '../../renderer/src/controls/FontField.svelte';
+import NumField from '../../renderer/src/controls/NumField.svelte';
+import Row from '../../renderer/src/controls/Row.svelte';
+import Section from '../../renderer/src/controls/Section.svelte';
+import SelectField from '../../renderer/src/controls/SelectField.svelte';
+import TextField from '../../renderer/src/controls/TextField.svelte';
+import ToggleField from '../../renderer/src/controls/ToggleField.svelte';
+import { channelBinding, compositionBinding, contentBinding, layerFieldBinding } from '../../renderer/src/controls/binding';
+import { doc } from '../../renderer/src/state/document.svelte';
+import { setSelection, sel } from '../../renderer/src/state/selection.svelte';
+import { perf, transport } from '../../renderer/src/state/transport.svelte';
 import InspectorPanel from './InspectorPanel.svelte';
-import { configureInspectorRegistry } from './inspector/refresh.svelte';
-import { registerInspectorPanel } from './register-inspector';
+import activate from './index';
 
 type Channel = { v: number; kf: Array<{ t: number; v: number }>; expr: string | null };
 type TestLayer = Record<string, any> & { p: Record<string, Channel> };
@@ -19,6 +29,42 @@ const CHANNELS = [
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
+
+const controls: ControlsAPI = {
+  NumField: NumField as ControlsAPI['NumField'],
+  ColorField: ColorField as ControlsAPI['ColorField'],
+  FillField: FillField as ControlsAPI['FillField'],
+  FontField: FontField as ControlsAPI['FontField'],
+  SelectField: SelectField as ControlsAPI['SelectField'],
+  TextField: TextField as ControlsAPI['TextField'],
+  ToggleField: ToggleField as ControlsAPI['ToggleField'],
+  Row: Row as ControlsAPI['Row'],
+  Section: Section as ControlsAPI['Section'],
+  binding: {
+    channelBinding,
+    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options),
+    contentBinding,
+    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options)
+  }
+};
+
+function apiFor(PM: Record<string, any>, register = vi.fn()): PowermoveAPI {
+  return {
+    id: 'inspector',
+    apiVersion: 1,
+    manifest: { id: 'inspector', name: 'Inspector', version: '1.0.0', apiVersion: 1 },
+    panels: { register },
+    ui: {
+      controls,
+      icon: (name: string) => `<svg data-icon="${name}" aria-hidden="true"><path/></svg>`
+    },
+    host: {
+      pm: PM,
+      state: { doc, sel, transport, perf },
+      mount: vi.fn()
+    }
+  } as unknown as PowermoveAPI;
+}
 
 function layer(id: string, opacity = 100): TestLayer {
   const p = Object.fromEntries(CHANNELS.map((channel) => [channel, {
@@ -136,13 +182,12 @@ function setup(
     time: 0
   };
 
-  PM.Inspector = { refresh: vi.fn(), body: null, syncs: [] };
-  (window as any).PM = PM;
-  configureInspectorRegistry(PM);
   doc.replace(currentProject as any);
   setSelection({ layers: selected, keys: [], chan: null });
   transport.time = 0;
-  instance = mount(InspectorPanel, { target, props: { panelId: 'inspector', spec: {} } });
+  const api = apiFor(PM);
+  activate(api);
+  instance = mount(InspectorPanel, { target, props: { panelId: 'inspector', spec: {}, api } });
   flushSync();
 
   return { PM, apply, menu, offFonts, drag: () => dragOptions! };
@@ -190,6 +235,18 @@ afterEach(async () => {
 });
 
 describe('InspectorPanel', () => {
+  it('activates by registering the inspector panel contribution', () => {
+    const register = vi.fn(() => ({ dispose: vi.fn() }));
+
+    activate(apiFor({}, register));
+
+    expect(register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      id: 'inspector',
+      title: 'Properties',
+      component: InspectorPanel
+    }));
+  });
+
   it('registers the persistent Properties panel and installs the inert legacy shim', () => {
     let definition: Record<string, any> | undefined;
     const PM: Record<string, any> = {
@@ -202,10 +259,16 @@ describe('InspectorPanel', () => {
       })
     };
 
-    registerInspectorPanel(PM);
+    const register = vi.fn((next: Record<string, any>) => {
+      definition = next;
+      return { dispose: vi.fn() };
+    });
+    activate(apiFor(PM, register));
 
-    expect(definition).toMatchObject({ title: 'Properties', persist: true });
-    expect(definition?.build).toBeTypeOf('function');
+    expect(register).toHaveBeenCalledOnce();
+    expect(definition).toMatchObject({ id: 'inspector', title: 'Properties' });
+    expect(definition?.component).toBe(InspectorPanel);
+    expect(definition?.header).toBeTypeOf('function');
     expect(PM.Inspector.body).toBeNull();
     expect(PM.Inspector.syncs).toEqual([]);
     expect(PM.Inspector.refresh).toBeTypeOf('function');

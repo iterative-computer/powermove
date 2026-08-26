@@ -10,10 +10,10 @@ Powermove is a small kernel plus extensions. The kernel owns the project store,
 the typed 19-command edit boundary with undo/revision checks, the WebGL
 compositor (including two-input transitions), and typed registries for panels,
 commands, keybindings, effects, transitions, themes, palette providers, menus,
-and status items. Everything above the kernel — the default effects,
-transitions, keymap, theme, and toolbar — ships as built-in extensions in
-`src/extensions/*`, written against the same `PowermoveAPI` (apiVersion 1)
-that user extensions use.
+and status items. Everything above the kernel — the default theme, keymap,
+effects, transitions, toolbar, viewer, timeline, inspector, and Mods surface —
+ships as built-in extensions in `src/extensions/*`, written against the same
+`PowermoveAPI` (apiVersion 1) that user extensions use.
 
 User extensions ("mods") live in `<userData>/extensions/<id>/` as a
 `manifest.json` plus TypeScript/Svelte sources. The main process compiles them

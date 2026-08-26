@@ -277,7 +277,7 @@ function applyLook(id: any, options: any = {}) {
     const L: any = PM.mkLayer('shader', { name: k.name });
     L.d.code = k.code;
     PM.addLayer(L, 0);
-    PM.syncShaderUniforms(L);
+    PM.syncShaderUniforms?.(L);
     for (const un in (k.uniforms || {})) {
       if (L.d.uniforms[un]) {
         L.d.uniforms[un].v = k.uniforms[un].v;

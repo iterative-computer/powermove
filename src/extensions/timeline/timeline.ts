@@ -1,15 +1,19 @@
 /* Ported from js/ui/timeline.js — behavior-preserving. */
-import type { PMRegistry } from '../registry';
-
-export function install(PM: PMRegistry): void {
-createTimeline(PM);
+export function install(pm: any): void {
+createTimelineRuntime(pm);
 }
 
 export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
 } as const;
 
-export function createTimeline(PM: PMRegistry): any {
+/** Compatibility name for tests and downstream forks of the legacy runtime. */
+export function createTimeline(pm: any): any {
+return createTimelineRuntime(pm);
+}
+
+export function createTimelineRuntime(pm: any): any {
+const PM = pm;
 if (PM.TL?.attachHead && PM.TL?.attachCanvas) return PM.TL;
 const h = PM.h, clamp = PM.clamp;
 
@@ -19,6 +23,16 @@ const T: any = {
   hover: null, marquee: null,
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
+/* Built-in extensions activate after project hydration. Restore the current
+   project session here, matching the former app bootstrap path that ran after
+   the legacy timeline installer. */
+const sessionTimeline = PM.Projects?.getState?.(PM.proj?.id)?.timeline;
+if (sessionTimeline) {
+  T.pps = Number.isFinite(sessionTimeline.pps) ? sessionTimeline.pps : T.pps;
+  T.scrollT = Number.isFinite(sessionTimeline.scrollT) ? sessionTimeline.scrollT : T.scrollT;
+  T.scrollY = Number.isFinite(sessionTimeline.scrollY) ? sessionTimeline.scrollY : T.scrollY;
+  T.graph = !!sessionTimeline.graph;
+}
 PM.TL = T;
 
 /* After Effects keeps the work area inside the composition. Powermove keeps

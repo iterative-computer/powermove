@@ -1,14 +1,10 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import ColorField from '../../controls/ColorField.svelte';
-  import FontField from '../../controls/FontField.svelte';
-  import NumField from '../../controls/NumField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import SelectField, { type SelectOption } from '../../controls/SelectField.svelte';
-  import { contentBinding } from '../../controls/binding';
-  import type { EditBinding } from '../../controls/gesture';
-  import { doc } from '../../state/document.svelte';
+  import { inspectorContext, type EditBinding, type SelectOption } from './context';
+
+  const { api, doc } = inspectorContext();
+  const { ColorField, FontField, NumField, Row, Section, SelectField } = api.ui.controls;
+  const { contentBinding } = api.ui.controls.binding;
 
   let {
     PM,
@@ -102,7 +98,7 @@
       edit={edit('weight', 'Weight')}
       options={weights.map((value) => ({ v: value, label: String(value) }))}
       label="Weight"
-      onChange={(value) => PM.Fonts?.ensure?.(content.font, Number(value) || 400)}
+      onChange={(value: unknown) => PM.Fonts?.ensure?.(content.font, Number(value) || 400)}
     />
   </Row>
   <Row label="Size"><NumField {PM} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></Row>

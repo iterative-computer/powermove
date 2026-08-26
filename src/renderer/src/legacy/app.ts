@@ -179,7 +179,7 @@ function hydrate(p: any) {
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
-      if (L.type === 'shader') PM.syncShaderUniforms(L);
+      if (L.type === 'shader') PM.syncShaderUniforms?.(L);
     });
   };
   base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
@@ -258,7 +258,7 @@ void main(){
   fragColor=vec4(col,1.);
 }`, w: 1920, h: 1080, uniforms: {},
   } }, p));
-  PM.syncShaderUniforms(bg);
+  PM.syncShaderUniforms?.(bg);
   p.markers = [{ t: .45, name: 'Reveal' }, { t: 5.55, name: 'Expansion' }, { t: 7.25, name: 'Resolve' }];
   p.notes = 'One continuous signal becomes the field. Keep the hierarchy singular, restrained, and physical.';
   return p;
@@ -304,7 +304,7 @@ async function restoreProjectAssets(project: any, warn: any = true) {
   const result = await PM.assets.restoreProject(project);
   if (result.stale || PM.proj !== project) return result;
   PM.bus.emit('assets');
-  PM.Inspector.refresh();
+  PM.Inspector?.refresh?.();
   PM.invalidate('all');
   if (warn && result.missing.length) {
     const count = result.missing.length;
@@ -358,7 +358,7 @@ PM.selectLayers((bootSession?.selection?.layers || []).filter((id: any) => PM.L(
 PM.sel.keys = [...new Set((bootSession?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
 PM.sel.keys = PM.resolveSelectedKeys().map((key: any) => key.i);
 PM.setTime(Number.isFinite(bootSession?.time) ? bootSession.time : .9, { raw: true, force: true });
-if (bootSession?.timeline) {
+if (bootSession?.timeline && PM.TL) {
   PM.TL.pps = Number.isFinite(bootSession.timeline.pps) ? bootSession.timeline.pps : PM.TL.pps;
   PM.TL.scrollT = Number.isFinite(bootSession.timeline.scrollT) ? bootSession.timeline.scrollT : PM.TL.scrollT;
   PM.TL.scrollY = Number.isFinite(bootSession.timeline.scrollY) ? bootSession.timeline.scrollY : PM.TL.scrollY;
@@ -405,7 +405,9 @@ function captureProjectSession() {
   PM.Projects.putState(PM.proj.id, {
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
-    timeline: { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph },
+    timeline: PM.TL
+      ? { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph }
+      : undefined,
   });
 }
 
@@ -478,10 +480,12 @@ function switchProject(p: any) {
   PM.sel.keys = [...new Set((session?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
   PM.sel.keys = PM.resolveSelectedKeys().map((key: any) => key.i);
   PM.sel.chan = session?.selection?.chan || null;
-  PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
-  PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
-  PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
-  PM.TL.graph = !!session?.timeline?.graph;
+  if (PM.TL) {
+    PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
+    PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
+    PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
+    PM.TL.graph = !!session?.timeline?.graph;
+  }
   PM.hist.clear();
   PM.rasterClear();
   PM.assets.clear();
@@ -491,8 +495,8 @@ function switchProject(p: any) {
   PM.bus.emit('layers');
   PM.bus.emit('sel');
   PM.bus.emit('assets');
-  PM.Inspector.refresh();
-  PM.Viewer.layout();
+  PM.Inspector?.refresh?.();
+  PM.Viewer?.layout?.();
   PM.invalidate('all');
   PM.invalidate('status');
   restoreProjectAssets(PM.proj);
@@ -588,11 +592,11 @@ PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
 
 /* first full frame after persistent panels have measured */
 window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-  PM.Viewer.layout();
-  PM.TL.frameView();
+  PM.Viewer?.layout?.();
+  PM.TL?.frameView?.();
   PM.bus.emit('layers');
   PM.bus.emit('sel');
-  PM.Inspector.refresh();
+  PM.Inspector?.refresh?.();
   PM.invalidate('all');
   PM.invalidate('status');
   if (PM.SpatialAssistant) PM.SpatialAssistant.init();

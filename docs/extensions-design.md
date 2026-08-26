@@ -31,8 +31,8 @@ src/renderer/src/kernel/
   loader.ts         imports bundles, activate/deactivate, isolation, health
   extensions.svelte.ts   reactive list of loaded extensions (for the Mods panel)
 src/extensions/              built-ins (each: manifest.json + index.ts [+ *.svelte])
-  effects-basic/ theme-default/ keymap-default/ toolbar/ panels-basic/
-  fxbrowser/ notes/ takes/ perf/ workspaces/ mods/ ...
+  theme-default/ keymap-default/ effects-basic/ transitions-basic/
+  toolbar/ viewer/ timeline/ inspector/ mods/
 src/main/extensions/
   discovery.ts      scan dirs, read/validate manifests
   compiler.ts       esbuild (+ svelte plugin) → <userData>/extensions-build/<id>/bundle.js
@@ -73,7 +73,8 @@ export default function activate(api: PowermoveAPI): void | Disposable | Promise
 - `api.theme.register({id,name,tokens,css?})` / `api.theme.activate(id)`
 - `api.palette.registerProvider(fn)`; `api.menus.contribute(location, items)`; `api.status.register(item)`
 - `api.project` — `get()`, `apply(commands, meta)`, `selection`, `time`, `on(event)` — thin typed façade over `PM.Edit` etc.
-- `api.ui` — `toast`, `confirm`, `menu`, `modal`
+- `api.ui` — `toast`, `confirm`, `menu`, `modal`, plus kernel-provided control
+  components and binding helpers (`api.ui.controls`)
 - `api.storage` — per-extension namespaced KV
 - `api.on(event, fn)` — `project:changed | selection | time | layout | extension:loaded …`
 - `api.log`, `api.id`, `api.version`
@@ -83,6 +84,8 @@ Escape hatch: `api.host.pm` exposes the legacy `PM` object, typed `unknown`. It 
 documented as "unstable, used by built-ins mid-migration; agent should prefer the
 typed surface". This is what makes "control every part" true on day one without
 waiting for the whole legacy tree to be re-expressed through the API.
+`api.host.state` similarly exposes the renderer's `doc`, `sel`, `transport`, and
+`perf` rune stores for built-in UI that has not yet moved to typed store facades.
 
 ## 5. Override model
 
@@ -149,16 +152,18 @@ extensions load if `apiVersion <= current` (additive changes) and are flagged
    registry. Legacy callers unchanged; kernel is now the source of truth.
 3. Main-process loader: discovery, compiler, IPC, watcher, `app://…/ext/` route.
 4. Renderer loader + Mods panel + recovery UX.
-5. Move built-ins into `src/extensions/*` (effects-basic, theme-default, keymap-default,
-   toolbar, simple panels, fxbrowser, mods). Timeline/viewer/inspector/agent register via
-   the kernel from their current location (replaceable by id; physical move deferred).
+5. Move built-ins into `src/extensions/*` (effects-basic, theme-default,
+   keymap-default, toolbar, mods) and route the remaining panels through the
+   kernel while their source is migrated.
 6. Transitions: model + compositor pass + registry + commands + inspector + timeline mark.
 7. Agent integration: workspace relocation, instructions, result schema, Fix-it.
 8. Boundary lint (`scripts/check-boundaries.mjs`): `src/extensions/*` may import only
    `powermove`, svelte, own files. Docs: `docs/EXTENSIONS.md`.
+9. Move the viewer, timeline, and inspector sources into forkable built-in
+   extensions, exposing shared kernel controls and rune-store escape hatches
+   through the versioned API.
 
 ## 10. Non-goals (this round)
 
 npm dependencies inside extensions; extension marketplace; sandboxing extensions
-(they are trusted code — personal software); moving timeline/viewer/inspector source
-into `src/extensions/` (they are replaceable but physically stay put).
+(they are trusted code — personal software).

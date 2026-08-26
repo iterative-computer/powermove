@@ -3,12 +3,12 @@
 </script>
 
 <script lang="ts">
-  import { doc } from '../../state/document.svelte';
-  import { transport } from '../../state/transport.svelte';
-  import NumField from '../../controls/NumField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import { channelBinding, type EditBinding } from '../../controls/binding';
-  import LegacyIcon from './LegacyIcon.svelte';
+  import Icon from './Icon.svelte';
+  import { inspectorContext, type EditBinding } from './context';
+
+  const { api, doc, transport } = inspectorContext();
+  const { NumField, Row } = api.ui.controls;
+  const { channelBinding } = api.ui.controls.binding;
 
   let {
     PM,
@@ -242,7 +242,7 @@
         aria-label={`Animate ${label}`}
         aria-pressed={animated}
         onclick={toggleStopwatch}
-      ><LegacyIcon {PM} name="clock" /></button>
+      ><Icon name="clock" /></button>
     {/snippet}
 
     <div style="display:flex;align-items:center;gap:4px">
@@ -268,7 +268,7 @@
           aria-label={`Toggle keyframe for ${label} at playhead`}
           aria-pressed={keyAtPlayhead}
           onclick={toggleKey}
-        ><LegacyIcon {PM} name="diamond" /></button>
+        ><Icon name="diamond" /></button>
       {/if}
     </div>
   </Row>

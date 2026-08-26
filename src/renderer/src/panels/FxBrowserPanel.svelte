@@ -38,7 +38,7 @@
       { type: 'add_effect', target: layer.id, effect },
       { label: `Add ${label}`, origin: 'effects-panel' }
     );
-    PM.Inspector.refresh();
+    PM.Inspector?.refresh?.();
     PM.invalidate();
     status = `Added ${label}`;
   }

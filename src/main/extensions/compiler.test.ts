@@ -28,6 +28,16 @@ afterEach(async () => {
 });
 
 describe('compileExtension', () => {
+  it('compiles every source-heavy built-in through the same forkable extension pipeline', async () => {
+    const outDir = await temporaryDirectory();
+    for (const id of ['viewer', 'timeline', 'inspector']) {
+      const dir = path.resolve('src/extensions', id);
+      const result = await compileExtension({ dir, entry: 'index.ts', outDir });
+      if (!result.ok) throw new Error(`${id}: ${result.error}`);
+      expect(result.bundlePath).toBe(path.join(outDir, id, 'bundle.js'));
+    }
+  });
+
   it('bundles TypeScript to the atomic target and returns its SHA-256 prefix', async () => {
     const { dir, outDir } = await fixture();
     await writeFile(path.join(dir, 'message.ts'), 'export const message: string = "hello";');

@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { PMRegistry } from '../registry';
 import { install } from './viewer';
 
 const originalWindow = (globalThis as any).window;
@@ -10,9 +9,9 @@ afterEach(() => {
   else (globalThis as any).window = originalWindow;
 });
 
-function viewerRegistry(): PMRegistry {
+function viewerRegistry(): Record<string, any> {
   (globalThis as any).window = { addEventListener() {} };
-  const PM: PMRegistry = {
+  const PM: Record<string, any> = {
     h() {},
     clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
     registerPanel() {},
@@ -23,7 +22,7 @@ function viewerRegistry(): PMRegistry {
   return PM;
 }
 
-describe('legacy viewer install', () => {
+describe('viewer runtime', () => {
   it('chooses the closest snap within the screen-space threshold', () => {
     const V = viewerRegistry().Viewer;
 

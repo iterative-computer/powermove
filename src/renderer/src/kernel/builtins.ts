@@ -17,5 +17,8 @@ export const BUILTIN_EXTENSIONS: Record<string, () => Promise<ExtensionModule>> 
   'effects-basic': () => import('../../../extensions/effects-basic/index') as Promise<ExtensionModule>,
   'transitions-basic': () => import('../../../extensions/transitions-basic/index') as Promise<ExtensionModule>,
   toolbar: () => import('../../../extensions/toolbar/index') as Promise<ExtensionModule>,
+  viewer: () => import('../../../extensions/viewer/index') as Promise<ExtensionModule>,
+  timeline: () => import('../../../extensions/timeline/index') as Promise<ExtensionModule>,
+  inspector: () => import('../../../extensions/inspector/index') as Promise<ExtensionModule>,
   mods: () => import('../../../extensions/mods/index') as Promise<ExtensionModule>,
 };

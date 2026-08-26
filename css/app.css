@@ -212,14 +212,6 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .panel.noscroll > .body{overflow:hidden}
 .panel.headless > header{display:none}
 
-/* ── viewer ────────────────────────────────────────────── */
-#panel-viewer{background:var(--bg-panel-2)}
-#panel-viewer .body{display:flex;flex-direction:column;padding:14px;overflow:hidden}
-#stage{flex:1;min-height:0;display:grid;place-items:center;position:relative}
-#stage-inner{position:relative;border-radius:0;corner-shape:round;overflow:hidden;box-shadow:none;outline:0}
-[data-preview-corners="rounded"] #stage-inner{border-radius:var(--r-md);corner-shape:var(--ui-corner-smoothing)}
-#gl{display:block;width:100%;height:100%;background:#000}
-#overlay{position:absolute;inset:0;pointer-events:none}
 .chip{
   height:26px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;border-radius:var(--r-sm);
   background:var(--bg-float);color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;box-shadow:var(--ctl-edge);
@@ -235,33 +227,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .chip svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 
 /* ── timeline ──────────────────────────────────────────── */
-#panel-timeline{flex:0 0 340px}
-#tl-head{
-  height:var(--hdr-h);flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 10px;border-bottom:1px solid var(--line);
-}
-#tl-head .iconbtn{width:26px;height:26px}
-#tl-head .iconbtn svg{width:14px;height:14px}
-#tl-head[data-density="compact"]{height:32px;gap:6px;padding-inline:8px}
-#tl-head[data-density="compact"] .iconbtn{width:24px;height:24px}
-#tl-head[data-density="compact"] .iconbtn svg{width:13px;height:13px}
-#tl-head[data-density="compact"] #tl-time{font-size:var(--fs-sm);min-width:0}
-#tl-head[data-density="compact"] input[type=range]{width:64px}
-.tl-group{min-width:0;display:flex;align-items:center;gap:4px}
-.tl-view{margin-left:auto;gap:5px}
-/* Timecode reads as a quiet readout, not a headline: same optical size as the
-   rest of the chrome, tabular so scrubbing doesn't jitter, no forced width. */
-#tl-time{font-family:var(--f-mono);font-size:var(--fs-md);letter-spacing:0;color:var(--tx);font-variant-numeric:tabular-nums;margin-left:6px;padding:0 2px}
-#tl-time.edit{color:var(--accent)}
-.zoomrow{display:flex;align-items:center;color:var(--tx-3)}
 input[type=range]{-webkit-appearance:none;height:3px;border-radius:3px;background:var(--ink-3);width:96px}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:11px;border-radius:50%;background:var(--bg-float);box-shadow:var(--ctl-edge)}
-#tl-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
-#tl-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-#tl-edit{position:absolute;display:none;height:18px;padding:0 4px;background:var(--bg-float);border:1px solid var(--accent);
-  border-radius:var(--r-xs);font-family:var(--f-mono);font-size:var(--fs-xs);z-index:6}
-
 /* ── inspector ─────────────────────────────────────────── */
-.insp{padding:var(--pad) var(--pad) 24px;display:flex;flex-direction:column;gap:4px}
 .generated-tool-readout{display:block;max-width:150px;color:var(--tx-2);font-size:var(--fs-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .generated-tool-preview{margin-top:7px;padding:9px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--bg-row);color:var(--tx-2);font-size:var(--fs-sm)}
 .generated-tool-preview[hidden]{display:none!important}
@@ -341,18 +309,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .stopwatch:hover{color:var(--tx-2);background:var(--ink-1)}
 .stopwatch.on{color:var(--accent)}
 .stopwatch svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:1.8}
-.twirl{width:14px;height:14px;display:grid;place-items:center;color:var(--tx-3);flex:none;transition:transform var(--dur-2) var(--ease-io)}
-.twirl.open{transform:rotate(90deg)}
-.grp{margin-left:0}
-.grp .row{margin-left:12px}
 .empty{padding:28px 16px;color:var(--tx-3);font-size:var(--fs-sm);text-align:center;line-height:var(--lh);text-wrap:pretty}
-/* The inspector's in-body header until DockLayout owns panel chrome. */
-.inspector-header{height:var(--hdr-h);margin:-4px -4px 6px;padding:0 4px 0 8px;background:transparent;border-bottom:1px solid var(--line);border-radius:0}
-.inspector-header:hover{background:transparent}
-.inspector-header .k{color:var(--tx);font-weight:var(--fw-medium)}
-.inspector-header .k .sub{color:var(--tx-3);font-weight:var(--fw-regular)}
-.inspector-header .iconbtn{width:24px;height:24px;color:var(--tx-3)}
-
 /* ── layers panel ──────────────────────────────────────── */
 .lyr{display:flex;align-items:center;gap:6px;height:26px;padding:0 8px;border-radius:var(--r-sm);font-size:var(--fs-md);color:var(--tx-2);transition:background var(--dur-1),color var(--dur-1)}
 .lyr:hover{background:var(--ink-1)}
@@ -451,9 +408,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .font-results{min-height:28px;overflow:auto;margin-top:5px}
 .font-results .font-item{width:100%;text-align:left;font-size:var(--fs-md);cursor:default}
 .font-empty{padding:10px 9px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.4}
-/* Persistent canvas panels need an explicit internal flex column. */
-#panel-timeline > .body{display:flex;flex-direction:column;overflow:hidden}
-
 /* ── assistant rail ────────────────────────────────────── */
 /* Shake the pointer to enter spatial selection; no persistent assistant chrome. */
 #spatial-assistant{position:fixed;inset:0;z-index:500;pointer-events:auto;cursor:crosshair;isolation:isolate;color:var(--tx)}

@@ -1,17 +1,14 @@
+import type { PowermoveAPI } from 'powermove';
+
 import InspectorPanel from './InspectorPanel.svelte';
-import { showFxMenu } from './inspector/actions';
-import {
-  configureInspectorRegistry,
-  inspectorRefresh
-} from './inspector/refresh.svelte';
-import { registerSveltePanel } from './registerSveltePanel';
+import { showFxMenu } from './actions';
+import { inspectorRefresh } from './refresh.svelte.js';
 
 type LegacyPM = Record<string, any>;
 
-export function registerInspectorPanel(PM: LegacyPM): void {
-  configureInspectorRegistry(PM);
+export default function activate(api: PowermoveAPI): void {
+  const PM = api.host.pm as LegacyPM;
 
-  /* Keep the public runtime hook with the panel that owns uniform UI. */
   PM.syncShaderUniforms = (layer: any): void => {
     const definitions = PM.parseUniforms(layer.d.code);
     PM.UIState.setShaderMeta(layer, { udefs: definitions });
@@ -43,5 +40,25 @@ export function registerInspectorPanel(PM: LegacyPM): void {
   };
 
   PM.fxMenu = (anchor: HTMLElement) => showFxMenu(PM, anchor);
-  registerSveltePanel(PM, 'inspector', { title: 'Properties', component: InspectorPanel, header: () => {} });
+
+  /* The app hydrates before built-ins activate. Bring every already-loaded
+     shader onto the inspector-owned uniform contract immediately. */
+  const containers = [PM.proj, ...Object.values(PM.proj?.comps ?? {})] as any[];
+  for (const container of containers) {
+    for (const layer of container?.layers ?? []) {
+      if (layer?.type !== 'shader') continue;
+      try {
+        PM.syncShaderUniforms(layer);
+      } catch (error) {
+        api.log('warn', `could not synchronize shader uniforms for ${String(layer.id ?? 'unknown')}`, error);
+      }
+    }
+  }
+
+  api.panels.register({
+    id: 'inspector',
+    title: 'Properties',
+    component: InspectorPanel as any,
+    header: () => {}
+  });
 }

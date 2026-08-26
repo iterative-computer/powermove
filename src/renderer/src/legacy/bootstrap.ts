@@ -33,8 +33,6 @@ import { install as installCompositor } from './gl/compositor';
 import { install as installEngine } from './core/engine';
 import { install as installControls } from './ui/controls';
 import { install as installLayout } from './ui/layout';
-import { install as installViewer } from './ui/viewer';
-import { install as installTimeline } from './ui/timeline';
 import { install as installLibraryUi } from './ui/library';
 import { install as installShortcuts } from './ui/shortcuts';
 import { install as installWorkspace } from './core/workspace';
@@ -84,8 +82,6 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/engine', installEngine],
   ['ui/controls', installControls],
   ['ui/layout', installLayout],
-  ['ui/viewer', installViewer],
-  ['ui/timeline', installTimeline],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],
   ['core/workspace', installWorkspace],

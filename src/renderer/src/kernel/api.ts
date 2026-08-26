@@ -261,7 +261,48 @@ export interface ProjectAPI {
 
 /* ── ui helpers ──────────────────────────────────────────── */
 
+export type ControlComponent = Component<Record<string, unknown>>;
+
+export type ControlEditBinding =
+  | { mode: 'command'; label: string; origin?: string; command: EditCommand | ((value: unknown) => EditCommand) }
+  | { mode: 'local'; label: string; set(value: unknown): void }
+  | { mode: 'set'; label: string; set(value: unknown): void };
+
+export interface ControlBindingOptions {
+  label?: string;
+  origin?: string;
+}
+
+export interface ControlsAPI {
+  /** Kernel-provided control components; props match src/renderer/src/controls — stable within apiVersion 1. */
+  readonly NumField: ControlComponent;
+  readonly ColorField: ControlComponent;
+  readonly FillField: ControlComponent;
+  readonly FontField: ControlComponent;
+  readonly SelectField: ControlComponent;
+  readonly TextField: ControlComponent;
+  readonly ToggleField: ControlComponent;
+  readonly Row: ControlComponent;
+  readonly Section: ControlComponent;
+  /**
+   * UNSTABLE. Binding factories used by built-in property editors. Their
+   * returned binding shape is versioned, but helper arguments may grow.
+   */
+  readonly binding: {
+    channelBinding(
+      pm: Record<string, any>,
+      layerId: string,
+      channel: string,
+      options?: ControlBindingOptions & { time?: number | (() => number) }
+    ): ControlEditBinding;
+    layerFieldBinding(pm: Record<string, any>, layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    contentBinding(pm: Record<string, any>, layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    compositionBinding(pm: Record<string, any>, field: string, options?: ControlBindingOptions): ControlEditBinding;
+  };
+}
+
 export interface UIAPI {
+  readonly controls: ControlsAPI;
   toast(text: string, opts?: { sticky?: boolean }): void;
   confirm(title: string, body?: string): Promise<boolean>;
   menu(anchor: HTMLElement | { x: number; y: number }, items: MenuContribution[]): void;
@@ -320,6 +361,17 @@ export interface HostAPI {
    * versions without an apiVersion bump.
    */
   readonly pm: unknown;
+  /**
+   * UNSTABLE. Escape hatch to the renderer's rune stores. Built-ins use it
+   * mid-migration; shapes may change between app versions without an
+   * apiVersion bump.
+   */
+  readonly state: {
+    readonly doc: unknown;
+    readonly sel: unknown;
+    readonly transport: unknown;
+    readonly perf: unknown;
+  };
   /** Mount a Svelte component into an element (kernel-provided svelte runtime). */
   mount<P extends Record<string, unknown>>(component: Component<P>, target: HTMLElement, props: P): () => void;
 }

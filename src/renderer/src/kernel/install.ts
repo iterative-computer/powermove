@@ -10,6 +10,7 @@
  * install) rather than throwing and taking the app down with it.
  */
 import type {
+  ControlsAPI,
   Disposable,
   EditCommand,
   EditMeta,
@@ -32,6 +33,19 @@ import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
 import { DEFAULT_THEME, installThemeApply, type ThemeApplyHandle } from './theme-apply';
+import NumField from '../controls/NumField.svelte';
+import ColorField from '../controls/ColorField.svelte';
+import FillField from '../controls/FillField.svelte';
+import FontField from '../controls/FontField.svelte';
+import SelectField from '../controls/SelectField.svelte';
+import TextField from '../controls/TextField.svelte';
+import ToggleField from '../controls/ToggleField.svelte';
+import Row from '../controls/Row.svelte';
+import Section from '../controls/Section.svelte';
+import { channelBinding, compositionBinding, contentBinding, layerFieldBinding } from '../controls/binding';
+import { doc } from '../state/document.svelte';
+import { sel } from '../state/selection.svelte';
+import { perf, transport } from '../state/transport.svelte';
 
 type LegacyPM = Record<string, any>;
 
@@ -51,6 +65,24 @@ export interface InstalledKernel extends Kernel {
 }
 
 const STORE_PREFIX = 'ext.';
+
+const controls: ControlsAPI = {
+  NumField: NumField as unknown as ControlsAPI['NumField'],
+  ColorField: ColorField as unknown as ControlsAPI['ColorField'],
+  FillField: FillField as unknown as ControlsAPI['FillField'],
+  FontField: FontField as unknown as ControlsAPI['FontField'],
+  SelectField: SelectField as unknown as ControlsAPI['SelectField'],
+  TextField: TextField as unknown as ControlsAPI['TextField'],
+  ToggleField: ToggleField as unknown as ControlsAPI['ToggleField'],
+  Row: Row as unknown as ControlsAPI['Row'],
+  Section: Section as unknown as ControlsAPI['Section'],
+  binding: {
+    channelBinding,
+    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
+    contentBinding,
+    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options)
+  }
+};
 
 /* ── PM-backed capability adapters ───────────────────────── */
 
@@ -80,6 +112,7 @@ function makeProject(PM: LegacyPM): ProjectAPI {
 
 function makeUI(PM: LegacyPM): UIAPI {
   return {
+    controls,
     toast: (text, opts) => PM?.toast?.(text, opts?.sticky ? 8000 : 2200, opts ?? {}),
     confirm: (title, body) =>
       new Promise<boolean>((resolve) => {
@@ -202,6 +235,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
 
   const deps: Omit<HostDeps, 'reportRuntimeError'> = {
     pm: PM,
+    state: { doc, sel, transport, perf },
     ui: makeUI(PM),
     project: makeProject(PM),
     storage: makeStorage(PM),
@@ -339,16 +373,23 @@ export async function bootExtensions(installed: InstalledKernel, builtins: Recor
     deps: installed.deps
   });
   installed.loader = loader;
+  const refreshLayout = (): void => {
+    const pm = installed.deps.pm as Record<string, any>;
+    const workspace = pm?.Layout?.ws ?? pm?.WS?.current;
+    if (workspace && typeof pm?.Layout?.apply === 'function') pm.Layout.apply(workspace);
+    else pm?.bus?.emit?.('layout');
+  };
   const booting = loader.boot();
   await loader.builtinsReady;
   /* Built-ins have now registered their themes, so the persisted id resolves. */
   installed.restoreTheme();
   /* ToolbarMount retries its lazy panel lookup on layout. It mounted before
-     extensions booted, so retry as soon as the bundled toolbar is available. */
-  (installed.deps.pm as Record<string, any>)?.bus?.emit?.('layout');
+     extensions booted. Reapply the current workspace so panel slots that were
+     empty while their built-ins were unavailable get another mount pass. */
+  refreshLayout();
   await booting;
   /* Extensions may add or replace layout contributions during full boot. */
-  (installed.deps.pm as Record<string, any>)?.bus?.emit?.('layout');
+  refreshLayout();
   return loader;
 }
 

@@ -1,14 +1,12 @@
 <script lang="ts">
-  import { doc } from '../../state/document.svelte';
-  import { transport } from '../../state/transport.svelte';
-  import ColorField from '../../controls/ColorField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import type { EditBinding } from '../../controls/gesture';
+  import { inspectorContext, type EditBinding } from './context';
   import ChannelRow from './ChannelRow.svelte';
-  import LegacyIcon from './LegacyIcon.svelte';
+  import Icon from './Icon.svelte';
   import { showFxMenu } from './actions';
-  import { inspectorRefresh } from './refresh.svelte';
+  import { inspectorRefresh } from './refresh.svelte.js';
+
+  const { api, doc, transport } = inspectorContext();
+  const { ColorField, Row, Section } = api.ui.controls;
 
   let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
 
@@ -69,7 +67,7 @@
       event.preventDefault();
       showFxMenu(PM, event.currentTarget, layer);
     }}
-  ><LegacyIcon {PM} name="plus" />Add effect</button>
+  ><Icon name="plus" />Add effect</button>
 {/if}
 
 {#each effects as effect (effect.id)}
@@ -90,7 +88,7 @@
         aria-controls={paramsId}
         onclick={() => toggleOpen(effect)}
       >
-        <span class:open={expanded} class="twirl" aria-hidden="true"><LegacyIcon {PM} name="chev" /></span>
+        <span class:open={expanded} class="twirl" aria-hidden="true"><Icon name="chev" /></span>
         <span class="k" style="color:var(--tx);font-weight:500;text-align:left">{definition.label}</span>
       </button>
       <button
@@ -100,14 +98,14 @@
         aria-label={`${effect.on ? 'Disable' : 'Enable'} ${definition.label}`}
         aria-pressed={!!effect.on}
         onclick={(event) => setEnabled(event, effect)}
-      ><LegacyIcon {PM} name="eye" /></button>
+      ><Icon name="eye" /></button>
       <button
         type="button"
         class="stopwatch"
         title="Remove effect"
         aria-label={`Remove ${definition.label}`}
         onclick={(event) => remove(event, effect)}
-      ><LegacyIcon {PM} name="x" /></button>
+      ><Icon name="x" /></button>
     </div>
 
     {#if expanded}

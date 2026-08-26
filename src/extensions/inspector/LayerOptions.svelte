@@ -1,13 +1,9 @@
 <script lang="ts">
-  import ColorField from '../../controls/ColorField.svelte';
-  import NumField from '../../controls/NumField.svelte';
-  import Row from '../../controls/Row.svelte';
-  import Section from '../../controls/Section.svelte';
-  import SelectField, { type SelectOption } from '../../controls/SelectField.svelte';
-  import ToggleField from '../../controls/ToggleField.svelte';
-  import { layerFieldBinding } from '../../controls/binding';
-  import type { EditBinding } from '../../controls/gesture';
-  import { doc } from '../../state/document.svelte';
+  import { inspectorContext, type EditBinding, type SelectOption } from './context';
+
+  const { api, doc } = inspectorContext();
+  const { ColorField, NumField, Row, Section, SelectField, ToggleField } = api.ui.controls;
+  const { layerFieldBinding } = api.ui.controls.binding;
 
   let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
 

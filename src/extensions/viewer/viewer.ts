@@ -1,21 +1,21 @@
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 /* TODO(extensions): `menus.contribute('viewer:context', …)` has no host here.
-   src/renderer/src/legacy/ui/viewer.ts never opens a context menu — the canvas
+   src/extensions/viewer/viewer.ts never opens a context menu — the canvas
    has no `contextmenu` listener — so there is no single obvious place to append
    contributions. Wire it when the viewer grows a right-click menu of its own.
-   (`timeline:context` and `layer:context` are hosted in ui/timeline.ts;
+   (`timeline:context` and `layer:context` are hosted in extensions/timeline;
    `panel:context` in layout/menu.ts; `titlebar:right` in shell/Titlebar.svelte.) */
-import type { PMRegistry } from '../registry';
-
-export function install(PM: PMRegistry): void {
-createViewer(PM);
-}
-
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: true,
 } as const;
 
-export function createViewer(PM: PMRegistry): any {
+/** Compatibility entry point for registry-based tests and legacy installers. */
+export function install(PM: any): void {
+  createViewerRuntime(PM);
+}
+
+/** Install the legacy viewer controller against the host registry. */
+export function createViewerRuntime(PM: any): any {
 if (PM.Viewer?.attach) return PM.Viewer;
 const clamp = PM.clamp;
 
@@ -251,7 +251,7 @@ function bindStage(stage: any, inner: any) {
   inner.addEventListener('dblclick', (e: any) => {
     const [x, y] = toComp(e);
     const L = PM.GL.pick(x, y, PM.time);
-    if (L && L.type === 'text') PM.Inspector.focusText(L);
+    if (L && L.type === 'text') PM.Inspector?.focusText?.(L);
   });
 }
 
@@ -351,8 +351,8 @@ function startMove(e: any, layers: any, T: any) {
       V.guides = nextGuides;
       PM.invalidate();
     },
-    up: () => { clearGuides(); moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector.refresh(); },
-    cancel: () => { clearGuides(); PM.Edit.cancel(); PM.Inspector.refresh(); },
+    up: () => { clearGuides(); moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    cancel: () => { clearGuides(); PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
   });
 }
 
@@ -386,8 +386,8 @@ function startTransform(e: any, L: any, hit: any, T: any) {
       }
       PM.invalidate();
     },
-    up: () => { moved ? PM.Edit.commit() : PM.Edit.cancel(); PM.Inspector.refresh(); },
-    cancel: () => { PM.Edit.cancel(); PM.Inspector.refresh(); },
+    up: () => { moved ? PM.Edit.commit() : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    cancel: () => { PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
   });
 }
 
