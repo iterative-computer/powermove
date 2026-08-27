@@ -6,6 +6,7 @@ export const ADAPTER_VERSION = '2';
 
 export const REQUIRED_CODEX_FLAGS = [
   '--ephemeral',
+  '--ignore-user-config',
   '--skip-git-repo-check',
   '--ignore-rules',
   '--sandbox',
@@ -79,7 +80,6 @@ export function buildEditorArgv(options: EditorArgvOptions): string[] {
 
 export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
   const argv = ['--search'];
-  if (options.disableMcp) argv.push('--config', 'mcp_servers={}');
   if (options.access === 'computer') {
     argv.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
@@ -91,6 +91,10 @@ export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
   argv.push('--add-dir', options.extensionsDir);
 
   argv.push('exec');
+  // Config overrides merge with the user's TOML, so `mcp_servers={}` does not
+  // actually clear named servers. This exec flag is the supported isolation
+  // boundary; authentication still comes from CODEX_HOME.
+  if (options.disableMcp) argv.push('--ignore-user-config');
   if (options.sessionId !== null && options.sessionId.trim() !== '') argv.push('resume');
   argv.push(
     '--skip-git-repo-check',

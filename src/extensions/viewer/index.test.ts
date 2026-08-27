@@ -26,7 +26,7 @@ describe('viewer extension', () => {
     const PM: Record<string, any> = {
       clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
       bus: { on: vi.fn(() => () => {}) },
-      GL: { gl: null, init: vi.fn() },
+      GL: { gl: null, init: vi.fn(), resize: vi.fn() },
       proj: { w: 1920, h: 1080, layers: [] },
       quality: 1,
       invalidate: vi.fn()
@@ -49,7 +49,7 @@ describe('viewer extension', () => {
     panel?.build?.(body, { spec: {} });
 
     expect(body.querySelector('#stage > #stage-inner > #gl')).not.toBeNull();
-    expect(body.querySelector('#stage > #stage-inner > #overlay')).not.toBeNull();
+    expect(body.querySelector('#stage > #overlay')).not.toBeNull();
     expect(body.querySelectorAll('#stage, #stage-inner, #gl, #overlay')).toHaveLength(4);
     expect(PM.GL.init).toHaveBeenCalledWith(body.querySelector('#gl'));
     expect(PM.Viewer.ov).toBe(body.querySelector('#overlay'));
@@ -60,7 +60,7 @@ describe('viewer extension', () => {
     const PM: Record<string, any> = {
       clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
       bus: { on: vi.fn(() => () => {}) },
-      GL: { gl: null, init: vi.fn() },
+      GL: { gl: null, init: vi.fn(), resize: vi.fn() },
       proj: { w: 1920, h: 1080, layers: [] },
       quality: 1,
       invalidate: vi.fn()
@@ -73,11 +73,13 @@ describe('viewer extension', () => {
     const first = document.createElement('div');
     const second = document.createElement('div');
     panel?.build?.(first, { spec: {} });
+    const stage = first.querySelector('#stage');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     panel?.build?.(second, { spec: {} });
 
     expect(PM.GL.init).toHaveBeenCalledOnce();
-    expect(PM.Viewer.stage).toBe(first.querySelector('#stage'));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('attach ignored'));
+    expect(PM.Viewer.stage).toBe(stage);
+    expect(second.querySelector('#stage')).toBe(stage);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

@@ -9,10 +9,21 @@ PM.touch = () => {
   version++;
   /* hierarchy memos must never outlive an edit */
   woMemo.clear(); wmMemo.clear(); memoT = null;
+  hierarchySource = null;
 };
 PM.animVersion = () => version;
 let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map();
+let hierarchySource: any = null;
+let hierarchyLayers = new Map<string, any>();
+function hierarchyLayer(id: string): any {
+  const source = PM.curComp().layers;
+  if (hierarchySource !== source) {
+    hierarchySource = source;
+    hierarchyLayers = new Map(source.map((layer: any) => [layer.id, layer]));
+  }
+  return hierarchyLayers.get(id) || null;
+}
 
 /* ── keyframe evaluation ───────────────────────────────── */
 function evalKfs(kf: any, t: any) {
@@ -141,7 +152,10 @@ PM.localMatrix = (L: any, T: any) => {
 const chainSeen = () => new Set();
 
 /** Start a fresh evaluation window (called by the compositor per frame). */
-PM.beginEval = (T: any) => { memoT = T; };
+PM.beginEval = (T: any) => {
+  if (memoT !== T) { woMemo.clear(); wmMemo.clear(); }
+  memoT = T;
+};
 
 PM.worldMatrix = (L: any, T: any) => {
   if (memoT === T) { const c = wmMemo.get(L.id); if (c) return c; }
@@ -152,7 +166,7 @@ PM.worldMatrix = (L: any, T: any) => {
     seen.add(cur.id);
     chain.push(cur);
     if (memoT === T) { const c = wmMemo.get(cur.id); if (c) { hit = c; break; } }
-    cur = cur.parent ? PM.L(cur.parent) : null;
+    cur = cur.parent ? hierarchyLayer(cur.parent) : null;
   }
   /* fold from the topmost ancestor down to L */
   let m, i0;
@@ -175,7 +189,7 @@ PM.worldOpacity = (L: any, T: any) => {
     seen.add(cur.id);
     chain.push(cur);
     if (memoT === T) { const c = woMemo.get(cur.id); if (c !== undefined) { hit = c; break; } }
-    cur = cur.parent ? PM.L(cur.parent) : null;
+    cur = cur.parent ? hierarchyLayer(cur.parent) : null;
   }
   /* hit is the cached cumulative opacity of some ancestor — apply only the layers below it */
   let o, i0;

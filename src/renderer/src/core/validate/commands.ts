@@ -62,7 +62,7 @@ const BLEND_MODES = new Set([
 ]);
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed'
+  'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked'
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
@@ -381,7 +381,7 @@ function parseLayerPatch(value: unknown): LayerPatch | ValidationError {
     if (number instanceof ValidationError) return number;
     out[key] = number;
   }
-  for (const key of ['visible', 'locked', 'solo', 'shy', 'motionBlur', 'collapsed'] as const) {
+  for (const key of ['visible', 'locked', 'solo', 'shy', 'motionBlur', 'collapsed', 'scaleLinked'] as const) {
     if (patch[key] != null) out[key] = Boolean(patch[key]);
   }
   for (const key of ['name', 'color'] as const) if (patch[key] != null) out[key] = stringified(patch[key]);

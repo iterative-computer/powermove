@@ -108,7 +108,7 @@ describe('StatusBar kernel status items', () => {
 });
 
 describe('Titlebar menu contributions', () => {
-  it('renders contributed buttons after the three fixed ones', () => {
+  it('does not render legacy extension shortcuts beside the fixed buttons', () => {
     const kernel = createKernel();
     disposeSignals = installKernelSignals(kernel);
     const run = vi.fn();
@@ -116,15 +116,12 @@ describe('Titlebar menu contributions', () => {
     const { target } = render(Titlebar, fakePM(kernel));
 
     const buttons = [...target.querySelectorAll<HTMLButtonElement>('.tb-right .iconbtn')];
-    expect(buttons).toHaveLength(4);
-    expect(buttons[3]!.title).toBe('Mods (⌘M)');
-    expect(buttons[3]!.getAttribute('aria-label')).toBe('Mods');
-
-    flushSync(() => buttons[3]!.click());
-    expect(run).toHaveBeenCalledOnce();
+    expect(buttons).toHaveLength(3);
+    expect(target.querySelector('.titlebar-contribution')).toBeNull();
+    expect(run).not.toHaveBeenCalled();
   });
 
-  it('appears without a remount when a contribution arrives later', () => {
+  it('does not add titlebar clutter when an extension arrives later', () => {
     const kernel = createKernel();
     disposeSignals = installKernelSignals(kernel);
     const { target } = render(Titlebar, fakePM(kernel));
@@ -132,7 +129,7 @@ describe('Titlebar menu contributions', () => {
 
     flushSync(() => void kernel.contributeMenu('ext', 'titlebar:right', () => [{ label: 'Mods', run: () => {} }]));
 
-    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(4);
+    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(3);
   });
 
   it('ignores separators and headers, which have no button form', () => {
@@ -141,6 +138,6 @@ describe('Titlebar menu contributions', () => {
     kernel.contributeMenu('ext', 'titlebar:right', () => ['-', { header: 'Tools' }, { label: 'Mods', run: () => {} }]);
     const { target } = render(Titlebar, fakePM(kernel));
 
-    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(4);
+    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(3);
   });
 });

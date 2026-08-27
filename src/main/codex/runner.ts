@@ -111,8 +111,26 @@ function failure(error: string, cancelled = false): CodexRunResult {
   return { ok: false, error, cancelled };
 }
 
+function structuredCliError(stdout: string): string {
+  let error = '';
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event: unknown = JSON.parse(line);
+      if (!isRecord(event)) continue;
+      if (event.type === 'error' && isString(event.message)) error = event.message;
+      if (event.type === 'item.completed' && isRecord(event.item) &&
+        event.item.type === 'error' && isString(event.item.message)) {
+        error = event.item.message;
+      }
+    } catch { /* stdout can contain non-event notices */ }
+  }
+  return error;
+}
+
 function diagnosticText(attempt: AttemptResult, fallback: string): string {
-  return humanizeCodexFailure(attempt.stderr.trim() || attempt.spawnError?.message || '', fallback);
+  const parts = [attempt.stderr.trim(), structuredCliError(attempt.stdout), attempt.spawnError?.message]
+    .filter((part): part is string => Boolean(part));
+  return humanizeCodexFailure(parts.join('\n'), fallback);
 }
 
 /* Raw CLI stderr must never reach the conversation: it is log noise (timestamps,
@@ -126,7 +144,10 @@ export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT gen
   if (/AuthRequired|www_authenticate|Unauthorized|\b401\b/i.test(text) && /rmcp|mcp/i.test(text)) {
     return 'One of your Codex integrations (an MCP server) needs to be signed in again. Run `codex` in a terminal, re-authenticate it, then retry.';
   }
-  if (/not logged in|login required|please run codex login|invalid api key|credentials/i.test(text)) {
+  if (/failed to initialize in-process app-server client.{0,160}Operation not permitted|attempt to write a readonly database/i.test(text)) {
+    return 'Powermove was opened from a restricted development environment, so Codex cannot start. Quit Powermove, reopen it normally, then retry.';
+  }
+  if (/not logged in|login required|please run codex login|invalid api key|missing (?:authentication )?credentials|authentication credentials (?:were|are) not provided/i.test(text)) {
     return 'Codex CLI is not signed in. Run `codex login` in a terminal, then retry.';
   }
   if (/ENOENT|command not found|No such file/i.test(text)) {
@@ -150,7 +171,7 @@ function attemptOutput(attempt: AttemptResult): string {
 /* Codex connects to every configured MCP server at startup; one broken server
    (expired OAuth, dead transport) can kill a run that never needed it. */
 export function isMcpStartupFailure(diagnostic: string): boolean {
-  return /rmcp|mcp/i.test(diagnostic) && /AuthRequired|Transport channel closed|worker quit|connection refused|handshake/i.test(diagnostic);
+  return /rmcp|mcp/i.test(diagnostic) && /AuthRequired|Transport channel closed|worker quit|connection refused|handshak(?:e|ing)/i.test(diagnostic);
 }
 
 function sortJsonValue(value: unknown): unknown {
@@ -331,7 +352,13 @@ export class CodexRunner {
         if (!disableMcp && attempt.code !== 0 && isMcpStartupFailure(diagnostic)) {
           console.error('[codex] MCP startup failure; retrying without MCP servers:', diagnostic.slice(0, 1_000));
           options.onProgress?.('One of your Codex integrations failed to start — retrying without integrations…');
+          // A resumed thread may retain tool state from the failed MCP startup.
+          // The request already contains the current project and prompt, so retry
+          // from a clean thread as well as a clean user configuration.
+          await state.sessionWrite;
+          await clearSession(layout.sessionPath);
           await rm(layout.outputPath, { force: true });
+          resumeId = null;
           disableMcp = true;
           mcpFallback = true;
           continue;

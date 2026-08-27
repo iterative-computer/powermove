@@ -47,7 +47,7 @@ export interface AgentResult {
   artifacts: AgentArtifactResult[];
   externalActions: string[];
   notes: string[];
-  extensions?: AgentExtensionChange[];
+  extensions: AgentExtensionChange[];
 }
 
 export interface ExtensionFixFile {
@@ -75,7 +75,7 @@ export function agentResultSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['summary', 'commands', 'artifacts', 'externalActions', 'notes'],
+    required: ['summary', 'commands', 'artifacts', 'externalActions', 'notes', 'extensions'],
     properties: {
       summary: { type: 'string' },
       commands: { type: 'array', maxItems: 80, items: { type: 'string' } },
@@ -100,7 +100,7 @@ export function agentResultSchema(): Record<string, unknown> {
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['id', 'action'],
+          required: ['id', 'action', 'summary'],
           properties: {
             id: { type: 'string', pattern: EXTENSION_ID.source },
             action: { type: 'string', enum: ['created', 'updated', 'removed'] },

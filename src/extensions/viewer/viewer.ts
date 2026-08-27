@@ -34,7 +34,7 @@ V.attach = (stage: HTMLElement) => {
     }
     const inner = stage.querySelector<HTMLElement>(':scope > #stage-inner');
     const gl = inner?.querySelector<HTMLCanvasElement>(':scope > #gl');
-    const ov = inner?.querySelector<HTMLCanvasElement>(':scope > #overlay');
+    const ov = stage.querySelector<HTMLCanvasElement>('#overlay');
     if (!inner || !gl || !ov) throw new Error('Viewer host is missing the legacy canvas skeleton');
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     if (!PM.GL.gl) PM.GL.init(gl);
@@ -62,8 +62,8 @@ V.layout = () => {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const rw = Math.max(2, Math.round(p.w * PM.quality)), rh = Math.max(2, Math.round(p.h * PM.quality));
   PM.GL.resize(rw, rh);
-  V.ov.width = Math.round(dw * dpr); V.ov.height = Math.round(dh * dpr);
-  V.ov.style.width = dw + 'px'; V.ov.style.height = dh + 'px';
+  V.ov.width = Math.round(r.width * dpr); V.ov.height = Math.round(r.height * dpr);
+  V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   PM.invalidate();
 };
 PM.bus.on('quality', () => V.layout());
@@ -73,7 +73,7 @@ PM.bus.on('layout:applied', () => V.layout());
 
 /* comp px <-> screen px */
 const toComp = (e: any) => {
-  const r = V.ov.getBoundingClientRect();
+  const r = V.inner.getBoundingClientRect();
   return [(e.clientX - r.left) / V.shown, (e.clientY - r.top) / V.shown];
 };
 
@@ -92,11 +92,12 @@ function drawOverlay() {
       V.layout();
     }
   }
-  const p = PM.proj, dpr = V.ov.width / (p.w * V.shown);
+  const p = PM.proj, dpr = V.ov.width / V.stage.getBoundingClientRect().width;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
   const S = V.shown * dpr;
-  c.save(); c.scale(S, S);
+  const frame = V.inner.getBoundingClientRect(), stage = V.stage.getBoundingClientRect();
+  c.save(); c.translate((frame.left - stage.left) * dpr, (frame.top - stage.top) * dpr); c.scale(S, S);
   c.lineWidth = 1 / S;
 
   drawSnapGuides(c, S, p);
@@ -239,7 +240,7 @@ Object.assign(V, {
 
 /* ── direct manipulation ───────────────────────────────── */
 function bindStage(stage: any, inner: any) {
-  inner.addEventListener('pointerdown', onDown);
+  stage.addEventListener('pointerdown', onDown);
   stage.addEventListener('wheel', (e: any) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
@@ -283,7 +284,7 @@ function onDown(e: any) {
 
   /* handle grab on the selected layer */
   const sel = PM.firstSel();
-  if (sel && PM.active(sel, T)) {
+  if (sel && !sel.lock && PM.active(sel, T)) {
     const hit = handleAt(sel, x, y, T);
     if (hit) return startTransform(e, sel, hit, T);
   }
@@ -361,7 +362,7 @@ function startTransform(e: any, L: any, hit: any, T: any) {
   const s0 = { sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T), r: PM.ev(L, 'rotation', T) };
   const m = PM.worldMatrix(L, T);
   const cx = m[4], cy = m[5];
-  const r0 = V.ov.getBoundingClientRect();
+  const r0 = V.inner.getBoundingClientRect();
   const a0 = Math.atan2((e.clientY - r0.top) / V.shown - cy, (e.clientX - r0.left) / V.shown - cx);
   PM.Edit.begin(hit.rotate ? 'Rotate layer' : 'Scale layer', { origin: 'canvas' });
   let moved = false;

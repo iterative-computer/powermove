@@ -53,6 +53,7 @@
         : PM.ev(layer, channel, transport.time)
   ));
   const animated = $derived((doc.tick.values, doc.proj, (prop?.kf?.length ?? 0) > 0));
+  const scaleLinked = $derived((doc.tick.values, doc.proj, !!layer.scaleLinked));
   const keyAtPlayhead = $derived((
     doc.tick.values,
     doc.proj,
@@ -246,6 +247,11 @@
     {/snippet}
 
     <div style="display:flex;align-items:center;gap:4px">
+      {#if channel === 'scale.x' && !property}
+        <button type="button" class="stopwatch scale-link" class:on={scaleLinked} aria-label="Link Scale X and Y" aria-pressed={scaleLinked}
+          title={scaleLinked ? 'Unlink scale axes' : 'Link scale axes · preserve proportions'}
+          onclick={() => PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}><Icon name="link" /></button>
+      {/if}
       <NumField
         {PM}
         get={() => value}

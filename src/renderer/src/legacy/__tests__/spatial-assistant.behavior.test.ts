@@ -390,6 +390,79 @@ it('reloads typed extension changes during the autonomous request flow', async (
   assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Added mod New Mod'));
 });
 
+function placementHarness() {
+  const { PM } = spatialHarness();
+  window.requestAnimationFrame = () => 0;
+  PM.Layout.hasPanel = () => true;
+  PM.proj = { id: 'placement-project', name: 'Test Project', revision: 0, layers: [] };
+  PM.WS.current = { layout: { docks: [{ id: 'center', panels: [{ id: 'timeline' }, { id: 'viewer' }] }] } };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn(command => command),
+  };
+  const jobs = [];
+  PM.CodexBridge.request = vi.fn((prompt, schema, images, options) => new Promise((resolve, reject) => {
+    jobs.push({ prompt, options, resolve, reject });
+  }));
+  return { PM, jobs };
+}
+
+const placementMessage = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
+const emptyAgentResult = { text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) };
+
+it('announces the ghost through public progress before any final result, then clears it on success', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.submit('Adjust the timeline controls');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  assert.ok(jobs[0].prompt.startsWith('Adjust the timeline controls'), 'consent still previews the user request');
+  assert.ok(jobs[0].prompt.includes('Before editing files or building controls'));
+  jobs[0].options.onProgress(placementMessage);
+  assert.notEqual(PM.AgentUI.state.activity, placementMessage, 'never display raw protocol metadata');
+  jobs[0].options.onTrace({ kind: 'thought', text: placementMessage });
+  assert.equal(PM.AgentUI.state.uiPlacement, null, 'private reasoning cannot place a ghost');
+  jobs[0].options.onTrace({ kind: 'answer', text: placementMessage });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.uiPlacement?.id, 'timeline'));
+  assert.equal(PM.AgentUI.state.phase, 'running');
+  assert.ok(!JSON.stringify(PM.AgentUI.state.trace).includes('POWERMOVE_UI_TARGET'));
+  jobs[0].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(PM.AgentUI.state.uiPlacement, null);
+});
+
+it('clears placement on stop and ignores late events from stopped or steered runs', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.submit('Change the timeline');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].options.onTrace({ kind: 'answer', text: placementMessage });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.uiPlacement?.id, 'timeline'));
+  PM.AgentUI.submit('Actually change the viewer');
+  assert.equal(PM.AgentUI.state.uiPlacement, null);
+  jobs[0].options.onTrace({ kind: 'answer', text: placementMessage });
+  assert.equal(PM.AgentUI.state.uiPlacement, null);
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  jobs[1].options.onTrace({ kind: 'answer', text: placementMessage.replace('timeline', 'viewer') });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.uiPlacement?.id, 'viewer'));
+  PM.AgentUI.stop();
+  assert.equal(PM.AgentUI.state.uiPlacement, null);
+  jobs[1].options.onTrace({ kind: 'answer', text: placementMessage });
+  assert.equal(PM.AgentUI.state.uiPlacement, null);
+  jobs.forEach(job => job.resolve(emptyAgentResult));
+});
+
+it('clears placement on agent failure without disturbing the project or workspace', async () => {
+  const { PM, jobs } = placementHarness();
+  const before = JSON.stringify([PM.proj, PM.WS.current]);
+  PM.AgentUI.submit('Change the timeline');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].options.onTrace({ kind: 'answer', text: placementMessage });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.uiPlacement?.id, 'timeline'));
+  jobs[0].reject(new Error('Fixture failure'));
+  await vi.waitFor(() => assert.notEqual(PM.AgentUI.state.phase, 'running'));
+  assert.equal(PM.AgentUI.state.uiPlacement, null);
+  assert.equal(JSON.stringify([PM.proj, PM.WS.current]), before);
+});
+
 it('offers Fix it when a reloaded mod is unhealthy', async () => {
   const { PM, assistant } = spatialHarness();
   PM.Kernel = { loader: {

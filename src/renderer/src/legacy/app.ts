@@ -4,6 +4,7 @@ import type { PMRegistry } from './registry';
 export function install(PM: PMRegistry): void {
 const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
+let saveGeneration = 0;
 PM.app = APP;
 
 /* ── appearance (system default; light/dark are explicit overrides) ── */
@@ -395,14 +396,15 @@ function projectThumb() {
 function persistCurrent(withThumb: any) {
   try {
     PM.Projects.put(PM.proj, withThumb ? projectThumb() : undefined);
-    APP.dirty = false;
-  } catch (e) { console.warn('Project save failed', e); }
+    return true;
+  } catch (e) { APP.dirty = true; console.warn('Project save failed', e); return false; }
 }
 
 function captureProjectSession() {
   if (!PM.proj?.id) return;
   persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
+    lastActiveAt: Date.now(),
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
     timeline: PM.TL
@@ -419,31 +421,55 @@ function closeProjectTransients() {
 }
 PM.autosave = () => {
   APP.dirty = true;
+  const generation = ++saveGeneration, projectId = PM.proj.id;
   window.clearTimeout(APP.saveTimer);
-  APP.saveTimer = window.setTimeout(() => {
-    persistCurrent(true);
-    PM.invalidate('status'); PM.bus.emit('project:saved'); PM.bus.emit('projects:tabs');
+  APP.saveTimer = window.setTimeout(async () => {
+    try {
+      if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
+      await PM.store.flush?.();
+      if (generation !== saveGeneration || projectId !== PM.proj.id) return;
+      APP.dirty = false;
+      PM.bus.emit('project:saved');
+    } catch (error) {
+      APP.dirty = true;
+      PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
+      console.warn('Project save failed', error);
+    }
+    PM.invalidate('status'); PM.bus.emit('projects:tabs');
   }, 550);
 };
+PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
 ['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
 
 PM.saveProject = async () => {
-  const text = PM.serialize();
-  if (APP.fileHandle && APP.fileHandle.createWritable) {
-    try {
-      const w = await APP.fileHandle.createWritable(); await w.write(text); await w.close();
-      APP.dirty = false; PM.toast('Project saved'); PM.invalidate('status'); return;
-    } catch (e) { console.warn(e); }
-  }
-  if ((window as any).showSaveFilePicker) {
-    try {
+  if (APP.saving) return false;
+  APP.saving = true;
+  try {
+    const text = PM.serialize(), projectId = PM.proj.id;
+    const finish = () => {
+      // Saving a captured snapshot must not mark edits made during the dialog saved.
+      if (PM.proj.id === projectId && PM.serialize() === text) APP.dirty = false;
+      PM.toast('Project saved'); PM.invalidate('status'); return true;
+    };
+    if (window.powermove?.saveFile) {
+      const result = await window.powermove.saveFile({ name: safeName(PM.proj.name) + '.pmv', data: new TextEncoder().encode(text) });
+      if (result.ok) return finish();
+      if (!result.cancelled) throw new Error(result.error || 'Save failed');
+      return false;
+    }
+    if (!APP.fileHandle && (window as any).showSaveFilePicker) {
       APP.fileHandle = await (window as any).showSaveFilePicker({ suggestedName: safeName(PM.proj.name) + '.pmv', types: [{ description: 'Powermove Project', accept: { 'application/json': ['.pmv'] } }] });
+    }
+    if (APP.fileHandle?.createWritable) {
       const w = await APP.fileHandle.createWritable(); await w.write(text); await w.close();
-      APP.dirty = false; PM.toast('Project saved'); PM.invalidate('status'); return;
-    } catch (e: any) { if (e.name === 'AbortError') return; }
-  }
-  PM.download(new window.Blob([text], { type: 'application/json' }), safeName(PM.proj.name) + '.pmv');
-  APP.dirty = false; PM.toast('Project downloaded'); PM.invalidate('status');
+      return finish();
+    }
+    PM.download(new window.Blob([text], { type: 'application/json' }), safeName(PM.proj.name) + '.pmv');
+    PM.toast('Download started'); return false;
+  } catch (error: any) {
+    if (error.name === 'AbortError') return false;
+    PM.toast('Could not save project: ' + (error.message || 'Save failed'), 6000); return false;
+  } finally { APP.saving = false; }
 };
 PM.openProject = () => {
   const inp = h('input', { type: 'file', accept: '.pmv,.json,application/json' });
@@ -454,6 +480,7 @@ async function openProjectFile(file: any) {
   try {
     const o = JSON.parse(await file.text());
     switchProject(hydrate(o.proj || o));
+    if (o.ws?.layout?.docks) PM.WS.restoreSnapshot(o.ws);
     PM.toast('Opened ' + file.name);
   } catch (e: any) { PM.toast('Could not open project: ' + e.message, 4500); }
 }
@@ -471,6 +498,7 @@ function switchProject(p: any) {
   PM.proj = hydrate(p);
   PM.Projects.markOpen(PM.proj.id);
   const session = PM.Projects.getState(PM.proj.id);
+  PM.Projects.putState(PM.proj.id, { ...session, lastActiveAt: Date.now() });
   if (session?.workspace) PM.WS.restoreSnapshot(session.workspace);
   else PM.WS.activate('design', true);
   persistCurrent(false);

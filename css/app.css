@@ -635,6 +635,24 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-modelbar:focus-within{background:var(--ink-1)}
 .agent-modelbar select{min-width:0;appearance:none;border:0;outline:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-overflow:ellipsis}
 .agent-modelbar select.effort{opacity:.55;text-transform:capitalize}
+.panel-refiner-host{flex:none;min-height:0;min-width:0;max-height:70%;overflow:auto}
+.panel.is-refining{min-height:240px!important}
+.panel.headless>.panel-refine{position:absolute;right:6px;top:6px;z-index:3;background:var(--bg-panel);opacity:0;transition:opacity var(--dur-1)}
+.panel.headless:hover>.panel-refine,.panel.headless:focus-within>.panel-refine{opacity:1}
+#library-screen.panel-library{width:min(500px,calc(100vw - 32px));height:auto;max-height:min(680px,calc(100vh - 36px));background:var(--bg-panel)}
+.panel-library-head{display:flex;align-items:center;gap:8px;padding:12px 12px 8px 16px;flex:none}
+.panel-library-head b{font-size:var(--fs-md);font-weight:var(--fw-medium)}
+.panel-library-head .sp{flex:1}
+.panel-library-search{display:flex;align-items:center;gap:8px;margin:0 12px 8px;padding:7px 9px;border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-3)}
+.panel-library-search svg,.panel-library-open svg{width:15px;height:15px;flex:none}
+.panel-library-search input{border:0;outline:0;background:transparent;min-width:0;width:100%;color:var(--tx);font:inherit}
+.panel-library-list{overflow:auto;min-height:0;padding:0 8px 8px}
+.panel-library-row{display:flex;align-items:center;gap:8px;min-height:38px;padding:0 4px;border-radius:var(--r-md)}
+.panel-library-row:hover{background:var(--ink-1)}
+.panel-library-open{display:flex;align-items:center;gap:10px;flex:1;min-width:0;padding:8px;border:0;background:transparent;color:var(--tx);font:inherit;text-align:left}
+.panel-library-open span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.panel-library-status{color:var(--tx-3);font-size:var(--fs-xs)}
+.panel-library-empty{padding:24px;text-align:center;color:var(--tx-3)}
 .agent-approval{height:24px;display:flex;align-items:center;padding:0 6px;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap;transition:background var(--dur-1),color var(--dur-1)}
 .agent-approval:hover{background:var(--ink-1);color:var(--tx-2)}
 .agent-approval>i{display:none}

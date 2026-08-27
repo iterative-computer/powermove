@@ -266,12 +266,15 @@ export function createLoader(options: LoaderOptions): Loader {
   }
 
   async function reload(id: string): Promise<void> {
-    await deactivate(id);
-    reloadTokens.set(id, (reloadTokens.get(id) ?? 0) + 1);
-    await refreshRecords();
-    const record = recordFor(id);
-    if (!record || record.enabled === false || BLOCKED.has(record.health?.state)) return;
-    await activate(record);
+    const panelChanges = kernel.panels.batchChanges();
+    try {
+      await deactivate(id);
+      reloadTokens.set(id, (reloadTokens.get(id) ?? 0) + 1);
+      await refreshRecords();
+      const record = recordFor(id);
+      if (!record || record.enabled === false || BLOCKED.has(record.health?.state)) return;
+      await activate(record);
+    } finally { panelChanges.dispose(); }
   }
 
   function reportRuntimeError(id: string, error: unknown): void {

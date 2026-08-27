@@ -64,6 +64,9 @@ function evaluateSecond(PM: PMRegistry): { acc: number; ms: number } {
   for (let frame = 0; frame < 30; frame++) {
     const time = frame / 30;
     PM.beginEval(time);
+    // The previous baseline accidentally reused the first frame's hierarchy.
+    // Keep the benchmark honest: every timestamp must evaluate new transforms.
+    expect(PM.worldMatrix(PM.proj.layers[0], time)[4]).toBeCloseTo(PM.ev(PM.proj.layers[0], 'position.x', time));
     for (let index = 0; index < 1000; index++) {
       acc += PM.ev(PM.proj.layers[index], 'position.x', time);
       acc += PM.worldOpacity(PM.proj.layers[index], time);

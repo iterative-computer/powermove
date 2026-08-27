@@ -33,6 +33,7 @@
   </div>
 {:else if message.role === 'user'}
   <div class="agent-msg user" class:is-entering={message.entering}>
+    {#if message.focusLabels?.length}<div class="agent-message-focus">Focus · {message.focusLabels.join(', ')}</div>{/if}
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}
@@ -55,3 +56,7 @@
     {/if}
   </div>
 {/if}
+
+<style>
+  .agent-message-focus { color: var(--tx-3); font: var(--fs-xs)/1.4 var(--f-ui); text-wrap: pretty; }
+</style>

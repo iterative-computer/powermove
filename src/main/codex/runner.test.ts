@@ -280,6 +280,42 @@ describe('CodexRunner lifecycle', () => {
       })
     ]);
   });
+
+  it('drops a resumed session and user config when an MCP server breaks startup', async () => {
+    const userData = await temporaryDirectory('runner-mcp-fallback');
+    const invocationFile = path.join(userData, 'invocations.txt');
+    const root = agentWorkspaceRoot(userData, 'runner-project');
+    const sessionPath = sessionPathFor(root, 'project');
+    await mkdir(path.dirname(sessionPath), { recursive: true });
+    await writeFile(sessionPath, 'session-with-broken-mcp');
+
+    const progress: string[] = [];
+    const result = await new CodexRunner().run(request({ id: 'mcp-fallback-1234' }), {
+      ...fakeOptions(userData, {
+        FAKE_CODEX_MODE: 'mcp-fallback',
+        FAKE_CODEX_INVOCATIONS: invocationFile
+      }),
+      onProgress: (text) => progress.push(text)
+    });
+
+    expect(result.ok).toBe(true);
+    expect((await readFile(invocationFile, 'utf8')).trim().split('\n')).toEqual(['resume', 'fresh']);
+    expect(await readFile(sessionPath, 'utf8')).toBe('thread-recorded-1');
+    expect(progress).toContain('One of your Codex integrations failed to start — retrying without integrations…');
+  });
+
+  it('reports a structured CLI error instead of an unrelated stderr notice', async () => {
+    const result = await new CodexRunner().run(request({ id: 'structured-failure-1234' }), fakeOptions(
+      await temporaryDirectory('runner-structured-failure'),
+      { FAKE_CODEX_MODE: 'structured-failure' }
+    ));
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'The agent failed: The structured failure is the real cause',
+      cancelled: false
+    });
+  });
 });
 
 describe('humanizeCodexFailure', () => {
@@ -299,6 +335,18 @@ describe('humanizeCodexFailure', () => {
     expect(humanizeCodexFailure('spawn codex ENOENT')).toContain('installed');
   });
 
+  it('does not mistake an unrelated MCP credential warning for a Codex login failure', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    const raw = [
+      'Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)',
+      'WARN codex_mcp: OAuth refresh credentials for server motioner are missing an authorization server issuer'
+    ].join('\n');
+    const text = humanizeCodexFailure(raw);
+    expect(text).toContain('restricted development environment');
+    expect(text).toContain('reopen it normally');
+    expect(text).not.toContain('codex login');
+  });
+
   it('reduces unknown stderr to its last meaningful line without log noise', async () => {
     const { humanizeCodexFailure } = await import('./runner');
     const text = humanizeCodexFailure('2026-08-26T10:00:00Z WARN codex::something: first\n2026-08-26T10:00:01Z ERROR codex::other: everything exploded badly');
@@ -316,6 +364,7 @@ describe('isMcpStartupFailure', () => {
     const { isMcpStartupFailure } = await import('./runner');
     expect(isMcpStartupFailure('ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(...)')).toBe(true);
     expect(isMcpStartupFailure('mcp handshake failed: connection refused')).toBe(true);
+    expect(isMcpStartupFailure('MCP startup failed while handshaking with server')).toBe(true);
     expect(isMcpStartupFailure('The model produced invalid JSON')).toBe(false);
     expect(isMcpStartupFailure('AuthRequired without any emcee context')).toBe(false);
   });

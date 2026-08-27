@@ -1,6 +1,5 @@
 <script lang="ts">
   import Icon from '../panels/Icon.svelte';
-  import { kernelSignals } from '../kernel/signals.svelte';
   import ToolbarMount from './ToolbarMount.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
@@ -31,14 +30,6 @@
   });
   const selectedId = $derived(homeOpen ? 'home' : (activeProjectId ?? tabIds[0] ?? 'home'));
 
-  /* Extension buttons after the three fixed ones. Re-collected whenever a
-     contribution is added or removed (the signal ticks on registry change). */
-  const titlebarActions = $derived.by(() => {
-    kernelSignals.menus;
-    refreshToken;
-    const items = (PM.Kernel?.collectMenu?.('titlebar:right') ?? []) as Array<any>;
-    return items.filter((item) => item && item !== '-' && typeof item.label === 'string');
-  });
 
   function nameFor(id: string): string {
     return metas.find((meta) => meta.id === id)?.name || 'Untitled';
@@ -326,21 +317,10 @@
   <button class="iconbtn" type="button" title="Ask Powermove agent (⌘⇧K)" aria-label="Ask Powermove agent" onclick={() => PM.SpatialAssistant?.open?.()}>
     <Icon {PM} name="wand" />
   </button>
-  <button class="iconbtn" type="button" title="Library · Sections and Workspaces" aria-label="Open library, sections, and workspaces" onclick={() => PM.LibraryUI?.open?.()}>
+  <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
     <Icon {PM} name="grid" />
   </button>
   <button class="iconbtn" type="button" title="Settings" aria-label="Open settings" onclick={() => PM.SettingsUI?.open?.()}>
     <Icon {PM} name="gear" />
   </button>
-  {#each titlebarActions as action (action.label)}
-    <button
-      class="iconbtn titlebar-contribution"
-      class:on={action.on}
-      type="button"
-      title={action.kb ? `${action.label} (${action.kb})` : action.label}
-      aria-label={action.label}
-      disabled={action.disabled}
-      onclick={() => action.run?.()}
-    >{action.label}</button>
-  {/each}
 </div>

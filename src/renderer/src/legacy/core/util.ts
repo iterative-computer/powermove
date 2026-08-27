@@ -189,7 +189,7 @@ function flush() {
 /* ── persistence ───────────────────────────────────────── */
 PM.store = {
   get(k: any, d: any) { try { const v = window.localStorage.getItem('pm.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k: any, v: any) { try { window.localStorage.setItem('pm.' + k, JSON.stringify(v)); } catch (e) { window.console.warn('store', e); } },
+  set(k: any, v: any) { try { window.localStorage.setItem('pm.' + k, JSON.stringify(v)); return true; } catch (e) { window.console.warn('store', e); return false; } },
   del(k: any) { window.localStorage.removeItem('pm.' + k); },
 };
 

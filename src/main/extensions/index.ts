@@ -152,3 +152,18 @@ export async function serveExtensionAsset(pathname: string): Promise<Response | 
     return null;
   }
 }
+
+/**
+ * Development renders the app from Vite's http://localhost origin while
+ * generated extensions still come from app://powermove. Module imports enforce
+ * CORS across that boundary, so allow only the exact renderer origin Electron
+ * gave us. Packaged builds have no dev URL and therefore expose no CORS header.
+ */
+export function extensionAssetCorsHeaders(devRendererUrl: string | undefined): Record<string, string> {
+  if (!devRendererUrl) return {};
+  try {
+    return { 'Access-Control-Allow-Origin': new URL(devRendererUrl).origin };
+  } catch {
+    return {};
+  }
+}

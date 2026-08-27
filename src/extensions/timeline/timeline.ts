@@ -7,6 +7,10 @@ export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
 } as const;
 
+export function shouldDrawClipLabel(layerType: unknown): boolean {
+return layerType !== 'audio';
+}
+
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
 export function createTimeline(pm: any): any {
 return createTimelineRuntime(pm);
@@ -517,26 +521,28 @@ function drawClip(c: any, L: any, y: any) {
   if (L.type === 'audio') drawAudioClipWaveform(c, L, {
     x: x0, y: yy, width: w, height: hh,
   }, darkText);
-  c.textBaseline = 'middle';
-  let lx = Math.max(x0, T.gut) + 8;
-  if (!sel) {
-    /* color swatch, itself a miniature of the chip material */
-    const sw = 9;
-    c.fillStyle = L.color;
-    roundRect(c, lx, yy + hh / 2 - sw / 2, sw, sw, 2.5); c.fill();
-    c.strokeStyle = shade(L.color, .84); c.lineWidth = 1; c.stroke();
-    lx += sw + 7;
+  if (shouldDrawClipLabel(L.type)) {
+    c.textBaseline = 'middle';
+    let lx = Math.max(x0, T.gut) + 8;
+    if (!sel) {
+      /* color swatch, itself a miniature of the chip material */
+      const sw = 9;
+      c.fillStyle = L.color;
+      roundRect(c, lx, yy + hh / 2 - sw / 2, sw, sw, 2.5); c.fill();
+      c.strokeStyle = shade(L.color, .84); c.lineWidth = 1; c.stroke();
+      lx += sw + 7;
+    }
+    if (T.style.showTypeBadges && BADGE[L.type]) {
+      c.font = '500 9px ' + fui();
+      c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.55)' : 'rgba(255,255,255,.6)') : theme.tx3;
+      const b = BADGE[L.type].toUpperCase();
+      c.fillText(b, lx, yy + hh / 2 + .5);
+      lx += c.measureText(b).width + 6;
+    }
+    c.font = '500 11px ' + fui();
+    c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.92)' : 'rgba(255,255,255,.97)') : theme.tx2;
+    c.fillText(L.name, lx, yy + hh / 2 + .5);
   }
-  if (T.style.showTypeBadges && BADGE[L.type]) {
-    c.font = '500 9px ' + fui();
-    c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.55)' : 'rgba(255,255,255,.6)') : theme.tx3;
-    const b = BADGE[L.type].toUpperCase();
-    c.fillText(b, lx, yy + hh / 2 + .5);
-    lx += c.measureText(b).width + 6;
-  }
-  c.font = '500 11px ' + fui();
-  c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.92)' : 'rgba(255,255,255,.97)') : theme.tx2;
-  c.fillText(L.name, lx, yy + hh / 2 + .5);
   c.restore();
   c.restore();
 }

@@ -246,6 +246,7 @@ export function install(PM: PMRegistry): void {
   const cached = new Map(Object.entries(snapshot).map(([key, value]) => [`pm.${key}`, value]));
   const serviceKey = (key: any) => String(key).startsWith('pm.') ? String(key).slice(3) : String(key);
   const legacyKey = (key: any) => `pm.${serviceKey(key)}`;
+  const saveErrors = new Map<string, string>();
 
   PM.store = {
     get(key: any, fallback: any) {
@@ -257,20 +258,30 @@ export function install(PM: PMRegistry): void {
       const service = serviceKey(key);
       try {
         const copy = cloneValue(value);
+        saveErrors.delete(service);
         bridge.store.set(service, copy);
         cached.set(legacyKey(service), copy);
+        return true;
       } catch (error) {
         window.console.warn('store', error);
+        saveErrors.set(service, errorText(error, 'Save failed'));
+        return false;
       }
     },
     del(key: any) {
       const service = serviceKey(key);
       cached.delete(legacyKey(service));
       bridge.store.delete(service);
+    },
+    async flush() {
+      await bridge.store.flush();
+      if (saveErrors.size) throw new Error([...saveErrors.values()][0]);
     }
   };
 
   bridge.store.onError((event: any) => {
+    saveErrors.set(event.key, String(event.error));
+    PM.bus?.emit('storage:error', event);
     if (String(event.error).includes('unknown store key')) {
       cached.delete(legacyKey(event.key));
     }

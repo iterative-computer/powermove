@@ -4,6 +4,7 @@
   import type { DockSpec, PanelSpec, Workspace } from './model';
   import PanelPool from './PanelPool.svelte';
   import Splitter from './Splitter.svelte';
+  import UIPlacementGhost from '../panels/agent/UIPlacementGhost.svelte';
 
   let { PM }: { PM: PMRegistry } = $props();
   let manifest = $state.raw<Workspace | null>(null);
@@ -42,3 +43,5 @@
     <Dock {PM} dock={entry.dock} specs={entry.specs} {tick} oncommit={commit} />
   {/each}
 {/if}
+
+<UIPlacementGhost />

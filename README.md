@@ -25,6 +25,12 @@ with a toggle. The agent writes mods directly into that directory through its
 Codex workspace (`--add-dir`), guided by `docs/EXTENSIONS.md` and the typed API
 pack; results report changed extension ids so the app reloads them in place.
 
+For interface requests, the agent is prompted to announce its target panel or
+new-panel insertion point before editing. A validated public placement message
+shows a click-through loading ghost there until the run finishes, fails, or is
+stopped. This temporary overlay does not edit the project or saved layout and
+does not reopen the app; scene-only requests do not show it.
+
 ## Architecture
 
 - `src/main/` owns the Electron lifecycle, windows, menus, storage, native file operations, the private `app://powermove` protocol, and Codex CLI processes.
@@ -68,6 +74,16 @@ npm run dist:mac  # arm64 DMG, ZIP, and app in dist/
 - Add Developer ID signing, hardened runtime, and notarization for public distribution.
 
 ## Design and migration notes
+
+The panel Library lists every registered panel and offers **New panel** and
+panel-specific refinement. Panel focus shares the model/reasoning options row;
+selection boxes carry all intersecting panels into the agent request.
+
+Scale axes can be linked in Properties. Animation caches are refreshed for each
+frame, and selection handles extend across the viewer workspace. Save confirms
+the native file write; autosave waits for storage and restores the last active
+project. The animation performance baseline now measures actual frame changes
+(the old baseline accidentally reused frozen transforms).
 
 - [Electron scaffold](docs/scaffold.md)
 - [Phase 0 platform decisions](docs/phase0-decisions.md)

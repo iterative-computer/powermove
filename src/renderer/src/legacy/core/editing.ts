@@ -25,7 +25,7 @@ const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = 
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed',
+  'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked',
 ]);
 let live: any = null;
 
@@ -279,6 +279,7 @@ function setLayer(command: any) {
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
+  if (patch.scaleLinked != null) layer.scaleLinked = !!patch.scaleLinked;
   PM.touch();
   return { id: layer.id, keys: Object.keys(patch) };
 }

@@ -13,7 +13,7 @@ import path from 'node:path';
 import { IPC } from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
-import { registerExtensionsIpc, serveExtensionAsset } from './extensions';
+import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './extensions';
 import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
@@ -70,6 +70,9 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      // Dev renders from Vite's http origin, so generated app:// extension
+      // modules need Chromium's normal CORS checks enabled for that boundary.
+      corsEnabled: true,
       stream: true
     }
   }
@@ -125,6 +128,7 @@ function registerAppProtocol(): void {
         if (asset === null) return errorResponse(404, 'Not found');
         const headers = responseHeaders('text/javascript; charset=utf-8');
         headers['Cache-Control'] = 'no-store';
+        Object.assign(headers, extensionAssetCorsHeaders(devRendererUrl));
         return new Response(asset.body, { status: asset.status, headers });
       }
       const filePath = path.resolve(rendererRoot, requestedPath);

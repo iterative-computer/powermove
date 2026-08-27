@@ -190,6 +190,7 @@ interface LayerBase<T extends LayerType, D extends object> {
   solo: boolean;
   shy: boolean;
   collapsed: boolean;
+  scaleLinked?: boolean;
   color: string;
   blend: BlendMode;
   mblur: boolean;

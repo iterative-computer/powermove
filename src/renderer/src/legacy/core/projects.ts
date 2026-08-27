@@ -33,7 +33,7 @@ R.put = (proj: any, thumb: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
-  try { PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }); } catch (e) { /* quota */ }
+  if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }) === false) throw new Error('Project storage is unavailable or full');
   return meta;
 };
 
@@ -89,7 +89,13 @@ R.putState = (id: any, state: any) => { if (id && state && typeof state === 'obj
 
 /** Pure boot choice: content first (open tabs, then registry), then a named
     empty project. Anonymous empty projects never win over the welcome demo. */
-R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, legacy = null }: any = {}) => {
+R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, getState = R.getState, legacy = null }: any = {}) => {
+  const active = tabs.map((id: string) => ({ id, at: Number(getState(id)?.lastActiveAt) || 0 }))
+    .filter((item: any) => item.at > 0).sort((a: any, b: any) => b.at - a.at);
+  for (const item of active) {
+    const project = R.unwrap(get(item.id));
+    if (project && Array.isArray(project.layers)) return project;
+  }
   const ids = [...tabs, ...metas.map((m: any) => m.id).filter((id: any) => !tabs.includes(id))];
   let namedEmpty = null;
   for (const id of ids) {

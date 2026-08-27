@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import type { PMRegistry } from '../legacy/registry';
 import DockLayout from './DockLayout.svelte';
+import { installPanelRefiner } from './panel-refiner';
 import {
   buildDockDropTargets,
   clampPanelHeight,
@@ -70,6 +71,7 @@ function applyTheme(PM: PMRegistry, theme: Record<string, any>): void {
 }
 
 export function installSvelteLayout(PM: PMRegistry): void {
+  installPanelRefiner(PM);
   const root = document.getElementById('body');
   if (!root) return;
 

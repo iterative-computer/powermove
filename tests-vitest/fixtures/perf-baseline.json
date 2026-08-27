@@ -1,9 +1,9 @@
 {
-  "calibrationMs": 1.3583750000000236,
-  "evalMedianMs": 14.75754199999983,
-  "exprMedianMs": 14.413874999999962,
-  "evalRatio": 10.864114843102659,
-  "exprRatio": 10.611116223428516,
-  "recordedAt": "2026-08-25T23:45:01.017Z",
-  "node": "v24.18.0"
+  "calibrationMs": 1.3108750000001237,
+  "evalMedianMs": 65.76637499999993,
+  "exprMedianMs": 73.14691600000015,
+  "evalRatio": 50.16982931247733,
+  "exprRatio": 55.800069419275864,
+  "recordedAt": "2026-08-27T03:53:31.243Z",
+  "node": "v26.7.0"
 }

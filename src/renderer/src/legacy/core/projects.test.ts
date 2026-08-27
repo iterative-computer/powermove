@@ -49,4 +49,12 @@ describe('legacy project registry install', () => {
     expect(PM.Projects.pickBoot({ tabs: ['blank'], metas: [{ id: 'blank' }, { id: 'named' }], get }).id).toBe('named');
     expect(PM.Projects.pickBoot({ tabs: ['blank'], metas: [{ id: 'blank' }, { id: 'hero' }], get }).id).toBe('hero');
   });
+
+  it('restores the last active open project, including a deliberately empty composition', () => {
+    const { PM } = projectsRegistry();
+    const get = (id: string) => ({ id, name: id, layers: id === 'older' ? [{}] : [] });
+    const project = PM.Projects.pickBoot({ tabs: ['older', 'current'], metas: [], get, getState: (id: string) => ({ lastActiveAt: id === 'current' ? 20 : 10 }) });
+    expect(project.id).toBe('current');
+    expect(project.layers).toEqual([]);
+  });
 });

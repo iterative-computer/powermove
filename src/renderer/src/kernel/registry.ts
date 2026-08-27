@@ -38,6 +38,26 @@ export class Registry<T extends { id: string }> {
   /** id → stack, top of stack (last element) is active. Insertion-ordered. */
   private stacks = new Map<string, Array<RegistryEntry<T>>>();
   private listeners = new Set<(change: RegistryChange) => void>();
+  private batchDepth = 0;
+  private batchBefore = new Map<string, T>();
+  private batchIds = new Set<string>();
+
+  /** Keep a reload's temporary unregister/register gap out of mounted UI. */
+  batchChanges(): Disposable {
+    if (this.batchDepth++ === 0) this.batchBefore = new Map(this.list().map(item => [item.id, item]));
+    let disposed = false;
+    return { dispose: () => {
+      if (disposed) return; disposed = true;
+      if (--this.batchDepth) return;
+      const ids = [...this.batchIds]; this.batchIds.clear();
+      const before = this.batchBefore; this.batchBefore = new Map();
+      for (const id of ids) {
+        const previous = before.get(id), next = this.get(id);
+        if (previous === next) continue;
+        this.emit({ id, kind: !previous ? 'add' : !next ? 'remove' : 'replace' });
+      }
+    } };
+  }
 
   register(ownerId: string, item: T): Disposable {
     const id = item?.id;
@@ -139,6 +159,7 @@ export class Registry<T extends { id: string }> {
   }
 
   private emit(change: RegistryChange): void {
+    if (this.batchDepth) { this.batchIds.add(change.id); return; }
     for (const fn of [...this.listeners]) {
       try {
         fn(change);

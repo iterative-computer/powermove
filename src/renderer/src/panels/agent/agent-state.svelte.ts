@@ -1,3 +1,5 @@
+import type { UIPlacement } from './ui-placement';
+
 export type AgentPhase = 'idle' | 'prompt' | 'running' | 'preview' | 'result';
 
 export interface AgentOption {
@@ -16,6 +18,7 @@ export interface AgentMessage {
   /** Run failures render with the error treatment. */
   error?: boolean;
   fixExtensionId?: string;
+  focusLabels?: string[];
 }
 
 export interface AgentStep {
@@ -34,6 +37,7 @@ export interface AgentSnapshot {
   requestToken: number;
   conversation: AgentMessage[];
   activity: string;
+  uiPlacement?: UIPlacement | null;
   trace: TraceStep[];
   plan: Record<string, any> | null;
   run: Record<string, any> | null;
@@ -70,6 +74,7 @@ const EMPTY_SNAPSHOT: AgentSnapshot = {
   requestToken: 0,
   conversation: [],
   activity: '',
+  uiPlacement: null,
   trace: [],
   plan: null,
   run: null,
@@ -117,6 +122,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
 
   Object.assign(agentState, snapshot, {
     phase,
+    uiPlacement: phase === 'running' && snapshot.uiPlacement ? { ...snapshot.uiPlacement } : null,
     plan: snapshot.plan ? { ...snapshot.plan } : null,
     run: snapshot.run ? {
       ...snapshot.run,
@@ -134,6 +140,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     } : null,
     conversation: snapshot.conversation.map((message) => ({
       ...message,
+      focusLabels: message.focusLabels ? [...message.focusLabels] : undefined,
       attachments: message.attachments?.map((attachment) =>
         typeof attachment === 'string' ? attachment : { ...attachment })
     })),

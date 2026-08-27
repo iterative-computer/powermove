@@ -4,6 +4,10 @@ import type { CodexTraceEvent } from '../../../../shared/ipc';
 import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
+import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions } from '../../panels/agent/ui-placement';
+import { flushSync, mount, unmount } from 'svelte';
+import AgentOptions from '../../panels/agent/AgentOptions.svelte';
+import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -133,6 +137,8 @@ const S: any = {
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
   requestText: '', run: null, conversation: [], activity: '', trace: [], activeRequest: null, composerDraft: '',
+  uiPlacement: null,
+  focusPicker: null,
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
@@ -178,6 +184,7 @@ function agentUISnapshot(): AgentSnapshot {
     requestToken: S.requestToken,
     conversation: S.conversation.map((message: any) => ({ ...message })),
     activity: S.activity,
+    uiPlacement: S.uiPlacement,
     trace: S.trace,
     plan: S.plan,
     run: S.run,
@@ -219,8 +226,9 @@ registerAgentPanel(PM, {
     PM.AgentUI?.update({ focusComposer: true });
   },
   setScope: (scope: string) => {
-    S.scope = scope || 'workspace'; PM.store.set('agentScope', S.scope);
-    PM.AgentUI?.update({ focusComposer: true });
+    S.scope = panelFocusContext(scope || 'workspace', PM.WS?.current, PM.PANELS || {}).scope;
+    PM.store.set('agentScope', S.scope);
+    PM.AgentUI?.update({ flush: true });
   },
   toggleAutoApplyPanels: () => {
     S.autoApplyPanels = !S.autoApplyPanels;
@@ -252,6 +260,7 @@ function init() {
 }
 
 function openAgentPanel() {
+  PM.PanelRefiner?.close();
   if (PM.ProjectsScreen?.isOpen) PM.ProjectsScreen.hide();
   if (PM.LibraryUI?.isOpen) PM.LibraryUI.close?.();
   const workspace: any = PM.WS?.current;
@@ -581,7 +590,7 @@ function finishSelection(event: any) {
   const draft: any = S.card?.querySelector('textarea')?.value || '';
   S.region = rect;
   S.context = inspectRegion(S.points, S.region);
-  S.scope = S.context.targetPanelId ? `panel:${S.context.targetPanelId}` : 'workspace';
+  S.scope = panelScope(S.context.panels.map((panel: any) => panel.id));
   PM.store.set('agentScope', S.scope);
   const regionCapture: any = captureRegionImage(S.sceneFrame, S.region);
   S.regionImage = regionCapture?.dataUrl || null;
@@ -702,28 +711,30 @@ function pointInPolygon(point: any, polygon: any) {
 }
 
 function inspectRegion(polygon: any, rect: any) {
-  const seen: any = new Map(), panels: any = new Map();
+  const seen: any = new Map();
   S.root.style.pointerEvents = 'none';
   for (let gy: any = 0; gy < 5; gy++) for (let gx: any = 0; gx < 5; gx++) {
     const p: any = { x: rect.x + rect.width * (gx + .5) / 5, y: rect.y + rect.height * (gy + .5) / 5 };
     if (!pointInPolygon(p, polygon)) continue;
     window.document.elementsFromPoint(p.x, p.y).forEach((el: any) => {
       if (el === window.document.body || el === window.document.documentElement || el.closest('#spatial-assistant')) return;
-      const panel: any = el.closest('.panel');
-      if (panel?.dataset.panel) panels.set(panel.dataset.panel, (panels.get(panel.dataset.panel) || 0) + 1);
       const key: any = el.id || `${el.tagName}.${[...el.classList].slice(0, 3).join('.')}`;
       if (!seen.has(key) && seen.size < 18) seen.set(key, describeElement(el));
     });
   }
   S.root.style.pointerEvents = '';
-  const ranked: any = [...panels].sort((a: any, b: any) => b[1] - a[1]);
-  const targetPanelId: any = ranked[0]?.[0] || '';
+  // Exact rectangle intersections also catch narrow panels missed by the sample grid.
+  const ranked = intersectingPanels(rect, Array.from(window.document.querySelectorAll<HTMLElement>('#body .panel[data-panel]')).map(panel => {
+    const bounds = panel.getBoundingClientRect();
+    return { id: panel.dataset.panel || '', rect: { x: bounds.left, y: bounds.top, width: bounds.width, height: bounds.height } };
+  }));
+  const targetPanelId: any = ranked[0] || '';
   const target: any = targetPanelId ? PM.$(`#panel-${window.CSS.escape(targetPanelId)}`) : null;
   return {
     targetPanelId,
     targetTitle: target?.querySelector('.ptitle')?.textContent?.trim() || (targetPanelId ? PM.PANELS[targetPanelId]?.title : '') || 'interface area',
     rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-    panels: ranked.map(([id]: any) => ({ id, title: PM.PANELS[id]?.title || id })).slice(0, 5),
+    panels: ranked.map(id => ({ id, title: PM.PANELS[id]?.title || id })).slice(0, 32),
     elements: [...seen.values()],
   };
 }
@@ -839,6 +850,7 @@ function makeCardMovable(card: any, handle: any) {
 }
 
 function showComposer(draft: any = '') {
+  if (S.focusPicker) { void unmount(S.focusPicker); S.focusPicker = null; }
   S.card?.remove();
   const selectedContext: any = !!S.context.targetPanelId;
   const input: any = h('textarea', {
@@ -853,14 +865,18 @@ function showComposer(draft: any = '') {
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input); }
   });
-  const targetLabel: any = selectedContext ? `Selected · ${S.context.targetTitle}` : 'Powermove agent · full composition';
+  const targetLabel: any = selectedContext ? `Selected · ${panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {}).label}` : 'Powermove agent · full composition';
   const handle: any = h('div.spatial-target', { title: targetLabel }, targetLabel);
-  const contextLabel: any = selectedContext ? h('span.spatial-context-label', `Selected ${S.context.targetTitle}`) : null;
+  const focusHost = h('div.spatial-focus-host');
   S.card = h('div.spatial-compose.compact.full',
     handle,
-    h('div.spatial-input-row', contextLabel, input, sendBtn),
+    h('div.spatial-input-row', input, sendBtn),
+    focusHost,
     h('div.spatial-actions', status, cancelBtn));
   S.root.appendChild(S.card);
+  PM.AgentUI?.update({ flush: true });
+  S.focusPicker = mount(AgentOptions, { target: focusHost, props: { PM } });
+  flushSync();
   autosizeTextarea(input, () => {
     if (!S.card || !input.isConnected) return;
     const position: any = cardCoordinates(S.card);
@@ -889,7 +905,7 @@ function conversationReply(plan: any) {
 
 function promoteToConversation() {
   dismissOverlay(true);
-  openAgentPanel();
+  if (!PM.PanelRefiner?.activeId) openAgentPanel();
 }
 
 function setAgentAccessMode(mode: any) {
@@ -897,15 +913,6 @@ function setAgentAccessMode(mode: any) {
   S.accessMode = mode;
   PM.store.set('agentAccessMode', mode);
   PM.AgentUI?.update({ focusComposer: true });
-}
-
-function scopeLabel() {
-  if (S.scope === 'composition') return 'Composition';
-  if (S.scope?.startsWith('panel:')) {
-    const id: any = S.scope.slice(6);
-    return PM.PANELS[id]?.title || id;
-  }
-  return 'Entire workspace';
 }
 
 const TEXT_ATTACHMENT_TYPES: any = new Set([
@@ -958,6 +965,7 @@ function stopActiveRequest() {
   const active: any = S.activeRequest;
   S.activeRequest = null;
   ++S.requestToken;
+  S.uiPlacement = null;
   active?.abort();
   sealTrace();
   S.steps = []; S.activity = ''; S.plan = null; S.phase = 'conversation';
@@ -983,6 +991,17 @@ function trimTrace() {
 
 function reduceTrace(step: CodexTraceEvent) {
   if (!step || typeof step !== 'object') return;
+  if ((step.kind === 'answer' || step.kind === 'thought') && isUIPlacementMessage(step.text)) {
+    // Only explicit public commentary can place a ghost, never reasoning or tool output.
+    if (step.kind === 'answer' && S.phase === 'working') {
+      const placement = parseUIPlacement(step.text, PM.WS?.current);
+      if (placement) {
+        S.uiPlacement = placement;
+        S.activity = `Working on ${placement.label}…`;
+      }
+    }
+    return;
+  }
   if (step.kind === 'thought') {
     if (!step.text) return;
     let thought: any = S.trace.at(-1);
@@ -1102,7 +1121,7 @@ async function applyExtensionChanges(extensions: any) {
   return turns;
 }
 
-async function runAutonomousRequest({ request, token, controller, access }: any) {
+async function runAutonomousRequest({ request, token, controller, access, focus, context }: any) {
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpoint: any = {
     id: PM.uid('agent-checkpoint'),
@@ -1123,7 +1142,7 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
   PM.AgentUI?.update();
   const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
   const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
-  const raw: any = await PM.CodexBridge.request(request, null, attachedImages, {
+  const raw: any = await PM.CodexBridge.request(`${request}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
     mode: 'autonomous', access,
     projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
     projectJSON: JSON.stringify(PM.proj),
@@ -1131,7 +1150,7 @@ async function runAutonomousRequest({ request, token, controller, access }: any)
     model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
     timeoutMs: 3_600_000,
     onProgress: (summary: any) => {
-      if (token !== S.requestToken || !summary) return;
+      if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;
       S.activity = summary; PM.AgentUI?.update();
     },
     onTrace: (step: CodexTraceEvent) => {
@@ -1195,6 +1214,8 @@ async function sendRequest(input: any) {
   const typedRequest: any = input.value.trim();
   if ((!typedRequest && !S.attachments.length) || S.phase === 'applying') return;
   const request: any = typedRequest || 'Review the attached files and make the relevant editable change.';
+  const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
+  const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;
   const steering: any = S.phase === 'working';
   const previousRequest: any = S.activeRequest;
   const token: any = ++S.requestToken;
@@ -1203,10 +1224,12 @@ async function sendRequest(input: any) {
   previousRequest?.abort();
   S.requestText = request;
   S.trace = [];
+  S.uiPlacement = null;
   S.requestAttachments = S.attachments.splice(0);
   S.composerDraft = '';
   S.conversation.push({
     role: 'user', text: typedRequest || `Attached ${S.requestAttachments.length} file${S.requestAttachments.length === 1 ? '' : 's'}`,
+    focusLabels: focus.panels.map(panel => panel.title),
     attachments: S.requestAttachments.map((item: any) => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })), entering: true,
   });
   const accessAtStart: any = S.accessMode;
@@ -1234,7 +1257,7 @@ async function sendRequest(input: any) {
   promoteToConversation(); PM.AgentUI?.update({ focusComposer: true });
   try {
     if (autonomous) {
-      await runAutonomousRequest({ request, token, controller, access: accessAtStart });
+      await runAutonomousRequest({ request, token, controller, access: accessAtStart, focus, context });
       return;
     }
     /* Let the send handoff finish before the next progress render replaces the
@@ -1251,11 +1274,11 @@ async function sendRequest(input: any) {
     const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
     const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
     const raw: any = await PM.CodexBridge.request(
-      agentPrompt(request, observation, steering), responseSchema(), attachedImages,
+      agentPrompt(request, observation, steering, focus, context), responseSchema(), attachedImages,
       {
         model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
         onProgress: (summary: any) => {
-          if (token !== S.requestToken || !summary) return;
+          if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;
           S.activity = summary; PM.AgentUI?.update();
         },
         onTrace: (step: CodexTraceEvent) => {
@@ -1267,7 +1290,7 @@ async function sendRequest(input: any) {
     if (token !== S.requestToken) return;
     let decoded: any;
     try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
-    const plan: any = sanitizePlan(decoded, S.context, request);
+    const plan: any = sanitizePlan(decoded, { ...context, targetPanelId: focus.panels[0]?.id || context?.targetPanelId || '' }, request);
     if (plan.operation === 'noop') throw new Error(plan.message || 'I could not turn that into an editable change yet');
     if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'I could not prepare the composition edit');
     if (plan.kind === 'section' && !plan.section.controls.length) throw new Error('The generated section had no controls connected to editable source');
@@ -1290,6 +1313,7 @@ async function sendRequest(input: any) {
     PM.AgentUI?.update({ focusComposer: true });
   } finally {
     if (token === S.requestToken) {
+      S.uiPlacement = null;
       sealTrace();
       if (S.activeRequest === controller) S.activeRequest = null;
       PM.AgentUI?.update({ flush: true });
@@ -1343,7 +1367,7 @@ function responseSchema() {
   };
 }
 
-function agentPrompt(request: any, observation: any, steering: any = false) {
+function agentPrompt(request: any, observation: any, steering: any = false, focus: PanelFocusContext = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {}), context: any = S.context) {
   const workspace: any = PM.WS.current;
   const commands: any = Object.values(PM.commands || {}).map((c: any) => ({ id: c.id, label: c.label }));
   const attachedFiles: any = S.requestAttachments.slice(0, 6).map((item: any) => ({
@@ -1356,7 +1380,13 @@ function agentPrompt(request: any, observation: any, steering: any = false) {
     role: message.role, text: message.text,
     attachments: (message.attachments || []).map((item: any) => typeof item === 'string' ? item : item.name),
   }));
-  return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Return only the requested JSON object.
+  return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Your final response must be only the requested JSON object.
+
+${uiPlacementInstructions(workspace)}
+
+${panelFocusPrompt(focus)}
+
+${NATIVE_PANEL_DESIGN}
 
 RULES
 - ${steering ? 'This is steering for an active run. Replace the unfinished plan with one updated plan that honors the earlier request and the newest direction.' : 'This is a new run. Build one complete editable plan for the latest request.'}
@@ -1396,10 +1426,10 @@ ATTACHED FILES
 ${JSON.stringify(attachedFiles)}
 
 SELECTED REGION SEMANTICS
-${JSON.stringify(S.context)}
+${JSON.stringify(context)}
 
 ACTIVE PROMPT SCOPE
-${JSON.stringify({ scope: S.scope, label: scopeLabel() })}
+${JSON.stringify(focus)}
 
 CONVERSATION SO FAR
 ${JSON.stringify(conversation)}
@@ -2022,6 +2052,7 @@ function undoSceneRun() {
 
 function onKey(event: any) {
   if (!S.active) return;
+  if (event.target?.closest?.('.panel-focus-popup')) return;
   if (event.key === 'Escape') {
     event.preventDefault(); event.stopPropagation();
     if (S.phase === 'applying') return;
@@ -2036,6 +2067,7 @@ function dismissOverlay(preserveContext: any) {
   window.removeEventListener('keydown', onKey, true);
   window.cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
+  if (S.focusPicker) { void unmount(S.focusPicker); S.focusPicker = null; }
   S.root?.remove();
   Object.assign(S, {
     root: null, ink: null, path: null, shadePath: null, hint: null, card: null,

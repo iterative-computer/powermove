@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createTimelineRuntime } from './timeline';
+import { createTimelineRuntime, shouldDrawClipLabel } from './timeline';
 
 function timelineRegistry(): Record<string, any> {
   vi.stubGlobal('window', {
@@ -23,6 +23,13 @@ function timelineRegistry(): Record<string, any> {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('timeline runtime', () => {
+  it('keeps audio strips label-free without hiding other clip labels', () => {
+    expect(shouldDrawClipLabel('audio')).toBe(false);
+    expect(shouldDrawClipLabel('video')).toBe(true);
+    expect(shouldDrawClipLabel('image')).toBe(true);
+    expect(shouldDrawClipLabel('text')).toBe(true);
+  });
+
   it('extends the composition when the out marker passes its end', () => {
     const math = timelineRegistry().TimelineWorkArea;
     const patch = math.resize([0, 10], 1, 14.5, 10, 1 / 30);
