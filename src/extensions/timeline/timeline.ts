@@ -3,6 +3,17 @@ export function install(pm: any): void {
 createTimelineRuntime(pm);
 }
 
+/** Resolve overlapping keyframe hit targets without stealing an established
+    selection. With no selected hit, array order remains the visual/top order. */
+export function pickKeyframeHit<T extends { i?: string }>(
+  keys: T[], selectedIds: string[], distance: (key: T) => number, threshold: number,
+): T | null {
+  const hits = keys.filter((key) => distance(key) < threshold);
+  if (!hits.length) return null;
+  const selected = new Set(selectedIds);
+  return hits.find((key) => typeof key.i === 'string' && selected.has(key.i)) || hits[0]!;
+}
+
 export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
 } as const;
@@ -975,7 +986,10 @@ function trimInCommands(L: any, from: any) {
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const additive = e.shiftKey || e.metaKey;
   PM.sel.chan = r.key;
-  const hit = r.prop.kf.find((k: any) => Math.abs(t2x(r.L.from + k.t) - x) < 6);
+  const hit = pickKeyframeHit(
+    r.prop.kf, PM.sel.keys,
+    (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
+  );
   if (!hit) return marquee(e, { clickTime: true, additive });
   const wasSelected = keySelected(hit);
   if (additive) PM.selectLayers(r.L.id, true);
@@ -1009,10 +1023,10 @@ function graphDown(e: any, x: any, y: any) {
     if (handles?.ho && Math.hypot(x - handles.ho[0], y - handles.ho[1]) < 7) return dragHandle(e, k, 'eo', g, kf, L);
     if (handles?.hi && Math.hypot(x - handles.hi[0], y - handles.hi[1]) < 7) return dragHandle(e, k, 'ei', g, kf, L);
   }
-  const hit = kf.find((k: any) => {
+  const hit = pickKeyframeHit(kf, PM.sel.keys, (k: any) => {
     const pt = PM.UIState.getKeyHandles(k)?.pt;
-    return pt && Math.hypot(x - pt[0], y - pt[1]) < 8;
-  });
+    return pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity;
+  }, 8);
   if (!hit) return marquee(e, { clickTime: true, additive: e.shiftKey || e.metaKey, graph: true });
   const additive = e.shiftKey || e.metaKey;
   const wasSelected = keySelected(hit);

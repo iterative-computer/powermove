@@ -38,7 +38,36 @@ describe('legacy model install', () => {
     expect(project.layers.map((item: any) => item.name)).toEqual(['Group', 'Keep']);
     expect(layer.from).toBe(1);
     expect(Math.abs(layer.dur - 4) < 1e-9).toBe(true);
+    expect(sub.dur).toBe(4);
+    expect(sub.work).toEqual([0, 4]);
+    expect(sub.layers.map((item: any) => item.from)).toEqual([0, 1]);
     expect(PM.compOf(layer)).toBe(sub);
+  });
+
+  it('refreshes keyframe ids in every cloned animation channel', () => {
+    const PM = projectModel();
+    const project = PM.mkProject({ name: 'T' });
+    PM.proj = project;
+    const layer: any = PM.mkLayer('shader', { name: 'Animated' }, project);
+    const keyed = (id: string) => ({ v: 0, kf: [{ i: id, t: 0, v: 0 }], expr: null });
+    layer.p.opacity = keyed('transform');
+    layer.fx = [{ id: 'fx', type: 'blur', p: { amount: keyed('effect') } }];
+    layer.masks = [{ id: 'mask', p: { x: keyed('mask') } }];
+    layer.d.uniforms = { amount: keyed('uniform') };
+    layer.transitionIn = { type: 'wipe', p: { angle: keyed('transition') } };
+
+    const clone = PM.cloneLayer(layer);
+    const ids = [
+      clone.p.opacity.kf[0].i, clone.fx[0].p.amount.kf[0].i,
+      clone.masks[0].p.x.kf[0].i, clone.d.uniforms.amount.kf[0].i,
+      clone.transitionIn.p.angle.kf[0].i,
+    ];
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).not.toContain('transform');
+    expect(ids).not.toContain('effect');
+    expect(ids).not.toContain('mask');
+    expect(ids).not.toContain('uniform');
+    expect(ids).not.toContain('transition');
   });
 
   it('garbage-collects a composition with its last precomp layer', () => {

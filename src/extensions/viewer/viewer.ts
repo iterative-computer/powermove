@@ -9,9 +9,130 @@ export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: true,
 } as const;
 
+export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+type Point = { x: number; y: number };
+type Bounds = { x0: number; y0: number; x1: number; y1: number; w: number; h: number };
+type Corner = readonly [number, number];
+type AffineMatrix = readonly [number, number, number, number, number, number];
+
+const HANDLE_NAMES: readonly ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+const RESIZE_CURSORS = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'] as const;
+const HANDLE_CURSOR_ANGLE: Record<ResizeHandle, number> = {
+  e: 0, se: 45, s: 90, sw: 135, w: 180, nw: 225, n: 270, ne: 315,
+};
+const ROTATE_CURSOR = `url('data:image/svg+xml,${encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 26 26'>" +
+  "<path d='M13 4a9 9 0 1 0 9 9' fill='none' stroke='black' stroke-width='4.5' stroke-linecap='round'/>" +
+  "<path d='M13 4a9 9 0 1 0 9 9' fill='none' stroke='white' stroke-width='2' stroke-linecap='round'/>" +
+  "<path d='M13 0l-.3 8.4 6-3.9z' fill='white' stroke='black' stroke-width='1.4' stroke-linejoin='round'/>" +
+  '</svg>',
+)}') 13 13, auto`;
+
+function applyMatrix(m: AffineMatrix, point: Point): Point {
+  return {
+    x: m[0] * point.x + m[2] * point.y + m[4],
+    y: m[1] * point.x + m[3] * point.y + m[5],
+  };
+}
+
+function invertPoint(m: AffineMatrix, point: Point): Point | null {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (Math.abs(det) < 1e-9) return null;
+  const dx = point.x - m[4], dy = point.y - m[5];
+  return {
+    x: (dx * m[3] - dy * m[2]) / det,
+    y: (dy * m[0] - dx * m[1]) / det,
+  };
+}
+
+function pointInBounds(bounds: Bounds, corner: Corner): Point {
+  return {
+    x: bounds.x0 + bounds.w * corner[0],
+    y: bounds.y0 + bounds.h * corner[1],
+  };
+}
+
+/** Figma-style resize cursor projected through the selection's on-screen angle. */
+export function resizeCursorForHandle(matrix: AffineMatrix, handle: ResizeHandle): string {
+  const axis = Math.atan2(matrix[1], matrix[0]) * 180 / Math.PI;
+  let angle = (HANDLE_CURSOR_ANGLE[handle] + axis) % 180;
+  if (angle < 0) angle += 180;
+  return RESIZE_CURSORS[Math.round(angle / 45) % RESIZE_CURSORS.length]!;
+}
+
+/** Canvas-handle policy mirrors Figma/Motioner semantics: typography and
+    intrinsic media never stretch through ordinary selection handles. */
+export function resizeLocksAspect(type: string, shiftKey = false): boolean {
+  return shiftKey || type === 'text' || type === 'image' || type === 'video';
+}
+
+export interface ResizeCalculation {
+  scaleX: number;
+  scaleY: number;
+  pivotLocal: Point;
+}
+
+/**
+ * Resolve a resize in the transform's original local coordinate system.
+ * The caller keeps pivotLocal fixed in world space after applying the scales.
+ */
+export function calculateResize(
+  bounds: Bounds,
+  corner: Corner,
+  pointerLocal: Point,
+  grabOffset: Point,
+  startScale: Point,
+  options: { fromCenter?: boolean; lockAspect?: boolean; minScale?: number } = {},
+): ResizeCalculation {
+  const activeX = corner[0] !== .5;
+  const activeY = corner[1] !== .5;
+  const center = pointInBounds(bounds, [.5, .5]);
+  const pivotCorner: Corner = options.fromCenter
+    ? [.5, .5]
+    : [activeX ? 1 - corner[0] : .5, activeY ? 1 - corner[1] : .5];
+  const pivotLocal = pointInBounds(bounds, pivotCorner);
+  const handleLocal = pointInBounds(bounds, corner);
+  const grabbed = { x: pointerLocal.x - grabOffset.x, y: pointerLocal.y - grabOffset.y };
+  const dx = handleLocal.x - pivotLocal.x;
+  const dy = handleLocal.y - pivotLocal.y;
+  let factorX = activeX && Math.abs(dx) > 1e-9 ? (grabbed.x - pivotLocal.x) / dx : 1;
+  let factorY = activeY && Math.abs(dy) > 1e-9 ? (grabbed.y - pivotLocal.y) / dy : 1;
+
+  if (options.lockAspect) {
+    let uniform: number;
+    if (activeX && activeY) {
+      /* Orthogonally project onto the original corner diagonal. This behaves
+         continuously for both growth and shrinkage instead of choosing an axis. */
+      uniform = ((grabbed.x - pivotLocal.x) * dx + (grabbed.y - pivotLocal.y) * dy) /
+        Math.max(1e-9, dx * dx + dy * dy);
+    } else uniform = activeX ? factorX : factorY;
+    factorX = uniform;
+    factorY = uniform;
+  }
+
+  const minimum = Math.max(.001, options.minScale ?? .1);
+  const scaleX = Math.max(minimum, startScale.x * factorX);
+  const scaleY = Math.max(minimum, startScale.y * factorY);
+  return { scaleX, scaleY, pivotLocal: options.fromCenter ? center : pivotLocal };
+}
+
 /** Compatibility entry point for registry-based tests and legacy installers. */
 export function install(PM: any): void {
   createViewerRuntime(PM);
+}
+
+/** Geometry hit test for selection-preserving direct manipulation. The active
+    selection owns a drag inside its visible transform box even when a
+    full-frame layer is stacked above it. */
+export function layerContainsPoint(PM: any, L: any, x: number, y: number, T: number): boolean {
+  const b = PM.GL.bounds(L, T); if (!b) return false;
+  const m = PM.worldMatrix(L, T);
+  const det = m[0] * m[3] - m[1] * m[2]; if (Math.abs(det) < 1e-9) return false;
+  const dx = x - m[4], dy = y - m[5];
+  const lx = (dx * m[3] - dy * m[2]) / det;
+  const ly = (dy * m[0] - dx * m[1]) / det;
+  return lx >= b.x0 && lx <= b.x1 && ly >= b.y0 && ly <= b.y1;
 }
 
 /** Install the legacy viewer controller against the host registry. */
@@ -72,7 +193,7 @@ window.addEventListener('resize', () => V.layout());
 PM.bus.on('layout:applied', () => V.layout());
 
 /* comp px <-> screen px */
-const toComp = (e: any) => {
+const toComp = (e: any): [number, number] => {
   const r = V.inner.getBoundingClientRect();
   return [(e.clientX - r.left) / V.shown, (e.clientY - r.top) / V.shown];
 };
@@ -107,25 +228,30 @@ function drawOverlay() {
     const b = PM.GL.bounds(L, PM.time);
     if (!b) continue;
     const m = PM.worldMatrix(L, PM.time);
-    c.save();
-    c.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+    const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map((corner) =>
+      applyMatrix(m, pointInBounds(b, corner)));
     c.strokeStyle = 'rgba(255,107,26,.95)';
-    c.lineWidth = 1.4 / S / Math.max(.05, Math.hypot(m[0], m[1]));
-    c.strokeRect(b.x0, b.y0, b.w, b.h);
-    /* handles */
-    const hs = 5 / S / Math.max(.05, Math.hypot(m[0], m[1]));
+    c.lineWidth = 1.4 / Math.max(.02, V.shown);
+    c.beginPath();
+    c.moveTo(corners[0]!.x, corners[0]!.y);
+    corners.slice(1).forEach((point) => c.lineTo(point.x, point.y));
+    c.closePath();
+    c.stroke();
+    /* Handles are UI chrome, not layer content: keep them square and a
+       constant screen size under zoom, rotation, skew, and nonuniform scale. */
+    const hs = 5 / Math.max(.02, V.shown);
     c.fillStyle = '#fff';
     c.strokeStyle = 'rgba(0,0,0,.45)';
+    c.lineWidth = 1 / Math.max(.02, V.shown);
     HANDLES.forEach(([hx, hy]: any) => {
-      const x = b.x0 + b.w * hx, y = b.y0 + b.h * hy;
-      c.fillRect(x - hs, y - hs, hs * 2, hs * 2);
-      c.strokeRect(x - hs, y - hs, hs * 2, hs * 2);
+      const point = applyMatrix(m, pointInBounds(b, [hx, hy]));
+      c.fillRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
+      c.strokeRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
     });
-    c.restore();
   }
   c.restore();
 }
-const HANDLES: any = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
+const HANDLES: readonly (readonly [number, number])[] = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
 const MOVE_DRAG_THRESHOLD_PX = 3;
 
 function drawSnapGuides(c: any, S: any, p: any) {
@@ -235,12 +361,16 @@ function worldDeltaToLocal(L: any, T: any, dx: any, dy: any) {
 
 Object.assign(V, {
   snapAxis, worldBounds, unionBounds, snapshotSnapTargets, alignmentSnap,
-  alignmentGuideChanged, passedMoveDragThreshold,
+  alignmentGuideChanged, passedMoveDragThreshold, calculateResize, resizeCursorForHandle,
+  resizeLocksAspect,
+  layerContainsPoint: (L: any, x: any, y: any, T: any) => layerContainsPoint(PM, L, x, y, T),
 });
 
 /* ── direct manipulation ───────────────────────────────── */
 function bindStage(stage: any, inner: any) {
   stage.addEventListener('pointerdown', onDown);
+  inner.addEventListener('pointermove', updateStageCursor);
+  inner.addEventListener('pointerleave', () => { inner.style.cursor = ''; });
   stage.addEventListener('wheel', (e: any) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
@@ -256,6 +386,26 @@ function bindStage(stage: any, inner: any) {
   });
 }
 
+function cursorForHit(L: any, hit: any, T: any) {
+  if (hit.rotate) return ROTATE_CURSOR;
+  return resizeCursorForHandle(PM.worldMatrix(L, T), hit.handle);
+}
+
+function updateStageCursor(e: any) {
+  if (!V.inner) return;
+  if (PM.tool === 'hand' || e.metaKey) { V.inner.style.cursor = 'grab'; return; }
+  if (PM.tool === 'zoom') { V.inner.style.cursor = e.shiftKey ? 'zoom-out' : 'zoom-in'; return; }
+  if (PM.tool && PM.tool !== 'select') { V.inner.style.cursor = 'crosshair'; return; }
+  const [x, y] = toComp(e), T = PM.time;
+  const selected = PM.firstSel();
+  if (selected && !selected.lock && PM.active(selected, T)) {
+    const hit = handleAt(selected, x, y, T);
+    if (hit) { V.inner.style.cursor = cursorForHit(selected, hit, T); return; }
+    if (layerContainsPoint(PM, selected, x, y, T)) { V.inner.style.cursor = 'move'; return; }
+  }
+  V.inner.style.cursor = 'default';
+}
+
 function startPan(e: any) {
   const start = [V.pan[0], V.pan[1]];
   V.fit = false;
@@ -269,7 +419,7 @@ function onDown(e: any) {
   if (e.button !== 0) return;
 
   /* AE-style tool override: Hand pans, Zoom zooms. Space/⌘ temporarily = Hand. */
-  const tool = (PM.tool === 'hand' || PM.tool === 'zoom') ? PM.tool : (e.metaKey || e.altKey ? 'hand' : 'select');
+  const tool = (PM.tool === 'hand' || PM.tool === 'zoom') ? PM.tool : (e.metaKey ? 'hand' : 'select');
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') {
     const dir = e.shiftKey ? -1 : 1;
@@ -289,6 +439,16 @@ function onDown(e: any) {
     if (hit) return startTransform(e, sel, hit, T);
   }
   const L = PM.GL.pick(x, y, T);
+  const selected = PM.selLayers().filter((layer: any) =>
+    !layer.lock && PM.active(layer, T) && PM.TYPE_META?.[layer.type]?.pickable !== false);
+  if (selected.some((layer: any) => layerContainsPoint(PM, layer, x, y, T))) {
+    const selectedIds = new Set(selected.map((layer: any) => layer.id));
+    return startMove(e, selected, T, {
+      click: () => {
+        if (L && !selectedIds.has(L.id)) PM.selectLayers(L.id, e.shiftKey);
+      },
+    });
+  }
   if (!L) { if (!e.shiftKey) PM.selectLayers([]); return; }
   PM.selectLayers(L.id, e.shiftKey);
   startMove(e, PM.selLayers().filter((l: any) => !l.lock), T);
@@ -297,23 +457,25 @@ function onDown(e: any) {
 function handleAt(L: any, x: any, y: any, T: any) {
   const b = PM.GL.bounds(L, T); if (!b) return null;
   const m = PM.worldMatrix(L, T);
-  const det = m[0] * m[3] - m[1] * m[2]; if (!det) return null;
-  const dx = x - m[4], dy = y - m[5];
-  const lx = (dx * m[3] - dy * m[2]) / det, ly = (dy * m[0] - dx * m[1]) / det;
-  const tol = 9 / (V.shown * Math.max(.05, Math.hypot(m[0], m[1])));
+  const tolerance = 9 / Math.max(.02, V.shown);
   for (let i = 0; i < HANDLES.length; i++) {
-    const hx = b.x0 + b.w * HANDLES[i][0], hy = b.y0 + b.h * HANDLES[i][1];
-    if (Math.abs(lx - hx) < tol && Math.abs(ly - hy) < tol) return { i, corner: HANDLES[i] };
+    const corner = HANDLES[i]!;
+    const point = applyMatrix(m, pointInBounds(b, corner));
+    if (Math.hypot(x - point.x, y - point.y) <= tolerance) {
+      return { i, corner, handle: HANDLE_NAMES[i]! };
+    }
   }
-  /* just outside a corner → rotate */
-  for (const [hx0, hy0] of [[0, 0], [1, 0], [1, 1], [0, 1]] as any) {
-    const hx = b.x0 + b.w * hx0, hy = b.y0 + b.h * hy0;
-    if (Math.abs(lx - hx) < tol * 2.4 && Math.abs(ly - hy) < tol * 2.4) return { rotate: true };
+  /* Just outside a corner rotates; the selection interior remains a move hit. */
+  if (!layerContainsPoint(PM, L, x, y, T)) {
+    for (const corner of [[0, 0], [1, 0], [1, 1], [0, 1]] as any) {
+      const point = applyMatrix(m, pointInBounds(b, corner));
+      if (Math.hypot(x - point.x, y - point.y) <= tolerance * 2.4) return { rotate: true };
+    }
   }
   return null;
 }
 
-function startMove(e: any, layers: any, T: any) {
+function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
   const start = layers.map((L: any) => ({ L, x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T) }));
   const selectedIds = new Set(layers.map((L: any) => L.id));
@@ -352,22 +514,51 @@ function startMove(e: any, layers: any, T: any) {
       V.guides = nextGuides;
       PM.invalidate();
     },
-    up: () => { clearGuides(); moved ? PM.Edit.commit('Move layer') : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    up: () => {
+      clearGuides();
+      if (moved) PM.Edit.commit('Move layer');
+      else { PM.Edit.cancel(); options.click?.(); }
+      PM.Inspector?.refresh?.();
+    },
     cancel: () => { clearGuides(); PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
   });
 }
 
 function startTransform(e: any, L: any, hit: any, T: any) {
   const b = PM.GL.bounds(L, T);
-  const s0 = { sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T), r: PM.ev(L, 'rotation', T) };
-  const m = PM.worldMatrix(L, T);
+  if (!b) return;
+  const s0 = {
+    sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T),
+    x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T),
+    r: PM.ev(L, 'rotation', T),
+  };
+  const textSize0 = L.type === 'text' ? Math.max(4, Number(L.d?.size) || 4) : null;
+  const m = [...PM.worldMatrix(L, T)] as [number, number, number, number, number, number];
   const cx = m[4], cy = m[5];
   const r0 = V.inner.getBoundingClientRect();
   const a0 = Math.atan2((e.clientY - r0.top) / V.shown - cy, (e.clientX - r0.left) / V.shown - cx);
-  PM.Edit.begin(hit.rotate ? 'Rotate layer' : 'Scale layer', { origin: 'canvas' });
+  const pointerStart = { x: (e.clientX - r0.left) / V.shown, y: (e.clientY - r0.top) / V.shown };
+  const pointerStartLocal = invertPoint(m, pointerStart);
+  const handleLocal = hit.corner ? pointInBounds(b, hit.corner) : null;
+  const grabOffset = pointerStartLocal && handleLocal
+    ? { x: pointerStartLocal.x - handleLocal.x, y: pointerStartLocal.y - handleLocal.y }
+    : { x: 0, y: 0 };
+  const applied = { sx: s0.sx, sy: s0.sy, x: s0.x, y: s0.y };
+  let appliedTextSize = textSize0;
+  const applyValue = (path: string, value: number, key: keyof typeof applied) => {
+    if (Math.abs(value - applied[key]) < .0005) return;
+    setOrKey(L, path, value, T);
+    applied[key] = value;
+  };
+  const applyTextSize = (value: number) => {
+    if (appliedTextSize == null || Math.abs(value - appliedTextSize) < .0005) return;
+    PM.Edit.dispatch({ type: 'set_content', target: L.id, patch: { size: value } });
+    appliedTextSize = value;
+  };
+  PM.Edit.begin(hit.rotate ? 'Rotate layer' : textSize0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
   let moved = false;
   PM.drag(e, {
-    cursor: hit.rotate ? 'grabbing' : 'nwse-resize',
+    cursor: cursorForHit(L, hit, T),
     move: (dx: any, dy: any, ev: any) => {
       moved = true;
       if (hit.rotate) {
@@ -376,14 +567,46 @@ function startTransform(e: any, L: any, hit: any, T: any) {
         if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
         setOrKey(L, 'rotation', PM.round(deg, 2), T);
       } else {
-        const sgnX = hit.corner[0] === 0 ? -1 : hit.corner[0] === 1 ? 1 : 0;
-        const sgnY = hit.corner[1] === 0 ? -1 : hit.corner[1] === 1 ? 1 : 0;
-        const kx = sgnX ? 1 + (dx / V.shown) * sgnX / Math.max(1, b.w) * 2 : 1;
-        const ky = sgnY ? 1 + (dy / V.shown) * sgnY / Math.max(1, b.h) * 2 : 1;
-        let nx = s0.sx * kx, ny = s0.sy * ky;
-        if (!ev.altKey) { const k = sgnX && sgnY ? Math.max(kx, ky) : (sgnX ? kx : ky); nx = s0.sx * k; ny = s0.sy * k; }
-        setOrKey(L, 'scale.x', PM.round(nx, 2), T);
-        setOrKey(L, 'scale.y', PM.round(ny, 2), T);
+        const pointerWorld = { x: (ev.clientX - r0.left) / V.shown, y: (ev.clientY - r0.top) / V.shown };
+        const pointerLocal = invertPoint(m, pointerWorld);
+        if (!pointerLocal) return;
+        const next = calculateResize(b, hit.corner, pointerLocal, grabOffset,
+          { x: s0.sx, y: s0.sy }, {
+            fromCenter: ev.altKey,
+            lockAspect: resizeLocksAspect(L.type, ev.shiftKey),
+          });
+        const fixedWorld = applyMatrix(m, next.pivotLocal);
+
+        let renderedPivotLocal = next.pivotLocal;
+        if (textSize0 != null) {
+          /* Text owns its visual size through the typography model. Canvas
+             resizing changes Size; Scale X/Y remain explicit transform
+             overrides instead of becoming an accidental second font size. */
+          const factor = next.scaleX / Math.max(.001, s0.sx);
+          applyTextSize(PM.round(Math.max(4, textSize0 * factor), 2));
+          const resizedBounds = PM.GL.bounds(L, T);
+          if (resizedBounds) {
+            const pivotRatio: Corner = [
+              b.w ? (next.pivotLocal.x - b.x0) / b.w : .5,
+              b.h ? (next.pivotLocal.y - b.y0) / b.h : .5,
+            ];
+            renderedPivotLocal = pointInBounds(resizedBounds, pivotRatio);
+          }
+        } else {
+          applyValue('scale.x', PM.round(next.scaleX, 3), 'sx');
+          applyValue('scale.y', PM.round(next.scaleY, 3), 'sy');
+        }
+        /* Every move starts from the gesture snapshot. This prevents the
+           previous correction from accumulating as the pointer changes. */
+        applyValue('position.x', s0.x, 'x');
+        applyValue('position.y', s0.y, 'y');
+        const resizedMatrix = PM.worldMatrix(L, T);
+        const renderedPivot = applyMatrix(resizedMatrix, renderedPivotLocal);
+        const [positionDx, positionDy] = worldDeltaToLocal(
+          L, T, fixedWorld.x - renderedPivot.x, fixedWorld.y - renderedPivot.y,
+        );
+        applyValue('position.x', PM.round(s0.x + positionDx, 3), 'x');
+        applyValue('position.y', PM.round(s0.y + positionDy, 3), 'y');
       }
       PM.invalidate();
     },

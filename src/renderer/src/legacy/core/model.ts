@@ -216,10 +216,17 @@ PM.precompose = (ids: any, name: any) => {
   sub.layers.forEach((l: any) => { if (l.parent && !ids.includes(l.parent)) l.parent = null; });
   const start = Math.min(...sel.map((l: any) => l.from));
   const end = Math.max(...sel.map((l: any) => l.from + l.dur));
+  const span = Math.max(.04, end - start);
+  /* Nested rendering receives layer-local time (T - precomp.from), so children
+     must be rebased to the nested composition's zero. Keeping root-relative
+     starts here made every non-zero precompose silently disappear. */
+  sub.layers.forEach((l: any) => { l.from = Math.max(0, l.from - start); });
+  sub.dur = span;
+  sub.work = [0, span];
   const idx = Math.min(...sel.map((l: any) => PM.proj.layers.indexOf(l)));
   const L = PM.mkLayer('precomp', { name: name || ('Precomp ' + (Object.keys(PM.proj.comps).length + 1)), d: { comp: compId, w: PM.proj.w, h: PM.proj.h } }, PM.proj);
   L.from = Math.max(0, Math.min(start, end - .04));
-  L.dur = Math.max(.04, end - L.from);
+  L.dur = span;
   PM.proj.comps[compId] = sub;
   PM.proj.layers = PM.proj.layers.filter((l: any) => !ids.includes(l.id));
   PM.proj.layers.forEach((l: any) => { if (l.parent && ids.includes(l.parent)) l.parent = null; });
@@ -242,7 +249,12 @@ PM.cloneLayer = (L: any) => {
   const c = JSON.parse(JSON.stringify(L));
   c.id = uid('L');
   c.name = L.name.replace(/ (\d+)$/, '') + ' ' + (PM.proj.layers.filter((x: any) => x.name.startsWith(L.name.replace(/ \d+$/, ''))).length + 1);
-  for (const k in c.p) c.p[k].kf.forEach((kf: any) => kf.i = uid('k'));
+  const renew = (prop: any) => (prop?.kf || []).forEach((kf: any) => { kf.i = uid('k'); });
+  Object.values(c.p || {}).forEach(renew);
+  (c.fx || []).forEach((fx: any) => Object.values(fx.p || {}).forEach(renew));
+  (c.masks || []).forEach((mask: any) => Object.values(mask.p || {}).forEach(renew));
+  Object.values(c.d?.uniforms || {}).forEach(renew);
+  for (const field of ['transitionIn', 'transitionOut']) Object.values(c[field]?.p || {}).forEach(renew);
   return c;
 };
 
