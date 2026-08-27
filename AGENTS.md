@@ -4,8 +4,8 @@ Explain technical work in plain language. Assume the user has very little coding
 
 ## Interface-panel changes
 
-After changing anything that affects a visible interface panel, fully quit and reopen the Powermove development app before reporting the work as complete. This includes panel components, registration, layout, styling, and built-in panel extensions under `src/extensions/`.
+Interface-panel changes must update in place without reopening Powermove. Keep the current app process, window, and editing session open. This includes panel components, registration, layout, styling, and built-in panel extensions under `src/extensions/`.
 
-Start the fresh app from the repository root with `npm run dev`, then verify the requested change in the newly opened Electron window. Hot reload, unit tests, or a browser preview alone do not satisfy this requirement.
+Use the existing renderer hot reload or extension reload path and verify the requested change in the already-open Electron window. Do not quit, relaunch, or force a whole-window reload just to display a panel change. If the live update fails, investigate it instead of masking the problem with a restart. If a change genuinely cannot take effect without restarting, explain why and ask the user first.
 
 Preserve unrelated working-tree changes, and commit only files that belong to the requested change.
