@@ -59,7 +59,9 @@ function scaleScene(PM: PMRegistry, expression: string | null = null): void {
 }
 
 function evaluateSecond(PM: PMRegistry): { acc: number; ms: number } {
-  const startedAt = performance.now();
+  /* CPU time keeps this scale contract stable when Vitest compiles other files
+     in parallel; wall time was mostly measuring scheduler contention. */
+  const startedAt = process.threadCpuUsage();
   let acc = 0;
   for (let frame = 0; frame < 30; frame++) {
     const time = frame / 30;
@@ -75,7 +77,8 @@ function evaluateSecond(PM: PMRegistry): { acc: number; ms: number } {
       acc += PM.worldMatrix(layer, time)[4];
     }
   }
-  return { acc, ms: performance.now() - startedAt };
+  const used = process.threadCpuUsage(startedAt);
+  return { acc, ms: (used.user + used.system) / 1000 };
 }
 
 function medianBenchmark(PM: PMRegistry): number {
@@ -87,12 +90,13 @@ function medianBenchmark(PM: PMRegistry): number {
 }
 
 function calibrateOnce(): { acc: number; ms: number } {
-  const startedAt = performance.now();
+  const startedAt = process.threadCpuUsage();
   let acc = 0;
   for (let index = 0; index < CALIBRATION_ITERATIONS; index++) {
     acc += calibrationValues[index & 1023]! * 1.000001 + (index & 7);
   }
-  return { acc, ms: performance.now() - startedAt };
+  const used = process.threadCpuUsage(startedAt);
+  return { acc, ms: (used.user + used.system) / 1000 };
 }
 
 function calibrationMedian(): number {
