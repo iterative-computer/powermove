@@ -1,6 +1,21 @@
 /* Ported from js/gl/compositor.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
+/**
+ * Which uniform an effect/transition param binds to. Kernel-generated shaders
+ * declare `u_<param>`; legacy raw shaders declare the positional `u_p<i>` (or
+ * `u_c<i>` for colors). Named wins when the linked program actually has it.
+ */
+export function paramUniformName(pd: { k: string; type?: string }, index: number, hasNamed: boolean): string {
+  if (hasNamed) return 'u_' + pd.k;
+  return (pd.type === 'color' ? 'u_c' : 'u_p') + index;
+}
+
+/** Missing placeholders preserve project data but have no shader to render. */
+export function hasRenderableEffects(effects: Array<{ on?: boolean; missing?: boolean }>): boolean {
+  return effects.some((effect) => effect.on && effect.missing !== true);
+}
+
 export function install(PM: PMRegistry): void {
 
 const GL: any = {
@@ -77,6 +92,17 @@ function setU(p: any, n: any, v: any) {
   else gl.uniform4f(l, v[0], v[1], v[2], v[3]);
 }
 function setI(p: any, n: any, v: any) { const l = uloc(p, n); if (l !== null) GL.gl.uniform1i(l, v); }
+
+/* Effect/transition params bind by NAME (`u_amount`) — that is what the kernel
+   generates for extension shaders. Legacy raw shaders declare the positional
+   `u_p<i>`/`u_c<i>` names instead, so fall back to those when the named uniform
+   is not present in the linked program. */
+function setParam(p: any, pd: any, index: number, value: any) {
+  const name = paramUniformName(pd, index, uloc(p, 'u_' + pd.k) !== null);
+  if (pd.type === 'color') setU(p, name, PM.hex2rgb(String(value)));
+  else if (pd.type === 'toggle') setU(p, name, [value ? 1 : 0]);
+  else setU(p, name, [Number(value) || 0]);
+}
 
 /* ── FBO pool ──────────────────────────────────────────── */
 function grab(w: any, h: any) {
@@ -277,7 +303,7 @@ function contentQuad(L: any, T: any, W: any, H: any) {
       /* Integrator fix (Phase 3b): the legacy source referenced an undeclared `gl`
          here, so every precomp render threw a ReferenceError. Use the context
          the shader branch above uses. */
-      GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND);
+      GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND); GL.stats.passes++;
       free(inner);
     } finally {
       pmScopePop();
@@ -324,7 +350,9 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any) {
 function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
   let cur = srcF;
   for (const fx of L.fx) {
-    if (!fx.on) continue;
+    /* `missing` marks an effect whose type is not registered (the extension
+       providing it is off or gone). Skip it and keep its data intact. */
+    if (!fx.on || fx.missing) continue;
     const def = PM.FX[fx.type];
     if (!def) continue;
     const key = 'fx:' + fx.type;
@@ -342,11 +370,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
       g.u('u_texel', 1 / W, 1 / H);
       g.u('u_time', T);
       setI(p, 'u_pass', pass);
-      def.params.forEach((pd: any, i: any) => {
-        const val = PM.evP(L, fx.p[pd.k], T, pd.k);
-        if (pd.type === 'color') setU(p, 'u_c' + i, PM.hex2rgb(String(val)));
-        else setU(p, 'u_p' + i, [Number(val) || 0]);
-      });
+      def.params.forEach((pd: any, i: any) => setParam(p, pd, i, PM.evP(L, fx.p[pd.k], T, pd.k)));
       GL.gl.disable(GL.gl.BLEND);
       draw();
       GL.gl.enable(GL.gl.BLEND);
@@ -426,6 +450,63 @@ const BLEND_ID = { normal: 0, add: 1, screen: 2, multiply: 3, overlay: 4, softli
 const PC_MAX_DEPTH = 6;
 let pcDepth = 0;
 
+function copyFbo(srcF: any, W: any, H: any) {
+  const out = grab(W, H);
+  bind(out); clear();
+  const p = program('copy', PM.FRAG_COPY);
+  if (p) {
+    const g = use(p);
+    bindTex(0, srcF.tex); setI(p, 'u_tex', 0);
+    g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+    GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND); GL.stats.passes++;
+  }
+  return out;
+}
+
+function activeTransition(L: any, T: any) {
+  const start = Number(L.from) || 0;
+  const length = Math.max(0, Number(L.dur) || 0);
+  const end = start + length;
+  const at = (transition: any, edge: 'in' | 'out') => {
+    if (!transition || transition.missing || typeof transition.type !== 'string') return null;
+    const def = PM.transitionDef?.(transition.type);
+    if (!def) return null;
+    const dur = Math.min(length, Math.max(.02, Number(transition.dur) || .5));
+    if (dur <= 0) return null;
+    if (edge === 'in' && T >= start && T <= start + dur) {
+      return { transition, def, edge, prog: PM.clamp((T - start) / dur, 0, 1) };
+    }
+    if (edge === 'out' && T >= end - dur && T <= end) {
+      return { transition, def, edge, prog: PM.clamp((T - (end - dur)) / dur, 0, 1) };
+    }
+    return null;
+  };
+  return at(L.transitionIn, 'in') || at(L.transitionOut, 'out');
+}
+
+function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: any, W: any, H: any) {
+  const key = 'tr:' + activeTr.transition.type;
+  const p = program(key, activeTr.def.frag);
+  if (!p) return null;
+
+  const out = grab(W, H);
+  bind(out); clear();
+  const g = use(p);
+  const from = activeTr.edge === 'in' ? before : withLayer;
+  const to = activeTr.edge === 'in' ? withLayer : before;
+  bindTex(0, from.tex); setI(p, 'u_from', 0);
+  bindTex(1, to.tex); setI(p, 'u_to', 1);
+  g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+  g.u('u_texel', 1 / W, 1 / H); g.u('u_time', T); g.u('u_prog', activeTr.prog);
+  (activeTr.def.params || []).forEach((pd: any, index: number) => {
+    const prop = activeTr.transition.p && activeTr.transition.p[pd.k];
+    setParam(p, pd, index, prop ? PM.evP(L, prop, T, pd.k) : pd.def);
+  });
+  GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND);
+  GL.stats.passes++;
+  return out;
+}
+
 /** Render a whole project (main or nested) into a pooled FBO and return it.
     opt.transparent skips the background fill (nested comps composite over). */
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
@@ -463,13 +544,14 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     const alpha = PM.worldOpacity(L, T);
     if (alpha <= .001) continue;
 
-    const hasFx = L.fx.some((f: any) => f.on);
+    const hasFx = hasRenderableEffects(L.fx);
     const hasMasks = (L.masks || []).some((m: any) => m.on !== false);
     const blend = (BLEND_ID as any)[L.blend] || 0;
     const mb = L.mblur && opt.mblur !== false;
+    const transition = activeTransition(L, T);
 
     /* fast path: no masks, no effects, normal blend, no motion blur → straight into acc */
-    if (!hasMasks && !hasFx && !blend && !mb) {
+    if (!hasMasks && !hasFx && !blend && !mb && !transition) {
       bind(acc);
       drawContent(L, T, W, H, alpha);
       continue;
@@ -489,8 +571,10 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     if (hasMasks) res = applyMasks(L, T, res, W, H);
     if (hasFx) res = runEffects(L, T, res, W, H);
 
+    let withLayer = acc;
     if (!blend) {
-      bind(acc);
+      if (transition) withLayer = copyFbo(acc, W, H);
+      bind(withLayer);
       const p = program('copyA', PM.FRAG_DRAW);
       const g = use(p);
       bindTex(0, res.tex); setI(p, 'u_tex', 0);
@@ -507,7 +591,14 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
       g.u('u_alpha', 1); setI(p, 'u_blend', blend);
       gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
-      free(acc); acc = nxt;
+      withLayer = nxt;
+      if (!transition) { free(acc); acc = nxt; }
+    }
+    if (transition) {
+      const transitioned = runTransition(L, T, transition, acc, withLayer, W, H);
+      free(acc);
+      acc = transitioned || withLayer;
+      if (transitioned) free(withLayer);
     }
     if (res !== lf) free(res);
     free(lf);

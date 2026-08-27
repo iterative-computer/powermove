@@ -1,13 +1,57 @@
-/* Ported from js/ui/shortcuts.js — behavior-preserving. */
+/* Ported from js/ui/shortcuts.js — behavior-preserving.
+ *
+ * The command table lives in the kernel now:
+ *   - `def()` registers a `CommandDefinition` under owner `legacy`;
+ *     `PM.commands` is a live view over `kernel.commands` in the old
+ *     `{ id, label, kb, run, cat }` shape (see kernel-view.ts).
+ *   - keybindings are contributed by the built-in `keymap-default` extension
+ *     and dispatched by the one key listener the kernel installs.
+ */
+import type { CommandDefinition } from '../../kernel/api';
+import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
+
+export const LEGACY_OWNER = 'legacy';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
+const kernel = ensureKernel(PM);
 
-const C: any = {};
-PM.commands = C;
-const def: any = (id?: any, label?: any, kb?: any, run?: any, cat: any = 'General') => { C[id] = { id, label, kb, run, cat }; };
-PM.cmd = (id?: any, ...a: any[]) => { const c: any = C[id]; if (c) return c.run(...a); console.warn('no cmd', id); };
+/* One live registration per command id: re-registering (`def` on reinstall,
+   or `PM.commands.palette.run = …` from overlays/install.ts) replaces rather
+   than stacking, so the legacy layer never buries its own entries. */
+const owned = new Map<string, { dispose(): void }>();
+const put = (definition: CommandDefinition): void => {
+  owned.get(definition.id)?.dispose();
+  owned.set(definition.id, kernel.commands.register(LEGACY_OWNER, definition));
+};
+
+const def: any = (id?: any, label?: any, kb?: any, run?: any, cat: any = 'General', opts: any = {}) => {
+  put({
+    id, label, kb, category: cat,
+    /* The kernel key listener treats a `false` return as "not handled" and
+       skips preventDefault. Legacy always prevented the default, so a command
+       that happens to return false must not change that. */
+    run: (...a: any[]) => { const result = run(...a); return result === false ? undefined : result; },
+    ...(opts.when ? { when: opts.when } : {})
+  });
+};
+const hidden = { when: () => false };
+
+PM.commands = registryView<CommandDefinition, any>(kernel.commands, {
+  read: (_item, id) => commandView(kernel, id, put),
+  write: (id, value: any) => {
+    if (!value || typeof value !== 'object') return false;
+    put({ ...value, id, category: value.cat ?? value.category ?? 'General' });
+    return true;
+  },
+  remove: (id) => {
+    owned.get(id)?.dispose();
+    owned.delete(id);
+    return true;
+  }
+});
+PM.cmd = (id?: any, ...a: any[]) => { const c: any = kernel.commands.get(id); if (c) return c.run(...a); console.warn('no cmd', id); };
 
 const center: any = () => ({ 'position.x': PM.proj.w / 2, 'position.y': PM.proj.h / 2 });
 function addLayer(type?: any, opts: any = {}) {
@@ -26,7 +70,7 @@ PM.addLayerCmd = addLayer;
 def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headline', p: center() }), 'Create');
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
-def('newShader', 'New shader layer', '⌘⇧G', () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms(L); PM.openShaderEditor(L); return L; }, 'Create');
+def('newShader', 'New shader layer', '⌘⇧G', () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms?.(L); PM.openShaderEditor(L); return L; }, 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
@@ -123,8 +167,8 @@ def('gotoStart', 'Go to start', '⇱', () => PM.setTime(0), 'Transport');
 def('gotoEnd', 'Go to end', '⇲', () => PM.setTime(PM.proj.dur), 'Transport');
 def('nextFrame', 'Next frame', '→', () => PM.step(1), 'Transport');
 def('prevFrame', 'Previous frame', '←', () => PM.step(-1), 'Transport');
-def('nextEdge', 'Next edge', '⇧→', () => PM.setTime(PM.TL.nextEdge()), 'Transport');
-def('prevEdge', 'Previous edge', '⇧←', () => PM.setTime(PM.TL.prevEdge()), 'Transport');
+def('nextEdge', 'Next edge', '⇧→', () => { const edge = PM.TL?.nextEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
+def('prevEdge', 'Previous edge', '⇧←', () => { const edge = PM.TL?.prevEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 
@@ -144,7 +188,7 @@ def('revealKeys', 'Reveal animated properties', 'U', () => {
   PM.selLayers().forEach((L: any) => { L.collapsed = false; L._reveal = null; });
   PM.invalidate('timeline');
 }, 'Reveal');
-def('graph', 'Toggle graph editor', 'G', () => { PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
+def('graph', 'Toggle graph editor', 'G', () => { if (!PM.TL) return; PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
 /* sel.keys holds keyframe ids (Phase 3a); easing needs the live objects */
@@ -165,7 +209,7 @@ function allSelKeys() {
 }
 
 /* ── view / files ──────────────────────────────────────── */
-def('fitView', 'Fit composition in view', '⇧F', () => { PM.Viewer.fit = true; PM.Viewer.layout(); PM.TL.frameView(); }, 'View');
+def('fitView', 'Fit composition in view', '⇧F', () => { if (PM.Viewer) { PM.Viewer.fit = true; PM.Viewer.layout?.(); } PM.TL?.frameView?.(); }, 'View');
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
@@ -175,73 +219,67 @@ def('projects', 'Projects screen', '⌘P', () => PM.ProjectsScreen && PM.Project
 def('newProject', 'New project', '⌘N', () => PM.newProject(), 'File');
 def('takeSave', 'Save take', '⌘⇧S', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
 
+/* ── JKL transport + trim handles ──────────────────────── */
+/* These were inline in the old keydown handler with no command behind them.
+   They are commands now (that is how the kernel dispatches keys) but stay out
+   of the palette and the agent's command list, exactly as before. */
+def('transportPause', 'Pause', 'K', () => PM.pause(), 'Transport', hidden);
+def('transportPlay', 'Play', 'L', () => PM.play(), 'Transport', hidden);
+def('trimIn', 'Trim in to playhead', 'I', () => PM.hist.do('Trim in', () => PM.selLayers().forEach((L: any) => {
+  if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
+  const d: any = PM.time - L.from;
+  if (PM.MediaTiming.isTimed(L)) L.d.trim = PM.MediaTiming.trimAtStart(L, PM.time);
+  L.dur -= d; L.from = PM.time;
+})), 'Edit', hidden);
+def('trimOut', 'Trim out to playhead', 'O', () => PM.hist.do('Trim out', () => PM.selLayers().forEach((L: any) => {
+  L.dur = Math.max(1 / PM.proj.fps, PM.time - L.from);
+})), 'Edit', hidden);
+
 /* ── keymap ────────────────────────────────────────────── */
-const isField: any = (e?: any) => {
-  const t: any = e.target;
-  return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
-};
-window.addEventListener('keydown', (e?: any) => {
-  if (isField(e)) {
-    if (e.key === 'Escape') e.target.blur();
-    return;
-  }
-  const m: any = e.metaKey || e.ctrlKey, s: any = e.shiftKey, a: any = e.altKey;
-  const k: any = e.key;
-  const go: any = (id?: any) => { e.preventDefault(); PM.cmd(id); };
-
-  if (m && k.toLowerCase() === 'k') return go(s ? 'agent' : 'palette');
-  if (m && k.toLowerCase() === 'z') return go(s ? 'redo' : 'undo');
-  if (m && k.toLowerCase() === 'y' && !s && !a) return go('newSolid');
-  if (m && s && k.toLowerCase() === 'y') return go('newShape');
-  if (m && k.toLowerCase() === 't') return go('newText');
-  if (m && s && k.toLowerCase() === 'g') return go('newShader');
-  if (m && k.toLowerCase() === 'd') return go(s ? 'split' : 'duplicate');
-  if (m && k.toLowerCase() === 'c') return go(s ? 'precompose' : 'copyLayers');
-  if (m && k.toLowerCase() === 'v' && !s) return go('pasteLayers');
-  if (m && k.toLowerCase() === 'a') return go('selectAll');
-  if (m && k.toLowerCase() === 'i') return go('import');
-  if (m && k.toLowerCase() === 's') return go(s ? 'takeSave' : 'save');
-  if (m && k.toLowerCase() === 'o') return go('open');
-  if (m && k.toLowerCase() === 'e') return go('export');
-  if (m && k.toLowerCase() === 'p' && !s) return go('projects');
-  if (m && k.toLowerCase() === 'n') return go('newProject');
-  if (k === 'F9') return go(m ? 'easeLinear' : s ? 'easePower' : 'easeOut');
-
-  switch (k) {
-    case ' ': return go('play');
-    case 'Home': return go('gotoStart');
-    case 'End': return go('gotoEnd');
-    case 'ArrowRight': return go(s ? 'nextEdge' : 'nextFrame');
-    case 'ArrowLeft': return go(s ? 'prevEdge' : 'prevFrame');
-    case 'Backspace': case 'Delete': return go('delete');
-    case 'Escape': return go('deselect');
-  }
-  if (a || m) return;
-  switch (k.toLowerCase()) {
-    case 'v': return go('toolSelect');
-    case 'h': return go('toolHand');
-    case 'z': return go('toolZoom');
-    case 'p': return go('revealPos');
-    case 's': return go('revealScale');
-    case 'r': return go('revealRot');
-    case 't': return go('revealOpacity');
-    case 'a': return go('revealAnchor');
-    case 'u': return go('revealKeys');
-    case 'g': return go('graph');
-    case 'b': return go('workIn');
-    case 'n': return go('workOut');
-    case 'f': if (s) return go('fitView'); break;
-    case 'j': e.preventDefault(); return PM.setTime(PM.TL.prevEdge());
-    case 'k': e.preventDefault(); return PM.pause();
-    case 'l': e.preventDefault(); return PM.play();
-    case 'i': e.preventDefault(); return PM.hist.do('Trim in', () => PM.selLayers().forEach((L: any) => {
-      if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
-      const d: any = PM.time - L.from;
-      if (PM.MediaTiming.isTimed(L)) L.d.trim = PM.MediaTiming.trimAtStart(L, PM.time);
-      L.dur -= d; L.from = PM.time;
-    }));
-    case 'o': e.preventDefault(); return PM.hist.do('Trim out', () => PM.selLayers().forEach((L: any) => { L.dur = Math.max(1 / PM.proj.fps, PM.time - L.from); }));
+/* The keymap-default extension binds Escape in fields to this hidden command.
+   Returning false leaves the browser default alone after blurring the field. */
+put({
+  id: 'blurField',
+  label: 'Blur focused field',
+  category: 'Edit',
+  when: () => false,
+  run: () => {
+    const active: any = typeof document === 'undefined' ? null : document.activeElement;
+    const tag = typeof active?.tagName === 'string' ? active.tagName.toUpperCase() : '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || active?.isContentEditable) active.blur?.();
+    return false;
   }
 });
+}
 
+/** Legacy `{ id, label, kb, run, cat }` façade over one kernel command. */
+function commandView(kernel: ReturnType<typeof ensureKernel>, id: string, put: (def: CommandDefinition) => void): any {
+  const FIELDS = ['id', 'label', 'kb', 'run', 'cat'];
+  const read = (): CommandDefinition | undefined => kernel.commands.get(id);
+  const field = (definition: any, key: string): unknown => (key === 'cat' ? definition.category ?? 'General' : definition[key]);
+  return new Proxy(Object.create(null) as Record<string, unknown>, {
+    get(target, key) {
+      if (typeof key === 'symbol') return Reflect.get(target, key);
+      const definition = read();
+      return definition ? field(definition, key) : undefined;
+    },
+    set(target, key, value) {
+      if (typeof key === 'symbol') return Reflect.set(target, key, value);
+      const definition = read();
+      if (!definition) return false;
+      put(key === 'cat' ? { ...definition, category: value as string } : ({ ...definition, [key]: value } as CommandDefinition));
+      return true;
+    },
+    has(target, key) {
+      if (typeof key === 'symbol') return Reflect.has(target, key);
+      return !!read() && FIELDS.includes(key);
+    },
+    ownKeys: () => [...FIELDS],
+    getOwnPropertyDescriptor(target, key) {
+      if (typeof key === 'symbol') return Reflect.getOwnPropertyDescriptor(target, key);
+      const definition = read();
+      if (!definition || !FIELDS.includes(key)) return undefined;
+      return { value: field(definition, key), enumerable: true, configurable: true, writable: true };
+    }
+  });
 }

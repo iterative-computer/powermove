@@ -33,6 +33,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@powermove/macos-haptics": "file:native/macos-haptics"
+    "@powermove/macos-haptics": "file:native/macos-haptics",
+    "esbuild": "0.25.12"
   }
 }

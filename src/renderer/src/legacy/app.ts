@@ -27,6 +27,13 @@ PM.theme = (() => {
     mode = ['light', 'dark', 'system'].includes(t) ? t : 'system';
     PM.store.set('themeMode', mode);
     PM.store.set('theme', mode);
+    /* Legacy owns the preference and its persistence; the kernel owns the
+       active theme's tokens. Push the resolved scheme across so a registered
+       theme repaints its dark/light variant with the switch. */
+    if (PM.Kernel?.theme) {
+      PM.Kernel.theme.scheme = mode;
+      PM.Kernel.events?.emit?.('theme:changed', { id: PM.Kernel.theme.activeId, scheme: resolved() });
+    }
     syncNative();
     render();
   };
@@ -98,6 +105,37 @@ function hydrate(p: any) {
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
     prop.v = num(prop.v, fresh.v);
   };
+  const sanitizeTransition = (value: any) => {
+    if (value == null) return null;
+    if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.type !== 'string' || !value.type) return null;
+    const duration = PM.clamp(num(value.dur, 0.5), 0.02, 600);
+    const savedParams = value.p && typeof value.p === 'object' && !Array.isArray(value.p) ? value.p : {};
+    const definition = PM.transitionDef?.(value.type);
+    if (!definition) return { ...value, type: value.type, dur: duration, p: savedParams, missing: true };
+    const transition = PM.mkTransition(value.type);
+    if (!transition) return { ...value, type: value.type, dur: duration, p: savedParams, missing: true };
+    transition.dur = duration;
+    definition.params.forEach((param: any) => {
+      const fallback = param.def;
+      const saved = savedParams[param.k];
+      const source = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : { v: saved };
+      const validValue = (raw: any) => {
+        if (param.type === 'color') return typeof raw === 'string' && /^#[0-9a-f]{6}$/i.test(raw) ? raw : fallback;
+        if (param.type === 'toggle') return typeof raw === 'boolean' ? raw : fallback;
+        return num(raw, fallback);
+      };
+      transition.p[param.k] = {
+        v: validValue(source.v),
+        kf: (Array.isArray(source.kf) ? source.kf : [])
+          .filter((key: any) => key && typeof key === 'object' && Number.isFinite(num(key.t)))
+          .map((key: any) => ({ ...key, t: num(key.t), v: validValue(key.v), i: key.i || PM.uid('k'), hold: !!key.hold }))
+          .sort((a: any, b: any) => a.t - b.t)
+          .filter((key: any, index: any, keys: any) => index === 0 || key.t - keys[index - 1].t > 1e-6),
+        expr: typeof source.expr === 'string' && source.expr.trim() ? source.expr : null,
+      };
+    });
+    return transition;
+  };
   const sanitizeLayers = (layers: any, container: any) => {
     layers.forEach((L: any, li: any) => {
       L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
@@ -115,8 +153,16 @@ function hydrate(p: any) {
         sanitizeProp(L.p[k], fresh.p[k]);
       });
       Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
-      L.fx = L.fx.filter((f: any) => f && typeof f === 'object' && PM.FX && PM.FX[f.type]);
+      /* An effect whose type is not registered right now is kept as a marked
+         placeholder rather than deleted: the extension that provides it may
+         load later (or be re-enabled), and silently dropping the effect would
+         lose the user's keyframes on save. The compositor skips `missing`. */
+      L.fx = L.fx
+        .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
+        .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
       L.fx.forEach((f: any) => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
+      L.transitionIn = sanitizeTransition(L.transitionIn);
+      L.transitionOut = sanitizeTransition(L.transitionOut);
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].effects === false) L.fx = [];
       /* masks: validate shape/mode and every animatable channel */
       L.masks = Array.isArray(L.masks) ? L.masks.filter((m: any) => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
@@ -133,7 +179,7 @@ function hydrate(p: any) {
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
-      if (L.type === 'shader') PM.syncShaderUniforms(L);
+      if (L.type === 'shader') PM.syncShaderUniforms?.(L);
     });
   };
   base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
@@ -185,7 +231,13 @@ function demo() {
   key(signal, 'scale.x', [[0,0,'power'],[.7,100,'backOut'],[5.2,100,'glide'],[7.1,1800,'expoIn']]);
   key(signal, 'scale.y', [[0,0,'power'],[.7,100,'backOut'],[5.2,100,'glide'],[7.1,1800,'expoIn']]);
   key(signal, 'opacity', [[0,0,'power'],[.25,100,'power'],[5.65,100,'linear'],[7.2,92,'linear']]);
-  const glow = PM.mkEffect('glow'); glow.p.threshold.v = 18; glow.p.radius.v = 120; glow.p.intensity.v = 165; signal.fx.push(glow);
+  /* Built-in effects activate after the legacy app hydrates. Keep the demo's
+     glow as a recoverable placeholder during that short boot window. */
+  const glow = PM.mkEffect('glow') || {
+    id: PM.uid('f'), type: 'glow', on: true, missing: true,
+    p: { threshold: PM.P(18), radius: PM.P(120), intensity: PM.P(165) }
+  };
+  glow.p.threshold.v = 18; glow.p.radius.v = 120; glow.p.intensity.v = 165; signal.fx.push(glow);
 
   const bg = add(PM.mkLayer('shader', { name: 'Atmosphere', from: 0, dur: 8, d: {
     code: `uniform float uSpeed; // @param 0.16 0 2
@@ -206,7 +258,7 @@ void main(){
   fragColor=vec4(col,1.);
 }`, w: 1920, h: 1080, uniforms: {},
   } }, p));
-  PM.syncShaderUniforms(bg);
+  PM.syncShaderUniforms?.(bg);
   p.markers = [{ t: .45, name: 'Reveal' }, { t: 5.55, name: 'Expansion' }, { t: 7.25, name: 'Resolve' }];
   p.notes = 'One continuous signal becomes the field. Keep the hierarchy singular, restrained, and physical.';
   return p;
@@ -252,7 +304,7 @@ async function restoreProjectAssets(project: any, warn: any = true) {
   const result = await PM.assets.restoreProject(project);
   if (result.stale || PM.proj !== project) return result;
   PM.bus.emit('assets');
-  PM.Inspector.refresh();
+  PM.Inspector?.refresh?.();
   PM.invalidate('all');
   if (warn && result.missing.length) {
     const count = result.missing.length;
@@ -264,6 +316,39 @@ async function restoreProjectAssets(project: any, warn: any = true) {
 }
 
 PM.proj = loadBootProject();
+
+/* Extension boot happens after project hydration. Revalidate placeholders on
+   registry changes so a saved effect/transition becomes live as soon as its
+   provider activates, and becomes safely disabled again if that provider is
+   turned off. Saved parameters and keyframes remain on the same objects. */
+function revalidateContributionPlaceholders() {
+  let changed = false;
+  const containers = [PM.proj, ...Object.values(PM.proj?.comps || {})] as any[];
+  for (const container of containers) {
+    for (const layer of container?.layers || []) {
+      for (const effect of layer.fx || []) {
+        if (!effect || typeof effect.type !== 'string') continue;
+        const missing = !PM.FX?.[effect.type];
+        if (missing && !effect.missing) { effect.missing = true; changed = true; }
+        else if (!missing && effect.missing) { delete effect.missing; changed = true; }
+      }
+      for (const edge of ['transitionIn', 'transitionOut']) {
+        const transition = layer[edge];
+        if (!transition || typeof transition.type !== 'string') continue;
+        const missing = !PM.transitionDef?.(transition.type);
+        if (missing && !transition.missing) { transition.missing = true; changed = true; }
+        else if (!missing && transition.missing) { delete transition.missing; changed = true; }
+      }
+    }
+  }
+  if (changed) {
+    PM.Inspector?.refresh?.();
+    PM.invalidate();
+  }
+}
+PM.Kernel?.effects?.onChange?.(revalidateContributionPlaceholders);
+PM.Kernel?.transitions?.onChange?.(revalidateContributionPlaceholders);
+
 PM.WS.init();
 const bootSession = PM.Projects.getState(PM.proj.id);
 if (bootSession?.workspace) PM.WS.restoreSnapshot(bootSession.workspace);
@@ -273,7 +358,7 @@ PM.selectLayers((bootSession?.selection?.layers || []).filter((id: any) => PM.L(
 PM.sel.keys = [...new Set((bootSession?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
 PM.sel.keys = PM.resolveSelectedKeys().map((key: any) => key.i);
 PM.setTime(Number.isFinite(bootSession?.time) ? bootSession.time : .9, { raw: true, force: true });
-if (bootSession?.timeline) {
+if (bootSession?.timeline && PM.TL) {
   PM.TL.pps = Number.isFinite(bootSession.timeline.pps) ? bootSession.timeline.pps : PM.TL.pps;
   PM.TL.scrollT = Number.isFinite(bootSession.timeline.scrollT) ? bootSession.timeline.scrollT : PM.TL.scrollT;
   PM.TL.scrollY = Number.isFinite(bootSession.timeline.scrollY) ? bootSession.timeline.scrollY : PM.TL.scrollY;
@@ -320,7 +405,9 @@ function captureProjectSession() {
   PM.Projects.putState(PM.proj.id, {
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
-    timeline: { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph },
+    timeline: PM.TL
+      ? { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph }
+      : undefined,
   });
 }
 
@@ -393,10 +480,12 @@ function switchProject(p: any) {
   PM.sel.keys = [...new Set((session?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
   PM.sel.keys = PM.resolveSelectedKeys().map((key: any) => key.i);
   PM.sel.chan = session?.selection?.chan || null;
-  PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
-  PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
-  PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
-  PM.TL.graph = !!session?.timeline?.graph;
+  if (PM.TL) {
+    PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
+    PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
+    PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
+    PM.TL.graph = !!session?.timeline?.graph;
+  }
   PM.hist.clear();
   PM.rasterClear();
   PM.assets.clear();
@@ -406,8 +495,8 @@ function switchProject(p: any) {
   PM.bus.emit('layers');
   PM.bus.emit('sel');
   PM.bus.emit('assets');
-  PM.Inspector.refresh();
-  PM.Viewer.layout();
+  PM.Inspector?.refresh?.();
+  PM.Viewer?.layout?.();
   PM.invalidate('all');
   PM.invalidate('status');
   restoreProjectAssets(PM.proj);
@@ -503,11 +592,11 @@ PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
 
 /* first full frame after persistent panels have measured */
 window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-  PM.Viewer.layout();
-  PM.TL.frameView();
+  PM.Viewer?.layout?.();
+  PM.TL?.frameView?.();
   PM.bus.emit('layers');
   PM.bus.emit('sel');
-  PM.Inspector.refresh();
+  PM.Inspector?.refresh?.();
   PM.invalidate('all');
   PM.invalidate('status');
   if (PM.SpatialAssistant) PM.SpatialAssistant.init();

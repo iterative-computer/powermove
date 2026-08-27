@@ -6,7 +6,8 @@
     "commands",
     "artifacts",
     "externalActions",
-    "notes"
+    "notes",
+    "extensions"
   ],
   "properties": {
     "summary": { "type": "string" },
@@ -25,6 +26,20 @@
       }
     },
     "externalActions": { "type": "array", "maxItems": 80, "items": { "type": "string" } },
-    "notes": { "type": "array", "maxItems": 80, "items": { "type": "string" } }
+    "notes": { "type": "array", "maxItems": 80, "items": { "type": "string" } },
+    "extensions": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "action", "summary"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
+          "action": { "type": "string", "enum": ["created", "updated", "removed"] },
+          "summary": { "type": "string" }
+        }
+      }
+    }
   }
 }

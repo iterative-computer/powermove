@@ -1,0 +1,10 @@
+{
+  "id": "theme-default",
+  "name": "Powermove themes",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Provides the default Powermove appearance and a high-contrast option.",
+  "entry": "index.ts",
+  "contributes": ["themes"],
+  "author": "powermove"
+}

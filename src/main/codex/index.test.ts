@@ -8,8 +8,12 @@ const mocks = vi.hoisted(() => {
   const cancel = vi.fn(async () => true);
   const cancelAll = vi.fn(async () => undefined);
   let resolveRun: ((value: unknown) => void) | null = null;
-  const run = vi.fn(async (_req: unknown, options: { onProgress?: (text: string) => void }) => {
+  const run = vi.fn(async (_req: unknown, options: {
+    onProgress?: (text: string) => void;
+    onTrace?: (step: unknown) => void;
+  }) => {
     options.onProgress?.('Working…');
+    options.onTrace?.({ kind: 'thought', text: 'Inspecting source' });
     return await new Promise((resolve) => { resolveRun = resolve; });
   });
   return {
@@ -23,6 +27,8 @@ const mocks = vi.hoisted(() => {
     }
   };
 });
+
+const apiPackFiles = async () => [{ name: 'EXTENSIONS.md', text: '# Extensions' }];
 
 vi.mock('electron', () => ({ app: { once: mocks.appOnce } }));
 vi.mock('./runner', () => ({
@@ -79,6 +85,8 @@ describe('registerCodexIpc', () => {
     registerCodexIpc(ipcMain as never, {
       getWindow: () => null,
       userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles,
       isTrustedSender: () => true,
       codexBinaryPref: () => null
     });
@@ -88,6 +96,7 @@ describe('registerCodexIpc', () => {
     expect([...handlers.keys()]).toEqual([
       IPC.codexRun,
       IPC.codexCancel,
+      IPC.codexFixPrompt,
       IPC.consentComputer,
       IPC.artifactRead,
       IPC.artifactReveal
@@ -103,6 +112,14 @@ describe('registerCodexIpc', () => {
     const stranger = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
 
+    expect(mocks.run).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ipc-run-1234' }),
+      expect.objectContaining({
+        extensionsDir: '/tmp/powermove-user-extensions',
+        apiPackFiles
+      })
+    );
+
     await handlers.get(IPC.codexCancel)!({ sender: stranger }, { id: 'ipc-run-1234' });
     expect(mocks.cancel).not.toHaveBeenCalled();
     await handlers.get(IPC.codexCancel)!({ sender: owner }, { id: 'ipc-run-1234' });
@@ -111,6 +128,11 @@ describe('registerCodexIpc', () => {
       id: 'ipc-run-1234',
       kind: 'progress',
       text: 'Working…'
+    });
+    expect(owner.send).toHaveBeenCalledWith(IPC.codexEvent, {
+      id: 'ipc-run-1234',
+      kind: 'trace',
+      step: { kind: 'thought', text: 'Inspecting source' }
     });
 
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
@@ -126,11 +148,48 @@ describe('registerCodexIpc', () => {
     await pending;
   });
 
+  it('builds a fix prompt from a validated extension failure', async () => {
+    await expect(handlers.get(IPC.codexFixPrompt)!({ sender: new Sender() }, {
+      id: 'broken-extension',
+      error: 'index.ts:1: failed',
+      files: [{ path: 'index.ts', text: 'throw new Error();' }]
+    })).resolves.toContain('The extension `broken-extension` fails: index.ts:1: failed. Files:');
+  });
+
+  it.each([
+    ['invalid id', { id: '../escape', error: 'failed', files: [] }],
+    ['oversized error', { id: 'broken-extension', error: 'x'.repeat(4_001), files: [] }],
+  ])('rejects fix-prompt requests with %s', async (_label, request) => {
+    await expect(
+      handlers.get(IPC.codexFixPrompt)!({ sender: new Sender() }, request)
+    ).rejects.toThrow(IPC.codexFixPrompt);
+  });
+
+  it('degrades oversized fix-prompt requests instead of rejecting them', async () => {
+    const many = await handlers.get(IPC.codexFixPrompt)!({ sender: new Sender() }, {
+      id: 'broken-extension',
+      error: 'failed',
+      files: Array.from({ length: 41 }, (_, index) => ({ path: `${index}.ts`, text: '' }))
+    });
+    expect(many).toContain('path="39.ts"');
+    expect(many).not.toContain('path="40.ts"');
+
+    const big = await handlers.get(IPC.codexFixPrompt)!({ sender: new Sender() }, {
+      id: 'broken-extension',
+      error: 'failed',
+      files: [{ path: 'index.ts', text: 'é'.repeat(32_769) }]
+    });
+    expect(big).toContain('truncated');
+    expect(String(big).length).toBeLessThan(200_000);
+  });
+
   it('rejects an untrusted sender before handling payloads', async () => {
     handlers.clear();
     registerCodexIpc(ipcMain as never, {
       getWindow: () => null,
       userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles,
       isTrustedSender: () => false,
       codexBinaryPref: () => null
     });

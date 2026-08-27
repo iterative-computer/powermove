@@ -22,6 +22,8 @@ export function paletteEntries(PM: OverlayPM, query: string): PaletteEntry[] {
   const matches = (value: unknown): boolean => scorePaletteMatch(value, query) != null;
   const entries: PaletteEntry[] = [];
   for (const command of Object.values(PM.commands ?? {}) as Array<Record<string, any>>) {
+    /* `when` is the kernel's "runnable by id, but not offered here" flag. */
+    if (typeof command.when === 'function' && !command.when()) continue;
     if (!hasQuery || matches(command.label)) {
       entries.push({
         id: `command:${command.id}`,
@@ -70,5 +72,34 @@ export function paletteEntries(PM: OverlayPM, query: string): PaletteEntry[] {
       });
     }
   }
+  /* Extension-contributed entries come last and share the same 60-item cap.
+     Providers do their own matching — the raw query is passed straight through. */
+  for (const entry of paletteProviderEntries(PM, query)) entries.push(entry);
   return entries.slice(0, 60);
+}
+
+function paletteProviderEntries(PM: OverlayPM, query: string): PaletteEntry[] {
+  const providers = (PM as Record<string, any>).Kernel?.paletteProviders?.() ?? [];
+  const out: PaletteEntry[] = [];
+  for (const { provider } of providers as Array<{ provider: (q: string) => unknown }>) {
+    let produced: unknown;
+    try {
+      produced = provider(query);
+    } catch (error) {
+      console.error('[palette] provider failed', error);
+      continue;
+    }
+    if (!Array.isArray(produced)) continue;
+    for (const item of produced as Array<Record<string, any>>) {
+      if (!item || typeof item.run !== 'function') continue;
+      out.push({
+        id: String(item.id ?? `provider:${out.length}`),
+        label: String(item.label ?? ''),
+        cat: String(item.category ?? 'Extension'),
+        kb: item.kb ?? null,
+        run: () => item.run()
+      });
+    }
+  }
+  return out;
 }

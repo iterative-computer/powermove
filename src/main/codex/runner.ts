@@ -7,9 +7,12 @@ import {
   LIMITS,
   PROJECT_ID,
   REQUEST_ID,
+  type AgentExtensionChange,
+  type CodexTraceEvent,
   type CodexRunRequest,
   type CodexRunResult
 } from '../../shared/ipc';
+import { EXTENSION_ID } from '../../shared/extensions';
 import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
 import { buildAutonomousArgv, buildEditorArgv } from './adapter';
 import { collectArtifacts } from './artifacts';
@@ -17,6 +20,11 @@ import { consumeToken } from './consent';
 import { discoverCodexBinary } from './env';
 import { CodexEventParser } from './events';
 import { agentInstructions, agentResultSchema } from './instructions';
+import {
+  discoverUserSkillFiles,
+  isolatedCodexEnvironment,
+  prepareIsolatedCodexHome
+} from './isolation';
 import {
   agentWorkspaceRoot,
   clearSession,
@@ -26,6 +34,7 @@ import {
   sessionPathFor,
   writeSession,
   type AgentWorkspace,
+  type AgentApiPackFile,
   type CodexAuthority
 } from './workspace';
 
@@ -43,13 +52,17 @@ type SpawnLike = (
 
 export interface CodexRunOptions {
   userData: string;
+  extensionsDir: string;
+  apiPackFiles: () => Promise<AgentApiPackFile[]>;
   codexBinaryPref?: string | null;
   binary?: string;
   timeoutMs?: number;
   onProgress?: (text: string) => void;
+  onTrace?: (step: CodexTraceEvent) => void;
   onWarning?: (text: string) => void;
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
+  discoverDisabledSkillPaths?: () => Promise<string[]>;
 }
 
 interface ActiveRun {
@@ -104,8 +117,89 @@ function failure(error: string, cancelled = false): CodexRunResult {
   return { ok: false, error, cancelled };
 }
 
+function errorMessageFromValue(value: unknown, depth = 0): string | null {
+  if (depth > 8) return null;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return null;
+    if (text.startsWith('{')) {
+      try {
+        return errorMessageFromValue(JSON.parse(text) as unknown, depth + 1) ?? text;
+      } catch {
+        // The error message is ordinary prose, not nested JSON.
+      }
+    }
+    return text;
+  }
+  if (!isRecord(value)) return null;
+  return errorMessageFromValue(value.error, depth + 1)
+    ?? errorMessageFromValue(value.message, depth + 1)
+    ?? errorMessageFromValue(value.detail, depth + 1);
+}
+
+/** Extracts the actual failure from `codex exec --json` stdout events. */
+export function codexErrorFromStdout(stdout: string): string | null {
+  const lines = stdout.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(event) || typeof event.type !== 'string') continue;
+    if (!/(?:^|[._-])(?:error|failed|failure)(?:$|[._-])/i.test(event.type)) continue;
+    const message = errorMessageFromValue(event);
+    if (message) return message.slice(0, 4_000);
+  }
+  return null;
+}
+
+function meaningfulStderr(stderr: string): string {
+  return stderr
+    .split(/\r?\n/)
+    .filter((line) => !/^Reading additional input from stdin(?:\.\.\.)?$/i.test(line.trim()))
+    .join('\n')
+    .trim();
+}
+
 function diagnosticText(attempt: AttemptResult, fallback: string): string {
-  return attempt.stderr.trim() || attempt.spawnError?.message || fallback;
+  const diagnostic = codexErrorFromStdout(attempt.stdout)
+    ?? (meaningfulStderr(attempt.stderr) || attempt.spawnError?.message || '');
+  return humanizeCodexFailure(diagnostic, fallback);
+}
+
+/* Raw CLI stderr must never reach the conversation: it is log noise (timestamps,
+   rust module paths, auth headers). Map known failure classes to actionable
+   sentences and reduce everything else to its last meaningful line. The full
+   diagnostic stays in the main-process log. */
+export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT generation failed.'): string {
+  const text = diagnostic.trim();
+  if (!text) return fallback;
+  console.error('[codex] run failed:', text.slice(0, 4_000));
+  if (/AuthRequired|www_authenticate|Unauthorized|\b401\b/i.test(text) && /rmcp|mcp/i.test(text)) {
+    return 'One of your Codex integrations (an MCP server) needs to be signed in again. Run `codex` in a terminal, re-authenticate it, then retry.';
+  }
+  if (/not logged in|login required|please run codex login|invalid api key|credentials/i.test(text)) {
+    return 'Codex CLI is not signed in. Run `codex login` in a terminal, then retry.';
+  }
+  if (/ENOENT|command not found|No such file/i.test(text)) {
+    return 'The Codex CLI could not be launched. Check that `codex` is installed and on your PATH.';
+  }
+  if (/rate.?limit|\b429\b|overloaded/i.test(text)) {
+    return 'The model is rate-limited right now. Wait a moment and retry.';
+  }
+  if (/invalid_json_schema|Invalid schema for response_format/i.test(text)) {
+    return "Powermove's agent response format was rejected. Restart Powermove and retry; if it persists, update the app.";
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\d{4}-\d{2}-\d{2}T\S+\s+(ERROR|WARN|INFO)\s+\S*:?\s*/i, '').trim())
+    .filter(Boolean);
+  const last = lines.at(-1) ?? fallback;
+  return `The agent failed: ${last.slice(0, 240)}`;
 }
 
 function attemptOutput(attempt: AttemptResult): string {
@@ -118,6 +212,24 @@ function sortJsonValue(value: unknown): unknown {
   return Object.fromEntries(
     Object.keys(value).sort().map((key) => [key, sortJsonValue(value[key])])
   );
+}
+
+export function parseAgentExtensionChanges(value: unknown): AgentExtensionChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const changes: AgentExtensionChange[] = [];
+  for (const item of value) {
+    if (changes.length >= 32) break;
+    if (
+      !isRecord(item) ||
+      !isString(item.id) ||
+      !EXTENSION_ID.test(item.id) ||
+      !isOneOf(item.action, ['created', 'updated', 'removed'] as const)
+    ) continue;
+    const change: AgentExtensionChange = { id: item.id, action: item.action };
+    if (isString(item.summary)) change.summary = item.summary;
+    changes.push(change);
+  }
+  return changes;
 }
 
 function isUnknownSession(text: string): boolean {
@@ -184,6 +296,11 @@ export class CodexRunner {
 
       const binary = options.binary ?? await discoverCodexBinary(options.codexBinaryPref ?? null);
       if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+      const [codexHome, disabledSkillPaths] = await Promise.all([
+        prepareIsolatedCodexHome(options.userData),
+        (options.discoverDisabledSkillPaths ?? discoverUserSkillFiles)()
+      ]);
+      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
 
       if (req.mode === 'editor') {
         const input = await writeEditorInputs(req);
@@ -194,9 +311,10 @@ export class CodexRunner {
           prompt: req.prompt,
           imagePaths: input.imagePaths,
           model: req.model,
-          reasoningEffort: req.reasoningEffort
+          reasoningEffort: req.reasoningEffort,
+          disabledSkillPaths
         });
-        const attempt = await this.execute(req, state, binary, argv, input.directory, null, options, (timer) => {
+        const attempt = await this.execute(req, state, binary, argv, input.directory, codexHome, null, options, (timer) => {
           timeout = timer;
         });
         if (this.cancelled.has(req.id)) {
@@ -212,11 +330,18 @@ export class CodexRunner {
       }
 
       const authority = authorityForAccess(req.access);
+      let apiPackFiles: AgentApiPackFile[] = [];
+      try {
+        apiPackFiles = await options.apiPackFiles();
+      } catch (error) {
+        options.onWarning?.(`API pack unavailable: ${String(error)}`);
+      }
       const layout = await prepareAgentWorkspace(
         req,
         options.userData,
         authority,
-        agentResultSchema()
+        agentResultSchema(),
+        { extensionsDir: options.extensionsDir, apiPackFiles }
       );
       state.layout = layout;
       if (this.cancelled.has(req.id)) {
@@ -233,16 +358,19 @@ export class CodexRunner {
           instructions: agentInstructions({
             projectName: req.projectName,
             artifactPath: `artifacts/${layout.runId}`,
-            access: authority
+            access: authority,
+            extensionsDir: layout.extensionsDir
           }),
           prompt: req.prompt,
           imagePaths: layout.imagePaths,
           model: req.model,
           reasoningEffort: req.reasoningEffort,
           access: authority,
-          sessionId: resumeId
+          extensionsDir: layout.extensionsDir,
+          sessionId: resumeId,
+          disabledSkillPaths
         });
-        attempt = await this.execute(req, state, binary, argv, layout.root, layout, options, (timer) => {
+        attempt = await this.execute(req, state, binary, argv, layout.root, codexHome, layout, options, (timer) => {
           timeout = timer;
         });
         if (this.cancelled.has(req.id)) {
@@ -261,6 +389,8 @@ export class CodexRunner {
       }
 
       if (attempt === null || attempt.code !== 0) {
+        await state.sessionWrite;
+        await clearSession(layout.sessionPath);
         return failure(attempt ? diagnosticText(attempt, 'The autonomous agent failed.') : 'The autonomous agent failed.');
       }
 
@@ -276,7 +406,13 @@ export class CodexRunner {
       parsed.artifacts = await collectArtifacts(layout.runDirectory, layout.runId, requested);
       parsed.projectId = req.projectId;
       parsed.access = authorityForAccess(req.access);
-      return { ok: true, text: JSON.stringify(sortJsonValue(parsed)), access: authority };
+      const extensions = parseAgentExtensionChanges(parsed.extensions);
+      return {
+        ok: true,
+        text: JSON.stringify(sortJsonValue(parsed)),
+        access: authority,
+        ...(extensions === undefined ? {} : { extensions })
+      };
     } catch (error) {
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);
@@ -312,6 +448,7 @@ export class CodexRunner {
     binary: string,
     argv: string[],
     cwd: string,
+    codexHome: string,
     layout: AgentWorkspace | null,
     options: CodexRunOptions,
     setTimeoutHandle: (timer: NodeJS.Timeout) => void
@@ -327,6 +464,7 @@ export class CodexRunner {
       child = spawnProcess(binary, argv, {
         cwd,
         detached: true,
+        env: isolatedCodexEnvironment(codexHome),
         stdio: ['ignore', 'pipe', 'pipe']
       });
     } catch (error) {
@@ -345,6 +483,7 @@ export class CodexRunner {
     const stderrChunks: Buffer[] = [];
     const parser = new CodexEventParser({
       onProgress: (text) => options.onProgress?.(text),
+      onTrace: (step) => options.onTrace?.(step),
       onThreadId: (threadId) => {
         if (layout) {
           state.sessionWrite = state.sessionWrite

@@ -457,7 +457,7 @@ function applyFeatures(w: any) {
   const f: any = w.features || {};
   if (f.snapping !== undefined) PM.snap = !!f.snapping;
   if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
-  if (f.graphOnOpen !== undefined) PM.TL.graph = !!f.graphOnOpen;
+  if (f.graphOnOpen !== undefined && PM.TL) PM.TL.graph = !!f.graphOnOpen;
   window.document.documentElement.dataset.previewCorners = w.chrome?.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
   window.document.documentElement.dataset.timelineSurfaces = w.chrome?.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
   PM.invalidate();

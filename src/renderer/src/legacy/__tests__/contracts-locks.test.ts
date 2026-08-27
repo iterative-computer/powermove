@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { it } from 'vitest';
 
+import { EFFECTS } from '../../../../extensions/effects-basic/effects';
 import { makePM } from './make-pm';
 
 function fixture() {
@@ -16,6 +17,7 @@ function fixture() {
     'core/capabilities',
     'gl/shaders',
   );
+  for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   PM.proj = PM.mkProject({ name: 'Lock fixture', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
   PM.syncShaderUniforms = () => {};
@@ -56,6 +58,9 @@ const lockedCases = {
   add_effect: ({ layer }) => ({ type: 'add_effect', target: layer.id, effect: 'blur' }),
   remove_effect: ({ layer, effect }) => ({ type: 'remove_effect', target: layer.id, effect: effect.id }),
   set_effect: ({ layer, effect }) => ({ type: 'set_effect', target: layer.id, effect: effect.id, patch: { enabled: false } }),
+  set_transition: ({ layer }) => ({
+    type: 'set_transition', layer: layer.id, edge: 'in', transition: { type: 'crossfade' },
+  }),
   set_composition: () => ({ type: 'set_composition', patch: { name: 'Allowed composition edit' } }),
   add_layer: () => ({ type: 'add_layer', id: 'allowed-layer', layerType: 'solid', name: 'Allowed layer', select: false }),
   set_scene_parameter: () => ({ type: 'set_scene_parameter', name: 'Allowed parameter', value: 42 }),
@@ -80,7 +85,7 @@ const lockedCases = {
   },
 };
 
-it('the Phase 3a locked-layer operation matrix is frozen for all 18 operations', () => {
+it('the locked-layer operation matrix is frozen for all 19 operations', () => {
   const outcomes = {
     set_property: 'blocked',
     replace_keyframes: 'blocked',
@@ -95,6 +100,7 @@ it('the Phase 3a locked-layer operation matrix is frozen for all 18 operations',
     add_effect: 'blocked',
     remove_effect: 'blocked',
     set_effect: 'blocked',
+    set_transition: 'blocked',
     set_scene_parameter: 'allowed',
     add_marker: 'allowed',
     create_section: 'allowed',
@@ -337,4 +343,3 @@ it('agent, interface, and default origins are recorded as exact provenance strin
   }]).ok, true);
   assert.deepEqual([...PM.proj.edits.map((edit) => edit.origin)], ['agent', 'interface', 'interface']);
 });
-

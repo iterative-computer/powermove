@@ -10,7 +10,7 @@ afterEach(() => {
   else delete (globalThis as any).window;
 });
 
-function appRegistry(): {
+function appRegistry(withExtensionSurfaces = true): {
   PM: PMRegistry;
   memory: Map<string, any>;
   listeners: Map<string, any[]>;
@@ -176,11 +176,22 @@ function appRegistry(): {
   };
   PM.__busHandlers = busHandlers;
 
+  if (!withExtensionSurfaces) {
+    delete PM.TL;
+    delete PM.Viewer;
+    delete PM.Inspector;
+    delete PM.syncShaderUniforms;
+  }
+
   install(PM);
   return { PM, memory, listeners, timers, clearedTimers, toasts };
 }
 
 describe('legacy app install', () => {
+  it('boots before viewer, timeline, and inspector extensions activate', () => {
+    expect(() => appRegistry(false)).not.toThrow();
+  });
+
   it('persists appearance changes', () => {
     const { PM, memory } = appRegistry();
 

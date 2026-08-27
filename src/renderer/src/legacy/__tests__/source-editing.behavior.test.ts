@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { it } from 'vitest';
 
+import { EFFECTS } from '../../../../extensions/effects-basic/effects';
 import { makePM } from './make-pm';
 
 function editor() {
@@ -14,6 +15,7 @@ function editor() {
     'core/editing',
     'gl/shaders',
   );
+  for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   PM.proj = PM.mkProject({ name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
   PM.syncShaderUniforms = () => {};
@@ -246,4 +248,3 @@ it('a failed multi-command edit rolls the entire source back', () => {
   assert.equal(JSON.stringify(PM.proj), before);
   assert.equal(PM.hist.canUndo(), false);
 });
-

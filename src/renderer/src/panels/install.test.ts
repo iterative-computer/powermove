@@ -35,10 +35,9 @@ describe('unconditional Svelte panel install', () => {
 
     expect(Object.keys(PM.PANELS)).toEqual([
       'perf', 'assets', 'fxbrowser', 'workspaces', 'takes', 'notes',
-      'inspector', 'shader', 'viewer', 'timeline'
+      'shader'
     ]);
     expect(PM.PANELS.assets).toMatchObject({ title: 'Media', size: 200, persist: true });
-    expect(PM.PANELS.inspector).toMatchObject({ title: 'Properties', persist: true });
     expect(PM.PANELS.shader).toMatchObject({ title: 'Shader', size: 320, persist: true });
   });
 
@@ -60,18 +59,10 @@ describe('unconditional Svelte panel install', () => {
     expect(PM.pickFiles).toHaveBeenCalledOnce();
   });
 
-  it('owns the inspector and shader runtime hooks needed by the application engines', () => {
+  it('owns the shader runtime hook still supplied by the legacy panel installer', () => {
     const PM = registry();
-    const layer = { id: 'shader-1', d: { code: 'uniform float uSpeed;', uniforms: { stale: { v: 2 } } } };
-
-    PM.syncShaderUniforms(layer);
-
-    expect(PM.Inspector.refresh).toBeTypeOf('function');
-    expect(PM.fxMenu).toBeTypeOf('function');
     expect(PM.openShaderEditor).toBeTypeOf('function');
-    expect(layer.d.uniforms).toEqual({ uSpeed: { v: 1 } });
-    expect(PM.UIState.setShaderMeta).toHaveBeenCalledWith(layer, {
-      udefs: [{ name: 'uSpeed', def: 1 }]
-    });
+    expect(PM.Inspector).toBeUndefined();
+    expect(PM.syncShaderUniforms).toBeUndefined();
   });
 });

@@ -4,6 +4,27 @@ Powermove is an AI-native motion and video editor for macOS. It combines a GPU-b
 
 The refactored Electron application is the only supported app. The earlier root-page/WKWebView implementation and its separate test oracle were retired after parity coverage moved to Vitest.
 
+## Kernel and extensions
+
+Powermove is a small kernel plus extensions. The kernel owns the project store,
+the typed 19-command edit boundary with undo/revision checks, the WebGL
+compositor (including two-input transitions), and typed registries for panels,
+commands, keybindings, effects, transitions, themes, palette providers, menus,
+and status items. Everything above the kernel — the default theme, keymap,
+effects, transitions, toolbar, viewer, timeline, inspector, and Mods surface —
+ships as built-in extensions in `src/extensions/*`, written against the same
+`PowermoveAPI` (apiVersion 1) that user extensions use.
+
+User extensions ("mods") live in `<userData>/extensions/<id>/` as a
+`manifest.json` plus TypeScript/Svelte sources. The main process compiles them
+with esbuild on change and serves the bundles over `app://powermove/ext/`;
+the renderer kernel hot-loads them, contains their failures (an erroring mod is
+auto-disabled with a Fix it / Turn off toast), and lets any built-in be layered
+over or replaced (`replaces` in the manifest). The Mods panel lists everything
+with a toggle. The agent writes mods directly into that directory through its
+Codex workspace (`--add-dir`), guided by `docs/EXTENSIONS.md` and the typed API
+pack; results report changed extension ids so the app reloads them in place.
+
 ## Architecture
 
 - `src/main/` owns the Electron lifecycle, windows, menus, storage, native file operations, the private `app://powermove` protocol, and Codex CLI processes.

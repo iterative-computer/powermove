@@ -7,10 +7,15 @@ export interface AgentOption {
 }
 
 export interface AgentMessage {
-  role: 'user' | 'assistant';
-  text: string;
+  role: 'user' | 'assistant' | 'trace';
+  text?: string;
+  /** role 'trace': the sealed activity steps of a completed run. */
+  steps?: TraceStep[];
   attachments?: Array<Record<string, any> | string>;
   entering?: boolean;
+  /** Run failures render with the error treatment. */
+  error?: boolean;
+  fixExtensionId?: string;
 }
 
 export interface AgentStep {
@@ -19,11 +24,17 @@ export interface AgentStep {
   status: 'pending' | 'active' | 'complete' | 'error';
 }
 
+export type TraceStep =
+  | { kind: 'thought'; id: string; label: string; live: boolean }
+  | { kind: 'text'; id: string; text: string }
+  | { kind: 'tool'; id: string; toolName: string; label: string; status: 'running' | 'done' | 'error' | 'continued' };
+
 export interface AgentSnapshot {
   legacyPhase: string;
   requestToken: number;
   conversation: AgentMessage[];
   activity: string;
+  trace: TraceStep[];
   plan: Record<string, any> | null;
   run: Record<string, any> | null;
   panelRun: Record<string, any> | null;
@@ -44,6 +55,7 @@ export interface AgentSnapshot {
 
 export interface AgentUpdateOptions {
   focusComposer?: boolean;
+  flush?: boolean;
 }
 
 interface AgentViewState extends AgentSnapshot {
@@ -58,6 +70,7 @@ const EMPTY_SNAPSHOT: AgentSnapshot = {
   requestToken: 0,
   conversation: [],
   activity: '',
+  trace: [],
   plan: null,
   run: null,
   panelRun: null,
@@ -125,6 +138,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
         typeof attachment === 'string' ? attachment : { ...attachment })
     })),
     attachments: snapshot.attachments.map((attachment) => ({ ...attachment })),
+    trace: snapshot.trace.map((step) => ({ ...step })),
     steps: snapshot.steps.map((step) => ({ ...step })),
     models: snapshot.models.map((model) => ({ ...model })),
     reasoningEfforts: [...snapshot.reasoningEfforts],
@@ -144,6 +158,7 @@ export function resetAgentState(): void {
     phase: 'idle',
     conversation: [],
     attachments: [],
+    trace: [],
     steps: [],
     models: [],
     reasoningEfforts: [],

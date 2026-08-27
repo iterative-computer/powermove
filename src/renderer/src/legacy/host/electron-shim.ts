@@ -162,14 +162,19 @@ export function install(PM: PMRegistry): void {
               }
               request = { ...request, consentToken: consent.token };
             }
-            const result = await bridge.codex.run(request, (text: any) => {
-              PM.CodexBridge.progress(id, {
-                dataBase64: textToBase64(text)
-              });
-            });
+            const result = await bridge.codex.run(
+              request,
+              (text: any) => {
+                PM.CodexBridge.progress(id, {
+                  dataBase64: textToBase64(text)
+                });
+              },
+              (step: any) => PM.CodexBridge.trace(id, step)
+            );
             PM.CodexBridge.resolve(id, {
               ok: result.ok,
-              dataBase64: textToBase64(result.ok ? result.text : result.error)
+              dataBase64: textToBase64(result.ok ? result.text : result.error),
+              extensions: result.ok ? result.extensions : undefined
             });
           })().catch(error => {
             PM.CodexBridge.resolve(id, {

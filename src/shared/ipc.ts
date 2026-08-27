@@ -13,6 +13,7 @@ export const IPC = {
 
   codexRun: 'codex:run',
   codexCancel: 'codex:cancel',
+  codexFixPrompt: 'codex:fix-prompt',
   codexEvent: 'codex:event', // main → renderer
   consentComputer: 'consent:computer',
 
@@ -48,6 +49,7 @@ export const LIMITS = {
   codexPromptChars: 200_000,
   codexProjectJsonBytes: 24 * 1024 * 1024,
   codexProgressChars: 320,
+  codexTraceChars: 2_000,
   storeValueBytes: 32 * 1024 * 1024,
   logChars: 8_000
 } as const;
@@ -88,19 +90,53 @@ export interface CodexRunRequest {
   consentToken: string | null; // required when access === 'computer'
 }
 
+export interface AgentExtensionChange {
+  id: string;
+  action: 'created' | 'updated' | 'removed';
+  summary?: string;
+}
+
 export type CodexRunResult =
-  | { ok: true; text: string; access: Exclude<CodexAccess, 'editor'> | 'editor' }
+  | {
+      ok: true;
+      text: string;
+      access: Exclude<CodexAccess, 'editor'> | 'editor';
+      extensions?: AgentExtensionChange[];
+    }
   | { ok: false; error: string; cancelled: boolean };
 
 export interface CodexCancelRequest {
   id: string;
 }
 
-export interface CodexProgressEvent {
-  id: string;
-  kind: 'progress';
-  text: string; // already humanised, ≤ LIMITS.codexProgressChars
+export interface CodexFixPromptFile {
+  path: string;
+  text: string;
 }
+
+export interface CodexFixPromptRequest {
+  id: string;
+  error: string;
+  files: CodexFixPromptFile[];
+}
+
+export type CodexTraceEvent =
+  | { kind: 'thought'; text: string }
+  | { kind: 'answer'; text: string }
+  | { kind: 'tool-start'; itemId: string; toolName: string; label: string }
+  | { kind: 'tool-end'; itemId: string; isError: boolean };
+
+export type CodexProgressEvent =
+  | {
+      id: string;
+      kind: 'progress';
+      text: string; // already humanised, ≤ LIMITS.codexProgressChars
+    }
+  | {
+      id: string;
+      kind: 'trace';
+      step: CodexTraceEvent; // main-vetted structured activity
+    };
 
 /* Computer authority: main shows a native confirmation and mints a one-use,
    short-lived token. It is never persisted. */
@@ -148,6 +184,8 @@ export interface LogRequest {
 export type MenuCommand = 'newProject' | 'save' | 'open' | 'export' | 'undo' | 'redo' | 'settings';
 
 /* ── the preload surface ─────────────────────────────────── */
+import type { ExtensionsBridge } from './extensions';
+
 export interface PowermoveBridge {
   ping(): Promise<string>;
   versions: { electron: string; chrome: string; node: string };
@@ -155,8 +193,13 @@ export interface PowermoveBridge {
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
 
   codex: {
-    run(req: CodexRunRequest, onProgress?: (text: string) => void): Promise<CodexRunResult>;
+    run(
+      req: CodexRunRequest,
+      onProgress?: (text: string) => void,
+      onTrace?: (step: CodexTraceEvent) => void
+    ): Promise<CodexRunResult>;
     cancel(id: string): Promise<void>;
+    fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
   };
 
@@ -184,4 +227,6 @@ export interface PowermoveBridge {
   log(level: LogLevel, text: string): void;
   openExternal(url: string): Promise<void>;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;
+
+  extensions: ExtensionsBridge;
 }

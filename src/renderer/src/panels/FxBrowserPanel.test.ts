@@ -2,6 +2,9 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { registryView } from '../legacy/kernel-view';
+import { createKernel } from '../kernel/registries';
+import { installKernelSignals, resetKernelSignals } from '../kernel/signals.svelte';
 import FxBrowserPanel from './FxBrowserPanel.svelte';
 import { registerSimplePanels } from './register-simple';
 
@@ -76,6 +79,67 @@ describe('FxBrowserPanel', () => {
     expect(toast).toHaveBeenCalledWith('Select a layer first');
     expect(target.querySelector('[role="status"]')?.textContent).toBe('Select a layer first');
 
+    await unmount(component);
+  });
+
+  it('shows an effect registered by an extension without remounting', async () => {
+    const kernel = createKernel();
+    const signals = installKernelSignals(kernel);
+    window.PM = {
+      Kernel: kernel,
+      FX: registryView(kernel.effects, { read: (item: any) => item }),
+      firstSel: () => null,
+      Edit: { apply: vi.fn() },
+      Inspector: { refresh: vi.fn() },
+      invalidate: vi.fn(),
+      toast: vi.fn()
+    } as any;
+    kernel.registerEffect('legacy', {
+      id: 'blur', label: 'Gaussian Blur', group: 'Blur', params: [], frag: 'o = texture(u_tex, v_st);'
+    });
+    const target = document.createElement('div');
+    document.body.append(target);
+    const component = mount(FxBrowserPanel, { target, props: { panelId: 'fxbrowser', spec: {} } });
+    expect([...target.querySelectorAll('.nm')].map((node) => node.textContent)).toEqual(['Gaussian Blur']);
+
+    flushSync(() => void kernel.registerEffect('ext:vhs', {
+      id: 'vhs', label: 'VHS', group: 'Stylize', params: [], frag: 'o = texture(u_tex, v_st);'
+    }));
+
+    expect([...target.querySelectorAll('.sec')].map((node) => node.textContent)).toEqual(['Blur', 'Stylize']);
+    expect([...target.querySelectorAll('.nm')].map((node) => node.textContent)).toEqual(['Gaussian Blur', 'VHS']);
+
+    signals.dispose();
+    resetKernelSignals();
+    await unmount(component);
+  });
+
+  it('drops an effect from the browser when its extension unregisters it', async () => {
+    const kernel = createKernel();
+    const signals = installKernelSignals(kernel);
+    window.PM = {
+      Kernel: kernel,
+      FX: registryView(kernel.effects, { read: (item: any) => item }),
+      firstSel: () => null,
+      Edit: { apply: vi.fn() },
+      Inspector: { refresh: vi.fn() },
+      invalidate: vi.fn(),
+      toast: vi.fn()
+    } as any;
+    const registration = kernel.registerEffect('ext:vhs', {
+      id: 'vhs', label: 'VHS', group: 'Stylize', params: [], frag: 'o = texture(u_tex, v_st);'
+    });
+    const target = document.createElement('div');
+    document.body.append(target);
+    const component = mount(FxBrowserPanel, { target, props: { panelId: 'fxbrowser', spec: {} } });
+    expect(target.querySelectorAll('.nm')).toHaveLength(1);
+
+    flushSync(() => registration.dispose());
+
+    expect(target.querySelectorAll('.nm')).toHaveLength(0);
+
+    signals.dispose();
+    resetKernelSignals();
     await unmount(component);
   });
 

@@ -17,7 +17,7 @@ function harnessCommand(type: string): Record<string, unknown> {
 }
 
 describe('agent edit vocabulary contract', () => {
-  it('keeps the harness, shared vocabulary, and editor on the same 18 commands', () => {
+  it('keeps the harness, shared vocabulary, and editor on the same 19 commands', () => {
     const PM = makePM('core/editing', 'assistant/harness');
     const harnessOperations = EDIT_COMMAND_TYPES.map((type) => {
       const cleaned = PM.AgentHarness.cleanCommand(harnessCommand(type));
@@ -26,7 +26,7 @@ describe('agent edit vocabulary contract', () => {
       return cleaned.type;
     });
 
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(18);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(19);
     expect(harnessOperations).toEqual([...AGENT_COMMAND_TYPES]);
     expect(Object.keys(PM.Edit.operations)).toEqual([...EDIT_COMMAND_TYPES]);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);

@@ -15,6 +15,9 @@ describe('legacy editing install', () => {
     expect(PM.Edit.operations.transform_layers).toEqual({
       target: 'layer-collection', fields: ['transform', 'state'],
     });
-    expect(Object.keys(PM.Edit.operations)).toHaveLength(18);
+    expect(PM.Edit.operations.set_transition).toEqual({
+      target: 'layer', fields: ['layer', 'edge', 'transition'],
+    });
+    expect(Object.keys(PM.Edit.operations)).toHaveLength(19);
   });
 });

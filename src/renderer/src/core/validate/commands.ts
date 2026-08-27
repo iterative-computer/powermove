@@ -41,6 +41,7 @@ import {
   type SetLayerCommand,
   type SetPropertyCommand,
   type SetSceneParameterCommand,
+  type SetTransitionCommand,
   type TransformLayersCommand,
   type UpdateSectionCommand
 } from '../types/commands';
@@ -99,6 +100,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
   add_effect: ['type', 'target', 'effect', 'parameters', 'open'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],
+  set_transition: ['type', 'layer', 'edge', 'transition'],
   set_scene_parameter: ['type', 'name', 'label', 'control', 'value', 'min', 'max', 'options'],
   add_marker: ['type', 'id', 'time', 'name'],
   create_section: ['type', 'section'],
@@ -119,6 +121,7 @@ const AGENT_COMMAND_FIELDS = {
   add_effect: COMMAND_FIELDS.add_effect,
   remove_effect: COMMAND_FIELDS.remove_effect,
   set_effect: COMMAND_FIELDS.set_effect,
+  set_transition: COMMAND_FIELDS.set_transition,
   set_scene_parameter: COMMAND_FIELDS.set_scene_parameter,
   add_marker: COMMAND_FIELDS.add_marker,
   transform_layers: COMMAND_FIELDS.transform_layers
@@ -536,6 +539,41 @@ function parseSetEffect(source: Record<string, unknown>): SetEffectCommand | Val
   return out;
 }
 
+function parseSetTransition(source: Record<string, unknown>): SetTransitionCommand | ValidationError {
+  const layer = target(source.layer, 'layer');
+  if (layer instanceof ValidationError) return layer;
+  if (source.edge !== 'in' && source.edge !== 'out') return invalid('must be "in" or "out"', 'edge');
+  if (source.transition === null) {
+    return { type: 'set_transition', layer, edge: source.edge, transition: null };
+  }
+  if (!isRecord(source.transition)) return invalid('must be an object or null', 'transition');
+  const transitionType = requiredString(source.transition.type, 'transition.type');
+  if (transitionType instanceof ValidationError) return transitionType;
+  const transition: NonNullable<SetTransitionCommand['transition']> = { type: transitionType };
+  if (source.transition.dur !== undefined) {
+    const dur = finite(source.transition.dur, 'transition.dur');
+    if (dur instanceof ValidationError) return dur;
+    if (dur < 0.02 || dur > 600) return invalid('must be between 0.02 and 600', 'transition.dur');
+    transition.dur = dur;
+  }
+  if (source.transition.p !== undefined) {
+    const parameters = safePatch(source.transition.p, 'transition.p');
+    if (parameters instanceof ValidationError) return parameters;
+    const clean: Record<string, number | string | boolean> = {};
+    for (const [name, value] of Object.entries(parameters)) {
+      if (typeof value === 'number' && Number.isFinite(value)
+          || typeof value === 'boolean'
+          || typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) {
+        clean[name] = value;
+      } else {
+        return invalid('must be a finite number, hex color, or boolean', `transition.p.${name}`);
+      }
+    }
+    transition.p = clean;
+  }
+  return { type: 'set_transition', layer, edge: source.edge, transition };
+}
+
 function parseSetSceneParameter(source: Record<string, unknown>): SetSceneParameterCommand | ValidationError {
   const name = typeof source.name === 'string' ? source.name.trim() : stringified(source.name ?? '').trim();
   if (!name) return invalid('is required', 'name');
@@ -604,6 +642,15 @@ function isEffect(value: unknown): boolean {
     && Object.values(value.p).every(isChannel);
 }
 
+function isTransition(value: unknown): boolean {
+  return value === null || isRecord(value)
+    && typeof value.type === 'string' && value.type.length > 0
+    && isFiniteNumber(value.dur)
+    && (value.missing === undefined || typeof value.missing === 'boolean')
+    && isRecord(value.p)
+    && Object.values(value.p).every(isChannel);
+}
+
 function isMask(value: unknown): boolean {
   if (!isRecord(value) || typeof value.id !== 'string'
       || !['rect', 'ellipse'].includes(String(value.shape))
@@ -654,6 +701,8 @@ function isLayer(value: unknown): value is Layer {
       || typeof value.mblur !== 'boolean'
       || !(value.parent === null || typeof value.parent === 'string')
       || !isRecord(value.p) || !Array.isArray(value.fx) || !value.fx.every(isEffect)
+      || value.transitionIn !== undefined && !isTransition(value.transitionIn)
+      || value.transitionOut !== undefined && !isTransition(value.transitionOut)
       || !Array.isArray(value.masks) || !value.masks.every(isMask)
       || !isLayerContent(type, value.d) || !isRecord(value.locked_intent)) return false;
   const properties = value.p;
@@ -918,6 +967,7 @@ function parseObject(source: Record<string, unknown>): EditCommand | ValidationE
     case 'add_effect': return parseAddEffect(source);
     case 'remove_effect': return parseRemoveEffect(source);
     case 'set_effect': return parseSetEffect(source);
+    case 'set_transition': return parseSetTransition(source);
     case 'set_scene_parameter': return parseSetSceneParameter(source);
     case 'add_marker': return parseAddMarker(source);
     case 'create_section': return parseCreateSection(source);

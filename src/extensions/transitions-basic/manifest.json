@@ -1,0 +1,10 @@
+{
+  "id": "transitions-basic",
+  "name": "Basic Transitions",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Powermove's built-in crossfade, wipe, slide, and zoom transitions.",
+  "entry": "index.ts",
+  "contributes": ["transitions"],
+  "author": "powermove"
+}

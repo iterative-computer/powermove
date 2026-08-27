@@ -92,6 +92,14 @@ export interface Effect {
   p: Record<string, Channel>;
 }
 
+export interface Transition {
+  type: string;
+  dur: number;
+  p: Record<string, Channel>;
+  /** hydrate() marks transitions whose extension definition is unavailable. */
+  missing?: boolean;
+}
+
 export interface SolidContent {
   [key: string]: unknown;
   color: string;
@@ -188,6 +196,8 @@ interface LayerBase<T extends LayerType, D extends object> {
   parent: string | null;
   p: T extends 'audio' ? Record<never, never> : TransformChannels;
   fx: Effect[];
+  transitionIn?: Transition | null;
+  transitionOut?: Transition | null;
   masks: Mask[];
   d: D;
   locked_intent: Record<string, LockedIntentEntry | Record<string, unknown>>;

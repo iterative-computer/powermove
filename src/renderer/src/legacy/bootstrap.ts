@@ -7,6 +7,9 @@ import { installShell } from '../shell/install';
 import { installSvelteLayout } from '../layout/install';
 import { installSvelteOverlays } from '../overlays/install';
 
+import { BUILTIN_EXTENSIONS } from '../kernel/builtins';
+import { bootExtensions, installKernel } from '../kernel/install';
+
 import { install as installDiag } from './core/diag';
 import { install as installUtil } from './core/util';
 import { install as installUiState } from './core/ui-state';
@@ -24,13 +27,12 @@ import { install as installCapabilities } from './core/capabilities';
 import { install as installMedia } from './core/media';
 import { install as installAudio } from './core/audio';
 import { install as installShaders } from './gl/shaders';
+import { install as installTransitions } from './gl/transitions';
 import { install as installRaster } from './gl/raster';
 import { install as installCompositor } from './gl/compositor';
 import { install as installEngine } from './core/engine';
 import { install as installControls } from './ui/controls';
 import { install as installLayout } from './ui/layout';
-import { install as installViewer } from './ui/viewer';
-import { install as installTimeline } from './ui/timeline';
 import { install as installLibraryUi } from './ui/library';
 import { install as installShortcuts } from './ui/shortcuts';
 import { install as installWorkspace } from './core/workspace';
@@ -39,7 +41,6 @@ import { install as installHarness } from './assistant/harness';
 import { install as installScripting } from './core/scripting';
 import { install as installSpatial } from './assistant/spatial';
 import { install as installProjectsUi } from './ui/projects';
-import { install as installToolbar } from './ui/toolbar';
 import { install as installApp } from './app';
 
 declare global {
@@ -55,6 +56,11 @@ const PM: PMRegistry = (window.PM = window.PM || {});
 const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/diag', installDiag],
   ['core/util', installUtil],
+  /* The kernel registries must exist before anything registers into them:
+     gl/shaders (effects), gl/transitions, ui/layout (panels) and ui/shortcuts
+     (commands + keymap) all install against `PM.Kernel`. It needs core/util
+     for `PM.bus` and `PM.store`. */
+  ['kernel', (PM) => void installKernel(PM)],
   ['core/ui-state', installUiState],
   ['host/electron-shim', installElectronShim],
   ['core/fonts', installFonts],
@@ -70,13 +76,12 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/media', installMedia],
   ['core/audio', installAudio],
   ['gl/shaders', installShaders],
+  ['gl/transitions', installTransitions],
   ['gl/raster', installRaster],
   ['gl/compositor', installCompositor],
   ['core/engine', installEngine],
   ['ui/controls', installControls],
   ['ui/layout', installLayout],
-  ['ui/viewer', installViewer],
-  ['ui/timeline', installTimeline],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],
   ['core/workspace', installWorkspace],
@@ -85,7 +90,6 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['core/scripting', installScripting],
   ['assistant/spatial', installSpatial],
   ['ui/projects', installProjectsUi],
-  ['ui/toolbar', installToolbar],
   // Install the Svelte-owned chrome before the app boots and applies the
   // workspace layout.
   ['shell', installShell],
@@ -93,7 +97,10 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['overlays/svelte', installSvelteOverlays],
   ['runtime/bridge', installLegacyRuntime],
   ['panels/svelte', installSveltePanels],
-  ['app', installApp]
+  ['app', installApp],
+  /* Extensions load last: every kernel registry is populated and the whole
+     legacy UI is mounted, so an extension can override any of it. */
+  ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).catch((error) => console.error('[kernel] boot failed', error))]
 ];
 
 for (const [name, install] of INSTALLS) {

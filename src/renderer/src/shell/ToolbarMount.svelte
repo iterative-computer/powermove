@@ -10,18 +10,27 @@
   }
 
   onMount(() => {
-    const def = PM.PANELS?.toolbar;
-    if (def) {
+    let disposePanel: void | (() => void);
+    function mountPanel(): void {
+      if (disposePanel || body.childNodes.length) return;
+      const def = PM.PANELS?.toolbar;
+      if (!def) return;
       try {
-        def.build(body, {});
+        disposePanel = def.build(body, {});
       } catch (error) {
         window.console.error('toolbar', error);
       }
     }
 
-    const off = PM.bus?.on?.('projects:screen', syncVisibility);
+    mountPanel();
+    const offProjects = PM.bus?.on?.('projects:screen', syncVisibility);
+    const offLayout = PM.bus?.on?.('layout', mountPanel);
     syncVisibility();
-    return () => off?.();
+    return () => {
+      offProjects?.();
+      offLayout?.();
+      disposePanel?.();
+    };
   });
 </script>
 

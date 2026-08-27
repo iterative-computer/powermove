@@ -16,7 +16,7 @@ function decodeBase64(value: string): string {
 function loadShim(options: { snapshotError?: Error } = {}) {
   const PM: PMRegistry = {
     toast: vi.fn(),
-    CodexBridge: { progress: vi.fn(), resolve: vi.fn() },
+    CodexBridge: { progress: vi.fn(), trace: vi.fn(), resolve: vi.fn() },
     AgentArtifacts: { resolve: vi.fn() },
     WindowCapture: { resolve: vi.fn() },
     store: {},
@@ -72,8 +72,13 @@ afterEach(() => {
 describe('legacy Electron shim install', () => {
   it('maps Codex authority and effort and emits plain UTF-8 progress/result payloads', async () => {
     const { PM, bridge, window } = loadShim();
-    bridge.codex.run.mockImplementation(async (_request: unknown, onProgress?: (text: string) => void) => {
+    bridge.codex.run.mockImplementation(async (
+      _request: unknown,
+      onProgress?: (text: string) => void,
+      onTrace?: (step: unknown) => void
+    ) => {
       onProgress?.('Researching on the web…');
+      onTrace?.({ kind: 'tool-start', itemId: 'search-1', toolName: 'search', label: 'search · motion' });
       return { ok: true, text: 'Finished ✓', access: 'editor' };
     });
 
@@ -101,6 +106,9 @@ describe('legacy Electron shim install', () => {
       dataBase64: string;
     };
     expect(decodeBase64(progress.dataBase64)).toBe('Researching on the web…');
+    expect(PM.CodexBridge.trace).toHaveBeenCalledExactlyOnceWith('request-1234', {
+      kind: 'tool-start', itemId: 'search-1', toolName: 'search', label: 'search · motion'
+    });
     expect(result.ok).toBe(true);
     expect(decodeBase64(result.dataBase64)).toBe('Finished ✓');
 

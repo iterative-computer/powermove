@@ -1,3 +1,10 @@
+/**
+ * Bootstrap contract: call `registerCodexIpc(ipcMain, { extensionsDir,
+ * apiPackFiles, ... })`. `extensionsDir` is the writable user-extension root.
+ * `apiPackFiles` should return `EXTENSIONS.md`, `api.ts`, `extensions.ts`,
+ * `project.ts`, and `commands.ts`, read from `app.getAppPath()` sources in
+ * development or `process.resourcesPath/api-pack/` when packaged.
+ */
 import {
   app,
   type BrowserWindow,
@@ -13,18 +20,27 @@ import {
   REQUEST_ID,
   type ArtifactRef,
   type CodexCancelRequest,
+  type CodexFixPromptRequest,
   type CodexRunRequest,
   type ConsentRequest
 } from '../../shared/ipc';
+import { EXTENSION_ID } from '../../shared/extensions';
 import { IpcValidationError, isRecord, isString } from '../../shared/guards';
 import { readArtifact, revealArtifact } from './artifacts';
 import { requestComputerConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
-import { agentWorkspaceRoot } from './workspace';
+import { buildFixPrompt } from './instructions';
+import { agentWorkspaceRoot, type AgentApiPackFile } from './workspace';
+
+const FIX_PROMPT_ERROR_CHARS = 4_000;
+const FIX_PROMPT_FILES = 40;
+const FIX_PROMPT_FILE_BYTES = 64 * 1024;
 
 export interface CodexIpcContext {
   getWindow(): BrowserWindow | null;
   userData: string;
+  extensionsDir: string;
+  apiPackFiles(): Promise<AgentApiPackFile[]>;
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
   codexBinaryPref(): string | null;
 }
@@ -43,6 +59,32 @@ function requireCancelRequest(value: unknown): CodexCancelRequest {
     throw new IpcValidationError(IPC.codexCancel, 'invalid request id');
   }
   return { id: value.id };
+}
+
+function requireFixPromptRequest(value: unknown): CodexFixPromptRequest {
+  if (
+    !isRecord(value) ||
+    !isString(value.id) ||
+    !EXTENSION_ID.test(value.id) ||
+    !isString(value.error, FIX_PROMPT_ERROR_CHARS) ||
+    !Array.isArray(value.files)
+  ) {
+    throw new IpcValidationError(IPC.codexFixPrompt, 'invalid request');
+  }
+
+  // Degrade instead of rejecting: read-source may return up to 400 files.
+  const files = value.files.slice(0, FIX_PROMPT_FILES).map((file) => {
+    if (!isRecord(file) || !isString(file.path, 1_000) || file.path.length === 0 || !isString(file.text)) {
+      throw new IpcValidationError(IPC.codexFixPrompt, 'invalid extension file');
+    }
+    const text =
+      Buffer.byteLength(file.text, 'utf8') > FIX_PROMPT_FILE_BYTES
+        ? `${file.text.slice(0, FIX_PROMPT_FILE_BYTES)}\n/* …truncated… */`
+        : file.text;
+    return { path: file.path, text };
+  });
+
+  return { id: value.id, error: value.error, files };
 }
 
 function requireConsentRequest(value: unknown): ConsentRequest {
@@ -81,10 +123,17 @@ export function registerCodexIpc(ipcMain: IpcMain, ctx: CodexIpcContext): void {
     try {
       return await runner.run(req, {
         userData: ctx.userData,
+        extensionsDir: ctx.extensionsDir,
+        apiPackFiles: ctx.apiPackFiles,
         codexBinaryPref: ctx.codexBinaryPref(),
         onProgress: (text) => {
           if (!owner.isDestroyed()) {
             owner.send(IPC.codexEvent, { id: req.id, kind: 'progress', text });
+          }
+        },
+        onTrace: (step) => {
+          if (!owner.isDestroyed()) {
+            owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step });
           }
         }
       });
@@ -98,6 +147,11 @@ export function registerCodexIpc(ipcMain: IpcMain, ctx: CodexIpcContext): void {
     requireTrusted(event, ctx);
     const req = requireCancelRequest(rawRequest);
     if (owners.get(req.id) === event.sender) await runner.cancel(req.id);
+  });
+
+  ipcMain.handle(IPC.codexFixPrompt, async (event, rawRequest: unknown) => {
+    requireTrusted(event, ctx);
+    return buildFixPrompt(requireFixPromptRequest(rawRequest));
   });
 
   ipcMain.handle(IPC.consentComputer, async (event, rawRequest: unknown) => {

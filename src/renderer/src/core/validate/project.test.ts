@@ -244,6 +244,38 @@ describe('sanitizeProject', () => {
     expect(Object.hasOwn(layer.d, 'runtimeOnly')).toBe(false);
   });
 
+  it('sanitizes transition channels while preserving extension-defined types', () => {
+    const transitionIn = JSON.parse(`{
+      "type":"custom-reveal",
+      "dur":"0.01",
+      "missing":true,
+      "p":{
+        "amount":{"v":0.75,"kf":[{"t":"1","v":1,"eo":[0,0],"ei":[1,1],"hold":false,"i":"amount-1"}],"expr":"value"},
+        "tint":{"v":"#aabbcc","kf":[],"expr":null},
+        "badColor":{"v":"red","kf":[],"expr":null},
+        "constructor":{"v":1,"kf":[],"expr":null}
+      }
+    }`) as Record<string, unknown>;
+    const project = sanitizeProject({
+      layers: [{ type: 'solid', transitionIn, transitionOut: { type: '', dur: 2, p: {} } }]
+    });
+    const layer = project.layers[0];
+
+    expect(layer?.transitionIn).toMatchObject({
+      type: 'custom-reveal', dur: 0.02, missing: true,
+      p: {
+        amount: { v: 0.75, expr: 'value' },
+        tint: { v: '#aabbcc', kf: [], expr: null },
+        badColor: { v: 0, kf: [], expr: null }
+      }
+    });
+    expect(layer?.transitionIn?.p.amount?.kf[0]).toMatchObject({
+      t: 1, v: 1, eo: [0, 0], ei: [1, 1], hold: false, i: 'amount-1'
+    });
+    expect(Object.hasOwn(layer?.transitionIn?.p ?? {}, 'constructor')).toBe(false);
+    expect(layer?.transitionOut).toBeNull();
+  });
+
   it('keeps the last 200 provenance entries and leaves operations opaque', () => {
     const operations = [
       {

@@ -10,7 +10,9 @@
     "tsBuildInfoFile": "./node_modules/.tsconfig.web.tsbuildinfo",
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["svelte", "vite/client"]
+    "types": ["svelte", "vite/client"],
+    "baseUrl": ".",
+    "paths": { "powermove": ["src/renderer/src/kernel/api.ts"] }
   },
-  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/shared/**/*.ts"]
+  "include": ["src/renderer/src/**/*.ts", "src/renderer/src/**/*.svelte", "src/extensions/**/*.ts", "src/extensions/**/*.svelte", "src/shared/**/*.ts"]
 }

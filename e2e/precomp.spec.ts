@@ -3,6 +3,9 @@ import { expect, test } from './helpers/app';
 test.describe('@precomp nested composition rendering', () => {
   test('precomposing layers renders without throwing and produces pixels', async ({ session }) => {
     const { page } = session;
+    // The viewer is a built-in extension now, so its WebGL host activates
+    // asynchronously after the legacy registry first becomes observable.
+    await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     const result = await page.evaluate(() => {
       const PM = (window as any).PM;
       const ids = PM.proj.layers.slice(0, 2).map((layer: any) => layer.id);

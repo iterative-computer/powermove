@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { EFFECTS } from '../../../../extensions/effects-basic/effects';
 import type { PMRegistry } from '../registry';
 import { install } from './shaders';
 
@@ -10,11 +11,12 @@ function shaderRegistry(): PMRegistry {
     P: (value: any) => ({ v: value, kf: [], expr: '' }),
   };
   install(PM);
+  for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   return PM;
 }
 
 describe('legacy shader registry install', () => {
-  it('installs effect definitions and creates their parameter values', () => {
+  it('exposes extension effect definitions and creates their parameter values', () => {
     const PM = shaderRegistry();
     const blur = PM.mkEffect('blur');
     blur.p.amount.v = 12;

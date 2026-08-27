@@ -6,7 +6,14 @@ import path from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CodexRunRequest } from '../../shared/ipc';
-import { CodexRunner, isCodexRunRequest, type CodexRunOptions } from './runner';
+import {
+  codexErrorFromStdout,
+  CodexRunner,
+  isCodexRunRequest,
+  parseAgentExtensionChanges,
+  type CodexRunOptions
+} from './runner';
+import { isolatedCodexHome } from './isolation';
 import { agentWorkspaceRoot, sessionPathFor } from './workspace';
 
 const fakeCodex = path.join(__dirname, '__fixtures__', 'fake-codex.sh');
@@ -48,11 +55,20 @@ function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
 function fakeOptions(userData: string, environment: Record<string, string>): CodexRunOptions {
   return {
     userData,
+    extensionsDir: path.join(userData, 'extensions'),
+    apiPackFiles: async () => [
+      { name: 'EXTENSIONS.md', text: '# Extensions' },
+      { name: 'api.ts', text: 'export interface PowermoveAPI {}' },
+      { name: 'extensions.ts', text: 'export const EXTENSION_ID = /x/;' },
+      { name: 'project.ts', text: 'export interface Project {}' },
+      { name: 'commands.ts', text: 'export type EditCommand = never;' }
+    ],
     binary: fakeCodex,
     timeoutMs: 10_000,
+    discoverDisabledSkillPaths: async () => [],
     spawnProcess: (command, args, options) => spawn(command, args, {
       ...options,
-      env: { ...process.env, ...environment }
+      env: { ...options.env, ...environment }
     })
   };
 }
@@ -70,6 +86,46 @@ async function waitForFile(file: string): Promise<void> {
 }
 
 describe('CodexRunner validation and authority', () => {
+  it('drops invalid extension changes and caps the typed result at 32 items', () => {
+    const valid = Array.from({ length: 35 }, (_, index) => ({
+      id: `extension-${index}`,
+      action: index % 2 === 0 ? 'created' : 'updated',
+      summary: `Change ${index}`
+    }));
+    expect(parseAgentExtensionChanges([
+      { id: '../escape', action: 'removed' },
+      { id: 'valid-extension', action: 'invalid' },
+      ...valid
+    ])).toEqual(valid.slice(0, 32));
+    expect(parseAgentExtensionChanges(null)).toBeUndefined();
+  });
+
+  it('returns validated extension changes separately while preserving result text', async () => {
+    const result = await new CodexRunner().run(request({ id: 'extensions-run-1234' }), fakeOptions(
+      await temporaryDirectory('runner-extensions'),
+      {
+        FAKE_CODEX_RESULT: JSON.stringify({
+          summary: 'done',
+          commands: [],
+          artifacts: [],
+          externalActions: [],
+          notes: [],
+          extensions: [
+            { id: 'valid-extension', action: 'created', summary: 'Adds a command' },
+            { id: '../invalid', action: 'removed' }
+          ]
+        })
+      }
+    ));
+
+    expect(result).toMatchObject({
+      ok: true,
+      extensions: [{ id: 'valid-extension', action: 'created', summary: 'Adds a command' }]
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(JSON.parse(result.text).extensions).toHaveLength(2);
+  });
+
   it('validates the frozen request shape and collapses autonomous editor access to project', async () => {
     const req = request({ access: 'editor' });
     expect(isCodexRunRequest(req)).toBe(true);
@@ -101,6 +157,47 @@ describe('CodexRunner validation and authority', () => {
 });
 
 describe('CodexRunner lifecycle', () => {
+  it('launches Codex with the app-owned isolated home', async () => {
+    const userData = await temporaryDirectory('runner-isolation');
+    let launchedHome: string | undefined;
+    const options = fakeOptions(userData, {});
+    options.spawnProcess = (command, args, spawnOptions) => {
+      launchedHome = spawnOptions.env?.CODEX_HOME;
+      return spawn(command, args, spawnOptions);
+    };
+
+    const result = await new CodexRunner().run(request({
+      id: 'editor-isolation-1234',
+      mode: 'editor',
+      access: 'editor',
+      projectJSON: null
+    }), options);
+
+    expect(result.ok).toBe(true);
+    expect(launchedHome).toBe(isolatedCodexHome(userData));
+  });
+
+  it('forwards structured traces from editor-mode stdout', async () => {
+    const trace: unknown[] = [];
+    const result = await new CodexRunner().run(request({
+      id: 'editor-trace-1234',
+      mode: 'editor',
+      access: 'editor',
+      projectJSON: null
+    }), {
+      ...fakeOptions(await temporaryDirectory('runner-editor-trace'), {}),
+      onTrace: (step) => trace.push(step)
+    });
+
+    expect(result.ok).toBe(true);
+    expect(trace).toEqual([
+      { kind: 'tool-start', itemId: '0', toolName: 'bash', label: 'bash · pwd' },
+      { kind: 'tool-end', itemId: '0', isError: false },
+      { kind: 'thought', text: 'Reviewing the café timeline' },
+      { kind: 'answer', text: 'Preparing the final animation' }
+    ]);
+  });
+
   it('guards the cancel-before-spawn race', async () => {
     const userData = await temporaryDirectory('runner-before-spawn');
     const runner = new CodexRunner();
@@ -110,7 +207,13 @@ describe('CodexRunner lifecycle', () => {
       mode: 'editor',
       access: 'editor',
       projectJSON: null
-    }), { userData, binary: fakeCodex, spawnProcess });
+    }), {
+      userData,
+      extensionsDir: path.join(userData, 'extensions'),
+      apiPackFiles: async () => [],
+      binary: fakeCodex,
+      spawnProcess
+    });
     await runner.cancel('editor-cancel-1234');
 
     await expect(pending).resolves.toEqual({
@@ -199,5 +302,59 @@ describe('CodexRunner lifecycle', () => {
         importToTimeline: true
       })
     ]);
+  });
+
+  it('surfaces a JSONL API failure and clears the thread recorded by the failed run', async () => {
+    const userData = await temporaryDirectory('runner-jsonl-failure');
+    const root = agentWorkspaceRoot(userData, 'runner-project');
+    const sessionPath = sessionPathFor(root, 'project');
+
+    const result = await new CodexRunner().run(
+      request({ id: 'jsonl-failure-1234' }),
+      fakeOptions(userData, { FAKE_CODEX_MODE: 'fail-after-thread' })
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Powermove's agent response format was rejected. Restart Powermove and retry; if it persists, update the app.",
+      cancelled: false
+    });
+    await expect(readFile(sessionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('humanizeCodexFailure', () => {
+  it('extracts failures from Codex JSONL, including nested JSON messages', () => {
+    expect(codexErrorFromStdout([
+      '{"type":"thread.started","thread_id":"thread-1"}',
+      '{"type":"turn.failed","error":{"message":"{\\"error\\":{\\"message\\":\\"Invalid schema for response_format codex_output_schema\\"}}"}}'
+    ].join('\n'))).toBe('Invalid schema for response_format codex_output_schema');
+  });
+
+  it('maps MCP auth failures to an actionable sentence', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    const raw = '2026-08-26T22:35:35.620618Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\\"OAuth\\"" })';
+    const text = humanizeCodexFailure(raw);
+    expect(text).toContain('MCP server');
+    expect(text).toContain('codex');
+    expect(text).not.toContain('rmcp::');
+    expect(text).not.toContain('www_authenticate');
+  });
+
+  it('maps login failures and missing binary', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    expect(humanizeCodexFailure('Error: not logged in. Please run codex login.')).toContain('codex login');
+    expect(humanizeCodexFailure('spawn codex ENOENT')).toContain('installed');
+  });
+
+  it('reduces unknown stderr to its last meaningful line without log noise', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    const text = humanizeCodexFailure('2026-08-26T10:00:00Z WARN codex::something: first\n2026-08-26T10:00:01Z ERROR codex::other: everything exploded badly');
+    expect(text).toBe('The agent failed: everything exploded badly');
+  });
+
+  it('falls back cleanly on empty diagnostics', async () => {
+    const { humanizeCodexFailure } = await import('./runner');
+    expect(humanizeCodexFailure('', 'The autonomous agent failed.')).toBe('The autonomous agent failed.');
   });
 });

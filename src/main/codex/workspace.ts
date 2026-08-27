@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { LIMITS, type CodexRunRequest } from '../../shared/ipc';
@@ -9,10 +9,12 @@ export type CodexAuthority = 'project' | 'computer';
 export interface AgentWorkspace {
   root: string;
   inputsDirectory: string;
+  apiPackDirectory: string;
   attachmentsDirectory: string;
   referencesDirectory: string;
   internalDirectory: string;
   artifactRoot: string;
+  extensionsDir: string;
   runId: string;
   runDirectory: string;
   schemaPath: string;
@@ -21,7 +23,18 @@ export interface AgentWorkspace {
   imagePaths: string[];
 }
 
+export interface AgentApiPackFile {
+  name: string;
+  text: string;
+}
+
+export interface PrepareAgentWorkspaceOptions {
+  extensionsDir: string;
+  apiPackFiles: readonly AgentApiPackFile[];
+}
+
 const byteLength = (value: string): number => Buffer.byteLength(value, 'utf8');
+const SESSION_CONTRACT_VERSION = 2;
 
 export function safeAgentComponent(value: string, fallback = 'project'): string {
   const cleaned = value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
@@ -33,7 +46,7 @@ export function agentWorkspaceRoot(userData: string, projectId: string): string 
 }
 
 export function sessionPathFor(root: string, authority: CodexAuthority): string {
-  return path.join(root, '.powermove', `session-${authority}.txt`);
+  return path.join(root, '.powermove', `session-v${SESSION_CONTRACT_VERSION}-${authority}.txt`);
 }
 
 export async function readSession(sessionPath: string): Promise<string | null> {
@@ -70,15 +83,41 @@ export async function prepareAgentWorkspace(
   userData: string,
   authority: CodexAuthority,
   schema: Record<string, unknown>,
+  options: PrepareAgentWorkspaceOptions,
   runId = safeAgentComponent(`${Math.floor(Date.now() / 1000)}-${randomUUID()}`, 'run')
 ): Promise<AgentWorkspace> {
   if (req.projectJSON === null) throw new Error('Autonomous runs require a project snapshot.');
   if (byteLength(req.projectJSON) > LIMITS.codexProjectJsonBytes) {
     throw new Error('The project snapshot is larger than 24 MB.');
   }
+  if (!path.isAbsolute(options.extensionsDir)) {
+    throw new Error('The user extensions directory must be an absolute path.');
+  }
+
+  const apiPackNames = new Set<string>();
+  for (const file of options.apiPackFiles) {
+    if (
+      file.name.length === 0 ||
+      file.name === '.' ||
+      file.name === '..' ||
+      path.basename(file.name) !== file.name ||
+      file.name.includes('\0') ||
+      apiPackNames.has(file.name)
+    ) {
+      continue; // skip malformed pack entries; the run proceeds without them
+    }
+    apiPackNames.add(file.name);
+  }
+  const seen = new Set<string>();
+  const apiPackFiles = options.apiPackFiles.filter((file) => {
+    if (!apiPackNames.has(file.name) || seen.has(file.name)) return false;
+    seen.add(file.name);
+    return true;
+  });
 
   const root = agentWorkspaceRoot(userData, req.projectId);
   const inputsDirectory = path.join(root, 'inputs');
+  const apiPackDirectory = path.join(root, 'powermove-api');
   const attachmentsDirectory = path.join(inputsDirectory, 'attachments');
   const referencesDirectory = path.join(inputsDirectory, 'references');
   const internalDirectory = path.join(root, '.powermove');
@@ -89,6 +128,7 @@ export async function prepareAgentWorkspace(
   const sessionPath = sessionPathFor(root, authority);
 
   await Promise.all([
+    mkdir(apiPackDirectory, { recursive: true }),
     mkdir(attachmentsDirectory, { recursive: true }),
     mkdir(referencesDirectory, { recursive: true }),
     mkdir(internalDirectory, { recursive: true }),
@@ -96,6 +136,15 @@ export async function prepareAgentWorkspace(
   ]);
   await writeFile(path.join(inputsDirectory, 'powermove-project.json'), req.projectJSON, 'utf8');
   await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, 'utf8');
+
+  for (const file of apiPackFiles) {
+    await writeFile(path.join(apiPackDirectory, file.name), file.text, 'utf8');
+  }
+  // Remove stale pack files individually (never rm -rf: a concurrent run on the
+  // same project may be reading the directory).
+  for (const entry of await readdir(apiPackDirectory)) {
+    if (!apiPackNames.has(entry)) await rm(path.join(apiPackDirectory, entry), { force: true });
+  }
 
   for (const [index, attachment] of req.attachments.entries()) {
     if (index >= LIMITS.codexAttachments) break;
@@ -116,10 +165,12 @@ export async function prepareAgentWorkspace(
   return {
     root,
     inputsDirectory,
+    apiPackDirectory,
     attachmentsDirectory,
     referencesDirectory,
     internalDirectory,
     artifactRoot,
+    extensionsDir: options.extensionsDir,
     runId,
     runDirectory,
     schemaPath,

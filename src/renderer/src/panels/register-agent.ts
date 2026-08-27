@@ -34,10 +34,39 @@ export interface AgentLegacyBridge {
 type LegacyPM = Record<string, any>;
 
 export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): void {
+  const updateInterval = 32;
+  let updateTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastUpdateAt: number | null = null;
+  let queuedOptions: AgentUpdateOptions = {};
+
+  const commitUpdate = (options: AgentUpdateOptions): void => {
+    lastUpdateAt = Date.now();
+    setAgentSnapshot(bridge.snapshot(), options);
+  };
+
   PM.AgentUI = {
     state: agentState,
     update(options: AgentUpdateOptions = {}) {
-      setAgentSnapshot(bridge.snapshot(), options);
+      const now = Date.now();
+      const mustFlush = options.flush || options.focusComposer;
+      const shouldCoalesce = agentState.phase === 'running' && !mustFlush;
+      if (!shouldCoalesce || lastUpdateAt === null || now - lastUpdateAt >= updateInterval) {
+        if (updateTimer !== null) clearTimeout(updateTimer);
+        updateTimer = null;
+        const merged = { ...queuedOptions, ...options };
+        queuedOptions = {};
+        commitUpdate(merged);
+        return;
+      }
+
+      queuedOptions = { ...queuedOptions, ...options };
+      if (updateTimer !== null) return;
+      updateTimer = setTimeout(() => {
+        updateTimer = null;
+        const pending = queuedOptions;
+        queuedOptions = {};
+        commitUpdate(pending);
+      }, Math.max(0, updateInterval - (now - lastUpdateAt)));
     },
     submit: bridge.submit,
     stop: bridge.stop,

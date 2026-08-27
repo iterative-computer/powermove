@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PMRegistry } from '../registry';
-import { install } from './compositor';
+import { hasRenderableEffects, install, paramUniformName } from './compositor';
 
 function compositorRegistry(): PMRegistry {
   const PM: PMRegistry = {
@@ -34,5 +34,35 @@ describe('legacy compositor install', () => {
     expect(bounds.ax).toBe(250);
     expect(bounds.ay).toBe(150);
     expect(String(PM.GL.renderProject)).toContain('PM.FRAG_BACKGROUND_FILL');
+  });
+});
+
+describe('effect and transition parameter uniforms', () => {
+  /* Kernel-generated shaders declare `u_<param>`; legacy raw shaders declare
+     the positional `u_p<i>` / `u_c<i>` names. Bind by name first, fall back. */
+  it('prefers the named uniform when the program declares it', () => {
+    expect(paramUniformName({ k: 'amount' }, 0, true)).toBe('u_amount');
+    expect(paramUniformName({ k: 'shadow', type: 'color' }, 4, true)).toBe('u_shadow');
+  });
+
+  it('falls back to the positional name for legacy raw shaders', () => {
+    expect(paramUniformName({ k: 'amount' }, 0, false)).toBe('u_p0');
+    expect(paramUniformName({ k: 'angle' }, 1, false)).toBe('u_p1');
+    expect(paramUniformName({ k: 'shadow', type: 'color' }, 4, false)).toBe('u_c4');
+    expect(paramUniformName({ k: 'on', type: 'toggle' }, 2, false)).toBe('u_p2');
+  });
+});
+
+describe('compositor effect fast path', () => {
+  it('ignores enabled missing-effect placeholders when choosing the fast path', () => {
+    expect(hasRenderableEffects([{ on: true, missing: true }])).toBe(false);
+    expect(hasRenderableEffects([
+      { on: true, missing: true },
+      { on: false, missing: false }
+    ])).toBe(false);
+    expect(hasRenderableEffects([
+      { on: true, missing: true },
+      { on: true, missing: false }
+    ])).toBe(true);
   });
 });

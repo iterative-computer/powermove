@@ -1,0 +1,10 @@
+{
+  "id": "keymap-default",
+  "name": "Default keymap",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Powermove's built-in keyboard shortcuts.",
+  "entry": "index.ts",
+  "contributes": ["keybindings"],
+  "author": "powermove"
+}

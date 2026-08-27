@@ -22,8 +22,8 @@ import { install as installCompositor } from '../gl/compositor';
 import { install as installEngine } from '../core/engine';
 import { install as installControls } from '../ui/controls';
 import { install as installLayout } from '../ui/layout';
-import { install as installViewer } from '../ui/viewer';
-import { install as installTimeline } from '../ui/timeline';
+import { install as installViewer } from '../../../../extensions/viewer/viewer';
+import { install as installTimeline } from '../../../../extensions/timeline/timeline';
 import { install as installLibraryUi } from '../ui/library';
 import { install as installShortcuts } from '../ui/shortcuts';
 import { install as installWorkspace } from '../core/workspace';
@@ -32,7 +32,6 @@ import { install as installHarness } from '../assistant/harness';
 import { install as installScripting } from '../core/scripting';
 import { install as installSpatial } from '../assistant/spatial';
 import { install as installProjectsUi } from '../ui/projects';
-import { install as installToolbar } from '../ui/toolbar';
 import { install as installApp } from '../app';
 
 const INSTALLS = [
@@ -68,7 +67,6 @@ const INSTALLS = [
   ['core/scripting', installScripting],
   ['assistant/spatial', installSpatial],
   ['ui/projects', installProjectsUi],
-  ['ui/toolbar', installToolbar],
   ['app', installApp],
 ] as const;
 
