@@ -6,7 +6,8 @@
     "commands",
     "artifacts",
     "externalActions",
-    "notes"
+    "notes",
+    "extensions"
   ],
   "properties": {
     "summary": { "type": "string" },
@@ -32,7 +33,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "action"],
+        "required": ["id", "action", "summary"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$" },
           "action": { "type": "string", "enum": ["created", "updated", "removed"] },

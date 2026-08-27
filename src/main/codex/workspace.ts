@@ -34,6 +34,7 @@ export interface PrepareAgentWorkspaceOptions {
 }
 
 const byteLength = (value: string): number => Buffer.byteLength(value, 'utf8');
+const SESSION_CONTRACT_VERSION = 2;
 
 export function safeAgentComponent(value: string, fallback = 'project'): string {
   const cleaned = value.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
@@ -45,7 +46,7 @@ export function agentWorkspaceRoot(userData: string, projectId: string): string 
 }
 
 export function sessionPathFor(root: string, authority: CodexAuthority): string {
-  return path.join(root, '.powermove', `session-${authority}.txt`);
+  return path.join(root, '.powermove', `session-v${SESSION_CONTRACT_VERSION}-${authority}.txt`);
 }
 
 export async function readSession(sessionPath: string): Promise<string | null> {

@@ -77,7 +77,7 @@ describe('autonomous agent contract', () => {
     expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(6 * 1024);
   });
 
-  it('defines optional, bounded extension changes in the result schema', () => {
+  it('defines required, bounded extension changes in the strict result schema', () => {
     const schema = agentResultSchema() as {
       required: string[];
       properties: { extensions: Record<string, unknown> };
@@ -87,9 +87,9 @@ describe('autonomous agent contract', () => {
       items: { required: string[]; properties: Record<string, Record<string, unknown>> };
     };
 
-    expect(schema.required).not.toContain('extensions');
+    expect(schema.required).toContain('extensions');
     expect(extensions.maxItems).toBe(32);
-    expect(extensions.items.required).toEqual(['id', 'action']);
+    expect(extensions.items.required).toEqual(['id', 'action', 'summary']);
     expect(extensions.items.properties.id?.pattern).toBe('^[a-z0-9][a-z0-9-]{1,63}$');
     expect(extensions.items.properties.action?.enum).toEqual(['created', 'updated', 'removed']);
     expect(extensions.items.properties).toHaveProperty('summary');

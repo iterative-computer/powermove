@@ -2,11 +2,12 @@ import { execFile } from 'node:child_process';
 import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { discoverCodexBinary } from './env';
 
-export const ADAPTER_VERSION = '2';
+export const ADAPTER_VERSION = '4';
 
 export const REQUIRED_CODEX_FLAGS = [
   '--ephemeral',
   '--skip-git-repo-check',
+  '--ignore-user-config',
   '--ignore-rules',
   '--sandbox',
   '--output-schema',
@@ -16,6 +17,7 @@ export const REQUIRED_CODEX_FLAGS = [
   '--config',
   '--image',
   '--search',
+  '--disable',
   '--add-dir',
   '--approve-for-me',
   '--dangerously-bypass-approvals-and-sandbox'
@@ -28,6 +30,7 @@ interface CommonArgvOptions {
   imagePaths: readonly string[];
   model: string | null;
   reasoningEffort: ReasoningEffort | null;
+  disabledSkillPaths: readonly string[];
 }
 
 export interface EditorArgvOptions extends CommonArgvOptions {}
@@ -37,9 +40,29 @@ export interface AutonomousArgvOptions extends CommonArgvOptions {
   extensionsDir: string;
   sessionId: string | null;
   instructions: string;
-  /** Retry path: strip the user's global MCP servers so a broken one (expired
-      OAuth, dead transport) cannot take the whole run down with it. */
-  disableMcp?: boolean;
+}
+
+/**
+ * Session-level isolation is defense in depth on top of the app-owned
+ * CODEX_HOME. It also suppresses user skills from $HOME/.agents/skills, which
+ * live outside CODEX_HOME.
+ */
+function isolatedSessionArgv(disabledSkillPaths: readonly string[]): string[] {
+  const argv = [
+    '--disable', 'plugins',
+    '--disable', 'apps',
+    '--disable', 'skill_search',
+    '--disable', 'skill_mcp_dependency_install',
+    '--config', 'mcp_servers={}',
+    '--config', 'skills.include_instructions=false',
+    '--config', 'skills.bundled.enabled=false'
+  ];
+  if (disabledSkillPaths.length > 0) {
+    const rules = disabledSkillPaths.map((skillPath) =>
+      `{path=${JSON.stringify(skillPath)},enabled=false}`).join(',');
+    argv.push('--config', `skills.config=[${rules}]`);
+  }
+  return argv;
 }
 
 function appendModelOptions(
@@ -63,7 +86,9 @@ export function buildEditorArgv(options: EditorArgvOptions): string[] {
     'exec',
     '--ephemeral',
     '--skip-git-repo-check',
+    '--ignore-user-config',
     '--ignore-rules',
+    ...isolatedSessionArgv(options.disabledSkillPaths),
     '--sandbox',
     'read-only',
     '--output-schema',
@@ -79,7 +104,6 @@ export function buildEditorArgv(options: EditorArgvOptions): string[] {
 
 export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
   const argv = ['--search'];
-  if (options.disableMcp) argv.push('--config', 'mcp_servers={}');
   if (options.access === 'computer') {
     argv.push('--dangerously-bypass-approvals-and-sandbox');
   } else {
@@ -93,7 +117,9 @@ export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
   argv.push('exec');
   if (options.sessionId !== null && options.sessionId.trim() !== '') argv.push('resume');
   argv.push(
+    '--ignore-user-config',
     '--skip-git-repo-check',
+    ...isolatedSessionArgv(options.disabledSkillPaths),
     '--output-schema',
     options.schemaPath,
     '--output-last-message',

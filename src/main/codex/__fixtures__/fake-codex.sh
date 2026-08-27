@@ -39,6 +39,12 @@ if [ "${FAKE_CODEX_MODE:-success}" = 'hang' ]; then
   while :; do sleep 1; done
 fi
 
+if [ "${FAKE_CODEX_MODE:-success}" = 'fail-after-thread' ]; then
+  printf '%s\n' '{"type":"turn.failed","error":{"type":"invalid_request_error","code":"invalid_json_schema","message":"Invalid schema for response_format codex_output_schema: missing required property."}}'
+  printf '%s\n' 'Reading additional input from stdin...' >&2
+  exit 19
+fi
+
 if [ -z "$output_path" ]; then
   printf '%s\n' 'fake codex did not receive --output-last-message' >&2
   exit 18

@@ -7,11 +7,13 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { CodexRunRequest } from '../../shared/ipc';
 import {
+  codexErrorFromStdout,
   CodexRunner,
   isCodexRunRequest,
   parseAgentExtensionChanges,
   type CodexRunOptions
 } from './runner';
+import { isolatedCodexHome } from './isolation';
 import { agentWorkspaceRoot, sessionPathFor } from './workspace';
 
 const fakeCodex = path.join(__dirname, '__fixtures__', 'fake-codex.sh');
@@ -63,9 +65,10 @@ function fakeOptions(userData: string, environment: Record<string, string>): Cod
     ],
     binary: fakeCodex,
     timeoutMs: 10_000,
+    discoverDisabledSkillPaths: async () => [],
     spawnProcess: (command, args, options) => spawn(command, args, {
       ...options,
-      env: { ...process.env, ...environment }
+      env: { ...options.env, ...environment }
     })
   };
 }
@@ -154,6 +157,26 @@ describe('CodexRunner validation and authority', () => {
 });
 
 describe('CodexRunner lifecycle', () => {
+  it('launches Codex with the app-owned isolated home', async () => {
+    const userData = await temporaryDirectory('runner-isolation');
+    let launchedHome: string | undefined;
+    const options = fakeOptions(userData, {});
+    options.spawnProcess = (command, args, spawnOptions) => {
+      launchedHome = spawnOptions.env?.CODEX_HOME;
+      return spawn(command, args, spawnOptions);
+    };
+
+    const result = await new CodexRunner().run(request({
+      id: 'editor-isolation-1234',
+      mode: 'editor',
+      access: 'editor',
+      projectJSON: null
+    }), options);
+
+    expect(result.ok).toBe(true);
+    expect(launchedHome).toBe(isolatedCodexHome(userData));
+  });
+
   it('forwards structured traces from editor-mode stdout', async () => {
     const trace: unknown[] = [];
     const result = await new CodexRunner().run(request({
@@ -280,9 +303,34 @@ describe('CodexRunner lifecycle', () => {
       })
     ]);
   });
+
+  it('surfaces a JSONL API failure and clears the thread recorded by the failed run', async () => {
+    const userData = await temporaryDirectory('runner-jsonl-failure');
+    const root = agentWorkspaceRoot(userData, 'runner-project');
+    const sessionPath = sessionPathFor(root, 'project');
+
+    const result = await new CodexRunner().run(
+      request({ id: 'jsonl-failure-1234' }),
+      fakeOptions(userData, { FAKE_CODEX_MODE: 'fail-after-thread' })
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      error: "Powermove's agent response format was rejected. Restart Powermove and retry; if it persists, update the app.",
+      cancelled: false
+    });
+    await expect(readFile(sessionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });
 
 describe('humanizeCodexFailure', () => {
+  it('extracts failures from Codex JSONL, including nested JSON messages', () => {
+    expect(codexErrorFromStdout([
+      '{"type":"thread.started","thread_id":"thread-1"}',
+      '{"type":"turn.failed","error":{"message":"{\\"error\\":{\\"message\\":\\"Invalid schema for response_format codex_output_schema\\"}}"}}'
+    ].join('\n'))).toBe('Invalid schema for response_format codex_output_schema');
+  });
+
   it('maps MCP auth failures to an actionable sentence', async () => {
     const { humanizeCodexFailure } = await import('./runner');
     const raw = '2026-08-26T22:35:35.620618Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\\"OAuth\\"" })';
@@ -308,15 +356,5 @@ describe('humanizeCodexFailure', () => {
   it('falls back cleanly on empty diagnostics', async () => {
     const { humanizeCodexFailure } = await import('./runner');
     expect(humanizeCodexFailure('', 'The autonomous agent failed.')).toBe('The autonomous agent failed.');
-  });
-});
-
-describe('isMcpStartupFailure', () => {
-  it('matches the rmcp AuthRequired fatal and transport closures', async () => {
-    const { isMcpStartupFailure } = await import('./runner');
-    expect(isMcpStartupFailure('ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(...)')).toBe(true);
-    expect(isMcpStartupFailure('mcp handshake failed: connection refused')).toBe(true);
-    expect(isMcpStartupFailure('The model produced invalid JSON')).toBe(false);
-    expect(isMcpStartupFailure('AuthRequired without any emcee context')).toBe(false);
   });
 });
