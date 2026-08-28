@@ -4,6 +4,7 @@
   import Conversation from './agent/Conversation.svelte';
   import PlanPreview from './agent/PlanPreview.svelte';
   import ResultActions from './agent/ResultActions.svelte';
+  import ThreadPicker from './agent/ThreadPicker.svelte';
   import { agentState } from './agent/agent-state.svelte';
 
   let { panelId }: PanelProps = $props();
@@ -38,6 +39,13 @@
   /* Pin-to-bottom is a threshold, not a boolean stick: while the reader is
      within 160px of the end, new content keeps them at the end. */
   $effect(() => {
+    agentState.threadId;
+    userScrolled = false;
+    showJump = false;
+    if (scroller) window.requestAnimationFrame(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
+  });
+
+  $effect(() => {
     agentState.revision;
     if (!scroller) return;
     if (!userScrolled || distanceFromBottom() < 160) {
@@ -48,6 +56,7 @@
 </script>
 
 <div class="agent-panel-body agent-shell" data-svelte-panel={panelId} data-agent-panel data-agent-phase={agentState.phase}>
+  <ThreadPicker {PM} />
   <div
     class="agent-scroll"
     role="log"
@@ -57,7 +66,7 @@
     bind:this={scroller}
     onscroll={onScroll}
   >
-    <Conversation {PM} />
+    {#key agentState.threadId}<Conversation {PM} />{/key}
   </div>
   <div class="agent-footer">
     {#if showJump}

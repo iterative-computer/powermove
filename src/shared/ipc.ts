@@ -10,6 +10,8 @@ export const IPC = {
   ping: 'app:ping',
 
   fileSave: 'file:save',
+  projectOpen: 'project:open',
+  projectConfirmClose: 'project:confirm-close',
 
   codexRun: 'codex:run',
   codexCancel: 'codex:cancel',
@@ -61,8 +63,12 @@ export const PROJECT_ID = /^[A-Za-z0-9_-]{1,120}$/;
 export interface FileSaveRequest {
   name: string;
   data: Uint8Array;
+  projectId?: string;
+  saveAs?: boolean;
 }
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
+export type ProjectOpenResult = { ok: true; path: string; projectId: string; text: string } | { ok: false; cancelled: boolean; error?: string };
+export type CloseDecision = 'save' | 'discard' | 'cancel';
 
 /* ── codex ───────────────────────────────────────────────── */
 export type CodexMode = 'editor' | 'autonomous';
@@ -76,6 +82,7 @@ export interface CodexAttachment {
 
 export interface CodexRunRequest {
   id: string; // REQUEST_ID
+  threadId?: string; // optional for older renderer clients; isolates resumed CLI sessions
   mode: CodexMode;
   prompt: string;
   schema: Record<string, unknown> | null;
@@ -181,7 +188,7 @@ export interface LogRequest {
   level: LogLevel;
   text: string;
 }
-export type MenuCommand = 'newProject' | 'save' | 'open' | 'export' | 'undo' | 'redo' | 'settings';
+export type MenuCommand = 'newProject' | 'save' | 'saveAs' | 'open' | 'export' | 'undo' | 'redo' | 'settings';
 
 /* ── the preload surface ─────────────────────────────────── */
 import type { ExtensionsBridge } from './extensions';
@@ -191,6 +198,8 @@ export interface PowermoveBridge {
   versions: { electron: string; chrome: string; node: string };
 
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
+  openProjectFile(): Promise<ProjectOpenResult>;
+  confirmProjectClose(name: string): Promise<CloseDecision>;
 
   codex: {
     run(

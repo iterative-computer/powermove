@@ -2,6 +2,7 @@ import { LIMITS } from '../../shared/ipc';
 import type { AgentExtensionChange, CodexAccess } from '../../shared/ipc';
 import { AGENT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
 import { EXTENSION_ID } from '../../shared/extensions';
+import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
 
 export interface AgentInstructionsOptions {
   projectName: string;
@@ -17,6 +18,9 @@ export function agentInstructions({
   extensionsDir
 }: AgentInstructionsOptions): string {
   return `You are the general production agent working beside Powermove. Complete the user's request end to end, using web search, shell tools, installed creative applications, and reusable integrations when useful.
+
+${AGENT_TESTING_INSTRUCTIONS}
+Read powermove-api/BACKGROUND_TESTING.md before visual or interaction tests; it identifies the source checkout when available. Do not assume an Agent Workspace contains the app's npm scripts.
 
 PROJECT EDITING
 The current Powermove project snapshot is inputs/powermove-project.json. Treat it as read-only reference; never rewrite it. For scene edits such as layers, properties, effects, keyframes, easing, expressions, composition settings, markers, or sections, return typed commands even if you also create or change an extension.

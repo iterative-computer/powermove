@@ -20,9 +20,11 @@ import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
 import { installMenu } from './menu';
 import { registerSaveIpc } from './save';
+import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { createStore, installQuitFlush, registerStoreIpc } from './storage';
 import { DARK_BACKGROUND, registerThemeIpc } from './theme';
+import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 
 const APP_ORIGIN = 'app://powermove';
 const CONTENT_SECURITY_POLICY =
@@ -79,6 +81,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 // e2e runs point this at a temp dir so tests never touch real user data.
+const isBackgroundTest = backgroundTesting(process.env, app.getPath('userData'));
 const userDataOverride = process.env['POWERMOVE_USER_DATA'];
 if (userDataOverride && path.isAbsolute(userDataOverride)) {
   app.setPath('userData', userDataOverride);
@@ -87,6 +90,14 @@ if (userDataOverride && path.isAbsolute(userDataOverride)) {
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | null = null;
 let quitPrepared = () => false;
+async function prepareEditorClose(window: BrowserWindow): Promise<void> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()
+    || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
+  // User decisions and large file saves must not be cut off by the recovery-flush timeout.
+  const allowed = await window.webContents.executeJavaScript('window.PM?.prepareToClose?.() ?? true');
+  if (!allowed) throw new Error('Close cancelled');
+  await flushEditor(window);
+}
 async function flushEditor(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
     || !isAllowedNavigation(window.webContents.getURL(),devRendererUrl)) return;
@@ -243,7 +254,9 @@ function isTrustedSenderContents(sender: WebContents): boolean {
 }
 
 function createWindow(): BrowserWindow {
+  const testOptions = backgroundWindowOptions(isBackgroundTest);
   const window = new BrowserWindow({
+    ...testOptions,
     width: 1440,
     height: 900,
     minWidth: 980,
@@ -252,6 +265,7 @@ function createWindow(): BrowserWindow {
     trafficLightPosition: { x: 14, y: 15 },
     backgroundColor: DARK_BACKGROUND,
     webPreferences: {
+      ...testOptions.webPreferences,
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       sandbox: true,
@@ -268,9 +282,10 @@ function createWindow(): BrowserWindow {
     event.preventDefault();
     if (closing) return;
     closing = true;
-    void flushEditor(window).then(() => {
+    void prepareEditorClose(window).then(() => {
       if (!window.isDestroyed()) { closePrepared=true;window.close();closePrepared=false; }
     }).catch(error => {
+      if (error.message === 'Close cancelled') return;
       console.error('Could not save before closing',error);
       // Keep the editable document open when its durable save fails.
       if (!window.webContents.isDestroyed()) void window.webContents.executeJavaScript("window.PM?.toast?.('Could not save before closing. Your project is still open.',6000)").catch(() => undefined);
@@ -291,7 +306,7 @@ function createWindow(): BrowserWindow {
 
   // Opt out with POWERMOVE_DEVTOOLS=0 (e2e: the DevTools window would otherwise
   // be the "first window" Playwright attaches to).
-  if (!app.isPackaged && process.env['POWERMOVE_DEVTOOLS'] !== '0') {
+  if (!isBackgroundTest && !app.isPackaged && process.env['POWERMOVE_DEVTOOLS'] !== '0') {
     window.webContents.openDevTools({ mode: 'detach' });
   }
 
@@ -304,6 +319,7 @@ if (!hasSingleInstanceLock) {
   app.setName('Powermove');
 
   app.on('second-instance', () => {
+    if (isBackgroundTest) return;
     if (mainWindow === null) {
       createWindow();
       return;
@@ -337,7 +353,7 @@ if (!hasSingleInstanceLock) {
     await store.load();
     registerStoreIpc(ipcMain, store, { isTrustedSender });
     const quitBarrier = installQuitFlush(app, store, async () => {
-      await Promise.all(BrowserWindow.getAllWindows().map(flushEditor));
+      for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
     });
     quitPrepared = quitBarrier.isPrepared;
 
@@ -377,7 +393,7 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    registerSaveIpc(ipcMain, ctx);
+    registerSaveIpc(ipcMain, { ...ctx, projects: new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json')) });
     registerCaptureIpc(ipcMain, ctx);
     registerShellIpc(ipcMain, ctx);
     registerThemeIpc(ipcMain, ctx);
@@ -390,6 +406,7 @@ if (!hasSingleInstanceLock) {
       : app.getAppPath();
     const apiPackEntries: Array<[name: string, devPath: string]> = [
       ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
+      ['BACKGROUND_TESTING.md', 'docs/background-testing.md'],
       ['api.ts', 'src/renderer/src/kernel/api.ts'],
       ['extensions.ts', 'src/shared/extensions.ts'],
       ['project.ts', 'src/renderer/src/core/types/project.ts'],
@@ -400,7 +417,11 @@ if (!hasSingleInstanceLock) {
       for (const [name, devPath] of apiPackEntries) {
         const file = app.isPackaged ? path.join(apiPackDir, name) : path.join(apiPackDir, devPath);
         try {
-          files.push({ name, text: await readFile(file, 'utf8') });
+          let text = await readFile(file, 'utf8');
+          if (name === 'BACKGROUND_TESTING.md' && !app.isPackaged) {
+            text += `\nCurrent source checkout: ${app.getAppPath()}\nRun the npm commands from that directory, not from this agent workspace.\n`;
+          }
+          files.push({ name, text });
         } catch (error) {
           console.warn(`[api-pack] missing ${name}: ${String(error)}`);
         }
@@ -418,9 +439,11 @@ if (!hasSingleInstanceLock) {
     });
     installMenu(() => mainWindow);
 
+    if (isBackgroundTest) app.dock?.hide();
     createWindow();
 
     app.on('activate', () => {
+      if (isBackgroundTest) return;
       if (BrowserWindow.getAllWindows().length === 0) {
         createWindow();
       }

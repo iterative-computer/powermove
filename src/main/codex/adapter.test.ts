@@ -2,6 +2,7 @@ import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
 import {
   ADAPTER_VERSION,
   REQUIRED_CODEX_FLAGS,
@@ -37,7 +38,7 @@ describe('Codex CLI adapter', () => {
       'gpt-5-codex',
       '--config',
       'model_reasoning_effort="high"',
-      'Polish this composition',
+      `${AGENT_TESTING_INSTRUCTIONS}\n\nPolish this composition`,
       '--image',
       '/tmp/editor/frame-0.png',
       '--image',

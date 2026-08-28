@@ -70,6 +70,7 @@ describe('application menu', () => {
       'New Project',
       'Open Project…',
       'Save Project',
+      'Save Project As…',
       'separator',
       'Export…'
     ]);
@@ -77,12 +78,13 @@ describe('application menu', () => {
       'CommandOrControl+N',
       'CommandOrControl+O',
       'CommandOrControl+S',
+      'CommandOrControl+Shift+S',
       'CommandOrControl+E'
     ]);
     for (const item of fileItems) {
       item.click?.({} as never, undefined, {} as never);
     }
-    expect(sent).toEqual(['newProject', 'open', 'save', 'export']);
+    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'export']);
 
     const editItems = submenu(topLevel(template, 'Edit'));
     const undo = editItems.find((item) => item.label === 'Undo');
@@ -93,7 +95,7 @@ describe('application menu', () => {
     expect(redo).not.toHaveProperty('role');
     undo?.click?.({} as never, undefined, {} as never);
     redo?.click?.({} as never, undefined, {} as never);
-    expect(sent).toEqual(['newProject', 'open', 'save', 'export', 'undo', 'redo']);
+    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'export', 'undo', 'redo']);
     expect(editItems.filter((item) => item.role).map((item) => item.role)).toEqual([
       'cut',
       'copy',

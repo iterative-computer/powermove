@@ -74,7 +74,15 @@ async function startElectron(
       ...env,
       POWERMOVE_USER_DATA: userData,
       POWERMOVE_DEVTOOLS: '0',
+      POWERMOVE_BACKGROUND_TEST: '1',
     }
+  });
+  // Native dialogs are substituted in the hidden harness, never shown on the user's desktop.
+  // Individual tests can supply chosen paths or decisions while retaining real file IPC.
+  await app.evaluate(({ dialog }) => {
+    dialog.showSaveDialog = async () => ({ canceled: true, filePath: '' });
+    dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+    dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
   });
   const instrumented = new WeakSet<Page>();
   const instrument = (target: Page): void => {
@@ -94,13 +102,10 @@ async function startElectron(
   };
   app.on('window', instrument);
   app.windows().forEach(instrument);
-  // Never attach to a DevTools window; wait for the app document itself.
-  const isAppPage = (p: Page): boolean => p.url().startsWith('app://') || p.url().startsWith('http://localhost');
-  let page = app.windows().find(isAppPage);
-  while (!page) {
-    const next = await app.waitForEvent('window');
-    if (isAppPage(next)) page = next;
-  }
+  // Hidden windows are announced before navigation. Waiting for a second
+  // window here would hang forever. DevTools is disabled in background mode.
+  const page = await app.firstWindow();
+  await page.waitForURL(url => url.protocol === 'app:' || url.hostname === 'localhost');
   instrument(page);
   await page.waitForLoadState('domcontentloaded');
   await page.waitForFunction(() => Boolean((window as any).PM));

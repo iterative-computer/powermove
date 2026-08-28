@@ -411,6 +411,55 @@ function placementHarness() {
 const placementMessage = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
 const emptyAgentResult = { text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) };
 
+it('keeps thread history, drafts and Codex sessions separate; ignores late stopped replies', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.update({ flush: true });
+  const first = PM.AgentUI.state.threadId;
+  PM.AgentUI.submit('First thread request');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  assert.equal(jobs[0].options.threadId, first);
+  PM.AgentUI.newThread();
+  assert.equal(PM.AgentUI.state.threadId, first, 'switching must not interrupt the active run');
+  PM.AgentUI.stop();
+  PM.AgentUI.setDraft('First draft');
+  PM.AgentUI.newThread();
+  const second = PM.AgentUI.state.threadId;
+  assert.notEqual(second, first);
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+  assert.equal(PM.AgentUI.state.composerDraft, '');
+  jobs[0].options.onProgress('late progress'); jobs[0].resolve(emptyAgentResult);
+  await Promise.resolve();
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+  PM.AgentUI.submit('Second thread request');
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  assert.equal(jobs[1].options.threadId, second);
+  assert.ok(!jobs[1].prompt.includes('First thread request'));
+  jobs[1].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  PM.AgentUI.switchThread(first);
+  assert.equal(PM.AgentUI.state.composerDraft, 'First draft');
+  assert.ok(PM.AgentUI.state.conversation.some(m => m.text === 'First thread request'));
+  assert.ok(!PM.AgentUI.state.conversation.some(m => m.text === 'Second thread request'));
+  PM.AgentUI.submit('Continue first thread');
+  await vi.waitFor(() => assert.equal(jobs.length, 3));
+  assert.equal(jobs[2].options.threadId, first);
+  assert.ok(jobs[2].prompt.includes('First thread request'));
+  assert.ok(!jobs[2].prompt.includes('Second thread request'));
+  jobs[2].resolve(emptyAgentResult);
+});
+
+it('project switches retain the old transcript and reject its late result', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.submit('Old project request');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  PM.proj = { id: 'other-project', name: 'Other', revision: 0, layers: [] };
+  PM.AgentUI.update({ flush: true });
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+  jobs[0].resolve(emptyAgentResult);
+  await Promise.resolve();
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+});
+
 it('announces the ghost through public progress before any final result, then clears it on success', async () => {
   const { PM, jobs } = placementHarness();
   PM.AgentUI.submit('Adjust the timeline controls');

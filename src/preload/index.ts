@@ -30,6 +30,8 @@ const bridge: PowermoveBridge = {
   },
 
   saveFile: (req) => ipcRenderer.invoke(IPC.fileSave, req) as Promise<FileSaveResult>,
+  openProjectFile: () => ipcRenderer.invoke(IPC.projectOpen),
+  confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
 
   codex: {
     async run(req, onProgress, onTrace) {

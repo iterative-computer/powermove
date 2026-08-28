@@ -9,6 +9,9 @@ import {
 import { registerSveltePanel } from './registerSveltePanel';
 
 export interface AgentLegacyBridge {
+  newThread?(): void;
+  switchThread?(id: string): void;
+  flushThreads?(): void;
   snapshot(): AgentSnapshot;
   submit(value: string): void;
   stop(): void;
@@ -45,6 +48,9 @@ export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): voi
   };
 
   PM.AgentUI = {
+    newThread: bridge.newThread,
+    switchThread: bridge.switchThread,
+    flushThreads: bridge.flushThreads,
     state: agentState,
     update(options: AgentUpdateOptions = {}) {
       const now = Date.now();

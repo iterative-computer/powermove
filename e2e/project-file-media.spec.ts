@@ -1,18 +1,17 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 test('saved project files restore imported video without the original session media', async ({ session }) => {
   await importFixture(session.page, 'h264-aac.mp4');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'h264-aac.mp4'));
-  await session.app.evaluate(({ ipcMain }) => {
-    ipcMain.removeHandler('file:save');
-    ipcMain.handle('file:save', (_event, request) => {
-      (globalThis as any).__savedProjectFile = Buffer.from(request.data).toString('utf8');
-      return { ok: true, path: '/tmp/test.pmv' };
-    });
-  });
+  const destination = path.join(session.userData, 'Media.pmv');
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+  }, destination);
   expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
-  const saved = await session.app.evaluate(() => (globalThis as any).__savedProjectFile as string);
+  const saved = await readFile(destination, 'utf8');
   const document = JSON.parse(saved);
   expect(Object.keys(document.media || {})).toHaveLength(1);
   await session.page.evaluate(async () => {
@@ -20,9 +19,10 @@ test('saved project files restore imported video without the original session me
     for (const asset of Object.values(PM.proj.assets)) await PM.MediaStore.remove(asset);
   });
   await session.relaunch();
-  const chooser = session.page.waitForEvent('filechooser');
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+  }, destination);
   await session.page.evaluate(() => (window as any).PM.openProject());
-  await (await chooser).setFiles({ name: 'restored.pmv', mimeType: 'application/json', buffer: Buffer.from(saved) });
   await session.page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === 'h264-aac.mp4' && a.el?.readyState >= 2));
   const restored = await session.page.evaluate(async () => {
     const PM = (window as any).PM, asset = Object.values(PM.proj.assets)[0];

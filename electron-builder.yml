@@ -12,6 +12,8 @@ extraResources:
     to: builtin-extensions
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
+  - from: docs/background-testing.md
+    to: api-pack/BACKGROUND_TESTING.md
   - from: src/renderer/src/kernel/api.ts
     to: api-pack/api.ts
   - from: src/shared/extensions.ts

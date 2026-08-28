@@ -63,6 +63,20 @@ function workspaceOptions(overrides: Partial<PrepareAgentWorkspaceOptions> = {})
 }
 
 describe('safeAgentComponent', () => {
+  it('isolates thread sessions within each project and authority', async () => {
+    const root = await temporaryDirectory();
+    const a = sessionPathFor(root, 'project', 'thread-a');
+    const b = sessionPathFor(root, 'project', 'thread-b');
+    const computer = sessionPathFor(root, 'computer', 'thread-a');
+    await writeSession(a, 'codex-a'); await writeSession(b, 'codex-b');
+    expect(await readSession(a)).toBe('codex-a');
+    expect(await readSession(b)).toBe('codex-b');
+    expect(await readSession(computer)).toBeNull();
+    await clearSession(a);
+    expect(await readSession(b)).toBe('codex-b');
+    expect(() => sessionPathFor(root, 'project', '../escape')).toThrow(/Invalid/);
+    expect(() => sessionPathFor(root, 'project', '')).toThrow(/Invalid/);
+  });
   it('replaces unsafe runs, trims hyphens, preserves the allowlist, and caps length', () => {
     expect(safeAgentComponent(' --hello !@# world__- ')).toBe('hello-world__');
     expect(safeAgentComponent('!!!', 'fallback')).toBe('fallback');

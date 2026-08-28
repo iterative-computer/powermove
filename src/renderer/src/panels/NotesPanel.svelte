@@ -30,6 +30,7 @@
   });
 
   $effect(() => () => flushNotes());
+  $effect(() => PM.bus?.on?.('project:flush-edits', flushNotes));
 
   $effect(() => {
     const element = textareaElement;
@@ -48,6 +49,7 @@
        Phase 5 gives project notes a source-edit command. */
     if (PM.proj === project) PM.proj.notes = value;
     else project.notes = value;
+    if (PM.proj === project) PM.autosave?.();
     status = 'Notes saved';
   }
 

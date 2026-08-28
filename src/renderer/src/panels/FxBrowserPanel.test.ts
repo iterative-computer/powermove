@@ -9,13 +9,67 @@ import FxBrowserPanel from './FxBrowserPanel.svelte';
 import { registerSimplePanels } from './register-simple';
 
 afterEach(() => {
+  vi.useRealTimers();
   document.body.replaceChildren();
   delete window.PM;
 });
 
 describe('FxBrowserPanel', () => {
+  async function feedbackPanel(apply = vi.fn(() => ({ ok: true } as { ok: boolean; message?: string }))) {
+    const listeners = new Map<string, () => void>();
+    const toast = vi.fn();
+    window.PM = {
+      FX: { blur: { group: 'Blur', label: 'Gaussian Blur' }, glow: { group: 'Stylize', label: 'Glow' } },
+      firstSel: () => ({ id: 'layer-1', name: 'Title' }),
+      Edit: { apply }, Inspector: { refresh: vi.fn() }, invalidate: vi.fn(), toast,
+      bus: { on: (event: string, callback: () => void) => { listeners.set(event, callback); return () => listeners.delete(event); } }
+    } as any;
+    const target = document.createElement('div');
+    document.body.append(target);
+    const component = mount(FxBrowserPanel, { target, props: { panelId: 'fxbrowser', spec: {} } });
+    flushSync();
+    const buttons = [...target.querySelectorAll<HTMLButtonElement>('.simple-effect-row')];
+    return { component, target, buttons, apply, toast, listeners };
+  }
+
+  it('clears the confirmation after a short delay and restarts it on another addition', async () => {
+    vi.useFakeTimers();
+    const panel = await feedbackPanel();
+    flushSync(() => panel.buttons[0]?.click());
+    flushSync(() => vi.advanceTimersByTime(1600));
+    flushSync(() => panel.buttons[1]?.click());
+    expect(panel.buttons[0]?.classList.contains('effect-added')).toBe(false);
+    expect(panel.buttons[1]?.classList.contains('effect-added')).toBe(true);
+    flushSync(() => vi.advanceTimersByTime(1600));
+    expect(panel.buttons[1]?.classList.contains('effect-added')).toBe(true);
+    flushSync(() => vi.advanceTimersByTime(600));
+    expect(panel.target.querySelectorAll('.effect-added')).toHaveLength(0);
+    expect(panel.buttons[1]?.querySelector('.idx')?.textContent).toBe('+');
+    await unmount(panel.component);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(panel.listeners.size).toBe(0);
+  });
+
+  it.each(['sel', 'project', 'history'])('clears stale feedback on %s changes', async event => {
+    const panel = await feedbackPanel();
+    flushSync(() => panel.buttons[0]?.click());
+    flushSync(() => panel.listeners.get(event)?.());
+    expect(panel.target.querySelectorAll('.effect-added')).toHaveLength(0);
+    await unmount(panel.component);
+  });
+
+  it('reports a rejected edit without claiming the effect was added', async () => {
+    const panel = await feedbackPanel(vi.fn(() => ({ ok: false, message: 'Layer is locked' })));
+    flushSync(() => panel.buttons[0]?.click());
+    expect(panel.target.querySelectorAll('.effect-added')).toHaveLength(0);
+    expect(panel.toast).toHaveBeenCalledWith('Could not add Gaussian Blur: Layer is locked');
+    expect(window.PM?.Inspector.refresh).not.toHaveBeenCalled();
+    await unmount(panel.component);
+  });
+
   it('groups effects and applies one add_effect command through the legacy editing path', async () => {
-    const apply = vi.fn();
+    const apply = vi.fn(() => ({ ok: true }));
+    const toast = vi.fn();
     const refresh = vi.fn();
     const invalidate = vi.fn();
     window.PM = {
@@ -24,11 +78,11 @@ describe('FxBrowserPanel', () => {
         glow: { group: 'Stylize', label: 'Glow' },
         sharpen: { group: 'Blur', label: 'Sharpen' }
       },
-      firstSel: () => ({ id: 'layer-1' }),
+      firstSel: () => ({ id: 'layer-1', name: 'Title' }),
       Edit: { apply },
       Inspector: { refresh },
       invalidate,
-      toast: vi.fn()
+      toast
     } as any;
     const target = document.createElement('div');
     document.body.append(target);
@@ -55,6 +109,9 @@ describe('FxBrowserPanel', () => {
     expect(refresh).toHaveBeenCalledOnce();
     expect(invalidate).toHaveBeenCalledOnce();
     expect(target.querySelector('[role="status"]')?.textContent).toBe('Added Gaussian Blur');
+    expect(button?.classList.contains('effect-added')).toBe(true);
+    expect(button?.querySelector('.effect-added-label')?.textContent).toBe('Added');
+    expect(toast).toHaveBeenCalledWith('Gaussian Blur added to Title');
 
     await unmount(component);
   });

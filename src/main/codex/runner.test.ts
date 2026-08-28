@@ -50,6 +50,14 @@ function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
   };
 }
 
+it('validates optional thread ids without accepting paths or unbounded input', () => {
+  expect(isCodexRunRequest(request())).toBe(true);
+  expect(isCodexRunRequest(request({threadId:'thread-123'}))).toBe(true);
+  for (const threadId of ['', '../outside', 'a/b', 'x'.repeat(121), 12]) {
+    expect(isCodexRunRequest({...request(),threadId})).toBe(false);
+  }
+});
+
 function fakeOptions(userData: string, environment: Record<string, string>): CodexRunOptions {
   return {
     userData,
@@ -81,6 +89,17 @@ async function waitForFile(file: string): Promise<void> {
   }
   throw new Error(`Timed out waiting for ${file}`);
 }
+
+it('starts each thread fresh and resumes only the selected thread', async () => {
+  const userData = await temporaryDirectory('powermove-threads-runner');
+  const invocationFile = path.join(userData, 'invocations.txt');
+  const runner = new CodexRunner();
+  const options = fakeOptions(userData, { FAKE_CODEX_INVOCATIONS: invocationFile });
+  for (const threadId of ['thread-a', 'thread-b', 'thread-a']) {
+    expect((await runner.run(request({threadId}), options)).ok).toBe(true);
+  }
+  expect((await readFile(invocationFile, 'utf8')).trim().split('\n')).toEqual(['fresh', 'fresh', 'resume']);
+});
 
 describe('CodexRunner validation and authority', () => {
   it('drops invalid extension changes and caps the typed result at 32 items', () => {

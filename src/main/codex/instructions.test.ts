@@ -74,6 +74,9 @@ describe('autonomous agent contract', () => {
     expect(instructions).toMatch(/scene edits.+return typed commands/s);
     expect(instructions).toContain('Return each command as one JSON-encoded string');
     expect(instructions).toContain('externalActions');
+    expect(instructions).toContain('Never open or show a new window for testing');
+    expect(instructions).toContain('POWERMOVE_BACKGROUND_TEST=1');
+    expect(instructions).toContain('isolated temporary test data');
     expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(6 * 1024);
   });
 

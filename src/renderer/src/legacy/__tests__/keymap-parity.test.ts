@@ -85,7 +85,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+a selects all', { key: 'a', metaKey: true }, 'selectAll'],
   ['cmd+i imports', { key: 'i', metaKey: true }, 'import'],
   ['cmd+s saves', { key: 's', metaKey: true }, 'save'],
-  ['cmd+shift+s saves a take', { key: 's', metaKey: true, shiftKey: true }, 'takeSave'],
+  ['cmd+shift+s saves a project as', { key: 's', metaKey: true, shiftKey: true }, 'saveAs'],
   ['cmd+o opens', { key: 'o', metaKey: true }, 'open'],
   ['cmd+e exports', { key: 'e', metaKey: true }, 'export'],
   ['cmd+p shows projects', { key: 'p', metaKey: true }, 'projects'],
@@ -206,7 +206,7 @@ describe('legacy keymap parity', () => {
     for (const binding of editorBindings) {
       expect(binding.ownerId).toBe('keymap-default');
       expect(binding.priority).toBe(100);
-      expect(binding.inFields).toBe(false);
+      expect(binding.inFields).toBe(['save', 'saveAs'].includes(binding.command));
     }
     expect(bindings.find((binding: any) => binding.command === 'blurField')).toMatchObject({
       ownerId: 'keymap-default',

@@ -102,6 +102,7 @@ beforeEach(() => {
   document.body.append(target);
   const store = { set: vi.fn() };
   PM = {
+    uid: (prefix: string) => `${prefix}${crypto.randomUUID()}`,
     ICONS: { sparkle: '', panel: '', chev: '', plus: '', x: '', return: '', frame: '', cam: '', clock: '', link: '', project: '' },
     PANELS: { viewer: { title: 'Composition' }, timeline: { title: 'Timeline' } },
     WS: { current: { layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] }, hiddenPanels: [] } },
@@ -144,6 +145,21 @@ afterEach(async () => {
 });
 
 describe('AgentPanel', () => {
+  it('offers accessible new-thread and switching controls and disables them during a run', () => {
+    PM.AgentUI.newThread = vi.fn(); PM.AgentUI.switchThread = vi.fn();
+    const threads = [{ id: 'first', title: 'Animate the title' }, { id: 'second', title: 'New thread' }];
+    renderPanel(snapshot({ threadId: 'first', threads }));
+    const picker = target.querySelector<HTMLSelectElement>('[aria-label="Switch thread"]')!;
+    expect(picker.value).toBe('first');
+    picker.value = 'second'; picker.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(PM.AgentUI.switchThread).toHaveBeenCalledWith('second');
+    target.querySelector<HTMLButtonElement>('[aria-label="New thread"]')!.click();
+    expect(PM.AgentUI.newThread).toHaveBeenCalledOnce();
+    flushSync(() => setAgentSnapshot(snapshot({threadId:'first',threads,threadSwitchBlocked:true})));
+    expect(picker.disabled).toBe(true);
+    expect(target.querySelector<HTMLButtonElement>('[aria-label="New thread"]')!.disabled).toBe(true);
+    expect(picker.title).toContain('Finish or stop');
+  });
   it('renders idle, prompt, running, preview, and result blocks from state setters', () => {
     renderPanel();
     expect(target.querySelector('[data-agent-phase="idle"]')).toBeTruthy();
@@ -437,7 +453,7 @@ describe('agent bridge', () => {
       get: vi.fn((_key: string, fallback: unknown) => fallback),
       set: vi.fn()
     };
-    const registry: Record<string, any> = { store, registerPanel: vi.fn() };
+    const registry: Record<string, any> = { store, registerPanel: vi.fn(), uid: PM.uid };
     installSpatial(registry);
 
     registry.AgentUI.setAccess('project');
@@ -456,6 +472,7 @@ describe('agent bridge', () => {
   it('labels the two persistent agent authorities by what they change', () => {
     const registry: Record<string, any> = {
       store: { get: vi.fn((_key: string, fallback: unknown) => fallback), set: vi.fn() },
+      uid: PM.uid,
       registerPanel: vi.fn()
     };
     installSpatial(registry);

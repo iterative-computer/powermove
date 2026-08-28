@@ -70,6 +70,14 @@ afterEach(() => {
 });
 
 describe('legacy Electron shim install', () => {
+  it('connects native menu commands before DOM readiness or font discovery', () => {
+    const { PM, bridge, window } = loadShim();
+    expect(window.document.readyState).toBe('loading');
+    expect(bridge.onMenuCommand).toHaveBeenCalledOnce();
+    PM.cmd = vi.fn();
+    bridge.onMenuCommand.mock.calls[0][0]('save');
+    expect(PM.cmd).toHaveBeenCalledWith('save');
+  });
   it('maps Codex authority and effort and emits plain UTF-8 progress/result payloads', async () => {
     const { PM, bridge, window } = loadShim();
     bridge.codex.run.mockImplementation(async (

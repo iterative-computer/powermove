@@ -9,6 +9,8 @@ import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
 import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
+import { AgentThreads, threadTitle } from '../../panels/agent/threads';
+import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -41,6 +43,7 @@ PM.CodexBridge = {
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
         id, prompt, schema, images: images.slice(0, 6),
+        threadId: options.threadId || '',
         model: options.model || '', reasoningEffort: options.reasoningEffort || '',
         mode: options.mode || 'editor', access: options.access || 'editor',
         projectId: options.projectId || '', projectName: options.projectName || '',
@@ -165,6 +168,89 @@ const AGENT_ACCESS_MODES: any = [
 ];
 const SEND_TRANSITION_MS: any = 240;
 
+const threads = new AgentThreads({
+  get: (key, fallback) => PM.store?.get?.(key, fallback) ?? fallback,
+  set: (key, value) => PM.store?.set?.(key, value),
+}, () => PM.uid('thread-'));
+threads.load(PM.proj?.id || '');
+let threadSaveError = false;
+let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let changingThreadProject = false;
+let lastThreadWrite = '';
+const threadResults = new Map<string, any>();
+
+function captureThread() {
+  const thread = threads.active;
+  Object.assign(thread, {
+    conversation: S.conversation, composerDraft: S.composerDraft,
+    attachments: S.attachments, scope: S.scope, title: threadTitle(S.conversation),
+  });
+}
+
+function persistThreads() {
+  clearTimeout(threadSaveTimer); threadSaveTimer = undefined;
+  captureThread();
+  const serialized = JSON.stringify([threads.projectId, threads.activeId, threads.threads]);
+  if (serialized === lastThreadWrite) return;
+  threadSaveError = !threads.save();
+  if (!threadSaveError) lastThreadWrite = serialized;
+}
+
+function restoreThread() {
+  const thread = threads.active;
+  const saved = threadResults.get(`${threads.projectId}/${thread.id}`);
+  // Checkpoints and unapplied plans are only safe while the document is unchanged.
+  const result = saved?.revision === Number(PM.proj?.revision || 0) ? saved : null;
+  Object.assign(S, {
+    conversation: thread.conversation, composerDraft: thread.composerDraft, attachments: thread.attachments,
+    scope: thread.scope, phase: result?.phase || (thread.conversation.length ? 'conversation' : 'idle'),
+    plan: result?.plan || null, run: result?.run || null, panelRun: result?.panelRun || null,
+    steps: result?.steps || [], trace: [], activity: '', uiPlacement: null,
+    context: null, region: null, regionImage: null, requestAttachments: [], requestText: '',
+    stepsExpanded: false, pendingEntering: false,
+  });
+}
+
+function ensureThreadProject() {
+  const projectId = PM.proj?.id || '';
+  if (changingThreadProject || projectId === threads.projectId) return;
+  changingThreadProject = true;
+  if (S.activeRequest || S.phase === 'working') stopActiveRequest();
+  persistThreads();
+  ++S.requestToken;
+  threadResults.clear();
+  threads.load(projectId);
+  restoreThread();
+  changingThreadProject = false;
+}
+
+function switchThread(id?: string) {
+  ensureThreadProject();
+  if (S.activeRequest || S.phase === 'working' || S.phase === 'applying') {
+    PM.toast?.('Finish or stop the current run before switching threads.'); return;
+  }
+  if (id === threads.activeId || (id && !threads.threads.some(t => t.id === id))) return;
+  persistThreads();
+  threadResults.set(`${threads.projectId}/${threads.activeId}`, {
+    revision: Number(PM.proj?.revision || 0), phase: S.phase,
+    plan: S.plan, run: S.run, panelRun: S.panelRun, steps: S.steps,
+  });
+  // Close only the spatial prompt; the editor window and project stay intact.
+  if (S.active) dismissOverlay(true);
+  ++S.requestToken;
+  if (id) threads.select(id); else threads.create();
+  restoreThread();
+  persistThreads();
+  PM.AgentUI?.update({ flush: true, focusComposer: true });
+}
+
+restoreThread();
+PM.bus?.on?.('project', () => { ensureThreadProject(); PM.AgentUI?.update({ flush: true }); });
+PM.bus?.on?.('storage:error', (event: any) => {
+  if (event?.key === threads.key) { threadSaveError = true; PM.AgentUI?.update({ flush: true }); }
+});
+if (typeof window !== 'undefined') window.addEventListener('beforeunload', persistThreads);
+
 const Spatial: any = {
   init,
   activate,
@@ -180,8 +266,20 @@ PM.SpatialAssistant = Spatial;
 PM.requestExtensionFix = requestFix;
 
 function agentUISnapshot(): AgentSnapshot {
+  ensureThreadProject();
+  captureThread();
+  // Coalesce drafts/activity; never serialize the entire archive on each token.
+  if (!threadSaveTimer) threadSaveTimer = setTimeout(() => {
+    const previousError = threadSaveError;
+    persistThreads();
+    if (threadSaveError !== previousError) PM.AgentUI?.update({ flush: true });
+  }, 500);
   S.attachmentUI?.refresh();
   const snapshot: AgentSnapshot = {
+    threadId: threads.activeId,
+    threads: threads.threads.map(({ id, title }) => ({ id, title })),
+    threadSwitchBlocked: !!S.activeRequest || S.phase === 'working' || S.phase === 'applying',
+    threadSaveError,
     legacyPhase: S.phase,
     requestToken: S.requestToken,
     conversation: S.conversation.map((message: any) => ({ ...message })),
@@ -211,10 +309,14 @@ function agentUISnapshot(): AgentSnapshot {
 }
 
 registerAgentPanel(PM, {
+  flushThreads: persistThreads,
+  newThread: () => switchThread(),
+  switchThread,
   snapshot: agentUISnapshot,
   submit: (value: string) => { void sendRequest({ value }); },
   stop: stopActiveRequest,
-  setDraft: (value: string) => { S.composerDraft = value; },
+  setDraft: (value: string) => { S.composerDraft = value; captureThread();
+    clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300); },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
     if (!AGENT_MODELS.some((item: any) => item.id === model) || !REASONING_EFFORTS.includes(effort)) return;
@@ -920,13 +1022,15 @@ function setAgentAccessMode(mode: any) {
 
 let attachmentQueue = Promise.resolve();
 async function addAttachmentFiles(files: any) {
+  const thread = threads.active;
   const pendingFiles = [...files];
   attachmentQueue = attachmentQueue.then(async () => {
     for (const file of pendingFiles) {
-      if (S.attachments.length >= 6) { PM.toast('You can attach up to 6 files per message.'); break; }
-      try { S.attachments.push(await readPromptAttachment(file, PM.uid('attachment-'))); }
+      if (thread.attachments.length >= 6) { PM.toast('You can attach up to 6 files per message.'); break; }
+      try { thread.attachments.push(await readPromptAttachment(file, PM.uid('attachment-'))); }
       catch (error) { PM.toast(error instanceof Error ? error.message : String(error), 6000); }
     }
+    threads.save();
     PM.AgentUI?.update({ focusComposer: true });
   });
   await attachmentQueue;
@@ -1135,8 +1239,9 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   PM.AgentUI?.update();
   const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
   const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
-  const raw: any = await PM.CodexBridge.request(`${request}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
+  const raw: any = await PM.CodexBridge.request(`${request}\n\n${AGENT_TESTING_INSTRUCTIONS}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(S.conversation.filter((m: any) => m.role !== 'trace').slice(0, -1).slice(-12).map((m: any) => ({ role: m.role, text: m.text })))}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
     mode: 'autonomous', access,
+    threadId: threads.activeId,
     projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
     projectJSON: JSON.stringify(PM.proj),
     attachments: requestFileAttachments(S.requestAttachments),
@@ -1205,6 +1310,7 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
 
 async function sendRequest(input: any) {
   const typedRequest: any = input.value.trim();
+  ensureThreadProject();
   if ((!typedRequest && !S.attachments.length) || S.phase === 'applying') return;
   const request: any = typedRequest || 'Review the attached files and make the relevant editable change.';
   const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
@@ -1225,6 +1331,8 @@ async function sendRequest(input: any) {
     focusLabels: focus.panels.map(panel => panel.title),
     attachments: S.requestAttachments.map((item: any) => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })), entering: true,
   });
+  threads.active.updatedAt = Date.now();
+  persistThreads();
   const accessAtStart: any = S.accessMode;
   const autonomous: any = accessAtStart !== 'editor';
   updateSteps(autonomous ? [
@@ -1269,6 +1377,7 @@ async function sendRequest(input: any) {
     const raw: any = await PM.CodexBridge.request(
       agentPrompt(request, observation, steering, focus, context), responseSchema(), attachedImages,
       {
+        threadId: threads.activeId,
         attachments: requestFileAttachments(S.requestAttachments),
         model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
         onProgress: (summary: any) => {
@@ -1312,7 +1421,7 @@ async function sendRequest(input: any) {
       if (S.activeRequest === controller) S.activeRequest = null;
       PM.AgentUI?.update({ flush: true });
     }
-    if (accessAtStart === 'computer') {
+    if (accessAtStart === 'computer' && token === S.requestToken) {
       S.accessMode = 'project';
       if (token === S.requestToken && S.phase !== 'working') PM.AgentUI?.update();
     }
@@ -1375,6 +1484,8 @@ function agentPrompt(request: any, observation: any, steering: any = false, focu
     attachments: (message.attachments || []).map((item: any) => typeof item === 'string' ? item : item.name),
   }));
   return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Your final response must be only the requested JSON object.
+
+${AGENT_TESTING_INSTRUCTIONS}
 
 ${uiPlacementInstructions(workspace)}
 

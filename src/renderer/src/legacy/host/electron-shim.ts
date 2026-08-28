@@ -8,6 +8,8 @@ export function install(PM: PMRegistry): void {
 
   const bridge = (window as any).powermove;
   const encoder = new window.TextEncoder();
+  // File commands cannot wait for local-font enumeration or its permission prompt.
+  bridge.onMenuCommand((command: any) => PM.cmd && PM.cmd(command));
 
   function bytesFromBase64(value: any) {
     const normalized = String(value || '').replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
@@ -81,6 +83,7 @@ export function install(PM: PMRegistry): void {
 
     return {
       id: String(body.id || ''),
+      ...(typeof body.threadId === 'string' && body.threadId ? { threadId: body.threadId } : {}),
       mode,
       prompt: String(body.prompt || ''),
       schema: body.schema && typeof body.schema === 'object' && !Array.isArray(body.schema)
@@ -309,7 +312,6 @@ export function install(PM: PMRegistry): void {
       });
     }
 
-    bridge.onMenuCommand((command: any) => PM.cmd && PM.cmd(command));
     window.setTimeout(() => {
       try {
         const ok = !!(PM.GL && PM.GL.gl);

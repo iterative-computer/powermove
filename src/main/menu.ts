@@ -14,6 +14,7 @@ const commandItem = (
   command: MenuCommand,
   send: (command: MenuCommand) => void
 ): MenuItemConstructorOptions => ({
+  id: command,
   label,
   accelerator,
   click: () => send(command)
@@ -51,6 +52,7 @@ export function appMenuTemplate(
         commandItem('New Project', 'CommandOrControl+N', 'newProject', send),
         commandItem('Open Project…', 'CommandOrControl+O', 'open', send),
         commandItem('Save Project', 'CommandOrControl+S', 'save', send),
+        commandItem('Save Project As…', 'CommandOrControl+Shift+S', 'saveAs', send),
         { type: 'separator' },
         commandItem('Export…', 'CommandOrControl+E', 'export', send)
       ]

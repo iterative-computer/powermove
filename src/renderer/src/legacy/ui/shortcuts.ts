@@ -207,11 +207,12 @@ def('fitView', 'Fit composition in view', '⇧F', () => { if (PM.Viewer) { PM.Vi
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
+def('saveAs', 'Save project as…', '⌘⇧S', () => PM.saveProject({ saveAs: true }), 'File');
 def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');
 def('export', 'Export…', '⌘E', () => PM.Export.dialog(), 'File');
 def('projects', 'Projects screen', '⌘P', () => PM.ProjectsScreen && PM.ProjectsScreen.toggle(), 'File');
 def('newProject', 'New project', '⌘N', () => PM.newProject(), 'File');
-def('takeSave', 'Save take', '⌘⇧S', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
+def('takeSave', 'Save take', '', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
 
 /* ── JKL transport + trim handles ──────────────────────── */
 /* These were inline in the old keydown handler with no command behind them.

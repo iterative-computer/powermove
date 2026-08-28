@@ -73,13 +73,13 @@
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: raw }));
   }
 
-  function closeProject(id: string): void {
+  async function closeProject(id: string): Promise<void> {
+    if (PM.confirmCloseProject && !await PM.confirmCloseProject(id)) return;
     if (rovingId === id) rovingId = '';
     const active = id === PM.proj?.id;
     if (active) {
       try {
         PM.Projects?.put?.(PM.proj);
-        if (PM.app) PM.app.dirty = false;
       } catch (error) {
         window.console.warn('Project save failed', error);
       }
@@ -248,14 +248,14 @@
 
     {#each tabIds as id (id)}
       {@const active = id === activeProjectId && !homeOpen}
-      {@const dirty = id === activeProjectId && appDirty}
+      {@const dirty = PM.projectFileState?.(id)?.dirty ?? (id === activeProjectId && appDirty)}
       {@const tabName = nameFor(id)}
       <div
         class="project-doc"
         class:on={active}
         class:dirty
         class:renaming={renamingId === id}
-        title={tabName || id}
+        title={PM.projectFileState?.(id)?.path || `${tabName} — Not saved to a file`}
         role="tab"
         data-tab-id={id}
         aria-selected={active}

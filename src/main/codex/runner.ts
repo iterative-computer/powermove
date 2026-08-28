@@ -87,6 +87,7 @@ function authorityForAccess(access: CodexRunRequest['access']): CodexAuthority {
 export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
   if (!isRecord(value)) return false;
   if (!isString(value.id) || !REQUEST_ID.test(value.id)) return false;
+  if (value.threadId !== undefined && (!isString(value.threadId) || !/^[A-Za-z0-9_-]{1,120}$/.test(value.threadId))) return false;
   if (!isOneOf(value.mode, MODES)) return false;
   if (!isString(value.prompt, LIMITS.codexPromptChars) || value.prompt.length === 0) return false;
   if (!(value.schema === null || isRecord(value.schema))) return false;
@@ -532,7 +533,8 @@ export class CodexRunner {
     const authority = authorityForAccess(state.request.access);
     const targetSession = state.layout?.sessionPath ?? sessionPathFor(
       agentWorkspaceRoot(userData, state.request.projectId),
-      authority
+      authority,
+      state.request.threadId
     );
     await state.sessionWrite;
     await Promise.all([

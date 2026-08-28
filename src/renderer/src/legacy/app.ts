@@ -1,10 +1,44 @@
 /* Ported from js/app.js — behavior-preserving. */
 import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia } from './core/project-file';
+import { projectFingerprint } from './core/project-fingerprint';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
+const document = window.document;
+type FileState = { path?: string; savedHash?: string; dirty: boolean; handle?: any };
+const fileStates = new Map<string, FileState>();
+const comparisonVersions = new Map<string, number>();
+function fileState(id = PM.proj.id): FileState {
+  let state = fileStates.get(id);
+  if (!state) {
+    const saved = PM.Projects.getState(id)?.file;
+    state = { path: saved?.path, savedHash: saved?.savedHash, dirty: true };
+    fileStates.set(id, state);
+  }
+  return state;
+}
+function fileUI() {
+  APP.dirty = fileState().dirty;
+  PM.invalidate('status'); PM.bus.emit('projects:tabs');
+  document.title = `${APP.dirty ? '• ' : ''}${PM.proj.name} — Powermove`;
+}
+async function refreshFileDirty(project = PM.proj): Promise<boolean> {
+  const state = fileState(project.id), json = JSON.stringify(project);
+  const version = (comparisonVersions.get(project.id) || 0) + 1;
+  comparisonVersions.set(project.id, version);
+  const hash = await projectFingerprint(json);
+  // A newer edit wins over an in-flight comparison.
+  if (comparisonVersions.get(project.id) !== version || JSON.stringify(project) !== json) return true;
+  state.dirty = !state.savedHash || state.savedHash !== hash;
+  if (PM.proj.id === project.id) fileUI();
+  return state.dirty;
+}
+function rememberFile(id: string, state: FileState) {
+  PM.Projects.putState(id, { ...PM.Projects.getState(id), file: { path: state.path, savedHash: state.savedHash } });
+}
+PM.projectFileState = (id: string) => fileState(id);
 let saveGeneration = 0;
 PM.app = APP;
 
@@ -403,8 +437,10 @@ function persistCurrent(withThumb: any) {
 
 function captureProjectSession() {
   if (!PM.proj?.id) return true;
+  PM.bus.emit('project:flush-edits');
   const saved = persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
+    ...PM.Projects.getState(PM.proj.id),
     lastActiveAt: Date.now(),
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
@@ -419,6 +455,7 @@ function captureProjectSession() {
 // still alive. beforeunload alone runs after the main process's quit flush.
 PM.flushProject = async () => {
   await APP.importQueue;
+  PM.AgentUI?.flushThreads?.();
   window.clearTimeout(APP.saveTimer);
   if (!captureProjectSession()) throw new Error('Project storage is unavailable or full');
   await PM.store.flush?.();
@@ -432,6 +469,9 @@ function closeProjectTransients() {
 }
 PM.autosave = () => {
   APP.dirty = true;
+  fileState().dirty = true;
+  comparisonVersions.set(PM.proj.id, (comparisonVersions.get(PM.proj.id) || 0) + 1);
+  fileUI();
   const generation = ++saveGeneration, projectId = PM.proj.id;
   window.clearTimeout(APP.saveTimer);
   APP.saveTimer = window.setTimeout(async () => {
@@ -439,8 +479,9 @@ PM.autosave = () => {
       if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
       await PM.store.flush?.();
       if (generation !== saveGeneration || projectId !== PM.proj.id) return;
-      APP.dirty = false;
-      PM.bus.emit('project:saved');
+      // Local recovery is not the user's .pmv file and must never mark it saved.
+      await refreshFileDirty();
+      PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
       PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
@@ -452,30 +493,46 @@ PM.autosave = () => {
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
 ['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
 
-PM.saveProject = async () => {
+PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) => {
   if (APP.saving) return false;
   APP.saving = true;
   try {
+    (window.document.activeElement as HTMLElement | null)?.blur?.();
+    PM.bus.emit('project:flush-edits');
     await APP.importQueue;
-    const snapshot = PM.serialize(), projectId = PM.proj.id;
+    const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
+    if (!project) throw new Error('This project is no longer available.');
+    const projectJSON = JSON.stringify(project);
+    const snapshot = JSON.stringify({ v: PM.version, proj: JSON.parse(projectJSON),
+      ws: projectId === PM.proj.id ? PM.WS.current : PM.Projects.getState(projectId)?.workspace });
+    const state = fileState(projectId);
+    const suggestedName = safeName(project.name) + '.pmv';
     const text = await packProjectFile(snapshot, PM.MediaStore);
-    const finish = () => {
-      // Saving a captured snapshot must not mark edits made during the dialog saved.
-      if (PM.proj.id === projectId && PM.serialize() === snapshot) APP.dirty = false;
-      PM.toast('Project saved'); PM.invalidate('status'); return true;
+    const finish = async (path?: string) => {
+      state.path = path || state.path;
+      state.savedHash = await projectFingerprint(projectJSON);
+      rememberFile(projectId, state);
+      await refreshFileDirty(projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId) || project);
+      if (projectId === PM.proj.id) captureProjectSession();
+      await PM.store.flush?.();
+      PM.bus.emit('project:saved');
+      PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName));
+      return true;
     };
     if (window.powermove?.saveFile) {
-      const result = await window.powermove.saveFile({ name: safeName(PM.proj.name) + '.pmv', data: new TextEncoder().encode(text) });
-      if (result.ok) return finish();
+      const result = await window.powermove.saveFile({ name: suggestedName, projectId, saveAs, data: new TextEncoder().encode(text) });
+      if (result.ok) return await finish(result.path);
       if (!result.cancelled) throw new Error(result.error || 'Save failed');
       return false;
     }
-    if (!APP.fileHandle && (window as any).showSaveFilePicker) {
-      APP.fileHandle = await (window as any).showSaveFilePicker({ suggestedName: safeName(PM.proj.name) + '.pmv', types: [{ description: 'Powermove Project', accept: { 'application/json': ['.pmv'] } }] });
+    let handle = saveAs ? null : state.handle;
+    if (!handle && (window as any).showSaveFilePicker) {
+      handle = await (window as any).showSaveFilePicker({ suggestedName, types: [{ description: 'Powermove Project', accept: { 'application/json': ['.pmv'] } }] });
     }
-    if (APP.fileHandle?.createWritable) {
-      const w = await APP.fileHandle.createWritable(); await w.write(text); await w.close();
-      return finish();
+    if (handle?.createWritable) {
+      const w = await handle.createWritable(); await w.write(text); await w.close();
+      state.handle = handle;
+      return await finish(handle.name);
     }
     PM.download(new window.Blob([text], { type: 'application/json' }), safeName(PM.proj.name) + '.pmv');
     PM.toast('Download started'); return false;
@@ -484,16 +541,31 @@ PM.saveProject = async () => {
     PM.toast('Could not save project: ' + (error.message || 'Save failed'), 6000); return false;
   } finally { APP.saving = false; }
 };
-PM.openProject = () => {
+PM.openProject = async () => {
+  if (window.powermove?.openProjectFile) {
+    const result = await window.powermove.openProjectFile();
+    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), text: async () => result.text }, result);
+    else if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
+    return;
+  }
   const inp = h('input', { type: 'file', accept: '.pmv,.json,application/json' });
   inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
   inp.click();
 };
-async function openProjectFile(file: any) {
+async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
   try {
     const o = JSON.parse(await file.text());
+    const source = o.proj || o;
+    if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) throw new Error('This is not a Powermove project.');
+    source.id = association?.projectId || PM.uid('project');
+    const project = hydrate(source);
     await restoreProjectFileMedia(o, PM.MediaStore);
-    switchProject(hydrate(o.proj || o));
+    switchProject(project);
+    const state = fileState(project.id);
+    state.path = association?.path;
+    state.savedHash = association ? await projectFingerprint(JSON.stringify(PM.proj)) : undefined;
+    rememberFile(project.id, state);
+    await refreshFileDirty();
     if (o.ws?.layout?.docks) PM.WS.restoreSnapshot(o.ws);
     PM.toast('Opened ' + file.name);
   } catch (e: any) { PM.toast('Could not open project: ' + e.message, 4500); }
@@ -532,7 +604,7 @@ function switchProject(p: any) {
   PM.rasterClear();
   PM.assets.clear();
   APP.fileHandle = null;
-  APP.dirty = true;
+  APP.dirty = fileState().dirty;
   PM.bus.emit('project');
   PM.bus.emit('layers');
   PM.bus.emit('sel');
@@ -544,6 +616,27 @@ function switchProject(p: any) {
   restoreProjectAssets(PM.proj);
   PM.autosave();
 }
+
+PM.confirmCloseProject = async (id: string) => {
+  PM.bus.emit('project:flush-edits');
+  await APP.importQueue;
+  if (APP.saving) { PM.toast('Please wait for the current save to finish.'); return false; }
+  const project = id === PM.proj.id ? PM.proj : PM.Projects.get(id);
+  if (!project || !await refreshFileDirty(project)) return true;
+  if (!window.powermove?.confirmProjectClose) return window.confirm?.('Close without saving a project file?') ?? false;
+  const decision = await window.powermove.confirmProjectClose(project.name || 'Untitled');
+  if (decision === 'cancel') return false;
+  if (decision === 'save') {
+    if (!await PM.saveProject({ projectId: id })) return false;
+    return !await refreshFileDirty(id === PM.proj.id ? PM.proj : PM.Projects.get(id) || project);
+  }
+  return true;
+};
+PM.prepareToClose = async () => {
+  const ids = [...new Set([PM.proj.id, ...PM.Projects.tabs()])];
+  for (const id of ids) if (!await PM.confirmCloseProject(id)) return false;
+  return true;
+};
 
 /* ── media import ──────────────────────────────────────── */
 PM.pickFiles = () => {
@@ -630,6 +723,12 @@ window.addEventListener('pm-open-project', (e: any) => {
 /* boot registration: the startup project becomes the first tab */
 PM.Projects.markOpen(PM.proj.id);
 persistCurrent(false);
+void refreshFileDirty();
+for (const id of PM.Projects.tabs()) {
+  if (id === PM.proj.id) continue;
+  const project = PM.Projects.get(id);
+  if (project) void refreshFileDirty(project);
+}
 PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
 
 /* first full frame after persistent panels have measured */

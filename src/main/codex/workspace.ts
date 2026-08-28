@@ -44,8 +44,11 @@ export function agentWorkspaceRoot(userData: string, projectId: string): string 
   return path.join(userData, 'Agent Workspaces', safeAgentComponent(projectId));
 }
 
-export function sessionPathFor(root: string, authority: CodexAuthority): string {
-  return path.join(root, '.powermove', `session-${authority}.txt`);
+export function sessionPathFor(root: string, authority: CodexAuthority, threadId?: string): string {
+  if (threadId !== undefined && !/^[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error('Invalid agent thread id');
+  return threadId
+    ? path.join(root, '.powermove', 'threads', threadId, `session-${authority}.txt`)
+    : path.join(root, '.powermove', `session-${authority}.txt`);
 }
 
 export async function readSession(sessionPath: string): Promise<string | null> {
@@ -124,7 +127,7 @@ export async function prepareAgentWorkspace(
   const runDirectory = path.join(artifactRoot, runId);
   const schemaPath = path.join(internalDirectory, 'result-schema.json');
   const outputPath = path.join(internalDirectory, `result-${runId}.json`);
-  const sessionPath = sessionPathFor(root, authority);
+  const sessionPath = sessionPathFor(root, authority, req.threadId);
 
   await Promise.all([
     mkdir(apiPackDirectory, { recursive: true }),

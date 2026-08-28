@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-import { rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -13,7 +11,8 @@ import {
 } from 'electron';
 
 import { isBytes, isRecord, isString, IpcValidationError } from '../shared/guards';
-import { IPC, LIMITS, type FileSaveResult } from '../shared/ipc';
+import { IPC, LIMITS, PROJECT_ID, type FileSaveResult, type ProjectOpenResult, type CloseDecision } from '../shared/ipc';
+import { atomicWrite, type ProjectFiles } from './project-files';
 
 const MAX_SAVE_NAME_CHARS = 200;
 
@@ -38,6 +37,7 @@ export interface SaveDialogAdapter {
 export interface SaveIpcContext {
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
   dialogs?: SaveDialogAdapter;
+  projects?: ProjectFiles;
 }
 
 /** Convert an untrusted suggestion into one plain filename. */
@@ -71,28 +71,21 @@ export function saveFiltersForName(name: string): FileFilter[] | undefined {
   ];
 }
 
-async function atomicWrite(filePath: string, data: Uint8Array): Promise<void> {
-  const tempPath = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`
-  );
-
-  try {
-    await writeFile(tempPath, data, { flag: 'wx' });
-    await rename(tempPath, filePath);
-  } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
-    throw error;
-  }
-}
-
 export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcContext): void {
+  const pending = new Set<object>();
   ipcMain.handle(IPC.fileSave, async (event, payload: unknown): Promise<FileSaveResult> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!isRecord(payload)) throw new IpcValidationError(IPC.fileSave, 'expected an object');
 
     const name = sanitizeSaveName(payload['name']);
     if (name === null) throw new IpcValidationError(IPC.fileSave, 'invalid name');
+    const projectId = payload['projectId'];
+    if (projectId !== undefined && (typeof projectId !== 'string' || !PROJECT_ID.test(projectId))) {
+      throw new IpcValidationError(IPC.fileSave, 'invalid project id');
+    }
+    if (payload['saveAs'] !== undefined && typeof payload['saveAs'] !== 'boolean') {
+      throw new IpcValidationError(IPC.fileSave, 'invalid saveAs');
+    }
 
     const data = payload['data'];
     if (!(data instanceof Uint8Array)) {
@@ -105,22 +98,54 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Save window is unavailable');
 
-    const options: SaveDialogOptions = {
-      defaultPath: name,
-      filters: saveFiltersForName(name)
-    };
-    const result = ctx.dialogs?.showSave
-      ? await ctx.dialogs.showSave(window, options)
-      : await dialog.showSaveDialog(window, options);
-
-    if (result.canceled || result.filePath === '') return { ok: false, cancelled: true };
-
+    if (pending.has(event.sender)) return { ok: false, cancelled: false, error: 'A save is already in progress.' };
+    pending.add(event.sender);
     try {
-      await atomicWrite(result.filePath, data);
-      return { ok: true, path: result.filePath };
-    } catch {
-      return { ok: false, cancelled: false, error: 'save failed' };
+      const known = projectId && ctx.projects ? await ctx.projects.destination(projectId) : undefined;
+      let selectedPath: string | undefined;
+      if (!known || payload['saveAs']) {
+        const options: SaveDialogOptions = { defaultPath: known || name, filters: saveFiltersForName(name) };
+        const result = ctx.dialogs?.showSave
+          ? await ctx.dialogs.showSave(window, options)
+          : await dialog.showSaveDialog(window, options);
+        if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+        selectedPath = result.filePath;
+      }
+      if (projectId && ctx.projects) {
+        return { ok: true, path: await ctx.projects.save(projectId, data, selectedPath) };
+      }
+      await atomicWrite(selectedPath!, data);
+      return { ok: true, path: selectedPath! };
+    } catch (error: any) {
+      return { ok: false, cancelled: false, error: error.message || 'Save failed. Check disk space and folder permissions.' };
+    } finally {
+      pending.delete(event.sender);
     }
+  });
+  ipcMain.handle(IPC.projectOpen, async (event): Promise<ProjectOpenResult> => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed() || !ctx.projects) throw new Error('Project window is unavailable');
+    try {
+      const result = await dialog.showOpenDialog(window, {
+        title: 'Open Project', properties: ['openFile'],
+        filters: [{ name: 'Powermove Project', extensions: ['pmv', 'pmv1', 'json'] }]
+      });
+      if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
+      return { ok: true, ...await ctx.projects.open(result.filePaths[0]) };
+    } catch (error: any) { return { ok: false, cancelled: false, error: error.message || 'Could not open project.' }; }
+  });
+  ipcMain.handle(IPC.projectConfirmClose, async (event, name: unknown): Promise<CloseDecision> => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (typeof name !== 'string' || name.length > 1000) throw new IpcValidationError(IPC.projectConfirmClose, 'invalid name');
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) return 'cancel';
+    const result = await dialog.showMessageBox(window, {
+      type: 'question', message: `Save changes to “${name}” before closing?`,
+      detail: 'Your project file has not been updated. Local recovery is kept separately.',
+      buttons: ['Save', 'Cancel', 'Don’t Save'], defaultId: 0, cancelId: 1, noLink: true
+    });
+    return result.response === 0 ? 'save' : result.response === 2 ? 'discard' : 'cancel';
   });
 }
 

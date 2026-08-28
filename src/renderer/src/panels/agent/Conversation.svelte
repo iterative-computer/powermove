@@ -34,7 +34,7 @@
     </div>
   </div>
 {/if}
-{#each agentState.conversation.slice(-30) as message, index (`${message.role}-${index}`)}
+{#each agentState.conversation as message, index (`${message.role}-${index}`)}
   <Turn {PM} {message} />
 {/each}
 {#if showTimeline || agentState.activity}

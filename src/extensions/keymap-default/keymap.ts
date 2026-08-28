@@ -25,7 +25,7 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
   ['v', 'pasteLayers', false],
   ['a', 'selectAll', true], ['shift+a', 'selectAll', true],
   ['i', 'import', true], ['shift+i', 'import', true],
-  ['s', 'save', true], ['shift+s', 'takeSave', true],
+  ['s', 'save', false], ['shift+s', 'saveAs', false],
   ['o', 'open', true], ['shift+o', 'open', true],
   ['e', 'export', true], ['shift+e', 'export', true],
   ['p', 'projects', false],
@@ -36,6 +36,10 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
 for (const [chord, command, looseModifiers] of MOD_CHORDS) {
   bind(`cmd+${chord}`, command, looseModifiers);
   bind(`ctrl+${chord}`, command, looseModifiers);
+  if (command === 'save' || command === 'saveAs') {
+    KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 1]!.inFields = true;
+    KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 2]!.inFields = true;
+  }
 }
 
 /* The old `switch (k)` ran before its alt/meta guard, so these work bare or

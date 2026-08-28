@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from './registry';
 import { install } from './app';
@@ -188,6 +188,73 @@ function appRegistry(withExtensionSurfaces = true): {
 }
 
 describe('legacy app install', () => {
+  it('saves named projects with an identity, preserves dirty state through autosave, and supports Save As', async () => {
+    const { PM, timers } = appRegistry();
+    const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
+    (window as any).powermove = { saveFile };
+    expect(await PM.saveProject()).toBe(true);
+    expect(saveFile.mock.calls[0]?.[0]).toMatchObject({ projectId: 'P1', name: 'Test.pmv', saveAs: false });
+    expect(PM.app.dirty).toBe(false);
+    PM.proj.name = 'Edited'; PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(PM.app.dirty).toBe(true);
+    expect(await PM.saveProject({ saveAs: true })).toBe(true);
+    expect(saveFile.mock.calls.at(-1)?.[0]).toMatchObject({ saveAs: true });
+    expect(PM.app.dirty).toBe(false);
+  });
+
+  it('does not mark cancellation or a failed write saved', async () => {
+    const { PM } = appRegistry();
+    (window as any).powermove = { saveFile: async () => ({ ok: false, cancelled: true }) };
+    PM.autosave();
+    expect(await PM.saveProject()).toBe(false);
+    expect(PM.app.dirty).toBe(true);
+    (window as any).powermove.saveFile = async () => ({ ok: false, cancelled: false, error: 'Disk full' });
+    expect(await PM.saveProject()).toBe(false);
+    expect(PM.app.dirty).toBe(true);
+  });
+
+  it('keeps edits made during a save dirty and suppresses duplicate save dialogs', async () => {
+    const { PM } = appRegistry();
+    let finish!: (result: any) => void;
+    const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    (window as any).powermove = { saveFile };
+    const saving = PM.saveProject();
+    await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
+    expect(await PM.saveProject()).toBe(false);
+    PM.proj.name = 'New edit'; PM.autosave();
+    finish({ ok: true, path: '/tmp/Test.pmv' });
+    expect(await saving).toBe(true);
+    expect(PM.app.dirty).toBe(true);
+  });
+
+  it('keeps the project open when the close prompt or its Save dialog is cancelled', async () => {
+    const { PM } = appRegistry();
+    (window as any).powermove = { confirmProjectClose: async () => 'cancel' };
+    expect(await PM.prepareToClose()).toBe(false);
+    (window as any).powermove = {
+      confirmProjectClose: async () => 'save', saveFile: async () => ({ ok: false, cancelled: true })
+    };
+    expect(await PM.prepareToClose()).toBe(false);
+    (window as any).powermove.confirmProjectClose = async () => 'discard';
+    expect(await PM.prepareToClose()).toBe(true);
+  });
+
+  it('never marks a different project saved when switching during the file dialog', async () => {
+    const { PM } = appRegistry();
+    let finish!: (result: any) => void;
+    const saveFile = vi.fn((_request: any) => new Promise(resolve => { finish = resolve; }));
+    (window as any).powermove = { saveFile };
+    const saving = PM.saveProject();
+    await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
+    PM.proj = { ...PM.proj, id: 'P2', name: 'Another project' }; PM.autosave();
+    finish({ ok: true, path: '/tmp/first.pmv' });
+    expect(await saving).toBe(true);
+    expect(PM.proj.name).toBe('Another project');
+    expect(PM.app.dirty).toBe(true);
+    expect(PM.projectFileState('P2').path).toBeUndefined();
+    expect(PM.projectFileState('P1').path).toBe('/tmp/first.pmv');
+  });
   it('boots before viewer, timeline, and inspector extensions activate', () => {
     expect(() => appRegistry(false)).not.toThrow();
   });

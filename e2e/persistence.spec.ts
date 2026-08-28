@@ -1,4 +1,6 @@
 import { expect, test } from './helpers/app';
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 test.describe('@persistence native project persistence', () => {
   test('keeps an imported project and its edits when closed immediately',async({session})=>{
@@ -7,9 +9,12 @@ test.describe('@persistence native project persistence', () => {
       p.layers.push(PM.mkLayer('solid',{name:'Imported editable layer',d:{w:100,h:100,color:'#12AB34'}},p));
       return JSON.stringify({proj:p});
     });
-    const chooser=session.page.waitForEvent('filechooser');
+    const destination = path.join(session.userData, 'restart-proof.pmv');
+    await writeFile(destination, source);
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+    }, destination);
     await session.page.evaluate(()=>(window as any).PM.openProject());
-    await (await chooser).setFiles({name:'restart-proof.pmv',mimeType:'application/json',buffer:Buffer.from(source)});
     await session.page.waitForFunction(()=>(window as any).PM.proj.name==='Imported restart proof');
     await session.page.evaluate(()=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_content',target:PM.proj.layers[0].id,patch:{color:'#FF1122'}})});
     await session.relaunch();

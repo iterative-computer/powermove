@@ -19,10 +19,7 @@ test.describe('@menu-save save command routing', () => {
       item.click();
       return true;
     });
-    test.fixme(
-      !menuWired,
-      'Waiting for the native application menu to install command-name item ids (including save)'
-    );
+    expect(menuWired).toBe(true);
 
     await expect.poll(() => page.evaluate(() => (window as any).__e2eCommandCalls)).toEqual(['save', 'save']);
   });

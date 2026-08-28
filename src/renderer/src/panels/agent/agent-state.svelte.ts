@@ -33,6 +33,10 @@ export type TraceStep =
   | { kind: 'tool'; id: string; toolName: string; label: string; status: 'running' | 'done' | 'error' | 'continued' };
 
 export interface AgentSnapshot {
+  threadId?: string;
+  threads?: Array<{ id: string; title: string }>;
+  threadSwitchBlocked?: boolean;
+  threadSaveError?: boolean;
   legacyPhase: string;
   requestToken: number;
   conversation: AgentMessage[];
@@ -70,6 +74,10 @@ interface AgentViewState extends AgentSnapshot {
 }
 
 const EMPTY_SNAPSHOT: AgentSnapshot = {
+  threadId: '',
+  threads: [],
+  threadSwitchBlocked: false,
+  threadSaveError: false,
   legacyPhase: 'idle',
   requestToken: 0,
   conversation: [],
@@ -121,6 +129,10 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
   if ((phase === 'idle' || phase === 'prompt') && !snapshot.activity) progressLines = [];
 
   Object.assign(agentState, snapshot, {
+    threadId: snapshot.threadId || '',
+    threads: snapshot.threads?.map(thread => ({ ...thread })) || [],
+    threadSwitchBlocked: snapshot.threadSwitchBlocked || false,
+    threadSaveError: snapshot.threadSaveError || false,
     phase,
     uiPlacement: phase === 'running' && snapshot.uiPlacement ? { ...snapshot.uiPlacement } : null,
     plan: snapshot.plan ? { ...snapshot.plan } : null,

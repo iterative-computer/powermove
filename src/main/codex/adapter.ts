@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { discoverCodexBinary } from './env';
+import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
 
 export const ADAPTER_VERSION = '2';
 
@@ -74,7 +75,7 @@ export function buildEditorArgv(options: EditorArgvOptions): string[] {
     '--json'
   ];
   appendModelOptions(argv, options.model, options.reasoningEffort);
-  appendPromptAndImages(argv, options.prompt, options.imagePaths);
+  appendPromptAndImages(argv, `${AGENT_TESTING_INSTRUCTIONS}\n\n${options.prompt}`, options.imagePaths);
   return argv;
 }
 
