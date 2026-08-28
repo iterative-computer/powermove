@@ -224,7 +224,7 @@ PM.setKey = (L: any, key: any, T: any, value: any, ease: any) => {
   if (!p) return null;
   return PM.setKeyOn(p, T - L.from, value, ease, PM.proj.fps);
 };
-PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'power', fps: any = 30) => {
+PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30) => {
   const t = PM.snapF(tLocal, fps);
   let k = p.kf.find((k: any) => Math.abs(k.t - t) < .5 / fps);
   if (k) { k.v = value; }
@@ -238,7 +238,7 @@ PM.hasKeyAt = (L: any, p: any, T: any) => p.kf.find((k: any) => Math.abs(k.t - (
 PM.toggleStopwatch = (L: any, key: any, T: any) => {
   const p = L.p[key]; if (!p) return;
   if (p.kf.length) { p.v = PM.ev(L, key, T); p.kf = []; }
-  else PM.setKeyOn(p, T - L.from, p.v, 'power', PM.proj.fps);
+  else PM.setKeyOn(p, T - L.from, p.v, 'linear', PM.proj.fps);
   PM.touch(); PM.invalidate();
 };
 
@@ -253,7 +253,7 @@ PM.animate = (L: any, key: any, points: any, opt: any = {}) => {
   const p = L.p[key] || (opt.prop || null);
   if (!p) return false;
   if (!opt.keep) p.kf = [];
-  points.forEach((pt: any) => PM.setKeyOn(p, pt.t, pt.v, pt.ease || opt.ease || 'power', PM.proj.fps));
+  points.forEach((pt: any) => PM.setKeyOn(p, pt.t, pt.v, pt.ease || opt.ease || 'linear', PM.proj.fps));
   PM.touch();
   return true;
 };

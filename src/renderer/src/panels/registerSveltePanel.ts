@@ -1,6 +1,7 @@
 /* Adapter from the panel registry's build contract to a Svelte component.
    DockLayout's panel pool keeps each mounted component alive across moves. */
 import { flushSync, mount, unmount, type Component } from 'svelte';
+import { PANEL_ICONS } from './panel-icons';
 
 export interface PanelProps {
   panelId: string;
@@ -9,6 +10,7 @@ export interface PanelProps {
 
 export interface SveltePanelDef {
   title: string;
+  icon?: string;
   component: Component<PanelProps>;
   size?: number;
   min?: number;
@@ -28,6 +30,7 @@ const mounted = new Map<string, { unmount(): void }>();
 export function registerSveltePanel(PM: LegacyPM, id: string, def: SveltePanelDef): void {
   const { component, ...rest } = def;
   PM.registerPanel(id, {
+    icon: PANEL_ICONS[id],
     ...rest,
     persist: true,
     build(body: HTMLElement, inst: Record<string, any>) {

@@ -56,18 +56,18 @@ R.rename = (id: any, name: any) => {
   const raw = R.get(id);
   const active = PM.proj && PM.proj.id === id ? PM.proj : null;
   const meta = R.list().find((x: any) => x.id === id);
-  const previous = (raw && raw.name) || (active && active.name) || (meta && meta.name) || 'Untitled';
+  const previous = (active && active.name) || (raw && raw.name) || (meta && meta.name) || 'Untitled';
   const next = String(name == null ? '' : name).trim() || previous;
-  if (raw) {
-    raw.name = next;
-    R.put(raw);
-  } else if (active) {
-    active.name = next;
-    R.put(active);
+  if (active || raw) {
+    // Persist the live document when active; the stored snapshot may predate
+    // recent edits. Do not mutate the live name until the write succeeds.
+    R.put({ ...(active || raw), name: next });
   } else if (meta) {
     R.upsertMeta({ ...meta, name: next, at: Date.now() });
   } else return null;
   if (active) active.name = next;
+  PM.bus?.emit?.('projects:tabs');
+  if (active) { PM.touch?.(); PM.bus?.emit?.('project'); }
   return next;
 };
 
@@ -161,4 +161,12 @@ R.markOpen = (id: any) => {
 R.markClosed = (id: any) => PM.store.set(R.openKey, R.tabs().filter((x: any) => x !== id));
 
 PM.Projects = R;
+}
+
+// Registry methods hold no editor session state. Refresh them in place during
+// development without propagating a name-workflow edit into a window reload.
+if (import.meta.hot) {
+  import.meta.hot.accept(next => {
+    if (next && window.PM) next.install(window.PM);
+  });
 }

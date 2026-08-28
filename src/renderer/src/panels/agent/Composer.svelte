@@ -27,7 +27,7 @@
     if (next !== lastFocusVersion && !mode.disabled) {
       lastFocusVersion = next;
       queueMicrotask(() => {
-        if (!PM.PanelRefiner?.activeId || panelId.startsWith('refine-')) textarea?.focus();
+        if (!document.querySelector('.spatial-compose')) textarea?.focus();
       });
     }
   });
@@ -110,7 +110,7 @@
   {/if}
   <div class="agent-input-row">
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
-    <button class="agent-round agent-attach" type="button" title="Attach images or text files" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <button class="agent-round agent-attach" type="button" title="Attach files (images up to 4 MB; other files up to 100 KB)" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
     <textarea
       id={textareaId}
@@ -122,7 +122,6 @@
       bind:this={textarea}
       value={draft}
       oninput={input}
-      onfocus={() => { if (panelId === 'agent') PM.PanelRefiner?.close(); }}
       onpaste={paste}
       onkeydown={keydown}
     ></textarea>

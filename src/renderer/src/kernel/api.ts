@@ -44,7 +44,7 @@ export interface PanelDefinition {
   hideMoveHandle?: boolean;
   /** CSS selector inside the body that hosts the move handle. */
   moveSlot?: string;
-  /** Icon name from the kernel icon set (optional). */
+  /** Choose a meaningful, distinct icon from the kernel icon set for every new panel. */
   icon?: string;
 }
 

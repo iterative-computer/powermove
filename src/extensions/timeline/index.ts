@@ -30,6 +30,7 @@ export default function activate(api: PowermoveAPI): void {
 
   api.panels.register({
     id: 'timeline',
+    icon: 'timeline',
     ...timelinePanelOptions,
     build(body) {
       const styles = document.createElement('style');

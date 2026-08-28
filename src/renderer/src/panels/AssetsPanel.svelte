@@ -54,7 +54,7 @@
   }
 
   function assetIcon(kind: string): string {
-    return kind === 'audio' ? 'clock' : kind === 'video' ? 'cam' : 'frame';
+    return kind === 'audio' ? 'music' : kind === 'video' ? 'film' : 'image';
   }
 
   function liveAsset(asset: Asset): Record<string, any> | undefined {

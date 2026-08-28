@@ -90,7 +90,6 @@ export function openPanelMenu(
         run: () => PM.WS.mutate((w: Workspace) => restorePanel(w, item.id))
       })),
     { kind: 'separator' },
-    { kind: 'action', label: 'Refine this panel…', run: () => PM.PanelRefiner?.open(spec.id) },
     /* Extension contributions land at the end so they never shift the
        positions a user has learned for the built-in rows. */
     ...panelContextContributions(PM, spec.id, dock.id)

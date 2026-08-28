@@ -105,8 +105,11 @@
   function finishRename(commit: boolean): void {
     if (!renamingId) return;
     const id = renamingId;
+    if (commit) {
+      try { PM.Projects?.rename?.(id, renameValue); }
+      catch (error) { PM.toast?.(`Could not rename project: ${error instanceof Error ? error.message : String(error)}`); return; }
+    }
     renamingId = null;
-    if (commit) PM.Projects?.rename?.(id, renameValue);
     PM.bus?.emit?.('projects:tabs');
     if (commit) PM.bus?.emit?.('project');
   }
@@ -143,6 +146,12 @@
   }
 
   function projectKeydown(event: KeyboardEvent, id: string): void {
+    if (event.key === 'F2') {
+      event.preventDefault();
+      event.stopPropagation();
+      beginRename(id);
+      return;
+    }
     if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
       focusTab(event);
       return;
@@ -253,6 +262,11 @@
         aria-label={renamingId === id ? `Rename ${tabName}` : `${tabName}${dirty ? ', unsaved' : ''}`}
         tabindex={tabIndex(id)}
         onclick={(event) => projectClick(event, id)}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          PM.menu(event.currentTarget, [{ label: 'Rename project…', kb: 'F2', run: () => beginRename(id) }], { x: event.clientX, y: event.clientY });
+        }}
         ondblclick={(event) => {
           if ((event.target as Element)?.closest?.('.project-doc-close')) return;
           event.preventDefault();
@@ -314,9 +328,6 @@
 <div class="titlebar-drag" aria-hidden="true"></div>
 <ToolbarMount {PM} />
 <div class="tb-right" id="tb-right">
-  <button class="iconbtn" type="button" title="Ask Powermove agent (⌘⇧K)" aria-label="Ask Powermove agent" onclick={() => PM.SpatialAssistant?.open?.()}>
-    <Icon {PM} name="wand" />
-  </button>
   <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
     <Icon {PM} name="grid" />
   </button>

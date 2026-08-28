@@ -42,6 +42,7 @@ export default function activate(api: PowermoveAPI): void {
 
   api.panels.register({
     id: 'toolbar',
+    icon: 'tools',
     title: 'Tools',
     headless: true,
     flush: true,

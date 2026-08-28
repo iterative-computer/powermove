@@ -1,7 +1,39 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
+import {copyFile,unlink} from 'node:fs/promises';
+import path from 'node:path';
+import {fixturePath} from './helpers/media';
 
 test.describe('@import-mp4 H.264 import smoke', () => {
+  test('keeps imported video playable after the source is removed and the app closes',async({session}) => {
+    const source=path.join(session.userData,'temporary-import.mp4');
+    await copyFile(fixturePath('h264-aac.mp4'),source);
+    const chooser=session.page.waitForEvent('filechooser');
+    await session.page.evaluate(() => (window as any).PM.pickFiles());
+    await (await chooser).setFiles(source);
+    await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l:any) => l.name==='temporary-import.mp4'));
+    const id=await session.page.evaluate(() => (window as any).PM.proj.id);
+    // A successful import promises an app-owned copy, not a session-only URL or
+    // a dependency on the original in Downloads. No test-only store flush.
+    await unlink(source);
+    await session.relaunch();
+    await session.page.waitForFunction((id) => (window as any).PM.proj.id===id,id);
+    await session.page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a:any) => a.name==='temporary-import.mp4'));
+    const restored=await session.page.evaluate(async() => {
+      const PM=(window as any).PM,asset=[...PM.assets.map.values()].find((a:any)=>a.name==='temporary-import.mp4') as any;
+      const blob=await PM.MediaStore.get(PM.proj.assets[asset.id]);
+      const layer=PM.proj.layers.find((l:any)=>l.d.asset===asset.id);
+      PM.Edit.apply({type:'set_layer',target:layer.id,patch:{from:0}});
+      PM.setTime(1.5,{raw:true,force:true});
+      await new Promise<void>((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Restored video did not seek')),8000);
+        const poll=()=>{if(Math.abs(asset.el.currentTime-1.5)<.05 && asset.el.readyState>=2){clearTimeout(timer);resolve()}else setTimeout(poll,50)};poll()});
+      const frame=PM.renderFrameTo(1.5,PM.proj.w,PM.proj.h),ctx=frame.getContext('2d');
+      const pixel=[...ctx.getImageData(frame.width/2,frame.height/2,1,1).data];
+      return {bytes:blob?.size,live:asset.el.readyState,pixel};
+    });
+    expect(restored.bytes).toBeGreaterThan(0);expect(restored.live).toBeGreaterThanOrEqual(2);
+    expect(restored.pixel[1]).toBeGreaterThan(225);expect(restored.pixel[0]).toBeLessThan(30);
+  });
   test('imports H.264/AAC media and renders its green frame', async ({ session }) => {
     const { page } = session;
     await importFixture(page, 'h264-aac.mp4');

@@ -273,6 +273,74 @@ describe('AgentPanel', () => {
     button.click();
     expect(PM.SpatialAssistant.requestFix).toHaveBeenCalledExactlyOnceWith('broken-mod');
   });
+
+  it('shows autonomous results once in the conversation without a completion card', () => {
+    renderPanel(snapshot({
+      legacyPhase: 'result',
+      conversation: [{ role: 'assistant', text: 'The title now fades in.' }],
+      run: {
+        autonomous: true, changed: true, summary: 'The title now fades in.',
+        review: { message: 'The editable Powermove result is ready to review.' },
+        frames: { images: ['data:image/png;base64,AA=='], times: [0] }
+      }
+    }));
+
+    const log = target.querySelector('[role="log"]')!;
+    expect(target.textContent?.split('The title now fades in.')).toHaveLength(2);
+    expect(target.textContent).not.toContain('Autonomous result');
+    expect(target.querySelector('.agent-footer .agent-card')).toBeNull();
+    expect(target.textContent).not.toContain('Keep change');
+    expect(target.textContent).not.toContain('ready to review');
+    const undo = [...log.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Undo change')!;
+    undo.click();
+    expect(PM.AgentUI.undoSceneRun).toHaveBeenCalledOnce();
+    expect(log.querySelector('details')?.open).toBe(false);
+    expect(log.querySelector('details img')?.getAttribute('alt')).toBe('Rendered composition at 0 seconds');
+  });
+
+  it('keeps files, notes, and warnings inline for an autonomous response with no source changes', () => {
+    PM.assetKind.mockReturnValue('video');
+    renderPanel(snapshot({
+      legacyPhase: 'result',
+      conversation: [{ role: 'assistant', text: 'I found a clip.' }],
+      run: {
+        autonomous: true, changed: false, summary: 'I found a clip.',
+        review: { message: 'Review the license before publishing.' },
+        reviewError: 'The clip could not be imported.',
+        externalActions: ['Downloaded reference footage'],
+        artifacts: [{ name: 'clip.mp4', path: 'artifacts/clip.mp4', mime: 'video/mp4', size: 2048 }]
+      }
+    }));
+
+    const log = target.querySelector('[role="log"]')!;
+    expect(log.textContent).toContain('Review the license before publishing.');
+    expect(log.textContent).toContain('The clip could not be imported.');
+    expect(log.textContent).toContain('Downloaded reference footage');
+    expect(target.textContent).not.toContain('Undo change');
+    expect(target.textContent).not.toContain('Done');
+    log.querySelector<HTMLButtonElement>('[aria-label="Add clip.mp4 to timeline"]')!.click();
+    log.querySelector<HTMLButtonElement>('[aria-label="Reveal clip.mp4 in Finder"]')!.click();
+    expect(PM.AgentUI.importArtifact).toHaveBeenCalledOnce();
+    expect(PM.AgentUI.revealArtifact).toHaveBeenCalledOnce();
+    expect(target.querySelector('textarea')?.disabled).toBe(false);
+
+    flushSync(() => setAgentSnapshot(snapshot({
+      legacyPhase: 'result', conversation: [{ role: 'assistant', text: 'No changes needed.' }],
+      run: { autonomous: true, changed: false, review: { message: 'The agent run completed without changing Powermove source.' } }
+    })));
+    expect(target.textContent).not.toContain('completed without changing');
+  });
+
+  it('preserves the review card for a non-autonomous scene edit', () => {
+    renderPanel(snapshot({ legacyPhase: 'result', run: { review: { message: 'Check the timing.' } } }));
+    const card = target.querySelector('.agent-footer .agent-card')!;
+    expect(card.textContent).toContain('Rendered result');
+    const buttons = [...card.querySelectorAll<HTMLButtonElement>('button')];
+    buttons.find(button => button.textContent === 'Undo change')!.click();
+    buttons.find(button => button.textContent === 'Keep change')!.click();
+    expect(PM.AgentUI.undoSceneRun).toHaveBeenCalledOnce();
+    expect(PM.AgentUI.keepSceneRun).toHaveBeenCalledOnce();
+  });
 });
 
 describe('agent bridge', () => {

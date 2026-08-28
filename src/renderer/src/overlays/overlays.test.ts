@@ -53,6 +53,26 @@ afterEach(async () => {
 });
 
 describe('installSvelteOverlays', () => {
+  it('renders a keyboard-accessible easing grid with actual Bézier paths', () => {
+    const run = vi.fn();
+    const curve = [0, 0, 1, 1];
+    const menu = PM.menu(document.body, [
+      { header: 'Keyframe' },
+      ...Array.from({ length: 8 }, (_, i) => ({ label: `Curve ${i}`, curve, run })),
+      '-', { label: 'Delete keyframe', run }
+    ]);
+    flushSync();
+    expect(menu.classList.contains('curve-grid')).toBe(true);
+    expect(menu.querySelectorAll('svg.curve-preview')).toHaveLength(8);
+    expect(menu.querySelector('path.curve-line')?.getAttribute('d')).toBe('M6 34C6 34 46 6 46 6');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(document.activeElement?.textContent?.trim()).toBe('Curve 4');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.activeElement?.textContent?.trim()).toBe('Curve 5');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(run).toHaveBeenCalledOnce();
+  });
   it('keeps the shared toast live region intact across consecutive installs', async () => {
     installSvelteOverlays(PM);
     flushSync();

@@ -75,6 +75,15 @@ PM.icon = (name: any) => {
 };
 /* Phosphor Icons 2.1.1, regular weight. MIT licensed. */
 PM.ICONS = {
+  music: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M56 128v0m0-16v32m36-64v96m36-128v160m36-128v96m36-64v32"/></g>',
+  film: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="32" y="40" width="192" height="176" rx="16"/><path d="M72 40v176m112-176v176M32 88h40m-40 80h40m112-80h40m-40 80h40m-116-68 48 28-48 28z"/></g>',
+  image: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="32" y="40" width="192" height="176" rx="16"/><circle cx="92" cy="92" r="16"/><path d="m32 176 56-48 40 32 40-48 56 64"/></g>',
+  puzzle: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M48 48h56a24 24 0 1 1 48 0h56v56a24 24 0 1 1 0 48v56h-56a24 24 0 1 0-48 0H48v-56a24 24 0 1 0 0-48z"/></g>',
+  note: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M160 32H48v192h160V80zM160 32v48h48M80 120h96M80 152h96M80 184h64"/></g>',
+  speedometer: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M48 200a104 104 0 1 1 160 0zM128 136l48-64M56 144h16m0-64 16 16m40-56v24m56 80h16"/><circle cx="128" cy="144" r="12"/></g>',
+  sliders: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M48 40v56m0 32v88m80-176v88m0 32v56m80-176v24m0 32v120M24 96h48v32H24zm80 32h48v32h-48zm80-64h48v32h-48z"/></g>',
+  timeline: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M40 32v192m-16-56h16m-16-80h16"/><rect x="72" y="48" width="144" height="32" rx="8"/><rect x="72" y="112" width="88" height="32" rx="8"/><rect x="112" y="176" width="104" height="32" rx="8"/></g>',
+  tools: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="m152 48 32 32 40-40a64 64 0 0 1-80 80L64 200a24 24 0 0 1-34-34l80-80a64 64 0 0 1 80-80z"/></g>',
   dot: '<path d="M140,128a12,12,0,1,1-12-12A12,12,0,0,1,140,128Z"/>',
   missing: '<path d="M140,180a12,12,0,1,1-12-12A12,12,0,0,1,140,180ZM128,72c-22.06,0-40,16.15-40,36v4a8,8,0,0,0,16,0v-4c0-11,10.77-20,24-20s24,9,24,20-10.77,20-24,20a8,8,0,0,0-8,8v8a8,8,0,0,0,16,0v-.72c18.24-3.35,32-17.9,32-35.28C168,88.15,150.06,72,128,72Zm104,56A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/>',
   play: '<path d="M232.4,114.49,88.32,26.35a16,16,0,0,0-16.2-.3A15.86,15.86,0,0,0,64,39.87V216.13A15.94,15.94,0,0,0,80,232a16.07,16.07,0,0,0,8.36-2.35L232.4,141.51a15.81,15.81,0,0,0,0-27ZM80,215.94V40l143.83,88Z"/>',

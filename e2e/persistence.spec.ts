@@ -1,6 +1,21 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@persistence native project persistence', () => {
+  test('keeps an imported project and its edits when closed immediately',async({session})=>{
+    const source=await session.page.evaluate(()=>{
+      const PM=(window as any).PM,p=PM.mkProject({name:'Imported restart proof',w:640,h:360,dur:5});
+      p.layers.push(PM.mkLayer('solid',{name:'Imported editable layer',d:{w:100,h:100,color:'#12AB34'}},p));
+      return JSON.stringify({proj:p});
+    });
+    const chooser=session.page.waitForEvent('filechooser');
+    await session.page.evaluate(()=>(window as any).PM.openProject());
+    await (await chooser).setFiles({name:'restart-proof.pmv',mimeType:'application/json',buffer:Buffer.from(source)});
+    await session.page.waitForFunction(()=>(window as any).PM.proj.name==='Imported restart proof');
+    await session.page.evaluate(()=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_content',target:PM.proj.layers[0].id,patch:{color:'#FF1122'}})});
+    await session.relaunch();
+    const project=await session.page.evaluate(()=>({name:(window as any).PM.proj.name,color:(window as any).PM.proj.layers[0].d.color}));
+    expect(project).toEqual({name:'Imported restart proof',color:'#FF1122'});
+  });
   test('autosaves a project and restores it after relaunch', async ({ session }) => {
     const storeWired = await session.page.evaluate(async () => {
       try {

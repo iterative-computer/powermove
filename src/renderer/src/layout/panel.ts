@@ -65,15 +65,6 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
 
   const body = makeElement('div', 'body');
   element.appendChild(body);
-  const refine = makeElement('button', 'iconbtn panel-refine');
-  refine.type = 'button';
-  refine.title = `Refine ${def.title}`;
-  refine.setAttribute('aria-label', `Refine ${def.title}`);
-  refine.setAttribute('aria-expanded', 'false');
-  appendIcon(PM, refine, 'wand');
-  refine.addEventListener('click', () => PM.PanelRefiner?.toggle(spec.id));
-  if (headless) element.appendChild(refine);
-  else header.insertBefore(refine, options);
 
   const moveHandle = headless && !def.hideMoveHandle ? makeElement('button', 'panel-move-handle') : null;
   if (moveHandle) {

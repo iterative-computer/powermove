@@ -73,8 +73,7 @@
   ontoggle={(event) => { open = (event as ToggleEvent).newState === 'open'; }}
   onkeydown={(event) => { event.stopPropagation(); if (event.key === 'Escape') { event.preventDefault(); close(); } }}
 >
-  <div class="panel-focus-heading"><span>Focus on panels</span><button type="button" onclick={close}>Done</button></div>
-  <button class="panel-focus-all" type="button" onclick={() => PM.AgentUI?.setScope('workspace')}>All panels</button>
+  <div class="panel-focus-heading"><span>Focus on panels</span></div>
   <div class="panel-focus-list">
     {#each options as panel (panel.id)}
       <label>
@@ -94,10 +93,8 @@
   .panel-focus-popup { position: fixed; inset: auto; margin: 0; width: min(248px, calc(100vw - 16px)); max-height: min(300px, calc(100vh - 16px)); box-sizing: border-box; padding: 6px; border: 1px solid var(--line); border-radius: var(--r-lg, 12px); background: var(--bg-panel); color: var(--tx); box-shadow: var(--shadow-lift); font: var(--fs-sm)/1.4 var(--f-ui); overflow: auto; }
   .panel-focus-popup::backdrop { background: transparent; }
   .panel-focus-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px 6px; color: var(--tx-3); font-size: var(--fs-xs); }
-  .panel-focus-heading button { border: 0; background: transparent; color: var(--tx-2); font: inherit; padding: 3px; }
-  .panel-focus-all { width: 100%; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: inherit; text-align: left; padding: 6px; margin-bottom: 3px; font: inherit; }
   .panel-focus-list label { display: flex; align-items: center; gap: 7px; min-height: 28px; padding: 0 6px; border-radius: var(--r-sm); cursor: pointer; }
-  .panel-focus-list label:hover, .panel-focus-all:hover { background: var(--ink-1); }
+  .panel-focus-list label:hover { background: var(--ink-1); }
   .panel-focus-list input { margin: 0; width: 13px; height: 13px; accent-color: var(--accent); }
   .panel-focus-list span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .panel-focus-list small { color: var(--tx-3); font-size: var(--fs-xs); }

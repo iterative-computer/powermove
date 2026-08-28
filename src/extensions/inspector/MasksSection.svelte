@@ -64,7 +64,7 @@
         property.v = PM.evP(layer, property, PM.time, key);
         property.kf = [];
       } else {
-        PM.setKeyOn(property, PM.time - layer.from, property.v, 'power', PM.proj.fps);
+        PM.setKeyOn(property, PM.time - layer.from, property.v, 'linear', PM.proj.fps);
       }
     });
   }

@@ -7,6 +7,7 @@ import { registerAgentPanel } from '../../panels/register-agent';
 import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions } from '../../panels/agent/ui-placement';
 import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
+import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 
 export function install(PM: PMRegistry): void {
@@ -179,6 +180,7 @@ PM.SpatialAssistant = Spatial;
 PM.requestExtensionFix = requestFix;
 
 function agentUISnapshot(): AgentSnapshot {
+  S.attachmentUI?.refresh();
   const snapshot: AgentSnapshot = {
     legacyPhase: S.phase,
     requestToken: S.requestToken,
@@ -260,7 +262,6 @@ function init() {
 }
 
 function openAgentPanel() {
-  PM.PanelRefiner?.close();
   if (PM.ProjectsScreen?.isOpen) PM.ProjectsScreen.hide();
   if (PM.LibraryUI?.isOpen) PM.LibraryUI.close?.();
   const workspace: any = PM.WS?.current;
@@ -850,6 +851,7 @@ function makeCardMovable(card: any, handle: any) {
 }
 
 function showComposer(draft: any = '') {
+  S.attachmentUI?.dispose();
   if (S.focusPicker) { void unmount(S.focusPicker); S.focusPicker = null; }
   S.card?.remove();
   const selectedContext: any = !!S.context.targetPanelId;
@@ -874,6 +876,7 @@ function showComposer(draft: any = '') {
     focusHost,
     h('div.spatial-actions', status, cancelBtn));
   S.root.appendChild(S.card);
+  S.attachmentUI = mountPromptAttachments(PM, S.card, () => S.attachments);
   PM.AgentUI?.update({ flush: true });
   S.focusPicker = mount(AgentOptions, { target: focusHost, props: { PM } });
   flushSync();
@@ -905,7 +908,7 @@ function conversationReply(plan: any) {
 
 function promoteToConversation() {
   dismissOverlay(true);
-  if (!PM.PanelRefiner?.activeId) openAgentPanel();
+  openAgentPanel();
 }
 
 function setAgentAccessMode(mode: any) {
@@ -915,28 +918,18 @@ function setAgentAccessMode(mode: any) {
   PM.AgentUI?.update({ focusComposer: true });
 }
 
-const TEXT_ATTACHMENT_TYPES: any = new Set([
-  'application/json', 'application/javascript', 'application/xml', 'image/svg+xml',
-]);
-
-function isTextAttachment(file: any) {
-  return file.type.startsWith('text/') || TEXT_ATTACHMENT_TYPES.has(file.type)
-    || /\.(?:txt|md|json|js|mjs|cjs|ts|tsx|jsx|css|html?|svg|xml|wgsl|glsl|csv|log)$/i.test(file.name);
-}
-
+let attachmentQueue = Promise.resolve();
 async function addAttachmentFiles(files: any) {
-  const available: any = Math.max(0, 6 - S.attachments.length);
-  for (const file of [...files].slice(0, available)) {
-    if (file.size > 4_000_000) { PM.toast(`${file.name} is larger than 4 MB`); continue; }
-    const item: any = { id: PM.uid('attachment-'), name: file.name || 'Pasted attachment', type: file.type || 'application/octet-stream', size: file.size };
-    if (/^image\/(?:png|jpeg|webp|gif)$/i.test(file.type)) {
-      item.dataUrl = await new Promise((resolve: any, reject: any) => {
-        const reader: any = new window.FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file);
-      });
-    } else if (isTextAttachment(file)) item.content = (await file.text()).slice(0, 100_000);
-    S.attachments.push(item);
-  }
-  PM.AgentUI?.update({ focusComposer: true });
+  const pendingFiles = [...files];
+  attachmentQueue = attachmentQueue.then(async () => {
+    for (const file of pendingFiles) {
+      if (S.attachments.length >= 6) { PM.toast('You can attach up to 6 files per message.'); break; }
+      try { S.attachments.push(await readPromptAttachment(file, PM.uid('attachment-'))); }
+      catch (error) { PM.toast(error instanceof Error ? error.message : String(error), 6000); }
+    }
+    PM.AgentUI?.update({ focusComposer: true });
+  });
+  await attachmentQueue;
 }
 
 async function importAutonomousArtifact(artifact: any) {
@@ -1146,7 +1139,7 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
     mode: 'autonomous', access,
     projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
     projectJSON: JSON.stringify(PM.proj),
-    attachments: S.requestAttachments.filter((item: any) => item.content).map((item: any) => ({ name: item.name, type: item.type, content: item.content })),
+    attachments: requestFileAttachments(S.requestAttachments),
     model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
     timeoutMs: 3_600_000,
     onProgress: (summary: any) => {
@@ -1276,6 +1269,7 @@ async function sendRequest(input: any) {
     const raw: any = await PM.CodexBridge.request(
       agentPrompt(request, observation, steering, focus, context), responseSchema(), attachedImages,
       {
+        attachments: requestFileAttachments(S.requestAttachments),
         model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
         onProgress: (summary: any) => {
           if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;
@@ -1345,9 +1339,9 @@ function responseSchema() {
       },
       interfaceEdit: { type: 'string' },
       section: {
-        type: 'object', additionalProperties: false, required: ['id', 'title', 'size', 'note', 'tool', 'controls'],
+        type: 'object', additionalProperties: false, required: ['id', 'title', 'icon', 'size', 'note', 'tool', 'controls'],
         properties: {
-          id: { type: 'string' }, title: { type: 'string' }, size: { type: 'number' }, note: { type: 'string' }, tool: { type: 'string' },
+          id: { type: 'string' }, title: { type: 'string' }, icon: { type: 'string' }, size: { type: 'number' }, note: { type: 'string' }, tool: { type: 'string' },
           controls: { type: 'array', maxItems: 64, items: {
             type: 'object', additionalProperties: false,
             required: ['type', 'label', 'parameter', 'defaultValue', 'min', 'max', 'step', 'options', 'target', 'path', 'command', 'stateKey', 'source', 'action', 'primary'],
@@ -1728,6 +1722,7 @@ function sanitizePlan(raw: any, context: any, request: any = '') {
     interfaceEdit: kind === 'interface' ? interfaceEdit : null,
     section: {
       id: baseId, title: cleanText(sectionSource.title, 'Generated section', 70),
+      icon: typeof sectionSource.icon === 'string' && PM.ICONS?.[sectionSource.icon] ? sectionSource.icon : undefined,
       size: PM.clamp(Number(sectionSource.size) || 220, 120, 700), note: cleanText(sectionSource.note, '', 240),
       tool: recipe?.id || '', state, controls,
     },
@@ -2067,6 +2062,7 @@ function dismissOverlay(preserveContext: any) {
   window.removeEventListener('keydown', onKey, true);
   window.cancelAnimationFrame(S.hintFrame); S.hintFrame = 0; S.hintPoint = null;
   if (S.renderStop) S.renderStop();
+  S.attachmentUI?.dispose(); S.attachmentUI = null;
   if (S.focusPicker) { void unmount(S.focusPicker); S.focusPicker = null; }
   S.root?.remove();
   Object.assign(S, {

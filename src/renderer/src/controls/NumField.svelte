@@ -19,6 +19,7 @@
     unit = '',
     precision,
     label,
+    ariaLabel,
     link = false,
     onInput,
     onCommit
@@ -33,6 +34,7 @@
     unit?: string;
     precision?: number;
     label?: string;
+    ariaLabel?: string;
     link?: boolean;
     onInput?: (value: number) => void;
     onCommit?: (value: number) => void;
@@ -159,8 +161,8 @@
   readonly={!editing}
   value={shown}
   title={label || ''}
-  aria-labelledby={labelledBy}
-  aria-label={labelledBy ? undefined : (label ?? edit.label)}
+  aria-labelledby={ariaLabel ? undefined : labelledBy}
+  aria-label={ariaLabel ?? (labelledBy ? undefined : (label ?? edit.label))}
   aria-valuenow={Number.isFinite(numeric) ? numeric : undefined}
   aria-valuemin={min}
   aria-valuemax={max}

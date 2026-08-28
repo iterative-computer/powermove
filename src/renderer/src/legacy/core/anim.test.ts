@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './anim';
+import { makePM } from '../__tests__/make-pm';
 
 function animRegistry(): PMRegistry {
   const PM: PMRegistry = {
@@ -19,6 +20,22 @@ function animRegistry(): PMRegistry {
 }
 
 describe('legacy animation install', () => {
+  it('defaults every new-key path to linear and preserves explicit easing', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
+    PM.proj = PM.mkProject();
+    const layer = PM.mkLayer('solid'); PM.proj.layers = [layer];
+    const check = (key: any) => expect(key).toMatchObject({ eo: [0, 0], ei: [1, 1] });
+    check(PM.KF(0, 10));
+    PM.toggleStopwatch(layer, 'opacity', 0);
+    check(layer.p.opacity.kf[0]);
+    PM.Edit.apply({ type: 'set_property', target: layer.id, path: 'opacity', value: 50, time: 1 });
+    check(layer.p.opacity.kf[1]);
+    PM.animate(layer, 'rotation', [{ t: 0, v: 0 }, { t: 1, v: 90 }]);
+    layer.p.rotation.kf.forEach(check);
+    PM.Edit.apply({ type: 'replace_keyframes', target: layer.id, path: 'position.x', keyframes: [{ time: 0, value: 0 }, { time: 1, value: 100 }] });
+    layer.p['position.x'].kf.forEach(check);
+    expect(PM.KF(0, 10, 'power').eo).toEqual([.62, .05]);
+  });
   it('detects self, descendant, unrelated, existing, and empty parents', () => {
     const PM = animRegistry();
     const mk = (id: any, parent: any) => ({ id, parent });

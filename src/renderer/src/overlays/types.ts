@@ -12,6 +12,7 @@ export type MenuAction = {
   kb?: string | null;
   on?: boolean;
   disabled?: boolean;
+  curve?: readonly number[];
   run?: () => unknown;
 };
 

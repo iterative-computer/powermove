@@ -126,7 +126,7 @@ function setProperty(command: any) {
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
-    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'power', PM.proj.fps);
+    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps);
     if (command.hold != null) key.hold = !!command.hold;
   } else {
     prop.v = value;
@@ -156,7 +156,7 @@ function replaceKeyframes(command: any) {
     if (!key || typeof key !== 'object') throw new Error(`Keyframe ${index + 1} is invalid`);
     const time: any = Math.max(0, finite(key.time, `keyframe ${index + 1} time`));
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
-    return { time, value, ease: key.ease || 'power', hold: !!key.hold };
+    return { time, value, ease: key.ease || 'linear', hold: !!key.hold };
   });
   if (command.replace !== false) prop.kf = [];
   for (const key of next) {

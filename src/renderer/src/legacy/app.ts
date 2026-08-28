@@ -1,5 +1,6 @@
 /* Ported from js/app.js — behavior-preserving. */
 import type { PMRegistry } from './registry';
+import { packProjectFile, restoreProjectFileMedia } from './core/project-file';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -401,8 +402,8 @@ function persistCurrent(withThumb: any) {
 }
 
 function captureProjectSession() {
-  if (!PM.proj?.id) return;
-  persistCurrent(false);
+  if (!PM.proj?.id) return true;
+  const saved = persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
     lastActiveAt: Date.now(),
     workspace: PM.WS.snapshot(), time: PM.time,
@@ -411,7 +412,17 @@ function captureProjectSession() {
       ? { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph }
       : undefined,
   });
+  return saved;
 }
+
+// Native close/quit calls this while the document and its IPC channel are
+// still alive. beforeunload alone runs after the main process's quit flush.
+PM.flushProject = async () => {
+  await APP.importQueue;
+  window.clearTimeout(APP.saveTimer);
+  if (!captureProjectSession()) throw new Error('Project storage is unavailable or full');
+  await PM.store.flush?.();
+};
 
 function closeProjectTransients() {
   PM.LibraryUI?.close?.();
@@ -445,10 +456,12 @@ PM.saveProject = async () => {
   if (APP.saving) return false;
   APP.saving = true;
   try {
-    const text = PM.serialize(), projectId = PM.proj.id;
+    await APP.importQueue;
+    const snapshot = PM.serialize(), projectId = PM.proj.id;
+    const text = await packProjectFile(snapshot, PM.MediaStore);
     const finish = () => {
       // Saving a captured snapshot must not mark edits made during the dialog saved.
-      if (PM.proj.id === projectId && PM.serialize() === text) APP.dirty = false;
+      if (PM.proj.id === projectId && PM.serialize() === snapshot) APP.dirty = false;
       PM.toast('Project saved'); PM.invalidate('status'); return true;
     };
     if (window.powermove?.saveFile) {
@@ -479,6 +492,7 @@ PM.openProject = () => {
 async function openProjectFile(file: any) {
   try {
     const o = JSON.parse(await file.text());
+    await restoreProjectFileMedia(o, PM.MediaStore);
     switchProject(hydrate(o.proj || o));
     if (o.ws?.layout?.docks) PM.WS.restoreSnapshot(o.ws);
     PM.toast('Opened ' + file.name);
