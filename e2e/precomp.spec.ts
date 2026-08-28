@@ -24,4 +24,36 @@ test.describe('@precomp nested composition rendering', () => {
     expect(result.lit).toBeGreaterThan(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
+
+  test('preserves pixels when a non-zero-start layer is precomposed', async ({ session }) => {
+    const { page } = session;
+    await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
+    const result = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const project = PM.mkProject({ name: 'Precomp clock', w: 64, h: 64, fps: 30, dur: 4, bg: '#000000' });
+      const solid = PM.mkLayer('solid', {
+        name: 'Late solid', from: 2, dur: 1, d: { color: '#FFFFFF', w: 64, h: 64 },
+      }, project);
+      project.layers = [solid];
+      PM.replaceProject(project);
+      const brightness = () => {
+        const canvas = PM.renderFrameTo(2.5, 64, 64) as HTMLCanvasElement;
+        const data = canvas.getContext('2d')!.getImageData(0, 0, 64, 64).data;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) sum += data[i]! + data[i + 1]! + data[i + 2]!;
+        return sum;
+      };
+      const before = brightness();
+      const precomp = PM.precompose([solid.id], 'Late precomp');
+      const after = brightness();
+      const nested = PM.proj.comps[precomp.d.comp];
+      return { before, after, outerFrom: precomp.from, innerFrom: nested.layers[0].from };
+    });
+
+    expect(result.before).toBeGreaterThan(0);
+    expect(result.after).toBeGreaterThan(result.before * 0.99);
+    expect(result.outerFrom).toBe(2);
+    expect(result.innerFrom).toBe(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
 });

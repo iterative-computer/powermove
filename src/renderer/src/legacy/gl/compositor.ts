@@ -16,6 +16,16 @@ export function hasRenderableEffects(effects: Array<{ on?: boolean; missing?: bo
   return effects.some((effect) => effect.on && effect.missing !== true);
 }
 
+/** Evaluate a persisted effect channel, falling back when an extension adds a
+    parameter after the project was saved. This keeps one bad effect off the
+    whole-frame failure path. */
+export function effectParamValue(PM: PMRegistry, layer: any, effect: any, param: any, time: number): any {
+  const prop = effect?.p?.[param.k];
+  if (!prop) return param.def;
+  const value = PM.evP(layer, prop, time, param.k);
+  return value == null ? param.def : value;
+}
+
 export function install(PM: PMRegistry): void {
 
 const GL: any = {
@@ -370,7 +380,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
       g.u('u_texel', 1 / W, 1 / H);
       g.u('u_time', T);
       setI(p, 'u_pass', pass);
-      def.params.forEach((pd: any, i: any) => setParam(p, pd, i, PM.evP(L, fx.p[pd.k], T, pd.k)));
+      def.params.forEach((pd: any, i: any) => setParam(p, pd, i, effectParamValue(PM, L, fx, pd, T)));
       GL.gl.disable(GL.gl.BLEND);
       draw();
       GL.gl.enable(GL.gl.BLEND);
@@ -638,6 +648,7 @@ GL.render = (T: any, opt: any = {}) => {
     Used for transparent PNG export where the canvas itself is opaque. */
 GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl; if (!gl) return null;
+  PM.beginEval(T);
   PM.scope.push(PM.proj);
   let acc;
   try { acc = GL.renderProject(PM.proj, T, W, H, opt); }

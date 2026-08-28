@@ -66,6 +66,18 @@ test('Scale keys move outside the layer, delete together, and never delete their
   }, id)).toEqual([1, 1, 1]);
   await page.keyboard.press('Meta+z');
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.y'].kf.length, id)).toBe(2);
+  await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    // replaceProject sets fixture data; register its tab as a real open project
+    // before exercising close/reopen instead of reopening the demo tab.
+    PM.Projects.markOpen(PM.proj.id);
+    await PM.flushProject();
+  });
+  await session.relaunch();
+  expect(await session.page.evaluate((id) => {
+    const L = (window as any).PM.L(id);
+    return [L.p['scale.x'].kf[0].t, L.p['scale.y'].kf[0].t];
+  }, id)).toEqual([-1, -1]);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

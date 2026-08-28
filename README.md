@@ -4,6 +4,10 @@ Powermove is an AI-native motion and video editor for macOS. It combines a GPU-b
 
 The refactored Electron application is the only supported app. The earlier root-page/WKWebView implementation and its separate test oracle were retired after parity coverage moved to Vitest.
 
+## Project files
+
+Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file, retain a `.pmv1` backup, and keep unsaved changes separate from local recovery. **Command+O** reopens projects with their embedded media. See [saving and recovery](docs/project-files.md) for details and the current file-size limit.
+
 ## Kernel and extensions
 
 Powermove is a small kernel plus extensions. The kernel owns the project store,

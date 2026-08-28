@@ -56,4 +56,19 @@ describe('legacy selection install', () => {
 
     expect(PM.resolveSelectedKeys()).toEqual([nested, first]);
   });
+
+  it('resolves transition keyframes as first-class animation channels', () => {
+    const { PM } = selectionRegistry();
+    const transition = { i: 'transition-key' };
+    PM.proj = {
+      layers: [{
+        p: {}, fx: [], masks: [], d: {},
+        transitionIn: { p: { angle: { kf: [transition] } } },
+      }],
+      comps: {},
+    };
+    PM.sel.keys = ['transition-key'];
+
+    expect(PM.resolveSelectedKeys()).toEqual([transition]);
+  });
 });

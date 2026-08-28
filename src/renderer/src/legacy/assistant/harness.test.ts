@@ -32,6 +32,7 @@ describe('legacy assistant harness install', () => {
       keyframes: Array.from({ length: 85 }, (_, index) => `key-${index}`),
       curve: [.2, .1, .8, .9], overrideLock: true,
     });
+    const added = PM.AgentHarness.cleanCommand({ type: 'add_layer', layerType: 'text', name: 'Title' });
 
     expect(cleaned.preserveHandEdits).toBe(true);
     expect(Object.hasOwn(cleaned, 'unknownField')).toBe(false);
@@ -39,6 +40,7 @@ describe('legacy assistant harness install', () => {
     expect(Object.hasOwn(replaced, 'unknownField')).toBe(false);
     expect(easing.keyframes).toHaveLength(80);
     expect(Object.hasOwn(easing, 'overrideLock')).toBe(false);
+    expect(added.from).toBe(0);
     expect(PM.AgentHarness.cleanCommand({
       type: 'create_section', section: { id: 'section-1', layers: [{ id: 'layer-1' }] },
     })).toEqual({ type: 'create_section', section: { id: 'section-1', layers: [{ id: 'layer-1' }] } });

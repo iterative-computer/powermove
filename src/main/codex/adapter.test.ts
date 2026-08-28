@@ -20,13 +20,31 @@ describe('Codex CLI adapter', () => {
         prompt: 'Polish this composition',
         imagePaths: ['/tmp/editor/frame-0.png', '/tmp/editor/frame-1.jpg'],
         model: 'gpt-5-codex',
-        reasoningEffort: 'high'
+        reasoningEffort: 'high',
+        disabledSkillPaths: ['/Users/test/.agents/skills/custom/SKILL.md']
       })
     ).toEqual([
       'exec',
       '--ephemeral',
       '--skip-git-repo-check',
+      '--ignore-user-config',
       '--ignore-rules',
+      '--disable',
+      'plugins',
+      '--disable',
+      'apps',
+      '--disable',
+      'skill_search',
+      '--disable',
+      'skill_mcp_dependency_install',
+      '--config',
+      'mcp_servers={}',
+      '--config',
+      'skills.include_instructions=false',
+      '--config',
+      'skills.bundled.enabled=false',
+      '--config',
+      'skills.config=[{path="/Users/test/.agents/skills/custom/SKILL.md",enabled=false}]',
       '--sandbox',
       'read-only',
       '--output-schema',
@@ -58,7 +76,8 @@ describe('Codex CLI adapter', () => {
         access: 'project',
         extensionsDir: '/user-data/extensions',
         sessionId: null,
-        instructions: 'AGENT INSTRUCTIONS'
+        instructions: 'AGENT INSTRUCTIONS',
+        disabledSkillPaths: []
       })
     ).toEqual([
       '--search',
@@ -66,7 +85,22 @@ describe('Codex CLI adapter', () => {
       '--add-dir',
       '/user-data/extensions',
       'exec',
+      '--ignore-user-config',
       '--skip-git-repo-check',
+      '--disable',
+      'plugins',
+      '--disable',
+      'apps',
+      '--disable',
+      'skill_search',
+      '--disable',
+      'skill_mcp_dependency_install',
+      '--config',
+      'mcp_servers={}',
+      '--config',
+      'skills.include_instructions=false',
+      '--config',
+      'skills.bundled.enabled=false',
       '--output-schema',
       '/workspace/.powermove/result-schema.json',
       '--output-last-message',
@@ -90,7 +124,8 @@ describe('Codex CLI adapter', () => {
         access: 'computer',
         extensionsDir: '/user-data/extensions',
         sessionId: ' thread-123\n',
-        instructions: 'AGENT INSTRUCTIONS'
+        instructions: 'AGENT INSTRUCTIONS',
+        disabledSkillPaths: []
       })
     ).toEqual([
       '--search',
@@ -99,7 +134,22 @@ describe('Codex CLI adapter', () => {
       '/user-data/extensions',
       'exec',
       'resume',
+      '--ignore-user-config',
       '--skip-git-repo-check',
+      '--disable',
+      'plugins',
+      '--disable',
+      'apps',
+      '--disable',
+      'skill_search',
+      '--disable',
+      'skill_mcp_dependency_install',
+      '--config',
+      'mcp_servers={}',
+      '--config',
+      'skills.include_instructions=false',
+      '--config',
+      'skills.bundled.enabled=false',
       '--output-schema',
       '/workspace/.powermove/result-schema.json',
       '--output-last-message',
@@ -114,7 +164,7 @@ describe('Codex CLI adapter', () => {
     ]);
   });
 
-  it('isolates an MCP fallback from the user config while retaining Codex auth', () => {
+  it('isolates every run from the user config while retaining Codex auth', () => {
     const argv = buildAutonomousArgv({
       schemaPath: '/workspace/.powermove/result-schema.json',
       outputPath: '/workspace/.powermove/result-run-3.json',
@@ -126,14 +176,15 @@ describe('Codex CLI adapter', () => {
       extensionsDir: '/user-data/extensions',
       sessionId: null,
       instructions: 'AGENT INSTRUCTIONS',
-      disableMcp: true
+      disabledSkillPaths: []
     });
     expect(argv.slice(argv.indexOf('exec'), argv.indexOf('exec') + 3)).toEqual([
       'exec',
       '--ignore-user-config',
       '--skip-git-repo-check'
     ]);
-    expect(argv).not.toContain('mcp_servers={}');
+    expect(argv.filter(flag => flag === '--ignore-user-config')).toHaveLength(1);
+    expect(argv).toContain('mcp_servers={}');
   });
 
   it('reports supported and missing flags from codex exec --help', async () => {

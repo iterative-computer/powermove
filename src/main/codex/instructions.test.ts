@@ -80,7 +80,7 @@ describe('autonomous agent contract', () => {
     expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(6 * 1024);
   });
 
-  it('defines strict, bounded extension changes in the result schema', () => {
+  it('defines required, bounded extension changes in the strict result schema', () => {
     const schema = agentResultSchema() as {
       required: string[];
       properties: { extensions: Record<string, unknown> };

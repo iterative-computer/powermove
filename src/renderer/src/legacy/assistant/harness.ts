@@ -61,7 +61,8 @@ function propertyDigest(layer: any) {
     path: item.key,
     value: PM.evP(layer, item.prop, PM.time, item.key),
     keyframes: item.prop.kf.slice(0, MAX_KEYFRAMES).map((key: any) => ({
-      time: PM.round(key.t, 3), value: clone(key.v), hold: !!key.hold,
+      time: PM.round(key.t, 3), compositionTime: PM.round(layer.from + key.t, 3),
+      value: clone(key.v), hold: !!key.hold,
     })),
     expression: item.prop.expr || null,
     handEdited: !!(layer.locked_intent?.[item.key] || layer.locked_intent?.[item.key.split('.')[0]]),
@@ -128,6 +129,10 @@ function cleanCommand(raw: any) {
     if (!Array.isArray(out.keyframes)) return null;
     out.keyframes = out.keyframes.slice(0, MAX_KEYFRAMES);
   }
+  /* Agent-authored layers are deterministic and reviewable regardless of where
+     the human happened to leave the playhead. Interactive add-layer commands
+     retain their existing playhead-relative behavior. */
+  if (out.type === 'add_layer' && out.from === undefined) out.from = 0;
   if (out.type === 'set_easing') {
     if (!Array.isArray(out.keyframes)) return null;
     out.keyframes = out.keyframes.slice(0, MAX_KEYFRAMES);

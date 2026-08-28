@@ -130,3 +130,18 @@ test('Save on native window close writes the document before closing', async ({ 
   await expect.poll(() => session.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(0);
   expect(await savedName(destination)).toBe('Saved on close');
 });
+
+test('native Quit honors Cancel without closing the editing session', async ({ session }) => {
+  await rename(session, 'Cancel quitting');
+  await session.app.evaluate(({ dialog, app }) => {
+    dialog.showMessageBox = async () => {
+      (globalThis as any).__quitPrompt = true;
+      return { response: 1, checkboxChecked: false };
+    };
+    app.quit();
+  });
+  await expect.poll(() => session.app.evaluate(() => (globalThis as any).__quitPrompt)).toBe(true);
+  expect(await session.page.evaluate(() => (window as any).PM.proj.name)).toBe('Cancel quitting');
+  expect(await session.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1);
+  await session.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); });
+});

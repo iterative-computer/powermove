@@ -156,6 +156,14 @@ describe('save IPC', () => {
         { name: 'ok.pmv', data: new Uint8Array() }
       )
     ).rejects.toThrow('Unauthorized IPC sender');
+    await expect(untrusted.invokes.get(IPC.projectOpen)?.(invokeEvent())).rejects.toThrow('Unauthorized IPC sender');
+    await expect(untrusted.invokes.get(IPC.projectConfirmClose)?.(invokeEvent(), 'Demo')).rejects.toThrow('Unauthorized IPC sender');
+    await expect(trusted.invokes.get(IPC.fileSave)?.(invokeEvent(), {
+      name: 'Demo.pmv', projectId: '../arbitrary-file', data: new Uint8Array()
+    })).rejects.toThrow('invalid project id');
+    await expect(trusted.invokes.get(IPC.fileSave)?.(invokeEvent(), {
+      name: 'Demo.pmv', saveAs: 'yes', data: new Uint8Array()
+    })).rejects.toThrow('invalid saveAs');
   });
 });
 

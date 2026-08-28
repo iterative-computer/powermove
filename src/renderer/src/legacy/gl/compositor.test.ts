@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { PMRegistry } from '../registry';
-import { hasRenderableEffects, install, paramUniformName } from './compositor';
+import { effectParamValue, hasRenderableEffects, install, paramUniformName } from './compositor';
 
 function compositorRegistry(): PMRegistry {
   const PM: PMRegistry = {
@@ -64,5 +64,13 @@ describe('compositor effect fast path', () => {
       { on: true, missing: true },
       { on: true, missing: false }
     ])).toBe(true);
+  });
+
+  it('starts a fresh evaluator window for pixel export and defaults absent effect channels', () => {
+    const PM = compositorRegistry();
+    PM.evP = () => 42;
+    expect(String(PM.GL.renderToPixels)).toContain('PM.beginEval(T)');
+    expect(effectParamValue(PM, {}, { p: {} }, { k: 'amount', def: 12 }, 0)).toBe(12);
+    expect(effectParamValue(PM, {}, { p: { amount: { v: 42 } } }, { k: 'amount', def: 12 }, 0)).toBe(42);
   });
 });
