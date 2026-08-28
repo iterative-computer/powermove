@@ -8,7 +8,7 @@ import activate from './index';
 describe('viewer extension', () => {
   beforeEach(() => {
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({} as CanvasRenderingContext2D));
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({} as never));
     vi.stubGlobal('ResizeObserver', class {
       observe(): void {}
       disconnect(): void {}
