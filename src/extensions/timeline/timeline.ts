@@ -1,7 +1,78 @@
 /* Ported from js/ui/timeline.js — behavior-preserving. */
+export interface KeyframeMoveSnapshotItem<Property = unknown> {
+  id: string;
+  property: Property;
+  time: number;
+  maxTime?: number;
+  selected: boolean;
+  order?: number;
+}
+
+export interface KeyframeMovePlan<Property = unknown> {
+  delta: number;
+  moves: Array<{ item: KeyframeMoveSnapshotItem<Property>; time: number }>;
+  removed: Array<KeyframeMoveSnapshotItem<Property>>;
+}
+
+/** Plan one frame-snapped keyframe move from an immutable gesture snapshot.
+    All selected keys receive the same delta. Destination collisions are
+    scoped to one property and the selected/moving key wins by id. */
+export function planKeyframeMove<Property>(
+  items: Array<KeyframeMoveSnapshotItem<Property>>, requestedDelta: number, fps: number,
+): KeyframeMovePlan<Property> {
+  const rate = Number.isFinite(fps) && fps > 0 ? fps : 30;
+  const selected = items.filter((item) => item.selected && Number.isFinite(item.time));
+  if (!selected.length) return { delta: 0, moves: [], removed: [] };
+  const rawDelta = Number.isFinite(requestedDelta) ? requestedDelta : 0;
+  let delta = Math.round(rawDelta * rate) / rate;
+  const minTime = Math.min(...selected.map((item) => item.time));
+  delta = Math.max(delta, -minTime);
+  const maxDelta = Math.min(...selected.map((item) => {
+    const maxTime = Number.isFinite(item.maxTime) ? Math.max(item.time, item.maxTime!) : Infinity;
+    return maxTime - item.time;
+  }));
+  delta = Math.min(delta, maxDelta);
+  if (Object.is(delta, -0)) delta = 0;
+  const moves = selected.map((item) => ({ item, time: item.time + delta }));
+
+  /* A value-only graph edit must not clean up unrelated legacy duplicates.
+     Resolve occupied frames only when the gesture actually moves in time. */
+  const removed: Array<KeyframeMoveSnapshotItem<Property>> = [];
+  if (Math.abs(delta) > 1e-12) {
+    const destinations = new Map<Property, Set<number>>();
+    for (const move of moves) {
+      let frames = destinations.get(move.item.property);
+      if (!frames) destinations.set(move.item.property, frames = new Set());
+      frames.add(Math.round(move.time * rate));
+    }
+    for (const item of items) {
+      if (item.selected) continue;
+      if (destinations.get(item.property)?.has(Math.round(item.time * rate))) removed.push(item);
+    }
+  }
+  return { delta, moves, removed };
+}
+
+/** Materialize a plan without mutating its source. Useful for tests and for
+    consumers that keep their own keyframe storage. */
+export function applyKeyframeMovePlan<Property>(
+  items: Array<KeyframeMoveSnapshotItem<Property>>, plan: KeyframeMovePlan<Property>,
+): Array<KeyframeMoveSnapshotItem<Property>> {
+  const removed = new Set(plan.removed);
+  const moved = new Map(plan.moves.map(({ item, time }) => [item, time]));
+  return items.filter((item) => !removed.has(item)).map((item) => ({
+    ...item,
+    time: moved.has(item) ? moved.get(item)! : item.time,
+  }));
+}
+
 export function install(pm: any): void {
 createTimelineRuntime(pm);
 }
+
+/** A new ESM instance gets a new token. It can recognize and dispose a
+    runtime left behind by the previous hot-reloaded module instance. */
+const TIMELINE_RUNTIME_TOKEN = Symbol('powermove.timeline.runtime');
 
 /** Resolve overlapping keyframe hit targets without stealing an established
     selection. With no selected hit, array order remains the visual/top order. */
@@ -29,10 +100,14 @@ return createTimelineRuntime(pm);
 
 export function createTimelineRuntime(pm: any): any {
 const PM = pm;
-if (PM.TL?.attachHead && PM.TL?.attachCanvas) return PM.TL;
+const previous = PM.TL;
+if (previous?.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN && !previous.__timelineRuntimeDisposed) return previous;
+const previousHead = previous?.__timelineHead || null;
+const previousWrap = previous?.__timelineWrap || null;
+previous?.disposeRuntime?.();
 const h = PM.h, clamp = PM.clamp;
 
-const T: any = {
+const T: any = previous || {
   gut: 224, row: 32, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null,
@@ -41,7 +116,7 @@ const T: any = {
 /* Built-in extensions activate after project hydration. Restore the current
    project session here, matching the former app bootstrap path that ran after
    the legacy timeline installer. */
-const sessionTimeline = PM.Projects?.getState?.(PM.proj?.id)?.timeline;
+const sessionTimeline = !previous && PM.Projects?.getState?.(PM.proj?.id)?.timeline;
 if (sessionTimeline) {
   T.pps = Number.isFinite(sessionTimeline.pps) ? sessionTimeline.pps : T.pps;
   T.scrollT = Number.isFinite(sessionTimeline.scrollT) ? sessionTimeline.scrollT : T.scrollT;
@@ -49,6 +124,71 @@ if (sessionTimeline) {
   T.graph = !!sessionTimeline.graph;
 }
 PM.TL = T;
+T.__timelineRuntimeToken = TIMELINE_RUNTIME_TOKEN;
+T.__timelineRuntimeDisposed = false;
+
+const runtimeCleanups: Array<() => void> = [];
+let headCleanups: Array<() => void> = [];
+let canvasCleanups: Array<() => void> = [];
+const frameIds = new Set<number>();
+const timerIds = new Set<number>();
+const activeDrags = new Set<any>();
+let resizeObserver: ResizeObserver | null = null;
+let disposed = false;
+
+function listen(target: any, event: string, handler: any, options?: any, bucket = runtimeCleanups) {
+  target?.addEventListener?.(event, handler, options);
+  const cleanup = () => target?.removeEventListener?.(event, handler, options);
+  bucket.push(cleanup);
+  return cleanup;
+}
+function onBus(event: string, handler: any, bucket = runtimeCleanups) {
+  const release = PM.bus.on(event, handler);
+  bucket.push(typeof release === 'function' ? release : () => PM.bus.off?.(event, handler));
+}
+function scheduleFrame(fn: () => void) {
+  let id = 0;
+  id = window.requestAnimationFrame(() => { frameIds.delete(id); if (!disposed) fn(); });
+  frameIds.add(id);
+  return id;
+}
+function scheduleTimer(fn: () => void, delay: number) {
+  let id = 0;
+  id = window.setTimeout(() => { timerIds.delete(id); if (!disposed) fn(); }, delay);
+  timerIds.add(id);
+  return id;
+}
+function runCleanups(bucket: Array<() => void>) {
+  for (const cleanup of bucket.splice(0).reverse()) {
+    try { cleanup(); } catch { }
+  }
+}
+function beginDrag(event: any, options: any) {
+  let control: any;
+  const finish = (kind: 'up' | 'cancel') => (...args: any[]) => {
+    activeDrags.delete(control);
+    return options[kind]?.(...args);
+  };
+  control = PM.drag(event, { ...options, up: finish('up'), cancel: finish('cancel') });
+  activeDrags.add(control);
+  return control;
+}
+function disposeRuntime() {
+  if (disposed) return;
+  disposed = true;
+  [...activeDrags].forEach((control) => control?.cancel?.()); activeDrags.clear();
+  runCleanups(canvasCleanups);
+  runCleanups(headCleanups);
+  runCleanups(runtimeCleanups);
+  resizeObserver?.disconnect(); resizeObserver = null;
+  frameIds.forEach((id) => window.cancelAnimationFrame?.(id)); frameIds.clear();
+  timerIds.forEach((id) => window.clearTimeout?.(id)); timerIds.clear();
+  if (T.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN) {
+    T.__timelineRuntimeDisposed = true;
+    T.__timelineRuntimeToken = null;
+  }
+}
+T.disposeRuntime = disposeRuntime;
 
 /* After Effects keeps the work area inside the composition. Powermove keeps
    those same editing rules, with one useful extension: pulling the out marker
@@ -83,7 +223,10 @@ T.attachHead = (head: HTMLElement) => {
     if (attachedHead === head) return;
     /* Re-bindable: buildHead constructs fresh controls on the new host, so a
        replacement head (HMR) simply rebinds. */
+    runCleanups(headCleanups);
+    headCleanups = [];
     attachedHead = head;
+    T.__timelineHead = head;
     buildHead(head);
 };
 
@@ -92,7 +235,11 @@ T.attachCanvas = (wrap: HTMLElement) => {
     const cv = wrap.querySelector<HTMLCanvasElement>(':scope > #tl-canvas');
     if (!cv) throw new Error('Timeline host is missing the legacy canvas skeleton');
     /* Re-bindable: the 2D canvas has no cross-host state; rebind on a new host. */
+    runCleanups(canvasCleanups);
+    canvasCleanups = [];
+    resizeObserver?.disconnect(); resizeObserver = null;
     attachedWrap = wrap;
+    T.__timelineWrap = wrap;
     /* Keep the backing store transparent while a host resize is in flight.
        An opaque 2D canvas is cleared to black as soon as its bitmap changes,
        which made the whole timeline flash/stick black while a section was
@@ -100,22 +247,31 @@ T.attachCanvas = (wrap: HTMLElement) => {
     T.cv = cv; T.ctx = cv.getContext('2d');
     refreshTimelineManifest();
     bind(cv, wrap);
-    new window.ResizeObserver(() => resize(wrap)).observe(wrap);
-    window.requestAnimationFrame(() => resize(wrap));
+    resizeObserver = new window.ResizeObserver(() => resize(wrap));
+    resizeObserver.observe(wrap);
+    scheduleFrame(() => resize(wrap));
 };
 
 function buildHead(head: any) {
-  const btn = (icon: any, fn: any, title: any) => h('button.iconbtn', { type: 'button', title, onclick: fn }, PM.icon(icon));
+  /* The layout owns the move handle injected into this slot. Preserve it when
+     a hot-reloaded runtime rebuilds only the controls around it. */
+  const moveHandles = [...head.children].filter((node: any) => node.classList?.contains('panel-move-handle'));
+  head.replaceChildren(...moveHandles);
+  const btn = (icon: any, fn: any, title: any) => {
+    const button = h('button.iconbtn', { type: 'button', title }, PM.icon(icon));
+    listen(button, 'click', fn, undefined, headCleanups);
+    return button;
+  };
   const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
   const zoom = h('input', { type: 'range', min: 8, max: 900, value: T.pps, step: 1, title: 'Timeline zoom', 'aria-label': 'Timeline zoom' });
-  zoom.addEventListener('input', () => { T.pps = +zoom.value; PM.invalidate('timeline'); });
+  listen(zoom, 'input', () => { T.pps = +zoom.value; PM.invalidate('timeline'); }, undefined, headCleanups);
   const snap = h('button.iconbtn' + (PM.snap ? '.on' : ''), { title: 'Snapping (S)' }, PM.icon('magnet'));
-  snap.onclick = () => { PM.snap = !PM.snap; snap.classList.toggle('on', PM.snap); };
+  listen(snap, 'click', () => { PM.snap = !PM.snap; snap.classList.toggle('on', PM.snap); }, undefined, headCleanups);
   const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (G)' }, PM.icon('graph'));
-  graph.onclick = () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); };
+  listen(graph, 'click', () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); }, undefined, headCleanups);
   const loop = h('button.iconbtn' + (PM.loop ? '.on' : ''), { title: 'Loop' }, PM.icon('undo'));
-  loop.onclick = () => { PM.loop = !PM.loop; loop.classList.toggle('on', PM.loop); };
+  listen(loop, 'click', () => { PM.loop = !PM.loop; loop.classList.toggle('on', PM.loop); }, undefined, headCleanups);
 
   const transport = h('div.tl-group.tl-transport',
     btn('prev', () => PM.setTime(prevEdge()), 'Previous edge'),
@@ -140,11 +296,11 @@ function buildHead(head: any) {
     if (playBtn.querySelector(`[data-icon="${icon}"]`)) return;
     playBtn.replaceChildren(PM.icon(icon));
   };
-  PM.bus.on('time', syncTime); PM.bus.on('transport', syncTransport);
+  onBus('time', syncTime, headCleanups); onBus('transport', syncTransport, headCleanups);
   syncTime(); syncTransport();
-  time.addEventListener('pointerdown', (e: any) => {
-    PM.drag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(PM.time + dx / 12 / PM.proj.fps) });
-  });
+  listen(time, 'pointerdown', (e: any) => {
+    beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(PM.time + dx / 12 / PM.proj.fps) });
+  }, undefined, headCleanups);
 }
 
 function refreshTimelineManifest() {
@@ -178,15 +334,15 @@ function resize(wrap?: any) {
   if (changed) draw();
   PM.invalidate('timeline');
 }
-window.addEventListener('resize', () => resize());
-PM.bus.on('layout:applied', () => {
+listen(window, 'resize', () => resize());
+onBus('layout:applied', () => {
   resize();
   /* Second pass after flex settles: the first layout:applied can fire while the
      dock is still animating to its final size (workspace switch, boot with a
      stale saved size), leaving the canvas showing a stale placeholder frame
      until the user nudges a splitter. */
-  window.requestAnimationFrame(() => resize());
-  window.setTimeout(() => resize(), 120);
+  scheduleFrame(() => resize());
+  scheduleTimer(() => resize(), 120);
 });
 
 /* ── row model ─────────────────────────────────────────── */
@@ -212,9 +368,9 @@ const t2x = (t: any) => T.gut + (t - T.scrollT) * T.pps;
 const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
 
 /* ── draw ──────────────────────────────────────────────── */
-PM.bus.on('draw:timeline', draw);
-PM.bus.on('layers', () => PM.invalidate('timeline'));
-PM.bus.on('sel', () => PM.invalidate('timeline'));
+onBus('draw:timeline', draw);
+onBus('layers', () => PM.invalidate('timeline'));
+onBus('sel', () => PM.invalidate('timeline'));
 
 function css(v: any) { return window.getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 let theme: any = null;
@@ -234,7 +390,7 @@ const refreshTheme = () => {
     line: css('--line') || 'rgba(15,15,20,.09)',
   };
 };
-PM.bus.on('layout', () => { refreshTimelineManifest(); refreshTheme(); refreshInk(); PM.invalidate('timeline'); });
+onBus('layout', () => { refreshTimelineManifest(); refreshTheme(); refreshInk(); PM.invalidate('timeline'); });
 
 /* Ink-on-paper colors for canvas chrome. Light theme uses black alpha;
    dark theme uses white alpha — resolved on every theme refresh. */
@@ -749,11 +905,11 @@ function hitRow(y: any) {
 }
 
 function bind(cv: any, wrap: any) {
-  cv.addEventListener('pointerdown', onDown);
-  cv.addEventListener('pointermove', onMove);
-  cv.addEventListener('dblclick', onDbl);
-  cv.addEventListener('contextmenu', onCtx);
-  cv.addEventListener('wheel', (e: any) => {
+  listen(cv, 'pointerdown', onDown, undefined, canvasCleanups);
+  listen(cv, 'pointermove', onMove, undefined, canvasCleanups);
+  listen(cv, 'dblclick', onDbl, undefined, canvasCleanups);
+  listen(cv, 'contextmenu', onCtx, undefined, canvasCleanups);
+  listen(cv, 'wheel', (e: any) => {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
       const tAt = x2t(e.offsetX);
@@ -767,7 +923,7 @@ function bind(cv: any, wrap: any) {
     }
     T.scrollT = Math.max(-.4, T.scrollT);
     PM.invalidate('timeline');
-  }, { passive: false });
+  }, { passive: false }, canvasCleanups);
 }
 
 function onMove(e: any) {
@@ -842,7 +998,7 @@ function workAreaDrag(e: any, idx: any) {
   const startDuration = PM.proj.dur;
   const frame = 1 / Math.max(1, PM.proj.fps);
   PM.Edit.begin('Work area', { origin: 'timeline' });
-  PM.drag(e, {
+  beginDrag(e, {
     cursor: 'ew-resize',
     move: (dx: any, dy: any, ev: any) => {
       const r = T.cv.getBoundingClientRect();
@@ -861,7 +1017,7 @@ function workAreaMove(e: any) {
   const frame = 1 / Math.max(1, PM.proj.fps);
   PM.Edit.begin('Move work area', { origin: 'timeline' });
   let moved = false;
-  PM.drag(e, {
+  beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: any) => {
       if (!moved && Math.abs(dx) < 2) return;
@@ -880,7 +1036,7 @@ function scrub(e: any) {
     PM.setTime(x2t(ev.clientX - r.left));
   };
   set(e);
-  PM.drag(e, { move: (dx: any, dy: any, ev: any) => set(ev) });
+  beginDrag(e, { move: (dx: any, dy: any, ev: any) => set(ev) });
 }
 
 function gutterDown(e: any, x: any, y: any) {
@@ -908,7 +1064,7 @@ function gutterDown(e: any, x: any, y: any) {
   /* drag to reorder */
   const startIdx = PM.proj.layers.indexOf(L);
   let done = false;
-  PM.drag(e, {
+  beginDrag(e, {
     move: (dx: any, dy: any) => {
       const delta = Math.round(dy / T.row);
       const to = clamp(startIdx + delta, 0, PM.proj.layers.length - 1);
@@ -927,7 +1083,7 @@ function slide(e: any) {
   const start = layers.map((L: any) => ({ L, from: L.from }));
   PM.Edit.begin('Move clip', { origin: 'timeline' });
   let moved = false;
-  PM.drag(e, {
+  beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: any) => {
       moved = true;
@@ -955,7 +1111,7 @@ function trim(e: any, side: any) {
   const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
   PM.Edit.begin('Trim clip', { origin: 'timeline' });
   let moved = false;
-  PM.drag(e, {
+  beginDrag(e, {
     cursor: 'ew-resize',
     move: (dx: any) => {
       moved = true;
@@ -983,6 +1139,64 @@ function trimInCommands(L: any, from: any) {
   return commands;
 }
 
+function captureKeyframeGesture(entries: any[]) {
+  const selected = new Set(entries.map((entry: any) => entry.key));
+  const layerByProperty = new Map(entries.map((entry: any) => [entry.prop, entry.L]));
+  const props = [...new Set(entries.map((entry: any) => entry.prop))];
+  const properties = props.map((prop: any) => ({
+    prop,
+    keys: prop.kf.map((key: any, order: number) => ({ key, time: key.t, value: key.v, order })),
+  }));
+  const items = properties.flatMap(({ prop, keys }: any) => keys.map((entry: any) => ({
+    id: entry.key.i,
+    property: prop,
+    time: entry.time,
+    /* Key times are layer-local. Existing files can contain keys beyond the
+       current composition; let those move left, but never teleport them left
+       merely because a drag began or allow the group to move farther right. */
+    maxTime: Math.max(
+      entry.time,
+      Math.max(0, PM.proj.dur - (Number(layerByProperty.get(prop)?.from) || 0)),
+    ),
+    selected: selected.has(entry.key),
+    order: entry.order,
+    key: entry.key,
+    value: entry.value,
+  })));
+  return { properties, items };
+}
+
+function restoreKeyframeGesture(snapshot: any) {
+  snapshot.properties.forEach(({ prop, keys }: any) => {
+    keys.forEach(({ key, time, value }: any) => { key.t = time; key.v = value; });
+    prop.kf = keys.map(({ key }: any) => key);
+  });
+}
+
+/** Rebuild from the pointer-down snapshot on every move. This is what makes a
+    key removed by a temporary collision come back when the pointer moves away. */
+function applyKeyframeGesture(snapshot: any, requestedDelta: number, valueDelta = 0, valueProp: any = null) {
+  restoreKeyframeGesture(snapshot);
+  const plan = planKeyframeMove(snapshot.items, requestedDelta, PM.proj.fps);
+  const removed = new Set(plan.removed.map((item: any) => item.key));
+  plan.moves.forEach(({ item, time }: any) => { item.key.t = time; });
+  if (valueProp && Number.isFinite(valueDelta)) {
+    snapshot.items.forEach((item: any) => {
+      if (item.selected && item.property === valueProp && typeof item.value === 'number') {
+        item.key.v = PM.round(item.value + valueDelta, 3);
+      }
+    });
+  }
+  snapshot.properties.forEach(({ prop, keys }: any) => {
+    const order = new Map(keys.map(({ key, order }: any) => [key, order]));
+    prop.kf = keys.map(({ key }: any) => key)
+      .filter((key: any) => !removed.has(key))
+      .sort((a: any, b: any) => a.t - b.t || (order.get(a) as number) - (order.get(b) as number));
+  });
+  PM.touch(); PM.invalidate();
+  return plan;
+}
+
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const additive = e.shiftKey || e.metaKey;
   PM.sel.chan = r.key;
@@ -999,19 +1213,19 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
     if (wasSelected) return;
   } else if (!wasSelected) setSelectedKeys([hit]);
   const entries = selectedKeyEntries();
-  const start = entries.map((entry: any) => ({ ...entry, t: entry.key.t }));
-  PM.hist.begin('Move keyframe');
+  const snapshot = captureKeyframeGesture(entries);
   let moved = false;
-  PM.drag(e, {
-    move: (dx: any) => {
-      moved = true;
-      const dt = PM.snapF(dx / T.pps, PM.proj.fps);
-      start.forEach((s: any) => { s.key.t = Math.max(0, s.t + dt); });
-      [...new Set(start.map((s: any) => s.prop))].forEach((prop: any) => prop.kf.sort((a: any, b: any) => a.t - b.t));
-      PM.touch(); PM.invalidate();
+  beginDrag(e, {
+    move: (dx: any, dy: any) => {
+      if (!moved && Math.hypot(dx, dy) < 3) return;
+      if (!moved) { moved = true; PM.hist.begin('Move keyframe'); }
+      applyKeyframeGesture(snapshot, dx / T.pps);
     },
-    up: () => { moved ? PM.hist.commit('Move keyframe') : PM.hist.cancel(); PM.invalidate('timeline'); },
-    cancel: () => { PM.hist.cancel(); PM.invalidate('timeline'); },
+    up: () => { if (moved) PM.hist.commit('Move keyframe'); PM.invalidate('timeline'); },
+    cancel: () => {
+      if (moved) { restoreKeyframeGesture(snapshot); PM.hist.cancel(); PM.touch(); }
+      PM.invalidate('timeline');
+    },
   });
 }
 
@@ -1036,21 +1250,20 @@ function graphDown(e: any, x: any, y: any) {
     setSelectedKeys(wasSelected ? PM.sel.keys.filter((id: any) => id !== hit.i) : [...PM.sel.keys, hit.i]);
     if (wasSelected) return;
   } else if (!wasSelected) setSelectedKeys([hit]);
-  const selected = kf.filter(keySelected);
-  const start = selected.map((key: any) => ({ key, t: key.t, v: key.v }));
-  PM.hist.begin('Edit curve');
-  PM.drag(e, {
+  const snapshot = captureKeyframeGesture(selectedKeyEntries());
+  let moved = false;
+  beginDrag(e, {
     move: (dx: any, dy: any) => {
-      const dv = (g.y2v(0) - g.y2v(dy)) * -1;
-      start.forEach((item: any) => {
-        item.key.t = Math.max(0, PM.snapF(item.t + dx / T.pps, PM.proj.fps));
-        item.key.v = PM.round(item.v + dv, 3);
-      });
-      kf.sort((a: any, b: any) => a.t - b.t);
-      PM.touch(); PM.invalidate();
+      if (!moved && Math.hypot(dx, dy) < 3) return;
+      if (!moved) { moved = true; PM.hist.begin('Edit curve'); }
+      const dv = g.y2v(dy) - g.y2v(0);
+      applyKeyframeGesture(snapshot, dx / T.pps, dv, g.target.prop);
     },
-    up: () => PM.hist.commit('Edit curve'),
-    cancel: () => PM.hist.cancel(),
+    up: () => { if (moved) PM.hist.commit('Edit curve'); PM.invalidate('timeline'); },
+    cancel: () => {
+      if (moved) { restoreKeyframeGesture(snapshot); PM.hist.cancel(); PM.touch(); }
+      PM.invalidate('timeline');
+    },
   });
 }
 function dragHandle(e: any, k: any, which: any, g: any, kf: any, L: any) {
@@ -1061,7 +1274,7 @@ function dragHandle(e: any, k: any, which: any, g: any, kf: any, L: any) {
   const bx = t2x(L.from + other.t), by = g.v2y(other.v);
   const start = [...k[which]];
   PM.hist.begin('Adjust easing');
-  PM.drag(e, {
+  beginDrag(e, {
     move: (dx: any, dy: any) => {
       const nx = clamp(start[0] + dx / (bx - ax || 1), 0, 1);
       const ny = start[1] + dy / (by - ay || 1);
@@ -1129,7 +1342,7 @@ function marquee(e: any, opt: any = {}) {
   const baseKeys = additive ? [...PM.sel.keys] : [];
   const baseLayers = additive ? [...PM.sel.layers] : [];
   let dragged = false;
-  PM.drag(e, {
+  beginDrag(e, {
     move: (dx: any, dy: any) => {
       if (!dragged && Math.hypot(dx, dy) < 3) return;
       dragged = true;
@@ -1187,9 +1400,11 @@ function renameLayer(L: any, rowIdx: any) {
     },
   });
   wrap.appendChild(inp); inp.focus(); inp.select();
+  const disposeInput = () => { inp.onblur = null; inp.onkeydown = null; inp.remove(); };
+  canvasCleanups.push(disposeInput);
   const done = (ok: any) => {
     if (ok && inp.value.trim()) PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { name: inp.value.trim() } }, { label: 'Rename layer', origin: 'timeline' });
-    inp.remove(); PM.invalidate();
+    disposeInput(); PM.invalidate();
   };
   inp.onblur = () => done(true);
   inp.onkeydown = (ev: any) => { ev.stopPropagation(); if (ev.key === 'Enter') done(true); if (ev.key === 'Escape') done(false); };
@@ -1279,5 +1494,12 @@ T.reveal = (L: any, keys: any) => {
   }
   PM.invalidate('timeline');
 };
+/* Direct module HMR can replace this runtime without rebuilding the panel.
+   Rebind the already-mounted hosts immediately; kernel reloads rebuild the
+   panel afterward and call these same idempotent attach methods. */
+const liveHead = previousHead && previousHead.isConnected !== false ? previousHead : PM.$?.('#tl-head');
+const liveWrap = previousWrap && previousWrap.isConnected !== false ? previousWrap : PM.$?.('#tl-canvas-wrap');
+if (liveHead) T.attachHead(liveHead);
+if (liveWrap) T.attachCanvas(liveWrap);
 return T;
 }
