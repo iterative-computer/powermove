@@ -6,7 +6,7 @@ if [ "$1" = "--version" ]; then
 fi
 
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf '%s\n' '--ephemeral --ignore-user-config --skip-git-repo-check --ignore-rules --sandbox --output-schema --output-last-message --json --model --config --image --search --add-dir --approve-for-me --dangerously-bypass-approvals-and-sandbox'
+  printf '%s\n' '--ephemeral --ignore-user-config --skip-git-repo-check --ignore-rules --sandbox --output-schema --output-last-message --json --model --config --image --search --disable --add-dir --approve-for-me --dangerously-bypass-approvals-and-sandbox'
   exit 0
 fi
 
@@ -50,6 +50,12 @@ if [ "${FAKE_CODEX_MODE:-success}" = 'hang' ]; then
   if [ -n "${FAKE_CODEX_PID_FILE:-}" ]; then printf '%s\n' "$$" > "$FAKE_CODEX_PID_FILE"; fi
   trap 'exit 143' TERM INT
   while :; do sleep 1; done
+fi
+
+if [ "${FAKE_CODEX_MODE:-success}" = 'fail-after-thread' ]; then
+  printf '%s\n' '{"type":"turn.failed","error":{"type":"invalid_request_error","code":"invalid_json_schema","message":"Invalid schema for response_format codex_output_schema: missing required property."}}'
+  printf '%s\n' 'Reading additional input from stdin...' >&2
+  exit 19
 fi
 
 if [ -z "$output_path" ]; then

@@ -85,7 +85,7 @@ describe('prepareAgentWorkspace', () => {
     expect(layout.root).toBe(path.join(userData, 'Agent Workspaces', 'Project_123'));
     expect(layout.runDirectory).toBe(path.join(layout.root, 'artifacts', 'run-123'));
     expect(layout.outputPath).toBe(path.join(layout.root, '.powermove', 'result-run-123.json'));
-    expect(layout.sessionPath).toBe(path.join(layout.root, '.powermove', 'session-project.txt'));
+    expect(layout.sessionPath).toBe(path.join(layout.root, '.powermove', 'session-v2-project.txt'));
     expect(layout.apiPackDirectory).toBe(path.join(layout.root, 'powermove-api'));
     expect(layout.extensionsDir).toBe(options.extensionsDir);
     expect(layout.imagePaths).toEqual([path.join(layout.root, 'inputs', 'references', 'reference-0.png')]);
@@ -202,7 +202,7 @@ describe('prepareAgentWorkspace', () => {
 
 describe('session helpers', () => {
   it('atomically stores, reads, and clears a trimmed session id', async () => {
-    const file = path.join(await temporaryDirectory(), '.powermove', 'session-project.txt');
+    const file = path.join(await temporaryDirectory(), '.powermove', 'session-v2-project.txt');
     await expect(readSession(file)).resolves.toBeNull();
     await writeSession(file, '  thread-123\n');
     await expect(readSession(file)).resolves.toBe('thread-123');

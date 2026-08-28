@@ -7,6 +7,17 @@ export function install(pm: any): void {
 createTimelineRuntime(pm);
 }
 
+/** Resolve overlapping keyframe hit targets without stealing an established
+    selection. With no selected hit, array order remains the visual/top order. */
+export function pickKeyframeHit<T extends { i?: string }>(
+  keys: T[], selectedIds: string[], distance: (key: T) => number, threshold: number,
+): T | null {
+  const hits = keys.filter((key) => distance(key) < threshold);
+  if (!hits.length) return null;
+  const selected = new Set(selectedIds);
+  return hits.find((key) => keyMembers(key).some(member => selected.has(member.key.i))) || hits[0]!;
+}
+
 export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
 } as const;
@@ -1042,7 +1053,10 @@ function trimInCommands(L: any, from: any) {
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const additive = e.shiftKey || e.metaKey;
   PM.sel.chan = r.key;
-  const hit = r.prop.kf.find((k: any) => Math.abs(t2x(r.L.from + k.t) - x) < 6);
+  const hit = pickKeyframeHit(
+    r.prop.kf, PM.sel.keys,
+    (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
+  );
   if (!hit) return marquee(e, { additive });
   const wasSelected = keySelected(hit);
   if (additive) PM.selectLayers(r.L.id, true);
@@ -1079,10 +1093,11 @@ function graphDown(e: any, x: any, y: any) {
   const series = g.series as any[];
   // Pick the closest visible point/handle, not whichever axis was iterated first.
   const points = series.flatMap(axis => axis.prop.kf.map((key: any) => ({ axis, key })));
-  const pointHit = points.map(item => {
+  const pointHits = points.map(item => {
     const pt = PM.UIState.getKeyHandles(item.key)?.pt;
-    return { ...item, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
-  }).sort((a, b) => a.distance - b.distance)[0];
+    return { ...item, i: item.key.i, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
+  }).sort((a, b) => a.distance - b.distance);
+  const pointHit = pickKeyframeHit(pointHits, PM.sel.keys, item => item.distance, 8) ?? pointHits[0];
   if (!pointHit || pointHit.distance >= 6) {
     const handles = points.flatMap(item => (['eo', 'ei'] as const).map(which => {
       const pt = PM.UIState.getKeyHandles(item.key)?.[which === 'eo' ? 'ho' : 'hi'];

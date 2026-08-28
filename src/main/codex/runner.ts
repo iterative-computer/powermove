@@ -21,6 +21,11 @@ import { discoverCodexBinary } from './env';
 import { CodexEventParser } from './events';
 import { agentInstructions, agentResultSchema } from './instructions';
 import {
+  discoverUserSkillFiles,
+  isolatedCodexEnvironment,
+  prepareIsolatedCodexHome
+} from './isolation';
+import {
   agentWorkspaceRoot,
   clearSession,
   discardPartialRun,
@@ -57,6 +62,7 @@ export interface CodexRunOptions {
   onWarning?: (text: string) => void;
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
+  discoverDisabledSkillPaths?: () => Promise<string[]>;
 }
 
 interface ActiveRun {
@@ -111,26 +117,62 @@ function failure(error: string, cancelled = false): CodexRunResult {
   return { ok: false, error, cancelled };
 }
 
-function structuredCliError(stdout: string): string {
-  let error = '';
-  for (const line of stdout.split(/\r?\n/)) {
-    try {
-      const event: unknown = JSON.parse(line);
-      if (!isRecord(event)) continue;
-      if (event.type === 'error' && isString(event.message)) error = event.message;
-      if (event.type === 'item.completed' && isRecord(event.item) &&
-        event.item.type === 'error' && isString(event.item.message)) {
-        error = event.item.message;
+function errorMessageFromValue(value: unknown, depth = 0): string | null {
+  if (depth > 8) return null;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return null;
+    if (text.startsWith('{')) {
+      try {
+        return errorMessageFromValue(JSON.parse(text) as unknown, depth + 1) ?? text;
+      } catch {
+        // The error message is ordinary prose, not nested JSON.
       }
-    } catch { /* stdout can contain non-event notices */ }
+    }
+    return text;
   }
-  return error;
+  if (!isRecord(value)) return null;
+  return errorMessageFromValue(value.error, depth + 1)
+    ?? errorMessageFromValue(value.message, depth + 1)
+    ?? errorMessageFromValue(value.detail, depth + 1);
+}
+
+/** Extracts the actual failure from `codex exec --json` stdout events. */
+export function codexErrorFromStdout(stdout: string): string | null {
+  const lines = stdout.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(event) || typeof event.type !== 'string') continue;
+    if (event.type === 'item.completed' && isRecord(event.item) && event.item.type === 'error') {
+      const message = errorMessageFromValue(event.item);
+      if (message) return message.slice(0, 4_000);
+    }
+    if (!/(?:^|[._-])(?:error|failed|failure)(?:$|[._-])/i.test(event.type)) continue;
+    const message = errorMessageFromValue(event);
+    if (message) return message.slice(0, 4_000);
+  }
+  return null;
+}
+
+function meaningfulStderr(stderr: string): string {
+  return stderr
+    .split(/\r?\n/)
+    .filter((line) => !/^Reading additional input from stdin(?:\.\.\.)?$/i.test(line.trim()))
+    .join('\n')
+    .trim();
 }
 
 function diagnosticText(attempt: AttemptResult, fallback: string): string {
-  const parts = [attempt.stderr.trim(), structuredCliError(attempt.stdout), attempt.spawnError?.message]
-    .filter((part): part is string => Boolean(part));
-  return humanizeCodexFailure(parts.join('\n'), fallback);
+  const diagnostic = codexErrorFromStdout(attempt.stdout)
+    ?? (meaningfulStderr(attempt.stderr) || attempt.spawnError?.message || '');
+  return humanizeCodexFailure(diagnostic, fallback);
 }
 
 /* Raw CLI stderr must never reach the conversation: it is log noise (timestamps,
@@ -156,6 +198,9 @@ export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT gen
   if (/rate.?limit|\b429\b|overloaded/i.test(text)) {
     return 'The model is rate-limited right now. Wait a moment and retry.';
   }
+  if (/invalid_json_schema|Invalid schema for response_format/i.test(text)) {
+    return "Powermove's agent response format was rejected. Restart Powermove and retry; if it persists, update the app.";
+  }
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.replace(/^\d{4}-\d{2}-\d{2}T\S+\s+(ERROR|WARN|INFO)\s+\S*:?\s*/i, '').trim())
@@ -166,12 +211,6 @@ export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT gen
 
 function attemptOutput(attempt: AttemptResult): string {
   return `${attempt.stderr}\n${attempt.stdout}`.trim();
-}
-
-/* Codex connects to every configured MCP server at startup; one broken server
-   (expired OAuth, dead transport) can kill a run that never needed it. */
-export function isMcpStartupFailure(diagnostic: string): boolean {
-  return /rmcp|mcp/i.test(diagnostic) && /AuthRequired|Transport channel closed|worker quit|connection refused|handshak(?:e|ing)/i.test(diagnostic);
 }
 
 function sortJsonValue(value: unknown): unknown {
@@ -264,6 +303,11 @@ export class CodexRunner {
 
       const binary = options.binary ?? await discoverCodexBinary(options.codexBinaryPref ?? null);
       if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+      const [codexHome, disabledSkillPaths] = await Promise.all([
+        prepareIsolatedCodexHome(options.userData),
+        (options.discoverDisabledSkillPaths ?? discoverUserSkillFiles)()
+      ]);
+      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
 
       if (req.mode === 'editor') {
         const input = await writeEditorInputs(req);
@@ -274,9 +318,10 @@ export class CodexRunner {
           prompt: req.prompt,
           imagePaths: input.imagePaths,
           model: req.model,
-          reasoningEffort: req.reasoningEffort
+          reasoningEffort: req.reasoningEffort,
+          disabledSkillPaths
         });
-        const attempt = await this.execute(req, state, binary, argv, input.directory, null, options, (timer) => {
+        const attempt = await this.execute(req, state, binary, argv, input.directory, codexHome, null, options, (timer) => {
           timeout = timer;
         });
         if (this.cancelled.has(req.id)) {
@@ -313,9 +358,7 @@ export class CodexRunner {
 
       let resumeId = await readSession(layout.sessionPath);
       let attempt: AttemptResult | null = null;
-      let disableMcp = false;
-      let mcpFallback = false;
-      for (let tryIndex = 0; tryIndex < 3; tryIndex += 1) {
+      for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
         const argv = buildAutonomousArgv({
           schemaPath: layout.schemaPath,
           outputPath: layout.outputPath,
@@ -332,9 +375,9 @@ export class CodexRunner {
           access: authority,
           extensionsDir: layout.extensionsDir,
           sessionId: resumeId,
-          disableMcp
+          disabledSkillPaths
         });
-        attempt = await this.execute(req, state, binary, argv, layout.root, layout, options, (timer) => {
+        attempt = await this.execute(req, state, binary, argv, layout.root, codexHome, layout, options, (timer) => {
           timeout = timer;
         });
         if (this.cancelled.has(req.id)) {
@@ -349,24 +392,12 @@ export class CodexRunner {
           resumeId = null;
           continue;
         }
-        if (!disableMcp && attempt.code !== 0 && isMcpStartupFailure(diagnostic)) {
-          console.error('[codex] MCP startup failure; retrying without MCP servers:', diagnostic.slice(0, 1_000));
-          options.onProgress?.('One of your Codex integrations failed to start — retrying without integrations…');
-          // A resumed thread may retain tool state from the failed MCP startup.
-          // The request already contains the current project and prompt, so retry
-          // from a clean thread as well as a clean user configuration.
-          await state.sessionWrite;
-          await clearSession(layout.sessionPath);
-          await rm(layout.outputPath, { force: true });
-          resumeId = null;
-          disableMcp = true;
-          mcpFallback = true;
-          continue;
-        }
         break;
       }
 
       if (attempt === null || attempt.code !== 0) {
+        await state.sessionWrite;
+        await clearSession(layout.sessionPath);
         return failure(attempt ? diagnosticText(attempt, 'The autonomous agent failed.') : 'The autonomous agent failed.');
       }
 
@@ -383,9 +414,6 @@ export class CodexRunner {
       parsed.projectId = req.projectId;
       parsed.access = authorityForAccess(req.access);
       const extensions = parseAgentExtensionChanges(parsed.extensions);
-      if (mcpFallback && Array.isArray(parsed.notes)) {
-        parsed.notes = ['This run skipped your Codex integrations: one of them failed to start (it likely needs to be signed in again).', ...parsed.notes].slice(0, 80);
-      }
       return {
         ok: true,
         text: JSON.stringify(sortJsonValue(parsed)),
@@ -427,6 +455,7 @@ export class CodexRunner {
     binary: string,
     argv: string[],
     cwd: string,
+    codexHome: string,
     layout: AgentWorkspace | null,
     options: CodexRunOptions,
     setTimeoutHandle: (timer: NodeJS.Timeout) => void
@@ -442,6 +471,7 @@ export class CodexRunner {
       child = spawnProcess(binary, argv, {
         cwd,
         detached: true,
+        env: isolatedCodexEnvironment(codexHome),
         stdio: ['ignore', 'pipe', 'pipe']
       });
     } catch (error) {

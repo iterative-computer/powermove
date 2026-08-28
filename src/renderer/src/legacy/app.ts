@@ -96,24 +96,42 @@ function hydrate(p: any) {
      keyframe, effect and layer field is normalized here so malformed data degrades
      to a static value instead of NaN transforms or a broken keyframe search.
      Applied recursively to nested compositions as well. */
-  const sanitizeProp = (prop: any, fresh: any) => {
-    prop.kf = Array.isArray(prop.kf) ? prop.kf : [];
-    /* sanitize keyframes: finite t/v only, sorted, near-duplicates collapsed */
-    prop.kf = prop.kf
-      .filter((q: any) => q && typeof q === 'object' && Number.isFinite(num(q.t)) && Number.isFinite(num(q.v)))
-      .map((q: any) => ({ ...q, t: num(q.t), v: num(q.v), i: q.i || PM.uid('k'), hold: !!q.hold }))
-      .sort((a: any, b: any) => a.t - b.t)
-      .filter((q: any, i: any, arr: any) => i === 0 || q.t - arr[i - 1].t > 1e-6);
+  const keyIds = new Set<string>();
+  const sanitizeProp = (prop: any, fresh: any, minTime = 0) => {
+    const fallback = fresh?.v;
+    const valid = (value: any) => {
+      if (typeof fallback === 'number') return typeof value === 'number' && Number.isFinite(value);
+      if (typeof fallback === 'string') return typeof value === 'string';
+      if (typeof fallback === 'boolean') return typeof value === 'boolean';
+      return value !== undefined && value !== null;
+    };
+    prop.v = valid(prop.v) ? prop.v : fallback;
+    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps, minTime);
+    prop.kf.forEach((key: any) => {
+      if (keyIds.has(key.i)) key.i = PM.uid('k');
+      keyIds.add(key.i);
+    });
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
-    prop.v = num(prop.v, fresh.v);
   };
-  const sanitizeTransition = (value: any) => {
+  const sanitizeLooseParams = (params: any, minTime = 0) => {
+    const source = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+    Object.keys(source).forEach((key: any) => {
+      const saved = source[key];
+      const prop = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : { v: saved };
+      const fallback = (typeof prop.v === 'number' && Number.isFinite(prop.v)) ||
+        typeof prop.v === 'string' || typeof prop.v === 'boolean' ? prop.v : 0;
+      sanitizeProp(prop, { v: fallback }, minTime);
+      source[key] = prop;
+    });
+    return source;
+  };
+  const sanitizeTransition = (value: any, minTime = 0) => {
     if (value == null) return null;
     if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.type !== 'string' || !value.type) return null;
     const duration = PM.clamp(num(value.dur, 0.5), 0.02, 600);
     const savedParams = value.p && typeof value.p === 'object' && !Array.isArray(value.p) ? value.p : {};
     const definition = PM.transitionDef?.(value.type);
-    if (!definition) return { ...value, type: value.type, dur: duration, p: savedParams, missing: true };
+    if (!definition) return { ...value, type: value.type, dur: duration, p: sanitizeLooseParams(savedParams, minTime), missing: true };
     const transition = PM.mkTransition(value.type);
     if (!transition) return { ...value, type: value.type, dur: duration, p: savedParams, missing: true };
     transition.dur = duration;
@@ -126,15 +144,10 @@ function hydrate(p: any) {
         if (param.type === 'toggle') return typeof raw === 'boolean' ? raw : fallback;
         return num(raw, fallback);
       };
-      transition.p[param.k] = {
-        v: validValue(source.v),
-        kf: (Array.isArray(source.kf) ? source.kf : [])
-          .filter((key: any) => key && typeof key === 'object' && Number.isFinite(num(key.t)))
-          .map((key: any) => ({ ...key, t: num(key.t), v: validValue(key.v), i: key.i || PM.uid('k'), hold: !!key.hold }))
-          .sort((a: any, b: any) => a.t - b.t)
-          .filter((key: any, index: any, keys: any) => index === 0 || key.t - keys[index - 1].t > 1e-6),
-        expr: typeof source.expr === 'string' && source.expr.trim() ? source.expr : null,
-      };
+      const prop = { ...source, v: validValue(source.v) };
+      prop.kf = (Array.isArray(source.kf) ? source.kf : []).map((key: any) => ({ ...key, v: validValue(key?.v) }));
+      sanitizeProp(prop, { v: fallback }, minTime);
+      transition.p[param.k] = prop;
     });
     return transition;
   };
@@ -152,7 +165,7 @@ function hydrate(p: any) {
       const fresh = PM.mkLayer(L.type || 'null', {}, container);
       Object.keys(fresh.p).forEach(k => {
         if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
-        sanitizeProp(L.p[k], fresh.p[k]);
+        sanitizeProp(L.p[k], fresh.p[k], -L.from);
       });
       Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
       /* An effect whose type is not registered right now is kept as a marked
@@ -162,9 +175,16 @@ function hydrate(p: any) {
       L.fx = L.fx
         .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
         .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
-      L.fx.forEach((f: any) => { f.id = f.id || PM.uid('fx'); f.p = f.p || {}; f.on = f.on !== false; });
-      L.transitionIn = sanitizeTransition(L.transitionIn);
-      L.transitionOut = sanitizeTransition(L.transitionOut);
+      L.fx.forEach((f: any) => {
+        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, -L.from); f.on = f.on !== false;
+        const definition = PM.FX?.[f.type];
+        for (const param of definition?.params || []) {
+          if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
+          sanitizeProp(f.p[param.k], { v: param.def }, -L.from);
+        }
+      });
+      L.transitionIn = sanitizeTransition(L.transitionIn, -L.from);
+      L.transitionOut = sanitizeTransition(L.transitionOut, -L.from);
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].effects === false) L.fx = [];
       /* masks: validate shape/mode and every animatable channel */
       L.masks = Array.isArray(L.masks) ? L.masks.filter((m: any) => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
@@ -176,12 +196,15 @@ function hydrate(p: any) {
         const freshM = PM.mkMask(m.shape, container);
         Object.keys(freshM.p).forEach(k => {
           if (!m.p[k] || typeof m.p[k] !== 'object') m.p[k] = freshM.p[k];
-          sanitizeProp(m.p[k], freshM.p[k]);
+          sanitizeProp(m.p[k], freshM.p[k], -L.from);
         });
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
-      if (L.type === 'shader') PM.syncShaderUniforms?.(L);
+      if (L.type === 'shader') {
+        L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
+        PM.syncShaderUniforms?.(L);
+      }
     });
   };
   base.comps = p.comps && typeof p.comps === 'object' ? p.comps : {};
@@ -201,6 +224,8 @@ function hydrate(p: any) {
   base.layers.forEach((L: any) => { if (L.type === 'precomp' && !(L.d && L.d.comp && base.comps[L.d.comp])) L.d.comp = null; });
   return base;
 }
+/* Shared project boundary for import/open flows and deterministic regression tests. */
+PM.hydrateProject = hydrate;
 function demo() {
   const p = PM.mkProject({ name: 'Velocity Study', w: 1920, h: 1080, fps: 30, dur: 8, bg: '#080809' });
   p.shutter = .5;
@@ -333,6 +358,21 @@ function revalidateContributionPlaceholders() {
         const missing = !PM.FX?.[effect.type];
         if (missing && !effect.missing) { effect.missing = true; changed = true; }
         else if (!missing && effect.missing) { delete effect.missing; changed = true; }
+        if (!missing) {
+          effect.p = effect.p && typeof effect.p === 'object' ? effect.p : {};
+          for (const param of PM.FX[effect.type].params || []) {
+            const prop = effect.p[param.k];
+            if (!prop || typeof prop !== 'object') {
+              effect.p[param.k] = PM.P(param.def);
+              changed = true;
+            } else {
+              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps, -layer.from);
+              if (typeof prop.expr !== 'string') prop.expr = null;
+              const sameType = typeof prop.v === typeof param.def;
+              if (!sameType || (typeof prop.v === 'number' && !Number.isFinite(prop.v))) prop.v = param.def;
+            }
+          }
+        }
       }
       for (const edge of ['transitionIn', 'transitionOut']) {
         const transition = layer[edge];
@@ -340,6 +380,21 @@ function revalidateContributionPlaceholders() {
         const missing = !PM.transitionDef?.(transition.type);
         if (missing && !transition.missing) { transition.missing = true; changed = true; }
         else if (!missing && transition.missing) { delete transition.missing; changed = true; }
+        if (!missing) {
+          transition.p = transition.p && typeof transition.p === 'object' ? transition.p : {};
+          for (const param of PM.transitionDef(transition.type).params || []) {
+            const prop = transition.p[param.k];
+            if (!prop || typeof prop !== 'object') {
+              transition.p[param.k] = PM.P(param.def);
+              changed = true;
+            } else {
+              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps, -layer.from);
+              if (typeof prop.expr !== 'string') prop.expr = null;
+              const sameType = typeof prop.v === typeof param.def;
+              if (!sameType || (typeof prop.v === 'number' && !Number.isFinite(prop.v))) prop.v = param.def;
+            }
+          }
+        }
       }
     }
   }

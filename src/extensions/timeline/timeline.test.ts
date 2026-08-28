@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createTimelineRuntime, shouldDrawClipLabel } from './timeline';
+import { createTimelineRuntime, pickKeyframeHit, shouldDrawClipLabel } from './timeline';
 import { expandScaleKeyIds, timelineProperties } from './property-tracks';
 import { moveBezierHandle, visibleBezierHandle } from './bezier-drag';
 import { makePM } from '../../renderer/src/legacy/__tests__/make-pm';
@@ -78,6 +78,25 @@ describe('timeline runtime', () => {
     expect(shouldDrawClipLabel('video')).toBe(true);
     expect(shouldDrawClipLabel('image')).toBe(true);
     expect(shouldDrawClipLabel('text')).toBe(true);
+  });
+
+  it('prefers an already-selected keyframe when hit targets overlap', () => {
+    const behind = { i: 'selected', x: 100 };
+    const top = { i: 'top', x: 100 };
+    const distance = (key: typeof behind) => Math.abs(key.x - 100);
+
+    expect(pickKeyframeHit([top, behind], ['selected'], distance, 6)).toBe(behind);
+    expect(pickKeyframeHit([top, behind], [], distance, 6)).toBe(top);
+    expect(pickKeyframeHit([top, behind], ['elsewhere'], distance, 6)).toBe(top);
+    const grouped = { i: 'scale-x', x: 100, members: [{ key: { i: 'scale-y' } }] };
+    expect(pickKeyframeHit([top, grouped], ['scale-y'], distance, 6)).toBe(grouped);
+  });
+
+  it('only preserves selection when that key is under the pointer', () => {
+    const selected = { i: 'selected', x: 100 };
+    const other = { i: 'other', x: 120 };
+
+    expect(pickKeyframeHit([selected, other], ['selected'], (key) => Math.abs(key.x - 120), 6)).toBe(other);
   });
 
   it('extends the composition when the out marker passes its end', () => {
