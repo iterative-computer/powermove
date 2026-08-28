@@ -56,7 +56,7 @@ function timelinePM(): Record<string, any> {
 describe('timeline extension', () => {
   beforeEach(() => {
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({} as never));
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ({} as CanvasRenderingContext2D));
     vi.stubGlobal('ResizeObserver', class {
       observe(): void {}
       disconnect(): void {}

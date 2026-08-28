@@ -9,7 +9,6 @@ import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
 import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
-import RippleCanvas from './RippleCanvas.svelte';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -175,7 +174,7 @@ const Spatial: any = {
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
   math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult },
-  lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
+  lifecycle: { requestAdapter: requestRippleAdapter, applyExtensionChanges, reduceTrace, sealTrace },
 };
 PM.SpatialAssistant = Spatial;
 PM.requestExtensionFix = requestFix;
@@ -319,6 +318,10 @@ async function requestFix(id: any) {
   }
 }
 
+function requestRippleAdapter() {
+  return (window.navigator as any).gpu?.requestAdapter?.({ powerPreference: 'high-performance' }) || null;
+}
+
 function watchShake(event: any) {
   /* Once summoned, keep the short-lived distortion centered on the live
      pointer. S.origin is the same object read by the WebGPU render loop. */
@@ -411,6 +414,10 @@ function warmRipple() {
     /* A selected-region attachment must represent this gesture, not an older
        idle cache. Start a fresh native snapshot as soon as shake intent is clear. */
     capture: PM.WindowCapture.request(),
+    /* A GPUAdapter is deliberately warmed per gesture. WebKit can invalidate a
+       long-lived adapter after a device is destroyed or lost. Reusing one from
+       app boot made every later Ripple device arrive already lost. */
+    adapter: requestRippleAdapter(),
   };
   S.rippleWarmup = warmup;
   window.setTimeout(() => {
@@ -483,7 +490,7 @@ function scheduleHint(x: any, y: any) {
 function activate(x: any, y: any, warmup: any = null) {
   if (S.active) return;
   S.active = true; S.phase = 'arming'; S.origin = { x, y }; S.points = [];
-  const rippleHost: any = h('div.spatial-ripple-host', { 'aria-hidden': 'true' });
+  const canvas: any = h('canvas', { 'aria-hidden': 'true' });
   S.shadePath = window.document.createElementNS('http://www.w3.org/2000/svg', 'path');
   S.shadePath.classList.add('spatial-shade');
   S.path = window.document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -491,7 +498,7 @@ function activate(x: any, y: any, warmup: any = null) {
   S.ink.classList.add('spatial-ink'); S.ink.append(S.shadePath, S.path);
   S.hint = h('div.spatial-hint', h('span', 'Type a prompt or drag to select an area'));
   S.root = h('div#spatial-assistant', { role: 'dialog', 'aria-label': 'Spatial coding assistant' },
-    rippleHost, h('div.spatial-wash'), S.ink, S.hint);
+    canvas, h('div.spatial-wash'), S.ink, S.hint);
   window.addEventListener('keydown', onKey, true);
   /* Capture first, while the overlay is not in the DOM. This is the texture the
      WGSL pass genuinely displaces instead of merely painting over the UI. */
@@ -506,7 +513,7 @@ function activate(x: any, y: any, warmup: any = null) {
   sceneRequest.then((sceneBitmap: any) => {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     /* Preserve clean pre-overlay pixels for the eventual selected-region
-       attachment before Motion GPU takes ownership of the ImageBitmap. */
+       attachment before WebGPU uploads and closes the ImageBitmap. */
     S.sceneFrame = snapshotScene(sceneBitmap);
     S.root.addEventListener('pointerdown', onOverlayPointerDown);
     window.document.body.appendChild(S.root);
@@ -517,7 +524,7 @@ function activate(x: any, y: any, warmup: any = null) {
     };
     showComposer();
     scheduleHint(x, y);
-    S.renderStop = startRipple(rippleHost, S.origin, sceneBitmap);
+    S.renderStop = startRipple(canvas, S.origin, sceneBitmap, warmup?.adapter || null);
     window.setTimeout(() => { if (S.active && S.phase === 'arming') S.phase = 'selecting'; }, 340);
   });
 }
@@ -2075,42 +2082,245 @@ function cancel() {
   PM.AgentUI?.update();
 }
 
-function startRipple(host: any, origin: any, sceneBitmap: any) {
+function startRipple(canvas: any, origin: any, sceneBitmap: any, adapterPromise: any = null) {
   if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
     sceneBitmap?.close?.();
-    host.dataset.renderer = 'reduced-motion';
+    canvas.dataset.renderer = 'reduced-motion';
     return () => {};
   }
-  let stopped: any = false, failed: any = false, fallbackTimer: any = 0, component: any = null;
+  let stopped: any = false, failed: any = false, frame: any = 0, fallbackTimer: any = 0, device: any = null;
+  let context: any = null, uniformBuffer: any = null, sceneTexture: any = null;
   const fallback: any = (reason: any) => {
     if (stopped || failed) return;
-    failed = true;
-    if (component) { void unmount(component); component = null; }
-    else sceneBitmap?.close?.();
-    host.dataset.renderer = 'css-fallback';
-    host.style.background = `radial-gradient(circle at ${origin.x}px ${origin.y}px,rgba(255,107,26,.34),rgba(76,35,88,.16) 30%,rgba(8,8,12,.05) 64%,transparent 78%)`;
-    host.style.opacity = '1';
-    host.style.transition = 'opacity var(--dur-3) var(--ease)';
+    failed = true; window.cancelAnimationFrame(frame);
+    /* A lost device can leave an opaque swapchain frame over the fallback. */
+    try { context?.unconfigure?.(); } catch {}
+    canvas.width = 1; canvas.height = 1;
+    canvas.dataset.renderer = 'css-fallback';
+    canvas.style.background = `radial-gradient(circle at ${origin.x}px ${origin.y}px,rgba(255,107,26,.34),rgba(76,35,88,.16) 30%,rgba(8,8,12,.05) 64%,transparent 78%)`;
+    canvas.style.opacity = '1';
+    canvas.style.transition = 'opacity .34s ease';
     /* The selection workflow remains visibly active even without WebGPU. The
        old fallback faded to zero, which made a recoverable renderer failure
        look exactly like a dead feature. */
-    fallbackTimer = window.setTimeout(() => { if (!stopped) host.style.opacity = '.24'; }, 900);
-    if (reason) window.console.warn('Motion GPU ripple unavailable; using visual fallback', reason);
+    fallbackTimer = window.setTimeout(() => { if (!stopped) canvas.style.opacity = '.24'; }, 900);
+    if (reason) window.console.warn('WebGPU ripple unavailable; using visual fallback', reason);
   };
-  host.dataset.renderer = 'motion-gpu-initializing';
-  try {
-    component = mount(RippleCanvas, { target: host, props: {
-      origin,
-      sceneBitmap,
-      onError: (report: any) => fallback(new Error(report?.rawMessage || report?.message || 'Motion GPU failed')),
-      onFirstFrame: () => { if (!stopped && !failed) host.dataset.renderer = 'motion-gpu'; },
-      onSettled: () => { if (!stopped && !failed) host.dataset.renderer = 'motion-gpu-settled'; },
-    } });
-  } catch (error: any) { fallback(error); }
+
+  /* Device and adapter acquisition are async, but activation needs a synchronous
+     cleanup handle. The closure below can cancel safely at every await boundary. */
+  (async () => {
+    if (!(window.navigator as any).gpu) throw new Error('WebGPU is not supported by this web view');
+    canvas.dataset.renderer = 'webgpu-initializing';
+    const adapter: any = await (adapterPromise || requestRippleAdapter());
+    if (!adapter) throw new Error('No WebGPU adapter is available');
+    device = await adapter.requestDevice();
+    if (stopped) { device.destroy(); return; }
+
+    context = canvas.getContext('webgpu');
+    if (!context) throw new Error('Could not create a WebGPU canvas context');
+    let format: any = (window.navigator as any).gpu.getPreferredCanvasFormat();
+    let hdr: any = false;
+    /* Prefer a floating-point extended-range swapchain. Modern WebGPU engines
+       expose extended tone mapping here; older ones safely fall back to SDR. */
+    try {
+      format = 'rgba16float';
+      context.configure({
+        device, format, alphaMode: 'premultiplied', colorSpace: 'display-p3',
+        toneMapping: { mode: 'extended' },
+      });
+      hdr = true;
+    } catch {
+      format = (window.navigator as any).gpu.getPreferredCanvasFormat();
+      context.configure({ device, format, alphaMode: 'premultiplied' });
+    }
+    canvas.dataset.dynamicRange = hdr ? 'hdr' : 'sdr';
+
+    const wgsl: any = `
+      struct Uniforms {
+        resolution: vec2f,
+        origin: vec2f,
+        time: f32,
+        intensity: f32,
+        hasScene: f32,
+        padding: f32,
+      }
+      @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+      @group(0) @binding(1) var sceneSampler: sampler;
+      @group(0) @binding(2) var sceneTexture: texture_2d<f32>;
+
+      @vertex
+      fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4f {
+        var positions = array<vec2f, 3>(
+          vec2f(-1.0, -1.0),
+          vec2f( 3.0, -1.0),
+          vec2f(-1.0,  3.0)
+        );
+        return vec4f(positions[vertexIndex], 0.0, 1.0);
+      }
+
+      @fragment
+      fn fragmentMain(@builtin(position) pixel: vec4f) -> @location(0) vec4f {
+        let uv = pixel.xy / uniforms.resolution;
+        let source = uniforms.origin / uniforms.resolution;
+        let aspect = uniforms.resolution.x / uniforms.resolution.y;
+        let delta = (uv - source) * vec2f(aspect, 1.0);
+        let distanceFromSource = length(delta);
+        // The cursor remains the emitter, while the wavefront is free to carry
+        // beyond it and across the full window before the animation settles.
+        let entrance = smoothstep(0.0, 0.11, uniforms.time);
+        let propagationFade = exp(-uniforms.time * 0.38);
+        let front = uniforms.time * 1.32;
+
+        // Wide, low-energy feedback bands make the deliberate shake legible
+        // across the editor instead of reading as tiny lines near the cursor.
+        // Their alpha remains restrained and the full-screen canvas clips them
+        // to the viewport without ever intercepting pointer input.
+        let crest = exp(-pow((distanceFromSource - front) * 4.4, 2.0)) * propagationFade;
+        let echo = exp(-pow((distanceFromSource - front + 0.28) * 6.2, 2.0)) * propagationFade;
+        let wakeMask = smoothstep(front + 0.48, front - 0.2, distanceFromSource);
+        let wake = (0.5 + 0.5 * sin(distanceFromSource * 34.0 - uniforms.time * 12.0))
+          * wakeMask * exp(-distanceFromSource * 1.2);
+        let core = exp(-distanceFromSource * 5.4) * exp(-uniforms.time * 0.74);
+        let cursorLens = exp(-pow(distanceFromSource * 3.4, 2.0));
+        let cursorRipple = sin(distanceFromSource * 38.0 - uniforms.time * 17.0)
+          * cursorLens * 0.006;
+        let shimmer = 0.5 + 0.5 * cos(atan2(delta.y, delta.x) * 3.0 - uniforms.time * 2.0);
+
+        let ringAlpha = clamp((crest * 0.24 + echo * 0.08 + wake * 0.04 + core * 0.13)
+          * uniforms.intensity * entrance, 0.0, 0.42);
+        let violet = vec3f(0.34, 0.18, 0.55);
+        let hot = clamp(crest + core + shimmer * echo * 0.35, 0.0, 1.0);
+        // Keep the defined displacement edge neutral; orange belongs only to
+        // the very broad HDR haze below, never to a crisp ring.
+        let ringColor = mix(violet, vec3f(0.92, 0.86, 0.82), hot * 0.24);
+
+        // True radial displacement: the interface texture itself is sampled at
+        // offset coordinates around the wave crest, with a restrained RGB split.
+        let radialDirection = delta / max(distanceFromSource, 0.0001);
+        let displacementStrength = (crest * 0.018 - echo * 0.006 + wake * 0.0015 + cursorRipple)
+          * uniforms.intensity * entrance;
+        let displacement = radialDirection * displacementStrength;
+        let displacedUV = clamp(uv - displacement, vec2f(0.001), vec2f(0.999));
+        let red = textureSample(sceneTexture, sceneSampler, clamp(displacedUV - displacement * 0.08, vec2f(0.001), vec2f(0.999))).r;
+        let green = textureSample(sceneTexture, sceneSampler, displacedUV).g;
+        let blue = textureSample(sceneTexture, sceneSampler, clamp(displacedUV + displacement * 0.08, vec2f(0.001), vec2f(0.999))).b;
+        let displacedScene = vec3f(red, green, blue);
+        let sceneColor = displacedScene * (1.0 + crest * 0.012 * uniforms.intensity);
+        // Orange is intentionally defocused into two enormous Gaussian lobes.
+        // Their low energy still exceeds SDR white after scene compositing,
+        // but there is no sharp orange crest left anywhere in the effect.
+        let hdrBloomNear = exp(-pow((distanceFromSource - front) * 1.15, 2.0));
+        let hdrBloomFar = exp(-pow((distanceFromSource - front) * 0.52, 2.0));
+        let hdrCrest = (hdrBloomNear * 0.18 + hdrBloomFar * 0.045)
+          * propagationFade * uniforms.intensity * entrance;
+        let hdrColor = vec3f(1.0, 0.72, 0.52);
+        let composited = sceneColor + ringColor * ringAlpha + hdrColor * hdrCrest;
+        let outputAlpha = mix(ringAlpha, 1.0, uniforms.hasScene);
+        let outputColor = mix(ringColor * ringAlpha, composited, uniforms.hasScene);
+        return vec4f(outputColor, outputAlpha);
+      }`;
+    const module: any = device.createShaderModule({ label: 'Spatial ripple WGSL', code: wgsl });
+    const compilation: any = await module.getCompilationInfo();
+    const errors: any = compilation.messages.filter((message: any) => message.type === 'error');
+    if (errors.length) throw new Error(errors.map((message: any) => message.message).join('\n'));
+
+    const pipeline: any = device.createRenderPipeline({
+      label: 'Spatial ripple pipeline', layout: 'auto',
+      vertex: { module, entryPoint: 'vertexMain' },
+      fragment: {
+        module, entryPoint: 'fragmentMain', targets: [{
+          format,
+          blend: {
+            color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+          },
+        }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+    uniformBuffer = device.createBuffer({
+      label: 'Spatial ripple uniforms', size: 32,
+      usage: (window as any).GPUBufferUsage.UNIFORM | (window as any).GPUBufferUsage.COPY_DST,
+    });
+    sceneTexture = device.createTexture({
+      label: 'Spatial interface snapshot', size: [1, 1], format: 'rgba8unorm',
+      usage: (window as any).GPUTextureUsage.TEXTURE_BINDING | (window as any).GPUTextureUsage.COPY_DST | (window as any).GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    let hasScene: any = 0;
+    if (sceneBitmap) {
+      sceneTexture.destroy();
+      sceneTexture = device.createTexture({
+        label: 'Spatial interface snapshot', size: [sceneBitmap.width, sceneBitmap.height], format: 'rgba8unorm',
+        usage: (window as any).GPUTextureUsage.TEXTURE_BINDING | (window as any).GPUTextureUsage.COPY_DST | (window as any).GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      device.queue.copyExternalImageToTexture(
+        { source: sceneBitmap }, { texture: sceneTexture }, [sceneBitmap.width, sceneBitmap.height],
+      );
+      sceneBitmap.close?.(); hasScene = 1;
+    }
+    const sceneSampler: any = device.createSampler({ magFilter: 'linear', minFilter: 'linear', addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge' });
+    const bindGroup: any = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: sceneSampler },
+        { binding: 2, resource: sceneTexture.createView() },
+      ],
+    });
+    const startedAt: any = window.performance.now();
+    const fadeStartsAt: any = 0.48;
+    const settlesAt: any = 1.45;
+    const trackedOrigin: any = { x: origin.x, y: origin.y };
+    let priorFrameAt: any = startedAt;
+    canvas.dataset.renderer = 'webgpu';
+
+    device.addEventListener?.('uncapturederror', (event: any) => {
+      window.console.warn('WebGPU ripple uncaptured error', event.error || event);
+    });
+    device.lost.then((info: any) => {
+      if (stopped) return;
+      const reason: any = info?.reason || 'unknown';
+      const message: any = info?.message || 'The WebGPU device was lost';
+      fallback(new Error(`${message} (reason: ${reason})`));
+    });
+    const draw: any = (now: any) => {
+      if (stopped || failed) return;
+      try {
+        const scale: any = Math.min(window.devicePixelRatio || 1, 2);
+        const width: any = Math.max(1, Math.round(window.innerWidth * scale));
+        const height: any = Math.max(1, Math.round(window.innerHeight * scale));
+        if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+        const elapsed: any = (now - startedAt) / 1000;
+        const fadeProgress: any = Math.max(0, Math.min(1, (elapsed - fadeStartsAt) / (settlesAt - fadeStartsAt)));
+        const intensity: any = 1 - fadeProgress * fadeProgress * (3 - 2 * fadeProgress);
+        const deltaSeconds: any = Math.min(.05, Math.max(0, (now - priorFrameAt) / 1000));
+        const follow: any = 1 - Math.exp(-deltaSeconds * 18);
+        trackedOrigin.x += (origin.x - trackedOrigin.x) * follow;
+        trackedOrigin.y += (origin.y - trackedOrigin.y) * follow;
+        priorFrameAt = now;
+        device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([
+          width, height, trackedOrigin.x * scale, trackedOrigin.y * scale, Math.min(elapsed, settlesAt), intensity, hasScene, 0,
+        ]));
+        const encoder: any = device.createCommandEncoder({ label: 'Spatial ripple frame' });
+        const pass: any = encoder.beginRenderPass({ colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store',
+        }] });
+        pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.draw(3); pass.end();
+        device.queue.submit([encoder.finish()]);
+        if (elapsed < settlesAt) frame = window.requestAnimationFrame(draw);
+        else canvas.dataset.renderer = 'webgpu-settled';
+      } catch (error: any) { fallback(error); }
+    };
+    frame = window.requestAnimationFrame(draw);
+  })().catch(fallback);
 
   return () => {
-    stopped = true; window.clearTimeout(fallbackTimer);
-    if (component) { void unmount(component); component = null; }
+    stopped = true; window.cancelAnimationFrame(frame); window.clearTimeout(fallbackTimer);
+    try { sceneTexture?.destroy?.(); } catch {}
+    try { uniformBuffer?.destroy?.(); } catch {}
+    if (device) { try { device.destroy(); } catch {} }
   };
 }
 }
