@@ -108,13 +108,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () =>
   sels.forEach((L: any) => { const c: any = PM.cloneLayer(L); PM.proj.layers.splice(PM.proj.layers.indexOf(L), 0, c); ids.push(c.id); });
   PM.bus.emit('layers'); PM.selectLayers(ids);
 }), 'Edit');
-def('delete', 'Delete layers', '⌫', () => {
-  if (!PM.sel.keys.length) return PM.Edit.apply({ type: 'delete_layers', targets: PM.sel.layers }, { label: 'Delete', origin: 'command' });
-  return PM.hist.do('Delete', () => {
-  PM.selLayers().forEach((L: any) => PM.allProps(L).forEach((p: any) => { p.prop.kf = p.prop.kf.filter((k: any) => !PM.sel.keys.includes(k.i)); }));
-  PM.sel.keys = []; PM.touch();
-  });
-}, 'Edit');
+def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
 def('split', 'Split at playhead', '⌘⇧D', () => PM.hist.do('Split', () => {
   PM.selLayers().forEach((L: any) => {
     if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
@@ -281,5 +275,29 @@ function commandView(kernel: ReturnType<typeof ensureKernel>, id: string, put: (
       if (!definition || !FIELDS.includes(key)) return undefined;
       return { value: field(definition, key), enumerable: true, configurable: true, writable: true };
     }
+  });
+}
+
+/** A keyframe deletion never falls through to its owning layer, including a
+ * held Delete key after the first keyframe has already been removed. */
+export function deleteSelection(PM: PMRegistry): unknown {
+  if (PM.sel.keys.length || PM.TL?.keySelectionActive) {
+    if (PM.TL) PM.TL.keySelectionActive = true;
+    const ids = new Set(PM.sel.keys);
+    if (!ids.size) return;
+    return PM.hist.do('Delete keyframes', () => {
+      PM.proj.layers.forEach((layer: any) => PM.allProps(layer).forEach(({ prop }: any) => {
+        prop.kf = prop.kf.filter((key: any) => !ids.has(key.i));
+      }));
+      PM.sel.keys = [];
+      PM.touch(); PM.bus.emit('sel'); PM.invalidate();
+    });
+  }
+  return PM.Edit.apply({ type: 'delete_layers', targets: PM.sel.layers }, { label: 'Delete', origin: 'command' });
+}
+
+if (import.meta.hot) {
+  import.meta.hot.accept(next => {
+    if (next && window.PM?.commands?.delete) window.PM.commands.delete.run = () => next.deleteSelection(window.PM);
   });
 }

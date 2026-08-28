@@ -19,6 +19,19 @@ function projectsRegistry(): { PM: PMRegistry; memory: Map<string, any> } {
 }
 
 describe('legacy project registry install', () => {
+  it('renames the active live document without reverting unsaved layers to the saved snapshot', () => {
+    const { PM } = projectsRegistry();
+    PM.Projects.put({ id: 'P1', name: 'Before', layers: [{ id: 'old' }] });
+    PM.proj = { id: 'P1', name: 'Before', layers: [{ id: 'old' }, { id: 'new' }] };
+    expect(PM.Projects.rename('P1', ' After ')).toBe('After');
+    expect(PM.Projects.get('P1')).toEqual(PM.proj);
+    expect(PM.Projects.get('P1').layers).toHaveLength(2);
+    PM.Projects.put({ id: 'P2', name: 'Other', layers: [] });
+    PM.Projects.rename('P2', 'Inactive');
+    expect(PM.proj.name).toBe('After');
+    expect(PM.Projects.get('P2').name).toBe('Inactive');
+  });
+
   it('round-trips project data and metadata', () => {
     const { PM } = projectsRegistry();
     const project = { id: 'P1', name: 'Hero', layers: [{ id: 'La' }] };

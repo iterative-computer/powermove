@@ -158,6 +158,7 @@ function setup(
     invalidate: vi.fn(),
     wouldCycle: vi.fn(() => false),
     curComp: () => currentProject,
+    L: (id: string) => currentProject.layers.find((candidate) => candidate.id === id),
     mkMask: vi.fn(() => ({
       id: 'mask-new', shape: 'rect', mode: 'add', on: true,
       p: Object.fromEntries(['x', 'y', 'w', 'h', 'rotation', 'feather'].map((key) => [key, { v: 0, kf: [], expr: null }]))
@@ -203,6 +204,7 @@ function channelRow(layerId: string, channel: string): HTMLElement {
 
 function labelledSpinbutton(label: string): HTMLInputElement {
   const result = [...target.querySelectorAll<HTMLInputElement>('[role="spinbutton"]')].find((input) => {
+    if (input.getAttribute('aria-label') === label) return true;
     const id = input.getAttribute('aria-labelledby');
     return !!id && document.getElementById(id)?.textContent?.trim() === label;
   });
@@ -311,6 +313,134 @@ describe('InspectorPanel', () => {
     expect(updated).toBe(row);
     expect(updated.querySelector<HTMLInputElement>('[role="spinbutton"]')?.value).toBe('55%');
     expect(updated.querySelector('[role="spinbutton"]')?.getAttribute('aria-valuenow')).toBe('55');
+  });
+
+  it('keeps both axes in the same Scale row when linking or unlinking', () => {
+    const candidate = layer('A');
+    candidate.scaleLinked = true;
+    candidate.p['scale.x']!.v = 180;
+    candidate.p['scale.y']!.v = 90;
+    const { apply } = setup([candidate]);
+    const row = channelRow('A', 'scale.x');
+    const x = labelledSpinbutton('Scale X');
+    const y = labelledSpinbutton('Scale Y');
+    expect(x.value).toBe('180%');
+    expect(y.value).toBe('90%');
+    expect(row.getAttribute('aria-label')).toBe('Scale property');
+    expect(row.querySelectorAll('[role="spinbutton"]')).toHaveLength(2);
+    expect(target.querySelector('[data-channel="scale.y"]')).toBeNull();
+    const link = row.querySelector<HTMLButtonElement>('[aria-label="Link Scale X and Y"]')!;
+    link.click();
+    expect(apply).toHaveBeenCalledExactlyOnceWith(
+      { type: 'set_layer', target: 'A', patch: { scaleLinked: false } },
+      { label: 'Link scale axes', origin: 'inspector' }
+    );
+    candidate.scaleLinked = false;
+    doc.bump('values');
+    flushSync();
+    expect(channelRow('A', 'scale.x')).toBe(row);
+    expect(labelledSpinbutton('Scale X')).toBe(x);
+    expect(labelledSpinbutton('Scale Y')).toBe(y);
+    expect(row.getAttribute('aria-label')).toBe('Scale property');
+    expect(target.querySelector('[data-channel="scale.y"]')).toBeNull();
+    expect(labelledSpinbutton('Scale X').value).toBe('180%');
+    expect(labelledSpinbutton('Scale Y').value).toBe('90%');
+    expect(link.getAttribute('aria-pressed')).toBe('false');
+    candidate.scaleLinked = true;
+    doc.bump('values');
+    flushSync();
+    expect(labelledSpinbutton('Scale X')).toBe(x);
+    expect(labelledSpinbutton('Scale Y')).toBe(y);
+    expect(target.querySelector('[data-channel="scale.y"]')).toBeNull();
+  });
+
+  it('edits both linked axes proportionally and only the chosen axis when unlinked', () => {
+    const candidate = layer('A');
+    candidate.scaleLinked = true;
+    candidate.p['scale.y']!.v = 50;
+    const { apply } = setup([candidate]);
+    const increment = (label: string) => labelledSpinbutton(label).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })
+    );
+    increment('Scale X');
+    expect(apply).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ type: 'set_property', path: 'scale.x', value: 101 }),
+      expect.objectContaining({ type: 'set_property', path: 'scale.y', value: 50.5 })
+    ], { label: 'Scale', origin: 'inspector' });
+    apply.mockClear();
+    increment('Scale Y');
+    expect(apply).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ type: 'set_property', path: 'scale.y', value: 51 }),
+      expect.objectContaining({ type: 'set_property', path: 'scale.x', value: 102 })
+    ], { label: 'Scale', origin: 'inspector' });
+    candidate.scaleLinked = false;
+    doc.bump('values');
+    flushSync();
+    apply.mockClear();
+    increment('Scale Y');
+    expect(apply).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ type: 'set_property', path: 'scale.y', value: 51 }),
+      { label: 'Scale Y', origin: 'inspector' }
+    );
+  });
+
+  it.each([true, false])('animates both axes and handles partial keys when scaleLinked=%s', (linked) => {
+    const candidate = layer('A');
+    candidate.scaleLinked = linked;
+    const { PM } = setup([candidate]);
+    const row = channelRow('A', 'scale.x');
+    const stopwatch = row.querySelector<HTMLButtonElement>('[aria-label="Animate Scale"]')!;
+    const diamond = row.querySelector<HTMLButtonElement>('.kd')!;
+    stopwatch.click();
+    expect(PM.hist.do).toHaveBeenLastCalledWith('Animate Scale', expect.any(Function));
+    expect(candidate.p['scale.x']!.kf).toHaveLength(1);
+    expect(candidate.p['scale.y']!.kf).toHaveLength(1);
+    // An existing project may have a key on just one of the linked axes.
+    candidate.p['scale.y']!.kf = [];
+    doc.bump('values');
+    flushSync();
+    expect(diamond.getAttribute('aria-pressed')).toBe('false');
+    diamond.click();
+    doc.bump('values');
+    flushSync();
+    expect(candidate.p['scale.x']!.kf).toHaveLength(1);
+    expect(candidate.p['scale.y']!.kf).toHaveLength(1);
+    expect(diamond.getAttribute('aria-pressed')).toBe('true');
+    diamond.click();
+    expect(candidate.p['scale.x']!.kf).toHaveLength(0);
+    expect(candidate.p['scale.y']!.kf).toHaveLength(0);
+    candidate.p['scale.y']!.kf = [{ t: 0, v: 100 }];
+    doc.bump('values');
+    flushSync();
+    expect(stopwatch.getAttribute('aria-pressed')).toBe('true');
+    stopwatch.click();
+    expect(candidate.p['scale.x']!.kf).toHaveLength(0);
+    expect(candidate.p['scale.y']!.kf).toHaveLength(0);
+  });
+
+  it('applies the unified Scale context menu to both axes', () => {
+    const candidate = layer('A');
+    candidate.scaleLinked = true;
+    candidate.p['scale.y']!.expr = 'value * 2';
+    const { PM, apply, menu } = setup([candidate]);
+    channelRow('A', 'scale.x').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    const items = menu.mock.calls[0]![1] as Array<{ label?: string; run?: () => void }>;
+    expect(labelledSpinbutton('Scale Y').classList.contains('link')).toBe(true);
+    items.find((item) => item.label === 'Remove expression')!.run!();
+    expect(apply).toHaveBeenCalledWith([
+      { type: 'set_expression', target: 'A', path: 'scale.x', expression: null },
+      { type: 'set_expression', target: 'A', path: 'scale.y', expression: null }
+    ], { label: 'Remove expression', origin: 'inspector' });
+    items.find((item) => item.label === 'Add keyframe at playhead')!.run!();
+    expect(candidate.p['scale.x']!.kf).toHaveLength(1);
+    expect(candidate.p['scale.y']!.kf).toHaveLength(1);
+    items.find((item) => item.label === 'Show in graph editor')!.run!();
+    expect(PM.TL.reveal).toHaveBeenLastCalledWith(candidate, ['scale.x', 'scale.y']);
+    items.find((item) => item.label === 'Reset')!.run!();
+    expect(apply).toHaveBeenCalledWith([
+      expect.objectContaining({ type: 'replace_keyframes', path: 'scale.x', keyframes: [] }),
+      expect.objectContaining({ type: 'replace_keyframes', path: 'scale.y', keyframes: [] })
+    ], { label: 'Reset', origin: 'inspector' });
   });
 
   it('derives stopwatch and keyframe-diamond state from keyframes and playhead time', () => {
@@ -509,8 +639,10 @@ describe('InspectorPanel', () => {
     expect(spinbuttons.length).toBeGreaterThan(0);
     for (const input of spinbuttons) {
       const labelledBy = input.getAttribute('aria-labelledby');
-      expect(labelledBy, input.outerHTML).toBeTruthy();
-      expect(document.getElementById(labelledBy!)?.textContent?.trim(), input.outerHTML).toBeTruthy();
+      const name = labelledBy
+        ? document.getElementById(labelledBy)?.textContent?.trim()
+        : input.getAttribute('aria-label')?.trim();
+      expect(name, input.outerHTML).toBeTruthy();
     }
 
     const buttons = [...target.querySelectorAll<HTMLButtonElement>('button')];

@@ -1,6 +1,15 @@
 /* Ported from js/core/model.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
+export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
+  ids = ([] as any[]).concat(ids).filter(Boolean);
+  if (PM.TL) PM.TL.keySelectionActive = false;
+  PM.sel.layers = add ? [...new Set([...PM.sel.layers, ...ids])] : ids;
+  if (!add) PM.sel.keys = [];
+  PM.bus.emit('sel');
+  PM.invalidate();
+}
+
 export function install(PM: PMRegistry): void {
 const uid = PM.uid;
 
@@ -8,7 +17,7 @@ const uid = PM.uid;
 const P = (v: any, o: any = {}) => ({ v, kf: [], expr: null, ...o });
 PM.P = P;
 
-const KF = (t: any, v: any, ease = 'power') => {
+const KF = (t: any, v: any, ease = 'linear') => {
   const { eo, ei } = PM.Ease.handles(ease);
   return { t, v, eo, ei, hold: false, i: uid('k') };
 };
@@ -168,11 +177,7 @@ PM.byName = (n: any) => {
 PM.sel = { layers: [], keys: [], chan: null };
 
 PM.selectLayers = (ids: any, add = false) => {
-  ids = ([] as any[]).concat(ids).filter(Boolean);
-  PM.sel.layers = add ? [...new Set([...PM.sel.layers, ...ids])] : ids;
-  if (!add) PM.sel.keys = [];
-  PM.bus.emit('sel');
-  PM.invalidate();
+  selectLayers(PM, ids, add);
 };
 PM.selLayers = () => PM.sel.layers.map(PM.L).filter(Boolean);
 PM.firstSel = () => PM.selLayers()[0] || null;
@@ -264,4 +269,11 @@ PM.deserialize = (json: any) => {
   const o = typeof json === 'string' ? JSON.parse(json) : json;
   return o.proj || o;
 };
+}
+
+// Selection updates can hot-swap without resetting the model or open project.
+if (import.meta.hot) {
+  import.meta.hot.accept(next => {
+    if (next && window.PM) window.PM.selectLayers = (ids: any, add = false) => next.selectLayers(window.PM, ids, add);
+  });
 }

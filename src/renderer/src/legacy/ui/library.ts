@@ -1,5 +1,6 @@
 /* The Library is the live panel catalog. Saved project content is left intact. */
 import type { PMRegistry } from '../registry';
+import { panelIcons } from '../../panels/panel-icons';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -17,11 +18,6 @@ function reveal(id: string) {
   });
   PM.panelInst[id]?.el?.scrollIntoView({ block: 'nearest' });
 }
-function refine(id: string) {
-  reveal(id);
-  if (PM.PanelRefiner?.open && id !== 'toolbar') PM.PanelRefiner.open(id);
-  else { PM.SpatialAssistant?.open?.(); PM.AgentUI?.setScope('panel:' + id); }
-}
 function create() {
   close();
   PM.SpatialAssistant?.open?.();
@@ -34,13 +30,13 @@ function paint() {
   const panels = Object.entries(PM.PANELS || {}).map(([id, def]: any) => ({ ...def, id }))
     .sort((a: any, b: any) => String(a.title || a.id).localeCompare(String(b.title || b.id)));
   const matches = panels.filter((panel: any) => !state.query || (panel.title + ' ' + panel.id).toLowerCase().includes(state.query));
+  const icons = panelIcons(panels, PM.ICONS || {});
   for (const panel of matches) {
     const location = PM.Layout?.findPanel?.(PM.WS?.current, panel.id);
     const visible = panel.id === 'toolbar' || (location && !location.dock.hidden && !location.spec.collapsed);
     const title = panel.title || panel.id;
-    const open = h('button.panel-library-open', { type: 'button', onclick: () => reveal(panel.id), 'aria-label': 'Open ' + title }, PM.icon(panel.icon || 'panel'), h('span', title));
-    const edit = h('button.iconbtn', { type: 'button', title: 'Refine ' + title, 'aria-label': 'Refine ' + title, onclick: () => refine(panel.id) }, PM.icon('wand'));
-    state.content.append(h('div.panel-library-row', { data: { panelId: panel.id } }, open, h('span.panel-library-status', visible ? 'Open' : ''), edit));
+    const open = h('button.panel-library-open', { type: 'button', onclick: () => reveal(panel.id), 'aria-label': 'Open ' + title }, PM.icon(icons[panel.id]), h('span', title));
+    state.content.append(h('div.panel-library-row', { data: { panelId: panel.id } }, open, h('span.panel-library-status', visible ? 'Open' : '')));
   }
   if (!matches.length) state.content.append(h('div.panel-library-empty', state.query ? 'No panels match your search.' : 'No panels are available.'));
 }
@@ -116,7 +112,7 @@ const WorkspaceEditor: any = {
 };
 
 
-PM.LibraryUI = { open, close, reveal, refine, create, get isOpen() { return !!state.root?.classList.contains('on'); } };
+PM.LibraryUI = { open, close, reveal, create, get isOpen() { return !!state.root?.classList.contains('on'); } };
 PM.WorkspaceEditor = WorkspaceEditor;
 PM.bus.on('layout:applied', () => { if (PM.LibraryUI.isOpen) paint(); });
 PM.bus.on('workspaces', () => { if (PM.LibraryUI.isOpen) paint(); });

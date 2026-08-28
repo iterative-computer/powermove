@@ -38,13 +38,15 @@ export function channelBinding(
     const source = options.time;
     return typeof source === 'function' ? source() : source ?? PM.time;
   };
-  let scale: { linked: boolean; ratio: number } | null = null;
+  let scale: { linked: boolean; animated: boolean; other: number; ratio: number } | null = null;
   const prepare = () => {
     if (path !== 'scale.x' && path !== 'scale.y') return;
     const layer = PM.L?.(layerId);
     const primary = Number(layer && PM.ev(layer, path, time()));
     const other = Number(layer && PM.ev(layer, path === 'scale.x' ? 'scale.y' : 'scale.x', time()));
-    scale = { linked: !!layer?.scaleLinked, ratio: Math.abs(primary) > 1e-8 ? other / primary : 1 };
+    scale = { linked: !!layer?.scaleLinked,
+      animated: !!(layer?.p?.['scale.x']?.kf.length || layer?.p?.['scale.y']?.kf.length),
+      other, ratio: Math.abs(primary) > 1e-8 ? other / primary : 1 };
   };
   const binding = commandBinding(options.label ?? path, options.origin, (value) => {
     const command = {
@@ -57,8 +59,10 @@ export function channelBinding(
       preserveHandEdits: false,
       markIntent: 'human'
     } as const;
-    if (!scale?.linked) return command;
-    return [command, { ...command, path: path === 'scale.x' ? 'scale.y' : 'scale.x', value: Number(value) * scale.ratio }];
+    if (!scale?.linked && !scale?.animated) return command;
+    const keyed = scale.animated ? { ...command, mode: 'keyframe' as const } : command;
+    return [keyed, { ...keyed, path: path === 'scale.x' ? 'scale.y' : 'scale.x',
+      value: scale.linked ? Number(value) * scale.ratio : scale.other }];
   });
   return { ...binding, prepare } as EditBinding;
 }

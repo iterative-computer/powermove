@@ -177,6 +177,7 @@ export type GeneratedControl =
 export interface GeneratedSection {
   id: string;
   title: string;
+  icon?: string;
   size: number;
   state: Record<string, GeneratedStateValue>;
   controls: GeneratedControl[];

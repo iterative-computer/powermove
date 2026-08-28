@@ -189,6 +189,25 @@ describe('Svelte shell', () => {
     expect(second.querySelector('.project-doc-label')?.textContent).toBe('Second');
   });
 
+  it('opens project rename with F2 and keeps the draft when saving fails', () => {
+    const { PM } = fakePM();
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+    const tab = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
+    flushSync(() => tab.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true })));
+    const input = tab.querySelector<HTMLInputElement>('.project-doc-input')!;
+    expect(input).not.toBeNull();
+    PM.Projects.rename.mockImplementation(() => { throw new Error('Disk full'); });
+    flushSync(() => {
+      input.value = 'Keep this draft';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    expect(tab.querySelector<HTMLInputElement>('.project-doc-input')?.value).toBe('Keep this draft');
+  });
+
   it('middle-click closes a tab without hiding Projects or retaining its roving id', () => {
     const { PM, projects } = fakePM();
     PM.ProjectsScreen.isOpen = true;

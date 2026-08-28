@@ -44,7 +44,7 @@ function serializedLegacyDemo(): string {
   const title = PM.mkLayer('text', { name: 'Title' }, project);
   title.id = 'title';
   const titleChannels = title.p as Record<string, { kf: unknown[] }>;
-  titleChannels.opacity!.kf.push(PM.KF(0, 0), PM.KF(1, 100));
+  titleChannels.opacity!.kf.push(PM.KF(0, 0, 'power'), PM.KF(1, 100, 'power'));
   title.masks = [PM.mkMask('ellipse', project)];
   title.fx = [{
     id: 'fx-glow', type: 'glow', on: true, open: false,

@@ -52,11 +52,14 @@ async function request(mode: any, action: any) {
       tx = db.transaction(STORE, mode);
       req = action(tx.objectStore(STORE));
     } catch (e: any) { finish({ ok: false, value: null }); return; }
+    let value: any = true;
     if (req) {
-      req.onsuccess = () => finish({ ok: true, value: req.result });
+      // Request success is not a committed write. A close/abort can still
+      // discard the transaction after this event.
+      req.onsuccess = () => { value = req.result; };
       req.onerror = () => finish({ ok: false, value: null });
     }
-    tx.oncomplete = () => finish({ ok: true, value: true });
+    tx.oncomplete = () => finish({ ok: true, value });
     tx.onerror = () => finish({ ok: false, value: null });
     tx.onabort = () => finish({ ok: false, value: null });
   });

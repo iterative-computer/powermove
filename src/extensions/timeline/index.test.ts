@@ -198,4 +198,41 @@ describe('timeline extension', () => {
     expect(PM.TL.cv).toBe(replacementBody.querySelector('#tl-canvas'));
     expect(replacementBody.querySelectorAll('.tl-transport')).toHaveLength(1);
   });
+
+  it.each(['layer', 'prop', 'graph', 'below'])('empty %s clicks clear selection without seeking; modified clicks preserve selection', (area) => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    const layer = { id: 'layer-1', from: 2, dur: 3, p: {} };
+    const prop = { kf: [] };
+    PM.proj.layers = [layer];
+    PM.sel = { layers: [layer.id], keys: ['key-1'], chan: '' };
+    PM.bus.emit = vi.fn();
+    PM.closeMenus = vi.fn();
+    PM.selectLayers = vi.fn((layers) => { PM.sel.layers = layers; });
+    PM.drag = vi.fn((_event, handlers) => handlers.up());
+    activate({
+      host: { pm: PM },
+      panels: { register: (definition: PanelDefinition) => { panel = definition; } },
+      onDispose: vi.fn(),
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+    const T = PM.TL;
+    T.rows = area === 'below' ? [] : [{ kind: area === 'prop' ? 'prop' : 'layer', L: layer, key: 'opacity', prop }];
+    T.graph = area === 'graph';
+    T._graph = { target: { L: layer, prop }, series: [{ prop }] };
+    for (const modifier of ['none', 'shiftKey', 'metaKey']) {
+      PM.sel.layers = [layer.id];
+      PM.sel.keys = ['key-1'];
+      const x = T.gut + T.pps; // 1s, before the clip or any key.
+      const y = T.ruler + T.row / 2;
+      const event = new PointerEvent('pointerdown', { clientX: x, clientY: y, [modifier]: true });
+      Object.defineProperties(event, { offsetX: { value: x }, offsetY: { value: y } });
+      T.cv.dispatchEvent(event);
+      expect(PM.setTime).not.toHaveBeenCalled();
+      expect(PM.sel.layers).toEqual(modifier === 'none' ? [] : [layer.id]);
+      expect(PM.sel.keys).toEqual(modifier === 'none' ? [] : ['key-1']);
+    }
+  });
 });

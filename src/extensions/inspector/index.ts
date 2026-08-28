@@ -57,6 +57,7 @@ export default function activate(api: PowermoveAPI): void {
 
   api.panels.register({
     id: 'inspector',
+    icon: 'sliders',
     title: 'Properties',
     component: InspectorPanel as any,
     header: () => {}

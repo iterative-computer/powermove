@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 /*
  * Kernel contributions rendered by the shell: status items in the status bar
- * and `titlebar:right` menu entries as extra buttons after the fixed three.
+ * and `titlebar:right` menu entries as extra buttons after the fixed two.
  */
 import { flushSync, mount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -116,7 +116,7 @@ describe('Titlebar menu contributions', () => {
     const { target } = render(Titlebar, fakePM(kernel));
 
     const buttons = [...target.querySelectorAll<HTMLButtonElement>('.tb-right .iconbtn')];
-    expect(buttons).toHaveLength(3);
+    expect(buttons).toHaveLength(2);
     expect(target.querySelector('.titlebar-contribution')).toBeNull();
     expect(run).not.toHaveBeenCalled();
   });
@@ -125,11 +125,11 @@ describe('Titlebar menu contributions', () => {
     const kernel = createKernel();
     disposeSignals = installKernelSignals(kernel);
     const { target } = render(Titlebar, fakePM(kernel));
-    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(3);
+    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(2);
 
     flushSync(() => void kernel.contributeMenu('ext', 'titlebar:right', () => [{ label: 'Mods', run: () => {} }]));
 
-    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(3);
+    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(2);
   });
 
   it('ignores separators and headers, which have no button form', () => {
@@ -138,6 +138,6 @@ describe('Titlebar menu contributions', () => {
     kernel.contributeMenu('ext', 'titlebar:right', () => ['-', { header: 'Tools' }, { label: 'Mods', run: () => {} }]);
     const { target } = render(Titlebar, fakePM(kernel));
 
-    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(3);
+    expect(target.querySelectorAll('.tb-right .iconbtn')).toHaveLength(2);
   });
 });

@@ -1,5 +1,6 @@
 /* Ported from js/app.js — behavior-preserving. */
 import type { PMRegistry } from './registry';
+import { packProjectFile, restoreProjectFileMedia } from './core/project-file';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -96,7 +97,7 @@ function hydrate(p: any) {
      to a static value instead of NaN transforms or a broken keyframe search.
      Applied recursively to nested compositions as well. */
   const keyIds = new Set<string>();
-  const sanitizeProp = (prop: any, fresh: any) => {
+  const sanitizeProp = (prop: any, fresh: any, minTime = 0) => {
     const fallback = fresh?.v;
     const valid = (value: any) => {
       if (typeof fallback === 'number') return typeof value === 'number' && Number.isFinite(value);
@@ -105,32 +106,32 @@ function hydrate(p: any) {
       return value !== undefined && value !== null;
     };
     prop.v = valid(prop.v) ? prop.v : fallback;
-    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps);
+    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps, minTime);
     prop.kf.forEach((key: any) => {
       if (keyIds.has(key.i)) key.i = PM.uid('k');
       keyIds.add(key.i);
     });
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
   };
-  const sanitizeLooseParams = (params: any) => {
+  const sanitizeLooseParams = (params: any, minTime = 0) => {
     const source = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
     Object.keys(source).forEach((key: any) => {
       const saved = source[key];
       const prop = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : { v: saved };
       const fallback = (typeof prop.v === 'number' && Number.isFinite(prop.v)) ||
         typeof prop.v === 'string' || typeof prop.v === 'boolean' ? prop.v : 0;
-      sanitizeProp(prop, { v: fallback });
+      sanitizeProp(prop, { v: fallback }, minTime);
       source[key] = prop;
     });
     return source;
   };
-  const sanitizeTransition = (value: any) => {
+  const sanitizeTransition = (value: any, minTime = 0) => {
     if (value == null) return null;
     if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.type !== 'string' || !value.type) return null;
     const duration = PM.clamp(num(value.dur, 0.5), 0.02, 600);
     const savedParams = value.p && typeof value.p === 'object' && !Array.isArray(value.p) ? value.p : {};
     const definition = PM.transitionDef?.(value.type);
-    if (!definition) return { ...value, type: value.type, dur: duration, p: sanitizeLooseParams(savedParams), missing: true };
+    if (!definition) return { ...value, type: value.type, dur: duration, p: sanitizeLooseParams(savedParams, minTime), missing: true };
     const transition = PM.mkTransition(value.type);
     if (!transition) return { ...value, type: value.type, dur: duration, p: savedParams, missing: true };
     transition.dur = duration;
@@ -145,7 +146,7 @@ function hydrate(p: any) {
       };
       const prop = { ...source, v: validValue(source.v) };
       prop.kf = (Array.isArray(source.kf) ? source.kf : []).map((key: any) => ({ ...key, v: validValue(key?.v) }));
-      sanitizeProp(prop, { v: fallback });
+      sanitizeProp(prop, { v: fallback }, minTime);
       transition.p[param.k] = prop;
     });
     return transition;
@@ -164,7 +165,7 @@ function hydrate(p: any) {
       const fresh = PM.mkLayer(L.type || 'null', {}, container);
       Object.keys(fresh.p).forEach(k => {
         if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
-        sanitizeProp(L.p[k], fresh.p[k]);
+        sanitizeProp(L.p[k], fresh.p[k], -L.from);
       });
       Object.keys(L.p).forEach(k => { if (!(k in fresh.p)) delete L.p[k]; });
       /* An effect whose type is not registered right now is kept as a marked
@@ -175,15 +176,15 @@ function hydrate(p: any) {
         .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
         .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
       L.fx.forEach((f: any) => {
-        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p); f.on = f.on !== false;
+        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, -L.from); f.on = f.on !== false;
         const definition = PM.FX?.[f.type];
         for (const param of definition?.params || []) {
           if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
-          sanitizeProp(f.p[param.k], { v: param.def });
+          sanitizeProp(f.p[param.k], { v: param.def }, -L.from);
         }
       });
-      L.transitionIn = sanitizeTransition(L.transitionIn);
-      L.transitionOut = sanitizeTransition(L.transitionOut);
+      L.transitionIn = sanitizeTransition(L.transitionIn, -L.from);
+      L.transitionOut = sanitizeTransition(L.transitionOut, -L.from);
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].effects === false) L.fx = [];
       /* masks: validate shape/mode and every animatable channel */
       L.masks = Array.isArray(L.masks) ? L.masks.filter((m: any) => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
@@ -195,13 +196,13 @@ function hydrate(p: any) {
         const freshM = PM.mkMask(m.shape, container);
         Object.keys(freshM.p).forEach(k => {
           if (!m.p[k] || typeof m.p[k] !== 'object') m.p[k] = freshM.p[k];
-          sanitizeProp(m.p[k], freshM.p[k]);
+          sanitizeProp(m.p[k], freshM.p[k], -L.from);
         });
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
       if (L.type === 'shader') {
-        L.d.uniforms = sanitizeLooseParams(L.d.uniforms);
+        L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
         PM.syncShaderUniforms?.(L);
       }
     });
@@ -365,7 +366,7 @@ function revalidateContributionPlaceholders() {
               effect.p[param.k] = PM.P(param.def);
               changed = true;
             } else {
-              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps);
+              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps, -layer.from);
               if (typeof prop.expr !== 'string') prop.expr = null;
               const sameType = typeof prop.v === typeof param.def;
               if (!sameType || (typeof prop.v === 'number' && !Number.isFinite(prop.v))) prop.v = param.def;
@@ -387,7 +388,7 @@ function revalidateContributionPlaceholders() {
               transition.p[param.k] = PM.P(param.def);
               changed = true;
             } else {
-              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps);
+              prop.kf = PM.normalizeKeyframes(prop.kf, param.def, PM.proj.fps, -layer.from);
               if (typeof prop.expr !== 'string') prop.expr = null;
               const sameType = typeof prop.v === typeof param.def;
               if (!sameType || (typeof prop.v === 'number' && !Number.isFinite(prop.v))) prop.v = param.def;
@@ -456,8 +457,8 @@ function persistCurrent(withThumb: any) {
 }
 
 function captureProjectSession() {
-  if (!PM.proj?.id) return;
-  persistCurrent(false);
+  if (!PM.proj?.id) return true;
+  const saved = persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
     lastActiveAt: Date.now(),
     workspace: PM.WS.snapshot(), time: PM.time,
@@ -466,7 +467,17 @@ function captureProjectSession() {
       ? { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph }
       : undefined,
   });
+  return saved;
 }
+
+// Native close/quit calls this while the document and its IPC channel are
+// still alive. beforeunload alone runs after the main process's quit flush.
+PM.flushProject = async () => {
+  await APP.importQueue;
+  window.clearTimeout(APP.saveTimer);
+  if (!captureProjectSession()) throw new Error('Project storage is unavailable or full');
+  await PM.store.flush?.();
+};
 
 function closeProjectTransients() {
   PM.LibraryUI?.close?.();
@@ -500,10 +511,12 @@ PM.saveProject = async () => {
   if (APP.saving) return false;
   APP.saving = true;
   try {
-    const text = PM.serialize(), projectId = PM.proj.id;
+    await APP.importQueue;
+    const snapshot = PM.serialize(), projectId = PM.proj.id;
+    const text = await packProjectFile(snapshot, PM.MediaStore);
     const finish = () => {
       // Saving a captured snapshot must not mark edits made during the dialog saved.
-      if (PM.proj.id === projectId && PM.serialize() === text) APP.dirty = false;
+      if (PM.proj.id === projectId && PM.serialize() === snapshot) APP.dirty = false;
       PM.toast('Project saved'); PM.invalidate('status'); return true;
     };
     if (window.powermove?.saveFile) {
@@ -534,6 +547,7 @@ PM.openProject = () => {
 async function openProjectFile(file: any) {
   try {
     const o = JSON.parse(await file.text());
+    await restoreProjectFileMedia(o, PM.MediaStore);
     switchProject(hydrate(o.proj || o));
     if (o.ws?.layout?.docks) PM.WS.restoreSnapshot(o.ws);
     PM.toast('Opened ' + file.name);

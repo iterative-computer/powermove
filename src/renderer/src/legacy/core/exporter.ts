@@ -1,5 +1,6 @@
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { packProjectFile } from './project-file';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -178,8 +179,12 @@ async function run(opts: any) {
   const W: any = Math.round(p.w * opts.scale / 2) * 2, H: any = Math.round(p.h * opts.scale / 2) * 2;
 
   if (opts.format === 'json') {
-    PM.download(new window.Blob([PM.serialize()], { type: 'application/json' }), (p.name || 'powermove') + '.pmv');
-    return PM.toast('Project exported');
+    try {
+      await PM.app?.importQueue;
+      const text = await packProjectFile(PM.serialize(), PM.MediaStore);
+      PM.download(new window.Blob([text], { type: 'application/json' }), (p.name || 'powermove') + '.pmv');
+      return PM.toast('Project exported');
+    } catch (error) { return PM.toast('Could not export project: ' + (error instanceof Error ? error.message : String(error)), 6000); }
   }
   if (opts.format === 'still') {
     const cv: any = opts.alpha ? alphaFrame(PM.time, W, H, opts.mblur) : PM.renderFrameTo(PM.time, W, H);

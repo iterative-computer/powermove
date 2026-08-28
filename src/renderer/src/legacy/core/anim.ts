@@ -52,7 +52,7 @@ function evalKfs(kf: any, t: any) {
 PM.evalKfs = evalKfs;
 
 /** Normalize persisted keyframes without discarding extension-owned fields. */
-PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any) => {
+PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) => {
   const expected = typeof fallbackValue;
   const validValue = (value: any) => {
     if (expected === 'number') return typeof value === 'number' && Number.isFinite(value);
@@ -66,7 +66,7 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any) => {
   const normalized = (Array.isArray(raw) ? raw : [])
     .map((key: any, index: number) => ({ key, index, time: Number(key?.t) }))
     .filter(({ key, time }: any) => key && typeof key === 'object' &&
-      Number.isFinite(time) && time >= 0 && validValue(key.v))
+      Number.isFinite(time) && time >= minTime && validValue(key.v))
     .map(({ key, index, time }: any) => ({
       ...key,
       t: time === 0 ? 0 : time,
@@ -296,7 +296,7 @@ PM.setKey = (L: any, key: any, T: any, value: any, ease: any) => {
   if (!p) return null;
   return PM.setKeyOn(p, T - L.from, value, ease, PM.proj.fps);
 };
-PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'power', fps: any = 30) => {
+PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30) => {
   if (!p || typeof p !== 'object') return null;
   p.kf = Array.isArray(p.kf) ? p.kf : [];
   const safeFps = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : 30;
@@ -313,7 +313,7 @@ PM.hasKeyAt = (L: any, p: any, T: any) => p.kf.find((k: any) => Math.abs(k.t - (
 PM.toggleStopwatch = (L: any, key: any, T: any) => {
   const p = L.p[key]; if (!p) return;
   if (p.kf.length) { p.v = PM.ev(L, key, T); p.kf = []; }
-  else PM.setKeyOn(p, T - L.from, p.v, 'power', PM.proj.fps);
+  else PM.setKeyOn(p, T - L.from, p.v, 'linear', PM.proj.fps);
   PM.touch(); PM.invalidate();
 };
 
@@ -328,7 +328,7 @@ PM.animate = (L: any, key: any, points: any, opt: any = {}) => {
   const p = L.p[key] || (opt.prop || null);
   if (!p) return false;
   if (!opt.keep) p.kf = [];
-  points.forEach((pt: any) => PM.setKeyOn(p, pt.t, pt.v, pt.ease || opt.ease || 'power', PM.proj.fps));
+  points.forEach((pt: any) => PM.setKeyOn(p, pt.t, pt.v, pt.ease || opt.ease || 'linear', PM.proj.fps));
   PM.touch();
   return true;
 };

@@ -339,6 +339,14 @@ describe('store IPC and quit integration', () => {
     release();
     await vi.waitFor(() => expect(quit).toHaveBeenCalledTimes(1));
   });
+  it('captures the live editor before flushing the main store',async()=>{
+    const app=Object.assign(new EventEmitter(),{quit:vi.fn()});
+    let prepared!:()=>void;
+    const prepare=vi.fn(()=>new Promise<void>(resolve=>{prepared=resolve})),flushAll=vi.fn(async()=>{});
+    const barrier=installQuitFlush(app as unknown as Pick<App,'on'|'quit'>,storeStub({flushAll}),prepare);
+    app.emit('before-quit',{preventDefault:vi.fn()});expect(flushAll).not.toHaveBeenCalled();expect(barrier.isPrepared()).toBe(false);
+    prepared();await vi.waitFor(()=>expect(app.quit).toHaveBeenCalledOnce());expect(flushAll).toHaveBeenCalledOnce();expect(barrier.isPrepared()).toBe(true);
+  });
 });
 
 function fileSystemWith(overrides: Partial<StoreFileSystem>): StoreFileSystem {

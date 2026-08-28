@@ -12,6 +12,7 @@ import ModsPanel from './ModsPanel.svelte';
 export default function activate(api: PowermoveAPI): void {
   api.panels.register({
     id: 'mods',
+    icon: 'puzzle',
     title: 'Mods',
     size: 260,
     build(body) {

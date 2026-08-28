@@ -23,6 +23,7 @@ export default function activate(api: PowermoveAPI): void {
 
   api.panels.register({
     id: 'viewer',
+    icon: 'frame',
     ...viewerPanelOptions,
     build(body) {
       // Reuse the live WebGL surface during extension/HMR updates. A new canvas
