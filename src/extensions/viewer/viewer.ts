@@ -13,8 +13,22 @@ export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 type Point = { x: number; y: number };
 type Bounds = { x0: number; y0: number; x1: number; y1: number; w: number; h: number };
+type WorldBounds = Bounds & { cx: number; cy: number };
 type Corner = readonly [number, number];
 type AffineMatrix = readonly [number, number, number, number, number, number];
+export type LinearMatrix = readonly [number, number, number, number];
+
+export interface SelectionGeometry {
+  mode: 'single' | 'common';
+  layers: any[];
+  roots: any[];
+  bounds: Bounds;
+  matrix: AffineMatrix;
+  corners: Point[];
+  handles: Record<ResizeHandle, Point>;
+  pivotWorld: Point;
+  transformable: boolean;
+}
 
 const HANDLE_NAMES: readonly ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 const RESIZE_CURSORS = ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'] as const;
@@ -28,6 +42,7 @@ const ROTATE_CURSOR = `url('data:image/svg+xml,${encodeURIComponent(
   "<path d='M13 0l-.3 8.4 6-3.9z' fill='white' stroke='black' stroke-width='1.4' stroke-linejoin='round'/>" +
   '</svg>',
 )}') 13 13, auto`;
+const VIEWER_RUNTIME_TOKEN = Symbol('powermove.viewer.runtime');
 
 function applyMatrix(m: AffineMatrix, point: Point): Point {
   return {
@@ -46,10 +61,215 @@ function invertPoint(m: AffineMatrix, point: Point): Point | null {
   };
 }
 
+function invertDirection(m: AffineMatrix, direction: Point): Point | null {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (Math.abs(det) < 1e-9) return null;
+  return {
+    x: (direction.x * m[3] - direction.y * m[2]) / det,
+    y: (direction.y * m[0] - direction.x * m[1]) / det,
+  };
+}
+
+/** Resolve an absolute local rotation whose local X axis points in the desired
+    world direction, even through a skewed/non-uniform parent transform. */
+export function localRotationForWorldDirection(parent: AffineMatrix | null, worldDirection: Point): number | null {
+  const local = parent ? invertDirection(parent, worldDirection) : worldDirection;
+  if (!local || Math.hypot(local.x, local.y) < 1e-9) return null;
+  return Math.atan2(local.y, local.x) * 180 / Math.PI;
+}
+
+export function multiplyLinear(left: LinearMatrix, right: LinearMatrix): LinearMatrix {
+  return [
+    left[0] * right[0] + left[2] * right[1],
+    left[1] * right[0] + left[3] * right[1],
+    left[0] * right[2] + left[2] * right[3],
+    left[1] * right[2] + left[3] * right[3],
+  ];
+}
+
+export function rotateLinear(matrix: LinearMatrix, degrees: number): LinearMatrix {
+  const angle = degrees * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle);
+  return [
+    cos * matrix[0] - sin * matrix[1], sin * matrix[0] + cos * matrix[1],
+    cos * matrix[2] - sin * matrix[3], sin * matrix[2] + cos * matrix[3],
+  ];
+}
+
+export interface DecomposedLocalLinear {
+  rotation: number;
+  scaleX: number;
+  scaleY: number;
+  skew: number;
+}
+
+export function composeLocalLinear(transform: DecomposedLocalLinear): LinearMatrix {
+  const rotation = transform.rotation * Math.PI / 180;
+  const skew = Math.tan(transform.skew * Math.PI / 180);
+  const cos = Math.cos(rotation), sin = Math.sin(rotation);
+  return [
+    cos * transform.scaleX,
+    sin * transform.scaleX,
+    transform.scaleY * (cos * skew - sin),
+    transform.scaleY * (sin * skew + cos),
+  ];
+}
+
+/** Solve the local R·Kx·S channels needed to produce a complete desired world
+    linear transform. Returning null for singular matrices avoids NaN/∞ edits. */
+export function solveLocalTransformForWorldLinear(
+  parent: LinearMatrix | null, desiredWorld: LinearMatrix,
+  preferred: { scaleX?: number; rotation?: number } = {},
+): DecomposedLocalLinear | null {
+  let local = desiredWorld;
+  if (parent) {
+    const det = parent[0] * parent[3] - parent[1] * parent[2];
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-8) return null;
+    local = [
+      (parent[3] * desiredWorld[0] - parent[2] * desiredWorld[1]) / det,
+      (-parent[1] * desiredWorld[0] + parent[0] * desiredWorld[1]) / det,
+      (parent[3] * desiredWorld[2] - parent[2] * desiredWorld[3]) / det,
+      (-parent[1] * desiredWorld[2] + parent[0] * desiredWorld[3]) / det,
+    ];
+  }
+  const scaleX = Math.hypot(local[0], local[1]);
+  if (!Number.isFinite(scaleX) || scaleX < 1e-8) return null;
+  const cos = local[0] / scaleX, sin = local[1] / scaleX;
+  const skewTimesScaleY = cos * local[2] + sin * local[3];
+  const scaleY = -sin * local[2] + cos * local[3];
+  if (!Number.isFinite(scaleY) || Math.abs(scaleY) < 1e-8) return null;
+  let skewRadians = Math.atan2(skewTimesScaleY, scaleY);
+  if (skewRadians > Math.PI / 2) skewRadians -= Math.PI;
+  else if (skewRadians < -Math.PI / 2) skewRadians += Math.PI;
+  let rotation = Math.atan2(local[1], local[0]) * 180 / Math.PI;
+  let signedScaleX = scaleX, signedScaleY = scaleY;
+  if ((preferred.scaleX ?? 1) < 0) {
+    rotation += 180;
+    signedScaleX = -signedScaleX;
+    signedScaleY = -signedScaleY;
+  }
+  if (Number.isFinite(preferred.rotation)) {
+    rotation += Math.round((preferred.rotation! - rotation) / 360) * 360;
+  }
+  const result = {
+    rotation,
+    scaleX: signedScaleX, scaleY: signedScaleY,
+    skew: skewRadians * 180 / Math.PI,
+  };
+  const check = composeLocalLinear(result);
+  const magnitude = Math.max(1, ...local.map(Math.abs));
+  if (check.some((value, index) => Math.abs(value - local[index]!) > magnitude * 1e-7)) return null;
+  return result;
+}
+
 function pointInBounds(bounds: Bounds, corner: Corner): Point {
   return {
     x: bounds.x0 + bounds.w * corner[0],
     y: bounds.y0 + bounds.h * corner[1],
+  };
+}
+
+function midpoint(a: Point, b: Point): Point {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function handlesFromCorners(corners: Point[]): Record<ResizeHandle, Point> {
+  const [nw, ne, se, sw] = corners;
+  return {
+    nw: nw!, n: midpoint(nw!, ne!), ne: ne!, e: midpoint(ne!, se!),
+    se: se!, s: midpoint(se!, sw!), sw: sw!, w: midpoint(sw!, nw!),
+  };
+}
+
+function layerIsTransformable(PM: any, layer: any, T: number): boolean {
+  return !!layer && !layer.lock && PM.active(layer, T) && PM.TYPE_META?.[layer.type]?.pickable !== false;
+}
+
+function visibleSelectionLayers(PM: any, selected: any[], T: number): any[] {
+  return selected.filter((layer) => !!layer && PM.active(layer, T) && PM.GL.bounds(layer, T));
+}
+
+/** Selected parents own their descendants. Returning only roots prevents a
+    parent and selected child from receiving the same transform twice. */
+export function selectionTransformRoots(PM: any, layers: any[], T: number): any[] {
+  const eligible = layers.filter((layer) => layerIsTransformable(PM, layer, T));
+  const ids = new Set(eligible.map((layer) => layer.id));
+  return eligible.filter((layer) => {
+    let parentId = layer.parent, guard = 0;
+    while (parentId && guard++ < 256) {
+      if (ids.has(parentId)) return false;
+      const parent = PM.L(parentId);
+      parentId = parent?.parent;
+    }
+    return true;
+  });
+}
+
+export function layerWorldBounds(PM: any, layer: any, T: number): WorldBounds | null {
+  const bounds = PM.GL.bounds(layer, T); if (!bounds) return null;
+  const matrix = PM.worldMatrix(layer, T);
+  const points = [
+    { x: bounds.x0, y: bounds.y0 }, { x: bounds.x1, y: bounds.y0 },
+    { x: bounds.x1, y: bounds.y1 }, { x: bounds.x0, y: bounds.y1 },
+  ].map((point) => applyMatrix(matrix, point));
+  const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  return { x0, x1, y0, y1, w: x1 - x0, h: y1 - y0, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+}
+
+/** The real world-space anchor. Matrix translation is the transformed local
+    origin, so it is not the rotation pivot when Anchor X/Y are non-zero. */
+export function layerWorldPivot(PM: any, layer: any, T: number): Point {
+  return applyMatrix(PM.worldMatrix(layer, T), {
+    x: PM.ev(layer, 'anchor.x', T),
+    y: PM.ev(layer, 'anchor.y', T),
+  });
+}
+
+export function transformPointAround(
+  point: Point, pivot: Point, scaleX: number, scaleY: number, rotationDegrees = 0,
+): Point {
+  const x = (point.x - pivot.x) * scaleX;
+  const y = (point.y - pivot.y) * scaleY;
+  if (!rotationDegrees) return { x: pivot.x + x, y: pivot.y + y };
+  const angle = rotationDegrees * Math.PI / 180;
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  return { x: pivot.x + x * cos - y * sin, y: pivot.y + x * sin + y * cos };
+}
+
+/** One geometry source for overlay drawing, hit-testing, and transforms. */
+export function resolveSelectionGeometry(PM: any, selected: any[], T: number): SelectionGeometry | null {
+  const layers = visibleSelectionLayers(PM, selected, T);
+  if (!layers.length) return null;
+  /* A selection is one atomic transform target. Locked or unpickable visual
+     members keep their chrome, but disable interaction for the entire box. */
+  const transformable = layers.every((layer) => layerIsTransformable(PM, layer, T));
+  const roots = transformable ? selectionTransformRoots(PM, layers, T) : [];
+
+  if (layers.length === 1) {
+    const layer = layers[0]!;
+    const bounds = PM.GL.bounds(layer, T); if (!bounds) return null;
+    const matrix = PM.worldMatrix(layer, T) as AffineMatrix;
+    const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const)
+      .map((corner) => applyMatrix(matrix, pointInBounds(bounds, corner)));
+    return {
+      mode: 'single', layers, roots, transformable, bounds, matrix, corners,
+      handles: handlesFromCorners(corners), pivotWorld: layerWorldPivot(PM, layer, T),
+    };
+  }
+
+  const measured = layers.map((layer) => layerWorldBounds(PM, layer, T)).filter(Boolean) as WorldBounds[];
+  if (!measured.length) return null;
+  const x0 = Math.min(...measured.map((bounds) => bounds.x0));
+  const x1 = Math.max(...measured.map((bounds) => bounds.x1));
+  const y0 = Math.min(...measured.map((bounds) => bounds.y0));
+  const y1 = Math.max(...measured.map((bounds) => bounds.y1));
+  const bounds = { x0, x1, y0, y1, w: x1 - x0, h: y1 - y0 };
+  const corners = [
+    { x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 },
+  ];
+  return {
+    mode: 'common', layers, roots, transformable, bounds, matrix: [1, 0, 0, 1, 0, 0], corners,
+    handles: handlesFromCorners(corners), pivotWorld: { x: (x0 + x1) / 2, y: (y0 + y1) / 2 },
   };
 }
 
@@ -137,20 +357,69 @@ export function layerContainsPoint(PM: any, L: any, x: number, y: number, T: num
 
 /** Install the legacy viewer controller against the host registry. */
 export function createViewerRuntime(PM: any): any {
-if (PM.Viewer?.attach) return PM.Viewer;
+const existing = PM.Viewer;
+if (existing?._runtimeToken === VIEWER_RUNTIME_TOKEN) return existing;
+const existingStage = existing?.stage as HTMLElement | undefined;
+if (existingStage && typeof existing?._disposeRuntime !== 'function') {
+  existing._legacyListenerFence = true;
+  /* The legacy runtime did not retain bus disposers. Its overlay callback is
+     the one behavioral stale closure; remove only that named viewer handler. */
+  const overlayHandlers = PM.bus?.m?.get?.('overlay');
+  if (overlayHandlers instanceof Set) {
+    for (const handler of overlayHandlers) if (handler?.name === 'drawOverlay') overlayHandlers.delete(handler);
+  }
+}
+/* The pre-disposer runtime's listeners cannot be removed retroactively. Keep
+   the capture fence on the retained Viewer object across every later HMR. */
+const legacyFence = !!existing?._legacyListenerFence;
+existing?._disposeRuntime?.();
 const clamp = PM.clamp;
 
-const V: any = { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, guides: null };
+const V: any = existing || { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, guides: null };
 PM.Viewer = V;
+V._runtimeToken = VIEWER_RUNTIME_TOKEN;
+let disposed = false;
+let unbindStage: (() => void) | null = null;
+let resizeObserver: ResizeObserver | null = null;
+let activeDrag: { cancel(): void } | null = null;
+const busOffs: Array<() => void> = [];
+
+const disposeRuntime = () => {
+  if (disposed) return;
+  disposed = true;
+  activeDrag?.cancel(); activeDrag = null;
+  unbindStage?.(); unbindStage = null;
+  resizeObserver?.disconnect(); resizeObserver = null;
+  busOffs.splice(0).forEach((off) => off());
+  window.removeEventListener('resize', onWindowResize);
+  setStageCursor('');
+  if (V._runtimeToken === VIEWER_RUNTIME_TOKEN) V._runtimeToken = null;
+};
+V._disposeRuntime = disposeRuntime;
+V.dispose = disposeRuntime;
+
+const beginDrag = (event: any, options: any) => {
+  activeDrag?.cancel();
+  let control: any;
+  const finish = (kind: 'up' | 'cancel', args: any[]) => {
+    if (activeDrag === control) activeDrag = null;
+    return options[kind]?.(...args);
+  };
+  control = PM.drag(event, {
+    ...options,
+    up: (...args: any[]) => finish('up', args),
+    cancel: (...args: any[]) => finish('cancel', args),
+  });
+  activeDrag = control;
+  return control;
+};
 
 V.attach = (stage: HTMLElement) => {
-    if (V.stage === stage) return;
-    if (V.stage) {
-      /* The WebGL context is bound to the original #gl canvas and cannot move
-         hosts; persist panels re-parent the same element in production, so a
-         second attach only happens under HMR — keep the old wiring alive
-         instead of leaving a dead panel behind a thrown build. */
-      console.warn('[viewer] attach ignored: already bound to a stage (HMR requires a full reload)');
+    if (disposed || V._boundStage === stage) return V;
+    if (V.stage && V.stage !== stage) {
+      /* Never replace the live WebGL canvas. Panel rebuilds re-parent V.stage;
+         attaching a genuinely different host would orphan the GL context. */
+      console.warn('[viewer] attach ignored: a different live WebGL stage already exists');
       return;
     }
     const inner = stage.querySelector<HTMLElement>(':scope > #stage-inner');
@@ -159,9 +428,14 @@ V.attach = (stage: HTMLElement) => {
     if (!inner || !gl || !ov) throw new Error('Viewer host is missing the legacy canvas skeleton');
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     if (!PM.GL.gl) PM.GL.init(gl);
-    bindStage(stage, inner);
+    unbindStage?.();
+    resizeObserver?.disconnect();
+    unbindStage = bindStage(stage, inner, legacyFence);
+    V._boundStage = stage;
     window.requestAnimationFrame(() => V.layout());
-    new window.ResizeObserver(() => V.layout()).observe(stage);
+    resizeObserver = new window.ResizeObserver(() => V.layout());
+    resizeObserver.observe(stage);
+    return V;
 };
 
 /* ── layout / sizing ───────────────────────────────────── */
@@ -187,10 +461,12 @@ V.layout = () => {
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   PM.invalidate();
 };
-PM.bus.on('quality', () => V.layout());
-PM.bus.on('project', () => V.layout());
-window.addEventListener('resize', () => V.layout());
-PM.bus.on('layout:applied', () => V.layout());
+const onWindowResize = () => V.layout();
+window.addEventListener('resize', onWindowResize);
+for (const event of ['quality', 'project', 'layout:applied']) {
+  const off = PM.bus.on(event, () => V.layout());
+  if (typeof off === 'function') busOffs.push(off);
+}
 
 /* comp px <-> screen px */
 const toComp = (e: any): [number, number] => {
@@ -199,8 +475,13 @@ const toComp = (e: any): [number, number] => {
 };
 
 /* ── overlay drawing ───────────────────────────────────── */
-PM.bus.on('overlay', drawOverlay);
-PM.bus.on('sel', () => PM.invalidate('render'));
+for (const [event, handler] of [
+  ['overlay', drawOverlay],
+  ['sel', () => PM.invalidate('render')],
+] as const) {
+  const off = PM.bus.on(event, handler);
+  if (typeof off === 'function') busOffs.push(off);
+}
 
 function drawOverlay() {
   const c = V.octx; if (!c) return;
@@ -224,18 +505,44 @@ function drawOverlay() {
   drawSnapGuides(c, S, p);
 
   const sels = PM.selLayers().filter((L: any) => PM.active(L, PM.time));
-  for (const L of sels) {
+  const selection = resolveSelectionGeometry(PM, sels, PM.time);
+  /* Multi-selection keeps light per-layer outlines for orientation, but owns
+     exactly one common transform box and one set of controls. */
+  if (sels.length > 1 || !selection) for (const L of sels) {
     const b = PM.GL.bounds(L, PM.time);
     if (!b) continue;
     const m = PM.worldMatrix(L, PM.time);
     const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map((corner) =>
       applyMatrix(m, pointInBounds(b, corner)));
-    c.strokeStyle = 'rgba(255,107,26,.95)';
-    c.lineWidth = 1.4 / Math.max(.02, V.shown);
+    c.strokeStyle = 'rgba(255,107,26,.5)';
+    c.lineWidth = 1 / Math.max(.02, V.shown);
     c.beginPath();
     c.moveTo(corners[0]!.x, corners[0]!.y);
     corners.slice(1).forEach((point) => c.lineTo(point.x, point.y));
     c.closePath();
+    c.stroke();
+  }
+  if (selection) {
+    c.strokeStyle = 'rgba(255,107,26,.95)';
+    c.lineWidth = 1.4 / Math.max(.02, V.shown);
+    c.beginPath();
+    c.moveTo(selection.corners[0]!.x, selection.corners[0]!.y);
+    selection.corners.slice(1).forEach((point) => c.lineTo(point.x, point.y));
+    c.closePath();
+    c.stroke();
+    if (!selection.transformable) { c.restore(); return; }
+    const rotate = rotationHandlePoint(selection);
+    c.beginPath();
+    c.moveTo(selection.handles.n.x, selection.handles.n.y);
+    c.lineTo(rotate.x, rotate.y);
+    c.stroke();
+    const rotateRadius = 4 / Math.max(.02, V.shown);
+    c.fillStyle = '#fff';
+    c.beginPath();
+    c.arc(rotate.x, rotate.y, rotateRadius, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = 'rgba(0,0,0,.45)';
+    c.lineWidth = 1 / Math.max(.02, V.shown);
     c.stroke();
     /* Handles are UI chrome, not layer content: keep them square and a
        constant screen size under zoom, rotation, skew, and nonuniform scale. */
@@ -243,8 +550,8 @@ function drawOverlay() {
     c.fillStyle = '#fff';
     c.strokeStyle = 'rgba(0,0,0,.45)';
     c.lineWidth = 1 / Math.max(.02, V.shown);
-    HANDLES.forEach(([hx, hy]: any) => {
-      const point = applyMatrix(m, pointInBounds(b, [hx, hy]));
+    HANDLE_NAMES.forEach((handle) => {
+      const point = selection.handles[handle];
       c.fillRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
       c.strokeRect(point.x - hs, point.y - hs, hs * 2, hs * 2);
     });
@@ -253,6 +560,16 @@ function drawOverlay() {
 }
 const HANDLES: readonly (readonly [number, number])[] = [[0, 0], [.5, 0], [1, 0], [1, .5], [1, 1], [.5, 1], [0, 1], [0, .5]];
 const MOVE_DRAG_THRESHOLD_PX = 3;
+
+function rotationHandlePoint(selection: SelectionGeometry): Point {
+  const nw = selection.corners[0]!, ne = selection.corners[1]!;
+  const dx = ne.x - nw.x, dy = ne.y - nw.y, length = Math.hypot(dx, dy) || 1;
+  const distance = 22 / Math.max(.02, V.shown);
+  return {
+    x: selection.handles.n.x + dy / length * distance,
+    y: selection.handles.n.y - dx / length * distance,
+  };
+}
 
 function drawSnapGuides(c: any, S: any, p: any) {
   const guides = V.guides;
@@ -289,13 +606,10 @@ function snapAxis(movingMarks: any, targetMarks: any, threshold: any) {
 }
 
 function worldBounds(L: any, T: any) {
-  const b = PM.GL.bounds(L, T); if (!b) return null;
-  const m = PM.worldMatrix(L, T);
-  const points = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]
-    .map(([x, y]: any) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
-  const xs = points.map((point: any) => point[0]), ys = points.map((point: any) => point[1]);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
-  return { x0, x1, y0, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+  const bounds = layerWorldBounds(PM, L, T);
+  if (!bounds) return null;
+  const { x0, x1, y0, y1, cx, cy } = bounds;
+  return { x0, x1, y0, y1, cx, cy };
 }
 
 function unionBounds(layers: any, T: any) {
@@ -351,7 +665,7 @@ function passedMoveDragThreshold(dx: any, dy: any) {
   return Math.hypot(dx, dy) >= MOVE_DRAG_THRESHOLD_PX;
 }
 
-function worldDeltaToLocal(L: any, T: any, dx: any, dy: any) {
+function worldDeltaToLocal(L: any, T: any, dx: any, dy: any): [number, number] {
   if (!L.parent) return [dx, dy];
   const parent = PM.L(L.parent); if (!parent) return [dx, dy];
   const m = PM.worldMatrix(parent, T), det = m[0] * m[3] - m[1] * m[2];
@@ -363,53 +677,77 @@ Object.assign(V, {
   snapAxis, worldBounds, unionBounds, snapshotSnapTargets, alignmentSnap,
   alignmentGuideChanged, passedMoveDragThreshold, calculateResize, resizeCursorForHandle,
   resizeLocksAspect,
+  resolveSelectionGeometry: (layers: any = PM.selLayers(), T: any = PM.time) =>
+    resolveSelectionGeometry(PM, layers, T),
+  selectionTransformRoots: (layers: any = PM.selLayers(), T: any = PM.time) =>
+    selectionTransformRoots(PM, layers, T),
+  layerWorldPivot: (layer: any, T: any = PM.time) => layerWorldPivot(PM, layer, T),
   layerContainsPoint: (L: any, x: any, y: any, T: any) => layerContainsPoint(PM, L, x, y, T),
 });
 
 /* ── direct manipulation ───────────────────────────────── */
-function bindStage(stage: any, inner: any) {
-  stage.addEventListener('pointerdown', onDown);
-  inner.addEventListener('pointermove', updateStageCursor);
-  inner.addEventListener('pointerleave', () => { inner.style.cursor = ''; });
-  stage.addEventListener('wheel', (e: any) => {
+function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => void {
+  const listeners: Array<[any, string, EventListener, boolean | AddEventListenerOptions | undefined]> = [];
+  const listen = (target: any, type: string, handler: EventListener, options?: boolean | AddEventListenerOptions) => {
+    target.addEventListener(type, handler, options);
+    listeners.push([target, type, handler, options]);
+  };
+  const guarded = (handler: (event: any) => void) => ((event: any) => {
+    if (fenceLegacyListeners) event.stopImmediatePropagation();
+    handler(event);
+  }) as EventListener;
+  const capture = fenceLegacyListeners ? true : undefined;
+  listen(stage, 'pointerdown', guarded(onDown), capture);
+  listen(stage, 'pointermove', guarded(updateStageCursor), capture);
+  listen(stage, 'pointerleave', guarded(() => setStageCursor('')), capture);
+  listen(stage, 'wheel', guarded((e: any) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
       V.fit = false;
       V.zoom = clamp((V.shown || 1) * (1 - e.deltaY * .0035), .05, 8);
       V.layout();
     }
-  }, { passive: false });
-  inner.addEventListener('dblclick', (e: any) => {
+  }), fenceLegacyListeners ? { capture: true, passive: false } : { passive: false });
+  listen(fenceLegacyListeners ? stage : inner, 'dblclick', guarded((e: any) => {
     const [x, y] = toComp(e);
     const L = PM.GL.pick(x, y, PM.time);
     if (L && L.type === 'text') PM.Inspector?.focusText?.(L);
-  });
+  }), capture);
+  return () => {
+    for (const [target, type, handler, options] of listeners) target.removeEventListener(type, handler, options);
+    if (V._boundStage === stage) V._boundStage = null;
+  };
 }
 
-function cursorForHit(L: any, hit: any, T: any) {
+function setStageCursor(cursor: string) {
+  if (V.stage) V.stage.style.cursor = cursor;
+  if (V.inner) V.inner.style.cursor = cursor;
+}
+
+function cursorForHit(selection: SelectionGeometry, hit: any) {
   if (hit.rotate) return ROTATE_CURSOR;
-  return resizeCursorForHandle(PM.worldMatrix(L, T), hit.handle);
+  return resizeCursorForHandle(selection.matrix, hit.handle);
 }
 
 function updateStageCursor(e: any) {
   if (!V.inner) return;
-  if (PM.tool === 'hand' || e.metaKey) { V.inner.style.cursor = 'grab'; return; }
-  if (PM.tool === 'zoom') { V.inner.style.cursor = e.shiftKey ? 'zoom-out' : 'zoom-in'; return; }
-  if (PM.tool && PM.tool !== 'select') { V.inner.style.cursor = 'crosshair'; return; }
+  if (PM.tool === 'hand') { setStageCursor('grab'); return; }
+  if (PM.tool === 'zoom') { setStageCursor(e.shiftKey ? 'zoom-out' : 'zoom-in'); return; }
+  if (PM.tool && PM.tool !== 'select') { setStageCursor('crosshair'); return; }
   const [x, y] = toComp(e), T = PM.time;
-  const selected = PM.firstSel();
-  if (selected && !selected.lock && PM.active(selected, T)) {
-    const hit = handleAt(selected, x, y, T);
-    if (hit) { V.inner.style.cursor = cursorForHit(selected, hit, T); return; }
-    if (layerContainsPoint(PM, selected, x, y, T)) { V.inner.style.cursor = 'move'; return; }
+  const selection = resolveSelectionGeometry(PM, PM.selLayers(), T);
+  if (selection?.transformable) {
+    const hit = handleAt(selection, x, y);
+    if (hit) { setStageCursor(cursorForHit(selection, hit)); return; }
+    if (pointInSelection(selection, x, y)) { setStageCursor('move'); return; }
   }
-  V.inner.style.cursor = 'default';
+  setStageCursor('default');
 }
 
 function startPan(e: any) {
   const start = [V.pan[0], V.pan[1]];
   V.fit = false;
-  PM.drag(e, {
+  beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: any, dy: any) => { V.pan = [start[0] + dx, start[1] + dy]; V.layout(); },
   });
@@ -418,8 +756,9 @@ function startPan(e: any) {
 function onDown(e: any) {
   if (e.button !== 0) return;
 
-  /* AE-style tool override: Hand pans, Zoom zooms. Space/⌘ temporarily = Hand. */
-  const tool = (PM.tool === 'hand' || PM.tool === 'zoom') ? PM.tool : (e.metaKey ? 'hand' : 'select');
+  /* Explicit tools own the canvas. Command remains available to the active
+     transform gesture for Motioner's 45-degree rotation snapping contract. */
+  const tool = (PM.tool === 'hand' || PM.tool === 'zoom') ? PM.tool : 'select';
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') {
     const dir = e.shiftKey ? -1 : 1;
@@ -432,44 +771,53 @@ function onDown(e: any) {
   const [x, y] = toComp(e);
   const T = PM.time;
 
-  /* handle grab on the selected layer */
-  const sel = PM.firstSel();
-  if (sel && !sel.lock && PM.active(sel, T)) {
-    const hit = handleAt(sel, x, y, T);
-    if (hit) return startTransform(e, sel, hit, T);
+  const selection = resolveSelectionGeometry(PM, PM.selLayers(), T);
+  if (selection?.transformable) {
+    const hit = handleAt(selection, x, y);
+    if (hit) return startTransform(e, selection, hit, T);
+  }
+  if (selection && !selection.transformable && pointInSelection(selection, x, y)) {
+    /* Locked mixed selections own their visible geometry defensively. Do not
+       let picking collapse the selection and start moving only an unlocked
+       subset underneath the same press. */
+    e.preventDefault();
+    return;
   }
   const L = PM.GL.pick(x, y, T);
-  const selected = PM.selLayers().filter((layer: any) =>
-    !layer.lock && PM.active(layer, T) && PM.TYPE_META?.[layer.type]?.pickable !== false);
-  if (selected.some((layer: any) => layerContainsPoint(PM, layer, x, y, T))) {
-    const selectedIds = new Set(selected.map((layer: any) => layer.id));
-    return startMove(e, selected, T, {
+  if (selection?.transformable && pointInSelection(selection, x, y)) {
+    const selectedIds = new Set(selection.layers.map((layer: any) => layer.id));
+    return startMove(e, selection.roots, T, {
+      selectionLayers: selection.layers,
       click: () => {
         if (L && !selectedIds.has(L.id)) PM.selectLayers(L.id, e.shiftKey);
+        else if (!L && !e.shiftKey) PM.selectLayers([]);
       },
     });
   }
   if (!L) { if (!e.shiftKey) PM.selectLayers([]); return; }
   PM.selectLayers(L.id, e.shiftKey);
-  startMove(e, PM.selLayers().filter((l: any) => !l.lock), T);
+  const nextSelection = resolveSelectionGeometry(PM, PM.selLayers(), T);
+  if (nextSelection) startMove(e, nextSelection.roots, T, { selectionLayers: nextSelection.layers });
 }
 
-function handleAt(L: any, x: any, y: any, T: any) {
-  const b = PM.GL.bounds(L, T); if (!b) return null;
-  const m = PM.worldMatrix(L, T);
-  const tolerance = 9 / Math.max(.02, V.shown);
-  for (let i = 0; i < HANDLES.length; i++) {
-    const corner = HANDLES[i]!;
-    const point = applyMatrix(m, pointInBounds(b, corner));
-    if (Math.hypot(x - point.x, y - point.y) <= tolerance) {
-      return { i, corner, handle: HANDLE_NAMES[i]! };
-    }
+function pointInSelection(selection: SelectionGeometry, x: number, y: number): boolean {
+  if (selection.mode === 'common') {
+    const bounds = selection.bounds;
+    return x >= bounds.x0 && x <= bounds.x1 && y >= bounds.y0 && y <= bounds.y1;
   }
-  /* Just outside a corner rotates; the selection interior remains a move hit. */
-  if (!layerContainsPoint(PM, L, x, y, T)) {
-    for (const corner of [[0, 0], [1, 0], [1, 1], [0, 1]] as any) {
-      const point = applyMatrix(m, pointInBounds(b, corner));
-      if (Math.hypot(x - point.x, y - point.y) <= tolerance * 2.4) return { rotate: true };
+  return layerContainsPoint(PM, selection.layers[0], x, y, PM.time);
+}
+
+function handleAt(selection: SelectionGeometry, x: any, y: any) {
+  const tolerance = 9 / Math.max(.02, V.shown);
+  const rotate = rotationHandlePoint(selection);
+  if (Math.hypot(x - rotate.x, y - rotate.y) <= tolerance * 1.2) return { rotate: true };
+  for (let i = 0; i < HANDLE_NAMES.length; i++) {
+    const handle = HANDLE_NAMES[i]!;
+    const corner = HANDLES[i]!;
+    const point = selection.handles[handle];
+    if (Math.hypot(x - point.x, y - point.y) <= tolerance) {
+      return { i, corner, handle };
     }
   }
   return null;
@@ -478,13 +826,13 @@ function handleAt(L: any, x: any, y: any, T: any) {
 function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
   const start = layers.map((L: any) => ({ L, x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T) }));
-  const selectedIds = new Set(layers.map((L: any) => L.id));
-  const correctionRoots = start.filter((s: any) => !hasSelectedAncestor(s.L, selectedIds));
+  const selectionLayers = options.selectionLayers || layers;
+  const selectedIds = new Set(selectionLayers.map((L: any) => L.id));
   const targets = snapshotSnapTargets(T, selectedIds);
   const clearGuides = () => { V.guides = null; PM.invalidate('render'); };
-  PM.Edit.begin('Move layer', { origin: 'canvas' });
+  PM.Edit.begin(selectionLayers.length > 1 ? 'Move selection' : 'Move layer', { origin: 'canvas' });
   let moved = false;
-  PM.drag(e, {
+  beginDrag(e, {
     move: (dx: any, dy: any, ev: any) => {
       if (!moved && !passedMoveDragThreshold(dx, dy)) return;
       moved = true;
@@ -494,16 +842,20 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
         if (Math.abs(ddx) > Math.abs(ddy)) { ddy = 0; axes.y = false; }
         else { ddx = 0; axes.x = false; }
       }
+      const moveDeltas = new Map<any, [number, number]>();
       start.forEach((s: any) => {
-        setOrKey(s.L, 'position.x', s.x + ddx, T);
-        setOrKey(s.L, 'position.y', s.y + ddy, T);
+        const delta = worldDeltaToLocal(s.L, T, ddx, ddy);
+        moveDeltas.set(s.L, delta);
+        setOrKey(s.L, 'position.x', s.x + delta[0], T);
+        setOrKey(s.L, 'position.y', s.y + delta[1], T);
       });
       let snap: any = { dx: 0, dy: 0, x: null, y: null };
-      if (PM.snap) snap = alignmentSnap(unionBounds(layers, T), targets, 8 / Math.max(.02, V.shown), axes);
-      correctionRoots.forEach((s: any) => {
+      if (PM.snap) snap = alignmentSnap(unionBounds(selectionLayers, T), targets, 8 / Math.max(.02, V.shown), axes);
+      start.forEach((s: any) => {
         const [cx, cy] = worldDeltaToLocal(s.L, T, snap.dx, snap.dy);
-        if (cx) setOrKey(s.L, 'position.x', s.x + ddx + cx, T);
-        if (cy) setOrKey(s.L, 'position.y', s.y + ddy + cy, T);
+        const [mx, my] = moveDeltas.get(s.L)!;
+        if (cx) setOrKey(s.L, 'position.x', s.x + mx + cx, T);
+        if (cy) setOrKey(s.L, 'position.y', s.y + my + cy, T);
       });
       const nextGuides = PM.snap && (snap.x || snap.y)
         ? { x: guideValue(snap.x), y: guideValue(snap.y) }
@@ -524,7 +876,45 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
   });
 }
 
-function startTransform(e: any, L: any, hit: any, T: any) {
+function worldPointToParentLocal(L: any, T: any, point: Point): Point | null {
+  if (!L.parent) return point;
+  const parent = PM.L(L.parent); if (!parent) return point;
+  return invertPoint(PM.worldMatrix(parent, T), point);
+}
+
+function parentWorldMatrix(L: any, T: any): AffineMatrix | null {
+  if (!L.parent) return null;
+  const parent = PM.L(L.parent);
+  return parent ? PM.worldMatrix(parent, T) as AffineMatrix : null;
+}
+
+function pointerAngleInParentSpace(L: any, T: any, pivotWorld: Point, pointerWorld: Point): number | null {
+  const worldDirection = { x: pointerWorld.x - pivotWorld.x, y: pointerWorld.y - pivotWorld.y };
+  const parent = parentWorldMatrix(L, T);
+  const local = parent ? invertDirection(parent, worldDirection) : worldDirection;
+  if (!local || Math.hypot(local.x, local.y) < 1e-9) return null;
+  return Math.atan2(local.y, local.x);
+}
+
+function pointerComp(e: any): Point {
+  const [x, y] = toComp(e);
+  return { x, y };
+}
+
+function angleDeltaDegrees(next: number, start: number): number {
+  let delta = (next - start) * 180 / Math.PI;
+  while (delta > 180) delta -= 360;
+  while (delta < -180) delta += 360;
+  return delta;
+}
+
+function startTransform(e: any, selection: SelectionGeometry, hit: any, T: any) {
+  if (selection.mode === 'common') return startCommonTransform(e, selection, hit, T);
+  return startSingleTransform(e, selection, hit, T);
+}
+
+function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T: any) {
+  const L = selection.layers[0];
   const b = PM.GL.bounds(L, T);
   if (!b) return;
   const s0 = {
@@ -534,10 +924,9 @@ function startTransform(e: any, L: any, hit: any, T: any) {
   };
   const textSize0 = L.type === 'text' ? Math.max(4, Number(L.d?.size) || 4) : null;
   const m = [...PM.worldMatrix(L, T)] as [number, number, number, number, number, number];
-  const cx = m[4], cy = m[5];
-  const r0 = V.inner.getBoundingClientRect();
-  const a0 = Math.atan2((e.clientY - r0.top) / V.shown - cy, (e.clientX - r0.left) / V.shown - cx);
-  const pointerStart = { x: (e.clientX - r0.left) / V.shown, y: (e.clientY - r0.top) / V.shown };
+  const pivotWorld = selection.pivotWorld;
+  const pointerStart = pointerComp(e);
+  const a0 = pointerAngleInParentSpace(L, T, pivotWorld, pointerStart);
   const pointerStartLocal = invertPoint(m, pointerStart);
   const handleLocal = hit.corner ? pointInBounds(b, hit.corner) : null;
   const grabOffset = pointerStartLocal && handleLocal
@@ -557,17 +946,20 @@ function startTransform(e: any, L: any, hit: any, T: any) {
   };
   PM.Edit.begin(hit.rotate ? 'Rotate layer' : textSize0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
   let moved = false;
-  PM.drag(e, {
-    cursor: cursorForHit(L, hit, T),
+  beginDrag(e, {
+    cursor: cursorForHit(selection, hit),
     move: (dx: any, dy: any, ev: any) => {
       moved = true;
       if (hit.rotate) {
-        const a = Math.atan2((ev.clientY - r0.top) / V.shown - cy, (ev.clientX - r0.left) / V.shown - cx);
-        let deg = s0.r + (a - a0) * 180 / Math.PI;
-        if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+        const pointer = pointerComp(ev);
+        const a = pointerAngleInParentSpace(L, T, pivotWorld, pointer);
+        if (a == null || a0 == null) return;
+        let deg = s0.r + angleDeltaDegrees(a, a0);
+        if (ev.metaKey || ev.ctrlKey) deg = Math.round(deg / 45) * 45;
+        else if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
         setOrKey(L, 'rotation', PM.round(deg, 2), T);
       } else {
-        const pointerWorld = { x: (ev.clientX - r0.left) / V.shown, y: (ev.clientY - r0.top) / V.shown };
+        const pointerWorld = pointerComp(ev);
         const pointerLocal = invertPoint(m, pointerWorld);
         if (!pointerLocal) return;
         const next = calculateResize(b, hit.corner, pointerLocal, grabOffset,
@@ -615,6 +1007,108 @@ function startTransform(e: any, L: any, hit: any, T: any) {
   });
 }
 
+function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T: any) {
+  const bounds = selection.bounds;
+  const pointerStart = pointerComp(e);
+  const handleStart = hit.corner ? pointInBounds(bounds, hit.corner) : null;
+  const grabOffset = handleStart
+    ? { x: pointerStart.x - handleStart.x, y: pointerStart.y - handleStart.y }
+    : { x: 0, y: 0 };
+  const rotationStart = Math.atan2(
+    pointerStart.y - selection.pivotWorld.y,
+    pointerStart.x - selection.pivotWorld.x,
+  );
+  const snapshots = selection.roots.map((L: any) => ({
+    L,
+    x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T),
+    sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T),
+    rotation: PM.ev(L, 'rotation', T),
+    skew: PM.ev(L, 'skew', T),
+    pivotWorld: layerWorldPivot(PM, L, T),
+    parentLinear: (() => {
+      const matrix = parentWorldMatrix(L, T);
+      return matrix ? [matrix[0], matrix[1], matrix[2], matrix[3]] as LinearMatrix : null;
+    })(),
+    worldLinear: (() => {
+      const matrix = PM.worldMatrix(L, T);
+      return [matrix[0], matrix[1], matrix[2], matrix[3]] as LinearMatrix;
+    })(),
+    textSize: L.type === 'text' ? Math.max(4, Number(L.d?.size) || 4) : null,
+    textOwnsDescendants: L.type === 'text' && PM.proj.layers.some((layer: any) => layer.parent === L.id),
+  }));
+  if (!snapshots.length) return;
+
+  const label = hit.rotate ? 'Rotate selection' : 'Resize selection';
+  PM.Edit.begin(label, { origin: 'canvas' });
+  let moved = false;
+  beginDrag(e, {
+    cursor: cursorForHit(selection, hit),
+    move: (_dx: any, _dy: any, ev: any) => {
+      moved = true;
+      const pointer = pointerComp(ev);
+      if (hit.rotate) {
+        const angle = Math.atan2(pointer.y - selection.pivotWorld.y, pointer.x - selection.pivotWorld.x);
+        let delta = angleDeltaDegrees(angle, rotationStart);
+        if (ev.metaKey || ev.ctrlKey) delta = Math.round(delta / 45) * 45;
+        else if (ev.shiftKey) delta = Math.round(delta / 15) * 15;
+        for (const snapshot of snapshots) {
+          const nextPivot = transformPointAround(
+            snapshot.pivotWorld, selection.pivotWorld, 1, 1, delta,
+          );
+          const nextPosition = worldPointToParentLocal(snapshot.L, T, nextPivot);
+          if (!nextPosition) continue;
+          setOrKey(snapshot.L, 'position.x', PM.round(nextPosition.x, 3), T);
+          setOrKey(snapshot.L, 'position.y', PM.round(nextPosition.y, 3), T);
+          if (!snapshot.parentLinear) {
+            /* With no parent, left-multiplying by R(delta) changes only the
+               local rotation; preserve scale/skew channels and their keys. */
+            setOrKey(snapshot.L, 'rotation', PM.round(snapshot.rotation + delta, 3), T);
+            continue;
+          }
+          const desiredWorld = rotateLinear(snapshot.worldLinear, delta);
+          const local = solveLocalTransformForWorldLinear(snapshot.parentLinear, desiredWorld, {
+            scaleX: snapshot.sx / 100, rotation: snapshot.rotation,
+          });
+          if (!local) continue;
+          const values = [
+            ['rotation', local.rotation],
+            ['scale.x', local.scaleX * 100],
+            ['scale.y', local.scaleY * 100],
+            ['skew', local.skew],
+          ] as const;
+          for (const [path, value] of values) setOrKey(snapshot.L, path, PM.round(value, 4), T);
+        }
+      } else {
+        const next = calculateResize(
+          bounds, hit.corner, pointer, grabOffset, { x: 1, y: 1 },
+          { fromCenter: ev.altKey, lockAspect: true, minScale: .01 },
+        );
+        const scaleX = next.scaleX, scaleY = next.scaleY;
+        const pivot = next.pivotLocal;
+        for (const snapshot of snapshots) {
+          if (snapshot.textSize != null && !snapshot.textOwnsDescendants) {
+            PM.Edit.dispatch({
+              type: 'set_content', target: snapshot.L.id,
+              patch: { size: PM.round(Math.max(4, snapshot.textSize * scaleX), 2) },
+            });
+          } else {
+            setOrKey(snapshot.L, 'scale.x', PM.round(snapshot.sx * scaleX, 3), T);
+            setOrKey(snapshot.L, 'scale.y', PM.round(snapshot.sy * scaleY, 3), T);
+          }
+          const nextPivot = transformPointAround(snapshot.pivotWorld, pivot, scaleX, scaleY);
+          const nextPosition = worldPointToParentLocal(snapshot.L, T, nextPivot);
+          if (!nextPosition) continue;
+          setOrKey(snapshot.L, 'position.x', PM.round(nextPosition.x, 3), T);
+          setOrKey(snapshot.L, 'position.y', PM.round(nextPosition.y, 3), T);
+        }
+      }
+      PM.invalidate();
+    },
+    up: () => { moved ? PM.Edit.commit(label) : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    cancel: () => { PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+  });
+}
+
 /** Write a value: sets a keyframe when the channel is animated, otherwise the static value. */
 function setOrKey(L: any, key: any, v: any, T: any) {
   return PM.Edit.dispatch({
@@ -623,5 +1117,8 @@ function setOrKey(L: any, key: any, v: any, T: any) {
   });
 }
 PM.setOrKey = setOrKey;
+/* Replacement activation receives the same viewer object and WebGL surface.
+   Rebind the new closures immediately; the panel never needs to reopen. */
+if (existingStage) V.attach(existingStage);
 return V;
 }

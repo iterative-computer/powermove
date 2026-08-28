@@ -25,10 +25,16 @@ function domHelper(selector: string, attrs?: unknown, ...children: unknown[]): H
 }
 
 function timelinePM(): Record<string, any> {
+  const busReleases: Array<ReturnType<typeof vi.fn>> = [];
   return {
     h: domHelper,
     clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-    bus: { on: vi.fn(() => () => {}) },
+    bus: { on: vi.fn(() => {
+      const release = vi.fn();
+      busReleases.push(release);
+      return release;
+    }) },
+    __timelineBusReleases: busReleases,
     proj: { w: 1920, h: 1080, fps: 30, dur: 10, work: [0, 10], layers: [], markers: [] },
     $: (selector: string) => document.querySelector(selector),
     icon: (name: string) => {
@@ -135,6 +141,64 @@ describe('timeline extension', () => {
     expect(slot.querySelector('.tl-transport')).not.toBeNull();
   });
 
+  it('registers and runs a disposer for kernel reload or disable', () => {
+    let panel: PanelDefinition | undefined;
+    let dispose: (() => void) | undefined;
+    const PM = timelinePM();
+    activate({
+      host: { pm: PM },
+      panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) },
+      onDispose: vi.fn((handler: () => void) => void (dispose = handler)),
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+    const snap = body.querySelector<HTMLButtonElement>('button[title="Snapping (S)"]')!;
+    const before = PM.snap;
+
+    expect(dispose).toEqual(expect.any(Function));
+    dispose?.();
+    snap.click();
+
+    expect(PM.TL.__timelineRuntimeDisposed).toBe(true);
+    expect(PM.snap).toBe(before);
+    expect(PM.__timelineBusReleases.length).toBeGreaterThan(0);
+    expect(PM.__timelineBusReleases.every((release: ReturnType<typeof vi.fn>) => release.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('reactivates in place with fresh handlers and preserved view state', () => {
+    const PM = timelinePM();
+    let firstPanel: PanelDefinition | undefined;
+    let firstDispose: (() => void) | undefined;
+    activate({
+      host: { pm: PM },
+      panels: { register: vi.fn((definition: PanelDefinition) => void (firstPanel = definition)) },
+      onDispose: vi.fn((handler: () => void) => void (firstDispose = handler)),
+    } as unknown as PowermoveAPI);
+    const firstBody = document.createElement('div');
+    document.body.append(firstBody);
+    firstPanel?.build?.(firstBody, { spec: {} });
+    const timeline = PM.TL;
+    timeline.pps = 246;
+
+    firstDispose?.();
+    let replacementPanel: PanelDefinition | undefined;
+    activate({
+      host: { pm: PM },
+      panels: { register: vi.fn((definition: PanelDefinition) => void (replacementPanel = definition)) },
+      onDispose: vi.fn(),
+    } as unknown as PowermoveAPI);
+    const replacementBody = document.createElement('div');
+    document.body.append(replacementBody);
+    replacementPanel?.build?.(replacementBody, { spec: {} });
+
+    expect(PM.TL).toBe(timeline);
+    expect(PM.TL.pps).toBe(246);
+    expect(PM.TL.__timelineRuntimeDisposed).toBe(false);
+    expect(PM.TL.cv).toBe(replacementBody.querySelector('#tl-canvas'));
+    expect(replacementBody.querySelectorAll('.tl-transport')).toHaveLength(1);
+  });
+
   it.each(['layer', 'prop', 'graph', 'below'])('empty %s clicks clear selection without seeking; modified clicks preserve selection', (area) => {
     let panel: PanelDefinition | undefined;
     const PM = timelinePM();
@@ -148,7 +212,8 @@ describe('timeline extension', () => {
     PM.drag = vi.fn((_event, handlers) => handlers.up());
     activate({
       host: { pm: PM },
-      panels: { register: (definition: PanelDefinition) => { panel = definition; } }
+      panels: { register: (definition: PanelDefinition) => { panel = definition; } },
+      onDispose: vi.fn(),
     } as unknown as PowermoveAPI);
     const body = document.createElement('div');
     document.body.append(body);
