@@ -304,6 +304,15 @@ it('whole-workspace proposals stay reachable and keep only source-connected gene
   assert.equal(plan.workspaceEdit.docks.some(dock => dock.panels.some(panel => panel.id === 'made-up-panel')), false);
 });
 
+it('Ripple adapter acquisition is fresh on every lifecycle request', async () => {
+  let calls = 0;
+  const assistant = spatialModel(() => Promise.resolve({ generation: ++calls }));
+  const first = await assistant.lifecycle.requestAdapter();
+  const second = await assistant.lifecycle.requestAdapter();
+  assert.equal(calls, 2);
+  assert.notEqual(first.generation, second.generation);
+});
+
 it('normalizes only valid typed extension changes', () => {
   const { PM, assistant } = spatialHarness();
   PM.proj = { id: 'project-1' };

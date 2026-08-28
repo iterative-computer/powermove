@@ -33,7 +33,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@motion-core/motion-gpu": "0.15.1",
     "@powermove/macos-haptics": "file:native/macos-haptics",
     "esbuild": "0.25.12"
   }
