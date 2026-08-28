@@ -17,11 +17,11 @@ import type { EditCommand } from '../core/types/commands';
 type LegacyPM = Record<string, any>;
 
 export type EditBinding =
-  | { mode: 'command'; label: string; origin?: string; command: EditCommand | ((value: unknown) => EditCommand) }
+  | { mode: 'command'; label: string; origin?: string; prepare?: () => void; command: EditCommand | ((value: unknown) => EditCommand | EditCommand[]) }
   | { mode: 'local'; label: string; set(value: unknown): void }
   | { mode: 'set'; label: string; set(value: unknown): void };
 
-const build = (b: Extract<EditBinding, { mode: 'command' }>, value: unknown): EditCommand =>
+const build = (b: Extract<EditBinding, { mode: 'command' }>, value: unknown): EditCommand | EditCommand[] =>
   typeof b.command === 'function' ? b.command(value) : ({ ...b.command, value } as EditCommand);
 
 export class EditGesture {
@@ -29,7 +29,7 @@ export class EditGesture {
 
   begin(): void {
     const { PM, b } = this;
-    if (b.mode === 'command') PM.Edit.begin(b.label, { origin: b.origin ?? 'interface' });
+    if (b.mode === 'command') { b.prepare?.(); PM.Edit.begin(b.label, { origin: b.origin ?? 'interface' }); }
     else if (b.mode === 'set') PM.hist.begin(b.label);
   }
 
@@ -54,7 +54,7 @@ export class EditGesture {
   /** Click-set: toggles, selects, colour apply. */
   once(value: unknown): unknown {
     const { PM, b } = this;
-    if (b.mode === 'command') return PM.Edit.apply(build(b, value), { label: b.label, origin: b.origin ?? 'interface' });
+    if (b.mode === 'command') { b.prepare?.(); return PM.Edit.apply(build(b, value), { label: b.label, origin: b.origin ?? 'interface' }); }
     if (b.mode === 'set') return PM.hist.do(b.label, () => b.set(value));
     b.set(value);
     return undefined;

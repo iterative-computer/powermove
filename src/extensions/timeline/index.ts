@@ -27,9 +27,15 @@ const TIMELINE_STYLES = `
 export default function activate(api: PowermoveAPI): void {
   const pm = api.host.pm as Record<string, any>;
   const timeline = createTimelineRuntime(pm);
+  /* Kernel deactivation runs before replacement activation. Capture this
+     module instance's disposer so disabling/reloading the extension cannot
+     leave its bus, window, observer, or DOM listeners alive. */
+  const disposeRuntime = timeline.disposeRuntime;
+  api.onDispose?.(() => disposeRuntime());
 
   api.panels.register({
     id: 'timeline',
+    icon: 'timeline',
     ...timelinePanelOptions,
     build(body) {
       const styles = document.createElement('style');

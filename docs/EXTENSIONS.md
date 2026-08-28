@@ -80,7 +80,7 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **transitions** — `register({ id, label, params, frag })`. Inputs `u_from` (frame so far), `u_to` (incoming layer), `u_prog` 0→1. Output `o`. Applied on a layer via its `transition` property (inspector or `set_layer` command with `{ transition: { type, dur, p } }`).
 - **theme** — `register({ id, name, scheme, tokens, darkTokens?, css?, rootAttributes? })`, `activate(id)`. Tokens are CSS custom properties (see "Theme tokens"). `css` may restyle anything.
 - **palette** — `registerProvider(query => entries[])`.
-- **menus** — `contribute(location, ctx => items[])`; locations: `titlebar:right`, `panel:context`, `layer:context`, `timeline:context`, `viewer:context`.
+- **menus** — `contribute(location, ctx => items[])`; locations: `panel:context`, `layer:context`, `timeline:context`, `viewer:context`. Titlebar extension shortcuts are retired; registered panels appear in the panel Library automatically.
 - **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
 - **project** — `get()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`.
   `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
@@ -120,6 +120,18 @@ api.effects.register({
 **Override just a piece** — don't fork; register the same panel/command/effect `id`. The latest registration wins; disabling yours restores the original.
 
 ## Theme tokens (subset; see css/tokens.css)
+
+### Native panels by default
+
+Unless the user's prompt explicitly requests a different style, new and modified
+panels must match regular Powermove panels one to one. Let `api.panels.register`
+supply the existing frame, header, docking, and scrolling. Reuse `api.ui.controls`
+and the closest built-in panel's rows, fields, sections, buttons, and icons.
+Match the same spacing, type sizes, label alignment, control heights, radii,
+borders, and surfaces using the app's tokens. Inherit light/dark mode; do not
+introduce a nested card, duplicate title bar, custom palette, or decorative UI.
+Keep controls source-connected and undoable. An explicit user style request
+overrides this default only for the requested surface.
 
 `--accent --bg-window --bg-panel --bg-panel-2 --bg-sunken --bg-field --tx --tx-2 --line --r-base --f-ui --f-mono --row-h --ctl-h --fs-md --dur-2 --ease`
 

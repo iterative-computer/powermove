@@ -2,6 +2,7 @@
   import { agentState } from './agent-state.svelte';
   import Timeline from './Timeline.svelte';
   import Turn from './Turn.svelte';
+  import ResultActions from './ResultActions.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -38,4 +39,7 @@
 {/each}
 {#if showTimeline || agentState.activity}
   <Timeline {PM} />
+{/if}
+{#if agentState.phase === 'result' && agentState.run?.autonomous && !agentState.panelRun}
+  <ResultActions {PM} />
 {/if}

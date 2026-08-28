@@ -17,6 +17,7 @@ function keyframes(project: any) {
       for (const effect of layer.fx || []) props.push(...Object.values(effect.p || {}));
       for (const mask of layer.masks || []) props.push(...Object.values(mask.p || {}));
       if (layer.type === 'shader') props.push(...Object.values(layer.d?.uniforms || {}));
+      for (const field of ['transitionIn', 'transitionOut']) props.push(...Object.values(layer[field]?.p || {}));
       for (const prop of props) for (const key of prop?.kf || []) if (typeof key?.i === 'string') out.push(key);
     }
     projects.push(...Object.values(comp.comps || {}) as any[]);

@@ -44,7 +44,7 @@ export interface PanelDefinition {
   hideMoveHandle?: boolean;
   /** CSS selector inside the body that hosts the move handle. */
   moveSlot?: string;
-  /** Icon name from the kernel icon set (optional). */
+  /** Choose a meaningful, distinct icon from the kernel icon set for every new panel. */
   icon?: string;
 }
 
@@ -264,7 +264,7 @@ export interface ProjectAPI {
 export type ControlComponent = Component<Record<string, unknown>>;
 
 export type ControlEditBinding =
-  | { mode: 'command'; label: string; origin?: string; command: EditCommand | ((value: unknown) => EditCommand) }
+  | { mode: 'command'; label: string; origin?: string; prepare?: () => void; command: EditCommand | ((value: unknown) => EditCommand | EditCommand[]) }
   | { mode: 'local'; label: string; set(value: unknown): void }
   | { mode: 'set'; label: string; set(value: unknown): void };
 

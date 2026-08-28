@@ -26,6 +26,30 @@ async function seedExtension(userData: string, id: string, indexTs: string, mani
 }
 
 test.describe('@extensions user extensions load through the kernel', () => {
+  test('replaces panel source in place without changing the document, window, or docking', async ({ session }) => {
+    const source = (label: string) => `export default function activate(api) { api.panels.register({ id:'reload-panel', title:'Reload panel', build(body) { body.textContent = '${label}'; } }); }`;
+    await seedExtension(session.userData, 'reload-panel', source('Before edit'));
+    await session.relaunch();
+    const { page, app } = session;
+    await page.waitForFunction(() => Boolean((window as any).PM.PANELS['reload-panel']));
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((ws: any) => PM.Layout.addPanel(ws, 'reload-panel', 'right'));
+      (window as any).__reloadDocument = document;
+      (window as any).__reloadProject = PM.proj;
+    });
+    await expect(page.locator('#panel-reload-panel .body')).toHaveText('Before edit');
+    const before = await page.evaluate(() => JSON.stringify((window as any).PM.WS.current));
+    const pid = app.process().pid;
+    await writeFile(path.join(session.userData, 'extensions/reload-panel/index.ts'), source('After edit'));
+    await page.evaluate(async () => { await (window as any).powermove.extensions.reload({ id: 'reload-panel' }); });
+    await expect(page.locator('#body #panel-reload-panel .body')).toHaveText('After edit');
+    expect(await page.evaluate(() => JSON.stringify((window as any).PM.WS.current))).toBe(before);
+    expect(await page.evaluate(() => (window as any).__reloadDocument === document && (window as any).__reloadProject === (window as any).PM.proj)).toBe(true);
+    expect(app.process().pid).toBe(pid);
+    expect(app.windows()).toHaveLength(1);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
   test('a user extension activates, contributes a command and an effect, and survives disable', async ({ session }) => {
     await seedExtension(
       session.userData,

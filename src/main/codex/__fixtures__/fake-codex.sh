@@ -6,16 +6,18 @@ if [ "$1" = "--version" ]; then
 fi
 
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf '%s\n' '--ephemeral --skip-git-repo-check --ignore-rules --sandbox --output-schema --output-last-message --json --model --config --image --search --add-dir --approve-for-me --dangerously-bypass-approvals-and-sandbox'
+  printf '%s\n' '--ephemeral --ignore-user-config --skip-git-repo-check --ignore-rules --sandbox --output-schema --output-last-message --json --model --config --image --search --disable --add-dir --approve-for-me --dangerously-bypass-approvals-and-sandbox'
   exit 0
 fi
 
 output_path=''
 resuming=0
+ignore_user_config=0
 previous=''
 for argument in "$@"; do
   if [ "$previous" = '--output-last-message' ]; then output_path="$argument"; fi
   if [ "$argument" = 'resume' ]; then resuming=1; fi
+  if [ "$argument" = '--ignore-user-config' ]; then ignore_user_config=1; fi
   previous="$argument"
 done
 
@@ -28,6 +30,17 @@ fi
 if [ "${FAKE_CODEX_MODE:-success}" = 'stale-resume' ] && [ "$resuming" -eq 1 ]; then
   printf '%s\n' 'Error: session is unknown or no longer exists' >&2
   exit 17
+fi
+
+if [ "${FAKE_CODEX_MODE:-success}" = 'mcp-fallback' ] && [ "$ignore_user_config" -eq 0 ]; then
+  printf '%s\n' 'ERROR rmcp::transport::worker: MCP startup failed: handshaking with MCP server failed' >&2
+  exit 19
+fi
+
+if [ "${FAKE_CODEX_MODE:-success}" = 'structured-failure' ]; then
+  printf '%s\n' 'Reading additional input from stdin...' >&2
+  printf '%s\n' '{"type":"item.completed","item":{"type":"error","message":"The structured failure is the real cause"}}'
+  exit 20
 fi
 
 fixture_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

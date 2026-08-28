@@ -17,12 +17,27 @@ export default function activate(api: PowermoveAPI): void {
 
   // Install at activation time so legacy consumers retain the PM.Viewer and
   // PM.setOrKey contracts even before the panel has mounted.
-  createViewerRuntime(PM);
+  const runtime = createViewerRuntime(PM);
+  const disposeRuntime = runtime.dispose as () => void;
+  api.onDispose(() => disposeRuntime());
 
   api.panels.register({
     id: 'viewer',
+    icon: 'frame',
     ...viewerPanelOptions,
     build(body) {
+      // Reuse the live WebGL surface during extension/HMR updates. A new canvas
+      // cannot inherit the old GL context, textures, or viewer event bindings.
+      if (PM.Viewer?.stage) {
+        const stage = PM.Viewer.stage as HTMLElement;
+        const styles = stage.querySelector('style');
+        if (styles) styles.textContent = VIEWER_STYLES;
+        const overlay = stage.querySelector('#overlay');
+        if (overlay && overlay.parentElement !== stage) stage.appendChild(overlay);
+        body.replaceChildren(stage);
+        PM.Viewer.layout();
+        return;
+      }
       const stage = document.createElement('div');
       stage.id = 'stage';
 
@@ -33,11 +48,11 @@ export default function activate(api: PowermoveAPI): void {
       gl.id = 'gl';
       const overlay = document.createElement('canvas');
       overlay.id = 'overlay';
-      inner.append(gl, overlay);
+      inner.append(gl);
 
       const styles = document.createElement('style');
       styles.textContent = VIEWER_STYLES;
-      stage.append(inner, styles);
+      stage.append(inner, overlay, styles);
       body.replaceChildren(stage);
 
       createViewerRuntime(PM).attach(stage);

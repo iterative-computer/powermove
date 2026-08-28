@@ -10,7 +10,7 @@ afterEach(() => {
   else delete (globalThis as any).window;
 });
 
-function appRegistry(withExtensionSurfaces = true): {
+function appRegistry(withExtensionSurfaces = true, bootProject?: any): {
   PM: PMRegistry;
   memory: Map<string, any>;
   listeners: Map<string, any[]>;
@@ -91,12 +91,14 @@ function appRegistry(withExtensionSurfaces = true): {
   };
   Object.defineProperty(globalThis, 'window', { value: fakeWindow, configurable: true });
 
-  const raw = {
+  const raw = bootProject || {
     id: 'P1', name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',
     layers: [], assets: {}, markers: [], params: {}, comps: {},
   };
   const projects = new Map<string, any>([[raw.id, raw]]);
   const busHandlers = new Map<string, any[]>();
+  let nextId = 0;
+  const normalizationCalls: any[] = [];
   const PM: PMRegistry = {
     bootVersion: 0,
     store: {
@@ -135,8 +137,21 @@ function appRegistry(withExtensionSurfaces = true): {
     },
     normalizeFill: (_fill: any, fallback: string) => ({ stops: [{ color: fallback }] }),
     clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-    TYPE_META: {},
+    TYPE_META: { shape: {}, shader: {} },
     MASK_SHAPES: [],
+    uid: (prefix: string) => `${prefix}${++nextId}`,
+    P: (value: any) => ({ v: value, kf: [], expr: null }),
+    mkLayer(type: string) {
+      return {
+        type, p: { opacity: { v: 100, kf: [], expr: null } }, fx: [], masks: [],
+        transitionIn: null, transitionOut: null, d: type === 'shader' ? { uniforms: {} } : {},
+      };
+    },
+    normalizeKeyframes(keys: any, fallback: any) {
+      normalizationCalls.push({ keys, fallback });
+      return (Array.isArray(keys) ? keys : []).filter((key: any) =>
+        key && Number.isFinite(key.t) && key.t >= 0 && typeof key.v === typeof fallback);
+    },
     WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), editing: false },
     selectLayers() {},
     L: () => null,
@@ -175,6 +190,7 @@ function appRegistry(withExtensionSurfaces = true): {
     toast(message: string) { toasts.push(message); },
   };
   PM.__busHandlers = busHandlers;
+  PM.__normalizationCalls = normalizationCalls;
 
   if (!withExtensionSurfaces) {
     delete PM.TL;
@@ -228,5 +244,38 @@ describe('legacy app install', () => {
     expect(timers.has(saveTimer)).toBe(true);
     listeners.get('beforeunload')?.[0]();
     expect(clearedTimers).toContain(saveTimer);
+  });
+
+  it('normalizes every persisted animation surface and preserves missing extension data', () => {
+    const raw: any = {
+      id: 'P1', name: 'Recovered', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',
+      assets: {}, markers: [], params: {}, comps: {},
+      layers: [{
+        id: 'shape', type: 'shape', name: 'Shape', from: 0, dur: 10, on: true,
+        p: { opacity: { v: 100, expr: 12, kf: [{ t: 1, v: 50 }, { t: -1, v: 80 }] } },
+        fx: [{ id: 'fx', type: 'extension-effect', on: true, p: { amount: { v: 7, kf: [{ t: 0, v: 8 }] } } }],
+        transitionIn: { type: 'extension-transition', dur: 1, p: { amount: { v: 3, kf: [{ t: 0, v: 4 }] } } },
+        masks: [], d: {},
+      }, {
+        id: 'shader', type: 'shader', name: 'Shader', from: 0, dur: 10, on: true,
+        p: { opacity: { v: 100, kf: [] } }, fx: [], masks: [],
+        d: { uniforms: { strength: { v: 2, kf: [{ t: 0, v: 3 }] } } },
+      }],
+    };
+    const { PM } = appRegistry(false, raw);
+    const shape: any = PM.proj.layers[0];
+    const shader: any = PM.proj.layers[1];
+
+    expect(shape.p.opacity.kf).toEqual([{ t: 1, v: 50 }]);
+    expect(shape.p.opacity.expr).toBeNull();
+    expect(shape.fx[0].missing).toBe(true);
+    expect(shape.fx[0].p.amount.kf).toHaveLength(1);
+    expect(shape.fx[0].p.amount.kf[0]).toMatchObject({ t: 0, v: 8 });
+    expect(shape.transitionIn.missing).toBe(true);
+    expect(shape.transitionIn.p.amount.kf).toHaveLength(1);
+    expect(shape.transitionIn.p.amount.kf[0]).toMatchObject({ t: 0, v: 4 });
+    expect(shader.d.uniforms.strength.kf).toHaveLength(1);
+    expect(shader.d.uniforms.strength.kf[0]).toMatchObject({ t: 0, v: 3 });
+    expect(PM.__normalizationCalls.length).toBeGreaterThanOrEqual(5);
   });
 });

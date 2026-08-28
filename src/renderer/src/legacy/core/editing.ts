@@ -25,9 +25,21 @@ const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = 
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed',
+  'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked',
 ]);
 let live: any = null;
+
+const projectLayers: any = () => {
+  const out: any[] = [], queue: any[] = [PM.proj], seen = new Set<any>();
+  while (queue.length) {
+    const comp = queue.shift();
+    if (!comp || seen.has(comp)) continue;
+    seen.add(comp);
+    out.push(...(comp.layers || []));
+    queue.push(...Object.values(comp.comps || {}));
+  }
+  return out;
+};
 
 const clone: any = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 const fail: any = (message: any) => ({ ok: false, message });
@@ -126,7 +138,7 @@ function setProperty(command: any) {
   const time: any = command.time == null ? PM.time : finite(command.time, 'time');
   const mode: any = command.mode || 'auto';
   if (mode === 'keyframe' || (mode === 'auto' && prop.kf.length)) {
-    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'power', PM.proj.fps);
+    const key: any = PM.setKeyOn(prop, time - layer.from, value, command.ease || 'linear', PM.proj.fps);
     if (command.hold != null) key.hold = !!command.hold;
   } else {
     prop.v = value;
@@ -156,7 +168,7 @@ function replaceKeyframes(command: any) {
     if (!key || typeof key !== 'object') throw new Error(`Keyframe ${index + 1} is invalid`);
     const time: any = Math.max(0, finite(key.time, `keyframe ${index + 1} time`));
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
-    return { time, value, ease: key.ease || 'power', hold: !!key.hold };
+    return { time, value, ease: key.ease || 'linear', hold: !!key.hold };
   });
   if (command.replace !== false) prop.kf = [];
   for (const key of next) {
@@ -184,7 +196,7 @@ function setEasing(command: any) {
   if (!ids.size) throw new Error('Select at least one keyframe');
   const curve: any = easingCurve(command.curve);
   const found: any = [];
-  for (const layer of PM.proj.layers) {
+  for (const layer of projectLayers()) {
     for (const item of PM.allProps(layer)) {
       for (const key of item.prop.kf) if (ids.has(key.i)) found.push(key);
     }
@@ -279,6 +291,7 @@ function setLayer(command: any) {
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
+  if (patch.scaleLinked != null) layer.scaleLinked = !!patch.scaleLinked;
   PM.touch();
   return { id: layer.id, keys: Object.keys(patch) };
 }
@@ -532,7 +545,7 @@ function keyframeLayers(command: any) {
   const ids: any = new Set((Array.isArray(command.keyframes) ? command.keyframes : [])
     .filter((id: any) => typeof id === 'string' && id));
   if (!ids.size) return [];
-  return PM.proj.layers.filter((layer: any) => PM.allProps(layer)
+  return projectLayers().filter((layer: any) => PM.allProps(layer)
     .some((item: any) => item.prop.kf.some((key: any) => ids.has(key.i))));
 }
 
@@ -704,7 +717,7 @@ function sourceCatalog() {
       const control: any = primitiveControl(value); if (!control) return null;
       return { path: `content.${key}`, label: key, control, value, ...(control === 'slider' ? numericRange(value, key) : {}) };
     }).filter(Boolean);
-    const properties: any = PM.allProps(layer).map((item: any) => {
+    const properties: any = PM.allProps(layer).filter((item: any) => !item.key.startsWith('transition')).map((item: any) => {
       const value: any = PM.evP(layer, item.prop, PM.time, item.key);
       const control: any = primitiveControl(value); if (!control) return null;
       const fxId: any = item.key.split('.')[0];
@@ -866,7 +879,7 @@ const Edit: any = {
       content: Object.entries(layer.d).filter(([, value]: any) => ['string', 'number', 'boolean'].includes(typeof value)).map(([key, value]: any) => ({
         path: `content.${key}`, value, command: { type: 'set_content', target: layer.id, patch: { [key]: value } },
       })),
-      properties: PM.allProps(layer).map((item: any) => ({
+      properties: PM.allProps(layer).filter((item: any) => !item.key.startsWith('transition')).map((item: any) => ({
         path: `properties.${item.key}`, label: item.label, group: item.group,
         value: PM.evP(layer, item.prop, PM.time, item.key), animatable: true,
         command: { type: 'set_property', target: layer.id, path: item.key, value: PM.evP(layer, item.prop, PM.time, item.key) },

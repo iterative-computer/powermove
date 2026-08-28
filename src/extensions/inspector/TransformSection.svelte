@@ -12,8 +12,7 @@
   const channels = [
     ['position.x', 'Position X'],
     ['position.y', 'Position Y'],
-    ['scale.x', 'Scale X'],
-    ['scale.y', 'Scale Y'],
+    ['scale.x', 'Scale'],
     ['rotation', 'Rotation'],
     ['opacity', 'Opacity'],
     ['anchor.x', 'Anchor X'],

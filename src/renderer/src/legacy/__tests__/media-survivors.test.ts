@@ -3,21 +3,21 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { makePM } from './make-pm';
 
-function fakeIndexedDB() {
+function fakeIndexedDB(abortWrite=false) {
   const records = new Map<string, unknown>();
   const request = (result: unknown, tx: any) => {
     const req: any = { result };
     setImmediate(() => {
       req.onsuccess?.();
-      setImmediate(() => tx.oncomplete?.());
+      setImmediate(() => abortWrite && tx.mode==='readwrite' ? tx.onabort?.() : tx.oncomplete?.());
     });
     return req;
   };
   const db: any = {
     objectStoreNames: { contains: () => true },
     createObjectStore() {},
-    transaction() {
-      const tx: any = {};
+    transaction(_store:string,mode:string) {
+      const tx: any = {mode};
       tx.objectStore = () => ({
         put(record: any) { records.set(record.id, record); return request(record.id, tx); },
         get(id: string) { return request(records.get(id), tx); },
@@ -43,6 +43,10 @@ function mediaPM(indexedDB: unknown = null) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('media oracle survivors', () => {
+  it('does not report a request as durable when its transaction later aborts',async()=>{
+    const PM=mediaPM(fakeIndexedDB(true));
+    expect(await PM.MediaStore.put('aborted',new Blob(['bytes']))).toBe(false);
+  });
   it('round-trips generic imported blobs through MediaStore', async () => {
     const PM = mediaPM(fakeIndexedDB());
     const original = new Blob(['exact media bytes'], { type: 'video/mp4' });

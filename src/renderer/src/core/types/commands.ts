@@ -103,6 +103,7 @@ export interface LayerPatch {
   parent?: LayerTarget;
   color?: string;
   collapsed?: boolean;
+  scaleLinked?: boolean;
 }
 
 export interface SetLayerCommand extends LayerTargetedCommand {

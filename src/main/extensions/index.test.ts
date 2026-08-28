@@ -6,7 +6,7 @@ import type { IpcMain } from 'electron';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EXT_IPC, type ExtensionRecord } from '../../shared/extensions';
-import { registerExtensionsIpc, serveExtensionAsset } from './index';
+import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './index';
 import type { ExtensionRegistry } from './registry';
 
 const temporaryDirectories: string[] = [];
@@ -115,6 +115,14 @@ describe('extensions IPC', () => {
 });
 
 describe('extension asset server', () => {
+  it('allows only the exact Vite renderer origin during development', () => {
+    expect(extensionAssetCorsHeaders('http://localhost:5174/')).toEqual({
+      'Access-Control-Allow-Origin': 'http://localhost:5174'
+    });
+    expect(extensionAssetCorsHeaders(undefined)).toEqual({});
+    expect(extensionAssetCorsHeaders('not a URL')).toEqual({});
+  });
+
   it('serves only a generated bundle with no-store JavaScript headers', async () => {
     const buildDir = await temporaryDirectory();
     await fs.mkdir(path.join(buildDir, 'valid-id'));

@@ -371,7 +371,7 @@ function sendValidationError(
  * Installs the two-pass quit barrier. The integrator owns and acquires the
  * application's single-instance lock before installing this helper.
  */
-export function installQuitFlush(app: Pick<App, 'on' | 'quit'>, store: Store): void {
+export function installQuitFlush(app: Pick<App, 'on' | 'quit'>, store: Store, prepare?: () => Promise<void>): { isPrepared(): boolean } {
   let flushing = false;
   let flushed = false;
 
@@ -381,12 +381,17 @@ export function installQuitFlush(app: Pick<App, 'on' | 'quit'>, store: Store): v
     if (flushing) return;
     flushing = true;
 
-    void withCeiling(store.flushAll(), QUIT_FLUSH_CEILING_MS).finally(() => {
-      flushed = true;
-      flushing = false;
-      app.quit();
+    const finish = () => withCeiling(store.flushAll(), QUIT_FLUSH_CEILING_MS).finally(() => {
+      flushed = true; flushing = false; app.quit();
     });
+    if (prepare) {
+      void prepare().then(finish).catch(error => {
+        flushing = false;
+        console.error('Could not prepare editor state for quitting; keeping the app open',error);
+      });
+    } else void finish();
   });
+  return {isPrepared:() => flushed};
 }
 
 async function withCeiling(operation: Promise<void>, milliseconds: number): Promise<void> {

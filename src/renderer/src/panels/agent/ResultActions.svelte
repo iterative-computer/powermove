@@ -6,6 +6,11 @@
   const run = $derived(agentState.run);
   const panelRun = $derived(agentState.panelRun);
   const reversible = $derived(run?.autonomous ? !!run.changed : true);
+  const reviewMessage = $derived(run?.review?.message || '');
+  const showReviewMessage = $derived(!run?.autonomous || (reviewMessage && ![
+    'The editable Powermove result is ready to review.',
+    'The agent run completed without changing Powermove source.'
+  ].includes(reviewMessage)));
 
   function artifactSize(bytes: unknown): string {
     const size = Math.max(0, Number(bytes) || 0);
@@ -17,6 +22,16 @@
     return artifact.mime?.startsWith('video/') ? 'cam' : artifact.mime?.startsWith('audio/') ? 'clock' : 'frame';
   }
 </script>
+
+{#snippet frames()}
+  {#if run?.frames?.images?.length}
+    <div class="spatial-frame-grid">
+      {#each run.frames.images as src, index}
+        <figure><img {src} alt={`Rendered composition at ${run.frames.times[index]} seconds`} /><figcaption>{run.frames.times[index]}s</figcaption></figure>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 
 {#if panelRun}
   <div class="agent-card">
@@ -32,12 +47,14 @@
     </div>
   </div>
 {:else if run}
-  <div class="agent-card">
-    <div class="agent-card-kicker">{run.autonomous ? 'Autonomous result' : 'Rendered result'}</div>
-    <h3>{run.autonomous ? (run.summary || 'Agent work is ready') : 'Review the actual result'}</h3>
-    <p>{run.review?.message || 'The rendered change is ready.'}</p>
+  <div class={run.autonomous ? 'agent-run-details' : 'agent-card'}>
+    {#if !run.autonomous}
+      <div class="agent-card-kicker">Rendered result</div>
+      <h3>Review the actual result</h3>
+    {/if}
+    {#if showReviewMessage}<p>{reviewMessage || 'The rendered change is ready.'}</p>{/if}
     {#if run.review?.critique}<p>{run.review.critique}</p>{/if}
-    {#if reversible}<p>Powermove source changes from this run are one Command-Z Undo step.</p>{/if}
+    {#if reversible && !run.autonomous}<p>Powermove source changes from this run are one Command-Z Undo step.</p>{/if}
     {#if run.externalActions?.length}
       <div class="agent-external-actions"><b>External activity</b>{#each run.externalActions as action}<span>{action}</span>{/each}</div>
     {/if}
@@ -58,17 +75,33 @@
         {/each}
       </div>
     {/if}
-    {#if run.reviewError}<p class="spatial-review-warning">Visual review stopped: {run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.</p>{/if}
+    {#if run.reviewError}
+      <p class="spatial-review-warning">{run.autonomous ? run.reviewError : `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`}</p>
+    {/if}
     {#if run.frames?.images?.length}
-      <div class="spatial-frame-grid">
-        {#each run.frames.images as src, index}
-          <figure><img {src} alt={`Rendered composition at ${run.frames.times[index]} seconds`} /><figcaption>{run.frames.times[index]}s</figcaption></figure>
-        {/each}
+      {#if run.autonomous}
+        <details><summary>View rendered frames</summary>{@render frames()}</details>
+      {:else}
+        {@render frames()}
+      {/if}
+    {/if}
+    {#if run.autonomous}
+      {#if reversible}<button class="agent-run-undo" type="button" title="Undo this run's Powermove changes (also available with Command-Z)" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
+    {:else}
+      <div class="agent-card-actions">
+        {#if reversible}<button class="agent-btn" type="button" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
+        <button class="agent-btn pri" type="button" onclick={() => PM.AgentUI?.keepSceneRun()}>{reversible ? 'Keep change' : 'Done'}</button>
       </div>
     {/if}
-    <div class="agent-card-actions">
-      {#if reversible}<button class="agent-btn" type="button" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
-      <button class="agent-btn pri" type="button" onclick={() => PM.AgentUI?.keepSceneRun()}>{reversible ? 'Keep change' : 'Done'}</button>
-    </div>
   </div>
 {/if}
+
+<style>
+  .agent-run-details { flex: none; min-width: 0; display: flex; flex-direction: column; gap: 8px; color: var(--tx); font-size: var(--fs-md); line-height: 1.6; overflow-wrap: anywhere; }
+  .agent-run-details:empty { display: none; }
+  .agent-run-details p { margin: 0; white-space: pre-wrap; }
+  .agent-run-details details { color: var(--tx-3); font-size: var(--fs-sm); }
+  .agent-run-details summary { cursor: pointer; }
+  .agent-run-undo { align-self: flex-start; padding: 2px 0; color: var(--tx-3); font-size: var(--fs-sm); }
+  .agent-run-undo:hover { color: var(--tx); }
+</style>

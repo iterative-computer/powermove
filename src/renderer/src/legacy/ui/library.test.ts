@@ -17,6 +17,6 @@ describe('legacy library UI install', () => {
     expect(typeof PM.LibraryUI.open).toBe('function');
     expect(typeof PM.LibraryUI.close).toBe('function');
     expect(typeof PM.WorkspaceEditor.show).toBe('function');
-    expect(subscriptions).toEqual(['library', 'workspaces', 'project']);
+    expect(subscriptions).toEqual(['layout:applied', 'workspaces', 'project']);
   });
 });

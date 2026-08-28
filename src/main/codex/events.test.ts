@@ -15,6 +15,18 @@ import {
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
 describe('CodexEventParser', () => {
+  it('streams early public UI placement over the existing trace before the result', () => {
+    const text = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
+    const trace: CodexTraceEvent[] = [];
+    const parser = new CodexEventParser({ onTrace: step => trace.push(step) });
+    const line = bytes(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }) + '\n');
+    parser.push(line.slice(0, 40));
+    expect(trace).toEqual([]);
+    parser.push(line.slice(40));
+    expect(trace).toEqual([{ kind: 'answer', text }]);
+    parser.finish();
+  });
+
   it('parses the recorded transcript across a partial UTF-8 boundary', () => {
     const transcript = readFileSync(new URL('./__fixtures__/recorded-transcript.ndjson', import.meta.url));
     const split = transcript.indexOf(Buffer.from('café')) + Buffer.byteLength('caf') + 1;

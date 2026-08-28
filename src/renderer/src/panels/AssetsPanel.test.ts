@@ -66,6 +66,9 @@ function setup(
   const PM: Record<string, any> = {
     proj: project,
     ICONS: {
+      image: '<path data-test-icon="image"></path>',
+      music: '<path data-test-icon="music"></path>',
+      film: '<path data-test-icon="film"></path>',
       plus: '<path data-test-icon="plus"></path>',
       trash: '<path data-test-icon="trash"></path>',
       frame: '<path data-test-icon="frame"></path>',
@@ -133,7 +136,7 @@ describe('AssetsPanel', () => {
     const icon = target.querySelector<SVGElement>('svg.pm-icon')!;
     expect(icon.style.fill).toBe('currentColor');
     expect(icon.style.stroke).toBe('none');
-    expect(icon.dataset.icon).toBe('frame');
+    expect(icon.dataset.icon).toBe('image');
 
     /* Import lives in the panel header (register-simple), not in the body. */
     expect([...target.querySelectorAll('button')].some((button) => button.textContent?.trim() === 'Import')).toBe(false);

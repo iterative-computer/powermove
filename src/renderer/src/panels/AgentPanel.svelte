@@ -9,14 +9,14 @@
   let { panelId }: PanelProps = $props();
   const PM = window.PM as Record<string, any>;
 
-  /* Supermove layout: the thread scrolls under a mask fade; proposals, results
-     and the composer live in a floating footer the scroller never runs under. */
+  /* The thread scrolls under a mask fade. Only edits awaiting review belong
+     in the footer; autonomous replies and their files stay in the thread. */
   let scroller = $state<HTMLDivElement>();
   let showJump = $state(false);
   let userScrolled = false;
 
   const showPreview = $derived(agentState.phase === 'preview');
-  const showResult = $derived(agentState.phase === 'result');
+  const showResult = $derived(agentState.phase === 'result' && (agentState.panelRun || !agentState.run?.autonomous));
 
   function distanceFromBottom(): number {
     if (!scroller) return 0;

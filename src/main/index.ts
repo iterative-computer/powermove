@@ -13,7 +13,7 @@ import path from 'node:path';
 import { IPC } from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
-import { registerExtensionsIpc, serveExtensionAsset } from './extensions';
+import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './extensions';
 import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
@@ -70,6 +70,9 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      // Dev renders from Vite's http origin, so generated app:// extension
+      // modules need Chromium's normal CORS checks enabled for that boundary.
+      corsEnabled: true,
       stream: true
     }
   }
@@ -83,6 +86,16 @@ if (userDataOverride && path.isAbsolute(userDataOverride)) {
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | null = null;
+let quitPrepared = () => false;
+async function flushEditor(window: BrowserWindow): Promise<void> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()
+    || !isAllowedNavigation(window.webContents.getURL(),devRendererUrl)) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([window.webContents.executeJavaScript('window.PM?.flushProject?.()'),
+      new Promise<never>((_resolve,reject) => {timer=setTimeout(() => reject(new Error('Editor save timed out')),5000);})]);
+  } finally { clearTimeout(timer); }
+}
 
 function responseHeaders(contentType: string): Record<string, string> {
   return {
@@ -125,6 +138,7 @@ function registerAppProtocol(): void {
         if (asset === null) return errorResponse(404, 'Not found');
         const headers = responseHeaders('text/javascript; charset=utf-8');
         headers['Cache-Control'] = 'no-store';
+        Object.assign(headers, extensionAssetCorsHeaders(devRendererUrl));
         return new Response(asset.body, { status: asset.status, headers });
       }
       const filePath = path.resolve(rendererRoot, requestedPath);
@@ -248,6 +262,21 @@ function createWindow(): BrowserWindow {
 
   mainWindow = window;
 
+  let closing = false, closePrepared = false;
+  window.on('close', event => {
+    if (closePrepared || quitPrepared() || window.webContents.isDestroyed()) return;
+    event.preventDefault();
+    if (closing) return;
+    closing = true;
+    void flushEditor(window).then(() => {
+      if (!window.isDestroyed()) { closePrepared=true;window.close();closePrepared=false; }
+    }).catch(error => {
+      console.error('Could not save before closing',error);
+      // Keep the editable document open when its durable save fails.
+      if (!window.webContents.isDestroyed()) void window.webContents.executeJavaScript("window.PM?.toast?.('Could not save before closing. Your project is still open.',6000)").catch(() => undefined);
+    }).finally(() => {closing=false;});
+  });
+
   window.on('closed', () => {
     if (mainWindow === window) {
       mainWindow = null;
@@ -307,7 +336,10 @@ if (!hasSingleInstanceLock) {
     const store = createStore(path.join(app.getPath('userData'), 'store'));
     await store.load();
     registerStoreIpc(ipcMain, store, { isTrustedSender });
-    installQuitFlush(app, store);
+    const quitBarrier = installQuitFlush(app, store, async () => {
+      await Promise.all(BrowserWindow.getAllWindows().map(flushEditor));
+    });
+    quitPrepared = quitBarrier.isPrepared;
 
     const userDir = path.join(app.getPath('userData'), 'extensions');
     const buildDir = path.join(app.getPath('userData'), 'extensions-build');

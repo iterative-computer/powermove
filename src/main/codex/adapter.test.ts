@@ -163,6 +163,29 @@ describe('Codex CLI adapter', () => {
     ]);
   });
 
+  it('isolates every run from the user config while retaining Codex auth', () => {
+    const argv = buildAutonomousArgv({
+      schemaPath: '/workspace/.powermove/result-schema.json',
+      outputPath: '/workspace/.powermove/result-run-3.json',
+      prompt: 'Retry without integrations',
+      imagePaths: [],
+      model: null,
+      reasoningEffort: null,
+      access: 'project',
+      extensionsDir: '/user-data/extensions',
+      sessionId: null,
+      instructions: 'AGENT INSTRUCTIONS',
+      disabledSkillPaths: []
+    });
+    expect(argv.slice(argv.indexOf('exec'), argv.indexOf('exec') + 3)).toEqual([
+      'exec',
+      '--ignore-user-config',
+      '--skip-git-repo-check'
+    ]);
+    expect(argv.filter(flag => flag === '--ignore-user-config')).toHaveLength(1);
+    expect(argv).toContain('mcp_servers={}');
+  });
+
   it('reports supported and missing flags from codex exec --help', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'powermove-adapter-'));
     const binary = path.join(directory, 'codex');

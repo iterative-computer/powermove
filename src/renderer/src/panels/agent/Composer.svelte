@@ -3,7 +3,7 @@
   import Icon from '../Icon.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { agentState, composerMode } from './agent-state.svelte';
-  import ModelPicker from './ModelPicker.svelte';
+  import AgentOptions from './AgentOptions.svelte';
 
   let { PM, panelId }: { PM: Record<string, any>; panelId: string } = $props();
   let textarea: HTMLTextAreaElement;
@@ -14,18 +14,6 @@
   const mode = $derived(composerMode(agentState.legacyPhase));
   const textareaId = $derived(`agent-composer-${panelId}`);
 
-  const visiblePanels = $derived.by(() => {
-    agentState.revision;
-    const workspace = PM.WS?.current;
-    const visible = new Set((workspace?.layout?.docks || []).flatMap((dock: any) => (dock.panels || []).map((panel: any) => panel.id)));
-    const hidden = new Set((workspace?.hiddenPanels || []).map((item: any) => item.id));
-    return Object.entries(PM.PANELS || {}).filter(([id]) => id !== 'toolbar' && (visible.has(id) || hidden.has(id))).map(([id, panel]: [string, any]) => ({
-      id,
-      title: id === 'viewer' ? 'Composition panel' : panel.title,
-      hidden: hidden.has(id)
-    }));
-  });
-
   $effect(() => {
     agentState.revision;
     const next = agentState.composerDraft;
@@ -35,20 +23,12 @@
   });
 
   $effect(() => {
-    const panels = visiblePanels;
-    const scope = agentState.scope;
-    if (scope.startsWith('panel:') && !panels.some((panel) => `panel:${panel.id}` === scope)) {
-      queueMicrotask(() => {
-        if (agentState.scope === scope) PM.AgentUI?.setScope('workspace');
-      });
-    }
-  });
-
-  $effect(() => {
     const next = agentState.focusVersion;
     if (next !== lastFocusVersion && !mode.disabled) {
       lastFocusVersion = next;
-      queueMicrotask(() => textarea?.focus());
+      queueMicrotask(() => {
+        if (!document.querySelector('.spatial-compose')) textarea?.focus();
+      });
     }
   });
 
@@ -130,7 +110,7 @@
   {/if}
   <div class="agent-input-row">
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
-    <button class="agent-round agent-attach" type="button" title="Attach images or text files" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <button class="agent-round agent-attach" type="button" title="Attach files (images up to 4 MB; other files up to 100 KB)" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
     <textarea
       id={textareaId}
@@ -162,9 +142,5 @@
     {/if}
   </div>
 </div>
-<!-- Model bar: outside the card, bare on the panel — single line, never wraps.
-     No scope picker (the agent infers its target) and no permission toggle. -->
-<div class="agent-option-bar">
-  <span class="sp"></span>
-  <ModelPicker {PM} />
-</div>
+<!-- All run choices share the same quiet options row. -->
+<AgentOptions {PM} />

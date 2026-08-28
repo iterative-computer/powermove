@@ -86,6 +86,19 @@ it('Edit.operations freezes the complete source-edit vocabulary', () => {
   assert.deepEqual(Object.keys(OPERATION_CONTRACT).sort(), [...OPERATIONS].sort());
 });
 
+it('set_easing reaches keyframes inside nested compositions', () => {
+  const { PM } = fixture();
+  const nested = PM.mkLayer('shape', { name: 'Nested' });
+  PM.setKeyOn(nested.p.opacity, 0, 0, 'linear', PM.proj.fps);
+  PM.setKeyOn(nested.p.opacity, 1, 100, 'linear', PM.proj.fps);
+  PM.proj.comps.child = { id: 'child', layers: [nested], comps: {}, fps: 30, dur: 2 };
+  const ids = nested.p.opacity.kf.map(key => key.i);
+
+  applyOne(PM, { type: 'set_easing', keyframes: ids, curve: [.1, .2, .8, .9] });
+
+  for (const key of nested.p.opacity.kf) assert.deepEqual([...key.eo, ...key.ei], [.1, .2, .8, .9]);
+});
+
 it('all 19 source operations apply successfully and have an observable effect', () => {
   const { PM, text, solid } = fixture();
 

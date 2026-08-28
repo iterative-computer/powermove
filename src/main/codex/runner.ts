@@ -150,6 +150,10 @@ export function codexErrorFromStdout(stdout: string): string | null {
       continue;
     }
     if (!isRecord(event) || typeof event.type !== 'string') continue;
+    if (event.type === 'item.completed' && isRecord(event.item) && event.item.type === 'error') {
+      const message = errorMessageFromValue(event.item);
+      if (message) return message.slice(0, 4_000);
+    }
     if (!/(?:^|[._-])(?:error|failed|failure)(?:$|[._-])/i.test(event.type)) continue;
     const message = errorMessageFromValue(event);
     if (message) return message.slice(0, 4_000);
@@ -182,7 +186,10 @@ export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT gen
   if (/AuthRequired|www_authenticate|Unauthorized|\b401\b/i.test(text) && /rmcp|mcp/i.test(text)) {
     return 'One of your Codex integrations (an MCP server) needs to be signed in again. Run `codex` in a terminal, re-authenticate it, then retry.';
   }
-  if (/not logged in|login required|please run codex login|invalid api key|credentials/i.test(text)) {
+  if (/failed to initialize in-process app-server client.{0,160}Operation not permitted|attempt to write a readonly database/i.test(text)) {
+    return 'Powermove was opened from a restricted development environment, so Codex cannot start. Quit Powermove, reopen it normally, then retry.';
+  }
+  if (/not logged in|login required|please run codex login|invalid api key|missing (?:authentication )?credentials|authentication credentials (?:were|are) not provided/i.test(text)) {
     return 'Codex CLI is not signed in. Run `codex login` in a terminal, then retry.';
   }
   if (/ENOENT|command not found|No such file/i.test(text)) {

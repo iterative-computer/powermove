@@ -33,7 +33,7 @@ R.put = (proj: any, thumb: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
-  try { PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }); } catch (e) { /* quota */ }
+  if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }) === false) throw new Error('Project storage is unavailable or full');
   return meta;
 };
 
@@ -56,18 +56,18 @@ R.rename = (id: any, name: any) => {
   const raw = R.get(id);
   const active = PM.proj && PM.proj.id === id ? PM.proj : null;
   const meta = R.list().find((x: any) => x.id === id);
-  const previous = (raw && raw.name) || (active && active.name) || (meta && meta.name) || 'Untitled';
+  const previous = (active && active.name) || (raw && raw.name) || (meta && meta.name) || 'Untitled';
   const next = String(name == null ? '' : name).trim() || previous;
-  if (raw) {
-    raw.name = next;
-    R.put(raw);
-  } else if (active) {
-    active.name = next;
-    R.put(active);
+  if (active || raw) {
+    // Persist the live document when active; the stored snapshot may predate
+    // recent edits. Do not mutate the live name until the write succeeds.
+    R.put({ ...(active || raw), name: next });
   } else if (meta) {
     R.upsertMeta({ ...meta, name: next, at: Date.now() });
   } else return null;
   if (active) active.name = next;
+  PM.bus?.emit?.('projects:tabs');
+  if (active) { PM.touch?.(); PM.bus?.emit?.('project'); }
   return next;
 };
 
@@ -89,7 +89,13 @@ R.putState = (id: any, state: any) => { if (id && state && typeof state === 'obj
 
 /** Pure boot choice: content first (open tabs, then registry), then a named
     empty project. Anonymous empty projects never win over the welcome demo. */
-R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, legacy = null }: any = {}) => {
+R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, getState = R.getState, legacy = null }: any = {}) => {
+  const active = tabs.map((id: string) => ({ id, at: Number(getState(id)?.lastActiveAt) || 0 }))
+    .filter((item: any) => item.at > 0).sort((a: any, b: any) => b.at - a.at);
+  for (const item of active) {
+    const project = R.unwrap(get(item.id));
+    if (project && Array.isArray(project.layers)) return project;
+  }
   const ids = [...tabs, ...metas.map((m: any) => m.id).filter((id: any) => !tabs.includes(id))];
   let namedEmpty = null;
   for (const id of ids) {
@@ -155,4 +161,12 @@ R.markOpen = (id: any) => {
 R.markClosed = (id: any) => PM.store.set(R.openKey, R.tabs().filter((x: any) => x !== id));
 
 PM.Projects = R;
+}
+
+// Registry methods hold no editor session state. Refresh them in place during
+// development without propagating a name-workflow edit into a window reload.
+if (import.meta.hot) {
+  import.meta.hot.accept(next => {
+    if (next && window.PM) next.install(window.PM);
+  });
 }

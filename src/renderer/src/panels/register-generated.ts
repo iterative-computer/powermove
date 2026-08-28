@@ -35,6 +35,7 @@ function dispose(PM: LegacyPM, id: string): void {
 function registerGeneratedPanel(PM: LegacyPM, section: GeneratedSection): void {
   PM.registerPanel(section.id, {
     title: section.title || 'Panel',
+    icon: section.icon,
     size: section.size || 200,
     persist: true,
     build(body: HTMLElement, inst: Record<string, any>) {
