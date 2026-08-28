@@ -17,7 +17,9 @@ export default function activate(api: PowermoveAPI): void {
 
   // Install at activation time so legacy consumers retain the PM.Viewer and
   // PM.setOrKey contracts even before the panel has mounted.
-  createViewerRuntime(PM);
+  const runtime = createViewerRuntime(PM);
+  const disposeRuntime = runtime.dispose as () => void;
+  api.onDispose(() => disposeRuntime());
 
   api.panels.register({
     id: 'viewer',
