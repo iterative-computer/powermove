@@ -2,7 +2,7 @@
   import { FragCanvas } from '@motion-core/motion-gpu/svelte';
   import type { MotionGPUErrorReport } from '@motion-core/motion-gpu';
   import RippleFrame from './RippleFrame.svelte';
-  import { rippleMaterial } from './ripple-material';
+  import { RIPPLE_COLOR_PIPELINE, rippleMaterial } from './ripple-material';
 
   let {
     origin,
@@ -19,11 +19,6 @@
   } = $props();
 
   const clearColor: [number, number, number, number] = [0, 0, 0, 0];
-  const color = {
-    dynamicRange: 'auto' as const,
-    canvasColorSpace: 'display-p3' as const,
-    outputEncoding: 'srgb' as const,
-  };
   const adapterOptions: GPURequestAdapterOptions = { powerPreference: 'high-performance' };
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
 </script>
@@ -31,7 +26,7 @@
 <FragCanvas
   material={rippleMaterial}
   {clearColor}
-  {color}
+  color={RIPPLE_COLOR_PIPELINE}
   {adapterOptions}
   {dpr}
   maxDelta={0.05}

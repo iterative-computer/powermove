@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { resolveMaterial } from '@motion-core/motion-gpu';
 import {
+  RIPPLE_COLOR_PIPELINE,
   RIPPLE_FADE_START_SECONDS,
   RIPPLE_SETTLE_SECONDS,
   rippleFollow,
@@ -18,6 +19,16 @@ describe('spatial ripple material', () => {
     expect(resolved.fragmentSource).toContain('fn frag(uv: vec2f) -> vec4f');
     expect(resolved.fragmentSource).toContain('textureSample(uScene, uSceneSampler');
     expect(resolved.fragmentSource).toContain('mix(ringColor, composited');
+  });
+
+  it('preserves captured window colors instead of re-encoding the interface', () => {
+    const resolved = resolveMaterial(rippleMaterial);
+    expect(resolved.textures.uScene.colorSpace).toBe('linear');
+    expect(resolved.signature).toContain('rgba8unorm:0:linear');
+    expect(RIPPLE_COLOR_PIPELINE).toMatchObject({
+      canvasColorSpace: 'srgb',
+      outputEncoding: 'linear',
+    });
   });
 
   it('preserves the original settle curve', () => {

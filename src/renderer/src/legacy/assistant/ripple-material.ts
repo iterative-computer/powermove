@@ -3,6 +3,17 @@ import { defineMaterial } from '@motion-core/motion-gpu';
 export const RIPPLE_FADE_START_SECONDS = 0.48;
 export const RIPPLE_SETTLE_SECONDS = 1.45;
 
+/**
+ * WindowCapture pixels already match the live Electron surface. Keep the
+ * captured channels unencoded and present them on an sRGB canvas so entering
+ * change mode cannot reinterpret the interface as Display-P3.
+ */
+export const RIPPLE_COLOR_PIPELINE = {
+  dynamicRange: 'auto',
+  canvasColorSpace: 'srgb',
+  outputEncoding: 'linear',
+} as const;
+
 export function rippleIntensity(elapsed: number): number {
   const progress = Math.max(0, Math.min(1,
     (elapsed - RIPPLE_FADE_START_SECONDS) / (RIPPLE_SETTLE_SECONDS - RIPPLE_FADE_START_SECONDS),
@@ -88,7 +99,7 @@ fn frag(uv: vec2f) -> vec4f {
   textures: {
     uScene: {
       source: null,
-      colorSpace: 'srgb',
+      colorSpace: 'linear',
       flipY: true,
       update: 'once',
       filter: 'linear',
