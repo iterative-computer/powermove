@@ -1,6 +1,10 @@
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses';
+
+const execFileAsync = promisify(execFile);
 
 export default async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return;
@@ -9,6 +13,11 @@ export default async function afterPack(context) {
     context.appOutDir,
     `${context.packager.appInfo.productFilename}.app`
   );
+
+  // File Provider provenance copied from dependencies makes macOS reject even
+  // an ad-hoc signature. The packaged bundle is generated output, so remove
+  // extended attributes before fuses refresh its signature.
+  await execFileAsync('/usr/bin/xattr', ['-cr', appPath]);
 
   await flipFuses(appPath, {
     version: FuseVersion.V1,

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CODEX_NOT_FOUND_MESSAGE,
+  bundledCodexCandidates,
   describeCodex,
   discoverCodex,
   resetCodexEnvironmentCacheForTests
@@ -61,8 +62,20 @@ describe('Codex binary discovery', () => {
     process.env.ZDOTDIR = directory;
     process.env.CODEX_BINARY = '/definitely/missing/powermove-codex';
 
-    await expect(discoverCodex('/also/missing/powermove-codex')).resolves.toBe(shellBinary);
-    await expect(discoverCodex('/still/missing/powermove-codex')).resolves.toBe(shellBinary);
+    await expect(discoverCodex('/also/missing/powermove-codex', { bundledCandidates: [] })).resolves.toBe(shellBinary);
+    await expect(discoverCodex('/still/missing/powermove-codex', { bundledCandidates: [] })).resolves.toBe(shellBinary);
+  });
+
+  it('uses Powermove bundled Codex before probing the user shell', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'powermove-env-bundled-'));
+    const bundledBinary = await fakeCodex(directory, 'codex-bundled', 'bundled 1.0');
+    process.env.ZDOTDIR = path.join(directory, 'missing-shell-config');
+
+    await expect(discoverCodex(null, { bundledCandidates: [bundledBinary] })).resolves.toBe(bundledBinary);
+    expect(bundledCodexCandidates('/Powermove', '/Powermove.app/Contents/Resources')).toEqual([
+      '/Powermove.app/Contents/Resources/codex/bin/codex',
+      '/Powermove/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex'
+    ]);
   });
 
   it('records codex --version once for the process-wide description', async () => {
@@ -81,7 +94,8 @@ describe('Codex binary discovery', () => {
   });
 
   it('provides an actionable not-found message', () => {
-    expect(CODEX_NOT_FOUND_MESSAGE).toContain('Install Codex');
+    expect(CODEX_NOT_FOUND_MESSAGE).toContain('built-in ChatGPT runtime');
+    expect(CODEX_NOT_FOUND_MESSAGE).toContain('Reinstall Powermove');
     expect(CODEX_NOT_FOUND_MESSAGE).toContain('CODEX_BINARY');
     expect(CODEX_NOT_FOUND_MESSAGE).toContain('Settings');
   });

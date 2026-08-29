@@ -17,6 +17,10 @@ export const IPC = {
   codexCancel: 'codex:cancel',
   codexFixPrompt: 'codex:fix-prompt',
   codexEvent: 'codex:event', // main → renderer
+  chatgptStatus: 'chatgpt:status',
+  chatgptConnect: 'chatgpt:connect',
+  chatgptDisconnect: 'chatgpt:disconnect',
+  chatgptChanged: 'chatgpt:changed', // main → renderer
   consentComputer: 'consent:computer',
 
   artifactRead: 'agent:artifact:read',
@@ -145,6 +149,15 @@ export type CodexProgressEvent =
       step: CodexTraceEvent; // main-vetted structured activity
     };
 
+export type ChatGPTConnectionState = 'checking' | 'connected' | 'connecting' | 'disconnected' | 'unavailable';
+
+export interface ChatGPTAccountStatus {
+  state: ChatGPTConnectionState;
+  email: string | null;
+  planType: string | null;
+  detail: string | null;
+}
+
 /* Computer authority: main shows a native confirmation and mints a one-use,
    short-lived token. It is never persisted. */
 export interface ConsentRequest {
@@ -210,6 +223,13 @@ export interface PowermoveBridge {
     cancel(id: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
+  };
+
+  chatgpt: {
+    status(): Promise<ChatGPTAccountStatus>;
+    connect(): Promise<ChatGPTAccountStatus>;
+    disconnect(): Promise<ChatGPTAccountStatus>;
+    onChanged(cb: (status: ChatGPTAccountStatus) => void): () => void;
   };
 
   artifacts: {

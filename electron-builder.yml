@@ -8,6 +8,8 @@ asar: true
 files:
   - out/**
 extraResources:
+  - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
+    to: codex/bin/codex
   - from: src/extensions
     to: builtin-extensions
   - from: docs/EXTENSIONS.md

@@ -131,6 +131,17 @@ beforeEach(() => {
     }
   };
   window.PM = PM as any;
+  Object.defineProperty(window, 'powermove', {
+    configurable: true,
+    value: {
+      chatgpt: {
+        status: vi.fn(async () => ({ state: 'connected', email: null, planType: 'plus', detail: null })),
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        onChanged: vi.fn(() => () => undefined)
+      }
+    }
+  });
 });
 
 afterEach(async () => {
@@ -141,10 +152,51 @@ afterEach(async () => {
   document.querySelectorAll('.modal').forEach((element) => element.remove());
   resetAgentState();
   delete window.PM;
+  Reflect.deleteProperty(window, 'powermove');
   vi.restoreAllMocks();
 });
 
 describe('AgentPanel', () => {
+  it('shows ChatGPT connection inside the agent and restores the composer after sign-in', async () => {
+    let changed: ((status: any) => void) | null = null;
+    const connect = vi.fn(async () => ({
+      state: 'connecting', email: null, planType: null, detail: 'Finish signing in in your browser.'
+    }));
+    Object.defineProperty(window, 'powermove', {
+      configurable: true,
+      value: {
+        chatgpt: {
+          status: vi.fn(async () => ({ state: 'disconnected', email: null, planType: null, detail: null })),
+          connect,
+          disconnect: vi.fn(),
+          onChanged: vi.fn((listener: (status: any) => void) => {
+            changed = listener;
+            return () => { changed = null; };
+          })
+        }
+      }
+    });
+
+    renderPanel();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent).toBe('Connect ChatGPT');
+    });
+    expect(target.querySelector('[aria-label="Message composer"]')).toBeNull();
+
+    target.querySelector<HTMLButtonElement>('.agent-connect-button')!.click();
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.textContent).toContain('Finish signing in in your browser.');
+    });
+    expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent).toBe('Waiting…');
+
+    flushSync(() => changed?.({ state: 'connected', email: null, planType: 'plus', detail: null }));
+    expect(target.querySelector('[aria-label="Message composer"]')).toBeTruthy();
+    expect(target.querySelector('.agent-connect-gate')).toBeNull();
+  });
+
   it('offers accessible new-thread and switching controls and disables them during a run', () => {
     PM.AgentUI.newThread = vi.fn(); PM.AgentUI.switchThread = vi.fn();
     const threads = [{ id: 'first', title: 'Animate the title' }, { id: 'second', title: 'New thread' }];

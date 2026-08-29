@@ -19,6 +19,7 @@ import {
   PROJECT_ID,
   REQUEST_ID,
   type ArtifactRef,
+  type ChatGPTAccountStatus,
   type CodexCancelRequest,
   type CodexFixPromptRequest,
   type CodexRunRequest,
@@ -29,6 +30,7 @@ import { IpcValidationError, isRecord, isString } from '../../shared/guards';
 import { readArtifact, revealArtifact } from './artifacts';
 import { requestComputerConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
+import { ChatGPTAccountClient } from './app-server-account';
 import { buildFixPrompt } from './instructions';
 import { agentWorkspaceRoot, type AgentApiPackFile } from './workspace';
 
@@ -43,6 +45,15 @@ export interface CodexIpcContext {
   apiPackFiles(): Promise<AgentApiPackFile[]>;
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
   codexBinaryPref(): string | null;
+  openExternal(url: string): Promise<void>;
+}
+
+export interface ChatGPTAccountController {
+  status(): Promise<ChatGPTAccountStatus>;
+  connect(): Promise<ChatGPTAccountStatus>;
+  disconnect(): Promise<ChatGPTAccountStatus>;
+  shutdown(): Promise<void>;
+  onChanged(listener: (status: ChatGPTAccountStatus) => void): () => void;
 }
 
 function requireTrusted(event: IpcMainInvokeEvent, ctx: CodexIpcContext): void {
@@ -107,9 +118,39 @@ function requireArtifactRef(channel: string, value: unknown): ArtifactRef {
 }
 
 /** Registers the frozen renderer contract without modifying the main bootstrap. */
-export function registerCodexIpc(ipcMain: IpcMain, ctx: CodexIpcContext): void {
+export function registerCodexIpc(
+  ipcMain: IpcMain,
+  ctx: CodexIpcContext,
+  account: ChatGPTAccountController = new ChatGPTAccountClient({
+    userData: ctx.userData,
+    codexBinaryPref: ctx.codexBinaryPref,
+    openExternal: ctx.openExternal
+  })
+): void {
   const runner = new CodexRunner();
   const owners = new Map<string, WebContents>();
+
+  account.onChanged((status) => {
+    const window = ctx.getWindow();
+    if (window !== null && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send(IPC.chatgptChanged, status);
+    }
+  });
+
+  ipcMain.handle(IPC.chatgptStatus, async (event) => {
+    requireTrusted(event, ctx);
+    return account.status();
+  });
+
+  ipcMain.handle(IPC.chatgptConnect, async (event) => {
+    requireTrusted(event, ctx);
+    return account.connect();
+  });
+
+  ipcMain.handle(IPC.chatgptDisconnect, async (event) => {
+    requireTrusted(event, ctx);
+    return account.disconnect();
+  });
 
   ipcMain.handle(IPC.codexRun, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
@@ -176,10 +217,14 @@ export function registerCodexIpc(ipcMain: IpcMain, ctx: CodexIpcContext): void {
     await revealArtifact(root, reference.path);
   });
 
-  app.once('before-quit', () => { void runner.cancelAll(); });
+  app.once('before-quit', () => {
+    void runner.cancelAll();
+    void account.shutdown();
+  });
 }
 
 export * from './adapter';
+export * from './app-server-account';
 export * from './artifacts';
 export * from './consent';
 export * from './env';

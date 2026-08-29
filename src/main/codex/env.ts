@@ -1,6 +1,18 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
+import path from 'node:path';
+
+export const PACKAGED_CODEX_RELATIVE_PATH = path.join('codex', 'bin', 'codex');
+export const DEVELOPMENT_CODEX_RELATIVE_PATH = path.join(
+  'node_modules',
+  '@openai',
+  'codex-darwin-arm64',
+  'vendor',
+  'aarch64-apple-darwin',
+  'bin',
+  'codex'
+);
 
 export const KNOWN_CODEX_PATHS = [
   '/opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex',
@@ -8,7 +20,12 @@ export const KNOWN_CODEX_PATHS = [
 ] as const;
 
 export const CODEX_NOT_FOUND_MESSAGE =
-  'Codex is not installed or could not be found. Install Codex and sign in with ChatGPT, set CODEX_BINARY, or choose the Codex binary in Settings.';
+  "Powermove's built-in ChatGPT runtime is missing or unavailable. Reinstall Powermove, set CODEX_BINARY, or choose a Codex binary in Settings.";
+
+export interface CodexDiscoveryOptions {
+  /** Overrides the built-in candidates so discovery order can be tested without the installed dependency. */
+  bundledCandidates?: readonly string[];
+}
 
 let loginShellProbe: Promise<string | null> | null = null;
 let description: Promise<CodexDescription> | null = null;
@@ -52,12 +69,29 @@ async function probeLoginShell(): Promise<string | null> {
   return loginShellProbe;
 }
 
-export async function discoverCodex(codexBinary: string | null): Promise<string> {
+export function bundledCodexCandidates(
+  appRoot = process.cwd(),
+  resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+): string[] {
+  const candidates = [path.join(appRoot, DEVELOPMENT_CODEX_RELATIVE_PATH)];
+  if (resourcesPath) candidates.unshift(path.join(resourcesPath, PACKAGED_CODEX_RELATIVE_PATH));
+  return candidates;
+}
+
+export async function discoverCodex(
+  codexBinary: string | null,
+  options: CodexDiscoveryOptions = {}
+): Promise<string> {
   const environmentBinary = await executable(process.env.CODEX_BINARY);
   if (environmentBinary !== null) return environmentBinary;
 
   const preferredBinary = await executable(codexBinary);
   if (preferredBinary !== null) return preferredBinary;
+
+  for (const candidate of options.bundledCandidates ?? bundledCodexCandidates()) {
+    const found = await executable(candidate);
+    if (found !== null) return found;
+  }
 
   const shellBinary = await probeLoginShell();
   if (shellBinary !== null) return shellBinary;

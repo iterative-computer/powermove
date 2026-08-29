@@ -17,11 +17,13 @@ describe('prompt attachments', () => {
     expect(text.content).toBe('Café 🎬');
     expect(Buffer.from(text.dataBase64!, 'base64').toString('utf8')).toBe(text.content);
   });
-  it('routes images to visual references and enforces the actual native byte limits', async () => {
+  it('routes images to visual references without arbitrary byte limits', async () => {
     const image = await readPromptAttachment(new File(['png'], 'reference.png', { type: 'image/png' }), 'image');
     expect(image.dataUrl).toMatch(/^data:image\/png;base64,/);
     expect(requestFileAttachments([image])).toEqual([]);
-    await expect(readPromptAttachment(new File([new Uint8Array(102401)], 'large.zip'), 'zip')).rejects.toThrow('100 KB');
-    await expect(readPromptAttachment(new File([new Uint8Array(4 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' }), 'png')).rejects.toThrow('4 MB');
+    const largeFile = await readPromptAttachment(new File([new Uint8Array(100 * 1024 + 1)], 'large.zip'), 'zip');
+    const largeImage = await readPromptAttachment(new File([new Uint8Array(4 * 1024 * 1024 + 1)], 'large.png', { type: 'image/png' }), 'png');
+    expect(largeFile.dataBase64).toBeTruthy();
+    expect(largeImage.dataUrl).toMatch(/^data:image\/png;base64,/);
   });
 });

@@ -1,12 +1,15 @@
-import { chmod, lstat, mkdir, readdir, readlink, realpath, stat, symlink, unlink } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, readFile, readdir, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
 export const ISOLATED_CODEX_HOME_NAME = 'codex-runtime';
+export const POWERMOVE_AUTH_OWNER_FILE = '.powermove-auth-owned';
+export const POWERMOVE_AUTH_STORE_CONFIG = 'cli_auth_credentials_store = "file"';
 const MAX_USER_SKILL_FILES = 2_000;
 const MAX_USER_SKILL_DEPTH = 6;
+const preparingHomes = new Map<string, Promise<string>>();
 
-/** The real Codex home is used only as the source of ChatGPT authentication. */
+/** The real Codex home is used only to bootstrap Powermove's private login once. */
 export function userCodexHome(environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.CODEX_HOME?.trim();
   return configured ? path.resolve(configured) : path.join(homedir(), '.codex');
@@ -19,40 +22,95 @@ export function isolatedCodexHome(userData: string, sourceHome = userCodexHome()
     : preferred;
 }
 
-function resolvedLinkTarget(linkPath: string, target: string): string {
-  return path.resolve(path.dirname(linkPath), target);
+async function exists(file: string): Promise<boolean> {
+  try {
+    await lstat(file);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function ensurePrivateCredentialStore(runtimeHome: string): Promise<void> {
+  const configFile = path.join(runtimeHome, 'config.toml');
+  let current = '';
+  try {
+    current = await readFile(configFile, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const setting = /^[ \t]*cli_auth_credentials_store[ \t]*=.*$/mu;
+  const next = setting.test(current)
+    ? current.replace(setting, POWERMOVE_AUTH_STORE_CONFIG)
+    : `${POWERMOVE_AUTH_STORE_CONFIG}\n${current}`;
+  if (next !== current) await writeFile(configFile, next, { mode: 0o600 });
+  await chmod(configFile, 0o600);
+}
+
+async function prepareHome(runtimeHome: string, sourceHome: string): Promise<string> {
+  await mkdir(runtimeHome, { recursive: true, mode: 0o700 });
+  await chmod(runtimeHome, 0o700);
+  // `auto` can find the user's shared macOS Keychain entry. File-only storage
+  // makes account/read and account/logout act solely on Powermove's auth.json.
+  await ensurePrivateCredentialStore(runtimeHome);
+
+  const authSource = path.join(sourceHome, 'auth.json');
+  const authFile = path.join(runtimeHome, 'auth.json');
+  const ownerFile = path.join(runtimeHome, POWERMOVE_AUTH_OWNER_FILE);
+  const wasInitialized = await exists(ownerFile);
+
+  try {
+    const metadata = await lstat(authFile);
+    if (metadata.isSymbolicLink()) {
+      // Migrate older Powermove builds away from a shared credential symlink.
+      // The copy makes later logout/reconnect operations local to Powermove.
+      await unlink(authFile);
+      if (await exists(authSource)) {
+        await copyFile(authSource, authFile);
+        await chmod(authFile, 0o600);
+      }
+    } else if (metadata.isFile()) {
+      await chmod(authFile, 0o600);
+    } else {
+      throw new Error('Powermove Codex authentication path is not a file.');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // Import an existing Codex login only on the first run. Once the owner
+    // marker exists, a missing auth file means the user disconnected Powermove.
+    if (!wasInitialized && await exists(authSource)) {
+      await copyFile(authSource, authFile);
+      await chmod(authFile, 0o600);
+    }
+  }
+
+  if (!wasInitialized) {
+    await writeFile(ownerFile, 'powermove\n', { mode: 0o600, flag: 'wx' }).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      // Another process completed initialization first.
+    });
+  }
+  return runtimeHome;
 }
 
 /**
- * Build an app-owned Codex home with no config, plugins, skills, hooks, or MCP
- * state. The auth file remains at its normal location and is exposed through a
- * symlink so Codex token refreshes continue to work in both applications.
+ * Build an app-owned Codex home with no user config, hooks, or MCP state.
+ * Authentication is copied on first use, then owned and refreshed by Codex
+ * inside Powermove's private app data so disconnect never signs other apps out.
  */
 export async function prepareIsolatedCodexHome(
   userData: string,
   sourceHome = userCodexHome()
 ): Promise<string> {
   const runtimeHome = isolatedCodexHome(userData, sourceHome);
-  await mkdir(runtimeHome, { recursive: true, mode: 0o700 });
-  await chmod(runtimeHome, 0o700);
-
-  const authSource = path.join(sourceHome, 'auth.json');
-  const authLink = path.join(runtimeHome, 'auth.json');
-  try {
-    const metadata = await lstat(authLink);
-    if (metadata.isSymbolicLink()) {
-      const target = await readlink(authLink);
-      if (resolvedLinkTarget(authLink, target) === path.resolve(authSource)) return runtimeHome;
-    }
-    await unlink(authLink);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-
-  // A dangling link is intentional when Codex is not signed in yet: signing in
-  // through the normal CLI makes the next Powermove run authenticated.
-  await symlink(authSource, authLink);
-  return runtimeHome;
+  const active = preparingHomes.get(runtimeHome);
+  if (active) return active;
+  const preparation = prepareHome(runtimeHome, sourceHome).finally(() => {
+    if (preparingHomes.get(runtimeHome) === preparation) preparingHomes.delete(runtimeHome);
+  });
+  preparingHomes.set(runtimeHome, preparation);
+  return preparation;
 }
 
 export function isolatedCodexEnvironment(runtimeHome: string): NodeJS.ProcessEnv {

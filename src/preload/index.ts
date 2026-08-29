@@ -4,6 +4,7 @@ import {
   IPC,
   type ArtifactFile,
   type CaptureResult,
+  type ChatGPTAccountStatus,
   type CodexProgressEvent,
   type CodexRunResult,
   type ConsentResult,
@@ -55,6 +56,17 @@ const bridge: PowermoveBridge = {
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
     requestComputerConsent: (req) =>
       ipcRenderer.invoke(IPC.consentComputer, req) as Promise<ConsentResult>
+  },
+
+  chatgpt: {
+    status: () => ipcRenderer.invoke(IPC.chatgptStatus) as Promise<ChatGPTAccountStatus>,
+    connect: () => ipcRenderer.invoke(IPC.chatgptConnect) as Promise<ChatGPTAccountStatus>,
+    disconnect: () => ipcRenderer.invoke(IPC.chatgptDisconnect) as Promise<ChatGPTAccountStatus>,
+    onChanged: (cb) => {
+      const listener = (_event: IpcRendererEvent, status: ChatGPTAccountStatus): void => cb(status);
+      ipcRenderer.on(IPC.chatgptChanged, listener);
+      return () => ipcRenderer.removeListener(IPC.chatgptChanged, listener);
+    }
   },
 
   artifacts: {

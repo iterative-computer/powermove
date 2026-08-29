@@ -60,6 +60,13 @@ it('validates optional thread ids without accepting paths or unbounded input', (
   }
 });
 
+it('accepts image and file bytes above the old attachment caps', () => {
+  expect(isCodexRunRequest(request({
+    images: [new Uint8Array(4 * 1024 * 1024 + 1)],
+    attachments: [{ name: 'large.bin', data: new Uint8Array(100 * 1024 + 1) }]
+  }))).toBe(true);
+});
+
 function fakeOptions(userData: string, environment: Record<string, string>): CodexRunOptions {
   return {
     userData,

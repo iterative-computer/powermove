@@ -151,7 +151,6 @@ export async function prepareAgentWorkspace(
 
   for (const [index, attachment] of req.attachments.entries()) {
     if (index >= LIMITS.codexAttachments) break;
-    if (attachment.data.byteLength > LIMITS.codexAttachmentBytes) continue;
     const name = safeAgentComponent(attachment.name, `attachment-${index}`);
     await writeFile(path.join(attachmentsDirectory, name), attachment.data);
   }
@@ -159,7 +158,6 @@ export async function prepareAgentWorkspace(
   const imagePaths: string[] = [];
   for (const [index, image] of req.images.entries()) {
     if (index >= LIMITS.codexImages) break;
-    if (image.byteLength > LIMITS.codexImageBytes) continue;
     const imagePath = path.join(referencesDirectory, `reference-${index}.${imageExtension(image)}`);
     await writeFile(imagePath, image);
     imagePaths.push(imagePath);

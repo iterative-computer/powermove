@@ -98,7 +98,7 @@ export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
   if (!isString(value.prompt, LIMITS.codexPromptChars) || value.prompt.length === 0) return false;
   if (!(value.schema === null || isRecord(value.schema))) return false;
   if (!isArrayOf(value.images, LIMITS.codexImages, (image): image is Uint8Array =>
-    isBytes(image, LIMITS.codexImageBytes))) return false;
+    isBytes(image))) return false;
   if (!(value.model === null || isString(value.model))) return false;
   if (!(value.reasoningEffort === null || isOneOf(value.reasoningEffort, EFFORTS))) return false;
   if (!isOneOf(value.access, ACCESS)) return false;
@@ -108,7 +108,7 @@ export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
     utf8Bytes(value.projectJSON) <= LIMITS.codexProjectJsonBytes))) return false;
   if (!isArrayOf(value.attachments, LIMITS.codexAttachments, (attachment): attachment is { name: string; data: Uint8Array } =>
     isRecord(attachment) && isString(attachment.name) &&
-    isBytes(attachment.data, LIMITS.codexAttachmentBytes))) return false;
+    isBytes(attachment.data))) return false;
   if (!(value.consentToken === null || isString(value.consentToken))) return false;
 
   return value.mode === 'editor' || value.projectJSON !== null;

@@ -130,7 +130,7 @@ describe('prepareAgentWorkspace', () => {
     expect(layout.imagePaths[0]).toMatch(/reference-0\.jpg$/);
   });
 
-  it('rejects a missing project and omits over-limit inputs', async () => {
+  it('rejects a missing project and preserves inputs above the old byte limits', async () => {
     const userData = await temporaryDirectory();
     await expect(prepareAgentWorkspace(
       request({ projectJSON: null }),
@@ -140,13 +140,19 @@ describe('prepareAgentWorkspace', () => {
       workspaceOptions()
     ))
       .rejects.toThrow(/project snapshot/i);
+    const largeImage = new Uint8Array(4 * 1024 * 1024 + 1);
+    largeImage.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const layout = await prepareAgentWorkspace(request({
-      attachments: [{ name: 'too-big', data: new Uint8Array(100 * 1024 + 1) }],
-      images: [new Uint8Array(4 * 1024 * 1024 + 1)]
+      attachments: [{ name: 'large.bin', data: new Uint8Array(100 * 1024 + 1) }],
+      images: [largeImage]
     }), userData, 'project', agentResultSchema(), workspaceOptions(), 'limited-run');
-    const { readdir } = await import('node:fs/promises');
-    await expect(readdir(layout.attachmentsDirectory)).resolves.toEqual([]);
-    await expect(readdir(layout.referencesDirectory)).resolves.toEqual([]);
+    const { readdir, stat } = await import('node:fs/promises');
+    await expect(readdir(layout.attachmentsDirectory)).resolves.toEqual(['large-bin']);
+    await expect(readdir(layout.referencesDirectory)).resolves.toEqual(['reference-0.png']);
+    await expect(stat(path.join(layout.attachmentsDirectory, 'large-bin')))
+      .resolves.toMatchObject({ size: 100 * 1024 + 1 });
+    await expect(stat(path.join(layout.referencesDirectory, 'reference-0.png')))
+      .resolves.toMatchObject({ size: 4 * 1024 * 1024 + 1 });
   });
 
   it('refreshes API pack files on every preparation', async () => {

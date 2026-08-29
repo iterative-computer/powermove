@@ -435,7 +435,8 @@ if (!hasSingleInstanceLock) {
       extensionsDir: userDir,
       apiPackFiles,
       isTrustedSender,
-      codexBinaryPref: () => null // a user-facing preference lands with the settings UI
+      codexBinaryPref: () => null, // a user-facing preference lands with the settings UI
+      openExternal: async (url) => { await shell.openExternal(url); }
     });
     installMenu(() => mainWindow);
 

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Icon from '../Icon.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
+  import { ATTACHMENT_HINT } from './attachments';
   import { agentState, composerMode } from './agent-state.svelte';
   import AgentOptions from './AgentOptions.svelte';
 
@@ -110,7 +111,7 @@
   {/if}
   <div class="agent-input-row">
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
-    <button class="agent-round agent-attach" type="button" title="Attach files (images up to 4 MB; other files up to 100 KB)" aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
     <textarea
       id={textareaId}

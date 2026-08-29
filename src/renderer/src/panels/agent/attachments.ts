@@ -1,6 +1,4 @@
-import { LIMITS } from '../../../../shared/ipc';
-
-export const ATTACHMENT_HINT = 'Attach files (images up to 4 MB; other files up to 100 KB)';
+export const ATTACHMENT_HINT = 'Attach images or files';
 
 export interface PromptAttachment {
   id: string;
@@ -16,8 +14,6 @@ export async function readPromptAttachment(file: File, id: string): Promise<Prom
   const imageTypes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
   const type = file.type || imageTypes[file.name.split('.').pop()?.toLowerCase() || ''] || 'application/octet-stream';
   const image = /^image\/(png|jpeg|webp|gif)$/.test(type);
-  const limit = image ? LIMITS.codexImageBytes : LIMITS.codexAttachmentBytes;
-  if (file.size > limit) throw new Error(`${file.name} is too large. ${image ? 'Images can be up to 4 MB.' : 'Other files can be up to 100 KB.'}`);
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));

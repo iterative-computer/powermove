@@ -2,11 +2,31 @@ import { EventEmitter } from 'node:events';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { IPC, type CodexRunRequest } from '../../shared/ipc';
+import { IPC, type ChatGPTAccountStatus, type CodexRunRequest } from '../../shared/ipc';
 
 const mocks = vi.hoisted(() => {
   const cancel = vi.fn(async () => true);
   const cancelAll = vi.fn(async () => undefined);
+  const accountStatus = vi.fn(async () => ({
+    state: 'connected' as const,
+    email: 'editor@example.com',
+    planType: 'plus',
+    detail: null
+  }));
+  const accountConnect = vi.fn(async () => ({
+    state: 'connecting' as const,
+    email: null,
+    planType: null,
+    detail: 'Finish signing in in your browser.'
+  }));
+  const accountDisconnect = vi.fn(async () => ({
+    state: 'disconnected' as const,
+    email: null,
+    planType: null,
+    detail: null
+  }));
+  const accountShutdown = vi.fn(async () => undefined);
+  let accountChanged: ((status: ChatGPTAccountStatus) => void) | null = null;
   let resolveRun: ((value: unknown) => void) | null = null;
   const run = vi.fn(async (_req: unknown, options: {
     onProgress?: (text: string) => void;
@@ -20,6 +40,21 @@ const mocks = vi.hoisted(() => {
     appOnce: vi.fn(),
     cancel,
     cancelAll,
+    accountStatus,
+    accountConnect,
+    accountDisconnect,
+    accountShutdown,
+    account: {
+      status: accountStatus,
+      connect: accountConnect,
+      disconnect: accountDisconnect,
+      shutdown: accountShutdown,
+      onChanged(listener: (status: ChatGPTAccountStatus) => void) {
+        accountChanged = listener;
+        return () => { accountChanged = null; };
+      }
+    },
+    emitAccount(status: ChatGPTAccountStatus) { accountChanged?.(status); },
     run,
     resolve(value: unknown) {
       resolveRun?.(value);
@@ -88,12 +123,16 @@ describe('registerCodexIpc', () => {
       extensionsDir: '/tmp/powermove-user-extensions',
       apiPackFiles,
       isTrustedSender: () => true,
-      codexBinaryPref: () => null
-    });
+      codexBinaryPref: () => null,
+      openExternal: async () => undefined
+    }, mocks.account);
   });
 
   it('registers every frozen Codex, consent, and artifact channel', () => {
     expect([...handlers.keys()]).toEqual([
+      IPC.chatgptStatus,
+      IPC.chatgptConnect,
+      IPC.chatgptDisconnect,
       IPC.codexRun,
       IPC.codexCancel,
       IPC.codexFixPrompt,
@@ -105,6 +144,24 @@ describe('registerCodexIpc', () => {
     const beforeQuit = mocks.appOnce.mock.calls.at(-1)?.[1] as (() => void) | undefined;
     beforeQuit?.();
     expect(mocks.cancelAll).toHaveBeenCalledOnce();
+    expect(mocks.accountShutdown).toHaveBeenCalledOnce();
+  });
+
+  it('reports, connects, and disconnects ChatGPT through trusted IPC', async () => {
+    const sender = new Sender();
+    await expect(handlers.get(IPC.chatgptStatus)!({ sender }, undefined)).resolves.toMatchObject({
+      state: 'connected',
+      planType: 'plus'
+    });
+    await expect(handlers.get(IPC.chatgptConnect)!({ sender }, undefined)).resolves.toMatchObject({
+      state: 'connecting'
+    });
+    await expect(handlers.get(IPC.chatgptDisconnect)!({ sender }, undefined)).resolves.toMatchObject({
+      state: 'disconnected'
+    });
+    expect(mocks.accountStatus).toHaveBeenCalledOnce();
+    expect(mocks.accountConnect).toHaveBeenCalledOnce();
+    expect(mocks.accountDisconnect).toHaveBeenCalledOnce();
   });
 
   it('streams progress and only allows the owning WebContents to cancel', async () => {
@@ -191,8 +248,9 @@ describe('registerCodexIpc', () => {
       extensionsDir: '/tmp/powermove-user-extensions',
       apiPackFiles,
       isTrustedSender: () => false,
-      codexBinaryPref: () => null
-    });
+      codexBinaryPref: () => null,
+      openExternal: async () => undefined
+    }, mocks.account);
     await expect(
       handlers.get(IPC.codexCancel)!({ sender: new Sender() }, { id: 'ipc-run-1234' })
     ).rejects.toThrow('Unauthorized IPC sender');
