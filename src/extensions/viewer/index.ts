@@ -10,6 +10,7 @@ const VIEWER_STYLES = `
   [data-preview-corners="rounded"] #stage-inner{border-radius:var(--r-md);corner-shape:var(--ui-corner-smoothing)}
   #gl{display:block;width:100%;height:100%;background:#000}
   #overlay{position:absolute;inset:0;pointer-events:none}
+  #stage.fx-drop-over > #stage-inner{outline:2px solid var(--accent);outline-offset:-2px;box-shadow:0 0 0 4px color-mix(in oklab, var(--accent) 28%, transparent);transition:box-shadow 120ms ease}
 `;
 
 export default function activate(api: PowermoveAPI): void {

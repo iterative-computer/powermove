@@ -10,7 +10,6 @@
   import MasksSection from './MasksSection.svelte';
   import ShaderUniforms from './ShaderUniforms.svelte';
   import TransformSection from './TransformSection.svelte';
-  import TransitionsSection from './TransitionsSection.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   let { panelId, api }: PanelProps & { api: PowermoveAPI } = $props();
@@ -48,7 +47,6 @@
         <TransformSection {PM} layer={firstLayer} />
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
         <EffectsSection {PM} layer={firstLayer} />
-        <TransitionsSection {PM} layer={firstLayer} />
         <MasksSection {PM} layer={firstLayer} />
       {/if}
       <LayerOptions {PM} layer={firstLayer} />

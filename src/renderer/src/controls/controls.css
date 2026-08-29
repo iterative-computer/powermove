@@ -7,7 +7,8 @@
 
 input.num:not([type=range]):not([type=color]):not([type=file]) {
   width: auto;
-  flex: 0 1 auto;
+  min-width: 0;
+  flex: 1 1 0;
   field-sizing: content;
   cursor: ew-resize;
 }

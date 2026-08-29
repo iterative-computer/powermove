@@ -13,7 +13,7 @@
   /* ── surfaces (canvas → surface → elevated) ── */
   --bg-window:#EEEEF1;   /* canvas */
   --bg-rail:#F3F3F6;
-  --bg-panel:#FBFBFC;    /* surface */
+  --bg-panel:#FDFDFE;    /* surface */
   --bg-panel-2:#F5F5F7;
   --bg-sunken:#E6E6EA;
   --bg-row:#F3F3F6;
@@ -76,6 +76,7 @@
   --pad:12px;     /* uniform outer padding for the whole shell */
   --gap:10px;     /* uniform gap between docks/panels */
   --hit:28px;     /* minimum interactive target */
+  --val-w:128px;  /* inspector value column: wells share one right-aligned track */
 
   --f-ui:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;
   --f-mono:"SF Mono",ui-monospace,Menlo,monospace;
@@ -91,12 +92,20 @@
     inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
     0 1px 1px -.5px rgb(var(--ink-rgb) / .06),
     0 3px 3px -1.5px rgb(var(--ink-rgb) / .06);
+  --ctl-raised:linear-gradient(180deg,#FFFFFF 0%,#F9F9FA 100%);
   --ctl-edge-inset:
     inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
     inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
   --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 60%,transparent);
 
   --shadow-raise:0 1px 2px rgb(var(--ink-rgb) / .06),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  /* panel: hairline ring + tight contact shadow + soft ambient, and a paper
+     highlight along the top edge so the card reads as a lifted sheet. */
+  --shadow-panel:
+    0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09),
+    0 1px 1px rgb(var(--ink-rgb) / .04),
+    0 4px 10px -2px rgb(var(--ink-rgb) / .07),
+    inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .8);
   --shadow-lift:0 4px 12px -2px rgb(var(--ink-rgb) / .1),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
   --shadow-float:0 16px 40px -8px rgb(var(--ink-rgb) / .22),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .7);
 
@@ -158,15 +167,26 @@
   --violet:#6C7BE8;
   --gray:#A9A9AE;
 
+  /* Raised control: lit from above. Inner top light, inner bottom shade,
+     a hairline ring to cut it from the track, and a drop shadow beneath. */
   --ctl-edge:
-    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .14),
-    inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .06);
+    inset 0 1px 0 rgb(var(--ink-rgb) / .12),
+    inset 0 -1px 0 rgb(0 0 0 / .28),
+    0 0 0 var(--hairline) rgb(0 0 0 / .55),
+    0 1px 2px rgb(0 0 0 / .45),
+    0 2px 6px -1px rgb(0 0 0 / .35);
+  --ctl-raised:linear-gradient(180deg,#3A3634 0%,#2C2927 100%);
   --ctl-edge-inset:
     inset 0 var(--hairline) 0 rgb(0 0 0 / .3),
     inset 0 calc(var(--hairline) * -1) 0 rgb(var(--ink-rgb) / .08);
   --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 65%,transparent);
 
   --shadow-raise:0 1px 2px rgb(0 0 0 / .4),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --shadow-panel:
+    0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
+    0 1px 1px rgb(0 0 0 / .3),
+    0 6px 14px -4px rgb(0 0 0 / .45),
+    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .07);
   --shadow-lift:0 4px 14px -2px rgb(0 0 0 / .5),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09);
   --shadow-float:0 20px 48px -8px rgb(0 0 0 / .65),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .12),inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .1);
 }
