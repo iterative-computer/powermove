@@ -289,7 +289,7 @@ function buildHead(head: any) {
   listen(zoom, 'input', () => { T.pps = +zoom.value; PM.invalidate('timeline'); }, undefined, headCleanups);
   const snap = h('button.iconbtn' + (PM.snap ? '.on' : ''), { title: 'Snapping (S)' }, PM.icon('magnet'));
   listen(snap, 'click', () => { PM.snap = !PM.snap; snap.classList.toggle('on', PM.snap); }, undefined, headCleanups);
-  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (G)' }, PM.icon('graph'));
+  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (G)' }, PM.icon('bezier'));
   listen(graph, 'click', () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); }, undefined, headCleanups);
   const loop = h('button.iconbtn' + (PM.loop ? '.on' : ''), { title: 'Loop' }, PM.icon('undo'));
   listen(loop, 'click', () => { PM.loop = !PM.loop; loop.classList.toggle('on', PM.loop); }, undefined, headCleanups);
@@ -298,12 +298,13 @@ function buildHead(head: any) {
     btn('prev', () => PM.setTime(prevEdge()), 'Previous edge'),
     playBtn,
     btn('next', () => PM.setTime(nextEdge()), 'Next edge'),
+    graph,
     time,
   );
   const view = h('div.tl-group.tl-view',
     h('div.zoomrow', zoom),
     btn('frame', () => T.frameView(), 'Frame entire composition (⇧F)'),
-    loop, snap, graph,
+    loop, snap,
   );
   head.append(transport, view);
   const syncTime = () => {

@@ -121,6 +121,24 @@ describe('timeline extension', () => {
     expect(second.querySelector('.tl-transport, button, .iconbtn')).not.toBeNull();
   });
 
+  it('places the dedicated Bézier editor control beside the transport timecode', () => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    activate({
+      host: { pm: PM },
+      panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+
+    const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (G)"]')!;
+    expect(graph.closest('.tl-transport')).not.toBeNull();
+    expect(graph.nextElementSibling?.id).toBe('tl-time');
+    expect(graph.querySelector('[data-icon="bezier"]')).not.toBeNull();
+    expect(body.querySelector('.tl-view button[title="Graph editor (G)"]')).toBeNull();
+  });
+
   it('renders the move slot synchronously before the layout injects its handle', () => {
     let panel: PanelDefinition | undefined;
     const PM = timelinePM();

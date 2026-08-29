@@ -97,7 +97,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
   ],
   delete_layers: ['type', 'target', 'targets'],
   reorder_layer: ['type', 'target', 'index'],
-  add_effect: ['type', 'target', 'effect', 'parameters', 'open'],
+  add_effect: ['type', 'target', 'effect', 'parameters', 'open', 'enabled'],
   remove_effect: ['type', 'target', 'effect'],
   set_effect: ['type', 'target', 'effect', 'patch'],
   set_transition: ['type', 'layer', 'edge', 'transition'],
@@ -515,6 +515,7 @@ function parseAddEffect(source: Record<string, unknown>): AddEffectCommand | Val
     out.parameters = parameters;
   }
   if (source.open != null) out.open = Boolean(source.open);
+  if (source.enabled != null) out.enabled = Boolean(source.enabled);
   return out;
 }
 

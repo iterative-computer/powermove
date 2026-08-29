@@ -165,6 +165,7 @@ export interface AddEffectCommand extends LayerTargetedCommand {
   effect: string;
   parameters?: JsonObject;
   open?: boolean;
+  enabled?: boolean;
 }
 
 export interface RemoveEffectCommand extends LayerTargetedCommand {

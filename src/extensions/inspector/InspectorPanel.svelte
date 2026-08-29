@@ -31,7 +31,7 @@
 </script>
 
 <div class="insp" data-svelte-panel={panelId} data-inspector-refresh={inspectorRefresh.version}>
-  <InspectorHeader {PM} layer={firstLayer} />
+  {#if firstLayer}<InspectorHeader {PM} layer={firstLayer} />{/if}
 
   {#if selectedLayers.length === 0}
     <CompositionSection {PM} />

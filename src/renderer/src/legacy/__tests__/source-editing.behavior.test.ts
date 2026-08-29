@@ -214,6 +214,38 @@ it('effect addition is one source transaction and one undo step', () => {
   assert.equal(PM.L(layer.id).fx.length, 1);
 });
 
+it('effect paste preserves editable channels while renewing effect and keyframe identities', () => {
+  const { PM } = editor();
+  const layer = addText(PM);
+  const source = PM.mkEffect('blur');
+  source.on = false;
+  source.open = false;
+  source.p.amount.v = 24;
+  source.p.amount.expr = 'value * 2';
+  source.p.amount.kf = [PM.KF(1, 36, 'easeInOut')];
+  layer.fx.push(source);
+
+  const result = PM.Edit.apply({
+    type: 'add_effect', target: layer.id, effect: source.type,
+    parameters: source.p, open: source.open, enabled: source.on,
+  }, { label: 'Paste effect', origin: 'inspector' });
+
+  assert.equal(result.ok, true);
+  const pasted = PM.L(layer.id).fx[1];
+  assert.notEqual(pasted.id, source.id);
+  assert.equal(pasted.on, false);
+  assert.equal(pasted.open, false);
+  assert.equal(pasted.p.amount.v, 24);
+  assert.equal(pasted.p.amount.expr, 'value * 2');
+  assert.deepEqual(
+    { ...pasted.p.amount.kf[0], i: undefined },
+    { ...source.p.amount.kf[0], i: undefined }
+  );
+  assert.notEqual(pasted.p.amount.kf[0].i, source.p.amount.kf[0].i);
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.L(layer.id).fx.length, 1);
+});
+
 it('section creation and updates cross the same undoable source transaction boundary', () => {
   const { PM } = editor();
   const layer = addText(PM);

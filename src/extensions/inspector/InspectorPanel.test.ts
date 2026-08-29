@@ -16,6 +16,7 @@ import { channelBinding, compositionBinding, contentBinding, layerFieldBinding }
 import { doc } from '../../renderer/src/state/document.svelte';
 import { setSelection, sel } from '../../renderer/src/state/selection.svelte';
 import { perf, transport } from '../../renderer/src/state/transport.svelte';
+import { clearEffectClipboard } from './effect-clipboard';
 import InspectorPanel from './InspectorPanel.svelte';
 import activate from './index';
 
@@ -222,6 +223,7 @@ function labelledSelect(label: string): HTMLSelectElement {
 }
 
 beforeEach(() => {
+  clearEffectClipboard();
   target = document.createElement('div');
   document.body.append(target);
 });
@@ -294,6 +296,13 @@ describe('InspectorPanel', () => {
     expect(target.querySelector('[data-inspector-layer="B"]')).toBeNull();
     expect(target.querySelector('[data-inspector-header]')?.textContent).toContain('Layer A');
     expect(target.querySelector('[role="status"]')?.textContent).toContain('2 layers selected · editing Layer A');
+  });
+
+  it('does not repeat the Properties heading above composition controls', () => {
+    setup([], []);
+
+    expect(target.querySelector('[data-inspector-header]')).toBeNull();
+    expect(target.textContent).toContain('Composition');
   });
 
   it('updates a channel value on the values tick without remounting its row', () => {
@@ -499,6 +508,57 @@ describe('InspectorPanel', () => {
       { type: 'remove_effect', target: 'A', effect: 'fx-1' },
       { label: 'Remove effect', origin: 'inspector' }
     );
+  });
+
+  it('selects multiple effects and routes copy, paste, and delete before layer shortcuts', () => {
+    const candidate = layer('A');
+    const channel = (value: number, id: string) => ({
+      v: value,
+      expr: value === 12 ? 'value * 2' : null,
+      kf: [{ t: 1, v: value + 1, eo: [.25, .1], ei: [.25, 1], hold: false, i: id }]
+    });
+    candidate.fx.push(
+      { id: 'fx-1', type: 'blur', on: false, open: false, p: { amount: channel(12, 'key-1') } },
+      { id: 'fx-2', type: 'blur', on: true, open: true, p: { amount: channel(24, 'key-2') } }
+    );
+    const { apply } = setup([candidate], ['A']);
+    const first = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
+    const second = target.querySelector<HTMLElement>('[data-effect-id="fx-2"]')!;
+
+    first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    second.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true }));
+    flushSync();
+    expect(first.dataset.selected).toBe('true');
+    expect(second.dataset.selected).toBe('true');
+
+    second.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'c', metaKey: true, bubbles: true, cancelable: true
+    }));
+    apply.mockClear();
+    const paste = new KeyboardEvent('keydown', {
+      key: 'v', metaKey: true, bubbles: true, cancelable: true
+    });
+    second.dispatchEvent(paste);
+    expect(paste.defaultPrevented).toBe(true);
+    expect(apply).toHaveBeenCalledExactlyOnceWith([
+      {
+        type: 'add_effect', target: 'A', effect: 'blur', parameters: candidate.fx[0].p,
+        open: false, enabled: false
+      },
+      {
+        type: 'add_effect', target: 'A', effect: 'blur', parameters: candidate.fx[1].p,
+        open: true, enabled: true
+      }
+    ], { label: 'Paste effects', origin: 'inspector' });
+
+    apply.mockClear();
+    const remove = new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true });
+    second.dispatchEvent(remove);
+    expect(remove.defaultPrevented).toBe(true);
+    expect(apply).toHaveBeenCalledExactlyOnceWith([
+      { type: 'remove_effect', target: 'A', effect: 'fx-1' },
+      { type: 'remove_effect', target: 'A', effect: 'fx-2' }
+    ], { label: 'Remove effects', origin: 'inspector' });
   });
 
   it('routes composition fields through an exact set_composition command', async () => {

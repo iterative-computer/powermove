@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { inspectorContext, type EditBinding } from './context';
   import ChannelRow from './ChannelRow.svelte';
+  /* App-local clipboard survives layer/inspector remounts without replacing the user's system clipboard. */
+  import { copyEffects, effectPasteCommands } from './effect-clipboard';
   import Icon from './Icon.svelte';
   import { showFxMenu } from './actions';
   import { inspectorRefresh } from './refresh.svelte.js';
@@ -11,6 +14,8 @@
   let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
 
   let openVersion = $state(0);
+  let selectedIds = $state<string[]>([]);
+  let selectionAnchor = $state<string | null>(null);
   const effects = $derived((inspectorRefresh.version, doc.tick.structure, doc.proj, [...(layer.fx ?? [])]));
 
   function propertyEdit(path: string, label: string): EditBinding {
@@ -50,11 +55,121 @@
 
   function remove(event: MouseEvent, effect: any): void {
     event.stopPropagation();
-    PM.Edit.apply(
+    const result = PM.Edit.apply(
       { type: 'remove_effect', target: layer.id, effect: effect.id },
       { label: 'Remove effect', origin: 'inspector' }
     );
+    if (result?.ok !== false) selectedIds = selectedIds.filter((id) => id !== effect.id);
     PM.invalidate?.();
+  }
+
+  function selected(effect: any): boolean {
+    return selectedIds.includes(effect.id);
+  }
+
+  function selectEffect(event: MouseEvent, effect: any): void {
+    const ordered = effects.map((candidate: any) => candidate.id);
+    if (event.shiftKey && selectionAnchor && ordered.includes(selectionAnchor)) {
+      const start = ordered.indexOf(selectionAnchor);
+      const end = ordered.indexOf(effect.id);
+      const range = ordered.slice(Math.min(start, end), Math.max(start, end) + 1);
+      selectedIds = event.metaKey || event.ctrlKey ? [...new Set([...selectedIds, ...range])] : range;
+    } else if (event.metaKey || event.ctrlKey) {
+      selectedIds = selected(effect)
+        ? selectedIds.filter((id) => id !== effect.id)
+        : [...selectedIds, effect.id];
+    } else selectedIds = [effect.id];
+    selectionAnchor = effect.id;
+    if (event.target === event.currentTarget) (event.currentTarget as HTMLElement).focus();
+  }
+
+  function focusEffect(id: string | null): void {
+    if (!id) return;
+    void tick().then(() => document.querySelector<HTMLElement>(
+      `[data-effect-id="${CSS.escape(id)}"]`
+    )?.focus());
+  }
+
+  function copySelected(fallback: any): void {
+    const available = new Set(effects.map((effect: any) => effect.id));
+    const active = selectedIds.filter((id) => available.has(id));
+    const ids = active.length ? new Set(active) : new Set([fallback.id]);
+    const copied = effects.filter((effect: any) => ids.has(effect.id));
+    selectedIds = copied.map((effect: any) => effect.id);
+    selectionAnchor = fallback.id;
+    const count = copyEffects(copied);
+    PM.toast?.(`Copied ${count} ${count === 1 ? 'effect' : 'effects'}`);
+  }
+
+  function pasteEffects(): void {
+    const commands = effectPasteCommands(layer.id)
+      .filter((command) => !!PM.FX?.[command.effect]);
+    if (!commands.length) {
+      PM.toast?.('Copy an effect first');
+      return;
+    }
+    const before = new Set(effects.map((effect: any) => effect.id));
+    const result = PM.Edit.apply(commands.length === 1 ? commands[0] : commands, {
+      label: commands.length === 1 ? 'Paste effect' : 'Paste effects',
+      origin: 'inspector'
+    });
+    if (result?.ok === false) return;
+    const pasted = (layer.fx ?? []).filter((effect: any) => !before.has(effect.id));
+    if (pasted.length) {
+      selectedIds = pasted.map((effect: any) => effect.id);
+      selectionAnchor = pasted.at(-1)?.id ?? null;
+      focusEffect(selectionAnchor);
+    }
+    PM.invalidate?.();
+  }
+
+  function deleteSelected(fallback: any): void {
+    const available = new Set(effects.map((effect: any) => effect.id));
+    const active = selectedIds.filter((id) => available.has(id));
+    const ids = active.length ? new Set(active) : new Set([fallback.id]);
+    const removing = effects.filter((effect: any) => ids.has(effect.id));
+    if (!removing.length) return;
+    const first = effects.findIndex((effect: any) => ids.has(effect.id));
+    const survivors = effects.filter((effect: any) => !ids.has(effect.id));
+    const next = survivors[Math.min(first, Math.max(0, survivors.length - 1))] ?? null;
+    const commands = removing.map((effect: any) => ({
+      type: 'remove_effect', target: layer.id, effect: effect.id
+    }));
+    const result = PM.Edit.apply(commands.length === 1 ? commands[0] : commands, {
+      label: commands.length === 1 ? 'Remove effect' : 'Remove effects',
+      origin: 'inspector'
+    });
+    if (result?.ok === false) return;
+    selectedIds = next ? [next.id] : [];
+    selectionAnchor = next?.id ?? null;
+    focusEffect(selectionAnchor);
+    PM.invalidate?.();
+  }
+
+  function moveSelection(event: KeyboardEvent, effect: any, direction: number): void {
+    const index = effects.findIndex((candidate: any) => candidate.id === effect.id);
+    const next = effects[Math.max(0, Math.min(effects.length - 1, index + direction))];
+    if (!next || next.id === effect.id) return;
+    if (event.shiftKey) {
+      const anchor = selectionAnchor ?? effect.id;
+      const start = effects.findIndex((candidate: any) => candidate.id === anchor);
+      const end = effects.findIndex((candidate: any) => candidate.id === next.id);
+      selectedIds = effects.slice(Math.min(start, end), Math.max(start, end) + 1).map((candidate: any) => candidate.id);
+    } else selectedIds = [next.id];
+    selectionAnchor ??= effect.id;
+    focusEffect(next.id);
+  }
+
+  function effectKeydown(event: KeyboardEvent, effect: any): void {
+    const key = event.key.toLowerCase();
+    const command = event.metaKey || event.ctrlKey;
+    if (key === 'arrowup' || key === 'arrowdown') moveSelection(event, effect, key === 'arrowup' ? -1 : 1);
+    else if (key === 'backspace' || key === 'delete') deleteSelected(effect);
+    else if (command && key === 'c') copySelected(effect);
+    else if (command && key === 'v') pasteEffects();
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 </script>
 
@@ -70,15 +185,24 @@
   ><Icon name="plus" />Add effect</button>
 {/if}
 
-{#each effects as effect (effect.id)}
-  {@const definition = PM.FX?.[effect.type]}
-  {#if definition}
+{#if effects.length > 0}
+<div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
+  {#each effects as effect (effect.id)}
+    {@const definition = PM.FX?.[effect.type]}
+    {#if definition}
     {@const expanded = isOpen(effect)}
     {@const paramsId = `fx-params-${layer.id}-${effect.id}`}
     <div
       class="row fx-head"
-      style="margin-top:4px;background:var(--ink-1)"
+      class:selected={selected(effect)}
       data-effect-id={effect.id}
+      data-selected={selected(effect) ? 'true' : undefined}
+      tabindex="0"
+      role="option"
+      aria-selected={selected(effect)}
+      aria-label={`${definition.label} effect`}
+      onclick={(event) => selectEffect(event, effect)}
+      onkeydown={(event) => effectKeydown(event, effect)}
     >
       <button
         type="button"
@@ -141,10 +265,29 @@
         {/each}
       </div>
     {/if}
-  {/if}
-{/each}
+    {/if}
+  {/each}
+</div>
+{/if}
 
 <style>
+  .fx-head {
+    margin-top: 4px;
+    background: var(--ink-1);
+    cursor: default;
+    outline: none;
+  }
+
+  .fx-head.selected {
+    background: var(--accent-dim);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 52%, transparent);
+  }
+
+  .fx-head:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+    outline-offset: 1px;
+  }
+
   .fx-expand {
     display: flex;
     flex: 1;

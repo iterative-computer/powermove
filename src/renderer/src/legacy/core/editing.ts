@@ -401,8 +401,26 @@ function addEffect(command: any) {
   const effect: any = PM.mkEffect(command.effect);
   if (!effect) throw new Error(`Unknown effect: ${command.effect}`);
   effect.open = command.open !== false;
+  effect.on = command.enabled !== false;
   const values: any = safePatch(command.parameters || {}, 'effect parameters');
-  for (const [key, value] of Object.entries(values)) if (effect.p[key]) effect.p[key].v = value;
+  for (const [key, value] of Object.entries(values)) {
+    if (!effect.p[key]) continue;
+    /* Inspector copy/paste supplies the whole parameter channel so animation,
+       easing, and expressions survive. Every pasted key gets a fresh identity;
+       duplicated IDs would make keyframe selection affect both effects. */
+    if (value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, 'v')) {
+      const channel: any = value;
+      effect.p[key] = {
+        ...effect.p[key],
+        v: clone(channel.v),
+        expr: typeof channel.expr === 'string' ? channel.expr : null,
+        kf: Array.isArray(channel.kf) ? channel.kf.map((keyframe: any) => ({
+          ...clone(keyframe),
+          i: PM.uid('k'),
+        })) : [],
+      };
+    } else effect.p[key].v = value;
+  }
   layer.fx.push(effect); PM.touch();
   return { id: layer.id, effectId: effect.id };
 }

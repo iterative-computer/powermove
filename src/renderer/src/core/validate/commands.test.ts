@@ -55,7 +55,7 @@ const validCommands: unknown[] = [
   { type: 'add_layer', id: 'new', layerType: 'solid', content: { color: '#112233' }, select: false },
   { type: 'delete_layers', targets: ['a', 'b'] },
   { type: 'reorder_layer', target: 'a', index: '2' },
-  { type: 'add_effect', target: 'a', effect: 'blur', parameters: { amount: 12 }, open: true },
+  { type: 'add_effect', target: 'a', effect: 'blur', parameters: { amount: 12 }, open: true, enabled: false },
   { type: 'remove_effect', target: 'a', effect: 'blur' },
   { type: 'set_effect', target: 'a', effect: 'blur', patch: { enabled: 0, open: 1 } },
   {
