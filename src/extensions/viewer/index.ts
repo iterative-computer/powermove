@@ -1,6 +1,7 @@
 import type { PowermoveAPI } from 'powermove';
 
 import { createViewerRuntime, viewerPanelOptions } from './viewer';
+import { installSourcePreview } from './source-preview';
 
 const VIEWER_STYLES = `
   #panel-viewer{background:var(--bg-panel-2)}
@@ -37,6 +38,7 @@ export default function activate(api: PowermoveAPI): void {
         if (overlay && overlay.parentElement !== stage) stage.appendChild(overlay);
         body.replaceChildren(stage);
         PM.Viewer.layout();
+        installSourcePreview(PM, stage);
         return;
       }
       const stage = document.createElement('div');
@@ -57,6 +59,7 @@ export default function activate(api: PowermoveAPI): void {
       body.replaceChildren(stage);
 
       createViewerRuntime(PM).attach(stage);
+      installSourcePreview(PM, stage);
     }
   });
 }

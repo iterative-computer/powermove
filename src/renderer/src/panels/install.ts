@@ -6,7 +6,7 @@ import { installGeneratedPanels } from './register-generated';
 import { registerShaderPanel } from './register-shader';
 import { registerSimplePanels } from './register-simple';
 import { registerSveltePanel } from './registerSveltePanel';
-import { applyFxDrop, hasFxDrag, readFxDrag } from '../fx/drop';
+import { applyFxDrop, hasAssetDrag, hasFileDrag, hasFxDrag, hasMediaDrag, readAssetDrag, readFxDrag } from '../fx/drop';
 
 type LegacyPM = Record<string, any>;
 
@@ -14,6 +14,7 @@ export function installSveltePanels(PM: LegacyPM): void {
   /* Drag payload helpers for the FX browser; extensions (viewer, timeline)
      cannot import renderer modules, so they reach these through PM. */
   PM.fxDrop = { hasFxDrag, readFxDrag, applyFxDrop };
+  PM.mediaDrop = { hasAssetDrag, hasFileDrag, hasMediaDrag, readAssetDrag };
   registerSveltePanel(PM, 'perf', { title: 'Performance', size: 150, component: PerfPanel });
   registerSimplePanels(PM); // notes, takes, workspaces, assets, fxbrowser
   registerShaderPanel(PM);

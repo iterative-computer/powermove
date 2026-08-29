@@ -710,7 +710,11 @@ PM.pickFiles = () => {
   window.document.body.appendChild(inp);
   inp.click();
 };
-async function importFiles(files: any) {
+/* `placement` decides what happens after decode:
+   - undefined → layers at the playhead (pickers, window-level drops)
+   - null      → assets only, no layers (drop on the Media panel)
+   - {at,index}→ layers at a time and layer-stack position (drop on the timeline) */
+async function importFiles(files: any, placement?: { at: number; index?: number } | null) {
   const mediaFiles: any = [];
   for (const f of files) {
     if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
@@ -718,7 +722,7 @@ async function importFiles(files: any) {
     mediaFiles.push(f);
   }
   if (!mediaFiles.length) return;
-  const importAt = PM.time;
+  const importAt = placement ? placement.at : PM.time;
   if (mediaFiles.length > 1) PM.toast(`Preparing ${mediaFiles.length} media files…`, 2400);
   const results = await PM.assets.importBatch(mediaFiles, {
     onProgress: (progress: any) => PM.bus.emit('import:progress', progress),
@@ -726,7 +730,11 @@ async function importFiles(files: any) {
   const failures = results.filter((result: any) => result.status === 'failed');
   failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000));
   const layerResults = results.filter((result: any) => result.status === 'created' || result.status === 'reused');
-  const commands = layerResults.map((result: any) => PM.commandForAsset(result.asset.id, importAt)).filter(Boolean);
+  const commands = placement === null ? [] : layerResults.map((result: any, n: number) => {
+    const command = PM.commandForAsset(result.asset.id, importAt);
+    if (command && placement?.index != null) command.index = placement.index + n;
+    return command;
+  }).filter(Boolean);
   if (commands.length) {
     PM.Edit.apply(commands, {
       label: commands.length === 1 ? 'Import media' : `Import ${commands.length} media files`,
@@ -735,10 +743,11 @@ async function importFiles(files: any) {
   }
   const relinked = results.filter((result: any) => result.status === 'relinked');
   const volatile = results.filter((result: any) => result.status !== 'failed' && !result.persisted);
-  if (commands.length || relinked.length) {
+  if (layerResults.length || relinked.length) {
     PM.autosave();
+    if (placement === null) PM.bus.emit('assets');
     const parts: any = [];
-    if (commands.length) parts.push(commands.length === 1 ? `Imported ${layerResults[0].asset.name}` : `Imported ${commands.length} files`);
+    if (layerResults.length) parts.push(layerResults.length === 1 ? `Imported ${layerResults[0].asset.name}` : `Imported ${layerResults.length} files`);
     if (relinked.length) parts.push(`relinked ${relinked.length} missing ${relinked.length === 1 ? 'asset' : 'assets'}`);
     if (volatile.length) parts.push('durable storage unavailable');
     PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400);
@@ -747,13 +756,13 @@ async function importFiles(files: any) {
 /* File pickers and drag/drop can fire while an earlier batch is still decoding.
    Preserve user order and project identity by serializing batches; each batch
    still performs its expensive work through the bounded parallel pool. */
-PM.importFiles = (files: any, { project = PM.proj }: any = {}) => {
+PM.importFiles = (files: any, { project = PM.proj, placement }: any = {}) => {
   const run = () => {
     if (PM.proj !== project) {
       PM.toast('Import stopped because you switched projects · import again in the intended project', 5000);
       return [];
     }
-    return importFiles(Array.from(files || []));
+    return importFiles(Array.from(files || []), placement);
   };
   APP.importQueue = APP.importQueue.then(run, run);
   return APP.importQueue;

@@ -28,6 +28,55 @@ export function readFxDrag(dt: DataTransfer | null | undefined): FxDragPayload |
   }
 }
 
+/* ── Media drags ──────────────────────────────────────────
+   Two sources: asset cards dragged out of the Media panel (carry an asset
+   payload) and OS files (carry `Files`). The Media panel and the timeline
+   both accept either; the window-level handler in app.ts is the fallback. */
+
+export const ASSET_DRAG_MIME = 'application/x-powermove-asset';
+
+export type AssetDragPayload = { id: string; name: string; kind: string; dur?: number };
+
+export function hasAssetDrag(dt: DataTransfer | null | undefined): boolean {
+  if (!dt) return false;
+  return Array.from(dt.types || []).includes(ASSET_DRAG_MIME);
+}
+
+export function hasFileDrag(dt: DataTransfer | null | undefined): boolean {
+  if (!dt) return false;
+  return Array.from(dt.types || []).includes('Files');
+}
+
+/** True for any drag the media drop targets care about (asset card or OS files). */
+export function hasMediaDrag(dt: DataTransfer | null | undefined): boolean {
+  return hasAssetDrag(dt) || hasFileDrag(dt);
+}
+
+export function writeAssetDrag(dt: DataTransfer | null | undefined, payload: AssetDragPayload): void {
+  if (!dt) return;
+  dt.setData(ASSET_DRAG_MIME, JSON.stringify(payload));
+  dt.effectAllowed = 'copy';
+}
+
+export function readAssetDrag(dt: DataTransfer | null | undefined): AssetDragPayload | null {
+  if (!dt) return null;
+  let raw = '';
+  try { raw = dt.getData(ASSET_DRAG_MIME); } catch { return null; }
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.id !== 'string' || !parsed.id) return null;
+    return {
+      id: parsed.id,
+      name: typeof parsed.name === 'string' && parsed.name ? parsed.name : 'Media',
+      kind: typeof parsed.kind === 'string' ? parsed.kind : 'image',
+      dur: Number(parsed.dur) > 0 ? Number(parsed.dur) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Apply a dropped effect/transition to a layer through the edit pipeline. Returns true on success. */
 export function applyFxDrop(payload: FxDragPayload, layerId: string | null | undefined, edge?: 'in' | 'out', pm: any = (globalThis as any).PM): boolean {
   const PM = pm;

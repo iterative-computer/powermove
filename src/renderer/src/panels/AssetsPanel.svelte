@@ -24,11 +24,28 @@
   let listElement: HTMLElement;
   let rootElement: HTMLElement;
   let status = $state('');
+  let observedProject = doc.proj;
 
   $effect(() => {
     const host = rootElement.parentElement;
     host?.classList.add('assets-panel-body');
-    return () => host?.classList.remove('assets-panel-body');
+    window.addEventListener('pointerdown', handleWindowPointerDown, true);
+    return () => {
+      host?.classList.remove('assets-panel-body');
+      window.removeEventListener('pointerdown', handleWindowPointerDown, true);
+      PM.Viewer?.preview?.clear?.();
+    };
+  });
+
+  /* Project tabs can also change through the keyboard or commands, without a
+     pointer event. A source preview belongs only to the project that selected
+     it, so a document swap always releases it. */
+  $effect(() => {
+    const project = doc.proj;
+    if (project !== observedProject) {
+      observedProject = project;
+      clearSelection();
+    }
   });
 
   function mediaDuration(seconds?: number): string {
@@ -59,6 +76,63 @@
 
   function liveAsset(asset: Asset): Record<string, any> | undefined {
     return PM.assets.get(asset.id);
+  }
+
+  function videoSource(asset?: Record<string, any>): string {
+    return String(asset?.url || asset?.el?.currentSrc || asset?.el?.src || '');
+  }
+
+  /* Reveal a video thumbnail only after Chromium has decoded a real frame.
+     Seeking on metadata alone can leave the element permanently black on some
+     codecs, which made the generic film icon look like the final thumbnail. */
+  function poster(video: HTMLVideoElement) {
+    const reveal = () => { video.dataset.ready = 'true'; };
+    const seek = () => {
+      const duration = Number(video.duration);
+      if (!(Number.isFinite(duration) && duration > 0)) return;
+      const target = Math.min(0.5, duration * 0.1);
+      if (Math.abs(video.currentTime - target) < .01 && video.readyState >= 2) reveal();
+      else {
+        try { video.currentTime = target; }
+        catch { /* The loadeddata listener gets another chance. */ }
+      }
+    };
+    const onFrame = () => {
+      if (video.currentTime > 0 || !(Number(video.duration) > 0)) reveal();
+      else seek();
+    };
+    video.addEventListener('loadedmetadata', seek);
+    video.addEventListener('loadeddata', seek);
+    video.addEventListener('seeked', onFrame);
+    video.addEventListener('canplay', onFrame);
+    if (video.readyState >= 2) onFrame();
+    else if (video.readyState >= 1) seek();
+    try { video.load(); } catch { }
+    return {
+      destroy() {
+        video.removeEventListener('loadedmetadata', seek);
+        video.removeEventListener('loadeddata', seek);
+        video.removeEventListener('seeked', onFrame);
+        video.removeEventListener('canplay', onFrame);
+      }
+    };
+  }
+
+  /* Audio thumbnails are a real waveform, matching the timeline clip. One
+     bar per pixel or so; each bar is the mean of the peaks under it, not the
+     max — a max over hundreds of peaks is ~1.0 for any music and draws a
+     wall. */
+  function waveBins(asset: Asset, bins = 120): number[] {
+    const peaks: ArrayLike<number> | undefined = liveAsset(asset)?.peaks;
+    if (!peaks || !peaks.length) return Array.from({ length: bins }, (_, i) => 18 + 14 * Math.abs(Math.sin(i * .7)));
+    const out: number[] = [];
+    for (let b = 0; b < bins; b++) {
+      const from = Math.floor(b * peaks.length / bins), to = Math.max(from + 1, Math.floor((b + 1) * peaks.length / bins));
+      let sum = 0;
+      for (let i = from; i < to; i++) sum += peaks[i] || 0;
+      out.push(Math.min(98, Math.max(3, (sum / (to - from)) * 100)));
+    }
+    return out;
   }
 
   function selectAsset(id: string, row?: HTMLElement): void {
@@ -110,9 +184,100 @@
     status = `Confirm deletion of ${asset.name}`;
   }
 
-  function handleRowClick(event: MouseEvent, asset: Asset): void {
-    if ((event.target as Element).closest('button')) return;
+  /* ── drag out: asset cards → timeline / viewer ── */
+  let draggingId = $state<string | null>(null);
+  function handleDragStart(event: DragEvent, asset: Asset): void {
+    if ((event.target as Element).closest('button')) { event.preventDefault(); return; }
+    const dt = event.dataTransfer;
+    if (!dt) return;
+    dt.setData('application/x-powermove-asset', JSON.stringify({ id: asset.id, name: asset.name, kind: asset.kind, dur: asset.dur }));
+    dt.effectAllowed = 'copy';
+    /* The ghost is just the tile, not the whole card: it reads as the thing
+       you'll get on the timeline. */
+    const tile = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('.asset-preview');
+    if (tile) dt.setDragImage(tile, tile.offsetWidth / 2, tile.offsetHeight / 2);
+    draggingId = asset.id;
+    selectedAssetId = asset.id;
+    /* dragover can't read payload data, so the timeline ghost reads this. */
+    PM.mediaDrag = { id: asset.id, name: asset.name, kind: asset.kind, dur: asset.dur };
+  }
+  function handleDragEnd(): void { draggingId = null; PM.mediaDrag = null; }
+
+  /* ── drop in: OS files → project media only, no layer ── */
+  let dropDepth = 0;
+  let dropOver = $state(false);
+  function fileDrag(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+  }
+  function handleDragEnter(event: DragEvent): void {
+    if (!fileDrag(event)) return;
+    event.preventDefault();
+    dropDepth++;
+    dropOver = true;
+  }
+  function handleDragOver(event: DragEvent): void {
+    if (!fileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  }
+  function handleDragLeave(event: DragEvent): void {
+    if (!fileDrag(event)) return;
+    dropDepth = Math.max(0, dropDepth - 1);
+    if (!dropDepth) dropOver = false;
+  }
+  function handleDrop(event: DragEvent): void {
+    dropDepth = 0;
+    dropOver = false;
+    if (!fileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    PM.importFiles(files, { placement: null });
+    status = `Importing ${files.length === 1 ? files[0]?.name : `${files.length} files`}`;
+  }
+
+  /* Select on pointerdown so a press anywhere on the tile (image, video,
+     waveform) selects, not only on the card's own box. */
+  function handleRowPointerDown(event: PointerEvent, asset: Asset): void {
+    if (event.button !== 0 || (event.target as Element).closest('button')) return;
     selectAsset(asset.id, event.currentTarget as HTMLElement);
+  }
+
+  function clearSelection(): void {
+    const preview = PM.Viewer?.preview;
+    const shouldClearPreview = selectedAssetId !== null || !!preview?.activeId;
+    selectedAssetId = null;
+    status = '';
+    if (shouldClearPreview) preview?.clear?.();
+    (document.activeElement as HTMLElement | null)?.blur?.();
+  }
+
+  /* Selection is temporary ownership: preserve it only while the next press
+     is inside the currently selected card. Capture runs before timeline drags
+     and project-tab handlers, so the preview disappears at pointerdown. */
+  function handleWindowPointerDown(event: PointerEvent): void {
+    if (!selectedAssetId) return;
+    const target = event.target;
+    const card = target instanceof Element
+      ? target.closest<HTMLElement>('.asset-card[data-asset-id]')
+      : null;
+    if (card?.dataset.assetId === selectedAssetId) return;
+    clearSelection();
+  }
+
+  /* A press on empty list space unfocuses, like clicking the desktop. */
+  function handleListPointerDown(event: PointerEvent): void {
+    if ((event.target as Element).closest('.asset-card')) return;
+    clearSelection();
+  }
+
+  function previewToggle(asset: Asset): void {
+    const preview = PM.Viewer?.preview;
+    if (!preview) { status = 'Source preview is unavailable'; return; }
+    preview.toggle(asset.id);
+    status = preview.playing ? `Playing ${asset.name}` : `Paused ${asset.name}`;
   }
 
   function handleRowDoubleClick(event: MouseEvent, asset: Asset): void {
@@ -156,62 +321,99 @@
       event.preventDefault();
       event.stopPropagation();
       selectAsset(asset.id, event.currentTarget as HTMLElement);
+      previewToggle(asset);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      clearSelection();
     }
   }
 
 </script>
 
-<div class="assets-panel-body" style="height:100%" data-svelte-panel={panelId} bind:this={rootElement}>
-  <div class="asset-list" role="listbox" aria-label="Project media" bind:this={listElement}>
+<div
+  class="assets-panel-body"
+  class:is-drop-over={dropOver}
+  role="region"
+  aria-label="Media"
+  style="height:100%"
+  data-svelte-panel={panelId}
+  bind:this={rootElement}
+  ondragenter={handleDragEnter}
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
+>
+  <div class="asset-list" role="listbox" tabindex="-1" aria-label="Project media" bind:this={listElement} onpointerdown={handleListPointerDown}>
     {#each assets as asset, index (asset.id)}
       {@const currentAsset = liveAsset(asset)}
       <div
         class="asset-card"
+        class:is-dragging={draggingId === asset.id}
         role="option"
+        draggable="true"
+        ondragstart={(event) => handleDragStart(event, asset)}
+        ondragend={handleDragEnd}
         tabindex={activeAssetId ? (activeAssetId === asset.id ? 0 : -1) : (index === 0 ? 0 : -1)}
         aria-selected={activeAssetId === asset.id}
         data-asset-id={asset.id}
-        title="Select media · double-click to add to the timeline"
-        onclick={(event) => handleRowClick(event, asset)}
+        title="Select media · double-click to add, or drag onto the timeline"
+        onpointerdown={(event) => handleRowPointerDown(event, asset)}
         ondblclick={(event) => handleRowDoubleClick(event, asset)}
         onkeydown={(event) => handleRowKeydown(event, asset, index)}
       >
         <span class={`asset-preview ${asset.kind}`}>
-          <Icon {PM} name={assetIcon(asset.kind)} />
-          {#if asset.kind === 'image' && currentAsset?.url}
-            <img src={currentAsset.url} alt="" />
+          {#if asset.kind === 'audio'}
+            <span class="asset-wave" aria-hidden="true">
+              {#each waveBins(asset) as h}<i style={`height:${h}%`}></i>{/each}
+            </span>
+          {:else}
+            <Icon {PM} name={assetIcon(asset.kind)} />
+            {#if asset.kind === 'image' && currentAsset?.url}
+              <img src={currentAsset.url} alt="" />
+            {:else if asset.kind === 'video' && videoSource(currentAsset)}
+              <video src={videoSource(currentAsset)} muted playsinline preload="auto" use:poster></video>
+            {/if}
           {/if}
+          {#if asset.dur}<span class="asset-badge">{mediaDuration(asset.dur)}</span>{/if}
+          <span class="asset-actions">
+            <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
+              <Icon {PM} name="plus" />
+            </button>
+            <button
+              class="asset-delete"
+              type="button"
+              title="Delete media"
+              aria-label={`Delete ${asset.name}`}
+              onclick={(event) => {
+                event.stopPropagation();
+                selectAsset(asset.id);
+                requestDelete(asset);
+              }}
+            >
+              <Icon {PM} name="trash" />
+            </button>
+          </span>
         </span>
         <span class="asset-copy">
           <b title={asset.name}>{asset.name}</b>
           <small title={mediaDetails(asset)}>{mediaDetails(asset)}</small>
         </span>
-        <span class="asset-actions">
-          <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
-            <Icon {PM} name="plus" />
-          </button>
-          <button
-            class="asset-delete"
-            type="button"
-            title="Delete media"
-            aria-label={`Delete ${asset.name}`}
-            onclick={(event) => {
-              event.stopPropagation();
-              selectAsset(asset.id);
-              requestDelete(asset);
-            }}
-          >
-            <Icon {PM} name="trash" />
-          </button>
-        </span>
       </div>
     {:else}
       <div class="asset-empty">
         <Icon {PM} name="project" />
-        <b>No imported media</b>
-        <span>Images, video, and audio stay with this project.</span>
+        <b>Add media</b>
+        <span>Drag files here or import from your computer.</span>
       </div>
     {/each}
+  </div>
+  <div class="asset-drop-overlay" aria-hidden="true">
+    <span class="asset-drop-card">
+      <Icon {PM} name="plus" />
+      <b>Add to project media</b>
+      <small>Drops here don't touch the timeline</small>
+    </span>
   </div>
   <span class="panel-sr-only" role="status">{status}</span>
 </div>

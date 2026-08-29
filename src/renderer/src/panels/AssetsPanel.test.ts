@@ -31,6 +31,15 @@ const AUDIO: AssetFixture = {
   dur: 30,
   size: 900
 };
+const VIDEO: AssetFixture = {
+  id: 'video-1',
+  name: 'Product.mp4',
+  kind: 'video',
+  w: 2560,
+  h: 1440,
+  dur: 15,
+  size: 13 * 1024 * 1024
+};
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
@@ -77,7 +86,11 @@ function setup(
       project: '<path data-test-icon="project"></path>',
       missing: '<path data-test-icon="missing"></path>'
     },
-    assets: new Map([['image-1', { url: 'blob:backdrop' }]]),
+    assets: new Map([
+      ['image-1', { url: 'blob:backdrop' }],
+      ['video-1', { el: { currentSrc: 'blob:product-video' } }]
+    ]),
+    Viewer: { preview: { clear: vi.fn(), toggle: vi.fn(), playing: false } },
     pickFiles: vi.fn(),
     cmd: vi.fn(),
     hist: { do: vi.fn((_label: string, operation: () => unknown) => operation()) },
@@ -142,6 +155,59 @@ describe('AssetsPanel', () => {
     expect([...target.querySelectorAll('button')].some((button) => button.textContent?.trim() === 'Import')).toBe(false);
     expect(target.querySelector('button[aria-label="Add Backdrop.png to timeline"]')).not.toBeNull();
     expect(target.querySelector('button[aria-label="Delete Backdrop.png"]')).not.toBeNull();
+  });
+
+  it('renders a video thumbnail from the live element url fallback', () => {
+    setup([VIDEO]);
+
+    const video = target.querySelector<HTMLVideoElement>('.asset-preview.video video');
+    expect(video).not.toBeNull();
+    expect(video?.src).toBe('blob:product-video');
+    expect(target.textContent).toContain('Product.mp4');
+  });
+
+  it('selects video cards with the same state used by audio cards', () => {
+    setup([AUDIO, VIDEO]);
+    const options = rows();
+
+    options[0]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    flushSync();
+    expect(rows().map((row) => row.getAttribute('aria-selected'))).toEqual(['true', 'false']);
+
+    rows()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    flushSync();
+    expect(rows().map((row) => row.getAttribute('aria-selected'))).toEqual(['false', 'true']);
+  });
+
+  it('clears selection and source preview when a pointer action starts outside the selected card', () => {
+    const { PM } = setup([AUDIO, VIDEO]);
+    rows()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    flushSync();
+    expect(rows()[1]!.getAttribute('aria-selected')).toBe('true');
+
+    const timeline = document.createElement('canvas');
+    timeline.id = 'tl-canvas';
+    document.body.append(timeline);
+    timeline.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    flushSync();
+
+    expect(rows().map((row) => row.getAttribute('aria-selected'))).toEqual(['false', 'false']);
+    expect(PM.Viewer.preview.clear).toHaveBeenCalledOnce();
+    timeline.remove();
+  });
+
+  it('clears selection and source preview when switching projects without a pointer event', () => {
+    const { PM } = setup([AUDIO, VIDEO]);
+    rows()[0]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    flushSync();
+
+    const nextProject = { id: 'project-2', assets: {}, layers: [] };
+    PM.proj = nextProject;
+    doc.replace(nextProject as any);
+    flushSync();
+
+    expect(target.querySelectorAll('[aria-selected="true"]')).toHaveLength(0);
+    expect(PM.Viewer.preview.clear).toHaveBeenCalledOnce();
   });
 
   it('adds media from its button and double-click', () => {

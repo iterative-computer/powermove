@@ -129,6 +129,7 @@ const T: any = previous || {
   gut: 224, row: 40, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null, dropRow: null as number | null,
+  drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
 /* Built-in extensions activate after project hydration. Restore the current
@@ -482,7 +483,7 @@ function drawInner() {
 
   drawTracksBg(c, W, H);
   if (T.graph) drawGraph(c, W, H);
-  else drawClips(c, W, H);
+  else { drawClips(c, W, H); drawDropGhost(c, W, H); }
   drawGutter(c, W, H);
   drawRuler(c, W, H);
   drawPlayhead(c, W, H);
@@ -633,6 +634,65 @@ function drawClips(c: any, W: any, H: any) {
     if (r.kind === 'layer') drawClip(c, r.L, y);
     else drawPropKeys(c, r, y);
   }
+  c.restore();
+}
+
+/* Drop ghost: a translucent clip in the media type's palette, dashed ring,
+   sitting exactly where the layer will land, plus a hairline at the drop
+   frame so the time reads against the ruler. Rows below the stack get an
+   insertion slot so "append at bottom" is still visible. */
+function drawDropGhost(c: any, W: any, H: any) {
+  const d = T.drop; if (!d || T.graph) return;
+  const p = PM.proj;
+  const type = d.kind === 'audio' ? 'audio' : d.kind === 'video' ? 'video' : d.kind === 'image' ? 'image' : null;
+  const pal = clipPalette({ type });
+  const dur = d.dur || Math.max(1 / p.fps, Math.min(4, p.dur - d.at) || 4);
+  const x0 = t2x(d.at), w = Math.max(6, dur * T.pps);
+  const y = rowY(d.rowIdx);
+  const yy = y + 1, hh = T.row - 2;
+  const r = Math.min(4, T.style.clipRadius);
+  c.save();
+  c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
+  /* landing slot behind the ghost */
+  c.fillStyle = INK.over2; c.fillRect(T.gut, y, W - T.gut, T.row);
+  /* body */
+  c.globalAlpha = .55;
+  roundRect(c, x0, yy, w, hh, r);
+  c.fillStyle = pal.body; c.fill();
+  c.globalAlpha = 1;
+  c.setLineDash([4, 3]);
+  c.strokeStyle = pal.primary; c.lineWidth = 1.25;
+  roundRect(c, x0 + .5, yy + .5, w - 1, hh - 1, r); c.stroke();
+  c.setLineDash([]);
+  /* label */
+  c.save();
+  roundRect(c, x0, yy, w, hh, r); c.clip();
+  c.font = '500 11px ' + fui();
+  c.textBaseline = 'middle';
+  c.fillStyle = pal.foreground;
+  const badge = type ? BADGE[type] : 'new';
+  c.globalAlpha = .7; c.fillText(badge, x0 + 7, yy + hh / 2);
+  c.globalAlpha = 1;
+  const bw = c.measureText(badge).width + 12;
+  const label = d.name;
+  if (w > bw + 24) c.fillText(label, x0 + 7 + bw, yy + hh / 2, w - bw - 14);
+  c.restore();
+  /* drop-frame hairline + ruler tag */
+  const hx = Math.round(x0) + .5;
+  c.strokeStyle = theme.accent; c.lineWidth = 1;
+  c.setLineDash([2, 3]);
+  c.beginPath(); c.moveTo(hx, T.ruler); c.lineTo(hx, yy); c.stroke();
+  c.setLineDash([]);
+  c.restore();
+  const tag = PM.tc(d.at, p.fps);
+  c.save();
+  c.font = '500 10px ' + fui(); c.textBaseline = 'middle';
+  const tw = c.measureText(tag).width + 10;
+  const tx = Math.min(W - tw - 2, Math.max(T.gut, x0));
+  roundRect(c, tx, 2, tw, T.ruler - 4, 3);
+  c.fillStyle = theme.accent; c.fill();
+  c.fillStyle = css('--on-accent') || '#fff';
+  c.fillText(tag, tx + 5, T.ruler / 2);
   c.restore();
 }
 
@@ -1078,26 +1138,71 @@ function bind(cv: any, wrap: any) {
     const hr = hitRow(y);
     return hr?.row?.L ? { layer: hr.row.L, index: hr.i } : null;
   };
+  /* Media drops (asset cards, OS files): the ghost clip follows the pointer's
+     frame-snapped time and row; dropping places the layer exactly there.
+     Rows below the last layer append to the bottom of the stack. */
+  const mediaDropAt = (e: any) => {
+    const p = PM.proj;
+    const at = Math.max(0, PM.snapF(x2t(Math.max(e.offsetX, T.gut)), p.fps));
+    const hr = hitRow(e.offsetY);
+    const rowIdx = hr ? hr.i : T.rows.length;
+    const index = hr?.row?.L ? p.layers.indexOf(hr.row.L) : p.layers.length;
+    return { at, rowIdx, index };
+  };
+  const setMediaDrop = (next: any) => {
+    const prev = T.drop;
+    if (!next && !prev) return;
+    if (next && prev && next.at === prev.at && next.rowIdx === prev.rowIdx && next.name === prev.name) return;
+    T.drop = next;
+    PM.invalidate('timeline');
+  };
   listen(cv, 'dragover', (e: any) => {
-    if (!PM.fxDrop?.hasFxDrag(e.dataTransfer)) return;
-    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
-    const hit = e.offsetX > T.gut ? dropLayerAt(e.offsetY) : null;
-    setDropRow(hit ? hit.index : null);
-  }, undefined, canvasCleanups);
-  listen(cv, 'dragleave', () => setDropRow(null), undefined, canvasCleanups);
-  listen(cv, 'drop', (e: any) => {
-    const payload = PM.fxDrop?.readFxDrag(e.dataTransfer);
-    setDropRow(null);
-    if (!payload) return;
-    e.preventDefault(); e.stopPropagation();
-    const hit = dropLayerAt(e.offsetY);
-    const L = hit?.layer || PM.firstSel?.();
-    let edge: 'in' | 'out' | undefined;
-    if (L && payload.kind === 'transition') {
-      const mid = t2x(L.from + L.dur / 2);
-      edge = e.offsetX < mid ? 'in' : 'out';
+    const dt = e.dataTransfer;
+    if (PM.fxDrop?.hasFxDrag(dt)) {
+      e.preventDefault(); dt.dropEffect = 'copy';
+      const hit = e.offsetX > T.gut ? dropLayerAt(e.offsetY) : null;
+      setDropRow(hit ? hit.index : null);
+      return;
     }
-    PM.fxDrop.applyFxDrop(payload, L?.id, edge, PM);
+    if (!PM.mediaDrop?.hasMediaDrag(dt)) return;
+    e.preventDefault(); e.stopPropagation(); dt.dropEffect = 'copy';
+    /* Payload data is unreadable during dragover; the drag source parks a
+       description on PM so the ghost can carry its name, kind and length. */
+    const src = PM.mediaDrag || { name: 'Media', kind: 'file' };
+    setMediaDrop({ ...mediaDropAt(e), name: src.name, kind: src.kind, dur: src.dur });
+  }, undefined, canvasCleanups);
+  listen(cv, 'dragleave', () => { setDropRow(null); setMediaDrop(null); }, undefined, canvasCleanups);
+  listen(cv, 'drop', (e: any) => {
+    const dt = e.dataTransfer;
+    const fx = PM.fxDrop?.readFxDrag(dt);
+    setDropRow(null); setMediaDrop(null);
+    if (fx) {
+      e.preventDefault(); e.stopPropagation();
+      const hit = dropLayerAt(e.offsetY);
+      const L = hit?.layer || PM.firstSel?.();
+      let edge: 'in' | 'out' | undefined;
+      if (L && fx.kind === 'transition') {
+        const mid = t2x(L.from + L.dur / 2);
+        edge = e.offsetX < mid ? 'in' : 'out';
+      }
+      PM.fxDrop.applyFxDrop(fx, L?.id, edge, PM);
+      return;
+    }
+    const asset = PM.mediaDrop?.readAssetDrag(dt);
+    const files = PM.mediaDrop?.hasFileDrag(dt) ? Array.from(dt.files || []) : [];
+    if (!asset && !files.length) return;
+    e.preventDefault(); e.stopPropagation();
+    const { at, index } = mediaDropAt(e);
+    if (asset) {
+      const command = PM.commandForAsset(asset.id, at);
+      if (!command) return;
+      command.index = index;
+      const result = PM.Edit.apply(command, { label: 'Add ' + asset.name, origin: 'command' });
+      if (result?.ok === false) PM.toast(result.message || 'Could not add ' + asset.name);
+      PM.autosave?.();
+    } else {
+      PM.importFiles(files, { placement: { at, index } });
+    }
   }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
     e.preventDefault();
