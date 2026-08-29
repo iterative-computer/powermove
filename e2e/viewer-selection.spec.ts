@@ -18,7 +18,6 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
       }, project);
       project.layers = [cover, text];
       PM.replaceProject(project);
-      PM.snap = false;
       PM.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers(text.id);
@@ -82,7 +81,6 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
       }, project);
       project.layers = [right, left];
       PM.replaceProject(project);
-      PM.snap = false;
       PM.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers([left.id, right.id]);
@@ -155,7 +153,6 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
       right.lock = true;
       project.layers = [right, left];
       PM.replaceProject(project);
-      PM.snap = false;
       PM.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers([left.id, right.id]);

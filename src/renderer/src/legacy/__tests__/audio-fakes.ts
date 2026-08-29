@@ -200,7 +200,7 @@ export function audioAsset(buffer: any, id = 'asset-1'): any {
 export function audioLayer(overrides: Record<string, any> = {}): any {
   const data = { asset: 'asset-1', trim: 0, gain: 1, fadeIn: 0, fadeOut: 0, ...(overrides.d ?? {}) };
   return {
-    id: 'audio-1', name: 'Audio', type: 'audio', on: true, solo: false,
+    id: 'audio-1', name: 'Audio', type: 'audio', on: true,
     from: 0, dur: 4, ...overrides, d: data,
   };
 }

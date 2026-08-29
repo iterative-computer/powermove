@@ -61,7 +61,7 @@ const BLEND_MODES = new Set([
   'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
 ]);
 const LAYER_FIELDS = new Set([
-  'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
+  'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
   'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked'
 ]);
 const COMPOSITION_FIELDS = new Set([
@@ -92,7 +92,7 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
   set_composition: ['type', 'patch'],
   add_layer: [
     'type', 'id', 'layerType', 'name', 'from', 'duration', 'content', 'properties',
-    'color', 'index', 'select', 'parent', 'blend', 'motionBlur', 'visible', 'solo',
+    'color', 'index', 'select', 'parent', 'blend', 'motionBlur', 'visible',
     'shy', 'collapsed'
   ],
   delete_layers: ['type', 'target', 'targets'],
@@ -147,7 +147,7 @@ const AGGREGATES = new Set<TransformAggregate>(['min', 'max', 'first', 'last', '
 const SAFE_STATE_KEY = /^[a-z][a-z0-9_.-]{0,79}$/i;
 const LAYER_PATHS = new Set([
   'layer.name', 'layer.from', 'layer.duration', 'layer.visible', 'layer.locked',
-  'layer.solo', 'layer.shy', 'layer.blend', 'layer.motionBlur', 'layer.parent',
+  'layer.shy', 'layer.blend', 'layer.motionBlur', 'layer.parent',
   'layer.color', 'layer.collapsed'
 ]);
 
@@ -381,7 +381,7 @@ function parseLayerPatch(value: unknown): LayerPatch | ValidationError {
     if (number instanceof ValidationError) return number;
     out[key] = number;
   }
-  for (const key of ['visible', 'locked', 'solo', 'shy', 'motionBlur', 'collapsed', 'scaleLinked'] as const) {
+  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'scaleLinked'] as const) {
     if (patch[key] != null) out[key] = Boolean(patch[key]);
   }
   for (const key of ['name', 'color'] as const) if (patch[key] != null) out[key] = stringified(patch[key]);
@@ -450,7 +450,7 @@ function parseAddLayer(source: Record<string, unknown>): AddLayerCommand | Valid
     if (number instanceof ValidationError) return number;
     out[key] = number;
   }
-  for (const key of ['select', 'motionBlur', 'visible', 'solo', 'shy', 'collapsed'] as const) {
+  for (const key of ['select', 'motionBlur', 'visible', 'shy', 'collapsed'] as const) {
     if (source[key] != null) out[key] = Boolean(source[key]);
   }
   for (const key of ['content', 'properties'] as const) {
@@ -696,7 +696,7 @@ function isLayer(value: unknown): value is Layer {
   if (typeof value.id !== 'string' || typeof value.name !== 'string'
       || !isFiniteNumber(value.from) || !isFiniteNumber(value.dur)
       || typeof value.on !== 'boolean' || typeof value.lock !== 'boolean'
-      || typeof value.solo !== 'boolean' || typeof value.shy !== 'boolean'
+      || typeof value.shy !== 'boolean'
       || typeof value.collapsed !== 'boolean' || typeof value.color !== 'string'
       || typeof value.blend !== 'string' || !BLEND_MODES.has(value.blend)
       || typeof value.mblur !== 'boolean'

@@ -103,6 +103,7 @@ describe('sanitizeProject', () => {
     expect(title.masks[0]?.shape).toBe('ellipse');
     expect(title.fx[0]).toMatchObject({ id: 'fx-glow', type: 'glow', on: true, open: false });
     expect(title.fx[0]?.p.intensity).toEqual({ v: 90, kf: [], expr: null });
+    expect('solo' in title).toBe(false);
 
     const audio = project.layers[1];
     expect(audio?.type).toBe('audio');

@@ -96,7 +96,6 @@ export interface LayerPatch {
   duration?: number;
   visible?: boolean;
   locked?: boolean;
-  solo?: boolean;
   shy?: boolean;
   blend?: BlendMode;
   motionBlur?: boolean;
@@ -145,7 +144,6 @@ export interface AddLayerCommand {
   blend?: BlendMode;
   motionBlur?: boolean;
   visible?: boolean;
-  solo?: boolean;
   shy?: boolean;
   collapsed?: boolean;
 }

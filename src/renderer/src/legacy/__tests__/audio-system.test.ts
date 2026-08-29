@@ -66,18 +66,16 @@ describe('legacy audio system behavior', () => {
     expect(bars).toHaveLength(2);
   });
 
-  it('plans trim, ranges, source bounds, enablement, and solo consistently', () => {
+  it('plans trim, ranges, source bounds, and enablement consistently', () => {
     const buffer = new FakeAudioBuffer([new Float32Array(20)], 4);
     const { PM } = audioHarness();
     const asset = { ...audioAsset(buffer), dur: 99 };
     const layer = audioLayer({ from: 2, dur: 6, d: { trim: 1 } });
 
-    const clip = PM.Audio.plan(layer, asset, 3.5, 10, { solo: false });
+    const clip = PM.Audio.plan(layer, asset, 3.5, 10);
     expect(clip).toMatchObject({ start: 3.5, localStart: 1.5, sourceOffset: 2.5, duration: 2.5, end: 6 });
     expect(PM.Audio.plan(layer, asset, 0, 2)).toBeNull();
     expect(PM.Audio.plan({ ...layer, on: false }, asset, 0, 10)).toBeNull();
-    expect(PM.Audio.plan(layer, asset, 0, 10, { solo: true })).toBeNull();
-    expect(PM.Audio.plan({ ...layer, solo: true }, asset, 0, 10, { solo: true })).not.toBeNull();
     expect(PM.Audio.plan(audioLayer({ from: 2, d: { trim: 5 } }), asset, 3, 6)).toBeNull();
   });
 
@@ -193,7 +191,7 @@ describe('legacy audio system behavior', () => {
     h.assets.set(asset.id, asset);
     h.PM.proj.layers = [layer];
 
-    const preview = h.PM.Audio.plan(layer, asset, 1, 6, { solo: false });
+    const preview = h.PM.Audio.plan(layer, asset, 1, 6);
     const rendered = await h.PM.Audio.renderOffline(1, 6);
     const offline = h.offlineContexts[0];
     const source = offline.sources[0];

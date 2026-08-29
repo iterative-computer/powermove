@@ -1631,7 +1631,7 @@ function controlConnection(target: any, path: any, controlType: any) {
   } else if (path.startsWith('layer.')) {
     const key: any = path.slice('layer.'.length);
     if (layer.type === 'audio' && ['motionBlur', 'blend', 'parent'].includes(key)) return null;
-    control = ['visible', 'locked', 'solo', 'shy', 'motionBlur', 'collapsed'].includes(key) ? 'toggle'
+    control = ['visible', 'locked', 'shy', 'motionBlur', 'collapsed'].includes(key) ? 'toggle'
       : ['duration', 'from'].includes(key) ? 'slider'
         : ['blend', 'parent'].includes(key) ? 'select'
           : key === 'color' ? 'color' : key === 'name' ? 'text' : '';

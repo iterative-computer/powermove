@@ -6,7 +6,6 @@ export const transport = $state({
   playing: false,
   quality: 1,
   loop: true,
-  snap: true,
   tool: 'select' as string
 });
 

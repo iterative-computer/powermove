@@ -702,8 +702,7 @@ function snapshotSnapCandidates(T: any, selectionLayers: any[]): SnapCandidates 
   const points: Point[] = boxSnapPoints({ x0: 0, y0: 0, x1: PM.proj.w, y1: PM.proj.h });
   const only = selectionLayers.length === 1 ? selectionLayers[0] : null;
   const parentId = only ? (only.parent || null) : null;
-  const soloOn = PM.proj.layers.some((L: any) => L.solo);
-  const visible = (L: any) => PM.active(L, T) && !(soloOn && !L.solo);
+  const visible = (L: any) => PM.active(L, T);
   for (const L of PM.proj.layers) {
     if ((L.parent || null) !== parentId || selectedIds.has(L.id) || !visible(L)) continue;
     const b = worldBounds(L, T); if (b) points.push(...boxSnapPoints(b));
@@ -927,9 +926,9 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
         setOrKey(s.L, 'position.x', s.x + delta[0], T);
         setOrKey(s.L, 'position.y', s.y + delta[1], T);
       });
-      /* Mod suspends snapping for the gesture. */
+      /* Shift enables snapping for the gesture. */
       let snap: SnapResult = { dx: 0, dy: 0, lines: [] };
-      const box = PM.snap && !(ev.metaKey || ev.ctrlKey) ? unionBounds(selectionLayers, T) : null;
+      const box = ev.shiftKey ? unionBounds(selectionLayers, T) : null;
       if (box) {
         snap = snapBox(snapCandidatesFromPoints(boxSnapPoints(box)), candidates,
           SNAP_DISTANCE / Math.max(.02, V.shown), axes);

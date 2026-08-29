@@ -24,7 +24,7 @@ let lockedLayerOpsCache: any = null;
 const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = new Set(
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
-  'name', 'from', 'duration', 'visible', 'locked', 'solo', 'shy', 'blend',
+  'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
   'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked',
 ]);
 let live: any = null;
@@ -276,7 +276,6 @@ function setLayer(command: any) {
   if (patch.duration != null) layer.dur = Math.max(1 / PM.proj.fps, finite(patch.duration, 'layer duration'));
   if (patch.visible != null) layer.on = !!patch.visible;
   if (patch.locked != null) layer.lock = !!patch.locked;
-  if (patch.solo != null) layer.solo = !!patch.solo;
   if (patch.shy != null) layer.shy = !!patch.shy;
   if (patch.blend != null) {
     if (!PM.BLENDS.includes(patch.blend)) throw new Error(`Unknown blend mode: ${patch.blend}`);
@@ -365,7 +364,6 @@ function addLayer(command: any) {
   }
   if (command.motionBlur != null) layer.mblur = !!command.motionBlur;
   if (command.visible != null) layer.on = !!command.visible;
-  if (command.solo != null) layer.solo = !!command.solo;
   if (command.shy != null) layer.shy = !!command.shy;
   if (command.collapsed != null) layer.collapsed = !!command.collapsed;
   if (type === 'shader' && PM.syncShaderUniforms) PM.syncShaderUniforms(layer);
@@ -722,7 +720,6 @@ function sourceCatalog() {
       { path: 'layer.duration', label: 'Duration', control: 'slider', value: layer.dur, min: 1 / Math.max(1, p.fps), max: Math.max(p.dur, layer.dur), step: 1 / Math.max(1, p.fps), unit: 's' },
       { path: 'layer.visible', label: 'Visible', control: 'toggle', value: layer.on },
       { path: 'layer.locked', label: 'Locked', control: 'toggle', value: layer.lock },
-      { path: 'layer.solo', label: 'Solo', control: 'toggle', value: layer.solo },
       { path: 'layer.shy', label: 'Shy', control: 'toggle', value: layer.shy },
       { path: 'layer.collapsed', label: 'Collapsed', control: 'toggle', value: layer.collapsed },
       { path: 'layer.color', label: 'Label color', control: 'color', value: layer.color },
@@ -797,7 +794,7 @@ const Edit: any = {
     set_content: { target: 'layer', fields: ['patch'] },
     set_layer: { target: 'layer', fields: ['patch'] },
     set_composition: { target: 'project', fields: ['patch'] },
-    add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties', 'parent', 'blend', 'motionBlur', 'visible', 'solo', 'shy', 'collapsed'] },
+    add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties', 'parent', 'blend', 'motionBlur', 'visible', 'shy', 'collapsed'] },
     delete_layers: { target: 'project', fields: ['targets'] },
     reorder_layer: { target: 'layer', fields: ['index'] },
     add_effect: { target: 'layer', fields: ['effect', 'parameters'] },

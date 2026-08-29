@@ -1,0 +1,37 @@
+{
+  "caveat" : "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+  "checksum" : 7788447.053061418,
+  "completedFrameMS" : {
+    "max" : 3.5931249731220305,
+    "median" : 0.2952916547656059,
+    "min" : 0.228041666559875,
+    "p95" : 1.0812916443683207
+  },
+  "cpuSubmitMS" : {
+    "max" : 0.03445835318416357,
+    "median" : 0.021124957129359245,
+    "min" : 0.017041689716279507,
+    "p95" : 0.030083348974585533
+  },
+  "device" : "Apple M5",
+  "evaluationMS" : {
+    "max" : 0.0038333237171173096,
+    "median" : 0.00241666566580534,
+    "min" : 0.002374988980591297,
+    "p95" : 0.002583314199000597
+  },
+  "fps" : 60,
+  "frames" : 90,
+  "gpuMS" : {
+    "max" : 3.2542499830015004,
+    "median" : 0.08808332495391369,
+    "min" : 0.08566665928810835,
+    "p95" : 0.46387501060962677
+  },
+  "height" : 1080,
+  "layers" : 100,
+  "peakRSSBytes" : 71368704,
+  "runtime" : "Swift release / Metal",
+  "warmup" : 30,
+  "width" : 1920
+}

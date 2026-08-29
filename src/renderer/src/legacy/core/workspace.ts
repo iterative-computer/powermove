@@ -287,7 +287,7 @@ const PRESETS: any = () => ([
   {
     id: 'design', name: 'Design', builtin: true, density: 'normal',
     theme: { accent: '#FF6B1A' },
-    features: { snapping: true, autosave: true, adaptiveQuality: true },
+    features: { autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
         /* Default shape: project media above a tall agent on the left, the
@@ -302,7 +302,7 @@ const PRESETS: any = () => ([
   {
     id: 'gradient', name: 'Gradient', builtin: true, density: 'compact',
     theme: { accent: '#FF6B1A', radius: 10 },
-    features: { snapping: true, autosave: true, adaptiveQuality: true },
+    features: { autosave: true, adaptiveQuality: true },
     layout: {
       docks: [
         dock('left', [p('gradient-controls', { flex: true }), p('assets', { size: 190 })], 300),
@@ -324,7 +324,7 @@ const PRESETS: any = () => ([
   {
     id: 'animate', name: 'Animate', builtin: true, density: 'compact',
     theme: { accent: '#FF6B1A' },
-    features: { snapping: true, autosave: true, graphOnOpen: true },
+    features: { autosave: true, graphOnOpen: true },
     layout: {
       docks: [
         dock('left', [p('takes', { flex: true }), p('assets', { size: 170 })], 230),
@@ -336,7 +336,7 @@ const PRESETS: any = () => ([
   {
     id: 'shaderlab', name: 'Shader Lab', builtin: true, density: 'compact',
     theme: { accent: '#4C8DFF' },
-    features: { snapping: true, autosave: true },
+    features: { autosave: true },
     layout: {
       docks: [
         dock('left', [p('shader', { flex: true })], 460),
@@ -348,7 +348,7 @@ const PRESETS: any = () => ([
   {
     id: 'edit', name: 'Edit', builtin: true, density: 'normal',
     theme: { accent: '#3FCF8E' },
-    features: { snapping: true, autosave: true },
+    features: { autosave: true },
     layout: {
       docks: [
         dock('left', [p('assets', { flex: true }), p('fxbrowser', { size: 240 })], 250),
@@ -360,7 +360,7 @@ const PRESETS: any = () => ([
   {
     id: 'review', name: 'Review', builtin: true, density: 'comfy',
     theme: { accent: '#FF6B1A' },
-    features: { snapping: true, autosave: true },
+    features: { autosave: true },
     layout: {
       docks: [
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 180 })]),
@@ -371,7 +371,7 @@ const PRESETS: any = () => ([
   {
     id: 'focus', name: 'Focus', builtin: true, density: 'normal',
     theme: { accent: '#FF6B1A' },
-    features: { snapping: true, autosave: true },
+    features: { autosave: true },
     layout: { docks: [dock('center', [p('viewer', { flex: true })])] },
   },
 ]);
@@ -461,7 +461,6 @@ WS.restoreSnapshot = (snapshot: any) => {
 
 function applyFeatures(w: any) {
   const f: any = w.features || {};
-  if (f.snapping !== undefined) PM.snap = !!f.snapping;
   if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
   if (f.graphOnOpen !== undefined && PM.TL) PM.TL.graph = !!f.graphOnOpen;
   window.document.documentElement.dataset.previewCorners = w.chrome?.previewCornerRadius === 'rounded' ? 'rounded' : 'square';

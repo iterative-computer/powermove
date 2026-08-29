@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PanelDefinition, PowermoveAPI } from 'powermove';
 
-import activate from './index';
+import activate, { splitSelectedLayersAtPlayhead, toggleLayerStrips } from './index';
 
 function domHelper(selector: string, attrs?: unknown, ...children: unknown[]): HTMLElement {
   const element = document.createElement(selector.match(/^[^.#]+/)?.[0] ?? 'div');
@@ -42,7 +42,6 @@ function timelinePM(): Record<string, any> {
       icon.dataset.icon = name;
       return icon;
     },
-    snap: true,
     loop: false,
     time: 0,
     playing: false,
@@ -98,6 +97,65 @@ describe('timeline extension', () => {
     expect((PM as Record<string, any>).TL).toBeDefined();
   });
 
+  it('binds M to open mixed layer strips together and collapse an open selection', () => {
+    const layers = [
+      { id: 'layer-1', collapsed: true },
+      { id: 'layer-2', collapsed: false },
+    ];
+    const PM = {
+      selLayers: () => layers,
+      UIState: {
+        getLayerCollapsed: (layer: any) => layer.collapsed,
+        setLayerCollapsed: (layer: any, collapsed: boolean) => { layer.collapsed = collapsed; }
+      },
+      invalidate: vi.fn()
+    };
+
+    toggleLayerStrips(PM);
+    expect(layers.map((layer) => layer.collapsed)).toEqual([false, false]);
+    toggleLayerStrips(PM);
+    expect(layers.map((layer) => layer.collapsed)).toEqual([true, true]);
+    expect(PM.invalidate).toHaveBeenCalledWith('timeline');
+  });
+
+  it('selects only the new right-hand segments after splitting', () => {
+    const left = { id: 'left', from: 2, dur: 6, d: {} };
+    const project = { layers: [left] };
+    let selected: string[] = [left.id];
+    const PM = {
+      time: 5,
+      proj: project,
+      selLayers: () => [left],
+      cloneLayer: (layer: any) => ({ ...structuredClone(layer), id: 'right' }),
+      MediaTiming: { isTimed: () => false },
+      hist: { do: (_label: string, run: () => void) => run() },
+      bus: { emit: vi.fn() },
+      selectLayers: (ids: string[]) => { selected = ids; }
+    };
+
+    expect(splitSelectedLayersAtPlayhead(PM)).toEqual(['right']);
+    expect(project.layers.map((layer) => ({ id: layer.id, from: layer.from, dur: layer.dur }))).toEqual([
+      { id: 'right', from: 5, dur: 3 },
+      { id: 'left', from: 2, dur: 3 }
+    ]);
+    expect(selected).toEqual(['right']);
+  });
+
+  it('registers the M timeline keybinding outside text fields', () => {
+    let command: Record<string, any> | undefined;
+    let binding: Record<string, any> | undefined;
+    activate({
+      host: { pm: { h: vi.fn(), clamp: vi.fn(), bus: { on: vi.fn() }, invalidate: vi.fn() } },
+      panels: { register: vi.fn() },
+      commands: { register: vi.fn((definition) => void (command = definition)) },
+      keybindings: { bind: vi.fn((definition) => void (binding = definition)) }
+    } as unknown as PowermoveAPI);
+
+    expect(command).toMatchObject({ id: 'toggleLayerStrips', kb: 'M' });
+    expect(binding).toEqual({ key: 'm', command: 'toggleLayerStrips', priority: 90 });
+    expect(binding).not.toHaveProperty('inFields');
+  });
+
   it('builds the exact canvas skeleton and rebinds the runtime to replacement hosts', () => {
     let panel: PanelDefinition | undefined;
     const PM = timelinePM();
@@ -121,7 +179,7 @@ describe('timeline extension', () => {
     expect(second.querySelector('.tl-transport, button, .iconbtn')).not.toBeNull();
   });
 
-  it('places the dedicated Bézier editor control beside the transport timecode', () => {
+  it('places only the essential controls in the ruler gutter', () => {
     let panel: PanelDefinition | undefined;
     const PM = timelinePM();
     activate({
@@ -133,10 +191,42 @@ describe('timeline extension', () => {
     panel?.build?.(body, { spec: {} });
 
     const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (G)"]')!;
-    expect(graph.closest('.tl-transport')).not.toBeNull();
-    expect(graph.nextElementSibling?.id).toBe('tl-time');
+    const slot = graph.closest('.tl-graph-slot')!;
+    expect(slot.firstElementChild).toBe(graph);
+    expect(slot.previousElementSibling?.classList.contains('tl-transport')).toBe(true);
+    expect(graph.closest('.tl-transport')).toBeNull();
     expect(graph.querySelector('[data-icon="bezier"]')).not.toBeNull();
     expect(body.querySelector('.tl-view button[title="Graph editor (G)"]')).toBeNull();
+    expect(body.querySelector('button[title="Snapping (S)"]')).toBeNull();
+    expect(body.querySelector('button[title="Previous edge"]')).toBeNull();
+    expect(body.querySelector('button[title="Next edge"]')).toBeNull();
+    expect(body.querySelector('button[title="Frame entire composition (⇧F)"]')).toBeNull();
+    expect(body.querySelector('button[title="Loop"]')).toBeNull();
+    expect(body.querySelector('button[title="Play / Pause (Space)"]')).not.toBeNull();
+    expect(body.querySelector('input[aria-label="Timeline zoom"]')).toBeNull();
+    expect(body.querySelector('#tl-time')).not.toBeNull();
+    expect(body.querySelector<HTMLDivElement>('#tl-head')!.style.getPropertyValue('--tl-gutter')).toBe('224px');
+    expect(body.querySelector<HTMLDivElement>('#tl-head')!.style.getPropertyValue('--tl-ruler')).toBe('28px');
+  });
+
+  it('preserves the live panel move handle when the extension rebuilds in place', () => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    activate({
+      host: { pm: PM },
+      panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+    const handle = document.createElement('button');
+    handle.className = 'panel-move-handle inline';
+    body.querySelector('#tl-head')!.prepend(handle);
+
+    panel?.build?.(body, { spec: {} });
+
+    expect(body.querySelector('#tl-head')?.firstElementChild).toBe(handle);
+    expect(body.querySelectorAll('.panel-move-handle')).toHaveLength(1);
   });
 
   it('renders the move slot synchronously before the layout injects its handle', () => {
@@ -171,15 +261,15 @@ describe('timeline extension', () => {
     const body = document.createElement('div');
     document.body.append(body);
     panel?.build?.(body, { spec: {} });
-    const snap = body.querySelector<HTMLButtonElement>('button[title="Snapping (S)"]')!;
-    const before = PM.snap;
+    const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (G)"]')!;
+    const before = PM.TL.graph;
 
     expect(dispose).toEqual(expect.any(Function));
     dispose?.();
-    snap.click();
+    graph.click();
 
     expect(PM.TL.__timelineRuntimeDisposed).toBe(true);
-    expect(PM.snap).toBe(before);
+    expect(PM.TL.graph).toBe(before);
     expect(PM.__timelineBusReleases.length).toBeGreaterThan(0);
     expect(PM.__timelineBusReleases.every((release: ReturnType<typeof vi.fn>) => release.mock.calls.length === 1)).toBe(true);
   });

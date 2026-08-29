@@ -7,7 +7,6 @@ PM.time = 0;
 PM.playing = false;
 PM.quality = 1;          // render scale
 PM.loop = true;
-PM.snap = true;
 
 const E = { fps: 0, ms: 0, drops: 0, budget: 1000 / 60, auto: true };
 PM.perf = E;

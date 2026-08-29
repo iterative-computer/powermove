@@ -1,0 +1,234 @@
+{
+  "firstFrameMS": 4.199999988079071,
+  "requestToGPUCompleteMS": {
+    "median": 1.699999988079071,
+    "p95": 2.599999964237213,
+    "min": 1.199999988079071,
+    "max": 3.100000023841858
+  },
+  "cpuSubmitMS": null,
+  "gpuMS": null,
+  "rAFIntervalMS": {
+    "median": 8.300000000000068,
+    "p95": 8.700000000000045,
+    "min": 7.899999999999977,
+    "max": 8.899999999999977
+  },
+  "editToBackendCompleteMS": {
+    "median": 8.5,
+    "p95": 10.600000023841858,
+    "min": 7.5,
+    "max": 11.600000023841858
+  },
+  "samples": [
+    {
+      "elapsed": 2,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.199999988079071,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.899999976158142,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.199999988079071,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.4000000357627869,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.600000023841858,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.600000023841858,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.399999976158142,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.5,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.300000011920929,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.2999999523162842,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.4000000357627869,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.300000011920929,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.399999976158142,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.4000000357627869,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.399999976158142,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.699999988079071,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.699999988079071,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 1.699999988079071,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.199999988079071,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.300000011920929,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.599999964237213,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.5,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.300000011920929,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 3.100000023841858,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.100000023841858,
+      "cpu": null,
+      "gpu": null
+    },
+    {
+      "elapsed": 2.600000023841858,
+      "cpu": null,
+      "gpu": null
+    }
+  ],
+  "intervals": [
+    8.899999999999977,
+    8.100000000000023,
+    8.399999999999977,
+    8.400000000000091,
+    7.899999999999977,
+    8.399999999999977,
+    8.299999999999955,
+    8.300000000000068,
+    8.899999999999977,
+    8.200000000000045,
+    8.399999999999977,
+    8.299999999999955,
+    8.300000000000068,
+    8.299999999999955,
+    8.399999999999977,
+    8.300000000000068,
+    8.099999999999909,
+    8.600000000000023,
+    8.200000000000045,
+    8,
+    8.399999999999977,
+    8.399999999999977,
+    8.700000000000045,
+    8.299999999999955,
+    8.300000000000068,
+    8.299999999999955,
+    8.399999999999977,
+    7.899999999999977,
+    8.700000000000045,
+    8.400000000000091
+  ],
+  "captures": [
+    {
+      "time": 0,
+      "size": {
+        "width": 732,
+        "height": 412
+      },
+      "hash": "e3bb1cdd712f2495ce8ab9e9a9afb0d65a414601c2323de3a87923f3e037e2e7"
+    },
+    {
+      "time": 1,
+      "size": {
+        "width": 732,
+        "height": 412
+      },
+      "hash": "e1efa83ef71aecedf47ff8b9d7a5d0078fccdd05692d5266a9d7da53c2925954"
+    },
+    {
+      "time": 2,
+      "size": {
+        "width": 732,
+        "height": 412
+      },
+      "hash": "265378d52fac34b5d770060210ddf485bdddc30dcb5c6ea000b63c8359244fc4"
+    }
+  ],
+  "errors": []
+}

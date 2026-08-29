@@ -26,7 +26,7 @@ function legacyGoldenCommandTypes(): string[] {
 const channel = (value: number) => ({ v: value, kf: [], expr: null });
 const serializedTextLayer = {
   id: 'serialized-layer', type: 'text', name: 'Title', from: 0, dur: 5,
-  on: true, lock: false, solo: false, shy: false, collapsed: true,
+  on: true, lock: false, shy: false, collapsed: true,
   color: '#E8E2CF', blend: 'normal', mblur: false, parent: null,
   p: {
     'anchor.x': channel(0), 'anchor.y': channel(0),
@@ -249,6 +249,13 @@ describe('parseEditCommand', () => {
     expect(parseAgentEditCommand({
       type: 'set_transition', layer: 'L-1', edge: 'out', transition: null
     })).toEqual({ type: 'set_transition', layer: 'L-1', edge: 'out', transition: null });
+  });
+
+  it('rejects the removed Solo layer feature', () => {
+    expect(parseEditCommand({ type: 'set_layer', patch: { solo: true } })).toBeInstanceOf(ValidationError);
+    expect(parseEditCommand({ type: 'add_layer', layerType: 'solid', solo: true })).toEqual({
+      type: 'add_layer', layerType: 'solid'
+    });
   });
 
   it('validates transition duration and static parameter values', () => {

@@ -61,7 +61,7 @@ test('effect rows select, copy, paste, delete, and undo as editable source trans
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('composition properties do not repeat the panel title and the Bézier control sits by timecode', async ({ session }) => {
+test('timeline controls occupy the ruler gutter without legacy navigation buttons', async ({ session }) => {
   const { page } = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -72,8 +72,73 @@ test('composition properties do not repeat the panel title and the Bézier contr
   const graph = page.getByRole('button', { name: 'Graph editor (G)', exact: true });
   await expect(graph.locator('[data-icon="bezier"]')).toHaveCount(1);
   expect(await graph.evaluate((button) => ({
+    graphSlot: !!button.closest('.tl-graph-slot'),
     transport: !!button.closest('.tl-transport'),
-    next: button.nextElementSibling?.id
-  }))).toEqual({ transport: true, next: 'tl-time' });
+    first: button.parentElement?.firstElementChild === button,
+    previousGroup: button.parentElement?.previousElementSibling?.classList.contains('tl-transport')
+  }))).toEqual({ graphSlot: true, transport: false, first: true, previousGroup: true });
+  for (const name of ['Previous edge', 'Next edge', 'Frame entire composition (⇧F)', 'Loop']) {
+    await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+  }
+  await expect(page.getByRole('slider', { name: 'Timeline zoom', exact: true })).toHaveCount(0);
+  const geometry = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const head = document.querySelector('#tl-head')!.getBoundingClientRect();
+    const canvas = document.querySelector('#tl-canvas')!.getBoundingClientRect();
+    const controls = [...document.querySelectorAll('#tl-head button, #tl-head input')]
+      .map((element) => element.getBoundingClientRect());
+    return {
+      head: { x: head.x, y: head.y, width: head.width, height: head.height },
+      canvas: { x: canvas.x, y: canvas.y },
+      gutter: PM.TL.gut,
+      ruler: PM.TL.ruler,
+      controlsInside: controls.every((rect) => rect.left >= head.left && rect.right <= head.right
+        && rect.top >= head.top && rect.bottom <= head.bottom)
+    };
+  });
+  expect(Math.abs(geometry.head.x - geometry.canvas.x)).toBeLessThan(1.5);
+  expect(Math.abs(geometry.head.y - geometry.canvas.y)).toBeLessThan(1.5);
+  expect(Math.abs(geometry.head.width - geometry.gutter)).toBeLessThan(1.5);
+  expect(Math.abs(geometry.head.height - geometry.ruler)).toBeLessThan(1.5);
+  expect(geometry.controlsInside).toBe(true);
+  expect(await page.locator('#tl-time').evaluate((element) => getComputedStyle(element).color))
+    .toBe(await graph.evaluate((element) => getComputedStyle(element).color));
+  const dragPoint = await page.evaluate(() => {
+    const head = document.querySelector('#tl-head')!.getBoundingClientRect();
+    const time = document.querySelector('#tl-time')!.getBoundingClientRect();
+    const graph = document.querySelector<HTMLButtonElement>('button[title="Graph editor (G)"]')!.getBoundingClientRect();
+    return { x: (time.right + graph.left) / 2, y: head.top + head.height / 2 };
+  });
+  await page.mouse.move(dragPoint.x, dragPoint.y);
+  await page.mouse.down();
+  await page.mouse.move(dragPoint.x + 12, dragPoint.y + 8, { steps: 4 });
+  await expect(page.locator('body')).toHaveClass(/panel-dragging/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('body')).not.toHaveClass(/panel-dragging/);
+  await expect(page.locator('#panel-timeline')).toHaveCount(1);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('panel context menus flip wholly above or below the cursor', async ({ session }) => {
+  const { page } = session;
+  const assertSide = async (trigger: ReturnType<typeof page.locator>, side: 'above' | 'below') => {
+    const box = await trigger.boundingBox();
+    if (!box) throw new Error('context-menu trigger is not visible');
+    const cursor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await page.mouse.click(cursor.x, cursor.y, { button: 'right' });
+    const menu = page.locator('.drop[role="menu"]');
+    await expect(menu).toBeVisible();
+    const placement = await menu.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, side: element.getAttribute('data-side') };
+    });
+    expect(placement.side).toBe(side);
+    if (side === 'below') expect(placement.top).toBeGreaterThan(cursor.y);
+    else expect(placement.bottom).toBeLessThan(cursor.y);
+    await page.keyboard.press('Escape');
+  };
+
+  await assertSide(page.locator('#panel-assets > header'), 'below');
+  await assertSide(page.locator('#panel-timeline .panel-move-handle'), 'above');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

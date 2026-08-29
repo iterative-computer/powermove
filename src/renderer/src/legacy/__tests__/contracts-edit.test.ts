@@ -23,7 +23,7 @@ const OPERATION_CONTRACT = {
   set_content: { target: 'layer', fields: ['patch'] },
   set_layer: { target: 'layer', fields: ['patch'] },
   set_composition: { target: 'project', fields: ['patch'] },
-  add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties', 'parent', 'blend', 'motionBlur', 'visible', 'solo', 'shy', 'collapsed'] },
+  add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties', 'parent', 'blend', 'motionBlur', 'visible', 'shy', 'collapsed'] },
   delete_layers: { target: 'project', fields: ['targets'] },
   reorder_layer: { target: 'layer', fields: ['index'] },
   add_effect: { target: 'layer', fields: ['effect', 'parameters'] },

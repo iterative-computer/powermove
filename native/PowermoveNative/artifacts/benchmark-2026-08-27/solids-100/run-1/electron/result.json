@@ -1,0 +1,80 @@
+{
+  "runtime": "Electron / WebGL2",
+  "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+  "layers": 100,
+  "width": 1920,
+  "height": 1080,
+  "frames": 90,
+  "warmup": 30,
+  "evaluationMS": {
+    "median": 0.09999996423721313,
+    "p95": 0.19999998807907104,
+    "min": 0,
+    "max": 0.6000000238418579
+  },
+  "cpuSubmitMS": {
+    "median": 0.10000002384185791,
+    "p95": 0.30000001192092896,
+    "min": 0,
+    "max": 0.699999988079071
+  },
+  "completedFrameMS": {
+    "median": 0.5,
+    "p95": 1.699999988079071,
+    "min": 0.30000001192092896,
+    "max": 2.5
+  },
+  "checksum": 7788447.053061418,
+  "processMetrics": [
+    {
+      "type": "Browser",
+      "memory": {
+        "workingSetSize": 217840,
+        "peakWorkingSetSize": 333568
+      },
+      "cpu": {
+        "cumulativeCPUUsage": 0.932063,
+        "percentCPUUsage": 0,
+        "idleWakeupsPerSecond": 0
+      }
+    },
+    {
+      "type": "GPU",
+      "memory": {
+        "workingSetSize": 175936,
+        "peakWorkingSetSize": 176000
+      },
+      "cpu": {
+        "cumulativeCPUUsage": 0.269125,
+        "percentCPUUsage": 0,
+        "idleWakeupsPerSecond": 0
+      }
+    },
+    {
+      "type": "Utility",
+      "memory": {
+        "workingSetSize": 49680,
+        "peakWorkingSetSize": 49680
+      },
+      "cpu": {
+        "cumulativeCPUUsage": 0.051747,
+        "percentCPUUsage": 0,
+        "idleWakeupsPerSecond": 0
+      }
+    },
+    {
+      "type": "Tab",
+      "memory": {
+        "workingSetSize": 335344,
+        "peakWorkingSetSize": 611792
+      },
+      "cpu": {
+        "cumulativeCPUUsage": 0.759134,
+        "percentCPUUsage": 0,
+        "idleWakeupsPerSecond": 0
+      }
+    }
+  ],
+  "errors": [],
+  "caveat": "Production compositor in an isolated full Electron app. Timed synchronous frames exclude panel events; completion includes a 1-pixel readback. Not an end-to-end playback test."
+}

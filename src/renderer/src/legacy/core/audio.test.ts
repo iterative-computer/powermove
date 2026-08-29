@@ -20,7 +20,7 @@ function audioRegistry(): PMRegistry {
 
 function audioLayer(): any {
   return {
-    id: 'audio-1', name: 'Audio', type: 'audio', on: true, solo: false,
+    id: 'audio-1', name: 'Audio', type: 'audio', on: true,
     from: 0, dur: 4, d: { asset: 'asset-1', trim: 0, gain: 2, fadeIn: 3, fadeOut: 3 },
   };
 }

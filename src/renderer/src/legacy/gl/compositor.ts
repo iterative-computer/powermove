@@ -522,7 +522,6 @@ function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: an
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl;
   const layers = proj.layers;
-  const soloOn = layers.some((l: any) => l.solo);
 
   let acc = grab(W, H);
   bind(acc);
@@ -548,7 +547,6 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
     if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
-    if (soloOn && !L.solo) continue;
     if (!PM.active(L, T)) continue;
     if (L.shy && opt.hideShy) continue;
     const alpha = PM.worldOpacity(L, T);

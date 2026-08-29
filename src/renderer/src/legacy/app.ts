@@ -191,7 +191,7 @@ function hydrate(p: any) {
       if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
       L.from = Math.max(0, num(L.from, 0)); L.dur = Math.max(.01, num(L.dur, 5));
       if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
-      L.on = L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
+      L.on = L.on !== false; L.lock = !!L.lock; delete L.solo; L.shy = !!L.shy;
       L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
       L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
       if (L.type === 'audio') PM.Audio.normalizeLayer(L);

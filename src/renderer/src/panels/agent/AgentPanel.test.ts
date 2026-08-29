@@ -149,15 +149,20 @@ describe('AgentPanel', () => {
     PM.AgentUI.newThread = vi.fn(); PM.AgentUI.switchThread = vi.fn();
     const threads = [{ id: 'first', title: 'Animate the title' }, { id: 'second', title: 'New thread' }];
     renderPanel(snapshot({ threadId: 'first', threads }));
+    const threadBar = target.querySelector<HTMLElement>('[role="group"][aria-label="Agent threads"]')!;
     const picker = target.querySelector<HTMLSelectElement>('[aria-label="Switch thread"]')!;
+    const newThread = target.querySelector<HTMLButtonElement>('[aria-label="New thread"]')!;
+    expect(threadBar).toBeTruthy();
+    expect(threadBar.contains(picker)).toBe(true);
+    expect(threadBar.contains(newThread)).toBe(true);
     expect(picker.value).toBe('first');
     picker.value = 'second'; picker.dispatchEvent(new Event('change', { bubbles: true }));
     expect(PM.AgentUI.switchThread).toHaveBeenCalledWith('second');
-    target.querySelector<HTMLButtonElement>('[aria-label="New thread"]')!.click();
+    newThread.click();
     expect(PM.AgentUI.newThread).toHaveBeenCalledOnce();
     flushSync(() => setAgentSnapshot(snapshot({threadId:'first',threads,threadSwitchBlocked:true})));
     expect(picker.disabled).toBe(true);
-    expect(target.querySelector<HTMLButtonElement>('[aria-label="New thread"]')!.disabled).toBe(true);
+    expect(newThread.disabled).toBe(true);
     expect(picker.title).toContain('Finish or stop');
   });
   it('renders idle, prompt, running, preview, and result blocks from state setters', () => {

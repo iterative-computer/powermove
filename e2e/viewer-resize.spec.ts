@@ -23,7 +23,6 @@ test.describe('@viewer direct resize', () => {
       }, project);
       project.layers = [cover, text, parent];
       PM.replaceProject(project);
-      PM.snap = false;
       PM.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.setKey(text, 'scale.y', 0, 100, 'linear');
@@ -211,7 +210,6 @@ test.describe('@viewer direct resize', () => {
       textChild.parent = text.id;
       project.layers = [textChild, text, shape, parent];
       PM.replaceProject(project);
-      PM.snap = false;
       PM.tool = 'select';
       PM.setKey(shape, 'scale.x', 0, 100, 'linear');
       PM.setKey(shape, 'scale.y', 0, 100, 'linear');

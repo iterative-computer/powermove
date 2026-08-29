@@ -187,7 +187,6 @@ interface LayerBase<T extends LayerType, D extends object> {
   dur: number;
   on: boolean;
   lock: boolean;
-  solo: boolean;
   shy: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;

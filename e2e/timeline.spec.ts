@@ -107,6 +107,53 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
+test('M opens and collapses the selected layer strip', async ({ session }) => {
+  const { page } = session;
+  const id = await scaleFixture(page);
+  await expect.poll(() => page.evaluate((id) => {
+    const PM = (window as any).PM;
+    return PM.UIState.getLayerCollapsed(PM.L(id));
+  }, id)).toBe(false);
+
+  await page.keyboard.press('m');
+  await expect.poll(() => page.evaluate((id) => {
+    const PM = (window as any).PM;
+    return PM.UIState.getLayerCollapsed(PM.L(id));
+  }, id)).toBe(true);
+
+  await page.keyboard.press('m');
+  await expect.poll(() => page.evaluate((id) => {
+    const PM = (window as any).PM;
+    return PM.UIState.getLayerCollapsed(PM.L(id));
+  }, id)).toBe(false);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('Command Shift D selects the new segment to the right of the playhead', async ({ session }) => {
+  const { page } = session;
+  const leftId = await scaleFixture(page);
+  await page.keyboard.press('Meta+Shift+d');
+
+  expect(await page.evaluate((leftId) => {
+    const PM = (window as any).PM;
+    const selected = PM.selLayers();
+    return {
+      selectedIds: PM.sel.layers,
+      selected: selected.map((layer: any) => ({ id: layer.id, from: layer.from, dur: layer.dur })),
+      left: { id: PM.L(leftId).id, from: PM.L(leftId).from, dur: PM.L(leftId).dur }
+    };
+  }, leftId)).toEqual({
+    selectedIds: expect.arrayContaining([expect.any(String)]),
+    selected: [{ id: expect.any(String), from: 3, dur: 2 }],
+    left: { id: leftId, from: 2, dur: 1 }
+  });
+  expect(await page.evaluate(() => {
+    const PM = (window as any).PM;
+    return PM.sel.layers.length === 1 && PM.sel.layers[0] !== PM.proj.layers.find((layer: any) => layer.from === 2)?.id;
+  })).toBe(true);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 for (const descending of [false, true]) test(`incoming Bézier handles follow the pointer, undo and cancel (${descending ? 'falling' : 'rising'})`, async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
@@ -214,6 +261,73 @@ test('clicking the ruler moves the playhead', async ({ session }) => {
   // Work area must be untouched by the scrub click.
   const work = await page.evaluate(() => (window as any).PM.proj.work);
   expect(work?.[0] ?? 0).toBe(0);
+});
+
+test('middle-button dragging pans the timeline viewport horizontally', async ({ session }) => {
+  const { page } = session;
+  const id = await scaleFixture(page);
+  const before = await page.evaluate((id) => {
+    const PM = (window as any).PM;
+    const box = PM.TL.cv.getBoundingClientRect();
+    return {
+      x: box.x + PM.TL.gut + 180,
+      y: box.y + PM.TL.ruler + PM.TL.row / 2,
+      scrollT: PM.TL.scrollT,
+      time: PM.time,
+      selected: [...PM.sel.layers],
+      id
+    };
+  }, id);
+  await page.mouse.move(before.x, before.y);
+  await page.mouse.down({ button: 'middle' });
+  await page.mouse.move(before.x - 90, before.y, { steps: 8 });
+  await page.mouse.up({ button: 'middle' });
+
+  const after = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    return { scrollT: PM.TL.scrollT, time: PM.time, selected: [...PM.sel.layers] };
+  });
+  expect(after.scrollT).toBeGreaterThan(before.scrollT + 1);
+  expect(after.time).toBe(before.time);
+  expect(after.selected).toEqual(before.selected);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('Shift pressed during a playhead drag snaps live to clip edges and keyframes', async ({ session }) => {
+  const { page } = session;
+  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  const points = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.replaceProject(PM.mkProject({ name: 'Shift snap QA', dur: 8 }));
+    const layer = PM.mkLayer('solid', { name: 'Snap targets', from: 2, dur: 3 });
+    PM.proj.layers.push(layer);
+    PM.setKey(layer, 'opacity', 3.4, 50);
+    PM.TL.pps = 100;
+    PM.TL.scrollT = 0;
+    PM.invalidate('timeline');
+    const box = PM.TL.cv.getBoundingClientRect();
+    const point = (raw: number, target: number) => ({
+      x: box.x + PM.TL.gut + raw * PM.TL.pps,
+      y: box.y + PM.TL.ruler - 6,
+      target,
+    });
+    return [point(1.93, 2), point(3.33, 3.4), point(4.93, 5)];
+  });
+
+  for (const point of points) {
+    await page.mouse.move(point.x, point.y);
+    await page.mouse.down();
+    const raw = await page.evaluate(() => (window as any).PM.time);
+    expect(Math.abs(raw - point.target)).toBeGreaterThan(0.02);
+
+    await page.keyboard.down('Shift');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.time)).toBeCloseTo(point.target, 6);
+
+    await page.keyboard.up('Shift');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.time)).toBeCloseTo(raw, 6);
+    await page.mouse.up();
+  }
+  expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
 test('clicking the transport button pauses playback', async ({ session }) => {

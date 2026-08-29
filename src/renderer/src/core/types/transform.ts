@@ -68,7 +68,6 @@ export const LAYER_TRANSFORM_FIELDS = [
   'duration',
   'visible',
   'locked',
-  'solo',
   'shy',
   'blend',
   'motionBlur',

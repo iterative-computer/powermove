@@ -1,5 +1,6 @@
 import type { PMRegistry } from '../legacy/registry';
 import { markMenuDismissal } from '../overlays/dismissal';
+import { positionMenuAtCursor } from '../overlays/position';
 import {
   addPanel,
   dockLabel,
@@ -139,8 +140,12 @@ export function openPanelMenu(
 
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
-  menu.style.left = `${PM.clamp(event.clientX, 6, window.innerWidth - width - 6)}px`;
-  menu.style.top = `${PM.clamp(event.clientY, 6, window.innerHeight - height - 6)}px`;
+  const placement = positionMenuAtCursor(
+    event.clientX, event.clientY, width, height, window.innerWidth, window.innerHeight,
+  );
+  menu.style.left = `${placement.left}px`;
+  menu.style.top = `${placement.top}px`;
+  menu.dataset.side = placement.side;
   const buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')];
   let active = 0;
   const focusAt = (index: number): void => {

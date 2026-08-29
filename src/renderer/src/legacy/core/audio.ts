@@ -31,9 +31,8 @@ function audioLayers(project: any = PM.proj) {
   const root: any = project;
   const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any) => {
     if (!comp || !Array.isArray(comp.layers) || depth > MAX_PRECOMP_DEPTH) return;
-    const solo: any = comp.layers.some((layer: any) => layer && layer.solo);
     for (const layer of comp.layers) {
-      if (!layer || layer.on === false || (solo && !layer.solo)) continue;
+      if (!layer || layer.on === false) continue;
       const naturalStart: any = offset + Math.max(0, finite(layer.from));
       const start: any = Math.max(windowStart, naturalStart);
       const end: any = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
@@ -300,9 +299,8 @@ function envelopePoints(layer: any, localStart: any, duration: any, audibleDurat
   }));
 }
 
-function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any, options: any = {}) {
+function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any) {
   if (!layer || layer.type !== 'audio' || layer.on === false || !layer.d || !layer.d.asset || !asset) return null;
-  if (options.solo && !layer.solo) return null;
   const layerStart: any = Math.max(0, finite(layer.from));
   const layerDuration: any = Math.max(0, finite(layer.dur));
   const windowStart: any = Math.max(layerStart, finite(layer._audioWindowStart, layerStart));
@@ -326,7 +324,7 @@ function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any, options: a
 function voiceSignature(layer: any, asset: any) {
   const data: any = layer.d || {};
   return [asset.id, asset.audioToken && String(asset.audioToken), finite(layer.from), finite(layer.dur),
-    finite(data.trim), finite(data.gain, 1), finite(data.fadeIn), finite(data.fadeOut), !!layer.solo].join('|');
+    finite(data.trim), finite(data.gain, 1), finite(data.fadeIn), finite(data.fadeOut)].join('|');
 }
 
 function publishState() {

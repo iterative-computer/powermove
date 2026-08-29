@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { inspectorContext, type EditBinding } from './context';
   import ChannelRow from './ChannelRow.svelte';
   /* App-local clipboard survives layer/inspector remounts without replacing the user's system clipboard. */
@@ -16,6 +16,7 @@
   let openVersion = $state(0);
   let selectedIds = $state<string[]>([]);
   let selectionAnchor = $state<string | null>(null);
+  let effectsSection: HTMLElement;
   const effects = $derived((inspectorRefresh.version, doc.tick.structure, doc.proj, [...(layer.fx ?? [])]));
 
   function propertyEdit(path: string, label: string): EditBinding {
@@ -39,10 +40,30 @@
     return !!PM.UIState.getFxOpen(effect);
   }
 
-  function toggleOpen(effect: any): void {
+  function toggleOpen(event: MouseEvent, effect: any): void {
+    event.stopPropagation();
     PM.UIState.setFxOpen(effect, !isOpen(effect));
     openVersion++;
   }
+
+  function clearSelection(): void {
+    selectedIds = [];
+    selectionAnchor = null;
+  }
+
+  function clearSelectionFromBackground(event: PointerEvent): void {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const effectSurface = target.closest('.fx-head, .fx-params');
+    if (effectSurface && effectsSection?.contains(effectSurface)) return;
+    clearSelection();
+  }
+
+  onMount(() => {
+    const clearFromOutside = (event: PointerEvent) => clearSelectionFromBackground(event);
+    document.addEventListener('pointerdown', clearFromOutside, true);
+    return () => document.removeEventListener('pointerdown', clearFromOutside, true);
+  });
 
   function setEnabled(event: MouseEvent, effect: any): void {
     event.stopPropagation();
@@ -80,7 +101,7 @@
         : [...selectedIds, effect.id];
     } else selectedIds = [effect.id];
     selectionAnchor = effect.id;
-    if (event.target === event.currentTarget) (event.currentTarget as HTMLElement).focus();
+    (event.currentTarget as HTMLElement).focus();
   }
 
   function focusEffect(id: string | null): void {
@@ -173,104 +194,118 @@
   }
 </script>
 
-<Section title="Effects" />
-{#if effects.length === 0}
-  <button
-    type="button"
-    class="chip wide"
-    onpointerdown={(event) => {
-      event.preventDefault();
-      showFxMenu(PM, event.currentTarget, layer);
-    }}
-  ><Icon name="plus" />Add effect</button>
-{/if}
+<div
+  bind:this={effectsSection}
+  class="effects-section"
+  data-effects-section
+  role="group"
+  aria-label="Effects section"
+>
+  <Section title="Effects" />
+  {#if effects.length === 0}
+    <button
+      type="button"
+      class="chip wide"
+      onpointerdown={(event) => {
+        event.preventDefault();
+        showFxMenu(PM, event.currentTarget, layer);
+      }}
+    ><Icon name="plus" />Add effect</button>
+  {/if}
 
-{#if effects.length > 0}
-<div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
-  {#each effects as effect (effect.id)}
-    {@const definition = PM.FX?.[effect.type]}
-    {#if definition}
-    {@const expanded = isOpen(effect)}
-    {@const paramsId = `fx-params-${layer.id}-${effect.id}`}
-    <div
-      class="row fx-head"
-      class:selected={selected(effect)}
-      data-effect-id={effect.id}
-      data-selected={selected(effect) ? 'true' : undefined}
-      tabindex="0"
-      role="option"
-      aria-selected={selected(effect)}
-      aria-label={`${definition.label} effect`}
-      onclick={(event) => selectEffect(event, effect)}
-      onkeydown={(event) => effectKeydown(event, effect)}
-    >
-      <button
-        type="button"
-        class="fx-expand"
-        aria-label={`${expanded ? 'Collapse' : 'Expand'} ${definition.label}`}
-        aria-expanded={expanded}
-        aria-controls={paramsId}
-        onclick={() => toggleOpen(effect)}
+  {#if effects.length > 0}
+  <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
+    {#each effects as effect (effect.id)}
+      {@const definition = PM.FX?.[effect.type]}
+      {#if definition}
+      {@const expanded = isOpen(effect)}
+      {@const paramsId = `fx-params-${layer.id}-${effect.id}`}
+      <div
+        class="row fx-head"
+        class:selected={selected(effect)}
+        data-effect-id={effect.id}
+        data-selected={selected(effect) ? 'true' : undefined}
+        tabindex="0"
+        role="option"
+        aria-selected={selected(effect)}
+        aria-label={`${definition.label} effect`}
+        onclick={(event) => selectEffect(event, effect)}
+        onkeydown={(event) => effectKeydown(event, effect)}
       >
-        <span class:open={expanded} class="twirl" aria-hidden="true"><Icon name="chev" /></span>
-        <span class="k" style="color:var(--tx);font-weight:500;text-align:left">{definition.label}</span>
-      </button>
-      <button
-        type="button"
-        class:on={effect.on}
-        class="stopwatch"
-        aria-label={`${effect.on ? 'Disable' : 'Enable'} ${definition.label}`}
-        aria-pressed={!!effect.on}
-        onclick={(event) => setEnabled(event, effect)}
-      ><Icon name="eye" /></button>
-      <button
-        type="button"
-        class="stopwatch"
-        title="Remove effect"
-        aria-label={`Remove ${definition.label}`}
-        onclick={(event) => remove(event, effect)}
-      ><Icon name="x" /></button>
-    </div>
-
-    {#if expanded}
-      <div class="grp fx-params" id={paramsId}>
-        {#each definition.params ?? [] as parameter (parameter.k)}
-          {@const property = effect.p?.[parameter.k]}
-          {#if property}
-            {#if parameter.type === 'color'}
-              <Row label={parameter.label}>
-                <ColorField
-                  {PM}
-                  get={() => (doc.tick.values, doc.proj, property.v)}
-                  edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)}
-                  label={parameter.label}
-                />
-              </Row>
-            {:else}
-              <ChannelRow
-                {PM}
-                {layer}
-                channel={`${effect.id}.${parameter.k}`}
-                label={parameter.label}
-                {property}
-                getValue={(time) => PM.evP(layer, property, time, parameter.k)}
-                step={parameter.step}
-                min={parameter.min}
-                max={parameter.max}
-                unit={parameter.unit}
-                showDiamond={false}
-              />
-            {/if}
-          {/if}
-        {/each}
+        <button
+          type="button"
+          class="fx-expand"
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${definition.label}`}
+          aria-expanded={expanded}
+          aria-controls={paramsId}
+          onclick={(event) => toggleOpen(event, effect)}
+        >
+          <span class:open={expanded} class="twirl" aria-hidden="true"><Icon name="chev" /></span>
+        </button>
+        <span class="k fx-label">{definition.label}</span>
+        <button
+          type="button"
+          class:on={effect.on}
+          class="stopwatch"
+          aria-label={`${effect.on ? 'Disable' : 'Enable'} ${definition.label}`}
+          aria-pressed={!!effect.on}
+          onclick={(event) => setEnabled(event, effect)}
+        ><Icon name="eye" /></button>
+        <button
+          type="button"
+          class="stopwatch"
+          title="Remove effect"
+          aria-label={`Remove ${definition.label}`}
+          onclick={(event) => remove(event, effect)}
+        ><Icon name="x" /></button>
       </div>
-    {/if}
-    {/if}
-  {/each}
+
+      {#if expanded}
+        <div class="grp fx-params" id={paramsId}>
+          {#each definition.params ?? [] as parameter (parameter.k)}
+            {@const property = effect.p?.[parameter.k]}
+            {#if property}
+              {#if parameter.type === 'color'}
+                <Row label={parameter.label}>
+                  <ColorField
+                    {PM}
+                    get={() => (doc.tick.values, doc.proj, property.v)}
+                    edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)}
+                    label={parameter.label}
+                  />
+                </Row>
+              {:else}
+                <ChannelRow
+                  {PM}
+                  {layer}
+                  channel={`${effect.id}.${parameter.k}`}
+                  label={parameter.label}
+                  {property}
+                  getValue={(time) => PM.evP(layer, property, time, parameter.k)}
+                  step={parameter.step}
+                  min={parameter.min}
+                  max={parameter.max}
+                  unit={parameter.unit}
+                  showDiamond={false}
+                />
+              {/if}
+            {/if}
+          {/each}
+        </div>
+      {/if}
+      {/if}
+    {/each}
+  </div>
+  {/if}
 </div>
-{/if}
 
 <style>
+  .effects-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .fx-head {
     margin-top: 4px;
     background: var(--ink-1);
@@ -289,12 +324,19 @@
   }
 
   .fx-expand {
-    display: flex;
-    flex: 1;
+    display: grid;
+    flex: none;
     align-items: center;
     align-self: stretch;
+    width: 18px;
+    place-items: center;
+  }
+
+  .fx-label {
+    flex: 1;
     min-width: 0;
-    gap: 8px;
+    color: var(--tx);
+    font-weight: 500;
     text-align: left;
   }
 </style>

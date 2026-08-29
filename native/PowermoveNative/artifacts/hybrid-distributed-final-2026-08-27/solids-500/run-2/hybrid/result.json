@@ -1,0 +1,55 @@
+{
+  "runtime": "Electron + Swift/Metal + IOSurface",
+  "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+  "width": 1920,
+  "height": 1080,
+  "layers": 500,
+  "firstFrameMS": 46.700000047683716,
+  "completedFrameMS": {
+    "median": 1.600000023841858,
+    "p95": 2.400000035762787,
+    "min": 1.100000023841858,
+    "max": 19.80000001192093
+  },
+  "deliveryMS": {
+    "median": 0.8999999761581421,
+    "p95": 1.600000023841858,
+    "min": 0.6000000238418579,
+    "max": 19.69999998807907
+  },
+  "cpuSubmitMS": {
+    "median": 0.09537499863654375,
+    "p95": 0.17820834182202816,
+    "min": 0.06250001024454832,
+    "max": 0.33487495966255665
+  },
+  "gpuMS": {
+    "median": 0.1674999948590994,
+    "p95": 0.3969999961555004,
+    "min": 0.1510833390057087,
+    "max": 0.6017916603013873
+  },
+  "editToCompletedFrameMS": {
+    "median": 17.5,
+    "p95": 20.69999998807907,
+    "min": 15.899999976158142,
+    "max": 22.30000001192093
+  },
+  "editFirstVisibleFrameMS": {
+    "median": 12.199999988079071,
+    "p95": 13.399999976158142,
+    "min": 11.399999976158142,
+    "max": 14.400000035762787
+  },
+  "nativeState": {
+    "available": true,
+    "backend": "metal",
+    "reason": "",
+    "frames": 144,
+    "discarded": 0,
+    "roundTripMS": 8,
+    "cpuMS": 0.0790000194683671,
+    "gpuMS": 0.2768750418908894
+  },
+  "errors": []
+}

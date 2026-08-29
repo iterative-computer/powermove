@@ -5,6 +5,7 @@ import {
   createTimelineRuntime,
   pickKeyframeHit,
   planKeyframeMove,
+  resolveTimelineSnap,
   shouldDrawClipLabel,
   type KeyframeMoveSnapshotItem,
 } from './timeline';
@@ -170,6 +171,21 @@ describe('timeline runtime', () => {
     expect(replaced).toBe(timeline);
     expect(replaced).toMatchObject({ pps: 237, scrollT: 4.5, __timelineRuntimeDisposed: false });
     expect(replaced.attachHead).not.toBe(staleAttach);
+  });
+});
+
+describe('temporary Shift snapping', () => {
+  it('acquires the nearest target inside the visual tolerance', () => {
+    expect(resolveTimelineSnap(2.96, [1, 3, 3.08], 0.05)).toEqual({ time: 3, target: 3 });
+  });
+
+  it('holds an acquired target through nearby competition until release', () => {
+    expect(resolveTimelineSnap(3.035, [3, 3.04], 0.05, 3, 0.08)).toEqual({ time: 3, target: 3 });
+    expect(resolveTimelineSnap(3.2, [3, 3.04], 0.05, 3, 0.08)).toEqual({ time: 3.2, target: null });
+  });
+
+  it('leaves the playhead raw outside the acquire radius', () => {
+    expect(resolveTimelineSnap(4.2, [3, 5], 0.05)).toEqual({ time: 4.2, target: null });
   });
 });
 

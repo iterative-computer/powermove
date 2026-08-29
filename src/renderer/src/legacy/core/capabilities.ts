@@ -8,7 +8,7 @@ const MAX_EXPR_NODES: any = 160;
 const SAFE_KEY: any = /^[a-z][a-z0-9_.-]{0,79}$/i;
 const LAYER_PATHS: any = new Set([
   'layer.name', 'layer.from', 'layer.duration', 'layer.visible', 'layer.locked',
-  'layer.solo', 'layer.shy', 'layer.blend', 'layer.motionBlur', 'layer.parent',
+  'layer.shy', 'layer.blend', 'layer.motionBlur', 'layer.parent',
   'layer.color', 'layer.collapsed',
 ]);
 const SCOPES: any = new Set(['selection', 'all', 'visible']);

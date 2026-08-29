@@ -73,6 +73,7 @@
   --hdr-h:38px;
   --ctl-h:28px;   /* default control height: buttons, chips, fields inline */
   --gut:10px;
+  --panel-edge-inset:10px; /* inset panel-top controls, search rows, and footer cards */
   --pad:12px;     /* uniform outer padding for the whole shell */
   --gap:10px;     /* uniform gap between docks/panels */
   --hit:28px;     /* minimum interactive target */

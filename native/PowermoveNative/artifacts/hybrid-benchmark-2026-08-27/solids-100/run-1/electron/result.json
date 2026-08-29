@@ -1,0 +1,35 @@
+{
+  "runtime": "Frozen Electron / WebGL2",
+  "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+  "width": 1920,
+  "height": 1080,
+  "layers": 100,
+  "firstFrameMS": 2.199999988079071,
+  "completedFrameMS": {
+    "median": 0.5,
+    "p95": 1,
+    "min": 0.3999999761581421,
+    "max": 1.699999988079071
+  },
+  "deliveryMS": {
+    "median": 0.10000002384185791,
+    "p95": 0.20000004768371582,
+    "min": 0,
+    "max": 0.40000003576278687
+  },
+  "cpuSubmitMS": {
+    "median": 0.10000002384185791,
+    "p95": 0.20000004768371582,
+    "min": 0,
+    "max": 0.40000003576278687
+  },
+  "gpuMS": null,
+  "editToCompletedFrameMS": {
+    "median": 2.300000011920929,
+    "p95": 3.399999976158142,
+    "min": 2,
+    "max": 4.800000011920929
+  },
+  "nativeState": null,
+  "errors": []
+}

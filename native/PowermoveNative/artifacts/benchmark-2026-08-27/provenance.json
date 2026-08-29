@@ -1,0 +1,38 @@
+{
+  "baselineGitSHA": "7409f1a7a7f5ef4863bb2d865c7459d4c1491181",
+  "macOS": "27.0",
+  "kernel": "27.0.0",
+  "cpu": "Apple M5",
+  "arch": "arm64",
+  "nativeBinarySHA256": "a052b7fe0820278923e315d22f25e2f3d12f188c1bdafe2f9aa6fedbf0d038a2",
+  "nativeAppBinarySHA256": "f4eb7511cb0bbe8a8c71020f25eaf9a6332171eb75252b67e1ad25559be3e62a",
+  "resultsSHA256": "dd4cec09fe406ffc80145f67ff842fe5742290e364386e568292e09964e6a3a5",
+  "sourceFiles": {
+    "native/PowermoveNative/Sources/PowermoveNative/CanvasView.swift": "2ea6d12eff13e4c1480cd4ab1e0018553728c300f7d86467a883e2dd7a21ca45",
+    "native/PowermoveNative/Sources/PowermoveNative/EditorView.swift": "7363b009a97d73ff7d1c5a1a68ff9ec72f0375d1455860aac10d1c3f192bfcdd",
+    "native/PowermoveNative/Sources/PowermoveNative/Editor.swift": "906c4bacd832c8e73efae78c01703a55b974b8ec6138decba3c9715c2a46f72e",
+    "native/PowermoveNative/Sources/PowermoveNative/main.swift": "6b52528e919305376922e7e606520d4cd12f674b1ceaa07a1e0b1d9521465cd5",
+    "native/PowermoveNative/Sources/PowermoveCore/Animation.swift": "c053ee5d0602f5e66f39ce977754382dfa84bead785acbe8f0942adb1d6107c0",
+    "native/PowermoveNative/Sources/PowermoveCore/JSON.swift": "8e9428fd83eaa7bf0f25d9c057c7eaaecb0d4492a88697980157467f3c106c33",
+    "native/PowermoveNative/Sources/PowermoveCore/Document.swift": "34734c20e903cf4f9ccf6733a0868447735af3541e7ae0c1530bae213222e44b",
+    "native/PowermoveNative/Sources/PowermoveRender/MetalRenderer.swift": "843b380651497a8e4fb19469df5ca7fb9ed7abdd0a0e27ef8e63fba6f32038c6",
+    "native/PowermoveNative/Sources/PowermoveRender/Shaders.metal": "d6be7e42d093662d18984b4cdc102f362031b1fe0b9ad8db827ff01ce4bc07a4",
+    "native/PowermoveNative/Sources/PowermoveBench/main.swift": "7534d021714a8555fa32b58375b5948255c1f1e0269893553b2ebe3d5ca5f634",
+    "native/PowermoveNative/Package.swift": "41759972f0d1807ac7c72adeeac1ee5c0c77e6b492933fe6c5128e24d57f8848",
+    "scripts/benchmark-native.mjs": "9f29303a0af961c730366aab13a972480892edf6ff9709bd8278e721e0128228",
+    "scripts/native-fixtures.mjs": "5c93179083191db4094fe3b0ae88290cc6f745a85901545e4074bba45d719114"
+  },
+  "electronRendererBundles": {
+    "out/renderer/assets/index-XTgcnLzD.js": "a9ee46b9e20e608a30678a1dd2e5a2eef1049b9ab45bf506209cb3820dffc552",
+    "out/renderer/assets/index-C1Q9D-0q.js": "5b332dfae8c93529660127616c0797ae3c9ee05f8a503fc76ae90bd97ce58a2f",
+    "out/renderer/assets/index-BEfLrdJS.js": "558558dcff0a410fc29ba8b92a79d03c103b4f06989ade06788a82f1f3816651",
+    "out/renderer/assets/index-DiKiS99x.js": "3e6cb7a7c5b4814c90f8d9f5b42dd5b549088a389448d21693321c497ee330b8",
+    "out/renderer/assets/index-Cyk0DbBn.js": "7a70668bcb6fcefaa99324c120d922a714f1520bc321848368b528b871805f19",
+    "out/renderer/assets/index-DdJ1RvVW.js": "ccdc256abe485d54beb0a58eb4a0f0660c87d2b9e39b83bdcefeb42f7a8a8c50",
+    "out/renderer/assets/index-BeSI0Lg2.js": "37aca9a6a0e657b4435297cbc21b897d2abfd57059665ce0180eaef79234fe8a",
+    "out/renderer/assets/index-Wq7B93vB.js": "d307b386fd3b2d84948ee7336e7fafe5695234ac185976260afcd47c7851c20e",
+    "out/renderer/assets/index-E9cSowWH.js": "6461479dde50c1adf942ed0e4fb7dc283bddd21442d4ebcff30aef8b039e60bc",
+    "out/renderer/assets/index-C42qZQ5S.js": "355909f8ca6d200329bec04efdee3c769825e4a3fd26c70c37a4f27d146f5bcf"
+  },
+  "collected": "Immediately after the benchmark; no renderer changes between trials and provenance capture."
+}

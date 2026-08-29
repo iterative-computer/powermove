@@ -1,0 +1,2925 @@
+{
+  "cpu": "Apple M5",
+  "os": "27.0.0",
+  "arch": "arm64",
+  "frames": 90,
+  "warmup": 30,
+  "runs": 3,
+  "baselineMainSHA": "527993987be196f981e87c5b3cf07d79e6ac7b3d828dbbbfcad825f43adbe9d1",
+  "nativeBenchSHA": "a052b7fe0820278923e315d22f25e2f3d12f188c1bdafe2f9aa6fedbf0d038a2",
+  "hybridMainSHA": "475553a1554f611dfe232e936981d1ec17153aa154e66e67a1677fb9064fcb68",
+  "hybridLibrarySHA": "1b8c8cacb2a5263b71543df7b90db9e629521ab00f571969577929034a41ffc6",
+  "addonSHA": "237822f594f0d68b5d44bd22e15d531e390c025b48b809e981f19ef3f62c333e",
+  "results": [
+    {
+      "name": "solids-10",
+      "run": 1,
+      "fixtureSHA": "a4b1013a07785260d17998f88a7ba88060ec80c37b8c8b0f93583652a0e73ad2",
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 10,
+        "firstFrameMS": 10.400000035762787,
+        "completedFrameMS": {
+          "median": 0.5,
+          "p95": 1.9000000357627869,
+          "min": 0.30000001192092896,
+          "max": 2.5
+        },
+        "deliveryMS": {
+          "median": 0,
+          "p95": 0.10000002384185791,
+          "min": 0,
+          "max": 0.19999998807907104
+        },
+        "cpuSubmitMS": {
+          "median": 0,
+          "p95": 0.10000002384185791,
+          "min": 0,
+          "max": 0.19999998807907104
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 1,
+          "p95": 2.199999988079071,
+          "min": 1,
+          "max": 3.900000035762787
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 570912.3053061421,
+        "completedFrameMS": {
+          "max": 3.1225000275298953,
+          "median": 0.28683332493528724,
+          "min": 0.2012916374951601,
+          "p95": 0.9518750011920929
+        },
+        "cpuSubmitMS": {
+          "max": 0.04670833004638553,
+          "median": 0.014916702639311552,
+          "min": 0.010999967344105244,
+          "p95": 0.021875021047890186
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.0007083290256559849,
+          "median": 0.0002500019036233425,
+          "min": 0.00024994369596242905,
+          "p95": 0.0002916785888373852
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 2.762999967671931,
+          "median": 0.07716665277257562,
+          "min": 0.07470836862921715,
+          "p95": 0.4807499935850501
+        },
+        "height": 1080,
+        "layers": 10,
+        "peakRSSBytes": 70467584,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 10,
+        "firstFrameMS": 65.39999997615814,
+        "completedFrameMS": {
+          "median": 1.4000000357627869,
+          "p95": 2.399999976158142,
+          "min": 1.0999999642372131,
+          "max": 3
+        },
+        "deliveryMS": {
+          "median": 0.699999988079071,
+          "p95": 1.5999999642372131,
+          "min": 0.5,
+          "max": 1.7000000476837158
+        },
+        "cpuSubmitMS": {
+          "median": 0.0560833141207695,
+          "p95": 0.15695829642936587,
+          "min": 0.02500001573935151,
+          "max": 0.19995833281427622
+        },
+        "gpuMS": {
+          "median": 0.10462501086294651,
+          "p95": 0.7277500117197633,
+          "min": 0.097708310931921,
+          "max": 0.9153750143013895
+        },
+        "editToCompletedFrameMS": {
+          "median": 6.700000047683716,
+          "p95": 11,
+          "min": 5.400000035762787,
+          "max": 11.5
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 4.199999988079071,
+          "cpuMS": 0.03491668030619621,
+          "gpuMS": 0.13474997831508517
+        },
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ],
+        "native": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ],
+        "hybrid": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-10",
+      "run": 2,
+      "fixtureSHA": "a4b1013a07785260d17998f88a7ba88060ec80c37b8c8b0f93583652a0e73ad2",
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 570912.3053061421,
+        "completedFrameMS": {
+          "max": 3.141083347145468,
+          "median": 0.2801666269078851,
+          "min": 0.20512501941993833,
+          "p95": 0.7103333482518792
+        },
+        "cpuSubmitMS": {
+          "max": 0.04900002386420965,
+          "median": 0.01458328915759921,
+          "min": 0.010958348866552114,
+          "p95": 0.021250045392662287
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.0012500095181167126,
+          "median": 0.0002916785888373852,
+          "min": 0.0002500019036233425,
+          "p95": 0.00033335527405142784
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 2.8213750338181853,
+          "median": 0.0772500061430037,
+          "min": 0.07662497228011489,
+          "p95": 0.42275001760572195
+        },
+        "height": 1080,
+        "layers": 10,
+        "peakRSSBytes": 70303744,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 10,
+        "firstFrameMS": 29.69999998807907,
+        "completedFrameMS": {
+          "median": 1.300000011920929,
+          "p95": 2.399999976158142,
+          "min": 1.0999999642372131,
+          "max": 3
+        },
+        "deliveryMS": {
+          "median": 0.699999988079071,
+          "p95": 1.5,
+          "min": 0.5,
+          "max": 1.899999976158142
+        },
+        "cpuSubmitMS": {
+          "median": 0.04979170626029372,
+          "p95": 0.19491667626425624,
+          "min": 0.01858331961557269,
+          "max": 0.26125001022592187
+        },
+        "gpuMS": {
+          "median": 0.11283333878964186,
+          "p95": 0.7127500139176846,
+          "min": 0.09699998190626502,
+          "max": 1.1232499964535236
+        },
+        "editToCompletedFrameMS": {
+          "median": 7.099999964237213,
+          "p95": 8.799999952316284,
+          "min": 4,
+          "max": 10
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 4.100000023841858,
+          "cpuMS": 0.034583325032144785,
+          "gpuMS": 0.12637500185519457
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 10,
+        "firstFrameMS": 18.80000001192093,
+        "completedFrameMS": {
+          "median": 0.40000003576278687,
+          "p95": 0.8999999761581421,
+          "min": 0.2999999523162842,
+          "max": 1.5
+        },
+        "deliveryMS": {
+          "median": 0,
+          "p95": 0.10000002384185791,
+          "min": 0,
+          "max": 0.20000004768371582
+        },
+        "cpuSubmitMS": {
+          "median": 0,
+          "p95": 0.10000002384185791,
+          "min": 0,
+          "max": 0.20000004768371582
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 1.100000023841858,
+          "p95": 1.899999976158142,
+          "min": 0.800000011920929,
+          "max": 3.199999988079071
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ],
+        "native": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ],
+        "hybrid": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-10",
+      "run": 3,
+      "fixtureSHA": "a4b1013a07785260d17998f88a7ba88060ec80c37b8c8b0f93583652a0e73ad2",
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 10,
+        "firstFrameMS": 21.5,
+        "completedFrameMS": {
+          "median": 1.399999976158142,
+          "p95": 2.199999988079071,
+          "min": 1,
+          "max": 3.5
+        },
+        "deliveryMS": {
+          "median": 0.699999988079071,
+          "p95": 1.399999976158142,
+          "min": 0.5,
+          "max": 1.600000023841858
+        },
+        "cpuSubmitMS": {
+          "median": 0.05233328556641936,
+          "p95": 0.12116663856431842,
+          "min": 0.025374989490956068,
+          "max": 0.18437497783452272
+        },
+        "gpuMS": {
+          "median": 0.10287499753758311,
+          "p95": 0.27445831801742315,
+          "min": 0.09762501576915383,
+          "max": 0.7779999868944287
+        },
+        "editToCompletedFrameMS": {
+          "median": 6.900000035762787,
+          "p95": 8.699999988079071,
+          "min": 4.400000035762787,
+          "max": 12.5
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 2.899999976158142,
+          "cpuMS": 0.030291674192994833,
+          "gpuMS": 0.10429165558889508
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 10,
+        "firstFrameMS": 15.900000035762787,
+        "completedFrameMS": {
+          "median": 0.40000003576278687,
+          "p95": 1,
+          "min": 0.2999999523162842,
+          "max": 1.9000000357627869
+        },
+        "deliveryMS": {
+          "median": 0,
+          "p95": 0.10000002384185791,
+          "min": 0,
+          "max": 0.19999998807907104
+        },
+        "cpuSubmitMS": {
+          "median": 0,
+          "p95": 0.10000002384185791,
+          "min": 0,
+          "max": 0.19999998807907104
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 1.100000023841858,
+          "p95": 2.100000023841858,
+          "min": 0.9000000357627869,
+          "max": 3.199999988079071
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 570912.3053061421,
+        "completedFrameMS": {
+          "max": 3.2951250323094428,
+          "median": 0.28199999360367656,
+          "min": 0.23491663159802556,
+          "p95": 0.9348749881610274
+        },
+        "cpuSubmitMS": {
+          "max": 0.025791639927774668,
+          "median": 0.014666642528027296,
+          "min": 0.011625001206994057,
+          "p95": 0.020000035874545574
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.0009166542440652847,
+          "median": 0.00037497375160455704,
+          "min": 0.0002916203811764717,
+          "p95": 0.0004166504368185997
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.0084166792221367,
+          "median": 0.07741665467619896,
+          "min": 0.07500004721805453,
+          "p95": 0.4549166769720614
+        },
+        "height": 1080,
+        "layers": 10,
+        "peakRSSBytes": 70156288,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ],
+        "native": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ],
+        "hybrid": [
+          "82ca1b01f70c74f33e1aa1fa2e8b2fac35e6632bd1ae756dd8068071ffe74410",
+          "b5f0e7c8a77e51c44301265d11c79a3122d82a3a3e10e782e6403aaba7f8b91c",
+          "d4f9ccd57bc90b5b70ee354bc1ac61b7cbf425805d03e4a093e0d49d67d69398"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-100",
+      "run": 1,
+      "fixtureSHA": "c81a1609d3ad54408535055af1aafa51127663dd22952a5addf582521a2c9894",
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 100,
+        "firstFrameMS": 2.199999988079071,
+        "completedFrameMS": {
+          "median": 0.5,
+          "p95": 1,
+          "min": 0.3999999761581421,
+          "max": 1.699999988079071
+        },
+        "deliveryMS": {
+          "median": 0.10000002384185791,
+          "p95": 0.20000004768371582,
+          "min": 0,
+          "max": 0.40000003576278687
+        },
+        "cpuSubmitMS": {
+          "median": 0.10000002384185791,
+          "p95": 0.20000004768371582,
+          "min": 0,
+          "max": 0.40000003576278687
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 2.300000011920929,
+          "p95": 3.399999976158142,
+          "min": 2,
+          "max": 4.800000011920929
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 7788447.053061418,
+        "completedFrameMS": {
+          "max": 3.710250020958483,
+          "median": 0.30204164795577526,
+          "min": 0.210666679777205,
+          "p95": 2.746624988503754
+        },
+        "cpuSubmitMS": {
+          "max": 0.035416625905781984,
+          "median": 0.021249987185001373,
+          "min": 0.018000020645558834,
+          "p95": 0.028583337552845478
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.005750043783336878,
+          "median": 0.002583314199000597,
+          "min": 0.002500019036233425,
+          "p95": 0.003500026650726795
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.4663333208300173,
+          "median": 0.08791667642071843,
+          "min": 0.08558330591768026,
+          "p95": 2.4863749858923256
+        },
+        "height": 1080,
+        "layers": 100,
+        "peakRSSBytes": 71401472,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 100,
+        "firstFrameMS": 37.60000002384186,
+        "completedFrameMS": {
+          "median": 1.300000011920929,
+          "p95": 2.200000047683716,
+          "min": 1.0999999642372131,
+          "max": 4.700000047683716
+        },
+        "deliveryMS": {
+          "median": 0.699999988079071,
+          "p95": 1.4000000357627869,
+          "min": 0.5,
+          "max": 1.7000000476837158
+        },
+        "cpuSubmitMS": {
+          "median": 0.05674996646121144,
+          "p95": 0.16212498303502798,
+          "min": 0.03633333835750818,
+          "max": 0.2717082970775664
+        },
+        "gpuMS": {
+          "median": 0.11175003601238132,
+          "p95": 0.36595837445929646,
+          "min": 0.10658334940671921,
+          "max": 0.8280833135358989
+        },
+        "editToCompletedFrameMS": {
+          "median": 24.399999976158142,
+          "p95": 30.69999998807907,
+          "min": 23.899999976158142,
+          "max": 32.10000002384186
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 21.899999976158142,
+          "cpuMS": 0.04270835779607296,
+          "gpuMS": 0.25649997405707836
+        },
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d66895a5391d8dd788e2988edc7c7eca3acb2dc2ce3e8b1ab1869b7d9729634f"
+        ],
+        "native": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d5e6f4dc43d189ec71298c768e2822c6a43d680d24c1a5ba617971611a6d8d83"
+        ],
+        "hybrid": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d5e6f4dc43d189ec71298c768e2822c6a43d680d24c1a5ba617971611a6d8d83"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-100",
+      "run": 2,
+      "fixtureSHA": "c81a1609d3ad54408535055af1aafa51127663dd22952a5addf582521a2c9894",
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 7788447.053061418,
+        "completedFrameMS": {
+          "max": 3.678958339150995,
+          "median": 0.29200001154094934,
+          "min": 0.22570829605683684,
+          "p95": 3.0733750318177044
+        },
+        "cpuSubmitMS": {
+          "max": 0.05262496415525675,
+          "median": 0.02195837441831827,
+          "min": 0.018333375919610262,
+          "p95": 0.03225001273676753
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.009083305485546589,
+          "median": 0.0026249908842146397,
+          "min": 0.0025416375137865543,
+          "p95": 0.003374996595084667
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.1921249465085566,
+          "median": 0.08600001456215978,
+          "min": 0.0837499974295497,
+          "p95": 2.601583313662559
+        },
+        "height": 1080,
+        "layers": 100,
+        "peakRSSBytes": 71319552,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 100,
+        "firstFrameMS": 32.90000003576279,
+        "completedFrameMS": {
+          "median": 1.4000000357627869,
+          "p95": 2.300000011920929,
+          "min": 1.0999999642372131,
+          "max": 3.800000011920929
+        },
+        "deliveryMS": {
+          "median": 0.800000011920929,
+          "p95": 1.600000023841858,
+          "min": 0.5,
+          "max": 2.299999952316284
+        },
+        "cpuSubmitMS": {
+          "median": 0.07358333095908165,
+          "p95": 0.18337497022002935,
+          "min": 0.04166667349636555,
+          "max": 0.2477500238455832
+        },
+        "gpuMS": {
+          "median": 0.11387496488168836,
+          "p95": 0.7145833224058151,
+          "min": 0.10558334179222584,
+          "max": 0.8875000057742
+        },
+        "editToCompletedFrameMS": {
+          "median": 24.099999964237213,
+          "p95": 25.30000001192093,
+          "min": 23.099999964237213,
+          "max": 30.19999998807907
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 21.900000035762787,
+          "cpuMS": 0.04299997817724943,
+          "gpuMS": 0.38400001358240843
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 100,
+        "firstFrameMS": 10.599999964237213,
+        "completedFrameMS": {
+          "median": 0.5,
+          "p95": 1,
+          "min": 0.3999999761581421,
+          "max": 1.699999988079071
+        },
+        "deliveryMS": {
+          "median": 0.10000002384185791,
+          "p95": 0.20000004768371582,
+          "min": 0,
+          "max": 0.40000003576278687
+        },
+        "cpuSubmitMS": {
+          "median": 0.10000002384185791,
+          "p95": 0.20000004768371582,
+          "min": 0,
+          "max": 0.40000003576278687
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 2.399999976158142,
+          "p95": 3.299999952316284,
+          "min": 2,
+          "max": 4.5
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d66895a5391d8dd788e2988edc7c7eca3acb2dc2ce3e8b1ab1869b7d9729634f"
+        ],
+        "native": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d5e6f4dc43d189ec71298c768e2822c6a43d680d24c1a5ba617971611a6d8d83"
+        ],
+        "hybrid": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d5e6f4dc43d189ec71298c768e2822c6a43d680d24c1a5ba617971611a6d8d83"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-100",
+      "run": 3,
+      "fixtureSHA": "c81a1609d3ad54408535055af1aafa51127663dd22952a5addf582521a2c9894",
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 100,
+        "firstFrameMS": 32.10000002384186,
+        "completedFrameMS": {
+          "median": 1.399999976158142,
+          "p95": 2.100000023841858,
+          "min": 1.0999999642372131,
+          "max": 2.199999988079071
+        },
+        "deliveryMS": {
+          "median": 0.699999988079071,
+          "p95": 1.5,
+          "min": 0.5999999642372131,
+          "max": 1.5
+        },
+        "cpuSubmitMS": {
+          "median": 0.06145832594484091,
+          "p95": 0.2174166147597134,
+          "min": 0.039416656363755465,
+          "max": 0.32691663363948464
+        },
+        "gpuMS": {
+          "median": 0.11341669596731663,
+          "p95": 0.5121249705553055,
+          "min": 0.10433333227410913,
+          "max": 0.8071250049397349
+        },
+        "editToCompletedFrameMS": {
+          "median": 25.19999998807907,
+          "p95": 27.599999964237213,
+          "min": 23.799999952316284,
+          "max": 27.600000023841858
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 21.69999998807907,
+          "cpuMS": 0.04266668111085892,
+          "gpuMS": 0.38549996679648757
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 100,
+        "firstFrameMS": 2.799999952316284,
+        "completedFrameMS": {
+          "median": 0.5,
+          "p95": 1,
+          "min": 0.3999999761581421,
+          "max": 1.5
+        },
+        "deliveryMS": {
+          "median": 0.10000002384185791,
+          "p95": 0.19999998807907104,
+          "min": 0,
+          "max": 0.5
+        },
+        "cpuSubmitMS": {
+          "median": 0.10000002384185791,
+          "p95": 0.19999998807907104,
+          "min": 0,
+          "max": 0.5
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 2.199999988079071,
+          "p95": 3,
+          "min": 2,
+          "max": 4.699999988079071
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 7788447.053061418,
+        "completedFrameMS": {
+          "max": 3.679624991491437,
+          "median": 0.275041616987437,
+          "min": 0.24375005159527063,
+          "p95": 2.4770833551883698
+        },
+        "cpuSubmitMS": {
+          "max": 0.047083362005651,
+          "median": 0.02274999860674143,
+          "min": 0.01891667488962412,
+          "p95": 0.03262498648837209
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.004125002305954695,
+          "median": 0.002583314199000597,
+          "min": 0.0024999608285725117,
+          "p95": 0.002708344254642725
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.3555416739545763,
+          "median": 0.08575001265853643,
+          "min": 0.0845832983031869,
+          "p95": 2.0896249916404486
+        },
+        "height": 1080,
+        "layers": 100,
+        "peakRSSBytes": 71483392,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d66895a5391d8dd788e2988edc7c7eca3acb2dc2ce3e8b1ab1869b7d9729634f"
+        ],
+        "native": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d5e6f4dc43d189ec71298c768e2822c6a43d680d24c1a5ba617971611a6d8d83"
+        ],
+        "hybrid": [
+          "961904580b568e7de133a6524c060acc00f01b16ba4cc1b6f509be7ccdb27b78",
+          "7229333cf82a71f914e4b8d14929032e78c1ebe95604bd352c6b6212fe068397",
+          "d5e6f4dc43d189ec71298c768e2822c6a43d680d24c1a5ba617971611a6d8d83"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-500",
+      "run": 1,
+      "fixtureSHA": "b394ca269564cdc126ed51a3542bd425645e68e7afe62e0d6a2bcaa257e62404",
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 500,
+        "firstFrameMS": 3.5,
+        "completedFrameMS": {
+          "median": 1,
+          "p95": 1.9000000357627869,
+          "min": 0.7999999523162842,
+          "max": 2.599999964237213
+        },
+        "deliveryMS": {
+          "median": 0.40000003576278687,
+          "p95": 0.800000011920929,
+          "min": 0.30000001192092896,
+          "max": 1
+        },
+        "cpuSubmitMS": {
+          "median": 0.40000003576278687,
+          "p95": 0.800000011920929,
+          "min": 0.30000001192092896,
+          "max": 1
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 7.900000035762787,
+          "p95": 8.800000011920929,
+          "min": 6.899999976158142,
+          "max": 9.300000011920929
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 39115179.26530717,
+        "completedFrameMS": {
+          "max": 4.053750017192215,
+          "median": 0.34383335150778294,
+          "min": 0.32070832094177604,
+          "p95": 2.840708359144628
+        },
+        "cpuSubmitMS": {
+          "max": 0.07883337093517184,
+          "median": 0.04983332473784685,
+          "min": 0.044874963350594044,
+          "p95": 0.06275001214817166
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.020875013433396816,
+          "median": 0.013583339750766754,
+          "min": 0.013291661161929369,
+          "p95": 0.016583362594246864
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.4417916904203594,
+          "median": 0.13950001448392868,
+          "min": 0.13816665159538388,
+          "p95": 2.4768750299699605
+        },
+        "height": 1080,
+        "layers": 500,
+        "peakRSSBytes": 78118912,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 500,
+        "firstFrameMS": 110.80000001192093,
+        "completedFrameMS": {
+          "median": 1.4000000357627869,
+          "p95": 2.399999976158142,
+          "min": 1.199999988079071,
+          "max": 18.399999976158142
+        },
+        "deliveryMS": {
+          "median": 0.800000011920929,
+          "p95": 1.5,
+          "min": 0.5999999642372131,
+          "max": 18.100000023841858
+        },
+        "cpuSubmitMS": {
+          "median": 0.08699996396899223,
+          "p95": 0.22354169050231576,
+          "min": 0.06716663483530283,
+          "max": 0.36045833257958293
+        },
+        "gpuMS": {
+          "median": 0.1648333272896707,
+          "p95": 0.453874992672354,
+          "min": 0.15825004084035754,
+          "max": 0.9248333517462015
+        },
+        "editToCompletedFrameMS": {
+          "median": 108.10000002384186,
+          "p95": 116.30000001192093,
+          "min": 106.89999997615814,
+          "max": 132.69999998807907
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 98.69999998807907,
+          "cpuMS": 0.08683337364345789,
+          "gpuMS": 0.6660833605565131
+        },
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "1d26fbbab75c5704f7eb82ae7b181a7f24a4ebea0803a20f270c19ea16184d7a"
+        ],
+        "native": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "4ddb6756d573ba396586acb1a12f98d7d0553ddcb0c55c03a48d6ea3739596f4"
+        ],
+        "hybrid": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "4ddb6756d573ba396586acb1a12f98d7d0553ddcb0c55c03a48d6ea3739596f4"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-500",
+      "run": 2,
+      "fixtureSHA": "b394ca269564cdc126ed51a3542bd425645e68e7afe62e0d6a2bcaa257e62404",
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 39115179.26530717,
+        "completedFrameMS": {
+          "max": 3.842708363663405,
+          "median": 0.33558334689587355,
+          "min": 0.3082082839682698,
+          "p95": 2.2794166579842567
+        },
+        "cpuSubmitMS": {
+          "max": 0.12608332326635718,
+          "median": 0.050125003326684237,
+          "min": 0.044249987695366144,
+          "p95": 0.05929166218265891
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.029791670385748148,
+          "median": 0.013458309695124626,
+          "min": 0.013208307791501284,
+          "p95": 0.016125035472214222
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.2350000110454857,
+          "median": 0.13987498823553324,
+          "min": 0.138291681651026,
+          "p95": 1.943624985869974
+        },
+        "height": 1080,
+        "layers": 500,
+        "peakRSSBytes": 78102528,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 500,
+        "firstFrameMS": 112.19999998807907,
+        "completedFrameMS": {
+          "median": 1.4000000357627869,
+          "p95": 2.199999988079071,
+          "min": 1.199999988079071,
+          "max": 19.30000001192093
+        },
+        "deliveryMS": {
+          "median": 0.800000011920929,
+          "p95": 1.5,
+          "min": 0.5999999642372131,
+          "max": 19.100000023841858
+        },
+        "cpuSubmitMS": {
+          "median": 0.08724996587261558,
+          "p95": 0.1971666351892054,
+          "min": 0.06687495624646544,
+          "max": 0.3520832979120314
+        },
+        "gpuMS": {
+          "median": 0.16366667114198208,
+          "p95": 0.4971666494384408,
+          "min": 0.15849998453631997,
+          "max": 0.7413750281557441
+        },
+        "editToCompletedFrameMS": {
+          "median": 107,
+          "p95": 109.60000002384186,
+          "min": 105.80000001192093,
+          "max": 116.80000001192093
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 97.69999998807907,
+          "cpuMS": 0.07958337664604187,
+          "gpuMS": 0.6693333270959556
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 500,
+        "firstFrameMS": 3.700000047683716,
+        "completedFrameMS": {
+          "median": 1,
+          "p95": 1.5999999642372131,
+          "min": 0.7999999523162842,
+          "max": 1.9000000357627869
+        },
+        "deliveryMS": {
+          "median": 0.5,
+          "p95": 0.800000011920929,
+          "min": 0.2999999523162842,
+          "max": 1.0999999642372131
+        },
+        "cpuSubmitMS": {
+          "median": 0.5,
+          "p95": 0.800000011920929,
+          "min": 0.2999999523162842,
+          "max": 1.0999999642372131
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 7.5,
+          "p95": 8.699999988079071,
+          "min": 7.100000023841858,
+          "max": 9.5
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "1d26fbbab75c5704f7eb82ae7b181a7f24a4ebea0803a20f270c19ea16184d7a"
+        ],
+        "native": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "4ddb6756d573ba396586acb1a12f98d7d0553ddcb0c55c03a48d6ea3739596f4"
+        ],
+        "hybrid": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "4ddb6756d573ba396586acb1a12f98d7d0553ddcb0c55c03a48d6ea3739596f4"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-500",
+      "run": 3,
+      "fixtureSHA": "b394ca269564cdc126ed51a3542bd425645e68e7afe62e0d6a2bcaa257e62404",
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 500,
+        "firstFrameMS": 138.5,
+        "completedFrameMS": {
+          "median": 1.600000023841858,
+          "p95": 2.699999988079071,
+          "min": 1.199999988079071,
+          "max": 6.5
+        },
+        "deliveryMS": {
+          "median": 0.8999999761581421,
+          "p95": 1.899999976158142,
+          "min": 0.6000000238418579,
+          "max": 5
+        },
+        "cpuSubmitMS": {
+          "median": 0.09887502528727055,
+          "p95": 0.36562501918524504,
+          "min": 0.06954168202355504,
+          "max": 0.6956667057238519
+        },
+        "gpuMS": {
+          "median": 0.16520835924893618,
+          "p95": 0.41841663187369704,
+          "min": 0.15858333790674806,
+          "max": 0.5988333723507822
+        },
+        "editToCompletedFrameMS": {
+          "median": 107.30000001192093,
+          "p95": 122.09999996423721,
+          "min": 106.29999995231628,
+          "max": 134.60000002384186
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 99.80000001192093,
+          "cpuMS": 0.08674996206536889,
+          "gpuMS": 0.7712499937042594
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 500,
+        "firstFrameMS": 4,
+        "completedFrameMS": {
+          "median": 1,
+          "p95": 1.699999988079071,
+          "min": 0.800000011920929,
+          "max": 2.800000011920929
+        },
+        "deliveryMS": {
+          "median": 0.5,
+          "p95": 0.7000000476837158,
+          "min": 0.2999999523162842,
+          "max": 2.200000047683716
+        },
+        "cpuSubmitMS": {
+          "median": 0.5,
+          "p95": 0.7000000476837158,
+          "min": 0.2999999523162842,
+          "max": 2.200000047683716
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 8.5,
+          "p95": 9.399999976158142,
+          "min": 7.400000035762787,
+          "max": 10.399999976158142
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 39115179.26530717,
+        "completedFrameMS": {
+          "max": 4.506208351813257,
+          "median": 0.3366666496731341,
+          "min": 0.3035416593775153,
+          "p95": 3.706374962348491
+        },
+        "cpuSubmitMS": {
+          "max": 0.10870833648368716,
+          "median": 0.04941661609336734,
+          "min": 0.04458328476175666,
+          "p95": 0.07095834007486701
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.02654170384630561,
+          "median": 0.013125012628734112,
+          "min": 0.01287501072511077,
+          "p95": 0.015208381228148937
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 4.236125038005412,
+          "median": 0.13950001448392868,
+          "min": 0.13812497491016984,
+          "p95": 3.2991250045597553
+        },
+        "height": 1080,
+        "layers": 500,
+        "peakRSSBytes": 78086144,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "1d26fbbab75c5704f7eb82ae7b181a7f24a4ebea0803a20f270c19ea16184d7a"
+        ],
+        "native": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "4ddb6756d573ba396586acb1a12f98d7d0553ddcb0c55c03a48d6ea3739596f4"
+        ],
+        "hybrid": [
+          "9bcbd739a8e60ac9c0bf1e0a7a9ccf78d0385982507a0a6bf880328ab15a1400",
+          "e2f39acc4ecfbcf42a820306c05608e6a33a9b91b7e2457fd6f419af63e744c9",
+          "4ddb6756d573ba396586acb1a12f98d7d0553ddcb0c55c03a48d6ea3739596f4"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-2000",
+      "run": 1,
+      "fixtureSHA": "8e521e0acff78d05fc793b475dcfc43cd537456237fd335253ed3c433d0777a3",
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 2000,
+        "firstFrameMS": 10.5,
+        "completedFrameMS": {
+          "median": 2.899999976158142,
+          "p95": 3.699999988079071,
+          "min": 2.599999964237213,
+          "max": 4.299999952316284
+        },
+        "deliveryMS": {
+          "median": 1.7000000476837158,
+          "p95": 2.400000035762787,
+          "min": 1.5999999642372131,
+          "max": 2.699999988079071
+        },
+        "cpuSubmitMS": {
+          "median": 1.7000000476837158,
+          "p95": 2.400000035762787,
+          "min": 1.5999999642372131,
+          "max": 2.699999988079071
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 27.19999998807907,
+          "p95": 30.299999952316284,
+          "min": 26.80000001192093,
+          "max": 32
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 157659625.06122783,
+        "completedFrameMS": {
+          "max": 4.289166652597487,
+          "median": 0.7042500074021518,
+          "min": 0.6579167093150318,
+          "p95": 3.8174582878127694
+        },
+        "cpuSubmitMS": {
+          "max": 0.30554167460650206,
+          "median": 0.1632916391827166,
+          "min": 0.14620833098888397,
+          "p95": 0.20079169189557433
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.11729163816198707,
+          "median": 0.058083387557417154,
+          "min": 0.05258334567770362,
+          "p95": 0.0662917154841125
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.784583299420774,
+          "median": 0.38587499875575304,
+          "min": 0.35758333979174495,
+          "p95": 3.0479999841190875
+        },
+        "height": 1080,
+        "layers": 2000,
+        "peakRSSBytes": 99057664,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 2000,
+        "firstFrameMS": 401.5,
+        "completedFrameMS": {
+          "median": 1.899999976158142,
+          "p95": 2.599999964237213,
+          "min": 1.5999999642372131,
+          "max": 2.800000011920929
+        },
+        "deliveryMS": {
+          "median": 1.2999999523162842,
+          "p95": 1.899999976158142,
+          "min": 1,
+          "max": 2.199999988079071
+        },
+        "cpuSubmitMS": {
+          "median": 0.20466663409024477,
+          "p95": 0.4588749725371599,
+          "min": 0.1705000177025795,
+          "max": 0.6584166549146175
+        },
+        "gpuMS": {
+          "median": 0.41099998634308577,
+          "p95": 0.6406250176951289,
+          "min": 0.38012495497241616,
+          "max": 0.8423750405199826
+        },
+        "editToCompletedFrameMS": {
+          "median": 411,
+          "p95": 430.30000001192093,
+          "min": 406.19999998807907,
+          "max": 435.10000002384186
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 407.5,
+          "cpuMS": 0.343791616614908,
+          "gpuMS": 1.880083349533379
+        },
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "686d309496c28a8de91aa18a62c25a84b785505404982c6a5a97b8f8ca4d0d1e"
+        ],
+        "native": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "0252970f3866348da3bfc2cfa673ea819a544a99264f12ee7907b78708417a1a"
+        ],
+        "hybrid": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "0252970f3866348da3bfc2cfa673ea819a544a99264f12ee7907b78708417a1a"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-2000",
+      "run": 2,
+      "fixtureSHA": "8e521e0acff78d05fc793b475dcfc43cd537456237fd335253ed3c433d0777a3",
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 157659625.06122783,
+        "completedFrameMS": {
+          "max": 4.304875037632883,
+          "median": 0.7022499921731651,
+          "min": 0.651500013191253,
+          "p95": 4.011083336081356
+        },
+        "cpuSubmitMS": {
+          "max": 0.24500000290572643,
+          "median": 0.1554166665300727,
+          "min": 0.14245836064219475,
+          "p95": 0.1912500010803342
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.25154167087748647,
+          "median": 0.05954166408628225,
+          "min": 0.055916665587574244,
+          "p95": 0.08483335841447115
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.7712916382588446,
+          "median": 0.3881249576807022,
+          "min": 0.35812496207654476,
+          "p95": 3.5287499777041376
+        },
+        "height": 1080,
+        "layers": 2000,
+        "peakRSSBytes": 98910208,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 2000,
+        "firstFrameMS": 395,
+        "completedFrameMS": {
+          "median": 1.9000000357627869,
+          "p95": 2.599999964237213,
+          "min": 1.5,
+          "max": 2.800000011920929
+        },
+        "deliveryMS": {
+          "median": 1.199999988079071,
+          "p95": 1.800000011920929,
+          "min": 1,
+          "max": 2.099999964237213
+        },
+        "cpuSubmitMS": {
+          "median": 0.20433333702385426,
+          "p95": 0.41037501068785787,
+          "min": 0.1810416579246521,
+          "max": 0.5944166914559901
+        },
+        "gpuMS": {
+          "median": 0.4089583526365459,
+          "p95": 0.680500001180917,
+          "min": 0.3839583368971944,
+          "max": 0.8054166682995856
+        },
+        "editToCompletedFrameMS": {
+          "median": 413.10000002384186,
+          "p95": 422.69999998807907,
+          "min": 406.89999997615814,
+          "max": 433.5
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 381.4000000357628,
+          "cpuMS": 0.24695834144949913,
+          "gpuMS": 1.8246250110678375
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 2000,
+        "firstFrameMS": 8.5,
+        "completedFrameMS": {
+          "median": 2.900000035762787,
+          "p95": 3.799999952316284,
+          "min": 2.5,
+          "max": 4.800000011920929
+        },
+        "deliveryMS": {
+          "median": 1.7000000476837158,
+          "p95": 2.400000035762787,
+          "min": 1.5,
+          "max": 2.800000011920929
+        },
+        "cpuSubmitMS": {
+          "median": 1.7000000476837158,
+          "p95": 2.400000035762787,
+          "min": 1.5,
+          "max": 2.800000011920929
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 28.19999998807907,
+          "p95": 30.69999998807907,
+          "min": 26.900000035762787,
+          "max": 35.19999998807907
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "686d309496c28a8de91aa18a62c25a84b785505404982c6a5a97b8f8ca4d0d1e"
+        ],
+        "native": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "0252970f3866348da3bfc2cfa673ea819a544a99264f12ee7907b78708417a1a"
+        ],
+        "hybrid": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "0252970f3866348da3bfc2cfa673ea819a544a99264f12ee7907b78708417a1a"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-2000",
+      "run": 3,
+      "fixtureSHA": "8e521e0acff78d05fc793b475dcfc43cd537456237fd335253ed3c433d0777a3",
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 2000,
+        "firstFrameMS": 416.10000002384186,
+        "completedFrameMS": {
+          "median": 2.300000011920929,
+          "p95": 2.899999976158142,
+          "min": 1.5999999642372131,
+          "max": 3.100000023841858
+        },
+        "deliveryMS": {
+          "median": 1.300000011920929,
+          "p95": 2.199999988079071,
+          "min": 1,
+          "max": 2.5
+        },
+        "cpuSubmitMS": {
+          "median": 0.21404161816462874,
+          "p95": 0.5309166735969484,
+          "min": 0.185375043656677,
+          "max": 0.6655416800640523
+        },
+        "gpuMS": {
+          "median": 0.41137501830235124,
+          "p95": 0.6914999685250223,
+          "min": 0.3782082931138575,
+          "max": 0.9194583399221301
+        },
+        "editToCompletedFrameMS": {
+          "median": 413.5999999642372,
+          "p95": 433.69999998807907,
+          "min": 408.19999998807907,
+          "max": 433.89999997615814
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 387,
+          "cpuMS": 0.26420835638418794,
+          "gpuMS": 1.8535000272095203
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 2000,
+        "firstFrameMS": 8.900000035762787,
+        "completedFrameMS": {
+          "median": 2.899999976158142,
+          "p95": 3.800000011920929,
+          "min": 2.5,
+          "max": 4.800000011920929
+        },
+        "deliveryMS": {
+          "median": 1.7000000476837158,
+          "p95": 2.5,
+          "min": 1.5,
+          "max": 3
+        },
+        "cpuSubmitMS": {
+          "median": 1.7000000476837158,
+          "p95": 2.5,
+          "min": 1.5,
+          "max": 3
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 28.100000023841858,
+          "p95": 30,
+          "min": 26.80000001192093,
+          "max": 31.399999976158142
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 157659625.06122783,
+        "completedFrameMS": {
+          "max": 4.1939583024941385,
+          "median": 0.7066666730679572,
+          "min": 0.6579583860002458,
+          "p95": 4.065083339810371
+        },
+        "cpuSubmitMS": {
+          "max": 0.21124997874721885,
+          "median": 0.15691667795181274,
+          "min": 0.14441669918596745,
+          "p95": 0.1855833106674254
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.09529164526611567,
+          "median": 0.06154162110760808,
+          "min": 0.05645834608003497,
+          "p95": 0.06712495815008879
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 3.690458368510008,
+          "median": 0.3893749671988189,
+          "min": 0.36387500585988164,
+          "p95": 3.3102500019595027
+        },
+        "height": 1080,
+        "layers": 2000,
+        "peakRSSBytes": 98975744,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "686d309496c28a8de91aa18a62c25a84b785505404982c6a5a97b8f8ca4d0d1e"
+        ],
+        "native": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "0252970f3866348da3bfc2cfa673ea819a544a99264f12ee7907b78708417a1a"
+        ],
+        "hybrid": [
+          "7910ba3db26da81055a32d1f0cbfdb46ca1d579afe6a0989ca709fc16c170884",
+          "5ea7aa59db484b76aed3c4adb5eaef1ffe674f971bcae28150ef97d8f39ce190",
+          "0252970f3866348da3bfc2cfa673ea819a544a99264f12ee7907b78708417a1a"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-5000",
+      "run": 1,
+      "fixtureSHA": "87af8b10b925b9f3748e98b27299f5a1bb71faec6c24ca20d5f871918d8f6dc1",
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 5000,
+        "firstFrameMS": 19.400000035762787,
+        "completedFrameMS": {
+          "median": 7.200000047683716,
+          "p95": 8.399999976158142,
+          "min": 6.300000011920929,
+          "max": 9.699999988079071
+        },
+        "deliveryMS": {
+          "median": 4.600000023841858,
+          "p95": 5.5,
+          "min": 4.299999952316284,
+          "max": 5.5
+        },
+        "cpuSubmitMS": {
+          "median": 4.600000023841858,
+          "p95": 5.5,
+          "min": 4.299999952316284,
+          "max": 5.5
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 71.39999997615814,
+          "p95": 72.5,
+          "min": 68.39999997615814,
+          "max": 89.70000004768372
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 394647716.6530794,
+        "completedFrameMS": {
+          "max": 5.345291632693261,
+          "median": 1.4945416478440166,
+          "min": 1.3922083307988942,
+          "p95": 4.979208286385983
+        },
+        "cpuSubmitMS": {
+          "max": 0.5197083810344338,
+          "median": 0.38691668305546045,
+          "min": 0.3450416261330247,
+          "p95": 0.4692916991189122
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.24408334866166115,
+          "median": 0.1720417058095336,
+          "min": 0.1573750050738454,
+          "p95": 0.19970833091065288
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 4.802666662726551,
+          "median": 0.9050000226125121,
+          "min": 0.8327499963343143,
+          "p95": 4.257375025190413
+        },
+        "height": 1080,
+        "layers": 5000,
+        "peakRSSBytes": 153272320,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 5000,
+        "firstFrameMS": 1046.0999999642372,
+        "completedFrameMS": {
+          "median": 3,
+          "p95": 3.399999976158142,
+          "min": 2.399999976158142,
+          "max": 3.899999976158142
+        },
+        "deliveryMS": {
+          "median": 2.300000011920929,
+          "p95": 2.699999988079071,
+          "min": 1.800000011920929,
+          "max": 2.700000047683716
+        },
+        "cpuSubmitMS": {
+          "median": 0.456791662145406,
+          "p95": 0.9495833655819297,
+          "min": 0.4019582993350923,
+          "max": 1.0723749874159694
+        },
+        "gpuMS": {
+          "median": 0.9226250112988055,
+          "p95": 1.3083333615213633,
+          "min": 0.8565000025555491,
+          "max": 1.3542916858568788
+        },
+        "editToCompletedFrameMS": {
+          "median": 1054.199999988079,
+          "p95": 1080.4000000357628,
+          "min": 1044.199999988079,
+          "max": 1089.9000000357628
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 999.3000000119209,
+          "cpuMS": 0.6273750332184136,
+          "gpuMS": 4.552875005174428
+        },
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "54286530a7ee4cb7ecba2ba123d041d0de058d7282076caf3a02a0a667785b80"
+        ],
+        "native": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "a887c7ec48bb00981ba0a6742960ac7732edfef0caec5765f102023805f93317"
+        ],
+        "hybrid": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "a887c7ec48bb00981ba0a6742960ac7732edfef0caec5765f102023805f93317"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-5000",
+      "run": 2,
+      "fixtureSHA": "87af8b10b925b9f3748e98b27299f5a1bb71faec6c24ca20d5f871918d8f6dc1",
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 394647716.6530794,
+        "completedFrameMS": {
+          "max": 5.157416686415672,
+          "median": 1.9456250010989606,
+          "min": 1.4107917086221278,
+          "p95": 4.220958333462477
+        },
+        "cpuSubmitMS": {
+          "max": 0.5888333544135094,
+          "median": 0.3928749938495457,
+          "min": 0.362000020686537,
+          "p95": 0.44887501280754805
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.20037498325109482,
+          "median": 0.15908328350633383,
+          "min": 0.15070836525410414,
+          "p95": 0.18891668878495693
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 4.2131666559726,
+          "median": 0.9562083287164569,
+          "min": 0.8424167172051966,
+          "p95": 3.4619166399352252
+        },
+        "height": 1080,
+        "layers": 5000,
+        "peakRSSBytes": 154255360,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 5000,
+        "firstFrameMS": 1040.2999999523163,
+        "completedFrameMS": {
+          "median": 3.199999988079071,
+          "p95": 4.100000023841858,
+          "min": 2.5,
+          "max": 4.700000047683716
+        },
+        "deliveryMS": {
+          "median": 2.300000011920929,
+          "p95": 3.099999964237213,
+          "min": 1.899999976158142,
+          "max": 3.400000035762787
+        },
+        "cpuSubmitMS": {
+          "median": 0.4769582883454859,
+          "p95": 0.964958337135613,
+          "min": 0.43008330976590514,
+          "max": 1.2489999644458294
+        },
+        "gpuMS": {
+          "median": 0.9282500250265002,
+          "p95": 1.2517499853856862,
+          "min": 0.8647500071674585,
+          "max": 1.6407083021476865
+        },
+        "editToCompletedFrameMS": {
+          "median": 1089.6000000238419,
+          "p95": 1314.0999999642372,
+          "min": 1065.699999988079,
+          "max": 1713.9000000357628
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 1204,
+          "cpuMS": 1.0705416789278388,
+          "gpuMS": 4.248541663400829
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 5000,
+        "firstFrameMS": 24.19999998807907,
+        "completedFrameMS": {
+          "median": 8.699999988079071,
+          "p95": 11.100000023841858,
+          "min": 6.800000011920929,
+          "max": 20.100000023841858
+        },
+        "deliveryMS": {
+          "median": 5.399999976158142,
+          "p95": 7,
+          "min": 4.599999964237213,
+          "max": 12.900000035762787
+        },
+        "cpuSubmitMS": {
+          "median": 5.399999976158142,
+          "p95": 7,
+          "min": 4.599999964237213,
+          "max": 12.900000035762787
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 81.89999997615814,
+          "p95": 85.90000003576279,
+          "min": 77.60000002384186,
+          "max": 114.10000002384186
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "54286530a7ee4cb7ecba2ba123d041d0de058d7282076caf3a02a0a667785b80"
+        ],
+        "native": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "a887c7ec48bb00981ba0a6742960ac7732edfef0caec5765f102023805f93317"
+        ],
+        "hybrid": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "a887c7ec48bb00981ba0a6742960ac7732edfef0caec5765f102023805f93317"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "solids-5000",
+      "run": 3,
+      "fixtureSHA": "87af8b10b925b9f3748e98b27299f5a1bb71faec6c24ca20d5f871918d8f6dc1",
+      "hybrid": {
+        "runtime": "Electron + Swift/Metal + IOSurface",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 5000,
+        "firstFrameMS": 1013.0999999642372,
+        "completedFrameMS": {
+          "median": 3,
+          "p95": 4.099999964237213,
+          "min": 2.299999952316284,
+          "max": 5.199999988079071
+        },
+        "deliveryMS": {
+          "median": 2.300000011920929,
+          "p95": 3.100000023841858,
+          "min": 1.7999999523162842,
+          "max": 4.600000023841858
+        },
+        "cpuSubmitMS": {
+          "median": 0.4600833053700626,
+          "p95": 0.9076249552890658,
+          "min": 0.4028749535791576,
+          "max": 2.6222500018775463
+        },
+        "gpuMS": {
+          "median": 0.9287500288337469,
+          "p95": 1.3511250144802034,
+          "min": 0.8541666902601719,
+          "max": 1.7416666960343719
+        },
+        "editToCompletedFrameMS": {
+          "median": 1282.800000011921,
+          "p95": 1390.699999988079,
+          "min": 1135.5,
+          "max": 1406.0999999642372
+        },
+        "nativeState": {
+          "available": true,
+          "backend": "metal",
+          "reason": "",
+          "frames": 134,
+          "discarded": 0,
+          "roundTripMS": 1310.199999988079,
+          "cpuMS": 0.8316250168718398,
+          "gpuMS": 3.42399999499321
+        },
+        "errors": []
+      },
+      "electron": {
+        "runtime": "Frozen Electron / WebGL2",
+        "device": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+        "width": 1920,
+        "height": 1080,
+        "layers": 5000,
+        "firstFrameMS": 18.69999998807907,
+        "completedFrameMS": {
+          "median": 7.899999976158142,
+          "p95": 9.400000035762787,
+          "min": 6.699999988079071,
+          "max": 10.099999964237213
+        },
+        "deliveryMS": {
+          "median": 4.900000035762787,
+          "p95": 5.799999952316284,
+          "min": 4.5,
+          "max": 6.099999964237213
+        },
+        "cpuSubmitMS": {
+          "median": 4.900000035762787,
+          "p95": 5.799999952316284,
+          "min": 4.5,
+          "max": 6.099999964237213
+        },
+        "gpuMS": null,
+        "editToCompletedFrameMS": {
+          "median": 77.5,
+          "p95": 79.80000001192093,
+          "min": 72.30000001192093,
+          "max": 89.39999997615814
+        },
+        "nativeState": null,
+        "errors": []
+      },
+      "native": {
+        "caveat": "Engine-only benchmark; no native window, timeline, audio, video, effects, extensions, or agent workload.",
+        "checksum": 394647716.6530794,
+        "completedFrameMS": {
+          "max": 2.838458342012018,
+          "median": 1.5060416772030294,
+          "min": 1.3916250318288803,
+          "p95": 2.4774999474175274
+        },
+        "cpuSubmitMS": {
+          "max": 0.7966666598804295,
+          "median": 0.38508331635966897,
+          "min": 0.353958283085376,
+          "p95": 0.47316664131358266
+        },
+        "device": "Apple M5",
+        "evaluationMS": {
+          "max": 0.22570829605683684,
+          "median": 0.14404166722670197,
+          "min": 0.13475003652274609,
+          "p95": 0.1707083429209888
+        },
+        "fps": 60,
+        "frames": 90,
+        "gpuMS": {
+          "max": 2.0389583078213036,
+          "median": 0.9001666330732405,
+          "min": 0.8300416520796716,
+          "p95": 1.193000003695488
+        },
+        "height": 1080,
+        "layers": 5000,
+        "peakRSSBytes": 153272320,
+        "runtime": "Swift release / Metal",
+        "warmup": 30,
+        "width": 1920
+      },
+      "pixels": [
+        {
+          "engine": "native",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 0,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 1,
+          "meanRGB": 0,
+          "max": 0,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "native",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        },
+        {
+          "engine": "hybrid",
+          "time": 2,
+          "meanRGB": 0.000001286008230452675,
+          "max": 3,
+          "pixelsOver16Percent": 0,
+          "pass": true
+        }
+      ],
+      "hashes": {
+        "electron": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "54286530a7ee4cb7ecba2ba123d041d0de058d7282076caf3a02a0a667785b80"
+        ],
+        "native": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "a887c7ec48bb00981ba0a6742960ac7732edfef0caec5765f102023805f93317"
+        ],
+        "hybrid": [
+          "7383fb0ed3fb8328dc18d68ad8311b7dbd265a5fbf9b4725f7806f014a1bde1f",
+          "375f032cfa5863b92b2b63c899ac03ce6d1bcb6a4b6c66ecc54fdf8d5edbee44",
+          "a887c7ec48bb00981ba0a6742960ac7732edfef0caec5765f102023805f93317"
+        ]
+      },
+      "valid": true
+    }
+  ]
+}

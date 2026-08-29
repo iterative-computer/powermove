@@ -647,6 +647,45 @@ describe('InspectorPanel', () => {
     expect(PM.UIState.setFxOpen).toHaveBeenCalledWith(candidate.fx[0], false);
   });
 
+  it('selects effect rows without changing disclosure and reserves disclosure for the chevron', () => {
+    const candidate = layer('A');
+    candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
+    const { PM } = setup([candidate], ['A']);
+    const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
+    const label = head.querySelector<HTMLElement>('.k')!;
+    const chevron = head.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+
+    head.click();
+    flushSync();
+    expect(head.dataset.selected).toBe('true');
+    expect(PM.UIState.setFxOpen).not.toHaveBeenCalled();
+
+    label.click();
+    expect(PM.UIState.setFxOpen).not.toHaveBeenCalled();
+
+    chevron.click();
+    expect(PM.UIState.setFxOpen).toHaveBeenCalledExactlyOnceWith(candidate.fx[0], true);
+  });
+
+  it('clears effect selection when clicking anywhere outside it but not from nested controls', () => {
+    const candidate = layer('A');
+    candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
+    setup([candidate], ['A'], { fxOpen: true });
+    const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
+
+    head.click();
+    flushSync();
+    expect(head.dataset.selected).toBe('true');
+
+    labelledSpinbutton('Amount').click();
+    flushSync();
+    expect(head.dataset.selected).toBe('true');
+
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    flushSync();
+    expect(head.dataset.selected).toBeUndefined();
+  });
+
   it('uses a typed mask property path while add mask stays history-backed', () => {
     const candidate = layer('A');
     const { PM, apply } = setup([candidate], ['A']);

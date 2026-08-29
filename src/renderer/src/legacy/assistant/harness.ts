@@ -20,7 +20,7 @@ const FIELDS: any = {
   set_content: ['type', 'target', 'patch'],
   set_layer: ['type', 'target', 'patch'],
   set_composition: ['type', 'patch'],
-  add_layer: ['type', 'id', 'layerType', 'name', 'from', 'duration', 'content', 'properties', 'color', 'index', 'select', 'parent', 'blend', 'motionBlur', 'visible', 'solo', 'shy', 'collapsed'],
+  add_layer: ['type', 'id', 'layerType', 'name', 'from', 'duration', 'content', 'properties', 'color', 'index', 'select', 'parent', 'blend', 'motionBlur', 'visible', 'shy', 'collapsed'],
   delete_layers: ['type', 'target', 'targets'],
   reorder_layer: ['type', 'target', 'index'],
   add_effect: ['type', 'target', 'effect', 'parameters', 'open'],

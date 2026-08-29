@@ -195,7 +195,6 @@ export interface WorkspaceTheme {
 }
 
 export interface WorkspaceFeatures {
-  snapping?: boolean;
   autosave?: boolean;
   adaptiveQuality?: boolean;
   graphOnOpen?: boolean;

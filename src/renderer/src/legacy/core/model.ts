@@ -82,7 +82,7 @@ function baseLayer(type: any, name: any, comp: any) {
   const L: any = {
     id: uid('L'), type, name,
     from: 0, dur: comp ? comp.dur : 5,
-    on: true, lock: false, solo: false, shy: false, collapsed: true,
+    on: true, lock: false, shy: false, collapsed: true,
     color: TYPE_META[type].color, blend: 'normal', mblur: false, parent: null,
     p: transformable ? {
       'anchor.x': P(0), 'anchor.y': P(0),

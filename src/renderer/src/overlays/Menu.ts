@@ -26,6 +26,7 @@ export class MenuController {
     this.removeForeignMenus();
     this.trigger = focusTarget(anchor);
     const rect = anchor.getBoundingClientRect();
+    const cursorOrigin = options.x != null || options.y != null;
     const x = options.x ?? (options.right ? rect.right : rect.left);
     const y = options.y ?? rect.bottom + 5;
     let instance: MenuInstance;
@@ -35,6 +36,7 @@ export class MenuController {
         items,
         x,
         y,
+        cursorOrigin,
         label: this.menuLabel(items),
         onrun: (item: MenuAction) => {
           this.close(true);

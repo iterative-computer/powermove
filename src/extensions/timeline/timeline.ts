@@ -18,6 +18,38 @@ export interface KeyframeMovePlan<Property = unknown> {
   removed: Array<KeyframeMoveSnapshotItem<Property>>;
 }
 
+export interface TimelineSnapResolution {
+  time: number;
+  target: number | null;
+}
+
+/** Resolve a temporary Shift-snap without letting two nearby targets make the
+    playhead flicker. A previously acquired target gets a slightly wider
+    release radius; otherwise the closest target inside the visual tolerance
+    wins. */
+export function resolveTimelineSnap(
+  time: number,
+  targets: number[],
+  tolerance: number,
+  lockedTarget: number | null = null,
+  releaseTolerance = tolerance * 1.5,
+): TimelineSnapResolution {
+  const raw = Number.isFinite(time) ? time : 0;
+  const acquire = Math.max(0, Number.isFinite(tolerance) ? tolerance : 0);
+  const release = Math.max(acquire, Number.isFinite(releaseTolerance) ? releaseTolerance : acquire);
+  if (lockedTarget != null && Number.isFinite(lockedTarget) && Math.abs(raw - lockedTarget) <= release) {
+    return { time: lockedTarget, target: lockedTarget };
+  }
+  let target: number | null = null;
+  let distance = acquire + Number.EPSILON;
+  for (const candidate of targets) {
+    if (!Number.isFinite(candidate)) continue;
+    const next = Math.abs(raw - candidate);
+    if (next < distance) { target = candidate; distance = next; }
+  }
+  return target == null ? { time: raw, target: null } : { time: target, target };
+}
+
 /** Plan one frame-snapped keyframe move from an immutable gesture snapshot.
     All selected keys receive the same delta. Destination collisions are
     scoped to one property and the selected/moving key wins by id. */
@@ -155,6 +187,8 @@ const timerIds = new Set<number>();
 const activeDrags = new Set<any>();
 let resizeObserver: ResizeObserver | null = null;
 let disposed = false;
+let shiftHeld = false;
+let refreshActiveScrub: (() => void) | null = null;
 
 function listen(target: any, event: string, handler: any, options?: any, bucket = runtimeCleanups) {
   target?.addEventListener?.(event, handler, options);
@@ -182,6 +216,21 @@ function runCleanups(bucket: Array<() => void>) {
   for (const cleanup of bucket.splice(0).reverse()) {
     try { cleanup(); } catch { }
   }
+}
+function updateShiftHeld(next: boolean) {
+  if (shiftHeld === next) return;
+  shiftHeld = next;
+  refreshActiveScrub?.();
+}
+listen(window, 'keydown', (event: KeyboardEvent) => {
+  if (event.key === 'Shift') updateShiftHeld(true);
+}, true);
+listen(window, 'keyup', (event: KeyboardEvent) => {
+  if (event.key === 'Shift') updateShiftHeld(false);
+}, true);
+listen(window, 'blur', () => updateShiftHeld(false), undefined);
+function shiftSnapping(event?: any) {
+  return shiftHeld || !!event?.shiftKey || !!event?.getModifierState?.('Shift');
 }
 function beginDrag(event: any, options: any) {
   let control: any;
@@ -285,28 +334,40 @@ function buildHead(head: any) {
   };
   const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
-  const zoom = h('input', { type: 'range', min: 8, max: 900, value: T.pps, step: 1, title: 'Timeline zoom', 'aria-label': 'Timeline zoom' });
-  listen(zoom, 'input', () => { T.pps = +zoom.value; PM.invalidate('timeline'); }, undefined, headCleanups);
-  const snap = h('button.iconbtn' + (PM.snap ? '.on' : ''), { title: 'Snapping (S)' }, PM.icon('magnet'));
-  listen(snap, 'click', () => { PM.snap = !PM.snap; snap.classList.toggle('on', PM.snap); }, undefined, headCleanups);
   const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (G)' }, PM.icon('bezier'));
   listen(graph, 'click', () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); }, undefined, headCleanups);
-  const loop = h('button.iconbtn' + (PM.loop ? '.on' : ''), { title: 'Loop' }, PM.icon('undo'));
-  listen(loop, 'click', () => { PM.loop = !PM.loop; loop.classList.toggle('on', PM.loop); }, undefined, headCleanups);
-
+  const graphSlot = h('div.tl-group.tl-graph-slot', graph);
   const transport = h('div.tl-group.tl-transport',
-    btn('prev', () => PM.setTime(prevEdge()), 'Previous edge'),
     playBtn,
-    btn('next', () => PM.setTime(nextEdge()), 'Next edge'),
-    graph,
     time,
   );
-  const view = h('div.tl-group.tl-view',
-    h('div.zoomrow', zoom),
-    btn('frame', () => T.frameView(), 'Frame entire composition (⇧F)'),
-    loop, snap,
-  );
-  head.append(transport, view);
+  head.append(transport, graphSlot);
+  /* The old toolbar node owned the panel move handle, so replacing that node
+     during an extension hot update could strand a live panel without a drag
+     listener. Make the unoccupied gutter itself a stable drag surface; native
+     controls and the draggable timecode remain excluded. */
+  listen(head, 'pointerdown', (event: PointerEvent) => {
+    const target = event.target as Element | null;
+    if (event.button !== 0 || target?.closest('button,input,#tl-time')) return;
+    const panel = head.closest('.panel[data-panel="timeline"]') as HTMLElement | null;
+    const panelHeader = panel?.querySelector(':scope > header');
+    if (!panelHeader) return;
+    event.stopPropagation();
+    /* Reuse the layout's existing, live drag listener without importing its
+       private module into the hot-reloadable extension bundle. Subsequent real
+       pointer moves are still captured by PM.drag on window. */
+    panelHeader.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: event.button,
+      buttons: event.buttons,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      isPrimary: event.isPrimary,
+    }));
+  }, undefined, headCleanups);
   const syncTime = () => {
     time.textContent = PM.tc(PM.time, PM.proj.fps);
   };
@@ -334,8 +395,19 @@ function refreshTimelineManifest() {
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
   T.style = config;
   const head = PM.$('#tl-head');
-  if (head) head.dataset.density = config.toolbarDensity;
+  if (head) {
+    head.dataset.density = config.toolbarDensity;
+    syncHeadGeometry(head);
+  }
   return config;
+}
+
+function syncHeadGeometry(head = PM.$('#tl-head')) {
+  if (!head) return;
+  const gutter = `${Math.round(T.gut)}px`;
+  const ruler = `${Math.round(T.ruler)}px`;
+  if (head.style.getPropertyValue('--tl-gutter') !== gutter) head.style.setProperty('--tl-gutter', gutter);
+  if (head.style.getPropertyValue('--tl-ruler') !== ruler) head.style.setProperty('--tl-ruler', ruler);
 }
 
 function resize(wrap?: any) {
@@ -470,6 +542,7 @@ function drawInner() {
     .map((row: any) => Math.ceil(c.measureText(row.label).width)));
   T.propertyValueX = 100 + labelWidth + 12;
   T.gut = Math.max(T.gut, T.propertyValueX + 90);
+  syncHeadGeometry();
 
   const maxScroll = Math.max(0, T.rows.length * T.row - (H - T.ruler));
   T.scrollY = clamp(T.scrollY, 0, maxScroll);
@@ -890,7 +963,7 @@ function drawGutter(c: any, W: any, H: any) {
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
       else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
       /* Quiet card: controls surface on hover/selection or when they carry
-         state (hidden, locked, solo). Idle rows show number, tag, name. */
+         state (hidden or locked). Idle rows show number, tag, name. */
       const active = sel || T.hoverRow === i;
       const collapsed = PM.UIState.getLayerCollapsed(L);
       c.font = '400 10px ' + fmono();
@@ -899,11 +972,10 @@ function drawGutter(c: any, W: any, H: any) {
       /* eye / lock */
       if (active || !L.on) icoEye(c, 30, y + T.row / 2, L.on);
       if (active || L.lock) icoLock(c, 48, y + T.row / 2, L.lock);
-      if (L.solo) { c.fillStyle = theme.accent; c.beginPath(); c.arc(64, y + T.row / 2, 3, 0, 7); c.fill(); }
       /* twirl */
       if (active || !collapsed) {
         c.save();
-        c.translate(76, y + T.row / 2); c.rotate(collapsed ? 0 : Math.PI / 2);
+        c.translate(64, y + T.row / 2); c.rotate(collapsed ? 0 : Math.PI / 2);
         c.strokeStyle = active ? theme.tx2 : theme.tx3; c.lineWidth = 1.4; c.beginPath();
         c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
         c.restore();
@@ -912,14 +984,14 @@ function drawGutter(c: any, W: any, H: any) {
          bright tint, so the card and the clip share one material */
       const pal = clipPalette(L);
       const iy = y + T.row / 2;
-      c.fillStyle = pal.body; roundRect(c, 86, iy - 8, 16, 16, 3); c.fill();
+      c.fillStyle = pal.body; roundRect(c, 74, iy - 8, 16, 16, 3); c.fill();
       c.strokeStyle = pal.ring; c.lineWidth = 1; c.stroke();
       c.font = '600 8px ' + fui(); c.fillStyle = pal.primary; c.textAlign = 'center';
-      c.fillText((BADGE[L.type] || '·').toUpperCase().slice(0, 1), 94, iy + .5);
+      c.fillText((BADGE[L.type] || '·').toUpperCase().slice(0, 1), 82, iy + .5);
       c.textAlign = 'left';
       c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      clipText(c, L.name, 108, iy, T.gut - 142);
+      clipText(c, L.name, 96, iy, T.gut - 130);
       if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fui(); c.fillText('↳', T.gut - 24, iy); }
       if (L.mblur) {
         /* motion-blur marker: quiet dot, not a shouting badge */
@@ -1261,6 +1333,7 @@ function workAreaHit(x: any, y: any) {
 }
 
 function onDown(e: any) {
+  if (e.button === 1) return panViewport(e);
   const x = e.offsetX, y = e.offsetY;
   PM.closeMenus();
   if (y < T.ruler && x > T.gut) {
@@ -1283,6 +1356,18 @@ function onDown(e: any) {
   if (Math.abs(x - x0) < 5) return trim(e, 'in');
   if (Math.abs(x - x1) < 5) return trim(e, 'out');
   if (x > x0 && x < x1) return slide(e);
+}
+
+function panViewport(e: PointerEvent) {
+  e.preventDefault();
+  const start = T.scrollT;
+  beginDrag(e, {
+    cursor: 'grabbing',
+    move: (dx: number) => {
+      T.scrollT = Math.max(-.4, start - dx / T.pps);
+      PM.invalidate('timeline');
+    },
+  });
 }
 
 function selectLayerForPointer(L: any, additive: any) {
@@ -1335,12 +1420,38 @@ function workAreaMove(e: any) {
 }
 
 function scrub(e: any) {
+  const targets: number[] = [];
+  for (const L of PM.proj.layers) {
+    targets.push(L.from, L.from + L.dur);
+    for (const item of PM.allProps?.(L) || []) {
+      for (const key of item.prop?.kf || []) targets.push(L.from + key.t);
+    }
+  }
+  let rawTime = 0;
+  let lockedTarget: number | null = null;
+  const apply = () => {
+    const time = clamp(rawTime, 0, PM.proj.dur);
+    if (!shiftSnapping()) { lockedTarget = null; PM.setTime(time); return; }
+    const tolerance = 10 / Math.max(1, T.pps);
+    const resolved = resolveTimelineSnap(time, targets, tolerance, lockedTarget, 15 / Math.max(1, T.pps));
+    lockedTarget = resolved.target;
+    PM.setTime(resolved.time);
+  };
   const set = (ev: any) => {
     const r = T.cv.getBoundingClientRect();
-    PM.setTime(x2t(ev.clientX - r.left));
+    rawTime = x2t(ev.clientX - r.left);
+    if (ev?.shiftKey) updateShiftHeld(true);
+    apply();
   };
+  const refresh = () => apply();
+  const cleanup = () => { if (refreshActiveScrub === refresh) refreshActiveScrub = null; };
+  refreshActiveScrub = refresh;
   set(e);
-  beginDrag(e, { move: (dx: any, dy: any, ev: any) => set(ev) });
+  beginDrag(e, {
+    move: (dx: any, dy: any, ev: any) => set(ev),
+    up: cleanup,
+    cancel: cleanup,
+  });
 }
 
 function gutterDown(e: any, x: any, y: any) {
@@ -1354,8 +1465,7 @@ function gutterDown(e: any, x: any, y: any) {
   if (x < 22) { }
   else if (x < 40) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !L.on } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
   else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
-  else if (x < 72) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { solo: !L.solo } }, { label: 'Toggle solo', origin: 'timeline' }); return; }
-  else if (x < 86) {
+  else if (x < 74) {
     const collapsed = !PM.UIState.getLayerCollapsed(L);
     L.collapsed = collapsed;
     PM.UIState.setLayerCollapsed(L, collapsed);
@@ -1391,10 +1501,10 @@ function slide(e: any) {
   let moved = false;
   beginDrag(e, {
     cursor: 'grabbing',
-    move: (dx: any) => {
+    move: (dx: any, dy: any, ev: any) => {
       moved = true;
       let dt = dx / T.pps;
-      if (PM.snap) dt = snapDelta(start, dt);
+      if (shiftSnapping(ev)) dt = snapDelta(start, dt);
       start.forEach((s: any) => PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: Math.max(0, PM.snapF(s.from + dt, PM.proj.fps)) } }));
     },
     up: () => { moved ? PM.Edit.commit('Move clip') : PM.Edit.cancel(); },

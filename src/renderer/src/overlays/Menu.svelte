@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
+  import { positionMenuAtCursor } from './position';
   import type { MenuItem } from './types';
 
   let {
     items,
     x,
     y,
+    cursorOrigin = false,
     label = 'Menu',
     onrun,
     onclose
@@ -14,6 +16,7 @@
     items: MenuItem[];
     x: number;
     y: number;
+    cursorOrigin?: boolean;
     label?: string;
     onrun: (item: Exclude<MenuItem, '-' | { header: string }>) => void;
     onclose: (restoreFocus?: boolean) => void;
@@ -63,8 +66,15 @@
   onMount(() => {
     const width = menu.offsetWidth;
     const height = menu.offsetHeight;
-    left = Math.min(Math.max(x, 6), window.innerWidth - width - 6);
-    top = Math.min(Math.max(y, 6), window.innerHeight - height - 6);
+    if (cursorOrigin) {
+      const position = positionMenuAtCursor(x, y, width, height, window.innerWidth, window.innerHeight);
+      left = position.left;
+      top = position.top;
+      menu.dataset.side = position.side;
+    } else {
+      left = Math.min(Math.max(x, 6), window.innerWidth - width - 6);
+      top = Math.min(Math.max(y, 6), window.innerHeight - height - 6);
+    }
     buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')];
     for (const button of buttons) button.tabIndex = -1;
     menu.focus({ preventScroll: true });

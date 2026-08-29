@@ -5,7 +5,7 @@ import { createKernel } from '../kernel/registries';
 import { openPanelMenu } from './menu';
 import type { DockSpec, PanelSpec, Workspace } from './model';
 
-function harness() {
+function harness(x = 10, y = 10) {
   const kernel = createKernel();
   const workspace = { layout: { docks: [{ id: 'right', panels: [{ id: 'notes' }] }] }, hiddenPanels: [] } as unknown as Workspace;
   const PM: any = {
@@ -21,13 +21,30 @@ function harness() {
   const trigger = document.createElement('button');
   document.body.append(trigger);
   const open = (): HTMLElement | null =>
-    openPanelMenu(PM, new MouseEvent('contextmenu', { clientX: 10, clientY: 10 }), spec, dock, trigger);
+    openPanelMenu(PM, new MouseEvent('contextmenu', { clientX: x, clientY: y }), spec, dock, trigger);
   return { PM, kernel, open };
 }
 
-afterEach(() => document.body.replaceChildren());
+afterEach(() => {
+  document.body.replaceChildren();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('panel context menu contributions', () => {
+  it('places the whole menu below or above the cursor based on available space', () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(180);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(400);
+    vi.stubGlobal('innerWidth', 800);
+    vi.stubGlobal('innerHeight', 600);
+
+    const below = harness(70, 24).open()!;
+    expect({ top: below.style.top, side: below.dataset.side }).toEqual({ top: '30px', side: 'below' });
+    below.remove();
+    const above = harness(70, 520).open()!;
+    expect({ top: above.style.top, side: above.dataset.side }).toEqual({ top: '114px', side: 'above' });
+  });
+
   it('leaves the built-in rows untouched when nothing is contributed', () => {
     const { open } = harness();
     const menu = open()!;

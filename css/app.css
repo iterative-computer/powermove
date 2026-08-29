@@ -655,7 +655,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-suggestions button:hover::before{background:var(--accent)}
 .agent-suggestions button:active{transform:scale(.99)}
 /* footer */
-.agent-footer{position:relative;flex:none;display:flex;flex-direction:column;gap:8px;padding:0 10px 10px}
+.agent-footer{position:relative;flex:none;display:flex;flex-direction:column;gap:8px;padding:0 var(--panel-edge-inset) var(--panel-edge-inset)}
 .agent-jump{position:absolute;top:-40px;left:50%;transform:translateX(-50%);width:30px;height:30px;display:grid;place-items:center;border-radius:var(--r-pill);background:var(--bg-float);color:var(--tx-2);box-shadow:0 0 0 var(--hairline) var(--line-2),var(--shadow-lift);animation:agent-jump-in 160ms var(--ease) both}
 .agent-jump:hover{color:var(--tx)}.agent-jump:active{transform:translateX(-50%) scale(.94)}
 .agent-jump svg{width:14px;height:14px}
@@ -826,11 +826,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .segmented button:hover{color:var(--tx)}.segmented button.on{background:var(--ctl-raised);box-shadow:var(--ctl-edge);color:var(--tx)}.segmented button:focus-visible{outline:none;box-shadow:var(--focus-ring)}
 /* The header carries the segmented control as its title; the body is only
    the list. Search is a row that appears under the header on demand. */
+.panel > header:has(> .fxb-kind){padding-inline:var(--panel-edge-inset)}
+.panel > header:has(> .fxb-kind) .grip{display:none}
 #panel-fxbrowser > header .ptitle{display:none}
 #panel-fxbrowser > header .fxb-kind{display:inline-flex}
 #panel-fxbrowser > header .segmented button{height:22px;padding:0 10px;font-size:var(--fs-sm)}
 .fxb{height:100%;min-height:0;display:flex;flex-direction:column;font-size:var(--fs-sm)}
-.fxb-searchrow{flex:none;padding:8px 10px 2px}
+.fxb-searchrow{flex:none;padding:8px var(--panel-edge-inset) 2px}
 .fxb-search{width:100%;height:var(--ctl-h);padding:0 9px;border:0;border-radius:var(--r-sm);background:var(--bg-field);color:var(--tx);font-size:var(--fs-sm);box-shadow:var(--ctl-edge-inset)}
 .fxb-search::placeholder{color:var(--tx-4)}
 .fxb-search:focus{outline:0;box-shadow:var(--ctl-edge-inset),0 0 0 1px var(--accent)}

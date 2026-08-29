@@ -32,23 +32,29 @@ test.describe('@ui-placement early panel loading', () => {
     });
     await expect(ghost).toBeVisible();
     await expect(ghost).toContainText('Updating Timeline controls');
+    const field = ghost.locator('.ghost-edge-field');
+    await expect(field).toHaveAttribute('data-ghost-renderer', 'webgl');
     const overlayState = await ghost.evaluate(element => {
       const rect = element.getBoundingClientRect();
       const panel = document.getElementById('panel-timeline')!.getBoundingClientRect();
       const hit = document.elementFromPoint(rect.left + 10, rect.top + 10);
+      const canvas = element.querySelector('canvas')!;
       return {
         inset: Math.round(rect.left - panel.left),
         followsTop: Math.round(rect.top - panel.top),
         pointerEvents: getComputedStyle(element).pointerEvents,
-        interceptsPointer: hit === element || element.contains(hit)
+        interceptsPointer: hit === element || element.contains(hit),
+        canvasIsCapped: canvas.width <= Math.ceil(canvas.getBoundingClientRect().width * 1.5)
       };
     });
-    expect(overlayState).toEqual({ inset: 5, followsTop: 5, pointerEvents: 'none', interceptsPointer: false });
+    expect(overlayState).toEqual({ inset: 5, followsTop: 5, pointerEvents: 'none', interceptsPointer: false, canvasIsCapped: true });
     expect(await page.evaluate(() => JSON.stringify([(window as any).PM.proj, (window as any).PM.WS.current]))).toBe(baseline);
     await page.screenshot({ path: testInfo.outputPath('timeline-loading.png') });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    expect(await ghost.evaluate(element => getComputedStyle(element, '::after').animationName)).toBe('none');
+    await expect(field).toHaveAttribute('data-ghost-renderer', 'static');
+    await expect(field).toHaveAttribute('data-ghost-fallback', 'reduced-motion');
+    expect(await field.evaluate(element => getComputedStyle(element).display)).toBe('none');
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.WS.mutate((workspace: any) => PM.Layout.movePanel(workspace, 'timeline', 'left'));

@@ -430,7 +430,6 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     dur: Math.max(0.01, finite(source.dur, 5)),
     on: source.on !== false,
     lock: !!source.lock,
-    solo: !!source.solo,
     shy: !!source.shy,
     collapsed: source.collapsed !== false,
     color: stringOr(source.color, TYPE_META[type].color),

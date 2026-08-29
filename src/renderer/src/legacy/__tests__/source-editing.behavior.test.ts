@@ -134,7 +134,7 @@ it('the live editable-source catalog includes complete composition and selected-
     assert.equal(compositionPaths.has(path), true, `${path} is agent-bindable`);
   }
   const controls = new Set(catalog.layers.find(item => item.id === layer.id).controls.map(control => control.path));
-  for (const path of ['layer.name', 'layer.visible', 'layer.locked', 'layer.solo', 'layer.blend', 'content.text', 'content.font', 'properties.position.x', 'properties.opacity']) {
+  for (const path of ['layer.name', 'layer.visible', 'layer.locked', 'layer.blend', 'content.text', 'content.font', 'properties.position.x', 'properties.opacity']) {
     assert.equal(controls.has(path), true, `${path} is agent-bindable`);
   }
   assert.equal(PM.Edit.apply({ type: 'set_composition', patch: { width: 2560, height: 1440 } }, { origin: 'generated-ui' }).ok, true);

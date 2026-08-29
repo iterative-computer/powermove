@@ -87,7 +87,7 @@ describe('legacy audio edge cases', () => {
     const buffer = new FakeAudioBuffer([new Float32Array(100)], 10);
     const h = audioHarness({ decode: () => buffer, currentTime: 10 });
     h.assets.set('asset-1', audioAsset(buffer));
-    h.PM.proj.layers = [{ id: 'precomp-1', type: 'precomp', on: true, solo: false, from: 2, dur: 4, d: { comp: 'inner' } }];
+    h.PM.proj.layers = [{ id: 'precomp-1', type: 'precomp', on: true, from: 2, dur: 4, d: { comp: 'inner' } }];
     h.PM.proj.comps = { inner: { layers: [audioLayer({ id: 'nested-audio', from: 1, dur: 5, d: { trim: 0.25 } })] } };
 
     expect(h.PM.Audio.hasAudibleLayers(h.PM.proj)).toBe(true);
