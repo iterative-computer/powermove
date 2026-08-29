@@ -96,8 +96,9 @@ export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
 } as const;
 
-export function shouldDrawClipLabel(layerType: unknown): boolean {
-return layerType !== 'audio';
+/** Every clip carries its name, audio included: the waveform sits under it. */
+export function shouldDrawClipLabel(_layerType: unknown): boolean {
+return true;
 }
 
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
@@ -125,9 +126,9 @@ else if (previous?.attachCanvas) {
 const h = PM.h, clamp = PM.clamp;
 
 const T: any = previous || {
-  gut: 224, row: 32, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
+  gut: 224, row: 40, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
-  hover: null, marquee: null,
+  hover: null, marquee: null, dropRow: null as number | null,
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
 /* Built-in extensions activate after project hydration. Restore the current
@@ -325,7 +326,7 @@ function buildHead(head: any) {
 function refreshTimelineManifest() {
   const raw = PM.WS?.current?.chrome?.timeline || {};
   const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
-    rowHeight: 32, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
+    rowHeight: 40, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
     keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
   };
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
@@ -418,7 +419,6 @@ onBus('layout', () => { refreshTimelineManifest(); refreshTheme(); refreshInk();
 
 /* Ink-on-paper colors for canvas chrome. Light theme uses black alpha;
    dark theme uses white alpha — resolved on every theme refresh. */
-const ink = (a: any) => (document.documentElement.dataset.theme === 'dark' ? 'rgba(255,255,255,' : 'rgba(15,15,20,') + a + ')';
 const INK = { over:'', over2:'', grid:'', tick:'', sub:'', hi:'', lo:'', thumb:'', key:'', handle:'', inv:'' };
 function refreshInk() {
   const dark = document.documentElement.dataset.theme === 'dark';
@@ -494,7 +494,7 @@ function drawInner() {
     console.log(msg);
   }
   if (T.marquee) {
-    c.save(); c.strokeStyle = theme.accent; c.fillStyle = 'rgba(255,107,26,.10)'; c.lineWidth = 1; c.setLineDash([4, 3]);
+    c.save(); c.strokeStyle = theme.accent; c.fillStyle = rgba(theme.accent, .14); c.lineWidth = 1;
     const m = T.marquee;
     c.fillRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0);
     c.strokeRect(m.x0 + .5, m.y0 + .5, m.x1 - m.x0 - 1, m.y1 - m.y0 - 1); c.restore();
@@ -549,12 +549,17 @@ function drawTracksBg(c: any, W: any, H: any) {
     const y = rowY(i);
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
+    /* Row states are alpha washes: selected > hovered. No hairlines between
+       rows; the clip bodies give the rows their structure. */
     if (r.kind === 'layer' && PM.sel.layers.includes(r.L.id)) {
       c.fillStyle = INK.over; c.fillRect(T.gut, y, W - T.gut, T.row);
+    } else if (T.hoverRow === i) {
+      c.fillStyle = INK.over; c.globalAlpha = .7; c.fillRect(T.gut, y, W - T.gut, T.row); c.globalAlpha = 1;
     }
-    if (r.kind === 'layer') {
-      c.strokeStyle = INK.grid; c.beginPath();
-      c.moveTo(T.gut, y + T.row - .5); c.lineTo(W, y + T.row - .5); c.stroke();
+    if (T.dropRow === i) {
+      c.fillStyle = INK.over2; c.fillRect(T.gut, y, W - T.gut, T.row);
+      c.strokeStyle = theme.accent; c.lineWidth = 1;
+      c.strokeRect(T.gut + .5, y + .5, W - T.gut - 1, T.row - 1);
     }
   }
   c.restore();
@@ -572,22 +577,26 @@ function drawRuler(c: any, W: any, H: any) {
   c.strokeStyle = theme.line; c.beginPath(); c.moveTo(0, T.ruler - .5); c.lineTo(W, T.ruler - .5); c.stroke();
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, T.ruler); c.clip();
   const step = niceStep(T.pps);
-  c.font = '400 10px ' + fui();
-  c.fillStyle = theme.tx3; c.textBaseline = 'middle';
+  /* Bottom-anchored ticks — 8px major, 3px minor — with light mono labels
+     centered over the major tick, so numbers read as a scale, not a list. */
+  c.font = '300 10px ' + fmono();
+  c.fillStyle = theme.tx3; c.textBaseline = 'middle'; c.textAlign = 'center';
   c.strokeStyle = INK.tick;
   c.beginPath();
   for (let t = Math.floor(T.scrollT / step) * step; t2x(t) < W; t += step) {
     const x = Math.round(t2x(t)) + .5;
-    if (x < T.gut - 1) continue;
-    c.moveTo(x, T.ruler - 7); c.lineTo(x, T.ruler);
-    c.fillText(fmtRuler(t, step, p.fps), x + 5, T.ruler - 11);
+    if (x >= T.gut - 1) {
+      c.moveTo(x, T.ruler - 8); c.lineTo(x, T.ruler);
+      c.fillText(fmtRuler(t, step, p.fps), x, WORK_BAR.height + 8);
+    }
     /* minor ticks between labeled steps */
     for (let m = 1; m < 4; m++) {
       const mx = Math.round(t2x(t + step * m / 4)) + .5;
-      if (mx > T.gut && mx < W) { c.moveTo(mx, T.ruler - 3.5); c.lineTo(mx, T.ruler); }
+      if (mx > T.gut && mx < W) { c.moveTo(mx, T.ruler - 3); c.lineTo(mx, T.ruler); }
     }
   }
   c.stroke();
+  c.textAlign = 'left';
   /* Work-area brackets stay visible without drawing a line across the ruler. */
   const wa = p.work || [0, p.dur];
   const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
@@ -613,6 +622,7 @@ function fmtRuler(t: any, step: any, fps: any) {
   return (m ? m + ':' : '0:') + String(s).padStart(2, '0');
 }
 const fui = () => '"SF Pro Text",-apple-system,BlinkMacSystemFont,sans-serif';
+const fmono = () => '"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace';
 
 function drawClips(c: any, W: any, H: any) {
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
@@ -630,19 +640,29 @@ function rgba(hex: any, a: any) { const [r, g, b] = PM.hex2rgb(hex); return `rgb
 
 const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
 
-function drawAudioClipWaveform(c: any, L: any, { x, y, width, height }: any, darkText: any) {
+function drawAudioClipWaveform(c: any, L: any, { x, y, width, height, color }: any) {
   const clipLeft = Math.max(x, T.gut);
   c.save();
+  /* Waveform in the clip's bright tint. Compact rows get a quieter wave so
+     the label stays legible over it. */
+  /* Bars stand on the clip floor. Tall rows keep the label band clear above
+     them; compact rows let the label ride over a quieter wave. */
+  const tall = height > 44;
+  const top = tall ? 20 : 2;
+  if (!tall) c.globalAlpha *= .6;
   if (PM.Audio && typeof PM.Audio.drawWaveform === 'function') {
     try {
-      PM.Audio.drawWaveform(c, L, { x, y, width, height, clipLeft });
+      PM.Audio.drawWaveform(c, L, {
+        x, y: y + top, width, height: height - top - 2, clipLeft, color, placeholderColor: color,
+        step: 1, anchor: 1,
+      });
       c.restore();
       return;
     } catch (error) { /* Keep the timeline usable while waveform data is unavailable. */ }
   }
   const right = Math.min(x + width, T.w);
   if (right > clipLeft) {
-    c.strokeStyle = darkText ? 'rgba(20,20,24,.24)' : 'rgba(255,255,255,.36)';
+    c.strokeStyle = color;
     c.lineWidth = 1;
     c.beginPath();
     c.moveTo(clipLeft, Math.round(y + height / 2) + .5);
@@ -652,47 +672,77 @@ function drawAudioClipWaveform(c: any, L: any, { x, y, width, height }: any, dar
   c.restore();
 }
 
+/* Clip material is keyed by layer TYPE, not by the layer's swatch color —
+   a fixed, hand-tuned palette so every text clip is the same slate, every
+   audio clip the same deep green with a mint waveform. (Editor does this;
+   deriving bodies from arbitrary layer hues produces mud.) The layer color
+   stays a tag in the gutter. */
+const CLIP_TYPES: Record<string, { body: string; primary: string; foreground: string }> = {
+  /* Muted, low-chroma bodies: enough hue to tell types apart, never loud. */
+  text:   { body: '#3A4756', primary: '#9FB3C8', foreground: '#EAF0F6' },
+  audio:  { body: '#25473C', primary: '#5FC29C', foreground: '#DDF5EA' },
+  video:  { body: '#2E4266', primary: '#8FB0E8', foreground: '#E2EAF8' },
+  image:  { body: '#5E4A2E', primary: '#D9B57C', foreground: '#F6EFE3' },
+  shape:  { body: '#5E3D36', primary: '#D99A8A', foreground: '#F7E9E5' },
+  solid:  { body: '#573A4E', primary: '#CF93B8', foreground: '#F6E6F0' },
+  shader: { body: '#413B60', primary: '#A99AE0', foreground: '#ECE8F8' },
+  null:   { body: '#3E434B', primary: '#A2A9B3', foreground: '#EEF0F3' },
+};
+const CLIP_FALLBACK = { body: '#34505A', primary: '#8DB8C6', foreground: '#E6F1F4' };
+function mixHex(color: string, toward: [number, number, number], amount: number) {
+  const m1 = color.match(/^rgb\((\d+),(\d+),(\d+)\)$/);
+  const [r, g, b] = m1 ? [+m1[1]! / 255, +m1[2]! / 255, +m1[3]! / 255] : PM.hex2rgb(color);
+  const m = (v: number, t: number) => Math.round((v * 255) * (1 - amount) + t * amount);
+  return `rgb(${m(r, toward[0])},${m(g, toward[1])},${m(b, toward[2])})`;
+}
+function clipPalette(L: any) {
+  const base = CLIP_TYPES[L?.type] || CLIP_FALLBACK;
+  const dark = document.documentElement.dataset.theme === 'dark';
+  if (dark) return { ...base, ring: 'rgba(0,0,0,.55)' };
+  /* Light theme: the same hues lifted toward paper, ink from the body. */
+  return {
+    body: mixHex(base.body, [255, 255, 255], .72),
+    primary: mixHex(base.body, [255, 255, 255], .18),
+    foreground: mixHex(base.body, [0, 0, 0], .35),
+    ring: mixHex(base.body, [255, 255, 255], .45),
+  };
+}
+
 function drawClip(c: any, L: any, y: any) {
   const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
   if (x1 < T.gut || x0 > T.w) return;
-  const hh = T.row - 8;
-  const yy = y + 4;
+  /* Clips fill their row with a 1px breath between neighbours. */
+  const hh = T.row - 2;
+  const yy = y + 1;
   const sel = PM.sel.layers.includes(L.id);
-  const r = T.style.clipRadius;
+  const r = Math.min(4, T.style.clipRadius);
   const w = Math.max(4, x1 - x0);
-  /* Tactile chip material, matching the reference panels exactly:
-     vertical gradient body + inner top highlight (white 33%, y1) + hairline
-     ring in a darker shade (spread-1 analog) + soft drop shadow (y3 blur4),
-     color-tinted when the body is colored. Rest = neutral recipe with a color
-     swatch; selected = the colored recipe built from the layer color. */
-  const dark = document.documentElement.dataset.theme === 'dark';
+  const pal = clipPalette(L);
   const off = !L.on;
+  const dark = document.documentElement.dataset.theme === 'dark';
   c.save();
-  if (off) c.globalAlpha = .45;
-  /* drop shadow pass — felt, not seen */
-  c.shadowColor = sel ? rgba(L.color, .28) : (dark ? 'rgba(0,0,0,.3)' : 'rgba(15,15,20,.07)');
-  c.shadowBlur = 3; c.shadowOffsetY = 1;
+  if (off) c.globalAlpha = .5;
+  /* Tactile chip material: soft drop shadow (y3 blur4), vertical gradient
+     body, inner top highlight, hairline ring one shade under the body. */
+  c.shadowColor = dark ? 'rgba(0,0,0,.35)' : 'rgba(15,15,20,.12)';
+  c.shadowBlur = 4; c.shadowOffsetY = 2;
   roundRect(c, x0, yy, w, hh, r);
   const g = c.createLinearGradient(0, yy, 0, yy + hh);
-  if (sel) { g.addColorStop(0, shade(L.color, 1.03)); g.addColorStop(1, shade(L.color, .93)); }
-  else if (dark) { g.addColorStop(0, '#292623'); g.addColorStop(1, '#232020'); }
-  else { g.addColorStop(0, '#FCFCFD'); g.addColorStop(1, '#F4F4F6'); }
+  g.addColorStop(0, mixHex(pal.body, [255, 255, 255], dark ? .06 : .04));
+  g.addColorStop(1, mixHex(pal.body, [0, 0, 0], dark ? .10 : .05));
   c.fillStyle = g; c.fill();
   c.shadowColor = 'transparent'; c.shadowBlur = 0; c.shadowOffsetY = 0;
-  /* hairline ring, a shade under the body */
-  c.strokeStyle = sel ? shade(L.color, .8) : ink(dark ? '.14' : '.1');
-  c.lineWidth = 1; c.stroke();
   c.save();
   c.clip();
-  /* inner top highlight — a hint, not a stripe */
-  c.strokeStyle = sel ? 'rgba(255,255,255,.22)' : (dark ? 'rgba(255,255,255,.05)' : 'rgba(255,255,255,.65)');
+  /* inner top highlight — white 33% on light, a hint on dark */
+  c.strokeStyle = dark ? 'rgba(255,255,255,.10)' : 'rgba(255,255,255,.45)';
   c.lineWidth = 1;
   c.beginPath(); c.moveTo(x0 + r * .7, yy + 1.5); c.lineTo(x0 + w - r * .7, yy + 1.5); c.stroke();
   /* Transition windows read as wedges inside the clip instead of timeline
      handles: they communicate timing without adding another hit target. */
   c.save();
-  c.globalAlpha *= .6;
-  c.fillStyle = theme.accent;
+  c.globalAlpha *= .55;
+  c.fillStyle = pal.primary;
   const inWidth = Math.min(w, Math.max(0, Number(L.transitionIn?.dur) || 0) * T.pps);
   if (L.transitionIn && inWidth > 0) {
     c.beginPath();
@@ -712,43 +762,28 @@ function drawClip(c: any, L: any, y: any) {
     c.fill();
   }
   c.restore();
-  /* Label contrast from body luminance when the body is colored. */
-  const [cr, cg, cb] = PM.hex2rgb(L.color);
-  const lum = .2126 * cr + .7152 * cg + .0722 * cb;
-  const darkText = sel ? lum > .55 : !dark;
   if (L.type === 'audio') drawAudioClipWaveform(c, L, {
-    x: x0, y: yy, width: w, height: hh,
-  }, darkText);
+    x: x0, y: yy, width: w, height: hh, color: pal.primary,
+  });
   if (shouldDrawClipLabel(L.type)) {
+    /* Name only, top-left, sticking to the viewport edge as the clip scrolls
+       off. Short rows center it. */
     c.textBaseline = 'middle';
-    let lx = Math.max(x0, T.gut) + 8;
-    if (!sel) {
-      /* color swatch, itself a miniature of the chip material */
-      const sw = 9;
-      c.fillStyle = L.color;
-      roundRect(c, lx, yy + hh / 2 - sw / 2, sw, sw, 2.5); c.fill();
-      c.strokeStyle = shade(L.color, .84); c.lineWidth = 1; c.stroke();
-      lx += sw + 7;
-    }
-    if (T.style.showTypeBadges && BADGE[L.type]) {
-      c.font = '500 9px ' + fui();
-      c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.55)' : 'rgba(255,255,255,.6)') : theme.tx3;
-      const b = BADGE[L.type].toUpperCase();
-      c.fillText(b, lx, yy + hh / 2 + .5);
-      lx += c.measureText(b).width + 6;
-    }
-    c.font = '500 11px ' + fui();
-    c.fillStyle = sel ? (darkText ? 'rgba(20,20,24,.92)' : 'rgba(255,255,255,.97)') : theme.tx2;
-    c.fillText(L.name, lx, yy + hh / 2 + .5);
+    const lx = Math.max(x0, T.gut) + 6;
+    const maxX = x0 + w - 6;
+    c.font = '400 11px ' + fui();
+    c.fillStyle = pal.foreground;
+    if (maxX - lx > 12) clipText(c, L.name, lx, hh >= 30 ? yy + 10 : yy + hh / 2 + .5, maxX - lx);
   }
   c.restore();
+  /* Inset ring: 1px dark seam at rest, 2px accent when selected. Clipped to
+     the body so the stroke never grows the clip. */
+  c.save();
+  roundRect(c, x0, yy, w, hh, r); c.clip();
+  c.strokeStyle = sel ? theme.accent : mixHex(pal.body, [0, 0, 0], dark ? .4 : .18);
+  c.lineWidth = sel ? 4 : 2; c.stroke();
   c.restore();
-}
-/* Multiply a hex color's channels — cheap lighten/darken for chip gradients. */
-function shade(hex: any, f: any) {
-  const [r, g, b] = PM.hex2rgb(hex);
-  const ch = (v: any) => Math.max(0, Math.min(255, Math.round(v * f * 255)));
-  return `rgb(${ch(r)},${ch(g)},${ch(b)})`;
+  c.restore();
 }
 
 function drawPropKeys(c: any, r: any, y: any) {
@@ -757,15 +792,25 @@ function drawPropKeys(c: any, r: any, y: any) {
   c.beginPath(); c.moveTo(T.gut, cy); c.lineTo(T.w, cy); c.stroke();
   const kf = r.prop.kf;
   const keyRadius = T.style.keyframeSize / 2;
+  /* First/last keys are half-filled toward the animated span; interior keys
+     are solid. Tells you where a curve starts and ends at a glance. */
+  const times = kf.map((k: any) => k.t);
+  const first = Math.min(...times), last = Math.max(...times);
+  c.lineWidth = 1;
   for (const k of kf) {
     const x = t2x(L.from + k.t);
     if (x < T.gut - 6 || x > T.w + 6) continue;
     const sel = keySelected(k);
-  c.fillStyle = sel ? theme.accent : INK.key;
-    if (k.hold) { c.fillRect(x - keyRadius, cy - keyRadius, keyRadius * 2, keyRadius * 2); }
-    else {
-      c.beginPath(); c.moveTo(x, cy - keyRadius); c.lineTo(x + keyRadius, cy); c.lineTo(x, cy + keyRadius); c.lineTo(x - keyRadius, cy); c.fill();
-    }
+    const color = sel ? theme.accent : INK.key;
+    c.fillStyle = color; c.strokeStyle = color;
+    if (k.hold) { c.fillRect(x - keyRadius, cy - keyRadius, keyRadius * 2, keyRadius * 2); continue; }
+    c.beginPath(); c.moveTo(x, cy - keyRadius); c.lineTo(x + keyRadius, cy); c.lineTo(x, cy + keyRadius); c.lineTo(x - keyRadius, cy); c.closePath();
+    c.stroke();
+    const isFirst = k.t === first, isLast = k.t === last;
+    if (isFirst === isLast) { c.fill(); continue; }
+    c.beginPath(); c.moveTo(x, cy - keyRadius);
+    c.lineTo(x + (isFirst ? keyRadius : -keyRadius), cy);
+    c.lineTo(x, cy + keyRadius); c.closePath(); c.fill();
   }
 }
 
@@ -782,30 +827,48 @@ function drawGutter(c: any, W: any, H: any) {
     if (r.kind === 'layer') {
       const L = r.L, sel = PM.sel.layers.includes(L.id);
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
-      c.font = '400 10px ' + fui();
-      c.fillStyle = theme.tx4 || theme.tx3; c.textBaseline = 'middle';
+      else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
+      /* Quiet card: controls surface on hover/selection or when they carry
+         state (hidden, locked, solo). Idle rows show number, tag, name. */
+      const active = sel || T.hoverRow === i;
+      const collapsed = PM.UIState.getLayerCollapsed(L);
+      c.font = '400 10px ' + fmono();
+      c.fillStyle = INK.lo; c.textBaseline = 'middle';
       if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
       /* eye / lock */
-      icoEye(c, 30, y + T.row / 2, L.on);
-      icoLock(c, 48, y + T.row / 2, L.lock);
+      if (active || !L.on) icoEye(c, 30, y + T.row / 2, L.on);
+      if (active || L.lock) icoLock(c, 48, y + T.row / 2, L.lock);
       if (L.solo) { c.fillStyle = theme.accent; c.beginPath(); c.arc(64, y + T.row / 2, 3, 0, 7); c.fill(); }
       /* twirl */
-      c.save();
-      c.translate(76, y + T.row / 2); c.rotate(PM.UIState.getLayerCollapsed(L) ? 0 : Math.PI / 2);
-      c.strokeStyle = theme.tx3; c.lineWidth = 1.4; c.beginPath();
-      c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
-      c.restore();
-      /* color swatch + name (same swatch language as the clip strips) */
-      c.fillStyle = L.color; roundRect(c, 86, y + T.row / 2 - 4.5, 9, 9, 2.5); c.fill();
-      c.font = (sel ? '500 ' : '400 ') + '11.5px ' + fui();
+      if (active || !collapsed) {
+        c.save();
+        c.translate(76, y + T.row / 2); c.rotate(collapsed ? 0 : Math.PI / 2);
+        c.strokeStyle = active ? theme.tx2 : theme.tx3; c.lineWidth = 1.4; c.beginPath();
+        c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
+        c.restore();
+      }
+      /* type icon: a swatch of the clip body with the type letter in its
+         bright tint, so the card and the clip share one material */
+      const pal = clipPalette(L);
+      const iy = y + T.row / 2;
+      c.fillStyle = pal.body; roundRect(c, 86, iy - 8, 16, 16, 3); c.fill();
+      c.strokeStyle = pal.ring; c.lineWidth = 1; c.stroke();
+      c.font = '600 8px ' + fui(); c.fillStyle = pal.primary; c.textAlign = 'center';
+      c.fillText((BADGE[L.type] || '·').toUpperCase().slice(0, 1), 94, iy + .5);
+      c.textAlign = 'left';
+      c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      clipText(c, L.name, 101, y + T.row / 2, T.gut - 135);
-      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fui(); c.fillText('↳', T.gut - 24, y + T.row / 2); }
-      if (L.mblur) { c.fillStyle = theme.accent; c.font = '500 8.5px ' + fui(); c.fillText('MB', T.gut - 15, y + T.row / 2); }
+      clipText(c, L.name, 108, iy, T.gut - 142);
+      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fui(); c.fillText('↳', T.gut - 24, iy); }
+      if (L.mblur) {
+        /* motion-blur marker: quiet dot, not a shouting badge */
+        c.fillStyle = theme.accent; c.beginPath(); c.arc(T.gut - 12, iy, 2, 0, 7); c.fill();
+      }
     } else {
       const L = r.L;
       const selected = PM.sel.layers.includes(L.id) && trackSelected(r, PM.sel.chan);
       if (selected) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
+      else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
       c.font = '400 11px ' + fui();
       c.fillStyle = selected ? theme.accent : theme.tx3;
       const labelX = 100, valueX = T.propertyValueX;
@@ -813,7 +876,7 @@ function drawGutter(c: any, W: any, H: any) {
       /* value at playhead */
       const values = trackChannels(r).map(axis => PM.evP(L, axis.prop, PM.time, axis.key));
       const v = r.channels ? values.map(value => PM.round(value, 1)).join(', ') + '%' : values[0];
-      c.font = '400 10px ' + fui();
+      c.font = '400 10px ' + fmono();
       c.fillStyle = INK.sub;
       c.textAlign = 'left';
       c.fillText(typeof v === 'number' ? PM.round(v, 1) : r.channels ? v : String(v).slice(0, 8), valueX, y + T.row / 2,
@@ -849,19 +912,64 @@ function roundRect(c: any, x: any, y: any, w: any, hh: any, r: any) {
   c.arcTo(x, y, x + w, y, r); c.closePath();
 }
 
+/* Playhead motion glow. A critically damped spring follows the measured
+   playhead velocity (px/s) so the trail works for playback and scrubbing
+   alike, and settles smoothly once the head stops. Closed-form update keeps
+   it stable across uneven frame lengths. */
+const TRAIL = { pxPerVelocity: .3, response: .15, maxWidth: 150, alpha: .22 };
+const trail = { time: NaN, stamp: 0, width: 0, velocity: 0 };
+function stepTrail(): number {
+  const now = performance.now() / 1000;
+  const dt = trail.stamp ? Math.min(now - trail.stamp, .25) : 0;
+  const moved = Number.isFinite(trail.time) ? (PM.time - trail.time) * T.pps : 0;
+  trail.time = PM.time; trail.stamp = now;
+  const target = dt > 0 ? clamp(TRAIL.pxPerVelocity * moved / dt, -TRAIL.maxWidth, TRAIL.maxWidth) : 0;
+  if (dt > 0) {
+    const omega = 2 / TRAIL.response, decay = Math.exp(-omega * dt);
+    const error = trail.width - target, b = trail.velocity + omega * error;
+    trail.width = target + (error + b * dt) * decay;
+    trail.velocity = (trail.velocity - omega * b * dt) * decay;
+  }
+  if (Math.abs(trail.width) < .5 && Math.abs(target) < .5) { trail.width = 0; trail.velocity = 0; }
+  return trail.width;
+}
+
 function drawPlayhead(c: any, W: any, H: any) {
   const x = Math.round(t2x(PM.time)) + .5;
+  const width = stepTrail();
+  /* Keep animating until the trail has fully settled. */
+  if (width !== 0) scheduleFrame(() => PM.invalidate('timeline'));
   if (x < T.gut) return;
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, H); c.clip();
-  /* App accent, 1px crisp stem, tapered grip in the ruler. */
-  c.strokeStyle = theme.accent; c.lineWidth = 1;
-  c.beginPath(); c.moveTo(x, WORK_BAR.height + 2); c.lineTo(x, H); c.stroke();
-  c.fillStyle = theme.accent;
-  const gy = WORK_BAR.height + 2, gw = 9, gh = 11;
+  /* glow trail behind the direction of travel */
+  const tw = Math.abs(width);
+  if (tw > .5) {
+    const reverse = width < 0;
+    const g = c.createLinearGradient(reverse ? x + tw : x - tw, 0, x, 0);
+    g.addColorStop(0, rgba(theme.accent, 0)); g.addColorStop(1, rgba(theme.accent, TRAIL.alpha));
+    c.fillStyle = g;
+    c.fillRect(reverse ? x : x - tw, T.ruler, tw, H - T.ruler);
+  }
+  /* stem: a 3px panel-colored halo under the 1px accent core, so the line
+     stays legible over clips of any color */
+  const stemTop = WORK_BAR.height + 2;
+  c.beginPath(); c.moveTo(x, stemTop); c.lineTo(x, H);
+  c.strokeStyle = theme.panel; c.lineWidth = 3; c.stroke();
+  c.strokeStyle = theme.accent; c.lineWidth = 1; c.stroke();
+  /* knob: rounded teardrop, outlined in the panel color to lift off the ruler */
+  const gw = 10, gh = 13, r = 2, gy = stemTop, gx = x - gw / 2;
   c.beginPath();
-  c.moveTo(x - gw / 2, gy); c.lineTo(x + gw / 2, gy);
-  c.lineTo(x + gw / 2, gy + gh - 4); c.lineTo(x, gy + gh);
-  c.lineTo(x - gw / 2, gy + gh - 4); c.closePath(); c.fill();
+  c.moveTo(gx + r, gy);
+  c.lineTo(gx + gw - r, gy); c.quadraticCurveTo(gx + gw, gy, gx + gw, gy + r);
+  c.lineTo(gx + gw, gy + gh - 5.5);
+  c.quadraticCurveTo(gx + gw, gy + gh - 4, gx + gw - 1.2, gy + gh - 3);
+  c.lineTo(x + 1.4, gy + gh - .4); c.quadraticCurveTo(x, gy + gh + .6, x - 1.4, gy + gh - .4);
+  c.lineTo(gx + 1.2, gy + gh - 3);
+  c.quadraticCurveTo(gx, gy + gh - 4, gx, gy + gh - 5.5);
+  c.lineTo(gx, gy + r); c.quadraticCurveTo(gx, gy, gx + r, gy);
+  c.closePath();
+  c.strokeStyle = theme.panel; c.lineWidth = 2; c.lineJoin = 'round'; c.stroke();
+  c.fillStyle = theme.accent; c.fill();
   c.restore();
 }
 
@@ -956,8 +1064,41 @@ function hitRow(y: any) {
 function bind(cv: any, wrap: any) {
   listen(cv, 'pointerdown', onDown, undefined, canvasCleanups);
   listen(cv, 'pointermove', onMove, undefined, canvasCleanups);
+  listen(cv, 'pointerleave', () => setHoverRow(null), undefined, canvasCleanups);
   listen(cv, 'dblclick', onDbl, undefined, canvasCleanups);
   listen(cv, 'contextmenu', onCtx, undefined, canvasCleanups);
+  /* FX browser drops. Non-fx drags (OS files) fall through to the window
+     import handler untouched. */
+  const setDropRow = (index: number | null) => {
+    if (T.dropRow === index) return;
+    T.dropRow = index;
+    PM.invalidate('timeline');
+  };
+  const dropLayerAt = (y: number) => {
+    const hr = hitRow(y);
+    return hr?.row?.L ? { layer: hr.row.L, index: hr.i } : null;
+  };
+  listen(cv, 'dragover', (e: any) => {
+    if (!PM.fxDrop?.hasFxDrag(e.dataTransfer)) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+    const hit = e.offsetX > T.gut ? dropLayerAt(e.offsetY) : null;
+    setDropRow(hit ? hit.index : null);
+  }, undefined, canvasCleanups);
+  listen(cv, 'dragleave', () => setDropRow(null), undefined, canvasCleanups);
+  listen(cv, 'drop', (e: any) => {
+    const payload = PM.fxDrop?.readFxDrag(e.dataTransfer);
+    setDropRow(null);
+    if (!payload) return;
+    e.preventDefault(); e.stopPropagation();
+    const hit = dropLayerAt(e.offsetY);
+    const L = hit?.layer || PM.firstSel?.();
+    let edge: 'in' | 'out' | undefined;
+    if (L && payload.kind === 'transition') {
+      const mid = t2x(L.from + L.dur / 2);
+      edge = e.offsetX < mid ? 'in' : 'out';
+    }
+    PM.fxDrop.applyFxDrop(payload, L?.id, edge, PM);
+  }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
@@ -975,8 +1116,14 @@ function bind(cv: any, wrap: any) {
   }, { passive: false }, canvasCleanups);
 }
 
+function setHoverRow(index: number | null) {
+  if (T.hoverRow === index) return;
+  T.hoverRow = index;
+  PM.invalidate('timeline');
+}
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  setHoverRow(hitRow(y)?.i ?? null);
   let cur = 'default';
   if (x > T.gut) {
     const workHit = workAreaHit(x, y);

@@ -50,7 +50,7 @@ describe('legacy workspace library behavior survivors', () => {
     const PM = workspaceModel();
     const compact = PM.WS.normalize(manifest()).chrome;
     expect({ ...compact.timeline }).toEqual({
-      rowHeight: 32,
+      rowHeight: 40,
       gutterWidth: 224,
       rulerHeight: 28,
       clipRadius: 5,
