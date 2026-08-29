@@ -375,7 +375,7 @@ const legacyFence = !!existing?._legacyListenerFence;
 existing?._disposeRuntime?.();
 const clamp = PM.clamp;
 
-const V: any = existing || { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, guides: null };
+const V: any = existing || { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, snapLines: null };
 PM.Viewer = V;
 V._runtimeToken = VIEWER_RUNTIME_TOKEN;
 let disposed = false;
@@ -502,7 +502,7 @@ function drawOverlay() {
   c.save(); c.translate((frame.left - stage.left) * dpr, (frame.top - stage.top) * dpr); c.scale(S, S);
   c.lineWidth = 1 / S;
 
-  drawSnapGuides(c, S, p);
+  drawSnapLines(c, S);
 
   const sels = PM.selLayers().filter((L: any) => PM.active(L, PM.time));
   const selection = resolveSelectionGeometry(PM, sels, PM.time);
@@ -571,38 +571,108 @@ function rotationHandlePoint(selection: SelectionGeometry): Point {
   };
 }
 
-function drawSnapGuides(c: any, S: any, p: any) {
-  const guides = V.guides;
-  if (!guides || (guides.x == null && guides.y == null)) return;
+function drawSnapLines(c: any, S: any) {
+  const lines: SnapLine[] = V.snapLines;
+  if (!lines || !lines.length) return;
+  const cross = 3 / S;
   c.save();
-  c.strokeStyle = 'rgba(74,164,255,.96)';
+  c.strokeStyle = SNAP_COLOR;
   c.lineWidth = 1 / S;
-  c.setLineDash([5 / S, 3 / S]);
   c.beginPath();
-  if (guides.x != null) { c.moveTo(guides.x, 0); c.lineTo(guides.x, p.h); }
-  if (guides.y != null) { c.moveTo(0, guides.y); c.lineTo(p.w, guides.y); }
+  for (const line of lines) { c.moveTo(line.from.x, line.from.y); c.lineTo(line.to.x, line.to.y); }
+  c.stroke();
+  c.beginPath();
+  for (const line of lines) for (const point of [line.from, line.to]) {
+    c.moveTo(point.x - cross, point.y - cross); c.lineTo(point.x + cross, point.y + cross);
+    c.moveTo(point.x - cross, point.y + cross); c.lineTo(point.x + cross, point.y - cross);
+  }
   c.stroke();
   c.restore();
 }
 
-/* Screen-space alignment helpers. Bounds and guide coordinates stay in
-   composition pixels, while the tolerance is converted from a constant
-   on-screen distance by startMove(). */
-function snapAxis(movingMarks: any, targetMarks: any, threshold: any) {
-  let best = null;
-  for (const moving of movingMarks || []) {
-    const movingValue = typeof moving === 'number' ? moving : moving.value;
-    if (!Number.isFinite(movingValue)) continue;
-    for (const target of targetMarks || []) {
-      const targetValue = typeof target === 'number' ? target : target.value;
-      if (!Number.isFinite(targetValue)) continue;
-      const delta = targetValue - movingValue;
-      const distance = Math.abs(delta);
-      if (distance > threshold || (best && distance >= best.distance - 1e-9)) continue;
-      best = { delta, value: targetValue, distance };
+/* Alignment snapping. Candidates are points, not bare axis values: the
+   corners and center of every layer a gesture can align with, so a snap knows
+   which point it landed on and the guide can be drawn from the dragged point
+   to the target instead of across the whole composition. Everything stays in
+   composition pixels; the threshold is converted from a constant on-screen
+   distance by the caller. */
+type SnapAxisCandidate = { value: number; point: Point };
+type SnapCandidates = { x: SnapAxisCandidate[]; y: SnapAxisCandidate[] };
+type SnapLine = { from: Point; to: Point };
+type SnapTarget = { offset: number; distance: number; sourcePoint: Point; targetPoint: Point };
+type SnapResult = { dx: number; dy: number; lines: SnapLine[] };
+
+const SNAP_COLOR = '#F43535';
+/** How close, in CSS pixels, a candidate has to be before a gesture snaps to it. */
+const SNAP_DISTANCE = 6;
+
+function snapCandidatesFromPoints(points: Point[]): SnapCandidates {
+  return {
+    x: points.map((point) => ({ value: point.x, point })),
+    y: points.map((point) => ({ value: point.y, point })),
+  };
+}
+
+/** The four corners of an axis-aligned box plus its center. */
+function boxSnapPoints(b: { x0: number; x1: number; y0: number; y1: number }): Point[] {
+  return [
+    { x: b.x0, y: b.y0 }, { x: b.x1, y: b.y0 }, { x: b.x1, y: b.y1 }, { x: b.x0, y: b.y1 },
+    { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 },
+  ];
+}
+
+/**
+ * The nearest candidate within `threshold` on one axis, ties broken by the
+ * shorter guide: of two equally close snaps, the one whose line is shorter is
+ * the one the user meant.
+ */
+function findSnapTarget(
+  source: SnapAxisCandidate[], targets: SnapAxisCandidate[], threshold: number, axis: 'x' | 'y',
+): SnapTarget | null {
+  const cross = (a: Point, b: Point) => (axis === 'x' ? Math.abs(b.y - a.y) : Math.abs(b.x - a.x));
+  let best: SnapTarget | null = null;
+  for (const candidate of source) {
+    for (const target of targets) {
+      const offset = target.value - candidate.value;
+      const distance = Math.abs(offset);
+      if (distance > threshold) continue;
+      if (!best || distance < best.distance ||
+          (distance === best.distance && cross(candidate.point, target.point) < cross(best.sourcePoint, best.targetPoint))) {
+        best = { offset, distance, sourcePoint: candidate.point, targetPoint: target.point };
+      }
     }
   }
   return best;
+}
+
+/**
+ * Snaps a moving box against the candidates on each unlocked axis. Each guide
+ * runs from where the dragged point ends up (both axes' corrections applied,
+ * so the line meets the box) to the candidate it snapped to.
+ */
+function snapBox(
+  moving: SnapCandidates, candidates: SnapCandidates, threshold: number,
+  axes: { x: boolean; y: boolean } = { x: true, y: true },
+): SnapResult {
+  const xSnap = axes.x ? findSnapTarget(moving.x, candidates.x, threshold, 'x') : null;
+  const ySnap = axes.y ? findSnapTarget(moving.y, candidates.y, threshold, 'y') : null;
+  const lines: SnapLine[] = [];
+  if (xSnap) lines.push({
+    from: { x: xSnap.sourcePoint.x + xSnap.offset, y: xSnap.sourcePoint.y + (ySnap?.offset ?? 0) },
+    to: xSnap.targetPoint,
+  });
+  if (ySnap) lines.push({
+    from: { x: ySnap.sourcePoint.x + (xSnap?.offset ?? 0), y: ySnap.sourcePoint.y + ySnap.offset },
+    to: ySnap.targetPoint,
+  });
+  return { dx: xSnap?.offset ?? 0, dy: ySnap?.offset ?? 0, lines };
+}
+
+/** True when the guides now point somewhere new, which is when the haptic fires. */
+function snapLinesChanged(previous: SnapLine[] | null, next: SnapLine[] | null): boolean {
+  if (!next || !next.length) return false;
+  const key = (lines: SnapLine[]) => lines.map((l) => `${l.to.x},${l.to.y}`).sort().join('|');
+  return !previous || key(previous) !== key(next);
 }
 
 function worldBounds(L: any, T: any) {
@@ -620,45 +690,29 @@ function unionBounds(layers: any, T: any) {
   return { x0, x1, y0, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
 }
 
-function hasSelectedAncestor(L: any, selectedIds: any) {
-  let parentId = L.parent, guard = 0;
-  while (parentId && guard++ < 256) {
-    if (selectedIds.has(parentId)) return true;
-    const parent = PM.L(parentId);
-    parentId = parent && parent.parent;
-  }
-  return false;
-}
-
-function snapshotSnapTargets(T: any, selectedIds: any) {
-  const x = [{ value: 0 }, { value: PM.proj.w / 2 }, { value: PM.proj.w }];
-  const y = [{ value: 0 }, { value: PM.proj.h / 2 }, { value: PM.proj.h }];
+/**
+ * The points a gesture can snap to, taken once at dragstart so a layer cannot
+ * snap to where it has just been dragged. A single layer snaps within its own
+ * frame: its siblings plus its parent. A multi-selection spans frames, so the
+ * composition's top level is the only frame they share. The composition
+ * itself is always a candidate.
+ */
+function snapshotSnapCandidates(T: any, selectionLayers: any[]): SnapCandidates {
+  const selectedIds = new Set(selectionLayers.map((L: any) => L.id));
+  const points: Point[] = boxSnapPoints({ x0: 0, y0: 0, x1: PM.proj.w, y1: PM.proj.h });
+  const only = selectionLayers.length === 1 ? selectionLayers[0] : null;
+  const parentId = only ? (only.parent || null) : null;
   const soloOn = PM.proj.layers.some((L: any) => L.solo);
+  const visible = (L: any) => PM.active(L, T) && !(soloOn && !L.solo);
   for (const L of PM.proj.layers) {
-    if (selectedIds.has(L.id) || hasSelectedAncestor(L, selectedIds) || !PM.active(L, T) || (soloOn && !L.solo)) continue;
-    const b = worldBounds(L, T); if (!b) continue;
-    x.push({ value: b.x0 }, { value: b.cx }, { value: b.x1 });
-    y.push({ value: b.y0 }, { value: b.cy }, { value: b.y1 });
+    if ((L.parent || null) !== parentId || selectedIds.has(L.id) || !visible(L)) continue;
+    const b = worldBounds(L, T); if (b) points.push(...boxSnapPoints(b));
   }
-  return { x, y };
-}
-
-function alignmentSnap(bounds: any, targets: any, threshold: any, axes: any = { x: true, y: true }) {
-  if (!bounds) return { dx: 0, dy: 0, x: null, y: null };
-  const x = axes.x ? snapAxis([bounds.x0, bounds.cx, bounds.x1], targets.x, threshold) : null;
-  const y = axes.y ? snapAxis([bounds.y0, bounds.cy, bounds.y1], targets.y, threshold) : null;
-  return { dx: x ? x.delta : 0, dy: y ? y.delta : 0, x, y };
-}
-
-function guideValue(guide: any) {
-  return guide ? guide.value : null;
-}
-
-function alignmentGuideChanged(previous: any, next: any) {
-  if (!next || (next.x == null && next.y == null)) return false;
-  if (!previous) return true;
-  return (next.x != null && next.x !== previous.x) ||
-    (next.y != null && next.y !== previous.y);
+  const parent = parentId ? PM.L(parentId) : null;
+  if (parent && visible(parent)) {
+    const b = worldBounds(parent, T); if (b) points.push(...boxSnapPoints(b));
+  }
+  return snapCandidatesFromPoints(points);
 }
 
 function passedMoveDragThreshold(dx: any, dy: any) {
@@ -674,8 +728,8 @@ function worldDeltaToLocal(L: any, T: any, dx: any, dy: any): [number, number] {
 }
 
 Object.assign(V, {
-  snapAxis, worldBounds, unionBounds, snapshotSnapTargets, alignmentSnap,
-  alignmentGuideChanged, passedMoveDragThreshold, calculateResize, resizeCursorForHandle,
+  worldBounds, unionBounds, snapshotSnapCandidates, findSnapTarget, snapBox, boxSnapPoints,
+  snapCandidatesFromPoints, snapLinesChanged, passedMoveDragThreshold, calculateResize, resizeCursorForHandle,
   resizeLocksAspect,
   resolveSelectionGeometry: (layers: any = PM.selLayers(), T: any = PM.time) =>
     resolveSelectionGeometry(PM, layers, T),
@@ -852,9 +906,8 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
   const start = layers.map((L: any) => ({ L, x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T) }));
   const selectionLayers = options.selectionLayers || layers;
-  const selectedIds = new Set(selectionLayers.map((L: any) => L.id));
-  const targets = snapshotSnapTargets(T, selectedIds);
-  const clearGuides = () => { V.guides = null; PM.invalidate('render'); };
+  const candidates = snapshotSnapCandidates(T, selectionLayers);
+  const clearGuides = () => { V.snapLines = null; PM.invalidate('render'); };
   PM.Edit.begin(selectionLayers.length > 1 ? 'Move selection' : 'Move layer', { origin: 'canvas' });
   let moved = false;
   beginDrag(e, {
@@ -874,21 +927,24 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
         setOrKey(s.L, 'position.x', s.x + delta[0], T);
         setOrKey(s.L, 'position.y', s.y + delta[1], T);
       });
-      let snap: any = { dx: 0, dy: 0, x: null, y: null };
-      if (PM.snap) snap = alignmentSnap(unionBounds(selectionLayers, T), targets, 8 / Math.max(.02, V.shown), axes);
-      start.forEach((s: any) => {
+      /* Mod suspends snapping for the gesture. */
+      let snap: SnapResult = { dx: 0, dy: 0, lines: [] };
+      const box = PM.snap && !(ev.metaKey || ev.ctrlKey) ? unionBounds(selectionLayers, T) : null;
+      if (box) {
+        snap = snapBox(snapCandidatesFromPoints(boxSnapPoints(box)), candidates,
+          SNAP_DISTANCE / Math.max(.02, V.shown), axes);
+      }
+      if (snap.dx || snap.dy) start.forEach((s: any) => {
         const [cx, cy] = worldDeltaToLocal(s.L, T, snap.dx, snap.dy);
         const [mx, my] = moveDeltas.get(s.L)!;
         if (cx) setOrKey(s.L, 'position.x', s.x + mx + cx, T);
         if (cy) setOrKey(s.L, 'position.y', s.y + my + cy, T);
       });
-      const nextGuides = PM.snap && (snap.x || snap.y)
-        ? { x: guideValue(snap.x), y: guideValue(snap.y) }
-        : null;
-      if (alignmentGuideChanged(V.guides, nextGuides)) {
+      const nextLines = snap.lines.length ? snap.lines : null;
+      if (snapLinesChanged(V.snapLines, nextLines)) {
         window.powermove?.haptic.alignment();
       }
-      V.guides = nextGuides;
+      V.snapLines = nextLines;
       PM.invalidate();
     },
     up: () => {

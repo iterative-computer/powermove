@@ -28,37 +28,43 @@ function viewerRegistry(): Record<string, any> {
 }
 
 describe('viewer runtime', () => {
-  it('chooses the closest snap within the screen-space threshold', () => {
+  it('snaps to the nearest candidate and breaks ties by the shorter guide', () => {
     const V = viewerRegistry().Viewer;
+    const source = V.snapCandidatesFromPoints([{ x: 103, y: 10 }]);
+    const targets = V.snapCandidatesFromPoints([{ x: 100, y: 500 }, { x: 100, y: 40 }, { x: 200, y: 10 }]);
 
-    expect(V.snapAxis([93, 103, 113], [{ value: 0 }, { value: 100 }, { value: 200 }], 8))
-      .toEqual({ delta: -3, value: 100, distance: 3 });
-    expect(V.snapAxis([30, 40, 50], [100], 8)).toBeNull();
+    expect(V.findSnapTarget(source.x, targets.x, 6, 'x'))
+      .toEqual({ offset: -3, distance: 3, sourcePoint: { x: 103, y: 10 }, targetPoint: { x: 100, y: 40 } });
+    expect(V.findSnapTarget(source.x, targets.x, 2, 'x')).toBeNull();
   });
 
-  it('resolves alignment guides independently and respects a locked axis', () => {
+  it('snaps each axis independently, respects a locked axis, and draws guides to the target', () => {
     const V = viewerRegistry().Viewer;
-    const bounds = { x0: 193, cx: 203, x1: 213, y0: 42, cy: 52, y1: 62 };
+    const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 193, x1: 213, y0: 42, y1: 62 }));
+    const candidates = V.snapCandidatesFromPoints([{ x: 200, y: 0 }, { x: 400, y: 50 }]);
 
-    expect(V.alignmentSnap(bounds, { x: [0, 200, 400], y: [0, 50, 300] }, 6))
-      .toEqual({
-        dx: -3,
-        dy: -2,
-        x: { delta: -3, value: 200, distance: 3 },
-        y: { delta: -2, value: 50, distance: 2 },
-      });
-    expect(V.alignmentSnap(bounds, { x: [200], y: [50] }, 6, { x: true, y: false }))
-      .toEqual({ dx: -3, dy: 0, x: { delta: -3, value: 200, distance: 3 }, y: null });
+    const both = V.snapBox(moving, candidates, 6);
+    expect(both.dx).toBe(-3);
+    expect(both.dy).toBe(-2);
+    expect(both.lines).toEqual([
+      { from: { x: 200, y: 50 }, to: { x: 200, y: 0 } },
+      { from: { x: 200, y: 50 }, to: { x: 400, y: 50 } },
+    ]);
+
+    const locked = V.snapBox(moving, candidates, 6, { x: true, y: false });
+    expect(locked).toEqual({ dx: -3, dy: 0, lines: [{ from: { x: 200, y: 52 }, to: { x: 200, y: 0 } }] });
   });
 
-  it('detects guide entry and target changes without repeating while a guide stays visible', () => {
+  it('fires the haptic on guide entry and retarget, not while a guide stays put', () => {
     const V = viewerRegistry().Viewer;
+    const a = [{ from: { x: 0, y: 0 }, to: { x: 100, y: 0 } }];
+    const b = [{ from: { x: 0, y: 0 }, to: { x: 200, y: 0 } }];
 
-    expect(V.alignmentGuideChanged(null, { x: 100, y: null })).toBe(true);
-    expect(V.alignmentGuideChanged({ x: 100, y: null }, { x: 100, y: null })).toBe(false);
-    expect(V.alignmentGuideChanged({ x: 100, y: null }, { x: 200, y: null })).toBe(true);
-    expect(V.alignmentGuideChanged({ x: 100, y: null }, { x: 100, y: 300 })).toBe(true);
-    expect(V.alignmentGuideChanged({ x: 100, y: null }, null)).toBe(false);
+    expect(V.snapLinesChanged(null, a)).toBe(true);
+    expect(V.snapLinesChanged(a, a)).toBe(false);
+    expect(V.snapLinesChanged(a, b)).toBe(true);
+    expect(V.snapLinesChanged(a, [...a, ...b])).toBe(true);
+    expect(V.snapLinesChanged(a, null)).toBe(false);
   });
 
   it('keeps click jitter below the move-drag threshold', () => {
