@@ -28,8 +28,17 @@ if [ -n "${FAKE_CODEX_INVOCATIONS:-}" ]; then
 fi
 
 if [ "${FAKE_CODEX_MODE:-success}" = 'stale-resume' ] && [ "$resuming" -eq 1 ]; then
-  printf '%s\n' 'Error: session is unknown or no longer exists' >&2
+  printf '%s\n' 'Error: thread/resume: thread/resume failed: no rollout found for thread id stale-thread (code -32600)' >&2
   exit 17
+fi
+
+if [ "${FAKE_CODEX_MODE:-success}" = 'silent-stale-resume' ] && [ "$resuming" -eq 1 ]; then
+  exit 17
+fi
+
+if [ "${FAKE_CODEX_MODE:-success}" = 'silent-first-start' ] && [ -n "${FAKE_CODEX_INVOCATIONS:-}" ]; then
+  invocation_count=$(wc -l < "$FAKE_CODEX_INVOCATIONS" | tr -d ' ')
+  if [ "$invocation_count" -eq 1 ]; then exit 17; fi
 fi
 
 if [ "${FAKE_CODEX_MODE:-success}" = 'mcp-fallback' ] && [ "$ignore_user_config" -eq 0 ]; then

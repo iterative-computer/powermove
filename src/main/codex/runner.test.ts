@@ -323,6 +323,46 @@ describe('CodexRunner lifecycle', () => {
     ]);
   });
 
+  it('retries fresh when a resumed CLI exits before an agent turn or diagnostic starts', async () => {
+    const userData = await temporaryDirectory('runner-silent-stale');
+    const invocationFile = path.join(userData, 'invocations.txt');
+    const root = agentWorkspaceRoot(userData, 'runner-project');
+    const sessionPath = sessionPathFor(root, 'project');
+    await mkdir(path.dirname(sessionPath), { recursive: true });
+    await writeFile(sessionPath, 'stale-thread');
+
+    const progress: string[] = [];
+    const result = await new CodexRunner().run(request({ id: 'silent-stale-run-1234' }), {
+      ...fakeOptions(userData, {
+        FAKE_CODEX_MODE: 'silent-stale-resume',
+        FAKE_CODEX_INVOCATIONS: invocationFile
+      }),
+      onProgress: (text) => progress.push(text)
+    });
+
+    expect(result.ok).toBe(true);
+    expect((await readFile(invocationFile, 'utf8')).trim().split('\n')).toEqual(['resume', 'fresh']);
+    expect(progress).toContain('The saved agent thread could not be resumed — starting a fresh run…');
+  });
+
+  it('retries once when a fresh CLI exits silently before an agent turn starts', async () => {
+    const userData = await temporaryDirectory('runner-silent-first-start');
+    const invocationFile = path.join(userData, 'invocations.txt');
+    const progress: string[] = [];
+
+    const result = await new CodexRunner().run(request({ id: 'silent-first-start-1234' }), {
+      ...fakeOptions(userData, {
+        FAKE_CODEX_MODE: 'silent-first-start',
+        FAKE_CODEX_INVOCATIONS: invocationFile
+      }),
+      onProgress: (text) => progress.push(text)
+    });
+
+    expect(result.ok).toBe(true);
+    expect((await readFile(invocationFile, 'utf8')).trim().split('\n')).toEqual(['fresh', 'fresh']);
+    expect(progress).toContain('The agent stopped before it could start — retrying…');
+  });
+
   it('isolates a resumed session from broken user MCP configuration on the first attempt', async () => {
     const userData = await temporaryDirectory('runner-mcp-fallback');
     const invocationFile = path.join(userData, 'invocations.txt');

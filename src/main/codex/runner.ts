@@ -176,6 +176,11 @@ function diagnosticText(attempt: AttemptResult, fallback: string): string {
   return humanizeCodexFailure(diagnostic, fallback);
 }
 
+function attemptHasDiagnostic(attempt: AttemptResult): boolean {
+  return codexErrorFromStdout(attempt.stdout) !== null ||
+    meaningfulStderr(attempt.stderr).length > 0 || attempt.spawnError !== null;
+}
+
 /* Raw CLI stderr must never reach the conversation: it is log noise (timestamps,
    rust module paths, auth headers). Map known failure classes to actionable
    sentences and reduce everything else to its last meaningful line. The full
@@ -242,6 +247,22 @@ export function parseAgentExtensionChanges(value: unknown): AgentExtensionChange
 
 function isUnknownSession(text: string): boolean {
   return /(?:unknown|invalid|missing|not found|does not exist|could not find).{0,80}(?:session|thread|rollout)|(?:session|thread|rollout).{0,80}(?:unknown|invalid|missing|not found|does not exist|could not find)|no rollout found/i.test(text);
+}
+
+/** A failed resume is safe to replace with a fresh run until Codex has actually
+ * begun the turn. This also covers native child-process exits where the CLI's
+ * short startup diagnostic is unavailable to Electron. */
+function codexTurnStarted(stdout: string): boolean {
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event: unknown = JSON.parse(line);
+      if (!isRecord(event) || typeof event.type !== 'string') continue;
+      if (event.type === 'turn.started' || event.type.startsWith('item.')) return true;
+    } catch {
+      // Non-JSON notices are diagnostics, not evidence that a turn began.
+    }
+  }
+  return false;
 }
 
 function appendDiagnostic(chunks: Buffer[], chunk: Buffer): void {
@@ -360,6 +381,7 @@ export class CodexRunner {
       let resumeId = await readSession(layout.sessionPath);
       let attempt: AttemptResult | null = null;
       for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+        const resuming = Boolean(resumeId);
         const argv = buildAutonomousArgv({
           schemaPath: layout.schemaPath,
           outputPath: layout.outputPath,
@@ -386,7 +408,14 @@ export class CodexRunner {
           return failure('The Codex run was cancelled.', true);
         }
         const diagnostic = attemptOutput(attempt);
-        if (tryIndex === 0 && resumeId && attempt.code !== 0 && isUnknownSession(diagnostic)) {
+        const silentFailureBeforeTurn = attempt.code !== 0 &&
+          !codexTurnStarted(attempt.stdout) && !attemptHasDiagnostic(attempt);
+        const canRetryFresh = tryIndex === 0 && attempt.code !== 0 &&
+          ((resuming && isUnknownSession(diagnostic)) || silentFailureBeforeTurn);
+        if (canRetryFresh) {
+          options.onProgress?.(resuming
+            ? 'The saved agent thread could not be resumed — starting a fresh run…'
+            : 'The agent stopped before it could start — retrying…');
           await state.sessionWrite;
           await clearSession(layout.sessionPath);
           await rm(layout.outputPath, { force: true });
