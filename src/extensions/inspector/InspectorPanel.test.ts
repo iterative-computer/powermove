@@ -387,11 +387,12 @@ describe('InspectorPanel', () => {
   it.each([true, false])('animates both axes and handles partial keys when scaleLinked=%s', (linked) => {
     const candidate = layer('A');
     candidate.scaleLinked = linked;
-    const { PM } = setup([candidate]);
+    const { PM, menu } = setup([candidate]);
     const row = channelRow('A', 'scale.x');
-    const stopwatch = row.querySelector<HTMLButtonElement>('[aria-label="Animate Scale"]')!;
-    const diamond = row.querySelector<HTMLButtonElement>('.kd')!;
-    stopwatch.click();
+    /* One diamond per axis: static → click starts animating both axes. */
+    const diamond = row.querySelector<HTMLButtonElement>('.kf[data-key="scale.x"]')!;
+    expect(diamond.classList.contains('track')).toBe(false);
+    diamond.click();
     expect(PM.hist.do).toHaveBeenLastCalledWith('Animate Scale', expect.any(Function));
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
@@ -399,21 +400,27 @@ describe('InspectorPanel', () => {
     candidate.p['scale.y']!.kf = [];
     doc.bump('values');
     flushSync();
-    expect(diamond.getAttribute('aria-pressed')).toBe('false');
+    expect(diamond.classList.contains('track')).toBe(true);
+    expect(diamond.classList.contains('on')).toBe(false);
     diamond.click();
     doc.bump('values');
     flushSync();
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
-    expect(diamond.getAttribute('aria-pressed')).toBe('true');
+    expect(diamond.classList.contains('on')).toBe(true);
     diamond.click();
+    doc.bump('values');
+    flushSync();
     expect(candidate.p['scale.x']!.kf).toHaveLength(0);
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
+    /* Removing the animation lives in the context menu. */
     candidate.p['scale.y']!.kf = [{ t: 0, v: 100 }];
     doc.bump('values');
     flushSync();
-    expect(stopwatch.getAttribute('aria-pressed')).toBe('true');
-    stopwatch.click();
+    expect(diamond.getAttribute('aria-pressed')).toBe('true');
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: (e?: any) => void }>;
+    items.find((item) => item.label === 'Remove animation')!.run!(new MouseEvent('click'));
     expect(candidate.p['scale.x']!.kf).toHaveLength(0);
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
   });
@@ -443,32 +450,31 @@ describe('InspectorPanel', () => {
     ], { label: 'Reset', origin: 'inspector' });
   });
 
-  it('derives stopwatch and keyframe-diamond state from keyframes and playhead time', () => {
+  it('derives keyframe-diamond state from keyframes and playhead time', () => {
     const candidate = layer('A', 75);
     candidate.p.opacity!.kf = [{ t: 0, v: 75 }];
     setup([candidate], ['A']);
     const row = channelRow('A', 'opacity');
-    const stopwatch = row.querySelector<HTMLButtonElement>('button[aria-label="Animate Opacity"]')!;
-    const diamond = row.querySelector<HTMLButtonElement>('button.kd')!;
+    const diamond = row.querySelector<HTMLButtonElement>('button.kf')!;
 
-    expect(stopwatch.classList.contains('on')).toBe(true);
-    expect(stopwatch.getAttribute('aria-pressed')).toBe('true');
-    expect(diamond.style.display).not.toBe('none');
+    /* animated + key under the playhead: filled */
+    expect(diamond.classList.contains('track')).toBe(true);
     expect(diamond.classList.contains('on')).toBe(true);
     expect(diamond.getAttribute('aria-pressed')).toBe('true');
 
+    /* animated, playhead between keys: outlined */
     transport.time = 1;
     flushSync();
+    expect(diamond.classList.contains('track')).toBe(true);
     expect(diamond.classList.contains('on')).toBe(false);
-    expect(diamond.getAttribute('aria-pressed')).toBe('false');
-    expect(stopwatch.classList.contains('on')).toBe(true);
 
+    /* static: muted, still rendered so it can start an animation */
     candidate.p.opacity!.kf = [];
     doc.bump('values');
     flushSync();
-    expect(stopwatch.classList.contains('on')).toBe(false);
-    expect(stopwatch.getAttribute('aria-pressed')).toBe('false');
-    expect(diamond.style.display).toBe('none');
+    expect(diamond.classList.contains('track')).toBe(false);
+    expect(diamond.classList.contains('on')).toBe(false);
+    expect(diamond.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('sends the exact legacy add-effect and remove-effect commands', () => {

@@ -58,15 +58,23 @@
   .inspector-layer {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 0;
+    padding-bottom: 12px;
+  }
+
+  /* Sections are full-bleed; the panel supplies the horizontal inset the
+     section rules subtract back out. */
+  .inspector-layer > :global(.sec) {
+    margin-top: 12px;
   }
 
   .inspector-layer > :global(.sec:first-child) {
-    margin-top: 2px;
+    margin-top: 0;
   }
 
   .inspector-selection-note {
-    padding: 4px 6px;
+    padding: 6px 16px;
+    margin: 0 calc(-1 * var(--pad));
     color: var(--tx-3);
     font-size: var(--fs-xs);
   }
@@ -74,8 +82,12 @@
   .insp {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: var(--pad) var(--pad) 24px;
+    gap: 0;
+    padding: 0 var(--pad) 24px;
+  }
+
+  .insp :global(.chip.wide) {
+    margin: 0 4px 4px;
   }
 
   .insp :global(.stopwatch) {
@@ -138,13 +150,14 @@
   }
 
   .insp :global(.inspector-header) {
-    height: var(--hdr-h);
-    margin: -4px -4px 6px;
-    padding: 0 4px 0 8px;
-    border-bottom: 1px solid var(--line);
+    height: 48px;
+    margin: 0 calc(-1 * var(--pad)) 8px;
+    padding: 0 12px 0 16px;
+    border-bottom: 0;
     border-radius: 0;
     background: transparent;
   }
+  .insp :global(.inspector-header .k) { font-size: 12px; }
 
   .insp :global(.inspector-header:hover) {
     background: transparent;

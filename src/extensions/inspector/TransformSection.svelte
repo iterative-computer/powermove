@@ -2,26 +2,24 @@
   import { inspectorContext } from './context';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { Section } = inspectorContext().api.ui.controls;
+  const { Section, Row } = inspectorContext().api.ui.controls;
 
   let { PM, layer }: {
     PM: Record<string, any>;
     layer: Record<string, any>;
   } = $props();
-
-  const channels = [
-    ['position.x', 'Position X'],
-    ['position.y', 'Position Y'],
-    ['scale.x', 'Scale'],
-    ['rotation', 'Rotation'],
-    ['opacity', 'Opacity'],
-    ['anchor.x', 'Anchor X'],
-    ['anchor.y', 'Anchor Y'],
-    ['skew', 'Skew']
-  ] as const;
 </script>
 
 <Section title="Transform" />
-{#each channels as [channel, label] (channel)}
-  <ChannelRow {PM} {layer} {channel} {label} />
-{/each}
+<Row label="Position" pair>
+  <ChannelRow {PM} {layer} channel="position.x" label="Position X" compact prefix="X" />
+  <ChannelRow {PM} {layer} channel="position.y" label="Position Y" compact prefix="Y" />
+</Row>
+<ChannelRow {PM} {layer} channel="scale.x" label="Scale" />
+<ChannelRow {PM} {layer} channel="rotation" label="Rotation" />
+<ChannelRow {PM} {layer} channel="opacity" label="Opacity" />
+<Row label="Anchor" pair>
+  <ChannelRow {PM} {layer} channel="anchor.x" label="Anchor X" compact prefix="X" />
+  <ChannelRow {PM} {layer} channel="anchor.y" label="Anchor Y" compact prefix="Y" />
+</Row>
+<ChannelRow {PM} {layer} channel="skew" label="Skew" />

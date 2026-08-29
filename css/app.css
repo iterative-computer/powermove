@@ -252,36 +252,54 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .generated-curve-presets button i{width:13px;height:9px;flex:none;border-left:1px solid var(--tx-3);border-bottom:1px solid var(--tx-3);border-radius:0 0 0 2px;position:relative}
 .generated-curve-presets button i::after{content:"";position:absolute;left:1px;bottom:1px;width:10px;height:6px;border-top:1.5px solid var(--accent);border-radius:80% 20% 0 0;transform:skewY(-20deg)}
 .generated-curve-presets button span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* Sections read as quiet muted labels over a hairline; rows are label/value
-   pairs with no fills — the value carries the weight, the label recedes. */
-/* Sections group by whitespace and a quiet label, not by rules — a list of
-   dividers reads as stripes before it reads as groups. */
-.sec{margin:18px 8px 5px;font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--tx-4);letter-spacing:.01em}
-.sec:first-child{margin-top:6px}
+/* Sections are full-bleed groups: a hairline on top, a 40px header row with
+   an 11px title, and 8px-spaced rows padded 16px. One quiet system. */
+.sec{display:flex;align-items:center;justify-content:space-between;height:40px;margin:6px calc(-1 * var(--pad)) 0;padding:0 16px;
+  border-top:1px solid var(--line);font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--tx);letter-spacing:0}
+.sec:first-child{margin-top:0;border-top:0}
 .row{
-  display:flex;align-items:center;height:var(--row-h);border-radius:var(--r-sm);background:transparent;
-  padding:0 4px 0 8px;gap:var(--gap);position:relative;transition:background var(--dur-1);
+  display:flex;align-items:center;height:28px;border-radius:0;background:transparent;
+  padding:0 4px 0 8px;gap:8px;position:relative;
 }
-.row:hover{background:var(--ink-1)}
-.row .k{flex:1;min-width:0;color:var(--tx-2);font-size:var(--fs-md);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.row .v{font-family:var(--f-mono);font-size:var(--fs-sm);color:var(--tx);text-align:right;padding-right:6px;font-variant-numeric:tabular-nums}
-.row.split{padding:0 0 0 8px;gap:8px}
-.row.split .k{height:100%;display:flex;align-items:center;padding:0}
-/* The value column is a fixed-width track so wells align edge-to-edge down
-   the panel, the way a spec sheet lines up X / Y / Blur / Spread. */
-.row.split .vwrap{height:100%;display:flex;align-items:center;justify-content:flex-end;gap:4px;padding:0 4px;width:var(--val-w);flex:none}
+.row .k{flex:1;min-width:0;color:var(--tx-2);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .v{font-family:var(--f-mono);font-size:var(--fs-xs);color:var(--tx);text-align:right;padding-right:6px;font-variant-numeric:tabular-nums}
+/* Label column is a fixed 64px; the control owns the rest of the row. */
+.row.split{margin:4px calc(-1 * var(--pad));padding:0 16px;gap:8px;height:28px}
+.row.split .k{flex:none;width:64px;height:100%;display:flex;align-items:center;padding:0;color:var(--tx-2)}
+.row.split .vwrap{flex:1;min-width:0;height:100%;display:flex;align-items:center;gap:8px;padding:0;width:auto}
+/* Paired fields (X / Y) are one joined well split by a 1px seam, so the row
+   reads as a single control rather than two islands with a hole between. */
+.row.split .vwrap.pair{display:flex;gap:8px}
+.row.split .pair-group{display:grid;grid-template-columns:1fr 1fr;gap:1px;flex:1 1 0;min-width:0;height:100%;
+  border-radius:var(--r-sm);overflow:clip;background:rgb(var(--ink-rgb) / .06)}
+.row.split .pair-group .num{border-radius:0}
+.row.split .pair-group .well + .well{box-shadow:-1px 0 0 var(--bg-panel)}
 .row.split .vwrap > *{min-width:0}
-/* Well: the one material every value control shares — a quiet tinted field
-   with no border, text left-aligned like an input, white + ring when editing. */
+/* 4px above and below = 8px between rows, independent of the wrapper
+   element each row happens to sit in. */
+/* Well: the one material every value control shares — a 28px tinted field,
+   6px radius, no border; an inset accent ring while editing. */
 .num,.sel,.color-field{
-  height:24px;border-radius:var(--r-sm);background:var(--bg-field);color:var(--tx);
+  height:28px;border-radius:var(--r-sm);background:rgb(var(--ink-rgb) / .06);color:var(--tx);
   transition:background var(--dur-1),box-shadow var(--dur-1);
 }
-.num:hover,.sel:hover,.color-field:hover{background:var(--bg-row-hi)}
-.num{font-family:var(--f-mono);font-size:var(--fs-sm);cursor:ew-resize;text-align:left;font-variant-numeric:tabular-nums;
-  flex:1 1 0;min-width:0;line-height:24px;padding:0 8px}
-.num.editing{background:var(--bg-float);box-shadow:var(--ctl-edge-inset),0 0 0 1px var(--accent);cursor:text}
+.num:hover,.sel:hover,.color-field:hover{background:rgb(var(--ink-rgb) / .085)}
+.num{font-family:var(--f-mono);font-size:var(--fs-xs);cursor:ew-resize;text-align:left;font-variant-numeric:tabular-nums;
+  flex:1 1 0;min-width:0;width:100%;line-height:28px;padding:0 8px}
+.num.editing{background:rgb(var(--ink-rgb) / .06);box-shadow:inset 0 0 0 1px var(--accent);cursor:text}
 .num.link{color:var(--accent-tx)}
+/* A well with an optional 24px prefix gutter (X / Y / W / H) on the left and
+   a 24px keyframe slot on the right. */
+.well{position:relative;display:flex;flex:1 1 0;min-width:0;align-items:center}
+.well[data-prefix]::before{content:attr(data-prefix);position:absolute;left:0;top:0;bottom:0;width:24px;display:grid;place-items:center;
+  font-family:var(--f-mono);font-size:10px;color:var(--tx-3);pointer-events:none}
+.well[data-prefix] .num{padding-left:24px}
+.well.has-kf .num{padding-right:24px}
+.kf{position:absolute;right:0;top:0;width:24px;height:28px;display:grid;place-items:center;color:var(--tx-4);flex:none}
+.kf i{width:6px;height:6px;transform:rotate(45deg);border:1px solid rgb(var(--ink-rgb) / .35);background:transparent;transition:border-color var(--dur-1),background var(--dur-1)}
+.kf:hover i{border-color:var(--tx)}
+.kf.track i{border-color:var(--accent)}
+.kf.on i{border-color:var(--accent);background:var(--accent)}
 .color-field{flex:1 1 0;display:flex;flex-direction:row-reverse;justify-content:flex-end;align-items:center;gap:8px;padding:0 8px 0 4px}
 .color-field .sw{width:16px;height:16px;border-radius:var(--r-xs);box-shadow:inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .14)}.color-dialog{display:flex;flex-direction:column;gap:12px}.color-dialog-value{display:flex;align-items:center;gap:10px}.color-hex{height:32px;flex:1;padding:0 10px;border:0;box-shadow:var(--ctl-edge-inset);border-radius:var(--r-sm);background:var(--bg-field);font-family:var(--f-mono)}.color-dialog-preview{width:34px;height:34px;border-radius:var(--r-md);background:var(--sw-color)}.color-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:7px}.color-choice{aspect-ratio:1;border-radius:var(--r-md);background:var(--sw-color)}.color-choice.on{box-shadow:0 0 0 2px var(--accent)}
 .sw{width:22px;height:18px;border-radius:var(--r-sm);background:var(--sw-fill,var(--sw-color,#808080));position:relative;flex:none}
@@ -312,7 +330,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--bg-float);box-shadow:var(--shadow-raise);transition:transform var(--dur-2) var(--ease-io)}
 .toggle.on{background:var(--accent)}
 .toggle.on i{transform:translateX(14px)}
-.sel{flex:1 1 0;padding:0 8px;font-size:var(--fs-sm);font-family:var(--f-mono);max-width:100%}
+.sel{flex:1 1 0;width:100%;padding:0 8px;font-size:var(--fs-xs);font-family:var(--f-mono);max-width:100%}
 .stopwatch{width:18px;height:18px;border-radius:var(--r-xs);display:grid;place-items:center;color:var(--tx-4);flex:none;transition:background var(--dur-1),color var(--dur-1)}
 .stopwatch:hover{color:var(--tx-2);background:var(--ink-1)}
 .stopwatch.on{color:var(--accent)}
@@ -817,7 +835,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .fxb-search::placeholder{color:var(--tx-4)}
 .fxb-search:focus{outline:0;box-shadow:var(--ctl-edge-inset),0 0 0 1px var(--accent)}
 .fxb-list{min-height:0;flex:1;overflow:auto;padding:4px 6px 10px;display:flex;flex-direction:column}
-.fxb-sec{margin:10px 8px 2px}
+.fxb-sec{height:auto;margin:10px 8px 2px;padding:0;border-top:0;color:var(--tx-4);font-weight:var(--fw-medium)}
 .fxb-sec:first-child{margin-top:4px}
 .fxb-row{display:flex;align-items:center;gap:8px;height:24px;padding:0 6px 0 8px;border-radius:var(--r-sm);color:var(--tx-2);font-size:var(--fs-sm);text-align:left;cursor:grab;transition:background var(--dur-1),color var(--dur-1)}
 .fxb-row:hover,.fxb-row:focus-visible{background:var(--ink-1);color:var(--tx)}

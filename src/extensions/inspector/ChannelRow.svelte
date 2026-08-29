@@ -23,7 +23,9 @@
     unit,
     precision,
     showDiamond = true,
-    allowContextMenu = true
+    allowContextMenu = true,
+    compact = false,
+    prefix
   }: {
     PM: Record<string, any>;
     layer: Record<string, any>;
@@ -38,6 +40,10 @@
     precision?: number;
     showDiamond?: boolean;
     allowContextMenu?: boolean;
+    /** Render only the well (no Row); the parent composes X / Y pairs. */
+    compact?: boolean;
+    /** Single-letter gutter label inside the well (X, Y, W, H). */
+    prefix?: string;
   } = $props();
 
   const instance = `channel-${++instanceSequence}`;
@@ -53,7 +59,7 @@
         : PM.ev(layer, channel, transport.time)
   ));
   const scaleLinked = $derived((doc.tick.values, doc.proj, !!layer.scaleLinked));
-  const isScale = $derived(!property && channel === 'scale.x');
+  const isScale = $derived(!property && !compact && channel === 'scale.x');
   const channels = $derived(isScale ? ['scale.x', 'scale.y'] : [channel]);
   const properties = $derived((doc.tick.structure, doc.proj, channels.map((key) => property ?? layer.p?.[key])));
   const animated = $derived((doc.tick.values, doc.proj, properties.some((p) => (p?.kf?.length ?? 0) > 0)));
@@ -131,6 +137,14 @@
       });
     });
     refreshValues();
+  }
+
+  /* One diamond, editor-style: static → start animating (track + key);
+     animated → toggle the key under the playhead. Removing the animation
+     lives in the context menu. */
+  function diamondClick(event: MouseEvent): void {
+    if (!animated) toggleStopwatch(event);
+    else toggleKey(event);
   }
 
   function addKeyframe(): void {
@@ -224,6 +238,7 @@
     PM.menu(window.document.body, [
       { header: label },
       { label: 'Add keyframe at playhead', run: addKeyframe },
+      animated ? { label: 'Remove animation', run: (e: MouseEvent) => toggleStopwatch(e ?? new MouseEvent('click')) } : null,
       { label: 'Show in graph editor', run: showGraphEditor },
       '-',
       { header: 'Easing for all keys' },
@@ -243,89 +258,83 @@
   }
 </script>
 
-<div
-  role="group"
-  aria-label={`${label} property`}
-  data-channel-instance={instance}
-  data-layer-id={layer.id}
-  data-channel={channel}
-  oncontextmenu={allowContextMenu ? contextMenu : undefined}
-  onpointerdown={selectChannel}
->
-  <Row {label}>
-    {#snippet left()}
+{#snippet well(key: string, fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
+  <div class="well" class:has-kf={showDiamond} data-prefix={gutter}>
+    <NumField
+      {PM}
+      get={getter}
+      edit={fieldEdit}
+      label={fieldLabel}
+      ariaLabel={fieldLabel}
+      step={step ?? meta.step ?? 1}
+      min={min ?? meta.min}
+      max={max ?? meta.max}
+      unit={unit ?? meta.unit}
+      {precision}
+      link={linked}
+    />
+    {#if showDiamond}
       <button
         type="button"
-        class="stopwatch"
-        class:on={animated}
-        title={`Animate ${label}`}
-        aria-label={`Animate ${label}`}
+        class="kf"
+        class:track={animated}
+        class:on={animated && keyAtPlayhead}
+        title={!animated ? `Animate ${fieldLabel}` : keyAtPlayhead ? 'Remove keyframe' : 'Add keyframe'}
+        aria-label={!animated ? `Animate ${fieldLabel}` : keyAtPlayhead ? `Remove keyframe for ${fieldLabel}` : `Add keyframe for ${fieldLabel}`}
         aria-pressed={animated}
-        onclick={toggleStopwatch}
-      ><Icon name="clock" /></button>
-    {/snippet}
+        data-key={key}
+        onclick={diamondClick}
+      ><i aria-hidden="true"></i></button>
+    {/if}
+  </div>
+{/snippet}
 
-    <div class:scale-values={isScale} style="display:flex;align-items:center;gap:4px">
+{#if compact}
+  <div
+    role="group"
+    aria-label={`${label} property`}
+    data-channel-instance={instance}
+    data-layer-id={layer.id}
+    data-channel={channel}
+    style="display:contents"
+    oncontextmenu={allowContextMenu ? contextMenu : undefined}
+    onpointerdown={selectChannel}
+  >
+    {@render well(channel, label, edit, () => value, !!prop?.expr, prefix)}
+  </div>
+{:else}
+  <div
+    role="group"
+    aria-label={`${label} property`}
+    data-channel-instance={instance}
+    data-layer-id={layer.id}
+    data-channel={channel}
+    oncontextmenu={allowContextMenu ? contextMenu : undefined}
+    onpointerdown={selectChannel}
+  >
+    <Row {label} pair={isScale}>
+      {@render well(channel, isScale ? 'Scale X' : label, edit, () => value, !!prop?.expr, isScale ? 'X' : prefix)}
       {#if isScale}
-        <button type="button" class="stopwatch scale-link" class:on={scaleLinked} aria-label="Link Scale X and Y" aria-pressed={scaleLinked}
-          title={scaleLinked ? 'Adjust X and Y separately' : 'Adjust X and Y together · preserve proportions'}
-          onclick={() => PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}><Icon name="link" /></button>
+        {@render well('scale.y', 'Scale Y', scaleYEdit, () => PM.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
       {/if}
-      <NumField
-        {PM}
-        get={() => value}
-        {edit}
-        label={isScale ? 'Scale X' : label}
-        ariaLabel={isScale ? 'Scale X' : undefined}
-        step={step ?? meta.step ?? 1}
-        min={min ?? meta.min}
-        max={max ?? meta.max}
-        unit={unit ?? meta.unit}
-        {precision}
-        link={!!prop?.expr}
-      />
-      {#if isScale}
-        <span class="scale-comma" aria-hidden="true">,</span>
-        <NumField
-          {PM}
-          get={() => PM.ev(layer, 'scale.y', transport.time)}
-          edit={scaleYEdit}
-          label="Scale Y"
-          ariaLabel="Scale Y"
-          step={step ?? meta.step ?? 1}
-          min={min ?? meta.min}
-          max={max ?? meta.max}
-          unit={unit ?? meta.unit}
-          {precision}
-          link={!!layer.p?.['scale.y']?.expr}
-        />
-      {/if}
-      {#if showDiamond}
-        <button
-          type="button"
-          class="stopwatch kd"
-          class:on={keyAtPlayhead}
-          style:display={animated ? undefined : 'none'}
-          title="Keyframe at playhead"
-          aria-label={`Toggle keyframe for ${label} at playhead`}
-          aria-pressed={keyAtPlayhead}
-          onclick={toggleKey}
-        ><Icon name="diamond" /></button>
-      {/if}
-    </div>
-  </Row>
-</div>
+      {#snippet action()}
+        {#if isScale}
+          <button type="button" class="kf link-axes" class:on={scaleLinked} aria-label="Link Scale X and Y" aria-pressed={scaleLinked}
+            title={scaleLinked ? 'Adjust X and Y separately' : 'Adjust X and Y together · preserve proportions'}
+            onclick={() => PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}><Icon name="link" /></button>
+        {/if}
+      {/snippet}
+    </Row>
+  </div>
+{/if}
 
 <style>
-  .scale-values :global(.num) {
-    min-width: 0;
-    padding-inline: 3px;
+  .link-axes {
+    position: static;
+    color: var(--tx-4);
+    border-radius: var(--r-xs);
   }
-
-  .scale-comma {
-    color: var(--tx-3);
-    font-family: var(--f-mono);
-    font-size: var(--fs-sm);
-    margin-inline: -4px;
-  }
+  .link-axes:hover { color: var(--tx-2); background: var(--ink-1); }
+  .link-axes.on { color: var(--accent); }
+  .link-axes :global(svg) { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 </style>
