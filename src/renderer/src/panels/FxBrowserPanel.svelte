@@ -1,103 +1,149 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { kernelSignals } from '../kernel/signals.svelte';
+  import { fxBrowser } from './fx-browser.svelte';
   import type { PanelProps } from './registerSveltePanel';
 
-  interface EffectDefinition {
-    label: string;
-    group: string;
-  }
+  type Kind = 'effect' | 'transition';
+  interface Item { kind: Kind; id: string; label: string; group: string }
 
   let { panelId }: PanelProps = $props();
 
   const PM = window.PM as Record<string, any>;
-  /* Derived over the kernel's effects signal, so an effect registered (or
-     replaced, or removed) by an extension shows up without remounting. */
-  const groups = $derived.by(() => {
+  const kind = $derived(fxBrowser.kind);
+  const query = $derived(fxBrowser.query);
+  let status = $state('');
+  let list: HTMLDivElement | undefined = $state();
+  let searchEl: HTMLInputElement | undefined = $state();
+
+  $effect(() => {
+    if (fxBrowser.searchOpen) searchEl?.focus();
+  });
+
+  const effects = $derived.by<Item[]>(() => {
     kernelSignals.effects;
-    return Object.entries(PM.FX as Record<string, EffectDefinition>).reduce(
-      (result, [id, definition]) => {
-        (result[definition.group] ||= []).push([id, definition]);
-        return result;
-      },
-      {} as Record<string, Array<[string, EffectDefinition]>>
+    return Object.entries((PM.FX ?? {}) as Record<string, { label: string; group: string }>).map(
+      ([id, definition]) => ({ kind: 'effect', id, label: definition.label ?? id, group: definition.group ?? 'Other' })
     );
   });
-  let status = $state('');
-  let addedEffect = $state<string | null>(null);
-  let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function clearFeedback(): void {
-    clearTimeout(feedbackTimer);
-    feedbackTimer = undefined;
-    addedEffect = null;
-    status = '';
-  }
-
-  onMount(() => {
-    const events = ['sel', 'project', 'history'];
-    const unsubscribe = events.map(event => PM.bus?.on?.(event, clearFeedback));
-    return () => {
-      clearTimeout(feedbackTimer);
-      events.forEach((event, index) => {
-        if (typeof unsubscribe[index] === 'function') unsubscribe[index]();
-        else PM.bus?.off?.(event, clearFeedback);
-      });
-    };
+  const transitions = $derived.by<Item[]>(() => {
+    kernelSignals.transitions;
+    const found = new Map<string, any>();
+    try {
+      for (const definition of PM.Kernel?.transitions?.list?.() ?? []) {
+        if (definition?.id && !found.has(definition.id)) found.set(definition.id, definition);
+      }
+    } catch {
+      // An extension registry must not take the browser down with it.
+    }
+    for (const [id, definition] of Object.entries(PM.TRANSITIONS ?? {}) as Array<[string, any]>) {
+      if (!found.has(id)) found.set(id, { id, ...definition });
+    }
+    return [...found.values()].map((definition) => ({
+      kind: 'transition',
+      id: definition.id,
+      label: definition.label ?? definition.id,
+      group: definition.group ?? 'Transitions'
+    }));
   });
 
-  function addEffect(event: MouseEvent, effect: string, label: string): void {
-    /* Native double-click dispatches click, click, dblclick. Preserve the
-       legacy guard so one gesture still creates only one effect. */
-    if (event.detail > 1) return;
-    clearFeedback();
-    const layer = PM.firstSel();
+  const items = $derived(kind === 'effect' ? effects : transitions);
+  const categories = $derived([...new Set(items.map((item) => item.group))]);
+  const shown = $derived.by(() => {
+    const needle = query.trim().toLowerCase();
+    return items.filter(
+      (item) => !needle || item.label.toLowerCase().includes(needle) || item.id.toLowerCase().includes(needle)
+    );
+  });
+  /* Grouped when browsing; a search is one flat list. */
+  const sections = $derived.by<Array<{ group: string | null; items: Item[] }>>(() => {
+    if (query.trim()) return [{ group: null, items: shown }];
+    return categories
+      .map((group) => ({ group, items: shown.filter((item) => item.group === group) }))
+      .filter((section) => section.items.length);
+  });
+
+  const key = (item: Item): string => `${item.kind}:${item.id}`;
+
+  function apply(event: MouseEvent | KeyboardEvent, item: Item): void {
+    if ('detail' in event && event.detail > 1) return;
+    const layer = PM.firstSel?.();
     if (!layer) {
       status = 'Select a layer first';
-      PM.toast(status);
+      PM.toast?.(status);
       return;
     }
-    try {
-      const result = PM.Edit.apply(
-        { type: 'add_effect', target: layer.id, effect },
-        { label: `Add ${label}`, origin: 'effects-panel' }
-      );
-      if (!result?.ok) throw new Error(result?.message || 'The edit was not applied');
-    } catch (error) {
-      status = `Could not add ${label}: ${error instanceof Error ? error.message : String(error)}`;
-      PM.toast(status);
-      return;
-    }
+    const command =
+      item.kind === 'effect'
+        ? { type: 'add_effect', target: layer.id, effect: item.id }
+        : { type: 'set_transition', layer: layer.id, edge: 'in', transition: { type: item.id } };
+    PM.Edit.apply(command, { label: `Add ${item.label}`, origin: 'fx-browser' });
     PM.Inspector?.refresh?.();
     PM.invalidate();
-    status = `Added ${label}`;
-    addedEffect = effect;
-    PM.toast(`${label} added to ${layer.name || 'selected layer'}`);
-    feedbackTimer = setTimeout(clearFeedback, 2200);
+    status = `Added ${item.label}`;
+  }
+
+  function dragStart(event: DragEvent, item: Item): void {
+    event.dataTransfer?.setData(
+      'application/x-powermove-fx',
+      JSON.stringify({ kind: item.kind, id: item.id, label: item.label })
+    );
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy';
+  }
+
+  function listKey(event: KeyboardEvent): void {
+    const rows = [...(list?.querySelectorAll<HTMLButtonElement>('.fxb-row') ?? [])];
+    const index = rows.indexOf(event.currentTarget as HTMLButtonElement);
+    if (index < 0) return;
+    const map: Record<string, number> = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: rows.length - 1 };
+    const next = map[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    rows[Math.min(rows.length - 1, Math.max(0, next))]?.focus();
   }
 </script>
 
-<div class="simple-panel-list" data-svelte-panel={panelId}>
-  {#each Object.entries(groups) as [group, effects] (group)}
-    <div class="sec simple-panel-section">{group}</div>
-    {#each effects as [effect, definition] (effect)}
-      <button class="lyr simple-effect-row" class:effect-added={addedEffect === effect} type="button" onclick={(event) => addEffect(event, effect, definition.label)}>
-        <span class="nm">{definition.label}</span>
-        {#if addedEffect === effect}
-          <span class="effect-added-feedback" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            <span class="effect-added-label">Added</span>
+<div class="fxb" data-svelte-panel={panelId}>
+  {#if fxBrowser.searchOpen}
+    <div class="fxb-searchrow">
+      <input
+        bind:this={searchEl}
+        class="fxb-search"
+        type="search"
+        placeholder="Search {kind === 'effect' ? 'effects' : 'transitions'}"
+        aria-label="Search {kind === 'effect' ? 'effects' : 'transitions'}"
+        bind:value={fxBrowser.query}
+        onkeydown={(event) => { if (event.key === 'Escape') { fxBrowser.searchOpen = false; fxBrowser.query = ''; } }}
+      />
+    </div>
+  {/if}
+
+  <div class="fxb-list" bind:this={list} role="group" aria-label={kind === 'effect' ? 'Effects' : 'Transitions'}>
+    {#each sections as section (section.group ?? '')}
+      {#if section.group}<div class="sec fxb-sec">{section.group}</div>{/if}
+      {#each section.items as item, index (key(item))}
+        <button
+          type="button"
+          class="fxb-row"
+          draggable="true"
+          tabindex={index === 0 && section === sections[0] ? 0 : -1}
+          data-kind={item.kind}
+          data-id={item.id}
+          title="Click to add to the selected layer · drag onto a layer"
+          onclick={(event) => apply(event, item)}
+          onkeydown={listKey}
+          ondragstart={(event) => dragStart(event, item)}
+        >
+          <span class="fxb-label">{item.label}</span>
+          <span class="fxb-add" aria-hidden="true">
+            <svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></svg>
           </span>
-        {:else}
-          <span class="idx" aria-hidden="true">+</span>
-        {/if}
-      </button>
+        </button>
+      {/each}
+    {:else}
+      <div class="fxb-empty">No {kind === 'effect' ? 'effects' : 'transitions'} match “{query}”</div>
     {/each}
-  {/each}
+  </div>
+
   <span class="panel-sr-only" role="status">{status}</span>
 </div>
-
-<style>
-  .simple-effect-row.effect-added { background: var(--accent-dim); color: var(--tx); }
-  .effect-added-feedback { display: flex; align-items: center; gap: 4px; flex: none; color: var(--accent-tx); font-size: var(--fs-xs); }
-</style>

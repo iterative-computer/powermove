@@ -116,17 +116,24 @@ function decodeArrayBuffer(ctx: any, bytes: any) {
   });
 }
 
-function peakEnvelope(buffer: any, buckets: any = 640) {
-  const length: any = Math.max(1, Math.min(buckets, buffer.length || buckets));
+/* Waveform peaks at a fixed source rate, never a fixed count: a bucket must
+   span a few milliseconds so the envelope keeps its dynamics. Squashing a
+   whole file into a few hundred max-abs buckets flattens every bucket to the
+   file's loudest sample and draws a solid wall. */
+const PEAKS_PER_SECOND: any = 100;
+function peakEnvelope(buffer: any, rate: any = PEAKS_PER_SECOND) {
+  const frames: any = Math.max(1, buffer.length || 1);
+  const duration: any = Math.max(.001, finite(buffer.duration, frames / Math.max(1, finite(buffer.sampleRate, 1))));
+  const length: any = Math.max(1, Math.min(frames, Math.ceil(duration * rate)));
   const peaks: any = new Float32Array(length);
   const channels: any = Math.max(1, buffer.numberOfChannels || 1);
-  const stride: any = Math.max(1, Math.floor((buffer.length || 1) / length));
+  const data: any = [];
+  for (let channel: any = 0; channel < channels; channel++) data.push(buffer.getChannelData(channel));
   for (let bucket: any = 0; bucket < length; bucket++) {
-    const start: any = bucket * stride;
-    const end: any = bucket === length - 1 ? buffer.length : Math.min(buffer.length, start + stride);
+    const start: any = Math.floor(bucket * frames / length);
+    const end: any = bucket === length - 1 ? frames : Math.max(start + 1, Math.floor((bucket + 1) * frames / length));
     let peak: any = 0;
-    for (let channel: any = 0; channel < channels; channel++) {
-      const samples: any = buffer.getChannelData(channel);
+    for (const samples of data) {
       for (let index: any = start; index < end; index++) peak = Math.max(peak, Math.abs(samples[index] || 0));
     }
     peaks[bucket] = peak;
@@ -526,16 +533,24 @@ function drawWaveform(ctx: any, layer: any, options: any = {}) {
   const peaks: any = asset.peaks;
   const duration: any = Math.max(.001, finite(asset.dur));
   const trim: any = Math.max(0, finite(layer.d.trim));
-  const step: any = Math.max(2, finite(options.step, 2.5));
+  const step: any = Math.max(1, finite(options.step, 1));
+  /* anchor 0.5 mirrors around the middle; 1 stands the bars on the floor. */
+  const anchor: any = clamp(finite(options.anchor, .5), 0, 1);
+  const minBar: any = Math.max(0, finite(options.minBar, 1));
   ctx.fillStyle = options.color || 'rgba(255,255,255,.52)';
+  const secondsPerPx: any = Math.max(0, finite(layer.dur)) / Math.max(1, width);
+  const perSecond: any = peaks.length / duration;
   for (let px: any = left; px < right; px += step) {
-    const local: any = (px - x) / Math.max(1, width) * Math.max(0, finite(layer.dur));
-    const sourceTime: any = trim + local;
+    const sourceTime: any = trim + (px - x) * secondsPerPx;
     if (sourceTime >= duration) continue;
-    const sourceRatio: any = clamp(sourceTime / duration, 0, 1);
-    const peak: any = peaks[Math.min(peaks.length - 1, Math.floor(sourceRatio * peaks.length))] || 0;
-    const bar: any = Math.max(1, peak * (height - 4));
-    ctx.fillRect(px, y + (height - bar) / 2, Math.max(1, step - 1), bar);
+    /* One column summarizes every peak under it, so zooming out keeps the
+       envelope's shape instead of sampling a random bucket. */
+    const from: any = Math.min(peaks.length - 1, Math.floor(clamp(sourceTime / duration, 0, 1) * peaks.length));
+    const to: any = Math.min(peaks.length, Math.max(from + 1, Math.floor((sourceTime + step * secondsPerPx) * perSecond)));
+    let peak: any = 0;
+    for (let index: any = from; index < to; index++) peak = Math.max(peak, peaks[index] || 0);
+    const bar: any = Math.max(minBar, peak * height);
+    ctx.fillRect(px, y + (height - bar) * anchor, step, bar);
   }
   return true;
 }

@@ -19,8 +19,14 @@ const V2_TIMELINE_DEFAULTS: any = Object.freeze({
   keyframeSize: 7.5, showLayerNumbers: true, showTypeBadges: true,
   toolbarDensity: 'compact',
 });
-const TIMELINE_DEFAULTS: any = Object.freeze({
+/* Stock chrome before rows grew to 40px; untouched saves still migrate. */
+const V3_TIMELINE_DEFAULTS: any = Object.freeze({
   rowHeight: 32, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
+  keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true,
+  toolbarDensity: 'compact',
+});
+const TIMELINE_DEFAULTS: any = Object.freeze({
+  rowHeight: 40, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
   keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true,
   toolbarDensity: 'compact',
 });
@@ -28,7 +34,7 @@ const TIMELINE_CHROME_SCHEMA: any = 3;
 
 function isLegacyTimelineChrome(value: any) {
   if (!value || typeof value !== 'object') return true;
-  return [LEGACY_TIMELINE_DEFAULTS, V2_TIMELINE_DEFAULTS].some((defaults: any) =>
+  return [LEGACY_TIMELINE_DEFAULTS, V2_TIMELINE_DEFAULTS, V3_TIMELINE_DEFAULTS].some((defaults: any) =>
     Object.entries(defaults).every(([key, expected]: any) => value[key] === undefined || value[key] === expected));
 }
 

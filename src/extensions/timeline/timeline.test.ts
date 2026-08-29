@@ -80,8 +80,8 @@ describe('timeline runtime', () => {
     expect(b.ei).toEqual([1, 1]);
   });
 
-  it('keeps audio strips label-free without hiding other clip labels', () => {
-    expect(shouldDrawClipLabel('audio')).toBe(false);
+  it('labels every clip, audio included', () => {
+    expect(shouldDrawClipLabel('audio')).toBe(true);
     expect(shouldDrawClipLabel('video')).toBe(true);
     expect(shouldDrawClipLabel('image')).toBe(true);
     expect(shouldDrawClipLabel('text')).toBe(true);

@@ -713,6 +713,31 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     const L = PM.GL.pick(x, y, PM.time);
     if (L && L.type === 'text') PM.Inspector?.focusText?.(L);
   }), capture);
+  /* FX browser drops (effects / transitions). Non-fx drags (OS files) are left
+     untouched so the window-level import handler keeps working. */
+  const setDropOver = (on: boolean) => stage.classList.toggle('fx-drop-over', on);
+  listen(stage, 'dragenter', (e: any) => {
+    if (!PM.fxDrop?.hasFxDrag(e.dataTransfer)) return;
+    e.preventDefault(); setDropOver(true);
+  });
+  listen(stage, 'dragover', (e: any) => {
+    if (!PM.fxDrop?.hasFxDrag(e.dataTransfer)) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setDropOver(true);
+  });
+  listen(stage, 'dragleave', (e: any) => {
+    if (e.relatedTarget && stage.contains(e.relatedTarget)) return;
+    setDropOver(false);
+  });
+  listen(stage, 'drop', (e: any) => {
+    const payload = PM.fxDrop?.readFxDrag(e.dataTransfer);
+    setDropOver(false);
+    if (!payload) return;
+    e.preventDefault(); e.stopPropagation();
+    const [x, y] = toComp(e);
+    const hit = PM.GL.pick(x, y, PM.time);
+    const target = hit || PM.firstSel?.();
+    PM.fxDrop.applyFxDrop(payload, target?.id, undefined, PM);
+  });
   return () => {
     for (const [target, type, handler, options] of listeners) target.removeEventListener(type, handler, options);
     if (V._boundStage === stage) V._boundStage = null;
