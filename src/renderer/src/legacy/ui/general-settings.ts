@@ -41,7 +41,7 @@ export function createGeneralSettingsControl(theme: ThemePreference): GeneralSet
   const chatgpt = createChatGPTSettingsControl();
   const accounts = createSettingsSection(
     'Accounts',
-    'Signed in through the official Codex runtime'
+    'Uses the official Codex runtime'
   );
   accounts.body.append(chatgpt.element);
   const privacy = document.createElement('p');
