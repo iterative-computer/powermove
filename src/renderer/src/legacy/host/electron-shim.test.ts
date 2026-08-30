@@ -15,6 +15,7 @@ function decodeBase64(value: string): string {
 
 function loadShim(options: { snapshotError?: Error } = {}) {
   const PM: PMRegistry = {
+    uid: vi.fn((prefix: string) => `${prefix}test`),
     toast: vi.fn(),
     CodexBridge: { progress: vi.fn(), trace: vi.fn(), resolve: vi.fn() },
     AgentArtifacts: { resolve: vi.fn() },
@@ -139,6 +140,35 @@ describe('legacy Electron shim install', () => {
       access: 'project',
       reasoningEffort: 'high',
     });
+  });
+
+  it('uses the connected ChatGPT subscription and Luna for title-only turns', async () => {
+    const { PM, bridge } = loadShim();
+    bridge.codex.run.mockResolvedValue({
+      ok: true, text: '{"title":"Premiere-style timeline"}', access: 'editor'
+    });
+
+    await expect(PM.AgentThreadTitles.generate('Arrange this timeline like Premiere Pro')).resolves.toBe(
+      '{"title":"Premiere-style timeline"}'
+    );
+    expect(bridge.codex.run).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'chatgpt', model: 'gpt-5.6-luna', reasoningEffort: 'low',
+      mode: 'editor', access: 'editor', projectJSON: null, images: [], attachments: [],
+    }));
+    expect(bridge.codex.run.mock.calls[0]?.[0].prompt).toContain('Arrange this timeline like Premiere Pro');
+  });
+
+  it('uses the connected Claude subscription and Haiku for Claude title-only turns', async () => {
+    const { PM, bridge } = loadShim();
+    bridge.codex.run.mockResolvedValue({
+      ok: true, text: '{"title":"Premiere-style timeline"}', access: 'editor'
+    });
+
+    await PM.AgentThreadTitles.generate('Arrange this timeline like Premiere Pro', 'claude');
+    expect(bridge.codex.run).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'claude', model: 'haiku', reasoningEffort: 'low',
+      mode: 'editor', access: 'editor', projectJSON: null,
+    }));
   });
 
   it('preserves exact artifact and window-capture base64 result shapes', async () => {

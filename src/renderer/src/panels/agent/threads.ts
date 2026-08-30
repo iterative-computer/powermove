@@ -24,6 +24,34 @@ export function threadTitle(messages: AgentMessage[]): string {
   return text ? text.slice(0, 64) : 'New thread';
 }
 
+export function normalizeGeneratedThreadTitle(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const title = value
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s#>*`"“”]+|[\s#>*`"“”]+$/g, '')
+    .trim()
+    .slice(0, 64)
+    .trim();
+  return title || null;
+}
+
+const MINUTE = 60_000, HOUR = 60 * MINUTE, DAY = 24 * HOUR, MONTH = 30 * DAY, YEAR = 365 * DAY;
+
+/** Coarse, calm phrasing: the picker wants recency, not a timestamp. */
+export function relativeOpened(updatedAt: number, now = Date.now()): string {
+  const elapsed = now - updatedAt;
+  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return 'Opened earlier';
+  if (elapsed < 2 * MINUTE) return 'Opened just now';
+  if (elapsed < HOUR) return `Opened ${Math.floor(elapsed / MINUTE)} minutes ago`;
+  if (elapsed < DAY) { const hours = Math.floor(elapsed / HOUR); return `Opened ${hours} hour${hours === 1 ? '' : 's'} ago`; }
+  if (elapsed < 2 * DAY) return 'Opened yesterday';
+  if (elapsed < MONTH) return `Opened ${Math.floor(elapsed / DAY)} days ago`;
+  if (elapsed < 2 * MONTH) return 'Opened last month';
+  if (elapsed < YEAR) return `Opened ${Math.floor(elapsed / MONTH)} months ago`;
+  const years = Math.floor(elapsed / YEAR);
+  return `Opened ${years} year${years === 1 ? '' : 's'} ago`;
+}
+
 /** Project-local durable history. Transient plans/checkpoints stay in memory:
  * a saved preview must never be applied against a different document revision. */
 export class AgentThreads {
@@ -64,6 +92,14 @@ export class AgentThreads {
     const thread = newAgentThread(this.uid());
     this.threads.unshift(thread); this.activeId = thread.id;
     return thread;
+  }
+  remove(id: string): boolean {
+    const index = this.threads.findIndex(t => t.id === id);
+    if (index < 0) return false;
+    this.threads.splice(index, 1);
+    if (!this.threads.length) this.threads.push(newAgentThread(this.uid()));
+    if (this.activeId === id) this.activeId = this.threads[Math.min(index, this.threads.length - 1)]!.id;
+    return true;
   }
   select(id: string): boolean {
     if (!this.threads.some(t => t.id === id)) return false;

@@ -50,7 +50,7 @@ describe('legacy workspace library behavior survivors', () => {
     const PM = workspaceModel();
     const compact = PM.WS.normalize(manifest()).chrome;
     expect({ ...compact.timeline }).toEqual({
-      rowHeight: 40,
+      rowHeight: 30,
       gutterWidth: 224,
       rulerHeight: 28,
       clipRadius: 5,
@@ -59,7 +59,7 @@ describe('legacy workspace library behavior survivors', () => {
       showTypeBadges: true,
       toolbarDensity: 'compact',
     });
-    expect(compact.timelineChromeSchema).toBe(3);
+    expect(compact.timelineChromeSchema).toBe(4);
 
     const customized = PM.WS.normalize(manifest({
       chrome: { timeline: { rowHeight: 34, gutterWidth: 240 } },

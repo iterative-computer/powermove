@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentThreads, threadTitle } from './threads';
+import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from './threads';
 
 function setup() {
   const saved = new Map<string, unknown>(); let id = 0;
@@ -56,5 +56,11 @@ describe('agent thread archive', () => {
     expect(threadTitle([{ role:'assistant',text:'No' },{role:'user',text:' Make\n  this move '}])).toBe('Make this move');
     expect(threadTitle([])).toBe('New thread');
     expect(threadTitle([{role:'user',text:'a'.repeat(100)}])).toHaveLength(64);
+  });
+  it('normalizes generated titles and rejects empty or non-text output', () => {
+    expect(normalizeGeneratedThreadTitle('  **Premiere-style\nTimeline Setup**  ')).toBe('Premiere-style Timeline Setup');
+    expect(normalizeGeneratedThreadTitle('a'.repeat(100))).toHaveLength(64);
+    expect(normalizeGeneratedThreadTitle('   ')).toBeNull();
+    expect(normalizeGeneratedThreadTitle({ title: 'No' })).toBeNull();
   });
 });

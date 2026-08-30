@@ -96,6 +96,17 @@ export default function activate(api: PowermoveAPI): void {
     id: 'timeline',
     icon: 'timeline',
     ...timelinePanelOptions,
+    library: {
+      ...timelinePanelOptions.library,
+      render({ clone, width, height }) {
+        const canvas = clone.querySelector<HTMLCanvasElement>('[data-library-source-id="tl-canvas"]');
+        if (!canvas) return;
+        const preview = timeline.renderPreview(canvas, canvas.clientWidth || width, canvas.clientHeight || height);
+        const head = clone.querySelector<HTMLElement>('[data-library-source-id="tl-head"]');
+        head?.style.setProperty('--tl-gutter', `${Math.round(preview.gutter)}px`);
+        head?.style.setProperty('--tl-ruler', `${Math.round(preview.ruler)}px`);
+      }
+    },
     build(body) {
       /* Kernel extension reloads rebuild the body in place. Keep the live move
          handle and its layout-owned listeners instead of deleting it with the

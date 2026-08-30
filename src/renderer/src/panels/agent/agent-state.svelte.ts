@@ -34,7 +34,7 @@ export type TraceStep =
 
 export interface AgentSnapshot {
   threadId?: string;
-  threads?: Array<{ id: string; title: string }>;
+  threads?: Array<{ id: string; title: string; updatedAt?: number }>;
   threadSwitchBlocked?: boolean;
   threadSaveError?: boolean;
   legacyPhase: string;

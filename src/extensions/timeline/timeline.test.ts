@@ -81,8 +81,8 @@ describe('timeline runtime', () => {
     expect(b.ei).toEqual([1, 1]);
   });
 
-  it('labels every clip, audio included', () => {
-    expect(shouldDrawClipLabel('audio')).toBe(true);
+  it('labels every clip except audio, which shows its waveform alone', () => {
+    expect(shouldDrawClipLabel('audio')).toBe(false);
     expect(shouldDrawClipLabel('video')).toBe(true);
     expect(shouldDrawClipLabel('image')).toBe(true);
     expect(shouldDrawClipLabel('text')).toBe(true);

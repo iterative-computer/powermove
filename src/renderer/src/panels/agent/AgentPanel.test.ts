@@ -218,24 +218,39 @@ describe('AgentPanel', () => {
     }));
 
     await vi.waitFor(() => expect(target.querySelector('.agent-connect-gate')).toBeTruthy());
-    const picker = target.querySelector<HTMLSelectElement>('[aria-label="Switch thread"]');
+    const picker = target.querySelector<HTMLButtonElement>('[aria-label="Switch thread"]');
     expect(picker).toBeTruthy();
-    expect(picker?.value).toBe('saved-thread');
     expect(picker?.textContent).toContain('Saved conversation');
   });
 
   it('offers accessible new-thread and switching controls and disables them during a run', () => {
-    PM.AgentUI.newThread = vi.fn(); PM.AgentUI.switchThread = vi.fn();
-    const threads = [{ id: 'first', title: 'Animate the title' }, { id: 'second', title: 'New thread' }];
+    PM.AgentUI.newThread = vi.fn(); PM.AgentUI.switchThread = vi.fn(); PM.AgentUI.deleteThread = vi.fn();
+    const now = Date.now();
+    const threads = [
+      { id: 'first', title: 'Animate the title', updatedAt: now },
+      { id: 'second', title: 'New thread', updatedAt: now - 5 * 24 * 3600_000 }
+    ];
     renderPanel(snapshot({ threadId: 'first', threads }));
     const threadBar = target.querySelector<HTMLElement>('[role="group"][aria-label="Agent threads"]')!;
-    const picker = target.querySelector<HTMLSelectElement>('[aria-label="Switch thread"]')!;
+    const picker = target.querySelector<HTMLButtonElement>('[aria-label="Switch thread"]')!;
     const newThread = target.querySelector<HTMLButtonElement>('[aria-label="New thread"]')!;
     expect(threadBar).toBeTruthy();
     expect(threadBar.contains(picker)).toBe(true);
     expect(threadBar.contains(newThread)).toBe(true);
-    expect(picker.value).toBe('first');
-    picker.value = 'second'; picker.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(picker.textContent).toContain('Animate the title');
+
+    flushSync(() => picker.click());
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('.thread-row'));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.getAttribute('aria-selected')).toBe('true');
+    expect(rows[0]!.textContent).toContain('Current');
+    expect(rows[1]!.textContent).toContain('Opened 5 days ago');
+
+    flushSync(() => rows[0]!.querySelector<HTMLButtonElement>('[aria-label="Delete thread: Animate the title"]')!.click());
+    expect(PM.AgentUI.deleteThread).toHaveBeenCalledWith('first');
+    expect(PM.AgentUI.switchThread).not.toHaveBeenCalled();
+
+    flushSync(() => rows[1]!.click());
     expect(PM.AgentUI.switchThread).toHaveBeenCalledWith('second');
     newThread.click();
     expect(PM.AgentUI.newThread).toHaveBeenCalledOnce();
@@ -243,6 +258,21 @@ describe('AgentPanel', () => {
     expect(picker.disabled).toBe(true);
     expect(newThread.disabled).toBe(true);
     expect(picker.title).toContain('Finish or stop');
+  });
+
+  it('filters threads by the picker search field', () => {
+    PM.AgentUI.switchThread = vi.fn();
+    const threads = [{ id: 'first', title: 'Animate the title' }, { id: 'second', title: 'Colour grade' }];
+    renderPanel(snapshot({ threadId: 'first', threads }));
+    flushSync(() => target.querySelector<HTMLButtonElement>('[aria-label="Switch thread"]')!.click());
+    const search = document.querySelector<HTMLInputElement>('[aria-label="Search threads"]')!;
+    search.value = 'grade';
+    flushSync(() => search.dispatchEvent(new Event('input', { bubbles: true })));
+    const rows = Array.from(document.querySelectorAll<HTMLElement>('.thread-row'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain('Colour grade');
+    flushSync(() => rows[0]!.click());
+    expect(PM.AgentUI.switchThread).toHaveBeenCalledWith('second');
   });
   it('renders idle, prompt, running, preview, and result blocks from state setters', () => {
     renderPanel();

@@ -152,6 +152,48 @@
     });
   }
 
+  function regexEscape(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /* A clone cannot keep the live panel's IDs: duplicate IDs make app-level
+     queries ambiguous. But removing them breaks panels such as Timeline whose
+     own stylesheet deliberately targets #tl-head, #tl-canvas-wrap, and
+     #tl-canvas. Give every cloned ID a preview-only name and rewrite the
+     clone's embedded styles and ID references to match. */
+  function isolateCloneIds(clone: HTMLElement, panelId: string): void {
+    const withIds = [clone, ...clone.querySelectorAll<HTMLElement>('[id]')].filter((element) => element.id);
+    const replacements = new Map<string, string>();
+    withIds.forEach((element, index) => {
+      const sourceId = element.id;
+      const isolatedId = `library-preview-${panelId.replace(/[^a-zA-Z0-9_-]/g, '-')}-${index}`;
+      replacements.set(sourceId, isolatedId);
+      element.dataset.librarySourceId = sourceId;
+      element.id = isolatedId;
+    });
+
+    for (const style of clone.querySelectorAll('style')) {
+      let css = style.textContent || '';
+      for (const [sourceId, isolatedId] of replacements) {
+        css = css.replace(new RegExp(`#${regexEscape(sourceId)}(?![a-zA-Z0-9_-])`, 'g'), `#${isolatedId}`);
+      }
+      style.textContent = css;
+    }
+
+    const referenceAttributes = ['for', 'aria-activedescendant', 'aria-controls', 'aria-describedby', 'aria-labelledby'];
+    for (const element of [clone, ...clone.querySelectorAll<HTMLElement>('*')]) {
+      for (const attribute of referenceAttributes) {
+        const value = element.getAttribute(attribute);
+        if (!value) continue;
+        element.setAttribute(attribute, value.split(/\s+/).map((id) => replacements.get(id) || id).join(' '));
+      }
+      const href = element.getAttribute('href');
+      if (href?.startsWith('#') && replacements.has(href.slice(1))) {
+        element.setAttribute('href', `#${replacements.get(href.slice(1))}`);
+      }
+    }
+  }
+
   /* On the way back the card cannot simply be flipped: at stage size it is
      clipped by its own tile and by the scrolling grid. So a copy of the card
      flies over the whole screen instead, and the card itself stays hidden
@@ -274,11 +316,10 @@
       node.style.aspectRatio = `${sourceWidth} / ${sourceHeight}`;
       const clone = element.cloneNode(true) as HTMLElement;
       clone.classList.add('library-clone');
-      clone.removeAttribute('id');
+      isolateCloneIds(clone, id);
       clone.style.width = `${sourceWidth}px`;
       clone.style.height = `${sourceHeight}px`;
       clone.style.flex = 'none';
-      for (const inner of clone.querySelectorAll('[id]')) inner.removeAttribute('id');
       copyLiveState(element, clone);
       frame = document.createElement('div');
       frame.className = 'library-live-frame';
@@ -288,6 +329,10 @@
       node.appendChild(frame);
       node.classList.add('has-preview');
       fit();
+      const library = PM.PANELS?.[id]?.library;
+      if (library && typeof library.render === 'function') {
+        library.render({ source: element, clone, width: sourceWidth, height: sourceHeight });
+      }
     }
     render(params.id);
     return {

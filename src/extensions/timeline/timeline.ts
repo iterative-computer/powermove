@@ -129,9 +129,9 @@ export const timelinePanelOptions = {
   library: { width: 800, height: 440 },
 } as const;
 
-/** Every clip carries its name, audio included: the waveform sits under it. */
-export function shouldDrawClipLabel(_layerType: unknown): boolean {
-return true;
+/** Audio clips are read by their waveform; a name label only crowds it. */
+export function shouldDrawClipLabel(layerType: unknown): boolean {
+return layerType !== 'audio';
 }
 
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
@@ -390,7 +390,7 @@ function buildHead(head: any) {
 function refreshTimelineManifest() {
   const raw = PM.WS?.current?.chrome?.timeline || {};
   const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
-    rowHeight: 40, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
+    rowHeight: 30, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
     keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
   };
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
@@ -509,27 +509,39 @@ refreshInk();
 function draw() {
   try { drawInner(); } catch (e: any) { console.error('[timeline draw]', e, e.stack); }
 }
-function drawInner() {
-  refreshTimelineManifest();
+type TimelinePreviewTarget = { canvas: HTMLCanvasElement; width: number; height: number };
+
+function drawInner(preview?: TimelinePreviewTarget) {
+  if (!preview) refreshTimelineManifest();
   /* Re-resolve the live canvas every frame: workspace rebuilds can replace the
      panel element, and drawing into a detached canvas is the root cause of
      gutter/clip misalignment after layout changes. */
-  const liveCv = PM.$('#tl-canvas');
-  if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d'); }
-  const c = T.ctx; if (!c) return;
-  /* Unconditional size sync: measure the wrap every draw so the bitmap always
-     matches the laid-out size, regardless of missed observer/RAF frames. */
-  const host = T.cv && T.cv.parentElement;
-  if (host) {
-    const r = host.getBoundingClientRect();
-    if (r.width >= 8 && r.height >= 8) {
-      const bw = Math.max(2, Math.round(r.width * T.dpr));
-      const bh = Math.max(2, Math.round(r.height * T.dpr));
-      if (T.cv.width !== bw || T.cv.height !== bh || T.w !== r.width || T.hgt !== r.height) {
-        T.w = r.width; T.hgt = r.height; T.cv.width = bw; T.cv.height = bh;
+  if (preview) {
+    T.cv = preview.canvas;
+    T.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    T.w = preview.width;
+    T.hgt = preview.height;
+    T.cv.width = Math.max(2, Math.round(preview.width * T.dpr));
+    T.cv.height = Math.max(2, Math.round(preview.height * T.dpr));
+    T.ctx = T.cv.getContext('2d');
+  } else {
+    const liveCv = PM.$('#tl-canvas');
+    if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d'); }
+    /* Unconditional size sync: measure the wrap every draw so the bitmap always
+       matches the laid-out size, regardless of missed observer/RAF frames. */
+    const host = T.cv && T.cv.parentElement;
+    if (host) {
+      const r = host.getBoundingClientRect();
+      if (r.width >= 8 && r.height >= 8) {
+        const bw = Math.max(2, Math.round(r.width * T.dpr));
+        const bh = Math.max(2, Math.round(r.height * T.dpr));
+        if (T.cv.width !== bw || T.cv.height !== bh || T.w !== r.width || T.hgt !== r.height) {
+          T.w = r.width; T.hgt = r.height; T.cv.width = bw; T.cv.height = bh;
+        }
       }
     }
   }
+  const c = T.ctx; if (!c) return null;
   if (!theme) refreshTheme();
   const p = PM.proj;
   const W = T.w, H = T.hgt;
@@ -543,7 +555,11 @@ function drawInner() {
     .map((row: any) => Math.ceil(c.measureText(row.label).width)));
   T.propertyValueX = 100 + labelWidth + 12;
   T.gut = Math.max(T.gut, T.propertyValueX + 90);
-  syncHeadGeometry();
+  if (preview) {
+    T.scrollT = 0;
+    T.scrollY = 0;
+    T.pps = Math.max(.01, (W - T.gut - 16) / Math.max(.5, Number(PM.proj.dur) || .5));
+  } else syncHeadGeometry();
 
   const maxScroll = Math.max(0, T.rows.length * T.row - (H - T.ruler));
   T.scrollY = clamp(T.scrollY, 0, maxScroll);
@@ -575,7 +591,42 @@ function drawInner() {
     c.fillRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0);
     c.strokeRect(m.x0 + .5, m.y0 + .5, m.x1 - m.x0 - 1, m.y1 - m.y0 - 1); c.restore();
   }
+  if (preview) {
+    preview.canvas.dataset.timelinePreviewMode = 'full-duration';
+    preview.canvas.dataset.timelinePreviewStart = '0';
+    preview.canvas.dataset.timelinePreviewEnd = String(PM.proj.dur);
+    preview.canvas.dataset.timelinePreviewRight = String(T.gut + Math.max(0, Number(PM.proj.dur) || 0) * T.pps);
+    return { gutter: T.gut, ruler: T.ruler, pps: T.pps };
+  }
+  return null;
 }
+
+T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => {
+  const saved = {
+    cv: T.cv, ctx: T.ctx, w: T.w, hgt: T.hgt, dpr: T.dpr,
+    gut: T.gut, row: T.row, ruler: T.ruler, pps: T.pps,
+    scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph,
+    style: T.style, rows: T.rows, propertyValueX: T.propertyValueX,
+    hover: T.hover, marquee: T.marquee, dropRow: T.dropRow, drop: T.drop,
+  };
+  try {
+    T.gut = 224;
+    T.row = 30;
+    T.ruler = 28;
+    T.graph = false;
+    T.hover = null;
+    T.marquee = null;
+    T.dropRow = null;
+    T.drop = null;
+    T.style = {
+      clipRadius: 5, keyframeSize: 8, showLayerNumbers: true,
+      showTypeBadges: true, toolbarDensity: 'compact'
+    };
+    return drawInner({ canvas, width, height }) || { gutter: T.gut, ruler: T.ruler, pps: T.pps };
+  } finally {
+    Object.assign(T, saved);
+  }
+};
 
 /* Thin scrollbar on the right edge of the track area when rows overflow. */
 function drawScrollThumb(c: any, W: any, H: any, maxScroll: any) {
@@ -778,13 +829,9 @@ const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', null: 'N',
 function drawAudioClipWaveform(c: any, L: any, { x, y, width, height, color }: any) {
   const clipLeft = Math.max(x, T.gut);
   c.save();
-  /* Waveform in the clip's bright tint. Compact rows get a quieter wave so
-     the label stays legible over it. */
-  /* Bars stand on the clip floor. Tall rows keep the label band clear above
-     them; compact rows let the label ride over a quieter wave. */
-  const tall = height > 44;
-  const top = tall ? 20 : 2;
-  if (!tall) c.globalAlpha *= .6;
+  /* Waveform in the clip's bright tint. With no name label to stay clear of,
+     the bars stand on the clip floor and use the full body height. */
+  const top = 2;
   if (PM.Audio && typeof PM.Audio.drawWaveform === 'function') {
     try {
       PM.Audio.drawWaveform(c, L, {

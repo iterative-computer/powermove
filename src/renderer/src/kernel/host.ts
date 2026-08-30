@@ -147,6 +147,13 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
         const header = def.header;
         guarded.header = guard((el: HTMLElement, inst: Record<string, unknown>) => header(el, inst), `panel ${def.id} header`, undefined);
       }
+      if (def.library && typeof def.library.render === 'function') {
+        const render = def.library.render;
+        guarded.library = {
+          ...def.library,
+          render: guard((context) => render(context), `panel ${def.id} library preview`, undefined)
+        };
+      }
       /* A component panel still has to satisfy the host's imperative `build`
          contract (legacy layout calls `def.build(body, inst)`), so mount it
          through the shared Svelte runtime here. One live instance per panel id:

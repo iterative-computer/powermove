@@ -27,6 +27,15 @@ export interface PanelProps {
   api?: PowermoveAPI;
 }
 
+export interface PanelLibraryPreviewContext {
+  /** Mounted live panel used only as the source of current project content. */
+  source: HTMLElement;
+  /** Isolated clone laid out at the definition-owned Library size. */
+  clone: HTMLElement;
+  width: number;
+  height: number;
+}
+
 export interface PanelDefinition {
   id: string;
   title: string;
@@ -47,7 +56,12 @@ export interface PanelDefinition {
   /** Choose a meaningful, distinct icon from the kernel icon set for every new panel. */
   icon?: string;
   /** Library presentation is definition-owned, never inferred from the active workspace layout. */
-  library?: false | { width: number; height: number };
+  library?: false | {
+    width: number;
+    height: number;
+    /** Re-render stateful surfaces (for example canvas/WebGL) at the canonical size. */
+    render?: (context: PanelLibraryPreviewContext) => void;
+  };
 }
 
 export interface PanelsAPI {

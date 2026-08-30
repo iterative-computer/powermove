@@ -123,6 +123,37 @@ export function install(PM: PMRegistry): void {
 
   const noOp = { postMessage() {} };
 
+  const titleSchema = {
+    type: 'object', additionalProperties: false, required: ['title'],
+    properties: { title: { type: 'string', minLength: 1, maxLength: 64 } },
+  };
+  PM.AgentThreadTitles = {
+    async generate(firstRequest: any, provider: any = 'chatgpt') {
+      if (window.navigator?.webdriver) throw new Error('Automated sessions do not spend connected subscription usage.');
+      const request = String(firstRequest || '').replace(/\s+/g, ' ').trim().slice(0, 4_000);
+      if (!request) throw new Error('A first request is required to name the thread.');
+      const selectedProvider = provider === 'claude' ? 'claude' : 'chatgpt';
+      const result = await bridge.codex.run({
+        id: PM.uid('thread-title-'),
+        provider: selectedProvider,
+        mode: 'editor',
+        prompt: `Name a conversation from its first user request. Return a specific, natural title of 3 to 7 words. Do not add quotation marks or commentary.\n\nFIRST REQUEST\n${request}`,
+        schema: titleSchema,
+        images: [],
+        model: selectedProvider === 'claude' ? 'haiku' : 'gpt-5.6-luna',
+        reasoningEffort: 'low',
+        access: 'editor',
+        projectId: 'thread-title',
+        projectName: 'Powermove',
+        projectJSON: null,
+        attachments: [],
+        consentToken: null,
+      });
+      if (!result.ok) throw new Error(result.error || `${selectedProvider === 'claude' ? 'Claude' : 'ChatGPT'} could not name the thread.`);
+      return result.text;
+    },
+  };
+
   (window as any).webkit = {
     messageHandlers: {
       saveFile: {

@@ -439,6 +439,33 @@ it('keeps thread history, drafts and Codex sessions separate; ignores late stopp
   jobs[2].resolve(emptyAgentResult);
 });
 
+it('replaces the temporary first-request label with a generated thread title', async () => {
+  const { PM } = placementHarness();
+  let finishTitle;
+  PM.AgentThreadTitles = {
+    generate: vi.fn(() => new Promise(resolve => { finishTitle = resolve; })),
+  };
+  const request = 'Arrange this timeline to be closer to Premiere Pro while keeping the controls compact';
+
+  PM.AgentUI.submit(request);
+  await vi.waitFor(() => assert.equal(PM.AgentThreadTitles.generate.mock.calls.length, 1));
+  assert.equal(PM.AgentUI.state.threads[0].title, request.slice(0, 64));
+  finishTitle(JSON.stringify({ title: 'Premiere-style timeline layout' }));
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.threads[0].title, 'Premiere-style timeline layout'));
+  assert.equal(PM.AgentThreadTitles.generate.mock.calls[0][0], request);
+  assert.equal(PM.AgentThreadTitles.generate.mock.calls[0][1], 'chatgpt');
+});
+
+it('uses Claude to title the first request when Claude is the selected provider', async () => {
+  const { PM } = placementHarness();
+  PM.AgentThreadTitles = { generate: vi.fn(async () => JSON.stringify({ title: 'Claude timeline layout' })) };
+  PM.AgentUI.setProvider('claude');
+
+  PM.AgentUI.submit('Arrange this timeline like Premiere Pro');
+  await vi.waitFor(() => assert.equal(PM.AgentThreadTitles.generate.mock.calls.length, 1));
+  assert.equal(PM.AgentThreadTitles.generate.mock.calls[0][1], 'claude');
+});
+
 it('binds the first typed draft to the boot project before it can target an older thread', () => {
   const { PM } = spatialHarness();
   PM.store.set('agentThreads.project-1', {
@@ -456,7 +483,9 @@ it('binds the first typed draft to the boot project before it can target an olde
   PM.AgentUI.setDraft('A genuinely new request');
 
   assert.equal(PM.AgentUI.state.threadId, 'existing-thread');
-  assert.deepEqual(PM.AgentUI.state.threads, [{ id: 'existing-thread', title: 'Earlier request' }]);
+  assert.deepEqual(PM.AgentUI.state.threads, [{
+    id: 'existing-thread', title: 'Existing conversation', updatedAt: PM.AgentUI.state.threads[0].updatedAt,
+  }]);
   assert.equal(PM.AgentUI.state.composerDraft, 'A genuinely new request');
   assert.ok(PM.AgentUI.state.conversation.some(message => message.text === 'Earlier request'));
 });

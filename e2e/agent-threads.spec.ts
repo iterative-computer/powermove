@@ -3,19 +3,25 @@ import { test, expect } from './helpers/app';
 test('hidden renderer switches threads, keeps drafts, and restores history after relaunch', async ({ session }) => {
   const page = session.page;
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
-  const picker = page.getByRole('combobox', { name: 'Switch thread', exact: true });
+  const picker = page.getByRole('button', { name: 'Switch thread', exact: true });
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+  const activeThread = () => page.evaluate(() => (window as any).PM.AgentUI.state.threadId as string);
+  const pick = async (id: string) => {
+    await picker.click();
+    await page.locator(`.thread-row`).nth(await page.evaluate((threadId) => (window as any).PM.AgentUI.state.threads
+      .findIndex((thread: any) => thread.id === threadId), id)).click();
+  };
   await expect(picker).toBeVisible();
-  const first = await picker.inputValue();
+  const first = await activeThread();
   await composer.fill('First thread draft');
   await page.getByRole('button', { name: 'New thread', exact: true }).click();
-  const second = await picker.inputValue();
+  const second = await activeThread();
   expect(second).not.toBe(first);
   await expect(composer).toHaveValue('');
   await composer.fill('Second thread draft');
-  await picker.selectOption(first);
+  await pick(first);
   await expect(composer).toHaveValue('First thread draft');
-  await picker.selectOption(second);
+  await pick(second);
   await expect(composer).toHaveValue('Second thread draft');
   await expect.poll(() => page.evaluate(() => {
     const PM = (window as any).PM;
@@ -28,7 +34,8 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
   })).toEqual({ activeId: second, threadIds: [second, first] });
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveValue('Second thread draft');
-  await session.page.getByRole('combobox', { name: 'Switch thread', exact: true }).selectOption(first);
+  await session.page.getByRole('button', { name: 'Switch thread', exact: true }).click();
+  await session.page.locator('.thread-row').last().click();
   await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveValue('First thread draft');
 });
 
@@ -51,16 +58,17 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
     const PM = (window as any).PM;
     PM.SpatialAssistant.open();
     PM.AgentHarness.observe = async () => ({state:{},times:[],images:[]});
+    PM.AgentThreadTitles.generate = async () => JSON.stringify({title:'First conversation request'});
     PM.CodexBridge.request = async () => ({text:JSON.stringify({summary:'A saved test reply',commands:[],artifacts:[],externalActions:[],notes:[]})});
   });
   await page.getByRole('textbox', {name:'Message Powermove agent',exact:true}).fill('First conversation request');
   await page.getByRole('button', {name:'Send message',exact:true}).click();
   await expect(page.getByRole('log')).toContainText('A saved test reply');
-  const first = await page.getByRole('combobox', {name:'Switch thread',exact:true}).inputValue();
-  await expect(page.getByRole('combobox', {name:'Switch thread',exact:true})).toContainText('First conversation request');
+  await expect(page.getByRole('button', {name:'Switch thread',exact:true})).toContainText('First conversation request');
   await page.getByRole('button', {name:'New thread',exact:true}).click();
   await expect(page.getByRole('log')).not.toContainText('First conversation request');
-  await page.getByRole('combobox', {name:'Switch thread',exact:true}).selectOption(first);
+  await page.getByRole('button', {name:'Switch thread',exact:true}).click();
+  await page.getByRole('option', {name:'First conversation request'}).click();
   await expect(page.getByRole('log')).toContainText('A saved test reply');
   // Deliberately close immediately after typing: the native quit barrier must
   // flush the draft before its debounce timer fires.

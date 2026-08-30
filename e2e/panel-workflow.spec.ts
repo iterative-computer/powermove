@@ -16,13 +16,36 @@ test('library shows a panel grid, adds panels to the workspace, and edits panels
     timeline.style.setProperty('width', '137px', 'important');
     timeline.style.setProperty('height', '691px', 'important');
     const rect = timeline.getBoundingClientRect();
-    return { previous, width: rect.width, height: rect.height };
+    return {
+      previous,
+      width: rect.width,
+      height: rect.height,
+      runtime: {
+        pps: (window as any).PM.TL.pps,
+        scrollT: (window as any).PM.TL.scrollT,
+        scrollY: (window as any).PM.TL.scrollY
+      }
+    };
   });
   expect(timelineStyle.width).toBeLessThan(200);
   expect(timelineStyle.height).toBeGreaterThan(600);
   await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
   const library = page.getByRole('dialog', { name: 'Panel library', exact: true });
   await expect(library).toBeVisible();
+  const toolbarGeometry = await library.evaluate((screen) => {
+    const tabs = screen.querySelector<HTMLElement>('.library-top .segmented')!.getBoundingClientRect();
+    const actions = screen.querySelector<HTMLElement>('.library-top-action')!.getBoundingClientRect();
+    const actionButton = screen.querySelector<HTMLElement>('.library-top-action .btn')!.getBoundingClientRect();
+    const bounds = screen.getBoundingClientRect();
+    return {
+      left: tabs.left - bounds.left,
+      right: bounds.right - actions.right,
+      tabsHeight: tabs.height,
+      buttonHeight: actionButton.height
+    };
+  });
+  expect(Math.abs(toolbarGeometry.left - toolbarGeometry.right)).toBeLessThan(1);
+  expect(Math.abs(toolbarGeometry.tabsHeight - toolbarGeometry.buttonHeight)).toBeLessThan(1);
   const icons = await library.locator('.library-card .library-thumb-icon svg').evaluateAll(nodes => nodes.map(node => (node as SVGElement).dataset.icon));
   expect(new Set(icons).size).toBe(icons.length);
   expect(icons).not.toContain('missing');
@@ -58,6 +81,45 @@ test('library shows a panel grid, adds panels to the workspace, and edits panels
   const timelinePreview = library.locator('[data-panel-id="timeline"] .library-live-frame');
   await expect(timelinePreview).toHaveCSS('width', '800px');
   await expect(timelinePreview).toHaveCSS('height', '440px');
+  const timelineFit = await library.locator('[data-panel-id="timeline"] .library-clone').evaluate((clone) => {
+    const canvas = clone.querySelector<HTMLElement>('[data-library-source-id="tl-canvas"]');
+    const wrap = clone.querySelector<HTMLElement>('[data-library-source-id="tl-canvas-wrap"]');
+    if (!canvas || !wrap) return null;
+    const canvasRect = canvas.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    return {
+      position: getComputedStyle(canvas).position,
+      bitmapWidth: canvas.width / window.devicePixelRatio,
+      bitmapHeight: canvas.height / window.devicePixelRatio,
+      cssWidth: canvas.clientWidth,
+      cssHeight: canvas.clientHeight,
+      previewMode: canvas.dataset.timelinePreviewMode,
+      previewStart: Number(canvas.dataset.timelinePreviewStart),
+      previewEnd: Number(canvas.dataset.timelinePreviewEnd),
+      previewRight: Number(canvas.dataset.timelinePreviewRight),
+      inset: Math.max(
+        Math.abs(canvasRect.left - wrapRect.left),
+        Math.abs(canvasRect.top - wrapRect.top),
+        Math.abs(canvasRect.right - wrapRect.right),
+        Math.abs(canvasRect.bottom - wrapRect.bottom)
+      )
+    };
+  });
+  expect(timelineFit).not.toBeNull();
+  expect(timelineFit?.position).toBe('absolute');
+  expect(timelineFit?.bitmapWidth).toBeCloseTo(timelineFit?.cssWidth ?? 0, 0);
+  expect(timelineFit?.bitmapHeight).toBeCloseTo(timelineFit?.cssHeight ?? 0, 0);
+  expect(timelineFit?.previewMode).toBe('full-duration');
+  expect(timelineFit?.previewStart).toBe(0);
+  expect(timelineFit?.previewEnd).toBe(await page.evaluate(() => (window as any).PM.proj.dur));
+  expect(timelineFit?.previewRight).toBeLessThanOrEqual(timelineFit?.cssWidth ?? 0);
+  expect((timelineFit?.cssWidth ?? 0) - (timelineFit?.previewRight ?? 0)).toBeLessThanOrEqual(17);
+  expect(timelineFit?.inset).toBeLessThan(1);
+  expect(await page.evaluate(() => ({
+    pps: (window as any).PM.TL.pps,
+    scrollT: (window as any).PM.TL.scrollT,
+    scrollY: (window as any).PM.TL.scrollY
+  }))).toEqual(timelineStyle.runtime);
   await page.evaluate((previous) => {
     const timeline = document.getElementById('panel-timeline')!;
     if (previous === null) timeline.removeAttribute('style');

@@ -9,7 +9,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
 import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
-import { AgentThreads, threadTitle } from '../../panels/agent/threads';
+import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../panels/agent/threads';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 import RippleCanvas from './RippleCanvas.svelte';
 
@@ -198,13 +198,37 @@ let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let changingThreadProject = false;
 let lastThreadWrite = '';
 const threadResults = new Map<string, any>();
+const pendingThreadTitles = new Set<string>();
 
 function captureThread() {
   const thread = threads.active;
+  // Only real activity moves the clock: snapshots run on every token.
+  const touched = thread.conversation.length !== S.conversation.length || thread.composerDraft !== S.composerDraft;
+  const title = thread.title === 'New thread' ? threadTitle(S.conversation) : thread.title;
   Object.assign(thread, {
     conversation: S.conversation, composerDraft: S.composerDraft,
-    attachments: S.attachments, scope: S.scope, title: threadTitle(S.conversation),
+    attachments: S.attachments, scope: S.scope, title,
   });
+  if (touched) thread.updatedAt = Date.now();
+}
+
+function generateThreadTitle(projectId: string, threadId: string, firstRequest: string, provider: string) {
+  if (!PM.AgentThreadTitles?.generate || pendingThreadTitles.has(threadId)) return;
+  pendingThreadTitles.add(threadId);
+  void PM.AgentThreadTitles.generate(firstRequest, provider).then((raw: any) => {
+    if (threads.projectId !== projectId) return;
+    let decoded: any;
+    try { decoded = JSON.parse(String(raw || '')); } catch { return; }
+    const title = normalizeGeneratedThreadTitle(decoded?.title);
+    const thread = threads.threads.find(item => item.id === threadId);
+    if (!title || !thread || thread.conversation.find(message => message.role === 'user')?.text !== firstRequest) return;
+    thread.title = title;
+    thread.updatedAt = Date.now();
+    persistThreads();
+    PM.AgentUI?.update({ flush: true });
+  }).catch(() => {
+    // Keep the first-request fallback when offline or signed out.
+  }).finally(() => pendingThreadTitles.delete(threadId));
 }
 
 function persistThreads() {
@@ -243,6 +267,25 @@ function ensureThreadProject(): boolean {
   restoreThread();
   changingThreadProject = false;
   return true;
+}
+
+function deleteThread(id: string) {
+  ensureThreadProject();
+  if (S.activeRequest || S.phase === 'working' || S.phase === 'applying') {
+    PM.toast?.('Finish or stop the current run before deleting threads.'); return;
+  }
+  if (!threads.threads.some(t => t.id === id)) return;
+  persistThreads();
+  threadResults.delete(`${threads.projectId}/${id}`);
+  const wasActive = id === threads.activeId;
+  if (!threads.remove(id)) return;
+  if (wasActive) {
+    if (S.active) dismissOverlay(true);
+    ++S.requestToken;
+    restoreThread();
+  }
+  persistThreads();
+  PM.AgentUI?.update({ flush: true });
 }
 
 function switchThread(id?: string) {
@@ -298,7 +341,7 @@ function agentUISnapshot(): AgentSnapshot {
   S.attachmentUI?.refresh();
   const snapshot: AgentSnapshot = {
     threadId: threads.activeId,
-    threads: threads.threads.map(({ id, title }) => ({ id, title })),
+    threads: threads.threads.map(({ id, title, updatedAt }) => ({ id, title, updatedAt })),
     threadSwitchBlocked: !!S.activeRequest || S.phase === 'working' || S.phase === 'applying',
     threadSaveError,
     legacyPhase: S.phase,
@@ -335,6 +378,7 @@ registerAgentPanel(PM, {
   flushThreads: persistThreads,
   newThread: () => switchThread(),
   switchThread,
+  deleteThread,
   snapshot: agentUISnapshot,
   submit: (value: string) => { void sendRequest({ value }); },
   stop: stopActiveRequest,
@@ -1363,6 +1407,7 @@ async function sendRequest(input: any) {
   S.uiPlacement = null;
   S.requestAttachments = S.attachments.splice(0);
   S.composerDraft = '';
+  const firstUserRequest = !S.conversation.some((message: any) => message.role === 'user');
   S.conversation.push({
     role: 'user', text: typedRequest || `Attached ${S.requestAttachments.length} file${S.requestAttachments.length === 1 ? '' : 's'}`,
     focusLabels: focus.panels.map(panel => panel.title),
@@ -1370,6 +1415,9 @@ async function sendRequest(input: any) {
   });
   threads.active.updatedAt = Date.now();
   persistThreads();
+  if (firstUserRequest && typedRequest) {
+    generateThreadTitle(threads.projectId, threadIdAtStart, typedRequest, S.provider);
+  }
   const accessAtStart: any = S.accessMode;
   const autonomous: any = accessAtStart !== 'editor';
   updateSteps(autonomous ? [
