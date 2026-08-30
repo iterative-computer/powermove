@@ -16,11 +16,32 @@ PM.perf = E;
    reassert pause when a late start completes. Audio has its own decoded-buffer
    scheduler in core/audio.js and never uses this race-prone path. */
 const mediaState = new WeakMap<any, any>();
-function ensureMediaPlaying(el: any) {
+const VIDEO_DRIFT_SECONDS = 0.12;
+const VIDEO_RESYNC_INTERVAL_MS = 400;
+function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number) {
   let state = mediaState.get(el);
-  if (!state) { state = { desired: false, pending: false }; mediaState.set(el, state); }
+  if (!state) {
+    state = { desired: false, pending: false, expectedTime, playbackRate, lastResync: -Infinity };
+    mediaState.set(el, state);
+  }
   state.desired = true;
-  if (state.pending || !el.paused) return;
+  state.expectedTime = expectedTime;
+  state.playbackRate = playbackRate;
+  try {
+    if (Number.isFinite(playbackRate) && playbackRate > 0 && el.playbackRate !== playbackRate) {
+      el.playbackRate = playbackRate;
+    }
+  } catch (e) { }
+  if (!el.paused && !state.pending) {
+    const now = window.performance.now();
+    const drift = Math.abs(Number(el.currentTime || 0) - expectedTime);
+    if (!el.seeking && drift > VIDEO_DRIFT_SECONDS && now - state.lastResync >= VIDEO_RESYNC_INTERVAL_MS) {
+      try { el.currentTime = expectedTime; state.lastResync = now; } catch (e) { }
+    }
+    return;
+  }
+  if (state.pending) return;
+  try { el.currentTime = expectedTime; state.lastResync = window.performance.now(); } catch (e) { }
   state.pending = true;
   let started;
   try { started = el.play(); }
@@ -28,6 +49,12 @@ function ensureMediaPlaying(el: any) {
   Promise.resolve(started).then(() => {
     state.pending = false;
     if (!state.desired) { try { el.pause(); } catch (e) { } }
+    else if (Math.abs(Number(el.currentTime || 0) - state.expectedTime) > VIDEO_DRIFT_SECONDS) {
+      // Starting a cold 4K decoder can take several frames. Rejoin the editor
+      // clock once the play promise settles instead of carrying that lag for
+      // the rest of the clip.
+      try { el.currentTime = state.expectedTime; state.lastResync = window.performance.now(); } catch (e) { }
+    }
   }, () => {
     state.pending = false;
   });
@@ -47,7 +74,7 @@ function scrubVideos(T: any) {
     const inRange = PM.active(L, T);
     /* playback position must respect layer speed, matching the compositor's vt math */
     const vt = PM.clamp((T - L.from) * (L.d.speed || 1) + (L.d.trim || 0), 0, Math.max(0, (a.dur || 0) - .04));
-    if (PM.playing && inRange) { if (a.el.paused) { a.el.currentTime = vt; ensureMediaPlaying(a.el); } }
+    if (PM.playing && inRange) ensureMediaPlaying(a.el, vt, Math.max(.0001, Number(L.d.speed) || 1));
     else ensureMediaPaused(a.el);
     if (!PM.playing && Math.abs(a.el.currentTime - vt) > .02) { try { a.el.currentTime = vt; } catch (e) { } }
   }

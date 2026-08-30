@@ -7,6 +7,8 @@ function delayedVideo(): any {
   let finishPlay: any;
   const el: any = {
     paused: true,
+    playbackRate: 1,
+    seeking: false,
     currentTime: 0,
     playCalls: 0,
     pauseCalls: 0,
@@ -27,6 +29,7 @@ function delayedVideo(): any {
 function engine({ layer = null, media = null, work = [0, 10] }: any = {}): any {
   const listeners = new Map<string, any[]>();
   const frames: any[] = [];
+  let nowValue = 0;
   const audioCalls: any[] = [];
   const Audio = {
     start(time: any) { audioCalls.push(['start', time]); },
@@ -57,7 +60,7 @@ function engine({ layer = null, media = null, work = [0, 10] }: any = {}): any {
     },
   };
   vi.stubGlobal('window', {
-    performance: { now: () => 0 },
+    performance: { now: () => nowValue },
     requestAnimationFrame(handler: any) { frames.push(handler); return frames.length; },
     document: { createElement() { return {}; } },
   });
@@ -66,6 +69,7 @@ function engine({ layer = null, media = null, work = [0, 10] }: any = {}): any {
     PM,
     audioCalls,
     runFrame(now = 16) {
+      nowValue = now;
       const frame = frames.shift();
       if (!frame) throw new Error('an animation frame is queued');
       frame(now);
@@ -123,5 +127,32 @@ describe('legacy engine install', () => {
 
     expect(media.el.paused).toBe(true);
     expect(audioCalls.at(-1)).toEqual(['pause']);
+  });
+
+  it('resynchronizes a video after a delayed decoder start and during later drift', async () => {
+    const media = delayedVideo();
+    const layer = { id: 'video-1', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, runFrame } = engine({ layer, media });
+
+    PM.play();
+    runFrame(250);
+    media.el.currentTime = 0;
+    media.finishPlay();
+    await Promise.resolve();
+    expect(media.el.currentTime).toBeCloseTo(PM.time);
+
+    media.el.currentTime = 0;
+    runFrame(750);
+    expect(media.el.currentTime).toBeCloseTo(PM.time);
+  });
+
+  it('uses the layer speed as the video playback rate', () => {
+    const media = delayedVideo();
+    const layer = { id: 'video-1', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'asset-1', speed: 1.5, trim: 0 } };
+    const { PM, runFrame } = engine({ layer, media });
+
+    PM.play();
+    runFrame(16);
+    expect(media.el.playbackRate).toBe(1.5);
   });
 });
