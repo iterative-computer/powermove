@@ -1332,8 +1332,16 @@ function workAreaHit(x: any, y: any) {
   return null;
 }
 
+function releaseExternalFieldFocus() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return;
+  if (!active.matches('input, textarea, select') && !active.isContentEditable) return;
+  active.blur();
+}
+
 function onDown(e: any) {
-  if (e.button === 1) return panViewport(e);
+  if (e.button === 1) { releaseExternalFieldFocus(); return panViewport(e); }
+  if (e.button === 0) releaseExternalFieldFocus();
   const x = e.offsetX, y = e.offsetY;
   PM.closeMenus();
   if (y < T.ruler && x > T.gut) {

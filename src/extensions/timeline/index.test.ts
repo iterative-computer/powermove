@@ -343,4 +343,40 @@ describe('timeline extension', () => {
       expect(PM.sel.keys).toEqual(modifier === 'none' ? [] : ['key-1']);
     }
   });
+
+  it('releases an external text field when the timeline starts a pointer gesture', () => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    PM.bus.emit = vi.fn();
+    PM.sel = { layers: [], keys: [], chan: '' };
+    PM.closeMenus = vi.fn();
+    PM.selectLayers = vi.fn();
+    PM.drag = vi.fn((event: PointerEvent, handlers: { up?: () => void }) => {
+      event.preventDefault();
+      handlers.up?.();
+      return { cancel: vi.fn() };
+    });
+    activate({
+      host: { pm: PM },
+      panels: { register: (definition: PanelDefinition) => { panel = definition; } },
+      onDispose: vi.fn(),
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    const composer = document.createElement('textarea');
+    document.body.append(body, composer);
+    panel?.build?.(body, { spec: {} });
+    const canvas = body.querySelector<HTMLCanvasElement>('#tl-canvas')!;
+    const timeline = PM.TL;
+    timeline.rows = [];
+    composer.focus();
+
+    const x = timeline.gut + timeline.pps;
+    const y = timeline.ruler + timeline.row / 2;
+    const event = new PointerEvent('pointerdown', { button: 0, clientX: x, clientY: y, cancelable: true });
+    Object.defineProperties(event, { offsetX: { value: x }, offsetY: { value: y } });
+    canvas.dispatchEvent(event);
+
+    expect(document.activeElement).not.toBe(composer);
+    expect(PM.drag).toHaveBeenCalledOnce();
+  });
 });
