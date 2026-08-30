@@ -22,7 +22,7 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     await extensionsTab.click();
     await expect(extensionsTab).toHaveAttribute('aria-selected', 'true');
     const extensions = settings.getByRole('list', { name: 'Extensions' });
-    await expect(settings).toContainText('every discovered extension is shown');
+    await expect(settings).toContainText('extensions discovered');
     await expect(extensions).toContainText('Timeline');
     await expect(extensions).toContainText('Powermove themes');
     await generalTab.click();

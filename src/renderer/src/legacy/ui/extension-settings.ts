@@ -1,4 +1,5 @@
 import type { ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../../shared/extensions';
+import { createSettingsSection } from './settings-tabs';
 
 export interface ExtensionSettingsControl {
   element: HTMLElement;
@@ -35,20 +36,12 @@ function compareRecords(a: ExtensionRecord, b: ExtensionRecord): number {
 export function createExtensionSettingsControl(
   api: ExtensionsBridge | undefined = window.powermove?.extensions
 ): ExtensionSettingsControl {
-  const section = document.createElement('section');
-  section.className = 'settings-extensions';
-  const heading = document.createElement('div');
-  heading.className = 'settings-section-heading';
-  const title = document.createElement('b');
-  title.textContent = 'Extensions';
-  const summary = document.createElement('span');
-  summary.textContent = 'Loading every extension…';
-  heading.append(title, summary);
-  const list = document.createElement('div');
-  list.className = 'settings-extension-list';
+  const section = createSettingsSection('Extensions', 'Loading…');
+  const summary = section.summary;
+  const list = section.body;
+  list.classList.add('settings-extension-list');
   list.setAttribute('role', 'list');
   list.setAttribute('aria-label', 'Extensions');
-  section.append(heading, list);
 
   let alive = true;
   let stop = (): void => undefined;
@@ -56,7 +49,7 @@ export function createExtensionSettingsControl(
   const render = (records: ExtensionRecord[]): void => {
     if (!alive) return;
     const sorted = [...records].sort(compareRecords);
-    summary.textContent = `${sorted.length} ${sorted.length === 1 ? 'extension' : 'extensions'} · every discovered extension is shown`;
+    summary.textContent = `${sorted.length} ${sorted.length === 1 ? 'extension' : 'extensions'} discovered`;
     list.replaceChildren();
     if (sorted.length === 0) {
       const empty = document.createElement('div');
@@ -140,7 +133,7 @@ export function createExtensionSettingsControl(
   void refresh();
 
   return {
-    element: section,
+    element: section.element,
     destroy: () => {
       alive = false;
       stop();
