@@ -42,7 +42,7 @@ export function createGeneralSettingsControl(theme: ThemePreference): GeneralSet
   const claude = createClaudeSettingsControl();
   const accounts = createSettingsSection(
     'Accounts',
-    'Signed in through the official Codex and Claude Code runtimes'
+    'Uses the official Codex and Claude Code runtimes'
   );
   accounts.body.append(chatgpt.element, claude.element);
   const privacy = document.createElement('p');
