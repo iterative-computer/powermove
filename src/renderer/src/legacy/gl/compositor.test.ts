@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
-import { effectParamValue, hasRenderableEffects, install, paramUniformName } from './compositor';
+import { effectParamValue, hasRenderableEffects, install, paramUniformName, trackPresentedVideoFrames } from './compositor';
 
 function compositorRegistry(): PMRegistry {
   const PM: PMRegistry = {
@@ -22,6 +22,24 @@ function compositorRegistry(): PMRegistry {
 }
 
 describe('legacy compositor install', () => {
+  it('versions textures from each frame the browser presents', () => {
+    const callbacks: Array<() => void> = [];
+    const invalidated = vi.fn();
+    const video = {
+      requestVideoFrameCallback(callback: () => void) {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+    };
+
+    const state = trackPresentedVideoFrames(video, invalidated);
+    expect(state).toMatchObject({ version: 0, supported: true });
+    callbacks.shift()!();
+    expect(state.version).toBe(1);
+    expect(invalidated).toHaveBeenCalledOnce();
+    expect(callbacks).toHaveLength(1);
+  });
+
   it('uses tight text selection bounds and keeps the background fill shader path', () => {
     const PM = compositorRegistry();
     const text = { type: 'text', d: {} };
