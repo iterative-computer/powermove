@@ -17,6 +17,7 @@ import { install as installShortcuts } from '../ui/shortcuts';
 
 let PM: any;
 let ran: string[];
+let ranArgs: unknown[][];
 let activatedBindings: any[];
 
 function makeEditor() {
@@ -43,13 +44,21 @@ function makeEditor() {
     }
   } as any);
   ran = [];
+  ranArgs = [];
   /* Shadow every command with a recorder. Registering over an id is exactly
      what an extension override does, so this also exercises that path. */
   for (const id of PM.Kernel.commands.ids()) {
     /* `blurField` is the fall-through binding under Escape; shadowing it would
        swallow the chord before `deselect` ever sees it. */
     if (id === 'blurField') continue;
-    PM.Kernel.commands.register('test', { id, label: id, run: () => void ran.push(id) });
+    PM.Kernel.commands.register('test', {
+      id,
+      label: id,
+      run: (...args: unknown[]) => {
+        ran.push(id);
+        ranArgs.push(args);
+      }
+    });
   }
 }
 
@@ -127,7 +136,6 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   /* The old switch(k) sat before the `if (a || m) return` guard, so transport
      keys fired with a modifier held too. */
   ['cmd+space still toggles playback', { key: ' ', metaKey: true }, 'play'],
-  ['alt+ArrowRight still steps forward', { key: 'ArrowRight', altKey: true }, 'nextFrame'],
   ['cmd+Delete still deletes', { key: 'Delete', metaKey: true }, 'delete'],
   ['alt+Escape still deselects', { key: 'Escape', altKey: true }, 'deselect'],
   ['shift+Space still toggles playback', { key: ' ', shiftKey: true }, 'play'],
@@ -141,6 +149,24 @@ describe('legacy keymap parity', () => {
   it.each(TABLE)('%s', (_description, init, expected) => {
     const event = press(init);
     expect(ran).toEqual([expected]);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  const NUDGE_TABLE: Array<[string, KeyboardEventInit, [number, number]]> = [
+    ['Alt+ArrowLeft nudges one pixel left', { key: 'ArrowLeft', altKey: true }, [-1, 0]],
+    ['Alt+ArrowRight nudges one pixel right', { key: 'ArrowRight', altKey: true }, [1, 0]],
+    ['Alt+ArrowUp nudges one pixel up', { key: 'ArrowUp', altKey: true }, [0, -1]],
+    ['Alt+ArrowDown nudges one pixel down', { key: 'ArrowDown', altKey: true }, [0, 1]],
+    ['Alt+Shift+ArrowLeft nudges ten pixels left', { key: 'ArrowLeft', altKey: true, shiftKey: true }, [-10, 0]],
+    ['Alt+Shift+ArrowRight nudges ten pixels right', { key: 'ArrowRight', altKey: true, shiftKey: true }, [10, 0]],
+    ['Alt+Shift+ArrowUp nudges ten pixels up', { key: 'ArrowUp', altKey: true, shiftKey: true }, [0, -10]],
+    ['Alt+Shift+ArrowDown nudges ten pixels down', { key: 'ArrowDown', altKey: true, shiftKey: true }, [0, 10]]
+  ];
+
+  it.each(NUDGE_TABLE)('%s', (_description, init, delta) => {
+    const event = press(init);
+    expect(ran).toEqual(['nudgeSelection']);
+    expect(ranArgs).toEqual([delta]);
     expect(event.defaultPrevented).toBe(true);
   });
 

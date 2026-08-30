@@ -171,4 +171,9 @@ describe('preload bridge', () => {
     bridge().haptic.alignment();
     expect(electronMocks.send).toHaveBeenCalledExactlyOnceWith(IPC.hapticAlignment);
   });
+
+  it('exposes validated native text editing as one-way IPC', () => {
+    bridge().nativeEdit('paste');
+    expect(electronMocks.send).toHaveBeenCalledExactlyOnceWith(IPC.nativeEdit, 'paste');
+  });
 });

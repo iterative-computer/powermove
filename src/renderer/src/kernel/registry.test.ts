@@ -96,6 +96,21 @@ describe('Registry', () => {
     expect(registry.ownerEntries('ext')).toEqual([]);
   });
 
+  it('demotes reloaded built-ins without invalidating an extension override', () => {
+    const registry = new Registry<Item>();
+    registry.register('built-in', item('split', 'built-in-old'));
+    const extension = registry.register('extension', item('split', 'extension'));
+    registry.disposeOwner('built-in');
+    registry.register('built-in', item('split', 'built-in-new'));
+
+    expect(registry.get('split')?.from).toBe('built-in-new');
+    registry.demoteOwner('built-in');
+    expect(registry.get('split')?.from).toBe('extension');
+
+    extension.dispose();
+    expect(registry.get('split')?.from).toBe('built-in-new');
+  });
+
   it('is idempotent on double dispose and rejects items without an id', () => {
     const registry = new Registry<Item>();
     const handle = registry.register('a', item('x', 'a'));

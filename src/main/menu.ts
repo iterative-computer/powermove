@@ -3,32 +3,68 @@ import {
   BrowserWindow,
   Menu,
   type BrowserWindow as BrowserWindowType,
+  type Input,
   type MenuItemConstructorOptions
 } from 'electron';
 
 import { IPC, type MenuCommand } from '../shared/ipc';
 
+const RENDERER_MENU_CHORDS = new Set([
+  'KeyZ', 'shift+KeyZ',
+  'KeyX', 'KeyC', 'KeyV', 'KeyA', 'KeyD', 'KeyB', 'shift+KeyH',
+  'BracketRight', 'BracketLeft', 'shift+BracketRight', 'shift+BracketLeft',
+  'Equal', 'shift+Equal', 'Minus', 'Digit0', 'Digit1',
+]);
+
+export function isRendererOwnedMenuInput(input: Partial<Input>): boolean {
+  if ((!input.meta && !input.control) || input.alt) return false;
+  const code = input.code || '';
+  return RENDERER_MENU_CHORDS.has(`${input.shift ? 'shift+' : ''}${code}`);
+}
+
+/**
+ * Keep displayed native menu equivalents from pre-empting the renderer's
+ * field and key-repeat policy. `registerAccelerator: false` only works on
+ * Windows/Linux; this focused-WebContents gate is the macOS path as well.
+ */
+export function installRendererMenuShortcutRouting(
+  webContents: Pick<BrowserWindowType['webContents'], 'on' | 'off' | 'setIgnoreMenuShortcuts'>
+): () => void {
+  const route = (_event: Electron.Event, input: Input): void => {
+    webContents.setIgnoreMenuShortcuts(isRendererOwnedMenuInput(input));
+  };
+  webContents.on('before-input-event', route);
+  return () => {
+    webContents.off('before-input-event', route);
+    webContents.setIgnoreMenuShortcuts(false);
+  };
+}
+
 const commandItem = (
   label: string,
   accelerator: string,
   command: MenuCommand,
-  send: (command: MenuCommand) => void
+  send: (command: MenuCommand) => void,
+  registerAccelerator = true
 ): MenuItemConstructorOptions => ({
   id: command,
   label,
   accelerator,
+  ...(registerAccelerator ? {} : { registerAccelerator: false }),
   click: () => send(command)
 });
-
-const EDITABLE_FOCUS_SCRIPT = `(() => {
-  const element = document.activeElement;
-  return !!element && (element.matches?.('input, textarea, select') || element.isContentEditable);
-})()`;
 
 export function appMenuTemplate(
   send: (command: MenuCommand) => void
 ): MenuItemConstructorOptions[] {
-  const viewItems: MenuItemConstructorOptions[] = [{ role: 'togglefullscreen' }];
+  const viewItems: MenuItemConstructorOptions[] = [
+    commandItem('Zoom In', 'CommandOrControl+=', 'zoomIn', send, false),
+    commandItem('Zoom Out', 'CommandOrControl+-', 'zoomOut', send, false),
+    commandItem('Actual Size', 'CommandOrControl+1', 'actualSize', send, false),
+    commandItem('Fit Composition', 'CommandOrControl+0', 'fitComposition', send, false),
+    { type: 'separator' },
+    { role: 'togglefullscreen' }
+  ];
   if (!app.isPackaged) {
     viewItems.push(
       { type: 'separator' },
@@ -65,13 +101,22 @@ export function appMenuTemplate(
     {
       label: 'Edit',
       submenu: [
-        commandItem('Undo', 'CommandOrControl+Z', 'undo', send),
-        commandItem('Redo', 'CommandOrControl+Shift+Z', 'redo', send),
+        commandItem('Undo', 'CommandOrControl+Z', 'contextUndo', send, false),
+        commandItem('Redo', 'CommandOrControl+Shift+Z', 'contextRedo', send, false),
         { type: 'separator' },
-        { role: 'cut' },
-        commandItem('Copy', 'CommandOrControl+C', 'copy', send),
-        commandItem('Paste', 'CommandOrControl+V', 'paste', send),
-        { role: 'selectAll' }
+        commandItem('Cut', 'CommandOrControl+X', 'contextCut', send, false),
+        commandItem('Copy', 'CommandOrControl+C', 'contextCopy', send, false),
+        commandItem('Paste', 'CommandOrControl+V', 'contextPaste', send, false),
+        commandItem('Select All', 'CommandOrControl+A', 'contextSelectAll', send, false),
+        { type: 'separator' },
+        commandItem('Duplicate Layers', 'CommandOrControl+D', 'duplicate', send, false),
+        commandItem('Split at Playhead', 'CommandOrControl+B', 'split', send, false),
+        commandItem('Hide/Show Selected Layers', 'CommandOrControl+Shift+H', 'toggleVisibility', send, false),
+        { type: 'separator' },
+        commandItem('Bring Forward', 'CommandOrControl+]', 'bringForward', send, false),
+        commandItem('Send Backward', 'CommandOrControl+[', 'sendBackward', send, false),
+        commandItem('Bring to Front', 'CommandOrControl+Shift+]', 'bringToFront', send, false),
+        commandItem('Send to Back', 'CommandOrControl+Shift+[', 'sendToBack', send, false)
       ]
     },
     { label: 'View', submenu: viewItems },
@@ -96,24 +141,9 @@ export function installMenu(getWindow: () => BrowserWindowType | null): Menu {
   const menu = buildAppMenu((command) => {
     const focusedWindow = BrowserWindow.getFocusedWindow();
     const editorWindow = getWindow() ?? focusedWindow;
-    if (!editorWindow || editorWindow.isDestroyed() || editorWindow.webContents.isDestroyed()) return;
-    if (command === 'copy' || command === 'paste') {
-      const fieldWindow = focusedWindow ?? editorWindow;
-      if (fieldWindow.isDestroyed() || fieldWindow.webContents.isDestroyed()) return;
-      void fieldWindow.webContents.executeJavaScript(EDITABLE_FOCUS_SCRIPT).then((fieldFocused) => {
-        if (fieldWindow.isDestroyed() || fieldWindow.webContents.isDestroyed()) return;
-        if (fieldFocused) {
-          if (command === 'copy') fieldWindow.webContents.copy();
-          else fieldWindow.webContents.paste();
-          return;
-        }
-        if (!editorWindow.isDestroyed() && !editorWindow.webContents.isDestroyed()) {
-          editorWindow.webContents.send(IPC.menuCommand, command);
-        }
-      }).catch(() => undefined);
-      return;
-    }
-    editorWindow.webContents.send(IPC.menuCommand, command);
+    const target = command.startsWith('context') ? (focusedWindow ?? editorWindow) : editorWindow;
+    if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return;
+    target.webContents.send(IPC.menuCommand, command);
   });
   Menu.setApplicationMenu(menu);
   return menu;

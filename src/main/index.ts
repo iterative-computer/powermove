@@ -19,7 +19,8 @@ import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
-import { installMenu } from './menu';
+import { registerNativeEditIpc } from './native-edit';
+import { installMenu, installRendererMenuShortcutRouting } from './menu';
 import { registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
@@ -276,6 +277,7 @@ function createWindow(): BrowserWindow {
   });
 
   mainWindow = window;
+  installRendererMenuShortcutRouting(window.webContents);
 
   let closing = false, closePrepared = false;
   window.on('close', event => {
@@ -405,6 +407,7 @@ if (!hasSingleInstanceLock) {
     registerShellIpc(ipcMain, ctx);
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
+    registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     // API pack handed to the agent every autonomous run: the extension guide
     // plus the frozen kernel/shared/type contracts.

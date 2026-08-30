@@ -73,7 +73,7 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)`, `close`, `isOpen`, `refresh`, `list`.
   `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.
 - **commands** — `register({ id, label, category, run, when? })`, `run(id, …args)`, `has`, `list`. Commands appear in the palette (⌘K).
-- **keybindings** — `bind({ key, command, args?, inFields?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through.
+- **keybindings** — `bind({ key, command, args?, inFields?, looseModifiers?, repeat?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through. Repeated browser keydowns are ignored by default; set `repeat: true` only for continuous, repeat-safe actions such as frame stepping or nudging. Suppressed repeats do not prevent the browser's default behavior.
 - **effects** — `register({ id, label, group, params, frag, passes?, keepOrig? })`.
   Write only the body of `main()`. Available: `v_st` (uv), `u_tex`, `u_res`, `u_texel`, `u_time`, `u_pass`, helpers `src() luma() noise() fbm() hash() rgb2hsv() hsv2rgb()`. Each param `k` is a uniform `u_<k>` (float, or vec3 for `type:'color'`). Output `o` (vec4).
   Params are keyframable automatically and appear in the Effects browser + inspector.

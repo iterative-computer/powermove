@@ -38,6 +38,23 @@ const def: any = (id?: any, label?: any, kb?: any, run?: any, cat: any = 'Genera
 };
 const hidden = { when: () => false };
 
+const activeTextField = (): boolean => {
+  if (typeof document === 'undefined') return false;
+  const active: any = document.activeElement;
+  const tag = typeof active?.tagName === 'string' ? active.tagName.toUpperCase() : '';
+  return tag === 'INPUT' || tag === 'TEXTAREA' || active?.isContentEditable === true;
+};
+
+const nativeEdit = (action: string): unknown => {
+  const bridge: any = typeof window === 'undefined' ? null : (window as any).powermove;
+  if (typeof bridge?.nativeEdit === 'function') {
+    bridge.nativeEdit(action);
+    return true;
+  }
+  if (typeof document === 'undefined' || typeof document.execCommand !== 'function') return false;
+  return document.execCommand(action);
+};
+
 PM.commands = registryView<CommandDefinition, any>(kernel.commands, {
   read: (_item, id) => commandView(kernel, id, put),
   write: (id, value: any) => {
@@ -51,7 +68,15 @@ PM.commands = registryView<CommandDefinition, any>(kernel.commands, {
     return true;
   }
 });
-PM.cmd = (id?: any, ...a: any[]) => { const c: any = kernel.commands.get(id); if (c) return c.run(...a); console.warn('no cmd', id); };
+PM.cmd = (id?: any, ...a: any[]) => {
+  const c: any = kernel.commands.get(id);
+  if (c) return c.run(...a);
+  /* A missing command is deliberately an unhandled dispatch. Extensions can
+     replace/remove commands while a stale keybinding is still in flight; the
+     kernel uses `false` to let lower-priority bindings continue. */
+  console.warn('no cmd', id);
+  return false;
+};
 
 const center: any = () => ({ 'position.x': PM.proj.w / 2, 'position.y': PM.proj.h / 2 });
 function addLayer(type?: any, opts: any = {}) {
@@ -109,17 +134,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () =>
   PM.bus.emit('layers'); PM.selectLayers(ids);
 }), 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
-def('split', 'Split at playhead', '⌘⇧D', () => PM.hist.do('Split', () => {
-  PM.selLayers().forEach((L: any) => {
-    if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
-    const c: any = PM.cloneLayer(L);
-    c.from = PM.time; c.dur = L.from + L.dur - PM.time;
-    if (PM.MediaTiming.isTimed(L)) c.d.trim = PM.MediaTiming.trimAtStart(L, PM.time);
-    L.dur = PM.time - L.from;
-    PM.proj.layers.splice(PM.proj.layers.indexOf(L), 0, c);
-  });
-  PM.bus.emit('layers');
-}), 'Edit');
+def('split', 'Split at playhead', '⌘B', () => splitLayers(PM), 'Edit');
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
 def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
@@ -136,7 +151,7 @@ def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
 let layerClip: any = null;
 def('copyLayers', 'Copy layers', '⌘C', () => {
   if (PM.Inspector?.copySelectedEffects?.()) return;
-  const sels: any = PM.selLayers(); if (!sels.length) return;
+  const sels: any = selectedStackLayers(PM); if (!sels.length) return;
   /* An explicit layer copy becomes the active app-local clipboard payload.
      Effect rows stop propagation before this command, so copying an effect
      keeps the effect payload active while the user selects its destination. */
@@ -144,22 +159,25 @@ def('copyLayers', 'Copy layers', '⌘C', () => {
   layerClip = sels.map((L: any) => JSON.parse(JSON.stringify(L)));
   PM.toast(`Copied ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
 }, 'Edit');
+def('cutLayers', 'Cut layers', '⌘X', () => cutLayers(PM, (value: any[]) => { layerClip = value; }), 'Edit');
 def('pasteLayers', 'Paste layers', '⌘V', () => {
   /* Effect paste deliberately routes through the ordinary global shortcut:
      select effect → ⌘C → select destination layer → ⌘V. */
   if (PM.Inspector?.pasteCopiedEffects?.()) return;
-  if (!layerClip || !layerClip.length) return;
-  PM.hist.do('Paste layers', () => {
-    /* clones keep their relative stack order; parenting inside the set survives */
-    const pairs: any = layerClip.map((src: any) => [src, PM.cloneLayer(JSON.parse(JSON.stringify(src)))]);
-    const map: any = new Map(pairs.map(([src, c]: any) => [src.id, c]));
-    pairs.forEach(([src, c]: any) => { c.parent = src.parent && map.has(src.parent) ? map.get(src.parent).id : null; });
-    const pasted: any = pairs.map(([, c]: any) => c);
-    for (let i: any = pasted.length - 1; i >= 0; i--) PM.addLayer(pasted[i], 0);
-    PM.selectLayers(pasted.map((c: any) => c.id));
-  });
-  PM.toast(`Pasted ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
+  return pasteLayers(PM, () => layerClip);
 }, 'Edit');
+def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : PM.cmd('undo'), 'Edit', hidden);
+def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : PM.cmd('redo'), 'Edit', hidden);
+def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : PM.cmd('cutLayers'), 'Edit', hidden);
+def('contextCopy', 'Copy', null, () => activeTextField() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
+def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : PM.cmd('pasteLayers'), 'Edit', hidden);
+def('contextSelectAll', 'Select all', null, () => activeTextField() ? nativeEdit('selectAll') : PM.cmd('selectAll'), 'Edit', hidden);
+def('toggleVisibility', 'Hide/show selected layers', '⌘⇧H', () => toggleVisibility(PM), 'Edit');
+def('bringForward', 'Bring forward', '⌘]', () => orderLayers(PM, 'forward'), 'Edit');
+def('sendBackward', 'Send backward', '⌘[', () => orderLayers(PM, 'backward'), 'Edit');
+def('bringToFront', 'Bring to front', '⌘⇧]', () => orderLayers(PM, 'front'), 'Edit');
+def('sendToBack', 'Send to back', '⌘⇧[', () => orderLayers(PM, 'back'), 'Edit');
+def('nudgeSelection', 'Nudge selection', null, (dx?: any, dy?: any) => nudgeSelection(PM, dx, dy), 'Edit');
 def('undo', 'Undo', '⌘Z', () => PM.hist.undo(), 'Edit');
 def('redo', 'Redo', '⌘⇧Z', () => PM.hist.redo(), 'Edit');
 
@@ -211,7 +229,23 @@ function allSelKeys() {
 }
 
 /* ── view / files ──────────────────────────────────────── */
-def('fitView', 'Fit composition in view', '⇧F', () => { if (PM.Viewer) { PM.Viewer.fit = true; PM.Viewer.layout?.(); } PM.TL?.frameView?.(); }, 'View');
+def('fitView', 'Fit composition and timeline', '⇧F', () => {
+  if (PM.Viewer) {
+    PM.Viewer.fit = true;
+    if (Array.isArray(PM.Viewer.pan)) PM.Viewer.pan = [0, 0];
+    PM.Viewer.layout?.();
+  }
+  PM.TL?.frameView?.();
+}, 'View');
+def('fitComposition', 'Fit composition', '⌘0', () => {
+  if (!PM.Viewer) return false;
+  PM.Viewer.fit = true;
+  if (Array.isArray(PM.Viewer.pan)) PM.Viewer.pan = [0, 0];
+  PM.Viewer.layout?.();
+}, 'View');
+def('zoomIn', 'Zoom in', '⌘+', () => zoomViewer(PM, 1.25), 'View');
+def('zoomOut', 'Zoom out', '⌘-', () => zoomViewer(PM, .8), 'View');
+def('actualSize', 'Actual size', '⌘1', () => setViewerZoom(PM, 1), 'View');
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.open?.(), 'View');
@@ -254,6 +288,360 @@ put({
     return false;
   }
 });
+}
+
+type LayerOrder = 'forward' | 'backward' | 'front' | 'back';
+
+function currentLayers(PM: PMRegistry): any[] {
+  const comp = typeof PM.curComp === 'function' ? PM.curComp() : PM.proj;
+  return Array.isArray(comp?.layers) ? comp.layers : [];
+}
+
+function selectedStackLayers(PM: PMRegistry): any[] {
+  const layers = currentLayers(PM);
+  const ids = new Set((PM.sel?.layers || []).filter(Boolean));
+  if (ids.size) return layers.filter((layer: any) => ids.has(layer.id));
+  return typeof PM.selLayers === 'function' ? PM.selLayers().filter(Boolean) : [];
+}
+
+function selectLayerIds(PM: PMRegistry, ids: any[]): void {
+  if (typeof PM.selectLayers === 'function') {
+    PM.selectLayers(ids);
+    return;
+  }
+  PM.sel = PM.sel || { layers: [], keys: [] };
+  PM.sel.layers = [...ids];
+  PM.bus?.emit?.('sel');
+  PM.invalidate?.();
+}
+
+function finishLayerMutation(PM: PMRegistry): void {
+  if (PM.Edit?.mutate) return;
+  PM.bus?.emit?.('layers');
+  /* PM.selectLayers already invalidates when a command changes selection. */
+  if (typeof PM.selectLayers !== 'function') PM.invalidate?.();
+}
+
+function runAtomic(PM: PMRegistry, label: string, action: () => unknown): unknown {
+  if (PM.Edit?.mutate) {
+    return PM.Edit.mutate(label, action, { origin: 'command' });
+  }
+  if (PM.hist && typeof PM.hist.do === 'function') return PM.hist.do(label, action);
+  return action();
+}
+
+function cloneForCommand(PM: PMRegistry, layer: any): any {
+  const clone = typeof PM.cloneLayer === 'function'
+    ? PM.cloneLayer(layer)
+    : JSON.parse(JSON.stringify(layer));
+  return clone;
+}
+
+function ensureLayerId(PM: PMRegistry, layer: any, used: Set<any>, source?: any): void {
+  if (layer.id && layer.id !== source?.id && !used.has(layer.id)) {
+    used.add(layer.id);
+    return;
+  }
+  const next = typeof PM.uid === 'function' ? PM.uid('L') : `${source?.id || 'layer'}-copy`;
+  layer.id = next;
+  used.add(next);
+}
+
+function rebaseTailAnimation(PM: PMRegistry, layer: any, offset: number): void {
+  if (!Number.isFinite(offset) || offset === 0 || typeof PM.allProps !== 'function') return;
+  for (const { prop } of PM.allProps(layer)) {
+    if (!Array.isArray(prop?.kf)) continue;
+    for (const keyframe of prop.kf) {
+      if (Number.isFinite(Number(keyframe.t))) keyframe.t = Number(keyframe.t) - offset;
+    }
+  }
+  /* Expressions deliberately remain layer-local: `t` restarts on the new
+     clip, while authors who need composition continuity can use global `T`.
+     Keyframes, by contrast, are rebased so their value is continuous. */
+}
+
+/**
+ * Split the selected active layers, or all visible active root layers when
+ * there is no selection. The tail is inserted immediately above its source,
+ * preserving the source's parent and timed-media continuity.
+ */
+export function splitLayers(PM: PMRegistry): unknown {
+  const layers = currentLayers(PM);
+  const selected = selectedStackLayers(PM);
+  const selectionRequested = Boolean((PM.sel?.layers || []).length || selected.length);
+  const T = Number(PM.time);
+  if (!Number.isFinite(T)) return false;
+
+  const targets = (selectionRequested ? selected : layers.filter((layer: any) =>
+    !layer.parent && layer.on !== false))
+    .filter((layer: any) => !layer.lock && Number.isFinite(Number(layer.from))
+      && Number.isFinite(Number(layer.dur))
+      && T > Number(layer.from) && T < Number(layer.from) + Number(layer.dur));
+  if (!targets.length) return false;
+
+  return runAtomic(PM, 'Split', () => {
+    const tails: any[] = [];
+    const used = new Set(layers.map((layer: any) => layer.id));
+    /* `targets` follows stack order so each source/tail pair stays adjacent
+       even when several selected layers are split in one operation. */
+    for (const layer of targets) {
+      const index = layers.indexOf(layer);
+      if (index < 0) continue;
+      const sourceEnd = Number(layer.from) + Number(layer.dur);
+      const tail = cloneForCommand(PM, layer);
+      ensureLayerId(PM, tail, used, layer);
+      const sourceOffset = T - Number(layer.from);
+      tail.from = T;
+      tail.dur = sourceEnd - T;
+      rebaseTailAnimation(PM, tail, sourceOffset);
+      if (PM.MediaTiming?.isTimed?.(layer)) {
+        tail.d = tail.d && typeof tail.d === 'object' ? tail.d : {};
+        if (typeof PM.MediaTiming.trimAtStart === 'function') {
+          tail.d.trim = PM.MediaTiming.trimAtStart(layer, T);
+        }
+      }
+      /* The cut is an internal boundary, not a new entrance/exit. Keep the
+         original entrance on the head and the original exit on the tail. */
+      layer.transitionOut = null;
+      tail.transitionIn = null;
+      if (layer.type === 'audio') {
+        if (layer.d && typeof layer.d === 'object') layer.d.fadeOut = 0;
+        if (tail.d && typeof tail.d === 'object') tail.d.fadeIn = 0;
+      }
+      layer.dur = T - Number(layer.from);
+      layers.splice(index, 0, tail);
+      tails.push(tail);
+    }
+    if (!tails.length) return false;
+    selectLayerIds(PM, tails.map((layer: any) => layer.id));
+    finishLayerMutation(PM);
+    return tails;
+  });
+}
+
+/** Cut only unlocked selected layers and retain the cut payload for paste. */
+export function cutLayers(PM: PMRegistry, setClipboard: (value: any[]) => void = () => {}): unknown {
+  const layers = currentLayers(PM);
+  const selected = selectedStackLayers(PM);
+  const editable = selected.filter((layer: any) => !layer.lock);
+  if (!editable.length) {
+    PM.toast?.('No unlocked layers to cut');
+    return false;
+  }
+
+  const payload = editable.map((layer: any) => JSON.parse(JSON.stringify(layer)));
+  setClipboard(payload);
+  const ids = new Set(editable.map((layer: any) => layer.id));
+  return runAtomic(PM, 'Cut layers', () => {
+    const comp = typeof PM.curComp === 'function' ? PM.curComp() : PM.proj;
+    if (comp === PM.proj && typeof PM.removeLayers === 'function') {
+      /* The model helper also unparents survivors and garbage-collects unused
+         nested compositions. */
+      PM.removeLayers([...ids]);
+    } else {
+      comp.layers = layers.filter((layer: any) => !ids.has(layer.id));
+      comp.layers.forEach((layer: any) => {
+        if (ids.has(layer.parent)) layer.parent = null;
+      });
+      finishLayerMutation(PM);
+    }
+    const remainingSelection = selected.filter((layer: any) => !ids.has(layer.id)).map((layer: any) => layer.id);
+    selectLayerIds(PM, remainingSelection);
+    PM.toast?.(`Cut ${editable.length} ${editable.length === 1 ? 'layer' : 'layers'}`);
+    return editable;
+  });
+}
+
+/** Paste beside the topmost selected layer, preserving valid parent links. */
+export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = () => null): unknown {
+  const clipboard = getClipboard();
+  if (!Array.isArray(clipboard) || !clipboard.length) return false;
+  const layers = currentLayers(PM);
+  const selectedIds = new Set((PM.sel?.layers || []).filter(Boolean));
+  const selectedIndexes = layers
+    .map((layer: any, index: number) => selectedIds.has(layer.id) ? index : -1)
+    .filter((index: number) => index >= 0);
+  const insertAt = selectedIndexes.length ? Math.min(...selectedIndexes) : 0;
+  const currentIds = new Set(layers.map((layer: any) => layer.id));
+
+  return runAtomic(PM, 'Paste layers', () => {
+    const pairs = clipboard.map((source: any) => [source, cloneForCommand(PM, JSON.parse(JSON.stringify(source)))]);
+    const used = new Set(currentIds);
+    const idMap = new Map<any, any>();
+    pairs.forEach(([source, clone]: any) => {
+      ensureLayerId(PM, clone, used, source);
+      idMap.set(source.id, clone.id);
+    });
+    const pasted = pairs.map(([source, clone]: any) => {
+      if (source.parent && idMap.has(source.parent)) clone.parent = idMap.get(source.parent);
+      else clone.parent = source.parent && currentIds.has(source.parent) ? source.parent : null;
+      return clone;
+    });
+    layers.splice(insertAt, 0, ...pasted);
+    selectLayerIds(PM, pasted.map((layer: any) => layer.id));
+    finishLayerMutation(PM);
+    PM.toast?.(`Pasted ${pasted.length} ${pasted.length === 1 ? 'layer' : 'layers'}`);
+    return pasted;
+  });
+}
+
+/** Toggle visibility of the editable portion of the current selection. */
+export function toggleVisibility(PM: PMRegistry): unknown {
+  const editable = selectedStackLayers(PM).filter((layer: any) => !layer.lock);
+  if (!editable.length) return false;
+  const show = editable.every((layer: any) => layer.on === false);
+  const commands = editable.map((layer: any) => ({
+    type: 'set_layer', target: layer.id, patch: { visible: show },
+  }));
+  if (PM.Edit?.apply) {
+    return PM.Edit.apply(commands, { label: show ? 'Show layers' : 'Hide layers', origin: 'command' });
+  }
+  return runAtomic(PM, show ? 'Show layers' : 'Hide layers', () => {
+    editable.forEach((layer: any) => { layer.on = show; });
+    finishLayerMutation(PM);
+    return editable;
+  });
+}
+
+function stepLayerOrder(layers: any[], selected: Set<any>, movable: Set<any>, direction: 'forward' | 'backward'): boolean {
+  let changed = false;
+  if (direction === 'forward') {
+    for (let index = 0; index < layers.length; index++) {
+      const layer = layers[index];
+      if (!movable.has(layer.id) || index === 0) continue;
+      const previous = layers[index - 1];
+      if (selected.has(previous.id) || previous.lock) continue;
+      layers[index - 1] = layer;
+      layers[index] = previous;
+      changed = true;
+    }
+  } else {
+    for (let index = layers.length - 1; index >= 0; index--) {
+      const layer = layers[index];
+      if (!movable.has(layer.id) || index === layers.length - 1) continue;
+      const next = layers[index + 1];
+      if (selected.has(next.id) || next.lock) continue;
+      layers[index + 1] = layer;
+      layers[index] = next;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Reorder unlocked selected layers without crossing locked layer barriers. */
+export function orderLayers(PM: PMRegistry, mode: LayerOrder): unknown {
+  if (!['forward', 'backward', 'front', 'back'].includes(mode)) return false;
+  const layers = currentLayers(PM);
+  const selectedLayers = selectedStackLayers(PM);
+  const selected = new Set(selectedLayers.map((layer: any) => layer.id));
+  const movable = new Set(selectedLayers.filter((layer: any) => !layer.lock).map((layer: any) => layer.id));
+  if (!movable.size) return false;
+
+  const labels: Record<LayerOrder, string> = {
+    forward: 'Bring forward', backward: 'Send backward',
+    front: 'Bring to front', back: 'Send to back',
+  };
+  return runAtomic(PM, labels[mode], () => {
+    let changed = false;
+    if (mode === 'forward' || mode === 'backward') {
+      changed = stepLayerOrder(layers, selected, movable, mode);
+    } else {
+      const direction = mode === 'front' ? 'forward' : 'backward';
+      while (stepLayerOrder(layers, selected, movable, direction)) changed = true;
+    }
+    if (!changed) return false;
+    finishLayerMutation(PM);
+    return selectedLayers;
+  });
+}
+
+function worldNudgeToLocal(PM: PMRegistry, layer: any, dx: number, dy: number): [number, number] {
+  if (!layer.parent || typeof PM.worldMatrix !== 'function') return [dx, dy];
+  const parent = PM.L?.(layer.parent);
+  if (!parent) return [dx, dy];
+  const matrix = PM.worldMatrix(parent, PM.time);
+  if (!Array.isArray(matrix) || matrix.length < 4) return [dx, dy];
+  const determinant = matrix[0] * matrix[3] - matrix[1] * matrix[2];
+  if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-9) return [0, 0];
+  return [
+    (dx * matrix[3] - dy * matrix[2]) / determinant,
+    (dy * matrix[0] - dx * matrix[1]) / determinant,
+  ];
+}
+
+const NUDGE_HISTORY_GROUP = 'keyboard-nudge';
+const nudgeBatches = new WeakMap<object, { mark: any; timer: ReturnType<typeof setTimeout> }>();
+
+function beginNudgeHistory(PM: PMRegistry): boolean {
+  if (!PM.hist?.mark || !PM.hist?.squash || nudgeBatches.has(PM as object)) return false;
+  nudgeBatches.set(PM as object, {
+    mark: PM.hist.mark(), timer: 0 as unknown as ReturnType<typeof setTimeout>,
+  });
+  return true;
+}
+
+function coalesceNudgeHistory(PM: PMRegistry): void {
+  const batch = nudgeBatches.get(PM as object);
+  if (!batch) {
+    return;
+  }
+  clearTimeout(batch.timer);
+  batch.timer = setTimeout(() => {
+    PM.hist.squash(batch.mark, 'Nudge selection', NUDGE_HISTORY_GROUP);
+    nudgeBatches.delete(PM as object);
+  }, 180);
+}
+
+/** Move selected layer positions through atomic, keyframe-aware source edits. */
+export function nudgeSelection(PM: PMRegistry, dx?: any, dy?: any): unknown {
+  if (typeof dx !== 'number' || typeof dy !== 'number'
+    || !Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return false;
+  const commands: any[] = [];
+  for (const layer of selectedStackLayers(PM).filter((item: any) => !item.lock)) {
+    const [localX, localY] = worldNudgeToLocal(PM, layer, dx, dy);
+    for (const [path, delta] of [['position.x', localX], ['position.y', localY]] as const) {
+      if (!delta || !layer.p?.[path]) continue;
+      const current = typeof PM.ev === 'function' ? PM.ev(layer, path, PM.time) : layer.p[path].v;
+      if (!Number.isFinite(Number(current))) continue;
+      commands.push({
+        type: 'set_property', target: layer.id, path, value: Number(current) + delta,
+        time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human',
+      });
+    }
+  }
+  if (!commands.length || !PM.Edit?.apply) return false;
+  const meta = { label: 'Nudge selection', origin: 'command', historyGroup: NUDGE_HISTORY_GROUP };
+  const startedBatch = beginNudgeHistory(PM);
+  const result = PM.Edit.apply(commands, meta);
+  if (result?.ok) coalesceNudgeHistory(PM);
+  else if (startedBatch) nudgeBatches.delete(PM as object);
+  return result;
+}
+
+const VIEWER_MIN_ZOOM = .05;
+const VIEWER_MAX_ZOOM = 8;
+
+export function setViewerZoom(PM: PMRegistry, zoom: any): unknown {
+  const viewer = PM.Viewer;
+  if (!viewer || typeof zoom !== 'number' || !Number.isFinite(zoom)) return false;
+  const clamp = typeof PM.clamp === 'function'
+    ? PM.clamp.bind(PM)
+    : (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+  const wasFit = viewer.fit === true;
+  viewer.fit = false;
+  if (wasFit && Array.isArray(viewer.pan)) viewer.pan = [0, 0];
+  viewer.zoom = clamp(zoom, VIEWER_MIN_ZOOM, VIEWER_MAX_ZOOM);
+  viewer.layout?.();
+  return viewer.zoom;
+}
+
+export function zoomViewer(PM: PMRegistry, factor: any): unknown {
+  const viewer = PM.Viewer;
+  if (!viewer || typeof factor !== 'number' || !Number.isFinite(factor) || factor <= 0) return false;
+  const current = Number.isFinite(Number(viewer.shown)) ? Number(viewer.shown)
+    : Number.isFinite(Number(viewer.zoom)) ? Number(viewer.zoom) : 1;
+  return setViewerZoom(PM, current * factor);
 }
 
 /** Legacy `{ id, label, kb, run, cat }` façade over one kernel command. */
@@ -306,15 +694,21 @@ export function deleteSelection(PM: PMRegistry): unknown {
   return PM.Edit.apply({ type: 'delete_layers', targets: PM.sel.layers }, { label: 'Delete', origin: 'command' });
 }
 
+/** Replace the legacy command set as one in-place registry update during HMR. */
+export function reloadShortcuts(PM: PMRegistry): void {
+  const kernel = ensureKernel(PM);
+  const batch = kernel.commands.batchChanges();
+  try {
+    kernel.commands.disposeOwner(LEGACY_OWNER);
+    install(PM);
+    kernel.commands.demoteOwner(LEGACY_OWNER);
+  } finally {
+    batch.dispose();
+  }
+}
+
 if (import.meta.hot) {
   import.meta.hot.accept(next => {
-    if (!next || !window.PM?.commands) return;
-    if (window.PM.commands.delete) window.PM.commands.delete.run = () => next.deleteSelection(window.PM);
-    if (!window.PM.commands.settings) {
-      window.PM.commands.settings = {
-        id: 'settings', label: 'Settings…', kb: '⌘,', cat: 'View',
-        run: () => window.PM?.SettingsUI?.open?.()
-      };
-    }
+    if (next && window.PM) next.reloadShortcuts(window.PM);
   });
 }

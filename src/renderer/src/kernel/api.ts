@@ -94,6 +94,8 @@ export interface KeybindingDefinition {
   args?: unknown[];
   /** Fire even when a text field is focused (default false). */
   inFields?: boolean;
+  /** Fire on browser key-repeat events (default false); use for continuous actions only. */
+  repeat?: boolean;
   /**
    * Match when the chord's modifiers are a subset of the pressed modifiers,
    * and treat cmd/ctrl as equivalent — legacy keymap semantics.

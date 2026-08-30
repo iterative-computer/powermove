@@ -59,6 +59,13 @@ describe('chordOfEvent', () => {
     expect(chordOfEvent(event({ key: 'A', code: 'KeyA', shiftKey: true }))).toBe('shift+a');
   });
 
+  it('falls back to physical brackets when shift produces braces', () => {
+    expect(chordOfEvent(event({ key: '{', code: 'BracketLeft', metaKey: true, shiftKey: true }))).toBe('cmd+shift+[');
+    expect(chordOfEvent(event({ key: '}', code: 'BracketRight', ctrlKey: true, shiftKey: true }))).toBe('ctrl+shift+]');
+    // Unshifted bracket keys continue to use event.key directly.
+    expect(chordOfEvent(event({ key: '[', code: 'BracketLeft', metaKey: true }))).toBe('cmd+[');
+  });
+
   it('returns null for bare modifiers and empty keys', () => {
     expect(chordOfEvent(event({ key: 'Shift', shiftKey: true }))).toBeNull();
     expect(chordOfEvent(event({ key: 'Meta', metaKey: true }))).toBeNull();

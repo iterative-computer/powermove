@@ -1,14 +1,23 @@
 import type { KeybindingDefinition } from 'powermove';
 
 /**
- * Every keybinding implemented by the original editor keydown handler.
- * `cmd+…` rows also have `ctrl+…` equivalents because the old handler tested
- * `metaKey || ctrlKey`.
+ * The built-in editor keymap: legacy AE-style controls plus strict
+ * editor-workflow shortcuts. `cmd+…` rows also have `ctrl+…` equivalents so
+ * the same map works on macOS and Windows/Linux.
  */
 export const KEYMAP_DEFAULT: KeybindingDefinition[] = [];
 
-const bind = (key: string, command: string, looseModifiers = false): void => {
-  KEYMAP_DEFAULT.push({ key, command, priority: 100, ...(looseModifiers ? { looseModifiers: true } : {}) });
+const REPEATABLE_COMMANDS = new Set(['nextFrame', 'prevFrame', 'nudgeSelection']);
+
+const bind = (key: string, command: string, looseModifiers = false, args?: unknown[]): void => {
+  KEYMAP_DEFAULT.push({
+    key,
+    command,
+    ...(args ? { args } : {}),
+    priority: 100,
+    ...(REPEATABLE_COMMANDS.has(command) ? { repeat: true } : {}),
+    ...(looseModifiers ? { looseModifiers: true } : {})
+  });
 };
 
 /* Modifier chords: the old `if (m && …)` chain. `m` was meta OR ctrl. */
@@ -30,17 +39,59 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
   ['o', 'open', true], ['shift+o', 'open', true],
   ['e', 'export', true], ['shift+e', 'export', true],
   ['p', 'projects', false],
-  ['n', 'newProject', true], ['shift+n', 'newProject', true],
+  ['n', 'newProject', false],
   /* `if (k === 'F9') go(m ? 'easeLinear' : …)` — meta wins over shift. */
   ['f9', 'easeLinear', true], ['shift+f9', 'easeLinear', true]
 ];
 for (const [chord, command, looseModifiers] of MOD_CHORDS) {
-  bind(`cmd+${chord}`, command, looseModifiers);
-  bind(`ctrl+${chord}`, command, looseModifiers);
+  /* File commands are exact so a shifted chord is never caught by the plain
+     command's legacy subset matcher. Cmd/Ctrl+Shift+E remains an explicit
+     export alias for now. */
+  const exactFileChord = command === 'export' || command === 'newProject';
+  const loose = exactFileChord ? false : looseModifiers;
+  bind(`cmd+${chord}`, command, loose);
+  bind(`ctrl+${chord}`, command, loose);
   if (command === 'save' || command === 'saveAs' || command === 'settings') {
     KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 1]!.inFields = true;
     KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 2]!.inFields = true;
   }
+}
+
+/* Exact primary-modifier shortcuts from the editor-style workflow. Keep
+   these strict: an extra modifier should not turn into an accidental alias. */
+const PRO_CHORDS: Array<[string, string]> = [
+  ['b', 'split'],
+  ['x', 'cutLayers'],
+  ['shift+h', 'toggleVisibility'],
+  ['=', 'zoomIn'],
+  /* KeyboardEvent.key reports Shift+= as `+`, so retain the shift modifier
+     while spelling the literal plus key as a trailing `+`. */
+  ['shift++', 'zoomIn'],
+  ['-', 'zoomOut'],
+  ['0', 'fitComposition'],
+  ['1', 'actualSize'],
+  [']', 'bringForward'],
+  ['[', 'sendBackward'],
+  ['shift+]', 'bringToFront'],
+  ['shift+[', 'sendToBack']
+];
+for (const [chord, command] of PRO_CHORDS) {
+  bind(`cmd+${chord}`, command);
+  bind(`ctrl+${chord}`, command);
+}
+
+/* Alt-drag-style keyboard nudging. Register these before the legacy loose
+   transport aliases so the exact nudge chord wins when both describe the same
+   physical key. Plain and Shift arrows below retain timeline semantics. */
+const NUDGE_KEYS: Array<[string, [number, number]]> = [
+  ['left', [-1, 0]],
+  ['right', [1, 0]],
+  ['up', [0, -1]],
+  ['down', [0, 1]]
+];
+for (const [key, delta] of NUDGE_KEYS) {
+  bind(`alt+${key}`, 'nudgeSelection', false, delta);
+  bind(`alt+shift+${key}`, 'nudgeSelection', false, [delta[0] * 10, delta[1] * 10]);
 }
 
 /* The old `switch (k)` ran before its alt/meta guard, so these work bare or
