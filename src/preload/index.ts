@@ -9,6 +9,7 @@ import {
   type ConsentResult,
   type FileSaveResult,
   type MenuCommand,
+  type NativeEditAction,
   type PowermoveBridge,
   type StoreErrorEvent,
   type StoreSnapshot
@@ -93,6 +94,7 @@ const bridge: PowermoveBridge = {
     ipcRenderer.send(IPC.log, { level, text });
   },
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
+  nativeEdit: (action: NativeEditAction) => ipcRenderer.send(IPC.nativeEdit, action),
   onMenuCommand: (cb) => {
     const listener = (_event: IpcRendererEvent, command: MenuCommand): void => cb(command);
     ipcRenderer.on(IPC.menuCommand, listener);

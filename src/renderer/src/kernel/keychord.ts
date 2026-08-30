@@ -102,7 +102,10 @@ export function normalizeChord(input: string): string {
  * Normalise a KeyboardEvent to chord syntax, or null when only modifiers are
  * held. Letters/digits/punctuation come from `event.key`; when shift turns a
  * digit row key into a symbol we fall back to the physical `event.code` so
- * `shift+1` stays `shift+1` instead of becoming `shift+!`.
+ * `shift+1` stays `shift+1` instead of becoming `shift+!`. The same
+ * physical-key fallback handles US-layout bracket shortcuts: Shift+[ and
+ * Shift+] arrive as `{` and `}` in `event.key`, but their intended shortcut
+ * keys remain `[` and `]`.
  */
 export function chordOfEvent(event: KeyboardEvent): string | null {
   const raw = event?.key;
@@ -112,6 +115,9 @@ export function chordOfEvent(event: KeyboardEvent): string | null {
   let key = raw.length > 1 ? normalizeKeyName(raw) : raw.toLowerCase();
   const code = typeof event.code === 'string' ? event.code : '';
   if (event.shiftKey && /^Digit\d$/.test(code) && !/^[a-z0-9]$/.test(key)) key = code.slice(5);
+  if (event.shiftKey && (code === 'BracketLeft' || code === 'BracketRight')) {
+    key = code === 'BracketLeft' ? '[' : ']';
+  }
   if (raw === ' ') key = 'space';
 
   const parts: string[] = [];
