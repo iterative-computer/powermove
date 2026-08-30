@@ -129,7 +129,7 @@ describe('legacy engine install', () => {
     expect(audioCalls.at(-1)).toEqual(['pause']);
   });
 
-  it('resynchronizes a video after a delayed decoder start and during later drift', async () => {
+  it('resynchronizes a delayed decoder once without repeatedly seeking ordinary drift', async () => {
     const media = delayedVideo();
     const layer = { id: 'video-1', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'asset-1', speed: 1, trim: 0 } };
     const { PM, runFrame } = engine({ layer, media });
@@ -143,6 +143,21 @@ describe('legacy engine install', () => {
 
     media.el.currentTime = 0;
     runFrame(750);
+    expect(media.el.currentTime).toBe(0);
+  });
+
+  it('seeks a playing video after an explicit timeline jump', async () => {
+    const media = delayedVideo();
+    const layer = { id: 'video-1', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, runFrame } = engine({ layer, media });
+
+    PM.play();
+    runFrame(16);
+    media.finishPlay();
+    await Promise.resolve();
+    PM.setTime(2, { raw: true });
+    runFrame(32);
+
     expect(media.el.currentTime).toBeCloseTo(PM.time);
   });
 
