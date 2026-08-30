@@ -26,6 +26,20 @@ export function effectParamValue(PM: PMRegistry, layer: any, effect: any, param:
   return value == null ? param.def : value;
 }
 
+/** Track frames the browser actually presents, rather than decoder totals that
+    can advance in bursts before the corresponding frame is available to WebGL. */
+export function trackPresentedVideoFrames(el: any, onFrame: () => void): { version: number; supported: boolean } {
+  const state = { version: 0, supported: typeof el?.requestVideoFrameCallback === 'function' };
+  if (!state.supported) return state;
+  const presented = () => {
+    state.version++;
+    onFrame();
+    el.requestVideoFrameCallback(presented);
+  };
+  el.requestVideoFrameCallback(presented);
+  return state;
+}
+
 export function install(PM: PMRegistry): void {
 
 const GL: any = {
@@ -40,6 +54,19 @@ const MAX_TEXTURE_BYTES = PM.Memory?.budget?.('textures') || 192 * 1024 * 1024;
 let poolBytes = 0;
 let textureBytes = 0;
 let resourceTick = 0;
+const presentedVideoFrames = new WeakMap<any, { version: number; supported: boolean }>();
+
+function videoTextureVersion(el: any): number {
+  let state = presentedVideoFrames.get(el);
+  if (!state) {
+    state = trackPresentedVideoFrames(el, () => PM.invalidate('render'));
+    presentedVideoFrames.set(el, state);
+  }
+  if (state.supported) return state.version;
+  return Number(el.getVideoPlaybackQuality?.().totalVideoFrames
+    ?? el.webkitDecodedFrameCount
+    ?? Math.round(Number(el.currentTime || 0) * 1000));
+}
 
 /* ── program cache ─────────────────────────────────────── */
 function shader(gl: any, type: any, src: any) {
@@ -312,9 +339,7 @@ function contentQuad(L: any, T: any, W: any, H: any) {
       if (!PM.playing && Math.abs(el.currentTime - vt) > .02) { try { el.currentTime = vt; } catch (e) { } }
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
-    const videoVersion = L.type === 'video'
-      ? Number(el.getVideoPlaybackQuality?.().totalVideoFrames ?? el.webkitDecodedFrameCount ?? Math.round(Number(el.currentTime || 0) * 1000))
-      : 1;
+    const videoVersion = L.type === 'video' ? videoTextureVersion(el) : 1;
     const tex = texFor('a:' + a.id, el, { version: videoVersion });
     const bw = d.w || W, bh = d.h || H;
     let uv = [0, 0, 1, 1];
