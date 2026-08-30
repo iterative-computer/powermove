@@ -35,6 +35,11 @@ const GL: any = {
   errors: new Map(),
 };
 PM.GL = GL;
+const MAX_FBO_BYTES = PM.Memory?.budget?.('framebuffers') || 384 * 1024 * 1024;
+const MAX_TEXTURE_BYTES = PM.Memory?.budget?.('textures') || 192 * 1024 * 1024;
+let poolBytes = 0;
+let textureBytes = 0;
+let resourceTick = 0;
 
 /* ── program cache ─────────────────────────────────────── */
 function shader(gl: any, type: any, src: any) {
@@ -119,7 +124,7 @@ function grab(w: any, h: any) {
   const gl = GL.gl;
   for (let i = 0; i < GL.pool.length; i++) {
     const f = GL.pool[i];
-    if (!f.busy && f.w === w && f.h === h) { f.busy = true; return f; }
+    if (!f.busy && f.w === w && f.h === h) { f.busy = true; f.used = ++resourceTick; return f; }
   }
   const tex = gl.createTexture();
   bindTex(0, tex);
@@ -132,11 +137,27 @@ function grab(w: any, h: any) {
   const fb = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  const f = { fb, tex, w, h, busy: true };
+  const f = { fb, tex, w, h, busy: true, used: ++resourceTick, bytes: Math.max(0, w * h * 8) };
   GL.pool.push(f);
+  poolBytes += f.bytes;
   return f;
 }
 const free = (f: any) => { if (f) f.busy = false; };
+function disposeFbo(f: any) {
+  if (!f) return;
+  GL.gl?.deleteFramebuffer?.(f.fb);
+  GL.gl?.deleteTexture?.(f.tex);
+  poolBytes = Math.max(0, poolBytes - (f.bytes || 0));
+}
+function trimPool(targetBytes: number = MAX_FBO_BYTES) {
+  const freeEntries = GL.pool.filter((f: any) => !f.busy).sort((a: any, b: any) => a.used - b.used);
+  for (const f of freeEntries) {
+    if (poolBytes <= targetBytes || GL.pool.length <= 1) break;
+    const index = GL.pool.indexOf(f);
+    if (index >= 0) GL.pool.splice(index, 1);
+    disposeFbo(f);
+  }
+}
 /* Texture units that still reference a pooled texture from an earlier pass
    would form a framebuffer/texture feedback loop once that FBO is bound again
    (Chromium rejects the draw; WebKit silently tolerated it). */
@@ -155,13 +176,22 @@ function clear(r = 0, g = 0, b = 0, a = 0) {
 const IDENT = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 function m3(m: any) { return new Float32Array([m[0], m[1], 0, m[2], m[3], 0, m[4], m[5], 1]); }
 function fullQuad(w: any, h: any) { return new Float32Array([w, 0, 0, 0, h, 0, 0, 0, 1]); }
+function outputScale(W: number, H: number): [number, number] {
+  const comp = PM.curComp?.() || PM.proj;
+  return [W / Math.max(1, Number(comp?.w) || W), H / Math.max(1, Number(comp?.h) || H)];
+}
+function scaledWorld(layer: any, time: any, W: number, H: number): [number, number, number, number, number, number] {
+  const world = PM.worldMatrix(layer, time);
+  const [sx, sy] = outputScale(W, H);
+  return [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, world[4] * sx, world[5] * sy];
+}
 
 /* ── content textures ──────────────────────────────────── */
 function texFor(key: any, source: any, opts: any = {}) {
   const gl = GL.gl;
   let t = GL.texes.get(key);
   if (!t) {
-    t = { tex: gl.createTexture(), v: -1 };
+    t = { tex: gl.createTexture(), v: -1, bytes: 0, used: 0 };
     bindTex(0, t.tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -169,6 +199,7 @@ function texFor(key: any, source: any, opts: any = {}) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     GL.texes.set(key, t);
   }
+  t.used = ++resourceTick;
   if (opts.version !== undefined && t.v === opts.version) return t.tex;
   bindTex(0, t.tex);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
@@ -176,12 +207,28 @@ function texFor(key: any, source: any, opts: any = {}) {
   try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch (e) { }
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   t.v = opts.version === undefined ? t.v : opts.version;
+  const width = Number(source?.videoWidth || source?.naturalWidth || source?.width || 0);
+  const height = Number(source?.videoHeight || source?.naturalHeight || source?.height || 0);
+  const bytes = Math.max(0, width * height * 4);
+  textureBytes += bytes - (t.bytes || 0);
+  t.bytes = bytes;
   return t.tex;
+}
+function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES) {
+  const entries = [...GL.texes.entries()].sort((a: any, b: any) => a[1].used - b[1].used);
+  for (const [key, entry] of entries) {
+    if (textureBytes <= targetBytes || GL.texes.size <= 1) break;
+    if (boundTex.includes(entry.tex)) continue;
+    GL.gl?.deleteTexture?.(entry.tex);
+    textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
+    GL.texes.delete(key);
+  }
 }
 GL.dropTextures = (prefix = '') => {
   for (const [key, entry] of GL.texes) {
     if (!key.startsWith(prefix)) continue;
     if (GL.gl && entry.tex) GL.gl.deleteTexture(entry.tex);
+    textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
     GL.texes.delete(key);
   }
 };
@@ -217,9 +264,24 @@ GL.init = (canvas: any) => {
 GL.resize = (w: any, h: any) => {
   if (GL.canvas.width === w && GL.canvas.height === h) return;
   GL.canvas.width = w; GL.canvas.height = h;
-  GL.pool.forEach((f: any) => { GL.gl.deleteFramebuffer(f.fb); GL.gl.deleteTexture(f.tex); });
+  GL.pool.forEach((f: any) => disposeFbo(f));
   GL.pool.length = 0;
 };
+
+GL.memoryStats = () => ({
+  framebuffers: { entries: GL.pool.length, bytes: poolBytes, maxBytes: MAX_FBO_BYTES },
+  textures: { entries: GL.texes.size, bytes: textureBytes, maxBytes: MAX_TEXTURE_BYTES },
+});
+PM.Memory?.register?.('framebuffers', {
+  bytes: () => poolBytes,
+  entries: () => GL.pool.length,
+  trim: (target: number) => trimPool(target),
+});
+PM.Memory?.register?.('textures', {
+  bytes: () => textureBytes,
+  entries: () => GL.texes.size,
+  trim: (target: number) => trimTextures(target),
+});
 
 /* ── layer content ─────────────────────────────────────── */
 function contentQuad(L: any, T: any, W: any, H: any) {
@@ -245,7 +307,10 @@ function contentQuad(L: any, T: any, W: any, H: any) {
       if (!PM.playing && Math.abs(el.currentTime - vt) > .02) { try { el.currentTime = vt; } catch (e) { } }
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
-    const tex = texFor('a:' + a.id, el, { version: L.type === 'video' ? Math.random() : 1 });
+    const videoVersion = L.type === 'video'
+      ? Number(el.getVideoPlaybackQuality?.().totalVideoFrames ?? el.webkitDecodedFrameCount ?? Math.round(Number(el.currentTime || 0) * 1000))
+      : 1;
+    const tex = texFor('a:' + a.id, el, { version: videoVersion });
     const bw = d.w || W, bh = d.h || H;
     let uv = [0, 0, 1, 1];
     if (d.fit === 'cover' || d.fit === 'contain') {
@@ -261,7 +326,11 @@ function contentQuad(L: any, T: any, W: any, H: any) {
     return { tex, w: bw, h: bh, ax: bw / 2, ay: bh / 2, uv };
   }
   if (L.type === 'shader') {
-    const w = Math.min(d.w || W, 4096), hh = Math.min(d.h || H, 4096);
+    const comp = PM.curComp?.() || PM.proj;
+    const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
+    const [sx, sy] = outputScale(W, H);
+    const targetW = Math.min(4096, Math.max(2, Math.round(w * sx)));
+    const targetH = Math.min(4096, Math.max(2, Math.round(hh * sy)));
     const key = 'sh:' + L.id;
     const codeKey = key + ':' + hashStr(d.code);
     const p = program(codeKey, PM.SHADER_HEADER + '\n' + d.code, PM.VERT);
@@ -271,7 +340,7 @@ function contentQuad(L: any, T: any, W: any, H: any) {
        before drawContent samples the result (otherwise the draw reads and writes
        the same texture) */
     const target = boundFbo;
-    const f = grab(Math.max(2, Math.round(w)), Math.max(2, Math.round(hh)));
+    const f = grab(targetW, targetH);
     bind(f); clear(0, 0, 0, 0);
     const g = use(p);
     g.u('u_m', fullQuad(f.w, f.h)); g.u('u_res', f.w, f.h); g.u('u_uv', 0, 0, 1, 1);
@@ -296,19 +365,22 @@ function contentQuad(L: any, T: any, W: any, H: any) {
   if (L.type === 'precomp') {
     const sub = PM.compOf(L);
     if (!sub || pcDepth >= PC_MAX_DEPTH) return null;
-    const w = Math.max(2, Math.round(d.w || W)), hh = Math.max(2, Math.round(d.h || H));
+    const comp = PM.curComp?.() || PM.proj;
+    const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
+    const [sx, sy] = outputScale(W, H);
+    const targetW = Math.max(2, Math.round(w * sx)), targetH = Math.max(2, Math.round(hh * sy));
     const target = boundFbo;
-    const f = grab(w, hh);
+    const f = grab(targetW, targetH);
     bind(f); clear(0, 0, 0, 0);
     pmScopePush(sub);
     try {
-      const inner = GL.renderProject(sub, T - L.from, w, hh, { transparent: true });
+      const inner = GL.renderProject(sub, T - L.from, targetW, targetH, { transparent: true });
       /* blit the nested result into our FBO so ownership stays with this level */
       bind(f);
       const p = program('copyA', PM.FRAG_DRAW);
       const g = use(p);
       bindTex(0, inner.tex); setI(p, 'u_tex', 0);
-      g.u('u_m', fullQuad(w, hh)); g.u('u_res', w, hh); g.u('u_uv', 0, 0, 1, 1);
+      g.u('u_m', fullQuad(targetW, targetH)); g.u('u_res', targetW, targetH); g.u('u_uv', 0, 0, 1, 1);
       g.u('u_alpha', 1); setI(p, 'u_fromFbo', 1);
       /* Integrator fix (Phase 3b): the legacy source referenced an undeclared `gl`
          here, so every precomp render threw a ReferenceError. Use the context
@@ -332,7 +404,7 @@ function hashStr(s: any) { let h = 5381; for (let i = 0; i < s.length; i++) h = 
 function drawContent(L: any, T: any, W: any, H: any, alpha: any) {
   const c: any = contentQuad(L, T, W, H);
   if (!c) return false;
-  const world = PM.worldMatrix(L, T);
+  const world = scaledWorld(L, T, W, H);
   const M = PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
   if (c.solid) {
     const p = program('solid', PM.FRAG_SOLID);
@@ -402,7 +474,7 @@ function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
   const gl = GL.gl;
   const masks = (L.masks || []).filter((m: any) => m && m.on !== false && m.p);
   if (!masks.length) return srcF;
-  const world = PM.worldMatrix(L, T);
+  const world = scaledWorld(L, T, W, H);
   const det = world[0] * world[3] - world[1] * world[2];
   if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return srcF;
   /* inverse of the 2×3 world matrix */
@@ -639,6 +711,8 @@ GL.render = (T: any, opt: any = {}) => {
   gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
   free(acc);
   GL.pool.forEach((f: any) => f.busy = false);
+  trimPool();
+  trimTextures();
   GL.stats.ms = window.performance.now() - t0;
 };
 
@@ -656,6 +730,8 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
   free(acc);
   GL.pool.forEach((f: any) => f.busy = false);
+  trimPool();
+  trimTextures();
   return px;
 };
 

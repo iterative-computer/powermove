@@ -3,7 +3,7 @@ import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
 const AUDIO_EXTENSIONS: any = new Set(['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'aif', 'aiff']);
-const MAX_DECODED_BYTES: any = 320 * 1024 * 1024;
+const MAX_DECODED_BYTES: any = PM.Memory?.budget?.('audio') || 256 * 1024 * 1024;
 const MAX_PRECOMP_DEPTH: any = 8;
 const LIVE_LOOKAHEAD: any = 1;
 const DRIFT_TOLERANCE: any = .075;
@@ -18,6 +18,9 @@ const state: any = {
   running: false,
   generation: 0,
 };
+let audioCacheProject: any = null;
+let audioCache: any[] | null = null;
+let audioById: Map<string, any> | null = null;
 
 const clamp: any = (value: any, min: any, max: any) => Math.max(min, Math.min(max, value));
 const finite: any = (value: any, fallback: any = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -27,6 +30,7 @@ const finite: any = (value: any, fallback: any = 0) => Number.isFinite(Number(va
    more than once without its voices colliding. */
 function audioLayers(project: any = PM.proj) {
   if (!project || !Array.isArray(project.layers)) return [];
+  if (project === PM.proj && project === audioCacheProject && audioCache) return audioCache;
   const output: any = [];
   const root: any = project;
   const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any) => {
@@ -55,7 +59,18 @@ function audioLayers(project: any = PM.proj) {
     }
   };
   visit(project, 0, 0, Infinity, '', 0);
+  if (project === PM.proj) {
+    audioCacheProject = project;
+    audioCache = output;
+    audioById = new Map(output.map((layer: any) => [layer.id, layer]));
+  }
   return output;
+}
+
+function invalidateAudioIndex() {
+  audioCacheProject = null;
+  audioCache = null;
+  audioById = null;
 }
 
 function accepts(file: any) {
@@ -151,15 +166,21 @@ function activeAssetIds() {
   ]);
 }
 
-function trimDecodedCache() {
+function decodedUsage() {
+  if (!PM.assets?.map) return { bytes: 0, entries: 0 };
+  const decoded: any = [...PM.assets.map.values()].filter((asset: any) => asset && asset.kind === 'audio' && asset.audioBuffer);
+  return { bytes: decoded.reduce((sum: any, asset: any) => sum + decodedBytes(asset.audioBuffer), 0), entries: decoded.length };
+}
+
+function trimDecodedCache(targetBytes: any = MAX_DECODED_BYTES) {
   if (!PM.assets || !PM.assets.map) return;
   const decoded: any = [...PM.assets.map.values()].filter((asset: any) => asset && asset.kind === 'audio' && asset.audioBuffer);
   let total: any = decoded.reduce((sum: any, asset: any) => sum + decodedBytes(asset.audioBuffer), 0);
-  if (total <= MAX_DECODED_BYTES || decoded.length < 2) return;
+  if (total <= targetBytes || decoded.length < 2) return;
   const active: any = activeAssetIds();
   decoded.sort((a: any, b: any) => finite(a.audioUsedAt) - finite(b.audioUsedAt));
   for (const asset of decoded) {
-    if (total <= MAX_DECODED_BYTES) break;
+    if (total <= targetBytes) break;
     if (active.has(asset.id) || asset.audioDecoding) continue;
     total -= decodedBytes(asset.audioBuffer);
     asset.audioBuffer = null;
@@ -417,7 +438,8 @@ function requestDecode(layer: any, asset: any, generation: any) {
   state.decodeRequests.set(layer.id, request);
   decodeAsset(asset).then((buffer: any) => {
     if (!buffer || !state.running || generation !== state.generation) return;
-    const current: any = audioLayers().find((item: any) => item.id === layer.id);
+    audioLayers();
+    const current: any = audioById?.get(layer.id);
     if (!current || current.d.asset !== asset.id || !PM.assets || PM.assets.get(asset.id) !== asset) return;
     sync(PM.time, true);
   }).catch((error: any) => {
@@ -782,8 +804,14 @@ const Audio: any = PM.Audio = {
   }),
 };
 
-PM.bus.on('layers', reconcile);
+PM.Memory?.register?.('audio', {
+  bytes: () => decodedUsage().bytes,
+  entries: () => decodedUsage().entries,
+  trim: (target: number) => trimDecodedCache(target),
+});
+
+PM.bus.on('layers', () => { invalidateAudioIndex(); reconcile(); });
 PM.bus.on('assets', reconcile);
-PM.bus.on('project', reconcileProject);
+PM.bus.on('project', () => { invalidateAudioIndex(); reconcileProject(); });
 publishState();
 }

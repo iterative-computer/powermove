@@ -37,6 +37,7 @@ function stringIds(values: any) {
 PM.resolveSelectedKeys = () => {
   const ids = stringIds(PM.sel?.keys);
   if (!ids.length || !PM.proj) return [];
+  if (PM.ProjectIndex) return ids.map((id: any) => PM.ProjectIndex.keyframe(id)).filter(Boolean);
   const byId = new Map(keyframes(PM.proj).map(key => [key.i, key]));
   return ids.map((id: any) => byId.get(id)).filter(Boolean);
 };
@@ -45,6 +46,7 @@ PM.replaceProject = (next: any, opts: any = {}) => {
   const selection = opts.selection || PM.sel || {};
   PM.proj = next;
   PM.projGeneration++;
+  PM.ProjectIndex?.invalidate();
 
   const layerIds = new Set((next?.layers || []).map((layer: any) => layer.id));
   PM.sel.layers = stringIds(selection.layers).filter((id: any) => layerIds.has(id));

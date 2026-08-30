@@ -1,30 +1,37 @@
 import { LIMITS } from '../../../../shared/ipc';
+import { decodeProjectContainer, encodeProjectContainer } from '../../../../shared/project-container';
 
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any): Promise<boolean> };
 
 /** Saved files own their media; session-local blob URLs cannot survive reopening. */
-export async function packProjectFile(snapshot: string, store: MediaStore): Promise<string> {
-  const document = JSON.parse(snapshot);
+export async function packProjectFile(snapshot: string | any, store: MediaStore): Promise<Uint8Array> {
+  const document = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
   const project = document.proj || document;
-  const media: Record<string, { type: string; data: string }> = {};
-  let estimatedBytes = new TextEncoder().encode(snapshot).length;
+  const media: Array<{ id: string; type: string; data: Uint8Array }> = [];
+  let estimatedBytes = new TextEncoder().encode(JSON.stringify(document)).length;
   for (const [id, asset] of Object.entries<any>(project.assets || {})) {
     const blob = await store.get(asset);
     if (!blob) throw new Error(`The original media for “${asset.name || id}” is missing. Reimport it before saving.`);
-    estimatedBytes += Math.ceil(blob.size / 3) * 4 + 1024;
+    estimatedBytes += blob.size + 1024;
     if (estimatedBytes > LIMITS.fileSaveBytes) throw new Error('This project is too large to save as one file (256 MB maximum).');
-    const data = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
-      reader.onerror = () => reject(new Error(`Could not read ${asset.name || id}.`));
-      reader.readAsDataURL(blob);
-    });
-    media[id] = { type: blob.type || asset.type || '', data };
+    const data = new Uint8Array(await blob.arrayBuffer());
+    media.push({ id, type: blob.type || asset.type || '', data });
   }
-  return JSON.stringify({ ...document, media });
+  return encodeProjectContainer(document, media);
 }
 
 export async function restoreProjectFileMedia(document: any, store: MediaStore): Promise<void> {
+  if (document?.containerMedia) {
+    const project = document.proj || document;
+    for (const source of document.containerMedia as Array<{ id: string; type: string; data: Uint8Array }>) {
+      const asset = project.assets?.[source.id];
+      if (!asset || !(source.data instanceof Uint8Array)) continue;
+      if (!await store.put(source.id, new Blob([new Uint8Array(source.data)], { type: source.type }), asset)) {
+        throw new Error(`Could not restore ${asset.name || source.id}. Check available disk space.`);
+      }
+    }
+    return;
+  }
   if (!document.media) return; // Older files still use the local media store.
   const project = document.proj || document;
   const entries: Array<{ id: string; asset: any; blob: Blob }> = [];
@@ -50,4 +57,10 @@ export async function restoreProjectFileMedia(document: any, store: MediaStore):
   for (const { id, asset, blob } of entries) {
     if (!await store.put(id, blob, asset)) throw new Error(`Could not restore ${asset.name || id}. Check available disk space.`);
   }
+}
+
+export function unpackProjectFile(input: string | Uint8Array | ArrayBuffer): any {
+  const decoded = decodeProjectContainer(input);
+  if (decoded.media.length) decoded.document.containerMedia = decoded.media;
+  return decoded.document;
 }

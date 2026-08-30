@@ -40,8 +40,9 @@ function ensureMediaPaused(el: any) {
   if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
 }
 function scrubVideos(T: any) {
-  for (const L of PM.proj.layers) {
-    if (L.type !== 'video' || !L.d.asset) continue;
+  const videos = PM.ProjectIndex?.layersOfType?.('video', PM.proj) || PM.proj.layers.filter((layer: any) => layer.type === 'video');
+  for (const L of videos) {
+    if (!L.d.asset) continue;
     const a = PM.assets.get(L.d.asset); if (!a) continue;
     const inRange = PM.active(L, T);
     /* playback position must respect layer speed, matching the compositor's vt math */
@@ -134,12 +135,13 @@ window.requestAnimationFrame(frame);
 ['layers', 'sel', 'project', 'assets', 'quality'].forEach(ev => PM.bus.on(ev, () => PM.invalidate()));
 
 /* ── offscreen frame render (agent `look`, exporter, thumbnails) ── */
-PM.renderFrameTo = (T: any, w: any, h: any) => {
+PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}) => {
   const cv = PM.GL.canvas;
   const ow = cv.width, oh = cv.height, oq = PM.quality;
   PM.GL.resize(w, h);
   PM.quality = 1;
-  PM.GL.render(T, { mblur: true, mbSamples: 16, shutter: PM.proj.shutter || .5 });
+  const motionBlur = options.mblur !== false;
+  PM.GL.render(T, { mblur: motionBlur, mbSamples: motionBlur ? Math.max(1, Number(options.mbSamples) || 16) : 1, shutter: PM.proj.shutter || .5 });
   const out = window.document.createElement('canvas');
   out.width = w; out.height = h;
   (out.getContext('2d') as any).drawImage(cv, 0, 0);

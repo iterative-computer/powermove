@@ -181,8 +181,8 @@ async function run(opts: any) {
   if (opts.format === 'json') {
     try {
       await PM.app?.importQueue;
-      const text = await packProjectFile(PM.serialize(), PM.MediaStore);
-      PM.download(new window.Blob([text], { type: 'application/json' }), (p.name || 'powermove') + '.pmv');
+      const data = await packProjectFile(PM.serialize(), PM.MediaStore);
+      PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), (p.name || 'powermove') + '.pmv');
       return PM.toast('Project exported');
     } catch (error) { return PM.toast('Could not export project: ' + (error instanceof Error ? error.message : String(error)), 6000); }
   }
@@ -403,14 +403,12 @@ X.muxWebM = muxWebM;
 X.snapshot = (T: any, maxW: any = 480) => {
   const p: any = PM.proj;
   const s: any = Math.min(1, maxW / p.w);
-  /* W/H are composition coordinates, not merely output size. Rendering at
-     thumbnail width crops layers positioned in a larger composition. */
-  const full: any = PM.renderFrameTo(T, p.w, p.h);
-  if (s === 1) return full.toDataURL('image/jpeg', .74);
-  const cv: any = window.document.createElement('canvas');
-  cv.width = Math.max(2, Math.round(p.w * s));
-  cv.height = Math.max(2, Math.round(p.h * s));
-  cv.getContext('2d').drawImage(full, 0, 0, cv.width, cv.height);
+  const cv: any = PM.renderFrameTo(
+    T,
+    Math.max(2, Math.round(p.w * s)),
+    Math.max(2, Math.round(p.h * s)),
+    { mblur: false, mbSamples: 1 },
+  );
   return cv.toDataURL('image/jpeg', .74);
 };
 }

@@ -11,9 +11,9 @@
     layerFieldBinding(PM, layer.id, field as any, { label, origin: 'inspector' });
   const parentOptions = $derived<SelectOption[]>((doc.tick.structure, doc.proj, [
     { v: null, label: 'none' },
-    ...(PM.proj?.layers ?? [])
+    ...(PM.ProjectIndex?.parentOptions?.(layer) ?? (PM.proj?.layers ?? [])
       .filter((candidate: any) => candidate.id !== layer.id && !PM.wouldCycle?.(layer, candidate.id))
-      .map((candidate: any) => ({ v: candidate.id, label: String(candidate.name) }))
+      .map((candidate: any) => ({ v: candidate.id, label: String(candidate.name) })))
   ]));
 </script>
 

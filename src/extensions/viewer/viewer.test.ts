@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   calculateResize, composeLocalLinear, install, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
-  resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
+  previewRenderSize, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
   transformPointAround,
 } from './viewer';
 
@@ -28,6 +28,11 @@ function viewerRegistry(): Record<string, any> {
 }
 
 describe('viewer runtime', () => {
+  it('renders fitted high-resolution compositions near their displayed pixel size', () => {
+    expect(previewRenderSize(3840, 2160, 0.25, 2, 1)).toEqual({ width: 1920, height: 1080, scale: 0.5 });
+    expect(previewRenderSize(7680, 4320, 0.1, 2, 0.5)).toEqual({ width: 768, height: 432, scale: 0.1 });
+    expect(previewRenderSize(1920, 1080, 2, 2, 1)).toEqual({ width: 1920, height: 1080, scale: 1 });
+  });
   it('snaps to the nearest candidate and breaks ties by the shorter guide', () => {
     const V = viewerRegistry().Viewer;
     const source = V.snapCandidatesFromPoints([{ x: 103, y: 10 }]);

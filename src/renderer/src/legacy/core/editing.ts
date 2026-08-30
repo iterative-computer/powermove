@@ -30,6 +30,7 @@ const LAYER_FIELDS: any = new Set([
 let live: any = null;
 
 const projectLayers: any = () => {
+  if (PM.ProjectIndex) return PM.ProjectIndex.allLayers();
   const out: any[] = [], queue: any[] = [PM.proj], seen = new Set<any>();
   while (queue.length) {
     const comp = queue.shift();
@@ -65,6 +66,40 @@ const findLayer: any = (ref: any) => {
   if (typeof ref === 'number') return PM.proj.layers[ref - 1] || null;
   return PM.L(ref) || PM.byName(ref);
 };
+
+function layerPath(target: any): any[] | null {
+  if (!target || !PM.proj) return null;
+  const visit = (project: any, base: any[]): any[] | null => {
+    const index = (project.layers || []).indexOf(target);
+    if (index >= 0) return [...base, 'layers', index];
+    for (const [id, comp] of Object.entries(project.comps || {})) {
+      const found = visit(comp, [...base, 'comps', id]);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(PM.proj, []);
+}
+
+function commandScopes(command: any): any[][] {
+  const type = command?.type;
+  if (['add_layer', 'delete_layers', 'reorder_layer'].includes(type)) return [['layers'], ['comps']];
+  if (type === 'set_composition') {
+    return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work']];
+  }
+  if (type === 'set_scene_parameter') return [['params', String(command.name || '').trim()]];
+  if (type === 'add_marker') return [['markers']];
+  if (type === 'create_section' || type === 'update_section') return [['library']];
+  if (type === 'set_easing') return keyframeLayers(command).map((layer: any) => layerPath(layer)).filter(Boolean);
+  const layer = findLayer(command?.target || command?.layer || command?.targetId);
+  const path = layerPath(layer);
+  return path ? [path] : [[]];
+}
+
+function trackCommands(list: any[]) {
+  PM.hist.track([['revision'], ['edits']]);
+  for (const command of list) PM.hist.track(commandScopes(command));
+}
 const channelPath: any = (path: any) => String(path || '')
   .replace(/^properties\./, '')
   .replace(/^transform\./, '');
@@ -82,10 +117,6 @@ const lockedIntent: any = (layer: any, channel: any) => {
   const root: any = channel.split('.')[0];
   return intent[channel] || intent[root] || null;
 };
-
-function restore(json: any, selection: any) {
-  PM.replaceProject(JSON.parse(json), selection ? { selection } : {});
-}
 
 function summarize(command: any) {
   const target: any = command.target || command.layer || command.targetId || '';
@@ -652,6 +683,13 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'update_section': data = updateSection(command); break;
     default: throw new Error(`Unknown source edit: ${command.type}`);
   }
+  if (['add_layer', 'delete_layers', 'reorder_layer'].includes(command.type)
+      || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
+    PM.ProjectIndex?.invalidate();
+  } else if (['replace_keyframes', 'add_effect', 'remove_effect', 'set_transition'].includes(command.type)
+      || command.type === 'set_property' && command.mode === 'keyframe') {
+    PM.ProjectIndex?.invalidateKeyframes();
+  }
   if (policy.message) data = { ...data, message: policy.message, skippedLocked: policy.skippedLocked };
   return { command, data, message: policy.message };
 }
@@ -728,7 +766,7 @@ function sourceCatalog() {
     if (layer.type !== 'audio') fields.splice(fields.length - 1, 0,
       { path: 'layer.motionBlur', label: 'Motion blur', control: 'toggle', value: layer.mblur },
       { path: 'layer.blend', label: 'Blend mode', control: 'select', value: layer.blend, options: [...PM.BLENDS] },
-      { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, options: parentOptions.filter((option: any) => option.v !== layer.id) });
+      { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, optionsRef: 'parentLayers' });
     const content: any = Object.entries(layer.d || {}).map(([key, value]: any) => {
       const control: any = primitiveControl(value); if (!control) return null;
       return { path: `content.${key}`, label: key, control, value, ...(control === 'slider' ? numericRange(value, key) : {}) };
@@ -768,7 +806,7 @@ function sourceCatalog() {
     }
     return { id: layer.id, name: layer.name, type: layer.type, controls: [...fields, ...content, ...properties] };
   });
-  return { target: '$composition', composition, layers, operations: Object.keys(Edit.operations) };
+  return { target: '$composition', composition, layers, optionSets: { parentLayers: parentOptions }, operations: Object.keys(Edit.operations) };
 }
 
 /* Higher-order generated tools compile to the same primitive edit language
@@ -819,6 +857,7 @@ const Edit: any = {
     }
     if (live) {
       try {
+        trackCommands(list);
         const executed: any = list.map((command: any) => runOne(command, meta));
         const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
         executed.forEach(({ command }: any) => rememberLive(command));
@@ -827,10 +866,10 @@ const Edit: any = {
         return pass(['Source updated', ...notices].join('. '), { results, revision: PM.proj.revision || 0 });
       } catch (error: any) { return fail(String(error.message || error)); }
     }
-    const before: any = JSON.stringify(PM.proj);
     const selection: any = clone(PM.sel);
-    PM.hist.begin(meta.label || 'Edit source', meta.historyGroup || null);
+    PM.hist.beginScoped(meta.label || 'Edit source', meta.historyGroup || null);
     try {
+      trackCommands(list);
       const executed: any = list.map((command: any) => runOne(command, meta));
       const applied: any = executed.map((item: any, index: any) => recordedCommand(item.command, list[index]));
       const results: any = executed.map(({ command, data }: any) => ({ command: clone(command), data }));
@@ -840,8 +879,7 @@ const Edit: any = {
       const notices: any = executed.map((item: any) => item.message).filter(Boolean);
       return pass([meta.label || 'Source updated', ...notices].join('. '), { results, revision: PM.proj.revision });
     } catch (error: any) {
-      PM.hist.cancel();
-      restore(before, selection);
+      PM.hist.rollback(selection);
       return fail(String(error.message || error));
     }
   },
@@ -855,11 +893,11 @@ const Edit: any = {
   mutate(label: any, action: any, meta: any = {}) {
     if (live) return fail('Finish the active source edit before changing structure');
     if (typeof action !== 'function') return fail('A structural edit action is required');
-    const before: any = JSON.stringify(PM.proj);
     const selection: any = clone(PM.sel);
-    PM.hist.begin(label || 'Edit source', meta.historyGroup || null);
+    const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null);
     try {
       const result: any = action();
+      PM.ProjectIndex?.invalidate();
       if (JSON.stringify(PM.proj) === before) {
         PM.hist.cancel();
         return pass('No source changes', { result, revision: PM.proj.revision || 0 });
@@ -888,16 +926,16 @@ const Edit: any = {
       PM.hist.commit(label || 'Edit source');
       return pass(label || 'Source updated', { result, revision: PM.proj.revision });
     } catch (error: any) {
-      PM.hist.cancel();
-      restore(before, selection);
+      PM.hist.rollback(selection);
       return fail(String(error.message || error));
     }
   },
 
   begin(label: any, meta: any = {}) {
     if (live) throw new Error('A source edit is already active');
-    live = { label: label || 'Edit source', origin: meta.origin || 'interface', before: JSON.stringify(PM.proj), selection: clone(PM.sel), commands: [] };
-    PM.hist.begin(live.label);
+    PM.hist.beginScoped(label || 'Edit source');
+    PM.hist.track([['revision'], ['edits']]);
+    live = { label: label || 'Edit source', origin: meta.origin || 'interface', selection: clone(PM.sel), commands: [] };
   },
 
   dispatch(command: any) {
@@ -909,7 +947,7 @@ const Edit: any = {
     if (!live) return fail('No source edit is active');
     const transaction: any = live;
     live = null;
-    if (!transaction.commands.length || JSON.stringify(PM.proj) === transaction.before) {
+    if (!transaction.commands.length || !PM.hist.hasChanges()) {
       PM.hist.cancel();
       return pass('No source changes');
     }
@@ -923,13 +961,12 @@ const Edit: any = {
     if (!live) return false;
     const transaction: any = live;
     live = null;
-    PM.hist.cancel();
     /* A click on a scrubbable field begins and immediately cancels an empty
        gesture before opening its text input. Do not replace the project in
        that common case or control bindings would retain stale object refs. */
-    if (transaction.commands.length || JSON.stringify(PM.proj) !== transaction.before) {
-      restore(transaction.before, transaction.selection);
-    }
+    if (transaction.commands.length || PM.hist.hasChanges()) {
+      PM.hist.rollback(transaction.selection);
+    } else PM.hist.cancel();
     return true;
   },
 

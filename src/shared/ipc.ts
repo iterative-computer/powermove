@@ -77,7 +77,7 @@ export interface FileSaveRequest {
   saveAs?: boolean;
 }
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
-export type ProjectOpenResult = { ok: true; path: string; projectId: string; text: string } | { ok: false; cancelled: boolean; error?: string };
+export type ProjectOpenResult = { ok: true; path: string; projectId: string; data: Uint8Array } | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
 
 /* ── codex ───────────────────────────────────────────────── */

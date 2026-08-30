@@ -1,5 +1,6 @@
 /* Ported from js/core/model.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { installProjectIndex } from './project-index';
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
   ids = ([] as any[]).concat(ids).filter(Boolean);
@@ -165,25 +166,24 @@ PM.mkProject = (o: any = {}) => ({
    Empty stack = the main project (all UI/tool paths). */
 PM.scope = [];
 PM.curComp = () => PM.scope[PM.scope.length - 1] || PM.proj;
+installProjectIndex(PM);
 PM.L = (id: any) => {
-  const c = PM.curComp();
-  return c.layers.find((l: any) => l.id === id) || null;
+  return PM.ProjectIndex.byId(id, PM.curComp());
 };
 PM.byName = (n: any) => {
-  const q = String(n).toLowerCase().trim();
-  return PM.proj.layers.find((l: any) => l.name.toLowerCase() === q)
-      || PM.proj.layers.find((l: any) => l.name.toLowerCase().includes(q)) || null;
+  return PM.ProjectIndex.byName(n, PM.proj);
 };
 PM.sel = { layers: [], keys: [], chan: null };
 
 PM.selectLayers = (ids: any, add = false) => {
   selectLayers(PM, ids, add);
 };
-PM.selLayers = () => PM.sel.layers.map(PM.L).filter(Boolean);
+PM.selLayers = () => PM.ProjectIndex.selectedLayers(PM.sel.layers);
 PM.firstSel = () => PM.selLayers()[0] || null;
 
 PM.addLayer = (L: any, at: any) => {
   PM.proj.layers.splice(at == null ? 0 : at, 0, L);
+  PM.ProjectIndex.invalidate();
   PM.bus.emit('layers');
   return L;
 };
@@ -200,6 +200,7 @@ PM.removeLayers = (ids: any) => {
   Object.values(PM.proj.comps || {}).forEach((c: any) => scan(c.layers));
   for (const cid of Object.keys(PM.proj.comps || {})) if (!referenced.has(cid)) delete PM.proj.comps[cid];
   PM.sel.layers = PM.sel.layers.filter((i: any) => !ids.includes(i));
+  PM.ProjectIndex.invalidate();
   PM.bus.emit('layers');
 };
 
@@ -238,6 +239,7 @@ PM.precompose = (ids: any, name: any) => {
   PM.sel.layers = [];
   PM.proj.layers.splice(Math.min(idx, PM.proj.layers.length), 0, L);
   PM.selectLayers(L.id);
+  PM.ProjectIndex.invalidate();
   PM.bus.emit('layers');
   return L;
 };

@@ -237,9 +237,9 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
   const checkpoint: any = {
     id: PM.uid('agent-checkpoint'),
     label: `Before agent · ${text(request, 'composition edit', 42)}`,
-    json: JSON.stringify(PM.proj),
   };
   try { checkpoint.takeId = PM.takes?.save(checkpoint.label)?.id || null; } catch { checkpoint.takeId = null; }
+  if (!checkpoint.takeId) checkpoint.json = JSON.stringify(PM.proj);
   progress('Applying structured source edit…');
   const first = PM.Edit.apply(proposal.commands, {
     label: proposal.label, origin: 'agent', baseRevision: proposal.baseRevision, historyGroup,
@@ -292,9 +292,10 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
 }
 
 function rollback(checkpoint: any) {
-  if (!checkpoint?.json) return false;
   if (checkpoint.historyId && PM.hist.undoIfTop?.(checkpoint.historyId)) return true;
-  return !!PM.hist.restoreSnapshot(checkpoint.json, 'Undo agent run');
+  const take = checkpoint?.takeId && PM.takes?.all?.().find((item: any) => item.id === checkpoint.takeId);
+  const json = checkpoint?.json || take?.json;
+  return !!json && !!PM.hist.restoreSnapshot(json, 'Undo agent run');
 }
 
 PM.AgentHarness = {

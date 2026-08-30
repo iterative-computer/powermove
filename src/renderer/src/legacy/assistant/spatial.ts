@@ -11,7 +11,6 @@ import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } 
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../panels/agent/threads';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
-import RippleCanvas from './RippleCanvas.svelte';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -1297,13 +1296,16 @@ async function applyExtensionChanges(extensions: any) {
 
 async function runAutonomousRequest({ request, token, controller, access, focus, context, threadId }: any) {
   const baseRevision: any = Number(PM.proj.revision) || 0;
+  const checkpointLabel: any = `Before autonomous agent · ${request.slice(0, 42)}`;
   const checkpoint: any = {
     id: PM.uid('agent-checkpoint'),
-    label: `Before autonomous agent · ${request.slice(0, 42)}`,
-    json: JSON.stringify(PM.proj),
+    label: checkpointLabel,
   };
-  try { checkpoint.takeId = PM.takes?.save(`Before autonomous agent · ${request.slice(0, 42)}`)?.id || null; }
+  try { checkpoint.takeId = PM.takes?.save(checkpointLabel)?.id || null; }
   catch { checkpoint.takeId = null; }
+  // The take already owns the fallback project snapshot. Keep that large JSON
+  // out of reactive agent-panel state unless durable take storage is unavailable.
+  if (!checkpoint.takeId) checkpoint.json = JSON.stringify(PM.proj);
   const historyMark: any = PM.hist.mark();
   const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
   const [observation]: any = await Promise.all([
@@ -1705,7 +1707,13 @@ function controlConnection(target: any, path: any, controlType: any) {
   const layer: any = target === '$selection' || target === 'selection' ? PM.firstSel() : (PM.L(target) || PM.byName(target));
   if (!layer) return null;
   const spec: any = catalog?.layers?.find((item: any) => item.id === layer.id)?.controls?.find((item: any) => item.path === path);
-  if (spec) return { ...spec, target: target === '$selection' || target === 'selection' ? '$selection' : layer.id, path, connection: `Layer · ${layer.name}` };
+  if (spec) return {
+    ...spec,
+    ...(spec.optionsRef && catalog?.optionSets?.[spec.optionsRef] ? { options: catalog.optionSets[spec.optionsRef] } : {}),
+    target: target === '$selection' || target === 'selection' ? '$selection' : layer.id,
+    path,
+    connection: `Layer · ${layer.name}`,
+  };
   let control: any = controlType;
   if (path.startsWith('properties.')) {
     const channel: any = path.slice('properties.'.length);
@@ -2321,15 +2329,20 @@ function startRipple(host: any, origin: any, sceneBitmap: any) {
     if (reason) window.console.warn('Motion GPU ripple unavailable; using visual fallback', reason);
   };
   host.dataset.renderer = 'motion-gpu-initializing';
-  try {
-    component = mount(RippleCanvas, { target: host, props: {
-      origin,
-      sceneBitmap,
-      onError: (report: any) => fallback(new Error(report?.rawMessage || report?.message || 'Motion GPU failed')),
-      onFirstFrame: () => { if (!stopped && !failed) host.dataset.renderer = 'motion-gpu'; },
-      onSettled: () => { if (!stopped && !failed) host.dataset.renderer = 'motion-gpu-settled'; },
-    } });
-  } catch (error: any) { fallback(error); }
+  // WebGPU ripple code is optional and relatively heavy. Fetch it only when
+  // the user starts a spatial selection, keeping normal editor startup lean.
+  void import('./RippleCanvas.svelte').then(({ default: RippleCanvas }) => {
+    if (stopped || failed) { sceneBitmap?.close?.(); return; }
+    try {
+      component = mount(RippleCanvas, { target: host, props: {
+        origin,
+        sceneBitmap,
+        onError: (report: any) => fallback(new Error(report?.rawMessage || report?.message || 'Motion GPU failed')),
+        onFirstFrame: () => { if (!stopped && !failed) host.dataset.renderer = 'motion-gpu'; },
+        onSettled: () => { if (!stopped && !failed) host.dataset.renderer = 'motion-gpu-settled'; },
+      } });
+    } catch (error: any) { fallback(error); }
+  }).catch(fallback);
 
   return () => {
     stopped = true; window.clearTimeout(fallbackTimer);

@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 import { readFile } from 'node:fs/promises';
+import { decodeProjectContainer } from '../src/shared/project-container';
 import path from 'node:path';
 
 test('saved project files restore imported video without the original session media', async ({ session }) => {
@@ -11,9 +12,10 @@ test('saved project files restore imported video without the original session me
     dialog.showSaveDialog = async () => ({ canceled: false, filePath });
   }, destination);
   expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
-  const saved = await readFile(destination, 'utf8');
-  const document = JSON.parse(saved);
-  expect(Object.keys(document.media || {})).toHaveLength(1);
+  const saved = await readFile(destination);
+  const document = decodeProjectContainer(saved);
+  expect(document.binary).toBe(true);
+  expect(document.media).toHaveLength(1);
   await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     for (const asset of Object.values(PM.proj.assets)) await PM.MediaStore.remove(asset);

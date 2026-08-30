@@ -441,7 +441,10 @@ onBus('layout:applied', () => {
 });
 
 /* ── row model ─────────────────────────────────────────── */
+let rowsDirty = true;
+let propertyLabelWidth: number | null = null;
 function buildRows() {
+  if (!rowsDirty && Array.isArray(T.rows)) return T.rows;
   const rows = [];
   const layers = PM.proj.layers;
   for (let i = 0; i < layers.length; i++) {
@@ -454,6 +457,8 @@ function buildRows() {
     }
   }
   T.rows = rows;
+  rowsDirty = false;
+  propertyLabelWidth = null;
   return rows;
 }
 function alwaysShow(L: any, key: any) { return (PM.UIState.getReveal(L) || []).includes(key); }
@@ -469,8 +474,9 @@ const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
 
 /* ── draw ──────────────────────────────────────────────── */
 onBus('draw:timeline', draw);
-onBus('layers', () => PM.invalidate('timeline'));
-onBus('sel', () => PM.invalidate('timeline'));
+onBus('layers', () => { rowsDirty = true; PM.invalidate('timeline'); });
+onBus('sel', () => { rowsDirty = true; PM.invalidate('timeline'); });
+onBus('history', () => { rowsDirty = true; PM.invalidate('timeline'); });
 
 function css(v: any) { return window.getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 let theme: any = null;
@@ -530,7 +536,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     /* Unconditional size sync: measure the wrap every draw so the bitmap always
        matches the laid-out size, regardless of missed observer/RAF frames. */
     const host = T.cv && T.cv.parentElement;
-    if (host) {
+    if (host && (!PM.playing || !T.w || !T.hgt)) {
       const r = host.getBoundingClientRect();
       if (r.width >= 8 && r.height >= 8) {
         const bw = Math.max(2, Math.round(r.width * T.dpr));
@@ -551,8 +557,9 @@ function drawInner(preview?: TimelinePreviewTarget) {
   // Column widths are based on full labels, never on the fluctuating values.
   // Keep enough room for both Scale dimensions even at narrow saved gutters.
   c.font = '400 11px ' + fui();
-  const labelWidth = Math.max(64, ...T.rows.filter((row: any) => row.kind === 'prop')
+  if (propertyLabelWidth == null) propertyLabelWidth = Math.max(64, ...T.rows.filter((row: any) => row.kind === 'prop')
     .map((row: any) => Math.ceil(c.measureText(row.label).width)));
+  const labelWidth = propertyLabelWidth;
   T.propertyValueX = 100 + labelWidth + 12;
   T.gut = Math.max(T.gut, T.propertyValueX + 90);
   if (preview) {
@@ -976,10 +983,14 @@ function drawPropKeys(c: any, r: any, y: any) {
   const keyRadius = T.style.keyframeSize / 2;
   /* First/last keys are half-filled toward the animated span; interior keys
      are solid. Tells you where a curve starts and ends at a glance. */
-  const times = kf.map((k: any) => k.t);
-  const first = Math.min(...times), last = Math.max(...times);
+  const first = kf[0]?.t, last = kf.at(-1)?.t;
+  const localStart = T.scrollT - L.from - 8 / Math.max(.01, T.pps);
+  const localEnd = x2t(T.w + 8) - L.from;
+  let lo = 0, hi = kf.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (kf[mid].t < localStart) lo = mid + 1; else hi = mid; }
   c.lineWidth = 1;
-  for (const k of kf) {
+  for (let index = lo; index < kf.length && kf[index].t <= localEnd; index++) {
+    const k = kf[index];
     const x = t2x(L.from + k.t);
     if (x < T.gut - 6 || x > T.w + 6) continue;
     const sel = keySelected(k);

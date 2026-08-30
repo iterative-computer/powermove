@@ -10,6 +10,18 @@ export const viewerPanelOptions = {
   library: { width: 640, height: 480 },
 } as const;
 
+export function previewRenderSize(width: number, height: number, zoom: number, dpr: number, quality: number) {
+  const safeWidth = Math.max(2, Number(width) || 2);
+  const safeHeight = Math.max(2, Number(height) || 2);
+  const displayScale = Math.min(1, Math.max(0.05, Number(zoom) || 0.05) * Math.min(2, Math.max(1, Number(dpr) || 1)));
+  const scale = Math.max(0.05, Math.min(1, displayScale * Math.max(0.25, Math.min(1, Number(quality) || 1))));
+  return {
+    width: Math.max(2, Math.round(safeWidth * scale)),
+    height: Math.max(2, Math.round(safeHeight * scale)),
+    scale,
+  };
+}
+
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 type Point = { x: number; y: number };
@@ -456,8 +468,8 @@ V.layout = () => {
   if (!V.fit && (V.pan[0] || V.pan[1])) V.inner.style.transform = `translate(${V.pan[0]}px, ${V.pan[1]}px)`;
   else V.inner.style.transform = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const rw = Math.max(2, Math.round(p.w * PM.quality)), rh = Math.max(2, Math.round(p.h * PM.quality));
-  PM.GL.resize(rw, rh);
+  const renderSize = previewRenderSize(p.w, p.h, z, dpr, PM.quality);
+  PM.GL.resize(renderSize.width, renderSize.height);
   V.ov.width = Math.round(r.width * dpr); V.ov.height = Math.round(r.height * dpr);
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   PM.invalidate();

@@ -34,4 +34,15 @@ describe('legacy history install', () => {
     expect(PM.hist.redo()).toBe(true);
     expect(PM.proj.value).toBe(2);
   });
+
+  it('stores a small patch and reports a strict byte budget', () => {
+    const PM = historyRegistry();
+    PM.proj.large = Array.from({ length: 10_000 }, (_, index) => ({ index, stable: true }));
+    PM.hist.do('Set value', () => { PM.proj.value = 3; });
+
+    const stats = PM.hist.stats();
+    expect(stats.entries).toBe(1);
+    expect(stats.bytes).toBeLessThan(1_000);
+    expect(stats.maxBytes).toBe(256 * 1024 * 1024);
+  });
 });

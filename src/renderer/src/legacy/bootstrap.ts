@@ -13,6 +13,7 @@ import { bootExtensions, installKernel } from '../kernel/install';
 import { install as installDiag } from './core/diag';
 import { install as installUtil } from './core/util';
 import { install as installUiState } from './core/ui-state';
+import { install as installMemory } from './core/memory';
 import { install as installElectronShim } from './host/electron-shim';
 import { install as installFonts } from './core/fonts';
 import { install as installEasing } from './core/easing';
@@ -62,6 +63,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
      for `PM.bus` and `PM.store`. */
   ['kernel', (PM) => void installKernel(PM)],
   ['core/ui-state', installUiState],
+  ['core/memory', installMemory],
   ['host/electron-shim', installElectronShim],
   ['core/fonts', installFonts],
   ['core/easing', installEasing],

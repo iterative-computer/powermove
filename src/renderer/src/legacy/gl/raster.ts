@@ -31,6 +31,8 @@ export function install(PM: PMRegistry): void {
 const cache = new Map<any, any>();       // key -> {cv, w, h, used}
 let tick = 0;
 const MAX = 96;
+const MAX_BYTES = PM.Memory?.budget?.('raster') || 192 * 1024 * 1024;
+let cacheBytes = 0;
 
 function getCanvas(w: any, h: any) {
   const cv = window.document.createElement('canvas');
@@ -38,10 +40,22 @@ function getCanvas(w: any, h: any) {
   return cv;
 }
 
-function evict() {
-  if (cache.size <= MAX) return;
+function release(key: any, entry: any) {
+  if (!entry) return;
+  cache.delete(key);
+  cacheBytes = Math.max(0, cacheBytes - (entry.bytes || 0));
+  PM.GL?.dropTextures?.('r:' + key);
+  if (entry.cv) { entry.cv.width = 0; entry.cv.height = 0; }
+}
+
+function evict(targetBytes: any = MAX_BYTES) {
+  if (cache.size <= MAX && cacheBytes <= targetBytes) return;
   const arr = [...cache.entries()].sort((a, b) => a[1].used - b[1].used);
-  for (let i = 0; i < arr.length - MAX; i++) cache.delete((arr[i] as any)[0]);
+  for (const [key, entry] of arr) {
+    if (cache.size <= MAX && cacheBytes <= targetBytes) break;
+    if (cache.size <= 1) break;
+    release(key, entry);
+  }
 }
 
 /* ── text ──────────────────────────────────────────────── */
@@ -217,18 +231,25 @@ PM.raster = (L: any, scale: any = 1) => {
   if (!e) {
     e = L.type === 'text' ? rasterText(d, scale) : rasterShape(d, scale);
     e.dirty = true;
+    e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
     cache.set(key, e);
+    cacheBytes += e.bytes;
     evict();
   }
   e.used = ++tick;
   e.key = key;
   return e;
 };
-PM.rasterStats = () => ({ size: cache.size });
+PM.rasterStats = () => ({ size: cache.size, bytes: cacheBytes, maxBytes: MAX_BYTES });
 PM.rasterClear = () => {
-  cache.clear();
+  for (const [key, entry] of [...cache]) release(key, entry);
   PM.GL && PM.GL.dropTextures && PM.GL.dropTextures('r:');
 };
+PM.Memory?.register?.('raster', {
+  bytes: () => cacheBytes,
+  entries: () => cache.size,
+  trim: (target: number) => evict(target),
+});
 
 /* ── assets ────────────────────────────────────────────── */
 function assetKind(file: any) {

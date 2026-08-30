@@ -8,7 +8,36 @@ const R: any = {
   STATE: 'projectState.',   // + id → tab-owned editor/workspace session
   openKey: 'openTabs',      // [id] in stable visible tab order
   trashKey: 'projectTrash', // metadata for recoverable deletion; slots stay intact
+  JOURNAL: 'projectJournal.',
 };
+const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
+const CHECKPOINT_REVISIONS = 50;
+const journalBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+
+function applyPatches(root: any, patches: any[]) {
+  let next = root;
+  for (const patch of patches || []) {
+    if (!Array.isArray(patch?.path)) continue;
+    if (!patch.path.length) { next = patch.exists ? clone(patch.value) : undefined; continue; }
+    let parent = next;
+    for (let index = 0; index < patch.path.length - 1; index++) {
+      parent = parent?.[patch.path[index]];
+      if (parent == null) break;
+    }
+    if (parent == null) continue;
+    const key = patch.path.at(-1);
+    if (patch.exists) parent[key] = clone(patch.value);
+    else if (Array.isArray(parent) && typeof key === 'number') parent.splice(key, 1);
+    else delete parent[key];
+  }
+  return next;
+}
+
+function journal(id: any) {
+  const value = id ? PM.store.get(R.JOURNAL + id, []) : [];
+  return Array.isArray(value) ? value : [];
+}
 
 R.list = () => {
   const l = PM.store.get(R.KEY, null);
@@ -34,6 +63,23 @@ R.put = (proj: any, thumb: any) => {
   /* Serialize the project passed to us, not whichever project happens to be
      active. This matters for rename/duplicate and keeps every slot canonical. */
   if (PM.store.set(R.SLOT + proj.id, { v: PM.version || '1.0.0', proj }) === false) throw new Error('Project storage is unavailable or full');
+  PM.store.del(R.JOURNAL + proj.id);
+  return meta;
+};
+
+/** Lightweight crash recovery: compact typed-history patches between checkpoints. */
+R.recover = (proj: any, thumb: any) => {
+  if (!proj?.id) return null;
+  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now() };
+  if (thumb) meta.thumb = thumb;
+  R.upsertMeta(meta);
+  PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
+  const raw = PM.store.get(R.SLOT + proj.id, null);
+  const entries = journal(proj.id);
+  if (!raw || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
+      || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
+    return R.put(proj, thumb);
+  }
   return meta;
 };
 
@@ -88,7 +134,11 @@ R.get = (id: any) => {
     if (auto && auto.proj && auto.proj.id === id) return auto.proj;
     return null;
   }
-  return R.unwrap(raw);
+  let project = R.unwrap(raw);
+  if (!project) return null;
+  project = clone(project);
+  for (const entry of journal(id)) project = applyPatches(project, entry.patches);
+  return project;
 };
 
 R.getState = (id: any) => id ? PM.store.get(R.STATE + id, null) : null;
@@ -150,6 +200,7 @@ R.destroy = (id: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
   try { PM.store.del(R.STATE + id); } catch (e) { }
+  try { PM.store.del(R.JOURNAL + id); } catch (e) { }
 };
 
 /* ── open-tab bookkeeping ──────────────────────────────── */
@@ -168,6 +219,17 @@ R.markOpen = (id: any) => {
 R.markClosed = (id: any) => PM.store.set(R.openKey, R.tabs().filter((x: any) => x !== id));
 
 PM.Projects = R;
+PM.bus?.on?.('history:project-patch', (entry: any) => {
+  if (!entry?.projectId || !Array.isArray(entry.patches) || !entry.patches.length) return;
+  const entries = journal(entry.projectId);
+  entries.push({ revision: Number(entry.revision) || 0, patches: entry.patches });
+  /* Keep the journal bounded even before the next debounced checkpoint. */
+  if (journalBytes(entries) > MAX_JOURNAL_BYTES) {
+    if (PM.proj?.id === entry.projectId) R.put(PM.proj);
+    return;
+  }
+  PM.store.set(R.JOURNAL + entry.projectId, entries);
+});
 }
 
 // Registry methods hold no editor session state. Refresh them in place during

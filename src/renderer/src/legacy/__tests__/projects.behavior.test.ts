@@ -90,4 +90,21 @@ it('get() falls back to the legacy autosave slot for a matching id', () => {
   assert.equal(PM.Projects.get('other'), null);
 });
 
+it('replays compact recovery patches over the last full checkpoint', () => {
+  const { PM, mem } = projectsModel();
+  PM.proj = { id: 'P1', name: 'Before', revision: 0, layers: [{ id: 'L1', name: 'Layer' }] };
+  PM.Projects.put(PM.proj);
+  PM.bus.emit('history:project-patch', {
+    projectId: 'P1', revision: 1,
+    patches: [
+      { path: ['name'], exists: true, value: 'After' },
+      { path: ['revision'], exists: true, value: 1 },
+      { path: ['layers', 0, 'name'], exists: true, value: 'Renamed layer' },
+    ],
+  });
+
+  assert.equal(PM.Projects.get('P1').name, 'After');
+  assert.equal(PM.Projects.get('P1').layers[0].name, 'Renamed layer');
+  assert.equal(mem.has('projectJournal.P1'), true);
+});
 

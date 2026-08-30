@@ -1,6 +1,6 @@
 /* Ported from js/app.js — behavior-preserving. */
 import type { PMRegistry } from './registry';
-import { packProjectFile, restoreProjectFileMedia } from './core/project-file';
+import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { createExtensionSettingsControl } from './ui/extension-settings';
 import { createGeneralSettingsControl } from './ui/general-settings';
@@ -493,7 +493,9 @@ function projectThumb() {
 }
 function persistCurrent(withThumb: any) {
   try {
-    PM.Projects.put(PM.proj, withThumb ? projectThumb() : undefined);
+    const thumb = withThumb ? projectThumb() : undefined;
+    if (withThumb && PM.Projects.recover) PM.Projects.recover(PM.proj, thumb);
+    else PM.Projects.put(PM.proj, thumb);
     return true;
   } catch (e) { APP.dirty = true; console.warn('Project save failed', e); return false; }
 }
@@ -566,11 +568,11 @@ PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) =>
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
     const projectJSON = JSON.stringify(project);
-    const snapshot = JSON.stringify({ v: PM.version, proj: JSON.parse(projectJSON),
-      ws: projectId === PM.proj.id ? PM.WS.current : PM.Projects.getState(projectId)?.workspace });
+    const snapshot = { v: PM.version, proj: project,
+      ws: projectId === PM.proj.id ? PM.WS.current : PM.Projects.getState(projectId)?.workspace };
     const state = fileState(projectId);
     const suggestedName = safeName(project.name) + '.pmv';
-    const text = await packProjectFile(snapshot, PM.MediaStore);
+    const data = await packProjectFile(snapshot, PM.MediaStore);
     const finish = async (path?: string) => {
       state.path = path || state.path;
       state.savedHash = await projectFingerprint(projectJSON);
@@ -583,7 +585,7 @@ PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) =>
       return true;
     };
     if (window.powermove?.saveFile) {
-      const result = await window.powermove.saveFile({ name: suggestedName, projectId, saveAs, data: new TextEncoder().encode(text) });
+      const result = await window.powermove.saveFile({ name: suggestedName, projectId, saveAs, data });
       if (result.ok) return await finish(result.path);
       if (!result.cancelled) throw new Error(result.error || 'Save failed');
       return false;
@@ -593,11 +595,11 @@ PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) =>
       handle = await (window as any).showSaveFilePicker({ suggestedName, types: [{ description: 'Powermove Project', accept: { 'application/json': ['.pmv'] } }] });
     }
     if (handle?.createWritable) {
-      const w = await handle.createWritable(); await w.write(text); await w.close();
+      const w = await handle.createWritable(); await w.write(data); await w.close();
       state.handle = handle;
       return await finish(handle.name);
     }
-    PM.download(new window.Blob([text], { type: 'application/json' }), safeName(PM.proj.name) + '.pmv');
+    PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), safeName(PM.proj.name) + '.pmv');
     PM.toast('Download started'); return false;
   } catch (error: any) {
     if (error.name === 'AbortError') return false;
@@ -607,7 +609,7 @@ PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) =>
 PM.openProject = async () => {
   if (window.powermove?.openProjectFile) {
     const result = await window.powermove.openProjectFile();
-    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), text: async () => result.text }, result);
+    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), arrayBuffer: async () => result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength) }, result);
     else if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
     return;
   }
@@ -617,7 +619,8 @@ PM.openProject = async () => {
 };
 async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
   try {
-    const o = JSON.parse(await file.text());
+    const input = file.arrayBuffer ? await file.arrayBuffer() : await file.text();
+    const o = unpackProjectFile(input);
     const source = o.proj || o;
     if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) throw new Error('This is not a Powermove project.');
     source.id = association?.projectId || PM.uid('project');
