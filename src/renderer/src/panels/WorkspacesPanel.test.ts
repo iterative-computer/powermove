@@ -32,8 +32,9 @@ function fakePM(initial: Workspace[]) {
     PM.WS.current = PM.WS.all.find((workspace: Workspace) => workspace.id === id);
   });
   const PM: Record<string, any> = {
-    ICONS: { x: '<path/>', plus: '<path/>', code: '<path/>', missing: '<path/>' },
+    ICONS: { trash: '<path/>', plus: '<path/>', code: '<path/>', missing: '<path/>' },
     bus,
+    modal: vi.fn(),
     WS: {
       all: [...initial],
       current: initial[0],
@@ -110,6 +111,14 @@ describe('WorkspacesPanel', () => {
     expect(PM.WS.activate).toHaveBeenCalledWith('custom');
 
     flushSync(() => target.querySelector<HTMLButtonElement>('[aria-label="Delete My workspace"]')!.click());
+    expect(PM.WS.remove).not.toHaveBeenCalled();
+    const confirmation = PM.modal.mock.calls[0][0];
+    expect(confirmation).toMatchObject({
+      title: 'Delete “My workspace” workspace?',
+      body: 'This removes the saved workspace layout. Your project and its layers will not be deleted.'
+    });
+    expect(confirmation.actions.map((action: any) => action.label)).toEqual(['Cancel', 'Delete workspace']);
+    flushSync(() => confirmation.actions[1].run());
     expect(PM.WS.remove).toHaveBeenCalledWith('custom');
 
     flushSync(() => buttonWithText(target, 'Save current').click());

@@ -2,13 +2,7 @@ import type { PMRegistry } from '../legacy/registry';
 import { markMenuDismissal } from '../overlays/dismissal';
 import { positionMenuAtCursor } from '../overlays/position';
 import {
-  addPanel,
-  dockLabel,
-  hasPanel,
   hidePanel,
-  movePanel,
-  movePanelBy,
-  restorePanel,
   type DockSpec,
   type PanelSpec,
   type Workspace
@@ -53,46 +47,10 @@ export function openPanelMenu(
   if (!ws || !def) return null;
   menuCleanups.get(PM)?.();
   PM.closeMenus?.();
-  const position = dock.panels.findIndex((item) => item.id === spec.id);
   const items: MenuItem[] = [
     { kind: 'header', label: def.title },
     ...(canPopoutPanel(spec.id) ? [{ kind: 'action' as const, label: 'Pop out to window', run: () => PM.Popout?.open?.(spec.id) }] : []),
-    ...(spec.id === 'viewer' ? [] : [{ kind: 'action' as const, label: 'Hide panel', run: () => PM.WS.mutate((w: Workspace) => hidePanel(w, spec.id)) }]),
-    { kind: 'separator' },
-    { kind: 'header', label: 'Move to' },
-    ...(['left', 'center', 'right'] as const).map((dockId) => ({
-      kind: 'action' as const,
-      label: dockLabel(dockId),
-      disabled: dock.id === dockId,
-      run: () => PM.WS.mutate((w: Workspace) => movePanel(w, spec.id, dockId))
-    })),
-    {
-      kind: 'action', label: 'Move up', disabled: position <= 0,
-      run: () => PM.WS.mutate((w: Workspace) => movePanelBy(w, spec.id, -1))
-    },
-    {
-      kind: 'action', label: 'Move down', disabled: position < 0 || position >= dock.panels.length - 1,
-      run: () => PM.WS.mutate((w: Workspace) => movePanelBy(w, spec.id, 1))
-    },
-    { kind: 'separator' },
-    { kind: 'header', label: 'Add panel' },
-    ...Object.values(PM.PANELS)
-      .filter((panel: any) => !hasPanel(ws, panel.id)
-        && !(ws.hiddenPanels ?? []).some((item) => item.id === panel.id)
-        && panel.id !== 'toolbar')
-      .map((panel: any) => ({
-        kind: 'action' as const,
-        label: panel.title,
-        run: () => PM.WS.mutate((w: Workspace) => addPanel(w, panel.id, dock.id))
-      })),
-    ...(ws.hiddenPanels ?? [])
-      .filter((item) => PM.PANELS[item.id])
-      .map((item) => ({
-        kind: 'action' as const,
-        label: `Restore ${PM.PANELS[item.id].title}`,
-        run: () => PM.WS.mutate((w: Workspace) => restorePanel(w, item.id))
-      })),
-    { kind: 'separator' },
+    ...(spec.id === 'viewer' ? [] : [{ kind: 'action' as const, label: 'Close panel', run: () => PM.WS.mutate((w: Workspace) => hidePanel(w, spec.id)) }]),
     /* Extension contributions land at the end so they never shift the
        positions a user has learned for the built-in rows. */
     ...panelContextContributions(PM, spec.id, dock.id)

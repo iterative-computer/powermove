@@ -5,6 +5,7 @@
   import Composer from '../panels/agent/Composer.svelte';
   import { panelIcons } from '../panels/panel-icons';
   import { panelScope } from '../panels/agent/panel-focus';
+  import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
 
   let { PM }: { PM: Record<string, any> } = $props();
@@ -18,9 +19,11 @@
   let lastFocus: HTMLElement | null = null;
   let searchEl = $state<HTMLInputElement | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
+  let deletedIds = $state(new Set<string>());
 
   export function open(target?: 'panels' | 'workspaces'): void {
     if (target) view = target;
+    deletedIds = deletedPanelIds(PM);
     version += 1;
     lastFocus = document.activeElement as HTMLElement | null;
     shown = true;
@@ -58,7 +61,7 @@
     void version;
     return Object.entries(PM.PANELS || {})
       .map(([id, def]: [string, any]) => ({ ...def, id, title: def.title || id }))
-      .filter(panelBelongsInLibrary)
+      .filter((panel) => panelBelongsInLibrary(panel) && !deletedIds.has(panel.id))
       .sort((a, b) => String(a.title).localeCompare(String(b.title)));
   });
   const icons = $derived(panelIcons(panels, PM.ICONS || {}));
@@ -285,6 +288,26 @@
     PM.LibraryUI?.reveal?.(id);
   }
 
+  function confirmDeletePanel(event: MouseEvent, panel: any): void {
+    event.stopPropagation();
+    PM.modal?.({
+      title: `Delete “${panel.title}” panel?`,
+      body: 'This removes the panel from the Library and every workspace. This cannot be undone.',
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Delete panel',
+          pri: true,
+          run: () => {
+            if (!deletePanel(PM, panel.id)) return false;
+            deletedIds = deletedPanelIds(PM);
+            version += 1;
+          }
+        }
+      ]
+    });
+  }
+
   /* Each grid cell shows a snapshot clone of the live panel, laid out at the
      canonical size owned by its definition. The active dock is only a source
      of panel content; its width, height, collapsed state, and location never
@@ -420,8 +443,21 @@
 
   function deleteWorkspace(event: MouseEvent, workspace: any): void {
     event.stopPropagation();
-    PM.WS?.remove?.(workspace.id);
-    version += 1;
+    PM.modal?.({
+      title: `Delete “${workspace.name}” workspace?`,
+      body: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Delete workspace',
+          pri: true,
+          run: () => {
+            PM.WS?.remove?.(workspace.id);
+            version += 1;
+          }
+        }
+      ]
+    });
   }
 
   function workspaceDocks(workspace: any): Array<{ flex: boolean; panels: string[] }> {
@@ -578,10 +614,22 @@
                         </span>
                       </div>
                     </button>
+                    {#if panel.id !== 'viewer' && panel.id !== 'toolbar'}
+                      <button
+                        class="iconbtn library-card-delete"
+                        type="button"
+                        aria-label={`Delete ${panel.title} panel`}
+                        title={`Delete ${panel.title} panel`}
+                        onclick={(event) => confirmDeletePanel(event, panel)}
+                      >
+                        <Icon {PM} name="trash" />
+                      </button>
+                    {/if}
                     <button
                       class="iconbtn library-card-add"
                       type="button"
                       aria-label={inWorkspace(panel.id) ? `Show ${panel.title} in workspace` : `Add ${panel.title} to workspace`}
+                      title={inWorkspace(panel.id) ? `Show ${panel.title} in workspace` : `Add ${panel.title} to workspace`}
                       onclick={() => addToWorkspace(panel.id)}
                     >
                       <Icon {PM} name={inWorkspace(panel.id) ? 'eye' : 'plus'} />
@@ -626,6 +674,7 @@
                         class="iconbtn library-card-add"
                         type="button"
                         aria-label={`Delete ${workspace.name}`}
+                        title={`Delete ${workspace.name} workspace`}
                         onclick={(event) => deleteWorkspace(event, workspace)}
                       >
                         <Icon {PM} name="trash" />

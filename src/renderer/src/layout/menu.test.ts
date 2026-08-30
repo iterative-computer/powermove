@@ -45,12 +45,16 @@ describe('panel context menu contributions', () => {
     expect({ top: above.style.top, side: above.dataset.side }).toEqual({ top: '114px', side: 'above' });
   });
 
-  it('leaves the built-in rows untouched when nothing is contributed', () => {
+  it('only shows the essential built-in panel actions', () => {
     const { open } = harness();
     const menu = open()!;
+    const labels = [...menu.querySelectorAll('button')].map((button) => button.textContent);
 
     expect(menu.querySelector('.hd')?.textContent).toBe('Notes');
-    expect([...menu.querySelectorAll('button')].some((button) => button.textContent === 'Hide panel')).toBe(true);
+    expect(labels).toEqual(['Pop out to window', 'Close panel']);
+    expect(menu.textContent).not.toContain('Move to');
+    expect(menu.textContent).not.toContain('Add panel');
+    expect(menu.textContent).not.toContain('Restore ');
   });
 
   it('appends contributed items after the built-in rows, behind a separator', () => {

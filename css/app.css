@@ -855,8 +855,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .library-live{position:relative;width:100%;overflow:hidden}
 .library-live-frame{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none;display:flex;flex-direction:column}
 .library-live-frame>.panel.library-clone{flex:1 1 auto;min-height:0}
-.library-card-add{position:absolute;top:12px;right:12px;z-index:1;background:rgb(10 10 12 / .62);backdrop-filter:blur(8px);color:#fff;opacity:0;transition:opacity var(--dur-2)}
-.library-card:hover .library-card-add,.library-card:focus-within .library-card-add{opacity:1}.library-card-add:hover{background:rgb(10 10 12 / .82)}
+.library-card-add,.library-card-delete{position:absolute;top:12px;z-index:1;background:rgb(10 10 12 / .62);backdrop-filter:blur(8px);color:#fff;opacity:0;transition:opacity var(--dur-2)}
+.library-card-add{right:12px}.library-card-delete{right:48px}
+.library-card:hover .library-card-add,.library-card:focus-within .library-card-add,.library-card:hover .library-card-delete,.library-card:focus-within .library-card-delete{opacity:1}.library-card-add:hover,.library-card-delete:hover{background:rgb(10 10 12 / .82)}.library-card-add:hover{color:#fff}.library-card-delete:hover{color:#ff8b8b}
 /* panel editor — conversation on the left, the live panel on the right */
 .library-editor{min-height:0;flex:1;display:flex}
 .library-chat{width:min(360px,42vw);flex:none;display:flex;flex-direction:column;border-right:1px solid var(--line);background:transparent}

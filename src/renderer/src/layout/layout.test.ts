@@ -260,10 +260,10 @@ describe('Svelte DockLayout panel pool', () => {
     const menu = document.querySelector<HTMLElement>('.drop[role="menu"]')!;
     const buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')];
     expect(menu.getAttribute('aria-label')).toBe('Alpha panel options');
-    expect(buttons.length).toBeGreaterThan(3);
+    expect(buttons).toHaveLength(2);
     expect(buttons.every((button) => button instanceof HTMLButtonElement)).toBe(true);
     expect(menu.textContent).toContain('Pop out to window');
-    expect(buttons.some((button) => button.getAttribute('aria-disabled') === 'true')).toBe(true);
+    expect(buttons.map((button) => button.textContent)).toEqual(['Pop out to window', 'Close panel']);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
     expect(buttons.every((button) => button.style.background === '')).toBe(true);
     // Pointer-opened: focus parks on the menu, no row is painted; arrows enter the list.
@@ -272,7 +272,6 @@ describe('Svelte DockLayout panel pool', () => {
     expect(document.activeElement).toBe(buttons[0]);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(document.activeElement).toBe(buttons[1]);
-    expect(buttons.some((button) => button.getAttribute('aria-disabled') === 'true')).toBe(true);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(document.querySelector('.drop')).toBeNull();
     expect(document.activeElement).toBe(trigger);

@@ -46,8 +46,21 @@
 
   function remove(event: MouseEvent, workspace: Workspace): void {
     event.stopPropagation();
-    PM.WS.remove(workspace.id);
-    status = `Deleted ${workspace.name}`;
+    PM.modal?.({
+      title: `Delete “${workspace.name}” workspace?`,
+      body: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
+      actions: [
+        { label: 'Cancel' },
+        {
+          label: 'Delete workspace',
+          pri: true,
+          run: () => {
+            PM.WS.remove(workspace.id);
+            status = `Deleted ${workspace.name}`;
+          }
+        }
+      ]
+    });
   }
 
   function saveCurrent(): void {
@@ -74,8 +87,8 @@
         <span class="nm" title={workspace.name}>{workspace.name}</span>
       </button>
       {#if !workspace.builtin}
-        <button class="stopwatch" type="button" aria-label={`Delete ${workspace.name}`} onclick={(event) => remove(event, workspace)}>
-          <Icon {PM} name="x" />
+        <button class="stopwatch" type="button" aria-label={`Delete ${workspace.name}`} title={`Delete ${workspace.name} workspace`} onclick={(event) => remove(event, workspace)}>
+          <Icon {PM} name="trash" />
         </button>
       {/if}
     </div>
