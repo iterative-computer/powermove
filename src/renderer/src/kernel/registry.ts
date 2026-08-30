@@ -146,6 +146,24 @@ export class Registry<T extends { id: string }> {
     for (const entry of this.ownerEntries(ownerId)) this.remove(entry);
   }
 
+  /**
+   * Move one owner's contributions below every other owner without replacing
+   * entry objects. Built-in hot reload uses this after re-registering its base
+   * definitions so live extension overrides keep precedence and valid
+   * disposal handles.
+   */
+  demoteOwner(ownerId: string): void {
+    for (const [id, stack] of this.stacks) {
+      const owned = stack.filter((entry) => entry.ownerId === ownerId);
+      if (!owned.length || owned.length === stack.length) continue;
+      const others = stack.filter((entry) => entry.ownerId !== ownerId);
+      const previous = stack[stack.length - 1];
+      const reordered = [...owned, ...others];
+      this.stacks.set(id, reordered);
+      if (previous !== reordered[reordered.length - 1]) this.emit({ id, kind: 'replace' });
+    }
+  }
+
   clear(): void {
     for (const id of [...this.stacks.keys()]) {
       this.stacks.delete(id);

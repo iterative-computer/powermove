@@ -64,6 +64,56 @@ describe('installKeyListener', () => {
     expect(runs).toEqual(['first', 'second']);
   });
 
+  it('suppresses ordinary bindings on repeated keydowns without preventing default', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('ext', { key: 'cmd+k', command: 'palette' });
+
+    expect(press({ key: 'k', metaKey: true, repeat: true })).toBe(false);
+    expect(runs).toEqual([]);
+  });
+
+  it('dispatches repeat-enabled bindings and prevents default when handled', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('ext', { key: 'cmd+k', command: 'palette', repeat: true });
+
+    expect(press({ key: 'k', metaKey: true, repeat: true })).toBe(true);
+    expect(runs).toEqual([['palette', []]]);
+  });
+
+  it('does not fall through from a repeat-enabled decline to a suppressed binding', () => {
+    const kernel = createKernel();
+    const runs: string[] = [];
+    listeners.push(
+      kernel.installKeyListener((command) => {
+        runs.push(command);
+        return false;
+      })
+    );
+    kernel.bind('ext', { key: 'cmd+k', command: 'repeat-first', repeat: true, priority: 0 });
+    kernel.bind('built-in', { key: 'cmd+k', command: 'ordinary-second', priority: 10 });
+
+    expect(press({ key: 'k', metaKey: true, repeat: true })).toBe(false);
+    expect(runs).toEqual(['repeat-first']);
+  });
+
+  it('falls through between repeat-enabled bindings and prevents once one handles', () => {
+    const kernel = createKernel();
+    const runs: string[] = [];
+    listeners.push(
+      kernel.installKeyListener((command) => {
+        runs.push(command);
+        return command === 'repeat-first' ? false : undefined;
+      })
+    );
+    kernel.bind('ext', { key: 'cmd+k', command: 'repeat-first', repeat: true, priority: 0 });
+    kernel.bind('built-in', { key: 'cmd+k', command: 'repeat-second', repeat: true, priority: 10 });
+
+    expect(press({ key: 'k', metaKey: true, repeat: true })).toBe(true);
+    expect(runs).toEqual(['repeat-first', 'repeat-second']);
+  });
+
   it('prevents before invoking even when every binding declines', () => {
     const kernel = createKernel();
     listeners.push(kernel.installKeyListener(() => false));

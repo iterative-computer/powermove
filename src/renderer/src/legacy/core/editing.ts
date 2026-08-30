@@ -109,7 +109,7 @@ function rememberLive(command: any) {
   else live.commands[index] = copy;
 }
 
-function record(label: any, origin: any, applied: any) {
+function record(label: any, origin: any, applied: any, detail: any = {}) {
   PM.proj.revision = Math.max(0, Number(PM.proj.revision) || 0) + 1;
   PM.proj.edits = Array.isArray(PM.proj.edits) ? PM.proj.edits : [];
   PM.proj.edits.push({
@@ -118,8 +118,9 @@ function record(label: any, origin: any, applied: any) {
     at: Date.now(),
     origin: origin || 'interface',
     label: label || 'Edit source',
-    summary: applied.map(summarize),
+    summary: detail.summary || applied.map(summarize),
     operations: clone(applied),
+    ...(detail.structural ? { structural: clone(detail.structural) } : {}),
   });
   if (PM.proj.edits.length > MAX_EDITS) PM.proj.edits.splice(0, PM.proj.edits.length - MAX_EDITS);
 }
@@ -838,6 +839,54 @@ const Edit: any = {
       PM.hist.commit(meta.label || 'Edit source');
       const notices: any = executed.map((item: any) => item.message).filter(Boolean);
       return pass([meta.label || 'Source updated', ...notices].join('. '), { results, revision: PM.proj.revision });
+    } catch (error: any) {
+      PM.hist.cancel();
+      restore(before, selection);
+      return fail(String(error.message || error));
+    }
+  },
+
+  /**
+   * Record a trusted structural mutation through the same revision,
+   * provenance, notification, rollback, and history boundary as typed edits.
+   * The public primitive vocabulary cannot losslessly represent cloned layers,
+   * so provenance stores a canonical post-edit layer tree for exact replay.
+   */
+  mutate(label: any, action: any, meta: any = {}) {
+    if (live) return fail('Finish the active source edit before changing structure');
+    if (typeof action !== 'function') return fail('A structural edit action is required');
+    const before: any = JSON.stringify(PM.proj);
+    const selection: any = clone(PM.sel);
+    PM.hist.begin(label || 'Edit source', meta.historyGroup || null);
+    try {
+      const result: any = action();
+      if (JSON.stringify(PM.proj) === before) {
+        PM.hist.cancel();
+        return pass('No source changes', { result, revision: PM.proj.revision || 0 });
+      }
+      const previous: any = JSON.parse(before);
+      const withoutTree: any = (project: any) => {
+        const source: any = clone(project);
+        delete source.layers; delete source.comps; delete source.revision; delete source.edits;
+        return source;
+      };
+      if (JSON.stringify(withoutTree(previous)) !== JSON.stringify(withoutTree(PM.proj))) {
+        throw new Error('Structural edits may only change the project layer tree');
+      }
+      /* Structural commands clone/reorder complete layers, which the public
+         primitive vocabulary cannot faithfully replay. Record one canonical
+         post-edit tree instead of misleading partial add/reorder operations. */
+      record(label, meta.origin, [], {
+        summary: ['replace project layer tree'],
+        structural: {
+          format: 'powermove-layer-tree-v1',
+          layers: clone(PM.proj.layers || []),
+          comps: clone(PM.proj.comps || {}),
+        },
+      });
+      changed();
+      PM.hist.commit(label || 'Edit source');
+      return pass(label || 'Source updated', { result, revision: PM.proj.revision });
     } catch (error: any) {
       PM.hist.cancel();
       restore(before, selection);

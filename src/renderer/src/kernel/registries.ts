@@ -32,6 +32,7 @@ export interface KeybindingEntry extends KeybindingDefinition {
   chord: string;
   priority: number;
   inFields: boolean;
+  repeat: boolean;
   ownerId: string;
 }
 
@@ -211,6 +212,7 @@ export function createKernel(): Kernel {
         chord,
         priority: def.priority ?? 0,
         inFields: def.inFields === true,
+        repeat: def.repeat === true,
         ownerId
       };
       return keybindings.register(ownerId, entry);
@@ -312,10 +314,17 @@ export function createKernel(): Kernel {
         const field = isFieldTarget(event.target);
         for (const binding of kernel.bindingsFor(chord)) {
           if (field && !binding.inFields) continue;
+          if (event.repeat && !binding.repeat) continue;
           /* Field-aware bindings may deliberately decline to leave the native
              field behavior alone (the built-in Escape-to-blur binding does).
-             All editor-level bindings preserve HEAD's prevent-before-run order. */
-          if (!binding.inFields) event.preventDefault();
+             Ordinary editor-level bindings preserve HEAD's prevent-before-run
+             order; repeated events defer cancellation until handled. */
+          /* A repeated keydown is only cancellable once a repeat-enabled
+             command actually handles it. This lets a declined repeat fall
+             through and leaves the browser default intact when every
+             candidate is suppressed or declines. Ordinary keydowns retain
+             the historical prevent-before-run behavior. */
+          if (!event.repeat && !binding.inFields) event.preventDefault();
           let result: unknown;
           try {
             result = runCommand(binding.command, binding.args ?? []);
@@ -324,7 +333,7 @@ export function createKernel(): Kernel {
             return;
           }
           if (result === false) continue;
-          if (binding.inFields) event.preventDefault();
+          if (binding.inFields || event.repeat) event.preventDefault();
           return;
         }
       };

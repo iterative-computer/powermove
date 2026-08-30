@@ -39,6 +39,7 @@ export const IPC = {
   hapticAlignment: 'haptic:alignment',
   log: 'log',
   openExternal: 'shell:open-external',
+  nativeEdit: 'edit:native',
   menuCommand: 'menu:command' // main → renderer
 } as const;
 
@@ -201,7 +202,32 @@ export interface LogRequest {
   level: LogLevel;
   text: string;
 }
-export type MenuCommand = 'newProject' | 'save' | 'saveAs' | 'open' | 'export' | 'undo' | 'redo' | 'settings';
+export type MenuCommand =
+  | 'newProject'
+  | 'save'
+  | 'saveAs'
+  | 'open'
+  | 'export'
+  | 'contextUndo'
+  | 'contextRedo'
+  | 'contextCut'
+  | 'contextCopy'
+  | 'contextPaste'
+  | 'contextSelectAll'
+  | 'duplicate'
+  | 'split'
+  | 'toggleVisibility'
+  | 'bringForward'
+  | 'sendBackward'
+  | 'bringToFront'
+  | 'sendToBack'
+  | 'zoomIn'
+  | 'zoomOut'
+  | 'actualSize'
+  | 'fitComposition'
+  | 'fitView'
+  | 'settings';
+export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll';
 
 /* ── the preload surface ─────────────────────────────────── */
 import type { ExtensionsBridge } from './extensions';
@@ -255,6 +281,7 @@ export interface PowermoveBridge {
   };
   log(level: LogLevel, text: string): void;
   openExternal(url: string): Promise<void>;
+  nativeEdit(action: NativeEditAction): void;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;
 
   extensions: ExtensionsBridge;
