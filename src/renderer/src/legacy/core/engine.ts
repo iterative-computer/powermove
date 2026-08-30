@@ -17,11 +17,11 @@ PM.perf = E;
    scheduler in core/audio.js and never uses this race-prone path. */
 const mediaState = new WeakMap<any, any>();
 const VIDEO_DRIFT_SECONDS = 0.12;
-const VIDEO_RESYNC_INTERVAL_MS = 400;
+let videoSeekGeneration = 0;
 function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number) {
   let state = mediaState.get(el);
   if (!state) {
-    state = { desired: false, pending: false, expectedTime, playbackRate, lastResync: -Infinity };
+    state = { desired: false, pending: false, expectedTime, playbackRate, seekGeneration: -1 };
     mediaState.set(el, state);
   }
   state.desired = true;
@@ -33,15 +33,16 @@ function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number)
     }
   } catch (e) { }
   if (!el.paused && !state.pending) {
-    const now = window.performance.now();
-    const drift = Math.abs(Number(el.currentTime || 0) - expectedTime);
-    if (!el.seeking && drift > VIDEO_DRIFT_SECONDS && now - state.lastResync >= VIDEO_RESYNC_INTERVAL_MS) {
-      try { el.currentTime = expectedTime; state.lastResync = now; } catch (e) { }
+    // A real timeline jump needs one seek. Ordinary decoder drift does not:
+    // repeatedly assigning currentTime flushes queued 4K frames and turns a
+    // small clock difference into visibly low-frame-rate playback.
+    if (state.seekGeneration !== videoSeekGeneration) {
+      try { el.currentTime = expectedTime; state.seekGeneration = videoSeekGeneration; } catch (e) { }
     }
     return;
   }
   if (state.pending) return;
-  try { el.currentTime = expectedTime; state.lastResync = window.performance.now(); } catch (e) { }
+  try { el.currentTime = expectedTime; state.seekGeneration = videoSeekGeneration; } catch (e) { }
   state.pending = true;
   let started;
   try { started = el.play(); }
@@ -53,7 +54,7 @@ function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number)
       // Starting a cold 4K decoder can take several frames. Rejoin the editor
       // clock once the play promise settles instead of carrying that lag for
       // the rest of the clip.
-      try { el.currentTime = state.expectedTime; state.lastResync = window.performance.now(); } catch (e) { }
+      try { el.currentTime = state.expectedTime; state.seekGeneration = videoSeekGeneration; } catch (e) { }
     }
   }, () => {
     state.pending = false;
@@ -87,7 +88,7 @@ PM.setTime = (t: any, opt: any = {}) => {
   if (!opt.raw) t = PM.snapF(t, p.fps);
   if (t === PM.time && !opt.force) return;
   PM.time = t;
-  if (PM.playing) PM.Audio.seek(t);
+  if (PM.playing) { videoSeekGeneration++; PM.Audio.seek(t); }
   PM.bus.emit('time', t);
   PM.invalidate('render'); PM.invalidate('timeline'); PM.invalidate('status');
   if (!PM.playing) PM.invalidate('ui');
@@ -128,7 +129,7 @@ function frame(now: any) {
     let t = PM.time + dt;
     const [ws, we] = p.work && p.work[1] > p.work[0] ? p.work : [0, p.dur];
     if (t >= we - 1e-6) {
-      if (PM.loop) { t = ws; PM.Audio.seek(t); }
+      if (PM.loop) { t = ws; videoSeekGeneration++; PM.Audio.seek(t); }
       else { PM.setTime(we); PM.pause(); return; }
     }
     PM.time = t;
