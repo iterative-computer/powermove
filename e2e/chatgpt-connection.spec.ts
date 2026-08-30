@@ -15,6 +15,17 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     await expect(settings).toBeVisible();
     await expect(settings).toContainText('ChatGPT');
     await expect(settings).toContainText('motion@example.com · Pro plan');
+    const generalTab = settings.getByRole('tab', { name: 'General', exact: true });
+    const extensionsTab = settings.getByRole('tab', { name: 'Extensions', exact: true });
+    await expect(generalTab).toHaveAttribute('aria-selected', 'true');
+    await expect(settings.getByRole('tabpanel', { name: 'Extensions', exact: true })).toBeHidden();
+    await extensionsTab.click();
+    await expect(extensionsTab).toHaveAttribute('aria-selected', 'true');
+    const extensions = settings.getByRole('list', { name: 'Extensions' });
+    await expect(settings).toContainText('every discovered extension is shown');
+    await expect(extensions).toContainText('Timeline');
+    await expect(extensions).toContainText('Powermove themes');
+    await generalTab.click();
     const disconnect = settings.getByRole('button', { name: 'Disconnect', exact: true });
     await expect(disconnect).toBeEnabled();
     await disconnect.click();

@@ -3,6 +3,8 @@ import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { createChatGPTSettingsControl } from './ui/chatgpt-settings';
+import { createExtensionSettingsControl } from './ui/extension-settings';
+import { createSettingsTabs } from './ui/settings-tabs';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -460,25 +462,32 @@ PM.hist.clear();
 restoreProjectAssets(PM.proj);
 
 /* ── shell ─────────────────────────────────────────────── */
-function openSettings() {
+function openSettings(initialTab: 'general' | 'extensions' = 'general') {
   const chatgpt = createChatGPTSettingsControl();
+  const extensions = createExtensionSettingsControl();
   const appearance = h('select.settings-appearance', { 'aria-label': 'Appearance' },
     h('option', { value: 'system' }, 'Default'),
     h('option', { value: 'light' }, 'Light'), h('option', { value: 'dark' }, 'Dark'));
   appearance.value = PM.theme.mode;
   appearance.onchange = () => PM.theme.apply(appearance.value);
-  const body = h('div.settings-view',
+  const general = h('section',
     chatgpt.element,
     h('div.settings-row', h('div.settings-copy', h('b', 'Appearance'), h('span', 'Choose how Powermove looks.')), appearance),
     h('p.settings-note', 'ChatGPT authentication is managed securely by Codex. Powermove never reads or stores your account token.'));
+  const extensionPage = h('section', extensions.element);
+  const tabs = createSettingsTabs([
+    { id: 'general', label: 'General', panel: general },
+    { id: 'extensions', label: 'Extensions', panel: extensionPage }
+  ], initialTab);
+  const body = h('div.settings-view', tabs.element);
   const dialog = PM.modal({
     title: 'Settings',
     body,
-    width: 440,
+    width: 620,
     actions: [{ label: 'Done', pri: true }],
-    onClose: () => chatgpt.destroy()
+    onClose: () => { chatgpt.destroy(); extensions.destroy(); }
   });
-  window.setTimeout(() => chatgpt.focus(), 30);
+  if (initialTab === 'general') window.setTimeout(() => chatgpt.focus(), 30);
   return dialog;
 }
 PM.SettingsUI = { open: openSettings };
