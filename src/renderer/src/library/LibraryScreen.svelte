@@ -114,8 +114,10 @@
     return rootEl?.querySelector<HTMLElement>('.library-stage-frame') ?? null;
   }
 
-  /* Travels `node` from the `from` box to where it already sits. */
-  function flip(node: HTMLElement, from: DOMRect, fade: boolean, done?: () => void): Animation | null {
+  /* Travels `node` from the `from` box to where it already sits. Transform
+     only: any opacity on the moving panel — or on an ancestor fading it in —
+     reads as a flash rather than as one object changing place. */
+  function flip(node: HTMLElement, from: DOMRect, done?: () => void): Animation | null {
     const to = node.getBoundingClientRect();
     if (!from.width || !from.height || !to.width || !to.height) { done?.(); return null; }
     const origin = node.style.transformOrigin;
@@ -123,7 +125,7 @@
     const shift = `translate(${from.left - to.left}px,${from.top - to.top}px)`;
     const scale = `scale(${from.width / to.width},${from.height / to.height})`;
     const animation = node.animate(
-      [{ transform: `${shift} ${scale}`, opacity: fade ? 0.55 : 1 }, { transform: 'none', opacity: 1 }],
+      [{ transform: `${shift} ${scale}` }, { transform: 'none' }],
       { duration: FLIP_MS, easing: FLIP_EASE }
     );
     const settle = () => { node.style.transformOrigin = origin; done?.(); };
@@ -174,7 +176,7 @@
     copyLiveState(card, ghost);
     rootEl.appendChild(ghost);
     card.style.visibility = 'hidden';
-    flying = flip(ghost, from, false, () => {
+    flying = flip(ghost, from, () => {
       flying = null;
       ghost.remove();
       card.style.visibility = '';
@@ -193,7 +195,7 @@
        size before the first painted frame of the animation. */
     flushSync();
     const stage = stageBox();
-    if (stage) flip(stage, from, true);
+    if (stage) flip(stage, from);
   }
 
   /* `animate` is off when the whole library is closing: close() returns the
@@ -438,7 +440,7 @@
     </header>
 
     {#if editingPanel}
-      <div class="library-editor library-view">
+      <div class="library-editor">
         <aside class="library-chat" aria-label="Panel conversation">
           <div class="library-chat-log">
             <Conversation {PM} />
@@ -474,7 +476,7 @@
         </section>
       </div>
     {:else}
-      <div class="library-shell library-view">
+      <div class="library-shell">
         <main class="library-main">
           <div class="library-top">
             <div class="segmented" aria-label="Library sections">

@@ -871,16 +871,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .library-stage-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:32px 20px;text-align:center;color:var(--tx-3)}
 .library-stage-empty svg{width:28px;height:28px;margin-bottom:9px;color:var(--tx-4)}.library-stage-empty b{color:var(--tx);font-weight:var(--fw-medium)}.library-stage-empty span{max-width:40ch;font-size:var(--fs-sm);line-height:1.55;text-wrap:pretty}
 /* Panels ⇄ composer. The picked panel itself carries the swap: LibraryScreen
-   FLIPs the preview box between its card and the editor stage, so nothing
-   here may transform an ancestor of .library-live or .library-stage-frame —
-   an animated ancestor moves the ground the FLIP measured against. The
-   surrounding chrome fades instead, and clears fast so the travelling panel
-   lands on a settled view. Only the arriving view animates: the editor hands
-   its borrowed live panel back to the layout pool synchronously on teardown,
-   so it must not outlive the swap. */
+   FLIPs the preview box between its card and the editor stage. So nothing
+   here may touch either box or its ancestors — a transform moves the ground
+   the FLIP measured against, and an opacity fade turns the travelling panel
+   into a flash. Only the chrome beside it animates: the grid, the composer
+   column, the stage bar and the header, each of which is a sibling of the
+   moving panel rather than a parent of it. */
 .library-fly{position:absolute;z-index:6;pointer-events:none;aspect-ratio:auto;transform-origin:0 0;box-shadow:var(--shadow-float)}
-.library-view{animation:library-view-fade var(--dur-2) var(--ease)}
-.library-editor .library-chat{animation:library-view-rise var(--dur-3) var(--ease) 60ms both}
+.library-shell{animation:library-view-fade var(--dur-2) var(--ease)}
+.library-editor .library-chat,.library-editor .library-stage-bar{animation:library-view-rise var(--dur-3) var(--ease) 60ms both}
 .library-head .library-title,.library-head .library-back{animation:library-view-rise var(--dur-2) var(--ease)}
 @keyframes library-view-fade{from{opacity:0}}
 @keyframes library-view-rise{from{opacity:0;transform:translateY(5px)}}
