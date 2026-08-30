@@ -11,9 +11,15 @@ import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } 
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../panels/agent/threads';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
+import { idlePreload } from './idle-preload';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
+let rippleModule: ReturnType<typeof idlePreload> | null = null;
+const loadRippleModule = () => {
+  rippleModule ||= idlePreload(window, () => import('./RippleCanvas.svelte'));
+  return rippleModule.start();
+};
 
 /* The native Codex client owns ChatGPT authentication. This bridge only moves a
    prompt and a strict JSON schema across WKWebView; no account secret enters JS. */
@@ -442,6 +448,9 @@ function init() {
   window.addEventListener('pointercancel', () => { S.pressed = false; }, true);
   window.addEventListener('pointermove', watchShake, true);
   refreshSceneCache();
+  // Fetch and compile the optional ripple after initial UI work. First use
+  // remains immediate if the user activates it before the idle callback.
+  rippleModule ||= idlePreload(window, () => import('./RippleCanvas.svelte'));
 }
 
 function openAgentPanel() {
@@ -2331,7 +2340,7 @@ function startRipple(host: any, origin: any, sceneBitmap: any) {
   host.dataset.renderer = 'motion-gpu-initializing';
   // WebGPU ripple code is optional and relatively heavy. Fetch it only when
   // the user starts a spatial selection, keeping normal editor startup lean.
-  void import('./RippleCanvas.svelte').then(({ default: RippleCanvas }) => {
+  void loadRippleModule().then(({ default: RippleCanvas }) => {
     if (stopped || failed) { sceneBitmap?.close?.(); return; }
     try {
       component = mount(RippleCanvas, { target: host, props: {

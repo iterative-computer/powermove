@@ -66,16 +66,21 @@ async function startElectron(
   diagnostics: RendererDiagnostics
 ): Promise<{ app: ElectronApplication; page: Page }> {
   await ensureBuilt();
+  const launchEnv = {
+    ...process.env,
+    ...env,
+    POWERMOVE_USER_DATA: userData,
+    POWERMOVE_DEVTOOLS: '0',
+    POWERMOVE_BACKGROUND_TEST: '1',
+  };
+  // Codex and some Node launchers set this for their own Electron subprocesses.
+  // Passing it through makes Electron run as plain Node, which rejects the
+  // Chromium debugging flag Playwright needs before our app can even start.
+  delete launchEnv.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({
     args: ['.'],
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      ...env,
-      POWERMOVE_USER_DATA: userData,
-      POWERMOVE_DEVTOOLS: '0',
-      POWERMOVE_BACKGROUND_TEST: '1',
-    }
+    env: launchEnv
   });
   // Native dialogs are substituted in the hidden harness, never shown on the user's desktop.
   // Individual tests can supply chosen paths or decisions while retaining real file IPC.

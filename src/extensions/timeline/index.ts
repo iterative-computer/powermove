@@ -63,7 +63,13 @@ export function splitSelectedLayersAtPlayhead(pm: Record<string, any>): string[]
       rightIds.push(right.id);
     }
     pm.bus.emit('layers');
-    if (rightIds.length) pm.selectLayers(rightIds);
+    if (rightIds.length) {
+      // The project index intentionally avoids rescanning large layer stacks
+      // on every lookup. This command mutates the array directly, so retire
+      // the old index before resolving the newly-created selection.
+      pm.ProjectIndex?.invalidate?.();
+      pm.selectLayers(rightIds);
+    }
   });
   return rightIds;
 }

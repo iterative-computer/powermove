@@ -24,8 +24,12 @@ test('panel picker, independent hover states, media icons, and titlebar spacing'
     for (const preview of await page.locator('.asset-preview').all()) {
       expect(await preview.evaluate(el => getComputedStyle(el).backgroundImage)).toBe('none');
     }
-    await expect(page.locator('.asset-preview.audio [data-icon="music"]')).toBeVisible();
-    await expect(page.locator('.asset-preview.video [data-icon="film"]')).toBeVisible();
+    const waveformBars = await page.locator('.asset-preview.audio .asset-wave').evaluateAll(
+      waveforms => waveforms.map(waveform => waveform.querySelectorAll('i').length)
+    );
+    expect(waveformBars.length).toBeGreaterThan(0);
+    expect(waveformBars.every(count => count === 120)).toBe(true);
+    await expect(page.locator('.asset-preview.video [data-icon="film"]').first()).toBeVisible();
     const titlebar = await page.locator('#titlebar').evaluate(el => ({ left: parseFloat(getComputedStyle(el).paddingLeft), height: el.getBoundingClientRect().height }));
     expect(titlebar).toEqual({ left: 96, height: 44 });
     await page.getByRole('button', { name: 'Open panel library' }).click();

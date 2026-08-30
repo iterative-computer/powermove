@@ -219,7 +219,8 @@ async function decodeAsset(asset: any) {
       asset.audioUsedAt = Date.now();
       asset.audioDecodeError = null;
       asset.audioRetryAt = 0;
-      trimDecodedCache();
+      if (PM.Memory?.maintain) PM.Memory.maintain('audio');
+      else trimDecodedCache();
       PM.bus && PM.bus.emit('audio:decoded', asset.id);
       PM.invalidate && PM.invalidate('timeline');
       return buffer;

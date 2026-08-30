@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
+import { decodeProjectContainer } from '../src/shared/project-container';
 
 test.beforeEach(async ({ session }) => {
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
@@ -77,13 +78,14 @@ test('cancelled Save never reports a saved file; successful Save writes a reopen
     ]);
     await PM.saveProject(); return JSON.parse(PM.serialize());
   });
-  const saved = JSON.parse(await readFile(file, 'utf8'));
+  const savedBytes = await readFile(file);
+  const saved = decodeProjectContainer(savedBytes).document;
   expect(saved.proj).toEqual(original.proj);
-  await page.evaluate(async text => {
+  await page.evaluate(async bytes => {
     const PM = (window as any).PM;
     PM.Edit.apply({ type: 'delete_layers', targets: PM.proj.layers.map((L: any) => L.id) });
-    await PM.importFiles([new File([text], 'roundtrip.pmv', { type: 'application/json' })]);
-  }, JSON.stringify(saved));
+    await PM.importFiles([new File([new Uint8Array(bytes)], 'roundtrip.pmv', { type: 'application/octet-stream' })]);
+  }, Array.from(savedBytes));
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].p['position.x'].kf.map((k: any) => [k.t, k.v]))).toEqual([[0, 100], [2, 300]]);
   await page.screenshot({ path: info.outputPath('saved-project.png') });
   await page.evaluate(async () => { await new Promise(resolve => setTimeout(resolve, 800)); await (window as any).powermove.store.flush(); });

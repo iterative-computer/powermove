@@ -130,6 +130,7 @@ describe('timeline extension', () => {
       MediaTiming: { isTimed: () => false },
       hist: { do: (_label: string, run: () => void) => run() },
       bus: { emit: vi.fn() },
+      ProjectIndex: { invalidate: vi.fn() },
       selectLayers: (ids: string[]) => { selected = ids; }
     };
 
@@ -138,6 +139,7 @@ describe('timeline extension', () => {
       { id: 'right', from: 5, dur: 3 },
       { id: 'left', from: 2, dur: 3 }
     ]);
+    expect(PM.ProjectIndex.invalidate).toHaveBeenCalledOnce();
     expect(selected).toEqual(['right']);
   });
 

@@ -231,10 +231,12 @@ PM.raster = (L: any, scale: any = 1) => {
   if (!e) {
     e = L.type === 'text' ? rasterText(d, scale) : rasterShape(d, scale);
     e.dirty = true;
+    e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
     cache.set(key, e);
     cacheBytes += e.bytes;
-    evict();
+    if (PM.Memory?.maintain) PM.Memory.maintain('raster', cache.size > MAX);
+    else evict();
   }
   e.used = ++tick;
   e.key = key;

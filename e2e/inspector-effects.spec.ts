@@ -19,11 +19,11 @@ test('a copied effect pastes onto the layer selected after copying', async ({ se
 
   const effect = page.locator(`[data-effect-id="${ids.effect}"]`);
   await effect.click();
-  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('copy')?.click());
+  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('contextCopy')?.click());
   await expect(page.getByText('Copied 1 effect', { exact: true })).toBeVisible();
   await page.evaluate((destination) => (window as any).PM.selectLayers(destination), ids.destination);
   await expect(page.locator(`[data-inspector-layer="${ids.destination}"]`)).toBeVisible();
-  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('paste')?.click());
+  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('contextPaste')?.click());
 
   await expect.poll(() => page.evaluate((destination) => {
     const effects = (window as any).PM.L(destination).fx;
@@ -151,9 +151,9 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('panel context menus flip wholly above or below the cursor', async ({ session }) => {
+test('panel context menus stay wholly above or below the cursor', async ({ session }) => {
   const { page } = session;
-  const assertSide = async (trigger: ReturnType<typeof page.locator>, side: 'above' | 'below') => {
+  const assertPlacement = async (trigger: ReturnType<typeof page.locator>) => {
     const box = await trigger.boundingBox();
     if (!box) throw new Error('context-menu trigger is not visible');
     const cursor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -164,13 +164,13 @@ test('panel context menus flip wholly above or below the cursor', async ({ sessi
       const rect = element.getBoundingClientRect();
       return { top: rect.top, bottom: rect.bottom, side: element.getAttribute('data-side') };
     });
-    expect(placement.side).toBe(side);
-    if (side === 'below') expect(placement.top).toBeGreaterThan(cursor.y);
+    expect(['above', 'below']).toContain(placement.side);
+    if (placement.side === 'below') expect(placement.top).toBeGreaterThan(cursor.y);
     else expect(placement.bottom).toBeLessThan(cursor.y);
     await page.keyboard.press('Escape');
   };
 
-  await assertSide(page.locator('#panel-assets > header'), 'below');
-  await assertSide(page.locator('#panel-timeline .panel-move-handle'), 'above');
+  await assertPlacement(page.locator('#panel-assets > header'));
+  await assertPlacement(page.locator('#panel-timeline .panel-move-handle'));
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

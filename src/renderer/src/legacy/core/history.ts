@@ -4,7 +4,9 @@ import type { PMRegistry } from '../registry';
 type PathPart = string | number;
 type Patch = { path: PathPart[]; exists: boolean; value?: any };
 
-const MAX_ENTRIES = 120;
+// Patch entries are tiny for ordinary edits. Keep a deep practical timeline
+// while the byte budget remains the hard memory bound for structural changes.
+const MAX_ENTRIES = 1_000;
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 
 const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));

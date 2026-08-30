@@ -142,7 +142,11 @@ function grab(w: any, h: any) {
   poolBytes += f.bytes;
   return f;
 }
-const free = (f: any) => { if (f) f.busy = false; };
+const free = (f: any) => {
+  if (!f) return;
+  f.busy = false;
+  PM.Memory?.maintain?.('framebuffers');
+};
 function disposeFbo(f: any) {
   if (!f) return;
   GL.gl?.deleteFramebuffer?.(f.fb);
@@ -212,6 +216,7 @@ function texFor(key: any, source: any, opts: any = {}) {
   const bytes = Math.max(0, width * height * 4);
   textureBytes += bytes - (t.bytes || 0);
   t.bytes = bytes;
+  PM.Memory?.maintain?.('textures');
   return t.tex;
 }
 function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES) {

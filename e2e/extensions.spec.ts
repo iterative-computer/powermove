@@ -70,7 +70,9 @@ export default function activate(api: PowermoveAPI) {
     const { page } = session;
 
     // Wait for the kernel to finish booting extensions (compile is async in main).
-    await page.waitForFunction(() => (globalThis as unknown as { __e2eProbe?: number }).__e2eProbe === 1, undefined, { timeout: 15_000 });
+    // An initial refresh and a watcher refresh can legitimately activate the
+    // same extension twice before this assertion observes it.
+    await page.waitForFunction(() => Number((globalThis as unknown as { __e2eProbe?: number }).__e2eProbe) >= 1, undefined, { timeout: 15_000 });
 
     const state = await page.evaluate(() => {
       const PM = (window as unknown as Record<string, any>).PM;

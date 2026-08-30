@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test, type LaunchedApp } from './helpers/app';
+import { decodeProjectContainer } from '../src/shared/project-container';
 
 async function saveTo(session: LaunchedApp, destination: string | null) {
   await session.app.evaluate(({ dialog }, filePath) => {
@@ -17,7 +18,7 @@ async function rename(session: LaunchedApp, name: string) {
   }, name);
 }
 const savedName = async (file: string) => {
-  try { return JSON.parse(await readFile(file, 'utf8')).proj.name; }
+  try { return decodeProjectContainer(await readFile(file)).document.proj.name; }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 };
 

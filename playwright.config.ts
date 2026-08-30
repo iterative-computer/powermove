@@ -7,7 +7,10 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  globalTimeout: 120_000,
+  // The desktop suite intentionally uses one worker so hidden Electron
+  // sessions never contend for GPU/process resources. Give the complete
+  // suite enough time to run instead of cutting it off after ~30 tests.
+  globalTimeout: 600_000,
   expect: { timeout: 10_000 },
   outputDir: './e2e/test-results',
   reporter: [

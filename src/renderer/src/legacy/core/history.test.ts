@@ -45,4 +45,15 @@ describe('legacy history install', () => {
     expect(stats.bytes).toBeLessThan(1_000);
     expect(stats.maxBytes).toBe(256 * 1024 * 1024);
   });
+
+  it('retains a deep run of compact edits instead of discarding them at 120 steps', () => {
+    const PM = historyRegistry();
+    for (let value = 2; value <= 302; value++) {
+      PM.hist.do(`Set ${value}`, () => { PM.proj.value = value; });
+    }
+
+    expect(PM.hist.stats().entries).toBe(301);
+    for (let value = 301; value >= 1; value--) expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.value).toBe(1);
+  });
 });
