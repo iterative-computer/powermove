@@ -74,7 +74,6 @@ npm run dist:mac  # arm64 DMG, ZIP, and app in dist/
 - Replace the expression evaluator with an interpreter and remove application-level `unsafe-eval`.
 - Add a supported ProRes import/transcode path.
 - Add H.264/MP4 export; current delivery is WebM/VP9/Opus plus still/PNG-sequence paths.
-- Restore safe panel pop-outs where the new shell intentionally omits them.
 - Add Developer ID signing, hardened runtime, and notarization for public distribution.
 
 ## Design and migration notes

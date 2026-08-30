@@ -144,4 +144,4 @@
   </div>
 </div>
 <!-- All run choices share the same quiet options row. -->
-<AgentOptions {PM} />
+<AgentOptions {PM} showPanelFocus={panelId !== 'library'} />

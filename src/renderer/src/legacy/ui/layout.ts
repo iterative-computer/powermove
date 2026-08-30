@@ -16,6 +16,11 @@ export const LEGACY_OWNER = 'legacy';
 /** Bootstrap the panel registry before the concrete Svelte layout is installed. */
 export function install(PM: PMRegistry): void {
   const kernel = ensureKernel(PM);
+  /* Panels temporarily removed because their extension was disabled are not a
+     user layout choice. Remember only those removals so re-enabling the last
+     provider restores the panel, while panels the user had already hidden stay
+     hidden. */
+  const suspended = new Set<string>();
 
   /* One live registration per id, so re-registering a panel (HMR, a built-in
      re-running its install) replaces instead of stacking under itself. */
@@ -56,7 +61,17 @@ export function install(PM: PMRegistry): void {
   kernel.panels.onChange((change) => {
     const inst = PM.panelInst?.[change.id];
     const definition = kernel.panels.get(change.id);
-    if (change.kind === 'add') return;
+    if (change.kind === 'add') {
+      if (!definition) return;
+      if (inst) {
+        inst.def = definition;
+        PM.Layout?.refresh?.(change.id);
+      }
+      if (!suspended.delete(change.id)) return;
+      if (!PM.Layout?.restorePanel || !PM.WS?.mutate) return;
+      PM.WS.mutate((workspace: any) => PM.Layout.restorePanel(workspace, change.id));
+      return;
+    }
     if (definition) {
       if (!inst?.el?.isConnected) return;
       inst.def = definition;
@@ -64,7 +79,9 @@ export function install(PM: PMRegistry): void {
       return;
     }
     if (!PM.Layout?.hidePanel || !PM.WS?.mutate) return;
-    PM.WS.mutate((workspace: any) => PM.Layout.hidePanel(workspace, change.id));
+    PM.WS.mutate((workspace: any) => {
+      if (PM.Layout.hidePanel(workspace, change.id)) suspended.add(change.id);
+    });
   });
 
   PM.Layout = {

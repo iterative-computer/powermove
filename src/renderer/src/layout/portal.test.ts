@@ -98,6 +98,23 @@ afterEach(async () => {
 });
 
 describe('panel portal parking', () => {
+  it('adds a working move handle when a headless panel enables dragging during a live update', () => {
+    expect(document.querySelector('#panel-viewer .panel-move-handle')).toBeNull();
+
+    PM.registerPanel('viewer', {
+      title: 'Preview',
+      headless: true,
+      hideMoveHandle: false,
+      build() {}
+    });
+
+    const handle = document.querySelector<HTMLButtonElement>('#panel-viewer .panel-move-handle');
+    expect(handle?.getAttribute('aria-label')).toBe('Move Preview panel');
+
+    handle?.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }) as unknown as PointerEvent);
+    expect(PM.drag).toHaveBeenCalledOnce();
+  });
+
   it('moves the pool to document.body and releases focus before hiding a panel', () => {
     const pool = document.getElementById('pm-panel-pool')!;
     const input = document.querySelector<HTMLInputElement>('#panel-alpha input')!;

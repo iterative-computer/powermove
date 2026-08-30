@@ -18,13 +18,15 @@ export type TraceStep =
       status: 'running' | 'done' | 'error' | 'continued';
     };
 
-export type ToolsRowStatus = 'running' | 'error' | 'done';
+export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
 
 export interface ToolsRow {
   kind: 'tools';
   id: string;
   label: string;
   status: ToolsRowStatus;
+  failedCount: number;
+  toolCount: number;
   /** Individual step labels, kept for a title tooltip on settled groups. */
   detail?: string[];
 }
@@ -71,23 +73,34 @@ type ToolStep = Extract<TraceStep, { kind: 'tool' }>;
 export function groupedToolRow(steps: ToolStep[]): ToolsRow {
   const actions = [...new Set(steps.map((step) => toolAction(step.toolName)))];
   const label = joinActions(actions);
+  const failedCount = steps.filter((step) => step.status === 'error').length;
+  const settledCount = steps.filter((step) => step.status !== 'running').length;
   // `continued` is a bookkeeping state (the call was resumed), not a failure —
-  // it settles like `done`. Running wins over error wins over done.
+  // it settles like `done`. A failed exploratory check must not paint successful
+  // commands and edits in the same batch as wholly failed.
   const status: ToolsRowStatus = steps.some((step) => step.status === 'running')
     ? 'running'
-    : steps.some((step) => step.status === 'error')
+    : failedCount === settledCount && failedCount > 0
       ? 'error'
+      : failedCount > 0
+        ? 'partial'
       : 'done';
   const row: ToolsRow = {
     kind: 'tools',
     id: `tools-${steps[0]?.id ?? steps[0]?.toolName ?? 'activity'}`,
     label: label.charAt(0).toUpperCase() + label.slice(1),
-    status
+    status,
+    failedCount,
+    toolCount: steps.length
   };
   // Powermove keeps what supermove drops: once a group settles, the individual
   // labels stay reachable as a tooltip. Detail without visual noise.
   if (status !== 'running' && steps.length > 1) {
-    row.detail = steps.map((step) => step.label).filter(Boolean);
+    row.detail = steps
+      .filter((step) => Boolean(step.label))
+      .map((step) => failedCount > 0
+        ? `${step.status === 'error' ? 'Failed' : 'Succeeded'} · ${step.label}`
+        : step.label);
   }
   return row;
 }

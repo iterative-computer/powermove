@@ -473,6 +473,7 @@ function openSettings(initialTab: 'general' | 'extensions' = 'general') {
     title: 'Settings',
     body: h('div.settings-view', tabs.element),
     width: 620,
+    fill: true,
     actions: [{ label: 'Done', pri: true }],
     onClose: () => { general.destroy(); extensions.destroy(); }
   });

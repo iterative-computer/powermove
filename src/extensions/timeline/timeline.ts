@@ -126,6 +126,7 @@ export function pickKeyframeHit<T extends { i?: string }>(
 
 export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
+  library: { width: 800, height: 440 },
 } as const;
 
 /** Every clip carries its name, audio included: the waveform sits under it. */

@@ -372,6 +372,35 @@ describe('loader reload', () => {
     expect(log).toEqual(['one', 'two', 'one']);
     expect(loader.activeIds()).toEqual(['one']);
   });
+
+  it('swaps a timeline replacement and its built-in fallback whenever either is toggled', async () => {
+    const log: string[] = [];
+    const { deps } = fakeDeps();
+    const timeline = builtinRec('timeline');
+    const replacement = rec('timeline-pro', {
+      manifest: { id: 'timeline-pro', name: 'Timeline Pro', version: '1.0.0', apiVersion: 1, replaces: ['timeline'] }
+    });
+    const bridge = fakeBridge([timeline, replacement]);
+    const loader = createLoader({
+      kernel,
+      bridge: bridge.bridge,
+      deps,
+      builtins: { timeline: mod(log, 'timeline'), 'timeline-pro': mod(log, 'timeline-pro') }
+    });
+
+    await loader.boot();
+    expect(loader.activeIds()).toEqual(['timeline-pro']);
+
+    bridge.state.records = [timeline, { ...replacement, enabled: false }];
+    bridge.emit({ ids: ['timeline-pro'], reason: 'disable' });
+    await loader.whenIdle();
+    expect(loader.activeIds()).toEqual(['timeline']);
+
+    bridge.state.records = [timeline, replacement];
+    bridge.emit({ ids: ['timeline-pro'], reason: 'enable' });
+    await loader.whenIdle();
+    expect(loader.activeIds()).toEqual(['timeline-pro']);
+  });
 });
 
 /* ── runtime error policy ────────────────────────────────── */

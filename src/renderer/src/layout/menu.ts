@@ -13,6 +13,7 @@ import {
   type PanelSpec,
   type Workspace
 } from './model';
+import { canPopoutPanel } from './popout';
 
 type MenuItem =
   | { kind: 'header'; label: string }
@@ -55,6 +56,7 @@ export function openPanelMenu(
   const position = dock.panels.findIndex((item) => item.id === spec.id);
   const items: MenuItem[] = [
     { kind: 'header', label: def.title },
+    ...(canPopoutPanel(spec.id) ? [{ kind: 'action' as const, label: 'Pop out to window', run: () => PM.Popout?.open?.(spec.id) }] : []),
     ...(spec.id === 'viewer' ? [] : [{ kind: 'action' as const, label: 'Hide panel', run: () => PM.WS.mutate((w: Workspace) => hidePanel(w, spec.id)) }]),
     { kind: 'separator' },
     { kind: 'header', label: 'Move to' },

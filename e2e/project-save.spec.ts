@@ -78,6 +78,51 @@ test('native Open preserves editable source and subsequent saves update the open
   expect(undone.restored).toBe(undone.original);
 });
 
+test('Projects screen exposes file state and saves active, duplicated, and opened projects independently', async ({ session }) => {
+  const first = path.join(session.userData, 'From Projects.pmv');
+  const saveAs = path.join(session.userData, 'Projects Save As.pmv');
+  const duplicate = path.join(session.userData, 'Independent Copy.pmv');
+  const page = session.page;
+  const card = (name: string) => page.locator('.ps-card').filter({ has: page.locator('.ps-name', { hasText: name }) });
+  const runAction = async (name: string, action: string) => {
+    const project = card(name);
+    await project.getByRole('button', { name: 'Project actions' }).click();
+    await page.getByRole('menuitem', { name: action, exact: true }).click();
+  };
+
+  await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
+  await expect(card('Velocity Study')).toContainText('Not saved to a file');
+
+  await saveTo(session, first);
+  await runAction('Velocity Study', 'Save');
+  await expect.poll(() => savedName(first)).toBe('Velocity Study');
+  await expect(card('Velocity Study')).toContainText('Saved · From Projects.pmv');
+
+  await rename(session, 'Projects workflow');
+  await expect(card('Projects workflow')).toContainText('Unsaved changes · From Projects.pmv');
+  await saveTo(session, saveAs);
+  await runAction('Projects workflow', 'Save As…');
+  await expect.poll(() => savedName(saveAs)).toBe('Projects workflow');
+  await expect(card('Projects workflow')).toContainText('Saved · Projects Save As.pmv');
+
+  await runAction('Projects workflow', 'Duplicate');
+  await expect(card('Projects workflow copy')).toContainText('Not saved to a file');
+  await saveTo(session, duplicate);
+  await runAction('Projects workflow copy', 'Save');
+  await expect.poll(() => savedName(duplicate)).toBe('Projects workflow copy');
+  expect(await savedName(saveAs)).toBe('Projects workflow');
+  await page.screenshot({ path: '/tmp/powermove-projects-functional.png' });
+
+  const beforeOpen = await page.evaluate(() => (window as any).PM.proj.id);
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+  }, saveAs);
+  await page.getByRole('button', { name: 'Open Project…', exact: true }).click();
+  await expect(page.locator('#projects-screen')).not.toHaveClass(/\bon\b/);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).not.toBe(beforeOpen);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.app.dirty)).toBe(false);
+});
+
 test('cancel, disk-write failures, and external modifications never clear unsaved changes', async ({ session }) => {
   const destination = path.join(session.userData, 'Safe.pmv');
   await rename(session, 'Unsaved work');

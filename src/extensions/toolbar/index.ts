@@ -48,6 +48,7 @@ export default function activate(api: PowermoveAPI): void {
     flush: true,
     size: 40,
     noscroll: true,
+    library: false,
     build(body) {
       body.id = 'toolbar';
       const interactiveButtons: HTMLButtonElement[] = [];

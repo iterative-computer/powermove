@@ -1,5 +1,37 @@
 import { expect, test } from './helpers/app';
 
+test('a copied effect pastes onto the layer selected after copying', async ({ session }) => {
+  const { page } = session;
+  const ids = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.replaceProject(PM.mkProject({ name: 'Simple effect paste QA', dur: 10 }));
+    const source = PM.mkLayer('solid', { name: 'Source layer' });
+    const destination = PM.mkLayer('solid', { name: 'Destination layer' });
+    const effect = PM.mkEffect('blur');
+    effect.p.amount.v = 32;
+    source.fx.push(effect);
+    PM.proj.layers.push(source, destination);
+    PM.selectLayers(source.id);
+    PM.hist.clear();
+    PM.invalidate();
+    return { source: source.id, destination: destination.id, effect: effect.id };
+  });
+
+  const effect = page.locator(`[data-effect-id="${ids.effect}"]`);
+  await effect.click();
+  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('copy')?.click());
+  await expect(page.getByText('Copied 1 effect', { exact: true })).toBeVisible();
+  await page.evaluate((destination) => (window as any).PM.selectLayers(destination), ids.destination);
+  await expect(page.locator(`[data-inspector-layer="${ids.destination}"]`)).toBeVisible();
+  await session.app.evaluate(({ Menu }) => Menu.getApplicationMenu()?.getMenuItemById('paste')?.click());
+
+  await expect.poll(() => page.evaluate((destination) => {
+    const effects = (window as any).PM.L(destination).fx;
+    return effects.map((candidate: any) => [candidate.type, candidate.p.amount.v]);
+  }, ids.destination)).toEqual([['blur', 32]]);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 test('effect rows select, copy, paste, delete, and undo as editable source transactions', async ({ session }) => {
   const { page } = session;
   const ids = await page.evaluate(() => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { ChatGPTAccountStatus } from '../../../shared/ipc';
   import type { PanelProps } from './registerSveltePanel';
   import Composer from './agent/Composer.svelte';
@@ -25,6 +26,13 @@
   const showPreview = $derived(agentState.phase === 'preview');
   const showResult = $derived(agentState.phase === 'result' && (agentState.panelRun || !agentState.run?.autonomous));
   const showConnectionGate = $derived(accountStatus.state !== 'connected' && accountStatus.state !== 'checking');
+
+  onMount(() => {
+    // Panels mount before app.ts chooses the boot project. Synchronize on the
+    // first frame so saved threads are present before the composer is usable.
+    const frame = window.requestAnimationFrame(() => PM.AgentUI?.update?.({ flush: true }));
+    return () => window.cancelAnimationFrame(frame);
+  });
 
   function unavailable(error: unknown): ChatGPTAccountStatus {
     return {
@@ -124,6 +132,7 @@
 </script>
 
 <div class="agent-panel-body agent-shell" data-svelte-panel={panelId} data-agent-panel data-agent-phase={agentState.phase}>
+  <ThreadPicker {PM} />
   {#if showConnectionGate}
     <div class="agent-connect-gate" role="status" aria-live="polite">
       <select class="agent-connect-provider" aria-label="Provider" value={agentState.provider} onchange={changeGateProvider}>
@@ -147,7 +156,6 @@
       <small>Sign-in is handled by the official {providerName === 'Claude' ? 'Claude Code' : 'Codex'} runtime. Powermove never sees your password.</small>
     </div>
   {:else}
-    <ThreadPicker {PM} />
     <div
       class="agent-scroll"
       role="log"

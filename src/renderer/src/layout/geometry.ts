@@ -137,9 +137,10 @@ export function transferPanelHeights(
 }
 
 export function visibleDockPlan(
-  workspace: Workspace
+  workspace: Workspace,
+  isDetached: (id: string) => boolean = () => false
 ): Array<{ dock: Workspace['layout']['docks'][number]; specs: Workspace['layout']['docks'][number]['panels'] }> {
   return (workspace.layout?.docks || [])
-    .map((dock) => ({ dock, specs: dock.panels || [] }))
+    .map((dock) => ({ dock, specs: (dock.panels || []).filter((spec) => !isDetached(spec.id)) }))
     .filter((item) => !item.dock.hidden && item.specs.length > 0);
 }

@@ -20,6 +20,11 @@ const commandItem = (
   click: () => send(command)
 });
 
+const EDITABLE_FOCUS_SCRIPT = `(() => {
+  const element = document.activeElement;
+  return !!element && (element.matches?.('input, textarea, select') || element.isContentEditable);
+})()`;
+
 export function appMenuTemplate(
   send: (command: MenuCommand) => void
 ): MenuItemConstructorOptions[] {
@@ -64,8 +69,8 @@ export function appMenuTemplate(
         commandItem('Redo', 'CommandOrControl+Shift+Z', 'redo', send),
         { type: 'separator' },
         { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' },
+        commandItem('Copy', 'CommandOrControl+C', 'copy', send),
+        commandItem('Paste', 'CommandOrControl+V', 'paste', send),
         { role: 'selectAll' }
       ]
     },
@@ -89,9 +94,26 @@ export function buildAppMenu(send: (command: MenuCommand) => void): Menu {
 
 export function installMenu(getWindow: () => BrowserWindowType | null): Menu {
   const menu = buildAppMenu((command) => {
-    const window = BrowserWindow.getFocusedWindow() ?? getWindow();
-    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
-    window.webContents.send(IPC.menuCommand, command);
+    const focusedWindow = BrowserWindow.getFocusedWindow();
+    const editorWindow = getWindow() ?? focusedWindow;
+    if (!editorWindow || editorWindow.isDestroyed() || editorWindow.webContents.isDestroyed()) return;
+    if (command === 'copy' || command === 'paste') {
+      const fieldWindow = focusedWindow ?? editorWindow;
+      if (fieldWindow.isDestroyed() || fieldWindow.webContents.isDestroyed()) return;
+      void fieldWindow.webContents.executeJavaScript(EDITABLE_FOCUS_SCRIPT).then((fieldFocused) => {
+        if (fieldWindow.isDestroyed() || fieldWindow.webContents.isDestroyed()) return;
+        if (fieldFocused) {
+          if (command === 'copy') fieldWindow.webContents.copy();
+          else fieldWindow.webContents.paste();
+          return;
+        }
+        if (!editorWindow.isDestroyed() && !editorWindow.webContents.isDestroyed()) {
+          editorWindow.webContents.send(IPC.menuCommand, command);
+        }
+      }).catch(() => undefined);
+      return;
+    }
+    editorWindow.webContents.send(IPC.menuCommand, command);
   });
   Menu.setApplicationMenu(menu);
   return menu;

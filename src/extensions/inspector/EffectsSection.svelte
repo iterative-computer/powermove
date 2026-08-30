@@ -49,6 +49,7 @@
   function clearSelection(): void {
     selectedIds = [];
     selectionAnchor = null;
+    PM.Inspector?.clearEffectSelection?.();
   }
 
   function clearSelectionFromBackground(event: PointerEvent): void {
@@ -101,6 +102,7 @@
         : [...selectedIds, effect.id];
     } else selectedIds = [effect.id];
     selectionAnchor = effect.id;
+    PM.Inspector?.setEffectSelection?.(layer.id, selectedIds);
     (event.currentTarget as HTMLElement).focus();
   }
 
@@ -118,6 +120,7 @@
     const copied = effects.filter((effect: any) => ids.has(effect.id));
     selectedIds = copied.map((effect: any) => effect.id);
     selectionAnchor = fallback.id;
+    PM.Inspector?.setEffectSelection?.(layer.id, selectedIds);
     const count = copyEffects(copied);
     PM.toast?.(`Copied ${count} ${count === 1 ? 'effect' : 'effects'}`);
   }

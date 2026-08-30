@@ -265,6 +265,31 @@ export function createLoader(options: LoaderOptions): Loader {
     if (entry) kernel.events.emit('extension:unloaded', { id });
   }
 
+  /** Bring the whole active graph back to the current load plan. A toggle can
+      affect more than its own id: replacements expose their built-in fallback,
+      and dependencies can enable or disable a chain of extensions. Keep panel
+      registry changes batched so a replacement swap never presents the layout
+      with a momentary "panel missing" state. */
+  async function reconcile(list: ExtensionRecord[], changedIds: string[] = []): Promise<void> {
+    const plan = planLoad(list, Object.keys(builtins));
+    const desired = new Set(plan.order);
+    const changed = new Set(changedIds);
+    const panelChanges = kernel.panels.batchChanges();
+    try {
+      for (const { id, health } of plan.skipped) setHealth(id, health);
+      for (const id of [...active.keys()].reverse()) {
+        if (!desired.has(id) || changed.has(id)) await deactivate(id);
+      }
+      for (const id of plan.order) {
+        if (active.has(id)) continue;
+        const record = recordFor(id);
+        if (record) await activate(record);
+      }
+    } finally {
+      panelChanges.dispose();
+    }
+  }
+
   async function reload(id: string): Promise<void> {
     const panelChanges = kernel.panels.batchChanges();
     try {
@@ -332,22 +357,12 @@ export function createLoader(options: LoaderOptions): Loader {
 
   function onChanged(event: ExtensionsChangedEvent): void {
     kernel.events.emit('extensions:changed', { ids: [...event.ids], reason: event.reason });
-    if (event.reason === 'health') {
-      /* Health round-trips originate from this renderer's own reports; reloading
-         on them re-reports health and loops. Refresh the records only. */
-      enqueue(async () => {
-        await refreshRecords();
-      });
-      return;
-    }
     enqueue(async () => {
       const list = await refreshRecords();
-      const byId = new Map(list.map((record) => [record.id, record]));
-      for (const id of event.ids) {
-        const record = byId.get(id);
-        if (record && record.enabled !== false && !BLOCKED.has(record.health?.state)) await reload(id);
-        else await deactivate(id);
-      }
+      /* Health events are round-trips from this renderer. Re-plan so a failed
+         replacement can expose its fallback, but do not reload the reporting
+         extension and start another report loop. */
+      await reconcile(list, event.reason === 'health' ? [] : event.ids);
     });
   }
 

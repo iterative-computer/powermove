@@ -6,7 +6,8 @@
    (`timeline:context` and `layer:context` are hosted in extensions/timeline;
    `panel:context` in layout/menu.ts; `titlebar:right` in shell/Titlebar.svelte.) */
 export const viewerPanelOptions = {
-  title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: true,
+  title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
+  library: { width: 640, height: 480 },
 } as const;
 
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';

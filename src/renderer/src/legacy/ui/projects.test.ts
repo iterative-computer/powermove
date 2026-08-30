@@ -51,7 +51,7 @@ afterEach(() => {
 });
 
 describe('legacy projects screen install', () => {
-  it('installs the production library controls and project actions', () => {
+  it('connects the project library to real Open, Save, Save As, and safe duplication', async () => {
     const elements: FakeElement[] = [];
     let menuItems: any[] = [];
     const body = new FakeElement('body');
@@ -71,19 +71,32 @@ describe('legacy projects screen install', () => {
     };
     const live = { id: 'P1', name: 'Hero', at: Date.now() };
     const trashed = { id: 'P2', name: 'Old', deletedAt: Date.now() };
-    const PM: PMRegistry = {
+    const saveProject = vi.fn(async () => true);
+    const put = vi.fn();
+    const putState = vi.fn();
+    let PM: PMRegistry;
+    const openProject = vi.fn(async () => { PM.proj = { id: 'P3' }; });
+    PM = {
       h,
       icon: (name: string) => h('svg', name),
       store: { get: (_key: string, fallback: any) => fallback, set() {} },
-      bus: { emit() {} },
+      bus: { emit() {}, on: () => () => {} },
       Projects: {
         list: () => [live],
         trashList: () => [trashed],
         get: (id: string) => ({ id, name: id === 'P1' ? 'Hero' : 'Old', w: 1920, h: 1080, layers: [] }),
+        tabs: () => ['P1'],
+        getState: () => ({ time: 4, file: { path: '/tmp/Hero.pmv', savedHash: 'hash' } }),
+        put,
+        putState,
       },
       proj: { id: 'P1' },
+      projectFileState: () => ({ path: '/tmp/Hero.pmv', dirty: true }),
       menu: (_anchor: any, items: any[]) => { menuItems = items; },
       newProject() {},
+      openProject,
+      saveProject,
+      uid: () => 'P-copy',
       toast() {},
     };
 
@@ -93,10 +106,27 @@ describe('legacy projects screen install', () => {
     expect(elements.some(el => el.attrs.placeholder === 'Search projects')).toBe(true);
     expect(text).toContain('All Projects');
     expect(text).toContain('Recently edited');
+    expect(text).toContain('Open Project…');
+    expect(text.some(value => value.includes('Unsaved changes · Hero.pmv'))).toBe(true);
 
     const liveMore = [...elements].reverse().find(el => el.attrs['aria-label'] === 'Project actions')!;
     liveMore.onclick({ stopPropagation() {} });
+    expect(menuItems.some(item => item && item.label === 'Save')).toBe(true);
+    expect(menuItems.some(item => item && item.label === 'Save As…')).toBe(true);
     expect(menuItems.some(item => item && item.label === 'Move to Trash…')).toBe(true);
+    await menuItems.find(item => item?.label === 'Save').run();
+    await menuItems.find(item => item?.label === 'Save As…').run();
+    expect(saveProject).toHaveBeenNthCalledWith(1, { projectId: 'P1', saveAs: false });
+    expect(saveProject).toHaveBeenNthCalledWith(2, { projectId: 'P1', saveAs: true });
+
+    menuItems.find(item => item?.label === 'Duplicate').run();
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({ id: 'P-copy', name: 'Hero copy' }), undefined);
+    expect(putState).toHaveBeenCalledWith('P-copy', { time: 4 });
+
+    const openButton = elements.find(el => el.children.includes('Open Project…'))!;
+    await openButton.onclick();
+    expect(openProject).toHaveBeenCalledOnce();
+    expect(PM.ProjectsScreen.isOpen).toBe(false);
 
     PM.ProjectsScreen.show('trash');
     const trashMore = [...elements].reverse().find(el => el.attrs['aria-label'] === 'Project actions')!;

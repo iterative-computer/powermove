@@ -202,6 +202,28 @@ describe('AgentPanel', () => {
     expect(target.querySelector('.agent-connect-gate')).toBeNull();
   });
 
+  it('keeps existing threads visible while the provider connection is unavailable', async () => {
+    Object.defineProperty(window, 'powermove', {
+      configurable: true,
+      value: {
+        chatgpt: {
+          status: vi.fn(async () => ({ state: 'unavailable', email: null, planType: null, detail: 'Offline' })),
+          connect: vi.fn(), disconnect: vi.fn(), onChanged: vi.fn(() => () => undefined)
+        }
+      }
+    });
+    renderPanel(snapshot({
+      threadId: 'saved-thread',
+      threads: [{ id: 'saved-thread', title: 'Saved conversation' }]
+    }));
+
+    await vi.waitFor(() => expect(target.querySelector('.agent-connect-gate')).toBeTruthy());
+    const picker = target.querySelector<HTMLSelectElement>('[aria-label="Switch thread"]');
+    expect(picker).toBeTruthy();
+    expect(picker?.value).toBe('saved-thread');
+    expect(picker?.textContent).toContain('Saved conversation');
+  });
+
   it('offers accessible new-thread and switching controls and disables them during a run', () => {
     PM.AgentUI.newThread = vi.fn(); PM.AgentUI.switchThread = vi.fn();
     const threads = [{ id: 'first', title: 'Animate the title' }, { id: 'second', title: 'New thread' }];

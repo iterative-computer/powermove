@@ -9,7 +9,10 @@ export function install(PM: PMRegistry): void {
   const bridge = (window as any).powermove;
   const encoder = new window.TextEncoder();
   // File commands cannot wait for local-font enumeration or its permission prompt.
-  bridge.onMenuCommand((command: any) => PM.cmd && PM.cmd(command));
+  bridge.onMenuCommand((command: any) => {
+    const editorCommand = command === 'copy' ? 'copyLayers' : command === 'paste' ? 'pasteLayers' : command;
+    PM.cmd?.(editorCommand);
+  });
 
   function bytesFromBase64(value: any) {
     const normalized = String(value || '').replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
@@ -178,7 +181,8 @@ export function install(PM: PMRegistry): void {
             PM.CodexBridge.resolve(id, {
               ok: result.ok,
               dataBase64: textToBase64(result.ok ? result.text : result.error),
-              extensions: result.ok ? result.extensions : undefined
+              extensions: result.ok ? result.extensions : undefined,
+              extensionChangeSetId: result.ok ? result.extensionChangeSetId : undefined
             });
           })().catch(error => {
             PM.CodexBridge.resolve(id, {

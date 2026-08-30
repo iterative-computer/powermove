@@ -46,6 +46,8 @@ export interface PanelDefinition {
   moveSlot?: string;
   /** Choose a meaningful, distinct icon from the kernel icon set for every new panel. */
   icon?: string;
+  /** Library presentation is definition-owned, never inferred from the active workspace layout. */
+  library?: false | { width: number; height: number };
 }
 
 export interface PanelsAPI {

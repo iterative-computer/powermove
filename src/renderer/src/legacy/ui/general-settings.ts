@@ -40,14 +40,11 @@ export function createGeneralSettingsControl(theme: ThemePreference): GeneralSet
 
   const chatgpt = createChatGPTSettingsControl();
   const claude = createClaudeSettingsControl();
-  const accounts = createSettingsSection(
-    'Accounts',
-    'Uses the official Codex and Claude Code runtimes'
-  );
+  const accounts = createSettingsSection('Accounts');
   accounts.body.append(chatgpt.element, claude.element);
   const privacy = document.createElement('p');
   privacy.className = 'settings-note';
-  privacy.textContent = 'Powermove never reads or stores your account token.';
+  privacy.textContent = 'Sign-in runs in the official Codex and Claude Code runtimes; Powermove never stores your token.';
   accounts.element.append(privacy);
 
   const appearance = document.createElement('select');

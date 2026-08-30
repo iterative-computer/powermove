@@ -22,6 +22,7 @@ import {
   type ChatGPTAccountStatus,
   type ClaudeAccountStatus,
   type CodexCancelRequest,
+  type AgentChangeSetRestoreRequest,
   type CodexFixPromptRequest,
   type CodexRunRequest,
   type ConsentRequest
@@ -34,7 +35,8 @@ import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
 import { ClaudeAccountClient, ClaudeRunner } from '../claude';
 import { buildFixPrompt } from './instructions';
-import { agentWorkspaceRoot, type AgentApiPackFile } from './workspace';
+import { restoreExtensionChangeSet } from './change-history';
+import { agentWorkspaceRoot, safeAgentComponent, type AgentApiPackFile } from './workspace';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -49,6 +51,7 @@ export interface CodexIpcContext {
   codexBinaryPref(): string | null;
   claudeBinaryPref?(): string | null;
   openExternal(url: string): Promise<void>;
+  refreshExtensions?(ids: string[]): Promise<void>;
 }
 
 export interface ChatGPTAccountController {
@@ -81,6 +84,15 @@ function requireCancelRequest(value: unknown): CodexCancelRequest {
     throw new IpcValidationError(IPC.codexCancel, 'invalid request id');
   }
   return { id: value.id };
+}
+
+function requireRestoreRequest(value: unknown): AgentChangeSetRestoreRequest {
+  if (
+    !isRecord(value) ||
+    !isString(value.projectId) || !PROJECT_ID.test(value.projectId) ||
+    !isString(value.changeSetId) || !/^[A-Za-z0-9_-]{1,160}$/.test(value.changeSetId)
+  ) throw new IpcValidationError(IPC.codexRestoreChangeSet, 'invalid change-set request');
+  return { projectId: value.projectId, changeSetId: value.changeSetId };
 }
 
 function requireFixPromptRequest(value: unknown): CodexFixPromptRequest {
@@ -237,6 +249,18 @@ export function registerCodexIpc(
   ipcMain.handle(IPC.codexFixPrompt, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     return buildFixPrompt(requireFixPromptRequest(rawRequest));
+  });
+
+  ipcMain.handle(IPC.codexRestoreChangeSet, async (event, rawRequest: unknown) => {
+    requireTrusted(event, ctx);
+    const req = requireRestoreRequest(rawRequest);
+    const record = await restoreExtensionChangeSet({
+      liveDirectory: ctx.extensionsDir,
+      historyRoot: path.join(ctx.userData, 'Agent Change History', safeAgentComponent(req.projectId)),
+      changeSetId: req.changeSetId
+    });
+    await ctx.refreshExtensions?.(record.changes.map((change) => change.id));
+    return { changeSetId: record.id, extensions: record.changes };
   });
 
   ipcMain.handle(IPC.consentComputer, async (event, rawRequest: unknown) => {

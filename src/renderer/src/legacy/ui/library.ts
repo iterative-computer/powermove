@@ -1,11 +1,20 @@
-/* The Library is the live panel catalog. Saved project content is left intact. */
+/* The Library is the live panel catalog and workspace gallery. Saved project
+   content is left intact. The screen itself is Svelte (LibraryScreen); this
+   installer keeps the legacy PM.LibraryUI contract and defers any DOM work
+   until the library is first opened. */
+import { mount } from 'svelte';
+
 import type { PMRegistry } from '../registry';
-import { panelIcons } from '../../panels/panel-icons';
+import LibraryScreen from '../../library/LibraryScreen.svelte';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
-const state: any = { root: null, overlay: null, content: null, search: null, lastFocus: null, query: '' };
+let screen: any = null;
 const button: any = (label: string, run: () => void, primary = false) => h('button.btn' + (primary ? '.pri' : ''), { onclick: run }, label);
+function ensure() {
+  if (!screen) screen = mount(LibraryScreen, { target: document.body, props: { PM } });
+  return screen;
+}
 function reveal(id: string) {
   if (!PM.PANELS[id]) return;
   close();
@@ -24,58 +33,11 @@ function create() {
   PM.AgentUI?.setScope('workspace');
   PM.AgentUI?.setDraft('Create a new panel that ', true);
 }
-function paint() {
-  if (!state.content) return;
-  state.content.replaceChildren();
-  const panels = Object.entries(PM.PANELS || {}).map(([id, def]: any) => ({ ...def, id }))
-    .sort((a: any, b: any) => String(a.title || a.id).localeCompare(String(b.title || b.id)));
-  const matches = panels.filter((panel: any) => !state.query || (panel.title + ' ' + panel.id).toLowerCase().includes(state.query));
-  const icons = panelIcons(panels, PM.ICONS || {});
-  for (const panel of matches) {
-    const location = PM.Layout?.findPanel?.(PM.WS?.current, panel.id);
-    const visible = panel.id === 'toolbar' || (location && !location.dock.hidden && !location.spec.collapsed);
-    const title = panel.title || panel.id;
-    const open = h('button.panel-library-open', { type: 'button', onclick: () => reveal(panel.id), 'aria-label': 'Open ' + title }, PM.icon(icons[panel.id]), h('span', title));
-    state.content.append(h('div.panel-library-row', { data: { panelId: panel.id } }, open, h('span.panel-library-status', visible ? 'Open' : '')));
-  }
-  if (!matches.length) state.content.append(h('div.panel-library-empty', state.query ? 'No panels match your search.' : 'No panels are available.'));
-}
-function ensure() {
-  if (state.root) return;
-  state.search = h('input', { type: 'search', placeholder: 'Search panels', 'aria-label': 'Search panels', oninput: () => {
-    state.query = state.search.value.trim().toLowerCase(); paint();
-  } });
-  state.content = h('div.panel-library-list', { 'aria-label': 'Available panels' });
-  state.root = h('section#library-screen.panel-library', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Panel library', tabindex: '-1' },
-    h('header.panel-library-head', h('b', 'Panels'), h('span.sp'),
-      h('button.btn', { type: 'button', onclick: create }, PM.icon('plus'), 'New panel'),
-      h('button.iconbtn', { type: 'button', 'aria-label': 'Close Library', onclick: close }, PM.icon('x'))),
-    h('label.panel-library-search', PM.icon('search'), state.search), state.content);
-  state.overlay = h('div#library-overlay', state.root);
-  state.overlay.addEventListener('pointerdown', (event: any) => { if (event.target === state.overlay) close(); });
-  state.overlay.addEventListener('keydown', (event: KeyboardEvent) => {
-    event.stopPropagation();
-    if (event.key === 'Escape') { event.preventDefault(); close(); }
-    if (event.key !== 'Tab') return;
-    const items = [...state.root.querySelectorAll('button,input')] as HTMLElement[];
-    const first = items[0], last = items.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-  });
-  document.body.appendChild(state.overlay);
-}
-function open() {
-  ensure(); state.lastFocus = document.activeElement; paint();
-  const app = document.getElementById('app'); if (app) app.inert = true;
-  state.overlay.classList.add('on'); state.root.classList.add('on');
-  window.requestAnimationFrame(() => state.search.focus());
+function open(view?: 'panels' | 'workspaces') {
+  ensure().open(view);
 }
 function close() {
-  if (!state.overlay?.classList.contains('on')) return;
-  state.overlay.classList.remove('on'); state.root.classList.remove('on');
-  const app = document.getElementById('app'); if (app) app.inert = false;
-  const focus = state.lastFocus; state.lastFocus = null;
-  if (focus?.isConnected) focus.focus();
+  screen?.close();
 }
 const WorkspaceEditor: any = {
   el: null,
@@ -112,10 +74,10 @@ const WorkspaceEditor: any = {
 };
 
 
-PM.LibraryUI = { open, close, reveal, create, get isOpen() { return !!state.root?.classList.contains('on'); } };
+PM.LibraryUI = { open, close, reveal, create, get isOpen() { return !!screen?.isOpen(); } };
 PM.WorkspaceEditor = WorkspaceEditor;
-PM.bus.on('layout:applied', () => { if (PM.LibraryUI.isOpen) paint(); });
-PM.bus.on('workspaces', () => { if (PM.LibraryUI.isOpen) paint(); });
+PM.bus.on('layout:applied', () => { if (PM.LibraryUI.isOpen) screen?.refresh(); });
+PM.bus.on('workspaces', () => { if (PM.LibraryUI.isOpen) screen?.refresh(); });
 PM.bus.on('project', close);
-PM.Kernel?.events?.on?.('extensions:changed', () => { if (PM.LibraryUI.isOpen) paint(); });
+PM.Kernel?.events?.on?.('extensions:changed', () => { if (PM.LibraryUI.isOpen) screen?.refresh(); });
 }

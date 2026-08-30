@@ -96,6 +96,67 @@ export default function activate(api: PowermoveAPI) {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('timeline replacements swap with the built-in timeline without corrupting the live panel', async ({ session }) => {
+    await seedExtension(
+      session.userData,
+      'e2e-timeline-replacement',
+      `export default function activate(api) {
+  api.panels.register({
+    id: 'timeline', title: 'Replacement Timeline', headless: true, flush: true, noscroll: true,
+    size: 340, moveSlot: '#replacement-head',
+    build(body) {
+      const head = document.createElement('div');
+      head.id = 'replacement-head';
+      const marker = document.createElement('div');
+      marker.dataset.timelineReplacement = 'active';
+      marker.textContent = 'Replacement timeline';
+      body.replaceChildren(head, marker);
+    }
+  });
+}`,
+      { replaces: ['timeline'] }
+    );
+    await session.relaunch();
+    const { page, app } = session;
+    await expect(page.locator('#body #panel-timeline [data-timeline-replacement="active"]')).toBeVisible();
+    const before = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      (window as any).__replacementToggleDocument = document;
+      (window as any).__replacementToggleProject = PM.proj;
+      return { dock: PM.Layout.findPanel(PM.WS.current, 'timeline')?.dock?.id };
+    });
+    const pid = app.process().pid;
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await page.evaluate(async () => {
+        await (window as any).powermove.extensions.setEnabled({ id: 'e2e-timeline-replacement', enabled: false });
+      });
+      await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('timeline');
+      await expect(page.locator('#body #panel-timeline #tl-canvas')).toHaveCount(1);
+      await expect(page.locator('#body #panel-timeline .panel-move-handle')).toHaveCount(1);
+
+      await page.evaluate(async () => {
+        await (window as any).powermove.extensions.setEnabled({ id: 'e2e-timeline-replacement', enabled: true });
+      });
+      await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('e2e-timeline-replacement');
+      await expect(page.locator('#body #panel-timeline [data-timeline-replacement="active"]')).toBeVisible();
+      await expect(page.locator('#body #panel-timeline .panel-move-handle')).toHaveCount(1);
+    }
+
+    const after = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      return {
+        dock: PM.Layout.findPanel(PM.WS.current, 'timeline')?.dock?.id,
+        sameDocument: (window as any).__replacementToggleDocument === document,
+        sameProject: (window as any).__replacementToggleProject === PM.proj
+      };
+    });
+    expect(after).toEqual({ dock: before.dock, sameDocument: true, sameProject: true });
+    expect(app.process().pid).toBe(pid);
+    expect(app.windows()).toHaveLength(1);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('a broken extension is contained: the app boots and reports the failure', async ({ session }) => {
     await seedExtension(
       session.userData,
@@ -139,5 +200,48 @@ export default function activate(api: PowermoveAPI) {
       undefined,
       { timeout: 15_000 }
     );
+  });
+
+  test('turning the built-in timeline off and on restores its live panel in place', async ({ session }) => {
+    const { page, app } = session;
+    await expect(page.locator('#panel-timeline')).toBeVisible();
+    const pid = app.process().pid;
+    const before = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      (window as any).__timelineToggleDocument = document;
+      (window as any).__timelineToggleProject = PM.proj;
+      return {
+        dock: PM.Layout.findPanel(PM.WS.current, 'timeline')?.dock?.id,
+        active: PM.Kernel.loader.activeIds().includes('timeline')
+      };
+    });
+    expect(before.active).toBe(true);
+
+    await page.evaluate(async () => {
+      await (window as any).powermove.extensions.setEnabled({ id: 'timeline', enabled: false });
+    });
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds().includes('timeline'))).toBe(false);
+
+    await page.evaluate(async () => {
+      await (window as any).powermove.extensions.setEnabled({ id: 'timeline', enabled: true });
+    });
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds().includes('timeline'))).toBe(true);
+    await expect(page.locator('#panel-timeline')).toBeVisible();
+    await expect(page.locator('#panel-timeline #tl-canvas')).toHaveCount(1);
+    await expect(page.locator('#panel-timeline .panel-move-handle')).toHaveCount(1);
+
+    const after = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      return {
+        dock: PM.Layout.findPanel(PM.WS.current, 'timeline')?.dock?.id,
+        sameDocument: (window as any).__timelineToggleDocument === document,
+        sameProject: (window as any).__timelineToggleProject === PM.proj,
+        transportCount: document.querySelectorAll('#panel-timeline .tl-transport').length
+      };
+    });
+    expect(after).toEqual({ dock: before.dock, sameDocument: true, sameProject: true, transportCount: 1 });
+    expect(app.process().pid).toBe(pid);
+    expect(app.windows()).toHaveLength(1);
+    expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });

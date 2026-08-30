@@ -23,7 +23,10 @@
   const plan = $derived.by(() => {
     void tick;
     if (!manifest) return [] as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
-    return PM.Layout.visibleDockPlan(manifest) as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
+    return PM.Layout.visibleDockPlan(
+      manifest,
+      (id: string) => PM.Popout?.isOpen?.(id) === true
+    ) as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
   });
 </script>
 

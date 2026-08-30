@@ -439,6 +439,28 @@ it('keeps thread history, drafts and Codex sessions separate; ignores late stopp
   jobs[2].resolve(emptyAgentResult);
 });
 
+it('binds the first typed draft to the boot project before it can target an older thread', () => {
+  const { PM } = spatialHarness();
+  PM.store.set('agentThreads.project-1', {
+    version: 1,
+    activeId: 'existing-thread',
+    threads: [{
+      id: 'existing-thread', title: 'Existing conversation', updatedAt: 1,
+      conversation: [{ role: 'user', text: 'Earlier request' }],
+      composerDraft: '', attachments: [], scope: 'workspace',
+    }],
+  });
+
+  // Production installs the agent before app.ts chooses the boot project.
+  PM.proj = { id: 'project-1', name: 'Boot project', revision: 0, layers: [] };
+  PM.AgentUI.setDraft('A genuinely new request');
+
+  assert.equal(PM.AgentUI.state.threadId, 'existing-thread');
+  assert.deepEqual(PM.AgentUI.state.threads, [{ id: 'existing-thread', title: 'Earlier request' }]);
+  assert.equal(PM.AgentUI.state.composerDraft, 'A genuinely new request');
+  assert.ok(PM.AgentUI.state.conversation.some(message => message.text === 'Earlier request'));
+});
+
 it('project switches retain the old transcript and reject its late result', async () => {
   const { PM, jobs } = placementHarness();
   PM.AgentUI.submit('Old project request');

@@ -41,7 +41,7 @@ describe('viewer extension', () => {
 
     expect(panel).toMatchObject({
       id: 'viewer', title: 'Composition', flush: true, noscroll: true,
-      headless: true, hideMoveHandle: true
+      headless: true, hideMoveHandle: false
     });
     expect(PM.Viewer).toBeDefined();
     expect(PM.setOrKey).toBeTypeOf('function');

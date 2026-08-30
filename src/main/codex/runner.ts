@@ -15,6 +15,7 @@ import {
 import { EXTENSION_ID } from '../../shared/extensions';
 import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
 import { buildAutonomousArgv, buildEditorArgv } from './adapter';
+import { publishExtensionChanges } from './change-history';
 import { collectArtifacts } from './artifacts';
 import { consumeToken } from './consent';
 import { discoverCodexBinary } from './env';
@@ -28,6 +29,7 @@ import {
 import {
   agentWorkspaceRoot,
   clearSession,
+  discardExtensionStage,
   discardPartialRun,
   prepareAgentWorkspace,
   readSession,
@@ -446,11 +448,14 @@ export class CodexRunner {
       parsed.projectId = req.projectId;
       parsed.access = authorityForAccess(req.access);
       const extensions = parseAgentExtensionChanges(parsed.extensions);
+      const changeSet = await publishExtensionChanges(layout, extensions ?? []);
+      await discardExtensionStage(layout);
       return {
         ok: true,
         text: JSON.stringify(sortJsonValue(parsed)),
         access: authority,
-        ...(extensions === undefined ? {} : { extensions })
+        ...(extensions === undefined ? {} : { extensions }),
+        ...(changeSet === null ? {} : { extensionChangeSetId: changeSet.id })
       };
     } catch (error) {
       if (this.cancelled.has(req.id)) {

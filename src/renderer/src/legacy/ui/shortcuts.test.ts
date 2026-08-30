@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './shortcuts';
@@ -67,5 +67,25 @@ describe('legacy shortcut install', () => {
     expect(command.duration).toBe(29.58);
     expect(command.from).toBe(0.9);
     expect(command.content).toEqual({ asset: 'asset-1', trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 });
+  });
+
+  it('lets the active effect clipboard handle global paste before layers', () => {
+    const PM = shortcutsRegistry();
+    const pasteCopiedEffects = vi.fn(() => true);
+    PM.Inspector = { pasteCopiedEffects };
+
+    PM.cmd('pasteLayers');
+
+    expect(pasteCopiedEffects).toHaveBeenCalledOnce();
+  });
+
+  it('lets selected effects handle global copy before layers', () => {
+    const PM = shortcutsRegistry();
+    const copySelectedEffects = vi.fn(() => true);
+    PM.Inspector = { copySelectedEffects };
+
+    PM.cmd('copyLayers');
+
+    expect(copySelectedEffects).toHaveBeenCalledOnce();
   });
 });

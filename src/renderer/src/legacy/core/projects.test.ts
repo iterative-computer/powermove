@@ -21,6 +21,8 @@ function projectsRegistry(): { PM: PMRegistry; memory: Map<string, any> } {
 describe('legacy project registry install', () => {
   it('renames the active live document without reverting unsaved layers to the saved snapshot', () => {
     const { PM } = projectsRegistry();
+    const files = new Map<string, any>([['P2', { path: '/tmp/Other.pmv', dirty: false }]]);
+    PM.projectFileState = (id: string) => files.get(id);
     PM.Projects.put({ id: 'P1', name: 'Before', layers: [{ id: 'old' }] });
     PM.proj = { id: 'P1', name: 'Before', layers: [{ id: 'old' }, { id: 'new' }] };
     expect(PM.Projects.rename('P1', ' After ')).toBe('After');
@@ -30,6 +32,7 @@ describe('legacy project registry install', () => {
     PM.Projects.rename('P2', 'Inactive');
     expect(PM.proj.name).toBe('After');
     expect(PM.Projects.get('P2').name).toBe('Inactive');
+    expect(files.get('P2').dirty).toBe(true);
   });
 
   it('round-trips project data and metadata', () => {

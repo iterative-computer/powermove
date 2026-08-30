@@ -5,13 +5,22 @@ directories:
   output: dist
 
 asar: true
+electronLanguages:
+  - en
 files:
   - out/**
+  # The native agent runtimes are copied once below, at the paths used by the
+  # packaged binary resolvers. Keep their npm wrappers/metadata, but do not let
+  # electron-builder auto-pack a second copy of either platform executable.
+  - '!node_modules/@openai/codex-darwin-arm64/**'
   - '!node_modules/@anthropic-ai/claude-code-darwin-arm64/**'
   - '!node_modules/@anthropic-ai/claude-code/bin/claude.exe'
+  # esbuild/lib/main.js resolves the @esbuild platform package at runtime. The
+  # install-time bin copy is the same executable and is not used by Powermove.
+  - '!node_modules/esbuild/bin/esbuild'
 extraResources:
-  - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
-    to: codex/bin/codex
+  - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
+    to: codex
   - from: node_modules/@anthropic-ai/claude-code-darwin-arm64/claude
     to: claude/bin/claude
   - from: src/extensions

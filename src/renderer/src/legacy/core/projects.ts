@@ -65,6 +65,13 @@ R.rename = (id: any, name: any) => {
   } else if (meta) {
     R.upsertMeta({ ...meta, name: next, at: Date.now() });
   } else return null;
+  /* Inactive projects do not emit the active-document autosave events. Mark
+     their file association dirty here so the Projects screen and close guard
+     never imply that a rename already reached the external .pmv file. */
+  if (!active && next !== previous) {
+    const file = PM.projectFileState?.(id);
+    if (file) file.dirty = true;
+  }
   if (active) active.name = next;
   PM.bus?.emit?.('projects:tabs');
   if (active) { PM.touch?.(); PM.bus?.emit?.('project'); }

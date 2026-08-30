@@ -5,7 +5,7 @@
   let { PM }: { PM: Record<string, any> } = $props();
   const run = $derived(agentState.run);
   const panelRun = $derived(agentState.panelRun);
-  const reversible = $derived(run?.autonomous ? !!run.changed : true);
+  const reversible = $derived(run?.autonomous ? !!run.changed || !!run.extensionChangeSetId : true);
   const reviewMessage = $derived(run?.review?.message || '');
   const showReviewMessage = $derived(!run?.autonomous || (reviewMessage && ![
     'The editable Powermove result is ready to review.',
@@ -86,7 +86,7 @@
       {/if}
     {/if}
     {#if run.autonomous}
-      {#if reversible}<button class="agent-run-undo" type="button" title="Undo this run's Powermove changes (also available with Command-Z)" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
+      {#if reversible}<button class="agent-run-undo" type="button" title="Restore this run's project and app-extension changes" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}
     {:else}
       <div class="agent-card-actions">
         {#if reversible}<button class="agent-btn" type="button" onclick={() => PM.AgentUI?.undoSceneRun()}>Undo change</button>{/if}

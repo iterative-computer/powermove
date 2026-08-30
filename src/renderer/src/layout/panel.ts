@@ -16,6 +16,54 @@ function appendIcon(PM: PMRegistry, element: HTMLElement, name: string): void {
   if (icon instanceof Node) element.appendChild(icon);
 }
 
+/** Keep the layout-owned drag affordance in sync with a headless panel's live
+ * definition. Extension HMR can change this option after the shell was built,
+ * so this cannot be a create-once decision inside ensurePanel. */
+export function syncPanelMoveHandle(PM: PMRegistry, id: string): HTMLButtonElement | null {
+  const inst = PM.panelInst[id];
+  if (!inst?.el || !inst.body || !inst.def) return null;
+  let handle = inst.moveHandle instanceof HTMLButtonElement
+    ? inst.moveHandle
+    : inst.el.querySelector('.panel-move-handle') as HTMLButtonElement | null;
+  const enabled = !!inst.def.headless && !inst.def.hideMoveHandle;
+  if (!enabled) {
+    handle?.remove();
+    inst.moveHandle = null;
+    return null;
+  }
+
+  if (!handle) {
+    handle = makeElement('button', 'panel-move-handle');
+    handle.type = 'button';
+    appendIcon(PM, handle, 'grip');
+    handle.addEventListener('pointerdown', (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const current = (PM.Layout.ws && findPanel(PM.Layout.ws as Workspace, id))
+        || { spec: inst.spec, dock: inst.dock };
+      if (!current?.dock || !current.spec) return;
+      event.stopPropagation();
+      beginPanelDrag(PM, event, current.spec, current.dock, inst.el);
+    });
+    handle.addEventListener('contextmenu', (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const current = (PM.Layout.ws && findPanel(PM.Layout.ws as Workspace, id))
+        || { spec: inst.spec, dock: inst.dock };
+      if (!current?.dock || !current.spec) return;
+      openPanelMenu(PM, event, current.spec, current.dock, handle!);
+    });
+    inst.moveHandle = handle;
+  }
+
+  handle.title = `Move ${inst.def.title} · right-click for options`;
+  handle.setAttribute('aria-label', `Move ${inst.def.title} panel`);
+  const slot = inst.def.moveSlot ? inst.body.querySelector(inst.def.moveSlot) : null;
+  handle.classList.toggle('inline', !!slot);
+  if (slot) slot.insertBefore(handle, slot.firstChild);
+  else inst.el.appendChild(handle);
+  return handle;
+}
+
 export function syncPanelManifest(PM: PMRegistry, id: string, spec: PanelSpec, dock: DockSpec): HTMLElement | null {
   const inst = PM.panelInst[id];
   if (!inst?.el) return null;
@@ -66,16 +114,7 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
   const body = makeElement('div', 'body');
   element.appendChild(body);
 
-  const moveHandle = headless && !def.hideMoveHandle ? makeElement('button', 'panel-move-handle') : null;
-  if (moveHandle) {
-    moveHandle.type = 'button';
-    moveHandle.title = `Move ${def.title} · right-click for options`;
-    moveHandle.setAttribute('aria-label', `Move ${def.title} panel`);
-    appendIcon(PM, moveHandle, 'grip');
-    element.appendChild(moveHandle);
-  }
-
-  Object.assign(inst, { el: element, body, header, def, spec, dock, moveHandle, cache: body });
+  Object.assign(inst, { el: element, body, header, def, spec, dock, moveHandle: null, cache: body });
   applyPanelSize(element, spec, def);
   element.style.minHeight = `${spec.min || 56}px`;
 
@@ -90,13 +129,6 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
   }
   inst.built = true;
 
-  if (moveHandle && def.moveSlot) {
-    const slot = body.querySelector(def.moveSlot);
-    if (slot) {
-      moveHandle.classList.add('inline');
-      slot.insertBefore(moveHandle, slot.firstChild);
-    }
-  }
   try {
     def.header?.(header, inst);
   } catch {
@@ -147,10 +179,7 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
     showMenu(event);
   });
   header.addEventListener('contextmenu', showMenu);
-  if (moveHandle) {
-    moveHandle.addEventListener('pointerdown', beginMove);
-    moveHandle.addEventListener('contextmenu', showMenu);
-  }
+  syncPanelMoveHandle(PM, spec.id);
   if (spec.collapsed) setPanelCollapsed(PM, spec.id, true, false);
   return element;
 }

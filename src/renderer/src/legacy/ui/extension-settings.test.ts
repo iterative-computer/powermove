@@ -55,9 +55,14 @@ describe('extension settings control', () => {
 
     await vi.waitFor(() => expect(control.element.querySelectorAll('[data-extension-id]')).toHaveLength(5));
     expect(control.element.textContent).toContain('5 extensions discovered');
-    expect(control.element.querySelector('[data-extension-id="agent-ext"]')?.textContent).toContain('Agent');
-    expect(control.element.querySelector('[data-extension-id="builtin-ext"]')?.textContent).toContain('Built in');
-    expect(control.element.querySelector('[data-extension-id="disabled-ext"]')?.textContent).toContain('Off');
+    expect(control.element.querySelector('[data-extension-id="agent-ext"] .settings-extension-tag')?.textContent).toBe('Agent');
+    /* Built in is the default, so only added extensions carry a source tag. */
+    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .settings-extension-tag')).toBeNull();
+    expect(control.element.querySelector('[data-extension-id="disabled-ext"] .toggle')?.getAttribute('aria-pressed')).toBe('false');
+    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .toggle')?.getAttribute('aria-pressed')).toBe('true');
+    expect(control.element.querySelector('[data-extension-id="broken-ext"] .settings-extension-status')?.textContent).toBe('Needs attention');
+    /* A healthy row leans on its switch instead of repeating an "Active" pill. */
+    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .settings-extension-status')).toBeNull();
     expect(control.element.querySelector('[data-extension-id="old-timeline"]')?.textContent).toContain('Replaced by new-timeline');
     expect(control.element.querySelector('[data-extension-id="broken-ext"]')?.textContent).toContain('Invalid manifest');
 
@@ -76,12 +81,13 @@ describe('extension settings control', () => {
     harness.emit({ ids: ['new-agent'], reason: 'create' });
     await vi.waitFor(() => expect(control.element.querySelectorAll('[data-extension-id]')).toHaveLength(2));
 
-    const toggle = control.element.querySelector<HTMLInputElement>('[data-extension-id="new-agent"] input');
+    const toggle = control.element.querySelector<HTMLButtonElement>('[data-extension-id="new-agent"] .toggle');
     if (!toggle) throw new Error('New agent extension toggle was not rendered.');
-    toggle.checked = false;
-    toggle.dispatchEvent(new Event('change'));
+    expect(toggle.classList.contains('on')).toBe(true);
+    toggle.click();
     await vi.waitFor(() => expect(harness.api.setEnabled).toHaveBeenCalledWith({ id: 'new-agent', enabled: false }));
-    expect(control.element.querySelector('[data-extension-id="new-agent"]')?.textContent).toContain('Off');
+    await vi.waitFor(() => expect(control.element
+      .querySelector('[data-extension-id="new-agent"] .toggle')?.getAttribute('aria-pressed')).toBe('false'));
     control.destroy();
   });
 

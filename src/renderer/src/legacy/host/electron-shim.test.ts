@@ -77,6 +77,10 @@ describe('legacy Electron shim install', () => {
     PM.cmd = vi.fn();
     bridge.onMenuCommand.mock.calls[0][0]('save');
     expect(PM.cmd).toHaveBeenCalledWith('save');
+    bridge.onMenuCommand.mock.calls[0][0]('copy');
+    bridge.onMenuCommand.mock.calls[0][0]('paste');
+    expect(PM.cmd).toHaveBeenNthCalledWith(2, 'copyLayers');
+    expect(PM.cmd).toHaveBeenNthCalledWith(3, 'pasteLayers');
   });
   it('maps Codex authority and effort and emits plain UTF-8 progress/result payloads', async () => {
     const { PM, bridge, window } = loadShim();
@@ -87,7 +91,7 @@ describe('legacy Electron shim install', () => {
     ) => {
       onProgress?.('Researching on the web…');
       onTrace?.({ kind: 'tool-start', itemId: 'search-1', toolName: 'search', label: 'search · motion' });
-      return { ok: true, text: 'Finished ✓', access: 'editor' };
+      return { ok: true, text: 'Finished ✓', access: 'editor', extensionChangeSetId: 'run-restore-1' };
     });
 
     const handlers = window.webkit.messageHandlers;
@@ -112,6 +116,7 @@ describe('legacy Electron shim install', () => {
     const result = (PM.CodexBridge.resolve as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as {
       ok: boolean;
       dataBase64: string;
+      extensionChangeSetId?: string;
     };
     expect(decodeBase64(progress.dataBase64)).toBe('Researching on the web…');
     expect(PM.CodexBridge.trace).toHaveBeenCalledExactlyOnceWith('request-1234', {
@@ -119,6 +124,7 @@ describe('legacy Electron shim install', () => {
     });
     expect(result.ok).toBe(true);
     expect(decodeBase64(result.dataBase64)).toBe('Finished ✓');
+    expect(result.extensionChangeSetId).toBe('run-restore-1');
 
     handlers.pmCodex?.postMessage({
       id: 'request-5678',

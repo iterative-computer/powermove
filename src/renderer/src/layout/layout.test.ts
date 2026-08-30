@@ -247,7 +247,7 @@ describe('Svelte DockLayout panel pool', () => {
     expect(panel.querySelector(domContract.panel.moveHandle)).not.toBeNull();
   });
 
-  it('opens a native-button menu with roving arrow focus and no pop-out entry', () => {
+  it('opens a native-button menu with roving arrow focus and a pop-out entry', () => {
     register(PM, 'alpha');
     register(PM, 'viewer', { headless: true, hideMoveHandle: true });
     register(PM, 'beta');
@@ -262,7 +262,7 @@ describe('Svelte DockLayout panel pool', () => {
     expect(menu.getAttribute('aria-label')).toBe('Alpha panel options');
     expect(buttons.length).toBeGreaterThan(3);
     expect(buttons.every((button) => button instanceof HTMLButtonElement)).toBe(true);
-    expect(menu.textContent).not.toContain('Pop out');
+    expect(menu.textContent).toContain('Pop out to window');
     expect(buttons.some((button) => button.getAttribute('aria-disabled') === 'true')).toBe(true);
     expect(buttons.every((button) => !button.disabled)).toBe(true);
     expect(buttons.every((button) => button.style.background === '')).toBe(true);
@@ -272,7 +272,7 @@ describe('Svelte DockLayout panel pool', () => {
     expect(document.activeElement).toBe(buttons[0]);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(document.activeElement).toBe(buttons[1]);
-    expect(buttons[1]?.getAttribute('aria-disabled')).toBe('true');
+    expect(buttons.some((button) => button.getAttribute('aria-disabled') === 'true')).toBe(true);
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(document.querySelector('.drop')).toBeNull();
     expect(document.activeElement).toBe(trigger);

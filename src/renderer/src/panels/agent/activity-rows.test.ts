@@ -29,6 +29,8 @@ describe('activityRows', () => {
       id: 'tools-1',
       label: 'Ran commands, edited files, and searched the web',
       status: 'done',
+      failedCount: 0,
+      toolCount: 3,
       renderKey: 'tools-1-0',
       pulsing: false
     });
@@ -124,14 +126,20 @@ describe('activityRows', () => {
     ]);
   });
 
-  it('applies running > error > done status precedence', () => {
+  it('distinguishes a partly failed batch from a wholly failed batch', () => {
     expect(at(activityRows([tool({ toolName: 'write', status: 'error' })])).status).toBe('error');
     expect(
       at(activityRows([tool({ id: 'a', status: 'error' }), tool({ id: 'b', status: 'running' })])).status
     ).toBe('running');
     expect(
       at(activityRows([tool({ id: 'a', status: 'done' }), tool({ id: 'b', status: 'error' })])).status
+    ).toBe('partial');
+    expect(
+      at(activityRows([tool({ id: 'a', status: 'error' }), tool({ id: 'b', status: 'error' })])).status
     ).toBe('error');
+    expect(
+      at(activityRows([tool({ id: 'a', status: 'done' }), tool({ id: 'b', status: 'error' })])).detail
+    ).toEqual(['Succeeded · Ran a command', 'Failed · Ran a command']);
   });
 
   it('settles a continued tool call like a done one', () => {

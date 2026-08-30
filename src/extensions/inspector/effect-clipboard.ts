@@ -37,6 +37,10 @@ export function effectPasteCommands(target: string): PasteEffectCommand[] {
   return clipboard.map((effect) => ({ type: 'add_effect', target, ...clone(effect) }));
 }
 
+export function effectClipboardSize(): number {
+  return clipboard.length;
+}
+
 export function clearEffectClipboard(): void {
   clipboard = [];
 }

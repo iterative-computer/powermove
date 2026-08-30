@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { findPanel, hidePanel, restorePanel } from '../../layout/model';
 import type { PMRegistry } from '../registry';
 import { install } from './layout';
 
@@ -46,5 +47,47 @@ describe('legacy layout install', () => {
 
     const targets = PM.Layout.buildDockDropTargets(docks, rect(0, 44, 1400, 860));
     expect(PM.Layout.hitTestDockPlacement(targets, 18, 400)).toEqual({ dockId: 'left', index: 0 });
+  });
+
+  it('restores a visible panel when its last extension provider is re-enabled', () => {
+    const PM = layoutRegistry();
+    const workspace: any = {
+      layout: { docks: [{ id: 'center', panels: [{ id: 'viewer', flex: true }, { id: 'timeline', size: 340 }] }] },
+      hiddenPanels: []
+    };
+    PM.Layout.hidePanel = hidePanel;
+    PM.Layout.restorePanel = restorePanel;
+    PM.Layout.refresh = vi.fn();
+    PM.WS = { current: workspace, mutate: (change: (next: any) => void) => change(workspace) };
+    PM.panelInst.timeline = { def: { title: 'Old Timeline' } };
+
+    const first = PM.Kernel.panels.register('timeline', { id: 'timeline', title: 'Timeline' });
+    first.dispose();
+    expect(workspace.hiddenPanels.map((panel: any) => panel.id)).toEqual(['timeline']);
+
+    PM.Kernel.panels.register('timeline', { id: 'timeline', title: 'Timeline' });
+    expect(findPanel(workspace, 'timeline')?.dock.id).toBe('center');
+    expect(workspace.hiddenPanels).toEqual([]);
+  });
+
+  it('does not reopen a panel the user had already hidden before its extension stopped', () => {
+    const PM = layoutRegistry();
+    const workspace: any = {
+      layout: { docks: [{ id: 'center', panels: [{ id: 'viewer', flex: true }] }] },
+      hiddenPanels: [{ id: 'timeline', dockId: 'center', index: 1, spec: { id: 'timeline', size: 340 } }]
+    };
+    PM.Layout.hidePanel = hidePanel;
+    PM.Layout.restorePanel = restorePanel;
+    PM.Layout.refresh = vi.fn();
+    PM.WS = { current: workspace, mutate: (change: (next: any) => void) => change(workspace) };
+    PM.panelInst.timeline = { def: { title: 'Old Timeline' } };
+
+    const first = PM.Kernel.panels.register('timeline', { id: 'timeline', title: 'Timeline' });
+    first.dispose();
+    PM.Kernel.panels.register('timeline', { id: 'timeline', title: 'Timeline' });
+
+    expect(findPanel(workspace, 'timeline')).toBeNull();
+    expect(workspace.hiddenPanels.map((panel: any) => panel.id)).toEqual(['timeline']);
+    expect(PM.Layout.refresh).toHaveBeenCalledWith('timeline');
   });
 });

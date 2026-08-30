@@ -63,7 +63,11 @@ PM.CodexBridge = {
       text = new window.TextDecoder().decode(bytes);
     } catch { text = 'The coding-agent response could not be decoded'; }
     if (result.ok) {
-      job.resolve(job.mode === 'autonomous' ? { text, extensions: result.extensions } : text);
+      job.resolve(job.mode === 'autonomous' ? {
+        text,
+        extensions: result.extensions,
+        extensionChangeSetId: result.extensionChangeSetId
+      } : text);
     } else job.reject(new Error(text));
   },
   progress(id: any, result: any) {
@@ -227,9 +231,9 @@ function restoreThread() {
   });
 }
 
-function ensureThreadProject() {
+function ensureThreadProject(): boolean {
   const projectId = PM.proj?.id || '';
-  if (changingThreadProject || projectId === threads.projectId) return;
+  if (changingThreadProject || projectId === threads.projectId) return false;
   changingThreadProject = true;
   if (S.activeRequest || S.phase === 'working') stopActiveRequest();
   persistThreads();
@@ -238,6 +242,7 @@ function ensureThreadProject() {
   threads.load(projectId);
   restoreThread();
   changingThreadProject = false;
+  return true;
 }
 
 function switchThread(id?: string) {
@@ -333,8 +338,12 @@ registerAgentPanel(PM, {
   snapshot: agentUISnapshot,
   submit: (value: string) => { void sendRequest({ value }); },
   stop: stopActiveRequest,
-  setDraft: (value: string) => { S.composerDraft = value; captureThread();
-    clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300); },
+  setDraft: (value: string) => {
+    const projectChanged = ensureThreadProject();
+    S.composerDraft = value; captureThread();
+    clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300);
+    if (projectChanged) PM.AgentUI?.update({ flush: true });
+  },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
     if (!AGENT_MODELS[S.provider].some((item: any) => item.id === model) || !REASONING_EFFORTS.includes(effort)) return;
@@ -381,6 +390,10 @@ registerAgentPanel(PM, {
 function init() {
   if (S.initialized) return;
   S.initialized = true;
+  // The agent installs before app.ts chooses the boot project. Rebind its
+  // placeholder thread as soon as the first app frame initializes the agent.
+  ensureThreadProject();
+  PM.AgentUI?.update({ flush: true });
   window.addEventListener('pointerdown', () => { S.pressed = true; }, true);
   window.addEventListener('pointerup', () => { S.pressed = false; }, true);
   window.addEventListener('pointercancel', () => { S.pressed = false; }, true);
@@ -1238,7 +1251,7 @@ async function applyExtensionChanges(extensions: any) {
   return turns;
 }
 
-async function runAutonomousRequest({ request, token, controller, access, focus, context }: any) {
+async function runAutonomousRequest({ request, token, controller, access, focus, context, threadId }: any) {
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpoint: any = {
     id: PM.uid('agent-checkpoint'),
@@ -1261,7 +1274,7 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
   const raw: any = await PM.CodexBridge.request(`${request}\n\n${AGENT_TESTING_INSTRUCTIONS}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(S.conversation.filter((m: any) => m.role !== 'trace').slice(0, -1).slice(-12).map((m: any) => ({ role: m.role, text: m.text })))}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
     mode: 'autonomous', access,
-    threadId: threads.activeId,
+    threadId,
     projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
     projectJSON: JSON.stringify(PM.proj),
     attachments: requestFileAttachments(S.requestAttachments),
@@ -1319,6 +1332,8 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   S.conversation.push(...extensionTurns);
   S.run = {
     autonomous: true, summary: result.summary, checkpoint,
+    extensionChangeSetId: typeof raw === 'object' ? raw?.extensionChangeSetId : undefined,
+    projectId: PM.proj.id,
     applied: result.commands, changed, artifacts: result.artifacts,
     externalActions: result.externalActions, extensions: result.extensions,
     review: { message: result.notes.join(' ') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
@@ -1333,6 +1348,7 @@ async function sendRequest(input: any) {
   const typedRequest: any = input.value.trim();
   ensureThreadProject();
   if ((!typedRequest && !S.attachments.length) || S.phase === 'applying') return;
+  const threadIdAtStart: any = threads.activeId;
   const request: any = typedRequest || 'Review the attached files and make the relevant editable change.';
   const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
   const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;
@@ -1379,7 +1395,7 @@ async function sendRequest(input: any) {
   promoteToConversation(); PM.AgentUI?.update({ focusComposer: true });
   try {
     if (autonomous) {
-      await runAutonomousRequest({ request, token, controller, access: accessAtStart, focus, context });
+      await runAutonomousRequest({ request, token, controller, access: accessAtStart, focus, context, threadId: threadIdAtStart });
       return;
     }
     /* Let the send handoff finish before the next progress render replaces the
@@ -1398,7 +1414,7 @@ async function sendRequest(input: any) {
     const raw: any = await PM.CodexBridge.request(
       agentPrompt(request, observation, steering, focus, context), responseSchema(), attachedImages,
       {
-        threadId: threads.activeId,
+        threadId: threadIdAtStart,
         attachments: requestFileAttachments(S.requestAttachments),
         provider: S.provider,
         model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
@@ -2170,11 +2186,30 @@ function keepSceneRun() {
   S.run = null; S.phase = 'conversation'; PM.AgentUI?.update({ focusComposer: true });
 }
 
-function undoSceneRun() {
+async function undoSceneRun() {
   if (!S.run) return;
-  const restored: any = PM.AgentHarness.rollback(S.run.checkpoint);
-  PM.toast(restored ? 'Agent change undone' : 'Could not restore the agent checkpoint');
-  S.conversation.push({ role: 'assistant', text: restored ? 'I restored the checkpoint. Tell me what to try differently.' : 'I could not restore that checkpoint.' });
+  let extensionRestored: any = !S.run.extensionChangeSetId;
+  let extensionError: any = '';
+  if (S.run.extensionChangeSetId) {
+    try {
+      await (window as any).powermove.codex.restoreChangeSet({
+        projectId: S.run.projectId,
+        changeSetId: S.run.extensionChangeSetId
+      });
+      extensionRestored = true;
+    } catch (error: any) {
+      extensionError = String(error?.message || error);
+    }
+  }
+  const projectRestored: any = !S.run.changed || PM.AgentHarness.rollback(S.run.checkpoint);
+  const restored: any = extensionRestored && projectRestored;
+  PM.toast(restored ? 'Agent change undone' : 'Could not fully restore the agent change');
+  S.conversation.push({
+    role: 'assistant',
+    text: restored
+      ? 'I restored the project checkpoint and the previous app-extension version. Tell me what to try differently.'
+      : `I could not fully restore that run.${extensionError ? ` ${extensionError}` : ''}`
+  });
   S.run = null; S.phase = 'conversation'; PM.AgentUI?.update({ focusComposer: true });
 }
 

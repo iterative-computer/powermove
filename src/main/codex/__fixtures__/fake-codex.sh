@@ -11,11 +11,13 @@ if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
 fi
 
 output_path=''
+extensions_dir=''
 resuming=0
 ignore_user_config=0
 previous=''
 for argument in "$@"; do
   if [ "$previous" = '--output-last-message' ]; then output_path="$argument"; fi
+  if [ "$previous" = '--add-dir' ]; then extensions_dir="$argument"; fi
   if [ "$argument" = 'resume' ]; then resuming=1; fi
   if [ "$argument" = '--ignore-user-config' ]; then ignore_user_config=1; fi
   previous="$argument"
@@ -73,6 +75,11 @@ if [ -z "$output_path" ]; then
 fi
 
 if [ -d 'inputs' ]; then
+  if [ -n "${FAKE_CODEX_EXTENSION_ID:-}" ] && [ -n "$extensions_dir" ]; then
+    mkdir -p "$extensions_dir/$FAKE_CODEX_EXTENSION_ID"
+    printf '%s\n' "{\"id\":\"$FAKE_CODEX_EXTENSION_ID\",\"name\":\"Fake extension\",\"version\":\"1.0.0\",\"apiVersion\":1,\"entry\":\"index.ts\",\"author\":\"agent\"}" > "$extensions_dir/$FAKE_CODEX_EXTENSION_ID/manifest.json"
+    printf '%s\n' 'export default function activate() {}' > "$extensions_dir/$FAKE_CODEX_EXTENSION_ID/index.ts"
+  fi
   artifact_directory=''
   for candidate in artifacts/*; do
     if [ -d "$candidate" ]; then artifact_directory="$candidate"; break; fi

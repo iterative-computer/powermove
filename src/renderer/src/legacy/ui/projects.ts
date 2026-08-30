@@ -3,6 +3,9 @@ import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
+const wasOpen = !!PM.ProjectsScreen?.isOpen;
+const previousSection = PM.ProjectsScreen?.section;
+PM.__disposeProjectsScreen?.();
 const S: any = {
   el: null, nav: null, grid: null, title: null, count: null, search: null,
   section: PM.store.get('projectsSection', 'recents'),
@@ -13,6 +16,7 @@ if (!['recents', 'projects', 'trash'].includes(S.section)) S.section = 'recents'
 
 PM.ProjectsScreen = {
   get isOpen() { return !!S.el && S.el.classList.contains('on'); },
+  get section() { return S.section; },
   show(section: any) {
     ensure();
     if (section && ['recents', 'projects', 'trash'].includes(section)) S.section = section;
@@ -28,7 +32,7 @@ function ensure() {
   S.search.addEventListener('input', paint);
   S.nav = h('div.ps-nav');
   const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav,
-    h('div.ps-sidefoot', 'Projects autosave locally. Deleted work stays in Trash until you remove it forever.'));
+    h('div.ps-sidefoot', 'Local recovery is automatic. Use Save to update a .pmv file you can move, copy, or back up.'));
 
   S.title = h('b'); S.count = h('span');
   const view = h('div.ps-view', { role: 'group', 'aria-label': 'Project layout' },
@@ -38,7 +42,7 @@ function ensure() {
   sort.value = S.sort;
   sort.onchange = () => { S.sort = sort.value; PM.store.set('projectsSort', S.sort); paint(); };
   const top = h('div.ps-top', h('div.ps-title', S.title, S.count), view, sort,
-    h('button.chip', { onclick: () => pickPmv().click() }, 'Import…'),
+    h('button.chip', { onclick: openProjectFromDisk }, 'Open Project…'),
     h('button.btn.pri', { onclick: () => { PM.ProjectsScreen.hide(); PM.newProject(); } }, PM.icon('plus'), 'New Project'));
   S.grid = h('div.ps-grid');
   S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, h('div.ps-content', S.grid)));
@@ -49,9 +53,12 @@ function ensure() {
   });
   S.el.addEventListener('dragover', (e: any) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
   S.el.addEventListener('drop', async (e: any) => {
-    const file = [...e.dataTransfer.files].find((f: any) => /\.(pmv|json)$/i.test(f.name));
+    const file = [...e.dataTransfer.files].find((f: any) => /\.pmv$/i.test(f.name));
     if (!file) return;
-    e.preventDefault(); await importFile(file);
+    e.preventDefault();
+    const before = PM.proj.id;
+    await PM.importFiles?.([file]);
+    if (PM.proj.id !== before) PM.ProjectsScreen.hide();
   });
 }
 
@@ -92,38 +99,75 @@ function paint() {
 
 function card(m: any, trashed: any) {
   const active = !trashed && m.id === PM.proj.id;
+  const open = !trashed && PM.Projects.tabs().includes(m.id);
+  const file = !trashed ? PM.projectFileState?.(m.id) : null;
   const raw = PM.Projects.get(m.id);
   const inner = h('div.ps-thumb-inner');
   if (m.thumb) inner.appendChild(h('img', { src: m.thumb, alt: '' }));
-  const thumb = h('div.ps-thumb', inner, active ? h('span.ps-card-badge', 'Open') : null);
+  const badges = h('div.ps-card-badges',
+    active || open ? h('span.ps-card-badge', active ? 'Active' : 'Open') : null,
+    file?.dirty ? h('span.ps-card-badge.unsaved', 'Unsaved') : null);
+  const thumb = h('div.ps-thumb', inner, badges);
   const more = h('button.ps-more', { title: 'Project actions', 'aria-label': 'Project actions' }, PM.icon('more'));
-  const sub = projectSub(m, raw, trashed);
+  const sub = projectSub(m, raw, trashed, file);
   const meta = h('div.ps-meta', h('div.ps-meta-copy', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'),
-    h('div.ps-sub', { title: sub }, sub)), more);
+    h('div.ps-sub', { title: sub.title }, sub.text)), more);
   const c = h('article.ps-card' + (active ? '.active' : ''), thumb, meta);
   c.onclick = () => {
     if (trashed) return;
-    PM.ProjectsScreen.hide(); window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: raw }));
+    openLocalProject(m);
   };
   c.oncontextmenu = (e: any) => { e.preventDefault(); projectMenu(c, m, trashed, e.clientX, e.clientY); };
   more.onclick = (e: any) => { e.stopPropagation(); projectMenu(more, m, trashed); };
   return c;
 }
-function projectSub(m: any, raw: any, trashed: any) {
+function projectSub(m: any, raw: any, trashed: any, file: any) {
   const dims = raw && raw.w && raw.h ? `${raw.w}×${raw.h}` : '';
   const date = trashed ? `Deleted ${ago(m.deletedAt)}` : `Edited ${ago(m.at)}`;
-  return dims ? `${date} · ${dims}` : date;
+  if (trashed) return { text: dims ? `${date} · ${dims}` : date, title: date };
+  const location = file?.path ? file.path.split(/[\\/]/).pop() : '';
+  const status = file?.path
+    ? file.dirty ? `Unsaved changes · ${location}` : `Saved · ${location}`
+    : 'Not saved to a file';
+  return {
+    text: [status, date, dims].filter(Boolean).join(' · '),
+    title: file?.path ? `${status}\n${file.path}` : status,
+  };
 }
 function projectMenu(anchor: any, m: any, trashed: any, x?: any, y?: any) {
   const items = trashed ? [
-    { label: 'Restore', run: () => { PM.Projects.restore(m.id); paint(); PM.bus.emit('projects:tabs'); PM.toast('Project restored'); } },
+    { label: 'Restore', run: () => restore(m) },
     '-', { label: 'Delete Forever…', run: () => destroyDialog(m) },
   ] : [
-    { label: 'Open', disabled: m.id === PM.proj.id, run: () => { PM.ProjectsScreen.hide(); window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: PM.Projects.get(m.id) })); } },
+    { label: 'Open', disabled: m.id === PM.proj.id, run: () => openLocalProject(m) },
+    { label: 'Save', run: () => save(m, false) },
+    { label: 'Save As…', run: () => save(m, true) },
+    '-',
     { label: 'Rename…', run: () => renameDialog(m) }, { label: 'Duplicate', run: () => duplicate(m) },
     '-', { label: 'Move to Trash…', run: () => trashDialog(m) },
   ];
   PM.menu(anchor, items, x == null ? {} : { x, y });
+}
+
+async function openProjectFromDisk() {
+  const before = PM.proj.id;
+  await PM.openProject?.();
+  if (PM.proj.id !== before) PM.ProjectsScreen.hide();
+}
+function openLocalProject(m: any) {
+  const project = PM.Projects.get(m.id);
+  if (!project) return PM.toast('Could not open this project because its local data is missing.');
+  PM.ProjectsScreen.hide();
+  if (project.id !== PM.proj.id) window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: project }));
+}
+async function save(m: any, saveAs: boolean) {
+  if (!PM.Projects.get(m.id)) return PM.toast('Could not save this project because its local data is missing.');
+  await PM.saveProject?.({ projectId: m.id, saveAs });
+  paint();
+}
+function restore(m: any) {
+  if (!PM.Projects.restore(m.id)) return PM.toast('Could not restore this project because its local data is missing.');
+  paint(); PM.bus.emit('projects:tabs'); PM.toast('Project restored');
 }
 
 function emptyState(searching: any) {
@@ -136,26 +180,14 @@ function emptyState(searching: any) {
     !searching && !trash ? h('button.btn', { onclick: () => { PM.ProjectsScreen.hide(); PM.newProject(); } }, PM.icon('plus'), 'Create a project') : null);
 }
 
-function pickPmv() {
-  const inp = h('input', { type: 'file', accept: '.pmv,.json,application/json' });
-  inp.onchange = async () => { if (inp.files[0]) await importFile(inp.files[0]); };
-  return inp;
-}
-async function importFile(file: any) {
-  try {
-    const o = JSON.parse(await file.text()), p = o.proj || o;
-    if (!p || !Array.isArray(p.layers)) throw new Error('Not a Powermove project');
-    PM.ProjectsScreen.hide(); window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: p }));
-    PM.toast('Imported ' + file.name);
-  } catch (e: any) { PM.toast('Could not import: ' + e.message, 4500); }
-}
-
 function renameDialog(m: any) {
   const raw = PM.Projects.get(m.id), name = h('input', { value: raw && raw.name || m.name });
   PM.modal({ title: 'Rename project', body: h('div.field', name), width: 400, actions: [
     { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => {
-      PM.Projects.rename(m.id, name.value);
-      paint(); PM.bus.emit('projects:tabs'); PM.bus.emit('project');
+      try {
+        if (!PM.Projects.rename(m.id, name.value)) throw new Error('Project data is missing');
+        paint(); PM.bus.emit('projects:tabs'); PM.bus.emit('project');
+      } catch (error: any) { PM.toast('Could not rename project: ' + (error.message || 'Unknown error')); }
     } },
   ] });
   window.setTimeout(() => { name.focus(); name.select(); }, 30);
@@ -163,15 +195,25 @@ function renameDialog(m: any) {
 function duplicate(m: any) {
   const source = PM.Projects.get(m.id);
   if (!source) return PM.toast('Project data missing');
-  const raw = JSON.parse(JSON.stringify(source));
-  raw.id = PM.uid('P'); raw.name = (m.name || 'Untitled') + ' copy';
-  PM.Projects.put(raw, m.thumb); paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”');
+  try {
+    const raw = JSON.parse(JSON.stringify(source));
+    raw.id = PM.uid('P'); raw.name = (m.name || 'Untitled') + ' copy';
+    PM.Projects.put(raw, m.thumb);
+    const sourceState = PM.Projects.getState(m.id);
+    if (sourceState) {
+      const copiedState = JSON.parse(JSON.stringify(sourceState));
+      delete copiedState.file;
+      PM.Projects.putState(raw.id, copiedState);
+    }
+    paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”');
+  } catch (error: any) { PM.toast('Could not duplicate project: ' + (error.message || 'Unknown error')); }
 }
 function trashDialog(m: any) {
   PM.modal({ title: 'Move “' + m.name + '” to Trash?', body: h('div', { style: { color: 'var(--tx-2)', fontSize: '12.5px', lineHeight: 1.6 } },
     'You can restore this project from Trash.'), width: 420, actions: [
     { label: 'Cancel' }, { label: 'Move to Trash', pri: true, run: () => {
-      PM.Projects.trash(m.id); if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
+      if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
+      if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
     } },
   ] });
 }
@@ -192,4 +234,12 @@ function ago(t: any) {
   if (s < 86400) return Math.round(s / 3600) + ' h ago'; if (s < 604800) return Math.round(s / 86400) + ' d ago';
   return new Date(t).toLocaleDateString();
 }
+
+const offTabs = PM.bus.on('projects:tabs', () => { if (PM.ProjectsScreen.isOpen) paint(); });
+PM.__disposeProjectsScreen = () => {
+  offTabs?.();
+  S.el?.remove?.();
+  S.el = null;
+};
+if (wasOpen) window.queueMicrotask(() => PM.ProjectsScreen.show(previousSection));
 }

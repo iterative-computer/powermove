@@ -11,7 +11,7 @@ describe('general settings control', () => {
     expect(headings).toEqual(['Accounts', 'Application']);
     const accounts = control.element.querySelector('.settings-section-body');
     expect(accounts?.querySelectorAll('.settings-provider')).toHaveLength(2);
-    expect(control.element.textContent).toContain('Powermove never reads or stores your account token.');
+    expect(control.element.textContent).toContain('Powermove never stores your token.');
     control.destroy();
   });
 

@@ -22,6 +22,10 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
     return PM.store.get(`agentThreads.${PM.proj.id}`)?.activeId;
   })).toBe(second);
   await session.relaunch();
+  await expect.poll(() => session.page.evaluate(() => {
+    const state = (window as any).PM.AgentUI.state;
+    return { activeId: state.threadId, threadIds: state.threads.map((thread: any) => thread.id) };
+  })).toEqual({ activeId: second, threadIds: [second, first] });
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveValue('Second thread draft');
   await session.page.getByRole('combobox', { name: 'Switch thread', exact: true }).selectOption(first);

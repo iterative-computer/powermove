@@ -2,12 +2,20 @@ import type { PowermoveAPI } from 'powermove';
 
 import InspectorPanel from './InspectorPanel.svelte';
 import { showFxMenu } from './actions';
+import {
+  clearEffectClipboard,
+  copyEffects,
+  effectClipboardSize,
+  effectPasteCommands,
+  type PasteEffectCommand
+} from './effect-clipboard';
 import { inspectorRefresh } from './refresh.svelte.js';
 
 type LegacyPM = Record<string, any>;
 
 export default function activate(api: PowermoveAPI): void {
   const PM = api.host.pm as LegacyPM;
+  let activeEffectSelection: { layerId: string; ids: string[] } | null = null;
 
   PM.syncShaderUniforms = (layer: any): void => {
     const definitions = PM.parseUniforms(layer.d.code);
@@ -36,6 +44,50 @@ export default function activate(api: PowermoveAPI): void {
         textarea?.focus();
         textarea?.select();
       });
+    },
+    setEffectSelection(layerId: string, ids: string[]): void {
+      activeEffectSelection = ids.length ? { layerId, ids: [...ids] } : null;
+    },
+    clearEffectSelection(): void {
+      activeEffectSelection = null;
+    },
+    copySelectedEffects(): boolean {
+      if (!activeEffectSelection) return false;
+      const layer = PM.L?.(activeEffectSelection.layerId);
+      const wanted = new Set(activeEffectSelection.ids);
+      const effects = (layer?.fx ?? []).filter((effect: any) => wanted.has(effect.id));
+      if (!effects.length) {
+        activeEffectSelection = null;
+        return false;
+      }
+      const count = copyEffects(effects);
+      PM.toast?.(`Copied ${count} ${count === 1 ? 'effect' : 'effects'}`);
+      return true;
+    },
+    clearEffectClipboard,
+    pasteCopiedEffects(): boolean {
+      if (!effectClipboardSize()) return false;
+      const targets = PM.selLayers?.().filter((layer: any) => layer?.type !== 'audio') ?? [];
+      if (!targets.length) {
+        PM.toast?.('Select a layer to paste the effect');
+        return true;
+      }
+      const commands: PasteEffectCommand[] = targets.flatMap((layer: any) => effectPasteCommands(layer.id))
+        .filter((command: PasteEffectCommand) => !!PM.FX?.[command.effect]);
+      if (!commands.length) {
+        PM.toast?.('The copied effect is not available');
+        return true;
+      }
+      const count = effectClipboardSize();
+      const result = PM.Edit.apply(commands.length === 1 ? commands[0] : commands, {
+        label: commands.length === 1 ? 'Paste effect' : 'Paste effects',
+        origin: 'inspector'
+      });
+      if (result?.ok === false) return true;
+      PM.invalidate?.();
+      const pasted = count * targets.length;
+      PM.toast?.(`Pasted ${pasted} ${pasted === 1 ? 'effect' : 'effects'}`);
+      return true;
     }
   };
 

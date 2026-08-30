@@ -36,6 +36,9 @@ export type ModalOptions = {
   body?: HTMLElement | string | null;
   actions?: ModalAction[];
   width?: number;
+  /** Let the dialog use the window's height; for list-shaped bodies that
+      would otherwise scroll inside a short frame. */
+  fill?: boolean;
   onClose?: () => void;
 };
 

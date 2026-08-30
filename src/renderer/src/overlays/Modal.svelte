@@ -8,6 +8,7 @@
     bodyContent,
     actions,
     width,
+    fill,
     titleId,
     onaction,
     onclose
@@ -16,6 +17,7 @@
     bodyContent?: HTMLElement | string | null;
     actions: ModalAction[];
     width: number;
+    fill?: boolean;
     titleId: string;
     onaction: (index: number) => void;
     onclose: () => void;
@@ -88,9 +90,9 @@
   tabindex="-1"
   style:width={`${width}px`}
   style:left="50%"
-  style:top="18vh"
+  style:top={fill ? '8vh' : '18vh'}
   style:transform="translateX(-50%)"
-  style:max-height="68vh"
+  style:max-height={fill ? '84vh' : '68vh'}
   data-svelte-overlay-modal="true"
 >
   {#if title}<h3 id={titleId}>{title}</h3>{/if}

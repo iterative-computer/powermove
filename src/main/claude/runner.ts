@@ -6,12 +6,14 @@ import path from 'node:path';
 import type { CodexRunRequest, CodexRunResult, CodexTraceEvent } from '../../shared/ipc';
 import { isRecord } from '../../shared/guards';
 import { collectArtifacts } from '../codex/artifacts';
+import { publishExtensionChanges } from '../codex/change-history';
 import { consumeToken } from '../codex/consent';
 import { agentInstructions, agentResultSchema } from '../codex/instructions';
 import { parseAgentExtensionChanges } from '../codex/runner';
 import {
   agentWorkspaceRoot,
   clearSession,
+  discardExtensionStage,
   discardPartialRun,
   prepareAgentWorkspace,
   readSession,
@@ -225,11 +227,14 @@ export class ClaudeRunner {
       parsed.projectId = req.projectId;
       parsed.access = authority;
       const extensions = parseAgentExtensionChanges(parsed.extensions);
+      const changeSet = await publishExtensionChanges(layout, extensions ?? []);
+      await discardExtensionStage(layout);
       return {
         ok: true,
         text: JSON.stringify(sortJson(parsed)),
         access: authority,
-        ...(extensions === undefined ? {} : { extensions })
+        ...(extensions === undefined ? {} : { extensions }),
+        ...(changeSet === null ? {} : { extensionChangeSetId: changeSet.id })
       };
     } catch (error) {
       if (this.cancelled.has(req.id)) {

@@ -14,6 +14,7 @@ const bind = (key: string, command: string, looseModifiers = false): void => {
 /* Modifier chords: the old `if (m && …)` chain. `m` was meta OR ctrl. */
 const MOD_CHORDS: Array<[string, string, boolean]> = [
   ['k', 'palette', true], ['shift+k', 'agent', true],
+  [',', 'settings', false],
   ['z', 'undo', true], ['shift+z', 'redo', true],
   /* The plain Y branch explicitly rejected both Shift and Alt. */
   ['y', 'newSolid', false], ['shift+y', 'newShape', true],
@@ -36,7 +37,7 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
 for (const [chord, command, looseModifiers] of MOD_CHORDS) {
   bind(`cmd+${chord}`, command, looseModifiers);
   bind(`ctrl+${chord}`, command, looseModifiers);
-  if (command === 'save' || command === 'saveAs') {
+  if (command === 'save' || command === 'saveAs' || command === 'settings') {
     KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 1]!.inFields = true;
     KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 2]!.inFields = true;
   }

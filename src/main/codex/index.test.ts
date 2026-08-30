@@ -139,6 +139,7 @@ describe('registerCodexIpc', () => {
       IPC.codexRun,
       IPC.codexCancel,
       IPC.codexFixPrompt,
+      IPC.codexRestoreChangeSet,
       IPC.consentComputer,
       IPC.artifactRead,
       IPC.artifactReveal

@@ -5,6 +5,15 @@ import { installSourcePreview } from './source-preview';
 
 const VIEWER_STYLES = `
   #panel-viewer{background:var(--bg-panel-2)}
+  #panel-viewer > .panel-move-handle{
+    top:7px;left:8px;transform:none;width:24px;height:24px;border:0;border-radius:0;
+    color:var(--tx-3);background:transparent;box-shadow:none
+  }
+  #panel-viewer > .panel-move-handle:hover,
+  #panel-viewer > .panel-move-handle:focus-visible,
+  #panel-viewer > .panel-move-handle:active{
+    color:var(--tx);background:transparent;box-shadow:none
+  }
   #panel-viewer .body{display:flex;flex-direction:column;padding:14px;overflow:hidden}
   #stage{flex:1;min-height:0;display:grid;place-items:center;position:relative}
   #stage-inner{position:relative;border-radius:0;corner-shape:round;overflow:hidden;box-shadow:none;outline:0}

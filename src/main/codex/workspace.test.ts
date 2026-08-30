@@ -101,7 +101,10 @@ describe('prepareAgentWorkspace', () => {
     expect(layout.outputPath).toBe(path.join(layout.root, '.powermove', 'result-run-123.json'));
     expect(layout.sessionPath).toBe(path.join(layout.root, '.powermove', 'session-v2-project.txt'));
     expect(layout.apiPackDirectory).toBe(path.join(layout.root, 'powermove-api'));
-    expect(layout.extensionsDir).toBe(options.extensionsDir);
+    expect(layout.liveDirectory).toBe(options.extensionsDir);
+    expect(layout.extensionsDir).toBe(path.join(layout.root, '.powermove', 'extension-runs', 'run-123'));
+    expect(layout.stagingDirectory).toBe(layout.extensionsDir);
+    expect(layout.historyRoot).toBe(path.join(userData, 'Agent Change History', 'Project_123'));
     expect(layout.imagePaths).toEqual([path.join(layout.root, 'inputs', 'references', 'reference-0.png')]);
 
     await expect(readFile(path.join(layout.inputsDirectory, 'powermove-project.json'), 'utf8'))

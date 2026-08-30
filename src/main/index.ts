@@ -13,6 +13,7 @@ import path from 'node:path';
 import { IPC } from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
+import { recoverAllInterruptedExtensionTransactions } from './codex/change-history';
 import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './extensions';
 import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
@@ -362,9 +363,11 @@ if (!hasSingleInstanceLock) {
     const builtinResourcesDir = app.isPackaged
       ? path.join(process.resourcesPath, 'builtin-extensions')
       : path.resolve(app.getAppPath(), 'src/extensions');
+    let refreshRestoredExtensions: ((ids: string[]) => Promise<void>) | undefined;
     // Extension boot must never prevent the window from appearing: a bad
     // directory or a slow compile degrades to "no user extensions" instead.
     try {
+      await recoverAllInterruptedExtensionTransactions(app.getPath('userData'), userDir);
       await mkdir(userDir, { recursive: true });
       let builtinIds: string[] = [];
       try {
@@ -383,6 +386,10 @@ if (!hasSingleInstanceLock) {
         resourcesDir: builtinResourcesDir
       });
       registerExtensionsIpc(ipcMain, { registry: extensionRegistry, isTrusted: isTrustedSender });
+      refreshRestoredExtensions = async (ids) => {
+        await extensionRegistry.refresh(ids);
+        extensionRegistry.emitChanged({ ids, reason: 'reload' });
+      };
       // Compile in the background; the renderer receives ext:changed when done.
       void extensionRegistry
         .refresh()
@@ -437,6 +444,7 @@ if (!hasSingleInstanceLock) {
       isTrustedSender,
       codexBinaryPref: () => null, // a user-facing preference lands with the settings UI
       claudeBinaryPref: () => null,
+      refreshExtensions: refreshRestoredExtensions,
       openExternal: async (url) => { await shell.openExternal(url); }
     });
     installMenu(() => mainWindow);

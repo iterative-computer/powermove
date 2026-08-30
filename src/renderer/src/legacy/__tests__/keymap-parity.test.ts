@@ -70,6 +70,8 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+k opens the palette', { key: 'k', metaKey: true }, 'palette'],
   ['ctrl+k opens the palette', { key: 'k', ctrlKey: true }, 'palette'],
   ['cmd+shift+k opens the agent', { key: 'k', metaKey: true, shiftKey: true }, 'agent'],
+  ['cmd+comma opens settings', { key: ',', metaKey: true }, 'settings'],
+  ['ctrl+comma opens settings', { key: ',', ctrlKey: true }, 'settings'],
   ['cmd+z undoes', { key: 'z', metaKey: true }, 'undo'],
   ['ctrl+z undoes', { key: 'z', ctrlKey: true }, 'undo'],
   ['cmd+shift+z redoes', { key: 'z', metaKey: true, shiftKey: true }, 'redo'],
@@ -206,7 +208,7 @@ describe('legacy keymap parity', () => {
     for (const binding of editorBindings) {
       expect(binding.ownerId).toBe('keymap-default');
       expect(binding.priority).toBe(100);
-      expect(binding.inFields).toBe(['save', 'saveAs'].includes(binding.command));
+      expect(binding.inFields).toBe(['save', 'saveAs', 'settings'].includes(binding.command));
     }
     expect(bindings.find((binding: any) => binding.command === 'blurField')).toMatchObject({
       ownerId: 'keymap-default',

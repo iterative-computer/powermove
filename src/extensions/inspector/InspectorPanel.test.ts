@@ -181,6 +181,7 @@ function setup(
       property.kf = property.kf.length ? [] : [{ t: time - candidate.from, v: property.v }];
     },
     firstSel: () => currentProject.layers.find(({ id }) => id === selected[0]) ?? null,
+    selLayers: () => currentProject.layers.filter(({ id }) => PM.sel.layers.includes(id)),
     time: 0
   };
 
@@ -559,6 +560,28 @@ describe('InspectorPanel', () => {
       { type: 'remove_effect', target: 'A', effect: 'fx-1' },
       { type: 'remove_effect', target: 'A', effect: 'fx-2' }
     ], { label: 'Remove effects', origin: 'inspector' });
+  });
+
+  it('keeps a copied effect active while a different destination layer is selected', () => {
+    const source = layer('A');
+    const destination = layer('B');
+    source.fx.push({
+      id: 'fx-1', type: 'blur', on: true, open: true,
+      p: { amount: { v: 18, expr: null, kf: [] } }
+    });
+    const { PM, apply } = setup([source, destination], ['A']);
+    const effect = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
+    effect.click();
+    expect(PM.Inspector.copySelectedEffects()).toBe(true);
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    PM.sel.layers = ['B'];
+    apply.mockClear();
+
+    expect(PM.Inspector.pasteCopiedEffects()).toBe(true);
+    expect(apply).toHaveBeenCalledExactlyOnceWith({
+      type: 'add_effect', target: 'B', effect: 'blur', parameters: source.fx[0].p,
+      open: true, enabled: true
+    }, { label: 'Paste effect', origin: 'inspector' });
   });
 
   it('routes composition fields through an exact set_composition command', async () => {

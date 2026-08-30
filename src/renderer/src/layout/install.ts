@@ -22,6 +22,8 @@ import {
   setPanelCollapsed,
   type Workspace
 } from './model';
+import { installPanelPopouts } from './popout';
+import { syncPanelMoveHandle } from './panel';
 
 type LayoutInstance = ReturnType<typeof mount> & {
   apply(workspace: Workspace): void;
@@ -73,6 +75,8 @@ export function installSvelteLayout(PM: PMRegistry): void {
   const root = document.getElementById('body');
   if (!root) return;
 
+  installPanelPopouts(PM);
+
   if (mounted) void unmount(mounted);
   root.replaceChildren();
 
@@ -120,12 +124,27 @@ export function installSvelteLayout(PM: PMRegistry): void {
   layout.refresh = (id: string): void => {
     const inst = PM.panelInst[id];
     if (!inst?.el || !inst.el.isConnected) return;
+    /* Headless panels own their toolbar DOM, but the move handle and its drag
+       listeners belong to the layout. Preserve that live node across an
+       extension rebuild and place it into the replacement definition's slot. */
+    const moveHandle = inst.moveHandle instanceof HTMLElement
+      ? inst.moveHandle
+      : inst.body.querySelector('.panel-move-handle') as HTMLElement | null;
+    moveHandle?.remove();
     inst.body.textContent = '';
     try {
       inst.def.build?.(inst.body, inst);
     } catch (error) {
       console.error(error);
     }
+    if (moveHandle && inst.def.moveSlot) {
+      const slot = inst.body.querySelector(inst.def.moveSlot);
+      if (slot) {
+        moveHandle.classList.add('inline');
+        slot.insertBefore(moveHandle, slot.firstChild);
+      }
+    }
+    syncPanelMoveHandle(PM, id);
     inst.def.header?.(inst.header, inst);
   };
   layout.applyTheme = (theme: Record<string, any>): void => applyTheme(PM, theme);

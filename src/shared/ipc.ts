@@ -16,6 +16,7 @@ export const IPC = {
   codexRun: 'codex:run',
   codexCancel: 'codex:cancel',
   codexFixPrompt: 'codex:fix-prompt',
+  codexRestoreChangeSet: 'codex:restore-change-set',
   codexEvent: 'codex:event', // main → renderer
   chatgptStatus: 'chatgpt:status',
   chatgptConnect: 'chatgpt:connect',
@@ -113,12 +114,24 @@ export interface AgentExtensionChange {
   summary?: string;
 }
 
+export interface AgentChangeSetRestoreRequest {
+  projectId: string;
+  changeSetId: string;
+}
+
+export interface AgentChangeSetRestoreResult {
+  changeSetId: string;
+  extensions: AgentExtensionChange[];
+}
+
 export type CodexRunResult =
   | {
       ok: true;
       text: string;
       access: Exclude<CodexAccess, 'editor'> | 'editor';
       extensions?: AgentExtensionChange[];
+      /** Durable app-owned rollback record for promoted extension changes. */
+      extensionChangeSetId?: string;
     }
   | { ok: false; error: string; cancelled: boolean };
 
@@ -215,7 +228,7 @@ export interface LogRequest {
   level: LogLevel;
   text: string;
 }
-export type MenuCommand = 'newProject' | 'save' | 'saveAs' | 'open' | 'export' | 'undo' | 'redo' | 'settings';
+export type MenuCommand = 'newProject' | 'save' | 'saveAs' | 'open' | 'export' | 'undo' | 'redo' | 'copy' | 'paste' | 'settings';
 
 /* ── the preload surface ─────────────────────────────────── */
 import type { ExtensionsBridge } from './extensions';
@@ -236,6 +249,7 @@ export interface PowermoveBridge {
     ): Promise<CodexRunResult>;
     cancel(id: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
+    restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
   };
 

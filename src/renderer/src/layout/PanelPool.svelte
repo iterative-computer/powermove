@@ -27,6 +27,12 @@
         dock: { id: hidden.dockId || hidden.dock?.id || 'right', panels: [], ...(hidden.dock ?? {}) }
       });
     }
+    /* Panels outside the workspace stay mounted too, parked in the pool, so
+       the library can always preview the live panel. */
+    for (const id of Object.keys(PM.PANELS ?? {})) {
+      if (id === 'toolbar' || found.has(id)) continue;
+      found.set(id, { spec: { id }, dock: { id: 'right', panels: [] } });
+    }
     return [...found.values()];
   });
 </script>
@@ -38,8 +44,12 @@
   use:mountOnDocumentBody
 >
   {#each entries as entry (entry.spec.id)}
+    <!-- Parked hosts get a real dock-like size so panels that measure
+         themselves (canvases, virtual lists, composers) lay out sanely and
+         preview correctly instead of collapsing to the pool's 1px width. -->
     <div
       data-panel-host={entry.spec.id}
+      style="width:320px;height:420px;display:flex;flex-direction:column"
       use:panelPoolHost={{ PM, spec: entry.spec, dock: entry.dock }}
     ></div>
   {/each}

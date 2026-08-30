@@ -47,6 +47,7 @@ export class ModalController {
         bodyContent: options.body,
         actions: options.actions ?? [],
         width: options.width ?? 460,
+        fill: options.fill ?? false,
         titleId,
         onaction: (index: number) => {
           const action = options.actions?.[index];

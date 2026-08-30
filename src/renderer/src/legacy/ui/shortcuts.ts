@@ -135,11 +135,19 @@ def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
 /* ── layer clipboard ───────────────────────────────────── */
 let layerClip: any = null;
 def('copyLayers', 'Copy layers', '⌘C', () => {
+  if (PM.Inspector?.copySelectedEffects?.()) return;
   const sels: any = PM.selLayers(); if (!sels.length) return;
+  /* An explicit layer copy becomes the active app-local clipboard payload.
+     Effect rows stop propagation before this command, so copying an effect
+     keeps the effect payload active while the user selects its destination. */
+  PM.Inspector?.clearEffectClipboard?.();
   layerClip = sels.map((L: any) => JSON.parse(JSON.stringify(L)));
   PM.toast(`Copied ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
 }, 'Edit');
 def('pasteLayers', 'Paste layers', '⌘V', () => {
+  /* Effect paste deliberately routes through the ordinary global shortcut:
+     select effect → ⌘C → select destination layer → ⌘V. */
+  if (PM.Inspector?.pasteCopiedEffects?.()) return;
   if (!layerClip || !layerClip.length) return;
   PM.hist.do('Paste layers', () => {
     /* clones keep their relative stack order; parenting inside the set survives */
@@ -206,6 +214,7 @@ function allSelKeys() {
 def('fitView', 'Fit composition in view', '⇧F', () => { if (PM.Viewer) { PM.Viewer.fit = true; PM.Viewer.layout?.(); } PM.TL?.frameView?.(); }, 'View');
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
+def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.open?.(), 'View');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
 def('saveAs', 'Save project as…', '⌘⇧S', () => PM.saveProject({ saveAs: true }), 'File');
 def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');
@@ -299,6 +308,13 @@ export function deleteSelection(PM: PMRegistry): unknown {
 
 if (import.meta.hot) {
   import.meta.hot.accept(next => {
-    if (next && window.PM?.commands?.delete) window.PM.commands.delete.run = () => next.deleteSelection(window.PM);
+    if (!next || !window.PM?.commands) return;
+    if (window.PM.commands.delete) window.PM.commands.delete.run = () => next.deleteSelection(window.PM);
+    if (!window.PM.commands.settings) {
+      window.PM.commands.settings = {
+        id: 'settings', label: 'Settings…', kb: '⌘,', cat: 'View',
+        run: () => window.PM?.SettingsUI?.open?.()
+      };
+    }
   });
 }

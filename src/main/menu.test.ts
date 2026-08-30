@@ -89,17 +89,21 @@ describe('application menu', () => {
     const editItems = submenu(topLevel(template, 'Edit'));
     const undo = editItems.find((item) => item.label === 'Undo');
     const redo = editItems.find((item) => item.label === 'Redo');
+    const copy = editItems.find((item) => item.label === 'Copy');
+    const paste = editItems.find((item) => item.label === 'Paste');
     expect(undo).toMatchObject({ accelerator: 'CommandOrControl+Z' });
     expect(redo).toMatchObject({ accelerator: 'CommandOrControl+Shift+Z' });
     expect(undo).not.toHaveProperty('role');
     expect(redo).not.toHaveProperty('role');
+    expect(copy).toMatchObject({ accelerator: 'CommandOrControl+C', id: 'copy' });
+    expect(paste).toMatchObject({ accelerator: 'CommandOrControl+V', id: 'paste' });
     undo?.click?.({} as never, undefined, {} as never);
     redo?.click?.({} as never, undefined, {} as never);
-    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'export', 'undo', 'redo']);
+    copy?.click?.({} as never, undefined, {} as never);
+    paste?.click?.({} as never, undefined, {} as never);
+    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'export', 'undo', 'redo', 'copy', 'paste']);
     expect(editItems.filter((item) => item.role).map((item) => item.role)).toEqual([
       'cut',
-      'copy',
-      'paste',
       'selectAll'
     ]);
 
@@ -121,18 +125,30 @@ describe('application menu', () => {
     expect(packaged).toEqual([{ role: 'togglefullscreen' }]);
   });
 
-  it('builds and installs the menu, targeting the focused window before the main window', () => {
+  it('builds and installs the menu, keeping app commands on the main editor window', () => {
     buildAppMenu(() => undefined);
     expect(electronMocks.buildFromTemplate).toHaveBeenCalledOnce();
 
     const focusedSend = vi.fn();
     const focusedWindow = {
       isDestroyed: () => false,
-      webContents: { isDestroyed: () => false, send: focusedSend }
+      webContents: {
+        isDestroyed: () => false,
+        send: focusedSend,
+        executeJavaScript: vi.fn(),
+        copy: vi.fn(),
+        paste: vi.fn()
+      }
     };
     const mainWindow = {
       isDestroyed: () => false,
-      webContents: { isDestroyed: () => false, send: vi.fn() }
+      webContents: {
+        isDestroyed: () => false,
+        send: vi.fn(),
+        executeJavaScript: vi.fn(),
+        copy: vi.fn(),
+        paste: vi.fn()
+      }
     };
     electronMocks.getFocusedWindow.mockReturnValue(focusedWindow);
 
@@ -142,8 +158,49 @@ describe('application menu', () => {
     const newProject = submenu(topLevel(installedTemplate, 'File'))[0];
     newProject?.click?.({} as never, undefined, {} as never);
 
-    expect(focusedSend).toHaveBeenCalledWith(IPC.menuCommand, 'newProject');
-    expect(mainWindow.webContents.send).not.toHaveBeenCalled();
+    expect(mainWindow.webContents.send).toHaveBeenCalledWith(IPC.menuCommand, 'newProject');
+    expect(focusedSend).not.toHaveBeenCalled();
     expect(electronMocks.setApplicationMenu).toHaveBeenCalledOnce();
+  });
+
+  it('routes native Copy/Paste to editor commands except inside editable fields', async () => {
+    const send = vi.fn();
+    const webContents = {
+      isDestroyed: () => false,
+      send,
+      executeJavaScript: vi.fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true),
+      copy: vi.fn(),
+      paste: vi.fn()
+    };
+    const focusedWindow = {
+      isDestroyed: () => false,
+      webContents
+    };
+    const editorSend = vi.fn();
+    const editorWindow = {
+      isDestroyed: () => false,
+      webContents: {
+        isDestroyed: () => false,
+        send: editorSend,
+        executeJavaScript: vi.fn(),
+        copy: vi.fn(),
+        paste: vi.fn()
+      }
+    };
+    electronMocks.getFocusedWindow.mockReturnValue(focusedWindow);
+    installMenu(() => editorWindow as never);
+    const installedTemplate = electronMocks.buildFromTemplate.mock.calls.at(-1)?.[0];
+    if (!installedTemplate) throw new Error('Menu template was not built');
+    const editItems = submenu(topLevel(installedTemplate, 'Edit'));
+
+    editItems.find((item) => item.id === 'copy')?.click?.({} as never, undefined, {} as never);
+    await vi.waitFor(() => expect(editorSend).toHaveBeenCalledWith(IPC.menuCommand, 'copy'));
+    editItems.find((item) => item.id === 'paste')?.click?.({} as never, undefined, {} as never);
+    await vi.waitFor(() => expect(webContents.paste).toHaveBeenCalledOnce());
+
+    expect(webContents.copy).not.toHaveBeenCalled();
+    expect(editorSend).not.toHaveBeenCalledWith(IPC.menuCommand, 'paste');
   });
 });

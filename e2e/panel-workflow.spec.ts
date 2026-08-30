@@ -4,27 +4,115 @@ test.beforeEach(async ({ session }) => {
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
 });
 
-test('library opens panels without the removed refinement feature', async ({ session }) => {
+test('library shows a panel grid, adds panels to the workspace, and edits panels with the agent', async ({ session }) => {
   const { page } = session;
   await expect(page.locator('.panel-refine')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Ask Powermove agent', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).PM.PanelRefiner)).toBeUndefined();
+  const timelineStyle = await page.evaluate(() => {
+    const timeline = document.getElementById('panel-timeline')!;
+    const previous = timeline.getAttribute('style');
+    timeline.style.setProperty('position', 'fixed', 'important');
+    timeline.style.setProperty('width', '137px', 'important');
+    timeline.style.setProperty('height', '691px', 'important');
+    const rect = timeline.getBoundingClientRect();
+    return { previous, width: rect.width, height: rect.height };
+  });
+  expect(timelineStyle.width).toBeLessThan(200);
+  expect(timelineStyle.height).toBeGreaterThan(600);
   await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
   const library = page.getByRole('dialog', { name: 'Panel library', exact: true });
   await expect(library).toBeVisible();
-  const icons = await library.locator('.panel-library-open svg').evaluateAll(nodes => nodes.map(node => (node as SVGElement).dataset.icon));
+  const icons = await library.locator('.library-card .library-thumb-icon svg').evaluateAll(nodes => nodes.map(node => (node as SVGElement).dataset.icon));
   expect(new Set(icons).size).toBe(icons.length);
   expect(icons).not.toContain('missing');
   expect(icons).not.toContain('panel');
-  expect(await library.locator('.panel-library-row').count()).toBe(await page.evaluate(() => Object.keys((window as any).PM.PANELS).length));
+  const panelCount = await page.evaluate(() => Object.keys((window as any).PM.PANELS).filter(id => id !== 'toolbar').length);
+  expect(await library.locator('.library-card').count()).toBe(panelCount);
+  await expect(library.locator('[data-panel-id="toolbar"]')).toHaveCount(0);
+  await expect(library.getByRole('button', { name: 'Edit Tools', exact: true })).toHaveCount(0);
+  await expect(library.locator('.library-panel-meta')).toHaveCount(0);
+  const previewLayout = await library.locator('.library-card[data-panel-id]').evaluateAll((cards) => cards.map((card) => {
+    const preview = card.querySelector<HTMLElement>('.library-live')!;
+    const frame = card.querySelector<HTMLElement>('.library-live-frame');
+    const previewRect = preview.getBoundingClientRect();
+    const frameRect = frame?.getBoundingClientRect();
+    const style = getComputedStyle(card);
+    return {
+      id: (card as HTMLElement).dataset.panelId,
+      panelOnly: style.borderTopWidth === '0px' && style.backgroundColor === 'rgba(0, 0, 0, 0)',
+      preview: { width: previewRect.width, height: previewRect.height },
+      frame: frameRect ? { width: frameRect.width, height: frameRect.height } : null,
+      fitted: !frameRect || (
+        Math.abs(frameRect.left - previewRect.left) < 1
+        && Math.abs(frameRect.top - previewRect.top) < 1
+        && Math.abs(frameRect.width - previewRect.width) < 1
+        && Math.abs(frameRect.height - previewRect.height) < 1
+      ),
+      fallbackHidden: !frame || preview.classList.contains('has-preview')
+    };
+  }));
+  expect(previewLayout.filter(item => !item.panelOnly)).toEqual([]);
+  expect(previewLayout.filter(item => !item.fitted)).toEqual([]);
+  expect(previewLayout.filter(item => !item.fallbackHidden)).toEqual([]);
+  const timelinePreview = library.locator('[data-panel-id="timeline"] .library-live-frame');
+  await expect(timelinePreview).toHaveCSS('width', '800px');
+  await expect(timelinePreview).toHaveCSS('height', '440px');
+  await page.evaluate((previous) => {
+    const timeline = document.getElementById('panel-timeline')!;
+    if (previous === null) timeline.removeAttribute('style');
+    else timeline.setAttribute('style', previous);
+  }, timelineStyle.previous);
   await expect(library.getByRole('button', { name: /^Refine / })).toHaveCount(0);
   await library.getByRole('searchbox', { name: 'Search panels' }).fill('Notes');
-  await library.getByRole('button', { name: 'Open Notes', exact: true }).click();
+  await expect(library.locator('.library-card')).toHaveCount(1);
+  await library.getByRole('button', { name: 'Add Notes to workspace', exact: true }).click();
+  await expect(library).toBeHidden();
   await expect(page.locator('#panel-notes')).toBeVisible();
-  await page.locator('#panel-notes header').click({ button: 'right' });
-  await expect(page.getByRole('menuitem', { name: /Refine/ })).toHaveCount(0);
-  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+  await library.getByRole('searchbox', { name: 'Search panels' }).fill('Notes');
+  await expect(library.locator('.library-card .library-live-frame .panel.library-clone')).toBeVisible();
+  await library.getByRole('button', { name: 'Edit Notes', exact: true }).click();
+  await expect(library.locator('.library-editor')).toBeVisible();
+  await expect(library.locator('.library-stage-frame #panel-notes')).toBeVisible();
+  await expect(library.locator('#agent-composer-library')).toBeVisible();
+  await expect(library.getByRole('button', { name: 'Back to panels', exact: true }).locator('svg[data-icon="chev"]')).toBeVisible();
+  await expect(library.getByRole('button', { name: 'Choose focused panels', exact: true })).toHaveCount(0);
+  await expect(library.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
+  await expect(library.getByRole('combobox', { name: 'Reasoning effort', exact: true })).toBeVisible();
+  const libraryOptionAlignment = await library.locator('.library-chat-foot').evaluate((footer) => {
+    const options = footer.querySelector('.agent-option-bar')!.getBoundingClientRect();
+    const model = footer.querySelector('.agent-modelbar')!.getBoundingClientRect();
+    return Math.abs(options.left - model.left);
+  });
+  expect(libraryOptionAlignment).toBeLessThan(4);
+  await library.getByRole('button', { name: 'Back to panels', exact: true }).click();
+  await expect(library.locator('.library-grid')).toBeVisible();
+  await expect(page.locator('#panel-notes')).toBeVisible();
+  await library.getByRole('searchbox', { name: 'Search panels' }).fill('');
+  const dragId = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    return Object.keys(PM.PANELS).find(id => id !== 'toolbar' && !PM.Layout.findPanel(PM.WS.current, id));
+  });
+  expect(dragId).toBeTruthy();
+  await page.evaluate(async (id) => {
+    const card = document.querySelector(`.library-card[data-panel-id="${id}"]`)!;
+    const transfer = new DataTransfer();
+    card.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const dock = document.querySelector('[data-dock="right"]')!;
+    dock.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: transfer }));
+    dock.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+    card.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+  }, dragId);
+  await expect(library).toBeHidden();
+  await expect(page.locator(`#dock-right #panel-${dragId}`)).toBeVisible();
+  await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
+  const workspaceCount = await page.evaluate(() => (window as any).PM.WS.all.length);
+  await library.getByRole('button', { name: /^Workspaces/ }).click();
+  await expect(library.locator('.library-card')).toHaveCount(workspaceCount);
+  await expect(library.locator('.library-card .workspace-map').first()).toBeVisible();
+  await library.getByRole('button', { name: /^Panels/ }).click();
   await library.getByRole('button', { name: 'New panel', exact: true }).click();
   await expect(page.locator('#agent-composer-agent')).toHaveValue('Create a new panel that ');
   expect(session.diagnostics.pageErrors).toEqual([]);

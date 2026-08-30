@@ -36,10 +36,10 @@ function compareRecords(a: ExtensionRecord, b: ExtensionRecord): number {
 export function createExtensionSettingsControl(
   api: ExtensionsBridge | undefined = window.powermove?.extensions
 ): ExtensionSettingsControl {
-  const section = createSettingsSection('Extensions', 'Loading…');
+  const section = createSettingsSection('Installed', 'Loading…');
+  section.element.classList.add('is-fill');
   const summary = section.summary;
   const list = section.body;
-  list.classList.add('settings-extension-list');
   list.setAttribute('role', 'list');
   list.setAttribute('aria-label', 'Extensions');
 
@@ -67,12 +67,22 @@ export function createExtensionSettingsControl(
       row.dataset.extensionId = record.id;
       const copy = document.createElement('div');
       copy.className = 'settings-extension-copy';
+      const heading = document.createElement('div');
+      heading.className = 'settings-extension-name';
       const name = document.createElement('b');
       name.textContent = nameOf(record);
-      const metadata = document.createElement('span');
+      heading.append(name);
+      /* Built in is the background state, so only extensions you or the agent
+         added carry a tag — nine identical "Built in" lines say nothing. */
+      if (record.scope !== 'builtin') {
+        const tag = document.createElement('span');
+        tag.className = 'settings-extension-tag';
+        tag.textContent = sourceLabel(record);
+        heading.append(tag);
+      }
       const version = record.manifest?.version ? ` · v${record.manifest.version}` : '';
-      metadata.textContent = `${record.id} · ${sourceLabel(record)}${version}`;
-      copy.append(name, metadata);
+      row.title = `${record.id}${version}`;
+      copy.append(heading);
       if (state.detail || record.manifest?.description) {
         const detail = document.createElement('span');
         detail.className = state.tone === 'warning' ? 'settings-extension-error' : '';
@@ -83,27 +93,38 @@ export function createExtensionSettingsControl(
 
       const controls = document.createElement('div');
       controls.className = 'settings-extension-controls';
-      const status = document.createElement('span');
-      status.className = `settings-extension-status is-${state.tone}`;
-      status.textContent = state.label;
-      const toggle = document.createElement('input');
-      toggle.type = 'checkbox';
-      toggle.className = 'settings-extension-toggle';
-      toggle.checked = record.enabled;
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = record.enabled ? 'toggle on' : 'toggle';
+      toggle.setAttribute('aria-pressed', String(record.enabled));
       toggle.setAttribute('aria-label', `${record.enabled ? 'Disable' : 'Enable'} ${nameOf(record)}`);
-      toggle.addEventListener('change', async () => {
-        if (!api) return;
+      const knob = document.createElement('i');
+      knob.setAttribute('aria-hidden', 'true');
+      toggle.append(knob);
+      toggle.addEventListener('click', async () => {
+        if (!api || toggle.disabled) return;
+        const next = !record.enabled;
         toggle.disabled = true;
+        toggle.classList.toggle('on', next);
+        toggle.setAttribute('aria-pressed', String(next));
         try {
-          render(await api.setEnabled({ id: record.id, enabled: toggle.checked }));
+          render(await api.setEnabled({ id: record.id, enabled: next }));
         } catch (error) {
-          toggle.checked = record.enabled;
-          summary.textContent = error instanceof Error ? error.message : 'The extension could not be updated.';
-        } finally {
+          toggle.classList.toggle('on', record.enabled);
+          toggle.setAttribute('aria-pressed', String(record.enabled));
           toggle.disabled = false;
+          summary.textContent = error instanceof Error ? error.message : 'The extension could not be updated.';
         }
       });
-      controls.append(status, toggle);
+      /* The switch already reads on/off, so a pill only earns its place when
+         something needs the reader's attention. */
+      if (state.tone === 'warning') {
+        const status = document.createElement('span');
+        status.className = 'settings-extension-status is-warning';
+        status.textContent = state.label;
+        controls.append(status);
+      }
+      controls.append(toggle);
       row.append(copy, controls);
       list.append(row);
     }

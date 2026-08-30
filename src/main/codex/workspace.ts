@@ -3,10 +3,11 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import path from 'node:path';
 
 import { LIMITS, type AgentProviderId, type CodexRunRequest } from '../../shared/ipc';
+import { prepareExtensionStage, type ExtensionStage } from './change-history';
 
 export type CodexAuthority = 'project' | 'computer';
 
-export interface AgentWorkspace {
+export interface AgentWorkspace extends ExtensionStage {
   root: string;
   inputsDirectory: string;
   apiPackDirectory: string;
@@ -14,6 +15,7 @@ export interface AgentWorkspace {
   referencesDirectory: string;
   internalDirectory: string;
   artifactRoot: string;
+  /** Run-private extension copy. The agent never receives the live directory. */
   extensionsDir: string;
   runId: string;
   runDirectory: string;
@@ -132,6 +134,9 @@ export async function prepareAgentWorkspace(
   const internalDirectory = path.join(root, '.powermove');
   const artifactRoot = path.join(root, 'artifacts');
   const runDirectory = path.join(artifactRoot, runId);
+  const extensionRunsDirectory = path.join(internalDirectory, 'extension-runs');
+  const extensionsDir = path.join(extensionRunsDirectory, runId);
+  const historyRoot = path.join(userData, 'Agent Change History', safeAgentComponent(req.projectId));
   const schemaPath = path.join(internalDirectory, 'result-schema.json');
   const outputPath = path.join(internalDirectory, `result-${runId}.json`);
   const sessionPath = sessionPathFor(root, authority, req.threadId, req.provider ?? 'chatgpt');
@@ -141,8 +146,16 @@ export async function prepareAgentWorkspace(
     mkdir(attachmentsDirectory, { recursive: true }),
     mkdir(referencesDirectory, { recursive: true }),
     mkdir(internalDirectory, { recursive: true }),
+    mkdir(extensionRunsDirectory, { recursive: true }),
     mkdir(runDirectory, { recursive: true })
   ]);
+  const extensionStage = await prepareExtensionStage({
+    liveDirectory: options.extensionsDir,
+    stagingDirectory: extensionsDir,
+    historyRoot,
+    projectId: req.projectId,
+    runId
+  });
   await writeFile(path.join(inputsDirectory, 'powermove-project.json'), req.projectJSON, 'utf8');
   await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, 'utf8');
 
@@ -177,7 +190,8 @@ export async function prepareAgentWorkspace(
     referencesDirectory,
     internalDirectory,
     artifactRoot,
-    extensionsDir: options.extensionsDir,
+    ...extensionStage,
+    extensionsDir,
     runId,
     runDirectory,
     schemaPath,
@@ -187,6 +201,13 @@ export async function prepareAgentWorkspace(
   };
 }
 
-export async function discardPartialRun(workspace: Pick<AgentWorkspace, 'runDirectory'>): Promise<void> {
-  await rm(workspace.runDirectory, { recursive: true, force: true });
+export async function discardPartialRun(workspace: Pick<AgentWorkspace, 'runDirectory' | 'stagingDirectory'>): Promise<void> {
+  await Promise.all([
+    rm(workspace.runDirectory, { recursive: true, force: true }),
+    rm(workspace.stagingDirectory, { recursive: true, force: true })
+  ]);
+}
+
+export async function discardExtensionStage(workspace: Pick<AgentWorkspace, 'stagingDirectory'>): Promise<void> {
+  await rm(workspace.stagingDirectory, { recursive: true, force: true });
 }

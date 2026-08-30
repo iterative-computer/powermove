@@ -24,7 +24,13 @@ function createAccountSettingsControl(
   const copy = document.createElement('div');
   copy.className = 'settings-copy';
   const title = document.createElement('b');
-  title.textContent = name;
+  title.className = 'settings-provider-title';
+  const titleText = document.createElement('span');
+  titleText.textContent = name;
+  const dot = document.createElement('i');
+  dot.className = 'settings-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  title.append(titleText, dot);
   const description = document.createElement('span');
   description.textContent = `Checking your ${runtime} sign-in…`;
   const action = document.createElement('button');
@@ -43,7 +49,7 @@ function createAccountSettingsControl(
   const render = (status: ChatGPTAccountStatus): void => {
     if (!alive) return;
     currentState = status.state;
-    action.classList.toggle('is-connected', status.state === 'connected');
+    dot.dataset.state = status.state;
     if (status.state === 'connected') {
       const identity = [status.email, planLabel(status.planType)].filter(Boolean).join(' · ');
       description.textContent = identity || `Your ${name} subscription is ready to use.`;
@@ -82,7 +88,6 @@ function createAccountSettingsControl(
     busy = true;
     if (currentState === 'connected' && canDisconnect) {
       description.textContent = `Disconnecting ${name} from Powermove…`;
-      action.classList.remove('is-connected');
       action.textContent = 'Disconnecting…';
       action.disabled = true;
       try { render(await accountApi.disconnect()); }

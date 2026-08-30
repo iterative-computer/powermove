@@ -130,6 +130,7 @@ describe('CodexRunner validation and authority', () => {
     const result = await new CodexRunner().run(request({ id: 'extensions-run-1234' }), fakeOptions(
       await temporaryDirectory('runner-extensions'),
       {
+        FAKE_CODEX_EXTENSION_ID: 'valid-extension',
         FAKE_CODEX_RESULT: JSON.stringify({
           summary: 'done',
           commands: [],
@@ -146,7 +147,8 @@ describe('CodexRunner validation and authority', () => {
 
     expect(result).toMatchObject({
       ok: true,
-      extensions: [{ id: 'valid-extension', action: 'created', summary: 'Adds a command' }]
+      extensions: [{ id: 'valid-extension', action: 'created', summary: 'Adds a command' }],
+      extensionChangeSetId: expect.any(String)
     });
     if (!result.ok) throw new Error(result.error);
     expect(JSON.parse(result.text).extensions).toHaveLength(2);
