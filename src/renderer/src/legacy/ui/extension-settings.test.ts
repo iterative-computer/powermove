@@ -54,7 +54,7 @@ describe('extension settings control', () => {
     const control = createExtensionSettingsControl(harness.api);
 
     await vi.waitFor(() => expect(control.element.querySelectorAll('[data-extension-id]')).toHaveLength(5));
-    expect(control.element.textContent).toContain('5 extensions · every discovered extension is shown');
+    expect(control.element.textContent).toContain('5 extensions discovered');
     expect(control.element.querySelector('[data-extension-id="agent-ext"]')?.textContent).toContain('Agent');
     expect(control.element.querySelector('[data-extension-id="builtin-ext"]')?.textContent).toContain('Built in');
     expect(control.element.querySelector('[data-extension-id="disabled-ext"]')?.textContent).toContain('Off');
