@@ -25,11 +25,13 @@ function baseSnapshot(overrides: Record<string, any> = {}): AgentSnapshot {
     scope: 'workspace',
     autoApplyPanels: true,
     model: 'gpt-5.6-sol',
+    provider: 'chatgpt',
     reasoningEffort: 'high',
     accessMode: 'editor',
     composerDraft: '',
     pendingEntering: false,
     models: [],
+    providers: [],
     reasoningEfforts: [],
     accessModes: [],
     ...overrides

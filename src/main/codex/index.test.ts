@@ -125,7 +125,7 @@ describe('registerCodexIpc', () => {
       isTrustedSender: () => true,
       codexBinaryPref: () => null,
       openExternal: async () => undefined
-    }, mocks.account);
+    }, mocks.account, mocks.account);
   });
 
   it('registers every frozen Codex, consent, and artifact channel', () => {
@@ -133,6 +133,9 @@ describe('registerCodexIpc', () => {
       IPC.chatgptStatus,
       IPC.chatgptConnect,
       IPC.chatgptDisconnect,
+      IPC.claudeStatus,
+      IPC.claudeConnect,
+      IPC.claudeDisconnect,
       IPC.codexRun,
       IPC.codexCancel,
       IPC.codexFixPrompt,
@@ -144,7 +147,7 @@ describe('registerCodexIpc', () => {
     const beforeQuit = mocks.appOnce.mock.calls.at(-1)?.[1] as (() => void) | undefined;
     beforeQuit?.();
     expect(mocks.cancelAll).toHaveBeenCalledOnce();
-    expect(mocks.accountShutdown).toHaveBeenCalledOnce();
+    expect(mocks.accountShutdown).toHaveBeenCalledTimes(2);
   });
 
   it('reports, connects, and disconnects ChatGPT through trusted IPC', async () => {

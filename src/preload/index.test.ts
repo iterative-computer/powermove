@@ -143,6 +143,30 @@ describe('preload bridge', () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.chatgptChanged, listener);
   });
 
+  it('exposes Claude status, connect, disconnect, and sanitized status events', async () => {
+    const connected = {
+      state: 'connected' as const,
+      email: 'editor@example.com',
+      planType: 'subscription',
+      detail: null
+    };
+    electronMocks.invoke.mockResolvedValue(connected);
+    await expect(bridge().claude.status()).resolves.toEqual(connected);
+    expect(electronMocks.invoke).toHaveBeenCalledWith(IPC.claudeStatus);
+    await expect(bridge().claude.connect()).resolves.toEqual(connected);
+    expect(electronMocks.invoke).toHaveBeenCalledWith(IPC.claudeConnect);
+    await expect(bridge().claude.disconnect()).resolves.toEqual(connected);
+    expect(electronMocks.invoke).toHaveBeenCalledWith(IPC.claudeDisconnect);
+
+    const onChanged = vi.fn();
+    const stop = bridge().claude.onChanged(onChanged);
+    const listener = electronMocks.on.mock.calls.at(-1)?.[1] as (...args: unknown[]) => void;
+    listener({ sender: 'must-not-leak' }, connected);
+    expect(onChanged).toHaveBeenCalledExactlyOnceWith(connected);
+    stop();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.claudeChanged, listener);
+  });
+
   it('exposes alignment haptics as one-way IPC', () => {
     bridge().haptic.alignment();
     expect(electronMocks.send).toHaveBeenCalledExactlyOnceWith(IPC.hapticAlignment);

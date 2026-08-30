@@ -92,3 +92,46 @@ test('large images and files cross the real renderer-to-main agent boundary', as
     await session.close();
   }
 });
+
+test('Claude subscription status and structured runs cross the real hidden app boundary', async () => {
+  const session = await launchApp({
+    env: {
+      CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
+      CLAUDE_BINARY: path.join(repoRoot, 'src/main/claude/__fixtures__/fake-claude.sh')
+    }
+  });
+  try {
+    const { page } = session;
+    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await expect(settings).toContainText('Claude');
+    await expect(settings).toContainText('claude@example.com · Max plan');
+    await settings.getByRole('button', { name: 'Done', exact: true }).click();
+
+    const provider = page.locator('.agent-modelbar select[aria-label="Provider"]');
+    await provider.selectOption('claude');
+    await expect(page.locator('.agent-modelbar select[aria-label="Model"]')).toHaveValue('sonnet');
+    await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toBeVisible();
+
+    const result = await page.evaluate(async () => await (window as any).powermove.codex.run({
+      id: 'claude-hidden-run',
+      provider: 'claude',
+      mode: 'editor',
+      prompt: 'Return a message.',
+      schema: { type: 'object', required: ['message'], properties: { message: { type: 'string' } } },
+      images: [],
+      model: 'sonnet',
+      reasoningEffort: 'high',
+      access: 'editor',
+      projectId: 'editor',
+      projectName: 'Editor',
+      projectJSON: null,
+      attachments: [],
+      consentToken: null
+    }));
+    expect(result).toMatchObject({ ok: true, text: '{"message":"claude editor done"}' });
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    await session.close();
+  }
+});

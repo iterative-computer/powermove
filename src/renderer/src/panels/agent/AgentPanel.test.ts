@@ -69,6 +69,7 @@ function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
     stepsExpanded: false,
     scope: 'workspace',
     autoApplyPanels: true,
+    provider: 'chatgpt',
     model: 'gpt-5.6-sol',
     reasoningEffort: 'high',
     accessMode: 'editor',
@@ -77,6 +78,10 @@ function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
     models: [
       { id: 'gpt-5.6-sol', label: '5.6 Sol' },
       { id: 'gpt-5.6-terra', label: '5.6 Terra' }
+    ],
+    providers: [
+      { id: 'chatgpt', label: 'ChatGPT' },
+      { id: 'claude', label: 'Claude' }
     ],
     reasoningEfforts: ['low', 'high'],
     accessModes: [
@@ -123,7 +128,7 @@ beforeEach(() => {
     modal: vi.fn(modal),
     store,
     AgentUI: {
-      submit: vi.fn(), stop: vi.fn(), setDraft: vi.fn((value: string) => setAgentComposerDraft(value)), setStepsExpanded: vi.fn(), setModel: vi.fn(),
+      submit: vi.fn(), stop: vi.fn(), setDraft: vi.fn((value: string) => setAgentComposerDraft(value)), setStepsExpanded: vi.fn(), setModel: vi.fn(), setProvider: vi.fn(),
       setAccess: vi.fn(), confirmComputerAccess: vi.fn(),
       setScope: vi.fn(), toggleAutoApplyPanels: vi.fn(), dismissPlan: vi.fn(), applyPlan: vi.fn(),
       addAttachments: vi.fn(), removeAttachment: vi.fn(), importArtifact: vi.fn(), revealArtifact: vi.fn(),
@@ -276,6 +281,11 @@ describe('AgentPanel', () => {
     renderPanel();
     expect(target.querySelector('select[aria-label="Agent authority"]')).toBeNull();
     expect(target.querySelector('select[aria-label="Agent scope"]')).toBeNull();
+
+    const provider = target.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+    provider.value = 'claude';
+    flushSync(() => provider.dispatchEvent(new Event('change', { bubbles: true })));
+    expect(PM.AgentUI.setProvider).toHaveBeenCalledWith('claude');
 
     const model = target.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!;
     model.value = 'gpt-5.6-terra';

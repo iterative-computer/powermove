@@ -5,6 +5,7 @@ import {
   type ArtifactFile,
   type CaptureResult,
   type ChatGPTAccountStatus,
+  type ClaudeAccountStatus,
   type CodexProgressEvent,
   type CodexRunResult,
   type ConsentResult,
@@ -66,6 +67,17 @@ const bridge: PowermoveBridge = {
       const listener = (_event: IpcRendererEvent, status: ChatGPTAccountStatus): void => cb(status);
       ipcRenderer.on(IPC.chatgptChanged, listener);
       return () => ipcRenderer.removeListener(IPC.chatgptChanged, listener);
+    }
+  },
+
+  claude: {
+    status: () => ipcRenderer.invoke(IPC.claudeStatus) as Promise<ClaudeAccountStatus>,
+    connect: () => ipcRenderer.invoke(IPC.claudeConnect) as Promise<ClaudeAccountStatus>,
+    disconnect: () => ipcRenderer.invoke(IPC.claudeDisconnect) as Promise<ClaudeAccountStatus>,
+    onChanged: (cb) => {
+      const listener = (_event: IpcRendererEvent, status: ClaudeAccountStatus): void => cb(status);
+      ipcRenderer.on(IPC.claudeChanged, listener);
+      return () => ipcRenderer.removeListener(IPC.claudeChanged, listener);
     }
   },
 

@@ -2,7 +2,7 @@
 import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
-import { createChatGPTSettingsControl } from './ui/chatgpt-settings';
+import { createChatGPTSettingsControl, createClaudeSettingsControl } from './ui/chatgpt-settings';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -462,6 +462,7 @@ restoreProjectAssets(PM.proj);
 /* ── shell ─────────────────────────────────────────────── */
 function openSettings() {
   const chatgpt = createChatGPTSettingsControl();
+  const claude = createClaudeSettingsControl();
   const appearance = h('select.settings-appearance', { 'aria-label': 'Appearance' },
     h('option', { value: 'system' }, 'Default'),
     h('option', { value: 'light' }, 'Light'), h('option', { value: 'dark' }, 'Dark'));
@@ -469,14 +470,15 @@ function openSettings() {
   appearance.onchange = () => PM.theme.apply(appearance.value);
   const body = h('div.settings-view',
     chatgpt.element,
+    claude.element,
     h('div.settings-row', h('div.settings-copy', h('b', 'Appearance'), h('span', 'Choose how Powermove looks.')), appearance),
-    h('p.settings-note', 'ChatGPT authentication is managed securely by Codex. Powermove never reads or stores your account token.'));
+    h('p.settings-note', 'Authentication is managed by the official Codex and Claude Code runtimes. Powermove never reads or stores your account token.'));
   const dialog = PM.modal({
     title: 'Settings',
     body,
     width: 440,
     actions: [{ label: 'Done', pri: true }],
-    onClose: () => chatgpt.destroy()
+    onClose: () => { chatgpt.destroy(); claude.destroy(); }
   });
   window.setTimeout(() => chatgpt.focus(), 30);
   return dialog;

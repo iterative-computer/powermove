@@ -41,6 +41,7 @@ import {
 const MODES = ['editor', 'autonomous'] as const;
 const ACCESS = ['editor', 'project', 'computer'] as const;
 const EFFORTS = ['low', 'medium', 'high'] as const;
+const PROVIDERS = ['chatgpt', 'claude'] as const;
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
 
@@ -93,6 +94,7 @@ function authorityForAccess(access: CodexRunRequest['access']): CodexAuthority {
 export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
   if (!isRecord(value)) return false;
   if (!isString(value.id) || !REQUEST_ID.test(value.id)) return false;
+  if (value.provider !== undefined && !isOneOf(value.provider, PROVIDERS)) return false;
   if (value.threadId !== undefined && (!isString(value.threadId) || !/^[A-Za-z0-9_-]{1,120}$/.test(value.threadId))) return false;
   if (!isOneOf(value.mode, MODES)) return false;
   if (!isString(value.prompt, LIMITS.codexPromptChars) || value.prompt.length === 0) return false;

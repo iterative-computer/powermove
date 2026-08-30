@@ -51,12 +51,14 @@ export interface AgentSnapshot {
   stepsExpanded: boolean;
   scope: string;
   autoApplyPanels: boolean;
+  provider: string;
   model: string;
   reasoningEffort: string;
   accessMode: string;
   composerDraft: string;
   pendingEntering: boolean;
   models: AgentOption[];
+  providers: AgentOption[];
   reasoningEfforts: string[];
   accessModes: AgentOption[];
 }
@@ -92,12 +94,14 @@ const EMPTY_SNAPSHOT: AgentSnapshot = {
   stepsExpanded: false,
   scope: 'workspace',
   autoApplyPanels: true,
+  provider: 'chatgpt',
   model: 'gpt-5.6-sol',
   reasoningEffort: 'high',
   accessMode: 'editor',
   composerDraft: '',
   pendingEntering: false,
   models: [],
+  providers: [],
   reasoningEfforts: [],
   accessModes: []
 };
@@ -160,6 +164,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     trace: snapshot.trace.map((step) => ({ ...step })),
     steps: snapshot.steps.map((step) => ({ ...step })),
     models: snapshot.models.map((model) => ({ ...model })),
+    providers: snapshot.providers.map((provider) => ({ ...provider })),
     reasoningEfforts: [...snapshot.reasoningEfforts],
     accessModes: snapshot.accessModes.map((mode) => ({ ...mode })),
     progressLines,
@@ -180,6 +185,7 @@ export function resetAgentState(): void {
     trace: [],
     steps: [],
     models: [],
+    providers: [],
     reasoningEfforts: [],
     accessModes: [],
     progressLines: [],

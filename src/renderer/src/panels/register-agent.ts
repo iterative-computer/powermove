@@ -18,6 +18,7 @@ export interface AgentLegacyBridge {
   setDraft(value: string): void;
   setStepsExpanded(expanded: boolean): void;
   setModel(model: string, effort: string): void;
+  setProvider?(provider: string): void;
   setAccess(mode: string): void;
   confirmComputerAccess(): void;
   setScope(scope: string): void;
@@ -83,6 +84,7 @@ export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): voi
     },
     setStepsExpanded: bridge.setStepsExpanded,
     setModel: bridge.setModel,
+    setProvider: bridge.setProvider,
     setAccess: bridge.setAccess,
     confirmComputerAccess: bridge.confirmComputerAccess,
     setScope: bridge.setScope,

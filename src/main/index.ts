@@ -436,6 +436,7 @@ if (!hasSingleInstanceLock) {
       apiPackFiles,
       isTrustedSender,
       codexBinaryPref: () => null, // a user-facing preference lands with the settings UI
+      claudeBinaryPref: () => null,
       openExternal: async (url) => { await shell.openExternal(url); }
     });
     installMenu(() => mainWindow);

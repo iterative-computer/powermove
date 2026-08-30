@@ -20,6 +20,7 @@ import {
   REQUEST_ID,
   type ArtifactRef,
   type ChatGPTAccountStatus,
+  type ClaudeAccountStatus,
   type CodexCancelRequest,
   type CodexFixPromptRequest,
   type CodexRunRequest,
@@ -31,6 +32,7 @@ import { readArtifact, revealArtifact } from './artifacts';
 import { requestComputerConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
+import { ClaudeAccountClient, ClaudeRunner } from '../claude';
 import { buildFixPrompt } from './instructions';
 import { agentWorkspaceRoot, type AgentApiPackFile } from './workspace';
 
@@ -45,6 +47,7 @@ export interface CodexIpcContext {
   apiPackFiles(): Promise<AgentApiPackFile[]>;
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
   codexBinaryPref(): string | null;
+  claudeBinaryPref?(): string | null;
   openExternal(url: string): Promise<void>;
 }
 
@@ -54,6 +57,14 @@ export interface ChatGPTAccountController {
   disconnect(): Promise<ChatGPTAccountStatus>;
   shutdown(): Promise<void>;
   onChanged(listener: (status: ChatGPTAccountStatus) => void): () => void;
+}
+
+export interface ClaudeAccountController {
+  status(): Promise<ClaudeAccountStatus>;
+  connect(): Promise<ClaudeAccountStatus>;
+  disconnect(): Promise<ClaudeAccountStatus>;
+  shutdown(): Promise<void>;
+  onChanged(listener: (status: ClaudeAccountStatus) => void): () => void;
 }
 
 function requireTrusted(event: IpcMainInvokeEvent, ctx: CodexIpcContext): void {
@@ -125,15 +136,27 @@ export function registerCodexIpc(
     userData: ctx.userData,
     codexBinaryPref: ctx.codexBinaryPref,
     openExternal: ctx.openExternal
+  }),
+  claudeAccount: ClaudeAccountController = new ClaudeAccountClient({
+    userData: ctx.userData,
+    claudeBinaryPref: () => ctx.claudeBinaryPref?.() ?? null
   })
 ): void {
   const runner = new CodexRunner();
+  const claudeRunner = new ClaudeRunner();
   const owners = new Map<string, WebContents>();
 
   account.onChanged((status) => {
     const window = ctx.getWindow();
     if (window !== null && !window.isDestroyed() && !window.webContents.isDestroyed()) {
       window.webContents.send(IPC.chatgptChanged, status);
+    }
+  });
+
+  claudeAccount.onChanged((status) => {
+    const window = ctx.getWindow();
+    if (window !== null && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send(IPC.claudeChanged, status);
     }
   });
 
@@ -152,6 +175,21 @@ export function registerCodexIpc(
     return account.disconnect();
   });
 
+  ipcMain.handle(IPC.claudeStatus, async (event) => {
+    requireTrusted(event, ctx);
+    return claudeAccount.status();
+  });
+
+  ipcMain.handle(IPC.claudeConnect, async (event) => {
+    requireTrusted(event, ctx);
+    return claudeAccount.connect();
+  });
+
+  ipcMain.handle(IPC.claudeDisconnect, async (event) => {
+    requireTrusted(event, ctx);
+    return claudeAccount.disconnect();
+  });
+
   ipcMain.handle(IPC.codexRun, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     const req = requireRunRequest(rawRequest);
@@ -159,14 +197,18 @@ export function registerCodexIpc(
 
     const owner = event.sender;
     owners.set(req.id, owner);
-    const rendererDestroyed = (): void => { void runner.cancel(req.id); };
+    const rendererDestroyed = (): void => {
+      void Promise.all([runner.cancel(req.id), claudeRunner.cancel(req.id)]);
+    };
     owner.once('destroyed', rendererDestroyed);
     try {
-      return await runner.run(req, {
+      const selectedRunner = req.provider === 'claude' ? claudeRunner : runner;
+      return await selectedRunner.run(req, {
         userData: ctx.userData,
         extensionsDir: ctx.extensionsDir,
         apiPackFiles: ctx.apiPackFiles,
         codexBinaryPref: ctx.codexBinaryPref(),
+        claudeBinaryPref: ctx.claudeBinaryPref?.() ?? null,
         onProgress: (text) => {
           if (!owner.isDestroyed()) {
             owner.send(IPC.codexEvent, { id: req.id, kind: 'progress', text });
@@ -187,7 +229,9 @@ export function registerCodexIpc(
   ipcMain.handle(IPC.codexCancel, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     const req = requireCancelRequest(rawRequest);
-    if (owners.get(req.id) === event.sender) await runner.cancel(req.id);
+    if (owners.get(req.id) === event.sender) {
+      await Promise.all([runner.cancel(req.id), claudeRunner.cancel(req.id)]);
+    }
   });
 
   ipcMain.handle(IPC.codexFixPrompt, async (event, rawRequest: unknown) => {
@@ -219,7 +263,9 @@ export function registerCodexIpc(
 
   app.once('before-quit', () => {
     void runner.cancelAll();
+    void claudeRunner.cancelAll();
     void account.shutdown();
+    void claudeAccount.shutdown();
   });
 }
 

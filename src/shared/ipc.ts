@@ -21,6 +21,10 @@ export const IPC = {
   chatgptConnect: 'chatgpt:connect',
   chatgptDisconnect: 'chatgpt:disconnect',
   chatgptChanged: 'chatgpt:changed', // main → renderer
+  claudeStatus: 'claude:status',
+  claudeConnect: 'claude:connect',
+  claudeDisconnect: 'claude:disconnect',
+  claudeChanged: 'claude:changed', // main → renderer
   consentComputer: 'consent:computer',
 
   artifactRead: 'agent:artifact:read',
@@ -78,6 +82,7 @@ export type CloseDecision = 'save' | 'discard' | 'cancel';
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
 export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type AgentProviderId = 'chatgpt' | 'claude';
 
 export interface CodexAttachment {
   name: string;
@@ -86,6 +91,7 @@ export interface CodexAttachment {
 
 export interface CodexRunRequest {
   id: string; // REQUEST_ID
+  provider?: AgentProviderId; // omitted by older renderers; defaults to ChatGPT
   threadId?: string; // optional for older renderer clients; isolates resumed CLI sessions
   mode: CodexMode;
   prompt: string;
@@ -153,6 +159,14 @@ export type ChatGPTConnectionState = 'checking' | 'connected' | 'connecting' | '
 
 export interface ChatGPTAccountStatus {
   state: ChatGPTConnectionState;
+  email: string | null;
+  planType: string | null;
+  detail: string | null;
+}
+
+export type ClaudeConnectionState = ChatGPTConnectionState;
+export interface ClaudeAccountStatus {
+  state: ClaudeConnectionState;
   email: string | null;
   planType: string | null;
   detail: string | null;
@@ -230,6 +244,13 @@ export interface PowermoveBridge {
     connect(): Promise<ChatGPTAccountStatus>;
     disconnect(): Promise<ChatGPTAccountStatus>;
     onChanged(cb: (status: ChatGPTAccountStatus) => void): () => void;
+  };
+
+  claude: {
+    status(): Promise<ClaudeAccountStatus>;
+    connect(): Promise<ClaudeAccountStatus>;
+    disconnect(): Promise<ClaudeAccountStatus>;
+    onChanged(cb: (status: ClaudeAccountStatus) => void): () => void;
   };
 
   artifacts: {

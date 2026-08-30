@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { LIMITS, type CodexRunRequest } from '../../shared/ipc';
+import { LIMITS, type AgentProviderId, type CodexRunRequest } from '../../shared/ipc';
 
 export type CodexAuthority = 'project' | 'computer';
 
@@ -45,11 +45,17 @@ export function agentWorkspaceRoot(userData: string, projectId: string): string 
   return path.join(userData, 'Agent Workspaces', safeAgentComponent(projectId));
 }
 
-export function sessionPathFor(root: string, authority: CodexAuthority, threadId?: string): string {
+export function sessionPathFor(
+  root: string,
+  authority: CodexAuthority,
+  threadId?: string,
+  provider: AgentProviderId = 'chatgpt'
+): string {
   if (threadId !== undefined && !/^[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error('Invalid agent thread id');
+  const providerPart = provider === 'chatgpt' ? '' : `-${provider}`;
   return threadId
-    ? path.join(root, '.powermove', 'threads', threadId, `session-v${SESSION_CONTRACT_VERSION}-${authority}.txt`)
-    : path.join(root, '.powermove', `session-v${SESSION_CONTRACT_VERSION}-${authority}.txt`);
+    ? path.join(root, '.powermove', 'threads', threadId, `session-v${SESSION_CONTRACT_VERSION}${providerPart}-${authority}.txt`)
+    : path.join(root, '.powermove', `session-v${SESSION_CONTRACT_VERSION}${providerPart}-${authority}.txt`);
 }
 
 export async function readSession(sessionPath: string): Promise<string | null> {
@@ -128,7 +134,7 @@ export async function prepareAgentWorkspace(
   const runDirectory = path.join(artifactRoot, runId);
   const schemaPath = path.join(internalDirectory, 'result-schema.json');
   const outputPath = path.join(internalDirectory, `result-${runId}.json`);
-  const sessionPath = sessionPathFor(root, authority, req.threadId);
+  const sessionPath = sessionPathFor(root, authority, req.threadId, req.provider ?? 'chatgpt');
 
   await Promise.all([
     mkdir(apiPackDirectory, { recursive: true }),

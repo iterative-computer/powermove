@@ -44,6 +44,7 @@ PM.CodexBridge = {
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
         id, prompt, schema, images: images.slice(0, 6),
+        provider: options.provider || 'chatgpt',
         threadId: options.threadId || '',
         model: options.model || '', reasoningEffort: options.reasoningEffort || '',
         mode: options.mode || 'editor', access: options.access || 'editor',
@@ -136,6 +137,8 @@ PM.WindowCapture = {
 /* Broad access is the default: the agent can use project tools and the web
    without a picker. Computer access still requires its per-run confirmation. */
 const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'project');
+const storedProvider: any = PM.store?.get?.('agentProvider', 'chatgpt');
+const initialProvider: any = ['chatgpt', 'claude'].includes(storedProvider) ? storedProvider : 'chatgpt';
 const S: any = {
   initialized: false, active: false, pressed: false, phase: 'idle',
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
@@ -151,16 +154,28 @@ const S: any = {
   pendingEntering: false,
   panelRun: null, scope: PM.store?.get?.('agentScope', 'workspace') || 'workspace',
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
-  model: PM.store?.get?.('agentModel', 'gpt-5.6-sol') || 'gpt-5.6-sol',
+  provider: initialProvider,
+  model: PM.store?.get?.(`agentModel.${initialProvider}`, initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol'),
   reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
   accessMode: ['editor', 'project'].includes(storedAccessMode) ? storedAccessMode : 'project',
 };
 
-const AGENT_MODELS: any = [
-  { id: 'gpt-5.6-sol', label: '5.6 Sol' },
-  { id: 'gpt-5.6-terra', label: '5.6 Terra' },
-  { id: 'gpt-5.6-luna', label: '5.6 Luna' },
+const AGENT_PROVIDERS: any = [
+  { id: 'chatgpt', label: 'ChatGPT' },
+  { id: 'claude', label: 'Claude' },
 ];
+const AGENT_MODELS: any = {
+  chatgpt: [
+    { id: 'gpt-5.6-sol', label: '5.6 Sol' },
+    { id: 'gpt-5.6-terra', label: '5.6 Terra' },
+    { id: 'gpt-5.6-luna', label: '5.6 Luna' },
+  ],
+  claude: [
+    { id: 'sonnet', label: 'Sonnet' },
+    { id: 'opus', label: 'Opus' },
+    { id: 'fable', label: 'Fable' },
+  ],
+};
 const REASONING_EFFORTS: any = ['low', 'medium', 'high', 'xhigh', 'max'];
 const AGENT_ACCESS_MODES: any = [
   { id: 'editor', label: 'Edit project', detail: 'Edit the current composition' },
@@ -295,12 +310,14 @@ function agentUISnapshot(): AgentSnapshot {
     stepsExpanded: S.stepsExpanded,
     scope: S.scope,
     autoApplyPanels: S.autoApplyPanels,
+    provider: S.provider,
     model: S.model,
     reasoningEffort: S.reasoningEffort,
     accessMode: S.accessMode,
     composerDraft: S.composerDraft,
     pendingEntering: S.pendingEntering,
-    models: AGENT_MODELS,
+    models: AGENT_MODELS[S.provider],
+    providers: AGENT_PROVIDERS,
     reasoningEfforts: REASONING_EFFORTS,
     accessModes: AGENT_ACCESS_MODES,
   };
@@ -320,9 +337,16 @@ registerAgentPanel(PM, {
     clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300); },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
-    if (!AGENT_MODELS.some((item: any) => item.id === model) || !REASONING_EFFORTS.includes(effort)) return;
+    if (!AGENT_MODELS[S.provider].some((item: any) => item.id === model) || !REASONING_EFFORTS.includes(effort)) return;
     S.model = model; S.reasoningEffort = effort;
-    PM.store.set('agentModel', model); PM.store.set('agentReasoningEffort', effort);
+    PM.store.set(`agentModel.${S.provider}`, model); PM.store.set('agentReasoningEffort', effort);
+    PM.AgentUI?.update({ focusComposer: true });
+  },
+  setProvider: (provider: string) => {
+    if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || S.activeRequest) return;
+    S.provider = provider;
+    S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
+    PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
   },
   setAccess: setAgentAccessMode,
@@ -1241,6 +1265,7 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
     projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
     projectJSON: JSON.stringify(PM.proj),
     attachments: requestFileAttachments(S.requestAttachments),
+    provider: S.provider,
     model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
     timeoutMs: 3_600_000,
     onProgress: (summary: any) => {
@@ -1375,6 +1400,7 @@ async function sendRequest(input: any) {
       {
         threadId: threads.activeId,
         attachments: requestFileAttachments(S.requestAttachments),
+        provider: S.provider,
         model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
         onProgress: (summary: any) => {
           if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;

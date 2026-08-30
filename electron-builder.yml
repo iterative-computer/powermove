@@ -7,9 +7,13 @@ directories:
 asar: true
 files:
   - out/**
+  - '!node_modules/@anthropic-ai/claude-code-darwin-arm64/**'
+  - '!node_modules/@anthropic-ai/claude-code/bin/claude.exe'
 extraResources:
   - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
     to: codex/bin/codex
+  - from: node_modules/@anthropic-ai/claude-code-darwin-arm64/claude
+    to: claude/bin/claude
   - from: src/extensions
     to: builtin-extensions
   - from: docs/EXTENSIONS.md

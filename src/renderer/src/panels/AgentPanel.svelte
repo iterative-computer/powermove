@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import type { ChatGPTAccountStatus } from '../../../shared/ipc';
   import type { PanelProps } from './registerSveltePanel';
   import Composer from './agent/Composer.svelte';
@@ -21,6 +20,7 @@
     state: 'checking', email: null, planType: null, detail: null
   });
   let accountBusy = $state(false);
+  const providerName = $derived(agentState.provider === 'claude' ? 'Claude' : 'ChatGPT');
 
   const showPreview = $derived(agentState.phase === 'preview');
   const showResult = $derived(agentState.phase === 'result' && (agentState.panelRun || !agentState.run?.autonomous));
@@ -33,12 +33,16 @@
     };
   }
 
-  async function connectChatGPT(): Promise<void> {
-    const api = window.powermove?.chatgpt;
+  function providerApi() {
+    return agentState.provider === 'claude' ? window.powermove?.claude : window.powermove?.chatgpt;
+  }
+
+  async function connectProvider(): Promise<void> {
+    const api = providerApi();
     if (!api || accountBusy) return;
     accountBusy = true;
     accountStatus = {
-      state: 'connecting', email: null, planType: null, detail: 'Opening ChatGPT sign-in…'
+      state: 'connecting', email: null, planType: null, detail: `Opening ${providerName} sign-in…`
     };
     try {
       accountStatus = await api.connect();
@@ -49,8 +53,8 @@
     }
   }
 
-  async function retryChatGPT(): Promise<void> {
-    const api = window.powermove?.chatgpt;
+  async function retryProvider(): Promise<void> {
+    const api = providerApi();
     if (!api || accountBusy) return;
     accountBusy = true;
     accountStatus = { state: 'checking', email: null, planType: null, detail: null };
@@ -61,6 +65,10 @@
     } finally {
       accountBusy = false;
     }
+  }
+
+  function changeGateProvider(event: Event): void {
+    PM.AgentUI?.setProvider?.((event.currentTarget as HTMLSelectElement).value);
   }
 
   function distanceFromBottom(): number {
@@ -98,10 +106,12 @@
     }
   });
 
-  onMount(() => {
-    const api = window.powermove?.chatgpt;
+  $effect(() => {
+    const provider = agentState.provider;
+    const api = provider === 'claude' ? window.powermove?.claude : window.powermove?.chatgpt;
+    accountStatus = { state: 'checking', email: null, planType: null, detail: null };
     if (!api) {
-      accountStatus = unavailable(new Error('Restart Powermove to finish installing ChatGPT connection.'));
+      accountStatus = unavailable(new Error(`Restart Powermove to finish installing ${provider === 'claude' ? 'Claude' : 'ChatGPT'} connection.`));
       return;
     }
     const stop = api.onChanged((status) => { accountStatus = status; });
@@ -116,20 +126,25 @@
 <div class="agent-panel-body agent-shell" data-svelte-panel={panelId} data-agent-panel data-agent-phase={agentState.phase}>
   {#if showConnectionGate}
     <div class="agent-connect-gate" role="status" aria-live="polite">
+      <select class="agent-connect-provider" aria-label="Provider" value={agentState.provider} onchange={changeGateProvider}>
+        {#each agentState.providers as provider (provider.id)}
+          <option value={provider.id}>{provider.label}</option>
+        {/each}
+      </select>
       <div class="agent-connect-mark" aria-hidden="true">
         <svg viewBox="0 0 24 24"><path d="M12 3.5c.7 4.6 3.3 7.2 7.9 7.9-4.6.7-7.2 3.3-7.9 7.9-.7-4.6-3.3-7.2-7.9-7.9 4.6-.7 7.2-3.3 7.9-7.9Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" /></svg>
       </div>
-      <b>{accountStatus.state === 'connecting' ? 'Finish connecting ChatGPT' : 'Connect ChatGPT'}</b>
+      <b>{accountStatus.state === 'connecting' ? `Finish connecting ${providerName}` : `Connect ${providerName}`}</b>
       <span>{accountStatus.detail || (accountStatus.state === 'unavailable'
-        ? 'Powermove could not start its ChatGPT service.'
-        : 'Use your ChatGPT subscription to power the Powermove agent.')}</span>
+        ? `Powermove could not start its ${providerName} service.`
+        : `Use your ${providerName} subscription to power the Powermove agent.`)}</span>
       <button
         class="btn pri agent-connect-button"
         type="button"
         disabled={accountBusy || accountStatus.state === 'connecting'}
-        onclick={accountStatus.state === 'unavailable' ? retryChatGPT : connectChatGPT}
-      >{accountStatus.state === 'connecting' ? 'Waiting…' : accountStatus.state === 'unavailable' ? 'Try again' : 'Connect ChatGPT'}</button>
-      <small>Sign-in opens in your browser. Powermove never sees your password.</small>
+        onclick={accountStatus.state === 'unavailable' ? retryProvider : connectProvider}
+      >{accountStatus.state === 'connecting' ? 'Waiting…' : accountStatus.state === 'unavailable' ? 'Try again' : `Connect ${providerName}`}</button>
+      <small>Sign-in is handled by the official {providerName === 'Claude' ? 'Claude Code' : 'Codex'} runtime. Powermove never sees your password.</small>
     </div>
   {:else}
     <ThreadPicker {PM} />

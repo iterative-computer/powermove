@@ -33,6 +33,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.251",
     "@motion-core/motion-gpu": "0.15.1",
     "@openai/codex": "0.149.0",
     "@powermove/macos-haptics": "file:native/macos-haptics",
