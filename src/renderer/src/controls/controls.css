@@ -41,7 +41,95 @@ select.sel {
 }
 
 .color-picker {
-  width: 360px;
+  width: 384px;
+}
+
+/* After Effects-style workbench: SV field, hue ribbon, then readouts. */
+.color-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px 128px;
+  gap: 8px;
+  height: 196px;
+}
+
+.color-sv,
+.color-hue {
+  height: 100%;
+}
+
+.color-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.color-compare {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  height: 46px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18);
+}
+
+.color-compare-swatch {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: var(--sw-color);
+}
+
+.color-compare-swatch.is-before {
+  cursor: pointer;
+  box-shadow: inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .18);
+}
+
+.color-channels {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 0;
+}
+
+.color-channels hr {
+  height: var(--hairline);
+  margin: 2px 0;
+  border: 0;
+  background: var(--line);
+}
+
+.color-channel {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) 10px;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  color: var(--tx-3);
+  font-size: var(--fs-xs);
+}
+
+.color-channel em {
+  font-style: normal;
+  color: var(--tx-3);
+  font-size: var(--fs-xs);
+}
+
+.color-channel input {
+  width: 100%;
+  min-width: 0;
+  height: 20px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: var(--bg-field);
+  box-shadow: var(--ctl-edge-inset);
+  color: var(--tx);
+  font: var(--fs-xs) var(--f-mono);
+  text-align: right;
 }
 
 .pm-control-font-drop {
@@ -54,4 +142,26 @@ select.sel {
   .fill-spectrum-color {
     transition: none;
   }
+}
+
+.color-dialog .color-grid {
+  gap: 6px;
+}
+
+.color-dialog .color-choice {
+  aspect-ratio: auto;
+  height: 22px;
+  border-radius: var(--r-xs);
+  /* White and near-black swatches need an edge to read against either theme. */
+  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18);
+}
+
+.color-dialog .color-choice.on {
+  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18), 0 0 0 2px var(--accent);
+}
+
+.color-dialog .color-hex {
+  height: 28px;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
 }

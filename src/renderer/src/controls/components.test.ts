@@ -253,6 +253,31 @@ describe('TextField', () => {
 });
 
 describe('picker drafts', () => {
+  it('ColorField previews saturation and brightness continuously, then cancels the preview', async () => {
+    const { PM, Edit, drag } = fakePM();
+    const target = render(ColorField, { PM, get: () => '#FF0000', edit: commandEdit('Color'), label: 'Color' });
+    target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+
+    const sv = target.querySelector<HTMLElement>('.color-sv')!;
+    vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
+      toJSON: () => ({})
+    });
+    sv.dispatchEvent(pointer('pointerdown', { pointerId: 1, clientX: 50, clientY: 25 }));
+
+    expect(Edit.begin).toHaveBeenCalledWith('Color', { origin: 'inspector' });
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#BF6060' }));
+
+    drag().move(25, 25, pointer('pointermove', { pointerId: 1, clientX: 75, clientY: 50 }));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#802020' }));
+    expect(PM.invalidate).toHaveBeenLastCalledWith('render');
+
+    target.querySelector<HTMLButtonElement>('footer .btn')!.click();
+    expect(Edit.cancel).toHaveBeenCalledOnce();
+    expect(Edit.commit).not.toHaveBeenCalled();
+  });
+
   it('ColorField keeps a local draft and applies the normalized uppercase choice', async () => {
     const { PM, Edit } = fakePM();
     const target = render(ColorField, { PM, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
@@ -264,7 +289,39 @@ describe('picker drafts', () => {
     hex.dispatchEvent(new InputEvent('input', { bubbles: true }));
     flushSync();
     target.querySelector<HTMLButtonElement>('footer .pri')!.click();
-    expect(Edit.apply).toHaveBeenCalledWith(expect.objectContaining({ value: '#34C759' }), { label: 'Color', origin: 'inspector' });
+    expect(Edit.begin).toHaveBeenCalledWith('Color', { origin: 'inspector' });
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#34C759' }));
+    expect(Edit.commit).toHaveBeenCalledWith('Color');
+  });
+
+  it('FillField previews color continuously across pointer moves', async () => {
+    const { PM, Edit, drag } = fakePM();
+    const target = render(FillField, {
+      PM,
+      get: () => ({ type: 'solid', angle: 0, stops: [{ id: 'red', color: '#FF0000', position: 0 }] }),
+      edit: commandEdit('Fill'),
+      label: 'Fill'
+    });
+    target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+
+    const sv = target.querySelector<HTMLElement>('.fill-sv')!;
+    vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
+      toJSON: () => ({})
+    });
+    sv.dispatchEvent(pointer('pointerdown', { pointerId: 1, clientX: 50, clientY: 25 }));
+    drag().move(25, 25, pointer('pointermove', { pointerId: 1, clientX: 75, clientY: 50 }));
+
+    expect(Edit.begin).toHaveBeenCalledWith('Fill', { origin: 'inspector' });
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({
+      value: expect.objectContaining({ stops: [expect.objectContaining({ color: '#802020' })] })
+    }));
+    expect(PM.invalidate).toHaveBeenLastCalledWith('render');
+
+    target.querySelector<HTMLButtonElement>('footer .pri')!.click();
+    expect(Edit.commit).toHaveBeenCalledWith('Fill');
+    expect(Edit.apply).not.toHaveBeenCalled();
   });
 
   it('FillField applies a normalized fill rather than its mutable draft', async () => {

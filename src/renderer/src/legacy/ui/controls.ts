@@ -130,37 +130,108 @@ PM.colorField = (get: any, set: any, opt: any = {}) => {
     wrap.setAttribute('aria-label', `${opt.label || 'Color'} · ${value}`);
   };
   wrap.addEventListener('pointerdown', (e: any) => e.stopPropagation());
-  wrap.addEventListener('click', () => openColorPicker(safe(), (value: any) => {
-    once(set, value, opt, opt.label || 'Color'); wrap.sync(); PM.invalidate('render');
-  }, opt.label || 'Color'));
+  wrap.addEventListener('click', () => {
+    const before = safe();
+    let previewing = false;
+    openColorPicker(before, {
+      preview: (value: any) => {
+        if (!previewing) { begin(opt, opt.label || 'Color'); previewing = true; }
+        write(set, value, opt); wrap.sync(); PM.invalidate('render');
+      },
+      commit: (value: any) => {
+        if (previewing) { write(set, value, opt); commit(opt, opt.label || 'Color'); previewing = false; }
+        wrap.sync(); PM.invalidate('render');
+      },
+      cancel: () => {
+        if (!previewing) return;
+        if (opt.local) set(before);
+        cancel(opt); previewing = false; wrap.sync(); PM.invalidate('render');
+      },
+    }, opt.label || 'Color');
+  });
   return wrap;
 };
 
-function openColorPicker(initial: any, apply: any, label: any) {
-  let chosen = initial;
-  const hex = h('input.color-hex', { value: chosen, 'aria-label': `${label} hex value`, spellcheck: 'false' });
-  const preview = h('div.color-dialog-preview'); preview.style.setProperty('--sw-color', chosen);
+function openColorPicker(initial: any, edit: any, label: any) {
   const presets = ['#09090A', '#FFFFFF', '#FF6B1A', '#FFB000', '#34C759', '#0A84FF', '#6E5AE6', '#FF375F'];
-  const grid = h('div.color-grid');
-  const sync = (value: any) => {
-    if (!/^#[0-9a-f]{6}$/i.test(value)) return false;
-    chosen = value.toUpperCase(); hex.value = chosen; preview.style.setProperty('--sw-color', chosen);
-    grid.querySelectorAll('button').forEach((button: any) => button.classList.toggle('on', button.dataset.color === chosen));
-    return true;
+  const before = normalizeHex(initial) || '#808080';
+  let chosen = before;
+  let hsv = rgbToHsv(hexToRgb(chosen));
+
+  const sv = h('div.fill-sv.color-sv', { role: 'slider', tabindex: '0', 'aria-label': 'Saturation and brightness' }, h('i'));
+  const hue = h('div.fill-hue.color-hue', { role: 'slider', tabindex: '0', 'aria-label': 'Hue' }, h('i'));
+  const newSwatch = h('span.color-compare-swatch', { 'aria-hidden': 'true' });
+  const oldSwatch = h('button.color-compare-swatch.is-before', { 'aria-label': `Restore original color ${before}`, title: `Original ${before}` });
+  oldSwatch.style.setProperty('--sw-color', before);
+  const hex = h('input.color-hex.pm-control-input', { value: chosen, 'aria-label': `${label} hex value`, spellcheck: 'false' });
+  const grid = h('div.color-grid', { role: 'group', 'aria-label': 'Color presets' });
+
+  const channels: any = {};
+  const channelRow = (key: any, text: any, unit: any) => {
+    const input = h('input.pm-control-input', { inputmode: 'numeric', 'aria-label': text });
+    channels[key] = input;
+    return h('label.color-channel', h('span', text), input, h('em', unit));
   };
+  const channelList = h('div.color-channels',
+    channelRow('h', 'H', '°'), channelRow('s', 'S', '%'), channelRow('v', 'B', '%'), h('hr', { 'aria-hidden': 'true' }),
+    channelRow('r', 'R', ''), channelRow('g', 'G', ''), channelRow('b', 'B', ''));
+
+  const sync = (skipHex?: any) => {
+    const rgb = hexToRgb(chosen) || { r: 0, g: 0, b: 0 };
+    newSwatch.style.setProperty('--sw-color', chosen);
+    sv.style.setProperty('--hue-color', rgbToHex(hsvToRgb({ h: hsv.h, s: 100, v: 100 })));
+    sv.firstChild.style.left = `${hsv.s}%`; sv.firstChild.style.top = `${100 - hsv.v}%`;
+    hue.firstChild.style.top = `${hsv.h / 359 * 100}%`;
+    channels.h.value = hsv.h; channels.s.value = hsv.s; channels.v.value = hsv.v;
+    channels.r.value = rgb.r; channels.g.value = rgb.g; channels.b.value = rgb.b;
+    if (!skipHex) hex.value = chosen;
+    grid.querySelectorAll('button').forEach((button: any) => button.classList.toggle('on', button.dataset.color === chosen));
+  };
+
+  const setHex = (value: any, skipHex?: any) => {
+    const valid = normalizeHex(value); if (!valid) return false;
+    chosen = valid; hsv = rgbToHsv(hexToRgb(valid)); sync(skipHex); edit.preview(chosen); return true;
+  };
+  const fromHsv = (next: any) => {
+    hsv = { h: clampChannel(next.h, 359), s: clampChannel(next.s, 100), v: clampChannel(next.v, 100) };
+    chosen = rgbToHex(hsvToRgb(hsv)); sync();
+  };
+
+  const pickSv = (event: any) => {
+    const rect = sv.getBoundingClientRect(); if (!rect.width || !rect.height) return;
+    fromHsv({ h: hsv.h, s: (event.clientX - rect.left) / rect.width * 100, v: 100 - (event.clientY - rect.top) / rect.height * 100 });
+  };
+  const pickHue = (event: any) => {
+    const rect = hue.getBoundingClientRect(); if (!rect.height) return;
+    fromHsv({ ...hsv, h: (event.clientY - rect.top) / rect.height * 359 });
+  };
+  const dragColor = (element: any, picker: any) => element.addEventListener('pointerdown', (event: any) => {
+    if (event.button !== 0) return;
+    event.preventDefault(); picker(event);
+    PM.drag(event, { move: (_dx: any, _dy: any, next: any) => picker(next), up: () => {} });
+  });
+  dragColor(sv, pickSv); dragColor(hue, pickHue);
+
   presets.forEach((color: any) => {
-    const choice = h('button.color-choice', { 'aria-label': color, title: color, onclick: () => sync(color) });
+    const choice = h('button.color-choice', { 'aria-label': color, title: color, onclick: () => setHex(color) });
     choice.dataset.color = color; choice.style.setProperty('--sw-color', color); grid.appendChild(choice);
   });
-  hex.addEventListener('input', () => sync(hex.value.trim()));
+  oldSwatch.addEventListener('click', () => setHex(before));
+  hex.addEventListener('input', () => { if (/^#?[0-9a-f]{6}$/i.test(hex.value.trim())) setHex(hex.value.trim(), true); });
   hex.addEventListener('keydown', (event: any) => event.stopPropagation());
-  sync(chosen);
-  const body = h('div.color-dialog', h('div.color-dialog-value', preview, hex), grid);
-  PM.modal({ title: label, body, width: 360, actions: [
+  for (const key of ['h', 's', 'v']) channels[key].addEventListener('change', () => fromHsv({ ...hsv, [key]: channels[key].value }));
+  for (const key of ['r', 'g', 'b']) channels[key].addEventListener('change', () => setHex(rgbToHex({ r: channels.r.value, g: channels.g.value, b: channels.b.value })));
+  sync();
+
+  const body = h('div.color-dialog',
+    h('div.color-workbench', sv, hue, h('div.color-side', h('div.color-compare', newSwatch, oldSwatch), channelList)),
+    h('div.color-dialog-value', hex), grid);
+  let accepted = false;
+  PM.modal({ title: label, body, width: 384, onClose: () => { if (!accepted) edit.cancel(); }, actions: [
     { label: 'Cancel' },
-    { label: 'Apply', pri: true, run: () => {
-      if (!sync(hex.value.trim())) { PM.toast('Enter a six-digit hex color'); return false; }
-      apply(chosen);
+    { label: 'OK', pri: true, run: () => {
+      if (!setHex(hex.value.trim())) { PM.toast('Enter a six-digit hex color'); return false; }
+      accepted = true; edit.commit(chosen);
     } },
   ] });
   window.setTimeout(() => { hex.focus(); hex.select(); }, 30);

@@ -46,6 +46,8 @@
   let pickerLeft = $state(12);
   let pickerTop = $state(52);
   let draft = $state<FillValue>({ type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: '#000000', position: 0 }] });
+  let before = $state<FillValue>({ type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: '#000000', position: 0 }] });
+  let previewing = $state(false);
   let selected = $state('');
   let hsv = $state({ h: 0, s: 0, v: 0 });
 
@@ -58,7 +60,9 @@
   }
 
   function show(): void {
-    draft = normalizeFill(PM, value, fallback);
+    previewing = false;
+    before = normalizeFill(PM, value, fallback);
+    draft = normalizeFill(PM, before, fallback);
     selected = draft.stops[0]!.id;
     channelsOpen = false;
     syncHsv();
@@ -71,21 +75,45 @@
     void tick().then(() => dialog?.querySelector<HTMLButtonElement>('.fill-type.on')?.focus());
   }
 
-  function close(): void {
+  function finishClose(): void {
     open = false;
     void tick().then(() => trigger?.focus());
   }
 
-  function apply(): void {
-    gesture.once(normalizeFill(PM, draft, fallback));
+  function previewDraft(): void {
+    if (!previewing) {
+      gesture.begin();
+      previewing = true;
+    }
+    gesture.write(normalizeFill(PM, draft, fallback));
     PM.invalidate?.('render');
-    close();
+  }
+
+  function cancelPreview(): void {
+    if (previewing) {
+      if (edit.mode === 'local') gesture.write(before);
+      gesture.cancel();
+      previewing = false;
+      PM.invalidate?.('render');
+    }
+    finishClose();
+  }
+
+  function apply(): void {
+    if (previewing) {
+      gesture.write(normalizeFill(PM, draft, fallback));
+      gesture.commit();
+      previewing = false;
+      PM.invalidate?.('render');
+    } else gesture.once(normalizeFill(PM, draft, fallback));
+    finishClose();
   }
 
   function setType(type: FillValue['type']): void {
     draft = normalizeFill(PM, { ...draft, type }, fallback);
     selected = draft.stops[0]!.id;
     syncHsv();
+    previewDraft();
   }
 
   function setSelectedColor(value: unknown): boolean {
@@ -93,33 +121,34 @@
     if (!valid) return false;
     selectedStop().color = valid;
     syncHsv();
+    previewDraft();
     return true;
   }
 
   function fromHsv(next: { h: unknown; s: unknown; v: unknown }): void {
     hsv = { h: Math.round(clamp(Number(next.h) || 0, 0, 359)), s: Math.round(clamp(Number(next.s) || 0, 0, 100)), v: Math.round(clamp(Number(next.v) || 0, 0, 100)) };
     selectedStop().color = rgbToHex(hsvToRgb(hsv));
+    previewDraft();
   }
 
-  function pickSv(event: PointerEvent): void {
-    const element = event.currentTarget as HTMLElement;
+  function pickSv(event: PointerEvent, element: HTMLElement): void {
     const rect = element.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     fromHsv({ h: hsv.h, s: (event.clientX - rect.left) / rect.width * 100, v: 100 - (event.clientY - rect.top) / rect.height * 100 });
   }
 
-  function pickHue(event: PointerEvent): void {
-    const element = event.currentTarget as HTMLElement;
+  function pickHue(event: PointerEvent, element: HTMLElement): void {
     const rect = element.getBoundingClientRect();
     if (!rect.height) return;
     fromHsv({ ...hsv, h: (event.clientY - rect.top) / rect.height * 359 });
   }
 
-  function startLocalDrag(event: PointerEvent, picker: (next: PointerEvent) => void): void {
+  function startLocalDrag(event: PointerEvent, picker: (next: PointerEvent, element: HTMLElement) => void): void {
     if (event.button !== 0) return;
     event.preventDefault();
-    picker(event);
-    PM.drag(event, { move: (_dx: number, _dy: number, next: PointerEvent) => picker(next), up: () => {} });
+    const element = event.currentTarget as HTMLElement;
+    picker(event, element);
+    PM.drag(event, { move: (_dx: number, _dy: number, next: PointerEvent) => picker(next, element), up: () => {} });
   }
 
   function addStop(): void {
@@ -129,6 +158,7 @@
     draft.stops.push({ id, color: prior.color, position: Math.min(100, prior.position + 10) });
     selected = id;
     syncHsv();
+    previewDraft();
   }
 
   function removeStop(index: number): void {
@@ -136,10 +166,11 @@
     draft.stops.splice(index, 1);
     selected = draft.stops[Math.max(0, index - 1)]!.id;
     syncHsv();
+    previewDraft();
   }
 
   function dialogKeydown(event: KeyboardEvent): void {
-    if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+    if (event.key === 'Escape') { event.preventDefault(); cancelPreview(); return; }
     if (event.key !== 'Tab') return;
     if (!dialog) return;
     const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]):not([hidden]),input:not([disabled]):not([hidden]),select:not([disabled]):not([hidden])')]
@@ -166,9 +197,9 @@
 </button>
 
 {#if open}
-  <div class="fill-picker-layer" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) close(); }}>
+  <div class="fill-picker-layer" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) cancelPreview(); }}>
     <div bind:this={dialog} class="fill-picker" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" style:left={`${pickerLeft}px`} style:top={`${pickerTop}px`} onkeydown={dialogKeydown}>
-      <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close fill picker" onclick={close}>×</button></header>
+      <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close fill picker" onclick={cancelPreview}>×</button></header>
       <div class="fill-picker-body">
         <div class="fill-types" role="group" aria-label="Fill type">
           {#each modes as [type, text]}
@@ -240,8 +271,8 @@
           {#each draft.stops as stop, index (stop.id)}
             <div class="fill-stop" class:on={stop.id === selected}>
               <button type="button" class="fill-stop-swatch" aria-label={`Select stop ${index + 1}`} style={`--sw-color:${stop.color}`} onclick={() => { selected = stop.id; syncHsv(); }}></button>
-              <input class="fill-stop-color" aria-label={`Stop ${index + 1} color`} value={stop.color} oninput={(event) => { if (/^#[0-9a-f]{6}$/i.test(event.currentTarget.value)) stop.color = event.currentTarget.value.toUpperCase(); }} />
-              <input type="range" min="0" max="100" aria-label={`Stop ${index + 1} position`} bind:value={stop.position} onchange={() => draft.stops.sort((a, b) => a.position - b.position)} />
+              <input class="fill-stop-color" aria-label={`Stop ${index + 1} color`} value={stop.color} oninput={(event) => { if (/^#[0-9a-f]{6}$/i.test(event.currentTarget.value)) { stop.color = event.currentTarget.value.toUpperCase(); previewDraft(); } }} />
+              <input type="range" min="0" max="100" aria-label={`Stop ${index + 1} position`} bind:value={stop.position} oninput={previewDraft} onchange={() => draft.stops.sort((a, b) => a.position - b.position)} />
               <span class="mono">{stop.position}%</span>
               <button type="button" class="iconbtn fill-stop-remove" aria-label={`Remove stop ${index + 1}`} title="Remove stop" disabled={draft.stops.length <= 2} onclick={() => removeStop(index)}>×</button>
             </div>
@@ -249,11 +280,11 @@
         </div>
 
         <div class="fill-picker-tools">
-          <label class="fill-angle" hidden={draft.type !== 'linear'}><span>Angle</span><input type="range" min="-180" max="180" bind:value={draft.angle} aria-label="Gradient angle" /><span class="mono">{draft.angle}°</span></label>
+          <label class="fill-angle" hidden={draft.type !== 'linear'}><span>Angle</span><input type="range" min="-180" max="180" bind:value={draft.angle} aria-label="Gradient angle" oninput={previewDraft} /><span class="mono">{draft.angle}°</span></label>
           <button type="button" class="btn" hidden={draft.type === 'solid' || draft.type === 'none'} onclick={addStop}>Add stop</button>
         </div>
       </div>
-      <footer><button type="button" class="btn" onclick={close}>Cancel</button><button type="button" class="btn pri" onclick={apply}>Apply</button></footer>
+      <footer><button type="button" class="btn" onclick={cancelPreview}>Cancel</button><button type="button" class="btn pri" onclick={apply}>Apply</button></footer>
     </div>
   </div>
 {/if}
