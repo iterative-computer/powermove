@@ -28,6 +28,8 @@ const TIMELINE_STYLES = `
 #tl-head[data-density="compact"] #tl-time{font-size:var(--fs-sm);min-width:0}
 #tl-head .tl-group{min-width:0;display:flex;align-items:center;gap:4px}
 #tl-head .tl-graph-slot{margin-left:auto}
+#tl-head .tl-graph-slot .iconbtn.on{color:var(--on-accent);background:var(--accent)}
+#tl-head .tl-graph-slot .iconbtn.on:hover{background:var(--accent-hover)}
 #tl-time{font-family:var(--f-mono);font-size:var(--fs-md);letter-spacing:0;color:var(--tx-2);font-variant-numeric:tabular-nums;margin-left:4px;padding:0 2px;white-space:nowrap;cursor:ew-resize}
 #tl-time.edit{color:var(--accent)}
 #tl-canvas-wrap{flex:1;position:relative;min-height:0;overflow:hidden}
