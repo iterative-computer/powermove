@@ -68,11 +68,20 @@ function engine({ layer = null, media = null, work = [0, 10] }: any = {}): any {
   return {
     PM,
     audioCalls,
+    reinstall() {
+      install(PM);
+    },
     runFrame(now = 16) {
       nowValue = now;
       const frame = frames.shift();
       if (!frame) throw new Error('an animation frame is queued');
       frame(now);
+    },
+    runQueuedFrames(now = 16) {
+      nowValue = now;
+      const queued = frames.splice(0);
+      if (!queued.length) throw new Error('an animation frame is queued');
+      queued.forEach(frame => frame(now));
     },
   };
 }
@@ -97,6 +106,16 @@ describe('legacy engine install', () => {
     PM.pause();
     PM.pause();
     expect(audioCalls.filter(([name]: any) => name === 'pause')).toHaveLength(2);
+  });
+
+  it('keeps one playback clock when the renderer bootstrap installs the engine again', () => {
+    const { PM, reinstall, runQueuedFrames } = engine();
+
+    reinstall();
+    PM.play();
+    runQueuedFrames(100);
+
+    expect(PM.time).toBeCloseTo(0.1);
   });
 
   it('seeks the audio scheduler before the new work-area tick when looping', () => {

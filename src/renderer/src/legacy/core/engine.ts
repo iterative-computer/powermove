@@ -1,7 +1,19 @@
 /* Ported from js/core/engine.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
+const ENGINE_RUNTIME = Symbol.for('powermove.engine.runtime');
+
 export function install(PM: PMRegistry): void {
+
+// Renderer bootstrap can be evaluated again while the same PM registry stays
+// alive. A second animation loop advances the shared playhead a second time on
+// every display refresh, making clips race past while the preview appears
+// frozen or black. Keep the playback clock a singleton for this registry.
+if ((PM as any)[ENGINE_RUNTIME]?.active) return;
+Object.defineProperty(PM, ENGINE_RUNTIME, {
+  value: { active: true },
+  configurable: true,
+});
 
 PM.time = 0;
 PM.playing = false;
