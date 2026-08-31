@@ -133,7 +133,7 @@
     setHex(before, false);
     const rect = trigger?.getBoundingClientRect();
     const pickerWidth = 384;
-    const pickerHeight = 356;
+    const pickerHeight = 316;
     pickerLeft = clamp((rect?.right ?? pickerWidth + 12) - pickerWidth, 12, window.innerWidth - pickerWidth - 12);
     pickerTop = clamp((rect?.bottom ?? 46) + 6, 52, window.innerHeight - pickerHeight - 12);
     open = true;
@@ -166,6 +166,16 @@
     finishClose();
   }
 
+  function commitAndClose(): void {
+    if (previewing) {
+      gesture.write(chosen);
+      gesture.commit();
+      previewing = false;
+      PM.invalidate?.('render');
+    }
+    finishClose();
+  }
+
   function keydown(event: KeyboardEvent): void {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); cancelPreview(); }
@@ -195,9 +205,9 @@
 </button>
 
 {#if open}
-  <div class="fill-picker-layer" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) cancelPreview(); }}>
+  <div class="fill-picker-layer" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) commitAndClose(); }}>
     <div bind:this={dialog} class="fill-picker color-picker" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" style:left={`${pickerLeft}px`} style:top={`${pickerTop}px`} onkeydown={keydown}>
-      <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close color picker" onclick={cancelPreview}>×</button></header>
+      <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close color picker" onclick={commitAndClose}>×</button></header>
       <div class="fill-picker-body color-dialog">
         <div class="color-workbench">
           <div
@@ -296,7 +306,6 @@
           {/each}
         </div>
       </div>
-      <footer><button type="button" class="btn" onclick={cancelPreview}>Cancel</button><button type="button" class="btn pri" onclick={apply}>OK</button></footer>
     </div>
   </div>
 {/if}

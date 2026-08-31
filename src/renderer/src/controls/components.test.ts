@@ -273,12 +273,12 @@ describe('picker drafts', () => {
     expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#802020' }));
     expect(PM.invalidate).toHaveBeenLastCalledWith('render');
 
-    target.querySelector<HTMLButtonElement>('footer .btn')!.click();
+    target.querySelector<HTMLElement>('.color-picker')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(Edit.cancel).toHaveBeenCalledOnce();
     expect(Edit.commit).not.toHaveBeenCalled();
   });
 
-  it('ColorField keeps a local draft and applies the normalized uppercase choice', async () => {
+  it('ColorField removes confirmation buttons and commits the normalized choice when clicking outside', async () => {
     const { PM, Edit } = fakePM();
     const target = render(ColorField, { PM, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
@@ -288,10 +288,13 @@ describe('picker drafts', () => {
     hex.value = '#34c759';
     hex.dispatchEvent(new InputEvent('input', { bubbles: true }));
     flushSync();
-    target.querySelector<HTMLButtonElement>('footer .pri')!.click();
+    expect(target.querySelector('.color-picker footer')).toBeNull();
+    target.querySelector<HTMLElement>('.fill-picker-layer')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    flushSync();
     expect(Edit.begin).toHaveBeenCalledWith('Color', { origin: 'inspector' });
     expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#34C759' }));
     expect(Edit.commit).toHaveBeenCalledWith('Color');
+    expect(target.querySelector('.color-picker')).toBeNull();
   });
 
   it('FillField previews color continuously across pointer moves', async () => {
