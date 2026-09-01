@@ -13,7 +13,12 @@ export const IPC = {
   projectOpen: 'project:open',
   projectConfirmClose: 'project:confirm-close',
 
+  mediaProxyCreate: 'media-proxy:create',
+  mediaProxyRead: 'media-proxy:read',
+  mediaProxyRelease: 'media-proxy:release',
+
   codexRun: 'codex:run',
+  codexSteer: 'codex:steer',
   codexCancel: 'codex:cancel',
   codexFixPrompt: 'codex:fix-prompt',
   codexRestoreChangeSet: 'codex:restore-change-set',
@@ -80,6 +85,20 @@ export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled
 export type ProjectOpenResult = { ok: true; path: string; projectId: string; data: Uint8Array } | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
 
+/* ── media playback proxies ─────────────────────────────── */
+export interface MediaProxyRequest {
+  sourcePath: string;
+  name: string;
+}
+export type MediaProxyResult =
+  | { ok: true; token: string; type: 'video/quicktime'; size: number }
+  | { ok: false; error: string };
+export interface MediaProxyReadRequest {
+  token: string;
+  offset: number;
+  length: number;
+}
+
 /* ── codex ───────────────────────────────────────────────── */
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
@@ -138,6 +157,16 @@ export type CodexRunResult =
 
 export interface CodexCancelRequest {
   id: string;
+}
+
+export interface CodexSteerRequest {
+  id: string;
+  prompt: string;
+  images: Uint8Array[];
+}
+
+export interface CodexSteerResult {
+  accepted: boolean;
 }
 
 export interface CodexFixPromptFile {
@@ -267,12 +296,19 @@ export interface PowermoveBridge {
   openProjectFile(): Promise<ProjectOpenResult>;
   confirmProjectClose(name: string): Promise<CloseDecision>;
 
+  media: {
+    createPlaybackProxy(file: File): Promise<MediaProxyResult>;
+    readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
+    releasePlaybackProxy(token: string): Promise<void>;
+  };
+
   codex: {
     run(
       req: CodexRunRequest,
       onProgress?: (text: string) => void,
       onTrace?: (step: CodexTraceEvent) => void
     ): Promise<CodexRunResult>;
+    steer(req: CodexSteerRequest): Promise<CodexSteerResult>;
     cancel(id: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;

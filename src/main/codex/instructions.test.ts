@@ -80,6 +80,21 @@ describe('autonomous agent contract', () => {
     expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(6 * 1024);
   });
 
+  it('makes editable values keyframeable by default', () => {
+    const instructions = agentInstructions({
+      projectName: 'Project',
+      artifactPath: 'artifacts/run-1',
+      access: 'project',
+      extensionsDir: '/absolute/user/extensions'
+    });
+
+    expect(instructions).toContain('ANIMATION-FIRST VALUES');
+    expect(instructions).toContain('every user-editable project value as keyframeable by default');
+    expect(instructions).toMatch(/effect, layer type, generated control, or extension/);
+    expect(instructions).toMatch(/real editable property\/keyframe model.+set_property or replace_keyframes/s);
+    expect(instructions).toContain('Do not bake adjustable values into opaque code, flattened media, or a second source of truth');
+  });
+
   it('defines required, bounded extension changes in the strict result schema', () => {
     const schema = agentResultSchema() as {
       required: string[];

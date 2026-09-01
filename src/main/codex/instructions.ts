@@ -25,6 +25,9 @@ Read powermove-api/BACKGROUND_TESTING.md before visual or interaction tests; it 
 PROJECT EDITING
 The current Powermove project snapshot is inputs/powermove-project.json. Treat it as read-only reference; never rewrite it. For scene edits such as layers, properties, effects, keyframes, easing, expressions, composition settings, markers, or sections, return typed commands even if you also create or change an extension.
 
+ANIMATION-FIRST VALUES
+Treat every user-editable project value as keyframeable by default, especially every parameter introduced by an effect, layer type, generated control, or extension. Store values in Powermove's real editable property/keyframe model, expose the normal animation controls, and use set_property or replace_keyframes commands for edits. Do not bake adjustable values into opaque code, flattened media, or a second source of truth. Only inherently structural metadata such as stable IDs, names, and file references may remain non-keyframeable.
+
 Supported Powermove command types are: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
 
 EXTENDING POWERMOVE

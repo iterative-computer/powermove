@@ -19,18 +19,18 @@ import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
+import { MediaProxyService, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
 import { registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
+import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './security-policy';
 import { createStore, installQuitFlush, registerStoreIpc } from './storage';
 import { DARK_BACKGROUND, registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 
 const APP_ORIGIN = 'app://powermove';
-const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' about: blob:";
 // Served with X-Content-Type-Options: nosniff, so anything not listed here is
 // rejected by <video>/<audio>/WebAssembly rather than sniffed.
 const MIME_TYPES: Readonly<Record<string, string>> = {
@@ -131,8 +131,7 @@ function errorResponse(status: number, message: string): Response {
 // The generated-script sandbox document is served with its own policy: Chromium
 // inherits the parent CSP into srcdoc/blob frames, so it must be a real URL.
 const SANDBOX_PATH = 'host/sandbox.html';
-const SANDBOX_CSP =
-  "default-src 'none'; script-src app://powermove/host/sandbox.js 'unsafe-eval'; worker-src blob:; connect-src 'none'";
+const SANDBOX_CSP = SANDBOX_CONTENT_SECURITY_POLICY;
 
 function registerAppProtocol(): void {
   const rendererRoot = path.resolve(__dirname, '../renderer');
@@ -347,6 +346,7 @@ if (!hasSingleInstanceLock) {
   });
 
   void app.whenReady().then(async () => {
+    const mediaProxies = new MediaProxyService(app.getPath('temp'));
     registerAppProtocol();
     installPermissionHandlers();
 
@@ -409,6 +409,8 @@ if (!hasSingleInstanceLock) {
     registerHapticsIpc(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
+    registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
+    app.once('will-quit', () => { void mediaProxies.dispose(); });
     // API pack handed to the agent every autonomous run: the extension guide
     // plus the frozen kernel/shared/type contracts.
     const apiPackDir = app.isPackaged

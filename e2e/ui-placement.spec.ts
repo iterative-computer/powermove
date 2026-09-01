@@ -33,7 +33,8 @@ test.describe('@ui-placement early panel loading', () => {
     await expect(ghost).toBeVisible();
     await expect(ghost).toContainText('Updating Timeline controls');
     const field = ghost.locator('.ghost-edge-field');
-    await expect(field).toHaveAttribute('data-ghost-renderer', 'webgl');
+    // The Motion GPU field reports itself only once it has presented a frame.
+    await expect(field).toHaveAttribute('data-ghost-renderer', 'motion-gpu', { timeout: 10_000 });
     const overlayState = await ghost.evaluate(element => {
       const rect = element.getBoundingClientRect();
       const panel = document.getElementById('panel-timeline')!.getBoundingClientRect();
@@ -82,12 +83,29 @@ test.describe('@ui-placement early panel loading', () => {
         options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Stopped'), { name: 'AbortError' })));
         options.onTrace({ kind: 'answer', text: 'POWERMOVE_UI_TARGET {"kind":"dock","id":"right","beforePanelId":"inspector","label":"Easing controls"}' });
       });
-      PM.AgentUI.submit('Add an easing panel above properties');
     });
+    const before = await page.evaluate(() => document.getElementById('panel-inspector')!.getBoundingClientRect().top);
+    await page.evaluate(() => (window as any).PM.AgentUI.submit('Add an easing panel above properties'));
     const ghost = page.locator('[data-ui-placement-ghost="right"]');
     await expect(ghost).toBeVisible();
     await expect(ghost).toContainText('Building Easing controls');
     expect(await ghost.evaluate(element => element.classList.contains('new-panel'))).toBe(true);
+    // The ghost holds the slot for real: it sits in the dock's flow above the
+    // announced panel, at panel width, and nothing is drawn on top of anything.
+    await expect.poll(async () => ghost.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      const inspector = document.getElementById('panel-inspector')!.getBoundingClientRect();
+      return {
+        dock: element.parentElement?.id,
+        gapAbovePanel: Math.round(inspector.top - rect.bottom),
+        sameWidth: Math.round(rect.width - inspector.width),
+        overlapsPanel: rect.bottom > inspector.top + 0.5,
+        reservedHeight: Math.round(rect.height) > 80
+      };
+    })).toEqual({ dock: 'dock-right', gapAbovePanel: 10, sameWidth: 0, overlapsPanel: false, reservedHeight: true });
+    expect(await page.evaluate(() => document.getElementById('panel-inspector')!.getBoundingClientRect().top)).toBeGreaterThan(before);
+    // Screenshot the settled field, not the moment before it has presented.
+    await expect(ghost.locator('.ghost-edge-field')).toHaveAttribute('data-ghost-renderer', 'motion-gpu', { timeout: 10_000 });
     await page.screenshot({ path: testInfo.outputPath('new-panel-loading.png') });
     await page.evaluate(() => (window as any).PM.theme.apply('dark'));
     await page.screenshot({ path: testInfo.outputPath('new-panel-loading-dark.png') });

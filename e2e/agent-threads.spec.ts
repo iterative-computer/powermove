@@ -1,5 +1,56 @@
 import { test, expect } from './helpers/app';
 
+test('Command+A selects the full agent composer draft', async ({ session }) => {
+  const page = session.page;
+  await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
+  const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+  await composer.fill('Select this entire composer draft');
+  await composer.press('Meta+A');
+  await expect.poll(() => composer.evaluate((textarea: HTMLTextAreaElement) => ({
+    start: textarea.selectionStart,
+    end: textarea.selectionEnd,
+    length: textarea.value.length,
+  }))).toEqual({ start: 0, end: 33, length: 33 });
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('steering stays in the active run and renders as a compact continuation', async ({ session }, testInfo) => {
+  const page = session.page;
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.SpatialAssistant.open();
+    PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
+    (window as any).__steeringProof = { requests: 0, steering: [] as string[] };
+    PM.CodexBridge.request = async () => {
+      (window as any).__steeringProof.requests += 1;
+      return await new Promise(() => {});
+    };
+    PM.CodexBridge.steer = async (prompt: string) => {
+      (window as any).__steeringProof.steering.push(prompt);
+      return true;
+    };
+  });
+
+  const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+  await composer.fill('Make a progressive blur effect');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Stop current run', exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__steeringProof.requests)).toBe(1);
+
+  await composer.fill('continue');
+  await composer.press('Enter');
+  await expect.poll(() => page.evaluate(() => (window as any).__steeringProof.steering.length)).toBe(1);
+  const userTurns = page.locator('.agent-msg.user');
+  await expect(userTurns).toHaveCount(2);
+  await expect(userTurns.nth(1)).toHaveClass(/is-steering/);
+  await expect(userTurns.nth(1).locator('.agent-bubble')).toHaveText('continue');
+  const boxes = await userTurns.evaluateAll((turns) => turns.map((turn) => turn.getBoundingClientRect().toJSON()));
+  expect(boxes[1].top - boxes[0].bottom).toBeLessThanOrEqual(10);
+  expect(await page.evaluate(() => (window as any).__steeringProof.requests)).toBe(1);
+  await testInfo.attach('hidden-agent-steering', { body: await page.screenshot(), contentType: 'image/png' });
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 test('hidden renderer switches threads, keeps drafts, and restores history after relaunch', async ({ session }) => {
   const page = session.page;
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());

@@ -228,6 +228,17 @@ export function install(PM: PMRegistry): void {
           void bridge.codex.cancel(String(body.id || '')).catch(() => {});
         }
       },
+      pmCodexSteer: {
+        postMessage(body: any = {}) {
+          const replyId = String(body.replyId || '');
+          void bridge.codex.steer({
+            id: String(body.id || ''),
+            prompt: String(body.prompt || ''),
+            images: binaryList(body.images)
+          }).then((result: any) => PM.CodexBridge.resolveSteer(replyId, result.accepted === true))
+            .catch(() => PM.CodexBridge.resolveSteer(replyId, false));
+        }
+      },
       pmAgentArtifact: {
         postMessage(body: any = {}) {
           const id = String(body.id || '');

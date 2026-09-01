@@ -49,9 +49,9 @@ oracle; path names below describe migration inputs and are not live dependencies
   undeclared `gl` in the source (`js/gl/compositor.js:277`), so every nested
   composition render threw a ReferenceError. Fixed to `GL.gl`; `e2e/precomp.spec.ts`
   fails on the original line and passes on the fix (mutation-checked).
-- Backlog (kept as-is, verbatim): `anim.ts compile()` builds an 8-parameter Function
-  but the `idx` helper path expects a 9th argument, so `idx` expressions throw and
-  fall back to the base value. Fix alongside the expression interpreter.
+- Resolved: project expressions now use the bounded parser/interpreter instead of
+  `Function`. The `idx` helper receives the layer's actual composition position,
+  with unit, scale, CSP, and hidden-Electron coverage guarding the behavior.
 - Process note: a reviewer flagged the integrator's precomp fix as lane drift because
   it landed mid-review; the auto-spawned fix lane was stopped before it could revert
   it. Integrator edits to lane-owned files now wait for the review stage to finish.

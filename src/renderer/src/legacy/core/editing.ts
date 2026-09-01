@@ -258,6 +258,7 @@ function setContent(command: any) {
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
   if (layer.type === 'audio') setAudioContent(layer, patch);
+  else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else Object.assign(layer.d, patch);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
     PM.syncShaderUniforms && PM.syncShaderUniforms(layer);
@@ -265,6 +266,40 @@ function setContent(command: any) {
   }
   PM.touch();
   return { id: layer.id, keys: Object.keys(patch) };
+}
+
+function extensionParamValue(definition: any, value: any) {
+  if (definition.type === 'color') {
+    if (typeof value !== 'string' || !/^#[0-9a-f]{6}$/i.test(value)) throw new Error(`${definition.label} must be a hex color`);
+    return value.toUpperCase();
+  }
+  if (definition.type === 'toggle') {
+    if (typeof value !== 'boolean') throw new Error(`${definition.label} must be on or off`);
+    return value;
+  }
+  const number = finite(value, definition.label);
+  return PM.clamp(number, definition.min, definition.max);
+}
+
+function setExtensionContent(layer: any, patch: any) {
+  const allowed = new Set(['definition', 'version', 'w', 'h', 'data', 'parameters']);
+  for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Extension layer content field “${key}” is not editable`);
+  if (patch.definition != null && patch.definition !== layer.d.definition) throw new Error('An extension layer definition cannot be changed in place');
+  const definition: any = PM.layerDefinition?.(layer.d.definition);
+  if (patch.version != null && (!definition || patch.version !== definition.version)) throw new Error('Extension layer version is owned by its definition');
+  if (patch.w != null) layer.d.w = PM.clamp(finite(patch.w, 'width'), 1, 16384);
+  if (patch.h != null) layer.d.h = PM.clamp(finite(patch.h, 'height'), 1, 16384);
+  if (patch.data != null) layer.d.data = { ...(layer.d.data || {}), ...safePatch(patch.data, 'extension data') };
+  if (patch.parameters != null) {
+    const values = safePatch(patch.parameters, 'extension parameters');
+    const definitions = new Map((definition?.params || []).map((item: any) => [item.k, item]));
+    for (const [name, value] of Object.entries(values)) {
+      const parameter: any = definitions.get(name);
+      const channel: any = layer.d.params?.[name];
+      if (!channel) throw new Error(`Unknown extension parameter: ${name}`);
+      channel.v = parameter ? extensionParamValue(parameter, value) : clone(value);
+    }
+  }
 }
 
 function setAudioContent(layer: any, patch: any) {
@@ -363,19 +398,51 @@ function setComposition(command: any) {
 function addLayer(command: any) {
   const type: any = command.layerType || command.kind;
   if (!PM.TYPE_META[type]) throw new Error(`Unknown layer type: ${type}`);
+  const requestedContent: any = safePatch(command.content || {}, 'content');
+  const extensionDefinition: any = type === 'extension'
+    ? PM.layerDefinition?.(String(requestedContent.definition || ''))
+    : null;
+  if (type === 'extension' && !extensionDefinition) {
+    throw new Error(`Unknown extension layer definition: ${String(requestedContent.definition || '(missing)')}`);
+  }
   if (type === 'audio' && (command.parent != null || (command.blend != null && command.blend !== 'normal') || command.motionBlur === true)) {
     throw new Error('Audio layers do not support parenting, blend modes, or motion blur');
   }
   const opts: any = {
-    name: command.name,
+    name: command.name || extensionDefinition?.label,
     from: command.from,
     dur: command.duration,
-    d: safePatch(command.content || {}, 'content'),
+    d: requestedContent,
     p: safePatch(command.properties || {}, 'properties'),
     color: command.color,
   };
   const layer: any = PM.mkLayer(type, opts);
   if (type === 'audio') setAudioContent(layer, opts.d);
+  if (type === 'extension') {
+    const supplied: any = safePatch(requestedContent.parameters || requestedContent.params || {}, 'extension parameters');
+    layer.d = {
+      definition: extensionDefinition.id,
+      version: extensionDefinition.version,
+      w: PM.clamp(finite(requestedContent.w ?? extensionDefinition.width ?? PM.proj.w, 'width'), 1, 16384),
+      h: PM.clamp(finite(requestedContent.h ?? extensionDefinition.height ?? PM.proj.h, 'height'), 1, 16384),
+      data: { ...clone(extensionDefinition.defaults || {}), ...safePatch(requestedContent.data || {}, 'extension data') },
+      params: {},
+    };
+    for (const parameter of extensionDefinition.params) {
+      const input: any = Object.hasOwn(supplied, parameter.k) ? supplied[parameter.k] : parameter.def;
+      const channelInput: any = input && typeof input === 'object' && !Array.isArray(input) && Object.hasOwn(input, 'v') ? input : null;
+      const channel: any = channelInput ? clone(channelInput) : PM.P(extensionParamValue(parameter, input));
+      channel.v = extensionParamValue(parameter, channel.v);
+      channel.kf = Array.isArray(channel.kf) ? channel.kf.map((key: any) => ({
+        ...key,
+        i: PM.uid('k'),
+        v: extensionParamValue(parameter, key?.v),
+      })) : [];
+      channel.expr = typeof channel.expr === 'string' ? channel.expr : null;
+      layer.d.params[parameter.k] = channel;
+    }
+    if (!command.color && extensionDefinition.color) layer.color = extensionDefinition.color;
+  }
   if (command.id != null) {
     if (PM.L(command.id)) throw new Error(`Layer id already exists: ${command.id}`);
     layer.id = String(command.id);
@@ -768,6 +835,7 @@ function sourceCatalog() {
       { path: 'layer.blend', label: 'Blend mode', control: 'select', value: layer.blend, options: [...PM.BLENDS] },
       { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, optionsRef: 'parentLayers' });
     const content: any = Object.entries(layer.d || {}).map(([key, value]: any) => {
+      if (layer.type === 'extension' && (key === 'definition' || key === 'version')) return null;
       const control: any = primitiveControl(value); if (!control) return null;
       return { path: `content.${key}`, label: key, control, value, ...(control === 'slider' ? numericRange(value, key) : {}) };
     }).filter(Boolean);
@@ -779,7 +847,9 @@ function sourceCatalog() {
       const fxParam: any = fx && PM.FX?.[fx.type]?.params?.find((param: any) => param.k === item.key.slice(fxId.length + 1));
       const shaderDef: any = layer.type === 'shader' && item.key.startsWith('u.')
         ? (layer._udefs || PM.parseUniforms?.(layer.d.code) || []).find((def: any) => `u.${def.name}` === item.key) : null;
-      const meta: any = fxParam || shaderDef || PM.CH?.[item.key] || {};
+      const extensionDef: any = layer.type === 'extension' && item.key.startsWith('x.')
+        ? PM.layerDefinition?.(layer.d.definition)?.params?.find((def: any) => `x.${def.k}` === item.key) : null;
+      const meta: any = fxParam || shaderDef || extensionDef || PM.CH?.[item.key] || {};
       return {
         path: `properties.${item.key}`, label: meta.label || item.label || item.key,
         group: item.group, control: meta.type === 'color' ? 'color' : control, value,

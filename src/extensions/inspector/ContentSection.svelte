@@ -148,4 +148,7 @@
   {/if}
   <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
   <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>
+{:else if layer.type === 'extension'}
+  <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
+  <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>
 {/if}

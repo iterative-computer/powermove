@@ -2,6 +2,10 @@
 
 Explain technical work in plain language. Assume the user has very little coding experience.
 
+## Animation-first values
+
+Treat every user-editable project value as keyframeable by default. This includes every parameter introduced by an effect, layer type, generated control, or extension. Store these values in Powermove's real editable property/keyframe model and expose the normal animation controls; do not bake adjustable values into opaque code, flattened media, or a second source of truth. Inherently structural metadata such as stable IDs, names, and file references may remain non-keyframeable.
+
 ## Interface-panel changes
 
 Interface-panel changes must update in place without reopening Powermove. Keep the current app process, window, and editing session open. This includes panel components, registration, layout, styling, and built-in panel extensions under `src/extensions/`.

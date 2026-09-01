@@ -16,6 +16,7 @@ export const BUILTIN_EXTENSIONS: Record<string, () => Promise<ExtensionModule>> 
   'keymap-default': () => import('../../../extensions/keymap-default/index') as Promise<ExtensionModule>,
   'effects-basic': () => import('../../../extensions/effects-basic/index') as Promise<ExtensionModule>,
   'transitions-basic': () => import('../../../extensions/transitions-basic/index') as Promise<ExtensionModule>,
+  'layers-3d': () => import('../../../extensions/layers-3d/index') as Promise<ExtensionModule>,
   toolbar: () => import('../../../extensions/toolbar/index') as Promise<ExtensionModule>,
   viewer: () => import('../../../extensions/viewer/index') as Promise<ExtensionModule>,
   timeline: () => import('../../../extensions/timeline/index') as Promise<ExtensionModule>,
@@ -26,12 +27,13 @@ export const BUILTIN_EXTENSIONS: Record<string, () => Promise<ExtensionModule>> 
 // Stop built-in panel edits at the extension boundary instead of letting Vite
 // bubble them into a full document reload. The loader preserves panel placement.
 if (import.meta.hot) {
-  const ids = ['theme-default', 'keymap-default', 'effects-basic', 'transitions-basic', 'toolbar', 'viewer', 'timeline', 'inspector', 'mods'];
+  const ids = ['theme-default', 'keymap-default', 'effects-basic', 'transitions-basic', 'layers-3d', 'toolbar', 'viewer', 'timeline', 'inspector', 'mods'];
   import.meta.hot.accept([
     '../../../extensions/theme-default/index',
     '../../../extensions/keymap-default/index',
     '../../../extensions/effects-basic/index',
     '../../../extensions/transitions-basic/index',
+    '../../../extensions/layers-3d/index',
     '../../../extensions/toolbar/index',
     '../../../extensions/viewer/index',
     '../../../extensions/timeline/index',

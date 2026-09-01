@@ -44,7 +44,9 @@ does not reopen the app; scene-only requests do not show it.
 - Agent requests run through the Codex CLI in the main process. Agent-authored project changes return through the same validated, revision-checked, undoable edit boundary as direct manipulation.
 - Production assets load from `app://powermove` under CSP. Generated JavaScript runs in a separate sandboxed host with an opaque origin, no network or native bridge, bounded inputs, and validated command output.
 
-The application CSP still permits `unsafe-eval` for the legacy expression evaluator. Removing it depends on the post-parity expression-interpreter work described below; the generated-script host remains separately sandboxed.
+Project expressions run through a bounded parser/interpreter, so the privileged
+editor document does not permit `unsafe-eval`. Generated JavaScript remains in
+its separate opaque-origin sandbox with no network or native bridge.
 
 ## Development
 
@@ -69,12 +71,15 @@ npm run dist:mac  # arm64 DMG, ZIP, and app in dist/
 - The renderer cannot bypass preload to reach Node, files, or Codex directly.
 - Generated scripts cannot run in the application document or return unvalidated mutations.
 
-## Post-parity backlog
+## Delivery status
 
-- Replace the expression evaluator with an interpreter and remove application-level `unsafe-eval`.
-- Add a supported ProRes import/transcode path.
-- Add H.264/MP4 export; current delivery is WebM/VP9/Opus plus still/PNG-sequence paths.
-- Add Developer ID signing, hardened runtime, and notarization for public distribution.
+- Unsupported MOV/ProRes video is converted automatically to a durable H.264
+  editing proxy while the original media stays embedded in the editable project.
+- Export includes playable H.264/AAC MP4, frame-exact WebM/VP9/Opus,
+  realtime WebM, still PNG, and PNG-sequence delivery.
+- Local builds remain ad-hoc signed. `npm run dist:release` is the guarded
+  Developer ID, hardened-runtime, notarization, and verification lane; it exits
+  before building unless the required certificate and Apple credentials exist.
 
 ## Design and migration notes
 

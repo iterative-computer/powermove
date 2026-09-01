@@ -528,6 +528,7 @@ it('clears placement on stop and ignores late events from stopped or steered run
   jobs[0].options.onTrace({ kind: 'answer', text: placementMessage });
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.uiPlacement?.id, 'timeline'));
   PM.AgentUI.submit('Actually change the viewer');
+  assert.equal(PM.AgentUI.state.conversation.at(-1)?.steering, true);
   assert.equal(PM.AgentUI.state.uiPlacement, null);
   jobs[0].options.onTrace({ kind: 'answer', text: placementMessage });
   assert.equal(PM.AgentUI.state.uiPlacement, null);
@@ -539,6 +540,24 @@ it('clears placement on stop and ignores late events from stopped or steered run
   jobs[1].options.onTrace({ kind: 'answer', text: placementMessage });
   assert.equal(PM.AgentUI.state.uiPlacement, null);
   jobs.forEach(job => job.resolve(emptyAgentResult));
+});
+
+it('keeps the current run alive when its transport accepts live steering', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.submit('Make a progressive blur effect');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  const firstSignal = jobs[0].options.signal;
+  PM.CodexBridge.steer = vi.fn(async () => true);
+
+  PM.AgentUI.submit('continue');
+  await vi.waitFor(() => assert.equal(PM.CodexBridge.steer.mock.calls.length, 1));
+  assert.equal(jobs.length, 1, 'steering must not launch a replacement run');
+  assert.equal(firstSignal.aborted, false, 'steering must not abort the active run');
+  assert.equal(PM.AgentUI.state.conversation.at(-1)?.steering, true);
+  assert.equal(PM.AgentUI.state.conversation.at(-1)?.text, 'continue');
+
+  jobs[0].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
 });
 
 it('clears placement on agent failure without disturbing the project or workspace', async () => {

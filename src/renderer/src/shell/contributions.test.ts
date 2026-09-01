@@ -15,7 +15,7 @@ import Titlebar from './Titlebar.svelte';
 function fakePM(kernel: ReturnType<typeof createKernel>) {
   return {
     Kernel: kernel,
-    ICONS: { home: '<path/>', x: '<path/>', plus: '<path/>', wand: '<path/>', grid: '<path/>', gear: '<path/>' },
+    ICONS: { home: '<path/>', x: '<path/>', plus: '<path/>', wand: '<path/>', grid: '<path/>', export: '<path/>', gear: '<path/>' },
     bus: { on: () => () => {}, emit() {} },
     proj: { id: 'p1', name: 'First', w: 1920, h: 1080, fps: 30, layers: [] },
     app: { dirty: false },

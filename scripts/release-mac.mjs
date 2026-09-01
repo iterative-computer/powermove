@@ -1,0 +1,84 @@
+import { execFile } from 'node:child_process';
+import { readdir } from 'node:fs/promises';
+import path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const repository = path.resolve(import.meta.dirname, '..');
+
+function releaseCredentials(environment) {
+  const missing = [];
+  if (!environment.CSC_LINK) missing.push('CSC_LINK');
+  if (!environment.CSC_KEY_PASSWORD) missing.push('CSC_KEY_PASSWORD');
+  const apiKey = environment.APPLE_API_KEY && environment.APPLE_API_KEY_ID && environment.APPLE_API_ISSUER;
+  const appleId = environment.APPLE_ID && environment.APPLE_APP_SPECIFIC_PASSWORD && environment.APPLE_TEAM_ID;
+  if (!apiKey && !appleId) {
+    missing.push('APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER (or Apple ID notarization credentials)');
+  }
+  return missing;
+}
+
+async function run(command, args) {
+  await execFileAsync(command, args, {
+    cwd: repository,
+    env: process.env,
+    maxBuffer: 20 * 1024 * 1024,
+  }).then(({ stdout, stderr }) => {
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+  });
+}
+
+async function findPackagedApp() {
+  const dist = path.join(repository, 'dist');
+  for (const entry of await readdir(dist, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('mac')) continue;
+    const candidate = path.join(dist, entry.name, 'Powermove.app');
+    try {
+      await readdir(candidate);
+      return candidate;
+    } catch {
+      // Keep looking for electron-builder's architecture-specific folder.
+    }
+  }
+  throw new Error('The signed Powermove.app was not found in dist/.');
+}
+
+async function main() {
+  const missing = releaseCredentials(process.env);
+  if (missing.length) {
+    throw new Error(`Production release credentials are incomplete: ${missing.join(', ')}.`);
+  }
+  if (process.argv.includes('--check')) {
+    process.stdout.write('Production signing and notarization credentials are present.\n');
+    return;
+  }
+
+  await run('npm', ['run', 'build']);
+  await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
+    '--mac',
+    '--config', 'electron-builder.yml',
+    '--config.mac.identity=Developer ID Application',
+    '--config.mac.hardenedRuntime=true',
+    '--config.mac.notarize=true',
+  ]);
+
+  const app = await findPackagedApp();
+  await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
+  await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
+  await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
+
+  const dist = path.join(repository, 'dist');
+  for (const entry of await readdir(dist, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.dmg')) continue;
+    const artifact = path.join(dist, entry.name);
+    await run('/usr/bin/hdiutil', ['verify', artifact]);
+    await run('/usr/bin/xcrun', ['stapler', 'validate', artifact]);
+  }
+  process.stdout.write(`Verified signed and notarized release: ${app}\n`);
+}
+
+main().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

@@ -1,5 +1,6 @@
 /* Ported from js/gl/compositor.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { extensionLayerFragment } from '../../kernel/extension-layers';
 
 /**
  * Which uniform an effect/transition param binds to. Kernel-generated shaders
@@ -44,7 +45,7 @@ export function install(PM: PMRegistry): void {
 
 const GL: any = {
   gl: null, canvas: null, w: 0, h: 0,
-  progs: new Map(), texes: new Map(), pool: [], quad: null,
+  progs: new Map(), texes: new Map(), meshes: new Map(), pool: [], quad: null,
   stats: { draws: 0, passes: 0, ms: 0, progs: 0 },
   errors: new Map(),
 };
@@ -106,6 +107,9 @@ GL.dropProgram = (key: any) => {
   if (p && p.pr) GL.gl.deleteProgram(p.pr);
   GL.progs.delete(key); GL.errors.delete(key);
 };
+GL.dropPrograms = (prefix: string) => {
+  for (const key of [...GL.progs.keys()]) if (String(key).startsWith(prefix)) GL.dropProgram(key);
+};
 
 function uloc(p: any, name: any) {
   let l = p.u.get(name);
@@ -147,11 +151,11 @@ function setParam(p: any, pd: any, index: number, value: any) {
 }
 
 /* ── FBO pool ──────────────────────────────────────────── */
-function grab(w: any, h: any) {
+function grab(w: any, h: any, depth = false) {
   const gl = GL.gl;
   for (let i = 0; i < GL.pool.length; i++) {
     const f = GL.pool[i];
-    if (!f.busy && f.w === w && f.h === h) { f.busy = true; f.used = ++resourceTick; return f; }
+    if (!f.busy && f.w === w && f.h === h && !!f.depth === depth) { f.busy = true; f.used = ++resourceTick; return f; }
   }
   const tex = gl.createTexture();
   bindTex(0, tex);
@@ -164,7 +168,15 @@ function grab(w: any, h: any) {
   const fb = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  const f = { fb, tex, w, h, busy: true, used: ++resourceTick, bytes: Math.max(0, w * h * 8) };
+  let depthBuffer = null;
+  if (depth) {
+    depthBuffer = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, depthBuffer);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthBuffer);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+  }
+  const f = { fb, tex, depth, depthBuffer, w, h, busy: true, used: ++resourceTick, bytes: Math.max(0, w * h * (depth ? 10 : 8)) };
   GL.pool.push(f);
   poolBytes += f.bytes;
   return f;
@@ -178,6 +190,7 @@ function disposeFbo(f: any) {
   if (!f) return;
   GL.gl?.deleteFramebuffer?.(f.fb);
   GL.gl?.deleteTexture?.(f.tex);
+  if (f.depthBuffer) GL.gl?.deleteRenderbuffer?.(f.depthBuffer);
   poolBytes = Math.max(0, poolBytes - (f.bytes || 0));
 }
 function trimPool(targetBytes: number = MAX_FBO_BYTES) {
@@ -202,7 +215,7 @@ function bind(f: any) {
   boundFbo = f || null;
 }
 function clear(r = 0, g = 0, b = 0, a = 0) {
-  const gl = GL.gl; gl.clearColor(r, g, b, a); gl.clear(gl.COLOR_BUFFER_BIT);
+  const gl = GL.gl; gl.clearColor(r, g, b, a); gl.clearDepth(1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 }
 const IDENT = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 function m3(m: any) { return new Float32Array([m[0], m[1], 0, m[2], m[3], 0, m[4], m[5], 1]); }
@@ -264,6 +277,33 @@ GL.dropTextures = (prefix = '') => {
     GL.texes.delete(key);
   }
 };
+
+function dropMesh(id: string) {
+  const entry = GL.meshes.get(id);
+  if (!entry) return;
+  GL.gl?.deleteBuffer?.(entry.positions);
+  GL.gl?.deleteBuffer?.(entry.normals);
+  GL.meshes.delete(id);
+}
+GL.dropMesh = dropMesh;
+
+function meshBuffers(asset: any) {
+  const mesh = asset?.mesh;
+  if (!mesh?.positions || !mesh?.normals || !(mesh.vertexCount > 0)) return null;
+  const cached = GL.meshes.get(asset.id);
+  if (cached?.source === mesh) return cached;
+  if (cached) dropMesh(asset.id);
+  const gl = GL.gl;
+  const positions = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, positions);
+  gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
+  const normals = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, normals);
+  gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.STATIC_DRAW);
+  const entry = { source: mesh, positions, normals, count: mesh.vertexCount };
+  GL.meshes.set(asset.id, entry);
+  return entry;
+}
 function bindTex(unit: any, tex: any) {
   const gl = GL.gl;
   gl.activeTexture(gl.TEXTURE0 + unit);
@@ -271,6 +311,73 @@ function bindTex(unit: any, tex: any) {
   boundTex[unit] = tex;
 }
 const draw = () => { GL.gl.drawArrays(GL.gl.TRIANGLE_STRIP, 0, 4); GL.stats.draws++; };
+
+const MESH_VERTEX = `#version 300 es
+precision highp float;
+in vec3 a_position;
+in vec3 a_normal;
+uniform vec2 u_resolution;
+uniform float u_yaw;
+uniform float u_pitch;
+uniform float u_distance;
+uniform float u_rotationX;
+uniform float u_rotationY;
+uniform float u_rotationZ;
+uniform float u_scale;
+out vec3 v_normal;
+out vec3 v_world;
+mat3 rx(float a){float c=cos(a),s=sin(a);return mat3(1,0,0,0,c,s,0,-s,c);}
+mat3 ry(float a){float c=cos(a),s=sin(a);return mat3(c,0,-s,0,1,0,s,0,c);}
+mat3 rz(float a){float c=cos(a),s=sin(a);return mat3(c,s,0,-s,c,0,0,0,1);}
+void main(){
+  mat3 model=rz(radians(u_rotationZ))*rx(radians(u_rotationX))*ry(radians(u_rotationY));
+  vec3 world=model*a_position*u_scale;
+  vec3 normal=normalize(model*a_normal);
+  float yaw=radians(u_yaw), pitch=radians(u_pitch);
+  vec3 camera=u_distance*vec3(cos(pitch)*sin(yaw),sin(pitch),cos(pitch)*cos(yaw));
+  vec3 forward=normalize(-camera);
+  vec3 right=normalize(cross(forward,vec3(0,1,0)));
+  vec3 up=cross(right,forward);
+  vec3 rel=world-camera;
+  float z=dot(rel,forward);
+  float near=.05, far=100.0, focal=1.8;
+  float aspect=u_resolution.x/max(u_resolution.y,1.0);
+  gl_Position=vec4(dot(rel,right)*focal/aspect,dot(rel,up)*focal,((far+near)/(far-near))*z-(2.0*far*near/(far-near)),z);
+  v_normal=normal; v_world=world;
+}`;
+
+const MESH_FRAGMENT = `#version 300 es
+precision highp float;
+in vec3 v_normal;
+in vec3 v_world;
+uniform vec3 u_objectColor;
+uniform vec3 u_lightColor;
+uniform float u_roughness;
+uniform float u_metalness;
+uniform float u_yaw;
+uniform float u_pitch;
+uniform float u_distance;
+out vec4 fragColor;
+void main(){
+  vec3 n=normalize(v_normal);
+  float yaw=radians(u_yaw), pitch=radians(u_pitch);
+  vec3 camera=u_distance*vec3(cos(pitch)*sin(yaw),sin(pitch),cos(pitch)*cos(yaw));
+  vec3 view=normalize(camera-v_world);
+  vec3 key=normalize(vec3(-3.5,5.0,4.0)-v_world);
+  vec3 rim=normalize(vec3(4.0,2.5,-3.0)-v_world);
+  float diffuse=max(dot(n,key),0.0);
+  float rimLight=pow(max(dot(n,rim),0.0),1.5);
+  vec3 halfVector=normalize(key+view);
+  float power=mix(18.0,180.0,1.0-clamp(u_roughness,0.0,1.0));
+  float spec=pow(max(dot(n,halfVector),0.0),power)*(0.12+2.4*clamp(u_metalness,0.0,1.0));
+  float fresnel=pow(1.0-max(dot(n,view),0.0),4.0);
+  vec3 color=u_objectColor*(0.14+diffuse*(1.0-.65*u_metalness));
+  color+=u_lightColor*spec+mix(u_objectColor,u_lightColor,.45)*fresnel*(.25+.7*u_metalness);
+  color+=vec3(.35,.42,.65)*rimLight*.2;
+  color=color/(color+vec3(1));
+  color=pow(color,vec3(1.0/2.2));
+  fragColor=vec4(color,1);
+}`;
 
 /* ── init ──────────────────────────────────────────────── */
 GL.init = (canvas: any) => {
@@ -314,8 +421,67 @@ PM.Memory?.register?.('textures', {
   entries: () => GL.texes.size,
   trim: (target: number) => trimTextures(target),
 });
+PM.bus?.on?.('assets', () => {
+  for (const id of [...GL.meshes.keys()]) if (!PM.assets?.get?.(id)) dropMesh(id);
+});
 
 /* ── layer content ─────────────────────────────────────── */
+function extensionParam(layer: any, definition: any, key: string, time: number, fallback: any) {
+  const parameter = definition?.params?.find((item: any) => item.k === key);
+  const property = layer.d?.params?.[key];
+  return property ? PM.evP(layer, property, time, key) : parameter?.def ?? fallback;
+}
+
+/** `undefined` means show the preserved-data placeholder; `null` is a shader failure. */
+function meshExtensionQuad(L: any, T: any, w: number, h: number, targetW: number, targetH: number, definition: any): any {
+  const assetField = definition.renderer.assetField;
+  const assetId = String(L.d?.data?.[assetField] || '');
+  const asset = assetId ? PM.assets?.get?.(assetId) : null;
+  const buffers = meshBuffers(asset);
+  if (!buffers) {
+    PM.UIState?.setShaderMeta?.(L, { definition, missing: true, missingAsset: assetId || null });
+    return undefined;
+  }
+  const key = `extension:${definition.id}:mesh:${definition.version}:${hashStr(MESH_VERTEX + MESH_FRAGMENT)}`;
+  const p = program(key, MESH_FRAGMENT, MESH_VERTEX);
+  PM.UIState?.setShaderMeta?.(L, { shaderKey: key, definition, missing: false, missingAsset: null });
+  if (!p) return null;
+  const target = boundFbo;
+  const f = grab(targetW, targetH, true);
+  bind(f);
+  const background = PM.hex2rgb(String(extensionParam(L, definition, 'background', T, '#0C0D12')));
+  const gl = GL.gl;
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  clear(background[0], background[1], background[2], 1);
+  gl.useProgram(p.pr);
+  const position = gl.getAttribLocation(p.pr, 'a_position');
+  const normal = gl.getAttribLocation(p.pr, 'a_normal');
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.positions);
+  gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.normals);
+  gl.enableVertexAttribArray(normal); gl.vertexAttribPointer(normal, 3, gl.FLOAT, false, 0, 0);
+  setU(p, 'u_resolution', [f.w, f.h]);
+  for (const [uniform, parameter, fallback] of [
+    ['u_yaw', 'yaw', 28], ['u_pitch', 'pitch', 18], ['u_distance', 'distance', 4.8],
+    ['u_rotationX', 'rotationX', 0], ['u_rotationY', 'rotationY', 25], ['u_rotationZ', 'rotationZ', 0],
+    ['u_scale', 'size', 1.35], ['u_roughness', 'roughness', .25], ['u_metalness', 'metalness', .7],
+  ] as any) {
+    let value = Number(extensionParam(L, definition, parameter, T, fallback)) || 0;
+    if (parameter === 'rotationY' && extensionParam(L, definition, 'autoRotate', T, false)) {
+      value += (T - L.from) * Number(extensionParam(L, definition, 'speed', T, 25));
+    }
+    setU(p, uniform, [value]);
+  }
+  setU(p, 'u_objectColor', PM.hex2rgb(String(extensionParam(L, definition, 'objectColor', T, '#C7C4FF'))));
+  setU(p, 'u_lightColor', PM.hex2rgb(String(extensionParam(L, definition, 'lightColor', T, '#FFB36B'))));
+  gl.drawArrays(gl.TRIANGLES, 0, buffers.count); GL.stats.draws++; GL.stats.passes++;
+  gl.disableVertexAttribArray(position); gl.disableVertexAttribArray(normal);
+  gl.disable(gl.DEPTH_TEST); gl.enable(gl.BLEND);
+  bind(target);
+  return { tex: f.tex, w, h, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
+}
+
 function contentQuad(L: any, T: any, W: any, H: any) {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
   const d = L.d;
@@ -389,6 +555,54 @@ function contentQuad(L: any, T: any, W: any, H: any) {
     GL.gl.disable(GL.gl.BLEND);
     draw();
     GL.gl.enable(GL.gl.BLEND);
+    bind(target);
+    return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
+  }
+  if (L.type === 'extension') {
+    const comp = PM.curComp?.() || PM.proj;
+    const w = Math.max(1, Number(d.w || comp.w || W)), hh = Math.max(1, Number(d.h || comp.h || H));
+    const [sx, sy] = outputScale(W, H);
+    const targetW = Math.min(4096, Math.max(2, Math.round(w * sx)));
+    const targetH = Math.min(4096, Math.max(2, Math.round(hh * sy)));
+    const definition: any = PM.layerDefinition?.(d.definition);
+    if (definition?.renderer?.kind === 'mesh') {
+      const mesh = meshExtensionQuad(L, T, w, hh, targetW, targetH, definition);
+      if (mesh !== undefined) return mesh;
+    }
+    const missing = `void main(){
+      vec2 q=floor(uv*24.0); float checker=mod(q.x+q.y,2.0);
+      vec3 a=vec3(.055,.05,.07), b=vec3(.16,.09,.15);
+      fragColor=vec4(mix(a,b,checker),1.0);
+    }`;
+    const source = definition?.renderer?.kind === 'fragment'
+      ? extensionLayerFragment(definition, PM.SHADER_HEADER)
+      : PM.SHADER_HEADER + '\n' + missing;
+    const key = `extension:${String(d.definition || 'missing')}:${definition?.version || 0}:${hashStr(source)}`;
+    const p = program(key, source, PM.VERT);
+    PM.UIState?.setShaderMeta?.(L, {
+      shaderKey: key,
+      definition,
+      missing: !definition || definition.renderer?.kind !== 'fragment',
+      missingAsset: definition?.renderer?.kind === 'mesh' ? String(d.data?.[definition.renderer.assetField] || '') : null,
+    });
+    if (!p) return null;
+    const target = boundFbo;
+    const f = grab(targetW, targetH);
+    bind(f); clear(0, 0, 0, 0);
+    const g = use(p);
+    g.u('u_m', fullQuad(f.w, f.h)); g.u('u_res', f.w, f.h); g.u('u_uv', 0, 0, 1, 1);
+    setU(p, 'iResolution', [f.w, f.h]);
+    setU(p, 'iTime', [T - L.from]); setU(p, 'iGlobalTime', [T]);
+    setU(p, 'iProgress', [PM.clamp((T - L.from) / Math.max(L.dur, 1e-4), 0, 1)]);
+    setI(p, 'iFrame', Math.round(T * PM.proj.fps)); setU(p, 'iMouse', [0, 0]);
+    for (const param of definition?.params || []) {
+      const property = d.params?.[param.k];
+      const value = property ? PM.evP(L, property, T, param.k) : param.def;
+      if (param.type === 'color') setU(p, 'u_' + param.k, PM.hex2rgb(String(value)));
+      else if (param.type === 'toggle') setI(p, 'u_' + param.k, value ? 1 : 0);
+      else setU(p, 'u_' + param.k, [Number(value) || 0]);
+    }
+    GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND);
     bind(target);
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
   }
@@ -786,7 +1000,7 @@ GL.pick = (x: any, y: any, T: any) => {
 GL.bounds = (L: any, T: any) => {
   const d = L.d;
   let w, h, ax, ay;
-  if (L.type === 'solid' || L.type === 'shader') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
+  if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'text') {
     const r = PM.raster(L, 1);

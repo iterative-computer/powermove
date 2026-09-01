@@ -64,6 +64,14 @@
 
   function keydown(event: KeyboardEvent): void {
     event.stopPropagation();
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'a') {
+      /* Keep select-all local to the draft. Powermove also owns this chord for
+         layer selection, and Electron's native menu routing can otherwise win
+         before Chromium applies the textarea default. */
+      event.preventDefault();
+      textarea.select();
+      return;
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       submit();

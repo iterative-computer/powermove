@@ -17,6 +17,7 @@ export const CONTRIBUTION_KINDS = [
   'keybindings',
   'effects',
   'transitions',
+  'layers',
   'themes',
   'palette',
   'menus',

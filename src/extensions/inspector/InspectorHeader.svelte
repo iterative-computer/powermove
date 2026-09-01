@@ -14,7 +14,10 @@
   } = $props();
 
   const layerName = $derived((doc.tick.structure, doc.proj, layer?.name ?? 'Properties'));
-  const typeLabel = $derived((doc.tick.structure, doc.proj, layer ? PM.TYPE_META?.[layer.type]?.label : ''));
+  const typeLabel = $derived((doc.tick.structure, doc.proj, layer
+    ? (layer.type === 'extension' ? PM.layerDefinition?.(layer.d?.definition)?.label : null)
+      || PM.TYPE_META?.[layer.type]?.label
+    : ''));
 </script>
 
 <!-- registerSveltePanel has no Svelte header lifecycle, so the legacy header

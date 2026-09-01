@@ -14,10 +14,12 @@
  * has zero legacy dependencies, so it can be unit-tested with a fake PM.
  */
 import type {
+  AssetsAPI,
   CommandDefinition,
   CommandsAPI,
   Disposable,
   EffectsAPI,
+  ExtensionLayersAPI,
   EventsAPI,
   ExtensionManifest,
   ExtensionRecord,
@@ -43,6 +45,7 @@ import type {
   UIAPI
 } from './api';
 import type { EffectDefinition, EditCommand, EditMeta, EditResult, TransitionDefinition } from './api';
+import type { ExtensionLayerDefinition } from './api';
 import type { Component } from 'svelte';
 import { chordOfEvent } from './keychord';
 import { runKernelCommand, type Kernel } from './registries';
@@ -74,6 +77,7 @@ export interface HostDeps {
     icon: UIAPI['icon'];
   };
   project: ProjectAPI;
+  assets: AssetsAPI;
   storage(id: string): StorageAPI;
   extensions: ExtensionsAPI;
   panelsBackend: PanelsBackend;
@@ -234,6 +238,12 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     get: (transitionId) => kernel.transitions.get(transitionId)
   };
 
+  const layers: ExtensionLayersAPI = {
+    register: (def: ExtensionLayerDefinition) => collect(kernel.registerLayerType(id, def)),
+    list: () => kernel.layerTypes.list(),
+    get: (definitionId) => kernel.layerTypes.get(definitionId)
+  };
+
   /* ── theme ─────────────────────────────────────────────── */
 
   const theme: ThemeAPI = {
@@ -314,6 +324,8 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     keybindings,
     effects,
     transitions,
+    layers,
+    assets: deps.assets,
     theme,
     palette,
     menus,

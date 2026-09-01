@@ -33,7 +33,7 @@
     {/each}
   </div>
 {:else if message.role === 'user'}
-  <div class="agent-msg user" class:is-entering={message.entering}>
+  <div class="agent-msg user" class:is-entering={message.entering} class:is-steering={message.steering}>
     {#if message.focusLabels?.length}<div class="agent-message-focus">Focus · {message.focusLabels.join(', ')}</div>{/if}
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
@@ -60,6 +60,8 @@
 
 <style>
   .agent-message-focus { color: var(--tx-3); font: var(--fs-xs)/1.4 var(--f-ui); text-wrap: pretty; }
+  /* Steering reads as a continuation of the request above it, not a new turn. */
+  .agent-msg.user.is-steering { margin-top: -12px; }
   .agent-trace-tool.is-partial,
   .agent-trace-tool.is-partial > svg { color: var(--warning); }
 </style>

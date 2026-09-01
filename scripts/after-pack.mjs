@@ -21,8 +21,8 @@ export default async function afterPack(context) {
 
   await flipFuses(appPath, {
     version: FuseVersion.V1,
-    // The arm64 build is not Developer ID signed. Refresh the ad-hoc signature
-    // after changing the Electron executable so macOS can still launch it.
+    // Fuses modify the Electron executable before electron-builder's final
+    // ad-hoc or Developer ID signing pass, so discard the stale inner signature.
     resetAdHocDarwinSignature: true,
     [FuseV1Options.RunAsNode]: false,
     [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,

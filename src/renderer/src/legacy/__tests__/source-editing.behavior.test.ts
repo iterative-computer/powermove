@@ -93,6 +93,39 @@ it('procedural scripts can add parented styled layers atomically and undo them',
   assert.equal(PM.L(sourceLayer.id).on, true);
 });
 
+it('extension layers remain structured, keyframeable, and undoable', () => {
+  const { PM } = editor();
+  const definition = {
+    id: 'demo.3d', label: 'Demo 3D', version: 2, color: '#9B8CFF',
+    params: [
+      { k: 'rotation', label: 'Rotation', def: 0, min: -360, max: 360 },
+      { k: 'metal', label: 'Metal', def: true, type: 'toggle' }
+    ],
+    defaults: { objects: [{ id: 'cube' }] },
+    renderer: { kind: 'fragment', fragment: 'void main(){ fragColor=vec4(1.0); }' }
+  };
+  PM.layerDefinition = id => id === definition.id ? definition : null;
+
+  const result = PM.Edit.apply([{
+    type: 'add_layer', id: 'cube-3d', layerType: 'extension',
+    content: { definition: definition.id, parameters: { rotation: 15 } }, select: false
+  }, {
+    type: 'set_property', target: 'cube-3d', path: 'x.rotation', value: 180,
+    time: 2, mode: 'keyframe'
+  }], { label: 'Build 3D cube', origin: 'agent' });
+
+  assert.equal(result.ok, true);
+  const layer = PM.L('cube-3d');
+  assert.equal(layer.type, 'extension');
+  assert.equal(layer.d.definition, 'demo.3d');
+  assert.deepEqual(layer.d.data, { objects: [{ id: 'cube' }] });
+  assert.equal(layer.d.params.rotation.v, 15);
+  assert.equal(layer.d.params.rotation.kf[0].v, 180);
+  assert.equal(PM.allProps(layer).find(item => item.key === 'x.rotation').group, 'Demo 3D');
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.L('cube-3d'), null);
+});
+
 it('an interrupted source gesture restores its edits and the next canvas gesture still works', () => {
   const { PM } = editor();
   const layer = addText(PM);

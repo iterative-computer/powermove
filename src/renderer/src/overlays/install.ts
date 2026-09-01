@@ -63,7 +63,7 @@ export function installSvelteOverlays(PM: PMRegistry): void {
   target.setAttribute('aria-live', 'polite');
   target.setAttribute('aria-atomic', 'false');
   target.style.zIndex = '402';
-  const toasts = mount(Toasts, { target }) as ToastInstance;
+  const toasts = mount(Toasts, { target, props: { PM } }) as ToastInstance;
   const menu = new MenuController(PM);
   const modal = new ModalController(PM);
   const palette = new PaletteController(PM);

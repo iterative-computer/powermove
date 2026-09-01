@@ -1,0 +1,10 @@
+{
+  "id": "layers-3d",
+  "name": "3D Layers",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Structured, keyframeable 3D scenes rendered by an extension layer.",
+  "entry": "index.ts",
+  "contributes": ["layers", "commands", "palette"],
+  "author": "powermove"
+}

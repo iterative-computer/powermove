@@ -1,6 +1,21 @@
 /* Ported from js/ui/timeline.js — behavior-preserving. */
 import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
-import { moveBezierHandle, visibleBezierHandle } from './bezier-drag';
+import {
+  bezierHandleAtPoint,
+  keysForBezierHandleDrag,
+  materializeLinearBezierSegment,
+  mirroredBezierHandlePoint,
+  moveBezierHandle,
+  pointForBezierHandle,
+  visibleBezierHandle,
+} from './bezier-drag';
+import {
+  graphSelectionBounds,
+  planGraphKeyframeMove,
+  pointInGraphSelection,
+  resolveGraphTarget,
+  selectionAfterMarquee,
+} from './graph-selection';
 
 export interface KeyframeMoveSnapshotItem<Property = unknown> {
   id: string;
@@ -177,6 +192,15 @@ if (sessionTimeline) {
 }
 PM.TL = T;
 T.keySelectionActive = !!(T.keySelectionActive || PM.sel?.keys?.length);
+T.graphFocus = T.graphFocus && typeof T.graphFocus.layerId === 'string' && typeof T.graphFocus.trackKey === 'string'
+  ? T.graphFocus : null;
+T.focusGraph = (L: any, channel: string) => {
+  const target = typeof PM.allProps === 'function'
+    ? timelineProperties(PM, L).find((row: any) => trackSelected(row, channel))
+    : null;
+  T.graphFocus = { layerId: L.id, trackKey: target?.key || channel };
+  PM.invalidate('timeline');
+};
 T.__timelineRuntimeToken = TIMELINE_RUNTIME_TOKEN;
 T.__timelineRuntimeDisposed = false;
 
@@ -831,7 +855,7 @@ function drawDropGhost(c: any, W: any, H: any) {
 
 function rgba(hex: any, a: any) { const [r, g, b] = PM.hex2rgb(hex); return `rgba(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0},${a})`; }
 
-const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
+const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', extension: 'ext', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
 
 function drawAudioClipWaveform(c: any, L: any, { x, y, width, height, color }: any) {
   const clipLeft = Math.max(x, T.gut);
@@ -875,6 +899,7 @@ const CLIP_TYPES: Record<string, { body: string; primary: string; foreground: st
   shape:  { body: '#5E3D36', primary: '#D99A8A', foreground: '#F7E9E5' },
   solid:  { body: '#573A4E', primary: '#CF93B8', foreground: '#F6E6F0' },
   shader: { body: '#413B60', primary: '#A99AE0', foreground: '#ECE8F8' },
+  extension: { body: '#40395D', primary: '#B2A6EF', foreground: '#F0EDFF' },
   null:   { body: '#3E434B', primary: '#A2A9B3', foreground: '#EEF0F3' },
 };
 const CLIP_FALLBACK = { body: '#34505A', primary: '#8DB8C6', foreground: '#E6F1F4' };
@@ -1167,8 +1192,13 @@ function drawPlayhead(c: any, W: any, H: any) {
 
 /* ── graph editor ──────────────────────────────────────── */
 function drawGraph(c: any, W: any, H: any) {
-  const rows = T.rows.filter((r: any) => r.kind === 'prop' && (trackSelected(r, PM.sel.chan) || r.prop.kf.length));
-  const target = rows.find((r: any) => PM.sel.layers.includes(r.L.id) && trackSelected(r, PM.sel.chan)) || rows[0];
+  /* Build from every project property, not only expanded timeline rows. A
+     collapsed strip must not make the focused curve disappear. */
+  const rows = PM.proj.layers.flatMap((L: any) => timelineProperties(PM, L)
+    .map((row: any) => ({ kind: 'prop', L, ...row })))
+    .filter((r: any) => trackSelected(r, PM.sel.chan) || r.prop.kf.length);
+  const target = resolveGraphTarget(rows, T.graphFocus, PM.sel.layers, (r: any) => trackSelected(r, PM.sel.chan));
+  if (target) T.graphFocus = { layerId: target.L.id, trackKey: target.key };
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
   if (!target) {
     c.fillStyle = theme.tx3; c.font = '400 11.5px ' + fui(); c.textAlign = 'center';
@@ -1185,7 +1215,7 @@ function drawGraph(c: any, W: any, H: any) {
   if (T.graphDragBounds) [vmin, vmax] = T.graphDragBounds;
   const top = T.ruler + 16, bot = H - 16;
   const v2y = (v: any) => bot - (v - vmin) / (vmax - vmin) * (bot - top);
-  T._graph = { target, series, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin) };
+  T._graph = { target, series, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null };
 
   /* value gridlines */
   c.strokeStyle = INK.grid; c.font = '400 9.5px ' + fui(); c.fillStyle = theme.tx3;
@@ -1217,8 +1247,7 @@ function drawGraph(c: any, W: any, H: any) {
     c.strokeStyle = INK.sub; c.lineWidth = 1;
     if (nx && !k.hold) {
       const handle = visibleBezierHandle(k, nx, 'eo');
-      const hx = x + (t2x(L.from + nx.t) - x) * handle[0];
-      const hy = y + (v2y(nx.v) - y) * handle[1];
+      const [hx, hy] = pointForBezierHandle(handle, [x, y], [t2x(L.from + nx.t), v2y(nx.v)]);
       c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
       c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
       PM.UIState.setKeyHandles(k, { ho: [hx, hy] });
@@ -1226,7 +1255,7 @@ function drawGraph(c: any, W: any, H: any) {
     if (pv && !pv.hold) {
       const handle = visibleBezierHandle(k, pv, 'ei');
       const px = t2x(L.from + pv.t), py = v2y(pv.v);
-      const hx = px + (x - px) * handle[0], hy = py + (y - py) * handle[1];
+      const [hx, hy] = pointForBezierHandle(handle, [px, py], [x, y]);
       c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
       c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
       PM.UIState.setKeyHandles(k, { hi: [hx, hy] });
@@ -1241,6 +1270,20 @@ function drawGraph(c: any, W: any, H: any) {
     c.fillText(axisIndex === 0 ? 'X' : 'Y', W - 42 + axisIndex * 20, T.ruler + 12);
   }
   });
+  const graphPoints: any[] = series.flatMap(axis => axis.prop.kf.map((key: any) => {
+    const point = PM.UIState.getKeyHandles(key)?.pt;
+    return point ? { id: key.i, key, axis, x: point[0], y: point[1] } : null;
+  })).filter(Boolean);
+  const selectedIds = new Set(PM.sel.keys);
+  T._graph.points = graphPoints;
+  T._graph.selectionBounds = graphSelectionBounds(graphPoints.filter(point => selectedIds.has(point.id)));
+  if (T._graph.selectionBounds) {
+    const bounds = T._graph.selectionBounds;
+    c.save(); c.strokeStyle = rgba(theme.accent, .9); c.lineWidth = 1;
+    c.setLineDash([3, 3]);
+    c.strokeRect(bounds.x0 + .5, bounds.y0 + .5, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+    c.restore();
+  }
   c.fillStyle = theme.tx2; c.font = '500 11px ' + fui();
   c.fillText(L.name + ' · ' + target.label, T.gut + 10, T.ruler + 12);
   c.restore();
@@ -1361,6 +1404,22 @@ function setHoverRow(index: number | null) {
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
   setHoverRow(hitRow(y)?.i ?? null);
+  if (T.graph && x > T.gut && y >= T.ruler) {
+    const graph = T._graph;
+    const keys = graph?.series?.flatMap((axis: any) => axis.prop.kf) ?? [];
+    const nearHandle = keys.some((key: any) => {
+      const handles = PM.UIState.getKeyHandles(key);
+      return [handles?.ho, handles?.hi].some((point: any) => point && Math.hypot(x - point[0], y - point[1]) < 7);
+    });
+    const nearPoint = keys.some((key: any) => {
+      const point = PM.UIState.getKeyHandles(key)?.pt;
+      return point && Math.hypot(x - point[0], y - point[1]) < 8;
+    });
+    T.cv.style.cursor = nearHandle ? 'crosshair'
+      : pointInGraphSelection(graph?.selectionBounds, x, y) ? 'move'
+      : nearPoint ? 'pointer' : 'crosshair';
+    return;
+  }
   let cur = 'default';
   if (x > T.gut) {
     const workHit = workAreaHit(x, y);
@@ -1525,7 +1584,11 @@ function gutterDown(e: any, x: any, y: any) {
   const hr = hitRow(y);
   if (!hr) return;
   const r = hr.row;
-  if (r.kind !== 'layer') { PM.sel.chan = r.key; PM.selectLayers(r.L.id); T.keySelectionActive = true; PM.invalidate('timeline'); return; }
+  if (r.kind !== 'layer') {
+    PM.sel.chan = r.key;
+    T.focusGraph(r.L, r.key);
+    PM.selectLayers(r.L.id); T.keySelectionActive = true; PM.invalidate('timeline'); return;
+  }
   T.keySelectionActive = false;
   PM.sel.keys = [];
   const L = r.L;
@@ -1536,6 +1599,7 @@ function gutterDown(e: any, x: any, y: any) {
     const collapsed = !PM.UIState.getLayerCollapsed(L);
     L.collapsed = collapsed;
     PM.UIState.setLayerCollapsed(L, collapsed);
+    rowsDirty = true;
     if (!collapsed) {
       const kids = visibleProps(L).length;
       keepRowsVisible(hr.i, kids);
@@ -1665,9 +1729,10 @@ function restoreKeyframeGesture(snapshot: any) {
 function applyKeyframeGesture(
   snapshot: any, requestedDelta: number,
   valueForItem: ((item: any) => number | null) | null = null,
+  planner: (items: any[], delta: number, fps: number) => any = planKeyframeMove,
 ) {
   restoreKeyframeGesture(snapshot);
-  const plan = planKeyframeMove(snapshot.items, requestedDelta, PM.proj.fps);
+  const plan = planner(snapshot.items, requestedDelta, PM.proj.fps);
   const removed = new Set(plan.removed.map((item: any) => item.key));
   plan.moves.forEach(({ item, time }: any) => { item.key.t = time; });
   if (valueForItem) {
@@ -1690,6 +1755,7 @@ function applyKeyframeGesture(
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const additive = e.shiftKey || e.metaKey;
   PM.sel.chan = r.key;
+  T.focusGraph(r.L, r.key);
   const hit = pickKeyframeHit(
     r.prop.kf, PM.sel.keys,
     (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
@@ -1739,6 +1805,9 @@ function graphDown(e: any, x: any, y: any) {
     const handle = handles[0];
     if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, L);
   }
+  if ((!pointHit || pointHit.distance >= 8) && pointInGraphSelection(g.selectionBounds, x, y)) {
+    return dragGraphSelection(e, g, L);
+  }
   if (!pointHit || pointHit.distance >= 8) return marquee(e, { additive: e.shiftKey || e.metaKey, graph: true });
   const hit = pointHit.key;
   const additive = e.shiftKey || e.metaKey;
@@ -1750,25 +1819,31 @@ function graphDown(e: any, x: any, y: any) {
     setSelectedKeys(wasSelected ? PM.sel.keys.filter((id: any) => !ids.has(id)) : [...PM.sel.keys, hit]);
     if (wasSelected) return;
   } else if (!wasSelected) setSelectedKeys([hit]);
-  const snapshot = captureKeyframeGesture(selectedKeyEntries().filter((entry: any) => entry.L === L));
+  return dragGraphSelection(e, g, L);
+}
+
+function dragGraphSelection(e: any, g: any, L: any) {
+  const visibleProperties = new Set(g.series.map((axis: any) => axis.prop));
+  const entries = selectedKeyEntries().filter((entry: any) => entry.L === L && visibleProperties.has(entry.prop));
+  if (!entries.length) return;
+  const snapshot = captureKeyframeGesture(entries);
+  const canvasBounds = T.cv.getBoundingClientRect();
+  const anchorY = e.clientY - canvasBounds.top;
   T.graphDragBounds = [g.vmin, g.vmax];
   const timeScale = T.pps;
   let moved = false;
   beginDrag(e, {
-    move: (dx: any, dy: any) => {
+    cursor: 'move',
+    move: (rawDx: any, rawDy: any, event: PointerEvent) => {
+      let dx = rawDx, dy = rawDy;
+      if (event?.shiftKey) {
+        if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { moved = true; PM.hist.begin('Edit curve'); }
-      const dv = g.y2v(y + dy) - g.y2v(y);
-      applyKeyframeGesture(snapshot, dx / timeScale, (item: any) => {
-        const editValue = item.property === pointHit.axis.prop || (g.target.channels && L.scaleLinked);
-        if (!editValue) return null;
-        // A linked Scale curve keeps the paired key's original proportions.
-        const primary = snapshot.items.find((other: any) =>
-          other.selected && other.property === pointHit.axis.prop && other.time === item.time)?.value;
-        const ratio = item.property === pointHit.axis.prop || !Number.isFinite(primary) || Math.abs(primary) < 1e-8
-          ? 1 : item.value / primary;
-        return item.value + dv * (Number.isFinite(ratio) ? ratio : 1);
-      });
+      if (!moved) { moved = true; PM.hist.begin(entries.length > 1 ? 'Edit keyframes' : 'Edit curve'); }
+      const dv = g.y2v(anchorY + dy) - g.y2v(anchorY);
+      applyKeyframeGesture(snapshot, dx / timeScale, (item: any) => item.value + dv, planGraphKeyframeMove);
     },
     up: () => {
       T.graphDragBounds = null;
@@ -1783,30 +1858,85 @@ function graphDown(e: any, x: any, y: any) {
   });
 }
 function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any) {
-  const i = kf.indexOf(k);
-  const previous = which === 'eo' ? k : kf[i - 1];
-  const next = which === 'eo' ? kf[i + 1] : k;
-  if (!previous || !next) return;
-  const segmentStart: [number, number] = [t2x(L.from + previous.t), g.v2y(previous.v)];
-  const segmentEnd: [number, number] = [t2x(L.from + next.t), g.v2y(next.v)];
-  const start = visibleBezierHandle(k, which === 'eo' ? next : previous, which);
-  const members = g.target.channels
-    ? trackChannels(g.target).flatMap(axis => axis.prop.kf.filter((key: any) => key.t === k.t)) : [k];
-  const originals = members.map(key => ({ key, handle: [...key[which]] }));
+  const axes = g.target.channels ? trackChannels(g.target) : g.series.filter((axis: any) => axis.prop.kf === kf);
+  const candidates = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
+  const targetKeys = new Set(keysForBezierHandleDrag(candidates.map((item: any) => item.key), k, PM.sel.keys));
+  const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));
+  const clickedIndex = kf.indexOf(k);
+  const clickedPrevious = which === 'eo' ? k : kf[clickedIndex - 1];
+  const clickedNext = which === 'eo' ? kf[clickedIndex + 1] : k;
+  if (!clickedPrevious || !clickedNext) return;
+  const clickedStart: [number, number] = [t2x(L.from + clickedPrevious.t), g.v2y(clickedPrevious.v)];
+  const clickedEnd: [number, number] = [t2x(L.from + clickedNext.t), g.v2y(clickedNext.v)];
+  const start = visibleBezierHandle(k, which === 'eo' ? clickedNext : clickedPrevious, which);
+  const originals = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({
+    key, eo: [...key.eo], ei: [...key.ei], bezierMode: key.bezierMode,
+  })));
+  const split = Boolean(e.altKey || e.getModifierState?.('Alt'));
+  const drags = memberAxes.map(({ axis, key }: any) => {
+    const keys = axis.prop.kf;
+    const index = keys.indexOf(key);
+    const previous = which === 'eo' ? key : keys[index - 1];
+    const next = which === 'eo' ? keys[index + 1] : key;
+    if (!previous || !next) return null;
+    const segmentStart: [number, number] = [t2x(L.from + previous.t), g.v2y(previous.v)];
+    const segmentEnd: [number, number] = [t2x(L.from + next.t), g.v2y(next.v)];
+    const oppositeWhich: 'eo' | 'ei' = which === 'eo' ? 'ei' : 'eo';
+    const oppositeNeighbor = which === 'eo' ? keys[index - 1] : keys[index + 1];
+    let opposite: any = null;
+    if (oppositeNeighbor && key.bezierMode !== 'split' && !split) {
+      const oppositeStart = which === 'eo'
+        ? [t2x(L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number]
+        : [t2x(L.from + key.t), g.v2y(key.v)] as [number, number];
+      const oppositeEnd = which === 'eo'
+        ? [t2x(L.from + key.t), g.v2y(key.v)] as [number, number]
+        : [t2x(L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number];
+      const oppositeHandle = visibleBezierHandle(key, oppositeNeighbor, oppositeWhich);
+      opposite = { which: oppositeWhich, segmentStart: oppositeStart, segmentEnd: oppositeEnd,
+        previous: which === 'eo' ? oppositeNeighbor : key,
+        next: which === 'eo' ? key : oppositeNeighbor,
+        point: pointForBezierHandle(oppositeHandle, oppositeStart, oppositeEnd), fallback: oppositeHandle };
+    }
+    return { key, previous, next, segmentStart, segmentEnd, opposite };
+  }).filter(Boolean);
   PM.hist.begin('Adjust easing');
   T.graphDragBounds = [g.vmin, g.vmax];
-  let moved = false;
+  let moved = false, prepared = false;
   beginDrag(e, {
     move: (dx: any, dy: any) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
       moved = true;
-      const handle = moveBezierHandle(start, [dx, dy], segmentStart, segmentEnd);
-      members.forEach((key: any) => { key[which] = handle.map(value => PM.round(value, 4)); });
+      if (!prepared) {
+        prepared = true;
+        drags.forEach((drag: any) => {
+          materializeLinearBezierSegment(drag.previous, drag.next);
+          if (drag.opposite) {
+            materializeLinearBezierSegment(drag.opposite.previous, drag.opposite.next);
+          }
+          if (split) drag.key.bezierMode = 'split';
+        });
+      }
+      const handle = moveBezierHandle(start, [dx, dy], clickedStart, clickedEnd);
+      drags.forEach((drag: any) => {
+        drag.key[which] = handle.map((value: number) => PM.round(value, 4));
+        if (!drag.opposite) return;
+        const keyPoint: [number, number] = [t2x(L.from + drag.key.t), g.v2y(drag.key.v)];
+        const draggedPoint = pointForBezierHandle(handle, drag.segmentStart, drag.segmentEnd);
+        const mirroredPoint = mirroredBezierHandlePoint(keyPoint, draggedPoint, drag.opposite.point);
+        const oppositeHandle = bezierHandleAtPoint(
+          mirroredPoint, drag.opposite.segmentStart, drag.opposite.segmentEnd, drag.opposite.fallback,
+        );
+        oppositeHandle[0] = Math.max(0, Math.min(1, oppositeHandle[0]));
+        drag.key[drag.opposite.which] = oppositeHandle.map((value: number) => PM.round(value, 4));
+      });
       PM.touch(); PM.invalidate();
     },
     up: () => { T.graphDragBounds = null; moved ? PM.hist.commit('Adjust easing') : PM.hist.cancel(); PM.invalidate(); },
     cancel: () => {
-      originals.forEach(({ key, handle }) => { key[which] = handle; });
+      originals.forEach(({ key, eo, ei, bezierMode }: any) => {
+        key.eo = eo; key.ei = ei;
+        if (bezierMode == null) delete key.bezierMode; else key.bezierMode = bezierMode;
+      });
       T.graphDragBounds = null; PM.hist.cancel(); PM.touch(); PM.invalidate();
     },
   });
@@ -1873,7 +2003,9 @@ function marquee(e: any, opt: any = {}) {
       dragged = true;
       T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
       const picked = keysInMarquee(T.marquee, !!opt.graph);
-      setSelectedKeys([...baseKeys, ...picked], [...baseLayers, ...layersForKeys([...baseKeys, ...picked])]);
+      const pickedIds = uniqueKeyIds(picked);
+      const nextKeys = selectionAfterMarquee(baseKeys, pickedIds, additive);
+      setSelectedKeys(nextKeys, [...baseLayers, ...layersForKeys(nextKeys)]);
       PM.invalidate('timeline');
     },
     up: () => {

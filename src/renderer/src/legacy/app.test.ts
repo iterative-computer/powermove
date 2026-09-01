@@ -137,7 +137,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any): {
     },
     normalizeFill: (_fill: any, fallback: string) => ({ stops: [{ color: fallback }] }),
     clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-    TYPE_META: { shape: {}, shader: {} },
+    TYPE_META: { shape: {}, shader: {}, extension: {} },
     MASK_SHAPES: [],
     uid: (prefix: string) => `${prefix}${++nextId}`,
     P: (value: any) => ({ v: value, kf: [], expr: null }),
@@ -204,6 +204,29 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any): {
 }
 
 describe('legacy app install', () => {
+  it('hydrates extension layers without needing their renderer and preserves safe structured data', () => {
+    const bootProject = {
+      id: 'P1', name: 'Hybrid', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',
+      assets: {}, markers: [], params: {}, comps: {},
+      layers: [{
+        id: 'L3D', name: '3D', type: 'extension', from: 0, dur: 10,
+        d: {
+          definition: 'vendor.scene', version: 2, w: 800, h: 600,
+          params: { yaw: { v: 25, kf: [{ i: 'k1', t: 1, v: 45 }], expr: null } },
+          data: { objects: [{ id: 'cube' }], unsafe: Number.NaN, constructor: { polluted: true } }
+        }
+      }]
+    };
+    const { PM } = appRegistry(true, bootProject);
+    const layer = PM.proj.layers[0];
+    expect(layer.d).toMatchObject({
+      definition: 'vendor.scene', version: 2, w: 800, h: 600,
+      params: { yaw: { v: 25, kf: [{ t: 1, v: 45 }] } },
+      data: { objects: [{ id: 'cube' }], unsafe: null }
+    });
+    expect(Object.hasOwn(layer.d.data, 'constructor')).toBe(false);
+  });
+
   it('saves named projects with an identity, preserves dirty state through autosave, and supports Save As', async () => {
     const { PM, timers } = appRegistry();
     const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));

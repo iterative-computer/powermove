@@ -8,7 +8,8 @@ const electronMocks = vi.hoisted(() => ({
   on: vi.fn(),
   removeListener: vi.fn(),
   send: vi.fn(),
-  sendSync: vi.fn()
+  sendSync: vi.fn(),
+  getPathForFile: vi.fn()
 }));
 
 vi.mock('electron', () => ({
@@ -23,7 +24,8 @@ vi.mock('electron', () => ({
     removeListener: electronMocks.removeListener,
     send: electronMocks.send,
     sendSync: electronMocks.sendSync
-  }
+  },
+  webUtils: { getPathForFile: electronMocks.getPathForFile }
 }));
 
 await import('./index');
@@ -94,6 +96,13 @@ describe('preload bridge', () => {
     expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(IPC.codexEvent, listener);
   });
 
+  it('sends steering over its dedicated IPC channel', async () => {
+    electronMocks.invoke.mockResolvedValue({ accepted: true });
+    const steering = { id: 'request-1234', prompt: 'Continue with softer edges', images: [] };
+    await expect(bridge().codex.steer(steering)).resolves.toEqual({ accepted: true });
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexSteer, steering);
+  });
+
   it('strips Electron event objects and returns working unsubscribes', () => {
     const onStoreError = vi.fn();
     const stopStore = bridge().store.onError(onStoreError);
@@ -117,6 +126,26 @@ describe('preload bridge', () => {
     electronMocks.sendSync.mockReturnValue({ theme: 'dark' });
     expect(bridge().store.snapshotSync()).toEqual({ theme: 'dark' });
     expect(electronMocks.sendSync).toHaveBeenCalledExactlyOnceWith(IPC.storeSnapshotSync);
+  });
+
+  it('resolves selected media paths only in preload and reads proxies in bounded requests', async () => {
+    const file = { name: 'source.mov' } as File;
+    const created = { ok: true, token: 'a'.repeat(32), type: 'video/quicktime', size: 12 } as const;
+    const bytes = new Uint8Array([1, 2, 3]);
+    electronMocks.getPathForFile.mockReturnValue('/Users/editor/source.mov');
+    electronMocks.invoke.mockResolvedValueOnce(created).mockResolvedValueOnce(bytes).mockResolvedValueOnce(undefined);
+
+    await expect(bridge().media.createPlaybackProxy(file)).resolves.toEqual(created);
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, IPC.mediaProxyCreate, {
+      sourcePath: '/Users/editor/source.mov',
+      name: 'source.mov'
+    });
+    await expect(bridge().media.readPlaybackProxy('a'.repeat(32), 4, 3)).resolves.toEqual(bytes);
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(2, IPC.mediaProxyRead, {
+      token: 'a'.repeat(32), offset: 4, length: 3
+    });
+    await bridge().media.releasePlaybackProxy('a'.repeat(32));
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(3, IPC.mediaProxyRelease, 'a'.repeat(32));
   });
 
   it('exposes ChatGPT status, connect, disconnect, and sanitized status events', async () => {

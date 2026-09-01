@@ -166,12 +166,14 @@
     // (shader uniforms/effect parameters) selected only through their menu.
     if (property) return;
     PM.sel.chan = channel;
+    PM.TL?.focusGraph?.(layer, channel);
     PM.TL?.reveal?.(layer, channels);
   }
 
   function showGraphEditor(): void {
     PM.sel.chan = channel;
     if (PM.TL) PM.TL.graph = true;
+    PM.TL?.focusGraph?.(layer, channel);
     PM.TL?.reveal?.(layer, channels);
   }
 

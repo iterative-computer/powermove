@@ -160,10 +160,19 @@ function layerLists(project: any) {
   return lists.filter(Array.isArray);
 }
 
+function layerAssetId(layer: any) {
+  return layer?.d?.asset || (layer?.type === 'extension' ? layer?.d?.data?.assetId : null) || null;
+}
+
+function replaceLayerAssetId(layer: any, assetId: any) {
+  if (layer?.d?.asset) layer.d.asset = assetId;
+  else if (layer?.type === 'extension' && layer?.d?.data?.assetId) layer.d.data.assetId = assetId;
+}
+
 function referenceCount(project: any, assetId: any) {
   let count: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
-    if (layer && layer.d && layer.d.asset === assetId) count++;
+    if (layerAssetId(layer) === assetId) count++;
   }));
   return count;
 }
@@ -174,7 +183,7 @@ function removeAsset(project: any, assetId: any) {
   layerLists(project).forEach((layers: any) => {
     for (let index: any = layers.length - 1; index >= 0; index--) {
       const layer: any = layers[index];
-      if (layer && layer.d && layer.d.asset === assetId) {
+      if (layerAssetId(layer) === assetId) {
         removedLayerIds.push(layer.id);
         layers.splice(index, 1);
       }
@@ -217,7 +226,7 @@ function coalesce(project: any, canonicalId: any, aliases: any) {
   const retired: any = new Set(aliases.filter((id: any) => id && id !== canonicalId));
   let changed: any = 0;
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
-    if (layer && layer.d && retired.has(layer.d.asset)) { layer.d.asset = canonicalId; changed++; }
+    if (retired.has(layerAssetId(layer))) { replaceLayerAssetId(layer, canonicalId); changed++; }
   }));
   retired.forEach((id: any) => { if (project.assets && project.assets[id]) delete project.assets[id]; });
   return changed;

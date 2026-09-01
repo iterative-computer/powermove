@@ -9,6 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "dist:mac": "electron-vite build && electron-builder --mac",
+    "dist:release": "node scripts/release-mac.mjs",
     "preview": "electron-vite preview",
     "test:e2e": "playwright test",
     "typecheck": "svelte-check --tsconfig ./tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",

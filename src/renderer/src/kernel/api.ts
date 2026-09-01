@@ -9,7 +9,7 @@
 
 import type { Component } from 'svelte';
 import type { Project } from '../core/types/project';
-import type { EditCommand, EditMeta, EditResult } from '../core/types/commands';
+import type { EditCommand, EditMeta, EditResult, JsonObject } from '../core/types/commands';
 import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionScope } from '../../../shared/extensions';
 
 export type { Project, EditCommand, EditMeta, EditResult, ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionScope };
@@ -180,6 +180,68 @@ export interface TransitionsAPI {
   get(id: string): TransitionDefinition | undefined;
 }
 
+/* ── structured extension layers ────────────────────────── */
+
+/**
+ * A programmable renderer paired with a structured `.pmv` layer instance.
+ * Version 1 supports fragment renderers; future renderer kinds can be added
+ * without changing the persisted layer shape.
+ */
+export interface ExtensionLayerDefinition {
+  id: string;
+  label: string;
+  version: number;
+  icon?: string;
+  color?: string;
+  width?: number;
+  height?: number;
+  params: EffectParamDefinition[];
+  defaults?: JsonObject;
+  renderer: {
+    kind: 'fragment';
+    /** Full GLSL `void main()` body. Powermove supplies its standard layer preamble and `u_<param>` uniforms. */
+    fragment: string;
+  } | {
+    kind: 'mesh';
+    /** Key inside layer `data` containing the durable model asset id. */
+    assetField: string;
+  };
+}
+
+export interface ExtensionLayersAPI {
+  register(definition: ExtensionLayerDefinition): Disposable;
+  list(): ExtensionLayerDefinition[];
+  get(id: string): ExtensionLayerDefinition | undefined;
+}
+
+/* ── durable project assets ─────────────────────────────── */
+
+export interface AssetRecord {
+  id: string;
+  name: string;
+  kind: string;
+  type?: string;
+  size?: number;
+  w?: number;
+  h?: number;
+  dur?: number;
+  format?: string;
+  vertices?: number;
+  triangles?: number;
+  layerDefinition?: string;
+  [key: string]: unknown;
+}
+
+export interface AssetsAPI {
+  /** Open the system file picker. A cancellation resolves to an empty array. */
+  pick(options?: { accept?: string; multiple?: boolean }): Promise<File[]>;
+  /** Import into Powermove's durable project media store. The file remains after layer Undo. */
+  import(file: File, options?: { layerDefinition?: string }): Promise<AssetRecord>;
+  get(id: string): AssetRecord | undefined;
+  /** Read a text asset from the live cache or durable media store (64 MB maximum). */
+  readText(id: string): Promise<string>;
+}
+
 /* ── themes ──────────────────────────────────────────────── */
 
 export interface ThemeDefinition {
@@ -321,7 +383,7 @@ export interface ControlsAPI {
 
 export interface UIAPI {
   readonly controls: ControlsAPI;
-  toast(text: string, opts?: { sticky?: boolean }): void;
+  toast(text: string, opts?: { sticky?: boolean; dismissible?: boolean; icon?: string }): void;
   confirm(title: string, body?: string): Promise<boolean>;
   menu(anchor: HTMLElement | { x: number; y: number }, items: MenuContribution[]): void;
   modal(opts: { title?: string; body?: HTMLElement | string; width?: number; actions?: Array<{ label: string; pri?: boolean; run?: () => unknown }> }): { close(): void; body: HTMLElement };
@@ -404,6 +466,8 @@ export interface PowermoveAPI {
   readonly keybindings: KeybindingsAPI;
   readonly effects: EffectsAPI;
   readonly transitions: TransitionsAPI;
+  readonly layers: ExtensionLayersAPI;
+  readonly assets: AssetsAPI;
   readonly theme: ThemeAPI;
   readonly palette: PaletteAPI;
   readonly menus: MenusAPI;

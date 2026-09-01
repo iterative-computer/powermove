@@ -11,6 +11,8 @@
     h?: number;
     dur?: number;
     size?: number;
+    vertices?: number;
+    triangles?: number;
   }
 
   let { panelId }: PanelProps = $props();
@@ -66,12 +68,13 @@
     const parts: string[] = [];
     if (asset.kind !== 'audio' && asset.w && asset.h) parts.push(`${asset.w}×${asset.h}`);
     if (asset.dur) parts.push(mediaDuration(asset.dur));
+    if (asset.kind === 'model' && asset.triangles) parts.push(`${asset.triangles.toLocaleString()} tris`);
     if (asset.size) parts.push(mediaSize(asset.size));
     return parts.join(' · ') || 'Ready to use';
   }
 
   function assetIcon(kind: string): string {
-    return kind === 'audio' ? 'music' : kind === 'video' ? 'film' : 'image';
+    return kind === 'audio' ? 'music' : kind === 'video' ? 'film' : kind === 'model' ? 'grid' : 'image';
   }
 
   function liveAsset(asset: Asset): Record<string, any> | undefined {
@@ -256,13 +259,15 @@
 
   /* Selection is temporary ownership: preserve it only while the next press
      is inside the currently selected card. Capture runs before timeline drags
-     and project-tab handlers, so the preview disappears at pointerdown. */
+     and project-tab handlers, so the preview disappears at pointerdown.
+     The source monitor itself is part of that ownership — its transport and
+     close button must survive the press that reaches them. */
   function handleWindowPointerDown(event: PointerEvent): void {
     if (!selectedAssetId) return;
     const target = event.target;
-    const card = target instanceof Element
-      ? target.closest<HTMLElement>('.asset-card[data-asset-id]')
-      : null;
+    if (!(target instanceof Element)) { clearSelection(); return; }
+    if (target.closest('#source-preview')) return;
+    const card = target.closest<HTMLElement>('.asset-card[data-asset-id]');
     if (card?.dataset.assetId === selectedAssetId) return;
     clearSelection();
   }
@@ -274,6 +279,7 @@
   }
 
   function previewToggle(asset: Asset): void {
+    if (asset.kind === 'model') { status = `${asset.name} is a 3D model`; return; }
     const preview = PM.Viewer?.preview;
     if (!preview) { status = 'Source preview is unavailable'; return; }
     preview.toggle(asset.id);

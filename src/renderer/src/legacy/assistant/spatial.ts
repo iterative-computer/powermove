@@ -24,6 +24,7 @@ const loadRippleModule = () => {
 /* The native Codex client owns ChatGPT authentication. This bridge only moves a
    prompt and a strict JSON schema across WKWebView; no account secret enters JS. */
 const pending: any = new Map();
+let activeCodexRequestId: any = null;
 function codexAbortError(message: any = 'The previous agent run was replaced') {
   const error: any = new Error(message); error.name = 'AbortError'; return error;
 }
@@ -38,6 +39,7 @@ PM.CodexBridge = {
       const settle: any = (error: any) => {
         const job: any = pending.get(id); if (!job) return;
         pending.delete(id); window.clearTimeout(job.timer);
+        if (activeCodexRequestId === id) activeCodexRequestId = null;
         job.signal?.removeEventListener('abort', job.abort);
         stopNative(); reject(error);
       };
@@ -45,6 +47,7 @@ PM.CodexBridge = {
       const timeout: any = Math.max(30_000, Math.min(Number(options.timeoutMs) || 120_000, 3_600_000));
       const timer: any = window.setTimeout(() => settle(new Error('The coding agent took too long to respond')), timeout);
       pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress, onTrace: options.onTrace, mode: options.mode });
+      activeCodexRequestId = id;
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
       bridge.postMessage({
@@ -58,9 +61,23 @@ PM.CodexBridge = {
       });
     });
   },
+  async steer(prompt: any, images: any = []) {
+    const id: any = activeCodexRequestId;
+    const bridge: any = (window as any).webkit?.messageHandlers?.pmCodexSteer;
+    if (!id || !pending.has(id) || !bridge) return false;
+    return await new Promise((resolve: any) => {
+      const replyId: any = PM.uid('spatial-steer-');
+      const timer: any = window.setTimeout(() => {
+        pendingSteering.delete(replyId); resolve(false);
+      }, 30_000);
+      pendingSteering.set(replyId, { resolve, timer });
+      bridge.postMessage({ replyId, id, prompt, images: images.slice(0, 6) });
+    });
+  },
   resolve(id: any, result: any) {
     const job: any = pending.get(id); if (!job) return;
     pending.delete(id); window.clearTimeout(job.timer);
+    if (activeCodexRequestId === id) activeCodexRequestId = null;
     job.signal?.removeEventListener('abort', job.abort);
     let text: any = '';
     try {
@@ -87,6 +104,12 @@ PM.CodexBridge = {
     const job: any = pending.get(id); if (!job || typeof job.onTrace !== 'function') return;
     job.onTrace(step);
   },
+};
+
+const pendingSteering: any = new Map();
+PM.CodexBridge.resolveSteer = (replyId: any, accepted: any) => {
+  const job: any = pendingSteering.get(replyId); if (!job) return;
+  pendingSteering.delete(replyId); window.clearTimeout(job.timer); job.resolve(accepted === true);
 };
 
 const artifactPending: any = new Map();
@@ -1408,6 +1431,40 @@ async function sendRequest(input: any) {
   const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
   const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;
   const steering: any = S.phase === 'working';
+  if (steering) {
+    const steeringAttachments: any = S.attachments.splice(0);
+    const steeringMessage: any = {
+      role: 'user', text: typedRequest || `Attached ${steeringAttachments.length} file${steeringAttachments.length === 1 ? '' : 's'}`,
+      steering: true,
+      attachments: steeringAttachments.map((item: any) => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })),
+      entering: true,
+    };
+    S.conversation.push(steeringMessage);
+    S.composerDraft = '';
+    S.uiPlacement = null;
+    S.activity = 'Updating the run with your direction…';
+    threads.active.updatedAt = Date.now();
+    persistThreads();
+    PM.AgentUI?.update({ focusComposer: true, flush: true });
+    const attachmentContext: any = steeringAttachments.map((item: any) => ({
+      name: item.name,
+      type: item.type,
+      content: item.content ? String(item.content).slice(0, 30_000) : undefined,
+    }));
+    const steeringImages: any = steeringAttachments
+      .filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl).slice(0, 6);
+    const accepted: any = await PM.CodexBridge.steer(
+      `${request}\n\nThis is new direction for the active run. Incorporate it into the same final editable result.\n\nATTACHED FILES\n${JSON.stringify(attachmentContext)}`,
+      steeringImages,
+    );
+    if (accepted) return;
+
+    /* Providers without a live steering transport keep the established
+       replace-and-resume behavior. Remove the optimistic turn first so the
+       fallback adds it exactly once. */
+    if (S.conversation.at(-1) === steeringMessage) S.conversation.pop();
+    S.attachments.unshift(...steeringAttachments);
+  }
   const previousRequest: any = S.activeRequest;
   const token: any = ++S.requestToken;
   const controller: any = new window.AbortController();
@@ -1421,6 +1478,7 @@ async function sendRequest(input: any) {
   const firstUserRequest = !S.conversation.some((message: any) => message.role === 'user');
   S.conversation.push({
     role: 'user', text: typedRequest || `Attached ${S.requestAttachments.length} file${S.requestAttachments.length === 1 ? '' : 's'}`,
+    steering,
     focusLabels: focus.panels.map(panel => panel.title),
     attachments: S.requestAttachments.map((item: any) => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })), entering: true,
   });

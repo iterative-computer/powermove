@@ -11,6 +11,8 @@ export interface AgentOption {
 export interface AgentMessage {
   role: 'user' | 'assistant' | 'trace';
   text?: string;
+  /** A user follow-up sent while the current run was still active. */
+  steering?: boolean;
   /** role 'trace': the sealed activity steps of a completed run. */
   steps?: TraceStep[];
   attachments?: Array<Record<string, any> | string>;

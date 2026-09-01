@@ -5,6 +5,8 @@ export type OverlayPM = PMRegistry;
 export type ToastOptions = {
   sticky?: boolean;
   dismissible?: boolean;
+  /** Prefer a Powermove icon name. When omitted, the toast message selects one. */
+  icon?: string;
 };
 
 export type MenuAction = {

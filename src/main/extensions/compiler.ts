@@ -2,8 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile, lstat } from 'node:fs/promises';
 import path from 'node:path';
 
-import * as esbuild from 'esbuild';
+import type { Loader, Plugin } from 'esbuild';
 import { EXTENSION_ID, isSafeEntry, MANIFEST_LIMITS } from '../../shared/extensions';
+import { loadEsbuild } from './esbuild-binary';
 
 export type CompileExtensionResult =
   | { ok: true; bundlePath: string; hash: string }
@@ -57,7 +58,7 @@ function isRuntimeImport(specifier: string): boolean {
   return specifier === 'powermove' || specifier === 'svelte' || specifier.startsWith('svelte/');
 }
 
-function sourceLoader(file: string): esbuild.Loader {
+function sourceLoader(file: string): Loader {
   if (file.endsWith('.svelte.ts')) return 'ts';
   if (file.endsWith('.svelte.js')) return 'js';
   if (file.endsWith('.ts')) return 'ts';
@@ -104,6 +105,7 @@ async function runtimeModule(specifier: string): Promise<string> {
 /** Compile a user or project extension into one browser ESM bundle. */
 export async function compileExtension({ dir, entry, outDir }: CompileExtensionOptions): Promise<CompileExtensionResult> {
   try {
+    const esbuild = await loadEsbuild();
     const id = path.basename(path.resolve(dir));
     if (!EXTENSION_ID.test(id)) throw new Error(`Invalid extension id: ${id}`);
     if (!isSafeEntry(entry)) throw new Error('Entry must be a relative .ts, .js, or .mjs source path');
@@ -142,7 +144,7 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
       throw new Error(`Could not resolve source import: ${specifier}`);
     };
 
-    const plugin: esbuild.Plugin = {
+    const plugin: Plugin = {
       name: 'powermove-extension-boundary',
       setup(build) {
         build.onResolve({ filter: /.*/ }, async (args) => {

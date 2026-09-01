@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Workspace } from '../../layout/model';
 import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions, UI_PLACEMENT_PREFIX } from './ui-placement';
-import { ghostRect } from './ui-placement-geometry';
+import { ghostRect, ghostRowCount, ghostSlotIndex } from './ui-placement-geometry';
 
 const workspace: Workspace = { layout: { docks: [
   { id: 'center', panels: [{ id: 'viewer' }, { id: 'timeline' }] },
@@ -51,16 +51,36 @@ describe('early UI placement', () => {
 
 describe('ghost placement geometry', () => {
   const target = { left: 200, top: 50, width: 300, height: 500 };
-  it('insets a panel without changing its layout', () => {
-    expect(ghostRect(panel, target)).toEqual({ left: 205, top: 55, width: 290, height: 490 });
-  });
-  it('shows new panels at the dock end or just before the announced panel', () => {
-    expect(ghostRect(dock, target)).toEqual({ left: 205, top: 397, width: 290, height: 148 });
-    expect(ghostRect(dock, target, { ...target, top: 230 })).toEqual({ left: 205, top: 230, width: 290, height: 148 });
+  it('insets a live panel without changing its layout', () => {
+    expect(ghostRect(target)).toEqual({ left: 205, top: 55, width: 290, height: 490 });
   });
   it('fits small areas and rejects hidden/non-finite geometry', () => {
-    expect(ghostRect(dock, { ...target, height: 45 })?.height).toBe(35);
-    expect(ghostRect(panel, { ...target, width: 0 })).toBeNull();
-    expect(ghostRect(panel, { ...target, top: NaN })).toBeNull();
+    expect(ghostRect({ ...target, height: 45 })?.height).toBe(35);
+    expect(ghostRect({ ...target, width: 0 })).toBeNull();
+    expect(ghostRect({ ...target, top: NaN })).toBeNull();
+  });
+  it('holds the slot the new panel was announced for', () => {
+    const panels = ['inspector', 'library'];
+    expect(ghostSlotIndex(dock, 'right', panels)).toBe(2);
+    expect(ghostSlotIndex({ ...dock, beforePanelId: 'inspector' }, 'right', panels)).toBe(0);
+    expect(ghostSlotIndex({ ...dock, beforePanelId: 'library' }, 'right', panels)).toBe(1);
+  });
+  it('claims no slot in another dock, for an existing panel, or without a placement', () => {
+    expect(ghostSlotIndex(dock, 'center', ['viewer'])).toBeNull();
+    expect(ghostSlotIndex(panel, 'right', ['timeline'])).toBeNull();
+    expect(ghostSlotIndex(null, 'right', [])).toBeNull();
+    // A panel that has since been popped out or closed sends the ghost to the end.
+    expect(ghostSlotIndex({ ...dock, beforePanelId: 'inspector' }, 'right', ['library'])).toBe(1);
+  });
+
+  it('fills the space it was given with skeleton rows', () => {
+    // 6px rows on an 11px rhythm: three fit in 40px, a fourth needs 57px.
+    expect(ghostRowCount(40)).toBe(3);
+    expect(ghostRowCount(56)).toBe(3);
+    expect(ghostRowCount(57)).toBe(4);
+    // A tall panel fills without an unbounded row count.
+    expect(ghostRowCount(4000)).toBe(24);
+    expect(ghostRowCount(0)).toBe(0);
+    expect(ghostRowCount(NaN)).toBe(0);
   });
 });

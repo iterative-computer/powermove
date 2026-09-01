@@ -10,7 +10,20 @@ import {
   type KeyframeMoveSnapshotItem,
 } from './timeline';
 import { expandScaleKeyIds, timelineProperties } from './property-tracks';
-import { moveBezierHandle, visibleBezierHandle } from './bezier-drag';
+import {
+  keysForBezierHandleDrag,
+  materializeLinearBezierSegment,
+  mirroredBezierHandlePoint,
+  moveBezierHandle,
+  visibleBezierHandle,
+} from './bezier-drag';
+import {
+  graphSelectionBounds,
+  planGraphKeyframeMove,
+  pointInGraphSelection,
+  resolveGraphTarget,
+  selectionAfterMarquee,
+} from './graph-selection';
 import { makePM } from '../../renderer/src/legacy/__tests__/make-pm';
 
 function timelineRegistry(): Record<string, any> {
@@ -79,6 +92,52 @@ describe('timeline runtime', () => {
     expect(visibleBezierHandle(b, a, 'ei')).toEqual([2 / 3, 2 / 3]);
     expect(a.eo).toEqual([0, 0]);
     expect(b.ei).toEqual([1, 1]);
+  });
+
+  it('materializes both linear handles before editing so neither point can disappear', () => {
+    const previous = { eo: [0, 0] as [number, number], ei: [1, 1] as [number, number] };
+    const next = { eo: [0, 0] as [number, number], ei: [1, 1] as [number, number] };
+    expect(materializeLinearBezierSegment(previous, next)).toBe(true);
+    expect(previous.eo).toEqual([1 / 3, 1 / 3]);
+    expect(next.ei).toEqual([2 / 3, 2 / 3]);
+    previous.eo = [.45, .1];
+    expect(materializeLinearBezierSegment(previous, next)).toBe(false);
+    expect(next.ei).toEqual([2 / 3, 2 / 3]);
+  });
+
+  it('rotates a continuous opposite handle while preserving its influence', () => {
+    const mirrored = mirroredBezierHandlePoint([100, 100], [130, 140], [80, 100]);
+    expect(Math.hypot(mirrored[0] - 100, mirrored[1] - 100)).toBeCloseTo(20);
+    expect((mirrored[0] - 100) * 30 + (mirrored[1] - 100) * 40).toBeCloseTo(-1000);
+  });
+
+  it('builds an AE-style transform box and toggles Shift-marquee selection', () => {
+    const bounds = graphSelectionBounds([{ id: 'a', x: 20, y: 30 }, { id: 'b', x: 80, y: 60 }]);
+    expect(bounds).toEqual({ x0: 20, y0: 30, x1: 80, y1: 60 });
+    expect(pointInGraphSelection(bounds, 50, 45)).toBe(true);
+    expect(selectionAfterMarquee(['a', 'b'], ['b', 'c'], true)).toEqual(['a', 'c']);
+    expect(selectionAfterMarquee(['a'], ['b', 'b'], false)).toEqual(['b']);
+  });
+
+  it('keeps the focused curve when another layer strip is selected', () => {
+    const focused = { kind: 'prop', key: 'opacity', L: { id: 'layer-a' }, prop: { kf: [{ i: 'a' }] } };
+    const other = { kind: 'prop', key: 'opacity', L: { id: 'layer-b' }, prop: { kf: [{ i: 'b' }] } };
+
+    expect(resolveGraphTarget(
+      [focused, other],
+      { layerId: 'layer-a', trackKey: 'opacity' },
+      ['layer-b'],
+      row => row.key === 'opacity',
+    )).toBe(focused);
+  });
+
+  it('adjusts every selected Bézier handle while preserving unselected handles', () => {
+    const first = { i: 'first', t: 0 };
+    const second = { i: 'second', t: 1 };
+    const third = { i: 'third', t: 2 };
+
+    expect(keysForBezierHandleDrag([first, second, third], first, ['first', 'second'])).toEqual([first, second]);
+    expect(keysForBezierHandleDrag([first, second, third], third, ['first', 'second'])).toEqual([third]);
   });
 
   it('labels every clip except audio, which shows its waveform alone', () => {
@@ -293,5 +352,16 @@ describe('keyframe move planning', () => {
     expect(plan.removed).toEqual([]);
     expect(applyKeyframeMovePlan([selected, overlap], plan).map((item) => item.id))
       .toEqual(['selected', 'overlap']);
+  });
+
+  it('moves a graph selection together without deleting an occupied key', () => {
+    const first = key('first', 'opacity', 1, true);
+    const second = key('second', 'opacity', 2, true);
+    const occupied = key('occupied', 'opacity', 4);
+    const plan = planGraphKeyframeMove([first, second, occupied], 3, 10);
+
+    expect(plan.delta).toBe(1.9);
+    expect(plan.moves.map(move => move.time)).toEqual([2.9, 3.9]);
+    expect(plan.removed).toEqual([]);
   });
 });

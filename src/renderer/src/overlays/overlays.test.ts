@@ -17,6 +17,12 @@ function registry(): Record<string, any> {
     clamp: (value: number, minimum: number, maximum: number) => Math.min(Math.max(value, minimum), maximum),
     commands,
     proj: { layers: [{ id: 'layer-1', name: 'Hero title' }] },
+    ICONS: {
+      undo: '<path/>', redo: '<path/>', x: '<path/>', trash: '<path/>', export: '<path/>',
+      project: '<path/>', layers: '<path/>', plus: '<path/>', hand: '<path/>', cursor: '<path/>',
+      eye: '<path/>', music: '<path/>', film: '<path/>', image: '<path/>', panel: '<path/>',
+      sparkle: '<path/>', note: '<path/>', missing: '<path/>'
+    },
     WS: {
       list: vi.fn(() => [{ id: 'edit', name: 'Editing' }]),
       activate: vi.fn()
@@ -389,9 +395,18 @@ describe('installSvelteOverlays', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it('queues, fades, auto-dismisses, and permits dismissing error toasts', () => {
+  it('replaces the visible toast, uses matching icons, fades, and permits dismissing errors', () => {
     vi.useFakeTimers();
-    PM.toast('Saved', 100);
+    PM.toast('Undo · Position X', 100);
+    flushSync();
+    expect(document.querySelectorAll('.toast')).toHaveLength(1);
+    expect(document.querySelector('.toast [data-icon="undo"]')).toBeTruthy();
+
+    PM.toast('Redo · Position X', 100);
+    flushSync();
+    expect(document.querySelectorAll('.toast')).toHaveLength(1);
+    expect(document.querySelector('.toast [data-icon="redo"]')).toBeTruthy();
+
     PM.toast('Save failed', 5000);
     flushSync();
 
@@ -399,12 +414,16 @@ describe('installSvelteOverlays', () => {
     expect(target.getAttribute('role')).toBe('status');
     expect(target.getAttribute('aria-live')).toBe('polite');
     expect((target as HTMLElement).style.zIndex).toBe('402');
-    expect(document.querySelectorAll('.toast')).toHaveLength(2);
+    expect(document.querySelectorAll('.toast')).toHaveLength(1);
+    expect(document.querySelector('.toast [data-icon="x"]')).toBeTruthy();
     expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(false);
     document.querySelector<HTMLButtonElement>('.toast[data-toast-error="true"] button')?.click();
     flushSync();
-    expect(document.querySelectorAll('.toast')).toHaveLength(1);
+    expect(document.querySelector('.toast')).toBeNull();
 
+    PM.toast('Saved project', 100);
+    flushSync();
+    expect(document.querySelector('.toast [data-icon="export"]')).toBeTruthy();
     vi.advanceTimersByTime(100);
     flushSync();
     expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(true);

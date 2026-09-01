@@ -16,6 +16,26 @@ describe('portable project media', () => {
     expect(new Uint8Array(await restored!.arrayBuffer())).toEqual(original);
   });
 
+  it('embeds an OBJ asset while keeping expanded geometry out of structured layer source', async () => {
+    const source = 'v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n';
+    const document = { proj: {
+      layers: [{ id: 'mesh', type: 'extension', d: { definition: 'example.obj', data: { assetId: 'obj' }, params: {} } }],
+      assets: { obj: { id: 'obj', name: 'triangle.obj', kind: 'model', format: 'obj', triangles: 1 } },
+    } };
+    const packed = await packProjectFile(document, {
+      get: async () => new Blob([source], { type: 'model/obj' }), put: async () => true
+    });
+    const unpacked = unpackProjectFile(packed);
+    expect(unpacked.proj.layers[0].d.data).toEqual({ assetId: 'obj' });
+    expect(JSON.stringify(unpacked.proj.layers[0])).not.toContain('positions');
+    let restored = '';
+    await restoreProjectFileMedia(unpacked, {
+      get: async () => null,
+      put: async (_id, blob) => { restored = await blob.text(); return true; }
+    });
+    expect(restored).toBe(source);
+  });
+
   it('restores a video-sized payload without overflowing the regex stack', async () => {
     const put = vi.fn(async (_id: string, _blob: Blob, _metadata: unknown) => true);
     const data = 'AAAA'.repeat(5_000_000);

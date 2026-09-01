@@ -10,6 +10,8 @@
  * install) rather than throwing and taking the app down with it.
  */
 import type {
+  AssetRecord,
+  AssetsAPI,
   ControlsAPI,
   Disposable,
   EditCommand,
@@ -166,6 +168,49 @@ function makeStorage(PM: LegacyPM): (id: string) => StorageAPI {
   });
 }
 
+function makeAssets(PM: LegacyPM): AssetsAPI {
+  return {
+    pick: (options = {}) => new Promise<File[]>((resolve, reject) => {
+      const input = window.document.createElement('input');
+      input.type = 'file';
+      input.accept = options.accept ?? '';
+      input.multiple = options.multiple === true;
+      input.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none';
+      let settled = false;
+      const finish = (files: File[]) => {
+        if (settled) return;
+        settled = true;
+        input.remove();
+        resolve(files);
+      };
+      input.addEventListener('change', () => finish(Array.from(input.files ?? [])), { once: true });
+      input.addEventListener('cancel', () => finish([]), { once: true });
+      window.document.body.appendChild(input);
+      try { input.click(); }
+      catch (error) { input.remove(); reject(error); }
+    }),
+    import: async (file, options = {}) => {
+      if (!(file instanceof File)) throw new Error('assets.import requires a File');
+      const live = await PM?.assets?.add?.(file, { layerDefinition: options.layerDefinition });
+      if (!live?.id) throw new Error(`Could not import ${file.name || 'asset'}`);
+      return (PM?.proj?.assets?.[live.id] ?? {
+        id: live.id, name: live.name, kind: live.kind, size: live.size
+      }) as AssetRecord;
+    },
+    get: (id) => PM?.proj?.assets?.[id] as AssetRecord | undefined,
+    readText: async (id) => {
+      const meta = PM?.proj?.assets?.[id];
+      if (!meta) throw new Error(`Asset not found: ${id}`);
+      const live = PM?.assets?.get?.(id);
+      if (typeof live?.sourceText === 'string') return live.sourceText;
+      const blob = live?.blob instanceof Blob ? live.blob : await PM?.MediaStore?.get?.(meta);
+      if (!(blob instanceof Blob)) throw new Error(`Asset data is missing: ${meta.name || id}`);
+      if (blob.size > 64 * 1024 * 1024) throw new Error('Text asset is larger than 64 MB');
+      return blob.text();
+    }
+  };
+}
+
 /**
  * Panel visibility, expressed the way the legacy shell expresses it: the
  * workspace owns which panels are mounted, so open/close go through
@@ -238,6 +283,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     state: { doc, sel, transport, perf },
     ui: makeUI(PM),
     project: makeProject(PM),
+    assets: makeAssets(PM),
     storage: makeStorage(PM),
     extensions: makeExtensionsAPI(PM, bridge, () => box.loader),
     panelsBackend: makePanelsBackend(PM, kernel),
@@ -261,6 +307,32 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
 
   const signals = installKernelSignals(kernel);
   subscriptions.push(() => signals.dispose());
+
+  /* Structured extension layers keep only definition ids and editable values
+     in the project. The live renderer definition comes from the registry, so
+     disable/reload can never erase project data. */
+  PM.layerDefinition = (id: string) => kernel.layerTypes.get(id);
+  const layerTypesChanged = kernel.layerTypes.onChange((change) => {
+    const definition = kernel.layerTypes.get(change.id);
+    if (definition) {
+      const containers = [PM?.proj, ...Object.values(PM?.proj?.comps ?? {})] as Array<Record<string, any> | undefined>;
+      for (const container of containers) for (const layer of container?.layers ?? []) {
+        if (layer?.type !== 'extension' || layer?.d?.definition !== change.id) continue;
+        layer.d.params = layer.d.params && typeof layer.d.params === 'object' ? layer.d.params : {};
+        for (const param of definition.params) {
+          if (!layer.d.params[param.k] || typeof layer.d.params[param.k] !== 'object') {
+            layer.d.params[param.k] = PM?.P?.(param.def) ?? { v: param.def, kf: [], expr: null };
+          }
+        }
+      }
+      PM?.ProjectIndex?.invalidateKeyframes?.();
+    }
+    PM?.GL?.dropPrograms?.(`extension:${change.id}:`);
+    PM?.bus?.emit?.('layers');
+    PM?.invalidate?.('render');
+    PM?.Inspector?.refresh?.();
+  });
+  subscriptions.push(() => layerTypesChanged.dispose());
 
   /* Themes: the kernel owns which theme is active and paints it; legacy
      `PM.theme` (app.ts) still owns the light/dark preference and its

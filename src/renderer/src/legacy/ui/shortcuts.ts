@@ -103,6 +103,17 @@ def('toolHand', 'Hand tool', 'H', () => PM.setTool('hand'), 'Tool');
 def('toolZoom', 'Zoom tool', 'Z', () => PM.setTool('zoom'), 'Tool');
 PM.commandForAsset = (id?: any, at: any = PM.time) => {
   const a: any = PM.proj.assets[id]; if (!a) return;
+  if (a.kind === 'model') {
+    const definition = a.layerDefinition || 'powermove.3d.obj-model';
+    if (!PM.layerDefinition?.(definition)) return;
+    return {
+      type: 'add_layer', layerType: 'extension', name: a.name,
+      from: PM.snapF(at, PM.proj.fps),
+      duration: Math.max(1 / PM.proj.fps, PM.proj.dur - at),
+      content: { definition, data: { assetId: id, objects: [{ id: 'model', assetId: id }] } },
+      select: true,
+    };
+  }
   const type: any = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
   const content: any = type === 'audio'
     ? { asset: id, trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 }
@@ -249,6 +260,7 @@ def('actualSize', 'Actual size', '⌘1', () => setViewerZoom(PM, 1), 'View');
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.open?.(), 'View');
+def('projectSettings', 'Project settings…', '⌘⇧,', () => PM.SettingsUI?.open?.('project'), 'File');
 def('save', 'Save project', '⌘S', () => PM.saveProject(), 'File');
 def('saveAs', 'Save project as…', '⌘⇧S', () => PM.saveProject({ saveAs: true }), 'File');
 def('open', 'Open project…', '⌘O', () => PM.openProject(), 'File');

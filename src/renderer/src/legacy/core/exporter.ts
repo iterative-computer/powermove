@@ -1,4 +1,17 @@
 /* Ported from js/core/exporter.js — behavior-preserving. */
+import {
+  EXPORT_FORMAT_OPTIONS,
+  EXPORT_FRAME_RATES,
+  EXPORT_QUALITY_OPTIONS,
+  EXPORT_RANGE_OPTIONS,
+  EXPORT_SCALE_OPTIONS,
+  clampExportScale,
+  exportActionLabel,
+  exportBitrateMbps,
+  exportFieldSupport,
+  normalizeExportDefaults,
+  planExport
+} from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
 import { packProjectFile } from './project-file';
 
@@ -105,47 +118,132 @@ function muxWebM(frames: any, { width, height, fps, codecId = 'V_VP9', audio }: 
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
 
+/* The project owns its delivery settings; the legacy global store only seeds
+   projects saved before Settings › Project existed. */
+X.defaults = () => normalizeExportDefaults(
+  PM.proj?.exportDefaults || PM.store.get('exportOpts', {}), PM.proj?.fps);
+
 X.dialog = () => {
   const p: any = PM.proj;
-  const st: any = PM.store.get('exportOpts', {});
-  const opts: any = Object.assign({ format: 'webm', scale: 1, fps: p.fps, range: 'work', quality: 'high', mblur: true, name: p.name }, st);
-  const body: any = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } });
-  const mk: any = (label: any, ctl: any) => body.appendChild(PM.row(label, ctl));
+  const opts: any = Object.assign({}, X.defaults(), { name: p.name });
+  const body: any = h('div.export-form');
+  const rows: any = {};
+  const mk: any = (key: any, label: any, ctl: any) => {
+    const r: any = PM.row(label, ctl);
+    rows[key] = r;
+    body.appendChild(r);
+    return r;
+  };
+  /* toggleField's `label` is the undo-history label, not visible text, so the
+     affordance hints beside each switch are rendered here instead. A single
+     wrapper: PM.row takes one node, and h() reads a bare array as attributes. */
+  const withHint: any = (toggle: any, text: any) => h('div.export-toggle', toggle, h('span.export-hint', text));
   const hasWC: any = typeof window.VideoEncoder !== 'undefined';
+  const plan: any = () => planExport(opts, { w: p.w, h: p.h, dur: p.dur, work: p.work });
 
-  mk('Format', PM.selectField(() => opts.format, (v: any) => { opts.format = v; info(); },
-    [{ v: 'webm', label: hasWC ? 'WebM · VP9 (frame-exact)' : 'WebM · VP9' },
-     { v: 'rec', label: 'WebM · realtime capture' },
-     { v: 'png', label: 'PNG sequence' },
-     { v: 'still', label: 'Still frame (PNG)' },
-     { v: 'json', label: 'Project file (.pmv)' }]));
-  mk('Resolution', PM.selectField(() => opts.scale, (v: any) => { opts.scale = v; info(); },
-    [{ v: .5, label: 'Half · ' + (p.w / 2 | 0) + '×' + (p.h / 2 | 0) },
-     { v: 1, label: 'Full · ' + p.w + '×' + p.h },
-     { v: 2, label: '2× · ' + p.w * 2 + '×' + p.h * 2 }]));
-  mk('Frame rate', PM.selectField(() => opts.fps, (v: any) => { opts.fps = v; info(); }, [24, 25, 30, 50, 60].map((f: any) => ({ v: f, label: f + ' fps' }))));
-  mk('Range', PM.selectField(() => opts.range, (v: any) => { opts.range = v; info(); },
-    [{ v: 'work', label: 'Work area' }, { v: 'all', label: 'Full composition' }]));
-  mk('Quality', PM.selectField(() => opts.quality, (v: any) => { opts.quality = v; info(); },
-    [{ v: 'draft', label: 'Draft · 4 Mbps' }, { v: 'high', label: 'High · 16 Mbps' }, { v: 'max', label: 'Max · 40 Mbps' }]));
-  mk('Motion blur', PM.toggleField(() => opts.mblur, (v: any) => { opts.mblur = v; }));
-  const hasAudio: any = PM.Audio.hasAudibleLayers(p);
-  mk('Include audio', PM.toggleField(() => opts.audio !== false, (v: any) => { opts.audio = v; }, { label: hasAudio ? 'Mixes composition audio (WebM)' : 'No audio layers in this project' }));
-  mk('Transparent background', PM.toggleField(() => !!opts.alpha, (v: any) => { opts.alpha = v; }, { label: 'PNG / still only' }));
-  const nfo: any = h('div', { style: { fontSize: '11px', color: 'var(--tx-3)', padding: '10px 4px 0', lineHeight: 1.7, fontVariantNumeric: 'tabular-nums' } });
-  body.appendChild(nfo);
-  function info() {
-    const [a, b]: any = range(opts);
-    const n: any = Math.max(1, Math.round((b - a) * opts.fps));
-    const mbps: any = opts.quality === 'draft' ? 4 : opts.quality === 'high' ? 16 : 40;
-    nfo.textContent = `${n} frames · ${PM.round(b - a, 2)}s · ${Math.round(p.w * opts.scale)}×${Math.round(p.h * opts.scale)}\n` +
-      (opts.format === 'webm' || opts.format === 'rec' ? `≈ ${PM.round(mbps * (b - a) / 8, 1)} MB` : opts.format === 'png' ? `${n} PNG files` : '');
-  }
-  info();
-  const m: any = PM.modal({
-    title: 'Export', body, width: 460,
-    actions: [{ label: 'Cancel' }, { label: 'Export', pri: true, run: () => { PM.store.set('exportOpts', opts); run(opts); } }],
+  mk('format', 'Format', PM.selectField(() => opts.format, (v: any) => { opts.format = v; sync(); },
+    EXPORT_FORMAT_OPTIONS.map((o: any) => {
+      if (o.v === 'mp4') return { v: o.v, label: 'MP4 · H.264 (realtime)' };
+      if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
+      return { ...o };
+    })));
+
+  /* Resolution: the common multiples of the composition, or any pixel size.
+     Custom sizes keep the composition's aspect so nothing renders stretched. */
+  const CUSTOM: any = '__custom__';
+  const presetScales: any = EXPORT_SCALE_OPTIONS.map((o: any) => o.v);
+  let customOpen: any = !presetScales.includes(opts.scale);
+  const scaleField: any = PM.selectField(
+    () => (customOpen ? CUSTOM : opts.scale),
+    (v: any) => {
+      customOpen = v === CUSTOM;
+      if (!customOpen) opts.scale = v;
+      sync();
+    },
+    [
+      ...EXPORT_SCALE_OPTIONS.map((o: any) => ({
+        v: o.v, label: `${o.label} · ${Math.round(p.w * o.v)}×${Math.round(p.h * o.v)}`
+      })),
+      { v: CUSTOM, label: 'Custom size…' },
+    ]);
+  mk('scale', 'Resolution', scaleField);
+  const sizeInput: any = (aria: any) => h('input.export-size-input', {
+    type: 'number', min: '16', max: '8192', step: '2', 'aria-label': aria,
   });
+  const wIn: any = sizeInput('Export width in pixels');
+  const hIn: any = sizeInput('Export height in pixels');
+  const sizeRow: any = mk('size', 'Size', h('div.export-size', wIn, h('span', '×'), hIn));
+  const applyCustom: any = (fromWidth: any) => {
+    const typed: any = Number(fromWidth ? wIn.value : hIn.value);
+    if (!Number.isFinite(typed) || typed < 2) return sync();
+    const base: any = fromWidth ? p.w : p.h;
+    opts.scale = clampExportScale(Math.min(8192, Math.max(16, Math.round(typed))) / base, opts.scale);
+    sync();
+  };
+  wIn.addEventListener('change', () => applyCustom(true));
+  hIn.addEventListener('change', () => applyCustom(false));
+  for (const inp of [wIn, hIn]) inp.addEventListener('keydown', (e: any) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') inp.blur();
+  });
+
+  mk('fps', 'Frame rate', PM.selectField(() => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: f + ' fps' }))));
+  const hasWork: any = !!(p.work && p.work[1] > p.work[0]);
+  mk('range', 'Range', PM.selectField(() => opts.range, (v: any) => { opts.range = v; sync(); },
+    EXPORT_RANGE_OPTIONS.map((o: any) => o.v === 'work' && !hasWork
+      ? { v: o.v, label: 'Work area · not set' } : { ...o })));
+  mk('quality', 'Quality', PM.selectField(() => opts.quality, (v: any) => { opts.quality = v; sync(); }, EXPORT_QUALITY_OPTIONS.map((o: any) => ({ ...o }))));
+  mk('mblur', 'Motion blur', PM.toggleField(() => opts.mblur, (v: any) => { opts.mblur = v; sync(); }, { label: 'Motion blur' }));
+  const hasAudio: any = PM.Audio.hasAudibleLayers(p);
+  mk('audio', 'Include audio', withHint(
+    PM.toggleField(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, { label: 'Include audio' }),
+    hasAudio ? 'Mixes composition audio into the video' : 'No audio layers in this project'));
+  mk('alpha', 'Transparent background', withHint(
+    PM.toggleField(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background' }),
+    'Keeps the background see-through'));
+
+  const nfoMain: any = h('b');
+  const nfoNote: any = h('span');
+  const nfo: any = h('div.export-summary', nfoMain, nfoNote);
+  body.appendChild(nfo);
+
+  let m: any = null;
+  function sync() {
+    const support: any = exportFieldSupport(opts.format);
+    for (const key of Object.keys(rows)) {
+      if (key === 'format' || key === 'size') continue;
+      rows[key].classList.toggle('is-off', !support[key]);
+    }
+    sizeRow.classList.toggle('is-off', !support.scale || !customOpen);
+    const est: any = plan();
+    if (customOpen) {
+      if (window.document.activeElement !== wIn) wIn.value = String(est.width);
+      if (window.document.activeElement !== hIn) hIn.value = String(est.height);
+      scaleField.sync?.();
+    }
+    if (opts.format === 'json') {
+      nfoMain.textContent = `${p.name || 'Untitled'}.pmv`;
+    } else if (opts.format === 'still') {
+      nfoMain.textContent = `${est.width}×${est.height} · frame at ${PM.tc(PM.time, p.fps)}`;
+    } else {
+      nfoMain.textContent = `${est.frames} frames · ${PM.round(est.seconds, 2)}s · ${est.width}×${est.height}`;
+    }
+    nfoNote.textContent = est.note;
+    const pri: any = m?.el?.querySelector('.mf .btn.pri');
+    if (pri) pri.textContent = exportActionLabel(opts.format);
+  }
+  sync();
+  m = PM.modal({
+    title: 'Export', body, width: 460,
+    actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); run(opts); } }],
+  });
+};
+
+/** Keep the dialog's last choices as this project's export settings. */
+X.remember = (opts: any) => {
+  const next: any = normalizeExportDefaults(opts, PM.proj?.fps);
+  PM.store.set('exportOpts', next);
+  PM.exportDefaults?.write?.(next);
 };
 
 function range(opts: any) {
@@ -155,19 +253,29 @@ function range(opts: any) {
 
 function progressUI(total: any) {
   const bar: any = h('i', { style: { width: '0%' } });
-  const label: any = h('div', { style: { fontSize: '11.5px', color: 'var(--tx-2)', fontVariantNumeric: 'tabular-nums' } }, 'Preparing…');
-  const prev: any = h('canvas', { style: { width: '100%', borderRadius: '8px', background: '#000', display: 'block' } });
-  const body: any = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-    prev, h('div.bar', { style: { height: '4px' } }, bar), label);
+  const label: any = h('span', 'Preparing…');
+  const eta: any = h('span');
+  const prev: any = h('canvas.export-preview');
+  const body: any = h('div.export-progress',
+    prev, h('div.bar', { style: { height: '4px' } }, bar), h('div.export-progress-label', label, eta));
   const mod: any = PM.modal({
     title: 'Exporting', body, width: 460,
     actions: [{ label: 'Cancel', run: () => { X.cancel = true; } }],
   });
+  const started: any = window.performance.now();
   return {
     mod, prev,
     set(i: any, extra: any) {
       bar.style.width = (i / total * 100).toFixed(1) + '%';
       label.textContent = `Frame ${i} / ${total}  ·  ${(i / total * 100).toFixed(0)}%` + (extra ? '  ·  ' + extra : '');
+      const elapsed: any = (window.performance.now() - started) / 1000;
+      /* ETA appears once there is enough signal for it not to jitter. */
+      if (i >= Math.min(total, 8) && i < total && elapsed > 1) {
+        const left: any = elapsed / i * (total - i);
+        eta.textContent = left >= 90 ? `~${Math.round(left / 60)} min left` : `~${Math.max(1, Math.round(left))}s left`;
+      } else if (i >= total) {
+        eta.textContent = 'Finishing…';
+      }
     },
   };
 }
@@ -199,20 +307,21 @@ async function run(opts: any) {
   const ui: any = progressUI(total);
   const pctx: any = ui.prev.getContext('2d');
   ui.prev.width = 320; ui.prev.height = Math.round(320 * H / W);
-  const bitrate: any = (opts.quality === 'draft' ? 4 : opts.quality === 'high' ? 16 : 40) * 1e6;
+  const bitrate: any = exportBitrateMbps(opts.quality) * 1e6;
   const t: any = window.performance.now();
 
   try {
     const wantsAudio: any = opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj);
     const needsRecorderAudio: any = opts.format === 'webm' && wantsAudio && !(await PM.Audio.supportsOpus());
-    if (opts.format === 'rec' || (opts.format === 'webm' && (typeof window.VideoEncoder === 'undefined' || needsRecorderAudio))) {
+    if (opts.format === 'mp4' || opts.format === 'rec' || (opts.format === 'webm' && (typeof window.VideoEncoder === 'undefined' || needsRecorderAudio))) {
       await exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     } else if (opts.format === 'png') {
       await exportPNGs({ opts, W, H, t0, total, ui, pctx });
     } else {
       await exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     }
-    if (!X.cancel) PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s`, 3400);
+    if (X.cancel) PM.toast('Export cancelled');
+    else PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s`, 3400);
   } catch (e: any) {
     window.console.error(e);
     PM.toast('Export failed: ' + e.message, 5000);
@@ -329,11 +438,19 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
     if (!audioTrack) { audioMix.stop(); throw new Error('Realtime audio export could not create an audio track'); }
     stream.addTrack(audioTrack);
   }
-  const types: any = audioMix
-    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
-    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const isMp4: any = opts.format === 'mp4';
+  const types: any = isMp4
+    ? (audioMix
+      ? ['video/mp4;codecs=avc1.42001f,mp4a.40.2', 'video/mp4;codecs=avc1.42001f', 'video/mp4']
+      : ['video/mp4;codecs=avc1.42001f', 'video/mp4'])
+    : (audioMix
+      ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']);
   const mime: any = types.find((m: any) => window.MediaRecorder.isTypeSupported(m));
-  if (!mime) { audioMix && audioMix.stop(); throw new Error('No supported realtime WebM recorder'); }
+  if (!mime) {
+    audioMix && audioMix.stop();
+    throw new Error(isMp4 ? 'H.264 MP4 export is unavailable on this Mac' : 'No supported realtime WebM recorder');
+  }
   const rec: any = new window.MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate });
   const chunks: any = [];
   rec.ondataavailable = (e: any) => e.data.size && chunks.push(e.data);
@@ -364,9 +481,12 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
       try { rec.stop(); await done; } catch (error: any) { }
     }
     audioMix && audioMix.stop();
+    track?.stop?.();
   }
   if (X.cancel) return;
-  PM.download(new window.Blob(chunks, { type: 'video/webm' }), `${PM.proj.name || 'powermove'}.webm`);
+  const extension: any = isMp4 ? 'mp4' : 'webm';
+  const type: any = isMp4 ? 'video/mp4' : 'video/webm';
+  PM.download(new window.Blob(chunks, { type }), `${PM.proj.name || 'powermove'}.${extension}`);
 }
 
 async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
@@ -394,7 +514,7 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
 }
 
 /* Programmatic export — used by tests and the native menu. */
-X.run = (opts: any) => run(Object.assign({ format: 'webm', scale: 1, fps: PM.proj.fps, range: 'work', quality: 'high', mblur: true, alpha: false, audio: true, name: PM.proj.name }, opts || {}));
+X.run = (opts: any) => run(Object.assign({}, X.defaults(), { name: PM.proj.name }, opts || {}));
 
 /* Test hooks: the muxer is deterministic pure JS, so it is verifiable headlessly. */
 X.muxWebM = muxWebM;

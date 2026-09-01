@@ -159,7 +159,7 @@ function freshTransformChannels(type: LayerType, comp: Pick<Comp, 'w' | 'h'>): T
     'position.x': comp.w / 2,
     'position.y': comp.h / 2
   };
-  if (type === 'solid' || type === 'shader' || type === 'precomp') {
+  if (type === 'solid' || type === 'shader' || type === 'extension' || type === 'precomp') {
     defaults['position.x'] = 0;
     defaults['position.y'] = 0;
   }
@@ -376,6 +376,25 @@ function contentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>):
         code: stringOr(source.code, ''), w: finite(source.w, comp.w), h: finite(source.h, comp.h),
         uniforms: sanitizeShaderUniforms(source.code, source.uniforms)
       };
+    case 'extension': {
+      const rawParams = copyRecord(source.params);
+      const params: Record<string, Channel> = {};
+      for (const [name, value] of Object.entries(rawParams)) {
+        if (FORBIDDEN_KEYS.has(name) || !/^[a-zA-Z][a-zA-Z0-9_]{0,63}$/.test(name)) continue;
+        const record = copyRecord(value);
+        const fallback = isChannelValue(record.v) ? record.v : 0;
+        params[name] = sanitizeLooseChannel(value, fallback);
+      }
+      return {
+        ...source,
+        definition: stringOr(source.definition, ''),
+        version: Math.max(1, Math.round(finite(source.version, 1))),
+        w: Math.max(1, finite(source.w, comp.w)),
+        h: Math.max(1, finite(source.h, comp.h)),
+        params,
+        data: sanitizeContentRecord(source.data) as Record<string, ProjectJsonValue>
+      };
+    }
     case 'precomp':
       return {
         ...source,

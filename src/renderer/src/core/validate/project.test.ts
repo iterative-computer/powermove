@@ -317,4 +317,25 @@ describe('sanitizeProject', () => {
     if (shader?.type === 'shader') expect(Object.hasOwn(shader.d.uniforms, 'constructor')).toBe(false);
     expect((Object.prototype as { polluted?: boolean }).polluted).toBeUndefined();
   });
+
+  it('preserves structured extension data when its renderer is not installed', () => {
+    const project = sanitizeProject({
+      w: 1920, h: 1080, dur: 5,
+      layers: [{
+        id: 'custom', type: 'extension', name: 'Custom', from: 0, dur: 5,
+        d: {
+          definition: 'demo.layer', version: 3, w: 800, h: 600,
+          params: { amount: { v: 0.5, kf: [{ t: 1, v: 1, i: 'key-1' }], expr: null } },
+          data: { objects: [{ id: 'cube' }] }
+        }
+      }]
+    });
+    const layer = project.layers[0];
+    expect(layer?.type).toBe('extension');
+    if (layer?.type !== 'extension') return;
+    expect(layer.d.definition).toBe('demo.layer');
+    expect(layer.d.version).toBe(3);
+    expect(layer.d.data).toEqual({ objects: [{ id: 'cube' }] });
+    expect(layer.d.params.amount?.kf[0]?.i).toBe('key-1');
+  });
 });

@@ -1,4 +1,5 @@
 /* Ported from js/core/model.js — behavior-preserving. */
+import { normalizeExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
 import { installProjectIndex } from './project-index';
 
@@ -58,6 +59,7 @@ const TYPE_META: any = {
   video:  { icon: 'cam',    color: '#3B62E8', label: 'Video' },
   audio:  { icon: 'clock',  color: '#4C8DFF', label: 'Audio', visual: false, transform: false, effects: false, masks: false, pickable: false },
   shader: { icon: 'wand',   color: '#FF6B1A', label: 'Shader' },
+  extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
   null:   { icon: 'dot',    color: '#6a6a70', label: 'Null', visual: false, pickable: false },
   precomp:{ icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
 };
@@ -112,6 +114,10 @@ const DEFAULTS: any = {
     L.d = { code: PM.SHADER_TEMPLATE, w: c.w, h: c.h, uniforms: {} };
     L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0;
   },
+  extension: (L: any, c: any) => {
+    L.d = { definition: '', version: 1, w: c.w, h: c.h, params: {}, data: {} };
+    L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0;
+  },
   null:   (L: any) => { L.d = {}; },
   precomp:(L: any, c: any) => { L.d = { comp: null, w: c.w, h: c.h }; L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0; },
 };
@@ -125,7 +131,7 @@ PM.mkLayer = (type: any, opts: any = {}, comp: any) => {
   if (opts.dur != null) L.dur = opts.dur;
   if (opts.color) L.color = opts.color;
   if (opts.p) for (const k in opts.p) if (L.p[k]) L.p[k].v = opts.p[k];
-  if (['solid', 'shader', 'precomp'].includes(type)) { L.p['position.x'].v = 0; L.p['position.y'].v = 0; }
+  if (['solid', 'shader', 'extension', 'precomp'].includes(type)) { L.p['position.x'].v = 0; L.p['position.y'].v = 0; }
   return L;
 };
 
@@ -155,6 +161,9 @@ PM.mkProject = (o: any = {}) => ({
   assets: {},
   markers: [],
   work: [0, o.dur || 10],
+  /* Delivery settings travel with the project: the Export dialog and the
+     Settings › Project tab both read and write this. */
+  exportDefaults: normalizeExportDefaults(o.exportDefaults, o.fps || 30),
   params: {},         // agent/workspace-exposed scene parameters
   revision: 0,
   edits: [],          // shared UI/agent transaction provenance
@@ -261,6 +270,7 @@ PM.cloneLayer = (L: any) => {
   (c.fx || []).forEach((fx: any) => Object.values(fx.p || {}).forEach(renew));
   (c.masks || []).forEach((mask: any) => Object.values(mask.p || {}).forEach(renew));
   Object.values(c.d?.uniforms || {}).forEach(renew);
+  Object.values(c.d?.params || {}).forEach(renew);
   for (const field of ['transitionIn', 'transitionOut']) Object.values(c[field]?.p || {}).forEach(renew);
   return c;
 };

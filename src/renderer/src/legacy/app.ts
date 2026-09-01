@@ -1,9 +1,15 @@
 /* Ported from js/app.js — behavior-preserving. */
+import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { createExtensionSettingsControl } from './ui/extension-settings';
 import { createGeneralSettingsControl } from './ui/general-settings';
+import {
+  createNewProjectForm,
+  createProjectSettingsControl,
+  type CompositionPatch
+} from './ui/project-settings';
 import { createSettingsTabs } from './ui/settings-tabs';
 
 export function install(PM: PMRegistry): void {
@@ -129,6 +135,7 @@ function hydrate(p: any) {
   };
   base.params = sanitizeParams(p.params);
   base.shutter = p.shutter == null ? .5 : p.shutter;
+  base.exportDefaults = normalizeExportDefaults(p.exportDefaults, base.fps);
   /* Production rule: a saved project must never poison the renderer. Every channel,
      keyframe, effect and layer field is normalized here so malformed data degrades
      to a static value instead of NaN transforms or a broken keyframe search.
@@ -161,6 +168,19 @@ function hydrate(p: any) {
       source[key] = prop;
     });
     return source;
+  };
+  const sanitizeJson = (value: any, seen = new WeakSet<object>(), depth = 0): any => {
+    if (value == null || typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'object' || depth > 32 || seen.has(value)) return null;
+    seen.add(value);
+    if (Array.isArray(value)) return value.slice(0, 10_000).map((item) => sanitizeJson(item, seen, depth + 1));
+    const out: any = {};
+    for (const [key, item] of Object.entries(value).slice(0, 10_000)) {
+      if (key === '__proto__' || key === 'prototype' || key === 'constructor') continue;
+      out[key] = sanitizeJson(item, seen, depth + 1);
+    }
+    return out;
   };
   const sanitizeTransition = (value: any, minTime = 0) => {
     if (value == null) return null;
@@ -241,6 +261,14 @@ function hydrate(p: any) {
       if (L.type === 'shader') {
         L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
         PM.syncShaderUniforms?.(L);
+      }
+      if (L.type === 'extension') {
+        L.d.definition = typeof L.d.definition === 'string' ? L.d.definition : '';
+        L.d.version = Math.max(1, Math.round(num(L.d.version, 1)));
+        L.d.w = PM.clamp(num(L.d.w, container.w), 1, 16384);
+        L.d.h = PM.clamp(num(L.d.h, container.h), 1, 16384);
+        L.d.params = sanitizeLooseParams(L.d.params, -L.from);
+        L.d.data = sanitizeJson(L.d.data) || {};
       }
     });
   };
@@ -462,22 +490,92 @@ PM.hist.clear();
 restoreProjectAssets(PM.proj);
 
 /* ── shell ─────────────────────────────────────────────── */
-function openSettings(initialTab: 'general' | 'extensions' = 'general') {
+/** Export defaults live on the project, so every write is an ordinary edit. */
+function readExportDefaults(): ExportDefaults {
+  return normalizeExportDefaults(PM.proj?.exportDefaults, PM.proj?.fps);
+}
+function writeExportDefaults(patch: Partial<ExportDefaults>) {
+  if (!PM.proj) return;
+  const next = normalizeExportDefaults({ ...readExportDefaults(), ...patch }, PM.proj.fps);
+  PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; });
+}
+PM.exportDefaults = { read: readExportDefaults, write: writeExportDefaults };
+
+function projectSettingsBridge() {
+  return {
+    composition: () => ({
+      name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur
+    }),
+    applyComposition: (patch: CompositionPatch) => {
+      /* Renaming goes through the project registry so the tab strip and the
+         stored project slot stay in step, exactly like an inline tab rename. */
+      if (patch.name != null) { PM.Projects.rename(PM.proj.id, patch.name); return; }
+      try {
+        PM.Edit.apply({ type: 'set_composition', patch }, { label: 'Project settings', origin: 'interface' });
+      } catch (error: any) {
+        PM.toast('Could not change the project: ' + (error?.message || 'invalid value'), 4500);
+        return;
+      }
+      if (PM.time > PM.proj.dur) PM.setTime(PM.proj.dur);
+      PM.rasterClear?.();
+      PM.Viewer?.layout?.();
+      PM.invalidate('all');
+    },
+    exportDefaults: readExportDefaults,
+    applyExportDefaults: writeExportDefaults,
+    backgroundField: () => PM.fillField(
+      () => PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg),
+      (value: any) => {
+        PM.proj.backgroundFill = PM.normalizeFill(value, PM.proj.bg);
+        PM.proj.bg = PM.proj.backgroundFill.stops[0].color;
+      },
+      { label: 'Background', command: (value: any) => ({ type: 'set_composition', patch: { backgroundFill: value } }) }
+    )
+  };
+}
+
+/* Settings is a singleton: the menu item, the ⌘, shortcut, and the titlebar
+   button all lead to the one dialog. A second request re-uses the open one and
+   switches it to the asked-for tab instead of stacking another copy. */
+let settingsSession: { dialog: any; show(tab: 'general' | 'project' | 'extensions'): void } | null = null;
+
+function openSettings(initialTab: 'general' | 'project' | 'extensions' = 'general') {
+  if (settingsSession) {
+    settingsSession.show(initialTab);
+    return settingsSession.dialog;
+  }
   const general = createGeneralSettingsControl(PM.theme);
   const extensions = createExtensionSettingsControl();
+  /* The Project tab only makes sense with a project open; without one it is
+     left out entirely rather than shown empty. */
+  const project = PM.proj ? createProjectSettingsControl(projectSettingsBridge()) : null;
+  const offProject = project ? PM.bus.on('project', () => project.refresh()) : null;
   const tabs = createSettingsTabs([
     { id: 'general', label: 'General', panel: h('section', general.element) },
+    ...(project ? [{ id: 'project', label: 'Project', panel: h('section', project.element) }] : []),
     { id: 'extensions', label: 'Extensions', panel: h('section', extensions.element) }
-  ], initialTab);
+  ], project || initialTab !== 'project' ? initialTab : 'general');
   const dialog = PM.modal({
     title: 'Settings',
     body: h('div.settings-view', tabs.element),
     width: 620,
     fill: true,
     actions: [{ label: 'Done', pri: true }],
-    onClose: () => { general.destroy(); extensions.destroy(); }
+    onClose: () => {
+      settingsSession = null;
+      offProject?.(); general.destroy(); project?.destroy(); extensions.destroy();
+    }
   });
-  if (initialTab === 'general') window.setTimeout(() => general.focus(), 30);
+  const show = (tab: 'general' | 'project' | 'extensions') => {
+    const target = tab === 'project' && !project ? 'general' : tab;
+    tabs.select(target);
+    window.setTimeout(() => {
+      if (target === 'general') general.focus();
+      else if (target === 'project') project?.focus();
+    }, 30);
+  };
+  settingsSession = { dialog, show };
+  show(initialTab);
   return dialog;
 }
 PM.SettingsUI = { open: openSettings };
@@ -637,11 +735,24 @@ async function openProjectFile(file: any, association?: { path: string; projectI
   } catch (e: any) { PM.toast('Could not open project: ' + e.message, 4500); }
 }
 PM.newProject = () => {
-  const name = h('input', { value: 'Untitled' });
-  PM.modal({ title: 'New composition', body: h('div.field', name), width: 400, actions: [
-    { label: 'Cancel' }, { label: 'Create', pri: true, run: () => switchProject(PM.mkProject({ name: name.value.trim() || 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' })) },
+  /* New projects start from the current one's format: the next composition is
+     usually a sibling of the one already open. */
+  const form = createNewProjectForm(PM.proj
+    ? { w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, bg: PM.proj.bg }
+    : {}, {
+      backgroundField: (get, set) => PM.colorField(get, set, { label: 'Background', local: true })
+    });
+  PM.modal({ title: 'New composition', body: form.element, width: 420, actions: [
+    { label: 'Cancel' },
+    { label: 'Create', pri: true, run: () => {
+      const values = form.values();
+      switchProject(PM.mkProject({
+        ...values,
+        exportDefaults: { ...(PM.proj ? readExportDefaults() : {}), fps: values.fps },
+      }));
+    } },
   ] });
-  window.setTimeout(() => { name.focus(); name.select(); }, 30);
+  window.setTimeout(() => form.focus(), 30);
 };
 function switchProject(p: any) {
   PM.pause();
@@ -708,7 +819,7 @@ PM.prepareToClose = async () => {
 PM.pickFiles = () => {
   const targetProject = PM.proj;
   const inp = h('input', {
-    type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.pmv',
+    type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.obj,.pmv',
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
   });
   const cleanup = () => { inp.onchange = null; inp.remove(); };
@@ -748,7 +859,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
   }).filter(Boolean);
   if (commands.length) {
     PM.Edit.apply(commands, {
-      label: commands.length === 1 ? 'Import media' : `Import ${commands.length} media files`,
+      label: commands.length === 1 ? 'Import file' : `Import ${commands.length} files`,
       origin: 'import',
     });
   }

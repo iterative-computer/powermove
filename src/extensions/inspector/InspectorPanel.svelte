@@ -5,6 +5,7 @@
   import CompositionSection from './CompositionSection.svelte';
   import ContentSection from './ContentSection.svelte';
   import EffectsSection from './EffectsSection.svelte';
+  import ExtensionLayerParams from './ExtensionLayerParams.svelte';
   import InspectorHeader from './InspectorHeader.svelte';
   import LayerOptions from './LayerOptions.svelte';
   import MasksSection from './MasksSection.svelte';
@@ -46,6 +47,7 @@
       {#if firstLayer.type !== 'audio'}
         <TransformSection {PM} layer={firstLayer} />
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
+        {#if firstLayer.type === 'extension'}<ExtensionLayerParams {PM} layer={firstLayer} />{/if}
         <EffectsSection {PM} layer={firstLayer} />
         <MasksSection {PM} layer={firstLayer} />
       {/if}

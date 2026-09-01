@@ -1,5 +1,6 @@
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { parseObj } from '../../kernel/obj';
 
 const VIDEO_READ_FAILURE = 'Could not read this video file';
 
@@ -24,6 +25,29 @@ export function videoImportFailureMessage(fileName: unknown, failure: unknown): 
   return extension === 'mov'
     ? "This file's codec is not supported by this build · ProRes .mov files need transcoding before import"
     : "This file's codec is not supported by this build · transcode it to H.264, HEVC, VP9, or AV1 and import it again";
+}
+
+export function waitForPresentedVideoFrame(el: any, timeout = 1800): Promise<boolean> {
+  if (typeof el.requestVideoFrameCallback !== 'function') return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false;
+    let callback = 0;
+    const finish = (presented: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      if (!presented && callback && typeof el.cancelVideoFrameCallback === 'function') {
+        try { el.cancelVideoFrameCallback(callback); } catch (e) { }
+      }
+      try { el.pause(); } catch (e) { }
+      resolve(presented);
+    };
+    callback = el.requestVideoFrameCallback(() => finish(true));
+    const timer = window.setTimeout(() => finish(false), timeout);
+    try {
+      Promise.resolve(el.play()).catch(() => finish(false));
+    } catch (e) { finish(false); }
+  });
 }
 
 export function install(PM: PMRegistry): void {
@@ -260,6 +284,7 @@ function assetKind(file: any) {
   if (mime.startsWith('video/')) return 'video';
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = (String(file.name || '').split('.').pop() as any).toLowerCase();
+  if (ext === 'obj' || mime === 'model/obj' || mime === 'text/plain+obj') return 'model';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp'].includes(ext)) return 'image';
   if (['mp4', 'mov', 'm4v', 'webm'].includes(ext)) return 'video';
   return null;
@@ -296,10 +321,49 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
     loaded();
   });
 }
+async function playbackProxy(file: any, name: string): Promise<any> {
+  const media = window.powermove?.media;
+  if (!media?.createPlaybackProxy) {
+    throw new Error(videoImportFailureMessage(name, { code: 4 }));
+  }
+  PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000);
+  const result = await media.createPlaybackProxy(file);
+  if (!result.ok) throw new Error(result.error);
+  try {
+    const parts: ArrayBuffer[] = [];
+    const chunkSize = 4 * 1024 * 1024;
+    for (let offset = 0; offset < result.size; offset += chunkSize) {
+      const chunk = await media.readPlaybackProxy(result.token, offset, Math.min(chunkSize, result.size - offset));
+      if (!chunk.byteLength) throw new Error('The optimized playback file ended unexpectedly');
+      const owned = new Uint8Array(chunk.byteLength);
+      owned.set(chunk);
+      parts.push(owned.buffer);
+    }
+    return new window.File(parts, name, {
+      type: result.type,
+      lastModified: Number(file.lastModified) || Date.now(),
+    });
+  } finally {
+    await media.releasePlaybackProxy(result.token).catch(() => undefined);
+  }
+}
 async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
-  const url = window.URL.createObjectURL(blob);
+  if (kind === 'model') {
+    if (Number(blob?.size) > 64 * 1024 * 1024) throw new Error('OBJ files larger than 64 MB are not supported');
+    const sourceText = await blob.text();
+    const mesh = parseObj(sourceText);
+    return {
+      id, name, kind, format: 'obj', blob, sourceText, mesh,
+      size: Number(blob.size) || Number(meta.size) || 0,
+      vertices: mesh.sourceVertexCount,
+      triangles: mesh.triangleCount,
+    };
+  }
+  let sourceBlob = blob;
+  let url = window.URL.createObjectURL(sourceBlob);
   let el: any, w = 0, hh = 0, dur = 0;
+  let playbackProxyUsed = meta.playbackProxy === true;
   try {
     if (kind === 'image') {
       if (window.createImageBitmap) {
@@ -313,18 +377,39 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
       }
       if (!(w > 0 && hh > 0)) throw new Error('Could not read this image file');
     } else if (kind === 'video') {
-      el = window.document.createElement('video');
-      el.preload = 'metadata'; el.muted = true; el.playsInline = true;
-      const ready = waitForVideoMetadata(el, name);
-      el.src = url;
-      try { el.load(); } catch (e) { }
-      await ready;
-      w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
+      const openVideo = async () => {
+        el = window.document.createElement('video');
+        el.preload = 'metadata'; el.muted = true; el.playsInline = true;
+        const ready = waitForVideoMetadata(el, name);
+        el.src = url;
+        try { el.load(); } catch (e) { }
+        await ready;
+        w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
+      };
+      await openVideo();
+      /* A MOV can expose valid dimensions and advance its audio clock even when
+         Chromium cannot decode a single video frame (notably Apple ProRes).
+         Probe one presented frame, then stream a macOS-native H.264 proxy only
+         when that proof fails. Known proxies skip the probe on project restore. */
+      if (!playbackProxyUsed && /\.mov$/i.test(String(name || ''))
+        && !await waitForPresentedVideoFrame(el)) {
+        try { el.pause(); } catch (e) { }
+        window.URL.revokeObjectURL(url);
+        sourceBlob = await playbackProxy(blob, name);
+        playbackProxyUsed = true;
+        url = window.URL.createObjectURL(sourceBlob);
+        await openVideo();
+        if (!await waitForPresentedVideoFrame(el)) {
+          throw new Error('The optimized video did not produce a playable frame');
+        }
+      }
     } else throw new Error('Unsupported media kind');
     return {
       id, name, kind, url, el,
       w: w || meta.w || 0, h: hh || meta.h || 0,
-      dur: dur || meta.dur || 0, size: blob.size || meta.size || 0,
+      dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
+      playbackProxy: playbackProxyUsed,
+      persistBlob: sourceBlob,
     };
   } catch (error) {
     try { if (el && el.close) el.close(); } catch (e) { }
@@ -333,7 +418,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
   }
 }
 let assetEpoch = 0;
-async function ingestAsset(file: any, { silent = false }: any = {}) {
+async function ingestAsset(file: any, { silent = false, layerDefinition }: any = {}) {
   const targetProject = PM.proj;
   const targetEpoch = assetEpoch;
   const assertCurrentProject = () => {
@@ -349,12 +434,27 @@ async function ingestAsset(file: any, { silent = false }: any = {}) {
   assertCurrentProject();
   const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
   const provisionalId = PM.uid('a');
-  /* Persistence and metadata decoding are independent. Starting both together
-     removes a full-file wait from the critical import path. */
-  const persist = PM.MediaStore.put(storageKey, file, { storageKey, fingerprint, type: file.type });
   const preparation = prepareAsset({ id: provisionalId, name: file.name, kind, blob: file });
-  const [preparedResult, persistedResult]: any = await Promise.allSettled([preparation, persist]);
+  /* Images/audio can persist while they decode. Video preparation may replace
+     an unsupported source with a much smaller playback proxy, so wait for that
+     decision before writing any video bytes to durable storage. */
+  const mayNeedPlaybackProxy = kind === 'video' && /\.mov$/i.test(String(file.name || ''));
+  const eagerPersist = mayNeedPlaybackProxy ? null
+    : PM.MediaStore.put(storageKey, file, { storageKey, fingerprint, type: file.type });
+  const preparedResult: any = await Promise.resolve(preparation).then(
+    value => ({ status: 'fulfilled', value }),
+    reason => ({ status: 'rejected', reason })
+  );
   const prepared = preparedResult.status === 'fulfilled' ? preparedResult.value : null;
+  const persistBlob = prepared?.persistBlob || file;
+  if (prepared) delete prepared.persistBlob;
+  const persistedResult: any = preparedResult.status === 'fulfilled'
+    ? await Promise.resolve(eagerPersist || PM.MediaStore.put(storageKey, persistBlob, {
+      storageKey, fingerprint, type: persistBlob.type || file.type,
+    })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }))
+    : eagerPersist
+      ? await Promise.resolve(eagerPersist).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }))
+      : { status: 'fulfilled', value: false };
   if (preparedResult.status === 'rejected' || persistedResult.status === 'rejected') {
     if (prepared) disposeAsset(prepared);
     throw preparedResult.status === 'rejected' ? preparedResult.reason : persistedResult.reason;
@@ -366,17 +466,27 @@ async function ingestAsset(file: any, { silent = false }: any = {}) {
     name: file.name, kind, fingerprint, storageKey,
     size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
     channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
+    playbackProxy: prepared.playbackProxy === true,
+    ...(kind === 'model' ? {
+      format: prepared.format || 'obj',
+      vertices: prepared.vertices || 0,
+      triangles: prepared.triangles || 0,
+      layerDefinition: typeof layerDefinition === 'string' ? layerDefinition : undefined,
+    } : {}),
   };
   const plan = PM.MediaImport.match(PM.proj, PM.assets.map, identity);
   const existingMeta = plan.canonicalId && PM.proj.assets[plan.canonicalId];
   const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
+  if (existingLive?.playbackProxy) identity.playbackProxy = true;
   const wasMissing = !!(existingMeta && !existingLive);
   const id = plan.canonicalId || provisionalId;
   let asset = prepared;
-  if (existingLive) {
+  const upgradesPlayback = !!(existingLive && prepared.playbackProxy && !existingLive.playbackProxy);
+  if (existingLive && !upgradesPlayback) {
     disposeAsset(prepared);
     asset = existingLive;
   } else {
+    if (existingLive) disposeAsset(existingLive);
     asset.id = id;
     PM.assets.map.set(id, asset);
     if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
@@ -392,7 +502,7 @@ async function ingestAsset(file: any, { silent = false }: any = {}) {
   const relinked = wasMissing || plan.aliases.length > 0;
   const result = {
     asset,
-    status: relinked ? 'relinked' : existingLive ? 'reused' : 'created',
+    status: relinked || upgradesPlayback ? 'relinked' : existingLive ? 'reused' : 'created',
     relinkedLayers,
     retiredAssets: plan.aliases.length,
     persisted,
@@ -440,7 +550,7 @@ PM.assets = {
   async restoreProject(project: any) {
     const epoch = assetEpoch;
     const metas: any[] = Object.values(project && project.assets || {})
-      .filter((meta: any) => meta && meta.id && ['image', 'video', 'audio'].includes(meta.kind));
+      .filter((meta: any) => meta && meta.id && ['image', 'video', 'audio', 'model'].includes(meta.kind));
     const restored: any[] = [], missing: any[] = [];
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };

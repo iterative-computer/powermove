@@ -9,6 +9,7 @@ describe('built-in extension order', () => {
       'keymap-default',
       'effects-basic',
       'transitions-basic',
+      'layers-3d',
       'toolbar',
       'viewer',
       'timeline',

@@ -7,6 +7,9 @@ import { IPC, type ChatGPTAccountStatus, type CodexRunRequest } from '../../shar
 const mocks = vi.hoisted(() => {
   const cancel = vi.fn(async () => true);
   const cancelAll = vi.fn(async () => undefined);
+  const appCancel = vi.fn(async () => true);
+  const appShutdown = vi.fn(async () => undefined);
+  const appSteer = vi.fn(async () => true);
   const accountStatus = vi.fn(async () => ({
     state: 'connected' as const,
     email: 'editor@example.com',
@@ -40,6 +43,9 @@ const mocks = vi.hoisted(() => {
     appOnce: vi.fn(),
     cancel,
     cancelAll,
+    appCancel,
+    appShutdown,
+    appSteer,
     accountStatus,
     accountConnect,
     accountDisconnect,
@@ -56,6 +62,12 @@ const mocks = vi.hoisted(() => {
     },
     emitAccount(status: ChatGPTAccountStatus) { accountChanged?.(status); },
     run,
+    appRunner: {
+      run,
+      cancel: appCancel,
+      steer: appSteer,
+      shutdown: appShutdown
+    },
     resolve(value: unknown) {
       resolveRun?.(value);
       resolveRun = null;
@@ -125,7 +137,7 @@ describe('registerCodexIpc', () => {
       isTrustedSender: () => true,
       codexBinaryPref: () => null,
       openExternal: async () => undefined
-    }, mocks.account, mocks.account);
+    }, mocks.account, mocks.account, mocks.appRunner as never);
   });
 
   it('registers every frozen Codex, consent, and artifact channel', () => {
@@ -137,6 +149,7 @@ describe('registerCodexIpc', () => {
       IPC.claudeConnect,
       IPC.claudeDisconnect,
       IPC.codexRun,
+      IPC.codexSteer,
       IPC.codexCancel,
       IPC.codexFixPrompt,
       IPC.codexRestoreChangeSet,
@@ -148,6 +161,7 @@ describe('registerCodexIpc', () => {
     const beforeQuit = mocks.appOnce.mock.calls.at(-1)?.[1] as (() => void) | undefined;
     beforeQuit?.();
     expect(mocks.cancelAll).toHaveBeenCalledOnce();
+    expect(mocks.appShutdown).toHaveBeenCalledOnce();
     expect(mocks.accountShutdown).toHaveBeenCalledTimes(2);
   });
 
@@ -176,8 +190,7 @@ describe('registerCodexIpc', () => {
     expect(mocks.run).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'ipc-run-1234' }),
       expect.objectContaining({
-        extensionsDir: '/tmp/powermove-user-extensions',
-        apiPackFiles
+        userData: '/tmp/powermove-index-test'
       })
     );
 
@@ -198,6 +211,23 @@ describe('registerCodexIpc', () => {
 
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+  });
+
+  it('steers only an active run owned by the requesting renderer', async () => {
+    const owner = new Sender();
+    const stranger = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+    const steering = { id: 'ipc-run-1234', prompt: 'Focus on the blur edge', images: [] };
+
+    await expect(handlers.get(IPC.codexSteer)!({ sender: stranger }, steering))
+      .resolves.toEqual({ accepted: false });
+    expect(mocks.appSteer).not.toHaveBeenCalled();
+    await expect(handlers.get(IPC.codexSteer)!({ sender: owner }, steering))
+      .resolves.toEqual({ accepted: true });
+    expect(mocks.appSteer).toHaveBeenCalledExactlyOnceWith(steering);
+
+    mocks.resolve({ ok: true, text: '{}', access: 'editor' });
+    await pending;
   });
 
   it('cancels a run when its renderer is destroyed', async () => {

@@ -25,6 +25,7 @@ import {
   type AgentChangeSetRestoreRequest,
   type CodexFixPromptRequest,
   type CodexRunRequest,
+  type CodexSteerRequest,
   type ConsentRequest
 } from '../../shared/ipc';
 import { EXTENSION_ID } from '../../shared/extensions';
@@ -33,6 +34,7 @@ import { readArtifact, revealArtifact } from './artifacts';
 import { requestComputerConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
+import { CodexAppServerRunner } from './app-server-runner';
 import { ClaudeAccountClient, ClaudeRunner } from '../claude';
 import { buildFixPrompt } from './instructions';
 import { restoreExtensionChangeSet } from './change-history';
@@ -84,6 +86,17 @@ function requireCancelRequest(value: unknown): CodexCancelRequest {
     throw new IpcValidationError(IPC.codexCancel, 'invalid request id');
   }
   return { id: value.id };
+}
+
+function requireSteerRequest(value: unknown): CodexSteerRequest {
+  if (
+    !isRecord(value) ||
+    !isString(value.id) || !REQUEST_ID.test(value.id) ||
+    !isString(value.prompt, 200_000) || value.prompt.length === 0 ||
+    !Array.isArray(value.images) || value.images.length > 6 ||
+    value.images.some((image) => !(image instanceof Uint8Array) || image.byteLength > 4 * 1024 * 1024)
+  ) throw new IpcValidationError(IPC.codexSteer, 'invalid steering request');
+  return { id: value.id, prompt: value.prompt, images: value.images as Uint8Array[] };
 }
 
 function requireRestoreRequest(value: unknown): AgentChangeSetRestoreRequest {
@@ -152,7 +165,8 @@ export function registerCodexIpc(
   claudeAccount: ClaudeAccountController = new ClaudeAccountClient({
     userData: ctx.userData,
     claudeBinaryPref: () => ctx.claudeBinaryPref?.() ?? null
-  })
+  }),
+  appServerRunner: CodexAppServerRunner = new CodexAppServerRunner()
 ): void {
   const runner = new CodexRunner();
   const claudeRunner = new ClaudeRunner();
@@ -210,11 +224,13 @@ export function registerCodexIpc(
     const owner = event.sender;
     owners.set(req.id, owner);
     const rendererDestroyed = (): void => {
-      void Promise.all([runner.cancel(req.id), claudeRunner.cancel(req.id)]);
+      void Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
     };
     owner.once('destroyed', rendererDestroyed);
     try {
-      const selectedRunner = req.provider === 'claude' ? claudeRunner : runner;
+      const selectedRunner = req.provider === 'claude'
+        ? claudeRunner
+        : (req.mode === 'editor' ? appServerRunner : runner);
       return await selectedRunner.run(req, {
         userData: ctx.userData,
         extensionsDir: ctx.extensionsDir,
@@ -238,11 +254,18 @@ export function registerCodexIpc(
     }
   });
 
+  ipcMain.handle(IPC.codexSteer, async (event, rawRequest: unknown) => {
+    requireTrusted(event, ctx);
+    const req = requireSteerRequest(rawRequest);
+    if (owners.get(req.id) !== event.sender) return { accepted: false };
+    return { accepted: await appServerRunner.steer(req) };
+  });
+
   ipcMain.handle(IPC.codexCancel, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     const req = requireCancelRequest(rawRequest);
     if (owners.get(req.id) === event.sender) {
-      await Promise.all([runner.cancel(req.id), claudeRunner.cancel(req.id)]);
+      await Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
     }
   });
 
@@ -287,6 +310,7 @@ export function registerCodexIpc(
 
   app.once('before-quit', () => {
     void runner.cancelAll();
+    void appServerRunner.shutdown();
     void claudeRunner.cancelAll();
     void account.shutdown();
     void claudeAccount.shutdown();

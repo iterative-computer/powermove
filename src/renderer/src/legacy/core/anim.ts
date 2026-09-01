@@ -1,5 +1,6 @@
 /* Ported from js/core/anim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { compileExpression } from './expression';
 
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
@@ -97,31 +98,17 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
 /* ── expressions ───────────────────────────────────────── */
 PM.exprCache = new Map();
 const EXPR_CACHE_MAX = 256;
-const HELPERS = `
-const PI=Math.PI, sin=Math.sin, cos=Math.cos, tan=Math.tan, abs=Math.abs, pow=Math.pow,
- sqrt=Math.sqrt, floor=Math.floor, ceil=Math.ceil, round=Math.round, min=Math.min, max=Math.max,
- sign=Math.sign, atan2=Math.atan2, exp=Math.exp, log=Math.log;
-const clamp=(v,a,b)=>v<a?a:v>b?b:v;
-const lerp=(a,b,u)=>a+(b-a)*u;
-const linear=(x,x0,x1,y0,y1)=>x1===x0?y0:y0+(y1-y0)*clamp((x-x0)/(x1-x0),0,1);
-const ease=(x,x0,x1,y0,y1)=>{const u=clamp(x1===x0?0:(x-x0)/(x1-x0),0,1);return y0+(y1-y0)*(u*u*(3-2*u));};
-const random=(seed)=>{let s=Math.sin((seed==null?1:seed)*127.1)*43758.5453;return s-Math.floor(s);};
-const wiggle=(freq,amp,seed)=>{const s=(seed||0)*17.3;let v=0,a=amp,f=freq;
-  for(let i=0;i<3;i++){v+=a*(Math.sin(t*f*6.2831+s+i*2.4)+Math.sin(t*f*3.94+s*1.7+i))*0.5;a*=.5;f*=2.03;}return v;};
-const bounce=(x)=>{x=clamp(x,0,1);return x<1/2.75?7.5625*x*x:x<2/2.75?7.5625*(x-=1.5/2.75)*x+.75:x<2.5/2.75?7.5625*(x-=2.25/2.75)*x+.9375:7.5625*(x-=2.625/2.75)*x+.984375;};
-const loop=(dur,x)=>dur<=0?x:x%dur;
-const pingpong=(dur,x)=>{if(dur<=0)return x;const m=x%(dur*2);return m<dur?m:dur*2-m;};
-`;
 function compile(src: any) {
   let c = PM.exprCache.get(src);
   if (c !== undefined) return c;
-  try {
-    /* idx costs O(n) to resolve — only materialize it for expressions that use it */
-    const needsIdx = /\bidx\b/.test(src);
-    const f = new Function('t', 'T', 'fps', 'value', 'layer', 'comp', 'param', 'ch',
-      HELPERS + '\nreturn (' + src + ');');
-    c = { f, needsIdx };
-  } catch (e) { c = null; }
+  const parsed = compileExpression(src);
+  c = parsed ? {
+    needsIdx: parsed.needsIdx,
+    f: (t: number, T: number, fps: number, value: unknown, layer: any, comp: any,
+      param: (name: string) => unknown, ch: string, idx: number) => parsed.evaluate({
+        t, T, fps, value, layer, comp, param, ch, idx,
+      }),
+  } : null;
   if (PM.exprCache.size >= EXPR_CACHE_MAX) PM.exprCache.delete(PM.exprCache.keys().next().value);
   PM.exprCache.set(src, c);
   return c;
@@ -138,7 +125,7 @@ function evalProp(prop: any, tLocal: any, ctx: any) {
     if (c && c.f) {
       try {
         const r = c.f(tLocal, ctx.T, ctx.fps, v, ctx.layer, ctx.comp, ctx.param, ctx.key,
-          c.needsIdx ? ctx.comp.layers.indexOf(ctx.layer) : 0);
+          c.needsIdx ? indexOfLayer(ctx.comp, ctx.layer) : 0);
         if (typeof r === 'number' && isFinite(r)) v = r;
         else if (typeof r === 'string') v = r;
       } catch (e) { /* keep base value */ }
@@ -223,6 +210,25 @@ const parentOf = (L: any) => {
     parentIndexes.set(comp, cached);
   }
   return cached.byId.get(L.parent) || null;
+};
+
+const indexOfLayer = (comp: any, layer: any) => {
+  if (!comp || typeof comp !== 'object' || !Array.isArray(comp.layers)) return 0;
+  const layers = comp.layers;
+  let cached = parentIndexes.get(comp);
+  if (!cached || cached.layers !== layers || cached.length !== layers.length) {
+    const byId = new Map<any, any>();
+    const indexes = new Map<any, number>();
+    layers.forEach((candidate: any, index: number) => {
+      if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
+      indexes.set(candidate, index);
+    });
+    cached = { layers, length: layers.length, byId, indexes };
+    parentIndexes.set(comp, cached);
+  } else if (!cached.indexes) {
+    cached.indexes = new Map(layers.map((candidate: any, index: number) => [candidate, index]));
+  }
+  return cached.indexes.get(layer) ?? 0;
 };
 
 /** Start a fresh evaluation window (called by the compositor per frame). */
@@ -342,6 +348,11 @@ PM.allProps = (L: any) => {
     for (const k in m.p) out.push({ key: 'm.' + m.id + '.' + k, prop: m.p[k], label: k, group: 'Mask ' + (i + 1) });
   });
   if (L.type === 'shader') for (const k in L.d?.uniforms || {}) out.push({ key: 'u.' + k, prop: L.d.uniforms[k], label: k, group: 'Shader' });
+  if (L.type === 'extension') {
+    const definition = PM.layerDefinition?.(L.d?.definition);
+    const labels = new Map((definition?.params || []).map((item: any) => [item.k, item.label]));
+    for (const k in L.d?.params || {}) out.push({ key: 'x.' + k, prop: L.d.params[k], label: labels.get(k) || k, group: definition?.label || 'Extension' });
+  }
   for (const [field, label] of [['transitionIn', 'Transition in'], ['transitionOut', 'Transition out']] as any) {
     const transition = L[field];
     for (const k in transition?.p || {}) out.push({ key: `${field}.p.${k}`, prop: transition.p[k], label: k, group: label });
@@ -356,6 +367,7 @@ PM.findProp = (L: any, key: any) => {
     return L[field]?.p?.[param] || null;
   }
   if (key.startsWith('u.')) return L.d?.uniforms && L.d.uniforms[key.slice(2)];
+  if (key.startsWith('x.')) return L.d?.params && L.d.params[key.slice(2)];
   if (key.startsWith('m.')) {
     const [, mid, mk] = key.split('.');
     const m = (L.masks || []).find((x: any) => x.id === mid);

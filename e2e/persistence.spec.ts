@@ -37,7 +37,7 @@ test.describe('@persistence native project persistence', () => {
 
     await session.page.evaluate(() => (window as any).PM.cmd('newProject'));
     const modal = session.page.locator('.modal');
-    await modal.locator('input').fill('E2E Persistence');
+    await modal.getByLabel('Project name').fill('E2E Persistence');
     await modal.getByRole('button', { name: 'Create' }).click();
 
     const result = await session.page.evaluate(() => (window as any).PM.Edit.apply([

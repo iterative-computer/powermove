@@ -1,3 +1,5 @@
+import type { ExportDefaults } from '../export-defaults';
+
 /**
  * Serializable Powermove project source.
  *
@@ -16,6 +18,7 @@ export const TYPE_META = {
     transform: false, effects: false, masks: false, pickable: false
   },
   shader: { icon: 'wand', color: '#FF6B1A', label: 'Shader' },
+  extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
   null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: false },
   precomp: { icon: 'layers', color: '#3FCF8E', label: 'Precomp' }
 } as const;
@@ -45,6 +48,8 @@ export interface Keyframe<T extends ChannelValue = ChannelValue> {
   v: T;
   eo: EaseHandle;
   ei: EaseHandle;
+  /** Joined like After Effects by default; Option-drag stores a persistent split. */
+  bezierMode?: 'continuous' | 'split';
   hold: boolean;
   i: string;
 }
@@ -162,6 +167,22 @@ export interface ShaderContent {
   uniforms: Record<string, Channel>;
 }
 
+/**
+ * Structured instance data for a layer whose rendering capability is supplied
+ * by an extension. The definition's code stays in the extension; the project
+ * stores only editable values and opaque JSON data. `params` are ordinary
+ * Powermove channels, so they participate in keyframes, expressions and Undo.
+ */
+export interface ExtensionLayerContent {
+  [key: string]: unknown;
+  definition: string;
+  version: number;
+  w: number;
+  h: number;
+  params: Record<string, Channel>;
+  data: Record<string, ProjectJsonValue>;
+}
+
 export interface NullContent {
   [key: string]: unknown;
 }
@@ -210,6 +231,7 @@ export type ImageLayer = LayerBase<'image', ImageContent>;
 export type VideoLayer = LayerBase<'video', VideoContent>;
 export type AudioLayer = LayerBase<'audio', AudioContent>;
 export type ShaderLayer = LayerBase<'shader', ShaderContent>;
+export type ExtensionLayer = LayerBase<'extension', ExtensionLayerContent>;
 export type NullLayer = LayerBase<'null', NullContent>;
 export type PrecompLayer = LayerBase<'precomp', PrecompContent>;
 
@@ -222,6 +244,7 @@ export type Layer =
   | VideoLayer
   | AudioLayer
   | ShaderLayer
+  | ExtensionLayer
   | NullLayer
   | PrecompLayer;
 
@@ -324,6 +347,8 @@ export interface Comp {
   created: number;
   /** hydrate() supplies this migration default; mkProject itself does not. */
   shutter?: number;
+  /** Per-project export settings; nested comps carry the field but never use it. */
+  exportDefaults?: ExportDefaults;
   /** The legacy library module installs this lazily. */
   library?: Record<string, unknown>;
   /** Free-form project notes are persisted by the demo and user projects. */

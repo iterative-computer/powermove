@@ -329,6 +329,23 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
   });
 
+  it('renders steering as a compact continuation of the active user request', () => {
+    renderPanel(snapshot({
+      legacyPhase: 'working',
+      requestToken: 2,
+      conversation: [
+        { role: 'user', text: 'Make a progressive blur effect' },
+        { role: 'user', text: 'continue', steering: true, entering: true }
+      ]
+    }));
+
+    const userTurns = target.querySelectorAll<HTMLElement>('.agent-msg.user');
+    expect(userTurns).toHaveLength(2);
+    expect(userTurns[0]?.classList.contains('is-steering')).toBe(false);
+    expect(userTurns[1]?.classList.contains('is-steering')).toBe(true);
+    expect(userTurns[1]?.querySelector('.agent-bubble')?.textContent).toBe('continue');
+  });
+
   it('separates the model and effort triggers and keeps no scope or authority pickers', () => {
     renderPanel();
     expect(target.querySelector('select[aria-label="Agent authority"]')).toBeNull();

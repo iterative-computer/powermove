@@ -9,6 +9,7 @@ import type {
   CommandDefinition,
   Disposable,
   EffectDefinition,
+  ExtensionLayerDefinition,
   KernelEvents,
   KeybindingDefinition,
   MenuContribution,
@@ -23,6 +24,7 @@ import { chordMatches, chordModifierCount, chordOfEvent, isFieldTarget, normaliz
 import { Registry } from './registry';
 import * as glslHelpers from './glsl';
 import { validateEffect, validateTransition } from './glsl';
+import { validateExtensionLayerDefinition } from './extension-layers';
 
 /* ── keybindings ─────────────────────────────────────────── */
 
@@ -120,6 +122,7 @@ export interface Kernel {
   readonly keybindings: Registry<KeybindingEntry>;
   readonly effects: Registry<EffectDefinition>;
   readonly transitions: Registry<TransitionDefinition>;
+  readonly layerTypes: Registry<ExtensionLayerDefinition>;
   readonly themes: Registry<ThemeDefinition>;
   readonly status: Registry<StatusItem>;
   readonly events: EventBus;
@@ -138,6 +141,7 @@ export interface Kernel {
 
   registerEffect(ownerId: string, def: EffectDefinition): Disposable;
   registerTransition(ownerId: string, def: TransitionDefinition): Disposable;
+  registerLayerType(ownerId: string, def: ExtensionLayerDefinition): Disposable;
 
   registerPaletteProvider(ownerId: string, provider: PaletteProvider): Disposable;
   paletteProviders(): PaletteProviderEntry[];
@@ -161,6 +165,7 @@ export function createKernel(): Kernel {
   const keybindings = new Registry<KeybindingEntry>();
   const effects = new Registry<EffectDefinition>();
   const transitions = new Registry<TransitionDefinition>();
+  const layerTypes = new Registry<ExtensionLayerDefinition>();
   const themes = new Registry<ThemeDefinition>();
   const status = new Registry<StatusItem>();
   const events = new EventBus();
@@ -176,6 +181,7 @@ export function createKernel(): Kernel {
     keybindings,
     effects,
     transitions,
+    layerTypes,
     themes,
     status,
     events,
@@ -240,6 +246,11 @@ export function createKernel(): Kernel {
     registerTransition(ownerId, def) {
       validateTransition(def);
       return transitions.register(ownerId, def);
+    },
+
+    registerLayerType(ownerId, def) {
+      validateExtensionLayerDefinition(def);
+      return layerTypes.register(ownerId, def);
     },
 
     registerPaletteProvider(ownerId, provider) {
@@ -357,6 +368,7 @@ export function createKernel(): Kernel {
       keybindings.disposeOwner(ownerId);
       effects.disposeOwner(ownerId);
       transitions.disposeOwner(ownerId);
+      layerTypes.disposeOwner(ownerId);
       themes.disposeOwner(ownerId);
       status.disposeOwner(ownerId);
       events.disposeOwner(ownerId);
@@ -377,6 +389,7 @@ export function createKernel(): Kernel {
       keybindings.clear();
       effects.clear();
       transitions.clear();
+      layerTypes.clear();
       themes.clear();
       status.clear();
       paletteProviders.length = 0;

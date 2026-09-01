@@ -1,6 +1,90 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@dock-layout Svelte DockLayout', () => {
+  test('keeps overfilled side panels usable between the titlebar and status bar', async ({ session }) => {
+    const { page, diagnostics } = session;
+    const ids = ['overflow-flex', 'overflow-fixed-a', 'overflow-fixed-b', 'overflow-fixed-c'];
+
+    await page.evaluate((panelIds) => {
+      const PM = (window as any).PM;
+      for (const id of panelIds) {
+        PM.registerPanel(id, {
+          title: id,
+          size: 260,
+          build(body: HTMLElement) {
+            const content = document.createElement('div');
+            content.style.height = '220px';
+            content.textContent = id;
+            body.appendChild(content);
+          }
+        });
+      }
+      PM.WS.mutate((workspace: any) => {
+        for (const dock of workspace.layout.docks) {
+          dock.panels = dock.panels.filter((panel: any) => !panelIds.includes(panel.id));
+        }
+        const right = PM.Layout.ensureDock(workspace, 'right');
+        right.hidden = false;
+        right.panels = panelIds.map((id: string, index: number) => index === 0
+          ? { id, flex: true }
+          : { id, size: 260 });
+      });
+    }, ids);
+
+    await expect(page.locator('#dock-right .panel')).toHaveCount(ids.length);
+    const initial = await page.evaluate((panelIds) => {
+      const dock = document.getElementById('dock-right')!;
+      const leftDock = document.getElementById('dock-left')!;
+      const body = document.getElementById('body')!;
+      const titlebar = document.getElementById('titlebar')!;
+      const status = document.getElementById('status')!;
+      const first = document.getElementById(`panel-${panelIds[0]}`)!;
+      const last = document.getElementById(`panel-${panelIds.at(-1)}`)!;
+      return {
+        overflowY: getComputedStyle(dock).overflowY,
+        leftOverflowY: getComputedStyle(leftDock).overflowY,
+        scrollHeight: dock.scrollHeight,
+        clientHeight: dock.clientHeight,
+        firstHeight: first.getBoundingClientRect().height,
+        firstTop: first.getBoundingClientRect().top,
+        lastBottom: last.getBoundingClientRect().bottom,
+        bodyTop: body.getBoundingClientRect().top,
+        bodyBottom: body.getBoundingClientRect().bottom,
+        titlebarBottom: titlebar.getBoundingClientRect().bottom,
+        statusTop: status.getBoundingClientRect().top
+      };
+    }, ids);
+
+    expect(initial.overflowY).toBe('auto');
+    expect(initial.leftOverflowY).toBe('auto');
+    expect(initial.scrollHeight).toBeGreaterThan(initial.clientHeight);
+    expect(initial.firstHeight).toBeGreaterThanOrEqual(240);
+    expect(initial.firstTop).toBeGreaterThanOrEqual(initial.bodyTop - 1);
+    expect(initial.titlebarBottom).toBeLessThanOrEqual(initial.bodyTop + 1);
+    expect(initial.bodyBottom).toBeLessThanOrEqual(initial.statusTop + 1);
+    expect(initial.lastBottom).toBeGreaterThan(initial.bodyBottom);
+
+    await page.locator('#dock-right').hover();
+    await page.mouse.wheel(0, 480);
+    await expect.poll(() => page.locator('#dock-right').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
+
+    const scrolled = await page.evaluate((lastId) => {
+      const dock = document.getElementById('dock-right')!;
+      dock.scrollTop = dock.scrollHeight;
+      return new Promise<{ scrollTop: number; lastBottom: number; bodyBottom: number }>((resolve) => {
+        requestAnimationFrame(() => resolve({
+          scrollTop: dock.scrollTop,
+          lastBottom: document.getElementById(`panel-${lastId}`)!.getBoundingClientRect().bottom,
+          bodyBottom: document.getElementById('body')!.getBoundingClientRect().bottom
+        }));
+      });
+    }, ids.at(-1)!);
+
+    expect(scrolled.scrollTop).toBeGreaterThan(0);
+    expect(scrolled.lastBottom).toBeLessThanOrEqual(scrolled.bodyBottom + 1);
+    expect(diagnostics.pageErrors).toEqual([]);
+  });
+
   test('keeps panel and viewer hosts alive across layout and workspace moves', async ({ session }) => {
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));

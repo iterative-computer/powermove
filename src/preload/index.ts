@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
   IPC,
@@ -11,6 +11,7 @@ import {
   type ConsentResult,
   type FileSaveResult,
   type MenuCommand,
+  type MediaProxyResult,
   type NativeEditAction,
   type PowermoveBridge,
   type StoreErrorEvent,
@@ -36,6 +37,21 @@ const bridge: PowermoveBridge = {
   openProjectFile: () => ipcRenderer.invoke(IPC.projectOpen),
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
 
+  media: {
+    createPlaybackProxy: (file) => {
+      const sourcePath = webUtils.getPathForFile(file);
+      if (!sourcePath) return Promise.resolve({ ok: false, error: 'The original file is no longer available' });
+      return ipcRenderer.invoke(IPC.mediaProxyCreate, {
+        sourcePath,
+        name: file.name
+      }) as Promise<MediaProxyResult>;
+    },
+    readPlaybackProxy: (token, offset, length) =>
+      ipcRenderer.invoke(IPC.mediaProxyRead, { token, offset, length }) as Promise<Uint8Array>,
+    releasePlaybackProxy: (token) =>
+      ipcRenderer.invoke(IPC.mediaProxyRelease, token) as Promise<void>
+  },
+
   codex: {
     async run(req, onProgress, onTrace) {
       const listener = (_event: IpcRendererEvent, progress: CodexProgressEvent): void => {
@@ -54,6 +70,7 @@ const bridge: PowermoveBridge = {
         ipcRenderer.removeListener(IPC.codexEvent, listener);
       }
     },
+    steer: (req) => ipcRenderer.invoke(IPC.codexSteer, req),
     cancel: (id) => ipcRenderer.invoke(IPC.codexCancel, { id }) as Promise<void>,
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),

@@ -51,11 +51,12 @@ export const MAX_COMMANDS = 80;
 export const MAX_KEYFRAMES = 80;
 export const MAX_EASING_TARGETS = 1_000;
 export const MAX_DELETE_TARGETS = 20;
+export const MAX_EXPRESSION_CHARS = 2_000;
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const COMMAND_TYPE_SET = new Set<string>(COMMAND_TYPES);
 const LAYER_TYPES = new Set<LayerType>([
-  'solid', 'text', 'shape', 'image', 'video', 'audio', 'shader', 'null', 'precomp'
+  'solid', 'text', 'shape', 'image', 'video', 'audio', 'shader', 'extension', 'null', 'precomp'
 ]);
 const BLEND_MODES = new Set([
   'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
@@ -311,6 +312,9 @@ function parseReplaceKeyframes(source: Record<string, unknown>): ReplaceKeyframe
     if (!(source.expression == null || typeof source.expression === 'string')) {
       return invalid('must be a string or null', 'expression');
     }
+    if (typeof source.expression === 'string' && source.expression.length > MAX_EXPRESSION_CHARS) {
+      return invalid(`must be ${MAX_EXPRESSION_CHARS} characters or fewer`, 'expression');
+    }
     out.expression = source.expression;
   }
   for (const key of ['overrideLock', 'preserveHandEdits'] as const) {
@@ -354,6 +358,9 @@ function parseSetExpression(source: Record<string, unknown>): SetExpressionComma
   if (path instanceof ValidationError) return path;
   if (owns(source, 'expression') && !(source.expression == null || typeof source.expression === 'string')) {
     return invalid('must be a string or null', 'expression');
+  }
+  if (typeof source.expression === 'string' && source.expression.length > MAX_EXPRESSION_CHARS) {
+    return invalid(`must be ${MAX_EXPRESSION_CHARS} characters or fewer`, 'expression');
   }
   const expression = typeof source.expression === 'string' ? source.expression : null;
   const out: SetExpressionCommand = { type: 'set_expression', path, expression };
@@ -680,6 +687,11 @@ function isLayerContent(type: LayerType, value: unknown): boolean {
       && numberFields('gain', 'trim', 'fadeIn', 'fadeOut');
     case 'shader': return typeof value.code === 'string' && numberFields('w', 'h')
       && isRecord(value.uniforms) && Object.values(value.uniforms).every(isChannel);
+    case 'extension': return typeof value.definition === 'string'
+      && Number.isSafeInteger(value.version) && Number(value.version) >= 1
+      && numberFields('w', 'h')
+      && isRecord(value.params) && Object.values(value.params).every(isChannel)
+      && isRecord(value.data);
     case 'null': return true;
     case 'precomp': return (value.comp === null || typeof value.comp === 'string') && numberFields('w', 'h');
   }

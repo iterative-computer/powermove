@@ -197,6 +197,211 @@ for (const descending of [false, true]) test(`incoming Bézier handles follow th
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
+test('editing one Bézier handle keeps the neighboring handle visible', async ({ session }) => {
+  const { page } = session;
+  const id = await scaleFixture(page);
+  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.waitForFunction((layerId) => {
+    const PM = (window as any).PM;
+    return Boolean(PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[1])?.hi);
+  }, id);
+  const incoming = await page.evaluate((layerId) => {
+    const PM = (window as any).PM, box = PM.TL.cv.getBoundingClientRect();
+    const point = PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[1]).hi;
+    return { x: box.x + point[0], y: box.y + point[1] };
+  }, id);
+  await page.mouse.move(incoming.x, incoming.y);
+  await page.mouse.down();
+  await page.mouse.move(incoming.x + 10, incoming.y - 14, { steps: 8 });
+  await page.mouse.up();
+
+  await expect.poll(() => page.evaluate((layerId) => {
+    const PM = (window as any).PM;
+    const first = PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[0]);
+    return first?.ho && first?.pt ? Math.hypot(first.ho[0] - first.pt[0], first.ho[1] - first.pt[1]) : 0;
+  }, id)).toBeGreaterThan(4);
+  expect(await page.evaluate((layerId) => (window as any).PM.L(layerId).p['scale.x'].kf.length, id)).toBe(2);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('continuous Bézier handles stay joined unless Option-drag splits them', async ({ session }) => {
+  const { page } = session;
+  const id = await scaleFixture(page);
+  await page.evaluate((layerId) => {
+    const PM = (window as any).PM;
+    PM.setKey(PM.L(layerId), 'scale.x', 5, 140);
+    PM.setKey(PM.L(layerId), 'scale.y', 5, 70);
+    PM.touch(); PM.invalidate();
+  }, id);
+  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.waitForFunction((layerId) => Boolean(
+    (window as any).PM.UIState.getKeyHandles((window as any).PM.L(layerId).p['scale.x'].kf[1])?.ho
+  ), id);
+  const outgoing = await page.evaluate((layerId) => {
+    const PM = (window as any).PM, box = PM.TL.cv.getBoundingClientRect();
+    const point = PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[1]).ho;
+    return { x: box.x + point[0], y: box.y + point[1] };
+  }, id);
+  const drag = async (option = false) => {
+    if (option) await page.keyboard.down('Alt');
+    await page.mouse.move(outgoing.x, outgoing.y);
+    await page.mouse.down();
+    await page.mouse.move(outgoing.x + 9, outgoing.y - 14, { steps: 8 });
+    await page.mouse.up();
+    if (option) await page.keyboard.up('Alt');
+  };
+
+  await drag();
+  expect(await page.evaluate((layerId) => {
+    const middle = (window as any).PM.L(layerId).p['scale.x'].kf[1];
+    return { incoming: middle.ei, outgoing: middle.eo, mode: middle.bezierMode ?? null };
+  }, id)).toEqual({
+    incoming: expect.not.arrayContaining([1, 1]),
+    outgoing: expect.not.arrayContaining([0, 0]),
+    mode: null,
+  });
+
+  await page.keyboard.press('Meta+z');
+  await drag(true);
+  expect(await page.evaluate((layerId) => {
+    const middle = (window as any).PM.L(layerId).p['scale.x'].kf[1];
+    return { incoming: middle.ei, outgoing: middle.eo, mode: middle.bezierMode };
+  }, id)).toEqual({
+    incoming: [1, 1],
+    outgoing: expect.not.arrayContaining([0, 0]),
+    mode: 'split',
+  });
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('marquee-selected graph keyframes move together from inside their transform box', async ({ session }) => {
+  const { page } = session;
+  const id = await scaleFixture(page);
+  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.waitForFunction((layerId) => {
+    const PM = (window as any).PM, layer = PM.L(layerId);
+    return ['scale.x', 'scale.y'].every(path => layer.p[path].kf.every((key: any) => PM.UIState.getKeyHandles(key)?.pt));
+  }, id);
+  const points = await page.evaluate((layerId) => {
+    const PM = (window as any).PM, box = PM.TL.cv.getBoundingClientRect();
+    const layer = PM.L(layerId);
+    return ['scale.x', 'scale.y'].flatMap(path => layer.p[path].kf.map((key: any) => {
+      const point = PM.UIState.getKeyHandles(key).pt;
+      return { x: box.x + point[0], y: box.y + point[1] };
+    }));
+  }, id);
+  const x0 = Math.min(...points.map(point => point.x)) - 10;
+  const y0 = Math.min(...points.map(point => point.y)) - 10;
+  const x1 = Math.max(...points.map(point => point.x)) + 10;
+  const y1 = Math.max(...points.map(point => point.y)) + 10;
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(x1, y1, { steps: 8 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => (window as any).PM.sel.keys.length)).toBe(4);
+
+  const box = await page.evaluate(() => {
+    const PM = (window as any).PM, canvas = PM.TL.cv.getBoundingClientRect();
+    const bounds = PM.TL._graph.selectionBounds;
+    return { x: canvas.x + (bounds.x0 + bounds.x1) / 2, y: canvas.y + (bounds.y0 + bounds.y1) / 2 };
+  });
+  const before = await page.evaluate((layerId) => {
+    const layer = (window as any).PM.L(layerId);
+    return ['scale.x', 'scale.y'].flatMap(path => layer.p[path].kf.map((key: any) => [key.t, key.v]));
+  }, id);
+  await page.mouse.move(box.x, box.y);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 18, box.y - 12, { steps: 8 });
+  await page.mouse.up();
+  const after = await page.evaluate((layerId) => {
+    const layer = (window as any).PM.L(layerId);
+    return ['scale.x', 'scale.y'].flatMap(path => layer.p[path].kf.map((key: any) => [key.t, key.v]));
+  }, id);
+  expect(after).toHaveLength(before.length);
+  expect(after.every((pair, index) => pair[0] > before[index]![0] && pair[1] > before[index]![1])).toBe(true);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('one selected Bézier handle adjusts every selected keyframe handle', async ({ session }) => {
+  const { page } = session;
+  const id = await scaleFixture(page);
+  await page.evaluate((layerId) => {
+    const PM = (window as any).PM, layer = PM.L(layerId);
+    PM.setKey(layer, 'scale.x', 5, 140);
+    PM.setKey(layer, 'scale.y', 5, 70);
+    PM.sel.keys = [
+      layer.p['scale.x'].kf[0].i, layer.p['scale.y'].kf[0].i,
+      layer.p['scale.x'].kf[1].i, layer.p['scale.y'].kf[1].i,
+    ];
+    PM.TL.keySelectionActive = true;
+    PM.bus.emit('sel'); PM.touch(); PM.invalidate();
+  }, id);
+  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.waitForFunction((layerId) => {
+    const PM = (window as any).PM, layer = PM.L(layerId);
+    return Boolean(PM.UIState.getKeyHandles(layer.p['scale.x'].kf[0])?.ho);
+  }, id);
+  const handle = await page.evaluate((layerId) => {
+    const PM = (window as any).PM, box = PM.TL.cv.getBoundingClientRect();
+    const point = PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[0]).ho;
+    return { x: box.x + point[0], y: box.y + point[1] };
+  }, id);
+
+  await page.mouse.move(handle.x, handle.y);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + 7, handle.y - 11, { steps: 8 });
+  await page.mouse.up();
+
+  expect(await page.evaluate((layerId) => {
+    const layer = (window as any).PM.L(layerId);
+    return ['scale.x', 'scale.y'].map(path => layer.p[path].kf.map((key: any) => key.eo));
+  }, id)).toEqual([
+    [expect.not.arrayContaining([0, 0]), expect.not.arrayContaining([0, 0]), [0, 0]],
+    [expect.not.arrayContaining([0, 0]), expect.not.arrayContaining([0, 0]), [0, 0]],
+  ]);
+  await page.keyboard.press('Meta+z');
+  expect(await page.evaluate((layerId) => {
+    const layer = (window as any).PM.L(layerId);
+    return ['scale.x', 'scale.y'].flatMap(path => layer.p[path].kf.map((key: any) => key.eo));
+  }, id)).toEqual([[0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]]);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('layer-strip clicks do not replace the curve focused in the Graph Editor', async ({ session }) => {
+  const { page } = session;
+  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  const ids = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.replaceProject(PM.mkProject({ name: 'Graph focus QA', dur: 10 }));
+    const focused = PM.mkLayer('solid', { name: 'Focused curve' });
+    const other = PM.mkLayer('solid', { name: 'Other layer' });
+    PM.proj.layers.push(focused, other);
+    PM.setKey(focused, 'opacity', 0, 0);
+    PM.setKey(focused, 'opacity', 1, 100);
+    PM.setKey(other, 'opacity', 0, 100);
+    PM.setKey(other, 'opacity', 1, 0);
+    PM.selectLayers(focused.id);
+    PM.sel.chan = 'opacity';
+    PM.TL.reveal(focused, ['opacity']);
+    PM.invalidate();
+    return { focused: focused.id, other: other.id };
+  });
+  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph?.target?.L?.name)).toBe('Focused curve');
+  const otherRow = await page.evaluate((otherId) => {
+    const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
+    const index = T.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === otherId);
+    return { x: box.x + 100, y: box.y + T.ruler + index * T.row - T.scrollY + T.row / 2 };
+  }, ids.other);
+  await page.mouse.click(otherRow.x, otherRow.y);
+  expect(await page.evaluate((otherId) => (window as any).PM.sel.layers)).toEqual([ids.other]);
+  expect(await page.evaluate(() => ({
+    layer: (window as any).PM.TL._graph.target.L.name,
+    key: (window as any).PM.TL._graph.target.key,
+  }))).toEqual({ layer: 'Focused curve', key: 'opacity' });
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 test('project rename is available from the tab menu and persists the live document', async ({ session }) => {
   const { page } = session;
   const tab = page.locator('#tabs .project-doc.on');

@@ -169,6 +169,16 @@ describe('EditCommand contract', () => {
 });
 
 describe('parseEditCommand', () => {
+  it('accepts a structured extension layer without interpreting its instance data', () => {
+    expect(parseEditCommand({
+      type: 'add_layer', id: 'custom', layerType: 'extension',
+      content: { definition: 'demo.layer', data: { objects: [{ id: 'cube' }] } }, select: false
+    })).toEqual({
+      type: 'add_layer', id: 'custom', layerType: 'extension',
+      content: { definition: 'demo.layer', data: { objects: [{ id: 'cube' }] } }, select: false
+    });
+  });
+
   it('accepts one canonical example of every operation', () => {
     expect(validCommands).toHaveLength(COMMAND_TYPES.length);
     expect(validCommands.map(parseEditCommand).filter(value => value instanceof ValidationError)).toEqual([]);

@@ -73,6 +73,7 @@ export function installProjectIndex(PM: PMRegistry): void {
     for (const effect of layer?.fx || []) properties.push(...Object.values(effect?.p || {}));
     for (const mask of layer?.masks || []) properties.push(...Object.values(mask?.p || {}));
     if (layer?.type === 'shader') properties.push(...Object.values(layer?.d?.uniforms || {}));
+    if (layer?.type === 'extension') properties.push(...Object.values(layer?.d?.params || {}));
     for (const field of ['transitionIn', 'transitionOut']) properties.push(...Object.values(layer?.[field]?.p || {}));
     return properties;
   };

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
-import { install, videoImportFailureMessage } from './raster';
+import { install, videoImportFailureMessage, waitForPresentedVideoFrame } from './raster';
 
 function rasterRegistry(): PMRegistry {
   const context2d: any = {
@@ -33,7 +33,10 @@ function rasterRegistry(): PMRegistry {
   return PM;
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe('legacy raster install', () => {
   it('selects actionable codec warnings for mov and mp4 decode failures', () => {
@@ -56,6 +59,33 @@ describe('legacy raster install', () => {
       .toBe('Could not read this video file');
     expect(videoImportFailureMessage('clip.mov', { code: 2, message: 'network error' }))
       .toBe('Could not read this video file');
+  });
+
+  it('distinguishes a real presented video frame from an audio-only advancing MOV', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    let presented: (() => void) | undefined;
+    const playable = {
+      requestVideoFrameCallback(callback: () => void) { presented = callback; return 7; },
+      cancelVideoFrameCallback: vi.fn(),
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+    };
+    const success = waitForPresentedVideoFrame(playable, 1000);
+    presented?.();
+    await expect(success).resolves.toBe(true);
+    expect(playable.pause).toHaveBeenCalledOnce();
+
+    const audioOnly = {
+      requestVideoFrameCallback: vi.fn(() => 9),
+      cancelVideoFrameCallback: vi.fn(),
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+    };
+    const failure = waitForPresentedVideoFrame(audioOnly, 1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(failure).resolves.toBe(false);
+    expect(audioOnly.cancelVideoFrameCallback).toHaveBeenCalledWith(9);
   });
 
   it('keeps padded raster textures and tight text selection bounds', () => {

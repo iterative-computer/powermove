@@ -62,6 +62,12 @@ function harness(kernel: Kernel = createKernel()) {
       icon: (name) => `<svg data-icon="${name}"></svg>`
     },
     project,
+    assets: {
+      pick: async () => [],
+      import: async (file) => ({ id: 'asset-1', name: file.name, kind: 'model' }),
+      get: () => undefined,
+      readText: async () => ''
+    },
     storage,
     extensions: { list: () => [], setEnabled: async () => {}, remove: async () => {}, reload: async () => {}, reveal: async () => {}, requestFix: vi.fn() },
     panelsBackend: {
@@ -103,6 +109,21 @@ describe('createExtensionAPI', () => {
     expect(applied[0]?.meta).toEqual({ label: 'Tint', origin: 'ext:vhs' });
     expect(applied[1]?.meta).toEqual({ origin: 'ext:vhs' });
     expect(api.project.revision()).toBe(3);
+  });
+
+  it('owns structured layer definitions and restores the previous provider on dispose', () => {
+    const { kernel, deps } = harness();
+    const first = createExtensionAPI(kernel, record('first'), deps);
+    const second = createExtensionAPI(kernel, record('second'), deps);
+    const base = {
+      id: 'demo.layer', label: 'Base', version: 1, params: [],
+      renderer: { kind: 'fragment' as const, fragment: 'void main(){ fragColor=vec4(1.0); }' }
+    };
+    first.api.layers.register(base);
+    second.api.layers.register({ ...base, label: 'Override' });
+    expect(first.api.layers.get('demo.layer')?.label).toBe('Override');
+    second.disposeAll();
+    expect(first.api.layers.get('demo.layer')?.label).toBe('Base');
   });
 
   it('namespaces storage per extension', () => {

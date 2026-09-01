@@ -28,7 +28,7 @@ function fakePM() {
     }
   };
   const PM: Record<string, any> = {
-    ICONS: { home: '<path/>', x: '<path/>', plus: '<path/>', wand: '<path/>', grid: '<path/>', gear: '<path/>', missing: '<path/>' },
+    ICONS: { home: '<path/>', x: '<path/>', plus: '<path/>', wand: '<path/>', grid: '<path/>', export: '<path/>', gear: '<path/>', missing: '<path/>' },
     bus,
     proj: projects.p1,
     app: { dirty: false },
@@ -120,6 +120,21 @@ describe('Svelte shell', () => {
     expect(PM.ProjectsScreen.hide).toHaveBeenCalledOnce();
     expect(opened).toHaveBeenCalledOnce();
     expect((opened.mock.calls[0]![0] as CustomEvent).detail).toBe(projects.p2);
+  });
+
+  it('opens the export dialog from the labelled titlebar button', () => {
+    const { PM } = fakePM();
+    PM.Export = { dialog: vi.fn() };
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    const button = target.querySelector<HTMLButtonElement>('.tb-right .tb-export')!;
+    expect(button.textContent?.trim()).toBe('Export');
+    flushSync(() => button.click());
+
+    expect(PM.Export.dialog).toHaveBeenCalledOnce();
   });
 
   it('reacts to document ticks, perf state, and legacy dirty events with primitive shell values', () => {

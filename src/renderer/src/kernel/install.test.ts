@@ -14,7 +14,7 @@ function fakePM(): LegacyPM {
   const store: Record<string, unknown> = {};
   const workspace = { id: 'design', panels: ['viewer'] };
   const PM: LegacyPM = {
-    proj: { id: 'p', revision: 7 },
+    proj: { id: 'p', revision: 7, assets: {} },
     sel: { layers: ['L1'], keys: ['k1', 4], chan: 'position.x' },
     time: 12,
     playing: false,
@@ -31,6 +31,14 @@ function fakePM(): LegacyPM {
     Edit: { apply: vi.fn(() => ({ ok: true, message: 'ok', data: {} })) },
     hist: { undo: vi.fn(), redo: vi.fn() },
     Export: { snapshot: vi.fn(async () => 'data:image/jpeg;base64,x') },
+    assets: {
+      add: vi.fn(async (file: File, options: any) => {
+        const asset = { id: 'asset-1', name: file.name, kind: 'model', sourceText: await file.text() };
+        PM.proj.assets[asset.id] = { id: asset.id, name: asset.name, kind: asset.kind, layerDefinition: options?.layerDefinition };
+        return asset;
+      }),
+      get: vi.fn(() => null)
+    },
     selectLayers: vi.fn(),
     setTime: vi.fn(),
     play: vi.fn(),
@@ -99,6 +107,16 @@ describe('installKernel', () => {
     expect(PM.setTime).toHaveBeenCalledWith(3);
     expect(PM.hist.undo).toHaveBeenCalled();
     expect(await api.project.snapshot()).toBe('data:image/jpeg;base64,x');
+  });
+
+  it('imports and reads durable project assets through the extension façade', async () => {
+    const PM = fakePM();
+    installed = installKernel(PM);
+    const api = installed.api('models');
+    const file = new File(['v 0 0 0'], 'model.obj', { type: 'model/obj' });
+    const asset = await api.assets.import(file, { layerDefinition: 'models.obj' });
+    expect(asset).toMatchObject({ id: 'asset-1', name: 'model.obj', kind: 'model', layerDefinition: 'models.obj' });
+    expect(PM.assets.add).toHaveBeenCalledWith(file, { layerDefinition: 'models.obj' });
   });
 
   it('namespaces storage under ext.<id> as one JSON object', () => {
