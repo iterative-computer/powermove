@@ -50,6 +50,24 @@ export function selectionAfterMarquee(baseIds: string[], pickedIds: string[], to
   return [...next];
 }
 
+/** Additive key gestures defer deselection until pointer-up: Shift-click
+ * toggles a selected key, while Shift-drag can still move the established
+ * selection. Linked-channel ids are handled as one hit group. */
+export function selectionAfterKeyGesture(
+  baseIds: string[], hitIds: string[], additive: boolean, dragged: boolean,
+): string[] {
+  const base = new Set(baseIds);
+  const hit = [...new Set(hitIds)];
+  const hitIsSelected = hit.some(id => base.has(id));
+  if (!additive) return hitIsSelected ? [...base] : hit;
+  if (!dragged && hitIsSelected) {
+    hit.forEach(id => base.delete(id));
+    return [...base];
+  }
+  hit.forEach(id => base.add(id));
+  return [...base];
+}
+
 export function graphSelectionBounds(points: GraphPoint[], minimumSize = 16): GraphSelectionBounds | null {
   if (points.length < 2) return null;
   let x0 = Math.min(...points.map(point => point.x));

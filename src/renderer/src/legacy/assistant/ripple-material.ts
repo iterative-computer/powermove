@@ -55,11 +55,13 @@ fn frag(uv: vec2f) -> vec4f {
 
   let ringAlpha = clamp((crest * 0.24 + echo * 0.08 + wake * 0.04 + core * 0.13)
     * motiongpuUniforms.uIntensity * entrance, 0.0, 0.42);
-  let violet = vec3f(0.34, 0.18, 0.55);
+  // The accent, deepened: the ring is the same family as the HDR haze below it
+  // rather than a second colour crossing the interface.
+  let ember = vec3f(0.42, 0.06, 0.01);
   let hot = clamp(crest + core + shimmer * echo * 0.35, 0.0, 1.0);
-  // Keep the defined displacement edge neutral; orange belongs only to
-  // the very broad HDR haze below, never to a crisp ring.
-  let ringColor = mix(violet, vec3f(0.92, 0.86, 0.82), hot * 0.24);
+  // Keep the defined displacement edge close to neutral; saturated orange
+  // belongs to the very broad HDR haze below, never to a crisp ring.
+  let ringColor = mix(ember, vec3f(0.92, 0.86, 0.82), hot * 0.24);
 
   // True radial displacement samples the captured interface around the crest,
   // with a restrained RGB split.

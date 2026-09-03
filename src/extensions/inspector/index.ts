@@ -12,10 +12,31 @@ import {
 import { inspectorRefresh } from './refresh.svelte.js';
 
 type LegacyPM = Record<string, any>;
+const FONT_AXIS_PREFIX = 'fontAxis.';
 
 export default function activate(api: PowermoveAPI): void {
   const PM = api.host.pm as LegacyPM;
   let activeEffectSelection: { layerId: string; ids: string[] } | null = null;
+
+  /* Loose text-content channels are intentionally extension-owned. Include
+     variable axes in the normal property catalog so timeline reveal, source
+     descriptions, expressions, and keyframes all see one real channel. */
+  if (typeof PM.allProps === 'function' && !PM.allProps.__fontAxisAware) {
+    const baseAllProps = PM.allProps;
+    const allProps = (layer: any) => {
+      const output = baseAllProps(layer);
+      if (layer?.type !== 'text') return output;
+      for (const [key, property] of Object.entries(layer.d ?? {})) {
+        if (!key.startsWith(FONT_AXIS_PREFIX) || !property || typeof property !== 'object'
+          || !Array.isArray((property as any).kf)) continue;
+        const axis = key.slice(FONT_AXIS_PREFIX.length);
+        output.push({ key: `c.${key}`, prop: property, label: axis, group: 'Variable font' });
+      }
+      return output;
+    };
+    allProps.__fontAxisAware = true;
+    PM.allProps = allProps;
+  }
 
   PM.syncShaderUniforms = (layer: any): void => {
     const definitions = PM.parseUniforms(layer.d.code);

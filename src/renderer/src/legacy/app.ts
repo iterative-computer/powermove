@@ -258,6 +258,12 @@ function hydrate(p: any) {
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
+      if (L.type === 'text') {
+        for (const key of ['boxWidth', 'boxHeight']) {
+          if (!L.d[key] || typeof L.d[key] !== 'object' || Array.isArray(L.d[key])) L.d[key] = fresh.d[key];
+          sanitizeProp(L.d[key], fresh.d[key], -L.from);
+        }
+      }
       if (L.type === 'shader') {
         L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
         PM.syncShaderUniforms?.(L);

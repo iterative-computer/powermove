@@ -50,6 +50,27 @@ export function waitForPresentedVideoFrame(el: any, timeout = 1800): Promise<boo
   });
 }
 
+const FONT_AXIS_PREFIX = 'fontAxis.';
+
+function cssString(value: unknown): string {
+  return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+export function textVariationEntries(d: any): Array<[string, number]> {
+  return Object.entries(d ?? {}).flatMap(([key, value]) => {
+    if (!key.startsWith(FONT_AXIS_PREFIX)) return [];
+    const axis = key.slice(FONT_AXIS_PREFIX.length);
+    const number = Number(value);
+    return /^[\x20-\x7e]{4}$/.test(axis) && Number.isFinite(number) ? [[axis, number] as [string, number]] : [];
+  }).sort(([a], [b]) => a.localeCompare(b));
+}
+
+export function formatFontVariationSettings(d: any): string {
+  return textVariationEntries(d)
+    .map(([axis, value]) => `"${cssString(axis)}" ${value}`)
+    .join(', ');
+}
+
 export function install(PM: PMRegistry): void {
 
 const cache = new Map<any, any>();       // key -> {cv, w, h, used}
@@ -83,8 +104,150 @@ function evict(targetBytes: any = MAX_BYTES) {
 }
 
 /* ── text ──────────────────────────────────────────────── */
+const variationFaces = new Map<string, {
+  family: string;
+  style: CSSStyleDeclaration;
+  settings: string;
+  loadedSettings: string;
+  pendingSettings: string;
+}>();
+
+function variationStyleSheet(): CSSStyleSheet | null {
+  const id = 'powermove-variable-font-faces';
+  let element = window.document.getElementById?.(id) as HTMLStyleElement | null;
+  if (!element) {
+    element = window.document.createElement('style');
+    element.id = id;
+    window.document.head?.append(element);
+  }
+  return element.sheet as CSSStyleSheet | null;
+}
+
+function loadVariationSettings(entry: { family: string; settings: string; loadedSettings: string; pendingSettings: string }): void {
+  const settings = entry.settings;
+  if (!settings || entry.loadedSettings === settings || entry.pendingSettings === settings) return;
+  entry.pendingSettings = settings;
+  void (async () => {
+    try {
+      await window.document.fonts?.load?.(`400 32px "${cssString(entry.family)}"`, 'Powermove');
+      await window.document.fonts?.ready;
+      if (entry.settings === settings) {
+        entry.loadedSettings = settings;
+        PM.rasterClear?.();
+        PM.invalidate?.();
+      }
+    } catch { /* Preserve the authored font fallback when the alias cannot load. */ }
+    finally { if (entry.pendingSettings === settings) entry.pendingSettings = ''; }
+  })();
+}
+
+async function resolveVariationSource(sourceFamily: string, entry: {
+  family: string; style: CSSStyleDeclaration; settings: string; loadedSettings: string; pendingSettings: string;
+}): Promise<void> {
+  const query = (window as any).queryLocalFonts;
+  if (typeof query === 'function') {
+    try {
+      const fonts = await query();
+      const matches = (Array.isArray(fonts) ? fonts : []).filter((font: any) =>
+        String(font?.family || '').trim().toLocaleLowerCase() === sourceFamily.toLocaleLowerCase());
+      const preferred = matches.find((font: any) => String(font?.style || '').toLocaleLowerCase() === 'regular')
+        ?? matches[0];
+      const names = [...new Set([preferred?.postscriptName, preferred?.fullName, preferred?.family]
+        .map((value: any) => String(value || '').trim()).filter(Boolean))];
+      if (names.length) entry.style.setProperty('src', names.map((name) => `local("${cssString(name)}")`).join(', '));
+    } catch { /* The family-name local source and normal fallback remain. */ }
+  }
+  entry.loadedSettings = '';
+  entry.pendingSettings = '';
+  loadVariationSettings(entry);
+}
+
+function variationFontFamily(d: any): string | null {
+  const settings = formatFontVariationSettings(d);
+  const sourceFamily = String(d?.font || '').trim();
+  if (!settings || !sourceFamily) return null;
+  let entry = variationFaces.get(sourceFamily);
+  if (!entry) {
+    const sheet = variationStyleSheet();
+    if (!sheet) return null;
+    const family = `Powermove Variable ${variationFaces.size + 1}`;
+    const index = sheet.insertRule(`@font-face{font-family:"${family}";src:local("${cssString(sourceFamily)}");font-weight:1 1000;font-stretch:1% 1000%;font-style:oblique -90deg 90deg;}`);
+    const rule = sheet.cssRules[index] as CSSFontFaceRule;
+    entry = { family, style: rule.style, settings: '', loadedSettings: '', pendingSettings: '' };
+    variationFaces.set(sourceFamily, entry);
+    void resolveVariationSource(sourceFamily, entry);
+  }
+  if (entry.settings !== settings) {
+    entry.style.setProperty('font-variation-settings', settings);
+    entry.settings = settings;
+    loadVariationSettings(entry);
+  }
+  return entry.family;
+}
+
 function fontStr(d: any) {
-  return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px "${d.font}", "SF Pro Display", -apple-system, sans-serif`;
+  const variableFamily = variationFontFamily(d);
+  const families = [variableFamily, d.font, 'SF Pro Display']
+    .filter(Boolean)
+    .map((family) => `"${cssString(family)}"`)
+    .join(', ');
+  return `${d.italic ? 'italic ' : ''}${d.weight || 500} ${d.size}px ${families}, -apple-system, sans-serif`;
+}
+
+function resolvedTextContent(input: any, time = PM.time) {
+  const layer = input?.type === 'text' ? input : null;
+  const d = layer ? layer.d : input;
+  const value = (key: string) => {
+    const source = d?.[key];
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return Number(source) || 0;
+    return layer && PM.evP
+      ? Number(PM.evP(layer, source, time, 'c.' + key)) || 0
+      : Number(source.v) || 0;
+  };
+  const boxWidth = Math.max(0, value('boxWidth'));
+  const boxHeight = Math.max(0, value('boxHeight'));
+  const resolved = { ...d, boxWidth, boxHeight, paragraph: boxWidth > 0 };
+  if (layer && PM.evP) {
+    for (const key of Object.keys(d ?? {})) {
+      if (!key.startsWith(FONT_AXIS_PREFIX)) continue;
+      const source = d[key];
+      if (!source || typeof source !== 'object' || !Array.isArray(source.kf)) continue;
+      resolved[key] = Number(PM.evP(layer, source, time, 'c.' + key));
+    }
+  }
+  return resolved;
+}
+
+/** The Type tool's drag gesture creates AE-style paragraph text. Keep the
+    complete source string, but wrap its rendered lines inside the authored
+    box and clip overflow below the box. */
+function textLines(d: any, context: any, lineHeight: number): string[] {
+  const source = String(d.text == null ? '' : d.text).split('\n');
+  const boxWidth = Number(d.boxWidth);
+  if (!d.paragraph || !Number.isFinite(boxWidth) || boxWidth <= 0) return source;
+  const width = (value: string) => context.measureText(value).width;
+  const wrapped: string[] = [];
+  for (const paragraph of source) {
+    if (!paragraph) { wrapped.push(''); continue; }
+    let line = '';
+    for (const token of paragraph.split(/(\s+)/u).filter(Boolean)) {
+      const candidate = line + token;
+      if (line && width(candidate) > boxWidth) {
+        wrapped.push(line.trimEnd());
+        line = token.trimStart();
+      } else line = candidate;
+      while (line && width(line) > boxWidth) {
+        let cut = 1;
+        while (cut < line.length && width(line.slice(0, cut + 1)) <= boxWidth) cut++;
+        wrapped.push(line.slice(0, cut));
+        line = line.slice(cut);
+      }
+    }
+    wrapped.push(line.trimEnd());
+  }
+  const boxHeight = Number(d.boxHeight);
+  if (!Number.isFinite(boxHeight) || boxHeight <= 0) return wrapped;
+  return wrapped.slice(0, Math.max(1, Math.floor(boxHeight / Math.max(1, lineHeight))));
 }
 
 /* Use the exact same canvas text metrics as the rasterizer when a procedural
@@ -98,8 +261,8 @@ function textLayout(d: any) {
   meas.textAlign = align;
   meas.textBaseline = 'alphabetic';
   if ('letterSpacing' in meas) meas.letterSpacing = (d.tracking || 0) + 'px';
-  const lines = String(d.text == null ? '' : d.text).split('\n');
   const lh = size * (d.leading || 1.15);
+  const lines = textLines(d, meas, lh);
   const width = (value: any) => meas.measureText(value).width;
   const graphemes = (value: any): any[] => {
     if (typeof Intl !== 'undefined' && Intl.Segmenter) {
@@ -135,7 +298,7 @@ function textLayout(d: any) {
   });
   return output;
 }
-PM.textLayout = textLayout;
+PM.textLayout = (input: any, time = PM.time) => textLayout(resolvedTextContent(input, time));
 
 function rasterText(d: any, scale: any) {
   const size = Math.max(1, Number(d.size) || 16);
@@ -146,16 +309,18 @@ function rasterText(d: any, scale: any) {
   meas.textAlign = align;
   meas.textBaseline = 'alphabetic';
   if ('letterSpacing' in meas) meas.letterSpacing = (d.tracking || 0) + 'px';
-  const lines = String(d.text == null ? '' : d.text).split('\n');
+  const lh = size * (d.leading || 1.15);
+  const lines = textLines(d, meas, lh);
   let wMax = 1;
   const metrics = lines.map(line => {
     const measured = meas.measureText(line);
     wMax = Math.max(wMax, measured.width);
     return measured;
   });
-  const lh = size * (d.leading || 1.15);
-  const w = Math.ceil(wMax) + pad * 2;
-  const hh = Math.ceil(lh * lines.length) + pad * 2;
+  const paragraphWidth = d.paragraph && Number.isFinite(Number(d.boxWidth)) ? Math.max(1, Number(d.boxWidth)) : 0;
+  const paragraphHeight = d.paragraph && Number.isFinite(Number(d.boxHeight)) ? Math.max(1, Number(d.boxHeight)) : 0;
+  const w = Math.ceil(Math.max(wMax, paragraphWidth)) + pad * 2;
+  const hh = Math.ceil(Math.max(lh * lines.length, paragraphHeight)) + pad * 2;
   const cv = getCanvas(w * scale, hh * scale);
   const c = cv.getContext('2d') as any;
   c.scale(scale, scale);
@@ -198,6 +363,12 @@ function rasterText(d: any, scale: any) {
     x1: maxX - anchorX + interactionPad,
     y1: maxY - anchorY + interactionPad,
   };
+  if (paragraphWidth > 0) {
+    selection.x0 = pad - anchorX - interactionPad;
+    selection.x1 = pad + paragraphWidth - anchorX + interactionPad;
+    selection.y0 = pad - anchorY - interactionPad;
+    selection.y1 = pad + Math.max(paragraphHeight, lh) - anchorY + interactionPad;
+  }
   selection.w = selection.x1 - selection.x0;
   selection.h = selection.y1 - selection.y0;
   return { cv, w, h: hh, anchorX, anchorY, selection };
@@ -218,6 +389,12 @@ function rr(c: any, x: any, y: any, w: any, h: any, r: any) {
 function rasterShape(d: any, scale: any) {
   const pad = Math.ceil((d.stroke || 0) / 2) + 4;
   const w = d.w + pad * 2, hh = d.h + pad * 2;
+  const strokePad = Math.max(0, Number(d.stroke) || 0) / 2;
+  const selection = {
+    x0: -d.w / 2 - strokePad, y0: -d.h / 2 - strokePad,
+    x1: d.w / 2 + strokePad, y1: d.h / 2 + strokePad,
+    w: d.w + strokePad * 2, h: d.h + strokePad * 2,
+  };
   const cv = getCanvas(w * scale, hh * scale);
   const c = cv.getContext('2d') as any;
   c.scale(scale, scale);
@@ -238,18 +415,18 @@ function rasterShape(d: any, scale: any) {
   } else if (d.shape === 'line') {
     c.beginPath(); c.moveTo(0, H / 2); c.lineTo(W, H / 2);
     c.lineWidth = Math.max(1, d.stroke || 6); c.strokeStyle = d.color; c.lineCap = 'round'; c.stroke();
-    return { cv, w, h: hh, anchorX: pad, anchorY: pad };
+    return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection };
   } else rr(c, 0, 0, W, H, d.radius || 0);
   c.fill();
   if (d.stroke > 0) c.stroke();
-  return { cv, w, h: hh, anchorX: pad, anchorY: pad };
+  return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection };
 }
 
 /** Get (and cache) a rasterized bitmap for a layer. `scale` = render supersample. */
-PM.raster = (L: any, scale: any = 1) => {
-  const d = L.d;
+PM.raster = (L: any, scale: any = 1, time: any = PM.time) => {
+  const d = L.type === 'text' ? resolvedTextContent(L, time) : L.d;
   const key = L.type === 'text'
-    ? 't|' + [d.text, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, scale].join('|')
+    ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, formatFontVariationSettings(d), scale].join('|')
     : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.stroke, d.strokeColor, d.points, scale].join('|');
   let e = cache.get(key);
   if (!e) {

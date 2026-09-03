@@ -2,7 +2,7 @@
   import { agentState } from './agent-state.svelte';
   import { activityRows, type TraceStep } from './activity-rows';
   import { toRichWords } from './rich-words';
-  import { stepIn } from './motion';
+  import { stepIn, wordRollIn } from './motion';
 
   let { PM: _PM }: { PM: Record<string, any> } = $props();
 
@@ -52,9 +52,9 @@
           class:is-action={isAction}
           class:is-pulsing={row.pulsing && isAction}
           class:shimmer-text={row.pulsing && !isAction}
-        >{#each words as word, wi (wi)}<span class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
+        >{#each words as word, wi (wi)}<span in:wordRollIn class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
       {:else if row.kind === 'text'}
-        <p in:stepIn class="agent-trace-text">{#each toRichWords(row.text) as word, wi (wi)}<span class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
+        <p in:stepIn class="agent-trace-text">{#each toRichWords(row.text) as word, wi (wi)}<span in:wordRollIn class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
       {:else}
         <div
           in:stepIn

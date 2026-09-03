@@ -90,7 +90,7 @@ function projectState() {
       properties: propertyDigest(layer),
       effects: (layer.fx || []).map((effect: any) => ({ id: effect.id, type: effect.type, enabled: effect.on })),
       textLayout: layer.type === 'text' && selectedIds.has(layer.id) && PM.textLayout
-        ? PM.textLayout(layer.d) : null,
+        ? PM.textLayout(layer, PM.time) : null,
     })),
     parameters: clone(p.params || {}),
     markers: clone(p.markers || []),

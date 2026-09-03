@@ -1,3 +1,4 @@
+import { adoptTemporalEase } from '../anim/temporal-ease';
 import {
   BLEND_MODES,
   TYPE_META,
@@ -35,6 +36,7 @@ const TRANSFORM_DEFAULTS = {
 
 const MASK_DEFAULTS = { x: 0, y: 0, w: 0, h: 0, rotation: 0, feather: 24 } as const;
 const MASK_SHAPES = ['rect', 'ellipse'] as const;
+const FONT_AXIS_PREFIX = 'fontAxis.';
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const MAX_EDITS = 200;
 const EFFECT_TYPES = new Set([
@@ -102,16 +104,13 @@ function sanitizeChannel(raw: unknown, fallback: number): Channel<number> {
       ...item,
       t: Number(item.t),
       v: Number(item.v),
-      eo: validHandle(item.eo, [0.62, 0.05]),
-      ei: validHandle(item.ei, [0, 1]),
-      i: typeof item.i === 'string' && item.i ? item.i : uid('k'),
-      hold: !!item.hold
+      i: typeof item.i === 'string' && item.i ? item.i : uid('k')
     }))
     .sort((a, b) => a.t - b.t)
     .filter((item, index, all) => index === 0 || item.t - all[index - 1]!.t > 1e-6);
   return {
     v: finite(prop.v, fallback),
-    kf: keys,
+    kf: adoptTemporalEase(keys),
     expr: typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null
   };
 }
@@ -130,27 +129,18 @@ function sanitizeLooseChannel(raw: unknown, fallback: ChannelValue): Channel {
       && Number.isFinite(Number(item.t))
       && isChannelValue(item.v))
     .map(item => ({
+      ...item,
       t: Number(item.t),
       v: item.v as ChannelValue,
-      eo: validHandle(item.eo, [0.62, 0.05]),
-      ei: validHandle(item.ei, [0, 1]),
-      i: typeof item.i === 'string' && item.i ? item.i : uid('k'),
-      hold: !!item.hold
+      i: typeof item.i === 'string' && item.i ? item.i : uid('k')
     }))
     .sort((a, b) => a.t - b.t)
     .filter((item, index, all) => index === 0 || item.t - all[index - 1]!.t > 1e-6);
   return {
     v: staticValue,
-    kf: keys,
+    kf: adoptTemporalEase(keys),
     expr: typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null
   };
-}
-
-function validHandle(value: unknown, fallback: [number, number]): [number, number] {
-  if (!Array.isArray(value) || value.length !== 2) return fallback;
-  const x = Number(value[0]);
-  const y = Number(value[1]);
-  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : fallback;
 }
 
 function freshTransformChannels(type: LayerType, comp: Pick<Comp, 'w' | 'h'>): TransformChannels {
@@ -159,7 +149,7 @@ function freshTransformChannels(type: LayerType, comp: Pick<Comp, 'w' | 'h'>): T
     'position.x': comp.w / 2,
     'position.y': comp.h / 2
   };
-  if (type === 'solid' || type === 'shader' || type === 'extension' || type === 'precomp') {
+  if (type === 'solid' || type === 'adjustment' || type === 'shader' || type === 'extension' || type === 'precomp') {
     defaults['position.x'] = 0;
     defaults['position.y'] = 0;
   }
@@ -210,18 +200,16 @@ function sanitizeTransitionChannel(raw: unknown): Channel {
       && Number.isFinite(Number(item.t))
       && isTransitionParamValue(item.v))
     .map(item => ({
+      ...item,
       t: Number(item.t),
       v: item.v as ChannelValue,
-      eo: validHandle(item.eo, [0.62, 0.05]),
-      ei: validHandle(item.ei, [0, 1]),
-      i: typeof item.i === 'string' && item.i ? item.i : uid('k'),
-      hold: !!item.hold
+      i: typeof item.i === 'string' && item.i ? item.i : uid('k')
     }))
     .sort((a, b) => a.t - b.t)
     .filter((item, index, all) => index === 0 || item.t - all[index - 1]!.t > 1e-6);
   return {
     v: staticValue,
-    kf: keys,
+    kf: adoptTemporalEase(keys),
     expr: typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null
   };
 }
@@ -317,6 +305,17 @@ function sanitizeContentRecord(raw: unknown): UnknownRecord {
   return isRecord(clean) ? clean : {};
 }
 
+function sanitizeTextFontAxes(source: UnknownRecord): UnknownRecord {
+  const output: UnknownRecord = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith(FONT_AXIS_PREFIX) || !isRecord(value)) continue;
+    const axis = key.slice(FONT_AXIS_PREFIX.length);
+    if (!/^[\x20-\x7e]{4}$/.test(axis)) continue;
+    output[key] = sanitizeChannel(value, finite(value.v));
+  }
+  return output;
+}
+
 function sanitizeLockedIntent(raw: unknown): Record<string, UnknownRecord> {
   if (!isRecord(raw)) return {};
   return Object.fromEntries(Object.entries(raw).filter((entry): entry is [string, UnknownRecord] =>
@@ -335,7 +334,9 @@ function contentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>):
     case 'text':
       return {
         ...source,
+        ...sanitizeTextFontAxes(source),
         text: stringOr(source.text, 'Powermove'), font: stringOr(source.font, 'SF Pro Display'),
+        boxWidth: sanitizeChannel(source.boxWidth, 0), boxHeight: sanitizeChannel(source.boxHeight, 0),
         weight: finite(source.weight, 600), size: finite(source.size, 128),
         tracking: finite(source.tracking, -2), leading: finite(source.leading, 1.1),
         color: stringOr(source.color, '#F2F2F2'),
@@ -370,6 +371,8 @@ function contentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>):
       };
     case 'audio':
       return normalizeAudioContent(source);
+    case 'adjustment':
+      return source;
     case 'shader':
       return {
         ...source,

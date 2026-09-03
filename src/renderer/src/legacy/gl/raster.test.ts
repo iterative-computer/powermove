@@ -107,4 +107,32 @@ describe('legacy raster install', () => {
     const layout = PM.textLayout({ ...text, text: 'AB\nC', leading: 1.1 });
     expect(layout.characters.map((piece: any) => piece.text)).toEqual(['A', 'B', 'C']);
   });
+
+  it('wraps paragraph text inside the Type tool box and keeps the box selectable', () => {
+    const PM = rasterRegistry();
+    const paragraph = PM.raster({
+      type: 'text',
+      d: {
+        text: 'one two three four', font: 'SF Pro Display', weight: 500, size: 40,
+        tracking: 0, leading: 1, color: '#fff', align: 'left', italic: false,
+        boxWidth: { v: 130, kf: [], expr: null }, boxHeight: { v: 100, kf: [], expr: null },
+      },
+    });
+
+    expect(paragraph.selection.x0).toBeLessThan(0);
+    expect(paragraph.selection.x1).toBeGreaterThan(130);
+    expect(paragraph.selection.y1).toBeGreaterThan(100);
+    expect(paragraph.w).toBeGreaterThan(130);
+    expect(paragraph.h).toBeGreaterThan(100);
+
+    const centered = PM.raster({
+      type: 'text',
+      d: {
+        text: 'centered', font: 'SF Pro Display', weight: 500, size: 40,
+        tracking: 0, leading: 1, color: '#fff', align: 'center', italic: false,
+        boxWidth: { v: 130, kf: [], expr: null }, boxHeight: { v: 100, kf: [], expr: null },
+      },
+    }).selection;
+    expect(Math.abs(centered.x0 + centered.x1)).toBeLessThan(1);
+  });
 });

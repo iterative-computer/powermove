@@ -25,6 +25,17 @@ export type Workspace = {
 };
 
 const DOCK_ORDER: Record<string, number> = { left: 0, center: 1, right: 2 };
+const SET_HEIGHT_PANEL_DEFAULTS: Readonly<Record<string, number>> = Object.freeze({ agent: 350 });
+
+/** Panels in this list keep a saved pixel height instead of absorbing the
+ * dock's unused vertical space. They can still be resized explicitly. */
+export function keepPanelAtSetHeight(spec: PanelSpec): boolean {
+  const fallback = SET_HEIGHT_PANEL_DEFAULTS[spec.id];
+  if (!fallback) return false;
+  spec.size = spec.size || fallback;
+  delete spec.flex;
+  return true;
+}
 
 export const eachDock = (ws: Workspace, fn: (dock: DockSpec) => void): void => {
   ws.layout.docks.forEach(fn);
@@ -34,8 +45,15 @@ export const hasPanel = (ws: Workspace, id: string): boolean =>
   ws.layout.docks.some((dock) => dock.panels.some((panel) => panel.id === id));
 
 export function ensureDockFill(dock: DockSpec | undefined): DockSpec | undefined {
-  if (dock?.panels.length && !dock.panels.some((panel) => panel.flex)) {
-    dock.panels[dock.panels.length - 1]!.flex = true;
+  if (!dock?.panels.length) return dock;
+  for (const panel of dock.panels) keepPanelAtSetHeight(panel);
+  if (!dock.panels.some((panel) => panel.flex)) {
+    for (let index = dock.panels.length - 1; index >= 0; index -= 1) {
+      const panel = dock.panels[index]!;
+      if (SET_HEIGHT_PANEL_DEFAULTS[panel.id]) continue;
+      panel.flex = true;
+      break;
+    }
   }
   return dock;
 }
@@ -112,7 +130,9 @@ export function addPanel(ws: Workspace, id: string, dockId?: string): void {
   removePanel(ws, id);
   ws.hiddenPanels = (ws.hiddenPanels ?? []).filter((item) => item.id !== id);
   const dock = ensureDock(ws, dockId || 'right');
-  dock.panels.push({ id, flex: dock.panels.length === 0 });
+  const spec: PanelSpec = { id, flex: dock.panels.length === 0 };
+  keepPanelAtSetHeight(spec);
+  dock.panels.push(spec);
   ensureDockFill(dock);
   if (dock.hidden) dock.hidden = false;
 }
@@ -122,6 +142,7 @@ export function insertPanel(ws: Workspace, spec: PanelSpec, dockId?: string, ind
   const clean: PanelSpec = { id: spec.id };
   if (spec.size) clean.size = spec.size;
   if (spec.flex) clean.flex = true;
+  keepPanelAtSetHeight(clean);
   const insertion = index == null ? dock.panels.length : Math.max(0, Math.min(index, dock.panels.length));
   dock.panels.splice(insertion, 0, clean);
   ensureDockFill(dock);
@@ -150,6 +171,11 @@ export function movePanelBy(ws: Workspace, id: string, delta: number): boolean {
 }
 
 export function applyPanelSize(el: HTMLElement, spec: PanelSpec, def: Record<string, any>): void {
+  if (keepPanelAtSetHeight(spec)) {
+    el.style.setProperty('--set-panel-height', `${spec.size}px`);
+  } else {
+    el.style.removeProperty('--set-panel-height');
+  }
   el.style.flex = spec.flex || (!spec.size && !def.size)
     ? '1 1 auto'
     : `0 0 ${spec.size || def.size}px`;

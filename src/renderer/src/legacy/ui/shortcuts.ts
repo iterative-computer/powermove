@@ -8,6 +8,7 @@
  *     and dispatched by the one key listener the kernel installs.
  */
 import type { CommandDefinition } from '../../kernel/api';
+import { hasTextSelection } from '../../kernel/keychord';
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
 
@@ -101,6 +102,37 @@ def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
 def('toolHand', 'Hand tool', 'H', () => PM.setTool('hand'), 'Tool');
 def('toolZoom', 'Zoom tool', 'Z', () => PM.setTool('zoom'), 'Tool');
+def('toolRotate', 'Rotation tool', 'W', () => PM.setTool('rotate'), 'Tool');
+def('toolAnchor', 'Pan Behind (Anchor Point) tool', 'Y', () => PM.setTool('anchor'), 'Tool');
+def('toolShape', 'Shape tool', 'Q', () => {
+  const shapes: any[] = ['rect', 'rounded', 'ellipse', 'polygon', 'star'];
+  const current: any = shapes.includes(PM.toolShape) ? PM.toolShape : 'rect';
+  const next: any = PM.tool === 'shape' ? shapes[(shapes.indexOf(current) + 1) % shapes.length] : current;
+  PM.setTool('shape', next);
+}, 'Tool');
+def('toolText', 'Horizontal Type tool', '⌘T', () => PM.setTool('text'), 'Tool');
+def('centerAnchor', 'Center anchor point in layer content', '⌘⌥Home', () => {
+  const commands: any[] = [];
+  for (const layer of PM.selLayers().filter((item: any) => !item.lock)) {
+    const bounds: any = PM.GL.bounds(layer, PM.time); if (!bounds) continue;
+    const anchorX: any = PM.ev(layer, 'anchor.x', PM.time);
+    const anchorY: any = PM.ev(layer, 'anchor.y', PM.time);
+    const nextX: any = (bounds.x0 + bounds.x1) / 2;
+    const nextY: any = (bounds.y0 + bounds.y1) / 2;
+    const matrix: any = PM.localMatrix(layer, PM.time);
+    const positionX: any = PM.ev(layer, 'position.x', PM.time);
+    const positionY: any = PM.ev(layer, 'position.y', PM.time);
+    const dx: any = nextX - anchorX, dy: any = nextY - anchorY;
+    commands.push(
+      { type: 'set_property', target: layer.id, path: 'anchor.x', value: nextX, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
+      { type: 'set_property', target: layer.id, path: 'anchor.y', value: nextY, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
+      { type: 'set_property', target: layer.id, path: 'position.x', value: positionX + matrix[0] * dx + matrix[2] * dy, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
+      { type: 'set_property', target: layer.id, path: 'position.y', value: positionY + matrix[1] * dx + matrix[3] * dy, time: PM.time, mode: 'auto', preserveHandEdits: false, markIntent: 'human' },
+    );
+  }
+  if (!commands.length) return false;
+  return PM.Edit.apply(commands, { label: 'Center anchor point', origin: 'command' });
+}, 'Tool');
 PM.commandForAsset = (id?: any, at: any = PM.time) => {
   const a: any = PM.proj.assets[id]; if (!a) return;
   if (a.kind === 'model') {
@@ -145,7 +177,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () =>
   PM.bus.emit('layers'); PM.selectLayers(ids);
 }), 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
-def('split', 'Split at playhead', '⌘B', () => splitLayers(PM), 'Edit');
+def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
 def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
@@ -180,10 +212,17 @@ def('pasteLayers', 'Paste layers', '⌘V', () => {
 def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : PM.cmd('undo'), 'Edit', hidden);
 def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : PM.cmd('redo'), 'Edit', hidden);
 def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : PM.cmd('cutLayers'), 'Edit', hidden);
-def('contextCopy', 'Copy', null, () => activeTextField() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
+def('contextCopy', 'Copy', null, () => activeTextField() || hasTextSelection() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
 def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : PM.cmd('pasteLayers'), 'Edit', hidden);
 def('contextSelectAll', 'Select all', null, () => activeTextField() ? nativeEdit('selectAll') : PM.cmd('selectAll'), 'Edit', hidden);
-def('toggleVisibility', 'Hide/show selected layers', '⌘⇧H', () => toggleVisibility(PM), 'Edit');
+def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
+def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View');
+def('lockSelectedLayers', 'Lock selected layers', '⌘L', () => setLayerLocks(PM, true), 'Edit');
+def('unlockAllLayers', 'Unlock all layers', '⌘⇧L', () => setLayerLocks(PM, false, true), 'Edit');
+def('selectPreviousLayer', 'Select previous layer', '⌘↑', () => selectAdjacentLayer(PM, -1), 'Edit');
+def('selectNextLayer', 'Select next layer', '⌘↓', () => selectAdjacentLayer(PM, 1), 'Edit');
+def('extendSelectionPreviousLayer', 'Extend selection to previous layer', '⌘⇧↑', () => selectAdjacentLayer(PM, -1, true), 'Edit');
+def('extendSelectionNextLayer', 'Extend selection to next layer', '⌘⇧↓', () => selectAdjacentLayer(PM, 1, true), 'Edit');
 def('bringForward', 'Bring forward', '⌘]', () => orderLayers(PM, 'forward'), 'Edit');
 def('sendBackward', 'Send backward', '⌘[', () => orderLayers(PM, 'backward'), 'Edit');
 def('bringToFront', 'Bring to front', '⌘⇧]', () => orderLayers(PM, 'front'), 'Edit');
@@ -196,10 +235,22 @@ def('redo', 'Redo', '⌘⇧Z', () => PM.hist.redo(), 'Edit');
 def('play', 'Play / pause', '␣', () => PM.toggle(), 'Transport');
 def('gotoStart', 'Go to start', '⇱', () => PM.setTime(0), 'Transport');
 def('gotoEnd', 'Go to end', '⇲', () => PM.setTime(PM.proj.dur), 'Transport');
-def('nextFrame', 'Next frame', '→', () => PM.step(1), 'Transport');
-def('prevFrame', 'Previous frame', '←', () => PM.step(-1), 'Transport');
+def('nextFrame', 'Next frame', 'Page Down', () => PM.step(1), 'Transport');
+def('prevFrame', 'Previous frame', 'Page Up', () => PM.step(-1), 'Transport');
+def('stepFrames', 'Step frames', null, (frames?: any) => {
+  if (!Number.isFinite(Number(frames)) || Number(frames) === 0) return false;
+  return PM.step(Number(frames));
+}, 'Transport', hidden);
 def('nextEdge', 'Next edge', '⇧→', () => { const edge = PM.TL?.nextEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('prevEdge', 'Previous edge', '⇧←', () => { const edge = PM.TL?.prevEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
+def('nextVisibleEvent', 'Next visible timeline event', 'K', () => goToTimelineEvent(PM, 1), 'Transport');
+def('prevVisibleEvent', 'Previous visible timeline event', 'J', () => goToTimelineEvent(PM, -1), 'Transport');
+def('nextSelectedEvent', 'Next selected timeline event', '⇧K', () => goToTimelineEvent(PM, 1, true), 'Transport');
+def('prevSelectedEvent', 'Previous selected timeline event', '⇧J', () => goToTimelineEvent(PM, -1, true), 'Transport');
+def('gotoLayerIn', 'Go to selected layer In point', 'I', () => goToSelectedLayerBoundary(PM, 'in'), 'Transport');
+def('gotoLayerOut', 'Go to selected layer Out point', 'O', () => goToSelectedLayerBoundary(PM, 'out'), 'Transport');
+def('gotoWorkIn', 'Go to work area start', '⇧Home', () => goToWorkAreaBoundary(PM, 'in'), 'Transport');
+def('gotoWorkOut', 'Go to work area end', '⇧End', () => goToWorkAreaBoundary(PM, 'out'), 'Transport');
 def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 
@@ -219,20 +270,21 @@ def('revealKeys', 'Reveal animated properties', 'U', () => {
   PM.selLayers().forEach((L: any) => { L.collapsed = false; L._reveal = null; });
   PM.invalidate('timeline');
 }, 'Reveal');
-def('graph', 'Toggle graph editor', 'G', () => { if (!PM.TL) return; PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
+def('graph', 'Toggle graph editor', '⇧F3', () => { if (!PM.TL) return; PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
 /* sel.keys holds keyframe ids (Phase 3a); easing needs the live objects */
 const easeTargets: any = () => PM.sel.keys.length ? PM.resolveSelectedKeys() : allSelKeys();
-def('easeOut', 'Easy ease keys', 'F9', () => PM.hist.do('Easy ease', () => {
+def('easyEase', 'Easy Ease', 'F9', () => PM.hist.do('Easy Ease', () => {
   PM.applyEaseTo(easeTargets(), 'easeInOut'); PM.invalidate();
 }), 'Keyframes');
-def('easePower', 'Powermove curve', '⇧F9', () => PM.hist.do('Power ease', () => {
-  PM.applyEaseTo(easeTargets(), 'power'); PM.invalidate();
+def('easyEaseIn', 'Easy Ease In', '⇧F9', () => PM.hist.do('Easy Ease In', () => {
+  PM.applyEaseTo(easeTargets(), 'easeIn'); PM.invalidate();
 }), 'Keyframes');
-def('easeLinear', 'Linear keys', '⌘⇧F9', () => PM.hist.do('Linear', () => {
-  PM.applyEaseTo(easeTargets(), 'linear'); PM.invalidate();
+def('easyEaseOut', 'Easy Ease Out', '⌘⇧F9', () => PM.hist.do('Easy Ease Out', () => {
+  PM.applyEaseTo(easeTargets(), 'easeOut'); PM.invalidate();
 }), 'Keyframes');
+def('nudgeKeyframes', 'Move selected keyframes', null, (frames?: any) => nudgeKeyframes(PM, frames), 'Keyframes', hidden);
 function allSelKeys() {
   const out: any = [];
   PM.selLayers().forEach((L: any) => PM.allProps(L).forEach((p: any) => out.push(...p.prop.kf)));
@@ -248,15 +300,15 @@ def('fitView', 'Fit composition and timeline', '⇧F', () => {
   }
   PM.TL?.frameView?.();
 }, 'View');
-def('fitComposition', 'Fit composition', '⌘0', () => {
+def('fitComposition', 'Fit composition', '⇧/', () => {
   if (!PM.Viewer) return false;
   PM.Viewer.fit = true;
   if (Array.isArray(PM.Viewer.pan)) PM.Viewer.pan = [0, 0];
   PM.Viewer.layout?.();
 }, 'View');
-def('zoomIn', 'Zoom in', '⌘+', () => zoomViewer(PM, 1.25), 'View');
-def('zoomOut', 'Zoom out', '⌘-', () => zoomViewer(PM, .8), 'View');
-def('actualSize', 'Actual size', '⌘1', () => setViewerZoom(PM, 1), 'View');
+def('zoomIn', 'Zoom in', '.', () => zoomViewer(PM, 1.25), 'View');
+def('zoomOut', 'Zoom out', ',', () => zoomViewer(PM, .8), 'View');
+def('actualSize', 'Actual size', '/', () => setViewerZoom(PM, 1), 'View');
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.open?.(), 'View');
@@ -269,21 +321,13 @@ def('projects', 'Projects screen', '⌘P', () => PM.ProjectsScreen && PM.Project
 def('newProject', 'New project', '⌘N', () => PM.newProject(), 'File');
 def('takeSave', 'Save take', '', () => { PM.takes.save(); PM.toast('Take saved'); }, 'File');
 
-/* ── JKL transport + trim handles ──────────────────────── */
-/* These were inline in the old keydown handler with no command behind them.
-   They are commands now (that is how the kernel dispatches keys) but stay out
-   of the palette and the agent's command list, exactly as before. */
-def('transportPause', 'Pause', 'K', () => PM.pause(), 'Transport', hidden);
-def('transportPlay', 'Play', 'L', () => PM.play(), 'Transport', hidden);
-def('trimIn', 'Trim in to playhead', 'I', () => PM.hist.do('Trim in', () => PM.selLayers().forEach((L: any) => {
-  if (PM.time <= L.from || PM.time >= L.from + L.dur) return;
-  const d: any = PM.time - L.from;
-  if (PM.MediaTiming.isTimed(L)) L.d.trim = PM.MediaTiming.trimAtStart(L, PM.time);
-  L.dur -= d; L.from = PM.time;
-})), 'Edit', hidden);
-def('trimOut', 'Trim out to playhead', 'O', () => PM.hist.do('Trim out', () => PM.selLayers().forEach((L: any) => {
-  L.dur = Math.max(1 / PM.proj.fps, PM.time - L.from);
-})), 'Edit', hidden);
+/* ── AE layer timing ───────────────────────────────────── */
+def('moveLayerIn', 'Move layer In point to current time', '[', () => editSelectedLayerTiming(PM, 'moveIn'), 'Edit');
+def('moveLayerOut', 'Move layer Out point to current time', ']', () => editSelectedLayerTiming(PM, 'moveOut'), 'Edit');
+def('trimIn', 'Trim In point to current time', '⌥[', () => editSelectedLayerTiming(PM, 'trimIn'), 'Edit');
+def('trimOut', 'Trim Out point to current time', '⌥]', () => editSelectedLayerTiming(PM, 'trimOut'), 'Edit');
+def('moveLayerInToStart', 'Move layer In point to composition start', '⌥Home', () => editSelectedLayerTiming(PM, 'inToStart'), 'Edit');
+def('moveLayerOutToEnd', 'Move layer Out point to composition end', '⌥End', () => editSelectedLayerTiming(PM, 'outToEnd'), 'Edit');
 
 /* ── keymap ────────────────────────────────────────────── */
 /* The keymap-default extension binds Escape in fields to this hidden command.
@@ -512,6 +556,218 @@ export function toggleVisibility(PM: PMRegistry): unknown {
     editable.forEach((layer: any) => { layer.on = show; });
     finishLayerMutation(PM);
     return editable;
+  });
+}
+
+/** Hide selection boxes and handles without changing layer visibility. */
+export function toggleLayerControls(PM: PMRegistry): unknown {
+  if (!PM.Viewer) return false;
+  PM.Viewer.showControls = PM.Viewer.showControls === false;
+  PM.invalidate?.('render');
+  return PM.Viewer.showControls;
+}
+
+/** Lock the selection, or unlock every layer in the current composition. */
+export function setLayerLocks(PM: PMRegistry, locked: boolean, all = false): unknown {
+  const layers = (all ? currentLayers(PM) : selectedStackLayers(PM))
+    .filter((layer: any) => Boolean(layer.lock) !== locked);
+  if (!layers.length || !PM.Edit?.apply) return false;
+  return PM.Edit.apply(
+    layers.map((layer: any) => ({ type: 'set_layer', target: layer.id, patch: { locked } })),
+    { label: locked ? 'Lock layers' : 'Unlock layers', origin: 'command' },
+  );
+}
+
+/** Cmd/Ctrl+Up/Down follows the visible layer stack; Shift extends the range. */
+export function selectAdjacentLayer(PM: PMRegistry, direction: -1 | 1, extend = false): unknown {
+  const layers = currentLayers(PM).filter((layer: any) => !layer.shy);
+  if (!layers.length) return false;
+  const selected = new Set((PM.sel?.layers || []).filter(Boolean));
+  const selectedIndexes = layers
+    .map((layer: any, index: number) => selected.has(layer.id) ? index : -1)
+    .filter((index: number) => index >= 0);
+  const anchor = selectedIndexes.length
+    ? (direction < 0 ? Math.min(...selectedIndexes) : Math.max(...selectedIndexes))
+    : (direction < 0 ? layers.length : -1);
+  const target = layers[anchor + direction];
+  if (!target) return false;
+  const ids = extend
+    ? layers.filter((layer: any) => selected.has(layer.id) || layer === target).map((layer: any) => layer.id)
+    : [target.id];
+  selectLayerIds(PM, ids);
+  return target;
+}
+
+type TimelineDirection = -1 | 1;
+type LayerBoundary = 'in' | 'out';
+type LayerTimingEdit = 'moveIn' | 'moveOut' | 'trimIn' | 'trimOut' | 'inToStart' | 'outToEnd';
+
+function finiteTimelineTimes(values: unknown[], duration: number): number[] {
+  return [...new Set(values
+    .map(value => Number(value))
+    .filter(value => Number.isFinite(value) && value >= 0 && value <= duration)
+    .map(value => Math.round(value * 1e6) / 1e6))]
+    .sort((a, b) => a - b);
+}
+
+/** Collect the same items AE treats as visible timeline events: composition
+ * bounds, work-area ends, markers, layer boundaries, and property keyframes. */
+export function timelineEventTimes(PM: PMRegistry, selectedOnly = false): number[] {
+  const comp: any = typeof PM.curComp === 'function' ? PM.curComp() : PM.proj;
+  const duration = Math.max(0, Number(comp?.dur) || 0);
+  const selected = new Set((PM.sel?.layers || []).filter(Boolean));
+  const layers = (Array.isArray(comp?.layers) ? comp.layers : [])
+    .filter((layer: any) => !selectedOnly || selected.has(layer.id));
+  if (selectedOnly && !layers.length) return [];
+
+  const times: unknown[] = selectedOnly ? [] : [0, duration, ...(comp.work || [])];
+  if (!selectedOnly) times.push(...(comp.markers || []).map((marker: any) => marker?.t));
+  for (const layer of layers) {
+    times.push(layer.from, Number(layer.from) + Number(layer.dur));
+    for (const entry of PM.allProps?.(layer) || []) {
+      for (const key of entry?.prop?.kf || []) times.push(Number(layer.from) + Number(key.t));
+    }
+  }
+  return finiteTimelineTimes(times, duration);
+}
+
+export function goToTimelineEvent(PM: PMRegistry, direction: TimelineDirection, selectedOnly = false): unknown {
+  if (direction !== -1 && direction !== 1) return false;
+  const times = timelineEventTimes(PM, selectedOnly);
+  const current = Number(PM.time) || 0;
+  const next = direction > 0
+    ? times.find(time => time > current + 1e-5)
+    : [...times].reverse().find(time => time < current - 1e-5);
+  if (!Number.isFinite(next)) return false;
+  PM.setTime?.(next);
+  return next;
+}
+
+/** I/O go to the earliest In and latest Out across the selected layers. */
+export function goToSelectedLayerBoundary(PM: PMRegistry, boundary: LayerBoundary): unknown {
+  const layers = selectedStackLayers(PM);
+  if (!layers.length) return false;
+  const times = layers.map((layer: any) => boundary === 'in'
+    ? Number(layer.from)
+    : Number(layer.from) + Number(layer.dur)).filter(Number.isFinite);
+  if (!times.length) return false;
+  const time = boundary === 'in' ? Math.min(...times) : Math.max(...times);
+  PM.setTime?.(time);
+  return time;
+}
+
+/** Shift+Home/End jumps to the preview range without changing it. This keeps
+ * B/N as editing commands and makes auditioning a trimmed work area cheap. */
+export function goToWorkAreaBoundary(PM: PMRegistry, boundary: LayerBoundary): unknown {
+  const comp: any = typeof PM.curComp === 'function' ? PM.curComp() : PM.proj;
+  const duration = Math.max(0, Number(comp?.dur) || 0);
+  const work = Array.isArray(comp?.work) ? comp.work : [0, duration];
+  const candidate = Number(work[boundary === 'in' ? 0 : 1]);
+  if (!Number.isFinite(candidate)) return false;
+  const time = Math.max(0, Math.min(duration, candidate));
+  PM.setTime?.(time);
+  return time;
+}
+
+/** Move or trim selected layer bars using AE's bracket-key model. Every
+ * operation is one typed, undoable source edit; timed media retains continuity
+ * when its In point is trimmed. */
+export function editSelectedLayerTiming(PM: PMRegistry, mode: LayerTimingEdit): unknown {
+  const frame = 1 / Math.max(1, Number(PM.proj?.fps) || 30);
+  const now = Number(PM.time);
+  if (!Number.isFinite(now)) return false;
+  const commands: any[] = [];
+  for (const layer of selectedStackLayers(PM).filter((item: any) => !item.lock)) {
+    const from = Number(layer.from), duration = Number(layer.dur), out = from + duration;
+    if (!Number.isFinite(from) || !Number.isFinite(duration)) continue;
+    if (mode === 'moveIn') {
+      commands.push({ type: 'set_layer', target: layer.id, patch: { from: Math.max(0, now) } });
+    } else if (mode === 'moveOut') {
+      commands.push({ type: 'set_layer', target: layer.id, patch: { from: Math.max(0, now - duration) } });
+    } else if (mode === 'inToStart') {
+      commands.push({ type: 'set_layer', target: layer.id, patch: { from: 0 } });
+    } else if (mode === 'outToEnd') {
+      commands.push({ type: 'set_layer', target: layer.id, patch: { from: Math.max(0, Number(PM.proj.dur) - duration) } });
+    } else if (mode === 'trimIn' && now > from && now < out) {
+      commands.push({ type: 'set_layer', target: layer.id, patch: { from: now, duration: out - now } });
+      if (PM.MediaTiming?.isTimed?.(layer)) {
+        commands.push({ type: 'set_content', target: layer.id, patch: { trim: PM.MediaTiming.trimAtStart(layer, now) } });
+      }
+    } else if (mode === 'trimOut' && now > from) {
+      commands.push({ type: 'set_layer', target: layer.id, patch: { duration: Math.max(frame, now - from) } });
+    }
+  }
+  if (!commands.length || !PM.Edit?.apply) return false;
+  const labels: Record<LayerTimingEdit, string> = {
+    moveIn: 'Move layer In point', moveOut: 'Move layer Out point',
+    trimIn: 'Trim layer In point', trimOut: 'Trim layer Out point',
+    inToStart: 'Move layer to start', outToEnd: 'Move layer to end',
+  };
+  return PM.Edit.apply(commands, { label: labels[mode], origin: 'command' });
+}
+
+interface SelectedKeyframeEntry {
+  comp: any;
+  layer: any;
+  prop: any;
+  key: any;
+}
+
+function selectedKeyframeEntries(PM: PMRegistry): SelectedKeyframeEntry[] {
+  const selected = new Set((PM.sel?.keys || []).filter(Boolean));
+  if (!selected.size) return [];
+  const entries: SelectedKeyframeEntry[] = [];
+  const comps = [PM.proj];
+  const seen = new Set<any>();
+  while (comps.length) {
+    const comp: any = comps.shift();
+    if (!comp || seen.has(comp)) continue;
+    seen.add(comp);
+    for (const layer of comp.layers || []) for (const item of PM.allProps?.(layer) || []) {
+      for (const key of item?.prop?.kf || []) if (selected.has(key?.i)) {
+        entries.push({ comp, layer, prop: item.prop, key });
+      }
+    }
+    comps.push(...Object.values(comp.comps || {}));
+  }
+  return entries;
+}
+
+/** Option/Alt+Left/Right moves selected keyframes by exact frames. The group
+ * stops at composition bounds and selected keys replace destination collisions
+ * in the same property, matching timeline drag semantics. */
+export function nudgeKeyframes(PM: PMRegistry, frames?: any): unknown {
+  const amount = Number(frames);
+  const fps = Math.max(1, Number(PM.proj?.fps) || 30);
+  if (!Number.isFinite(amount) || amount === 0) return false;
+  const selected = selectedKeyframeEntries(PM);
+  if (!selected.length) return false;
+
+  let delta = Math.round(amount) / fps;
+  const minDelta = Math.max(...selected.map(({ layer, key }) => -Number(layer.from) - Number(key.t)));
+  const maxDelta = Math.min(...selected.map(({ comp, layer, key }) => Number(comp.dur) - Number(layer.from) - Number(key.t)));
+  delta = Math.max(minDelta, Math.min(maxDelta, delta));
+  delta = Math.round(delta * fps) / fps;
+  if (Math.abs(delta) < 1e-12) return false;
+
+  const selectedKeys = new Set(selected.map(entry => entry.key));
+  const destinationFrames = new Map<any, Set<number>>();
+  for (const entry of selected) {
+    let destinations = destinationFrames.get(entry.prop);
+    if (!destinations) destinationFrames.set(entry.prop, destinations = new Set());
+    destinations.add(Math.round((Number(entry.key.t) + delta) * fps));
+  }
+
+  return PM.hist.do('Move keyframes', () => {
+    for (const [prop, destinations] of destinationFrames) {
+      prop.kf = prop.kf.filter((key: any) => selectedKeys.has(key)
+        || !destinations.has(Math.round(Number(key.t) * fps)));
+    }
+    for (const entry of selected) entry.key.t = Math.round((Number(entry.key.t) + delta) * fps) / fps;
+    for (const prop of destinationFrames.keys()) prop.kf.sort((a: any, b: any) => Number(a.t) - Number(b.t));
+    PM.touch?.();
+    PM.bus?.emit?.('sel');
+    PM.invalidate?.();
   });
 }
 

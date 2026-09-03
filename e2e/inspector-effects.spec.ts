@@ -101,7 +101,7 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
     PM.invalidate();
   });
   await expect(page.locator('#panel-inspector [data-inspector-header]')).toHaveCount(0);
-  const graph = page.getByRole('button', { name: 'Graph editor (G)', exact: true });
+  const graph = page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true });
   await expect(graph.locator('[data-icon="bezier"]')).toHaveCount(1);
   expect(await graph.evaluate((button) => ({
     graphSlot: !!button.closest('.tl-graph-slot'),
@@ -138,7 +138,7 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   const dragPoint = await page.evaluate(() => {
     const head = document.querySelector('#tl-head')!.getBoundingClientRect();
     const time = document.querySelector('#tl-time')!.getBoundingClientRect();
-    const graph = document.querySelector<HTMLButtonElement>('button[title="Graph editor (G)"]')!.getBoundingClientRect();
+    const graph = document.querySelector<HTMLButtonElement>('button[title="Graph editor (Shift+F3)"]')!.getBoundingClientRect();
     return { x: (time.right + graph.left) / 2, y: head.top + head.height / 2 };
   });
   await page.mouse.move(dragPoint.x, dragPoint.y);

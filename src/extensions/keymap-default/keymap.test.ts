@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(168);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(167);
+    expect(captured).toHaveLength(167);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(166);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
@@ -29,14 +29,28 @@ describe('keymap-default', () => {
     expect(captured.filter(({ command }) => command !== 'blurField').every(({ priority }) => priority === 100)).toBe(true);
   });
 
+  it('matches the After Effects tool shortcuts', () => {
+    expect(KEYMAP_DEFAULT).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'v', command: 'toolSelect' }),
+      expect.objectContaining({ key: 'h', command: 'toolHand' }),
+      expect.objectContaining({ key: 'z', command: 'toolZoom' }),
+      expect.objectContaining({ key: 'w', command: 'toolRotate' }),
+      expect.objectContaining({ key: 'y', command: 'toolAnchor' }),
+      expect.objectContaining({ key: 'q', command: 'toolShape' }),
+      expect.objectContaining({ key: 'cmd+t', command: 'toolText' }),
+      expect.objectContaining({ key: 'ctrl+t', command: 'toolText' })
+    ]));
+    expect(KEYMAP_DEFAULT.find(({ key, command }) => key === 'cmd+t' && command === 'newText')).toBeUndefined();
+  });
+
   it('marks only repeat-safe continuous actions as repeatable', () => {
     const repeatable = KEYMAP_DEFAULT.filter(({ repeat }) => repeat);
     const repeatableCommands = new Set(repeatable.map(({ command }) => command));
 
-    expect(repeatableCommands).toEqual(new Set(['nextFrame', 'prevFrame', 'nudgeSelection']));
+    expect(repeatableCommands).toEqual(new Set(['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes']));
     expect(repeatable).toHaveLength(16);
     expect(
-      KEYMAP_DEFAULT.filter(({ command }) => !['nextFrame', 'prevFrame', 'nudgeSelection'].includes(command)).every(({ repeat }) => repeat !== true)
+      KEYMAP_DEFAULT.filter(({ command }) => !['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes'].includes(command)).every(({ repeat }) => repeat !== true)
     ).toBe(true);
     expect(KEYMAP_DEFAULT.filter(({ command }) => ['play', 'delete', 'nextEdge', 'prevEdge'].includes(command)).every(({ repeat }) => repeat !== true)).toBe(true);
   });
@@ -46,11 +60,18 @@ describe('keymap-default', () => {
       'cmd+b', 'ctrl+b',
       'cmd+x', 'ctrl+x',
       'cmd+shift+h', 'ctrl+shift+h',
+      'cmd+l', 'ctrl+l',
+      'cmd+shift+l', 'ctrl+shift+l',
+      'cmd+up', 'ctrl+up',
+      'cmd+down', 'ctrl+down',
+      'cmd+shift+up', 'ctrl+shift+up',
+      'cmd+shift+down', 'ctrl+shift+down',
       'cmd+=', 'ctrl+=',
       'cmd+shift++', 'ctrl+shift++',
       'cmd+-', 'ctrl+-',
       'cmd+0', 'ctrl+0',
       'cmd+1', 'ctrl+1',
+      'cmd+alt+home', 'ctrl+alt+home',
       'cmd+]', 'ctrl+]',
       'cmd+[', 'ctrl+[',
       'cmd+shift+]', 'ctrl+shift+]',
@@ -63,12 +84,19 @@ describe('keymap-default', () => {
     expect(strict.map(({ key, command }) => `${key}:${command}`)).toEqual([
       'cmd+b:split', 'ctrl+b:split',
       'cmd+x:cutLayers', 'ctrl+x:cutLayers',
-      'cmd+shift+h:toggleVisibility', 'ctrl+shift+h:toggleVisibility',
+      'cmd+shift+h:toggleLayerControls', 'ctrl+shift+h:toggleLayerControls',
+      'cmd+l:lockSelectedLayers', 'ctrl+l:lockSelectedLayers',
+      'cmd+shift+l:unlockAllLayers', 'ctrl+shift+l:unlockAllLayers',
+      'cmd+up:selectPreviousLayer', 'ctrl+up:selectPreviousLayer',
+      'cmd+down:selectNextLayer', 'ctrl+down:selectNextLayer',
+      'cmd+shift+up:extendSelectionPreviousLayer', 'ctrl+shift+up:extendSelectionPreviousLayer',
+      'cmd+shift+down:extendSelectionNextLayer', 'ctrl+shift+down:extendSelectionNextLayer',
       'cmd+=:zoomIn', 'ctrl+=:zoomIn',
       'cmd+shift++:zoomIn', 'ctrl+shift++:zoomIn',
       'cmd+-:zoomOut', 'ctrl+-:zoomOut',
       'cmd+0:fitComposition', 'ctrl+0:fitComposition',
       'cmd+1:actualSize', 'ctrl+1:actualSize',
+      'cmd+alt+home:centerAnchor', 'ctrl+alt+home:centerAnchor',
       'cmd+]:bringForward', 'ctrl+]:bringForward',
       'cmd+[:sendBackward', 'ctrl+[:sendBackward',
       'cmd+shift+]:bringToFront', 'ctrl+shift+]:bringToFront',
@@ -77,19 +105,51 @@ describe('keymap-default', () => {
 
     expect(KEYMAP_DEFAULT.filter(({ command }) => command === 'nudgeSelection')).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ key: 'alt+left', args: [-1, 0], repeat: true }),
-        expect.objectContaining({ key: 'alt+right', args: [1, 0], repeat: true }),
-        expect.objectContaining({ key: 'alt+up', args: [0, -1], repeat: true }),
-        expect.objectContaining({ key: 'alt+down', args: [0, 1], repeat: true }),
-        expect.objectContaining({ key: 'alt+shift+left', args: [-10, 0], repeat: true }),
-        expect.objectContaining({ key: 'alt+shift+right', args: [10, 0], repeat: true }),
-        expect.objectContaining({ key: 'alt+shift+up', args: [0, -10], repeat: true }),
-        expect.objectContaining({ key: 'alt+shift+down', args: [0, 10], repeat: true })
+        expect.objectContaining({ key: 'left', args: [-1, 0], repeat: true }),
+        expect.objectContaining({ key: 'right', args: [1, 0], repeat: true }),
+        expect.objectContaining({ key: 'up', args: [0, -1], repeat: true }),
+        expect.objectContaining({ key: 'down', args: [0, 1], repeat: true }),
+        expect.objectContaining({ key: 'shift+left', args: [-10, 0], repeat: true }),
+        expect.objectContaining({ key: 'shift+right', args: [10, 0], repeat: true }),
+        expect.objectContaining({ key: 'shift+up', args: [0, -10], repeat: true }),
+        expect.objectContaining({ key: 'shift+down', args: [0, 10], repeat: true })
+      ])
+    );
+    expect(KEYMAP_DEFAULT.filter(({ command }) => command === 'nudgeKeyframes')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'alt+left', args: [-1], repeat: true }),
+        expect.objectContaining({ key: 'alt+right', args: [1], repeat: true }),
+        expect.objectContaining({ key: 'alt+shift+left', args: [-10], repeat: true }),
+        expect.objectContaining({ key: 'alt+shift+right', args: [10], repeat: true })
       ])
     );
     expect(KEYMAP_DEFAULT.filter(({ command }) => command === 'nudgeSelection').every(({ looseModifiers }) => looseModifiers !== true)).toBe(true);
     expect(KEYMAP_DEFAULT.find(({ key, command }) => key === 'cmd+shift+n' && command === 'newProject')).toBeUndefined();
     expect(KEYMAP_DEFAULT.filter(({ key, command }) => key === 'cmd+shift+e' && command === 'export')).toHaveLength(1);
+  });
+
+  it('uses After Effects timeline, layer timing, easing, and viewer shortcuts', () => {
+    const expected = [
+      ['pageup', 'prevFrame'], ['pagedown', 'nextFrame'],
+      ['shift+pageup', 'stepFrames'], ['shift+pagedown', 'stepFrames'],
+      ['shift+home', 'gotoWorkIn'], ['shift+end', 'gotoWorkOut'],
+      ['j', 'prevVisibleEvent'], ['k', 'nextVisibleEvent'],
+      ['shift+j', 'prevSelectedEvent'], ['shift+k', 'nextSelectedEvent'],
+      ['i', 'gotoLayerIn'], ['o', 'gotoLayerOut'],
+      ['[', 'moveLayerIn'], [']', 'moveLayerOut'],
+      ['alt+[', 'trimIn'], ['alt+]', 'trimOut'],
+      ['f9', 'easyEase'], ['shift+f9', 'easyEaseIn'],
+      ['cmd+shift+f9', 'easyEaseOut'],
+      ['.', 'zoomIn'], [',', 'zoomOut'], ['/', 'actualSize'],
+      ['shift+/', 'fitComposition'], ['shift+f3', 'graph'],
+      ['cmd+shift+a', 'deselect'], ['cmd+shift+h', 'toggleLayerControls'],
+    ];
+    for (const [key, command] of expected) {
+      expect(KEYMAP_DEFAULT).toContainEqual(expect.objectContaining({ key, command }));
+    }
+    expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'i', command: 'trimIn' }));
+    expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'k', command: 'transportPause' }));
+    expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'g', command: 'graph' }));
   });
 
   it('uses the browser plus key chord and does not alias Cmd+Shift+N to newProject', () => {
@@ -106,6 +166,9 @@ describe('keymap-default', () => {
       expect.objectContaining({ key: 'ctrl+shift++', command: 'zoomIn' })
     ]));
     expect(KEYMAP_DEFAULT.filter(({ key, command }) => key.endsWith('+shift+n') && command === 'newProject')).toEqual([]);
+    expect(chordOfEvent({
+      key: '?', code: 'Slash', metaKey: false, ctrlKey: false, altKey: false, shiftKey: true
+    } as KeyboardEvent)).toBe('shift+/');
   });
 
   it('matches shifted physical bracket events to strict layer-order commands', () => {

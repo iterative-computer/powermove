@@ -54,10 +54,14 @@ export function ghostCornerRadius(width: number, height: number, scale: number):
 /** Powermove owns the look; Motion GPU owns its WebGPU lifecycle and resources. */
 export const ghostMaterial = defineMaterial({
   fragment: `
-const GHOST_VIOLET = vec3f(0.22, 0.09, 0.55);
-const GHOST_LILAC = vec3f(0.52, 0.30, 1.0);
-const GHOST_COOL = vec3f(0.14, 0.30, 0.70);
-const GHOST_HAZE = vec3f(1.0, 0.62, 0.44);
+// The accent and its neighbours, linear: a deep ember for the body, the accent
+// itself through the flow, gold on the crests, and a warm near-white haze that
+// is the one tone allowed to leave the orange family, so the inner bloom does
+// not flatten into the rest of it.
+const GHOST_EMBER = vec3f(0.44, 0.04, 0.004);
+const GHOST_ACCENT = vec3f(1.0, 0.147, 0.010);
+const GHOST_GOLD = vec3f(1.0, 0.42, 0.07);
+const GHOST_HAZE = vec3f(1.0, 0.82, 0.62);
 
 fn ghostRoundedBox(point: vec2f, halfSize: vec2f, radius: f32) -> f32 {
   let corner = abs(point) - halfSize + radius;
@@ -145,12 +149,12 @@ fn frag(uv: vec2f) -> vec4f {
     + innerBloom * (0.07 + flow * 0.16) * pulse
     + outerHaze * sweep * 0.09 * pulse;
 
-  // Violet carries the body, lilac lifts the crests, and the cool tone keeps
-  // the trailing side from flattening into one purple wash.
-  var color = mix(GHOST_VIOLET, GHOST_COOL, clamp(field * 0.9, 0.0, 1.0));
-  color = mix(color, GHOST_LILAC, clamp(filament * 0.7 + sweep * 0.45, 0.0, 1.0));
-  // Orange only ever appears as a broad defocused warmth behind the rim, never
-  // as a crisp edge of its own.
+  // Ember carries the body, the accent runs through the flow, and gold lifts
+  // the filaments and the travelling crest.
+  var color = mix(GHOST_EMBER, GHOST_ACCENT, clamp(field * 0.9, 0.0, 1.0));
+  color = mix(color, GHOST_GOLD, clamp(filament * 0.7 + sweep * 0.45, 0.0, 1.0));
+  // The pale haze only ever appears as a broad defocused warmth behind the rim,
+  // never as a crisp edge of its own.
   color = color + GHOST_HAZE * innerBloom * breath * flow * 0.22;
 
   let alpha = clamp((bodyAlpha + rimAlpha) * entrance * motiongpuUniforms.uGain, 0.0, 0.62);

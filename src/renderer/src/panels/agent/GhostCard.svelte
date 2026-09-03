@@ -139,7 +139,7 @@
     height: 6px;
     border-radius: 50%;
     background: currentColor;
-    box-shadow: 0 0 8px color-mix(in srgb, #9e8ff0 55%, transparent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--accent, #ff6b1a) 55%, transparent);
     animation: ghost-breathe 3.6s ease-in-out infinite;
   }
   .ghost-rows {

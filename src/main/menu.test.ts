@@ -48,6 +48,7 @@ beforeEach(() => {
 describe('application menu', () => {
   it('routes renderer-owned native equivalents around the application menu', () => {
     expect(isRendererOwnedMenuInput({ meta: true, code: 'KeyB' })).toBe(true);
+    expect(isRendererOwnedMenuInput({ meta: true, shift: true, code: 'KeyD' })).toBe(true);
     expect(isRendererOwnedMenuInput({ control: true, shift: true, code: 'BracketRight' })).toBe(true);
     expect(isRendererOwnedMenuInput({ meta: true, shift: true, code: 'KeyB' })).toBe(false);
     expect(isRendererOwnedMenuInput({ meta: true, code: 'KeyQ' })).toBe(false);
@@ -144,8 +145,7 @@ describe('application menu', () => {
     const editorCommands = editItems.filter((item) => item.click && item !== undo && item !== redo && !contextCommands.includes(item));
     expect(editorCommands.map((item) => [item.label, item.accelerator])).toEqual([
       ['Duplicate Layers', 'CommandOrControl+D'],
-      ['Split at Playhead', 'CommandOrControl+B'],
-      ['Hide/Show Selected Layers', 'CommandOrControl+Shift+H'],
+      ['Split at Playhead', 'CommandOrControl+Shift+D'],
       ['Bring Forward', 'CommandOrControl+]'],
       ['Send Backward', 'CommandOrControl+['],
       ['Bring to Front', 'CommandOrControl+Shift+]'],
@@ -153,10 +153,9 @@ describe('application menu', () => {
     ]);
     expect(editorCommands.every((item) => item.registerAccelerator === false)).toBe(true);
     editorCommands.forEach((item) => item.click?.({} as never, undefined, {} as never));
-    expect(sent.slice(-7)).toEqual([
+    expect(sent.slice(-6)).toEqual([
       'duplicate',
       'split',
-      'toggleVisibility',
       'bringForward',
       'sendBackward',
       'bringToFront',
@@ -164,13 +163,14 @@ describe('application menu', () => {
     ]);
 
     const viewItems = submenu(topLevel(template, 'View'));
-    expect(viewItems.slice(0, 4).map((item) => [item.label, item.accelerator])).toEqual([
+    expect(viewItems.slice(0, 5).map((item) => [item.label, item.accelerator])).toEqual([
       ['Zoom In', 'CommandOrControl+='],
       ['Zoom Out', 'CommandOrControl+-'],
       ['Actual Size', 'CommandOrControl+1'],
-      ['Fit Composition', 'CommandOrControl+0']
+      ['Fit Composition', 'CommandOrControl+0'],
+      ['Show/Hide Layer Controls', 'CommandOrControl+Shift+H']
     ]);
-    expect(viewItems.slice(0, 4).every((item) => item.registerAccelerator === false)).toBe(true);
+    expect(viewItems.slice(0, 5).every((item) => item.registerAccelerator === false)).toBe(true);
 
     expect(topLevel(template, 'Window').role).toBe('window');
     expect(submenu(topLevel(template, 'Window')).filter((item) => item.role).map((item) => item.role))
@@ -192,6 +192,7 @@ describe('application menu', () => {
       'Zoom Out',
       'Actual Size',
       'Fit Composition',
+      'Show/Hide Layer Controls',
       'separator',
       'togglefullscreen'
     ]);

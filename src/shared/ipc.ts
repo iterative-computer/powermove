@@ -273,6 +273,7 @@ export type MenuCommand =
   | 'duplicate'
   | 'split'
   | 'toggleVisibility'
+  | 'toggleLayerControls'
   | 'bringForward'
   | 'sendBackward'
   | 'bringToFront'

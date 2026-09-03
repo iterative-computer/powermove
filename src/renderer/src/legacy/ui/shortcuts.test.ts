@@ -411,14 +411,15 @@ describe('pro editor shortcut behavior', () => {
     const frameView = vi.fn();
     PM.Viewer = { fit: true, zoom: 1, shown: 2, layout };
     PM.TL = { frameView };
-    expect(PM.commands.split.kb).toBe('⌘B');
+    expect(PM.commands.split.kb).toBe('⌘⇧D');
     expect(PM.commands.cutLayers.kb).toBe('⌘X');
-    expect(PM.commands.toggleVisibility.kb).toBe('⌘⇧H');
+    expect(PM.commands.toggleVisibility.kb).toBeNull();
+    expect(PM.commands.toggleLayerControls.kb).toBe('⌘⇧H');
     expect(PM.commands.bringForward.kb).toBe('⌘]');
-    expect(PM.commands.zoomIn.kb).toBe('⌘+');
-    expect(PM.commands.actualSize.kb).toBe('⌘1');
+    expect(PM.commands.zoomIn.kb).toBe('.');
+    expect(PM.commands.actualSize.kb).toBe('/');
     expect(PM.commands.fitView.kb).toBe('⇧F');
-    expect(PM.commands.fitComposition.kb).toBe('⌘0');
+    expect(PM.commands.fitComposition.kb).toBe('⇧/');
 
     PM.cmd('zoomIn');
     expect(PM.Viewer).toMatchObject({ fit: false, zoom: 2.5 });

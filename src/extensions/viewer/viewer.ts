@@ -31,6 +31,135 @@ type Corner = readonly [number, number];
 type AffineMatrix = readonly [number, number, number, number, number, number];
 export type LinearMatrix = readonly [number, number, number, number];
 
+export interface DragBox extends Bounds {}
+
+export interface ViewportRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+/** True only when the composition frame has no visible overlap with the
+    viewer. Touching an edge is treated as out of view: there is no useful
+    composition pixel left to navigate from. */
+export function compositionIsOutOfView(stage: ViewportRect, frame: ViewportRect): boolean {
+  return frame.right <= stage.left || frame.left >= stage.right
+    || frame.bottom <= stage.top || frame.top >= stage.bottom;
+}
+
+/** Explicit frame coordinates avoid CSS alignment changing semantics when a
+    zoomed composition crosses from smaller than the stage to larger than it. */
+export function compositionFramePosition(
+  stage: { width: number; height: number },
+  composition: { width: number; height: number },
+  zoom: number,
+  pan: Point,
+): Point {
+  return {
+    x: (stage.width - composition.width * zoom) / 2 + pan.x,
+    y: (stage.height - composition.height * zoom) / 2 + pan.y,
+  };
+}
+
+/** AE shape tools draw from one corner; Option changes the origin to the
+    center, and Shift constrains the result to a square/circle. */
+export function shapeBoxFromDrag(
+  start: Point, pointer: Point,
+  options: { fromCenter?: boolean; constrain?: boolean } = {},
+): DragBox {
+  let dx = pointer.x - start.x;
+  let dy = pointer.y - start.y;
+  if (options.constrain) {
+    const size = Math.max(Math.abs(dx), Math.abs(dy));
+    dx = (dx < 0 ? -1 : 1) * size;
+    dy = (dy < 0 ? -1 : 1) * size;
+  }
+  const opposite = options.fromCenter
+    ? { x: start.x - dx, y: start.y - dy }
+    : start;
+  const far = options.fromCenter
+    ? { x: start.x + dx, y: start.y + dy }
+    : { x: start.x + dx, y: start.y + dy };
+  const x0 = Math.min(opposite.x, far.x), x1 = Math.max(opposite.x, far.x);
+  const y0 = Math.min(opposite.y, far.y), y1 = Math.max(opposite.y, far.y);
+  return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
+}
+
+/** Pan needed after a magnification change so the same composition point
+    remains beneath the pointer, matching AE's Follow Cursor magnification. */
+export function zoomPanForPoint(
+  stage: { width: number; height: number },
+  pointer: Point,
+  compositionPoint: Point,
+  composition: { width: number; height: number },
+  zoom: number,
+): Point {
+  return {
+    x: pointer.x - stage.width / 2 - (compositionPoint.x - composition.width / 2) * zoom,
+    y: pointer.y - stage.height / 2 - (compositionPoint.y - composition.height / 2) * zoom,
+  };
+}
+
+export type ViewerWheelMode = 'zoom' | 'pan';
+
+/** Chromium exposes trackpad pinch as ctrl+wheel. Plain two-finger scrolling
+    is continuous (often fractional and/or two-axis), while a physical mouse
+    wheel retains discrete line/page or legacy 120-step deltas. */
+export function viewerWheelMode(event: {
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  deltaMode?: number;
+  deltaX: number;
+  deltaY: number;
+  wheelDeltaY?: number;
+}): ViewerWheelMode {
+  if (event.ctrlKey) return 'zoom';
+  if (event.shiftKey || Math.abs(event.deltaX) > .01) return 'pan';
+  if ((event.deltaMode || 0) !== 0) return 'zoom';
+  const legacy = Math.abs(Number(event.wheelDeltaY) || 0);
+  if (legacy >= 119 && Math.abs(legacy / 120 - Math.round(legacy / 120)) < .05) return 'zoom';
+  return 'pan';
+}
+
+function wheelZoomDelta(event: WheelEvent): number {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return event.deltaY * 40;
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * Math.max(100, event.currentTarget instanceof HTMLElement
+      ? event.currentTarget.clientHeight : 600);
+  }
+  return event.deltaY;
+}
+
+/** Resolve a Pan Behind drag in the layer's parent space. `linear` is the
+    layer's rotation/skew/scale matrix. Compensating Position keeps every
+    rendered pixel fixed while Anchor Point moves; Option disables that. */
+export function anchorMoveValues(
+  linear: LinearMatrix,
+  anchor: Point,
+  position: Point,
+  pointerInParent: Point,
+  options: { moveLayer?: boolean } = {},
+): { anchor: Point; position: Point } | null {
+  const det = linear[0] * linear[3] - linear[1] * linear[2];
+  if (Math.abs(det) < 1e-9) return null;
+  const dx = pointerInParent.x - position.x;
+  const dy = pointerInParent.y - position.y;
+  const localDx = (dx * linear[3] - dy * linear[2]) / det;
+  const localDy = (dy * linear[0] - dx * linear[1]) / det;
+  const nextAnchor = { x: anchor.x + localDx, y: anchor.y + localDy };
+  const moveLayer = options.moveLayer !== false;
+  return {
+    anchor: nextAnchor,
+    position: moveLayer ? {
+      x: position.x + linear[0] * localDx + linear[2] * localDy,
+      y: position.y + linear[1] * localDx + linear[3] * localDy,
+    } : { ...position },
+  };
+}
+
 export interface SelectionGeometry {
   mode: 'single' | 'common';
   layers: any[];
@@ -368,6 +497,19 @@ export function layerContainsPoint(PM: any, L: any, x: number, y: number, T: num
   return lx >= b.x0 && lx <= b.x1 && ly >= b.y0 && ly <= b.y1;
 }
 
+/** Text editing follows the visible selection before the topmost pixel pick.
+    This keeps a selected title editable even when a full-frame adjustment or
+    overlay layer sits above it in the render stack. */
+export function editableTextAtPoint(PM: any, x: number, y: number, T: number): any | null {
+  const selected = (PM.selLayers?.() || []).filter((layer: any) =>
+    layer?.type === 'text' && !layer.lock && PM.active?.(layer, T) !== false);
+  for (let index = selected.length - 1; index >= 0; index -= 1) {
+    if (layerContainsPoint(PM, selected[index], x, y, T)) return selected[index];
+  }
+  const picked = PM.GL?.pick?.(x, y, T);
+  return picked?.type === 'text' && !picked.lock ? picked : null;
+}
+
 /** Install the legacy viewer controller against the host registry. */
 export function createViewerRuntime(PM: any): any {
 const existing = PM.Viewer;
@@ -388,7 +530,18 @@ const legacyFence = !!existing?._legacyListenerFence;
 existing?._disposeRuntime?.();
 const clamp = PM.clamp;
 
-const V: any = existing || { zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null, snapLines: null };
+const V: any = existing || {
+  zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null,
+  snapLines: null, toolRect: null, zoomRect: null, temporaryTool: null,
+};
+const ZOOM_LAYOUT_VERSION = 3;
+if (V.zoomLayoutVersion !== ZOOM_LAYOUT_VERSION) {
+  /* One-time migration away from the discarded transform/clamp zoom model.
+     HMR returns the already-open viewer to a known frame without restarting. */
+  V.zoomLayoutVersion = ZOOM_LAYOUT_VERSION;
+  V.fit = true;
+  V.pan = [0, 0];
+}
 PM.Viewer = V;
 V._runtimeToken = VIEWER_RUNTIME_TOKEN;
 let disposed = false;
@@ -439,7 +592,17 @@ V.attach = (stage: HTMLElement) => {
     const gl = inner?.querySelector<HTMLCanvasElement>(':scope > #gl');
     const ov = stage.querySelector<HTMLCanvasElement>('#overlay');
     if (!inner || !gl || !ov) throw new Error('Viewer host is missing the legacy canvas skeleton');
+    let recovery = stage.querySelector<HTMLButtonElement>('#composition-recovery');
+    if (!recovery) {
+      recovery = document.createElement('button');
+      recovery.id = 'composition-recovery';
+      recovery.type = 'button';
+      recovery.hidden = true;
+      recovery.innerHTML = '<span>Composition is out of view</span><b>Fit composition</b>';
+      stage.appendChild(recovery);
+    }
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
+    V.recovery = recovery;
     if (!PM.GL.gl) PM.GL.init(gl);
     unbindStage?.();
     resizeObserver?.disconnect();
@@ -462,22 +625,46 @@ V.layout = () => {
   let z = V.fit ? Math.min((r.width - pad * 2) / p.w, (r.height - pad * 2) / p.h) : V.zoom;
   z = clamp(z, .02, 8);
   V.shown = z;
-  const dw = Math.round(p.w * z), dh = Math.round(p.h * z);
+  /* Keep display geometry fractional so its pixels and `shown` describe the
+     same coordinate system. The GL backing buffer is rounded independently. */
+  const dw = p.w * z, dh = p.h * z;
   V.inner.style.width = dw + 'px'; V.inner.style.height = dh + 'px';
-  /* apply pan (AE Hand tool) */
-  if (!V.fit && (V.pan[0] || V.pan[1])) V.inner.style.transform = `translate(${V.pan[0]}px, ${V.pan[1]}px)`;
-  else V.inner.style.transform = '';
+  const position = compositionFramePosition(
+    { width: r.width, height: r.height }, { width: p.w, height: p.h }, z,
+    { x: V.fit ? 0 : V.pan[0], y: V.fit ? 0 : V.pan[1] },
+  );
+  V.inner.style.left = position.x + 'px';
+  V.inner.style.top = position.y + 'px';
+  V.inner.style.transform = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const renderSize = previewRenderSize(p.w, p.h, z, dpr, PM.quality);
   PM.GL.resize(renderSize.width, renderSize.height);
   V.ov.width = Math.round(r.width * dpr); V.ov.height = Math.round(r.height * dpr);
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
+  V.updateRecovery?.();
   PM.invalidate();
+};
+V.returnToComposition = () => {
+  V.fit = true;
+  V.pan = [0, 0];
+  V.layout();
+};
+V.updateRecovery = () => {
+  if (!V.recovery || !V.stage || !V.inner) return false;
+  const hiddenBySourcePreview = !!V.preview?.activeId;
+  const out = !V.fit && !hiddenBySourcePreview
+    && compositionIsOutOfView(V.stage.getBoundingClientRect(), V.inner.getBoundingClientRect());
+  V.recovery.hidden = !out;
+  return out;
 };
 const onWindowResize = () => V.layout();
 window.addEventListener('resize', onWindowResize);
 for (const event of ['quality', 'project', 'layout:applied']) {
   const off = PM.bus.on(event, () => V.layout());
+  if (typeof off === 'function') busOffs.push(off);
+}
+{
+  const off = PM.bus.on('source-preview', () => V.updateRecovery?.());
   if (typeof off === 'function') busOffs.push(off);
 }
 
@@ -486,6 +673,35 @@ const toComp = (e: any): [number, number] => {
   const r = V.inner.getBoundingClientRect();
   return [(e.clientX - r.left) / V.shown, (e.clientY - r.top) / V.shown];
 };
+
+const stagePoint = (e: any): Point => {
+  const r = V.stage.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+};
+
+function setZoomAtPoint(compositionPoint: Point, pointer: Point, zoom: number): void {
+  const stage = V.stage.getBoundingClientRect();
+  V.fit = false;
+  V.zoom = clamp(zoom, .05, 8);
+  const pan = zoomPanForPoint(
+    { width: stage.width, height: stage.height }, pointer, compositionPoint,
+    { width: PM.proj.w, height: PM.proj.h }, V.zoom,
+  );
+  V.pan = [pan.x, pan.y];
+  V.layout();
+}
+
+function zoomAtEvent(e: any, factor: number): void {
+  const [x, y] = toComp(e);
+  setZoomAtPoint({ x, y }, stagePoint(e), (V.shown || 1) * factor);
+}
+
+function leaveFitMode(): void {
+  if (!V.fit) return;
+  V.zoom = Number.isFinite(V.shown) ? V.shown : V.zoom;
+  V.pan = [0, 0];
+  V.fit = false;
+}
 
 /* ── overlay drawing ───────────────────────────────────── */
 for (const [event, handler] of [
@@ -510,12 +726,49 @@ function drawOverlay() {
   const p = PM.proj, dpr = V.ov.width / V.stage.getBoundingClientRect().width;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
+  if (V.zoomRect) {
+    const box = V.zoomRect as DragBox;
+    c.save();
+    c.scale(dpr, dpr);
+    c.strokeStyle = 'rgba(255,255,255,.88)';
+    c.fillStyle = 'rgba(255,255,255,.08)';
+    c.setLineDash([4, 3]);
+    c.lineWidth = 1;
+    c.fillRect(box.x0, box.y0, box.w, box.h);
+    c.strokeRect(box.x0 + .5, box.y0 + .5, Math.max(0, box.w - 1), Math.max(0, box.h - 1));
+    c.restore();
+  }
   const S = V.shown * dpr;
   const frame = V.inner.getBoundingClientRect(), stage = V.stage.getBoundingClientRect();
   c.save(); c.translate((frame.left - stage.left) * dpr, (frame.top - stage.top) * dpr); c.scale(S, S);
   c.lineWidth = 1 / S;
 
   drawSnapLines(c, S);
+
+  if (V.toolRect) {
+    const box = V.toolRect.box as DragBox;
+    c.save();
+    c.strokeStyle = V.toolRect.kind === 'shape' ? '#fff' : 'rgba(255,255,255,.92)';
+    c.fillStyle = V.toolRect.kind === 'shape' ? 'rgba(255,255,255,.12)' : 'rgba(255,255,255,.045)';
+    c.setLineDash([5 / S, 4 / S]);
+    c.lineWidth = 1 / S;
+    if (V.toolRect.kind === 'shape' && PM.toolShape === 'ellipse') {
+      c.beginPath();
+      c.ellipse((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, box.w / 2, box.h / 2, 0, 0, Math.PI * 2);
+      c.fill(); c.stroke();
+    } else {
+      c.fillRect(box.x0, box.y0, box.w, box.h);
+      c.strokeRect(box.x0, box.y0, box.w, box.h);
+    }
+    c.restore();
+  }
+
+  /* Command+Shift+H is After Effects' Show Layer Controls toggle. Drawing and
+     tool feedback remain live; only selection boxes, handles, and paths hide. */
+  if (V.showControls === false) {
+    c.restore();
+    return;
+  }
 
   const sels = PM.selLayers().filter((L: any) => PM.active(L, PM.time));
   const selection = resolveSelectionGeometry(PM, sels, PM.time);
@@ -617,7 +870,7 @@ type SnapResult = { dx: number; dy: number; lines: SnapLine[] };
 
 const SNAP_COLOR = '#F43535';
 /** How close, in CSS pixels, a candidate has to be before a gesture snaps to it. */
-const SNAP_DISTANCE = 6;
+const SNAP_DISTANCE = 8;
 
 function snapCandidatesFromPoints(points: Point[]): SnapCandidates {
   return {
@@ -706,15 +959,16 @@ function unionBounds(layers: any, T: any) {
 /**
  * The points a gesture can snap to, taken once at dragstart so a layer cannot
  * snap to where it has just been dragged. A single layer snaps within its own
- * frame: its siblings plus its parent. A multi-selection spans frames, so the
- * composition's top level is the only frame they share. The composition
- * itself is always a candidate.
+ * frame: its siblings plus its parent. A multi-selection keeps that same frame
+ * when every selected layer shares a parent; only a cross-parent selection
+ * falls back to the composition's top level. The composition itself is always
+ * a candidate.
  */
 function snapshotSnapCandidates(T: any, selectionLayers: any[]): SnapCandidates {
   const selectedIds = new Set(selectionLayers.map((L: any) => L.id));
   const points: Point[] = boxSnapPoints({ x0: 0, y0: 0, x1: PM.proj.w, y1: PM.proj.h });
-  const only = selectionLayers.length === 1 ? selectionLayers[0] : null;
-  const parentId = only ? (only.parent || null) : null;
+  const parentIds = new Set(selectionLayers.map((L: any) => L.parent || null));
+  const parentId = parentIds.size === 1 ? [...parentIds][0] : null;
   const visible = (L: any) => PM.active(L, T);
   for (const L of PM.proj.layers) {
     if ((L.parent || null) !== parentId || selectedIds.has(L.id) || !visible(L)) continue;
@@ -765,19 +1019,60 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
   const capture = fenceLegacyListeners ? true : undefined;
   listen(stage, 'pointerdown', guarded(onDown), capture);
   listen(stage, 'pointermove', guarded(updateStageCursor), capture);
-  listen(stage, 'pointerleave', guarded(() => setStageCursor('')), capture);
+  listen(stage, 'pointerenter', guarded(() => { V.pointerOver = true; }), capture);
+  listen(stage, 'pointerleave', guarded(() => { V.pointerOver = false; setStageCursor(''); }), capture);
   listen(stage, 'wheel', guarded((e: any) => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      V.fit = false;
-      V.zoom = clamp((V.shown || 1) * (1 - e.deltaY * .0035), .05, 8);
-      V.layout();
+    e.preventDefault();
+    if (viewerWheelMode(e) === 'zoom') {
+      const factor = clamp(Math.exp(-wheelZoomDelta(e) * .0015), .5, 2);
+      zoomAtEvent(e, factor);
+      return;
     }
+    leaveFitMode();
+    const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
+    const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+    V.pan = [V.pan[0] - dx, V.pan[1] - dy];
+    V.layout();
   }), fenceLegacyListeners ? { capture: true, passive: false } : { passive: false });
+  if (V.recovery) listen(V.recovery, 'pointerdown', ((e: any) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }) as EventListener);
+  if (V.recovery) listen(V.recovery, 'click', ((e: any) => {
+    e.preventDefault();
+    e.stopPropagation();
+    V.returnToComposition();
+  }) as EventListener);
+  listen(window, 'keydown', ((e: any) => {
+    if (!V.pointerOver || e.code !== 'Space' || e.repeat || e.target?.closest?.('input,textarea,[contenteditable="true"]')) return;
+    /* Space remains the global transport shortcut even while the pointer is
+       over the canvas. The viewer may temporarily expose Hand for a Space-drag,
+       but must not swallow the same keydown before the timeline can play. */
+    V.temporaryTool = 'hand';
+    setStageCursor('grab');
+  }) as EventListener, true);
+  listen(window, 'keyup', ((e: any) => {
+    if (e.code !== 'Space' || V.temporaryTool !== 'hand') return;
+    e.preventDefault();
+    V.temporaryTool = null;
+    setStageCursor('default');
+  }) as EventListener, true);
   listen(fenceLegacyListeners ? stage : inner, 'dblclick', guarded((e: any) => {
     const [x, y] = toComp(e);
-    const L = PM.GL.pick(x, y, PM.time);
-    if (L && L.type === 'text') PM.Inspector?.focusText?.(L);
+    let L = editableTextAtPoint(PM, x, y, PM.time);
+    const remembered = V.textDoubleClickCandidate;
+    if (!L && remembered && Date.now() - remembered.at < 700) {
+      const candidate = PM.L?.(remembered.id);
+      if (candidate?.type === 'text' && !candidate.lock
+        && PM.active?.(candidate, PM.time) !== false
+        && layerContainsPoint(PM, candidate, x, y, PM.time)) L = candidate;
+    }
+    V.textDoubleClickCandidate = null;
+    if (L) {
+      e.preventDefault();
+      e.stopPropagation();
+      PM.Inspector?.focusText?.(L);
+    }
   }), capture);
   /* FX browser drops (effects / transitions). Non-fx drags (OS files) are left
      untouched so the window-level import handler keeps working. */
@@ -822,9 +1117,13 @@ function cursorForHit(selection: SelectionGeometry, hit: any) {
 
 function updateStageCursor(e: any) {
   if (!V.inner) return;
-  if (PM.tool === 'hand') { setStageCursor('grab'); return; }
-  if (PM.tool === 'zoom') { setStageCursor(e.shiftKey ? 'zoom-out' : 'zoom-in'); return; }
-  if (PM.tool && PM.tool !== 'select') { setStageCursor('crosshair'); return; }
+  const tool = V.temporaryTool || PM.tool;
+  if (tool === 'hand') { setStageCursor('grab'); return; }
+  if (tool === 'zoom') { setStageCursor(e.altKey ? 'zoom-out' : 'zoom-in'); return; }
+  if (tool === 'rotate') { setStageCursor(ROTATE_CURSOR); return; }
+  if (tool === 'anchor') { setStageCursor('crosshair'); return; }
+  if (tool === 'shape') { setStageCursor('crosshair'); return; }
+  if (tool === 'text') { setStageCursor('text'); return; }
   const [x, y] = toComp(e), T = PM.time;
   const selection = resolveSelectionGeometry(PM, PM.selLayers(), T);
   if (selection?.transformable) {
@@ -836,28 +1135,55 @@ function updateStageCursor(e: any) {
 }
 
 function startPan(e: any) {
+  leaveFitMode();
   const start = [V.pan[0], V.pan[1]];
-  V.fit = false;
   beginDrag(e, {
     cursor: 'grabbing',
-    move: (dx: any, dy: any) => { V.pan = [start[0] + dx, start[1] + dy]; V.layout(); },
+    move: (dx: any, dy: any, ev: any) => {
+      const speed = ev.shiftKey ? 2 : 1;
+      V.pan = [start[0] + dx * speed, start[1] + dy * speed];
+      V.layout();
+    },
   });
 }
 
 function onDown(e: any) {
+  if (e.button === 1) return startPan(e);
   if (e.button !== 0) return;
 
-  /* Explicit tools own the canvas. Command remains available to the active
-     transform gesture for Motioner's 45-degree rotation snapping contract. */
-  const tool = (PM.tool === 'hand' || PM.tool === 'zoom') ? PM.tool : 'select';
-  if (tool === 'hand') return startPan(e);
-  if (tool === 'zoom') {
-    const dir = e.shiftKey ? -1 : 1;
-    V.fit = false;
-    V.zoom = clamp((V.shown || 1) * (dir > 0 ? 1.25 : .8), .05, 8);
-    V.layout();
-    return;
+  /* The first click of a double-click may legitimately select a full-frame
+     layer above the text. Remember the selected text hit briefly so the
+     ensuing dblclick can still enter that text editor and select all. */
+  if ((V.temporaryTool || PM.tool || 'select') === 'select') {
+    const remembered = V.textDoubleClickCandidate;
+    if (remembered && Date.now() - remembered.at < 700
+      && Math.hypot(e.clientX - remembered.clientX, e.clientY - remembered.clientY) < 6) {
+      const layer = PM.L?.(remembered.id);
+      if (layer?.type === 'text' && !layer.lock && PM.active?.(layer, PM.time) !== false) {
+        V.textDoubleClickCandidate = null;
+        e.preventDefault();
+        e.stopPropagation();
+        PM.Inspector?.focusText?.(layer);
+        return;
+      }
+    }
+    const point = pointerComp(e);
+    const candidate = (PM.selLayers?.() || []).find((layer: any) =>
+      layer?.type === 'text' && !layer.lock
+      && PM.active?.(layer, PM.time) !== false
+      && layerContainsPoint(PM, layer, point.x, point.y, PM.time));
+    if (candidate) V.textDoubleClickCandidate = {
+      id: candidate.id, at: Date.now(), clientX: e.clientX, clientY: e.clientY,
+    };
   }
+
+  const tool = V.temporaryTool || PM.tool || 'select';
+  if (tool === 'hand') return startPan(e);
+  if (tool === 'zoom') return startZoom(e);
+  if (tool === 'shape') return startShape(e);
+  if (tool === 'text') return startText(e);
+  if (tool === 'rotate') return startRotationTool(e);
+  if (tool === 'anchor') return startAnchorTool(e);
 
   const [x, y] = toComp(e);
   const T = PM.time;
@@ -880,15 +1206,278 @@ function onDown(e: any) {
     return startMove(e, selection.roots, T, {
       selectionLayers: selection.layers,
       click: () => {
-        if (L && !selectedIds.has(L.id)) PM.selectLayers(L.id, e.shiftKey);
+        if (L && e.shiftKey && selectedIds.has(L.id)) {
+          PM.selectLayers(PM.sel.layers.filter((id: any) => id !== L.id));
+        } else if (L && !selectedIds.has(L.id)) PM.selectLayers(L.id, e.shiftKey);
         else if (!L && !e.shiftKey) PM.selectLayers([]);
       },
     });
   }
-  if (!L) { if (!e.shiftKey) PM.selectLayers([]); return; }
+  if (!L) return startSelectionMarquee(e);
+  if (e.shiftKey && PM.sel.layers.includes(L.id)) {
+    PM.selectLayers(PM.sel.layers.filter((id: any) => id !== L.id));
+    return;
+  }
   PM.selectLayers(L.id, e.shiftKey);
   const nextSelection = resolveSelectionGeometry(PM, PM.selLayers(), T);
   if (nextSelection) startMove(e, nextSelection.roots, T, { selectionLayers: nextSelection.layers });
+}
+
+function clearToolRect(): void {
+  V.toolRect = null;
+  PM.invalidate('render');
+}
+
+function startZoom(e: any): void {
+  const startScreen = stagePoint(e);
+  const startComposition = pointerComp(e);
+  let moved = false;
+  beginDrag(e, {
+    cursor: e.altKey ? 'zoom-out' : 'zoom-in',
+    move: (dx: number, dy: number, ev: any) => {
+      moved = passedMoveDragThreshold(dx, dy);
+      V.zoomRect = moved && !ev.altKey
+        ? shapeBoxFromDrag(startScreen, stagePoint(ev))
+        : null;
+      PM.invalidate('render');
+    },
+    up: (_dx: number, _dy: number, ev: any) => {
+      const box = V.zoomRect as DragBox | null;
+      V.zoomRect = null;
+      if (!moved || ev.altKey || !box || box.w < 3 || box.h < 3) {
+        zoomAtEvent(ev, ev.altKey ? .8 : 1.25);
+        return;
+      }
+      const endComposition = pointerComp(ev);
+      const compositionBox = shapeBoxFromDrag(startComposition, endComposition);
+      const stage = V.stage.getBoundingClientRect();
+      const zoom = Math.min(
+        (stage.width - 16) / Math.max(.01, compositionBox.w),
+        (stage.height - 16) / Math.max(.01, compositionBox.h),
+      );
+      setZoomAtPoint(
+        { x: (compositionBox.x0 + compositionBox.x1) / 2, y: (compositionBox.y0 + compositionBox.y1) / 2 },
+        { x: stage.width / 2, y: stage.height / 2 }, zoom,
+      );
+    },
+    cancel: () => { V.zoomRect = null; PM.invalidate('render'); },
+  });
+}
+
+function startSelectionMarquee(e: any): void {
+  const start = pointerComp(e);
+  const before = [...PM.sel.layers];
+  let moved = false;
+  beginDrag(e, {
+    cursor: 'default',
+    move: (dx: number, dy: number, ev: any) => {
+      if (!passedMoveDragThreshold(dx, dy)) return;
+      moved = true;
+      V.toolRect = { kind: 'selection', box: shapeBoxFromDrag(start, pointerComp(ev)) };
+      PM.invalidate('render');
+    },
+    up: () => {
+      const box = V.toolRect?.box as DragBox | undefined;
+      clearToolRect();
+      if (!moved || !box) {
+        if (!e.shiftKey) PM.selectLayers([]);
+        return;
+      }
+      const enclosed = PM.proj.layers.filter((layer: any) => {
+        if (!PM.active(layer, PM.time) || PM.TYPE_META?.[layer.type]?.pickable === false) return false;
+        const bounds = layerWorldBounds(PM, layer, PM.time);
+        return !!bounds && bounds.x0 >= box.x0 && bounds.x1 <= box.x1 && bounds.y0 >= box.y0 && bounds.y1 <= box.y1;
+      }).map((layer: any) => layer.id);
+      if (!e.shiftKey) PM.selectLayers(enclosed);
+      else {
+        const next = new Set(before);
+        for (const id of enclosed) next.has(id) ? next.delete(id) : next.add(id);
+        PM.selectLayers([...next]);
+      }
+    },
+    cancel: clearToolRect,
+  });
+}
+
+function startShape(e: any): void {
+  const start = pointerComp(e);
+  let moved = false;
+  beginDrag(e, {
+    cursor: 'crosshair',
+    move: (dx: number, dy: number, ev: any) => {
+      if (!passedMoveDragThreshold(dx, dy)) return;
+      moved = true;
+      V.toolRect = {
+        kind: 'shape',
+        box: shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey, constrain: ev.shiftKey }),
+      };
+      PM.invalidate('render');
+    },
+    up: (_dx: number, _dy: number, ev: any) => {
+      const box = moved
+        ? shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey, constrain: ev.shiftKey })
+        : null;
+      clearToolRect();
+      if (!box || box.w < .5 || box.h < .5) return;
+      createShape(box);
+    },
+    cancel: clearToolRect,
+  });
+}
+
+function createShape(box: DragBox): void {
+  const variant = ['rect', 'rounded', 'ellipse', 'polygon', 'star'].includes(PM.toolShape)
+    ? PM.toolShape : 'rect';
+  const selected = PM.firstSel?.();
+  const canMask = selected && !selected.lock && selected.type !== 'shape'
+    && PM.TYPE_META?.[selected.type]?.masks !== false
+    && (variant === 'rect' || variant === 'ellipse');
+  if (canMask) {
+    const matrix = PM.worldMatrix(selected, PM.time) as AffineMatrix;
+    const first = invertPoint(matrix, { x: box.x0, y: box.y0 });
+    const second = invertPoint(matrix, { x: box.x1, y: box.y1 });
+    if (!first || !second) return;
+    PM.Edit.mutate('Draw mask', () => {
+      const mask = PM.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect');
+      mask.p.x.v = (first.x + second.x) / 2;
+      mask.p.y.v = (first.y + second.y) / 2;
+      mask.p.w.v = Math.abs(second.x - first.x);
+      mask.p.h.v = Math.abs(second.y - first.y);
+      mask.p.feather.v = 0;
+      selected.masks.push(mask);
+      return mask;
+    }, { origin: 'canvas' });
+    PM.invalidate();
+    PM.Inspector?.refresh?.();
+    return;
+  }
+  const shape = variant === 'rounded' ? 'rect' : variant;
+  PM.Edit.apply({
+    type: 'add_layer', layerType: 'shape', name: `${variant[0].toUpperCase()}${variant.slice(1)}`,
+    from: PM.snapF(PM.time, PM.proj.fps), duration: Math.max(1 / PM.proj.fps, PM.proj.dur - PM.time),
+    content: {
+      /* The drawn dimensions live in ordinary animated Scale channels. The
+         source shape is normalized to 100px, so a Scale value in percent is
+         also the drawn size in composition pixels. */
+      shape, w: 100, h: 100,
+      radius: variant === 'rounded' ? 20 : 0,
+    },
+    properties: {
+      'position.x': (box.x0 + box.x1) / 2,
+      'position.y': (box.y0 + box.y1) / 2,
+      'scale.x': box.w,
+      'scale.y': box.h,
+    },
+    select: true,
+  }, { label: `Draw ${variant}`, origin: 'canvas' });
+  PM.invalidate();
+  PM.Inspector?.refresh?.();
+}
+
+function startText(e: any): void {
+  const [hitX, hitY] = toComp(e);
+  const hit = PM.GL.pick(hitX, hitY, PM.time);
+  if (hit?.type === 'text' && !e.shiftKey) {
+    PM.Inspector?.focusText?.(hit);
+    return;
+  }
+  const start = pointerComp(e);
+  let moved = false;
+  beginDrag(e, {
+    cursor: 'text',
+    move: (dx: number, dy: number, ev: any) => {
+      if (!passedMoveDragThreshold(dx, dy)) return;
+      moved = true;
+      V.toolRect = { kind: 'text', box: shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey }) };
+      PM.invalidate('render');
+    },
+    up: (_dx: number, _dy: number, ev: any) => {
+      const box = moved ? shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey }) : null;
+      clearToolRect();
+      const position = box ? { x: box.x0, y: box.y0 } : start;
+      const result = PM.Edit.apply({
+        type: 'add_layer', layerType: 'text', name: 'Text',
+        from: PM.snapF(PM.time, PM.proj.fps), duration: Math.max(1 / PM.proj.fps, PM.proj.dur - PM.time),
+        content: {
+          text: '', align: 'left',
+          boxWidth: PM.P(box?.w || 0), boxHeight: PM.P(box?.h || 0),
+        },
+        properties: { 'position.x': position.x, 'position.y': position.y },
+        select: true,
+      }, { label: box ? 'New paragraph text' : 'New point text', origin: 'canvas' });
+      const layer = result?.ok && result.data?.results?.[0]?.data?.layer;
+      if (layer) PM.Inspector?.focusText?.(layer);
+      PM.invalidate();
+    },
+    cancel: clearToolRect,
+  });
+}
+
+function selectionForTransformTool(e: any): SelectionGeometry | null {
+  const point = pointerComp(e);
+  let selection = resolveSelectionGeometry(PM, PM.selLayers(), PM.time);
+  if (selection && pointInSelection(selection, point.x, point.y)) return selection;
+  const layer = PM.GL.pick(point.x, point.y, PM.time);
+  if (!layer) return null;
+  PM.selectLayers(layer.id, e.shiftKey);
+  selection = resolveSelectionGeometry(PM, PM.selLayers(), PM.time);
+  return selection;
+}
+
+function startRotationTool(e: any): void {
+  const selection = selectionForTransformTool(e);
+  if (selection?.transformable) startTransform(e, selection, { rotate: true }, PM.time);
+}
+
+function startAnchorTool(e: any): void {
+  const selection = selectionForTransformTool(e);
+  if (!selection?.transformable || selection.layers.length !== 1) return;
+  const pointer = pointerComp(e);
+  if (Math.hypot(pointer.x - selection.pivotWorld.x, pointer.y - selection.pivotWorld.y) > 12 / Math.max(.02, V.shown)) return;
+  const layer = selection.layers[0];
+  const T = PM.time;
+  const local = PM.localMatrix(layer, T) as AffineMatrix;
+  const linear: LinearMatrix = [local[0], local[1], local[2], local[3]];
+  const anchor = { x: PM.ev(layer, 'anchor.x', T), y: PM.ev(layer, 'anchor.y', T) };
+  const position = { x: PM.ev(layer, 'position.x', T), y: PM.ev(layer, 'position.y', T) };
+  const parent = parentWorldMatrix(layer, T);
+  const bounds = PM.GL.bounds(layer, T);
+  let moved = false;
+  PM.Edit.begin('Move anchor point', { origin: 'canvas' });
+  beginDrag(e, {
+    cursor: 'crosshair',
+    move: (dx: number, dy: number, ev: any) => {
+      if (!passedMoveDragThreshold(dx, dy)) return;
+      moved = true;
+      const world = pointerComp(ev);
+      const pointerInParent = parent ? invertPoint(parent, world) : world;
+      if (!pointerInParent) return;
+      let next = anchorMoveValues(linear, anchor, position, pointerInParent, { moveLayer: !ev.altKey });
+      if (!next) return;
+      if ((ev.metaKey || ev.ctrlKey) && bounds) {
+        const xs = [bounds.x0, (bounds.x0 + bounds.x1) / 2, bounds.x1];
+        const ys = [bounds.y0, (bounds.y0 + bounds.y1) / 2, bounds.y1];
+        next.anchor.x = xs.reduce((best, value) => Math.abs(value - next!.anchor.x) < Math.abs(best - next!.anchor.x) ? value : best);
+        next.anchor.y = ys.reduce((best, value) => Math.abs(value - next!.anchor.y) < Math.abs(best - next!.anchor.y) ? value : best);
+        if (!ev.altKey) {
+          const dax = next.anchor.x - anchor.x, day = next.anchor.y - anchor.y;
+          next.position = {
+            x: position.x + linear[0] * dax + linear[2] * day,
+            y: position.y + linear[1] * dax + linear[3] * day,
+          };
+        }
+      }
+      setOrKey(layer, 'anchor.x', PM.round(next.anchor.x, 3), T);
+      setOrKey(layer, 'anchor.y', PM.round(next.anchor.y, 3), T);
+      if (!ev.altKey) {
+        setOrKey(layer, 'position.x', PM.round(next.position.x, 3), T);
+        setOrKey(layer, 'position.y', PM.round(next.position.y, 3), T);
+      }
+      PM.invalidate();
+    },
+    up: () => { moved ? PM.Edit.commit('Move anchor point') : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    cancel: () => { PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+  });
 }
 
 function pointInSelection(selection: SelectionGeometry, x: number, y: number): boolean {
@@ -939,9 +1528,12 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
         setOrKey(s.L, 'position.x', s.x + delta[0], T);
         setOrKey(s.L, 'position.y', s.y + delta[1], T);
       });
-      /* Shift enables snapping for the gesture. */
+      /* Alignment is part of ordinary direct manipulation. Shift only locks
+         the dominant movement axis; Command/Control temporarily bypasses
+         snapping for precise free movement. Keeping those jobs separate also
+         lets an unconstrained drag align both axes at once. */
       let snap: SnapResult = { dx: 0, dy: 0, lines: [] };
-      const box = ev.shiftKey ? unionBounds(selectionLayers, T) : null;
+      const box = !(ev.metaKey || ev.ctrlKey) ? unionBounds(selectionLayers, T) : null;
       if (box) {
         snap = snapBox(snapCandidatesFromPoints(boxSnapPoints(box)), candidates,
           SNAP_DISTANCE / Math.max(.02, V.shown), axes);

@@ -14,6 +14,44 @@ test('Command+A selects the full agent composer draft', async ({ session }) => {
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
+test('selected agent text copies and pastes normally without copying layers', async ({ session }) => {
+  const page = session.page;
+  const reply = 'Selection-ready agent reply';
+  await session.app.evaluate(({ clipboard }) => clipboard.writeText(''));
+  await page.evaluate((text) => {
+    const PM = (window as any).PM;
+    PM.SpatialAssistant.open();
+    PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
+    PM.CodexBridge.request = async () => ({
+      text: JSON.stringify({ summary: text, commands: [], artifacts: [], externalActions: [], notes: [] })
+    });
+  }, reply);
+
+  const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+  await composer.fill('Give me selectable text');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  const answer = page.locator('.agent-msg.assistant p').filter({ hasText: reply });
+  await expect(answer).toBeVisible();
+  await answer.evaluate((element) => {
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+
+  const selectedLayers = await page.evaluate(() => [...(window as any).PM.sel.layers]);
+  await page.keyboard.press('Meta+C');
+  await expect.poll(() => session.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(reply);
+  expect(await page.evaluate(() => [...(window as any).PM.sel.layers])).toEqual(selectedLayers);
+
+  await composer.click();
+  await page.keyboard.press('Meta+V');
+  await expect(composer).toHaveValue(reply);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 test('steering stays in the active run and renders as a compact continuation', async ({ session }, testInfo) => {
   const page = session.page;
   await page.evaluate(() => {

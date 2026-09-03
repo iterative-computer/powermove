@@ -11,7 +11,7 @@ import { IPC, type MenuCommand } from '../shared/ipc';
 
 const RENDERER_MENU_CHORDS = new Set([
   'KeyZ', 'shift+KeyZ',
-  'KeyX', 'KeyC', 'KeyV', 'KeyA', 'KeyD', 'KeyB', 'shift+KeyH',
+  'KeyX', 'KeyC', 'KeyV', 'KeyA', 'KeyD', 'shift+KeyD', 'KeyB', 'shift+KeyH',
   'BracketRight', 'BracketLeft', 'shift+BracketRight', 'shift+BracketLeft',
   'Equal', 'shift+Equal', 'Minus', 'Digit0', 'Digit1',
 ]);
@@ -62,6 +62,7 @@ export function appMenuTemplate(
     commandItem('Zoom Out', 'CommandOrControl+-', 'zoomOut', send, false),
     commandItem('Actual Size', 'CommandOrControl+1', 'actualSize', send, false),
     commandItem('Fit Composition', 'CommandOrControl+0', 'fitComposition', send, false),
+    commandItem('Show/Hide Layer Controls', 'CommandOrControl+Shift+H', 'toggleLayerControls', send, false),
     { type: 'separator' },
     { role: 'togglefullscreen' }
   ];
@@ -110,8 +111,7 @@ export function appMenuTemplate(
         commandItem('Select All', 'CommandOrControl+A', 'contextSelectAll', send, false),
         { type: 'separator' },
         commandItem('Duplicate Layers', 'CommandOrControl+D', 'duplicate', send, false),
-        commandItem('Split at Playhead', 'CommandOrControl+B', 'split', send, false),
-        commandItem('Hide/Show Selected Layers', 'CommandOrControl+Shift+H', 'toggleVisibility', send, false),
+        commandItem('Split at Playhead', 'CommandOrControl+Shift+D', 'split', send, false),
         { type: 'separator' },
         commandItem('Bring Forward', 'CommandOrControl+]', 'bringForward', send, false),
         commandItem('Send Backward', 'CommandOrControl+[', 'sendBackward', send, false),

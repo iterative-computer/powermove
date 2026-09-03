@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
+  import FontVariationAxes from './FontVariationAxes.svelte';
+  import { fontAxisContentKey } from './variable-font';
 
   const { api, doc } = inspectorContext();
   const { ColorField, FontField, NumField, Row, Section, SelectField } = api.ui.controls;
@@ -90,22 +92,25 @@
       />
     {/key}
   </Row>
-  {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
-  <Row label="Weight">
-    <SelectField
-      {PM}
-      get={get('weight', 400)}
-      edit={edit('weight', 'Weight')}
-      options={weights.map((value) => ({ v: value, label: String(value) }))}
-      label="Weight"
-      onChange={(value: unknown) => PM.Fonts?.ensure?.(content.font, Number(value) || 400)}
-    />
-  </Row>
+  {#if !content[fontAxisContentKey('wght')]}
+    {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
+    <Row label="Weight">
+      <SelectField
+        {PM}
+        get={get('weight', 400)}
+        edit={edit('weight', 'Weight')}
+        options={weights.map((value) => ({ v: value, label: String(value) }))}
+        label="Weight"
+        onChange={(value: unknown) => PM.Fonts?.ensure?.(content.font, Number(value) || 400)}
+      />
+    </Row>
+  {/if}
   <Row label="Size"><NumField {PM} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></Row>
   <Row label="Tracking"><NumField {PM} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></Row>
   <Row label="Leading"><NumField {PM} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></Row>
   <Row label="Align"><SelectField {PM} get={get('align', 'center')} edit={edit('align', 'Align')} options={['left', 'center', 'right']} label="Align" /></Row>
   <Row label="Color"><ColorField {PM} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></Row>
+  <FontVariationAxes {PM} {layer} {content} />
 {:else if layer.type === 'solid' || layer.type === 'shape'}
   <Row label="Fill"><ColorField {PM} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></Row>
   {#if layer.type === 'shape'}

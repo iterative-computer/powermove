@@ -51,7 +51,7 @@ describe('project settings control', () => {
     expect(field(control, 'Frame rate').value).toBe('30');
     expect(field(control, 'Duration in seconds').value).toBe('10');
     expect(field(control, 'Resolution preset').value).toBe('1920x1080');
-    expect(field(control, 'Export format').value).toBe('webm');
+    expect(field(control, 'Export format').value).toBe('mp4');
     control.destroy();
   });
 

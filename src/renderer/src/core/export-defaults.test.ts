@@ -11,7 +11,7 @@ import {
 describe('normalizeExportDefaults', () => {
   it('fills every field for an empty project', () => {
     expect(normalizeExportDefaults(undefined, 25)).toEqual({
-      format: 'webm', scale: 1, fps: 25, range: 'work', quality: 'high',
+      format: 'mp4', scale: 1, fps: 25, range: 'work', quality: 'high',
       mblur: true, audio: true, alpha: false
     });
   });
@@ -20,7 +20,7 @@ describe('normalizeExportDefaults', () => {
     const result = normalizeExportDefaults({
       format: 'mov', quality: 'ultra', range: 'clip', scale: 'huge'
     });
-    expect(result).toMatchObject({ format: 'webm', quality: 'high', range: 'work', scale: 1 });
+    expect(result).toMatchObject({ format: 'mp4', quality: 'high', range: 'work', scale: 1 });
   });
 
   it('keeps arbitrary positive scales and clamps runaway ones', () => {

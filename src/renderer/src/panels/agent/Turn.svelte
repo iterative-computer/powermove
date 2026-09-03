@@ -1,15 +1,46 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
+
   import type { AgentMessage } from './agent-state.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { activityRows } from './activity-rows';
   import { toRichWords } from './rich-words';
+  import { WORD_REVEAL_SETTLE_MS, glowFade, sweepDelay } from './motion';
+  import { mountPromptGlow } from './prompt-glow';
 
-  let { PM, message }: { PM: Record<string, any>; message: AgentMessage } = $props();
+  let {
+    PM,
+    message,
+    answering = false,
+  }: { PM: Record<string, any>; message: AgentMessage; answering?: boolean } = $props();
+
+  /* The halo marks the prompt the agent is working on. It is torn down with the
+     run — after the fade, so the light settles out instead of blinking off. */
+  const promptGlow = (host: HTMLElement) => ({ destroy: mountPromptGlow(host) });
 
   /* Supermove differentiation: the user speaks in a right-aligned bubble; the
      assistant answers as full-width text on the panel itself — no bubble, no
-     avatar. New assistant text reveals word by word. */
-  const words = $derived(message.role === 'assistant' && message.entering
+     avatar. A finished assistant reply reveals word by word.
+
+     `entering` is a one-shot flag — `snapshot()` in spatial.ts clears it on the
+     very next read, and reads are frequent — so reading it directly would swap
+     the animating spans back to static text mid-reveal. Latch it instead, and
+     hand the paragraph back to plain text once the wave has settled: the word
+     spans are inline-block while they move, and leaving them in place would
+     hold kerning off on a message that has stopped animating. */
+  let revealing = $state(false);
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    if (message.role !== 'assistant' || !message.entering) return;
+    if (settleTimer !== undefined) return;
+    revealing = true;
+    settleTimer = setTimeout(() => { revealing = false; }, WORD_REVEAL_SETTLE_MS);
+  });
+
+  onDestroy(() => clearTimeout(settleTimer));
+
+  const words = $derived(message.role === 'assistant' && revealing
     ? (message.text ?? '').split(/(\s+)/) : null);
 
   /* role 'trace': the sealed activity trail of a finished run — same rows as
@@ -38,12 +69,17 @@
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}
-    <div class="agent-bubble">{message.text}</div>
+    <div class="agent-prompt">
+      {#if answering}
+        <div use:promptGlow out:glowFade class="agent-prompt-glow" aria-hidden="true"></div>
+      {/if}
+      <div class="agent-bubble">{message.text}</div>
+    </div>
   </div>
 {:else}
   <div class="agent-msg assistant" class:is-error={message.error}>
     {#if words}
-      <p>{#each words as word, index}<span class="agent-word" style={`--word-index:${Math.min(index, 40)}`}>{word}</span>{/each}</p>
+      <p>{#each words as word, index}<span class="agent-word" style={`--word-delay:${sweepDelay(index).toFixed(1)}ms`}>{word}</span>{/each}</p>
     {:else}
       <p>{message.text}</p>
     {/if}

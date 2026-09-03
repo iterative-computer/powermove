@@ -1,5 +1,6 @@
 /* Ported from js/core/workspace.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { ensureDockFill, keepPanelAtSetHeight } from '../../layout/model';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -254,13 +255,13 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
       if (finite(q.size)) clean.size = PM.clamp(q.size, 56, 1600);
       if (finite(q.min)) clean.min = PM.clamp(q.min, 32, 800);
       if (text(q.title)) clean.title = text(q.title);
+      keepPanelAtSetHeight(clean);
       return clean;
     }).filter(Boolean);
     const out: any = { id: text(d.id, `dock-${index + 1}`), panels };
-    /* A visible dock must consume its full height. Keep the saved pixel size as
-       metadata, but let one panel flex so a short side panel cannot reserve a
-       large blank column beneath itself. */
-    if (panels.length && !panels.some((panel: any) => panel.flex)) panels[panels.length - 1].flex = true;
+    /* Let an eligible panel consume the dock's spare height. The agent is
+       intentionally excluded so its conversation stays at its saved height. */
+    ensureDockFill(out);
     if (finite(d.size)) out.size = PM.clamp(d.size, 200, 760);
     if (d.hidden) out.hidden = true;
     if (d.flex) out.flex = true;
@@ -299,7 +300,7 @@ const PRESETS: any = () => ([
         /* Default shape: project media above a tall agent on the left, the
            composition + timeline in the middle, and properties over effects
            on the right — the agent is a primary surface, not a footnote. */
-        dock('left', [p('assets', { size: 220 }), p('agent', { flex: true })], 300),
+        dock('left', [p('assets', { flex: true }), p('agent', { size: 350 })], 300),
         dock('center', [p('viewer', { flex: true }), p('timeline', { size: 340 })]),
         dock('right', [p('inspector', { flex: true }), p('fxbrowser', { size: 380 })], 320),
       ],
@@ -412,13 +413,11 @@ WS.init = () => {
   const lastSavedId: any = PM.store.get('workspace', 'design');
   const legacyGradientIds: any = new Set(WS.all.filter(WS.isLegacyGradient).map((w: any) => w.id));
   if (legacyGradientIds.size) WS.all = WS.all.filter((w: any) => !legacyGradientIds.has(w.id));
-  /* Built-ins are product source, not user-authored state. Refresh an older saved
-     built-in definition so fixes (including real source bindings) reach existing
-     installs; custom workspaces with different ids remain untouched. */
+  /* Presets seed missing workspaces, but a saved built-in may contain the user's
+     panel sizes, ordering, and visibility. Normalization above owns migrations;
+     replacing the whole preset here would silently reset that layout on boot. */
   PRESETS().forEach((preset: any) => {
-    const index: any = WS.all.findIndex((workspace: any) => workspace.id === preset.id && workspace.builtin);
-    if (index >= 0) WS.all[index] = normalizeWorkspace(preset);
-    else if (!WS.all.some((workspace: any) => workspace.id === preset.id)) WS.all.push(normalizeWorkspace(preset));
+    if (!WS.all.some((workspace: any) => workspace.id === preset.id)) WS.all.push(normalizeWorkspace(preset));
   });
   if (legacyGradientIds.size) WS.save();
   const lastId: any = legacyGradientIds.has(lastSavedId) ? 'gradient' : lastSavedId;

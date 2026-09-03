@@ -140,6 +140,25 @@ describe('installKeyListener', () => {
     expect(runs.map(([command]) => command)).toEqual(['blur', 'play']);
   });
 
+  it('leaves Copy to the browser when document text is selected', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('built-in', { key: 'cmd+c', command: 'copyLayers' });
+    const text = document.createTextNode('Copy this agent reply');
+    document.body.append(text);
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    expect(press({ key: 'c', metaKey: true })).toBe(false);
+    expect(runs).toEqual([]);
+
+    window.getSelection()?.removeAllRanges();
+    expect(press({ key: 'c', metaKey: true })).toBe(true);
+    expect(runs).toEqual([['copyLayers', []]]);
+  });
+
   it('passes binding args and ignores bare modifier keydowns', () => {
     const kernel = createKernel();
     const { runs } = install(kernel);

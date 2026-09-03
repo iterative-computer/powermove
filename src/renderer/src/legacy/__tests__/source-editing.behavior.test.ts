@@ -126,6 +126,30 @@ it('extension layers remain structured, keyframeable, and undoable', () => {
   assert.equal(PM.L('cube-3d'), null);
 });
 
+it('adjustment layers and their effects are one editable, undoable source transaction', () => {
+  const { PM } = editor();
+  const result = PM.Edit.apply([{
+    type: 'add_layer', id: 'global-grade', layerType: 'adjustment',
+    name: 'Global Grade', from: 1, duration: 6, select: false,
+  }, {
+    type: 'add_effect', target: 'global-grade', effect: 'color',
+    parameters: { saturation: 82 }, open: true,
+  }], { label: 'Add global grade', origin: 'effects-panel' });
+
+  assert.equal(result.ok, true);
+  const layer = PM.L('global-grade');
+  assert.equal(layer.type, 'adjustment');
+  assert.deepEqual(layer.d, {});
+  assert.equal(layer.p.opacity.v, 100);
+  assert.equal(layer.fx[0].type, 'color');
+  assert.equal(layer.fx[0].p.saturation.v, 82);
+  assert.equal(PM.proj.revision, 1);
+  assert.equal(PM.hist.undo(), true);
+  assert.equal(PM.L('global-grade'), null);
+  assert.equal(PM.hist.redo(), true);
+  assert.equal(PM.L('global-grade').fx[0].p.saturation.v, 82);
+});
+
 it('an interrupted source gesture restores its edits and the next canvas gesture still works', () => {
   const { PM } = editor();
   const layer = addText(PM);

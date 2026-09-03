@@ -146,4 +146,22 @@ describe('legacy animation install', () => {
     });
     expect(PM.findProp(layer, 'transitionIn.p.angle')).toBe(angle);
   });
+
+  it('exposes paragraph box dimensions through the shared animation registry', () => {
+    const PM = animRegistry();
+    PM.CH = {};
+    const boxWidth = { v: 320, kf: [], expr: null };
+    const boxHeight = { v: 180, kf: [], expr: null };
+    const layer: any = {
+      type: 'text', p: {}, fx: [], masks: [],
+      d: { boxWidth, boxHeight },
+    };
+
+    expect(PM.allProps(layer)).toEqual([
+      { key: 'c.boxWidth', prop: boxWidth, label: 'Text Box Width', group: 'Text' },
+      { key: 'c.boxHeight', prop: boxHeight, label: 'Text Box Height', group: 'Text' },
+    ]);
+    expect(PM.findProp(layer, 'c.boxWidth')).toBe(boxWidth);
+    expect(PM.findProp(layer, 'c.boxHeight')).toBe(boxHeight);
+  });
 });

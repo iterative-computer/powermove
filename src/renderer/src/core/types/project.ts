@@ -17,6 +17,7 @@ export const TYPE_META = {
     icon: 'clock', color: '#4C8DFF', label: 'Audio', visual: false,
     transform: false, effects: false, masks: false, pickable: false
   },
+  adjustment: { icon: 'wand', color: '#A78BFA', label: 'Adjustment', pickable: false },
   shader: { icon: 'wand', color: '#FF6B1A', label: 'Shader' },
   extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
   null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: false },
@@ -43,14 +44,21 @@ export type BlendMode = (typeof BLEND_MODES)[number];
 export type ChannelValue = number | string | boolean;
 export type EaseHandle = [number, number];
 
+export type { InterpolationType, TemporalEase } from '../anim/temporal-ease';
+
 export interface Keyframe<T extends ChannelValue = ChannelValue> {
   t: number;
   v: T;
-  eo: EaseHandle;
-  ei: EaseHandle;
-  /** Joined like After Effects by default; Option-drag stores a persistent split. */
-  bezierMode?: 'continuous' | 'split';
-  hold: boolean;
+  /** After Effects temporal interpolation, per side of the key. */
+  inInterp: import('../anim/temporal-ease').InterpolationType;
+  outInterp: import('../anim/temporal-ease').InterpolationType;
+  /** Speed in value units per second, influence as a percent of the segment. */
+  inEase: import('../anim/temporal-ease').TemporalEase;
+  outEase: import('../anim/temporal-ease').TemporalEase;
+  /** AE "Auto Bezier": the tangent follows the neighbouring keys. */
+  autoBezier: boolean;
+  /** AE "Continuous Bezier": one speed carries through the key. */
+  continuous: boolean;
   i: string;
 }
 
@@ -116,6 +124,9 @@ export interface SolidContent {
 export interface TextContent {
   [key: string]: unknown;
   text: string;
+  /** Zero width is point text. Positive values are an animatable paragraph box. */
+  boxWidth: Channel<number>;
+  boxHeight: Channel<number>;
   font: string;
   weight: number;
   size: number;
@@ -157,6 +168,15 @@ export interface AudioContent {
   trim: number;
   fadeIn: number;
   fadeOut: number;
+}
+
+/**
+ * An adjustment layer has no pixels of its own. Its effects process the
+ * accumulated composition beneath it, while ordinary layer timing, opacity,
+ * masks, keyframes, and Undo remain canonical project source.
+ */
+export interface AdjustmentContent {
+  [key: string]: unknown;
 }
 
 export interface ShaderContent {
@@ -230,6 +250,7 @@ export type ShapeLayer = LayerBase<'shape', ShapeContent>;
 export type ImageLayer = LayerBase<'image', ImageContent>;
 export type VideoLayer = LayerBase<'video', VideoContent>;
 export type AudioLayer = LayerBase<'audio', AudioContent>;
+export type AdjustmentLayer = LayerBase<'adjustment', AdjustmentContent>;
 export type ShaderLayer = LayerBase<'shader', ShaderContent>;
 export type ExtensionLayer = LayerBase<'extension', ExtensionLayerContent>;
 export type NullLayer = LayerBase<'null', NullContent>;
@@ -243,6 +264,7 @@ export type Layer =
   | ImageLayer
   | VideoLayer
   | AudioLayer
+  | AdjustmentLayer
   | ShaderLayer
   | ExtensionLayer
   | NullLayer

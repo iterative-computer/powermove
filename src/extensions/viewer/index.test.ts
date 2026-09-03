@@ -51,7 +51,9 @@ describe('viewer extension', () => {
 
     expect(body.querySelector('#stage > #stage-inner > #gl')).not.toBeNull();
     expect(body.querySelector('#stage > #overlay')).not.toBeNull();
-    expect(body.querySelectorAll('#stage, #stage-inner, #gl, #overlay')).toHaveLength(4);
+    expect(body.querySelector('#stage > #composition-recovery')?.textContent).toContain('Fit composition');
+    expect(body.querySelector<HTMLButtonElement>('#composition-recovery')?.hidden).toBe(true);
+    expect(body.querySelectorAll('#stage, #stage-inner, #gl, #overlay, #composition-recovery')).toHaveLength(5);
     expect(PM.GL.init).toHaveBeenCalledWith(body.querySelector('#gl'));
     expect(PM.Viewer.ov).toBe(body.querySelector('#overlay'));
   });

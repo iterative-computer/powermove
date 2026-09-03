@@ -1,18 +1,26 @@
+// @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install as installCapabilities } from './capabilities';
 import { install } from './workspace';
 
-function workspaceModel(): PMRegistry {
+function workspaceModel(saved: Record<string, any> = {}): PMRegistry {
   let nextId = 0;
   const PM: PMRegistry = {
     clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
     round: (value: number, places = 3) => Number(value.toFixed(places)),
     uid: (prefix: string) => `${prefix}${++nextId}`,
-    store: { get: (_key: string, fallback: any) => fallback, set() {} },
+    store: {
+      get: (key: string, fallback: any) => key in saved ? saved[key] : fallback,
+      set: (key: string, value: any) => { saved[key] = value; },
+    },
     bus: { emit() {} },
     registerPanel() {},
+    Layout: { apply() {} },
+    perf: {},
+    proj: { id: 'project' },
+    invalidate() {},
   };
   installCapabilities(PM);
   install(PM);
@@ -20,6 +28,42 @@ function workspaceModel(): PMRegistry {
 }
 
 describe('legacy workspace install', () => {
+  it('keeps the agent panel at a set height instead of making it fill the dock', () => {
+    const PM = workspaceModel();
+    const workspace = PM.WS.normalize({
+      id: 'agent-height', name: 'Agent height',
+      layout: { docks: [
+        { id: 'left', panels: [{ id: 'assets', size: 220 }, { id: 'agent', flex: true }] },
+        { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+      ] },
+    });
+    const assets = workspace.layout.docks[0].panels.find((panel: any) => panel.id === 'assets');
+    const agent = workspace.layout.docks[0].panels.find((panel: any) => panel.id === 'agent');
+
+    expect(agent).toMatchObject({ id: 'agent', size: 350 });
+    expect(agent.flex).toBeUndefined();
+    expect(assets.flex).toBe(true);
+  });
+
+  it('restores saved built-in panel geometry instead of replacing it at boot', () => {
+    const saved = {
+      workspace: 'design',
+      workspaces: [{
+        id: 'design', name: 'Design', builtin: true,
+        layout: { docks: [
+          { id: 'left', size: 444, panels: [{ id: 'assets', flex: true }] },
+          { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+        ] },
+      }],
+    };
+    const PM = workspaceModel(saved);
+
+    PM.WS.init();
+
+    expect(PM.WS.current.id).toBe('design');
+    expect(PM.WS.current.layout.docks.find((dock: any) => dock.id === 'left')?.size).toBe(444);
+  });
+
   it('retains a fluid main dock in agent-authored workspaces', () => {
     const PM = workspaceModel();
     const workspace = PM.WS.normalize({

@@ -14,6 +14,7 @@ import {
   planGraphKeyframeMove,
   pointInGraphSelection,
   resolveGraphTarget,
+  selectionAfterKeyGesture,
   selectionAfterMarquee,
 } from './graph-selection';
 
@@ -21,6 +22,7 @@ export interface KeyframeMoveSnapshotItem<Property = unknown> {
   id: string;
   property: Property;
   time: number;
+  compositionTime?: number;
   minTime?: number;
   maxTime?: number;
   selected: boolean;
@@ -36,6 +38,16 @@ export interface KeyframeMovePlan<Property = unknown> {
 export interface TimelineSnapResolution {
   time: number;
   target: number | null;
+}
+
+export interface KeyframeGroupSnapLock {
+  anchor: number;
+  target: number;
+}
+
+export interface KeyframeGroupSnapResolution {
+  delta: number;
+  lock: KeyframeGroupSnapLock | null;
 }
 
 /** Resolve a temporary Shift-snap without letting two nearby targets make the
@@ -63,6 +75,53 @@ export function resolveTimelineSnap(
     if (next < distance) { target = candidate; distance = next; }
   }
   return target == null ? { time: raw, target: null } : { time: target, target };
+}
+
+/** Snap one rigid keyframe selection by testing every selected key against
+    every visible timeline target. Keeping the anchor with the lock prevents
+    a dense set of markers or keys from making the whole selection chatter. */
+export function resolveKeyframeGroupSnap(
+  anchorTimes: number[], requestedDelta: number, targets: number[], tolerance: number,
+  locked: KeyframeGroupSnapLock | null = null, releaseTolerance = tolerance * 1.5,
+): KeyframeGroupSnapResolution {
+  const anchors = anchorTimes.filter(Number.isFinite);
+  const rawDelta = Number.isFinite(requestedDelta) ? requestedDelta : 0;
+  const acquire = Math.max(0, Number.isFinite(tolerance) ? tolerance : 0);
+  const release = Math.max(acquire, Number.isFinite(releaseTolerance) ? releaseTolerance : acquire);
+  if (!anchors.length) return { delta: rawDelta, lock: null };
+
+  if (locked && anchors.includes(locked.anchor)
+      && Math.abs(locked.anchor + rawDelta - locked.target) <= release) {
+    return { delta: locked.target - locked.anchor, lock: locked };
+  }
+
+  let lock: KeyframeGroupSnapLock | null = null;
+  let distance = acquire + Number.EPSILON;
+  for (const anchor of anchors) for (const target of targets) {
+    if (!Number.isFinite(target)) continue;
+    const next = Math.abs(anchor + rawDelta - target);
+    if (next < distance) { distance = next; lock = { anchor, target }; }
+  }
+  return lock ? { delta: lock.target - lock.anchor, lock } : { delta: rawDelta, lock: null };
+}
+
+export type KeyframeContextEntry = { key: { i?: string }; prop: unknown };
+
+/** A context-click on any selected key edits the complete selection. Clicking
+    an unselected key remains deliberately local, matching AE's least
+    surprising multi-keyframe menu behavior. */
+export function keyframeContextEntries<T extends KeyframeContextEntry>(
+  clickedEntries: T[], selectedIds: string[], selectedEntries: T[],
+): T[] {
+  const selected = new Set(selectedIds);
+  const clickedIsSelected = clickedEntries.some(entry => entry.key.i && selected.has(entry.key.i));
+  const source = clickedIsSelected && selectedEntries.length ? selectedEntries : clickedEntries;
+  const seen = new Set<object>();
+  return source.filter(entry => {
+    if (!entry?.key || seen.has(entry.key)) return false;
+    seen.add(entry.key);
+    return true;
+  });
 }
 
 /** Plan one frame-snapped keyframe move from an immutable gesture snapshot.
@@ -359,7 +418,7 @@ function buildHead(head: any) {
   };
   const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
-  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (G)' }, PM.icon('bezier'));
+  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (Shift+F3)' }, PM.icon('bezier'));
   listen(graph, 'click', () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); }, undefined, headCleanups);
   const graphSlot = h('div.tl-group.tl-graph-slot', graph);
   const transport = h('div.tl-group.tl-transport',
@@ -1698,6 +1757,7 @@ function captureKeyframeGesture(entries: any[]) {
     id: entry.key.i,
     property: prop,
     time: entry.time,
+    compositionTime: entry.time + (Number(layerByProperty.get(prop)?.from) || 0),
     minTime: Math.min(
       entry.time,
       -(Number(layerByProperty.get(prop)?.from) || 0),
@@ -1715,6 +1775,30 @@ function captureKeyframeGesture(entries: any[]) {
     value: entry.value,
   })));
   return { properties, items };
+}
+
+function keyframeSnapTargets(snapshot: any) {
+  const selected = new Set(snapshot.items.filter((item: any) => item.selected).map((item: any) => item.key));
+  const targets: number[] = [PM.time, 0, PM.proj.dur, ...(PM.proj.work || [])];
+  targets.push(...(PM.proj.markers || []).map((marker: any) => marker.t));
+  PM.proj.layers.forEach((L: any) => {
+    targets.push(L.from, L.from + L.dur);
+    PM.allProps(L).forEach(({ prop }: any) => prop.kf.forEach((key: any) => {
+      if (!selected.has(key)) targets.push(L.from + key.t);
+    }));
+  });
+  return [...new Set(targets.filter(Number.isFinite).map((time: number) => PM.round(time, 6)))];
+}
+
+function snapKeyframeGesture(snapshot: any, requestedDelta: number, lock: KeyframeGroupSnapLock | null) {
+  return resolveKeyframeGroupSnap(
+    snapshot.items.filter((item: any) => item.selected).map((item: any) => item.compositionTime),
+    requestedDelta,
+    keyframeSnapTargets(snapshot),
+    8 / T.pps,
+    lock,
+    12 / T.pps,
+  );
 }
 
 function restoreKeyframeGesture(snapshot: any) {
@@ -1764,21 +1848,29 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const wasSelected = keySelected(hit);
   if (additive) PM.selectLayers(r.L.id, true);
   else if (!PM.sel.layers.includes(r.L.id)) PM.selectLayers(r.L.id);
-  if (additive) {
-    const ids = new Set(uniqueKeyIds([hit]));
-    setSelectedKeys(wasSelected ? PM.sel.keys.filter((id: any) => !ids.has(id)) : [...PM.sel.keys, hit]);
-    if (wasSelected) return;
-  } else setSelectedKeys(wasSelected ? PM.sel.keys : [hit]);
+  const baseSelection = [...PM.sel.keys];
+  const hitIds = uniqueKeyIds([hit]);
+  setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, additive, true));
   const entries = selectedKeyEntries();
   const snapshot = captureKeyframeGesture(entries);
+  let snapLock: KeyframeGroupSnapLock | null = null;
   let moved = false;
   beginDrag(e, {
-    move: (dx: any, dy: any) => {
+    move: (dx: any, dy: any, event: PointerEvent) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
       if (!moved) { moved = true; PM.hist.begin('Move keyframe'); }
-      applyKeyframeGesture(snapshot, dx / T.pps);
+      let delta = dx / T.pps;
+      if (shiftSnapping(event)) {
+        const snap = snapKeyframeGesture(snapshot, delta, snapLock);
+        delta = snap.delta; snapLock = snap.lock;
+      } else snapLock = null;
+      applyKeyframeGesture(snapshot, delta);
     },
-    up: () => { if (moved) PM.hist.commit('Move keyframe'); PM.invalidate('timeline'); },
+    up: () => {
+      if (moved) PM.hist.commit('Move keyframe');
+      else if (additive && wasSelected) setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, true, false));
+      PM.invalidate('timeline');
+    },
     cancel: () => {
       if (moved) { restoreKeyframeGesture(snapshot); PM.hist.cancel(); PM.touch(); }
       PM.invalidate('timeline');
@@ -1814,15 +1906,15 @@ function graphDown(e: any, x: any, y: any) {
   const wasSelected = keySelected(hit);
   if (additive) PM.selectLayers(L.id, true);
   else if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
-  const ids = new Set(uniqueKeyIds([hit]));
-  if (additive) {
-    setSelectedKeys(wasSelected ? PM.sel.keys.filter((id: any) => !ids.has(id)) : [...PM.sel.keys, hit]);
-    if (wasSelected) return;
-  } else if (!wasSelected) setSelectedKeys([hit]);
-  return dragGraphSelection(e, g, L);
+  const baseSelection = [...PM.sel.keys];
+  const hitIds = uniqueKeyIds([hit]);
+  setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, additive, true));
+  return dragGraphSelection(e, g, L, () => {
+    if (additive && wasSelected) setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, true, false));
+  });
 }
 
-function dragGraphSelection(e: any, g: any, L: any) {
+function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
   const visibleProperties = new Set(g.series.map((axis: any) => axis.prop));
   const entries = selectedKeyEntries().filter((entry: any) => entry.L === L && visibleProperties.has(entry.prop));
   if (!entries.length) return;
@@ -1831,6 +1923,7 @@ function dragGraphSelection(e: any, g: any, L: any) {
   const anchorY = e.clientY - canvasBounds.top;
   T.graphDragBounds = [g.vmin, g.vmax];
   const timeScale = T.pps;
+  let snapLock: KeyframeGroupSnapLock | null = null;
   let moved = false;
   beginDrag(e, {
     cursor: 'move',
@@ -1843,11 +1936,17 @@ function dragGraphSelection(e: any, g: any, L: any) {
       if (!moved && Math.hypot(dx, dy) < 3) return;
       if (!moved) { moved = true; PM.hist.begin(entries.length > 1 ? 'Edit keyframes' : 'Edit curve'); }
       const dv = g.y2v(anchorY + dy) - g.y2v(anchorY);
-      applyKeyframeGesture(snapshot, dx / timeScale, (item: any) => item.value + dv, planGraphKeyframeMove);
+      let delta = dx / timeScale;
+      if (shiftSnapping(event) && dx !== 0) {
+        const snap = snapKeyframeGesture(snapshot, delta, snapLock);
+        delta = snap.delta; snapLock = snap.lock;
+      } else snapLock = null;
+      applyKeyframeGesture(snapshot, delta, (item: any) => item.value + dv, planGraphKeyframeMove);
     },
     up: () => {
       T.graphDragBounds = null;
       if (moved) PM.hist.commit('Edit curve');
+      else click?.();
       PM.invalidate();
     },
     cancel: () => {
@@ -2064,24 +2163,55 @@ function renameLayer(L: any, rowIdx: any) {
   inp.onkeydown = (ev: any) => { ev.stopPropagation(); if (ev.key === 'Enter') done(true); if (ev.key === 'Escape') done(false); };
 }
 
+function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
+  const entries = keyframeContextEntries(clickedEntries, PM.sel.keys, selectedKeyEntries());
+  const keys = entries.map((entry: any) => entry.key);
+  const multiple = keys.length > 1;
+  items.push({ header: multiple ? `${keys.length} keyframes` : 'Keyframe' });
+  const labels: Record<string, string> = {
+    linear: 'Linear', power: 'Power', easeOut: 'Ease out', easeInOut: 'Ease in / out',
+    expoOut: 'Exponential out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide',
+  };
+  ['linear', 'power', 'easeOut', 'easeInOut', 'expoOut', 'backOut', 'snap', 'glide'].forEach((name: any) =>
+    items.push({
+      label: labels[name], curve: PM.Ease.PRESETS[name],
+      on: keys.every((target: any) => !target.hold && PM.Ease.nameOf(target.eo, target.ei) === name),
+      run: () => PM.hist.do(multiple ? 'Ease keyframes' : 'Ease', () => PM.applyEaseTo(keys, name)),
+    }));
+  const allHold = keys.every((target: any) => target.hold);
+  items.push({
+    label: allHold ? 'Remove hold' : multiple ? 'Hold keyframes' : 'Toggle hold',
+    run: () => PM.hist.do(multiple ? 'Hold keyframes' : 'Hold', () => {
+      keys.forEach((target: any) => { target.hold = !allHold; });
+      PM.touch();
+    }),
+  });
+  items.push('-', {
+    label: multiple ? `Delete ${keys.length} keyframes` : 'Delete keyframe',
+    run: () => PM.hist.do(multiple ? 'Delete keyframes' : 'Delete keyframe', () => {
+      entries.forEach((entry: any) => PM.removeKey(entry.prop, entry.key));
+    }),
+  });
+}
+
 function onCtx(e: any) {
   e.preventDefault();
   const x = e.offsetX, y = e.offsetY;
   const hr = hitRow(y);
-  const items = [];
-  if (hr && hr.row.kind === 'prop') {
+  const items: any[] = [];
+  const graphPoint = T.graph && x > T.gut
+    ? [...(T._graph?.points || [])]
+      .map((point: any) => ({ ...point, distance: Math.hypot(x - point.x, y - point.y) }))
+      .sort((a: any, b: any) => a.distance - b.distance)[0]
+    : null;
+  if (graphPoint?.distance < 8) {
+    pushKeyframeMenu(items, [{ key: graphPoint.key, prop: graphPoint.axis.prop }]);
+  } else if (!T.graph && hr && hr.row.kind === 'prop') {
     const r = hr.row;
     const key = r.prop.kf.find((k: any) => Math.abs(t2x(r.L.from + k.t) - x) < 7);
     if (key) {
-      items.push({ header: 'Keyframe' });
       const members = key.members ?? [{ key, prop: r.prop }];
-      const labels: Record<string, string> = { linear: 'Linear', power: 'Power', easeOut: 'Ease out', easeInOut: 'Ease in / out', expoOut: 'Exponential out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide' };
-      ['linear', 'power', 'easeOut', 'easeInOut', 'expoOut', 'backOut', 'snap', 'glide'].forEach((n: any) =>
-        items.push({ label: labels[n], curve: PM.Ease.PRESETS[n],
-          on: members.every((m: any) => !m.key.hold && PM.Ease.nameOf(m.key.eo, m.key.ei) === n),
-          run: () => PM.hist.do('Ease', () => PM.applyEaseTo(members.map((m: any) => m.key), n)) }));
-      items.push({ label: key.hold ? 'Remove hold' : 'Toggle hold', run: () => PM.hist.do('Hold', () => { members.forEach((m: any) => { m.key.hold = !key.hold; }); PM.touch(); }) });
-      items.push('-', { label: 'Delete keyframe', run: () => PM.hist.do('Delete keyframe', () => members.forEach((m: any) => PM.removeKey(m.prop, m.key))) });
+      pushKeyframeMenu(items, members);
     } else {
       items.push({ label: 'Add keyframe here', run: () => PM.hist.do('Add keyframe', () => {
         const values = trackChannels(r).map(axis => ({ ...axis, value: PM.evP(r.L, axis.prop, x2t(x), axis.key) }));
@@ -2089,7 +2219,7 @@ function onCtx(e: any) {
       }) });
       items.push({ label: 'Clear all keyframes', disabled: !r.prop.kf.length, run: () => PM.hist.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.kf = []; }); PM.touch(); }) });
     }
-  } else if (hr && hr.row.kind === 'layer') {
+  } else if (!T.graph && hr && hr.row.kind === 'layer') {
     const L = hr.row.L;
     if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
     const inside = PM.time > L.from && PM.time < L.from + L.dur;
@@ -2113,7 +2243,7 @@ function onCtx(e: any) {
       );
     }
     items.push('-', { label: 'Delete', run: () => PM.cmd('delete') });
-  } else {
+  } else if (!T.graph || y < T.ruler) {
     items.push({ label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Reset work area', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Work area', origin: 'timeline' }) });
@@ -2121,14 +2251,16 @@ function onCtx(e: any) {
   /* Extension contributions land at the end, so the positions a user has
      learned for the built-in rows never move. `layer:context` only fires over a
      layer row; `timeline:context` fires for every row kind. */
-  const rowKind = hr ? hr.row.kind : 'empty';
-  const layerId = hr && hr.row.kind === 'layer' ? hr.row.L.id : null;
+  const rowKind = graphPoint?.distance < 8 ? 'keyframe' : T.graph ? 'graph' : hr ? hr.row.kind : 'empty';
+  const layerId = graphPoint?.distance < 8
+    ? T._graph?.target?.L?.id ?? null
+    : hr && hr.row.kind === 'layer' ? hr.row.L.id : null;
   const contributed = [
     ...(layerId ? PM.Kernel?.collectMenu?.('layer:context', { layerId }) ?? [] : []),
     ...(PM.Kernel?.collectMenu?.('timeline:context', { kind: rowKind, layerId, time: x2t(x) }) ?? []),
   ];
   if (contributed.length) items.push('-' as any, ...contributed);
-  PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
+  if (items.length) PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
 }
 
 /* ── edge navigation ───────────────────────────────────── */

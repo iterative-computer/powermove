@@ -83,6 +83,21 @@ describe('pro shortcut helper contracts', () => {
     expect(PM.hist.list()).toEqual([]);
   });
 
+  it('routes Edit-menu Copy to a selected document transcript', () => {
+    const PM = runtime();
+    const execCommand = vi.fn((_action: string) => true);
+    (globalThis as any).window = {
+      getSelection: () => ({ rangeCount: 1, isCollapsed: false, toString: () => 'Agent reply' }),
+    };
+    vi.stubGlobal('document', {
+      activeElement: { tagName: 'BODY' },
+      execCommand,
+    });
+
+    expect(PM.cmd('contextCopy')).toBe(true);
+    expect(execCommand).toHaveBeenCalledExactlyOnceWith('copy');
+  });
+
   it('replaces command registrations in place during hot reload', () => {
     const PM = runtime();
     const before = PM.Kernel.commands.ownerEntries(LEGACY_OWNER);
@@ -101,7 +116,7 @@ describe('pro shortcut helper contracts', () => {
     expect(PM.Kernel.panels.get('legacy-panel')).toBe(panel);
     expect(PM.Kernel.commands.get('split')).toBe(extensionCommand);
     extension.dispose();
-    expect(PM.commands.split.kb).toBe('⌘B');
+    expect(PM.commands.split.kb).toBe('⌘⇧D');
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(PM.cmd('missing-after-reload')).toBe(false);
     warning.mockRestore();

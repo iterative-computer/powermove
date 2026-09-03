@@ -167,7 +167,7 @@ export function normalizeExportDefaults(raw: unknown, fallbackFps = 30): ExportD
   const fps = Number(source.fps);
   const baseFps = Number.isFinite(fallbackFps) && fallbackFps > 0 ? Math.round(fallbackFps) : 30;
   return {
-    format: pick(FORMATS, source.format, 'webm'),
+    format: pick(FORMATS, source.format, 'mp4'),
     scale: clampExportScale(source.scale),
     fps: Number.isFinite(fps) && fps > 0 ? Math.min(240, Math.round(fps)) : baseFps,
     range: pick(RANGES, source.range, 'work'),

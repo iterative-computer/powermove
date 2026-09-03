@@ -163,7 +163,7 @@ for (const descending of [false, true]) test(`incoming Bézier handles follow th
     PM.L(id).p['scale.y'].kf[1].v = 0;
     PM.touch(); PM.invalidate();
   }, id);
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await page.waitForFunction((id) => {
     const PM = (window as any).PM;
     return PM.TL._graph?.series?.length === 2 && PM.UIState.getKeyHandles(PM.L(id).p['scale.x'].kf[1])?.hi;
@@ -200,7 +200,7 @@ for (const descending of [false, true]) test(`incoming Bézier handles follow th
 test('editing one Bézier handle keeps the neighboring handle visible', async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await page.waitForFunction((layerId) => {
     const PM = (window as any).PM;
     return Boolean(PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[1])?.hi);
@@ -233,7 +233,7 @@ test('continuous Bézier handles stay joined unless Option-drag splits them', as
     PM.setKey(PM.L(layerId), 'scale.y', 5, 70);
     PM.touch(); PM.invalidate();
   }, id);
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await page.waitForFunction((layerId) => Boolean(
     (window as any).PM.UIState.getKeyHandles((window as any).PM.L(layerId).p['scale.x'].kf[1])?.ho
   ), id);
@@ -277,7 +277,7 @@ test('continuous Bézier handles stay joined unless Option-drag splits them', as
 test('marquee-selected graph keyframes move together from inside their transform box', async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await page.waitForFunction((layerId) => {
     const PM = (window as any).PM, layer = PM.L(layerId);
     return ['scale.x', 'scale.y'].every(path => layer.p[path].kf.every((key: any) => PM.UIState.getKeyHandles(key)?.pt));
@@ -336,7 +336,7 @@ test('one selected Bézier handle adjusts every selected keyframe handle', async
     PM.TL.keySelectionActive = true;
     PM.bus.emit('sel'); PM.touch(); PM.invalidate();
   }, id);
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await page.waitForFunction((layerId) => {
     const PM = (window as any).PM, layer = PM.L(layerId);
     return Boolean(PM.UIState.getKeyHandles(layer.p['scale.x'].kf[0])?.ho);
@@ -386,7 +386,7 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
     PM.invalidate();
     return { focused: focused.id, other: other.id };
   });
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph?.target?.L?.name)).toBe('Focused curve');
   const otherRow = await page.evaluate((otherId) => {
     const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
@@ -441,7 +441,7 @@ test('empty timeline clicks preserve the playhead and marquee selection still wo
   await page.mouse.up();
   expect(await page.evaluate(() => (window as any).PM.sel.keys.length)).toBe(2);
   expect(await page.evaluate(() => (window as any).PM.time)).toBe(3);
-  await page.getByRole('button', { name: 'Graph editor (G)', exact: true }).click();
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
   await page.waitForFunction(() => Boolean((window as any).PM.TL._graph));
   await page.mouse.click(points.prop.x, points.prop.y);
   expect(await page.evaluate(() => (window as any).PM.time)).toBe(3);

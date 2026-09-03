@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
-import { effectParamValue, hasRenderableEffects, install, paramUniformName, trackPresentedVideoFrames } from './compositor';
+import {
+  continuousRasterScale, effectParamValue, hasRenderableEffects, install, paramUniformName,
+  trackPresentedVideoFrames,
+} from './compositor';
 
 function compositorRegistry(): PMRegistry {
   const PM: PMRegistry = {
@@ -22,6 +25,13 @@ function compositorRegistry(): PMRegistry {
 }
 
 describe('legacy compositor install', () => {
+  it('continuously rasterizes editable vector sources at their displayed scale', () => {
+    expect(continuousRasterScale([4, 0, 0, 4, 0, 0], 1)).toBe(4);
+    expect(continuousRasterScale([0, 3, -3, 0, 0, 0], 1)).toBe(3);
+    expect(continuousRasterScale([4, 0, 0, 4, 0, 0], .5)).toBe(2);
+    expect(continuousRasterScale([.25, 0, 0, .25, 0, 0], 1)).toBe(.25);
+  });
+
   it('versions textures from each frame the browser presents', () => {
     const callbacks: Array<() => void> = [];
     const invalidated = vi.fn();
@@ -52,6 +62,14 @@ describe('legacy compositor install', () => {
     expect(bounds.ax).toBe(250);
     expect(bounds.ay).toBe(150);
     expect(String(PM.GL.renderProject)).toContain('PM.FRAG_BACKGROUND_FILL');
+  });
+
+  it('routes adjustment layers through the accumulated lower-layer image', () => {
+    const PM = compositorRegistry();
+    const source = String(PM.GL.renderProject);
+
+    expect(source).toMatch(/L\.type === ["']adjustment["']/);
+    expect(source).toContain('compositeAdjustment(L, T, acc, W, H, alpha, hasMasks, blend)');
   });
 });
 

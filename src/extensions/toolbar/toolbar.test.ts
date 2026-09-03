@@ -31,14 +31,27 @@ describe('toolbar', () => {
     panel?.build?.(body, { spec: {} });
 
     expect(panel).toMatchObject({ id: 'toolbar', title: 'Tools', headless: true, flush: true, size: 40, noscroll: true });
-    expect(body.querySelectorAll('button')).toHaveLength(9);
+    expect(body.querySelectorAll('button')).toHaveLength(11);
     expect(body.querySelectorAll('.tl-sep')).toHaveLength(2);
     expect(body.querySelector('[data-tool="select"]')?.classList.contains('on')).toBe(true);
+
+    expect([...body.querySelectorAll<HTMLButtonElement>('button[data-tool]')].map((button) => button.dataset.tool))
+      .toEqual(['select', 'hand', 'zoom', 'rotate', 'anchor', 'shape', 'text']);
+    expect([...body.querySelectorAll<HTMLButtonElement>('button:not([data-tool])')].map((button) => button.title))
+      .toEqual([
+        'New solid (Command+Y)',
+        'New shader layer (Command+Shift+G)',
+        'New null object (Command+Option+Shift+Y)',
+        'Import media (Command+I)'
+      ]);
 
     body.querySelector<HTMLButtonElement>('[data-tool="hand"]')?.click();
     expect(run).toHaveBeenCalledWith('toolHand');
 
     (PM as { setTool?: (tool: string) => void }).setTool?.('hand');
     expect(body.querySelector('[data-tool="hand"]')?.classList.contains('on')).toBe(true);
+
+    body.querySelector<HTMLButtonElement>('[data-tool="rotate"]')?.click();
+    expect(run).toHaveBeenLastCalledWith('toolRotate');
   });
 });

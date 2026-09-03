@@ -15,11 +15,16 @@ const VIEWER_STYLES = `
     color:var(--tx);background:transparent;box-shadow:none
   }
   #panel-viewer .body{display:flex;flex-direction:column;padding:14px;overflow:hidden}
-  #stage{flex:1;min-height:0;display:grid;place-items:center;position:relative}
-  #stage-inner{position:relative;border-radius:0;corner-shape:round;overflow:hidden;box-shadow:none;outline:0}
+  #stage{flex:1;min-height:0;position:relative;overflow:hidden}
+  #stage-inner{position:absolute;border-radius:0;corner-shape:round;overflow:hidden;box-shadow:none;outline:0}
   [data-preview-corners="rounded"] #stage-inner{border-radius:var(--r-md);corner-shape:var(--ui-corner-smoothing)}
   #gl{display:block;width:100%;height:100%;background:#000}
   #overlay{position:absolute;inset:0;pointer-events:none}
+  #composition-recovery{position:absolute;z-index:5;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:10px;padding:7px 8px 7px 11px;border:1px solid color-mix(in srgb,var(--line) 72%,white 10%);border-radius:var(--r-md);background:color-mix(in srgb,var(--bg-panel) 92%,transparent);box-shadow:0 10px 32px rgb(0 0 0/.28);backdrop-filter:blur(14px);color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap}
+  #composition-recovery[hidden]{display:none}
+  #composition-recovery b{padding:4px 7px;border-radius:var(--r-sm);background:var(--accent);color:var(--on-accent);font-weight:var(--fw-medium)}
+  #composition-recovery:hover{color:var(--tx);border-color:color-mix(in srgb,var(--accent) 38%,var(--line))}
+  #composition-recovery:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   #stage.fx-drop-over > #stage-inner{outline:2px solid var(--accent);outline-offset:-2px;box-shadow:0 0 0 4px color-mix(in oklab, var(--accent) 28%, transparent);transition:box-shadow 120ms ease}
 `;
 

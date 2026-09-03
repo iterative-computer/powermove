@@ -35,6 +35,37 @@
     };
   }
 
+  function parameterAnimated(property: any): boolean {
+    doc.tick.values;
+    doc.proj;
+    return (property?.kf?.length ?? 0) > 0;
+  }
+
+  function parameterKeyAtPlayhead(property: any): boolean {
+    doc.tick.values;
+    doc.proj;
+    transport.time;
+    return !!PM.hasKeyAt(layer, property, transport.time);
+  }
+
+  function toggleParameterKeyframe(event: MouseEvent, parameter: any, property: any): void {
+    event.stopPropagation();
+    const time = transport.time;
+    PM.hist.do('Keyframe', () => {
+      const key = PM.hasKeyAt(layer, property, time);
+      if (key) PM.removeKey(property, key);
+      else PM.setKeyOn(
+        property,
+        time - layer.from,
+        parameterAnimated(property) ? PM.evP(layer, property, time, parameter.k) : property.v,
+        'linear',
+        PM.proj.fps
+      );
+    });
+    PM.Inspector?.refresh?.();
+    PM.invalidate?.();
+  }
+
   function isOpen(effect: any): boolean {
     openVersion;
     return !!PM.UIState.getFxOpen(effect);
@@ -270,12 +301,25 @@
             {#if property}
               {#if parameter.type === 'color'}
                 <Row label={parameter.label}>
-                  <ColorField
-                    {PM}
-                    get={() => (doc.tick.values, doc.proj, property.v)}
-                    edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)}
-                    label={parameter.label}
-                  />
+                  <div class="color-parameter">
+                    <ColorField
+                      {PM}
+                      get={() => (doc.tick.values, doc.proj, PM.evP(layer, property, transport.time, parameter.k))}
+                      edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)}
+                      label={parameter.label}
+                    />
+                    <button
+                      type="button"
+                      class="kf"
+                      class:track={parameterAnimated(property)}
+                      class:on={parameterAnimated(property) && parameterKeyAtPlayhead(property)}
+                      title={!parameterAnimated(property) ? `Animate ${parameter.label}` : parameterKeyAtPlayhead(property) ? 'Remove keyframe' : 'Add keyframe'}
+                      aria-label={!parameterAnimated(property) ? `Animate ${parameter.label}` : parameterKeyAtPlayhead(property) ? `Remove keyframe for ${parameter.label}` : `Add keyframe for ${parameter.label}`}
+                      aria-pressed={parameterAnimated(property)}
+                      data-key={`${effect.id}.${parameter.k}`}
+                      onclick={(event) => toggleParameterKeyframe(event, parameter, property)}
+                    ><i aria-hidden="true"></i></button>
+                  </div>
                 </Row>
               {:else}
                 <ChannelRow
@@ -289,7 +333,6 @@
                   min={parameter.min}
                   max={parameter.max}
                   unit={parameter.unit}
-                  showDiamond={false}
                 />
               {/if}
             {/if}
@@ -341,5 +384,15 @@
     color: var(--tx);
     font-weight: 500;
     text-align: left;
+  }
+
+  .color-parameter {
+    position: relative;
+    width: 100%;
+    padding-right: 24px;
+  }
+
+  .color-parameter :global(.color-field) {
+    width: 100%;
   }
 </style>

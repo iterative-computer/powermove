@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-  calculateResize, composeLocalLinear, install, layerContainsPoint, layerWorldPivot,
+  anchorMoveValues,
+  calculateResize, composeLocalLinear, compositionFramePosition, compositionIsOutOfView, editableTextAtPoint,
+  install, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
   previewRenderSize, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
-  transformPointAround,
+  shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 
 const originalWindow = (globalThis as any).window;
@@ -28,6 +30,65 @@ function viewerRegistry(): Record<string, any> {
 }
 
 describe('viewer runtime', () => {
+  it('detects a fully lost composition without firing while any pixels remain visible', () => {
+    const stage = { left: 0, top: 0, right: 1000, bottom: 700, width: 1000, height: 700 };
+    expect(compositionIsOutOfView(stage, {
+      left: 999, top: 100, right: 1199, bottom: 300, width: 200, height: 200,
+    })).toBe(false);
+    expect(compositionIsOutOfView(stage, {
+      left: 1000, top: 100, right: 1200, bottom: 300, width: 200, height: 200,
+    })).toBe(true);
+  });
+
+  it('positions small and oversized compositions from the same center-plus-pan model', () => {
+    expect(compositionFramePosition(
+      { width: 1000, height: 700 }, { width: 1000, height: 500 }, .5, { x: 20, y: -10 },
+    )).toEqual({ x: 270, y: 215 });
+    expect(compositionFramePosition(
+      { width: 1000, height: 700 }, { width: 1000, height: 500 }, 2, { x: 20, y: -10 },
+    )).toEqual({ x: -480, y: -160 });
+  });
+
+  it('builds AE-style shape boxes from a corner, center, and constrained square', () => {
+    expect(shapeBoxFromDrag({ x: 10, y: 20 }, { x: 110, y: 70 }))
+      .toEqual({ x0: 10, y0: 20, x1: 110, y1: 70, w: 100, h: 50 });
+    expect(shapeBoxFromDrag({ x: 60, y: 45 }, { x: 110, y: 70 }, { fromCenter: true }))
+      .toEqual({ x0: 10, y0: 20, x1: 110, y1: 70, w: 100, h: 50 });
+    expect(shapeBoxFromDrag({ x: 10, y: 20 }, { x: 110, y: 70 }, { constrain: true }))
+      .toEqual({ x0: 10, y0: 20, x1: 110, y1: 120, w: 100, h: 100 });
+  });
+
+  it('keeps the point under the Zoom tool fixed on screen', () => {
+    expect(zoomPanForPoint(
+      { width: 1000, height: 700 }, { x: 750, y: 200 }, { x: 700, y: 300 },
+      { width: 1000, height: 500 }, 2,
+    )).toEqual({ x: -150, y: -250 });
+  });
+
+  it('zooms a mouse wheel and trackpad pinch while leaving two-finger scroll as pan', () => {
+    expect(viewerWheelMode({ deltaX: 0, deltaY: 3, deltaMode: 1 })).toBe('zoom');
+    expect(viewerWheelMode({ deltaX: 0, deltaY: 4, wheelDeltaY: -120 })).toBe('zoom');
+    expect(viewerWheelMode({ deltaX: 0, deltaY: -12, ctrlKey: true })).toBe('zoom');
+    expect(viewerWheelMode({ deltaX: 1.5, deltaY: 8.25 })).toBe('pan');
+    expect(viewerWheelMode({ deltaX: 0, deltaY: 8.25 })).toBe('pan');
+    expect(viewerWheelMode({ deltaX: 0, deltaY: 120 })).toBe('pan');
+  });
+
+  it('moves Pan Behind in layer space and compensates Position unless Option is held', () => {
+    const compensated = anchorMoveValues(
+      [0, 2, -3, 0], { x: 10, y: 20 }, { x: 100, y: 200 }, { x: 130, y: 220 },
+    );
+    expect(compensated).not.toBeNull();
+    expect(compensated!.anchor.x).toBeCloseTo(20);
+    expect(compensated!.anchor.y).toBeCloseTo(10);
+    expect(compensated!.position).toEqual({ x: 130, y: 220 });
+
+    expect(anchorMoveValues(
+      [0, 2, -3, 0], { x: 10, y: 20 }, { x: 100, y: 200 }, { x: 130, y: 220 },
+      { moveLayer: false },
+    )).toEqual({ anchor: { x: 20, y: 10 }, position: { x: 100, y: 200 } });
+  });
+
   it('renders fitted high-resolution compositions near their displayed pixel size', () => {
     expect(previewRenderSize(3840, 2160, 0.25, 2, 1)).toEqual({ width: 1920, height: 1080, scale: 0.5 });
     expect(previewRenderSize(7680, 4320, 0.1, 2, 0.5)).toEqual({ width: 768, height: 432, scale: 0.1 });
@@ -58,6 +119,23 @@ describe('viewer runtime', () => {
 
     const locked = V.snapBox(moving, candidates, 6, { x: true, y: false });
     expect(locked).toEqual({ dx: -3, dy: 0, lines: [{ from: { x: 200, y: 52 }, to: { x: 200, y: 0 } }] });
+  });
+
+  it('keeps sibling alignment targets for a multi-selection inside one parent', () => {
+    const PM = viewerRegistry();
+    const parent = { id: 'parent', parent: null };
+    const left = { id: 'left', parent: parent.id };
+    const middle = { id: 'middle', parent: parent.id };
+    const target = { id: 'target', parent: parent.id };
+    const layers = [parent, left, middle, target];
+    PM.proj = { w: 640, h: 360, layers };
+    PM.active = () => true;
+    PM.L = (id: string) => layers.find((layer) => layer.id === id);
+    PM.GL.bounds = () => ({ x0: -10, x1: 10, y0: -10, y1: 10 });
+    PM.worldMatrix = (layer: any) => [1, 0, 0, 1, layer === target ? 290 : 50, 100];
+
+    const candidates = PM.Viewer.snapshotSnapCandidates(0, [left, middle]);
+    expect(candidates.x.map((candidate: any) => candidate.value)).toEqual(expect.arrayContaining([280, 290, 300]));
   });
 
   it('fires the haptic on guide entry and retarget, not while a guide stays put', () => {
@@ -101,6 +179,22 @@ describe('viewer runtime', () => {
 
     expect(layerContainsPoint(PM, selected, 960, 800, 0)).toBe(true);
     expect(layerContainsPoint(PM, selected, 700, 800, 0)).toBe(false);
+  });
+
+  it('edits selected text beneath a full-frame top layer before using pixel pick', () => {
+    const selected = { id: 'text', type: 'text' };
+    const cover = { id: 'cover', type: 'shape' };
+    const PM = {
+      selLayers: () => [selected], active: () => true,
+      GL: {
+        pick: () => cover,
+        bounds: () => ({ x0: -100, y0: -25, x1: 100, y1: 25 }),
+      },
+      worldMatrix: () => [1, 0, 0, 1, 500, 350],
+    };
+
+    expect(editableTextAtPoint(PM, 500, 350, 0)).toBe(selected);
+    expect(editableTextAtPoint(PM, 800, 350, 0)).toBeNull();
   });
 
   it('resizes edge handles on one axis and preserves the opposite midpoint', () => {

@@ -343,6 +343,12 @@ PM.animate = (L: any, key: any, points: any, opt: any = {}) => {
 PM.allProps = (L: any) => {
   const out = [];
   for (const k in L.p || {}) out.push({ key: k, prop: L.p[k], label: PM.CH[k] ? PM.CH[k].label : k, group: 'Transform' });
+  if (L.type === 'text') {
+    for (const [key, label] of [['boxWidth', 'Text Box Width'], ['boxHeight', 'Text Box Height']] as const) {
+      const prop = L.d?.[key];
+      if (prop && typeof prop === 'object' && Array.isArray(prop.kf)) out.push({ key: 'c.' + key, prop, label, group: 'Text' });
+    }
+  }
   (L.fx || []).forEach((fx: any) => { for (const k in fx.p || {}) out.push({ key: fx.id + '.' + k, prop: fx.p[k], label: k, group: fx.type }); });
   (L.masks || []).forEach((m: any, i: any) => {
     for (const k in m.p) out.push({ key: 'm.' + m.id + '.' + k, prop: m.p[k], label: k, group: 'Mask ' + (i + 1) });
@@ -361,6 +367,7 @@ PM.allProps = (L: any) => {
 };
 PM.findProp = (L: any, key: any) => {
   if (L.p?.[key]) return L.p[key];
+  if (key.startsWith('c.')) return L.d?.[key.slice(2)] || null;
   const transition = /^(transitionIn|transitionOut)\.p\.([a-zA-Z][a-zA-Z0-9]*)$/.exec(String(key));
   if (transition) {
     const field = transition[1]!, param = transition[2]!;

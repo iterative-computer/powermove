@@ -179,3 +179,11 @@
     </div>
   {/if}
 </div>
+
+<style>
+  /* The set-height variable is updated by explicit splitter resizing. The
+     important basis also pins older live sessions whose inline style is fluid. */
+  :global(#panel-agent:not([data-collapsed="1"])) {
+    flex: 0 0 var(--set-panel-height, 350px) !important;
+  }
+</style>

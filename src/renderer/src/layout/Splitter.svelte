@@ -107,9 +107,9 @@
     };
   };
   const pin = (element: HTMLElement, spec: PanelSpec, height: number): void => {
-    element.style.flex = `0 0 ${height}px`;
     spec.size = Math.round(height);
     delete spec.flex;
+    applyPanelSize(element, spec, PM.PANELS[spec.id] || {});
   };
   const setHorizontal = (geometry: NonNullable<ReturnType<typeof horizontalGeometry>>, delta: number): void => {
     let height: number;

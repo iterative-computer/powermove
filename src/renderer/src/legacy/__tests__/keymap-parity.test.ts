@@ -1,14 +1,6 @@
 // @vitest-environment happy-dom
 // @ts-nocheck -- legacy PM is intentionally a dynamic registry.
-/*
- * Parity table for the keydown handler that used to live in ui/shortcuts.ts.
- *
- * Every branch of the old if-chain and both switch blocks gets a row here. The
- * test fires a real KeyboardEvent at the window (which is where the kernel's
- * single listener lives) and asserts the command that ran, so the migration
- * from a hand-written handler to `kernel.keybindings` is verified against the
- * behaviour it replaced rather than against its own implementation.
- */
+/* End-to-end key dispatch for Powermove's AE-style editor profile. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import activateKeymap from '../../../../extensions/keymap-default/index';
@@ -86,7 +78,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+shift+z redoes', { key: 'z', metaKey: true, shiftKey: true }, 'redo'],
   ['cmd+y makes a solid', { key: 'y', metaKey: true }, 'newSolid'],
   ['cmd+shift+y makes a shape', { key: 'y', metaKey: true, shiftKey: true }, 'newShape'],
-  ['cmd+t makes text', { key: 't', metaKey: true }, 'newText'],
+  ['cmd+t picks the type tool', { key: 't', metaKey: true }, 'toolText'],
   ['cmd+shift+g makes a shader layer', { key: 'g', metaKey: true, shiftKey: true }, 'newShader'],
   ['cmd+d duplicates', { key: 'd', metaKey: true }, 'duplicate'],
   ['cmd+shift+d splits', { key: 'd', metaKey: true, shiftKey: true }, 'split'],
@@ -94,6 +86,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+shift+c precomposes', { key: 'c', metaKey: true, shiftKey: true }, 'precompose'],
   ['cmd+v pastes layers', { key: 'v', metaKey: true }, 'pasteLayers'],
   ['cmd+a selects all', { key: 'a', metaKey: true }, 'selectAll'],
+  ['cmd+shift+a deselects all', { key: 'a', metaKey: true, shiftKey: true }, 'deselect'],
   ['cmd+i imports', { key: 'i', metaKey: true }, 'import'],
   ['cmd+s saves', { key: 's', metaKey: true }, 'save'],
   ['cmd+shift+s saves a project as', { key: 's', metaKey: true, shiftKey: true }, 'saveAs'],
@@ -101,51 +94,68 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+e exports', { key: 'e', metaKey: true }, 'export'],
   ['cmd+p shows projects', { key: 'p', metaKey: true }, 'projects'],
   ['cmd+n makes a project', { key: 'n', metaKey: true }, 'newProject'],
-  ['F9 easy-eases', { key: 'F9' }, 'easeOut'],
-  ['shift+F9 applies the power curve', { key: 'F9', shiftKey: true }, 'easePower'],
-  ['cmd+F9 linearises', { key: 'F9', metaKey: true }, 'easeLinear'],
-  ['cmd+shift+F9 linearises', { key: 'F9', metaKey: true, shiftKey: true }, 'easeLinear'],
+  ['F9 applies Easy Ease', { key: 'F9' }, 'easyEase'],
+  ['shift+F9 applies Easy Ease In', { key: 'F9', shiftKey: true }, 'easyEaseIn'],
+  ['cmd+shift+F9 applies Easy Ease Out', { key: 'F9', metaKey: true, shiftKey: true }, 'easyEaseOut'],
   ['space toggles playback', { key: ' ' }, 'play'],
   ['Home goes to the start', { key: 'Home' }, 'gotoStart'],
   ['End goes to the end', { key: 'End' }, 'gotoEnd'],
-  ['ArrowRight steps forward', { key: 'ArrowRight' }, 'nextFrame'],
-  ['shift+ArrowRight jumps to the next edge', { key: 'ArrowRight', shiftKey: true }, 'nextEdge'],
-  ['ArrowLeft steps back', { key: 'ArrowLeft' }, 'prevFrame'],
-  ['shift+ArrowLeft jumps to the previous edge', { key: 'ArrowLeft', shiftKey: true }, 'prevEdge'],
+  ['Page Down steps forward', { key: 'PageDown' }, 'nextFrame'],
+  ['Page Up steps back', { key: 'PageUp' }, 'prevFrame'],
+  ['shift+Page Down steps ten frames', { key: 'PageDown', shiftKey: true }, 'stepFrames'],
+  ['shift+Page Up steps back ten frames', { key: 'PageUp', shiftKey: true }, 'stepFrames'],
+  ['ArrowRight nudges right', { key: 'ArrowRight' }, 'nudgeSelection'],
+  ['shift+ArrowRight nudges right ten pixels', { key: 'ArrowRight', shiftKey: true }, 'nudgeSelection'],
+  ['ArrowLeft nudges left', { key: 'ArrowLeft' }, 'nudgeSelection'],
+  ['shift+ArrowLeft nudges left ten pixels', { key: 'ArrowLeft', shiftKey: true }, 'nudgeSelection'],
   ['Backspace deletes', { key: 'Backspace' }, 'delete'],
   ['Delete deletes', { key: 'Delete' }, 'delete'],
   ['Escape deselects', { key: 'Escape' }, 'deselect'],
   ['v picks the selection tool', { key: 'v' }, 'toolSelect'],
   ['h picks the hand tool', { key: 'h' }, 'toolHand'],
   ['z picks the zoom tool', { key: 'z' }, 'toolZoom'],
+  ['w picks the rotation tool', { key: 'w' }, 'toolRotate'],
+  ['y picks the pan behind tool', { key: 'y' }, 'toolAnchor'],
+  ['q picks and cycles the shape tools', { key: 'q' }, 'toolShape'],
   ['p reveals position', { key: 'p' }, 'revealPos'],
   ['s reveals scale', { key: 's' }, 'revealScale'],
   ['r reveals rotation', { key: 'r' }, 'revealRot'],
   ['t reveals opacity', { key: 't' }, 'revealOpacity'],
   ['a reveals the anchor point', { key: 'a' }, 'revealAnchor'],
   ['u reveals animated properties', { key: 'u' }, 'revealKeys'],
-  ['g toggles the graph editor', { key: 'g' }, 'graph'],
   ['b sets the work area in', { key: 'b' }, 'workIn'],
   ['n sets the work area out', { key: 'n' }, 'workOut'],
   ['shift+f fits the composition', { key: 'f', shiftKey: true }, 'fitView'],
-  ['j jumps to the previous edge', { key: 'j' }, 'prevEdge'],
-  ['k pauses', { key: 'k' }, 'transportPause'],
-  ['l plays', { key: 'l' }, 'transportPlay'],
-  ['i trims in', { key: 'i' }, 'trimIn'],
-  ['o trims out', { key: 'o' }, 'trimOut'],
-  /* The old switch(k) sat before the `if (a || m) return` guard, so transport
-     keys fired with a modifier held too. */
+  ['j jumps to the previous visible event', { key: 'j' }, 'prevVisibleEvent'],
+  ['k jumps to the next visible event', { key: 'k' }, 'nextVisibleEvent'],
+  ['shift+j jumps to the previous selected event', { key: 'j', shiftKey: true }, 'prevSelectedEvent'],
+  ['shift+k jumps to the next selected event', { key: 'k', shiftKey: true }, 'nextSelectedEvent'],
+  ['i goes to the selected layer In point', { key: 'i' }, 'gotoLayerIn'],
+  ['o goes to the selected layer Out point', { key: 'o' }, 'gotoLayerOut'],
+  ['left bracket moves the layer In point', { key: '[', code: 'BracketLeft' }, 'moveLayerIn'],
+  ['right bracket moves the layer Out point', { key: ']', code: 'BracketRight' }, 'moveLayerOut'],
+  ['option+left bracket trims the layer In point', { key: '[', code: 'BracketLeft', altKey: true }, 'trimIn'],
+  ['option+right bracket trims the layer Out point', { key: ']', code: 'BracketRight', altKey: true }, 'trimOut'],
+  ['period zooms the viewer in', { key: '.', code: 'Period' }, 'zoomIn'],
+  ['comma zooms the viewer out', { key: ',', code: 'Comma' }, 'zoomOut'],
+  ['slash shows 100 percent', { key: '/', code: 'Slash' }, 'actualSize'],
+  ['shift+slash fits the composition', { key: '?', code: 'Slash', shiftKey: true }, 'fitComposition'],
+  ['shift+F3 toggles the Graph Editor', { key: 'F3', shiftKey: true }, 'graph'],
+  ['cmd+shift+h toggles layer controls', { key: 'h', metaKey: true, shiftKey: true }, 'toggleLayerControls'],
+  ['cmd+l locks selected layers', { key: 'l', metaKey: true }, 'lockSelectedLayers'],
+  ['cmd+shift+l unlocks all layers', { key: 'l', metaKey: true, shiftKey: true }, 'unlockAllLayers'],
+  ['cmd+up selects the previous layer', { key: 'ArrowUp', metaKey: true }, 'selectPreviousLayer'],
+  ['cmd+down selects the next layer', { key: 'ArrowDown', metaKey: true }, 'selectNextLayer'],
+  ['cmd+shift+up extends to the previous layer', { key: 'ArrowUp', metaKey: true, shiftKey: true }, 'extendSelectionPreviousLayer'],
+  ['cmd+shift+down extends to the next layer', { key: 'ArrowDown', metaKey: true, shiftKey: true }, 'extendSelectionNextLayer'],
+  /* Space remains global even when another modifier is held. */
   ['cmd+space still toggles playback', { key: ' ', metaKey: true }, 'play'],
-  ['cmd+Delete still deletes', { key: 'Delete', metaKey: true }, 'delete'],
-  ['alt+Escape still deselects', { key: 'Escape', altKey: true }, 'deselect'],
   ['shift+Space still toggles playback', { key: ' ', shiftKey: true }, 'play'],
-  ['shift+Delete still deletes', { key: 'Delete', shiftKey: true }, 'delete'],
   ['cmd+alt+k still opens the palette', { key: 'k', metaKey: true, altKey: true }, 'palette'],
-  ['cmd+ctrl+z still undoes', { key: 'z', metaKey: true, ctrlKey: true }, 'undo'],
-  ['alt+F9 still easy-eases', { key: 'F9', altKey: true }, 'easeOut']
+  ['cmd+ctrl+z still undoes', { key: 'z', metaKey: true, ctrlKey: true }, 'undo']
 ];
 
-describe('legacy keymap parity', () => {
+describe('AE-style keymap dispatch', () => {
   it.each(TABLE)('%s', (_description, init, expected) => {
     const event = press(init);
     expect(ran).toEqual([expected]);
@@ -153,19 +163,33 @@ describe('legacy keymap parity', () => {
   });
 
   const NUDGE_TABLE: Array<[string, KeyboardEventInit, [number, number]]> = [
-    ['Alt+ArrowLeft nudges one pixel left', { key: 'ArrowLeft', altKey: true }, [-1, 0]],
-    ['Alt+ArrowRight nudges one pixel right', { key: 'ArrowRight', altKey: true }, [1, 0]],
-    ['Alt+ArrowUp nudges one pixel up', { key: 'ArrowUp', altKey: true }, [0, -1]],
-    ['Alt+ArrowDown nudges one pixel down', { key: 'ArrowDown', altKey: true }, [0, 1]],
-    ['Alt+Shift+ArrowLeft nudges ten pixels left', { key: 'ArrowLeft', altKey: true, shiftKey: true }, [-10, 0]],
-    ['Alt+Shift+ArrowRight nudges ten pixels right', { key: 'ArrowRight', altKey: true, shiftKey: true }, [10, 0]],
-    ['Alt+Shift+ArrowUp nudges ten pixels up', { key: 'ArrowUp', altKey: true, shiftKey: true }, [0, -10]],
-    ['Alt+Shift+ArrowDown nudges ten pixels down', { key: 'ArrowDown', altKey: true, shiftKey: true }, [0, 10]]
+    ['ArrowLeft nudges one pixel left', { key: 'ArrowLeft' }, [-1, 0]],
+    ['ArrowRight nudges one pixel right', { key: 'ArrowRight' }, [1, 0]],
+    ['ArrowUp nudges one pixel up', { key: 'ArrowUp' }, [0, -1]],
+    ['ArrowDown nudges one pixel down', { key: 'ArrowDown' }, [0, 1]],
+    ['Shift+ArrowLeft nudges ten pixels left', { key: 'ArrowLeft', shiftKey: true }, [-10, 0]],
+    ['Shift+ArrowRight nudges ten pixels right', { key: 'ArrowRight', shiftKey: true }, [10, 0]],
+    ['Shift+ArrowUp nudges ten pixels up', { key: 'ArrowUp', shiftKey: true }, [0, -10]],
+    ['Shift+ArrowDown nudges ten pixels down', { key: 'ArrowDown', shiftKey: true }, [0, 10]]
   ];
 
   it.each(NUDGE_TABLE)('%s', (_description, init, delta) => {
     const event = press(init);
     expect(ran).toEqual(['nudgeSelection']);
+    expect(ranArgs).toEqual([delta]);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  const KEYFRAME_NUDGE_TABLE: Array<[string, KeyboardEventInit, [number]]> = [
+    ['Option+Left moves keys one frame earlier', { key: 'ArrowLeft', altKey: true }, [-1]],
+    ['Option+Right moves keys one frame later', { key: 'ArrowRight', altKey: true }, [1]],
+    ['Option+Shift+Left moves keys ten frames earlier', { key: 'ArrowLeft', altKey: true, shiftKey: true }, [-10]],
+    ['Option+Shift+Right moves keys ten frames later', { key: 'ArrowRight', altKey: true, shiftKey: true }, [10]],
+  ];
+
+  it.each(KEYFRAME_NUDGE_TABLE)('%s', (_description, init, delta) => {
+    const event = press(init);
+    expect(ran).toEqual(['nudgeKeyframes']);
     expect(ranArgs).toEqual([delta]);
     expect(event.defaultPrevented).toBe(true);
   });

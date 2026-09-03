@@ -41,6 +41,27 @@ export function trackPresentedVideoFrames(el: any, onFrame: () => void): { versi
   return state;
 }
 
+/** Choose the source-texture density from the layer's actual display matrix.
+ * Text and shape layers remain editable source data, but the GPU still needs a
+ * bitmap at the final sampling boundary. Rebuilding that bitmap as its display
+ * scale grows avoids baking a vector layer at 1x and stretching those pixels.
+ * Quarter-step buckets keep animated scale from creating a new cache entry on
+ * every frame while remaining visually indistinguishable at preview size. */
+export function continuousRasterScale(
+  matrix: readonly number[], density = 1, maxScale = 8,
+): number {
+  const m0 = Number(matrix?.[0]) || 0, m1 = Number(matrix?.[1]) || 0;
+  const m2 = Number(matrix?.[2]) || 0, m3 = Number(matrix?.[3]) || 0;
+  const aa = m0 * m0 + m1 * m1;
+  const bb = m0 * m2 + m1 * m3;
+  const cc = m2 * m2 + m3 * m3;
+  const discriminant = Math.sqrt(Math.max(0, (aa - cc) ** 2 + 4 * bb * bb));
+  const largest = Math.sqrt(Math.max(0, (aa + cc + discriminant) / 2));
+  const requested = largest * Math.max(.01, Number(density) || 1);
+  const bounded = Math.max(.25, Math.min(Math.max(.25, Number(maxScale) || 8), requested));
+  return Math.ceil(bounded * 4 - 1e-9) / 4;
+}
+
 export function install(PM: PMRegistry): void {
 
 const GL: any = {
@@ -489,8 +510,12 @@ function contentQuad(L: any, T: any, W: any, H: any) {
     return { solid: PM.hex2rgb(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
   if (L.type === 'text' || L.type === 'shape') {
-    const ss = PM.clamp(PM.quality || 1, .5, 2);
-    const r = PM.raster(L, ss);
+    /* Render editable text/shape source at the density it occupies in this
+       output. This is continuous rasterization: no fixed-resolution layer
+       bitmap is enlarged when the layer is scaled, parented, or previewed at
+       a different output resolution. */
+    const ss = continuousRasterScale(scaledWorld(L, T, W, H));
+    const r = PM.raster(L, ss, T);
     const tex = texFor('r:' + r.key, r.cv, { version: 1 });
     const ax = L.type === 'shape' ? r.w / 2 : r.anchorX;
     const ay = L.type === 'shape' ? r.h / 2 : r.anchorY;
@@ -752,7 +777,9 @@ function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
   {
     const pm = use(p);
     pm.u('u_m', fullQuad(W, H)); pm.u('u_res', W, H); pm.u('u_uv', 0, 0, 1, 1);
-    setU(p, 'u_inv', m3(inv));
+    /* setU receives its uniform arguments as a list; keep the matrix wrapped so
+       it selects uniformMatrix3fv rather than treating nine scalars as vec4. */
+    setU(p, 'u_inv', [m3(inv)]);
     setI(p, 'u_cnt', cnt); setI(p, 'u_hasAdd', hasAdd);
     setU(p, 'u_g', [gArr]); setU(p, 'u_q', [qArr]);
     gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
@@ -786,6 +813,47 @@ function copyFbo(srcF: any, W: any, H: any) {
     g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
     GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND); GL.stats.passes++;
   }
+  return out;
+}
+
+/** Apply an adjustment layer to the composition accumulated beneath it.
+ * The layer contributes no pixels of its own: the normal editable effect chain
+ * processes the full lower image, masks constrain the processed result, and
+ * opacity/blend determine how strongly it replaces the untouched original. */
+function compositeAdjustment(
+  L: any, T: any, acc: any, W: any, H: any,
+  alpha: number, hasMasks: boolean, blend: number,
+) {
+  const adjusted = runEffects(L, T, acc, W, H);
+  /* A missing or failed effect program must leave the composition unchanged,
+     including transparent nested compositions. */
+  if (adjusted === acc) return acc;
+
+  /* Adjustment masks gate the difference between adjusted and original. Apply
+     them after effects so transparent pixels outside the mask never become
+     effect input and so spatial effects can sample the real lower stack. */
+  const contribution = hasMasks ? applyMasks(L, T, adjusted, W, H) : adjusted;
+
+  const out = grab(W, H);
+  bind(out); clear();
+  const p = program('adjustment', PM.FRAG_COMPOSITE);
+  if (!p) {
+    free(out);
+    if (contribution !== adjusted) free(contribution);
+    free(adjusted);
+    return acc;
+  }
+  const g = use(p);
+  bindTex(0, contribution.tex); setI(p, 'u_tex', 0);
+  bindTex(1, acc.tex); setI(p, 'u_dst', 1);
+  g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+  g.u('u_alpha', alpha); setI(p, 'u_blend', blend);
+  GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND);
+  GL.stats.passes++;
+
+  if (contribution !== adjusted) free(contribution);
+  free(adjusted);
+  free(acc);
   return out;
 }
 
@@ -873,6 +941,14 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     const blend = (BLEND_ID as any)[L.blend] || 0;
     const mb = L.mblur && opt.mblur !== false;
     const transition = activeTransition(L, T);
+
+    /* Adjustment layers are full-frame processors over the already-rendered
+       stack below. An adjustment without an enabled renderable effect is a
+       transparent no-op, matching its lack of source pixels. */
+    if (L.type === 'adjustment') {
+      if (hasFx) acc = compositeAdjustment(L, T, acc, W, H, alpha, hasMasks, blend);
+      continue;
+    }
 
     /* fast path: no masks, no effects, normal blend, no motion blur → straight into acc */
     if (!hasMasks && !hasFx && !blend && !mb && !transition) {
@@ -1003,12 +1079,13 @@ GL.bounds = (L: any, T: any) => {
   if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'text') {
-    const r = PM.raster(L, 1);
+    const r = PM.raster(L, 1, T);
     if (r.selection) return { ...r.selection, ax: r.anchorX, ay: r.anchorY };
     w = r.w; h = r.h; ax = r.anchorX; ay = r.anchorY;
   }
   else if (L.type === 'shape') {
     const r = PM.raster(L, 1);
+    if (r.selection) return { ...r.selection, ax: r.w / 2, ay: r.h / 2 };
     w = r.w; h = r.h;
     ax = w / 2; ay = h / 2;
   } else if (L.type === 'image' || L.type === 'video') {

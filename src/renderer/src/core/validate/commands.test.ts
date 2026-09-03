@@ -169,6 +169,16 @@ describe('EditCommand contract', () => {
 });
 
 describe('parseEditCommand', () => {
+  it('accepts adjustment layers as canonical add-layer commands', () => {
+    expect(parseEditCommand({
+      type: 'add_layer', id: 'grade', layerType: 'adjustment', name: 'Global Grade',
+      from: 1, duration: 4, select: false
+    })).toEqual({
+      type: 'add_layer', id: 'grade', layerType: 'adjustment', name: 'Global Grade',
+      from: 1, duration: 4, select: false
+    });
+  });
+
   it('accepts a structured extension layer without interpreting its instance data', () => {
     expect(parseEditCommand({
       type: 'add_layer', id: 'custom', layerType: 'extension',

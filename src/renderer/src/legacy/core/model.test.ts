@@ -20,6 +20,23 @@ function projectModel(): PMRegistry {
 }
 
 describe('legacy model install', () => {
+  it('creates a full-comp adjustment layer with editable transform source', () => {
+    const PM = projectModel();
+    const project = PM.mkProject({ name: 'T', w: 1920, h: 1080, fps: 30, dur: 10 });
+    PM.proj = project;
+
+    const layer = PM.mkLayer('adjustment', { name: 'Global Grade' }, project);
+
+    expect(layer).toMatchObject({
+      type: 'adjustment', name: 'Global Grade', d: {}, fx: [], masks: [],
+      blend: 'normal', mblur: false, parent: null,
+    });
+    expect(layer.p['position.x'].v).toBe(0);
+    expect(layer.p['position.y'].v).toBe(0);
+    expect(layer.p.opacity.v).toBe(100);
+    expect(PM.TYPE_META.adjustment).toMatchObject({ label: 'Adjustment', pickable: false });
+  });
+
   it('precomposes layers with the original span and stack order', () => {
     const PM = projectModel();
     const project = PM.mkProject({ name: 'T', w: 1920, h: 1080, fps: 30, dur: 10 });

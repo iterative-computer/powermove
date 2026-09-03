@@ -120,9 +120,11 @@ describe('PM.commands view over kernel.commands', () => {
 
   it('keeps the keymap-only commands out of the offered set via when()', () => {
     const PM = commandsPM();
-    for (const id of ['transportPause', 'transportPlay', 'trimIn', 'trimOut', 'blurField']) {
-      expect(PM.commands[id].when()).toBe(false);
-    }
+    expect(PM.commands.blurField.when()).toBe(false);
+    expect(PM.commands.transportPause).toBeUndefined();
+    expect(PM.commands.transportPlay).toBeUndefined();
+    expect(PM.commands.trimIn.when).toBeUndefined();
+    expect(PM.commands.trimOut.when).toBeUndefined();
     expect(PM.commands.undo.when).toBeUndefined();
   });
 

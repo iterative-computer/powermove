@@ -20,7 +20,7 @@ import type {
   ThemeDefinition,
   TransitionDefinition
 } from './api';
-import { chordMatches, chordModifierCount, chordOfEvent, isFieldTarget, normalizeChord } from './keychord';
+import { chordMatches, chordModifierCount, chordOfEvent, hasTextSelection, isFieldTarget, normalizeChord } from './keychord';
 import { Registry } from './registry';
 import * as glslHelpers from './glsl';
 import { validateEffect, validateTransition } from './glsl';
@@ -322,6 +322,10 @@ export function createKernel(): Kernel {
         const event = raw as KeyboardEvent;
         const chord = chordOfEvent(event);
         if (!chord) return;
+        /* A highlighted transcript or other selectable document surface owns
+           Copy just like a focused input. Let Chromium place that text on the
+           system clipboard instead of dispatching the editor's Copy Layers. */
+        if ((chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
         const field = isFieldTarget(event.target);
         for (const binding of kernel.bindingsFor(chord)) {
           if (field && !binding.inFields) continue;

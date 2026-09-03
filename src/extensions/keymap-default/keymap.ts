@@ -7,7 +7,7 @@ import type { KeybindingDefinition } from 'powermove';
  */
 export const KEYMAP_DEFAULT: KeybindingDefinition[] = [];
 
-const REPEATABLE_COMMANDS = new Set(['nextFrame', 'prevFrame', 'nudgeSelection']);
+const REPEATABLE_COMMANDS = new Set(['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes']);
 
 const bind = (key: string, command: string, looseModifiers = false, args?: unknown[]): void => {
   KEYMAP_DEFAULT.push({
@@ -27,21 +27,19 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
   ['z', 'undo', true], ['shift+z', 'redo', true],
   /* The plain Y branch explicitly rejected both Shift and Alt. */
   ['y', 'newSolid', false], ['shift+y', 'newShape', true],
-  ['t', 'newText', true], ['shift+t', 'newText', true],
+  ['t', 'toolText', true], ['shift+t', 'toolText', true],
   ['shift+g', 'newShader', true],
   ['d', 'duplicate', true], ['shift+d', 'split', true],
   ['c', 'copyLayers', true], ['shift+c', 'precompose', true],
   /* Paste and Projects explicitly rejected Shift. */
   ['v', 'pasteLayers', false],
-  ['a', 'selectAll', true], ['shift+a', 'selectAll', true],
+  ['a', 'selectAll', true], ['shift+a', 'deselect', true],
   ['i', 'import', true], ['shift+i', 'import', true],
   ['s', 'save', false], ['shift+s', 'saveAs', false],
   ['o', 'open', true], ['shift+o', 'open', true],
   ['e', 'export', true], ['shift+e', 'export', true],
   ['p', 'projects', false],
   ['n', 'newProject', false],
-  /* `if (k === 'F9') go(m ? 'easeLinear' : …)` — meta wins over shift. */
-  ['f9', 'easeLinear', true], ['shift+f9', 'easeLinear', true]
 ];
 for (const [chord, command, looseModifiers] of MOD_CHORDS) {
   /* File commands are exact so a shifted chord is never caught by the plain
@@ -62,7 +60,13 @@ for (const [chord, command, looseModifiers] of MOD_CHORDS) {
 const PRO_CHORDS: Array<[string, string]> = [
   ['b', 'split'],
   ['x', 'cutLayers'],
-  ['shift+h', 'toggleVisibility'],
+  ['shift+h', 'toggleLayerControls'],
+  ['l', 'lockSelectedLayers'],
+  ['shift+l', 'unlockAllLayers'],
+  ['up', 'selectPreviousLayer'],
+  ['down', 'selectNextLayer'],
+  ['shift+up', 'extendSelectionPreviousLayer'],
+  ['shift+down', 'extendSelectionNextLayer'],
   ['=', 'zoomIn'],
   /* KeyboardEvent.key reports Shift+= as `+`, so retain the shift modifier
      while spelling the literal plus key as a trailing `+`. */
@@ -70,6 +74,7 @@ const PRO_CHORDS: Array<[string, string]> = [
   ['-', 'zoomOut'],
   ['0', 'fitComposition'],
   ['1', 'actualSize'],
+  ['alt+home', 'centerAnchor'],
   [']', 'bringForward'],
   ['[', 'sendBackward'],
   ['shift+]', 'bringToFront'],
@@ -80,9 +85,8 @@ for (const [chord, command] of PRO_CHORDS) {
   bind(`ctrl+${chord}`, command);
 }
 
-/* Alt-drag-style keyboard nudging. Register these before the legacy loose
-   transport aliases so the exact nudge chord wins when both describe the same
-   physical key. Plain and Shift arrows below retain timeline semantics. */
+/* AE nudges layers with the bare arrow keys and moves selected keyframes in
+   time with Option/Alt+Left/Right. Both variants repeat while held. */
 const NUDGE_KEYS: Array<[string, [number, number]]> = [
   ['left', [-1, 0]],
   ['right', [1, 0]],
@@ -90,37 +94,64 @@ const NUDGE_KEYS: Array<[string, [number, number]]> = [
   ['down', [0, 1]]
 ];
 for (const [key, delta] of NUDGE_KEYS) {
-  bind(`alt+${key}`, 'nudgeSelection', false, delta);
-  bind(`alt+shift+${key}`, 'nudgeSelection', false, [delta[0] * 10, delta[1] * 10]);
+  bind(key, 'nudgeSelection', false, delta);
+  bind(`shift+${key}`, 'nudgeSelection', false, [delta[0] * 10, delta[1] * 10]);
 }
+bind('alt+left', 'nudgeKeyframes', false, [-1]);
+bind('alt+right', 'nudgeKeyframes', false, [1]);
+bind('alt+shift+left', 'nudgeKeyframes', false, [-10]);
+bind('alt+shift+right', 'nudgeKeyframes', false, [10]);
 
-/* The old `switch (k)` ran before its alt/meta guard, so these work bare or
-   with any one of the modifiers represented below. */
+/* Composition transport follows AE: Page Up/Down steps frames; Home/End move
+   to the composition boundaries. Space remains Powermove's global preview. */
 const TRANSPORT_CHORDS: Array<[string, string]> = [
   ['space', 'play'],
   ['home', 'gotoStart'], ['end', 'gotoEnd'],
-  ['right', 'nextFrame'], ['shift+right', 'nextEdge'],
-  ['left', 'prevFrame'], ['shift+left', 'prevEdge'],
+  ['shift+home', 'gotoWorkIn'], ['shift+end', 'gotoWorkOut'],
+  ['pageup', 'prevFrame'], ['pagedown', 'nextFrame'],
   ['backspace', 'delete'], ['delete', 'delete'],
   ['escape', 'deselect']
 ];
 for (const [chord, command] of TRANSPORT_CHORDS) {
-  bind(chord, command, true);
-  bind(`cmd+${chord}`, command, true);
-  bind(`ctrl+${chord}`, command, true);
-  bind(`alt+${chord}`, command, true);
+  bind(chord, command, chord === 'space');
 }
-bind('f9', 'easeOut', true);
-bind('shift+f9', 'easePower', true);
+bind('shift+pageup', 'stepFrames', false, [-10]);
+bind('shift+pagedown', 'stepFrames', false, [10]);
+
+/* Timeline navigation and layer timing use AE's native muscle memory. */
+bind('j', 'prevVisibleEvent');
+bind('k', 'nextVisibleEvent');
+bind('shift+j', 'prevSelectedEvent');
+bind('shift+k', 'nextSelectedEvent');
+bind('i', 'gotoLayerIn');
+bind('o', 'gotoLayerOut');
+bind('[', 'moveLayerIn');
+bind(']', 'moveLayerOut');
+bind('alt+[', 'trimIn');
+bind('alt+]', 'trimOut');
+bind('alt+home', 'moveLayerInToStart');
+bind('alt+end', 'moveLayerOutToEnd');
+
+/* Viewer magnification and Graph Editor keys mirror the AE defaults. */
+bind('.', 'zoomIn');
+bind(',', 'zoomOut');
+bind('/', 'actualSize');
+bind('shift+/', 'fitComposition');
+bind('shift+f3', 'graph');
+
+/* AE's three standard temporal easing shortcuts. */
+bind('f9', 'easyEase');
+bind('shift+f9', 'easyEaseIn');
+bind('cmd+shift+f9', 'easyEaseOut');
+bind('ctrl+shift+f9', 'easyEaseOut');
 
 /* Bare keys ignored alt/meta but preserved Shift. */
 const BARE_KEYS: Array<[string, string]> = [
   ['v', 'toolSelect'], ['h', 'toolHand'], ['z', 'toolZoom'],
+  ['w', 'toolRotate'], ['y', 'toolAnchor'], ['q', 'toolShape'],
   ['p', 'revealPos'], ['s', 'revealScale'], ['r', 'revealRot'],
   ['t', 'revealOpacity'], ['a', 'revealAnchor'], ['u', 'revealKeys'],
-  ['g', 'graph'], ['b', 'workIn'], ['n', 'workOut'],
-  ['j', 'prevEdge'], ['k', 'transportPause'], ['l', 'transportPlay'],
-  ['i', 'trimIn'], ['o', 'trimOut']
+  ['b', 'workIn'], ['n', 'workOut'],
 ];
 for (const [chord, command] of BARE_KEYS) {
   bind(chord, command);

@@ -129,7 +129,10 @@ function setup(
     BLENDS: ['normal', 'screen'],
     MASK_SHAPES: ['rect', 'ellipse'],
     TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' } },
-    FX: { blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', step: 1, min: 0, max: 100 }] } },
+    FX: {
+      blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', step: 1, min: 0, max: 100 }] },
+      duotone: { label: 'Duotone', group: 'Color', params: [{ k: 'shadow', label: 'Shadow', type: 'color' }] }
+    },
     ICONS: Object.fromEntries(['layers', 'plus', 'clock', 'diamond', 'chev', 'eye', 'x'].map((name) => [name, '<path/>'])),
     sel: { layers: [...selected], keys: [], chan: null },
     TL: { graph: false, reveal: vi.fn() },
@@ -647,6 +650,27 @@ describe('InspectorPanel', () => {
       { type: 'set_content', target: 'A', patch: { w: 641 } },
       { label: 'Width', origin: 'inspector' }
     );
+  });
+
+  it('exposes direct keyframe controls for numeric and color effect parameters', () => {
+    const candidate = layer('A');
+    candidate.fx.push(
+      { id: 'fx-blur', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } },
+      { id: 'fx-duotone', type: 'duotone', on: true, p: { shadow: { v: '#1B2A4A', kf: [], expr: null } } }
+    );
+    setup([candidate], ['A'], { fxOpen: true });
+    transport.time = 2;
+    flushSync();
+
+    const amount = target.querySelector<HTMLButtonElement>('[aria-label="Animate Amount"]');
+    const shadow = target.querySelector<HTMLButtonElement>('[aria-label="Animate Shadow"]');
+    expect(amount).not.toBeNull();
+    expect(shadow).not.toBeNull();
+
+    amount!.click();
+    shadow!.click();
+    expect(candidate.fx[0].p.amount.kf).toEqual([{ t: 2, v: 5 }]);
+    expect(candidate.fx[1].p.shadow.kf).toEqual([{ t: 2, v: '#1B2A4A' }]);
   });
 
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {

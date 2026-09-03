@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createContext, runInContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
-import { TYPE_META, type Layer, type Project } from '../types/project';
+import { TYPE_META, type Channel, type Layer, type Project } from '../types/project';
 import { sanitizeProject } from './project';
 
 interface LegacyPM {
@@ -99,7 +99,15 @@ describe('sanitizeProject', () => {
     if (!title || title.type !== 'text') throw new Error('expected text fixture');
     expect(title.d.text).toBe('Powermove');
     expect(title.p.opacity.kf.map(key => [key.t, key.v])).toEqual([[0, 0], [1, 100]]);
-    expect(title.p.opacity.kf[0]).toMatchObject({ eo: [0.62, 0.05], ei: [0, 1] });
+    expect(title.p.opacity.kf[0]).toMatchObject({
+      inInterp: 'linear', outInterp: 'bezier',
+      inEase: { speed: 0, influence: 100 / 3 },
+      outEase: { speed: 8.064516129032258, influence: 62 },
+      autoBezier: false, continuous: false
+    });
+    expect(title.p.opacity.kf[0]).not.toHaveProperty('eo');
+    expect(title.p.opacity.kf[0]).not.toHaveProperty('ei');
+    expect(title.p.opacity.kf[0]).not.toHaveProperty('hold');
     expect(title.masks[0]?.shape).toBe('ellipse');
     expect(title.fx[0]).toMatchObject({ id: 'fx-glow', type: 'glow', on: true, open: false });
     expect(title.fx[0]?.p.intensity).toEqual({ v: 90, kf: [], expr: null });
@@ -191,7 +199,15 @@ describe('sanitizeProject', () => {
     expect(bad && bad.type !== 'audio' ? bad.p.opacity.v : null).toBe(100);
     expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf : []).toHaveLength(1);
     expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null)
-      .toMatchObject({ eo: [0.62, 0.05], ei: [0, 1] });
+      .toMatchObject({
+        inInterp: 'linear', outInterp: 'linear',
+        inEase: { speed: 0, influence: 100 / 3 },
+        outEase: { speed: 0, influence: 100 / 3 },
+        autoBezier: false, continuous: false
+      });
+    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('eo');
+    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('ei');
+    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('hold');
     expect(bad?.masks[0]).toMatchObject({ shape: 'rect', mode: 'add', on: true });
 
     const audio = project.layers[1];
@@ -239,10 +255,41 @@ describe('sanitizeProject', () => {
 
     expect(layer.d).toMatchObject({
       text: 'Hello', customBrandField: 'keep-me', nested: { safe: true },
-      font: 'SF Pro Display', size: 128
+      font: 'SF Pro Display', size: 128,
+      boxWidth: { v: 0, kf: [], expr: null }, boxHeight: { v: 0, kf: [], expr: null }
     });
     expect(Object.hasOwn(layer.d, 'constructor')).toBe(false);
     expect(Object.hasOwn(layer.d, 'runtimeOnly')).toBe(false);
+  });
+
+  it('hydrates persisted variable-font axes as canonical numeric channels', () => {
+    const project = sanitizeProject({
+      layers: [{
+        type: 'text',
+        d: {
+          'fontAxis.wdth': {
+            v: '75', expr: 'value + 5',
+            kf: [{ t: '1', v: '80', eo: [0.25, 0.1], ei: [0.75, 0.9], hold: false, i: 'width-1' }]
+          }
+        }
+      }]
+    });
+    const layer = project.layers[0];
+    if (layer?.type !== 'text') throw new Error('expected text layer');
+    const width = layer.d['fontAxis.wdth'] as Channel<number>;
+
+    expect(width.v).toBe(75);
+    expect(width.expr).toBe('value + 5');
+    expect(width.kf[0]).toMatchObject({
+      t: 1, v: 80, i: 'width-1',
+      inInterp: 'linear', outInterp: 'linear',
+      inEase: { speed: 0, influence: 100 / 3 },
+      outEase: { speed: 0, influence: 100 / 3 },
+      autoBezier: false, continuous: false
+    });
+    expect(width.kf[0]).not.toHaveProperty('eo');
+    expect(width.kf[0]).not.toHaveProperty('ei');
+    expect(width.kf[0]).not.toHaveProperty('hold');
   });
 
   it('sanitizes transition channels while preserving extension-defined types', () => {
@@ -271,8 +318,15 @@ describe('sanitizeProject', () => {
       }
     });
     expect(layer?.transitionIn?.p.amount?.kf[0]).toMatchObject({
-      t: 1, v: 1, eo: [0, 0], ei: [1, 1], hold: false, i: 'amount-1'
+      t: 1, v: 1, i: 'amount-1',
+      inInterp: 'linear', outInterp: 'linear',
+      inEase: { speed: 0, influence: 100 / 3 },
+      outEase: { speed: 0, influence: 100 / 3 },
+      autoBezier: false, continuous: false
     });
+    expect(layer?.transitionIn?.p.amount?.kf[0]).not.toHaveProperty('eo');
+    expect(layer?.transitionIn?.p.amount?.kf[0]).not.toHaveProperty('ei');
+    expect(layer?.transitionIn?.p.amount?.kf[0]).not.toHaveProperty('hold');
     expect(Object.hasOwn(layer?.transitionIn?.p ?? {}, 'constructor')).toBe(false);
     expect(layer?.transitionOut).toBeNull();
   });
@@ -337,5 +391,28 @@ describe('sanitizeProject', () => {
     expect(layer.d.version).toBe(3);
     expect(layer.d.data).toEqual({ objects: [{ id: 'cube' }] });
     expect(layer.d.params.amount?.kf[0]?.i).toBe('key-1');
+  });
+
+  it('hydrates adjustment layers with full editable effect, mask, and opacity source', () => {
+    const project = sanitizeProject({
+      w: 1920, h: 1080, dur: 5,
+      layers: [{
+        id: 'grade', type: 'adjustment', name: 'Global Grade', from: 0, dur: 5,
+        p: { opacity: { v: 65, kf: [], expr: null } },
+        fx: [{ id: 'grade-color', type: 'color', on: true, p: { saturation: { v: 80, kf: [], expr: null } } }],
+        masks: [{ id: 'grade-mask', shape: 'ellipse', mode: 'add', on: true, p: {} }],
+        d: { note: 'non-rendering source metadata' }
+      }]
+    });
+    const layer = project.layers[0];
+
+    expect(layer?.type).toBe('adjustment');
+    if (layer?.type !== 'adjustment') throw new Error('expected adjustment layer');
+    expect(layer.d).toEqual({ note: 'non-rendering source metadata' });
+    expect(layer.p.opacity.v).toBe(65);
+    expect(layer.p['position.x'].v).toBe(0);
+    expect(layer.p['position.y'].v).toBe(0);
+    expect(layer.fx[0]).toMatchObject({ id: 'grade-color', type: 'color', on: true });
+    expect(layer.masks[0]).toMatchObject({ id: 'grade-mask', shape: 'ellipse', mode: 'add', on: true });
   });
 });

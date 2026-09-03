@@ -19,6 +19,13 @@
   ]);
 
   const showTimeline = $derived(agentState.phase === 'running' || agentState.phase === 'preview');
+
+  /* The prompt the agent is answering: the last thing the user said before the
+     run started, steering included. It wears the halo for as long as the run
+     lasts, which is why no placeholder line has to stand in for progress. */
+  const answeringIndex = $derived(agentState.phase === 'running'
+    ? agentState.conversation.reduce((found, message, index) => message.role === 'user' ? index : found, -1)
+    : -1);
 </script>
 
 {#if !agentState.conversation.length && !agentState.activity}
@@ -35,7 +42,7 @@
   </div>
 {/if}
 {#each agentState.conversation as message, index (`${message.role}-${index}`)}
-  <Turn {PM} {message} />
+  <Turn {PM} {message} answering={index === answeringIndex} />
 {/each}
 {#if showTimeline || agentState.activity}
   <Timeline {PM} />

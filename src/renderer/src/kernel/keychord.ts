@@ -118,6 +118,7 @@ export function chordOfEvent(event: KeyboardEvent): string | null {
   if (event.shiftKey && (code === 'BracketLeft' || code === 'BracketRight')) {
     key = code === 'BracketLeft' ? '[' : ']';
   }
+  if (event.shiftKey && code === 'Slash') key = '/';
   if (raw === ' ') key = 'space';
 
   const parts: string[] = [];
@@ -177,4 +178,11 @@ export function isFieldTarget(target: unknown): boolean {
   const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : '';
   if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
   return el.isContentEditable === true;
+}
+
+/** True when the renderer owns a real, non-collapsed text selection. */
+export function hasTextSelection(): boolean {
+  if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false;
+  const selection = window.getSelection();
+  return Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.toString());
 }

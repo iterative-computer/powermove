@@ -2,7 +2,8 @@ import type { PowermoveAPI } from 'powermove';
 
 interface LegacyPM {
   tool?: string;
-  setTool?: (tool: string) => void;
+  toolShape?: string;
+  setTool?: (tool: string, detail?: string) => void;
   bus?: {
     emit?: (event: string) => void;
     on?: (event: string, listener: () => void) => void | (() => void);
@@ -10,33 +11,39 @@ interface LegacyPM {
 }
 
 interface ToolbarButton {
-  tool: string;
+  tool?: string;
   icon: string;
   title: string;
   command: string;
 }
 
 const INTERACTIVE: ToolbarButton[] = [
-  { tool: 'select', icon: 'cursor', title: 'Selection (V)', command: 'toolSelect' },
-  { tool: 'hand', icon: 'hand', title: 'Hand — pan view (H)', command: 'toolHand' },
-  { tool: 'zoom', icon: 'zoom', title: 'Zoom (Z)', command: 'toolZoom' }
+  { tool: 'select', icon: 'cursor', title: 'Selection Tool (V)', command: 'toolSelect' },
+  { tool: 'hand', icon: 'hand', title: 'Hand Tool (H)', command: 'toolHand' },
+  { tool: 'zoom', icon: 'zoom', title: 'Zoom Tool (Z) · Option-click to zoom out', command: 'toolZoom' },
+  { tool: 'rotate', icon: 'rotate', title: 'Rotation Tool (W)', command: 'toolRotate' },
+  { tool: 'anchor', icon: 'anchor', title: 'Pan Behind (Anchor Point) Tool (Y)', command: 'toolAnchor' },
+  { tool: 'shape', icon: 'shape', title: 'Shape Tool (Q) · press Q again to cycle', command: 'toolShape' },
+  { tool: 'text', icon: 'type', title: 'Horizontal Type Tool (Command+T)', command: 'toolText' }
 ];
 
+/* Layer creation and file import are commands in After Effects, not tools.
+   Keep them visibly separated so they never imply a persistent canvas mode. */
 const CREATE: ToolbarButton[] = [
-  { tool: 'text', icon: 'type', title: 'New text layer (⌘T)', command: 'newText' },
-  { tool: 'shape', icon: 'shape', title: 'New shape layer (⌘⇧Y)', command: 'newShape' },
-  { tool: 'solid', icon: 'solid', title: 'New solid (⌘Y)', command: 'newSolid' },
-  { tool: 'shader', icon: 'wand', title: 'New shader layer (⌘⇧G)', command: 'newShader' },
-  { tool: 'null', icon: 'frame', title: 'New null object', command: 'newNull' }
+  { icon: 'solid', title: 'New solid (Command+Y)', command: 'newSolid' },
+  { icon: 'wand', title: 'New shader layer (Command+Shift+G)', command: 'newShader' },
+  { icon: 'frame', title: 'New null object (Command+Option+Shift+Y)', command: 'newNull' }
 ];
 
-const IMPORT: ToolbarButton = { tool: 'camera', icon: 'cam', title: 'Import media (⌘I)', command: 'import' };
+const IMPORT: ToolbarButton = { icon: 'image', title: 'Import media (Command+I)', command: 'import' };
 
 export default function activate(api: PowermoveAPI): void {
   const PM = api.host.pm as LegacyPM;
   PM.tool ||= 'select';
-  PM.setTool = (tool: string): void => {
+  PM.toolShape ||= 'rect';
+  PM.setTool = (tool: string, detail?: string): void => {
     PM.tool = tool;
+    if (tool === 'shape' && detail) PM.toolShape = detail;
     PM.bus?.emit?.('tool');
   };
 
@@ -59,12 +66,18 @@ export default function activate(api: PowermoveAPI): void {
         button.className = 'iconbtn tl';
         button.title = definition.title;
         button.setAttribute('aria-label', definition.title);
-        button.dataset.tool = definition.tool;
+        if (definition.tool) button.dataset.tool = definition.tool;
         button.innerHTML = api.ui.icon(definition.icon);
         button.addEventListener('click', () => {
-          api.commands.run(definition.command);
+          /* Q cycles shape variants; clicking the already-active Shape button
+             simply keeps the visible variant selected, like AE's toolbar. */
+          if (definition.tool === 'shape') PM.setTool?.('shape', PM.toolShape);
+          else api.commands.run(definition.command);
           syncTools();
         });
+        if (definition.tool === 'anchor') {
+          button.addEventListener('dblclick', () => api.commands.run('centerAnchor'));
+        }
         if (interactive) interactiveButtons.push(button);
         body.appendChild(button);
       };

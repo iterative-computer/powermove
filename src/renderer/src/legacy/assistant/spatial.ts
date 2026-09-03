@@ -1175,7 +1175,7 @@ function stopActiveRequest() {
   sealTrace();
   S.steps = []; S.activity = ''; S.plan = null; S.phase = 'conversation';
   archiveTrace();
-  S.conversation.push({ role: 'assistant', text: 'Stopped. Add direction whenever you are ready.' });
+  S.conversation.push({ entering: true, role: 'assistant', text: 'Stopped. Add direction whenever you are ready.' });
   PM.AgentUI?.update({ focusComposer: true });
 }
 
@@ -1346,7 +1346,10 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   ]);
   if (token !== S.requestToken) return;
   S.steps[0].status = 'complete'; S.steps[1].status = 'active';
-  S.activity = access === 'computer' ? 'Working across Powermove and this Mac…' : 'Researching and working inside the project workspace…';
+  /* No stand-in prose before the model has said anything: the halo around the
+     prompt already reports that the run is live, and the first real progress
+     line replaces it the moment one arrives. */
+  S.activity = '';
   PM.AgentUI?.update();
   const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
   const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
@@ -1406,7 +1409,7 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
   finishSteps();
   archiveTrace();
-  S.conversation.push({ role: 'assistant', text: result.summary });
+  S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
   S.conversation.push(...extensionTurns);
   S.run = {
     autonomous: true, summary: result.summary, checkpoint,
@@ -1507,7 +1510,9 @@ async function sendRequest(input: any) {
   ], 0);
   S.stepsExpanded = false;
   S.plan = null; S.panelRun = null; S.phase = 'working';
-  S.activity = steering ? 'Updating the run with your direction…' : 'Looking at the composition and workspace…';
+  /* Steering is worth naming — it says which of two requests is being answered.
+     A fresh run is not: the prompt's halo already says it started. */
+  S.activity = steering ? 'Updating the run with your direction…' : '';
   S.pendingEntering = true;
   promoteToConversation(); PM.AgentUI?.update({ focusComposer: true });
   try {
@@ -1557,7 +1562,7 @@ async function sendRequest(input: any) {
     updateSteps(plan.steps);
     archiveTrace();
     S.stepsExpanded = S.steps.length > 1;
-    S.conversation.push({ role: 'assistant', text: conversationReply(plan) });
+    S.conversation.push({ entering: true, role: 'assistant', text: conversationReply(plan) });
     S.activity = ''; S.plan = plan; S.phase = 'conversation';
     if (plan.kind === 'panels' && S.autoApplyPanels) await applyPlan();
     else showPreview();
@@ -1567,7 +1572,7 @@ async function sendRequest(input: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     archiveTrace();
     S.activity = ''; S.phase = 'conversation';
-    S.conversation.push({ role: 'assistant', error: true, text: String(error.message || error).slice(0, 300) });
+    S.conversation.push({ entering: true, role: 'assistant', error: true, text: String(error.message || error).slice(0, 300) });
     PM.AgentUI?.update({ focusComposer: true });
   } finally {
     if (token === S.requestToken) {
@@ -2137,7 +2142,7 @@ function finishWorkspaceRun(checkpoint: any, summary: any, actions: any = []) {
   finishSteps();
   S.activity = ''; S.plan = null;
   S.panelRun = { checkpoint, after, historyId, actions, summary };
-  S.conversation.push({ role: 'assistant', text: `${summary}. This change is in Undo history.` });
+  S.conversation.push({ entering: true, role: 'assistant', text: `${summary}. This change is in Undo history.` });
   /* Deliberate Svelte deviation from HEAD: result transitions restore the
      persistent composer's focus instead of relying on a DOM rebuild. */
   S.phase = 'result'; PM.AgentUI?.update({ focusComposer: true });
@@ -2176,7 +2181,7 @@ async function applyPlan() {
     if (changed) finishWorkspaceRun(checkpoint, 'Applied the interface edit');
     else {
       finishSteps(); S.plan = null; S.activity = ''; S.phase = 'conversation';
-      S.conversation.push({ role: 'assistant', text: 'That interface setting was already in place.' }); PM.AgentUI?.update({ focusComposer: true });
+      S.conversation.push({ entering: true, role: 'assistant', text: 'That interface setting was already in place.' }); PM.AgentUI?.update({ focusComposer: true });
     }
     return;
   }
@@ -2187,7 +2192,7 @@ async function applyPlan() {
     if (changed) finishWorkspaceRun(checkpoint, 'Applied the Timeline redesign');
     else {
       finishSteps(); S.plan = null; S.activity = ''; S.phase = 'conversation';
-      S.conversation.push({ role: 'assistant', text: 'Those Timeline settings were already in place.' }); PM.AgentUI?.update({ focusComposer: true });
+      S.conversation.push({ entering: true, role: 'assistant', text: 'Those Timeline settings were already in place.' }); PM.AgentUI?.update({ focusComposer: true });
     }
     return;
   }
@@ -2245,7 +2250,7 @@ async function applyPanelPlan(plan: any) {
     PM.WS.restoreHistorySnapshot(checkpoint);
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.plan = null; S.phase = 'conversation';
-    S.conversation.push({ role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
+    S.conversation.push({ entering: true, role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
     PM.AgentUI?.update({ focusComposer: true });
   }
 }
@@ -2261,14 +2266,14 @@ function undoPanelRun() {
       () => PM.WS.restoreHistorySnapshot(checkpoint));
   }
   S.panelRun = null; S.phase = 'conversation';
-  S.conversation.push({ role: 'assistant', text: 'I restored the previous panel layout.' });
+  S.conversation.push({ entering: true, role: 'assistant', text: 'I restored the previous panel layout.' });
   PM.AgentUI?.update({ focusComposer: true }); PM.toast('Panel changes undone');
 }
 
 function keepPanelRun() {
   if (!S.panelRun) return;
   S.panelRun = null; S.phase = 'conversation';
-  S.conversation.push({ role: 'assistant', text: 'Kept the agent change. Command-Z can still reverse it.' });
+  S.conversation.push({ entering: true, role: 'assistant', text: 'Kept the agent change. Command-Z can still reverse it.' });
   PM.AgentUI?.update({ focusComposer: true });
 }
 
@@ -2288,7 +2293,7 @@ async function applyScenePlan(plan: any) {
   } catch (error: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
-    S.conversation.push({ role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
+    S.conversation.push({ entering: true, role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
     PM.AgentUI?.update({ focusComposer: true });
   }
 }
@@ -2303,7 +2308,7 @@ function showSceneResult(run: any) {
 function keepSceneRun() {
   if (!S.run) return;
   PM.toast('Kept agent change');
-  S.conversation.push({ role: 'assistant', text: S.run.autonomous
+  S.conversation.push({ entering: true, role: 'assistant', text: S.run.autonomous
     ? (S.run.changed ? 'Kept the autonomous result. Command-Z can still reverse its Powermove changes.' : 'Closed the completed autonomous run. Its artifacts remain available in the project workspace.')
     : `Kept ${S.run.applied.length} editable source changes. Command-Z can still reverse the complete run.` });
   S.run = null; S.phase = 'conversation'; PM.AgentUI?.update({ focusComposer: true });
@@ -2328,6 +2333,7 @@ async function undoSceneRun() {
   const restored: any = extensionRestored && projectRestored;
   PM.toast(restored ? 'Agent change undone' : 'Could not fully restore the agent change');
   S.conversation.push({
+    entering: true,
     role: 'assistant',
     text: restored
       ? 'I restored the project checkpoint and the previous app-extension version. Tell me what to try differently.'

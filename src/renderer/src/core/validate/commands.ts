@@ -56,7 +56,7 @@ export const MAX_EXPRESSION_CHARS = 2_000;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const COMMAND_TYPE_SET = new Set<string>(COMMAND_TYPES);
 const LAYER_TYPES = new Set<LayerType>([
-  'solid', 'text', 'shape', 'image', 'video', 'audio', 'shader', 'extension', 'null', 'precomp'
+  'solid', 'text', 'shape', 'image', 'video', 'audio', 'adjustment', 'shader', 'extension', 'null', 'precomp'
 ]);
 const BLEND_MODES = new Set([
   'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
@@ -685,6 +685,7 @@ function isLayerContent(type: LayerType, value: unknown): boolean {
       && ['cover', 'contain', 'stretch'].includes(String(value.fit)) && numberFields('w', 'h', 'trim', 'speed');
     case 'audio': return (value.asset === null || typeof value.asset === 'string')
       && numberFields('gain', 'trim', 'fadeIn', 'fadeOut');
+    case 'adjustment': return true;
     case 'shader': return typeof value.code === 'string' && numberFields('w', 'h')
       && isRecord(value.uniforms) && Object.values(value.uniforms).every(isChannel);
     case 'extension': return typeof value.definition === 'string'
