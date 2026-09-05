@@ -11,12 +11,8 @@
     error: boolean;
     sticky: boolean;
     dismissible: boolean;
-    fading: boolean;
     timeout: number;
-    removal: number;
   };
-
-  const LEAVE_MS = 160;
 
   let queue = $state<ToastItem[]>([]);
   let nextId = 1;
@@ -32,35 +28,24 @@
       error: inferredError,
       sticky: options.sticky ?? false,
       dismissible: options.dismissible ?? inferredError,
-      fading: false,
-      timeout: 0,
-      removal: 0
+      timeout: 0
     };
     queue = [item];
-    if (!item.sticky) item.timeout = window.setTimeout(() => fade(item.id), milliseconds);
+    if (!item.sticky) item.timeout = window.setTimeout(() => dismiss(item.id), milliseconds);
   }
 
   export function dismiss(id: number): void {
     const item = queue.find((candidate) => candidate.id === id);
     if (!item) return;
     window.clearTimeout(item.timeout);
-    window.clearTimeout(item.removal);
     queue = queue.filter((candidate) => candidate.id !== id);
   }
 
   export function clear(): void {
     for (const item of queue) {
       window.clearTimeout(item.timeout);
-      window.clearTimeout(item.removal);
     }
     queue = [];
-  }
-
-  function fade(id: number): void {
-    const item = queue.find((candidate) => candidate.id === id);
-    if (!item) return;
-    item.fading = true;
-    item.removal = window.setTimeout(() => dismiss(id), LEAVE_MS);
   }
 
   export function isErrorToast(message: unknown): boolean {
@@ -93,7 +78,6 @@
 {#each queue as item (item.id)}
   <div
     class="toast"
-    class:leaving={item.fading}
     role={item.error ? 'alert' : 'status'}
     data-toast-id={item.id}
     data-toast-error={item.error ? 'true' : undefined}

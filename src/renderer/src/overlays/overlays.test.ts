@@ -395,7 +395,7 @@ describe('installSvelteOverlays', () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it('replaces the visible toast, uses matching icons, fades, and permits dismissing errors', () => {
+  it('replaces the visible toast, uses matching icons, expires immediately, and permits dismissing errors', () => {
     vi.useFakeTimers();
     PM.toast('Undo · Position X', 100);
     flushSync();
@@ -425,9 +425,6 @@ describe('installSvelteOverlays', () => {
     flushSync();
     expect(document.querySelector('.toast [data-icon="export"]')).toBeTruthy();
     vi.advanceTimersByTime(100);
-    flushSync();
-    expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(true);
-    vi.advanceTimersByTime(160);
     flushSync();
     expect(document.querySelector('.toast')).toBeNull();
   });

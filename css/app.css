@@ -438,8 +438,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 :root[data-theme="dark"] #scrim{background:rgb(0 0 0 / .5)}
 #scrim.on{display:block}
 .modal{position:fixed;z-index:401;background:var(--bg-float);border:0;border-radius:var(--r-xl);
-  box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden;animation:modal-in var(--dur-3) var(--ease)}
-@keyframes modal-in{from{opacity:0;transform:translateX(-50%) translateY(5px) scale(.985)}}
+  box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden}
 .modal h3{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;padding:16px 18px 0}
 .modal .mb{padding:12px 18px 18px;display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:8px;overflow:auto}
 .modal .mf{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line)}
@@ -508,18 +507,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 #status .live{color:var(--success)}
 .toastwrap{position:fixed;bottom:36px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:6px;align-items:center}
 .toast{display:flex;align-items:center;gap:10px;max-width:min(520px,calc(100vw - 32px));background:var(--bg-float);border:0;border-radius:var(--r-md);padding:8px 10px 8px 14px;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx);
-  box-shadow:var(--shadow-float);animation:rise var(--dur-3) var(--ease);transition:opacity var(--dur-3) var(--ease-io),transform var(--dur-3) var(--ease-io)}
-.toast.leaving{opacity:0;transform:translateY(4px) scale(.98)}
+  box-shadow:var(--shadow-float)}
 .toast-icon{width:16px;height:16px;display:grid;place-items:center;flex:none;color:var(--tx-2)}
 .toast[data-toast-error] .toast-icon{color:var(--danger)}
 .toast-icon .pm-icon{width:16px;height:16px;display:block}
 .toast>span:not(.toast-icon){min-width:0;white-space:pre-wrap}
 .toast>button{width:22px;height:22px;flex:none;display:grid;place-items:center;margin-left:2px;border-radius:var(--r-xs);color:var(--tx-3);font-size:var(--fs-lg);line-height:1}
 .toast>button:hover{background:var(--ink-1);color:var(--tx)}
-@keyframes rise{from{opacity:0;transform:translateY(6px) scale(.98)}}
 .drop{position:absolute;z-index:300;background:var(--bg-float);border:0;border-radius:var(--r-md);
-  box-shadow:var(--shadow-float);padding:4px;min-width:180px;max-height:60vh;overflow:auto;transform-origin:top left;animation:menu-in var(--dur-2) var(--ease)}
-@keyframes menu-in{from{opacity:0;transform:translateY(-3px) scale(.985)}}
+  box-shadow:var(--shadow-float);padding:4px;min-width:180px;max-height:60vh;overflow:auto}
 .drop .di{display:flex;width:100%;align-items:center;gap:8px;height:28px;padding:0 8px 0 24px;border-radius:var(--r-xs);font-size:var(--fs-md);color:var(--tx);text-align:left;white-space:nowrap;position:relative;transition:background var(--dur-1),color var(--dur-1)}
 .drop:focus{outline:0}
 .drop .di:hover,.drop .di:focus-visible{background:var(--ink-1);outline:0}
@@ -550,7 +546,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .spatial-ink .spatial-shade{fill:rgba(7,7,10,.38);stroke:none;filter:none}
 #spatial-assistant.target-selected .spatial-wash{background:rgba(8,8,12,.035)}
 .spatial-hint{position:fixed;z-index:4;left:0;top:0;height:38px;padding:0 15px;display:flex;align-items:center;border:0;border-radius:var(--r-pill);background:color-mix(in srgb,var(--tx) 88%,transparent);color:var(--bg-panel);box-shadow:var(--shadow-float);backdrop-filter:blur(18px);font-size:var(--fs-md);font-weight:var(--fw-medium);letter-spacing:0;white-space:nowrap;pointer-events:none;will-change:transform}
-.spatial-compose{--spatial-frame-inset:8px;--spatial-input-radius:9px;--spatial-control-inset:3px;position:fixed;z-index:5;width:min(390px,calc(100vw - 28px));padding:var(--spatial-frame-inset);border:0;border-radius:calc(var(--spatial-input-radius) + var(--spatial-frame-inset));background:var(--bg-float);color:var(--tx);box-shadow:0 0 0 var(--hairline) var(--line-2),var(--shadow-float);cursor:default;animation:spatial-card-in 220ms cubic-bezier(.23,1,.32,1);transition:border-color var(--dur-2),box-shadow var(--dur-2),width var(--dur-2) var(--ease)}
+.spatial-compose{--spatial-frame-inset:8px;--spatial-input-radius:9px;--spatial-control-inset:3px;position:fixed;z-index:5;width:min(390px,calc(100vw - 28px));padding:var(--spatial-frame-inset);border:0;border-radius:calc(var(--spatial-input-radius) + var(--spatial-frame-inset));background:var(--bg-float);color:var(--tx);box-shadow:0 0 0 var(--hairline) var(--line-2),var(--shadow-float);cursor:default}
 /* Full-composition prompt is a pill: one surface, transparent input, controls
    inset 4px so the outer pill and the round send stay concentric. */
 .spatial-compose.full{--spatial-frame-inset:4px;padding:4px;border-radius:var(--r-pill)}
@@ -558,9 +554,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .spatial-compose.full .spatial-input-row:focus-within{background:transparent;box-shadow:none}
 .spatial-compose.full textarea{min-height:30px;height:30px;padding:6px 8px 6px 0}
 .spatial-compose.full .spatial-input-row>.spatial-action.spatial-action.pri{width:30px;height:30px;border-radius:var(--r-pill)}
-.spatial-compose.conversation{width:min(430px,calc(100vw - 28px));padding:0;overflow:hidden;border:1px solid var(--line-2);border-radius:var(--r-xl);animation:spatial-popout var(--dur-3) var(--ease)}
-@keyframes spatial-card-in{from{opacity:0;transform:translateY(3px) scale(.96)}to{opacity:1;transform:none}}
-@keyframes spatial-popout{from{opacity:.72;transform:scale(.96)}to{opacity:1;transform:none}}
+.spatial-compose.conversation{width:min(430px,calc(100vw - 28px));padding:0;overflow:hidden;border:1px solid var(--line-2);border-radius:var(--r-xl)}
 .spatial-target{min-width:0;padding:1px 4px 6px;color:var(--tx-3);font-size:var(--fs-sm);font-family:var(--f-ui);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;user-select:none}
 .spatial-target:active{cursor:grabbing}.spatial-target:focus-visible{outline:0}
 .spatial-compose.full .spatial-target{display:none}
