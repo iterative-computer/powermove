@@ -121,3 +121,35 @@ test('first-pass keyframe playback renders every width sample without delayed fo
   expect(result.stable).toBe(true);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('SF Pro weight scrubbing reuses decoded faces without crashing the renderer', async ({ session }) => {
+  test.setTimeout(60000);
+  const { page } = session;
+  const hasFont = await page.evaluate(async () => (await (window as any).queryLocalFonts()).some((font: any) => font.family === 'SF Pro'));
+  test.skip(!hasFont, 'Requires installed SF Pro');
+  const id = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.replaceProject(PM.mkProject({ name: 'SF Pro scrub regression', dur: 5 }));
+    const layer = PM.mkLayer('text', { d: { text: 'THE NEW', font: 'SF Pro', size: 345.45, tracking: -2, 'fontAxis.wght': PM.P(100) } });
+    PM.proj.layers.push(layer); PM.selectLayers(layer.id); PM.invalidate();
+    return layer.id;
+  });
+  await page.waitForFunction(() => [...document.fonts].some(face => face.family.startsWith('Powermove Axis')));
+  const result = await page.evaluate(id => {
+    const PM = (window as any).PM, layer = PM.L(id);
+    const sample = (weight: number) => {
+      layer.d['fontAxis.wght'].v = weight;
+      PM.rasterClear();
+      return PM.raster(layer, 1, 0).cv.toDataURL();
+    };
+    const before = sample(100);
+    for (let i = 0; i < 1000; i++) sample(40 + i / 2);
+    const heavy = sample(540), replay = sample(100);
+    return { stable: before === replay, changed: before !== heavy,
+      faces: [...document.fonts].filter(face => face.family.startsWith('Powermove Axis')).length };
+  }, id);
+  expect(result.stable).toBe(true);
+  expect(result.changed).toBe(true);
+  expect(result.faces).toBeLessThanOrEqual(8);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

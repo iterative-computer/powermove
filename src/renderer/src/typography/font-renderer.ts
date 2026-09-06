@@ -11,9 +11,11 @@ export const variationSettings = (content: any) => variationEntries(content).map
 
 /** Load the binary once per family. Binary FontFaces are synchronously loaded,
  * so a new animation sample never paints a temporary default-font frame.
- * Each sample still owns its face: simultaneous layers cannot change each other. */
+ * Recycle a bounded pool of faces per family. Repeatedly decoding the binary
+ * for every scrub sample can exhaust Chromium with large fonts such as SF Pro. */
 export function createVariableFontRenderer(invalidate: () => void) {
   const sources = new Map<string, { data?: ArrayBuffer }>();
+  const faceFamilies = new WeakMap<FontFace, string>();
   const faces = new Map<string, FontFace>();
   const instance = Math.random().toString(36).slice(2);
   let sequence = 0;
@@ -39,9 +41,22 @@ export function createVariableFontRenderer(invalidate: () => void) {
     let face = faces.get(key);
     if (face) { faces.delete(key); faces.set(key, face); return face.family; }
     try {
-      face = new FontFace(`Powermove Axis ${instance} ${++sequence}`, source.data, {
-        weight: '1 1000', stretch: '1% 1000%', style: content.italic ? 'italic' : 'normal', variationSettings: settings
-      } as FontFaceDescriptors & { variationSettings: string });
+      // Raster consumers paint synchronously; completed samples own pixels, not
+      // this face. Detach before changing descriptors so font matching is refreshed.
+      const reusable = [...faces].filter(([, candidate]) => faceFamilies.get(candidate) === family);
+      if (reusable.length >= 8) {
+        const [oldKey, oldest] = reusable[0];
+        faces.delete(oldKey);
+        document.fonts.delete(oldest);
+        face = oldest;
+        face.variationSettings = settings;
+        face.style = content.italic ? 'italic' : 'normal';
+      } else {
+        face = new FontFace(`Powermove Axis ${instance} ${++sequence}`, source.data, {
+          weight: '1 1000', stretch: '1% 1000%', style: content.italic ? 'italic' : 'normal', variationSettings: settings
+        } as FontFaceDescriptors & { variationSettings: string });
+        faceFamilies.set(face, family);
+      }
       if (face.status !== 'loaded') return null;
       document.fonts.add(face);
       faces.set(key, face);

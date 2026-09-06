@@ -26,7 +26,8 @@ describe('variable font rendering',()=>{
   it('renders every new animation sample synchronously after one source load', async () => {
     const blob = vi.fn(async () => new Blob([new Uint8Array([1, 2, 3])]));
     vi.spyOn(catalog, 'inspectFont').mockResolvedValue({ family: 'Animated', status: 'variable', axes: [], source: { family: 'Animated', blob } });
-    class Face { status = 'loaded'; constructor(public family: string, public source: unknown, public descriptors: any) {} async load() { return this; } }
+    const constructed: any[] = [];
+    class Face { status = 'loaded'; constructor(public family: string, public source: unknown, public descriptors: any) { constructed.push(this); } async load() { return this; } }
     vi.stubGlobal('FontFace', Face);
     vi.stubGlobal('document', { fonts: { add: vi.fn(), delete: vi.fn() } });
     const invalidate = vi.fn(), resolve = createVariableFontRenderer(invalidate);
@@ -36,6 +37,7 @@ describe('variable font rendering',()=>{
     for (let frame = 0; frame < 120; frame++) {
       expect(resolve({ ...content, 'fontAxis.wdth': 75 + frame / 2 })).not.toBeNull();
     }
+    expect(constructed).toHaveLength(8);
     expect(blob).toHaveBeenCalledTimes(1);
     expect(invalidate).toHaveBeenCalledTimes(1);
   });
