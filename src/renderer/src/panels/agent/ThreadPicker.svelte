@@ -175,7 +175,6 @@
     min-width: 0;
     margin: 0 10px;
     padding: 0 0 6px;
-    border-bottom: 1px solid var(--line);
     flex-shrink: 0;
   }
   .thread-trigger { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; height: 28px; padding: 0 2px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-2); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }

@@ -55,7 +55,7 @@
     display: block;
     overflow: hidden;
     border-radius: var(--r-sm);
-    border: 1px solid var(--line);
+    border: 0;
     background: var(--ink-1);
     animation: none;
     color: var(--tx-2);
@@ -106,7 +106,6 @@
     gap: 5px;
     margin: 0 8px 8px 15px;
     padding: 4px 0 2px 12px;
-    border-left: 1px solid var(--line-2);
     color: var(--tx-2);
     font-size: var(--fs-xs);
     font-weight: var(--fw-regular);

@@ -637,12 +637,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    language: the thread scrolls under a mask fade; user messages are bubbles,
    assistant text is full-width prose; tool activity is a flat shimmer
    timeline; proposals/results and the composer float in a footer card. */
+#panel-agent{box-shadow:none;--shadow-float:0 16px 40px -8px rgb(0 0 0 / .22);--shadow-lift:0 4px 12px -2px rgb(0 0 0 / .16)}
+#panel-agent>header::after{display:none}
+.agent-shell .spatial-frame-grid figure{border:0}
 #panel-agent>.body{display:flex;min-height:0;overflow:hidden}
 .agent-panel-body{container-type:inline-size}
 .agent-shell{position:relative;display:flex;flex:1;min-width:0;min-height:0;flex-direction:column;background:var(--bg-panel)}
 .agent-connect-gate{position:relative;display:flex;flex:1;min-height:0;align-items:center;justify-content:flex-start;flex-direction:column;padding:12px 16px;overflow-y:auto;text-align:center;color:var(--tx-3)}
-.agent-connect-provider{position:relative;align-self:flex-start;max-width:100%;margin-bottom:12px;appearance:none;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);padding:5px 24px 5px 9px}
-.agent-connect-mark{display:grid;place-items:center;width:32px;height:32px;flex:none;margin-bottom:8px;border:1px solid color-mix(in srgb,var(--accent) 28%,var(--line));border-radius:14px;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg-float));box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 8%,transparent)}
+.agent-connect-provider{position:relative;align-self:flex-start;max-width:100%;margin-bottom:12px;appearance:none;border:0;border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);padding:5px 24px 5px 9px}
+.agent-connect-mark{display:grid;place-items:center;width:32px;height:32px;flex:none;margin-bottom:8px;border:0;border-radius:14px;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg-float));box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 8%,transparent)}
 .agent-connect-mark svg{width:22px;height:22px}.agent-connect-gate>b{color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}.agent-connect-gate>span{max-width:260px;margin-top:6px;font-size:var(--fs-sm);line-height:1.5}.agent-connect-button{min-width:142px;margin-top:18px}.agent-connect-gate>small{max-width:240px;margin-top:10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.45}
 .agent-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:12px 12px 14px;scrollbar-width:thin;scrollbar-color:var(--ink-3) transparent}
 .agent-scroll::-webkit-scrollbar{width:4px}
@@ -664,11 +667,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-shell .agent-prompt-glow{left:0;right:0}
 /* messages */
 .agent-msg{flex:none;min-width:0}
-.agent-msg.user{display:flex;flex-direction:column;align-items:flex-start;gap:5px}
-.agent-bubble{padding:9px 11px;border-radius:var(--r-md);background:var(--bg-field);color:var(--tx);font-size:var(--fs-md);line-height:1.5;white-space:pre-wrap}
-/* Requests share the transcript column; a quiet edge marks the current one. */
-.agent-prompt{position:relative;max-width:100%;width:100%}
-.agent-prompt.is-answering{border-radius:var(--r-md);isolation:isolate}
+.agent-msg.user{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+.agent-bubble{color:var(--tx);font-size:var(--fs-md);line-height:1.6;white-space:pre-wrap}
+/* Sent messages hug their text and align to the right of the conversation. */
+.agent-prompt{position:relative;max-width:90%;width:fit-content;padding:10px 13px;border-radius:14px 14px 4px 14px;background:var(--ink-2);isolation:isolate}
 
 .agent-bubble{max-width:100%}
 /* run glow — a halo around the prompt the agent is answering, held 26px off
@@ -758,13 +760,13 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-suggestions button:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
 /* footer */
 .agent-footer{position:relative;flex:0 1 auto;min-height:0;max-height:70%;display:flex;flex-direction:column;gap:8px;padding:0 var(--panel-edge-inset) var(--panel-edge-inset)}
-.agent-jump{position:absolute;z-index:2;top:-40px;left:50%;transform:translateX(-50%);width:30px;height:30px;display:grid;place-items:center;border-radius:var(--r-pill);background:var(--bg-float);color:var(--tx-2);box-shadow:0 0 0 var(--hairline) var(--line-2),var(--shadow-lift);animation:agent-jump-in 160ms var(--ease) both}
+.agent-jump{position:absolute;z-index:2;top:-40px;left:50%;transform:translateX(-50%);width:30px;height:30px;display:grid;place-items:center;border-radius:var(--r-pill);background:var(--bg-float);color:var(--tx-2);box-shadow:0 4px 12px -2px rgb(0 0 0 / .16);animation:agent-jump-in 160ms var(--ease) both}
 .agent-jump:hover{color:var(--tx)}.agent-jump:active{transform:translateX(-50%) scale(.94)}
 .agent-jump svg{width:14px;height:14px}
 @keyframes agent-jump-in{from{opacity:0;transform:translateX(-50%) scale(.8)}to{opacity:1;transform:translateX(-50%)}}
 /* footer cards (proposal / result) */
 /* Concentric: 6px-radius rows inset 10px → outer 16px. */
-.agent-card{min-height:0;overflow-y:auto;padding:10px 10px 8px;border-radius:calc(var(--r-lg) - 6px);background:var(--bg-float);box-shadow:0 0 0 var(--hairline) var(--line-2),var(--shadow-raise);animation:agent-card-in 220ms var(--ease) both}
+.agent-card{min-height:0;overflow-y:auto;padding:10px 10px 8px;border-radius:calc(var(--r-lg) - 6px);background:var(--bg-float);box-shadow:none;animation:agent-card-in 220ms var(--ease) both}
 @keyframes agent-card-in{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
 .agent-card-kicker{margin-bottom:2px;color:var(--tx-4);font-size:var(--fs-xs);font-weight:var(--fw-medium)}
 .agent-card h3{margin:0 0 7px;font-size:var(--fs-md);font-weight:var(--fw-medium)}
@@ -781,7 +783,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-composer:focus-within{background:color-mix(in srgb,var(--bg-field) 94%,var(--tx) 6%)}
 .agent-compose-context{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;padding:0 2px;color:var(--tx-3);font-size:var(--fs-xs);line-height:1.4}
 .agent-compose-context span{color:var(--tx-4)}
-.agent-composer.is-dropping{box-shadow:0 0 0 1.5px var(--accent),var(--shadow-lift)}
+.agent-composer.is-dropping{background:color-mix(in srgb,var(--accent) 10%,var(--bg-field))}
 .agent-input-row{display:flex;align-items:center;gap:6px}
 .agent-composer textarea{display:block;flex:1;min-width:0;min-height:32px;max-height:96px;resize:none;align-self:center;padding:4px 2px;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
 .agent-composer textarea::-webkit-scrollbar{display:none}
@@ -803,7 +805,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-stop:hover{opacity:.9}
 .agent-stop>i{width:9px;height:9px;border-radius:2px;background:currentColor}
 /* Model and focus choices wrap within the composer at narrow dock widths. */
-.agent-option-bar{display:flex;align-items:center;gap:2px;min-width:0;padding:5px 0 0;flex-wrap:wrap;margin-top:0;border-top:1px solid var(--line)}
+.agent-option-bar{display:flex;align-items:center;gap:2px;min-width:0;padding:5px 0 0;flex-wrap:wrap;margin-top:0}
 .agent-option-bar .sp{flex:1}
 .agent-modelbar{display:flex;align-items:center;gap:2px;min-width:0;padding:0;border-radius:var(--r-sm);color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-regular);white-space:nowrap;transition:background var(--dur-1),color var(--dur-1)}
 .agent-modelbar select:hover,.agent-modelbar select:focus-visible{background:var(--ink-1);color:var(--tx)}
@@ -841,7 +843,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-msg-files .agent-attachment{background:var(--ink-2)}
 /* result extras */
 .agent-access-warning{display:flex;flex-direction:column;gap:10px;color:var(--tx-2);font-size:var(--fs-sm);line-height:1.55}.agent-access-warning p:last-child{padding:9px 10px;border-radius:var(--r-md);background:color-mix(in srgb,var(--red) 9%,var(--bg-row));color:color-mix(in srgb,var(--red) 75%,var(--tx))}
-.agent-artifacts{min-width:0;margin-top:4px;border-radius:var(--r-sm);border:1px solid var(--line);background:transparent}
+.agent-artifacts{min-width:0;margin-top:4px;border-radius:var(--r-sm);border:0;background:var(--bg-field)}
 .agent-artifacts>summary{display:flex;align-items:center;gap:6px;padding:6px 8px;list-style:none;color:var(--tx-2);font-size:var(--fs-xs);cursor:pointer}
 .agent-artifacts>summary::-webkit-details-marker{display:none}
 .agent-artifacts>summary small{color:var(--tx-4);font-size:inherit}

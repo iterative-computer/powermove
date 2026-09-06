@@ -25,8 +25,8 @@
     const inset = Boolean(state.canvas.closest('[data-prompt-inset]'));
     state.setUniform('uPad', inset ? 4 * dpr : glowPad(dpr));
     // A prompt can wrap to another line mid-run, so the shape is read per frame.
-    state.setUniform('uRadius', inset ? 8 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr));
-    state.setUniform('uTailRadius', inset ? 8 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr, PROMPT_GLOW_TAIL_RADIUS));
+    state.setUniform('uRadius', inset ? 14 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr));
+    state.setUniform('uTailRadius', inset ? 4 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr, PROMPT_GLOW_TAIL_RADIUS));
     // The theme can change mid-run, and the halo has to stay readable in both.
     state.setUniform('uGain', glowGain(document.documentElement.dataset.theme === 'dark') * (inset ? 1.8 : 1));
     if (firstFrame) {

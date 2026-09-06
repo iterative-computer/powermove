@@ -103,7 +103,8 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
   });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.evaluate(() => { (window as any).PM.theme.apply('light'); });
-  await page.getByRole('button', { name: 'Scroll to latest', exact: true }).click();
+  const jumpToLatest = page.getByRole('button', { name: 'Scroll to latest', exact: true });
+  if (await jumpToLatest.isVisible()) await jumpToLatest.click();
   await expect(page.locator('.agent-msg.assistant p')).toBeInViewport();
   await panel.screenshot({ path: path.join(artifacts, 'agent-complete-light.png') });
   expect(session.diagnostics.pageErrors).toEqual([]);

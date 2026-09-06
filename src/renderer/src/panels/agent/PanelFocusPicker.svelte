@@ -90,7 +90,7 @@
   .panel-focus-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .panel-focus-trigger:hover { color: var(--tx); background: var(--ink-1); }
   .panel-focus-trigger:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .panel-focus-popup { position: fixed; inset: auto; margin: 0; width: min(248px, calc(100vw - 16px)); max-height: min(300px, calc(100vh - 16px)); box-sizing: border-box; padding: 6px; border: 1px solid var(--line); border-radius: var(--r-lg, 12px); background: var(--bg-panel); color: var(--tx); box-shadow: var(--shadow-lift); font: var(--fs-sm)/1.4 var(--f-ui); overflow: auto; }
+  .panel-focus-popup { position: fixed; inset: auto; margin: 0; width: min(248px, calc(100vw - 16px)); max-height: min(300px, calc(100vh - 16px)); box-sizing: border-box; padding: 6px; border: 0; border-radius: var(--r-lg, 12px); background: var(--bg-panel); color: var(--tx); box-shadow: 0 4px 12px -2px rgb(0 0 0 / .16); font: var(--fs-sm)/1.4 var(--f-ui); overflow: auto; }
   .panel-focus-popup::backdrop { background: transparent; }
   .panel-focus-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px 6px; color: var(--tx-3); font-size: var(--fs-xs); }
   .panel-focus-list label { display: flex; align-items: center; gap: 7px; min-height: 28px; padding: 0 6px; border-radius: var(--r-sm); cursor: pointer; }

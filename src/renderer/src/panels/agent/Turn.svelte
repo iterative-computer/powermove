@@ -76,8 +76,9 @@
 {/if}
 
 <style>
-  .agent-prompt-signal{position:absolute;inset:0;overflow:hidden;border-radius:var(--r-md);pointer-events:none;z-index:2}
-  .agent-prompt-signal::before{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent)}
+  .agent-prompt-signal{position:absolute;inset:0;overflow:hidden;border-radius:inherit;pointer-events:none;z-index:0}
+  .agent-prompt-signal :global(canvas){opacity:.5}
+  .agent-prompt-signal::before{content:"";position:absolute;inset:0;border-radius:inherit;background:linear-gradient(110deg,color-mix(in srgb,var(--accent) 10%,transparent),transparent 80%)}
   .agent-prompt-signal:global([data-glow-renderer="motion-gpu"])::before{display:none}
   .agent-message-focus { color: var(--tx-3); font: var(--fs-xs)/1.4 var(--f-ui); text-wrap: pretty; }
   /* Steering reads as a continuation of the request above it, not a new turn. */
