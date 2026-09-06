@@ -26,7 +26,12 @@ export interface ToolsRow {
   label: string;
   status: ToolsRowStatus;
   failedCount: number;
+  successCount: number;
   toolCount: number;
+  /** The provider-emitted label for the tool doing work right now. */
+  currentLabel?: string;
+  /** Real provider-emitted activity, retained for the expandable work log. */
+  details: Array<Pick<ToolStep, 'id' | 'label' | 'status'>>;
   /** Individual step labels, kept for a title tooltip on settled groups. */
   detail?: string[];
 }
@@ -74,9 +79,11 @@ export function groupedToolRow(steps: ToolStep[]): ToolsRow {
   const actions = [...new Set(steps.map((step) => toolAction(step.toolName)))];
   const label = joinActions(actions);
   const failedCount = steps.filter((step) => step.status === 'error').length;
+  const successCount = steps.filter((step) => step.status === 'done').length;
   const settledCount = steps.filter((step) => step.status !== 'running').length;
   // `continued` is a bookkeeping state (the call was resumed), not a failure —
-  // it settles like `done`. A failed exploratory check must not paint successful
+  // it stops pulsing like `done`, but is not counted as confirmed success.
+  // A failed exploratory check must not paint successful
   // commands and edits in the same batch as wholly failed.
   const status: ToolsRowStatus = steps.some((step) => step.status === 'running')
     ? 'running'
@@ -91,7 +98,12 @@ export function groupedToolRow(steps: ToolStep[]): ToolsRow {
     label: label.charAt(0).toUpperCase() + label.slice(1),
     status,
     failedCount,
-    toolCount: steps.length
+    successCount,
+    toolCount: steps.length,
+    currentLabel: [...steps].reverse().find((step) => step.status === 'running' && step.label)?.label,
+    details: steps
+      .filter((step) => Boolean(step.label))
+      .map(({ id, label, status }) => ({ id, label, status }))
   };
   // Powermove keeps what supermove drops: once a group settles, the individual
   // labels stay reachable as a tooltip. Detail without visual noise.
@@ -99,7 +111,7 @@ export function groupedToolRow(steps: ToolStep[]): ToolsRow {
     row.detail = steps
       .filter((step) => Boolean(step.label))
       .map((step) => failedCount > 0
-        ? `${step.status === 'error' ? 'Failed' : 'Succeeded'} · ${step.label}`
+        ? `${step.status === 'error' ? 'Failed' : step.status === 'continued' ? 'Continued' : 'Succeeded'} · ${step.label}`
         : step.label);
   }
   return row;

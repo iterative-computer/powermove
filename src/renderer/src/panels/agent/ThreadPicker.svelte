@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AgentAtmosphere from './AgentAtmosphere.svelte';
   import { agentState } from './agent-state.svelte';
   import { relativeOpened } from './threads';
 
@@ -85,6 +86,7 @@
 
 {#if agentState.threadId}
   <div class="thread-bar" role="group" aria-label="Agent threads">
+    <AgentAtmosphere compact active={agentState.phase === 'running'} />
     <button
       class="thread-trigger"
       type="button"
@@ -169,15 +171,17 @@
   .thread-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     min-width: 0;
-    margin: 0 10px 8px 16px;
+    margin: 0 10px;
+    padding: 0 0 6px;
+    border-bottom: 1px solid var(--line);
     flex-shrink: 0;
   }
-  .thread-trigger { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; height: 28px; padding: 0 2px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3); font: inherit; font-size: var(--fs-xs); text-align: left; cursor: pointer; }
+  .thread-trigger { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; height: 28px; padding: 0 2px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-2); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
   .thread-trigger span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thread-chevron { width: 14px; height: 14px; flex-shrink: 0; }
-  .thread-new { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; padding: 6px; border: 0; border-radius: 50%; background: transparent; color: var(--tx-3); cursor: pointer; }
+  .thread-new { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; padding: 6px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3); cursor: pointer; }
   .thread-trigger:hover:not(:disabled), .thread-new:hover:not(:disabled) { color: var(--tx-2); }
   .thread-new:hover:not(:disabled) { background: var(--ink-1); }
   .thread-new:focus-visible, .thread-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

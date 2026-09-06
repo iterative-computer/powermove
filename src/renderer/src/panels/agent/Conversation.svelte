@@ -3,26 +3,23 @@
   import Timeline from './Timeline.svelte';
   import Turn from './Turn.svelte';
   import ResultActions from './ResultActions.svelte';
+  import AgentAtmosphere from './AgentAtmosphere.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
   const suggestions = $derived(agentState.accessMode === 'editor' ? [
-    ['Organize for animation', 'Organize my panels into a focused animation workspace'],
-    ['Move Timeline right', 'Move the Timeline to the right dock and give it more room'],
-    ['Open Inspector + Effects', 'Open the Inspector and Effects panels beside the composition'],
-    ['Focus the canvas', 'Focus the composition by hiding panels I do not need right now']
+    ['Animate a title', 'Animate the selected title with a confident entrance using editable keyframes'],
+    ['Shape the scene', 'Refine the composition with editable shapes, thoughtful spacing, and a clear visual hierarchy'],
+    ['Arrange my workspace', 'Organize my panels into a focused animation workspace']
   ] : [
     ['Find useful footage', 'Research and download useful licensed footage for this composition, then import the strongest choices'],
     ['Build an integration', 'Build and test the project-local integration needed to complete this project'],
-    ['Use Blender', 'Create the missing 3D asset in Blender, render it, and bring the result into this composition'],
     ['Finish the project', 'Use any useful project tools and web research to finish this composition end to end']
   ]);
 
   const showTimeline = $derived(agentState.phase === 'running' || agentState.phase === 'preview');
 
-  /* The prompt the agent is answering: the last thing the user said before the
-     run started, steering included. It wears the halo for as long as the run
-     lasts, which is why no placeholder line has to stand in for progress. */
+  /* Keep the current request marked across steering snapshots. */
   const answeringIndex = $derived(agentState.phase === 'running'
     ? agentState.conversation.reduce((found, message, index) => message.role === 'user' ? index : found, -1)
     : -1);
@@ -30,13 +27,15 @@
 
 {#if !agentState.conversation.length && !agentState.activity}
   <div class="agent-welcome">
-    <b>{agentState.accessMode === 'editor' ? 'Build or rearrange anything' : 'Work across the whole project'}</b>
-    <span>{agentState.accessMode === 'editor'
-      ? 'Edit the composition, build controls, or tell me exactly how to arrange your panels.'
-      : 'Research, create files, run tools, build integrations, and return editable results to Powermove.'}</span>
+    <div class="agent-welcome-heading">
+      <AgentAtmosphere compact />
+      <div><b>Make your next move</b><span>{agentState.accessMode === 'editor'
+        ? 'Your ideas. Editable motion.'
+        : 'Create, research, and build with your project.'}</span></div>
+    </div>
     <div class="agent-suggestions">
       {#each suggestions as [label, prompt]}
-        <button type="button" onclick={() => PM.AgentUI?.setDraft(prompt, true)}>{label}</button>
+        <button type="button" onclick={() => PM.AgentUI?.setDraft(prompt, true)}><span>{label}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></button>
       {/each}
     </div>
   </div>

@@ -1245,11 +1245,12 @@ function sealTrace() {
 }
 
 /* Move the finished run's trace into the conversation so the activity trail
-   stays visible above its summary (supermove keeps per-message steps). Text
-   rows are dropped — the final answer lands in its own conversation turn. */
-function archiveTrace() {
+   stays visible above its summary (supermove keeps per-message steps). Final
+   traces drop text because the answer lands in its own conversation turn;
+   steering checkpoints retain text because no replacement turn exists yet. */
+function archiveTrace(preserveText = false) {
   sealTrace();
-  const steps: any = S.trace.filter((step: any) => step.kind !== 'text');
+  const steps: any = preserveText ? [...S.trace] : S.trace.filter((step: any) => step.kind !== 'text');
   S.trace = [];
   if (steps.length) S.conversation.push({ role: 'trace', steps });
 }
@@ -1315,9 +1316,10 @@ async function applyExtensionChanges(extensions: any) {
     }
     const name: any = record?.manifest?.name || change.id;
     const verb: any = change.action === 'created' ? 'Added' : change.action === 'updated' ? 'Updated' : 'Removed';
-    turns.push({ role: 'assistant', text: `${verb} mod ${change.action === 'removed' ? change.id : name}` });
-
     const error: any = loadError || extensionHealthError(record);
+    turns.push({ role: 'assistant', text: `${verb} mod ${change.action === 'removed' ? change.id : name}`,
+      modResult: { id: change.id, name, action: change.action,
+        status: change.action === 'removed' ? 'removed' : error ? 'error' : 'ready' } });
     if ((change.action === 'created' || change.action === 'updated') && error) {
       const firstLine: any = (String(error).split(/\r?\n/, 1)[0] || '').slice(0, 400);
       turns.push({ role: 'assistant', text: `${name} didn't load: ${firstLine}`, fixExtensionId: change.id });
@@ -1435,6 +1437,11 @@ async function sendRequest(input: any) {
   const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;
   const steering: any = S.phase === 'working';
   if (steering) {
+    /* The live trace normally sits after the whole conversation. Seal it now
+       so everything the agent said before this steer stays chronologically
+       between the original prompt and the new direction. Text is retained
+       here because it is intermediate output, not the duplicated final reply. */
+    archiveTrace(true);
     const steeringAttachments: any = S.attachments.splice(0);
     const steeringMessage: any = {
       role: 'user', text: typedRequest || `Attached ${steeringAttachments.length} file${steeringAttachments.length === 1 ? '' : 's'}`,

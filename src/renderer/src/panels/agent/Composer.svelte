@@ -112,6 +112,7 @@
   ondragleave={() => { dragDepth = Math.max(0, dragDepth - 1); }}
   ondrop={drop}
 >
+  {#if mode.working}<div class="agent-compose-context">Add direction to this run<span>Enter to steer</span></div>{/if}
   {#if agentState.attachments.length}
     <div class="agent-attachment-rail">
       <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
@@ -136,7 +137,8 @@
     ></textarea>
     {#if mode.working}
       <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>
-    {:else}
+    {/if}
+    {#if !mode.working || draft.trim().length > 0 || agentState.attachments.length > 0}
       <button
         class="agent-round agent-send"
         class:is-sendable={draft.trim().length > 0 || agentState.attachments.length > 0}
@@ -150,6 +152,5 @@
       </button>
     {/if}
   </div>
+  <AgentOptions {PM} showPanelFocus={panelId !== 'library'} />
 </div>
-<!-- All run choices share the same quiet options row. -->
-<AgentOptions {PM} showPanelFocus={panelId !== 'library'} />

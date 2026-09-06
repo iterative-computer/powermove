@@ -30,6 +30,7 @@ describe('activityRows', () => {
       label: 'Ran commands, edited files, and searched the web',
       status: 'done',
       failedCount: 0,
+      successCount: 3,
       toolCount: 3,
       renderKey: 'tools-1-0',
       pulsing: false
@@ -53,14 +54,23 @@ describe('activityRows', () => {
     ]);
 
     expect(at(rows).detail).toEqual(['npm test', 'Timeline.svelte']);
+    expect(at(rows).details).toEqual([
+      { id: '1', label: 'npm test', status: 'done' },
+      { id: '2', label: 'Timeline.svelte', status: 'done' }
+    ]);
   });
 
-  it('omits detail while the group is still running, and for single steps', () => {
+  it('keeps real current activity visible while a group is running', () => {
     const running = activityRows([
-      tool({ id: '1', toolName: 'bash', label: 'npm test', status: 'running' }),
-      tool({ id: '2', toolName: 'edit', label: 'Timeline.svelte' })
+      tool({ id: '1', toolName: 'bash', label: 'npm test', status: 'done' }),
+      tool({ id: '2', toolName: 'edit', label: 'edit · Timeline.svelte', status: 'running' })
     ]);
     expect(at(running).detail).toBeUndefined();
+    expect(at(running).currentLabel).toBe('edit · Timeline.svelte');
+    expect(at(running).details).toEqual([
+      { id: '1', label: 'npm test', status: 'done' },
+      { id: '2', label: 'edit · Timeline.svelte', status: 'running' }
+    ]);
 
     const single = activityRows([tool({ id: '1', toolName: 'bash', label: 'npm test' })]);
     expect(at(single).detail).toBeUndefined();
@@ -140,6 +150,9 @@ describe('activityRows', () => {
     expect(
       at(activityRows([tool({ id: 'a', status: 'done' }), tool({ id: 'b', status: 'error' })])).detail
     ).toEqual(['Succeeded · Ran a command', 'Failed · Ran a command']);
+    expect(
+      at(activityRows([tool({ id: 'a', status: 'done' }), tool({ id: 'b', status: 'error' })])).successCount
+    ).toBe(1);
   });
 
   it('settles a continued tool call like a done one', () => {

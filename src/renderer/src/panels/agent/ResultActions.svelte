@@ -18,9 +18,14 @@
     return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
   }
 
-  function artifactIcon(artifact: Record<string, any>): string {
-    return artifact.mime?.startsWith('video/') ? 'cam' : artifact.mime?.startsWith('audio/') ? 'clock' : 'frame';
+  function artifactType(artifact: Record<string, any>): string {
+    const ext = String(artifact.name || artifact.path || '').split('.').pop()?.toLowerCase() || '';
+    const known: Record<string, string> = { cjs: 'JS', mjs: 'JS', js: 'JS', ts: 'TS', txt: 'TXT', md: 'MD', json: 'JSON' };
+    if (known[ext]) return known[ext];
+    if (/^[a-z0-9]{1,5}$/.test(ext)) return ext.toUpperCase();
+    return 'FILE';
   }
+
 </script>
 
 {#snippet frames()}
@@ -59,21 +64,26 @@
       <div class="agent-external-actions"><b>External activity</b>{#each run.externalActions as action}<span>{action}</span>{/each}</div>
     {/if}
     {#if run.artifacts?.length}
-      <div class="agent-artifacts">
+      <details class="agent-artifacts" open>
+        <summary><span>Files</span><small>{run.artifacts.length}</small><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4 3 3 3-3" /></svg></summary>
+        <div class="agent-artifact-list">
         {#each run.artifacts as artifact}
-          {@const artifactMeta = [artifact.mime || '', artifactSize(artifact.size)].filter(Boolean).join(' · ')}
           <div class="agent-artifact">
-            <Icon {PM} name={artifactIcon(artifact)} />
-            <span class="agent-artifact-copy"><b title={artifact.name || artifact.path}>{artifact.name || artifact.path}</b><small title={artifactMeta}>{artifactMeta}</small></span>
+            <span class="agent-file-type">{artifactType(artifact)}</span>
+            <span class="agent-artifact-copy"><b title={artifact.name || artifact.path}>{artifact.name || artifact.path}</b></span>
+            <small class="agent-file-size">{artifactSize(artifact.size)}</small>
+            <div class="agent-file-actions">
             {#if PM.assetKind({ name: artifact.name, type: artifact.mime })}
               <button type="button" disabled={artifact.importing || artifact.imported} aria-label={artifact.imported ? `${artifact.name} is already on the timeline` : `Add ${artifact.name} to timeline`} title={artifact.imported ? 'Already added to the timeline' : 'Add to timeline'} onclick={() => PM.AgentUI?.importArtifact(artifact)}>
                 {#if artifact.importing}<i aria-hidden="true"></i>{:else}<Icon {PM} name={artifact.imported ? 'link' : 'plus'} />{/if}
               </button>
             {/if}
             <button type="button" aria-label={`Reveal ${artifact.name || artifact.path} in Finder`} title="Reveal in Finder" onclick={() => PM.AgentUI?.revealArtifact(artifact)}><Icon {PM} name="project" /></button>
+            </div>
           </div>
         {/each}
-      </div>
+        </div>
+      </details>
     {/if}
     {#if run.reviewError}
       <p class="spatial-review-warning">{run.autonomous ? run.reviewError : `Visual review stopped: ${run.reviewError.slice(0, 130)}. You can still inspect and undo the rendered change.`}</p>

@@ -585,7 +585,7 @@ it('offers Fix it when a reloaded mod is unhealthy', async () => {
 
   const turns = await assistant.lifecycle.applyExtensionChanges([{ id: 'broken-mod', action: 'updated' }]);
   assert.deepEqual(turns, [
-    { role: 'assistant', text: 'Updated mod Broken Mod' },
+    { role: 'assistant', text: 'Updated mod Broken Mod', modResult: { id: 'broken-mod', name: 'Broken Mod', action: 'updated', status: 'error' } },
     { role: 'assistant', text: "Broken Mod didn't load: Unexpected token", fixExtensionId: 'broken-mod' },
   ]);
 });

@@ -88,7 +88,7 @@ describe('Timeline', () => {
     expect(rows).toHaveLength(3);
     expect(at(0).className).toContain('agent-trace-thought');
     expect(at(0).textContent).toBe('Reading the composition');
-    expect(at(1).className).toContain('agent-trace-tool');
+    expect(at(1).querySelector('.agent-trace-tool')).toBeTruthy();
     expect(at(1).textContent).toContain('Ran commands and edited files');
     expect(at(2).className).toContain('agent-trace-text');
     expect(at(2).textContent).toBe('The layout is fixed.');
@@ -105,6 +105,35 @@ describe('Timeline', () => {
       .toBe('npm test\nTimeline.svelte');
   });
 
+  it('shows the real active action and its live work log while running', () => {
+    render(trace([
+      { kind: 'tool', id: 'x1', toolName: 'bash', label: 'bash · npm test', status: 'done' },
+      { kind: 'tool', id: 'x2', toolName: 'edit_file', label: 'edit · Timeline.svelte', status: 'running' }
+    ]));
+
+    const row = target.querySelector('details.agent-trace-tool')!;
+    expect(row.hasAttribute('open')).toBe(true);
+    expect(row.className).toContain('is-pulsing');
+    expect(row.querySelector('summary')?.textContent).toContain('edit · Timeline.svelte');
+    expect(row.querySelector('summary')?.textContent).toContain('Working');
+    expect([...row.querySelectorAll('.agent-tool-details span')].map((item) => item.textContent))
+      .toEqual(['bash · npm test', 'edit · Timeline.svelte']);
+  });
+
+  it('makes completed work primary when one action failed', () => {
+    render(trace([
+      { kind: 'tool', id: 'x1', toolName: 'bash', label: 'bash · npm test', status: 'done' },
+      { kind: 'tool', id: 'x2', toolName: 'web_search', label: 'search · motion references', status: 'error' }
+    ]));
+
+    const row = target.querySelector('details.agent-trace-tool')!;
+    expect(row.querySelector('summary')?.textContent).toContain('1 completed');
+    expect(row.querySelector('summary')?.textContent).not.toContain('1 of 2 failed');
+    row.setAttribute('open', '');
+    expect(row.querySelector('.is-failed')?.textContent).toContain('search · motion references');
+    expect(row.querySelector('.is-failed')?.textContent).toContain('Failed');
+  });
+
   it('marks a failed tool group with an error class and a Failed chip', () => {
     render(trace([{ kind: 'tool', id: 'x1', toolName: 'edit', label: 'patch', status: 'error' }]));
 
@@ -119,7 +148,7 @@ describe('Timeline', () => {
     const row = target.querySelector('.agent-trace-tool')!;
     expect(row.className).not.toContain('is-error');
     expect(row.className).not.toContain('is-pulsing');
-    expect(row.querySelector('em')).toBeNull();
+    expect(row.querySelector('summary > em')).toBeNull();
   });
 
   it('pulses exactly one row even when stale live flags remain', () => {

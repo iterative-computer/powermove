@@ -1,3 +1,4 @@
+import type { AgentModResult } from './mod-result';
 import type { UIPlacement } from './ui-placement';
 
 export type AgentPhase = 'idle' | 'prompt' | 'running' | 'preview' | 'result';
@@ -20,6 +21,7 @@ export interface AgentMessage {
   /** Run failures render with the error treatment. */
   error?: boolean;
   fixExtensionId?: string;
+  modResult?: AgentModResult;
   focusLabels?: string[];
 }
 
@@ -158,6 +160,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     } : null,
     conversation: snapshot.conversation.map((message) => ({
       ...message,
+      modResult: message.modResult ? { ...message.modResult } : undefined,
       focusLabels: message.focusLabels ? [...message.focusLabels] : undefined,
       attachments: message.attachments?.map((attachment) =>
         typeof attachment === 'string' ? attachment : { ...attachment })
@@ -206,7 +209,7 @@ export function composerMode(legacyPhase: string): {
   return {
     working,
     disabled: legacyPhase === 'applying',
-    placeholder: working ? 'Add direction while the agent works…' : 'Describe what you want changed…',
+    placeholder: working ? 'Add direction…' : 'Describe a change…',
     sendLabel: working ? 'Steer current run' : 'Send message'
   };
 }

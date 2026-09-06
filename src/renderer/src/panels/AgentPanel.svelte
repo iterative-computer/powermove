@@ -12,7 +12,7 @@
   let { panelId }: PanelProps = $props();
   const PM = window.PM as Record<string, any>;
 
-  /* The thread scrolls under a mask fade. Only edits awaiting review belong
+  /* The transcript owns its vertical scroll. Only edits awaiting review belong
      in the footer; autonomous replies and their files stay in the thread. */
   let scroller = $state<HTMLDivElement>();
   let showJump = $state(false);
@@ -93,7 +93,7 @@
 
   function jumpToLatest(): void {
     userScrolled = false;
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   }
 
   /* Pin-to-bottom is a threshold, not a boolean stick: while the reader is

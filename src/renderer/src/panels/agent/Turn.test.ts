@@ -28,20 +28,56 @@ afterEach(() => {
 });
 
 describe('assistant word reveal', () => {
-  it('splits a finished reply into animating word spans', () => {
-    render({ role: 'assistant', text: 'I moved the panel', entering: true });
-    const words = target.querySelectorAll('.agent-word');
-    expect(words.length).toBeGreaterThan(1);
-    expect(Array.from(words).map((w) => w.textContent).join('')).toBe('I moved the panel');
+  it('keeps replayed tool details readable and partial failures visible while collapsed', () => {
+    render({
+      role: 'trace',
+      steps: [
+        { kind: 'tool', id: 'replayed', toolName: 'bash', label: 'Read project', status: 'done' },
+        { kind: 'tool', id: 'replayed', toolName: 'bash', label: 'Read project again', status: 'continued' },
+        { kind: 'tool', id: 'failed', toolName: 'bash', label: 'Preview failed', status: 'error' }
+      ]
+    });
+    const row = target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!;
+    expect(row.open).toBe(false);
+    expect(row.querySelector('summary')?.textContent).toContain('1 completed · 1 failed');
+    expect(row.querySelectorAll('.agent-tool-details > div')).toHaveLength(3);
+    expect(row.querySelector('.agent-tool-details')?.textContent).toContain('Continued');
   });
 
-  /* Every word carries its own offset, so the reveal reads as a wave rather
-     than one block fading. */
-  it('gives each word a later delay than the one before it', () => {
+  it('keeps archived agent text visible between prompts', () => {
+    render({
+      role: 'trace',
+      steps: [{ kind: 'text', id: 'before-steer', text: 'I have started building the blur.' }]
+    });
+    expect(target.querySelector('.agent-trace-text')?.textContent).toBe('I have started building the blur.');
+  });
+
+  it('keeps archived tool details expandable without live motion', () => {
+    render({
+      role: 'trace',
+      steps: [
+        { kind: 'tool', id: 'tool-1', toolName: 'bash', label: 'bash · npm test', status: 'done' },
+        { kind: 'tool', id: 'tool-2', toolName: 'edit', label: 'edit · Turn.svelte', status: 'done' }
+      ]
+    });
+    const row = target.querySelector('details.agent-trace-tool')!;
+    expect(row.className).not.toContain('is-pulsing');
+    expect([...row.querySelectorAll('.agent-tool-details span')].map((item) => item.textContent))
+      .toEqual(['bash · npm test', 'edit · Turn.svelte']);
+  });
+
+  it('keeps a finished reply in one stable text node', () => {
+    render({ role: 'assistant', text: 'I moved the panel', entering: true });
+    const words = target.querySelectorAll('.agent-word');
+    expect(words.length).toBe(0);
+    expect(target.querySelector('p')?.textContent).toBe('I moved the panel');
+  });
+
+  it('does not delay a completed reply behind a word sweep', () => {
     render({ role: 'assistant', text: 'one two three four', entering: true });
     const delays = Array.from(target.querySelectorAll('.agent-word')).map((word) =>
       parseFloat((word.getAttribute('style') || '').replace(/[^0-9.]/g, '')));
-    expect(delays[0]).toBe(0);
+    expect(delays).toEqual([]);
     for (let i = 1; i < delays.length; i++) {
       expect(delays[i]).toBeGreaterThan(delays[i - 1]!);
     }
@@ -52,16 +88,15 @@ describe('assistant word reveal', () => {
   it('keeps the words when entering is cleared mid-reveal', async () => {
     const message: AgentMessage = { role: 'assistant', text: 'still here', entering: true };
     render(message);
-    expect(target.querySelectorAll('.agent-word').length).toBeGreaterThan(0);
+    const paragraph = target.querySelector('p');
+    const textNode = paragraph?.firstChild;
 
     message.entering = false;
     flushSync();
-    expect(target.querySelectorAll('.agent-word').length).toBeGreaterThan(0);
+    expect(target.querySelector('p')?.firstChild).toBe(textNode);
   });
 
-  /* Once it has settled the paragraph goes back to plain text, so a message
-     that has stopped moving is not left as a row of inline-block boxes. */
-  it('hands back to plain text after the wave settles', () => {
+  it('keeps plain text after the reveal settles', () => {
     render({ role: 'assistant', text: 'settled text', entering: true });
     vi.advanceTimersByTime(WORD_REVEAL_SETTLE_MS + 10);
     flushSync();

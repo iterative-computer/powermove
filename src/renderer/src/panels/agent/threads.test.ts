@@ -64,3 +64,12 @@ describe('agent thread archive', () => {
     expect(normalizeGeneratedThreadTitle({ title: 'No' })).toBeNull();
   });
 });
+
+it('restores structured mod results with their status and action', () => {
+  const { make } = setup(); const threads = make(); threads.load('mods');
+  const modResult = { id: 'pexels', name: 'Pexels Browser', action: 'created', status: 'ready' } as const;
+  threads.active.conversation.push({ role: 'assistant', text: 'Added mod Pexels Browser', modResult });
+  threads.save();
+  const restored = make(); restored.load('mods');
+  expect(restored.active.conversation[0]?.modResult).toEqual(modResult);
+});
