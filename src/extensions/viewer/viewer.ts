@@ -1,3 +1,6 @@
+import { editCanvasText } from './canvas-text';
+import { drawEditablePaths, startPathEdit } from './path-editing';
+import { resolveContent } from 'powermove';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 /* TODO(extensions): `menus.contribute('viewer:context', …)` has no host here.
    src/extensions/viewer/viewer.ts never opens a context menu — the canvas
@@ -556,6 +559,8 @@ const disposeRuntime = () => {
   activeDrag?.cancel(); activeDrag = null;
   unbindStage?.(); unbindStage = null;
   resizeObserver?.disconnect(); resizeObserver = null;
+  V.previewOff?.(); V.previewOff=null;
+  PM.finishCanvasText?.();
   busOffs.splice(0).forEach((off) => off());
   window.removeEventListener('resize', onWindowResize);
   setStageCursor('');
@@ -603,6 +608,35 @@ V.attach = (stage: HTMLElement) => {
     }
     V.el = gl; V.ov = ov; V.octx = ov.getContext('2d'); V.inner = inner; V.stage = stage;
     V.recovery = recovery;
+    const zoomHost = stage.closest<HTMLElement>('.panel') ?? stage;
+    let zoomControl = zoomHost.querySelector<HTMLSelectElement>('#composition-zoom');
+    if (!zoomControl) {
+      zoomControl = document.createElement('select');
+      zoomControl.id = 'composition-zoom';
+      zoomControl.setAttribute('aria-label', 'Composition zoom');
+      zoomControl.title = 'Composition zoom';
+      for (const [value, label] of [['fit', 'Fit'], ...[5, 12.5, 25, 50, 100, 200, 400, 800].map(n => [String(n / 100), `${n}%`]), ['custom', 'Custom']] as [string, string][]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = label;
+        if (value === 'custom') option.hidden = true;
+        zoomControl.append(option);
+      }
+
+    }
+    // Share the panel chrome row with its move handle, outside the clipped stage.
+    zoomHost.append(zoomControl);
+    zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
+    V.zoomControl = zoomControl;
+    let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
+    if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
+    preview.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';
+    preview.replaceChildren();
+    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
+    for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
+    quality.value=PM.perf?.auto?'auto':String(PM.quality);quality.onchange=()=>{PM.perf.auto=quality.value==='auto';PM.quality=quality.value==='auto'?1:Number(quality.value);PM.previewResolution=quality.value;PM.bus.emit('quality');};preview.append(quality);
+    V.previewOff?.(); V.previewOff = undefined;
+
+    zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
+
     if (!PM.GL.gl) PM.GL.init(gl);
     unbindStage?.();
     resizeObserver?.disconnect();
@@ -625,6 +659,14 @@ V.layout = () => {
   let z = V.fit ? Math.min((r.width - pad * 2) / p.w, (r.height - pad * 2) / p.h) : V.zoom;
   z = clamp(z, .02, 8);
   V.shown = z;
+  if (V.zoomControl) {
+    const control = V.zoomControl as HTMLSelectElement;
+    control.options[0]!.textContent = `Fit (${Math.round(z * 1000) / 10}%)`;
+    const preset = [...control.options].find(option => Number(option.value) === z);
+    const custom = control.querySelector<HTMLOptionElement>('option[value="custom"]')!;
+    custom.textContent = `${Math.round(z * 1000) / 10}%`; custom.hidden = V.fit || !!preset;
+    control.value = V.fit ? 'fit' : preset?.value ?? 'custom';
+  }
   /* Keep display geometry fractional so its pixels and `shown` describe the
      same coordinate system. The GL backing buffer is rounded independently. */
   const dw = p.w * z, dh = p.h * z;
@@ -637,12 +679,18 @@ V.layout = () => {
   V.inner.style.top = position.y + 'px';
   V.inner.style.transform = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const renderSize = previewRenderSize(p.w, p.h, z, dpr, PM.quality);
+  const renderSize = PM.previewResolution && PM.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*PM.quality)),height:Math.max(2,Math.round(p.h*PM.quality))} : previewRenderSize(p.w, p.h, z, dpr, PM.quality);
   PM.GL.resize(renderSize.width, renderSize.height);
   V.ov.width = Math.round(r.width * dpr); V.ov.height = Math.round(r.height * dpr);
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   V.updateRecovery?.();
   PM.invalidate();
+};
+V.setZoom = (zoom: number) => {
+  if (!Number.isFinite(zoom)) return false;
+  if (V.fit) V.pan = [0, 0];
+  V.fit = false; V.zoom = clamp(zoom, .05, 8); V.layout();
+  return V.zoom;
 };
 V.returnToComposition = () => {
   V.fit = true;
@@ -744,6 +792,7 @@ function drawOverlay() {
   c.lineWidth = 1 / S;
 
   drawSnapLines(c, S);
+  if(V.showControls !== false)drawEditablePaths(PM,c,S);
 
   if (V.toolRect) {
     const box = V.toolRect.box as DragBox;
@@ -788,6 +837,28 @@ function drawOverlay() {
     c.closePath();
     c.stroke();
   }
+  // Anchors are layer controls, visible with normal selection as well as the
+  // anchor tool. Use the evaluated local anchor through the full parent chain.
+  c.save();
+  const anchorUnit = 1 / Math.max(.02, V.shown);
+  for (const layer of sels) {
+    if (!PM.GL.bounds(layer, PM.time)) continue;
+    const pivot = layerWorldPivot(PM, layer, PM.time);
+    if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
+    c.beginPath();
+    c.arc(pivot.x, pivot.y, 5 * anchorUnit, 0, Math.PI * 2);
+    c.moveTo(pivot.x - 8 * anchorUnit, pivot.y);
+    c.lineTo(pivot.x + 8 * anchorUnit, pivot.y);
+    c.moveTo(pivot.x, pivot.y - 8 * anchorUnit);
+    c.lineTo(pivot.x, pivot.y + 8 * anchorUnit);
+    c.strokeStyle = 'rgba(0,0,0,.8)';
+    c.lineWidth = 3 * anchorUnit;
+    c.stroke();
+    c.strokeStyle = '#fff';
+    c.lineWidth = anchorUnit;
+    c.stroke();
+  }
+  c.restore();
   if (selection) {
     c.strokeStyle = 'rgba(255,107,26,.95)';
     c.lineWidth = 1.4 / Math.max(.02, V.shown);
@@ -1013,6 +1084,7 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     listeners.push([target, type, handler, options]);
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
+    if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, [contenteditable]')) return;
     if (fenceLegacyListeners) event.stopImmediatePropagation();
     handler(event);
   }) as EventListener;
@@ -1058,6 +1130,7 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     setStageCursor('default');
   }) as EventListener, true);
   listen(fenceLegacyListeners ? stage : inner, 'dblclick', guarded((e: any) => {
+    if(PM.tool==='pen'){const L=PM.firstSel(),path=L?.d?.paths?.find((p:any)=>p.id===PM.activePath)||L?.masks?.find((m:any)=>m.path?.id===PM.activePath)?.path;if(path&&!L.lock){PM.Edit.mutate('Close path',()=>{if(path.p.closed.kf.length)PM.setKeyOn(path.p.closed,PM.time-L.from,true);else path.p.closed.v=true;PM.activePath=null;},{origin:'canvas'});PM.invalidate();PM.Inspector?.refresh?.();}e.preventDefault();e.stopPropagation();return;}
     const [x, y] = toComp(e);
     let L = editableTextAtPoint(PM, x, y, PM.time);
     const remembered = V.textDoubleClickCandidate;
@@ -1122,6 +1195,7 @@ function updateStageCursor(e: any) {
   if (tool === 'zoom') { setStageCursor(e.altKey ? 'zoom-out' : 'zoom-in'); return; }
   if (tool === 'rotate') { setStageCursor(ROTATE_CURSOR); return; }
   if (tool === 'anchor') { setStageCursor('crosshair'); return; }
+  if (tool === 'pen') { setStageCursor('crosshair'); return; }
   if (tool === 'shape') { setStageCursor('crosshair'); return; }
   if (tool === 'text') { setStageCursor('text'); return; }
   const [x, y] = toComp(e), T = PM.time;
@@ -1180,6 +1254,7 @@ function onDown(e: any) {
   const tool = V.temporaryTool || PM.tool || 'select';
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') return startZoom(e);
+  if (tool === 'pen') return startPathEdit(PM,e,pointerComp,beginDrag,V.shown);
   if (tool === 'shape') return startShape(e);
   if (tool === 'text') return startText(e);
   if (tool === 'rotate') return startRotationTool(e);
@@ -1378,7 +1453,7 @@ function startText(e: any): void {
   const [hitX, hitY] = toComp(e);
   const hit = PM.GL.pick(hitX, hitY, PM.time);
   if (hit?.type === 'text' && !e.shiftKey) {
-    PM.Inspector?.focusText?.(hit);
+    editCanvasText(PM,V,hit,e);
     return;
   }
   const start = pointerComp(e);
@@ -1406,7 +1481,7 @@ function startText(e: any): void {
         select: true,
       }, { label: box ? 'New paragraph text' : 'New point text', origin: 'canvas' });
       const layer = result?.ok && result.data?.results?.[0]?.data?.layer;
-      if (layer) PM.Inspector?.focusText?.(layer);
+      if (layer) editCanvasText(PM,V,layer);
       PM.invalidate();
     },
     cancel: clearToolRect,
@@ -1607,7 +1682,7 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
     x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T),
     r: PM.ev(L, 'rotation', T),
   };
-  const textSize0 = L.type === 'text' ? Math.max(4, Number(L.d?.size) || 4) : null;
+  const textSize0 = L.type === 'text' ? Math.max(4, Number(resolveContent(PM, L, PM.time).size) || 4) : null;
   const m = [...PM.worldMatrix(L, T)] as [number, number, number, number, number, number];
   const pivotWorld = selection.pivotWorld;
   const pointerStart = pointerComp(e);
@@ -1718,7 +1793,7 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
       const matrix = PM.worldMatrix(L, T);
       return [matrix[0], matrix[1], matrix[2], matrix[3]] as LinearMatrix;
     })(),
-    textSize: L.type === 'text' ? Math.max(4, Number(L.d?.size) || 4) : null,
+    textSize: L.type === 'text' ? Math.max(4, Number(resolveContent(PM, L, PM.time).size) || 4) : null,
     textOwnsDescendants: L.type === 'text' && PM.proj.layers.some((layer: any) => layer.parent === L.id),
   }));
   if (!snapshots.length) return;

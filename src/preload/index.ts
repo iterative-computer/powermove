@@ -37,6 +37,12 @@ const bridge: PowermoveBridge = {
   openProjectFile: () => ipcRenderer.invoke(IPC.projectOpen),
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
 
+  render: {
+    start: options => ipcRenderer.invoke(IPC.renderStart,options),
+    write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),
+    finish: token => ipcRenderer.invoke(IPC.renderFinish,{token}),
+    cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
+  },
   media: {
     createPlaybackProxy: (file) => {
       const sourcePath = webUtils.getPathForFile(file);
@@ -76,6 +82,17 @@ const bridge: PowermoveBridge = {
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),
     requestComputerConsent: (req) =>
       ipcRenderer.invoke(IPC.consentComputer, req) as Promise<ConsentResult>
+  },
+
+  agentTools: {
+    onRequest: (cb) => {
+      const listener = (_event: IpcRendererEvent, request: Parameters<typeof cb>[0]): void => cb(request);
+      ipcRenderer.on(IPC.agentToolRequest, listener);
+      return () => ipcRenderer.removeListener(IPC.agentToolRequest, listener);
+    },
+    respond: (response) => {
+      ipcRenderer.send(IPC.agentToolResponse, response);
+    }
   },
 
   chatgpt: {

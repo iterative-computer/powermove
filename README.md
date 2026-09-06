@@ -1,6 +1,6 @@
 # Powermove
 
-Powermove is an AI-native motion and video editor for macOS. It combines a GPU-backed editing engine with a dockable Svelte interface and an agent that can propose typed, undoable project edits through the locally installed Codex CLI.
+Powermove is an AI-native motion and video editor for macOS. It combines a GPU-backed editing engine with a dockable Svelte interface and native Codex or Claude Code agents that can inspect, render, and transactionally edit the live project through Powermove's typed, undoable tool layer.
 
 The refactored Electron application is the only supported app. The earlier root-page/WKWebView implementation and its separate test oracle were retired after parity coverage moved to Vitest.
 
@@ -25,9 +25,10 @@ with esbuild on change and serves the bundles over `app://powermove/ext/`;
 the renderer kernel hot-loads them, contains their failures (an erroring mod is
 auto-disabled with a Fix it / Turn off toast), and lets any built-in be layered
 over or replaced (`replaces` in the manifest). The Mods panel lists everything
-with a toggle. The agent writes mods directly into that directory through its
-Codex workspace (`--add-dir`), guided by `docs/EXTENSIONS.md` and the typed API
-pack; results report changed extension ids so the app reloads them in place.
+with a toggle. The agent stages mods in an isolated workspace, guided by
+`docs/EXTENSIONS.md` and the typed API pack. Powermove validates and promotes
+reported changes, retains the prior live version for recovery, and reloads the
+mod in place.
 
 For interface requests, the agent is prompted to announce its target panel or
 new-panel insertion point before editing. A validated public placement message
@@ -37,11 +38,11 @@ does not reopen the app; scene-only requests do not show it.
 
 ## Architecture
 
-- `src/main/` owns the Electron lifecycle, windows, menus, storage, native file operations, the private `app://powermove` protocol, and Codex CLI processes.
+- `src/main/` owns the Electron lifecycle, windows, menus, storage, native file operations, the private `app://powermove` protocol, and native Codex/Claude Code processes.
 - `src/preload/` exposes a narrow typed IPC bridge. The renderer is context-isolated and has no Node.js access.
 - `src/shared/` defines IPC contracts, limits, guards, and the shared edit vocabulary.
 - `src/renderer/` is a Svelte 5 runes shell over the typed editor core: project state, editing commands, layout, panels, playback, WebGL composition, and export.
-- Agent requests run through the Codex CLI in the main process. Agent-authored project changes return through the same validated, revision-checked, undoable edit boundary as direct manipulation.
+- Autonomous agent requests run through the provider's native harness. A run-scoped local MCP bridge exposes fresh project state, panel layout, real frame rendering, typed edits, and rollback while keeping the renderer as the sole owner of project state and Undo.
 - Production assets load from `app://powermove` under CSP. Generated JavaScript runs in a separate sandboxed host with an opaque origin, no network or native bridge, bounded inputs, and validated command output.
 
 Project expressions run through a bounded parser/interpreter, so the privileged
@@ -50,7 +51,7 @@ its separate opaque-origin sandbox with no network or native bridge.
 
 ## Development
 
-Requirements: macOS, Node.js 22 or newer, and npm. Agent features additionally require the Codex CLI to be installed and signed in.
+Requirements: macOS, Node.js 22 or newer, and npm. Agent features additionally require the Codex CLI or Claude Code to be installed and signed in.
 
 ```sh
 npm ci

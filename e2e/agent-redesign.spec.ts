@@ -77,6 +77,8 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
     await expect(page.getByRole('button', { name: 'Steer current run', exact: true })).toBeVisible();
     const overflow = await page.locator('.agent-shell').evaluate(root => [root, ...root.querySelectorAll('*')]
       .filter(el => el.clientWidth > 0 && !el.classList.contains('panel-sr-only')
+        // The external halo intentionally extends beyond these non-scrolling wrappers.
+        && !(el.matches('.agent-prompt, .agent-msg.user') && el.querySelector('.agent-prompt-signal'))
         && getComputedStyle(el).display !== 'inline' && getComputedStyle(el).textOverflow !== 'ellipsis'
         && el.scrollWidth > el.clientWidth + 1)
       .map(el => el.className));

@@ -8,6 +8,7 @@
   let popup = $state<HTMLDivElement>();
   let search: HTMLInputElement | undefined = $state();
   let open = $state(false);
+  let dismissByPress = false;
   let query = $state('');
   let left = $state(0);
   let top = $state(0);
@@ -31,8 +32,10 @@
     if (focusTrigger) trigger?.focus();
   }
 
-  function toggle(): void {
-    if (open) { close(); return; }
+  function toggle(event: MouseEvent): void {
+    const dismiss = open || (event.detail > 0 && dismissByPress);
+    dismissByPress = false;
+    if (dismiss) { close(); return; }
     const rect = trigger!.getBoundingClientRect();
     // The rows carry two lines each, so the popup is measured from the list it will hold.
     const height = Math.min(360, 92 + Math.max(1, threads.length) * 46);
@@ -96,6 +99,8 @@
       aria-expanded={open}
       title={hint}
       disabled={blocked}
+      onpointerdown={() => { dismissByPress = open; }}
+      onpointercancel={() => { dismissByPress = false; }}
       onclick={toggle}
     >
       <span>{active?.title || 'New thread'}</span>
@@ -119,7 +124,7 @@
   style:left={`${left}px`}
   style:top={`${top}px`}
   style:width={`${width}px`}
-  ontoggle={(event) => { open = (event as ToggleEvent).newState === 'open'; }}
+  onbeforetoggle={(event) => { open = (event as ToggleEvent).newState === 'open'; }}
   onkeydown={onKeydown}
 >
   {#if open}

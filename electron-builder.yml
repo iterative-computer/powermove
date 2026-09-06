@@ -9,6 +9,7 @@ electronLanguages:
   - en
 files:
   - out/**
+  - '!node_modules/ffmpeg-static/ffmpeg'
   # The native agent runtimes are copied once below, at the paths used by the
   # packaged binary resolvers. Keep their npm wrappers/metadata, but do not let
   # electron-builder auto-pack a second copy of either platform executable.
@@ -19,6 +20,10 @@ files:
   # install-time bin copy is the same executable and is not used by Powermove.
   - '!node_modules/esbuild/bin/esbuild'
 extraResources:
+  - from: node_modules/ffmpeg-static/ffmpeg
+    to: encoder/ffmpeg
+  - from: node_modules/ffmpeg-static/LICENSE
+    to: encoder/LICENSE
   - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
     to: codex
   - from: node_modules/@anthropic-ai/claude-code-darwin-arm64/claude
@@ -37,6 +42,8 @@ extraResources:
     to: api-pack/project.ts
   - from: src/renderer/src/core/types/commands.ts
     to: api-pack/commands.ts
+  - from: src/main/agent-tools/mcp-server.mjs
+    to: agent-tools/mcp-server.mjs
 extraMetadata:
   main: out/main/index.js
 

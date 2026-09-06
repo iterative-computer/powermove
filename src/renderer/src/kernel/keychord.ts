@@ -173,11 +173,21 @@ export function chordModifierCount(chord: string): number {
 
 /** True when the event target is a text-entry surface that should swallow keys. */
 export function isFieldTarget(target: unknown): boolean {
-  const el = target as (HTMLElement & { tagName?: string; isContentEditable?: boolean }) | null;
+  const el = target as (HTMLElement & {
+    tagName?: string;
+    isContentEditable?: boolean;
+    closest?: (selector: string) => Element | null;
+  }) | null;
   if (!el || typeof el !== 'object') return false;
   const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : '';
   if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
-  return el.isContentEditable === true;
+  if (el.isContentEditable === true) return true;
+  if (typeof el.closest !== 'function') return false;
+  const field = el.closest('input,textarea,[contenteditable]') as HTMLElement | null;
+  if (!field) return false;
+  const fieldTag = field.tagName?.toUpperCase();
+  if (fieldTag === 'INPUT' || fieldTag === 'TEXTAREA') return true;
+  return field.getAttribute?.('contenteditable') !== 'false';
 }
 
 /** True when the renderer owns a real, non-collapsed text selection. */

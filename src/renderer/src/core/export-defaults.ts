@@ -6,7 +6,7 @@
  * relying on one global preference shared by every project.
  */
 
-export type ExportFormat = 'mp4' | 'webm' | 'rec' | 'png' | 'still' | 'json';
+export type ExportFormat = 'prores' | 'mp4' | 'webm' | 'rec' | 'png' | 'still' | 'json';
 export type ExportQuality = 'draft' | 'high' | 'max';
 export type ExportRange = 'work' | 'all';
 
@@ -28,6 +28,7 @@ export interface ExportOption<T> {
 }
 
 export const EXPORT_FORMAT_OPTIONS: Array<ExportOption<ExportFormat>> = [
+  { v: 'prores', label: 'QuickTime · ProRes 4444' },
   { v: 'mp4', label: 'MP4 · H.264' },
   { v: 'webm', label: 'WebM · VP9' },
   { v: 'rec', label: 'WebM · realtime capture' },
@@ -53,7 +54,7 @@ export const EXPORT_RANGE_OPTIONS: Array<ExportOption<ExportRange>> = [
   { v: 'all', label: 'Full composition' }
 ];
 
-export const EXPORT_FRAME_RATES = [24, 25, 30, 50, 60];
+export const EXPORT_FRAME_RATES = [24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, 60];
 
 /** Which delivery settings a format actually reads; the rest are noise. */
 export interface ExportFieldSupport {
@@ -71,6 +72,7 @@ const NO_FIELDS: ExportFieldSupport = {
 };
 
 const FIELD_SUPPORT: Record<ExportFormat, ExportFieldSupport> = {
+  prores: { ...NO_FIELDS, scale: true, fps: true, range: true, mblur: true, audio: true, alpha: true },
   mp4: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
   webm: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
   rec: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
@@ -129,6 +131,8 @@ export function planExport(opts: ExportDefaults, comp: ExportCompositionInfo): E
     const mb = exportBitrateMbps(opts.quality) * seconds / 8;
     const codec = opts.format === 'mp4' ? 'H.264' : 'VP9/VP8';
     note = `≈ ${Math.round(mb * 10) / 10} MB · ${exportBitrateMbps(opts.quality)} Mbps ${codec}`;
+  } else if (opts.format === 'prores') {
+    note = 'ProRes 4444 · sRGB primaries/transfer · full range RGB to limited range YUV · '+(opts.alpha?'straight alpha':'opaque');
   } else if (opts.format === 'png') {
     note = `${frames} PNG file${frames === 1 ? '' : 's'}${opts.alpha ? ' · transparent' : ''}`;
   } else if (opts.format === 'still') {
@@ -165,11 +169,11 @@ function bool(value: unknown, fallback: boolean): boolean {
 export function normalizeExportDefaults(raw: unknown, fallbackFps = 30): ExportDefaults {
   const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const fps = Number(source.fps);
-  const baseFps = Number.isFinite(fallbackFps) && fallbackFps > 0 ? Math.round(fallbackFps) : 30;
+  const baseFps = Number.isFinite(fallbackFps) && fallbackFps > 0 ? fallbackFps : 30;
   return {
     format: pick(FORMATS, source.format, 'mp4'),
     scale: clampExportScale(source.scale),
-    fps: Number.isFinite(fps) && fps > 0 ? Math.min(240, Math.round(fps)) : baseFps,
+    fps: Number.isFinite(fps) && fps > 0 ? Math.min(240, fps) : baseFps,
     range: pick(RANGES, source.range, 'work'),
     quality: pick(QUALITIES, source.quality, 'high'),
     mblur: bool(source.mblur, true),

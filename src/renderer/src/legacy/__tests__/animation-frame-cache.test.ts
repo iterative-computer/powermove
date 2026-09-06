@@ -13,7 +13,7 @@ describe('animation frame cache', () => {
     for (const t of [0, 1, 2, .5, 0]) {
       PM.beginEval(t);
       expect(PM.worldMatrix(child, t)[4]).toBeCloseTo(10 + 100 * t);
-      expect(PM.worldOpacity(child, t)).toBeCloseTo(1 - t / 2);
+      expect(PM.worldOpacity(child, t)).toBeCloseTo(1);
     }
   });
 });

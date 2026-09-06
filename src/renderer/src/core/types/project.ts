@@ -82,6 +82,7 @@ export type TransformChannelName =
 export type TransformChannels = Record<TransformChannelName, Channel<number>>;
 
 export interface Mask {
+  path?: VectorPath;
   id: string;
   shape: 'rect' | 'ellipse';
   mode: 'add' | 'subtract';
@@ -113,6 +114,12 @@ export interface Transition {
   missing?: boolean;
 }
 
+/** Editable paths and text controls use the same channels as transforms. */
+export interface PathVertex { id:string; p:Record<'x'|'y'|'inX'|'inY'|'outX'|'outY',Channel<number>> }
+export interface VectorPath { id:string; name:string; parent:string|null; vertices:PathVertex[]; p:Record<string,Channel> }
+export interface TextAnimator { id:string; name:string; p:Record<string,Channel> }
+export interface TextStyleRange { id:string; start:number; end:number; p:Record<string,Channel> }
+
 export interface SolidContent {
   [key: string]: unknown;
   color: string;
@@ -122,6 +129,8 @@ export interface SolidContent {
 }
 
 export interface TextContent {
+  animators?: TextAnimator[];
+  styles?: TextStyleRange[];
   [key: string]: unknown;
   text: string;
   /** Zero width is point text. Positive values are an animatable paragraph box. */
@@ -138,6 +147,7 @@ export interface TextContent {
 }
 
 export interface ShapeContent {
+  paths?: VectorPath[];
   [key: string]: unknown;
   shape: 'rect' | 'ellipse' | 'polygon' | 'star' | 'line';
   color: string;
@@ -208,6 +218,9 @@ export interface NullContent {
 }
 
 export interface PrecompContent {
+  trim?: Channel<number>;
+  timeRemap?: Channel<boolean>;
+  sourceTime?: Channel<number>;
   [key: string]: unknown;
   comp: string | null;
   w: number;
@@ -229,6 +242,9 @@ interface LayerBase<T extends LayerType, D extends object> {
   on: boolean;
   lock: boolean;
   shy: boolean;
+  matteSource?: string | null;
+  matteMode?: Channel<'alpha'|'alpha-inverted'|'luma'|'luma-inverted'>;
+  solo?: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;
   color: string;

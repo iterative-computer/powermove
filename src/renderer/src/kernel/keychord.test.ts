@@ -88,6 +88,17 @@ describe('isFieldTarget', () => {
     expect(isFieldTarget(null)).toBe(false);
     expect(isFieldTarget(undefined)).toBe(false);
   });
+
+  it('matches nested content inside an editable surface', () => {
+    const editor = { tagName: 'DIV', isContentEditable: true };
+    let editable = true;
+    const child = { tagName: 'SPAN', closest: () => editable ? editor : null };
+
+    expect(isFieldTarget(editor)).toBe(true);
+    expect(isFieldTarget(child)).toBe(true);
+    editable = false;
+    expect(isFieldTarget(child)).toBe(false);
+  });
 });
 
 describe('chordMatches', () => {

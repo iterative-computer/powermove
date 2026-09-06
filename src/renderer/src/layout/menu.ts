@@ -1,5 +1,5 @@
 import type { PMRegistry } from '../legacy/registry';
-import { markMenuDismissal } from '../overlays/dismissal';
+import { consumeMenuTriggerPress, markMenuDismissal } from '../overlays/dismissal';
 import { positionMenuAtCursor } from '../overlays/position';
 import {
   hidePanel,
@@ -136,6 +136,7 @@ export function openPanelMenu(
   PM._menuOutside = (outsideEvent: PointerEvent) => {
     if (menu.contains(outsideEvent.target as Node)) return;
     markMenuDismissal(outsideEvent);
+    consumeMenuTriggerPress(outsideEvent, trigger);
     closeMenu(false);
   };
   const outside = PM._menuOutside;

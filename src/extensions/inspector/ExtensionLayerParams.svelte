@@ -1,9 +1,10 @@
 <script lang="ts">
   import { inspectorContext, type EditBinding } from './context';
+  import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc } = inspectorContext();
-  const { ColorField, Row, Section, ToggleField } = api.ui.controls;
+  const { api, doc, transport } = inspectorContext();
+  const { ColorField, Section, ToggleField } = api.ui.controls;
 
   let { PM, layer }: { PM: Record<string, any>; layer: Record<string, any> } = $props();
   const definition = $derived((doc.tick.structure, doc.proj, api.layers.get(String(layer.d?.definition || ''))));
@@ -52,23 +53,23 @@
     {#if property}
       {@const path = `x.${parameter.k}`}
       {#if parameter.type === 'color'}
-        <Row label={parameter.label}>
+        <AnimatedRow {PM} {layer} {path} label={parameter.label}>
           <ColorField
             {PM}
-            get={() => (doc.tick.values, doc.proj, PM.evP(layer, property, PM.time, parameter.k))}
+            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, parameter.label)}
             label={parameter.label}
           />
-        </Row>
+        </AnimatedRow>
       {:else if parameter.type === 'toggle'}
-        <Row label={parameter.label}>
+        <AnimatedRow {PM} {layer} {path} label={parameter.label}>
           <ToggleField
             {PM}
-            get={() => (doc.tick.values, doc.proj, PM.evP(layer, property, PM.time, parameter.k))}
+            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, parameter.label)}
             label={parameter.label}
           />
-        </Row>
+        </AnimatedRow>
       {:else}
         <ChannelRow
           {PM}
@@ -82,7 +83,6 @@
           max={parameter.max}
           unit={parameter.unit}
           precision={3}
-          showDiamond={false}
         />
       {/if}
     {/if}

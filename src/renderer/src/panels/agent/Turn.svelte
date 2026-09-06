@@ -25,7 +25,7 @@
   });
   const modResult = $derived.by(() => {
     void modRevision;
-    return modResultForMessage(message, PM.Kernel?.loader?.records?.() || []);
+    return modResultForMessage(message, PM.Kernel?.panels?.entries?.() || []);
   });
   function promptSignal(node: HTMLElement) { return { destroy: mountPromptGlow(node) }; }
 
@@ -53,7 +53,7 @@
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}
     <div class="agent-prompt" class:is-answering={answering} use:sendMessage={Boolean(message.entering)}>
-      {#if answering}<div class="agent-prompt-signal" data-prompt-inset aria-hidden="true" use:promptSignal out:glowFade={{duration: 220}}></div>{/if}
+      {#if answering}<div class="agent-prompt-signal" data-prompt-halo aria-hidden="true" use:promptSignal out:glowFade={{duration: 220}}></div>{/if}
       <div class="agent-bubble">{message.text}</div>
     </div>
   </div>
@@ -76,9 +76,9 @@
 {/if}
 
 <style>
-  .agent-prompt-signal{position:absolute;inset:0;overflow:hidden;border-radius:inherit;pointer-events:none;z-index:0}
-  .agent-prompt-signal :global(canvas){opacity:.5}
-  .agent-prompt-signal::before{content:"";position:absolute;inset:0;border-radius:inherit;background:linear-gradient(110deg,color-mix(in srgb,var(--accent) 10%,transparent),transparent 80%)}
+  .agent-prompt-signal{position:absolute;inset:-8px;overflow:hidden;border-radius:22px 22px 12px 22px;pointer-events:none;z-index:0}
+  .agent-prompt-signal :global(canvas){opacity:.8}
+  .agent-prompt-signal::before{content:"";position:absolute;inset:8px;border-radius:14px 14px 4px 14px;box-shadow:0 0 8px color-mix(in srgb,var(--accent) 20%,transparent)}
   .agent-prompt-signal:global([data-glow-renderer="motion-gpu"])::before{display:none}
   .agent-message-focus { color: var(--tx-3); font: var(--fs-xs)/1.4 var(--f-ui); text-wrap: pretty; }
   /* Steering reads as a continuation of the request above it, not a new turn. */

@@ -1,3 +1,8 @@
+import { temporalKeys } from './temporal-bridge';
+import { validMatteSource } from './matte';
+import { canAnimateContent, evaluatedValue, isProperty } from './content-properties';
+import { preserveParentPose } from './parenting';
+import { expressionDiagnostic } from './expression';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -24,8 +29,8 @@ let lockedLayerOpsCache: any = null;
 const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = new Set(
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
-  'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked',
+  'name', 'from', 'duration', 'visible', 'locked', 'shy', 'solo', 'blend',
+  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'scaleLinked',
 ]);
 let live: any = null;
 
@@ -105,6 +110,23 @@ const channelPath: any = (path: any) => String(path || '')
   .replace(/^transform\./, '');
 const property: any = (layer: any, path: any) => {
   const channel: any = channelPath(path);
+  if (channel.startsWith('c.')) {
+    const key = channel.slice(2);
+    if (canAnimateContent(layer, key) && !isProperty(layer.d[key]) && layer.d[key] != null) layer.d[key] = PM.P(layer.d[key]);
+  }
+  if (channel === 'l.blend' || channel === 'l.mblur' || channel === 'l.matteMode') {
+    const key = channel.slice(2);
+    if (!isProperty(layer[key])) layer[key] = PM.P(layer[key]);
+  }
+  if (channel.endsWith('.$enabled')) {
+    const effect = layer.fx?.find((item: any) => item.id === channel.slice(0, -9));
+    if (effect && !isProperty(effect.on)) effect.on = PM.P(effect.on);
+  }
+  const maskField = /^m\.([^.]+)\.(shape|mode|on)$/.exec(channel);
+  if (maskField) {
+    const mask = layer.masks?.find((item: any) => item.id === maskField[1]);
+    if (mask && !isProperty(mask[maskField[2]!])) mask[maskField[2]!] = PM.P(mask[maskField[2]!]);
+  }
   const transitionMatch: any = /^(transitionIn|transitionOut)\.p\.([a-zA-Z][a-zA-Z0-9]*)$/.exec(channel);
   if (transitionMatch) {
     const transition: any = layer[transitionMatch[1]];
@@ -202,12 +224,15 @@ function replaceKeyframes(command: any) {
     const value: any = typeof prop.v === 'number' ? finite(key.value, `keyframe ${index + 1} value`) : key.value;
     return { time, value, ease: key.ease || 'linear', hold: !!key.hold };
   });
-  if (command.replace !== false) prop.kf = [];
+  if (command.replace !== false) {
+    if (prop.kf.length && !next.length) prop.v = PM.evP(layer, prop, PM.time, channel);
+    prop.kf = [];
+  }
   for (const key of next) {
     const made: any = PM.setKeyOn(prop, key.time, key.value, key.ease, PM.proj.fps);
     made.hold = key.hold;
   }
-  if (command.expression !== undefined) prop.expr = command.expression || null;
+  if (command.expression !== undefined) {const diagnostic=command.expression?expressionDiagnostic(command.expression):null;if(diagnostic)throw new Error(diagnostic);prop.expr=command.expression||null;}
   PM.touch();
   return { id: layer.id, channel, keyframes: prop.kf.length };
 }
@@ -230,6 +255,7 @@ function setEasing(command: any) {
   const found: any = [];
   for (const layer of projectLayers()) {
     for (const item of PM.allProps(layer)) {
+      if(item.prop.kf.some((key:any)=>ids.has(key.i))) temporalKeys(item.prop.kf);
       for (const key of item.prop.kf) if (ids.has(key.i)) found.push(key);
     }
   }
@@ -248,6 +274,8 @@ function setExpression(command: any) {
   if (!layer) throw new Error('Layer not found');
   const { channel, prop }: any = property(layer, command.path || command.channel);
   if (!prop) throw new Error(`Property “${channel}” was not found on “${layer.name}”`);
+  const diagnostic = command.expression ? expressionDiagnostic(command.expression) : null;
+  if (diagnostic) throw new Error(diagnostic);
   prop.expr = command.expression || null;
   PM.touch();
   return { id: layer.id, channel, expression: prop.expr };
@@ -257,6 +285,13 @@ function setContent(command: any) {
   const layer: any = findLayer(command.target || command.layer || command.targetId);
   if (!layer) throw new Error('Layer not found');
   const patch: any = safePatch(command.patch, 'content patch');
+  for (const key of Object.keys(patch)) {
+    if (isProperty(layer.d?.[key]) && !isProperty(patch[key]) && canAnimateContent(layer, key)) {
+      setProperty({ target: layer.id, path: `c.${key}`, value: patch[key], preserveHandEdits: false });
+      delete patch[key];
+    }
+  }
+  if (!Object.keys(patch).length) return { id: layer.id };
   if (layer.type === 'audio') setAudioContent(layer, patch);
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else Object.assign(layer.d, patch);
@@ -310,6 +345,7 @@ function setAudioContent(layer: any, patch: any) {
   const next: any = { ...current, ...patch };
   if (next.asset != null && (typeof next.asset !== 'string' || !next.asset)) throw new Error('Audio source must be a media asset ID or null');
   const number: any = (key: any, fallback: any, min: any, max: any = Infinity) => {
+    if (isProperty(next[key])) return next[key];
     const value: any = next[key] == null ? fallback : finite(next[key], key);
     return PM.clamp(value, min, max);
   };
@@ -344,15 +380,25 @@ function setLayer(command: any) {
   if (patch.visible != null) layer.on = !!patch.visible;
   if (patch.locked != null) layer.lock = !!patch.locked;
   if (patch.shy != null) layer.shy = !!patch.shy;
+  if (patch.solo != null) layer.solo = !!patch.solo;
   if (patch.blend != null) {
     if (!PM.BLENDS.includes(patch.blend)) throw new Error(`Unknown blend mode: ${patch.blend}`);
-    layer.blend = patch.blend;
+    if (isProperty(layer.blend)) setProperty({ target: layer.id, path: 'l.blend', value: patch.blend, preserveHandEdits: false });
+    else layer.blend = patch.blend;
   }
-  if (patch.motionBlur != null) layer.mblur = !!patch.motionBlur;
+  if (patch.motionBlur != null) {
+    if (isProperty(layer.mblur)) setProperty({ target: layer.id, path: 'l.mblur', value: !!patch.motionBlur, preserveHandEdits: false });
+    else layer.mblur = !!patch.motionBlur;
+  }
+  if (patch.matteSource !== undefined) {
+    if (!validMatteSource(PM.proj.layers,layer,patch.matteSource))throw new Error('Invalid matte source or matte cycle');
+    layer.matteSource=patch.matteSource;layer.matteMode ||= PM.P('alpha');
+  }
   if (patch.parent !== undefined) {
     const parent: any = patch.parent == null ? null : findLayer(patch.parent);
     if (patch.parent != null && (!parent || parent.id === layer.id)) throw new Error('Invalid parent layer');
     if (parent && PM.wouldCycle(layer, parent.id)) throw new Error('Parenting would create a cycle');
+    if (layer.parent !== (parent?.id ?? null)) preserveParentPose(PM, layer, parent, PM.time);
     layer.parent = parent ? parent.id : null;
   }
   if (patch.color != null) layer.color = String(patch.color);
@@ -499,6 +545,11 @@ function addEffect(command: any) {
   if (!effect) throw new Error(`Unknown effect: ${command.effect}`);
   effect.open = command.open !== false;
   effect.on = command.enabled !== false;
+  if (isProperty(command.enabledAnimation)) {
+    const saved = command.enabledAnimation;
+    effect.on = { v: saved.v !== false, expr: typeof saved.expr === 'string' ? saved.expr : null,
+      kf: PM.normalizeKeyframes(saved.kf, true, PM.proj.fps, -layer.from).map((key: any) => ({ ...key, i: PM.uid('k') })) };
+  }
   const values: any = safePatch(command.parameters || {}, 'effect parameters');
   for (const [key, value] of Object.entries(values)) {
     if (!effect.p[key]) continue;
@@ -542,7 +593,10 @@ function setEffect(command: any) {
   const patch: any = safePatch(command.patch, 'effect patch');
   const allowed: any = new Set(['enabled', 'open']);
   for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new Error(`Effect field “${key}” is not editable`);
-  if (patch.enabled != null) effect.on = !!patch.enabled;
+  if (patch.enabled != null) {
+    if (isProperty(effect.on)) setProperty({ target: layer.id, path: `${effect.id}.$enabled`, value: !!patch.enabled, preserveHandEdits: false });
+    else effect.on = !!patch.enabled;
+  }
   if (patch.open != null) effect.open = !!patch.open;
   PM.touch();
   return { id: layer.id, effectId: effect.id };
@@ -824,15 +878,15 @@ function sourceCatalog() {
       { path: 'layer.name', label: 'Layer name', control: 'text', value: layer.name },
       { path: 'layer.from', label: 'Start time', control: 'slider', value: layer.from, min: 0, max: p.dur, step: 1 / Math.max(1, p.fps), unit: 's' },
       { path: 'layer.duration', label: 'Duration', control: 'slider', value: layer.dur, min: 1 / Math.max(1, p.fps), max: Math.max(p.dur, layer.dur), step: 1 / Math.max(1, p.fps), unit: 's' },
-      { path: 'layer.visible', label: 'Visible', control: 'toggle', value: layer.on },
+      { path: 'layer.visible', label: 'Visible', control: 'toggle', value: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') },
       { path: 'layer.locked', label: 'Locked', control: 'toggle', value: layer.lock },
       { path: 'layer.shy', label: 'Shy', control: 'toggle', value: layer.shy },
       { path: 'layer.collapsed', label: 'Collapsed', control: 'toggle', value: layer.collapsed },
       { path: 'layer.color', label: 'Label color', control: 'color', value: layer.color },
     ];
     if (layer.type !== 'audio') fields.splice(fields.length - 1, 0,
-      { path: 'layer.motionBlur', label: 'Motion blur', control: 'toggle', value: layer.mblur },
-      { path: 'layer.blend', label: 'Blend mode', control: 'select', value: layer.blend, options: [...PM.BLENDS] },
+      { path: 'layer.motionBlur', label: 'Motion blur', control: 'toggle', value: evaluatedValue(PM, layer, layer.mblur, PM.time, 'l.mblur') },
+      { path: 'layer.blend', label: 'Blend mode', control: 'select', value: evaluatedValue(PM, layer, layer.blend, PM.time, 'l.blend'), options: [...PM.BLENDS] },
       { path: 'layer.parent', label: 'Parent', control: 'select', value: layer.parent, optionsRef: 'parentLayers' });
     const content: any = Object.entries(layer.d || {}).map(([key, value]: any) => {
       if (layer.type === 'extension' && (key === 'definition' || key === 'version')) return null;

@@ -22,6 +22,132 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('guards and rolls back video tool edits through the live run transaction', async () => {
+    const PM = harnessEditor();
+    const video = PM.mkLayer('video', { from: 0, dur: 5 });
+    PM.proj.layers.push(video);
+    const before = JSON.stringify(PM.proj.layers);
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({ runId: 'video-rollback', callId: tool, tool, arguments: args, baseRevision: 0 });
+    const split = await call('edit_video', { operation: 'split', layerId: video.id, at: 2 });
+    expect(JSON.parse(split.content[0].text).clip.tailId).toBeTruthy();
+    await call('rollback_changes');
+    expect(JSON.stringify(PM.proj.layers)).toBe(before);
+    await call('edit_video', { operation: 'move', layerId: video.id, from: 1 });
+    PM.Edit.apply({ type: 'set_layer', target: video.id, patch: { name: 'User edit' } }, { origin: 'inspector' });
+    await expect(call('edit_video', { operation: 'remove', layerId: video.id })).rejects.toThrow('project changed');
+    const finish = await call('__finish_run', { commit: false });
+    expect(finish.ok).toBe(false);
+    expect(PM.L(video.id).name).toBe('User edit');
+  });
+
+  it('lets a native provider inspect and transactionally edit the live project through the preload bridge', async () => {
+    let handleRequest: ((request: any) => void) | null = null;
+    const responses: any[] = [];
+    vi.stubGlobal('window', {
+      requestAnimationFrame: (resolve: FrameRequestCallback) => resolve(0),
+      atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
+      powermove: {
+        agentTools: {
+          onRequest(callback: (request: any) => void) { handleRequest = callback; return () => {}; },
+          respond(response: any) { responses.push(response); }
+        }
+      }
+    });
+    const PM = makePM(
+      'core/easing', 'core/model', 'core/selection', 'core/anim',
+      'core/history', 'core/editing', 'assistant/harness',
+    );
+    PM.proj = PM.mkProject({ name: 'Native tools', w: 1920, h: 1080, fps: 30, dur: 6 });
+    PM.time = 0;
+    PM.syncShaderUniforms = () => {};
+    PM.mkEffect = () => null;
+    PM.Export = { snapshot: (time: number) => `data:image/png;base64,${Buffer.from(`frame-${time}`).toString('base64')}` };
+    expect(handleRequest).toBeTypeOf('function');
+
+    handleRequest!({
+      runId: 'native-run-1234', callId: 'call-state', tool: 'get_project_state',
+      arguments: {}, baseRevision: 0
+    });
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    expect(JSON.parse(responses[0].content[0].text).composition.revision).toBe(0);
+
+    handleRequest!({
+      runId: 'native-run-1234', callId: 'call-apply', tool: 'apply_commands',
+      arguments: {
+        label: 'Add native title',
+        commands: [JSON.stringify({
+          type: 'add_layer', id: 'native-title', layerType: 'text', name: 'Native title',
+          content: { text: 'Live' }, properties: { 'position.x': 960, 'position.y': 540 }
+        })]
+      },
+      baseRevision: 0
+    });
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+    expect(responses[1]).toMatchObject({ ok: true, changed: true, revision: 1 });
+    expect(PM.L('native-title')).toBeTruthy();
+
+    handleRequest!({
+      runId: 'native-run-1234', callId: 'call-render', tool: 'render_frames',
+      arguments: { times: [0, 3], width: 640 }, baseRevision: 0
+    });
+    await vi.waitFor(() => expect(responses).toHaveLength(3));
+    expect(responses[2].content.filter((item: any) => item.type === 'image')).toHaveLength(2);
+
+    handleRequest!({
+      runId: 'native-run-1234', callId: 'call-finish', tool: '__finish_run',
+      arguments: { commit: true }, baseRevision: 0
+    });
+    await vi.waitFor(() => expect(responses).toHaveLength(4));
+    expect(responses[3]).toMatchObject({ ok: true, changed: true });
+    expect(responses[3].historyId).toBeTruthy();
+    expect(PM.hist.list()).toHaveLength(1);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.L('native-title')).toBeNull();
+  });
+
+  it('rolls native live edits back when the provider run fails', async () => {
+    let handleRequest: ((request: any) => void) | null = null;
+    const responses: any[] = [];
+    vi.stubGlobal('window', {
+      requestAnimationFrame: (resolve: FrameRequestCallback) => resolve(0),
+      atob: (value: string) => Buffer.from(value, 'base64').toString('binary'),
+      powermove: {
+        agentTools: {
+          onRequest(callback: (request: any) => void) { handleRequest = callback; return () => {}; },
+          respond(response: any) { responses.push(response); }
+        }
+      }
+    });
+    const PM = makePM(
+      'core/easing', 'core/model', 'core/selection', 'core/anim',
+      'core/history', 'core/editing', 'assistant/harness',
+    );
+    PM.proj = PM.mkProject({ name: 'Native rollback', w: 1920, h: 1080, fps: 30, dur: 6 });
+    PM.syncShaderUniforms = () => {};
+    PM.mkEffect = () => null;
+
+    handleRequest!({
+      runId: 'native-run-failed', callId: 'call-apply', tool: 'apply_commands',
+      arguments: {
+        commands: [JSON.stringify({
+          type: 'add_layer', id: 'temporary-title', layerType: 'text', name: 'Temporary title',
+          content: { text: 'Temporary' }
+        })]
+      },
+      baseRevision: 0
+    });
+    await vi.waitFor(() => expect(PM.L('temporary-title')).toBeTruthy());
+
+    handleRequest!({
+      runId: 'native-run-failed', callId: 'call-finish', tool: '__finish_run',
+      arguments: { commit: false }, baseRevision: 0
+    });
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+
+    expect(responses[1]).toMatchObject({ ok: true, changed: false });
+    expect(PM.L('temporary-title')).toBeNull();
+  });
+
   it('observes source and real frames, applies one revision, and rolls the whole run back', async () => {
     const PM = harnessEditor();
     const bridgeCalls: any[] = [];

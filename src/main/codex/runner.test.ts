@@ -252,7 +252,7 @@ describe('CodexRunner lifecycle', () => {
     expect(spawnProcess).not.toHaveBeenCalled();
   });
 
-  it('kills the detached process group and clears session plus partial artifacts', async () => {
+  it('stops the process but resumes the same provider session and partial workspace', async () => {
     const userData = await temporaryDirectory('runner-mid-cancel');
     const pidFile = path.join(userData, 'fake.pid');
     const root = agentWorkspaceRoot(userData, 'runner-project');
@@ -266,17 +266,32 @@ describe('CodexRunner lifecycle', () => {
       FAKE_CODEX_PID_FILE: pidFile
     }));
     await waitForFile(pidFile);
+    const artifactRuns = await readdir(path.join(root, 'artifacts'));
+    const progressPath = path.join(root, 'artifacts', artifactRuns[0]!, 'progress.txt');
+    await writeFile(progressPath, 'completed work');
     const pid = Number((await readFile(pidFile, 'utf8')).trim());
     await runner.cancel('mid-cancel-1234');
     const result = await pending;
 
     expect(result).toEqual({ ok: false, error: 'The Codex run was cancelled.', cancelled: true });
-    await expect(readFile(sessionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(readdir(path.join(root, 'artifacts'))).resolves.toEqual([]);
+    expect((await readFile(sessionPath, 'utf8')).trim()).toBe('thread-recorded-1');
+    expect(await readFile(progressPath, 'utf8')).toBe('completed work');
+    const checkpoint = JSON.parse(await readFile(`${sessionPath}.checkpoint.json`, 'utf8'));
     expect(() => process.kill(pid, 0)).toThrow();
+    const options = fakeOptions(userData, {});
+    const spawnProcess = options.spawnProcess!;
+    options.spawnProcess = (command, args, settings) => {
+      expect(args).toContain('resume');
+      expect(args).toContain('thread-recorded-1');
+      expect(args).toContain(checkpoint.stagingDirectory);
+      return spawnProcess(command, args, settings);
+    };
+    await runner.run(request({ id: 'resumed-request' }), options);
+    expect(await readFile(progressPath, 'utf8')).toBe('completed work');
+    expect(await readdir(path.join(root, 'artifacts'))).toEqual(artifactRuns);
   }, 15_000);
 
-  it('settles a timeout and clears the collapsed authority session', async () => {
+  it('settles an ephemeral timeout without erasing an autonomous session', async () => {
     const userData = await temporaryDirectory('runner-timeout');
     const root = agentWorkspaceRoot(userData, 'runner-project');
     const sessionPath = sessionPathFor(root, 'project');
@@ -294,7 +309,7 @@ describe('CodexRunner lifecycle', () => {
     });
 
     expect(result).toEqual({ ok: false, error: 'The Codex run was cancelled.', cancelled: true });
-    await expect(readFile(sessionPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(sessionPath, 'utf8')).toBe('editor-session');
   });
 
   it('clears an unknown resumed session and retries exactly once fresh', async () => {

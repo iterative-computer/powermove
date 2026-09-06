@@ -1,4 +1,5 @@
 import { getContext, setContext } from 'svelte';
+import { inspectorPM } from './multi-edit';
 import type { ControlEditBinding, PowermoveAPI } from 'powermove';
 
 const INSPECTOR_CONTEXT = Symbol('powermove.inspector');
@@ -44,7 +45,7 @@ export function provideInspectorContext(api: PowermoveAPI): InspectorContext {
   };
   const context = {
     api,
-    PM: api.host.pm as Record<string, any>,
+    PM: inspectorPM(api.host.pm) as Record<string, any>,
     doc: state.doc,
     sel: state.sel,
     transport: state.transport

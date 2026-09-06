@@ -299,7 +299,7 @@ describe('InspectorPanel', () => {
     expect(target.querySelector('[data-inspector-layer="A"]')).not.toBeNull();
     expect(target.querySelector('[data-inspector-layer="B"]')).toBeNull();
     expect(target.querySelector('[data-inspector-header]')?.textContent).toContain('Layer A');
-    expect(target.querySelector('[role="status"]')?.textContent).toContain('2 layers selected · editing Layer A');
+    expect(target.querySelector('[role="status"]')?.textContent).toContain('2 layers selected · shared edits');
   });
 
   it('does not repeat the Properties heading above composition controls', () => {
@@ -400,13 +400,15 @@ describe('InspectorPanel', () => {
   it.each([true, false])('animates both axes and handles partial keys when scaleLinked=%s', (linked) => {
     const candidate = layer('A');
     candidate.scaleLinked = linked;
-    const { PM, menu } = setup([candidate]);
+    const { PM, menu,apply } = setup([candidate]);
+    apply.mockImplementation((commands:any)=>{for(const c of [].concat(commands) as any[]){const p=candidate.p[c.path];if(!p)continue;if(c.type==='replace_keyframes')p.kf=[];else if(c.type==='set_property'&&c.mode==='keyframe')p.kf.push({t:c.time,v:c.value});}});
     const row = channelRow('A', 'scale.x');
-    /* One diamond per axis: static → click starts animating both axes. */
-    const diamond = row.querySelector<HTMLButtonElement>('.kf[data-key="scale.x"]')!;
-    expect(diamond.classList.contains('track')).toBe(false);
-    diamond.click();
-    expect(PM.hist.do).toHaveBeenLastCalledWith('Animate Scale', expect.any(Function));
+    const stopwatch = row.querySelector<HTMLButtonElement>('.property-stopwatch')!;
+    expect(stopwatch.getAttribute('aria-pressed')).toBe('false');
+    stopwatch.click();
+    doc.bump('values'); flushSync();
+    let diamond = row.querySelector<HTMLButtonElement>('.kf[data-key="scale.x"]')!;
+    expect(apply).toHaveBeenLastCalledWith(expect.any(Array),{label:'Animate Scale',origin:'inspector'});
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
     // An existing project may have a key on just one of the linked axes.
@@ -430,12 +432,23 @@ describe('InspectorPanel', () => {
     candidate.p['scale.y']!.kf = [{ t: 0, v: 100 }];
     doc.bump('values');
     flushSync();
+    diamond = row.querySelector<HTMLButtonElement>('.kf[data-key="scale.x"]')!;
     expect(diamond.getAttribute('aria-pressed')).toBe('true');
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
     const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: (e?: any) => void }>;
     items.find((item) => item.label === 'Remove animation')!.run!(new MouseEvent('click'));
     expect(candidate.p['scale.x']!.kf).toHaveLength(0);
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
+  });
+
+  it('selects a property without opening its timeline rows', () => {
+    const candidate = layer('A');
+    const { PM } = setup([candidate]);
+    for (const channel of ['scale.x', 'opacity']) {
+      channelRow('A', channel).dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      expect(PM.sel.chan).toBe(channel);
+      expect(PM.TL.reveal).not.toHaveBeenCalled();
+    }
   });
 
   it('applies the unified Scale context menu to both axes', () => {
@@ -485,9 +498,8 @@ describe('InspectorPanel', () => {
     candidate.p.opacity!.kf = [];
     doc.bump('values');
     flushSync();
-    expect(diamond.classList.contains('track')).toBe(false);
-    expect(diamond.classList.contains('on')).toBe(false);
-    expect(diamond.getAttribute('aria-pressed')).toBe('false');
+    expect(row.querySelector('button.kf')).toBeNull();
+    expect(row.querySelector('.property-stopwatch')?.getAttribute('aria-pressed')).toBe('false');
   });
 
   it('sends the exact legacy add-effect and remove-effect commands', () => {
@@ -638,7 +650,7 @@ describe('InspectorPanel', () => {
     labelledSelect('Blend mode').value = '1';
     labelledSelect('Blend mode').dispatchEvent(new Event('change', { bubbles: true }));
     expect(apply).toHaveBeenCalledWith(
-      { type: 'set_layer', target: 'A', patch: { blend: 'screen' } },
+      expect.objectContaining({ type: 'set_property', target: 'A', path: 'l.blend', value: 'screen', mode: 'auto' }),
       { label: 'Blend', origin: 'inspector' }
     );
 
@@ -658,7 +670,9 @@ describe('InspectorPanel', () => {
       { id: 'fx-blur', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } },
       { id: 'fx-duotone', type: 'duotone', on: true, p: { shadow: { v: '#1B2A4A', kf: [], expr: null } } }
     );
-    setup([candidate], ['A'], { fxOpen: true });
+    const { apply, PM } = setup([candidate], ['A'], { fxOpen: true });
+    PM.findProp = (_layer: any, path: string) => { const [id, key] = path.split('.'); return candidate.fx.find((fx: any) => fx.id === id)?.p[key!]; };
+    doc.bump('values');
     transport.time = 2;
     flushSync();
 
@@ -669,8 +683,8 @@ describe('InspectorPanel', () => {
 
     amount!.click();
     shadow!.click();
-    expect(candidate.fx[0].p.amount.kf).toEqual([{ t: 2, v: 5 }]);
-    expect(candidate.fx[1].p.shadow.kf).toEqual([{ t: 2, v: '#1B2A4A' }]);
+    expect(apply).toHaveBeenCalledWith([expect.objectContaining({type:'set_property',path:'fx-blur.amount',value:5,mode:'keyframe',time:2})],expect.objectContaining({origin:'inspector'}));
+    expect(apply).toHaveBeenCalledWith([expect.objectContaining({ type: 'set_property', path: 'fx-duotone.shadow', value: '#1B2A4A', mode: 'keyframe', time: 2 })], expect.objectContaining({ origin: 'inspector' }));
   });
 
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {

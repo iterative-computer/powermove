@@ -1,5 +1,7 @@
 import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
+import { modelEffort } from '../../shared/agent-models';
+import { POWERMOVE_MCP_TOOL_NAMES, type NativeMcpServerConfig } from '../agent-tools/spec';
 
 const PROJECT_TOOLS = 'Read,Glob,Grep,Write,Edit,Bash,WebSearch,WebFetch';
 const EDITOR_TOOLS = 'Read,Glob,Grep';
@@ -23,6 +25,7 @@ interface ClaudeArgvOptions {
   access: CodexAccess;
   extensionsDir?: string;
   instructions?: string;
+  nativeTools?: NativeMcpServerConfig;
 }
 
 function promptWithImages(prompt: string, imagePaths: readonly string[]): string {
@@ -33,6 +36,12 @@ function promptWithImages(prompt: string, imagePaths: readonly string[]): string
 /** CLI arguments intentionally use only documented Claude Code flags. The
  * bundled executable remains Anthropic's unmodified native distribution. */
 export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
+  const mcpConfig = options.nativeTools
+    ? JSON.stringify({ mcpServers: { powermove: { type: 'stdio', ...options.nativeTools } } })
+    : '{"mcpServers":{}}';
+  const projectTools = options.nativeTools
+    ? `${PROJECT_TOOLS},${POWERMOVE_MCP_TOOL_NAMES.join(',')}`
+    : PROJECT_TOOLS;
   const argv = [
     '--print',
     '--output-format', 'stream-json',
@@ -40,14 +49,15 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
     '--safe-mode',
     '--setting-sources', '',
     '--strict-mcp-config',
-    '--mcp-config', '{"mcpServers":{}}',
+    '--mcp-config', mcpConfig,
     '--no-chrome',
     '--disable-slash-commands',
     '--json-schema', JSON.stringify(options.schema)
   ];
 
   if (options.model) argv.push('--model', options.model);
-  if (options.reasoningEffort) argv.push('--effort', options.reasoningEffort);
+  const effort = modelEffort('claude', options.model, options.reasoningEffort);
+  if (effort) argv.push('--effort', effort);
   if (options.access === 'editor') argv.push('--no-session-persistence');
   if (options.sessionId) argv.push('--resume', options.sessionId);
 
@@ -57,8 +67,8 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
     argv.push(
       '--permission-mode', options.access === 'editor' ? 'dontAsk' : 'acceptEdits',
       '--settings', STRICT_SANDBOX,
-      '--tools', options.access === 'editor' ? EDITOR_TOOLS : PROJECT_TOOLS,
-      '--allowedTools', options.access === 'editor' ? EDITOR_TOOLS : PROJECT_TOOLS
+      '--tools', options.access === 'editor' ? EDITOR_TOOLS : projectTools,
+      '--allowedTools', options.access === 'editor' ? EDITOR_TOOLS : projectTools
     );
   }
 

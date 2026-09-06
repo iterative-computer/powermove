@@ -118,6 +118,19 @@ describe('legacy shortcut install', () => {
     expect(command.content).toEqual({ asset: 'asset-1', trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 });
   });
 
+  it('attaches a proven video soundtrack to the imported video layer', () => {
+    const PM = shortcutsRegistry();
+    PM.proj.assets['video-1'] = {
+      id: 'video-1', name: 'interview.mp4', kind: 'video', dur: 12,
+      w: 1920, h: 1080, hasAudio: true,
+    };
+
+    const command = PM.commandForAsset('video-1');
+
+    expect(command.layerType).toBe('video');
+    expect(command.content).toMatchObject({ asset: 'video-1', embeddedAudio: true, trim: 0, speed: 1 });
+  });
+
   it('lets the active effect clipboard handle global paste before layers', () => {
     const PM = shortcutsRegistry();
     const pasteCopiedEffects = vi.fn(() => true);
@@ -206,6 +219,31 @@ describe('pro editor shortcut behavior', () => {
     const tail = PM.firstSel();
     expect(audio.d).toMatchObject({ trim: 2, fadeIn: 1, fadeOut: 0 });
     expect(tail.d).toMatchObject({ trim: 6, fadeIn: 0, fadeOut: 2 });
+  });
+
+  it('separates a video soundtrack into an adjacent editable audio layer with one-step Undo', () => {
+    const PM = editorRuntime();
+    PM.autosave = vi.fn();
+    const video = layer(PM, 'video', {
+      type: 'video', name: 'Interview', from: 1, dur: 8,
+      d: { asset: 'video-asset', trim: 2, speed: 1, embeddedAudio: true },
+    });
+    PM.selectLayers(video.id);
+
+    PM.cmd('separateAudio', video.id);
+
+    const audio = PM.firstSel();
+    expect(ids(PM)).toEqual([audio.id, video.id]);
+    expect(video.d.embeddedAudio).toBe(false);
+    expect(audio).toMatchObject({
+      name: 'Interview Audio', type: 'audio', from: 1, dur: 8,
+      d: { asset: 'video-asset', trim: 2, gain: 1, fadeIn: 0, fadeOut: 0 },
+    });
+    expect(PM.hist.list()).toEqual(['Separate audio']);
+    expect(PM.autosave).toHaveBeenCalledOnce();
+    expect(PM.hist.undo()).toBe(true);
+    expect(ids(PM)).toEqual([video.id]);
+    expect(PM.L(video.id).d.embeddedAudio).toBe(true);
   });
 
   it('splits every visible unlocked root layer with no selection and treats boundaries as no-ops', () => {

@@ -34,10 +34,11 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.251",
+    "@anthropic-ai/claude-code": "2.1.261",
     "@motion-core/motion-gpu": "0.15.1",
-    "@openai/codex": "0.149.0",
+    "@openai/codex": "0.153.4",
     "@powermove/macos-haptics": "file:native/macos-haptics",
-    "esbuild": "0.25.12"
+    "esbuild": "0.25.12",
+    "ffmpeg-static": "5.3.0"
   }
 }

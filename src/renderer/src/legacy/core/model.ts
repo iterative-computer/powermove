@@ -109,7 +109,7 @@ const DEFAULTS: any = {
   shape:  (L: any, c: any) => { L.d = { shape: 'rect', color: '#E8E2CF', w: 480, h: 480, radius: 24, stroke: 0, strokeColor: '#ffffff', points: 5 }; },
   text:   (L: any, c: any) => { L.d = { text: 'Powermove', boxWidth: P(0), boxHeight: P(0), font: 'SF Pro Display', weight: 600, size: 128, tracking: -2, leading: 1.1, color: '#F2F2F2', align: 'center', italic: false }; },
   image:  (L: any) => { L.d = { asset: null, fit: 'cover', w: 1920, h: 1080 }; },
-  video:  (L: any) => { L.d = { asset: null, fit: 'cover', trim: 0, speed: 1, w: 1920, h: 1080 }; },
+  video:  (L: any) => { L.d = { asset: null, fit: 'cover', trim: 0, speed: 1, embeddedAudio: false, w: 1920, h: 1080 }; },
   audio:  (L: any) => { L.d = { asset: null, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 }; L.color = '#4C8DFF'; },
   adjustment: (L: any) => {
     L.d = {};
@@ -232,25 +232,52 @@ PM.precompose = (ids: any, name: any) => {
     fps: PM.proj.fps, dur: PM.proj.dur, bg: '#000000',
   });
   sub.id = compId;
-  sub.layers = sel;
-  /* parenting across the comp boundary would be ambiguous — break it explicitly */
-  sub.layers.forEach((l: any) => { if (l.parent && !ids.includes(l.parent)) l.parent = null; });
+  const originalParents = new Map(sel.map((l: any) => [l.id,l.parent]));
+  sub.layers = [...sel];
+  const external = new Map<string, any>();
+  const rigCopy = (source: any) => {
+    const rig = PM.cloneLayer(source);
+    rig.type = 'null'; rig.name = source.name + ' · Rig'; rig.d = {};
+    rig.fx = []; rig.masks = []; rig.transitionIn = rig.transitionOut = null;
+    return rig;
+  };
+  const copyAncestors = (id: string | null): string | null => {
+    if (!id || ids.includes(id)) return id;
+    if (external.has(id)) return external.get(id).id;
+    const source = PM.proj.layers.find((l: any) => l.id === id);
+    if (!source) return null;
+    const rig = rigCopy(source); external.set(id,rig);
+    rig.parent = copyAncestors(source.parent); return rig.id;
+  };
+  sub.layers.forEach((l: any) => { l.parent = copyAncestors(l.parent); });
+  const outward = new Map<string, any>();
+  const preserveOutside = (id: string | null): string | null => {
+    if (!id || !ids.includes(id)) return id;
+    if (outward.has(id)) return outward.get(id).id;
+    const source = sel.find((l: any) => l.id === id);
+    const rig = rigCopy(source); outward.set(id,rig);
+    rig.parent = preserveOutside(originalParents.get(source.id) as string | null); return rig.id;
+  };
+  PM.proj.layers.filter((l: any) => !ids.includes(l.id)).forEach((l: any) => { l.parent = preserveOutside(l.parent); });
+  const preserveClock = external.size > 0 || outward.size > 0;
+  sub.layers.push(...external.values());
   const start = Math.min(...sel.map((l: any) => l.from));
   const end = Math.max(...sel.map((l: any) => l.from + l.dur));
   const span = Math.max(.04, end - start);
   /* Nested rendering receives layer-local time (T - precomp.from), so children
      must be rebased to the nested composition's zero. Keeping root-relative
      starts here made every non-zero precompose silently disappear. */
-  sub.layers.forEach((l: any) => { l.from = Math.max(0, l.from - start); });
-  sub.dur = span;
-  sub.work = [0, span];
+  if (!preserveClock) sub.layers.forEach((l: any) => { l.from = Math.max(0, l.from - start); });
+  sub.dur = preserveClock ? PM.proj.dur : span;
+  sub.work = preserveClock ? [start,end] : [0,span];
   const idx = Math.min(...sel.map((l: any) => PM.proj.layers.indexOf(l)));
   const L = PM.mkLayer('precomp', { name: name || ('Precomp ' + (Object.keys(PM.proj.comps).length + 1)), d: { comp: compId, w: PM.proj.w, h: PM.proj.h } }, PM.proj);
   L.from = Math.max(0, Math.min(start, end - .04));
   L.dur = span;
+  if (preserveClock) L.d.trim = P(start);
   PM.proj.comps[compId] = sub;
   PM.proj.layers = PM.proj.layers.filter((l: any) => !ids.includes(l.id));
-  PM.proj.layers.forEach((l: any) => { if (l.parent && ids.includes(l.parent)) l.parent = null; });
+  PM.proj.layers.push(...outward.values());
   PM.sel.layers = [];
   PM.proj.layers.splice(Math.min(idx, PM.proj.layers.length), 0, L);
   PM.selectLayers(L.id);
@@ -273,8 +300,11 @@ PM.cloneLayer = (L: any) => {
   c.name = L.name.replace(/ (\d+)$/, '') + ' ' + (PM.proj.layers.filter((x: any) => x.name.startsWith(L.name.replace(/ \d+$/, ''))).length + 1);
   const renew = (prop: any) => (prop?.kf || []).forEach((kf: any) => { kf.i = uid('k'); });
   Object.values(c.p || {}).forEach(renew);
-  (c.fx || []).forEach((fx: any) => Object.values(fx.p || {}).forEach(renew));
+  (c.fx || []).forEach((fx: any) => { renew(fx.on); Object.values(fx.p || {}).forEach(renew); });
   (c.masks || []).forEach((mask: any) => Object.values(mask.p || {}).forEach(renew));
+  Object.values(c.d || {}).forEach(renew);
+  renew(c.blend); renew(c.mblur); renew(c.on);
+  (c.masks || []).forEach((mask: any) => { renew(mask.shape); renew(mask.mode); renew(mask.on); });
   Object.values(c.d?.uniforms || {}).forEach(renew);
   Object.values(c.d?.params || {}).forEach(renew);
   for (const field of ['transitionIn', 'transitionOut']) Object.values(c[field]?.p || {}).forEach(renew);

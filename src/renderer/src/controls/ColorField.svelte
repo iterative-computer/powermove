@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sel } from '../state/selection.svelte';
   import { tick } from 'svelte';
   import { doc } from '../state/document.svelte';
   import { transport } from '../state/transport.svelte';
@@ -22,6 +23,7 @@
   const labelledBy = rowLabelId();
   const raw = $derived((doc.tick.values, doc.proj, transport.time, get()));
   const value = $derived(typeof raw === 'string' && /^#[0-9a-f]{3,8}$/i.test(raw) ? raw : '#808080');
+  const mixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,PM.inspectorMixed?.(edit,value)??false));
   const gesture = $derived(new EditGesture(PM, edit));
   const presets = ['#09090A', '#FFFFFF', '#FF6B1A', '#FFB000', '#34C759', '#0A84FF', '#6E5AE6', '#FF375F'];
   const hsvChannels = [['h', 'H', '°', 359], ['s', 'S', '%', 100], ['v', 'B', '%', 100]] as const;
@@ -200,7 +202,7 @@
   onpointerdown={(event) => event.stopPropagation()}
   onclick={show}
 >
-  <span style="font-family:var(--f-mono);font-size:var(--fs-md);color:var(--tx)">{value.toUpperCase()}</span>
+  <span style="font-family:var(--f-mono);font-size:var(--fs-md);color:var(--tx)">{mixed?'Mixed':value.toUpperCase()}</span>
   <span class="sw" aria-hidden="true" style={`--sw-color:${value}`}></span>
 </button>
 

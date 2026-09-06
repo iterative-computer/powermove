@@ -1,11 +1,13 @@
 <script lang="ts">
+  import AnimatedRow from './AnimatedRow.svelte';
+  import { resolveContent } from 'powermove';
   import { onDestroy } from 'svelte';
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
-  import FontVariationAxes from './FontVariationAxes.svelte';
-  import { fontAxisContentKey } from './variable-font';
+  import TypeSettings from './TypeSettings.svelte';
+  import { axisContentKey } from 'powermove';
 
-  const { api, doc } = inspectorContext();
-  const { ColorField, FontField, NumField, Row, Section, SelectField } = api.ui.controls;
+  const { api, doc, transport } = inspectorContext();
+  const { ColorField, FontField, NumField, Section, SelectField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
 
   let {
@@ -18,12 +20,13 @@
     fontsVersion?: number;
   } = $props();
 
-  const content = $derived((doc.tick.values, doc.proj, layer.d ?? {}));
+  const content = $derived((doc.tick.values, doc.proj, transport.time, resolveContent(PM, layer, transport.time)));
   const shape = $derived((doc.tick.values, doc.proj, content.shape));
   const assets = $derived((doc.tick.assets, doc.tick.structure, doc.proj, Object.values(PM.proj?.assets ?? {}) as any[]));
   const shaderError = $derived((doc.tick.values, doc.proj,
     layer.type === 'shader' ? PM.GL?.compileError?.(PM.UIState?.getShaderMeta?.(layer)?.shaderKey) : ''));
   let editingText = false;
+  let hasVariableWeight = $state(false);
 
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
   const edit = (key: string, label: string): EditBinding =>
@@ -60,17 +63,13 @@
       .concat([{ v: null, label: 'none' }]);
   }
 
-  const audioOptions = $derived<SelectOption[]>([
-    { v: null, label: 'None' },
-    ...assets
-      .filter((asset) => asset?.kind === 'audio')
-      .map((asset) => ({ v: asset.id, label: String(asset.name) }))
-  ]);
+
 </script>
 
-<Section title="Content" />
+{#if !(layer.type === 'shape' && layer.d.paths?.length)}<Section title="Content" />{/if}
 
 {#if layer.type === 'text'}
+  <AnimatedRow {PM} {layer} label="Text" path="c.text">
   <textarea
     data-inspector-text-layer={layer.id}
     aria-label="Text"
@@ -81,7 +80,8 @@
     onblur={commitText}
     onkeydown={(event) => event.stopPropagation()}
   ></textarea>
-  <Row label="Font">
+  </AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Font" path="c.font">
     {#key fontsVersion}
       <FontField
         {PM}
@@ -91,10 +91,10 @@
         weight={() => Number(content.weight) || 400}
       />
     {/key}
-  </Row>
-  {#if !content[fontAxisContentKey('wght')]}
+  </AnimatedRow>
+  {#if !hasVariableWeight && content[axisContentKey('wght')] == null}
     {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
-    <Row label="Weight">
+    <AnimatedRow {PM} {layer} label="Weight" path="c.weight">
       <SelectField
         {PM}
         get={get('weight', 400)}
@@ -103,44 +103,43 @@
         label="Weight"
         onChange={(value: unknown) => PM.Fonts?.ensure?.(content.font, Number(value) || 400)}
       />
-    </Row>
+    </AnimatedRow>
   {/if}
-  <Row label="Size"><NumField {PM} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></Row>
-  <Row label="Tracking"><NumField {PM} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></Row>
-  <Row label="Leading"><NumField {PM} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></Row>
-  <Row label="Align"><SelectField {PM} get={get('align', 'center')} edit={edit('align', 'Align')} options={['left', 'center', 'right']} label="Align" /></Row>
-  <Row label="Color"><ColorField {PM} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></Row>
-  <FontVariationAxes {PM} {layer} {content} />
-{:else if layer.type === 'solid' || layer.type === 'shape'}
-  <Row label="Fill"><ColorField {PM} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></Row>
+  <AnimatedRow {PM} {layer} label="Size" path="c.size"><NumField {PM} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Tracking" path="c.tracking"><NumField {PM} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Leading" path="c.leading"><NumField {PM} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Align" path="c.align"><SelectField {PM} get={get('align', 'center')} edit={edit('align', 'Align')} options={['left', 'center', 'right']} label="Align" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Color" path="c.color"><ColorField {PM} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
+  <TypeSettings {PM} {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} />
+{:else if (layer.type === 'solid' || layer.type === 'shape') && !layer.d.paths?.length}
+  <AnimatedRow {PM} {layer} label="Fill" path="c.color"><ColorField {PM} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
   {#if layer.type === 'shape'}
-    <Row label="Shape"><SelectField {PM} get={get('shape', 'rect')} edit={edit('shape', 'Shape')} options={['rect', 'ellipse', 'polygon', 'star', 'line']} label="Shape" /></Row>
+    <AnimatedRow {PM} {layer} label="Shape" path="c.shape"><SelectField {PM} get={get('shape', 'rect')} edit={edit('shape', 'Shape')} options={['rect', 'ellipse', 'polygon', 'star', 'line']} label="Shape" /></AnimatedRow>
   {/if}
-  <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
-  <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>
-  <Row label="Corner radius"><NumField {PM} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></Row>
+  <AnimatedRow {PM} {layer} label="Width" path="c.w"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Height" path="c.h"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Corner radius" path="c.radius"><NumField {PM} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></AnimatedRow>
   {#if layer.type === 'shape'}
-    <Row label="Stroke"><NumField {PM} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></Row>
-    <Row label="Stroke color"><ColorField {PM} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></Row>
+    <AnimatedRow {PM} {layer} label="Stroke" path="c.stroke"><NumField {PM} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
+    <AnimatedRow {PM} {layer} label="Stroke color" path="c.strokeColor"><ColorField {PM} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></AnimatedRow>
     {#if shape === 'polygon' || shape === 'star'}
-      <Row label="Points"><NumField {PM} get={get('points', 5)} edit={edit('points', 'Points')} label="Points" step={1} min={3} max={24} /></Row>
+      <AnimatedRow {PM} {layer} label="Points" path="c.points"><NumField {PM} get={get('points', 5)} edit={edit('points', 'Points')} label="Points" step={1} min={3} max={24} /></AnimatedRow>
     {/if}
   {/if}
 {:else if layer.type === 'image' || layer.type === 'video'}
-  <Row label="Source"><SelectField {PM} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" /></Row>
-  <Row label="Fit"><SelectField {PM} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></Row>
-  <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
-  <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>
+  <AnimatedRow {PM} {layer} label="Source"><SelectField {PM} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Fit" path="c.fit"><SelectField {PM} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Width" path="c.w"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Height" path="c.h"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
   {#if layer.type === 'video'}
-    <Row label="Trim start"><NumField {PM} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} unit="s" /></Row>
-    <Row label="Speed"><NumField {PM} get={get('speed', 1)} edit={edit('speed', 'Speed')} label="Speed" step={0.05} precision={2} min={0.05} /></Row>
+    <AnimatedRow {PM} {layer} label="Trim start" path="c.trim"><NumField {PM} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} unit="s" /></AnimatedRow>
+    <AnimatedRow {PM} {layer} label="Speed" path="c.speed"><NumField {PM} get={get('speed', 1)} edit={edit('speed', 'Speed')} label="Speed" step={0.05} precision={2} min={0.05} /></AnimatedRow>
   {/if}
 {:else if layer.type === 'audio'}
-  <Row label="Source"><SelectField {PM} get={get('asset', null)} edit={edit('asset', 'Audio source')} options={audioOptions} label="Audio source" /></Row>
-  <Row label="Trim start"><NumField {PM} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} min={0} unit="s" /></Row>
-  <Row label="Gain"><NumField {PM} get={get('gain', 1)} edit={edit('gain', 'Gain')} label="Gain" step={0.05} precision={2} min={0} max={4} /></Row>
-  <Row label="Fade in"><NumField {PM} get={get('fadeIn', 0)} edit={edit('fadeIn', 'Fade in')} label="Fade in" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></Row>
-  <Row label="Fade out"><NumField {PM} get={get('fadeOut', 0)} edit={edit('fadeOut', 'Fade out')} label="Fade out" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></Row>
+  <AnimatedRow {PM} {layer} label="Trim start" path="c.trim"><NumField {PM} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} min={0} unit="s" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Gain" path="c.gain"><NumField {PM} get={get('gain', 1)} edit={edit('gain', 'Gain')} label="Gain" step={0.05} precision={2} min={0} max={4} /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Fade in" path="c.fadeIn"><NumField {PM} get={get('fadeIn', 0)} edit={edit('fadeIn', 'Fade in')} label="Fade in" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Fade out" path="c.fadeOut"><NumField {PM} get={get('fadeOut', 0)} edit={edit('fadeOut', 'Fade out')} label="Fade out" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></AnimatedRow>
 {:else if layer.type === 'shader'}
   <button
     type="button"
@@ -151,9 +150,9 @@
   {#if shaderError}
     <div role="status" style="font-size:var(--fs-xs);color:var(--red);padding:6px 4px;white-space:pre-wrap;max-height:90px;overflow:auto">{shaderError}</div>
   {/if}
-  <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
-  <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>
+  <AnimatedRow {PM} {layer} label="Width" path="c.w"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Height" path="c.h"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
 {:else if layer.type === 'extension'}
-  <Row label="Width"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></Row>
-  <Row label="Height"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></Row>
+  <AnimatedRow {PM} {layer} label="Width" path="c.w"><NumField {PM} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Height" path="c.h"><NumField {PM} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
 {/if}

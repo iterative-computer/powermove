@@ -1,3 +1,5 @@
+import { prepareFrame } from './frame-preparation';
+import { installRenderQueue, wavBytes } from './render-queue';
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import {
   EXPORT_FORMAT_OPTIONS,
@@ -143,7 +145,7 @@ X.dialog = () => {
 
   mk('format', 'Format', PM.selectField(() => opts.format, (v: any) => { opts.format = v; sync(); },
     EXPORT_FORMAT_OPTIONS.map((o: any) => {
-      if (o.v === 'mp4') return { v: o.v, label: 'MP4 · H.264 (realtime)' };
+      if (o.v === 'mp4') return { v: o.v, label: (window as any).powermove?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
       if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
       return { ...o };
     })));
@@ -187,7 +189,7 @@ X.dialog = () => {
     if (e.key === 'Enter') inp.blur();
   });
 
-  mk('fps', 'Frame rate', PM.selectField(() => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: f + ' fps' }))));
+  mk('fps', 'Frame rate', PM.selectField(() => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: (Number.isInteger(f)?f:f.toFixed(3)) + ' fps' }))));
   const hasWork: any = !!(p.work && p.work[1] > p.work[0]);
   mk('range', 'Range', PM.selectField(() => opts.range, (v: any) => { opts.range = v; sync(); },
     EXPORT_RANGE_OPTIONS.map((o: any) => o.v === 'work' && !hasWork
@@ -202,6 +204,13 @@ X.dialog = () => {
     PM.toggleField(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background' }),
     'Keeps the background see-through'));
 
+  let presets=PM.store.get('renderPresets',[]);
+  let chosenPreset='';const presetOptions=[{v:'',label:'Choose saved preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
+  const presetSelect=PM.selectField(()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows) as any[])r.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
+  const presetName=h('input',{type:'text',placeholder:'Preset name','aria-label':'Render preset name',style:{width:'120px'}});
+  const savePreset=h('button.chip','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
+  body.append(h('div',{style:{display:'flex',gap:'8px',alignItems:'center',marginTop:'12px'}},presetSelect,presetName,savePreset));
+  body.append(h('p',{style:{fontSize:'11px',color:'var(--tx-3)'}},'Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.'));
   const nfoMain: any = h('b');
   const nfoNote: any = h('span');
   const nfo: any = h('div.export-summary', nfoMain, nfoNote);
@@ -234,8 +243,8 @@ X.dialog = () => {
   }
   sync();
   m = PM.modal({
-    title: 'Export', body, width: 460,
-    actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); run(opts); } }],
+    title: 'Export', body, width: 500,
+    actions: [{ label: 'Cancel' }, {label:'Queue',run:()=>{X.remember(opts);X.enqueue(opts);X.queueDialog();}},{ label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); run(opts); } }],
   });
 };
 
@@ -291,13 +300,18 @@ async function run(opts: any) {
       await PM.app?.importQueue;
       const data = await packProjectFile(PM.serialize(), PM.MediaStore);
       PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), (p.name || 'powermove') + '.pmv');
-      return PM.toast('Project exported');
-    } catch (error) { return PM.toast('Could not export project: ' + (error instanceof Error ? error.message : String(error)), 6000); }
+      PM.toast('Project exported');return {cancelled:false};
+    } catch (error) { const message=error instanceof Error?error.message:String(error);PM.toast('Could not export project: '+message,6000);return {error:message}; }
   }
   if (opts.format === 'still') {
-    const cv: any = opts.alpha ? alphaFrame(PM.time, W, H, opts.mblur) : PM.renderFrameTo(PM.time, W, H);
-    cv.toBlob((b: any) => PM.download(b, `${p.name}_${PM.tc(PM.time, p.fps).replace(/:/g, '-')}.png`));
-    return PM.toast('Frame exported');
+    const wasPlaying=PM.playing,at=PM.time;PM.pause();X.busy=true;
+    try{await prepareFrame(PM,at);
+      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur) : PM.renderFrameTo(at, W, H);
+      const blob=await new Promise<Blob>((resolve,reject)=>cv.toBlob((b:Blob|null)=>b?resolve(b):reject(new Error('Could not encode frame'))));
+      await PM.download(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`);
+      PM.toast('Frame exported');return {cancelled:false};
+    }catch(error){const message=(error as Error).message;PM.toast(message,6000);return {error:message};}
+    finally{X.busy=false;PM.preparedVideoFrames=null;PM.setTime(at,{force:true});PM.Viewer?.layout?.();if(wasPlaying)PM.play();}
   }
 
   X.busy = true; X.cancel = false;
@@ -313,7 +327,9 @@ async function run(opts: any) {
   try {
     const wantsAudio: any = opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj);
     const needsRecorderAudio: any = opts.format === 'webm' && wantsAudio && !(await PM.Audio.supportsOpus());
-    if (opts.format === 'mp4' || opts.format === 'rec' || (opts.format === 'webm' && (typeof window.VideoEncoder === 'undefined' || needsRecorderAudio))) {
+    if(opts.format==='prores'||(opts.format==='mp4'&&(window as any).powermove?.render)){
+      await exportNative({opts,W,H,t0,t1,total,ui,pctx});
+    } else if (opts.format === 'mp4' || opts.format === 'rec' || (opts.format === 'webm' && (typeof window.VideoEncoder === 'undefined' || needsRecorderAudio))) {
       await exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate });
     } else if (opts.format === 'png') {
       await exportPNGs({ opts, W, H, t0, total, ui, pctx });
@@ -322,12 +338,15 @@ async function run(opts: any) {
     }
     if (X.cancel) PM.toast('Export cancelled');
     else PM.toast(`Export finished in ${((window.performance.now() - t) / 1000).toFixed(1)}s`, 3400);
+    return {cancelled:X.cancel};
   } catch (e: any) {
     window.console.error(e);
     PM.toast('Export failed: ' + e.message, 5000);
+    return {error:e.message};
   } finally {
     X.busy = false;
     ui.mod.close();
+    PM.preparedVideoFrames=null;
     PM.quality = oldQ;
     PM.setTime(oldT, { force: true });
     PM.Viewer?.layout?.();
@@ -372,6 +391,15 @@ function alphaFrame(T: any, W: any, H: any, mblur: any) {
   return cv;
 }
 
+async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
+  const bridge=(window as any).powermove?.render;if(!bridge)throw new Error('The native encoder requires the updated desktop runtime.');
+  const token=await bridge.start({width:W,height:H,fps:opts.fps,format:opts.format,alpha:!!opts.alpha,name:opts.name||PM.proj.name});let released=false;
+  const chunks=async(bytes:Uint8Array,audio=false)=>{for(let at=0;at<bytes.length;at+=4*1024*1024)await bridge.write(token,bytes.slice(at,at+4*1024*1024),audio);};
+  try{for(let i=0;i<total;i++){if(X.cancel)break;const T=t0+i/opts.fps;await prepareFrame(PM,T);const cv=opts.alpha?alphaFrame(T,W,H,opts.mblur):PM.renderFrameTo(T,W,H,{mblur:opts.mblur});const bytes=new Uint8Array(cv.getContext('2d').getImageData(0,0,W,H).data);await chunks(bytes);pctx.drawImage(cv,0,0,ui.prev.width,ui.prev.height);ui.set(i+1,opts.format==='prores'?'ProRes 4444':'H.264');await new Promise(r=>setTimeout(r,0));}
+    if(X.cancel)return;if(opts.audio!==false&&PM.Audio.hasAudibleLayers(PM.proj)){const mix=await PM.Audio.renderOffline(t0,t1);if(mix)await chunks(wavBytes(mix),true);}const result=await bridge.finish(token);released=true;if(result.cancelled)X.cancel=true;
+  }finally{if(!released)await bridge.cancel(token).catch(()=>undefined);}
+}
+
 async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: any) {
   const frames: any = [];
   let configured: any = false;
@@ -398,6 +426,7 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
     const T: any = t0 + i / opts.fps;
+    await prepareFrame(PM,T);
     const cv: any = renderInto(T, W, H, opts.mblur);
     const frame: any = new window.VideoFrame(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
     enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 });
@@ -465,6 +494,7 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
     for (let i: any = 0; i < total; i++) {
       if (X.cancel) break;
       const T: any = t0 + i / opts.fps;
+    await prepareFrame(PM,T);
       const cv: any = renderInto(T, W, H, opts.mblur);
       if (track.requestFrame) track.requestFrame();
       const target: any = start + i * frameDur;
@@ -497,6 +527,7 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
     const T: any = t0 + i / opts.fps;
+    await prepareFrame(PM,T);
     let cv: any;
     if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur);
     if (!cv) cv = renderInto(T, W, H, opts.mblur);
@@ -514,10 +545,28 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
 }
 
 /* Programmatic export — used by tests and the native menu. */
+installRenderQueue(PM,X);
 X.run = (opts: any) => run(Object.assign({}, X.defaults(), { name: PM.proj.name }, opts || {}));
 
 /* Test hooks: the muxer is deterministic pure JS, so it is verifiable headlessly. */
 X.muxWebM = muxWebM;
+
+/* Await source decoding before an agent reviews a video frame. */
+X.snapshotAsync = async (T: number, maxW = 480) => {
+  if (X.busy || PM.agentFrameCapture) throw new Error('Wait for the current frame capture or export to finish.');
+  const wasPlaying = PM.playing;
+  PM.pause();
+  PM.agentFrameCapture = true;
+  try {
+    await prepareFrame(PM, T);
+    return X.snapshot(T, maxW);
+  } finally {
+    PM.agentFrameCapture = false;
+    PM.preparedVideoFrames = null;
+    PM.invalidate('render');
+    if (wasPlaying) PM.play();
+  }
+};
 
 /* Fast still capture used by the agent's `look` tool. */
 X.snapshot = (T: any, maxW: any = 480) => {

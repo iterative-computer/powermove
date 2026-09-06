@@ -441,6 +441,28 @@ describe('Svelte DockLayout panel pool', () => {
     ]);
   });
 
+  it('keeps headless timeline content accessible after double-click and restores saved collapse state', () => {
+    register(PM, 'alpha');
+    register(PM, 'viewer', { headless: true, hideMoveHandle: true });
+    register(PM, 'beta', { headless: true, size: 140 });
+    installSvelteLayout(PM);
+    PM.Layout.apply(PM.WS.current);
+    const panel = document.getElementById('panel-beta')!;
+    const body = panel.querySelector<HTMLElement>('.body')!;
+
+    panel.querySelector('header')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(body.style.display).not.toBe('none');
+    expect(panel.dataset.collapsed).toBe('0');
+
+    // A saved workspace or an older extension can carry the broken state.
+    PM.WS.current.layout.docks[1].panels[1].collapsed = true;
+    PM.Layout.apply(PM.WS.current);
+    expect(body.style.display).not.toBe('none');
+    expect(panel.dataset.collapsed).toBe('0');
+    expect(PM.WS.current.layout.docks[1].panels[1].collapsed).toBe(false);
+    expect(panel.style.flex).toBe('0 0 140px');
+  });
+
   it('collapses with the legacy CSS variable and restores fixed sizing', () => {
     register(PM, 'alpha');
     register(PM, 'viewer', { headless: true, hideMoveHandle: true });

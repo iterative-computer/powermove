@@ -1,3 +1,4 @@
+import { resolveContent } from './content-properties';
 /* Ported from js/core/media.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -248,13 +249,13 @@ PM.MediaImport = {
    continue at the matching source time instead of restarting at zero. */
 PM.MediaTiming = {
   isTimed(L: any) { return !!L && (L.type === 'audio' || L.type === 'video'); },
-  rate(L: any) { return L && L.type === 'video' ? Math.max(.0001, Number(L.d && L.d.speed) || 1) : 1; },
+  rate(L: any) { return L && L.type === 'video' ? Math.max(.0001, Number(resolveContent(PM, L, PM.time).speed) || 1) : 1; },
   trimAtStart(L: any, nextFrom: any) {
-    const trim: any = Math.max(0, Number(L && L.d && L.d.trim) || 0);
+    const trim: any = Math.max(0, Number(L ? resolveContent(PM, L, PM.time).trim : 0) || 0);
     return Math.max(0, trim + (Number(nextFrom) - Number(L.from || 0)) * this.rate(L));
   },
   earliestStart(L: any) {
-    const trim: any = Math.max(0, Number(L && L.d && L.d.trim) || 0);
+    const trim: any = Math.max(0, Number(L ? resolveContent(PM, L, PM.time).trim : 0) || 0);
     return Math.max(0, Number(L.from || 0) - trim / this.rate(L));
   },
 };

@@ -34,9 +34,11 @@
       <option value={model.id}>{model.label}</option>
     {/each}
   </select>
+  {#if agentState.reasoningEfforts.length}
   <select class="effort" aria-label="Reasoning effort" value={agentState.reasoningEffort} onchange={changeEffort} onkeydown={keydown}>
     {#each agentState.reasoningEfforts as effort (effort)}
       <option value={effort}>{effort}</option>
     {/each}
   </select>
+  {/if}
 </div>

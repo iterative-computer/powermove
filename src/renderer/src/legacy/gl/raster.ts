@@ -1,3 +1,8 @@
+import { animatedGlyphs, textControlValues } from '../core/text-animation';
+import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
+import { createVariableFontRenderer, variationEntries, variationSettings } from '../../typography/font-renderer';
+export { variationEntries as textVariationEntries, variationSettings as formatFontVariationSettings } from '../../typography/font-renderer';
+import { resolveContent } from '../core/content-properties';
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
@@ -50,25 +55,9 @@ export function waitForPresentedVideoFrame(el: any, timeout = 1800): Promise<boo
   });
 }
 
-const FONT_AXIS_PREFIX = 'fontAxis.';
 
 function cssString(value: unknown): string {
   return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-export function textVariationEntries(d: any): Array<[string, number]> {
-  return Object.entries(d ?? {}).flatMap(([key, value]) => {
-    if (!key.startsWith(FONT_AXIS_PREFIX)) return [];
-    const axis = key.slice(FONT_AXIS_PREFIX.length);
-    const number = Number(value);
-    return /^[\x20-\x7e]{4}$/.test(axis) && Number.isFinite(number) ? [[axis, number] as [string, number]] : [];
-  }).sort(([a], [b]) => a.localeCompare(b));
-}
-
-export function formatFontVariationSettings(d: any): string {
-  return textVariationEntries(d)
-    .map(([axis, value]) => `"${cssString(axis)}" ${value}`)
-    .join(', ');
 }
 
 export function install(PM: PMRegistry): void {
@@ -104,86 +93,7 @@ function evict(targetBytes: any = MAX_BYTES) {
 }
 
 /* ── text ──────────────────────────────────────────────── */
-const variationFaces = new Map<string, {
-  family: string;
-  style: CSSStyleDeclaration;
-  settings: string;
-  loadedSettings: string;
-  pendingSettings: string;
-}>();
-
-function variationStyleSheet(): CSSStyleSheet | null {
-  const id = 'powermove-variable-font-faces';
-  let element = window.document.getElementById?.(id) as HTMLStyleElement | null;
-  if (!element) {
-    element = window.document.createElement('style');
-    element.id = id;
-    window.document.head?.append(element);
-  }
-  return element.sheet as CSSStyleSheet | null;
-}
-
-function loadVariationSettings(entry: { family: string; settings: string; loadedSettings: string; pendingSettings: string }): void {
-  const settings = entry.settings;
-  if (!settings || entry.loadedSettings === settings || entry.pendingSettings === settings) return;
-  entry.pendingSettings = settings;
-  void (async () => {
-    try {
-      await window.document.fonts?.load?.(`400 32px "${cssString(entry.family)}"`, 'Powermove');
-      await window.document.fonts?.ready;
-      if (entry.settings === settings) {
-        entry.loadedSettings = settings;
-        PM.rasterClear?.();
-        PM.invalidate?.();
-      }
-    } catch { /* Preserve the authored font fallback when the alias cannot load. */ }
-    finally { if (entry.pendingSettings === settings) entry.pendingSettings = ''; }
-  })();
-}
-
-async function resolveVariationSource(sourceFamily: string, entry: {
-  family: string; style: CSSStyleDeclaration; settings: string; loadedSettings: string; pendingSettings: string;
-}): Promise<void> {
-  const query = (window as any).queryLocalFonts;
-  if (typeof query === 'function') {
-    try {
-      const fonts = await query();
-      const matches = (Array.isArray(fonts) ? fonts : []).filter((font: any) =>
-        String(font?.family || '').trim().toLocaleLowerCase() === sourceFamily.toLocaleLowerCase());
-      const preferred = matches.find((font: any) => String(font?.style || '').toLocaleLowerCase() === 'regular')
-        ?? matches[0];
-      const names = [...new Set([preferred?.postscriptName, preferred?.fullName, preferred?.family]
-        .map((value: any) => String(value || '').trim()).filter(Boolean))];
-      if (names.length) entry.style.setProperty('src', names.map((name) => `local("${cssString(name)}")`).join(', '));
-    } catch { /* The family-name local source and normal fallback remain. */ }
-  }
-  entry.loadedSettings = '';
-  entry.pendingSettings = '';
-  loadVariationSettings(entry);
-}
-
-function variationFontFamily(d: any): string | null {
-  const settings = formatFontVariationSettings(d);
-  const sourceFamily = String(d?.font || '').trim();
-  if (!settings || !sourceFamily) return null;
-  let entry = variationFaces.get(sourceFamily);
-  if (!entry) {
-    const sheet = variationStyleSheet();
-    if (!sheet) return null;
-    const family = `Powermove Variable ${variationFaces.size + 1}`;
-    const index = sheet.insertRule(`@font-face{font-family:"${family}";src:local("${cssString(sourceFamily)}");font-weight:1 1000;font-stretch:1% 1000%;font-style:oblique -90deg 90deg;}`);
-    const rule = sheet.cssRules[index] as CSSFontFaceRule;
-    entry = { family, style: rule.style, settings: '', loadedSettings: '', pendingSettings: '' };
-    variationFaces.set(sourceFamily, entry);
-    void resolveVariationSource(sourceFamily, entry);
-  }
-  if (entry.settings !== settings) {
-    entry.style.setProperty('font-variation-settings', settings);
-    entry.settings = settings;
-    loadVariationSettings(entry);
-  }
-  return entry.family;
-}
+const variationFontFamily = createVariableFontRenderer(() => { PM.rasterClear?.(); PM.invalidate?.(); });
 
 function fontStr(d: any) {
   const variableFamily = variationFontFamily(d);
@@ -196,7 +106,7 @@ function fontStr(d: any) {
 
 function resolvedTextContent(input: any, time = PM.time) {
   const layer = input?.type === 'text' ? input : null;
-  const d = layer ? layer.d : input;
+  const d = layer ? resolveContent(PM, layer, time) : input;
   const value = (key: string) => {
     const source = d?.[key];
     if (!source || typeof source !== 'object' || Array.isArray(source)) return Number(source) || 0;
@@ -209,7 +119,7 @@ function resolvedTextContent(input: any, time = PM.time) {
   const resolved = { ...d, boxWidth, boxHeight, paragraph: boxWidth > 0 };
   if (layer && PM.evP) {
     for (const key of Object.keys(d ?? {})) {
-      if (!key.startsWith(FONT_AXIS_PREFIX)) continue;
+      if (!key.startsWith('fontAxis.')) continue;
       const source = d[key];
       if (!source || typeof source !== 'object' || !Array.isArray(source.kf)) continue;
       resolved[key] = Number(PM.evP(layer, source, time, 'c.' + key));
@@ -275,20 +185,24 @@ function textLayout(d: any) {
      Measuring the joined run and subtracting the isolated segment preserves
      that incoming pair adjustment when the segment becomes its own layer. */
   const segmentX = (lineStart: any, prefix: any, segment: any) => lineStart + width(prefix + segment) - width(segment);
-  let characterIndex = 0, wordIndex = 0, lineIndex = 0;
+  let characterIndex = 0, wordIndex = 0, lineIndex = 0, sourceOffset=0;
   lines.forEach((line, row) => {
     const lineWidth = width(line);
     const startX = align === 'center' ? -lineWidth / 2 : align === 'right' ? -lineWidth : 0;
     const y = row * lh;
     if (line.length) output.lines.push({ text: line, x: startX, y, line: row, index: lineIndex++ });
 
-    let prefix = '';
+    const lineSource=Math.max(sourceOffset,String(d.text||'').indexOf(line,sourceOffset));
+    let prefix = '';let localWord=-1,wasSpace=true;
     for (const segment of graphemes(line)) {
       const x = segmentX(startX, prefix, segment);
-      if (!/^\s+$/u.test(segment)) output.characters.push({ text: segment, x, y, line: row, index: characterIndex++ });
+      const space=/^\s+$/u.test(segment);if(!space&&wasSpace)localWord++;
+      if (!space) output.characters.push({ text: segment, x, y, line: row, word:wordIndex+localWord, sourceStart:lineSource+prefix.length,index: characterIndex++ });
+      wasSpace=space;
       prefix += segment;
     }
 
+    sourceOffset=lineSource+line.length;
     const matcher = /\S+/gu;
     let match;
     while ((match = matcher.exec(line))) {
@@ -374,6 +288,24 @@ function rasterText(d: any, scale: any) {
   return { cv, w, h: hh, anchorX, anchorY, selection };
 }
 
+function rasterAnimatedText(layer:any,d:any,time:number,scale:number) {
+  const glyphs=animatedGlyphs(PM,layer,time,d,textLayout(d)),measure=getCanvas(8,8).getContext('2d')!;
+  const [animators,styles]=textControlValues(PM,layer,time);
+  if(!styles.length&&animators.every((a:any)=>!a.p.x&&!a.p.y&&!a.p.rotation&&!a.p.tracking&&a.p.scale===100&&a.p.opacity===100))return rasterText(d,scale);
+  // Range font metrics contribute to the following characters' advances.
+  for(const line of new Set(glyphs.map((g:any)=>g.line))){
+    const run=glyphs.filter((g:any)=>g.line===line);let advance=0;
+    for(const glyph of run){glyph.x+=advance;measure.font=fontStr(d);const base=measure.measureText(glyph.text).width;measure.font=fontStr(glyph.style);advance+=measure.measureText(glyph.text).width-base;}
+    const align=d.align==='center'?.5:d.align==='right'?1:0;for(const glyph of run)glyph.x-=advance*align;
+  }
+  let x0=0,y0=0,x1=1,y1=Math.max(1,d.size);
+  const records=glyphs.map((g:any)=>{measure.font=fontStr(g.style);const metrics=measure.measureText(g.text),w=metrics.width,h=Number(g.style.size)||d.size,r=g.rotation*Math.PI/180,c=Math.cos(r)*g.scale,s=Math.sin(r)*g.scale,baseline=g.y+d.size*.82;
+    for(const [x,y] of ([[0,-h],[w,-h],[0,h*.3],[w,h*.3]] as Array<[number,number]>)){const xx=g.x+c*x-s*y,yy=baseline+s*x+c*y;x0=Math.min(x0,xx-4);y0=Math.min(y0,yy-4);x1=Math.max(x1,xx+4);y1=Math.max(y1,yy+4);}return {...g,baseline};});
+  const w=Math.max(1,x1-x0),h=Math.max(1,y1-y0),density=Math.min(scale,8192/w,8192/h),cv=getCanvas(Math.ceil(w*density),Math.ceil(h*density)),ctx=cv.getContext('2d')!;ctx.scale(density,density);ctx.translate(-x0,-y0);
+  for(const g of records){ctx.save();ctx.translate(g.x,g.baseline);ctx.rotate(g.rotation*Math.PI/180);ctx.scale(g.scale,g.scale);ctx.globalAlpha=g.opacity;ctx.font=fontStr(g.style);ctx.fillStyle=g.style.color;ctx.fillText(g.text,0,0);ctx.restore();}
+  return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:{x0,y0,x1,y1,w,h}};
+}
+
 /* ── shapes ────────────────────────────────────────────── */
 function rr(c: any, x: any, y: any, w: any, h: any, r: any) {
   r = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
@@ -424,13 +356,14 @@ function rasterShape(d: any, scale: any) {
 
 /** Get (and cache) a rasterized bitmap for a layer. `scale` = render supersample. */
 PM.raster = (L: any, scale: any = 1, time: any = PM.time) => {
-  const d = L.type === 'text' ? resolvedTextContent(L, time) : L.d;
-  const key = L.type === 'text'
-    ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, formatFontVariationSettings(d), scale].join('|')
+  const d = L.type === 'text' ? resolvedTextContent(L, time) : resolveContent(PM, L, time);
+  const controls=L.type==='text'?textControlValues(PM,L,time):null;
+  const key = L.d.paths?.length ? 'paths|'+JSON.stringify(L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})))+'|'+scale : L.type === 'text'
+    ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, variationSettings(d), JSON.stringify(controls), scale].join('|')
     : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.stroke, d.strokeColor, d.points, scale].join('|');
   let e = cache.get(key);
   if (!e) {
-    e = L.type === 'text' ? rasterText(d, scale) : rasterShape(d, scale);
+    e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (L.d.animators?.length||L.d.styles?.length ? rasterAnimatedText(L,d,time,scale) : rasterText(d, scale)) : rasterShape(d, scale);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
@@ -469,7 +402,7 @@ function assetKind(file: any) {
 PM.assetKind = assetKind;
 function disposeAsset(a: any) {
   if (!a) return;
-  if (a.kind === 'audio' && PM.Audio) PM.Audio.disposeAsset(a);
+  if ((a.kind === 'audio' || a.audioBlob) && PM.Audio) PM.Audio.disposeAsset(a);
   try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
   try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
   if (a.url && String(a.url).startsWith('blob:')) window.URL.revokeObjectURL(a.url);
@@ -581,13 +514,43 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
         }
       }
     } else throw new Error('Unsupported media kind');
-    return {
+    const asset: any = {
       id, name, kind, url, el,
       w: w || meta.w || 0, h: hh || meta.h || 0,
       dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
       playbackProxy: playbackProxyUsed,
       persistBlob: sourceBlob,
     };
+    /* A video's soundtrack stays attached to the video asset until the user
+       separates it. Sharing the durable blob avoids storing the whole movie a
+       second time. New imports decode once to prove an audio stream exists;
+       restored videos use that saved result and decode lazily. */
+    if (kind === 'video' && (meta.hasAudio === true || meta.hasAudio == null)) {
+      try {
+        const audio: any = await PM.Audio.prepareAsset({
+          id, name, blob: sourceBlob,
+          meta: meta.hasAudio === true ? { dur: meta.audioDur || meta.dur || dur } : {},
+        });
+        Object.assign(asset, {
+          hasAudio: true,
+          audioDur: audio.audioBuffer?.duration || audio.dur || dur || 0,
+          audioBlob: audio.audioBlob,
+          audioBuffer: audio.audioBuffer,
+          audioDecoding: audio.audioDecoding,
+          audioDisposed: audio.audioDisposed,
+          audioToken: audio.audioToken,
+          audioDecodeError: audio.audioDecodeError,
+          audioRetryAt: audio.audioRetryAt,
+          audioUsedAt: audio.audioUsedAt,
+          peaks: audio.peaks,
+          channels: audio.channels,
+          sampleRate: audio.sampleRate,
+        });
+      } catch (error) {
+        asset.hasAudio = false;
+      }
+    } else if (kind === 'video') asset.hasAudio = false;
+    return asset;
   } catch (error) {
     try { if (el && el.close) el.close(); } catch (e) { }
     window.URL.revokeObjectURL(url);
@@ -644,6 +607,10 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
     size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
     channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
     playbackProxy: prepared.playbackProxy === true,
+    ...(kind === 'video' ? {
+      hasAudio: prepared.hasAudio === true,
+      audioDur: prepared.hasAudio ? prepared.audioDur || prepared.dur || 0 : 0,
+    } : {}),
     ...(kind === 'model' ? {
       format: prepared.format || 'obj',
       vertices: prepared.vertices || 0,

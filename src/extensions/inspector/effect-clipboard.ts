@@ -1,6 +1,7 @@
+import { isProperty } from 'powermove';
 type EffectLike = {
   type: string;
-  on?: boolean;
+  on?: boolean | { v: boolean; kf: unknown[]; expr?: string | null };
   open?: boolean;
   p?: Record<string, unknown>;
 };
@@ -12,6 +13,7 @@ export type PasteEffectCommand = {
   parameters: Record<string, unknown>;
   open: boolean;
   enabled: boolean;
+  enabledAnimation?: Record<string, unknown>;
 };
 
 type EffectSnapshot = Omit<PasteEffectCommand, 'type' | 'target'>;
@@ -28,7 +30,8 @@ export function copyEffects(effects: EffectLike[]): number {
     effect: effect.type,
     parameters: clone(effect.p ?? {}),
     open: effect.open !== false,
-    enabled: effect.on !== false,
+    enabled: isProperty(effect.on) ? (effect.on as any).v !== false : effect.on !== false,
+    ...(isProperty(effect.on) ? { enabledAnimation: clone(effect.on as unknown as Record<string, unknown>) } : {}),
   }));
   return clipboard.length;
 }

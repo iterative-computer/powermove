@@ -1,17 +1,34 @@
 import { expect, it } from 'vitest';
 import { modResultForMessage } from './mod-result';
-it('renders typed results even after removal and keeps failures explicit', () => {
-  for (const status of ['ready', 'error', 'removed'] as const) {
-    const modResult = { id: 'pexels', name: 'Pexels Browser', action: 'created' as const, status };
-    expect(modResultForMessage({ role: 'assistant', modResult }, [])).toEqual(modResult);
-    expect(modResultForMessage({ role: 'user', modResult }, [])).toBeNull();
+
+const created = { id: 'pexels', name: 'Pexels Browser', action: 'created', status: 'ready' } as const;
+const panels = [{ ownerId: 'pexels' }];
+
+it('shows successful typed agent panel creations only', () => {
+  expect(modResultForMessage({ role: 'assistant', modResult: created }, panels)).toEqual(created);
+  expect(modResultForMessage({ role: 'user', modResult: created }, panels)).toBeNull();
+  expect(modResultForMessage({ role: 'assistant', modResult: created }, [])).toBeNull();
+  expect(modResultForMessage({ role: 'assistant', modResult: created }, [{ ownerId: 'other' }])).toBeNull();
+});
+
+it('does not announce removals or failed changes', () => {
+  for (const action of ['removed'] as const) {
+    expect(modResultForMessage({ role: 'assistant', modResult: { ...created, action } }, panels)).toBeNull();
+  }
+  for (const status of ['error', 'removed'] as const) {
+    expect(modResultForMessage({ role: 'assistant', modResult: { ...created, status } }, panels)).toBeNull();
   }
 });
-it('upgrades only exact legacy mod notices backed by an installed record', () => {
-  const records = [{ id: 'pexels', manifest: { name: 'Pexels Browser' } }];
-  expect(modResultForMessage({ role: 'assistant', text: 'Added mod Pexels Browser' }, records))
-    .toEqual({ id: 'pexels', name: 'Pexels Browser', action: 'created', status: 'ready' });
-  for (const text of ['Added mod Missing', 'I added mod Pexels Browser', 'Added mod Pexels Browser\nMore text']) {
-    expect(modResultForMessage({ role: 'assistant', text }, records)).toBeNull();
+
+it('does not infer agent panel creation from legacy notices or arbitrary prose', () => {
+  for (const text of ['Added mod Pexels Browser', 'Updated mod Pexels Browser', 'I created Pexels Browser']) {
+    expect(modResultForMessage({ role: 'assistant', text }, panels)).toBeNull();
   }
+});
+
+it('shows edits only when the agent result owns a registered panel', () => {
+  const modResult = { ...created, action: 'updated' } as const;
+  expect(modResultForMessage({ role: 'assistant', modResult }, panels)).toEqual(modResult);
+  expect(modResultForMessage({ role: 'assistant', modResult }, [])).toBeNull();
+  expect(modResultForMessage({ role: 'user', modResult }, panels)).toBeNull();
 });

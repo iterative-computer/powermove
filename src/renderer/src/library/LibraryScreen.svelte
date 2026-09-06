@@ -309,7 +309,8 @@
   }
 
   /* Each grid cell shows a snapshot clone of the live panel, laid out at the
-     canonical size owned by its definition. The active dock is only a source
+     canonical width owned by its definition, growing to contain its content.
+     The active dock is only a source
      of panel content; its width, height, collapsed state, and location never
      shape the Library. A clone, not a borrow, keeps the workspace intact while
      a preview is dragged back onto a dock. */
@@ -355,6 +356,33 @@
       const library = PM.PANELS?.[id]?.library;
       if (library && typeof library.render === 'function') {
         library.render({ source: element, clone, width: sourceWidth, height: sourceHeight });
+      } else {
+        // Snapshots cannot scroll. Unroll their scroll regions from the inside
+        // out, then grow the card so the last controls and footer stay visible.
+        // Canvas previews own their geometry through library.render instead.
+        // A full-height inline textarea otherwise adds a baseline gap below
+        // itself on every measurement, even when its content already fits.
+        for (const textarea of clone.querySelectorAll('textarea')) textarea.style.display = 'block';
+        const regions = [...clone.querySelectorAll<HTMLElement>('*')].reverse();
+        for (const region of regions) {
+          const style = getComputedStyle(region);
+          if (!/^(auto|scroll|hidden)$/.test(style.overflowY) || !region.clientHeight
+            || style.position === 'absolute' || style.position === 'fixed'
+            || region.querySelector('canvas')) continue;
+          const height = region.scrollHeight;
+          if (height <= region.clientHeight + 1) continue;
+          const border = region.offsetHeight - region.clientHeight;
+          region.style.boxSizing = 'border-box';
+          region.style.height = `${height + border}px`;
+          region.style.minHeight = `${height + border}px`;
+          region.style.maxHeight = 'none';
+          region.style.flexShrink = '0';
+        }
+        sourceHeight = Math.max(sourceHeight, clone.scrollHeight + clone.offsetHeight - clone.clientHeight);
+        clone.style.height = `${sourceHeight}px`;
+        frame.style.height = `${sourceHeight}px`;
+        node.style.aspectRatio = `${sourceWidth} / ${sourceHeight}`;
+        fit();
       }
     }
     render(params.id);
@@ -595,7 +623,7 @@
           </div>
           <div class="library-content">
             {#if view === 'panels'}
-              <div class="library-grid panels" role="list" aria-label="Available panels">
+              <div class="library-grid panels" class:is-empty={matchedPanels.length === 0} role="list" aria-label="Available panels">
                 {#each matchedPanels as panel (panel.id)}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
@@ -636,14 +664,14 @@
                     </button>
                   </div>
                 {:else}
-                  <div class="library-empty">
-                    <b>No panels match</b>
-                    <span>{query ? 'Try a different search.' : 'No panels are available.'}</span>
+                  <div class="library-empty" role="status">
+                    <Icon {PM} name="search" />
+                    <b>There's nothing here.</b>
                   </div>
                 {/each}
               </div>
             {:else}
-              <div class="library-grid workspaces" role="list" aria-label="Workspaces">
+              <div class="library-grid workspaces" class:is-empty={matchedWorkspaces.length === 0} role="list" aria-label="Workspaces">
                 {#each matchedWorkspaces as workspace (workspace.id)}
                   <div class="library-card workspace-card" class:active={workspace.id === currentWorkspaceId} role="listitem" data-workspace-id={workspace.id}>
                     {#if workspace.id === currentWorkspaceId}
@@ -682,9 +710,9 @@
                     {/if}
                   </div>
                 {:else}
-                  <div class="library-empty">
-                    <b>No workspaces match</b>
-                    <span>{query ? 'Try a different search.' : 'Save the current layout to create one.'}</span>
+                  <div class="library-empty" role="status">
+                    <Icon {PM} name="search" />
+                    <b>There's nothing here.</b>
                   </div>
                 {/each}
               </div>

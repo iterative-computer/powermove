@@ -381,6 +381,36 @@ it('reloads typed extension changes during the autonomous request flow', async (
   assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Added mod New Mod'));
 });
 
+it('recognizes native live edits without applying final commands a second time', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => ({ index: -1, topId: null })), squash: vi.fn() };
+  PM.Edit = { apply: vi.fn(() => ({ ok: true })) };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn(command => command),
+  };
+  PM.CodexBridge.request = vi.fn(async () => {
+    PM.proj.revision = 1;
+    return {
+      text: JSON.stringify({
+        summary: 'Edited through native tools', commands: [], artifacts: [], externalActions: [], notes: []
+      }),
+      extensions: [],
+      liveEditsApplied: true,
+      liveEditHistoryId: 'native-history-1'
+    };
+  });
+
+  PM.AgentUI.submit('Make a live edit');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+
+  assert.equal(PM.AgentUI.state.run.changed, true);
+  assert.equal(PM.AgentUI.state.run.checkpoint.historyId, 'native-history-1');
+  assert.equal(PM.AgentUI.state.run.reviewError, '');
+  assert.equal(PM.Edit.apply.mock.calls.length, 0);
+});
+
 function placementHarness() {
   const { PM } = spatialHarness();
   window.requestAnimationFrame = () => 0;

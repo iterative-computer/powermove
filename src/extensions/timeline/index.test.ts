@@ -42,6 +42,7 @@ function timelinePM(): Record<string, any> {
       icon.dataset.icon = name;
       return icon;
     },
+    allProps: (layer: any) => Object.entries(layer.p ?? {}).map(([key, prop]) => ({ key, prop })),
     loop: false,
     time: 0,
     playing: false,

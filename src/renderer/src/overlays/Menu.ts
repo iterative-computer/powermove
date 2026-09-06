@@ -2,7 +2,7 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
-import { markMenuDismissal } from './dismissal';
+import { consumeMenuTriggerPress, markMenuDismissal } from './dismissal';
 
 type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement };
 
@@ -33,6 +33,7 @@ export class MenuController {
     instance = mount(Menu, {
       target: document.body,
       props: {
+        PM: this.PM,
         items,
         x,
         y,
@@ -55,6 +56,7 @@ export class MenuController {
     this.outside = (event: PointerEvent) => {
       if (!this.menu || this.menu.contains(event.target as Node)) return;
       markMenuDismissal(event);
+      if (!cursorOrigin) consumeMenuTriggerPress(event, anchor);
       this.close(true);
     };
     this.PM._menuOutside = this.outside;

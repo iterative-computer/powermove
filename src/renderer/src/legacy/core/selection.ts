@@ -1,3 +1,5 @@
+import { temporalKeys } from './temporal-bridge';
+import { layerPropertyChannels } from './project-index';
 /* Ported from js/core/selection.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -13,13 +15,8 @@ function keyframes(project: any) {
     if (!comp || seen.has(comp)) continue;
     seen.add(comp);
     for (const layer of comp.layers || []) {
-      const props = [...Object.values(layer.p || {})] as any[];
-      for (const effect of layer.fx || []) props.push(...Object.values(effect.p || {}));
-      for (const mask of layer.masks || []) props.push(...Object.values(mask.p || {}));
-      if (layer.type === 'shader') props.push(...Object.values(layer.d?.uniforms || {}));
-      if (layer.type === 'extension') props.push(...Object.values(layer.d?.params || {}));
-      for (const field of ['transitionIn', 'transitionOut']) props.push(...Object.values(layer[field]?.p || {}));
-      for (const prop of props) for (const key of prop?.kf || []) if (typeof key?.i === 'string') out.push(key);
+      const props = layerPropertyChannels(PM, layer);
+      for (const prop of props) for (const key of temporalKeys(prop?.kf || [])) if (typeof key?.i === 'string') out.push(key);
     }
     projects.push(...Object.values(comp.comps || {}) as any[]);
   }

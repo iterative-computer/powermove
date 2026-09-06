@@ -1,0 +1,2 @@
+/** Named runtime exports for the public powermove module. Keep in sync with editor-helpers.ts. */
+export const EDITOR_HELPER_EXPORTS = ['isProperty', 'canAnimateContent', 'resolveContent', 'contentLabel', 'evaluatedValue', 'makeVectorPath', 'makeVertex', 'structuredProperties', 'pathValues', 'groupMatrix', 'tracePath', 'pathTargets', 'temporalKeys', 'enableTimeRemap', 'validMatteSource', 'MATTE_MODES', 'expressionDiagnostic', 'EXPRESSION_NAMES', 'axisContentKey', 'axisPath', 'isAxisTag', 'inspectFont'] as const;

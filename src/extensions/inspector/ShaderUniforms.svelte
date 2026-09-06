@@ -1,9 +1,10 @@
 <script lang="ts">
   import { inspectorContext, type EditBinding } from './context';
+  import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc } = inspectorContext();
-  const { ColorField, Row, Section, ToggleField } = api.ui.controls;
+  const { api, doc, transport } = inspectorContext();
+  const { ColorField, Section, ToggleField } = api.ui.controls;
 
   let { PM, layer }: {
     PM: Record<string, any>;
@@ -44,23 +45,23 @@
     {#if property}
       {@const path = `u.${definition.name}`}
       {#if definition.control === 'color'}
-        <Row label={definition.label}>
+        <AnimatedRow {PM} {layer} {path} label={definition.label}>
           <ColorField
             {PM}
-            get={() => (doc.tick.values, doc.proj, property.v)}
+            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, definition.label)}
             label={definition.label}
           />
-        </Row>
+        </AnimatedRow>
       {:else if definition.control === 'toggle'}
-        <Row label={definition.label}>
+        <AnimatedRow {PM} {layer} {path} label={definition.label}>
           <ToggleField
             {PM}
-            get={() => (doc.tick.values, doc.proj, property.v)}
+            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, definition.label)}
             label={definition.label}
           />
-        </Row>
+        </AnimatedRow>
       {:else}
         <ChannelRow
           {PM}
@@ -73,7 +74,6 @@
           min={definition.min}
           max={definition.max}
           precision={3}
-          showDiamond={false}
         />
       {/if}
     {/if}

@@ -63,23 +63,28 @@ describe('pro shortcut helper contracts', () => {
     expect(PM.proj.layers).toHaveLength(2);
   });
 
-  it('routes Edit-menu commands to the focused text field', () => {
+  it('routes Edit-menu commands to focused inputs, textareas, and editable surfaces', () => {
     const PM = runtime();
     const execCommand = vi.fn((_action: string) => true);
-    vi.stubGlobal('document', {
-      activeElement: { tagName: 'INPUT' },
-      execCommand,
-    });
+    const documentStub = { activeElement: null as any, execCommand };
+    vi.stubGlobal('document', documentStub);
 
-    expect(PM.cmd('contextUndo')).toBe(true);
-    expect(PM.cmd('contextRedo')).toBe(true);
-    expect(PM.cmd('contextCut')).toBe(true);
-    expect(PM.cmd('contextCopy')).toBe(true);
-    expect(PM.cmd('contextPaste')).toBe(true);
-    expect(PM.cmd('contextSelectAll')).toBe(true);
-    expect(execCommand.mock.calls.map(([action]) => action)).toEqual([
+    for (const activeElement of [
+      { tagName: 'INPUT' },
+      { tagName: 'TEXTAREA' },
+      { tagName: 'DIV', isContentEditable: true },
+    ]) {
+      documentStub.activeElement = activeElement;
+      expect(PM.cmd('contextUndo')).toBe(true);
+      expect(PM.cmd('contextRedo')).toBe(true);
+      expect(PM.cmd('contextCut')).toBe(true);
+      expect(PM.cmd('contextCopy')).toBe(true);
+      expect(PM.cmd('contextPaste')).toBe(true);
+      expect(PM.cmd('contextSelectAll')).toBe(true);
+    }
+    expect(execCommand.mock.calls.map(([action]) => action)).toEqual(Array(3).fill([
       'undo', 'redo', 'cut', 'copy', 'paste', 'selectAll',
-    ]);
+    ]).flat());
     expect(PM.hist.list()).toEqual([]);
   });
 

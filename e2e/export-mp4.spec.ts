@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
+import path from 'node:path';
+import {readFile} from 'node:fs/promises';
 
 test.describe('@export-mp4 H.264 delivery', () => {
   test('exports a playable MP4 with H.264 video and AAC audio', async ({ session }) => {
@@ -29,65 +31,18 @@ test.describe('@export-mp4 H.264 delivery', () => {
       (layer: any) => layer.type === 'audio' && layer.name === 'tone.wav',
     ));
 
-    const exported = await page.evaluate(async () => {
-      const PM = (window as any).PM;
-      return await new Promise<{
-        bytes: number[];
-        name: string;
-        type: string;
-        width: number;
-        height: number;
-        duration: number;
-        presentedFrames: number;
-      }>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('Timed out waiting for exported MP4')), 35_000);
-        PM.download = async (blob: Blob, name: string) => {
-          const video = document.createElement('video');
-          const url = URL.createObjectURL(blob);
-          video.muted = true;
-          video.src = url;
-          try {
-            await new Promise<void>((ready, failed) => {
-              video.onloadedmetadata = () => ready();
-              video.onerror = () => failed(new Error('Exported MP4 did not load'));
-            });
-            let presentedFrames = 0;
-            const count = () => { presentedFrames += 1; };
-            video.requestVideoFrameCallback?.(count);
-            await video.play();
-            await new Promise<void>((ended, failed) => {
-              video.onended = () => ended();
-              video.onerror = () => failed(new Error('Exported MP4 did not play'));
-            });
-            clearTimeout(timer);
-            resolve({
-              bytes: Array.from(new Uint8Array(await blob.arrayBuffer())),
-              name,
-              type: blob.type,
-              width: video.videoWidth,
-              height: video.videoHeight,
-              duration: video.duration,
-              presentedFrames,
-            });
-          } catch (error) {
-            clearTimeout(timer);
-            reject(error);
-          } finally {
-            URL.revokeObjectURL(url);
-          }
-        };
-        void PM.Export.run({
-          format: 'mp4',
-          scale: 1,
-          fps: 30,
-          range: 'all',
-          quality: 'draft',
-          mblur: false,
-          alpha: false,
-          audio: true,
-        });
-      });
-    });
+    const output=path.join(session.userData,'E2E MP4.mp4');
+    await session.app.evaluate(({dialog},file)=>{dialog.showSaveDialog=async()=>({canceled:false,filePath:file});},output);
+    const result=await page.evaluate(async()=>await (window as any).PM.Export.run({format:'mp4',scale:1,fps:30,range:'all',quality:'draft',mblur:false,alpha:false,audio:true}));
+    expect(result).toEqual({cancelled:false});
+    const data=[...await readFile(output)];
+    const exported=await page.evaluate(async(bytes)=>{
+      const video=document.createElement('video'),url=URL.createObjectURL(new Blob([Uint8Array.from(bytes)],{type:'video/mp4'}));video.muted=true;video.src=url;
+      try{await new Promise<void>((resolve,reject)=>{video.onloadeddata=()=>resolve();video.onerror=()=>reject(Error('Exported video did not decode'));});
+        let presentedFrames=0;video.requestVideoFrameCallback?.(()=>presentedFrames++);await video.play();await new Promise<void>(resolve=>{video.onended=()=>resolve();});
+        return {bytes,name:'E2E MP4.mp4',type:'video/mp4',width:video.videoWidth,height:video.videoHeight,duration:video.duration,presentedFrames};
+      }finally{URL.revokeObjectURL(url);}
+    },data);
 
     const bytes = Uint8Array.from(exported.bytes);
     const signatures = new TextDecoder('latin1').decode(bytes);

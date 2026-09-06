@@ -112,6 +112,27 @@ describe('legacy audio system behavior', () => {
     expect(h.PM.Audio.inspect().voices).toEqual([]);
   });
 
+  it('mixes an attached video soundtrack before it is separated', () => {
+    const buffer = new FakeAudioBuffer([new Float32Array(40)], 4);
+    const h = audioHarness();
+    h.PM.evP = (_layer: any, prop: any) => prop.v;
+    const asset = { ...audioAsset(buffer), kind: 'video', name: 'interview.mp4' };
+    h.assets.set(asset.id, asset);
+    h.PM.proj.layers = [{
+      id: 'video-1', name: 'Interview', type: 'video', on: true,
+      from: 2, dur: 5,
+      d: { asset: asset.id, trim: { v: 1, kf: [], expr: null }, speed: 1, embeddedAudio: true },
+    }];
+
+    expect(h.PM.Audio.hasAudibleLayers()).toBe(true);
+    h.PM.Audio.start(3);
+
+    expect(h.contexts[0].sources[0].starts[0]).toEqual({ when: 0.25, offset: 2, duration: 4 });
+    expect(h.PM.Audio.inspect().voices).toEqual([
+      { layerId: 'video-1:embedded-audio', assetId: 'asset-1', sourceOffset: 2, duration: 4 },
+    ]);
+  });
+
   it('schedules a future clip at its in-point', () => {
     const buffer = new FakeAudioBuffer([new Float32Array(40)], 4);
     const h = audioHarness();

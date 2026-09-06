@@ -219,6 +219,21 @@ describe('one-shot fields', () => {
     expect(select.selectedOptions[0]?.textContent).toBe('overlay');
   });
 
+  it('FontField toggles closed and can open again', async () => {
+    const { PM } = fakePM();
+    const target = render(FontField, { PM, get: () => 'Inter', edit: commandEdit('Font') });
+    const trigger = target.querySelector<HTMLButtonElement>('button.font-select')!;
+    trigger.click();
+    await tick();
+    expect(target.querySelector('.font-drop')).not.toBeNull();
+    trigger.click();
+    await tick();
+    expect(target.querySelector('.font-drop')).toBeNull();
+    trigger.click();
+    await tick();
+    expect(target.querySelector('.font-drop')).not.toBeNull();
+  });
+
   it('FontField uses the font list, invalidates all views, and exposes a dialog/listbox', async () => {
     const { PM, Edit } = fakePM();
     const target = render(FontField, { PM, get: () => 'Inter', edit: commandEdit('Font'), label: 'Font' });

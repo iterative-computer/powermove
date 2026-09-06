@@ -97,6 +97,8 @@ export interface LayerPatch {
   visible?: boolean;
   locked?: boolean;
   shy?: boolean;
+  solo?: boolean;
+  matteSource?: string | null;
   blend?: BlendMode;
   motionBlur?: boolean;
   parent?: LayerTarget;
@@ -145,6 +147,8 @@ export interface AddLayerCommand {
   motionBlur?: boolean;
   visible?: boolean;
   shy?: boolean;
+  solo?: boolean;
+  matteSource?: string | null;
   collapsed?: boolean;
 }
 
@@ -164,6 +168,7 @@ export interface AddEffectCommand extends LayerTargetedCommand {
   parameters?: JsonObject;
   open?: boolean;
   enabled?: boolean;
+  enabledAnimation?: JsonObject;
 }
 
 export interface RemoveEffectCommand extends LayerTargetedCommand {

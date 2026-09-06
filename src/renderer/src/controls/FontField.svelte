@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sel } from '../state/selection.svelte';
   import { tick } from 'svelte';
   import { doc } from '../state/document.svelte';
   import { transport } from '../state/transport.svelte';
@@ -24,6 +25,7 @@
 
   const labelledBy = rowLabelId();
   const value = $derived((doc.tick.values, doc.proj, transport.time, String(get() ?? '')));
+  const mixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,PM.inspectorMixed?.(edit,value)??false));
   const gesture = $derived(new EditGesture(PM, edit));
   let trigger = $state<HTMLButtonElement>();
   let menu = $state<HTMLDivElement>();
@@ -39,6 +41,7 @@
   const familyStyle = (name: string): string => `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
   function show(): void {
+    if (open) { close(); return; }
     PM.closeMenus?.();
     open = true;
     query = '';
@@ -102,7 +105,7 @@
   style:font-family={familyStyle(value)}
   onpointerdown={(event) => event.stopPropagation()}
   onclick={show}
->{value}</button>
+>{mixed?'Mixed':value}</button>
 
 {#if open}
   <div bind:this={menu} class="drop font-drop pm-control-font-drop" role="dialog" aria-label={label ?? 'Choose font'} tabindex="-1" style:left={`${menuLeft}px`} style:top={`${menuTop}px`} style:width={`${menuWidth}px`} onkeydown={menuKeydown}>

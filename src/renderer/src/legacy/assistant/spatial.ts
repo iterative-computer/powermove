@@ -1,6 +1,6 @@
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
-import type { CodexTraceEvent } from '../../../../shared/ipc';
+import type { CodexTraceEvent, ReasoningEffort } from '../../../../shared/ipc';
 import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
@@ -11,6 +11,7 @@ import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } 
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../panels/agent/threads';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
+import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
 
 export function install(PM: PMRegistry): void {
@@ -88,7 +89,9 @@ PM.CodexBridge = {
       job.resolve(job.mode === 'autonomous' ? {
         text,
         extensions: result.extensions,
-        extensionChangeSetId: result.extensionChangeSetId
+        extensionChangeSetId: result.extensionChangeSetId,
+        liveEditsApplied: result.liveEditsApplied,
+        liveEditHistoryId: result.liveEditHistoryId
       } : text);
     } else job.reject(new Error(text));
   },
@@ -196,19 +199,7 @@ const AGENT_PROVIDERS: any = [
   { id: 'chatgpt', label: 'ChatGPT' },
   { id: 'claude', label: 'Claude' },
 ];
-const AGENT_MODELS: any = {
-  chatgpt: [
-    { id: 'gpt-5.6-sol', label: '5.6 Sol' },
-    { id: 'gpt-5.6-terra', label: '5.6 Terra' },
-    { id: 'gpt-5.6-luna', label: '5.6 Luna' },
-  ],
-  claude: [
-    { id: 'sonnet', label: 'Sonnet' },
-    { id: 'opus', label: 'Opus' },
-    { id: 'fable', label: 'Fable' },
-  ],
-};
-const REASONING_EFFORTS: any = ['low', 'medium', 'high', 'xhigh', 'max'];
+S.reasoningEffort = modelEffort(S.provider, S.model, S.reasoningEffort) || S.reasoningEffort;
 const AGENT_ACCESS_MODES: any = [
   { id: 'editor', label: 'Edit project', detail: 'Edit the current composition' },
   { id: 'project', label: 'Change Powermove (project)', detail: 'Create or edit mods with files, shell, web, and integrations' },
@@ -392,9 +383,9 @@ function agentUISnapshot(): AgentSnapshot {
     accessMode: S.accessMode,
     composerDraft: S.composerDraft,
     pendingEntering: S.pendingEntering,
-    models: AGENT_MODELS[S.provider],
+    models: AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS],
     providers: AGENT_PROVIDERS,
-    reasoningEfforts: REASONING_EFFORTS,
+    reasoningEfforts: modelEfforts(S.provider, S.model),
     accessModes: AGENT_ACCESS_MODES,
   };
   S.conversation.forEach((message: any) => { message.entering = false; });
@@ -418,15 +409,16 @@ registerAgentPanel(PM, {
   },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
-    if (!AGENT_MODELS[S.provider].some((item: any) => item.id === model) || !REASONING_EFFORTS.includes(effort)) return;
-    S.model = model; S.reasoningEffort = effort;
-    PM.store.set(`agentModel.${S.provider}`, model); PM.store.set('agentReasoningEffort', effort);
+    if (!AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS].some((item) => item.id === model) || !REASONING_EFFORTS.includes(effort as ReasoningEffort)) return;
+    S.model = model; S.reasoningEffort = modelEffort(S.provider, model, effort as ReasoningEffort) || effort;
+    PM.store.set(`agentModel.${S.provider}`, model); PM.store.set('agentReasoningEffort', S.reasoningEffort);
     PM.AgentUI?.update({ focusComposer: true });
   },
   setProvider: (provider: string) => {
     if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || S.activeRequest) return;
     S.provider = provider;
     S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
+    S.reasoningEffort = modelEffort(provider, S.model, S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
   },
@@ -1381,9 +1373,13 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   const result: any = normalizeAutonomousResult(decoded, typeof raw === 'object' ? raw?.extensions : []);
   S.steps[1].status = 'complete'; S.steps[2].status = 'active';
   S.activity = 'Bringing the result back into Powermove…'; PM.AgentUI?.update();
-  let changed: any = false;
+  const liveEditsApplied: any = typeof raw === 'object' && raw?.liveEditsApplied === true;
+  let changed: any = liveEditsApplied;
   let reviewError: any = '';
-  if ((Number(PM.proj.revision) || 0) !== baseRevision) {
+  if (liveEditsApplied) {
+    // The native provider already edited through PM.Edit.apply via the guarded
+    // live tool transaction. Its final commands array is deliberately empty.
+  } else if ((Number(PM.proj.revision) || 0) !== baseRevision) {
     reviewError = 'Project changed while the autonomous agent was working, so its proposed source edits and automatic imports were left unapplied.';
   } else {
     const commands: any = result.commands;
@@ -1407,7 +1403,9 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   }
   const extensionTurns: any = await applyExtensionChanges(result.extensions);
   if (token !== S.requestToken) return;
-  checkpoint.historyId = changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null;
+  checkpoint.historyId = liveEditsApplied
+    ? (typeof raw === 'object' ? raw?.liveEditHistoryId || null : null)
+    : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
   const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
   finishSteps();
   archiveTrace();

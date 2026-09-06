@@ -493,3 +493,5 @@ export interface ExtensionModule {
   /** Optional explicit deactivate; disposables registered through `api` are always released. */
   deactivate?: () => void | Promise<void>;
 }
+
+export * from './editor-helpers';

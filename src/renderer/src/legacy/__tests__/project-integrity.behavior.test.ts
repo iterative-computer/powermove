@@ -46,7 +46,7 @@ function baseProject(PM) {
   return p;
 }
 
-it('precompose breaks parenting across the comp boundary', () => {
+it('precompose retains editable parenting across the comp boundary', () => {
   const PM = projectModel();
   const p = baseProject(PM);
   const inner = PM.mkLayer('shape', { name: 'Inner' }, p);
@@ -55,7 +55,7 @@ it('precompose breaks parenting across the comp boundary', () => {
   p.layers.push(outer, inner);
   const L = PM.precompose([inner.id], 'Group');
   const sub = p.comps[L.d.comp];
-  assert.equal(sub.layers[0].parent, null, 'inbound parenting severed');
+  assert.ok(sub.layers.find(l => l.id === sub.layers[0].parent && l.type === 'null'), 'inbound parent preserved as a rig');
   assert.equal(outer.parent, null);
 });
 

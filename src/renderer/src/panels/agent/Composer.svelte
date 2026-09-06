@@ -112,7 +112,6 @@
   ondragleave={() => { dragDepth = Math.max(0, dragDepth - 1); }}
   ondrop={drop}
 >
-  {#if mode.working}<div class="agent-compose-context">Add direction to this run<span>Enter to steer</span></div>{/if}
   {#if agentState.attachments.length}
     <div class="agent-attachment-rail">
       <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />

@@ -326,6 +326,8 @@ export function createKernel(): Kernel {
            Copy just like a focused input. Let Chromium place that text on the
            system clipboard instead of dispatching the editor's Copy Layers. */
         if ((chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
+        /* isFieldTarget also walks to an editable ancestor, so nested markup
+           inside a panel editor stays in the native text-editing context. */
         const field = isFieldTarget(event.target);
         for (const binding of kernel.bindingsFor(chord)) {
           if (field && !binding.inFields) continue;

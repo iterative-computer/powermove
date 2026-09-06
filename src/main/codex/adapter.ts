@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { discoverCodexBinary } from './env';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
+import type { NativeMcpServerConfig } from '../agent-tools/spec';
 
 export const ADAPTER_VERSION = '4';
 
@@ -41,6 +42,7 @@ export interface AutonomousArgvOptions extends CommonArgvOptions {
   extensionsDir: string;
   sessionId: string | null;
   instructions: string;
+  nativeTools?: NativeMcpServerConfig;
 }
 
 /**
@@ -82,6 +84,20 @@ function appendPromptAndImages(argv: string[], prompt: string, imagePaths: reado
   for (const imagePath of imagePaths) argv.push('--image', imagePath);
 }
 
+function nativeMcpArgv(config?: NativeMcpServerConfig): string[] {
+  if (!config) return [];
+  const argv = [
+    '--config', `mcp_servers.powermove.command=${JSON.stringify(config.command)}`,
+    '--config', `mcp_servers.powermove.args=${JSON.stringify(config.args)}`,
+    '--config', 'mcp_servers.powermove.startup_timeout_sec=10',
+    '--config', 'mcp_servers.powermove.tool_timeout_sec=120'
+  ];
+  for (const [name, value] of Object.entries(config.env).sort(([a], [b]) => a.localeCompare(b))) {
+    argv.push('--config', `mcp_servers.powermove.env.${name}=${JSON.stringify(value)}`);
+  }
+  return argv;
+}
+
 export function buildEditorArgv(options: EditorArgvOptions): string[] {
   const argv = [
     'exec',
@@ -121,6 +137,7 @@ export function buildAutonomousArgv(options: AutonomousArgvOptions): string[] {
     '--ignore-user-config',
     '--skip-git-repo-check',
     ...isolatedSessionArgv(options.disabledSkillPaths),
+    ...nativeMcpArgv(options.nativeTools),
     '--output-schema',
     options.schemaPath,
     '--output-last-message',

@@ -3,7 +3,9 @@
 </script>
 
 <script lang="ts">
+  import { animateSelection, selectionChannels } from './selection-animation';
   import Icon from './Icon.svelte';
+  import { expressionDiagnostic, EXPRESSION_NAMES } from 'powermove';
   import { inspectorContext, type EditBinding } from './context';
 
   const { api, doc, transport } = inspectorContext();
@@ -49,7 +51,7 @@
   const instance = `channel-${++instanceSequence}`;
   const prop = $derived((doc.tick.structure, doc.proj, property ?? layer.p?.[channel]));
   const value = $derived((
-    doc.tick.values,
+    doc.tick.history, doc.tick.values,
     doc.proj,
     transport.time,
     getValue
@@ -58,14 +60,15 @@
         ? PM.evP(layer, prop, transport.time, channel)
         : PM.ev(layer, channel, transport.time)
   ));
-  const scaleLinked = $derived((doc.tick.values, doc.proj, !!layer.scaleLinked));
+  const runtimeError=$derived((void value,transport.time,doc.tick.values,prop?.expr ? PM.expressionErrors?.get(prop) : null));
+  const scaleLinked = $derived((doc.tick.history, doc.tick.values, doc.proj, !!layer.scaleLinked));
   const isScale = $derived(!property && !compact && channel === 'scale.x');
   const channels = $derived(isScale ? ['scale.x', 'scale.y'] : [channel]);
   const properties = $derived((doc.tick.structure, doc.proj, channels.map((key) => property ?? layer.p?.[key])));
-  const animated = $derived((doc.tick.values, doc.proj, properties.some((p) => (p?.kf?.length ?? 0) > 0)));
-  const expression = $derived((doc.tick.values, doc.proj, properties.find((p) => p?.expr)?.expr));
+  const animated = $derived((doc.tick.history, doc.tick.values, doc.proj, properties.some((p) => (p?.kf?.length ?? 0) > 0)));
+  const expression = $derived((doc.tick.history, doc.tick.values, doc.proj, properties.find((p) => p?.expr)?.expr));
   const keyAtPlayhead = $derived((
-    doc.tick.values,
+    doc.tick.history, doc.tick.values,
     doc.proj,
     transport.time,
     properties.every((p) => !!(p && PM.hasKeyAt(layer, p, transport.time)))
@@ -106,36 +109,16 @@
   function toggleStopwatch(event: MouseEvent): void {
     event.stopPropagation();
     const time = transport.time;
-    PM.hist.do(`Animate ${label}`, () => {
-      if (!property) {
-        // Scale has one stopwatch even when its numeric axes are unlinked.
-        const disable = animated;
-        channels.forEach((key) => {
-          if (!!layer.p[key].kf.length === disable) PM.toggleStopwatch(layer, key, time);
-        });
-        return;
-      }
-      if (prop.kf.length) {
-        prop.v = getValue ? getValue(time) : PM.evP(layer, prop, time, channel);
-        prop.kf = [];
-      } else {
-        PM.setKeyOn(prop, time - layer.from, prop.v, 'linear', PM.proj.fps);
-      }
-    });
+    animateSelection(PM,layer,channels,animated,time,`Animate ${label}`);
+    PM.touch?.();
+    PM.TL?.reveal?.(layer, channels);
     refreshValues();
   }
 
   function toggleKey(event: MouseEvent): void {
     event.stopPropagation();
     const time = transport.time;
-    PM.hist.do('Keyframe', () => {
-      const remove = keyAtPlayhead;
-      properties.forEach((p, index) => {
-        const at = PM.hasKeyAt(layer, p, time);
-        if (remove) PM.removeKey(p, at);
-        else if (!at) PM.setKeyOn(p, time - layer.from, getValue ? getValue(time) : PM.evP(layer, p, time, channels[index]), 'linear', PM.proj.fps);
-      });
-    });
+    const targets=selectionChannels(PM,layer,channels);PM.hist.do('Keyframe',()=>{for(const target of targets){const p=target.prop;if(!p)continue;const at=PM.hasKeyAt(target.layer,p,time);if(keyAtPlayhead)PM.removeKey(p,at);else if(!at)PM.setKeyOn(p,time-target.layer.from,PM.evP(target.layer,p,time,target.path),'linear',PM.proj.fps);}});
     refreshValues();
   }
 
@@ -167,7 +150,6 @@
     if (property) return;
     PM.sel.chan = channel;
     PM.TL?.focusGraph?.(layer, channel);
-    PM.TL?.reveal?.(layer, channels);
   }
 
   function showGraphEditor(): void {
@@ -204,6 +186,20 @@
     const body = window.document.createElement('div');
     body.style.cssText = 'display:flex;flex-direction:column;gap:10px';
     body.append(textarea, hint);
+    const diagnostic = window.document.createElement('div');
+    diagnostic.setAttribute('role','status'); diagnostic.style.color = 'var(--accent)';
+    const check = () => { diagnostic.textContent = textarea.value.trim() ? expressionDiagnostic(textarea.value.trim()) ?? 'Expression is valid' : ''; };
+    textarea.addEventListener('input',check); check();
+    const completion = window.document.createElement('select');
+    completion.setAttribute('aria-label','Insert expression name');
+    completion.append(new Option('Insert function or value…',''));
+    EXPRESSION_NAMES.forEach(name => completion.append(new Option(name,name)));
+    completion.onchange = () => {
+      if (!completion.value) return;
+      textarea.setRangeText(completion.value,textarea.selectionStart,textarea.selectionEnd,'end');
+      completion.value=''; textarea.focus(); check();
+    };
+    body.append(completion,diagnostic);
 
     PM.modal({
       title: `Expression · ${layer.name} · ${label}`,
@@ -214,7 +210,11 @@
         {
           label: 'Apply',
           pri: true,
-          run: () => applyExpression(textarea.value.trim() || null, 'Expression')
+          run: () => {
+            const source = textarea.value.trim();
+            if (source && expressionDiagnostic(source)) { check(); textarea.focus(); return false; }
+            applyExpression(source || null, 'Expression');
+          }
         }
       ]
     });
@@ -261,7 +261,7 @@
 </script>
 
 {#snippet well(key: string, fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
-  <div class="well" class:has-kf={showDiamond} data-prefix={gutter}>
+  <div class="well" class:has-kf={showDiamond && animated} data-prefix={gutter}>
     <NumField
       {PM}
       get={getter}
@@ -275,7 +275,7 @@
       {precision}
       link={linked}
     />
-    {#if showDiamond}
+    {#if showDiamond && animated}
       <button
         type="button"
         class="kf"
@@ -315,6 +315,14 @@
     onpointerdown={selectChannel}
   >
     <Row {label} pair={isScale}>
+      {#snippet left()}
+        <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={keyAtPlayhead}
+          aria-label={`${animated ? 'Remove animation from' : 'Animate'} ${label}`}
+          aria-pressed={animated} title={animated ? `Remove animation from ${label} · keep current value` : `Animate ${label}`}
+          onclick={toggleStopwatch}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg>
+        </button>
+      {/snippet}
       {@render well(channel, isScale ? 'Scale X' : label, edit, () => value, !!prop?.expr, isScale ? 'X' : prefix)}
       {#if isScale}
         {@render well('scale.y', 'Scale Y', scaleYEdit, () => PM.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
@@ -329,6 +337,8 @@
     </Row>
   </div>
 {/if}
+
+{#if runtimeError}<p role="status" style="color:var(--danger,#ef8989);font-size:11px;margin:0 8px 6px">{runtimeError}</p>{/if}
 
 <style>
   .link-axes {

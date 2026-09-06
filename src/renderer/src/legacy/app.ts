@@ -1,3 +1,4 @@
+import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import type { PMRegistry } from './registry';
@@ -214,12 +215,15 @@ function hydrate(p: any) {
       if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
       L.from = Math.max(0, num(L.from, 0)); L.dur = Math.max(.01, num(L.dur, 5));
       if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
-      L.on = L.on !== false; L.lock = !!L.lock; delete L.solo; L.shy = !!L.shy;
+      L.on = isProperty(L.on) ? L.on : L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
       L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
-      L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = !!L.mblur;
+      L.locked_intent = L.locked_intent || {}; L.blend = L.blend || 'normal'; L.mblur = isProperty(L.mblur) ? L.mblur : !!L.mblur;
       if (L.type === 'audio') PM.Audio.normalizeLayer(L);
       if (L.parent === L.id || (typeof L.parent === 'string' && !container.layers.some((o: any) => o.id === L.parent))) L.parent = null;
       const fresh = PM.mkLayer(L.type || 'null', {}, container);
+      if (L.type === 'text') for (const key of ['boxWidth', 'boxHeight']) if (!isProperty(L.d[key])) L.d[key] = fresh.d[key];
+      for (const [key, value] of Object.entries(L.d)) if (canAnimateContent(L, key) && isProperty(value)) sanitizeProp(value, { v: isProperty(fresh.d[key]) ? fresh.d[key].v : fresh.d[key] ?? (value as any).v }, -L.from);
+      for (const key of ['blend', 'mblur', 'on']) if (isProperty(L[key])) sanitizeProp(L[key], { v: key === 'blend' ? 'normal' : key === 'on' }, -L.from);
       Object.keys(fresh.p).forEach(k => {
         if (!L.p[k] || typeof L.p[k] !== 'object') L.p[k] = fresh.p[k];
         sanitizeProp(L.p[k], fresh.p[k], -L.from);
@@ -233,7 +237,8 @@ function hydrate(p: any) {
         .filter((f: any) => f && typeof f === 'object' && typeof f.type === 'string')
         .map((f: any) => (PM.FX && PM.FX[f.type] ? (f.missing ? (({ missing, ...rest }: any) => rest)(f) : f) : { ...f, missing: true }));
       L.fx.forEach((f: any) => {
-        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, -L.from); f.on = f.on !== false;
+        f.id = f.id || PM.uid('fx'); f.p = sanitizeLooseParams(f.p, -L.from); f.on = isProperty(f.on) ? f.on : f.on !== false;
+        if (isProperty(f.on)) sanitizeProp(f.on, { v: true }, -L.from);
         const definition = PM.FX?.[f.type];
         for (const param of definition?.params || []) {
           if (!f.p[param.k] || typeof f.p[param.k] !== 'object') f.p[param.k] = PM.P(param.def);
@@ -247,9 +252,12 @@ function hydrate(p: any) {
       L.masks = Array.isArray(L.masks) ? L.masks.filter((m: any) => m && typeof m === 'object' && m.p && typeof m.p === 'object') : [];
       L.masks.forEach((m: any) => {
         m.id = typeof m.id === 'string' && m.id ? m.id : PM.uid('K');
-        if (!PM.MASK_SHAPES.includes(m.shape)) m.shape = 'rect';
-        if (m.mode !== 'subtract') m.mode = 'add';
-        m.on = m.on !== false;
+        if (isProperty(m.shape)) sanitizeProp(m.shape, { v: 'rect' }, -L.from);
+        else if (!PM.MASK_SHAPES.includes(m.shape)) m.shape = 'rect';
+        if (isProperty(m.mode)) sanitizeProp(m.mode, { v: 'add' }, -L.from);
+        else if (m.mode !== 'subtract') m.mode = 'add';
+        m.on = isProperty(m.on) ? m.on : m.on !== false;
+        if (isProperty(m.on)) sanitizeProp(m.on, { v: true }, -L.from);
         const freshM = PM.mkMask(m.shape, container);
         Object.keys(freshM.p).forEach(k => {
           if (!m.p[k] || typeof m.p[k] !== 'object') m.p[k] = freshM.p[k];
@@ -258,12 +266,6 @@ function hydrate(p: any) {
         Object.keys(m.p).forEach(k => { if (!(k in freshM.p)) delete m.p[k]; });
       });
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
-      if (L.type === 'text') {
-        for (const key of ['boxWidth', 'boxHeight']) {
-          if (!L.d[key] || typeof L.d[key] !== 'object' || Array.isArray(L.d[key])) L.d[key] = fresh.d[key];
-          sanitizeProp(L.d[key], fresh.d[key], -L.from);
-        }
-      }
       if (L.type === 'shader') {
         L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
         PM.syncShaderUniforms?.(L);
@@ -271,8 +273,8 @@ function hydrate(p: any) {
       if (L.type === 'extension') {
         L.d.definition = typeof L.d.definition === 'string' ? L.d.definition : '';
         L.d.version = Math.max(1, Math.round(num(L.d.version, 1)));
-        L.d.w = PM.clamp(num(L.d.w, container.w), 1, 16384);
-        L.d.h = PM.clamp(num(L.d.h, container.h), 1, 16384);
+        if (!isProperty(L.d.w)) L.d.w = PM.clamp(num(L.d.w, container.w), 1, 16384);
+        if (!isProperty(L.d.h)) L.d.h = PM.clamp(num(L.d.h, container.h), 1, 16384);
         L.d.params = sanitizeLooseParams(L.d.params, -L.from);
         L.d.data = sanitizeJson(L.d.data) || {};
       }
@@ -730,13 +732,41 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     source.id = association?.projectId || PM.uid('project');
     const project = hydrate(source);
     await restoreProjectFileMedia(o, PM.MediaStore);
+    // File opens receive a fresh document ID to keep independent copies safe.
+    // Recover the most recent layout for this file, rather than reverting to
+    // the older workspace embedded the last time its content was saved.
+    const filePath = association?.path;
+    const rememberedWorkspace = filePath && fileState().path === filePath
+      ? PM.WS.snapshot()
+      : filePath ? PM.Projects.list()
+        .map((item: any) => PM.Projects.getState(item.id))
+        .filter((session: any) => session?.file?.path === filePath && session?.workspace?.layout?.docks)
+        .sort((a: any, b: any) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0))[0]?.workspace
+        : undefined;
+    // Native file opens intentionally get a fresh document identity. Carry the
+    // latest local conversation archive forward only for this exact file path.
+    // Flush first so opening the active file also retains a just-typed draft.
+    PM.AgentUI?.flushThreads?.();
+    const previousProjectId = filePath && fileState().path === filePath
+      ? PM.proj.id
+      : filePath ? PM.Projects.list()
+        .map((item: any) => ({ id: item.id, session: PM.Projects.getState(item.id) }))
+        .filter((item: any) => item.session?.file?.path === filePath)
+        .sort((a: any, b: any) => (b.session.lastActiveAt || 0) - (a.session.lastActiveAt || 0))[0]?.id
+        : undefined;
+    const archive = previousProjectId && PM.store.get(`agentThreads.${previousProjectId}`, null);
+    if (archive && PM.store.set(`agentThreads.${project.id}`, archive) === false) {
+      throw new Error('Could not restore agent threads: project storage is unavailable or full');
+    }
     switchProject(project);
     const state = fileState(project.id);
     state.path = association?.path;
     state.savedHash = association ? await projectFingerprint(JSON.stringify(PM.proj)) : undefined;
     rememberFile(project.id, state);
     await refreshFileDirty();
-    if (o.ws?.layout?.docks) PM.WS.restoreSnapshot(o.ws);
+    const workspace = rememberedWorkspace || o.ws;
+    if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
+    captureProjectSession();
     PM.toast('Opened ' + file.name);
   } catch (e: any) { PM.toast('Could not open project: ' + e.message, 4500); }
 }

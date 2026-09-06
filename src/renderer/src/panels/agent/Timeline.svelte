@@ -5,6 +5,7 @@
   import { stepIn } from './motion';
   import { revealText } from './text-reveal';
   import ToolActivity from './ToolActivity.svelte';
+  import WorkingTimer from './WorkingTimer.svelte';
 
   let { PM: _PM }: { PM: Record<string, any> } = $props();
 
@@ -23,6 +24,10 @@
      is already flowing. One shimmer line covers the gap. */
   const fallback = $derived(rows.length === 0 ? String(agentState.activity || '') : '');
 </script>
+
+{#if agentState.phase === 'running' && agentState.workingStartedAt !== null}
+  <WorkingTimer startedAt={agentState.workingStartedAt} />
+{/if}
 
 {#if planSteps.length}
   <div class="agent-timeline">

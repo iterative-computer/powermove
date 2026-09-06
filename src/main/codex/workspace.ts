@@ -127,6 +127,23 @@ export async function prepareAgentWorkspace(
   });
 
   const root = agentWorkspaceRoot(userData, req.projectId);
+  const checkpointPath = `${sessionPathFor(root, authority, req.threadId, req.provider ?? 'chatgpt')}.checkpoint.json`;
+  let checkpoint: ExtensionStage | null = null;
+  try {
+    const saved = JSON.parse(await readFile(checkpointPath, 'utf8')) as ExtensionStage;
+    if (!saved || typeof saved.runId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(saved.runId)
+      || saved.projectId !== req.projectId || saved.liveDirectory !== options.extensionsDir
+      || saved.stagingDirectory !== path.join(root, '.powermove', 'extension-runs', saved.runId)
+      || saved.historyRoot !== path.join(userData, 'Agent Change History', safeAgentComponent(req.projectId))
+      || typeof saved.baselineRootHash !== 'string' || !saved.baselineHashes) {
+      throw new Error('The saved agent checkpoint is invalid; its files have been preserved.');
+    }
+    await readdir(saved.stagingDirectory);
+    checkpoint = saved;
+    runId = saved.runId;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const inputsDirectory = path.join(root, 'inputs');
   const apiPackDirectory = path.join(root, 'powermove-api');
   const attachmentsDirectory = path.join(inputsDirectory, 'attachments');
@@ -149,7 +166,7 @@ export async function prepareAgentWorkspace(
     mkdir(extensionRunsDirectory, { recursive: true }),
     mkdir(runDirectory, { recursive: true })
   ]);
-  const extensionStage = await prepareExtensionStage({
+  const extensionStage = checkpoint ?? await prepareExtensionStage({
     liveDirectory: options.extensionsDir,
     stagingDirectory: extensionsDir,
     historyRoot,
@@ -208,6 +225,15 @@ export async function discardPartialRun(workspace: Pick<AgentWorkspace, 'runDire
   ]);
 }
 
-export async function discardExtensionStage(workspace: Pick<AgentWorkspace, 'stagingDirectory'>): Promise<void> {
+export async function preserveCancelledRun(workspace: AgentWorkspace): Promise<void> {
+  const file = `${workspace.sessionPath}.checkpoint.json`;
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const { liveDirectory, stagingDirectory, historyRoot, projectId, runId, baselineHashes, baselineRootHash } = workspace;
+  await writeFile(temporary, JSON.stringify({ liveDirectory, stagingDirectory, historyRoot, projectId, runId, baselineHashes, baselineRootHash }), { mode: 0o600 });
+  await rename(temporary, file);
+}
+
+export async function discardExtensionStage(workspace: Pick<AgentWorkspace, 'stagingDirectory'> & { sessionPath?: string }): Promise<void> {
   await rm(workspace.stagingDirectory, { recursive: true, force: true });
+  if (workspace.sessionPath) await rm(`${workspace.sessionPath}.checkpoint.json`, { force: true });
 }

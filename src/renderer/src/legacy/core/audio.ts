@@ -1,3 +1,4 @@
+import { evaluatedValue, isProperty, resolveContent } from './content-properties';
 /* Ported from js/core/audio.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -36,7 +37,7 @@ function audioLayers(project: any = PM.proj) {
   const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any) => {
     if (!comp || !Array.isArray(comp.layers) || depth > MAX_PRECOMP_DEPTH) return;
     for (const layer of comp.layers) {
-      if (!layer || layer.on === false) continue;
+      if (!layer || layer.on === false || (comp.layers.some((l: any) => l.solo) && !layer.solo)) continue;
       const naturalStart: any = offset + Math.max(0, finite(layer.from));
       const start: any = Math.max(windowStart, naturalStart);
       const end: any = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
@@ -53,9 +54,27 @@ function audioLayers(project: any = PM.proj) {
         });
         continue;
       }
+      if (layer.type === 'video' && layer.d?.embeddedAudio === true && !evaluatedValue(PM,layer,layer.d.timeRemap,PM.time,'c.timeRemap')) {
+        output.push({
+          ...layer,
+          type: 'audio',
+          id: `${itemPath}:embedded-audio`,
+          d: {
+            asset: layer.d.asset,
+            trim: Math.max(0, finite(evaluatedValue(PM, layer, layer.d.trim, PM.time, 'c.trim'))),
+            gain: 1,
+            fadeIn: 0,
+            fadeOut: 0,
+          },
+          _audioSourceId: layer.id,
+          _audioWindowStart: start,
+          _audioWindowEnd: end,
+        });
+        continue;
+      }
       if (layer.type !== 'precomp' || !layer.d || !layer.d.comp) continue;
       const nested: any = root.comps && root.comps[layer.d.comp];
-      visit(nested, naturalStart, start, end, itemPath, depth + 1);
+      if (!evaluatedValue(PM,layer,layer.d.timeRemap,PM.time,'c.timeRemap')) visit(nested, naturalStart - Number(evaluatedValue(PM,layer,layer.d.trim,PM.time,'c.trim') || 0), start, end, itemPath, depth + 1);
     }
   };
   visit(project, 0, 0, Infinity, '', 0);
@@ -88,10 +107,10 @@ function normalizeLayer(layer: any) {
   const data: any = layer.d && typeof layer.d === 'object' ? layer.d : {};
   layer.d = {
     asset: typeof data.asset === 'string' && data.asset ? data.asset : null,
-    trim: Math.max(0, finite(data.trim)),
-    gain: clamp(finite(data.gain, 1), 0, 4),
-    fadeIn: Math.max(0, finite(data.fadeIn)),
-    fadeOut: Math.max(0, finite(data.fadeOut)),
+    trim: isProperty(data.trim) ? data.trim : Math.max(0, finite(data.trim)),
+    gain: isProperty(data.gain) ? data.gain : clamp(finite(data.gain, 1), 0, 4),
+    fadeIn: isProperty(data.fadeIn) ? data.fadeIn : Math.max(0, finite(data.fadeIn)),
+    fadeOut: isProperty(data.fadeOut) ? data.fadeOut : Math.max(0, finite(data.fadeOut)),
   };
   layer.p = {};
   layer.fx = [];
@@ -168,13 +187,13 @@ function activeAssetIds() {
 
 function decodedUsage() {
   if (!PM.assets?.map) return { bytes: 0, entries: 0 };
-  const decoded: any = [...PM.assets.map.values()].filter((asset: any) => asset && asset.kind === 'audio' && asset.audioBuffer);
+  const decoded: any = [...PM.assets.map.values()].filter((asset: any) => asset && asset.audioBlob && asset.audioBuffer);
   return { bytes: decoded.reduce((sum: any, asset: any) => sum + decodedBytes(asset.audioBuffer), 0), entries: decoded.length };
 }
 
 function trimDecodedCache(targetBytes: any = MAX_DECODED_BYTES) {
   if (!PM.assets || !PM.assets.map) return;
-  const decoded: any = [...PM.assets.map.values()].filter((asset: any) => asset && asset.kind === 'audio' && asset.audioBuffer);
+  const decoded: any = [...PM.assets.map.values()].filter((asset: any) => asset && asset.audioBlob && asset.audioBuffer);
   let total: any = decoded.reduce((sum: any, asset: any) => sum + decodedBytes(asset.audioBuffer), 0);
   if (total <= targetBytes || decoded.length < 2) return;
   const active: any = activeAssetIds();
@@ -191,7 +210,7 @@ function trimDecodedCache(targetBytes: any = MAX_DECODED_BYTES) {
 }
 
 async function decodeAsset(asset: any) {
-  if (!asset || asset.kind !== 'audio') throw new Error('Audio asset is unavailable');
+  if (!asset || !asset.audioBlob) throw new Error('Audio asset is unavailable');
   if (asset.audioBuffer) {
     asset.audioUsedAt = Date.now();
     return asset.audioBuffer;
@@ -212,7 +231,8 @@ async function decodeAsset(asset: any) {
       }
       if (asset.audioDisposed || asset.audioToken !== token) return null;
       asset.audioBuffer = buffer;
-      asset.dur = buffer.duration;
+      if (asset.kind === 'video') asset.audioDur = buffer.duration;
+      else asset.dur = buffer.duration;
       asset.channels = buffer.numberOfChannels || 1;
       asset.sampleRate = buffer.sampleRate || 0;
       asset.peaks = peakEnvelope(buffer);
@@ -267,7 +287,7 @@ async function prepareAsset({ id, name, blob, meta = {} }: any) {
 }
 
 function disposeAsset(asset: any) {
-  if (!asset || asset.kind !== 'audio') return;
+  if (!asset || (asset.kind !== 'audio' && !asset.audioBlob)) return;
   asset.audioDisposed = true;
   asset.audioToken = Symbol('disposed-audio-asset');
   for (const [id, voice] of state.voices) if (voice.assetId === asset.id) stopVoice(id);
@@ -278,7 +298,8 @@ function disposeAsset(asset: any) {
 }
 
 function gainAt(layer: any, localTime: any, audibleDuration: any) {
-  const data: any = layer && layer.d || {};
+  if (evaluatedValue(PM, layer, layer.on, finite(layer.from) + finite(localTime), 'l.on') === false) return 0;
+  const data: any = resolveContent(PM, layer, finite(layer.from) + finite(localTime));
   const base: any = clamp(finite(data.gain, 1), 0, 4);
   const duration: any = Math.max(0, finite(audibleDuration, finite(layer && layer.dur)));
   const local: any = clamp(finite(localTime), 0, duration);
@@ -301,13 +322,18 @@ function envelope(layer: any, localStart: any, duration: any, samples: any = 96,
 /* gainAt() is piecewise linear. Scheduling only the exact slope changes keeps a
    100 ms fade at 100 ms even when the clip lasts for minutes. */
 function envelopePoints(layer: any, localStart: any, duration: any, audibleDuration: any) {
-  const data: any = layer && layer.d || {};
+  const data: any = resolveContent(PM, layer, finite(layer.from) + finite(localStart));
   const full: any = Math.max(0, finite(audibleDuration, finite(layer && layer.dur)));
   const start: any = clamp(finite(localStart), 0, full);
   const end: any = clamp(start + Math.max(0, finite(duration)), start, full);
   const fadeIn: any = Math.max(0, finite(data.fadeIn));
   const fadeOut: any = Math.max(0, finite(data.fadeOut));
   const times: any = [start, end];
+  if (isProperty(layer.on) || ['gain', 'fadeIn', 'fadeOut'].some(key => isProperty(layer.d?.[key]))) {
+    const step = 1 / Math.max(30, Number(PM.proj?.fps) || 30);
+    for (let local = start + step; local < end; local += step) times.push(local);
+    for (const key of ['gain', 'fadeIn', 'fadeOut']) for (const frame of layer.d?.[key]?.kf || []) if (frame.t > start && frame.t < end) times.push(frame.t);
+  }
   if (fadeIn > start + 1e-6 && fadeIn < end - 1e-6) times.push(fadeIn);
   const fadeOutStart: any = full - fadeOut;
   if (fadeOut > 0 && fadeOutStart > start + 1e-6 && fadeOutStart < end - 1e-6) times.push(fadeOutStart);
@@ -328,7 +354,7 @@ function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any) {
   const windowStart: any = Math.max(layerStart, finite(layer._audioWindowStart, layerStart));
   const windowEnd: any = Math.min(layerStart + layerDuration, finite(layer._audioWindowEnd, layerStart + layerDuration));
   const sourceDuration: any = asset.audioBuffer ? asset.audioBuffer.duration : finite(asset.dur);
-  const trim: any = Math.max(0, finite(layer.d.trim));
+  const trim: any = Math.max(0, finite(resolveContent(PM, layer, Math.max(layerStart, finite(rangeStart))).trim));
   const audibleDuration: any = Math.min(layerDuration, Math.max(0, sourceDuration - trim));
   const clipStart: any = windowStart;
   const clipEnd: any = Math.min(windowEnd, layerStart + audibleDuration);
@@ -346,7 +372,7 @@ function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any) {
 function voiceSignature(layer: any, asset: any) {
   const data: any = layer.d || {};
   return [asset.id, asset.audioToken && String(asset.audioToken), finite(layer.from), finite(layer.dur),
-    finite(data.trim), finite(data.gain, 1), finite(data.fadeIn), finite(data.fadeOut)].join('|');
+    JSON.stringify([layer.on, data.trim, data.gain, data.fadeIn, data.fadeOut])].join('|');
 }
 
 function publishState() {
@@ -458,7 +484,7 @@ function voiceDrift(voice: any, layer: any, time: any, ctx: any) {
     return Math.abs(audioUntilStart - transportUntilStart);
   }
   const audioSourceTime: any = voice.sourceOffset + Math.max(0, ctx.currentTime - voice.scheduledAt);
-  const transportSourceTime: any = Math.max(0, finite(layer.d && layer.d.trim) + time - finite(layer.from));
+  const transportSourceTime: any = Math.max(0, finite(resolveContent(PM, layer, time).trim) + time - finite(layer.from));
   return Math.abs(audioSourceTime - transportSourceTime);
 }
 
@@ -544,7 +570,7 @@ function drawWaveform(ctx: any, layer: any, options: any = {}) {
   const right: any = x + width;
   if (!(right > left && height > 2)) return false;
   if (!asset || !asset.peaks || !asset.peaks.length) {
-    if (asset && asset.kind === 'audio' && !asset.audioDecoding && !(asset.audioRetryAt > Date.now())) {
+    if (asset && asset.audioBlob && !asset.audioDecoding && !(asset.audioRetryAt > Date.now())) {
       decodeAsset(asset).catch(() => {});
     }
     ctx.fillStyle = options.placeholderColor || 'rgba(255,255,255,.22)';

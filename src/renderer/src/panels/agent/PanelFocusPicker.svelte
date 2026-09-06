@@ -7,6 +7,7 @@
   let trigger: HTMLButtonElement;
   let popup: HTMLDivElement;
   let open = $state(false);
+  let dismissByPress = false;
   let layoutVersion = $state(0);
   let left = $state(0);
   let top = $state(0);
@@ -41,8 +42,10 @@
     popup.hidePopover();
     trigger.focus();
   }
-  function toggle(): void {
-    if (open) { close(); return; }
+  function toggle(event: MouseEvent): void {
+    const dismiss = open || (event.detail > 0 && dismissByPress);
+    dismissByPress = false;
+    if (dismiss) { close(); return; }
     const rect = trigger.getBoundingClientRect();
     left = Math.max(8, Math.min(rect.left, window.innerWidth - 256));
     const height = Math.min(300, 88 + options.length * 28);
@@ -56,7 +59,9 @@
 </script>
 
 <div class="panel-focus-row" aria-label="Focused panels">
-  <button class="panel-focus-trigger" type="button" bind:this={trigger} aria-label="Choose focused panels" aria-haspopup="dialog" aria-expanded={open} {disabled} onclick={toggle}>
+  <button class="panel-focus-trigger" type="button" bind:this={trigger} aria-label="Choose focused panels" aria-haspopup="dialog" aria-expanded={open} {disabled} onpointerdown={() => { dismissByPress = open; }}
+      onpointercancel={() => { dismissByPress = false; }}
+      onclick={toggle}>
     <span>{focused.length === 1 ? focused[0]?.title : focused.length ? `${focused.length} panels` : agentState.scope === 'composition' ? 'Composition content' : 'All panels'}</span>
   </button>
 </div>
@@ -70,7 +75,7 @@
   aria-label="Panel focus"
   style:left={`${left}px`}
   style:top={`${top}px`}
-  ontoggle={(event) => { open = (event as ToggleEvent).newState === 'open'; }}
+  onbeforetoggle={(event) => { open = (event as ToggleEvent).newState === 'open'; }}
   onkeydown={(event) => { event.stopPropagation(); if (event.key === 'Escape') { event.preventDefault(); close(); } }}
 >
   <div class="panel-focus-heading"><span>Focus on panels</span></div>

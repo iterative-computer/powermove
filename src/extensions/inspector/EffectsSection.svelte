@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { inspectorContext, type EditBinding } from './context';
+  import { evaluatedValue } from 'powermove';
+  import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
   /* App-local clipboard survives layer/inspector remounts without replacing the user's system clipboard. */
   import { copyEffects, effectPasteCommands } from './effect-clipboard';
@@ -9,7 +11,7 @@
   import { inspectorRefresh } from './refresh.svelte.js';
 
   const { api, doc, transport } = inspectorContext();
-  const { ColorField, Row, Section } = api.ui.controls;
+  const { ColorField, Section, ToggleField } = api.ui.controls;
 
   let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
 
@@ -33,37 +35,6 @@
         preserveHandEdits: false
       })
     };
-  }
-
-  function parameterAnimated(property: any): boolean {
-    doc.tick.values;
-    doc.proj;
-    return (property?.kf?.length ?? 0) > 0;
-  }
-
-  function parameterKeyAtPlayhead(property: any): boolean {
-    doc.tick.values;
-    doc.proj;
-    transport.time;
-    return !!PM.hasKeyAt(layer, property, transport.time);
-  }
-
-  function toggleParameterKeyframe(event: MouseEvent, parameter: any, property: any): void {
-    event.stopPropagation();
-    const time = transport.time;
-    PM.hist.do('Keyframe', () => {
-      const key = PM.hasKeyAt(layer, property, time);
-      if (key) PM.removeKey(property, key);
-      else PM.setKeyOn(
-        property,
-        time - layer.from,
-        parameterAnimated(property) ? PM.evP(layer, property, time, parameter.k) : property.v,
-        'linear',
-        PM.proj.fps
-      );
-    });
-    PM.Inspector?.refresh?.();
-    PM.invalidate?.();
   }
 
   function isOpen(effect: any): boolean {
@@ -97,10 +68,12 @@
     return () => document.removeEventListener('pointerdown', clearFromOutside, true);
   });
 
+  const enabled = (effect: any) => (doc.tick.values, doc.proj, transport.time, evaluatedValue(PM, layer, effect.on, transport.time, `${effect.id}.$enabled`));
+
   function setEnabled(event: MouseEvent, effect: any): void {
     event.stopPropagation();
     PM.Edit.apply(
-      { type: 'set_effect', target: layer.id, effect: effect.id, patch: { enabled: !effect.on } },
+      { type: 'set_effect', target: layer.id, effect: effect.id, patch: { enabled: !enabled(effect) } },
       { label: 'Toggle effect', origin: 'inspector' }
     );
     PM.invalidate?.();
@@ -279,10 +252,10 @@
         <span class="k fx-label">{definition.label}</span>
         <button
           type="button"
-          class:on={effect.on}
+          class:on={enabled(effect)}
           class="stopwatch"
-          aria-label={`${effect.on ? 'Disable' : 'Enable'} ${definition.label}`}
-          aria-pressed={!!effect.on}
+          aria-label={`${enabled(effect) ? 'Disable' : 'Enable'} ${definition.label}`}
+          aria-pressed={!!enabled(effect)}
           onclick={(event) => setEnabled(event, effect)}
         ><Icon name="eye" /></button>
         <button
@@ -296,31 +269,18 @@
 
       {#if expanded}
         <div class="grp fx-params" id={paramsId}>
+          <AnimatedRow {PM} {layer} path={`${effect.id}.$enabled`} label="Enabled">
+            <ToggleField {PM} get={() => enabled(effect)} edit={propertyEdit(`${effect.id}.$enabled`, 'Enable effect')} label="Enabled" />
+          </AnimatedRow>
           {#each definition.params ?? [] as parameter (parameter.k)}
             {@const property = effect.p?.[parameter.k]}
             {#if property}
               {#if parameter.type === 'color'}
-                <Row label={parameter.label}>
-                  <div class="color-parameter">
-                    <ColorField
-                      {PM}
-                      get={() => (doc.tick.values, doc.proj, PM.evP(layer, property, transport.time, parameter.k))}
-                      edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)}
-                      label={parameter.label}
-                    />
-                    <button
-                      type="button"
-                      class="kf"
-                      class:track={parameterAnimated(property)}
-                      class:on={parameterAnimated(property) && parameterKeyAtPlayhead(property)}
-                      title={!parameterAnimated(property) ? `Animate ${parameter.label}` : parameterKeyAtPlayhead(property) ? 'Remove keyframe' : 'Add keyframe'}
-                      aria-label={!parameterAnimated(property) ? `Animate ${parameter.label}` : parameterKeyAtPlayhead(property) ? `Remove keyframe for ${parameter.label}` : `Add keyframe for ${parameter.label}`}
-                      aria-pressed={parameterAnimated(property)}
-                      data-key={`${effect.id}.${parameter.k}`}
-                      onclick={(event) => toggleParameterKeyframe(event, parameter, property)}
-                    ><i aria-hidden="true"></i></button>
-                  </div>
-                </Row>
+                <AnimatedRow {PM} {layer} path={`${effect.id}.${parameter.k}`} label={parameter.label}>
+                  <ColorField {PM}
+                    get={() => (doc.tick.values, doc.proj, PM.evP(layer, property, transport.time, parameter.k))}
+                    edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)} label={parameter.label} />
+                </AnimatedRow>
               {:else}
                 <ChannelRow
                   {PM}
@@ -386,13 +346,4 @@
     text-align: left;
   }
 
-  .color-parameter {
-    position: relative;
-    width: 100%;
-    padding-right: 24px;
-  }
-
-  .color-parameter :global(.color-field) {
-    width: 100%;
-  }
 </style>

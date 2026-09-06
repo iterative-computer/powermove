@@ -1,3 +1,6 @@
+import { pathValues, tracePath } from '../core/vector-paths';
+import { sourceTime } from '../core/retiming';
+import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { extensionLayerFragment } from '../../kernel/extension-layers';
@@ -13,8 +16,8 @@ export function paramUniformName(pd: { k: string; type?: string }, index: number
 }
 
 /** Missing placeholders preserve project data but have no shader to render. */
-export function hasRenderableEffects(effects: Array<{ on?: boolean; missing?: boolean }>): boolean {
-  return effects.some((effect) => effect.on && effect.missing !== true);
+export function hasRenderableEffects(effects: Array<{ on?: boolean; missing?: boolean }>, PM?: any, layer?: any, time?: number): boolean {
+  return effects.some((effect: any) => (PM ? evaluatedValue(PM, layer, effect.on, time!, `${effect.id}.$enabled`) : effect.on) && effect.missing !== true);
 }
 
 /** Evaluate a persisted effect channel, falling back when an extension adds a
@@ -505,7 +508,7 @@ function meshExtensionQuad(L: any, T: any, w: number, h: number, targetW: number
 
 function contentQuad(L: any, T: any, W: any, H: any) {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
-  const d = L.d;
+  const d = resolveContent(PM, L, T);
   if (L.type === 'solid') {
     return { solid: PM.hex2rgb(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
@@ -517,21 +520,21 @@ function contentQuad(L: any, T: any, W: any, H: any) {
     const ss = continuousRasterScale(scaledWorld(L, T, W, H));
     const r = PM.raster(L, ss, T);
     const tex = texFor('r:' + r.key, r.cv, { version: 1 });
-    const ax = L.type === 'shape' ? r.w / 2 : r.anchorX;
-    const ay = L.type === 'shape' ? r.h / 2 : r.anchorY;
+    const ax = L.type === 'shape' && !L.d.paths?.length ? r.w / 2 : r.anchorX;
+    const ay = L.type === 'shape' && !L.d.paths?.length ? r.h / 2 : r.anchorY;
     return { tex, w: r.w, h: r.h, ax, ay, uv: [0, 0, 1, 1] };
   }
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
     if (!a) return null;
-    let el = a.el, sw = a.w || 1, sh = a.h || 1;
+    let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || a.el, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
-      const vt = PM.clamp((T - L.from) * (d.speed || 1) + (d.trim || 0), 0, Math.max(0, a.dur - .04));
+      const vt = PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
       if (!PM.playing && Math.abs(el.currentTime - vt) > .02) { try { el.currentTime = vt; } catch (e) { } }
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
-    const videoVersion = L.type === 'video' ? videoTextureVersion(el) : 1;
-    const tex = texFor('a:' + a.id, el, { version: videoVersion });
+    const videoVersion = L.type === 'video' ? (el===a.el?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
+    const tex = texFor('a:' + a.id + (el===a.el?'':':'+L.id+'@'+T), el, { version: videoVersion });
     const bw = d.w || W, bh = d.h || H;
     let uv = [0, 0, 1, 1];
     if (d.fit === 'cover' || d.fit === 'contain') {
@@ -643,7 +646,7 @@ function contentQuad(L: any, T: any, W: any, H: any) {
     bind(f); clear(0, 0, 0, 0);
     pmScopePush(sub);
     try {
-      const inner = GL.renderProject(sub, T - L.from, targetW, targetH, { transparent: true });
+      const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH, { transparent: true });
       /* blit the nested result into our FBO so ownership stays with this level */
       bind(f);
       const p = program('copyA', PM.FRAG_DRAW);
@@ -703,7 +706,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
   for (const fx of L.fx) {
     /* `missing` marks an effect whose type is not registered (the extension
        providing it is off or gone). Skip it and keep its data intact. */
-    if (!fx.on || fx.missing) continue;
+    if (!evaluatedValue(PM, L, fx.on, T, `${fx.id}.$enabled`) || fx.missing) continue;
     const def = PM.FX[fx.type];
     if (!def) continue;
     const key = 'fx:' + fx.type;
@@ -738,11 +741,36 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
 /* ── masks ─────────────────────────────────────────────── */
 /* Rasterize analytic mask coverage (comp px → layer px via the inverse world
    matrix) and multiply it into the layer buffer. Runs before effects, AE-style. */
+function applyPathMasks(L:any,T:number,srcF:any,W:number,H:number,masks:any[]) {
+  const cv=document.createElement('canvas');cv.width=W;cv.height=H;const ctx=cv.getContext('2d')!;
+  const mode=(m:any)=>evaluatedValue(PM,L,m.mode,T,`m.${m.id}.mode`);
+  if(!masks.some(m=>mode(m)!=='subtract')){ctx.fillStyle='white';ctx.fillRect(0,0,W,H);}
+  const world=scaledWorld(L,T,W,H);
+  for(const m of masks){const item=document.createElement('canvas');item.width=W;item.height=H;const c=item.getContext('2d')!;c.transform(...world);c.fillStyle='white';
+    const ev=(key:string)=>Number(PM.evP(L,m.p[key],T,`m.${m.id}.${key}`))||0;
+    c.translate(ev('x'),ev('y'));c.rotate(ev('rotation')*Math.PI/180);
+    if(m.path){const v=pathValues(PM,L,m.path,T,`mp.${m.id}`);c.translate(v.x,v.y);c.rotate(v.rotation*Math.PI/180);c.scale(v.scaleX/100,v.scaleY/100);tracePath(c,{...v,closed:true,trimStart:0,trimEnd:100});}
+    else{c.beginPath();if(evaluatedValue(PM,L,m.shape,T,`m.${m.id}.shape`)==='ellipse')c.ellipse(0,0,Math.abs(ev('w'))/2,Math.abs(ev('h'))/2,0,0,Math.PI*2);else c.rect(-ev('w')/2,-ev('h')/2,ev('w'),ev('h'));}
+    c.fill();ctx.globalCompositeOperation=mode(m)==='subtract'?'destination-out':'source-over';ctx.filter=`blur(${Math.max(0,ev('feather'))*Math.hypot(world[0],world[1])/2}px)`;ctx.drawImage(item,0,0);
+  }
+  const out=grab(W,H);bind(out);clear();const p=program('pathMaskApply',PM.GLSL_PRE+'uniform sampler2D u_cov; void main(){o=texture(u_tex,v_st)*texture(u_cov,v_uv).a;}');
+  const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,texFor('path-mask:'+L.id,cv));setI(p,'u_cov',1);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);return out;
+}
+function applyTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:any) {
+  const source=proj.layers.find((l:any)=>l.id===L.matteSource);
+  const mode=evaluatedValue(PM,L,L.matteMode,T,'l.matteMode')||'alpha';
+  if(!source || (opt.matteDepth||0)>=8)return srcF;
+  const matte=GL.renderProject({...proj,layers:[{...source,on:true}]},T,W,H,{...opt,transparent:true,mattePass:true,matteDepth:(opt.matteDepth||0)+1,matteProject:proj});
+  const out=grab(W,H);bind(out);clear();const p=program('trackMatte',PM.GLSL_PRE+'uniform sampler2D u_matte; uniform int u_luma; uniform int u_invert; void main(){vec4 m=texture(u_matte,v_st);float a=u_luma==1?dot(m.rgb,vec3(.2126,.7152,.0722)):m.a;if(u_invert==1)a=1.-a;o=texture(u_tex,v_st)*clamp(a,0.,1.);}');
+  const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,matte.tex);setI(p,'u_matte',1);setI(p,'u_luma',mode.startsWith('luma')?1:0);setI(p,'u_invert',mode.endsWith('inverted')?1:0);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);free(matte);return out;
+}
+
 const MASK_MAX = 8;
 function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
   const gl = GL.gl;
-  const masks = (L.masks || []).filter((m: any) => m && m.on !== false && m.p);
+  const masks = (L.masks || []).filter((m: any) => m && evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false && m.p);
   if (!masks.length) return srcF;
+  if(masks.some((m:any)=>m.path))return applyPathMasks(L,T,srcF,W,H,masks);
   const world = scaledWorld(L, T, W, H);
   const det = world[0] * world[3] - world[1] * world[2];
   if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return srcF;
@@ -768,9 +796,11 @@ function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
     gArr[g + 3] = Math.abs(Number(PM.evP(L, m.p.h, T, 'h')) || 0);
     qArr[q + 0] = (Number(PM.evP(L, m.p.rotation, T, 'rotation')) || 0) * Math.PI / 180;
     qArr[q + 1] = Math.max(0, Number(PM.evP(L, m.p.feather, T, 'feather')) || 0);
-    qArr[q + 2] = m.shape === 'ellipse' ? 1 : 0;
-    qArr[q + 3] = m.mode === 'subtract' ? 1 : 0;
-    if (m.mode !== 'subtract') hasAdd = 1;
+    const shape = isProperty(m.shape) ? PM.evP(L, m.shape, T, `m.${m.id}.shape`) : m.shape;
+    const mode = isProperty(m.mode) ? PM.evP(L, m.mode, T, `m.${m.id}.mode`) : m.mode;
+    qArr[q + 2] = shape === 'ellipse' ? 1 : 0;
+    qArr[q + 3] = mode === 'subtract' ? 1 : 0;
+    if (mode !== 'subtract') hasAdd = 1;
     cnt++;
   }
   if (cnt === 0) { free(cov); return srcF; }
@@ -906,6 +936,7 @@ function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: an
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl;
   const layers = proj.layers;
+  const solo = layers.some((layer: any) => layer.solo);
 
   let acc = grab(W, H);
   bind(acc);
@@ -930,16 +961,19 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
+    if(PM.canvasTextEditing===L.id && !opt.exporting)continue;
+    if(!opt.mattePass && layers.some((l:any)=>l.matteSource===L.id))continue;
+    if (solo && !L.solo && !opt.mattePass) continue;
     if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
     if (L.shy && opt.hideShy) continue;
     const alpha = PM.worldOpacity(L, T);
     if (alpha <= .001) continue;
 
-    const hasFx = hasRenderableEffects(L.fx);
-    const hasMasks = (L.masks || []).some((m: any) => m.on !== false);
-    const blend = (BLEND_ID as any)[L.blend] || 0;
-    const mb = L.mblur && opt.mblur !== false;
+    const hasFx = hasRenderableEffects(L.fx, PM, L, T);
+    const hasMasks = (L.masks || []).some((m: any) => evaluatedValue(PM, L, m.on, T, `m.${m.id}.on`) !== false);
+    const blend = (BLEND_ID as any)[isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend] || 0;
+    const mb = (isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur) && opt.mblur !== false;
     const transition = activeTransition(L, T);
 
     /* Adjustment layers are full-frame processors over the already-rendered
@@ -951,7 +985,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     }
 
     /* fast path: no masks, no effects, normal blend, no motion blur → straight into acc */
-    if (!hasMasks && !hasFx && !blend && !mb && !transition) {
+    if (!hasMasks && !hasFx && !blend && !mb && !transition && !L.matteSource) {
       bind(acc);
       drawContent(L, T, W, H, alpha);
       continue;
@@ -969,7 +1003,8 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 
     let res = lf;
     if (hasMasks) res = applyMasks(L, T, res, W, H);
-    if (hasFx) res = runEffects(L, T, res, W, H);
+    if (hasFx) { const prior=res;res = runEffects(L, T, res, W, H);if(prior!==lf && res!==prior)free(prior); }
+    if (L.matteSource) {const prior=res;res=applyTrackMatte(L,T,res,W,H,opt.matteProject||proj,opt);if(prior!==lf && prior!==res)free(prior);}
 
     let withLayer = acc;
     if (!blend) {
@@ -1047,7 +1082,9 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   finally { PM.scope.pop(); }
   bind(acc);
   const px = new Uint8Array(W * H * 4);
-  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const floats=new Float32Array(W*H*4);
+  gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,floats);
+  for(let i=0;i<px.length;i++)px[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
   free(acc);
   GL.pool.forEach((f: any) => f.busy = false);
   trimPool();
@@ -1074,7 +1111,7 @@ GL.pick = (x: any, y: any, T: any) => {
 };
 /** Layer-space bounds (before transform), relative to the layer anchor origin. */
 GL.bounds = (L: any, T: any) => {
-  const d = L.d;
+  const d = resolveContent(PM, L, T);
   let w, h, ax, ay;
   if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
@@ -1084,8 +1121,8 @@ GL.bounds = (L: any, T: any) => {
     w = r.w; h = r.h; ax = r.anchorX; ay = r.anchorY;
   }
   else if (L.type === 'shape') {
-    const r = PM.raster(L, 1);
-    if (r.selection) return { ...r.selection, ax: r.w / 2, ay: r.h / 2 };
+    const r = PM.raster(L, 1, T);
+    if (r.selection) return { ...r.selection, ax: L.d.paths?.length?r.anchorX:r.w / 2, ay: L.d.paths?.length?r.anchorY:r.h / 2 };
     w = r.w; h = r.h;
     ax = w / 2; ay = h / 2;
   } else if (L.type === 'image' || L.type === 'video') {

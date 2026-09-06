@@ -1,3 +1,4 @@
+import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import {
   BLEND_MODES,
@@ -179,7 +180,7 @@ function sanitizeEffect(raw: unknown): Effect | null {
   const effect: Effect = {
     id: typeof raw.id === 'string' && raw.id ? raw.id : uid('fx'),
     type: raw.type,
-    on: raw.on !== false,
+    on: (isProperty(raw.on) ? sanitizeLooseChannel(raw.on, true) : raw.on !== false) as any,
     p: parameters
   };
   if ('open' in raw) effect.open = !!raw.open;
@@ -240,9 +241,10 @@ function sanitizeMask(raw: unknown, comp: Pick<Comp, 'w' | 'h'>): Mask | null {
   const source = raw.p;
   return {
     id: typeof raw.id === 'string' && raw.id ? raw.id : uid('K'),
-    shape,
-    mode: raw.mode === 'subtract' ? 'subtract' : 'add',
-    on: raw.on !== false,
+    ...(isRecord(raw.path) ? {path: sanitizeContentRecord(raw.path) as any} : {}),
+    shape: (isProperty(raw.shape) ? sanitizeLooseChannel(raw.shape, 'rect') : shape) as any,
+    mode: (isProperty(raw.mode) ? sanitizeLooseChannel(raw.mode, 'add') : raw.mode === 'subtract' ? 'subtract' : 'add') as any,
+    on: (isProperty(raw.on) ? sanitizeLooseChannel(raw.on, true) : raw.on !== false) as any,
     p: {
       x: sanitizeChannel(source.x, defaults.x),
       y: sanitizeChannel(source.y, defaults.y),
@@ -324,6 +326,19 @@ function sanitizeLockedIntent(raw: unknown): Record<string, UnknownRecord> {
 
 function contentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>): Layer['d'] {
   const source = sanitizeContentRecord(raw);
+  const values = { ...source };
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith(FONT_AXIS_PREFIX) && canAnimateContent({ type }, key) && isProperty(value)) values[key] = (value as any).v;
+  }
+  const output = staticContentFor(type, values, comp) as any;
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith(FONT_AXIS_PREFIX) && canAnimateContent({ type }, key) && isProperty(value)) output[key] = sanitizeLooseChannel(value, isProperty(output[key]) ? output[key].v : output[key]);
+  }
+  return output;
+}
+
+function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>): Layer['d'] {
+  const source = sanitizeContentRecord(raw);
   switch (type) {
     case 'solid':
       return {
@@ -367,6 +382,7 @@ function contentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 'h'>):
         asset: typeof source.asset === 'string' && source.asset ? source.asset : null,
         fit: source.fit === 'contain' || source.fit === 'stretch' ? source.fit : 'cover',
         trim: finite(source.trim), speed: finite(source.speed, 1),
+        embeddedAudio: source.embeddedAudio === true,
         w: finite(source.w, 1920), h: finite(source.h, 1080)
       };
     case 'audio':
@@ -450,13 +466,16 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
     from: Math.max(0, finite(source.from)),
     dur: Math.max(0.01, finite(source.dur, 5)),
-    on: source.on !== false,
+    on: isProperty(source.on) ? sanitizeLooseChannel(source.on, true) : source.on !== false,
     lock: !!source.lock,
     shy: !!source.shy,
+    solo: !!source.solo,
+    matteSource: typeof source.matteSource === 'string' ? source.matteSource : null,
+    matteMode: sanitizeLooseChannel(source.matteMode, 'alpha') as any,
     collapsed: source.collapsed !== false,
     color: stringOr(source.color, TYPE_META[type].color),
-    blend: type === 'audio' ? 'normal' : blend,
-    mblur: type === 'audio' ? false : !!source.mblur,
+    blend: type === 'audio' ? 'normal' : isProperty(source.blend) ? sanitizeLooseChannel(source.blend, 'normal') : blend,
+    mblur: type === 'audio' ? false : isProperty(source.mblur) ? sanitizeLooseChannel(source.mblur, false) : !!source.mblur,
     parent: type === 'audio' ? null : (typeof source.parent === 'string' && source.parent !== id ? source.parent : null),
     p: transformable ? sanitizeTransformChannels(source.p, type, comp) : {},
     fx: noEffects ? [] : (Array.isArray(source.fx) ? source.fx.map(sanitizeEffect).filter((item): item is Effect => item !== null) : []),

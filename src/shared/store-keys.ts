@@ -16,6 +16,8 @@ export const STATIC_KEYS = [
   'theme',
   'themeMode',
   'exportOpts',
+  'renderQueue',
+  'renderPresets',
   'bootVersion',
   'autosave',
   'projectsSection',

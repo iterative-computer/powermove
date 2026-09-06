@@ -75,6 +75,7 @@ export interface AgentUpdateOptions {
 interface AgentViewState extends AgentSnapshot {
   phase: AgentPhase;
   progressLines: string[];
+  workingStartedAt: number | null;
   focusVersion: number;
   revision: number;
 }
@@ -113,6 +114,7 @@ const EMPTY_SNAPSHOT: AgentSnapshot = {
 export const agentState: AgentViewState = $state({
   ...EMPTY_SNAPSHOT,
   phase: 'idle',
+  workingStartedAt: null,
   progressLines: [],
   focusVersion: 0,
   revision: 0
@@ -142,6 +144,9 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     threadSwitchBlocked: snapshot.threadSwitchBlocked || false,
     threadSaveError: snapshot.threadSaveError || false,
     phase,
+    workingStartedAt: phase === 'running'
+      ? (enteringRun || tokenChanged || (snapshot.threadId || '') !== agentState.threadId ? Date.now() : agentState.workingStartedAt)
+      : null,
     uiPlacement: phase === 'running' && snapshot.uiPlacement ? { ...snapshot.uiPlacement } : null,
     plan: snapshot.plan ? { ...snapshot.plan } : null,
     run: snapshot.run ? {
@@ -185,6 +190,7 @@ export function setAgentComposerDraft(value: string): void {
 export function resetAgentState(): void {
   Object.assign(agentState, EMPTY_SNAPSHOT, {
     phase: 'idle',
+    workingStartedAt: null,
     conversation: [],
     attachments: [],
     trace: [],

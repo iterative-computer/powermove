@@ -16,6 +16,7 @@ import { channelBinding, compositionBinding, contentBinding, layerFieldBinding }
 import { doc } from '../../renderer/src/state/document.svelte';
 import { sel } from '../../renderer/src/state/selection.svelte';
 import { perf, transport } from '../../renderer/src/state/transport.svelte';
+import * as fontCatalog from '../../renderer/src/typography/font-catalog';
 import VariableFontHarness from './VariableFontHarness.svelte';
 
 const controls: ControlsAPI = {
@@ -48,6 +49,9 @@ function setup(content: Record<string, any>) {
   const apply = vi.fn(() => ({ ok: true }));
   const PM: Record<string, any> = {
     proj: project,
+    selLayers: () => [layer], firstSel: () => layer, L: () => layer,
+    findProp: (_layer: any, path: string) => (layer.d as any)[path.slice(2)],
+    hasKeyAt: () => null,
     P: (value: number) => ({ v: value, kf: [], expr: null }),
     Fonts: { options: (value: string) => [value], ensure: vi.fn() },
     Edit: { apply, begin: vi.fn(), dispatch: vi.fn(), commit: vi.fn(), cancel: vi.fn() },
@@ -78,39 +82,35 @@ afterEach(async () => {
   if (instance) await unmount(instance);
   instance = undefined;
   target.remove();
+  vi.restoreAllMocks();
 });
 
-describe('variable font inspector', () => {
-  it('binds an enabled axis to a real keyframeable content property', () => {
-    const property = { v: 75, kf: [], expr: null };
-    const { apply } = setup({ 'fontAxis.wdth': property });
-    const row = target.querySelector<HTMLElement>('[data-channel="c.fontAxis.wdth"]')!;
-    expect(row).not.toBeNull();
-    row.querySelector<HTMLInputElement>('[role="spinbutton"]')!.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })
-    );
-    expect(apply).toHaveBeenCalledWith({
-      type: 'set_property', target: 'text-1', path: 'c.fontAxis.wdth', value: 75.875,
-      time: 2, mode: 'auto', preserveHandEdits: false,
-    }, { label: 'Width · wdth', origin: 'inspector' });
+describe('type settings', () => {
+  it('shows real discovered axes without creating project values or duplicate weight fields', async () => {
+    vi.spyOn(fontCatalog, 'inspectFont').mockResolvedValue({ family: 'Test Variable', status: 'variable', axes: [
+      { tag: 'wght', label: 'Weight', min: 100, max: 900, default: 400 },
+      { tag: 'wdth', label: 'Width', min: 75, max: 125, default: 100 }
+    ] });
+    const { PM, apply } = setup({});
+    await vi.waitFor(() => { flushSync(); expect(target.querySelector('[data-font-axis="wdth"] [role="spinbutton"]')).not.toBeNull(); });
+    expect(apply).not.toHaveBeenCalled();
+    const field = target.querySelector<HTMLInputElement>('[data-font-axis="wdth"] [role="spinbutton"]')!;
+    expect(field.getAttribute('aria-valuemin')).toBe('75'); expect(field.getAttribute('aria-valuemax')).toBe('125');
+    expect(field.value).toBe('100');
+    expect(target.querySelector('input[type="range"]')).toBeNull();
+    expect([...target.querySelectorAll('.row .k')].filter(node => node.textContent === 'Weight')).toHaveLength(1);
+    field.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+    expect(apply).toHaveBeenLastCalledWith([
+      {type:'set_content',target:'text-1',patch:{'fontAxis.wdth':{v:100,kf:[],expr:null}}},
+      {type:'set_property',target:'text-1',path:'c.fontAxis.wdth',value:100.01,time:2,mode:'auto',preserveHandEdits:false}
+    ], { label: 'Width axis', origin: 'inspector' });
   });
-
-  it('adds arbitrary four-character axes as persisted channel objects', () => {
-    const { apply } = setup({});
-    const input = target.querySelector<HTMLInputElement>('[aria-label="Custom OpenType axis tag"]')!;
-    input.value = 'GRAD';
-    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    flushSync();
-    target.querySelector<HTMLButtonElement>('.custom-axis-add button')!.click();
-    expect(apply).toHaveBeenCalledWith({
-      type: 'set_content', target: 'text-1',
-      patch: { 'fontAxis.GRAD': { v: 0, kf: [], expr: null } },
-    }, { label: 'Add Grade axis', origin: 'inspector' });
-  });
-
-  it('uses the variable weight channel instead of presenting two weight controls', () => {
-    setup({ 'fontAxis.wght': { v: 520, kf: [], expr: null } });
-    expect(target.querySelector('[data-channel="c.fontAxis.wght"]')).not.toBeNull();
-    expect([...target.querySelectorAll('.row .k')].filter((node) => node.textContent === 'Weight')).toHaveLength(0);
+  it('distinguishes static fonts and keeps saved custom axes without invented sliders', async () => {
+    vi.spyOn(fontCatalog,'inspectFont').mockResolvedValue({family:'Static',status:'static',axes:[]});
+    setup({'fontAxis.XTRA':{v:37,kf:[],expr:null}});
+    await vi.waitFor(()=>{flushSync();expect(target.textContent).toContain('is a static font');});
+    expect(target.querySelector('[data-channel="c.fontAxis.XTRA"]')).not.toBeNull();
+    expect(target.querySelector('[aria-label="Custom OpenType axis tag"]')).toBeNull();
+    expect(target.querySelector('input[type="range"]')).toBeNull();
   });
 });

@@ -8,6 +8,7 @@
  * the app, and every extension component shares the host's reactivity graph
  * (two copies would mean effects that never run and stores that never notify).
  */
+import * as editorHelpers from './editor-helpers';
 import * as svelte from 'svelte';
 /* `svelte/internal/client` ships no declaration file. It is imported purely so
    Vite bundles the one copy extension bundles resolve against — nothing here
@@ -18,6 +19,7 @@ import * as svelteStore from 'svelte/store';
 import type { Component } from 'svelte';
 
 export interface PowermoveRuntime {
+  powermove: typeof editorHelpers;
   svelte: typeof svelte;
   'svelte/internal/client': typeof svelteInternalClient;
   'svelte/store': typeof svelteStore;
@@ -33,6 +35,7 @@ export const RUNTIME_GLOBAL = '__powermove_runtime' as const;
 
 export function installRuntimeGlobals(): PowermoveRuntime {
   const runtime: PowermoveRuntime = {
+    powermove: editorHelpers,
     svelte,
     'svelte/internal/client': svelteInternalClient,
     'svelte/store': svelteStore,

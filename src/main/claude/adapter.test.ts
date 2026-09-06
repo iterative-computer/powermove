@@ -46,4 +46,29 @@ describe('Claude CLI adapter', () => {
     expect(argv).toContain('--dangerously-skip-permissions');
     expect(argv).not.toContain('--settings');
   });
+
+  it('gives the native Claude harness only the run-scoped Powermove MCP tools', () => {
+    const nativeTools = {
+      command: '/Applications/Powermove.app/Contents/MacOS/Powermove',
+      args: ['/Applications/Powermove.app/Contents/Resources/agent-tools/mcp-server.mjs'],
+      env: { ELECTRON_RUN_AS_NODE: '1', POWERMOVE_AGENT_TOOL_TOKEN: 'secret' }
+    };
+    const argv = buildClaudeArgv({
+      schema,
+      prompt: 'Edit the live composition',
+      imagePaths: [],
+      model: 'sonnet',
+      reasoningEffort: 'high',
+      sessionId: null,
+      access: 'project',
+      extensionsDir: '/tmp/extensions',
+      instructions: 'Use Powermove tools.',
+      nativeTools
+    });
+    const config = JSON.parse(argv[argv.indexOf('--mcp-config') + 1]!);
+    expect(config).toEqual({ mcpServers: { powermove: { type: 'stdio', ...nativeTools } } });
+    const allowed = argv[argv.indexOf('--allowedTools') + 1]!;
+    expect(allowed).toContain('mcp__powermove__get_project_state');
+    expect(allowed).toContain('mcp__powermove__apply_commands');
+  });
 });

@@ -42,10 +42,6 @@ export function createGeneralSettingsControl(theme: ThemePreference): GeneralSet
   const claude = createClaudeSettingsControl();
   const accounts = createSettingsSection('Accounts');
   accounts.body.append(chatgpt.element, claude.element);
-  const privacy = document.createElement('p');
-  privacy.className = 'settings-note';
-  privacy.textContent = 'Sign-in runs in the official Codex and Claude Code runtimes; Powermove never stores your token.';
-  accounts.element.append(privacy);
 
   const appearance = document.createElement('select');
   appearance.className = 'settings-appearance';

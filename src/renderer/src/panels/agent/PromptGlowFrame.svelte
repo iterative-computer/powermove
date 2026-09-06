@@ -22,13 +22,15 @@
     state.setUniform('uElapsed', elapsed);
     state.setUniform('uPulse', glowPulse(elapsed + GLOW_PULSE_LEAD));
     state.setUniform('uIntensity', glowEntrance(elapsed));
-    const inset = Boolean(state.canvas.closest('[data-prompt-inset]'));
-    state.setUniform('uPad', inset ? 4 * dpr : glowPad(dpr));
+    const bubbleHalo = Boolean(state.canvas.closest('[data-prompt-halo]'));
+    // Match the host's 8px exterior padding: the zero-distance contour is
+    // the actual bubble edge, not a smaller rectangle inside the message.
+    state.setUniform('uPad', bubbleHalo ? 8 * dpr : glowPad(dpr));
     // A prompt can wrap to another line mid-run, so the shape is read per frame.
-    state.setUniform('uRadius', inset ? 14 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr));
-    state.setUniform('uTailRadius', inset ? 4 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr, PROMPT_GLOW_TAIL_RADIUS));
+    state.setUniform('uRadius', bubbleHalo ? 14 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr));
+    state.setUniform('uTailRadius', bubbleHalo ? 4 * dpr : glowCornerRadius(state.canvas.width, state.canvas.height, dpr, PROMPT_GLOW_TAIL_RADIUS));
     // The theme can change mid-run, and the halo has to stay readable in both.
-    state.setUniform('uGain', glowGain(document.documentElement.dataset.theme === 'dark') * (inset ? 1.8 : 1));
+    state.setUniform('uGain', glowGain(document.documentElement.dataset.theme === 'dark'));
     if (firstFrame) {
       firstFrame = false;
       onFirstFrame?.();

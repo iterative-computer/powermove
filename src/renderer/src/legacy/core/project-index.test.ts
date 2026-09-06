@@ -51,3 +51,20 @@ describe('project index', () => {
     expect(PM.ProjectIndex.activeAt(7.5)).toEqual([child, grandchild]);
   });
 });
+
+it('indexes content keys and refreshes newly added keys after an earlier lookup', () => {
+  const { PM, child } = indexedProject();
+  child.d.color = PM.P('#ff0000');
+  const color = PM.setKeyOn(child.d.color, 1, '#0000ff');
+  PM.sel.keys = [color.i];
+  expect(PM.resolveSelectedKeys()).toEqual([color]);
+  expect(PM.ProjectIndex.layerForKeyframe(color.i)).toBe(child);
+  const position = PM.setKeyOn(child.p['position.y'], 2, 200);
+  expect(PM.ProjectIndex.keyframe(position.i)).toBe(position);
+  const saved = JSON.parse(JSON.stringify(PM.proj));
+  PM.replaceProject(saved, { selection: { layers: [child.id], keys: [color.i], chan: 'c.color' } });
+  expect(PM.sel.keys).toEqual([color.i]);
+  expect(PM.resolveSelectedKeys()[0].i).toBe(color.i);
+  PM.removeKey(PM.proj.layers[1].p['position.y'], PM.ProjectIndex.keyframe(position.i));
+  expect(PM.ProjectIndex.keyframe(position.i)).toBeNull();
+});

@@ -10,6 +10,7 @@ export type ToastOptions = {
 };
 
 export type MenuAction = {
+  icon?: string;
   label: string;
   kb?: string | null;
   on?: boolean;

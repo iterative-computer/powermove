@@ -21,6 +21,7 @@ import { consumeToken } from './consent';
 import { discoverCodexBinary } from './env';
 import { CodexEventParser } from './events';
 import { agentInstructions, agentResultSchema } from './instructions';
+import type { NativeMcpServerConfig } from '../agent-tools/spec';
 import {
   discoverUserSkillFiles,
   isolatedCodexEnvironment,
@@ -30,7 +31,7 @@ import {
   agentWorkspaceRoot,
   clearSession,
   discardExtensionStage,
-  discardPartialRun,
+  preserveCancelledRun,
   prepareAgentWorkspace,
   readSession,
   sessionPathFor,
@@ -42,7 +43,7 @@ import {
 
 const MODES = ['editor', 'autonomous'] as const;
 const ACCESS = ['editor', 'project', 'computer'] as const;
-const EFFORTS = ['low', 'medium', 'high'] as const;
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 const PROVIDERS = ['chatgpt', 'claude'] as const;
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
@@ -66,6 +67,7 @@ export interface CodexRunOptions {
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
   discoverDisabledSkillPaths?: () => Promise<string[]>;
+  nativeTools?: NativeMcpServerConfig;
 }
 
 interface ActiveRun {
@@ -402,7 +404,8 @@ export class CodexRunner {
           access: authority,
           extensionsDir: layout.extensionsDir,
           sessionId: resumeId,
-          disabledSkillPaths
+          disabledSkillPaths,
+          nativeTools: options.nativeTools
         });
         attempt = await this.execute(req, state, binary, argv, layout.root, codexHome, layout, options, (timer) => {
           timeout = timer;
@@ -596,17 +599,8 @@ export class CodexRunner {
   }
 
   private async cleanupCancelled(state: ActiveRun, userData = state.userData): Promise<void> {
-    const authority = authorityForAccess(state.request.access);
-    const targetSession = state.layout?.sessionPath ?? sessionPathFor(
-      agentWorkspaceRoot(userData, state.request.projectId),
-      authority,
-      state.request.threadId
-    );
     await state.sessionWrite;
-    await Promise.all([
-      clearSession(targetSession),
-      state.layout ? discardPartialRun(state.layout) : Promise.resolve()
-    ]);
+    if (state.layout) await preserveCancelledRun(state.layout);
   }
 }
 

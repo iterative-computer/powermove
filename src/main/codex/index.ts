@@ -39,6 +39,7 @@ import { ClaudeAccountClient, ClaudeRunner } from '../claude';
 import { buildFixPrompt } from './instructions';
 import { restoreExtensionChangeSet } from './change-history';
 import { agentWorkspaceRoot, safeAgentComponent, type AgentApiPackFile } from './workspace';
+import { PowermoveAgentToolBridge, type PowermoveAgentToolSession } from '../agent-tools/bridge';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -54,6 +55,10 @@ export interface CodexIpcContext {
   claudeBinaryPref?(): string | null;
   openExternal(url: string): Promise<void>;
   refreshExtensions?(ids: string[]): Promise<void>;
+  /** Standalone MCP shim copied beside the packaged app resources. */
+  agentToolServerPath?: string;
+  /** Defaults to process.execPath (Electron with ELECTRON_RUN_AS_NODE=1). */
+  agentToolCommand?: string;
 }
 
 export interface ChatGPTAccountController {
@@ -153,6 +158,39 @@ function requireArtifactRef(channel: string, value: unknown): ArtifactRef {
   return { projectId: value.projectId, path: value.path };
 }
 
+function projectRevision(projectJSON: string | null): number {
+  if (!projectJSON) return 0;
+  try {
+    const value: unknown = JSON.parse(projectJSON);
+    return isRecord(value) && typeof value.revision === 'number' && Number.isFinite(value.revision)
+      ? Math.max(0, Math.trunc(value.revision))
+      : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function amendLiveResult(text: string, dropCommands: boolean, warning?: string): string {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (!isRecord(value)) return text;
+    const notes = Array.isArray(value.notes) ? value.notes.filter((item): item is string => typeof item === 'string') : [];
+    const duplicated = dropCommands && Array.isArray(value.commands) && value.commands.length > 0;
+    if (!duplicated && !warning) return text;
+    return JSON.stringify({
+      ...value,
+      ...(dropCommands ? { commands: [] } : {}),
+      notes: [
+        ...notes,
+        ...(duplicated ? ['Powermove ignored final commands that duplicated edits already applied through the live tool transaction.'] : []),
+        ...(warning ? [warning] : [])
+      ]
+    });
+  } catch {
+    return text;
+  }
+}
+
 /** Registers the frozen renderer contract without modifying the main bootstrap. */
 export function registerCodexIpc(
   ipcMain: IpcMain,
@@ -171,6 +209,12 @@ export function registerCodexIpc(
   const runner = new CodexRunner();
   const claudeRunner = new ClaudeRunner();
   const owners = new Map<string, WebContents>();
+  const toolBridge = ctx.agentToolServerPath
+    ? new PowermoveAgentToolBridge(ipcMain, {
+        mcpServerPath: ctx.agentToolServerPath,
+        ...(ctx.agentToolCommand ? { command: ctx.agentToolCommand } : {})
+      })
+    : null;
 
   account.onChanged((status) => {
     const window = ctx.getWindow();
@@ -223,20 +267,30 @@ export function registerCodexIpc(
 
     const owner = event.sender;
     owners.set(req.id, owner);
+    let toolSession: PowermoveAgentToolSession | null = null;
     const rendererDestroyed = (): void => {
       void Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
+      void toolSession?.finish(false).catch(() => undefined);
     };
     owner.once('destroyed', rendererDestroyed);
     try {
       const selectedRunner = req.provider === 'claude'
         ? claudeRunner
         : (req.mode === 'editor' ? appServerRunner : runner);
-      return await selectedRunner.run(req, {
+      if (req.mode === 'autonomous' && toolBridge) {
+        toolSession = await toolBridge.openSession({
+          runId: req.id,
+          owner,
+          baseRevision: projectRevision(req.projectJSON)
+        });
+      }
+      let result = await selectedRunner.run(req, {
         userData: ctx.userData,
         extensionsDir: ctx.extensionsDir,
         apiPackFiles: ctx.apiPackFiles,
         codexBinaryPref: ctx.codexBinaryPref(),
         claudeBinaryPref: ctx.claudeBinaryPref?.() ?? null,
+        ...(toolSession ? { nativeTools: toolSession.mcpConfig } : {}),
         onProgress: (text) => {
           if (!owner.isDestroyed()) {
             owner.send(IPC.codexEvent, { id: req.id, kind: 'progress', text });
@@ -248,7 +302,28 @@ export function registerCodexIpc(
           }
         }
       });
+      if (toolSession) {
+        const changedBeforeFinish = toolSession.changed;
+        const finish = await toolSession.finish(result.ok);
+        toolSession = null;
+        if (result.ok) {
+          result = {
+            ...result,
+            text: amendLiveResult(result.text, changedBeforeFinish || finish.changed, finish.warning)
+          };
+        }
+        if (result.ok && finish.changed) {
+          result = {
+            ...result,
+            liveEditsApplied: true,
+            ...(finish.historyId ? { liveEditHistoryId: finish.historyId } : {})
+          };
+        }
+        if (finish.warning) console.warn(`[agent-tools] ${finish.warning}`);
+      }
+      return result;
     } finally {
+      if (toolSession) await toolSession.finish(false).catch(() => undefined);
       owner.removeListener('destroyed', rendererDestroyed);
       if (owners.get(req.id) === owner) owners.delete(req.id);
     }
@@ -312,6 +387,7 @@ export function registerCodexIpc(
     void runner.cancelAll();
     void appServerRunner.shutdown();
     void claudeRunner.cancelAll();
+    void toolBridge?.shutdown();
     void account.shutdown();
     void claudeAccount.shutdown();
   });

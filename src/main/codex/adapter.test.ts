@@ -187,6 +187,34 @@ describe('Codex CLI adapter', () => {
     expect(argv).toContain('mcp_servers={}');
   });
 
+  it('adds only the run-scoped Powermove MCP server after clearing inherited servers', () => {
+    const argv = buildAutonomousArgv({
+      schemaPath: '/workspace/schema.json',
+      outputPath: '/workspace/result.json',
+      prompt: 'Inspect and edit the live composition',
+      imagePaths: [],
+      model: null,
+      reasoningEffort: null,
+      access: 'project',
+      extensionsDir: '/workspace/extensions',
+      sessionId: null,
+      instructions: 'AGENT INSTRUCTIONS',
+      disabledSkillPaths: [],
+      nativeTools: {
+        command: '/Applications/Powermove.app/Contents/MacOS/Powermove',
+        args: ['/Applications/Powermove.app/Contents/Resources/agent-tools/mcp-server.mjs'],
+        env: { POWERMOVE_AGENT_TOOL_TOKEN: 'secret', ELECTRON_RUN_AS_NODE: '1' }
+      }
+    });
+    const reset = argv.indexOf('mcp_servers={}');
+    const command = argv.indexOf('mcp_servers.powermove.command="/Applications/Powermove.app/Contents/MacOS/Powermove"');
+    expect(reset).toBeGreaterThan(-1);
+    expect(command).toBeGreaterThan(reset);
+    expect(argv).toContain('mcp_servers.powermove.args=["/Applications/Powermove.app/Contents/Resources/agent-tools/mcp-server.mjs"]');
+    expect(argv).toContain('mcp_servers.powermove.env.ELECTRON_RUN_AS_NODE="1"');
+    expect(argv).toContain('mcp_servers.powermove.env.POWERMOVE_AGENT_TOOL_TOKEN="secret"');
+  });
+
   it('reports supported and missing flags from codex exec --help', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'powermove-adapter-'));
     const binary = path.join(directory, 'codex');

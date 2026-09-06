@@ -103,6 +103,27 @@ describe('preload bridge', () => {
     expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexSteer, steering);
   });
 
+  it('brokers native agent tool requests without exposing Electron event objects', () => {
+    const onRequest = vi.fn();
+    const stop = bridge().agentTools.onRequest(onRequest);
+    const listener = electronMocks.on.mock.calls[0]?.[1] as (...args: unknown[]) => void;
+    const request = {
+      runId: 'request-1234', callId: 'tool-call-1', tool: 'get_project_state',
+      arguments: {}, baseRevision: 4
+    };
+    listener({ sender: 'must-not-leak' }, request);
+    expect(onRequest).toHaveBeenCalledExactlyOnceWith(request);
+
+    const response = {
+      runId: request.runId, callId: request.callId, ok: true,
+      content: [{ type: 'text' as const, text: '{"revision":4}' }]
+    };
+    bridge().agentTools.respond(response);
+    expect(electronMocks.send).toHaveBeenCalledWith(IPC.agentToolResponse, response);
+    stop();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.agentToolRequest, listener);
+  });
+
   it('strips Electron event objects and returns working unsubscribes', () => {
     const onStoreError = vi.fn();
     const stopStore = bridge().store.onError(onStoreError);

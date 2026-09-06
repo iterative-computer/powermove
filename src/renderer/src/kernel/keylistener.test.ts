@@ -140,6 +140,21 @@ describe('installKeyListener', () => {
     expect(runs.map(([command]) => command)).toEqual(['blur', 'play']);
   });
 
+  it('runs field-aware paste from nested contenteditable markup', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('built-in', { key: 'cmd+v', command: 'pasteLayers' });
+    kernel.bind('built-in', { key: 'cmd+v', command: 'contextPaste', inFields: true, priority: 50 });
+    const editor = document.createElement('div');
+    editor.contentEditable = 'true';
+    const child = document.createElement('span');
+    editor.append(child);
+    document.body.append(editor);
+
+    expect(press({ key: 'v', metaKey: true }, child)).toBe(true);
+    expect(runs).toEqual([['contextPaste', []]]);
+  });
+
   it('leaves Copy to the browser when document text is selected', () => {
     const kernel = createKernel();
     const { runs } = install(kernel);

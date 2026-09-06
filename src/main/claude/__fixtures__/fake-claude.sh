@@ -22,5 +22,9 @@ if [ "$1" = "auth" ] && [ "$2" = "login" ]; then
 fi
 
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-1111-4111-8111-111111111111"}'
+if [ "${FAKE_CLAUDE_MODE:-}" = 'hang' ]; then
+  trap 'exit 143' TERM INT
+  while :; do sleep 1; done
+fi
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Preparing the Claude result"}]},"session_id":"11111111-1111-4111-8111-111111111111"}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"message\":\"claude editor done\"}","structured_output":{"message":"claude editor done"},"session_id":"11111111-1111-4111-8111-111111111111"}'

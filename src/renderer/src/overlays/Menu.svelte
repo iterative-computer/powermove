@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Icon from '../panels/Icon.svelte';
 
   import { positionMenuAtCursor } from './position';
   import type { MenuItem } from './types';
 
   let {
+    PM,
     items,
     x,
     y,
@@ -13,6 +15,7 @@
     onrun,
     onclose
   }: {
+    PM: Record<string, any>;
     items: MenuItem[];
     x: number;
     y: number;
@@ -125,6 +128,9 @@
             <path class="curve-key" d="M6 31L9 34L6 37L3 34Z M46 3L49 6L46 9L43 6Z" />
           </svg>
         {/if}
+        {#if item.icon}
+          <span class="menu-icon"><Icon {PM} name={item.icon} /></span>
+        {/if}
         <span>{item.label}</span>
         {#if item.kb}
           <span class="kb">{item.kb}</span>
@@ -135,6 +141,8 @@
 </div>
 
 <style>
+  .menu-icon { display: flex; flex: none; width: 16px; height: 16px; align-items: center; justify-content: center; }
+  .menu-icon :global(svg) { width: 16px; height: 16px; }
   .curve-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); width: 344px; gap: 3px; }
   .curve-grid > :global(:not(.curve-option)) { grid-column: 1 / -1; }
   .curve-grid .curve-option { display: flex; flex-direction: column; justify-content: center; min-height: 76px; gap: 2px; padding: 4px 2px; font-size: 10px; text-align: center; }

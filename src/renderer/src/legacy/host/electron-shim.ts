@@ -71,9 +71,9 @@ export function install(PM: PMRegistry): void {
       ? 'editor'
       : (body.access === 'computer' ? 'computer' : 'project');
     const requestedEffort = String(body.reasoningEffort || '');
-    const reasoningEffort = ['low', 'medium', 'high'].includes(requestedEffort)
+    const reasoningEffort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(requestedEffort)
       ? requestedEffort
-      : (['xhigh', 'max'].includes(requestedEffort) ? 'high' : null);
+      : null;
     const attachments = [];
     for (const attachment of Array.isArray(body.attachments) ? body.attachments : []) {
       try {
@@ -213,7 +213,9 @@ export function install(PM: PMRegistry): void {
               ok: result.ok,
               dataBase64: textToBase64(result.ok ? result.text : result.error),
               extensions: result.ok ? result.extensions : undefined,
-              extensionChangeSetId: result.ok ? result.extensionChangeSetId : undefined
+              extensionChangeSetId: result.ok ? result.extensionChangeSetId : undefined,
+              liveEditsApplied: result.ok ? result.liveEditsApplied : undefined,
+              liveEditHistoryId: result.ok ? result.liveEditHistoryId : undefined
             });
           })().catch(error => {
             PM.CodexBridge.resolve(id, {

@@ -12,18 +12,32 @@
     if (result.status !== 'ready') return [];
     return (PM.Kernel?.panels?.entries?.() || []).filter((entry: any) => entry.ownerId === result.id);
   });
-  const status = $derived(result.status === 'error' ? 'Needs attention' : result.action === 'removed' ? 'Mod removed' : result.action === 'updated' ? 'Mod updated' : 'Mod added');
 </script>
 
+{#if result.action === 'updated'}
+  <div class="agent-mod-result edited-result">
+    <div class="edited-heading">
+      <div class="mod-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4H5v16h14v-9 M11 13l1-4 7-7 3 3-7 7-4 1Z" /></svg></div>
+      <div class="mod-copy"><b>{panels.length === 1 ? 'Edited 1 panel' : `Edited ${panels.length} panels`}</b><small>{result.name}</small></div>
+    </div>
+    <div class="edited-panels">
+      {#each panels as panel (panel.id)}
+        <div class="edited-panel"><span>{panel.item.title || panel.id}</span><button class="agent-btn" type="button" aria-label={`Open ${panel.item.title || panel.id}`} onclick={() => PM.LibraryUI?.reveal?.(panel.id)}>Open <span aria-hidden="true">↗</span></button></div>
+      {/each}
+    </div>
+  </div>
+{:else}
 <div class="agent-mod-result" class:needs-attention={result.status === 'error'}>
   <div class="mod-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Z M3 12l9 5 9-5 M3 16l9 5 9-5" /></svg></div>
-  <div class="mod-copy"><small>{status}</small><b>{result.name}</b></div>
+  <div class="mod-copy"><small>Panel created</small><b>{result.name}</b></div>
   {#if panels.length === 1}
     <button class="agent-btn" type="button" aria-label={`Open ${result.name}`} onclick={() => PM.LibraryUI?.reveal?.(panels[0].id)}>Open <span aria-hidden="true">↗</span></button>
   {:else if panels.length > 1}
     <div class="mod-panels">{#each panels as panel (panel.id)}<button class="agent-btn" type="button" onclick={() => PM.LibraryUI?.reveal?.(panel.id)}>Open {panel.item.title || panel.id}</button>{/each}</div>
   {/if}
 </div>
+
+{/if}
 
 <style>
   .agent-mod-result{--mod-tint:var(--accent);display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:11px;border-radius:var(--r-md);background:linear-gradient(to top,color-mix(in srgb,var(--mod-tint) 4%,var(--bg-field)),color-mix(in srgb,var(--mod-tint) 1%,var(--bg-field)) 42%,var(--bg-field) 78%);min-width:0}
@@ -35,5 +49,12 @@
   button{flex:none;background:var(--ink-1);padding:0 8px}
   button span{margin-left:3px;color:var(--tx-3)}
   .mod-panels{flex-basis:100%;display:flex;flex-wrap:wrap;gap:4px}
+  .edited-result{display:block;padding:0;overflow:hidden;border:1px solid var(--line);background:var(--bg-field)}
+  .edited-heading{display:flex;align-items:center;gap:10px;padding:11px;background:var(--ink-1)}
+  .edited-heading .mod-mark{color:var(--tx-2);background:var(--bg-field)}
+  .edited-panels{border-top:1px solid var(--line);padding:4px 11px}
+  .edited-panel{display:flex;align-items:center;gap:12px;min-width:0;padding:7px 0}
+  .edited-panel>span{flex:1;min-width:0;overflow-wrap:anywhere;color:var(--tx-2);font-size:var(--fs-sm)}
+  .edited-panel button{border:1px solid var(--line);background:transparent}
   .needs-attention{--mod-tint:var(--warning)}
 </style>

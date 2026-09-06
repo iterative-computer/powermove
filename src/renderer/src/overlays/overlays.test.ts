@@ -128,7 +128,7 @@ describe('installSvelteOverlays', () => {
 
     const returned = PM.menu(trigger, [
       { header: 'Layer' },
-      { label: 'Selected', on: true, kb: '⌘1', run: enabled },
+      { label: 'Selected', icon: 'hand', on: true, kb: '⌘1', run: enabled },
       '-',
       { label: 'Unavailable', disabled: true, run: disabled }
     ]);
@@ -140,6 +140,8 @@ describe('installSvelteOverlays', () => {
     expect(menu.querySelector('.hd')?.textContent).toBe('Layer');
     expect(menu.querySelector('.sep[role="separator"]')).toBeTruthy();
     expect(items[0]?.classList.contains('on')).toBe(true);
+    expect(items[0]?.querySelector('.menu-icon svg')?.getAttribute('data-icon')).toBe('hand');
+    expect(items[1]?.querySelector('.menu-icon')).toBeNull();
     expect(items[1]?.getAttribute('aria-disabled')).toBe('true');
     // Pointer-opened: focus parks on the menu, no row is painted; arrows enter the list.
     expect(document.activeElement).toBe(menu);
@@ -214,6 +216,60 @@ describe('installSvelteOverlays', () => {
     } finally {
       window.removeEventListener('keydown', globalShortcut);
     }
+  });
+
+  it('toggles closed on a second trigger press, including nested trigger content', () => {
+    vi.useFakeTimers();
+    const trigger = document.querySelector<HTMLButtonElement>('#trigger')!;
+    trigger.innerHTML = '<span>Open</span>';
+    trigger.addEventListener('click', () => PM.menu(trigger, [{ label: 'Action' }]));
+    const press = () => {
+      const target = trigger.firstElementChild!;
+      target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      vi.advanceTimersByTime(0);
+    };
+    press();
+    expect(document.querySelector('.drop')).not.toBeNull();
+    press();
+    expect(document.querySelector('.drop')).toBeNull();
+    press();
+    expect(document.querySelector('.drop')).not.toBeNull();
+  });
+
+  it('switches directly to a different trigger and preserves item activation', () => {
+    vi.useFakeTimers();
+    const first = document.querySelector<HTMLButtonElement>('#trigger')!;
+    const second = document.createElement('button');
+    document.body.append(second);
+    const run = vi.fn();
+    second.onclick = () => PM.menu(second, [{ label: 'Second action', run }]);
+    PM.menu(first, [{ label: 'First action' }]);
+    vi.advanceTimersByTime(0);
+    second.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    second.click();
+    expect(document.querySelectorAll('.drop')).toHaveLength(1);
+    document.querySelector<HTMLButtonElement>('.drop .di')!.click();
+    expect(run).toHaveBeenCalledOnce();
+    expect(document.querySelector('.drop')).toBeNull();
+  });
+
+  it('closes pointerdown-opened legacy controls without reopening or blocking the next press', () => {
+    vi.useFakeTimers();
+    const trigger = document.querySelector<HTMLButtonElement>('#trigger')!;
+    trigger.onpointerdown = () => PM.menu(trigger, [{ label: 'Action' }]);
+    const press = () => {
+      trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      vi.advanceTimersByTime(0);
+    };
+    press();
+    expect(document.querySelector('.drop')).not.toBeNull();
+    press();
+    expect(document.querySelector('.drop')).toBeNull();
+    trigger.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true }));
+    press();
+    expect(document.querySelector('.drop')).not.toBeNull();
   });
 
   it('closes a menu on an outside pointer and restores its trigger', () => {

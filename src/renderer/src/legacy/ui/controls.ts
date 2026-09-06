@@ -1,6 +1,6 @@
 /* Ported from js/ui/controls.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
-import { markMenuDismissal } from '../../overlays/dismissal';
+import { consumeMenuTriggerPress, markMenuDismissal } from '../../overlays/dismissal';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -483,7 +483,7 @@ PM.fontField = (get: any, set: any, opt: any = {}) => {
     menu.style.width = width + 'px';
     menu.style.left = PM.clamp(rect.right - width, 6, window.innerWidth - width - 6) + 'px';
     menu.style.top = PM.clamp(rect.bottom + 5, 6, window.innerHeight - menu.offsetHeight - 6) + 'px';
-    PM._menuOutside = (e: any) => { if (menu.contains(e.target)) return; markMenuDismissal(e); PM.closeMenus(); };
+    PM._menuOutside = (e: any) => { if (menu.contains(e.target)) return; markMenuDismissal(e); consumeMenuTriggerPress(e, b); PM.closeMenus(); };
     window.setTimeout(() => window.document.addEventListener('pointerdown', PM._menuOutside, true), 0);
     window.requestAnimationFrame(() => search.focus());
   });

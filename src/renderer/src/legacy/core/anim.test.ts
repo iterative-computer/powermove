@@ -83,7 +83,7 @@ describe('legacy animation install', () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ t: 1, v: 2, hold: false, extra: 'new' });
     expect(result[0].eo).toEqual([.33, 0]);
-    expect(result[0].ei).toEqual([.67, 1]);
+    expect(result[0].inInterp).toBe('linear'); // First key has no incoming segment.
     expect(result[0].i).toBeTruthy();
     expect(result[1].t).toBe(2);
   });
@@ -158,8 +158,8 @@ describe('legacy animation install', () => {
     };
 
     expect(PM.allProps(layer)).toEqual([
-      { key: 'c.boxWidth', prop: boxWidth, label: 'Text Box Width', group: 'Text' },
-      { key: 'c.boxHeight', prop: boxHeight, label: 'Text Box Height', group: 'Text' },
+      { key: 'c.boxWidth', prop: boxWidth, label: 'Text Box Width', group: 'Content' },
+      { key: 'c.boxHeight', prop: boxHeight, label: 'Text Box Height', group: 'Content' },
     ]);
     expect(PM.findProp(layer, 'c.boxWidth')).toBe(boxWidth);
     expect(PM.findProp(layer, 'c.boxHeight')).toBe(boxHeight);

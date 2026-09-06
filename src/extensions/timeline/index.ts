@@ -20,7 +20,8 @@ const TIMELINE_STYLES = `
 #panel-timeline{flex:0 0 340px}
 #panel-timeline>.body{position:relative;display:flex;flex-direction:column;overflow:hidden}
 #tl-head{position:absolute;z-index:3;left:0;top:0;width:var(--tl-gutter,266px);height:var(--tl-ruler,28px);display:flex;align-items:center;justify-content:flex-start;gap:4px;padding:0 7px;background:var(--bg-panel);border-right:1px solid var(--line);border-bottom:1px solid var(--line);overflow:hidden}
-#tl-head .iconbtn{width:22px;height:22px;flex:none}
+#tl-head .iconbtn{width:22px;height:22px;flex:none;background:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));border:0;border-radius:var(--r-sm);box-shadow:none}
+#tl-head .iconbtn:hover{background:var(--bg-hover)}
 #tl-head .iconbtn svg{width:13px;height:13px}
 #tl-head[data-density="compact"]{gap:3px;padding-inline:6px}
 #tl-head[data-density="compact"] .iconbtn{width:22px;height:22px}

@@ -38,3 +38,42 @@ test('expanding a layer strip immediately shows its existing keyframed propertie
   }, layerId)).toContain('opacity');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+
+test('disclosure shows common controls and refreshes newly animated properties', async ({ session }) => {
+  const { page } = session;
+  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.replaceProject(PM.mkProject({ name: 'Common timeline controls', dur: 5 }));
+    const layer = PM.mkLayer('solid', { name: 'Unanimated layer', dur: 5 });
+    PM.proj.layers.push(layer);
+    PM.UIState.setLayerCollapsed(layer, true);
+    PM.bus.emit('layers');
+    PM.invalidate('timeline');
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).PM.TL.rows.length)).toBe(1);
+  const point = await page.evaluate(() => {
+    const T = (window as any).PM.TL;
+    const box = T.cv.getBoundingClientRect();
+    return { x: box.x + 66, y: box.y + T.ruler + T.row / 2 };
+  });
+  await page.mouse.click(point.x, point.y);
+  const rows = () => page.evaluate(() => (window as any).PM.TL.rows.filter((r: any) => r.kind === 'prop').map((r: any) => r.key));
+  await expect.poll(rows).toEqual(expect.arrayContaining(['anchor.x', 'anchor.y', 'position.x', 'position.y', 'scale', 'rotation', 'opacity']));
+  expect(await rows()).not.toContain('skew');
+  // The same stopwatch operation used by Properties, without selection changes.
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.toggleStopwatch(PM.proj.layers[0], 'skew', 0);
+  });
+  await expect.poll(rows).toContain('skew');
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.toggleStopwatch(PM.proj.layers[0], 'skew', 0);
+  });
+  await expect.poll(rows).not.toContain('skew');
+  await page.mouse.click(point.x, point.y);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.TL.rows.length)).toBe(1);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

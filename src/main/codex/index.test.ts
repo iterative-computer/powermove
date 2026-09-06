@@ -39,6 +39,14 @@ const mocks = vi.hoisted(() => {
     options.onTrace?.({ kind: 'thought', text: 'Inspecting source' });
     return await new Promise((resolve) => { resolveRun = resolve; });
   });
+  const toolFinish = vi.fn(async () => ({ changed: true, revision: 2, historyId: 'native-history-1' }));
+  const toolSession = {
+    changed: true,
+    mcpConfig: { command: '/test/electron', args: ['/test/mcp-server.mjs'], env: { RUN: '1' } },
+    finish: toolFinish
+  };
+  const toolOpenSession = vi.fn(async () => toolSession);
+  const toolShutdown = vi.fn(async () => undefined);
   return {
     appOnce: vi.fn(),
     cancel,
@@ -62,6 +70,10 @@ const mocks = vi.hoisted(() => {
     },
     emitAccount(status: ChatGPTAccountStatus) { accountChanged?.(status); },
     run,
+    toolFinish,
+    toolSession,
+    toolOpenSession,
+    toolShutdown,
     appRunner: {
       run,
       cancel: appCancel,
@@ -85,6 +97,12 @@ vi.mock('./runner', () => ({
     cancelAll = mocks.cancelAll;
   },
   isCodexRunRequest: () => true
+}));
+vi.mock('../agent-tools/bridge', () => ({
+  PowermoveAgentToolBridge: class {
+    openSession = mocks.toolOpenSession;
+    shutdown = mocks.toolShutdown;
+  }
 }));
 
 import { registerCodexIpc } from './index';
@@ -211,6 +229,53 @@ describe('registerCodexIpc', () => {
 
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+  });
+
+  it('gives autonomous native providers live tools and does not apply duplicate final commands', async () => {
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null,
+      userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles,
+      isTrustedSender: () => true,
+      codexBinaryPref: () => null,
+      openExternal: async () => undefined,
+      agentToolServerPath: '/test/mcp-server.mjs',
+      agentToolCommand: '/test/electron'
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    const owner = new Sender();
+    const request = {
+      ...runRequest(),
+      mode: 'autonomous' as const,
+      access: 'project' as const,
+      projectJSON: JSON.stringify({ revision: 1 })
+    };
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, request);
+
+    expect(mocks.toolOpenSession).toHaveBeenCalledWith({
+      runId: 'ipc-run-1234', owner, baseRevision: 1
+    });
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
+    ));
+    mocks.resolve({
+      ok: true,
+      access: 'project',
+      text: JSON.stringify({
+        summary: 'Done',
+        commands: ['{"type":"add_layer"}'],
+        artifacts: [], externalActions: [], notes: [], extensions: []
+      })
+    });
+
+    const result = await pending as any;
+    expect(mocks.toolFinish).toHaveBeenCalledExactlyOnceWith(true);
+    expect(result.liveEditsApplied).toBe(true);
+    expect(result.liveEditHistoryId).toBe('native-history-1');
+    const decoded = JSON.parse(result.text);
+    expect(decoded.commands).toEqual([]);
+    expect(decoded.notes.join(' ')).toContain('duplicated edits');
   });
 
   it('steers only an active run owned by the requesting renderer', async () => {

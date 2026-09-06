@@ -1,5 +1,16 @@
 import type { PMRegistry } from '../registry';
 
+export function layerPropertyChannels(PM: PMRegistry, layer: any): any[] {
+    if (typeof PM.allProps === 'function') return PM.allProps(layer).map((entry: any) => entry.prop);
+    const properties = [...Object.values(layer?.p || {})] as any[];
+    for (const effect of layer?.fx || []) properties.push(...Object.values(effect?.p || {}));
+    for (const mask of layer?.masks || []) properties.push(...Object.values(mask?.p || {}));
+    if (layer?.type === 'shader') properties.push(...Object.values(layer?.d?.uniforms || {}));
+    if (layer?.type === 'extension') properties.push(...Object.values(layer?.d?.params || {}));
+    for (const field of ['transitionIn', 'transitionOut']) properties.push(...Object.values(layer?.[field]?.p || {}));
+    return properties;
+}
+
 type CompIndex = {
   generation: number;
   layers: any[];
@@ -68,15 +79,7 @@ export function installProjectIndex(PM: PMRegistry): void {
     }
   };
 
-  const propertyChannels = (layer: any) => {
-    const properties = [...Object.values(layer?.p || {})] as any[];
-    for (const effect of layer?.fx || []) properties.push(...Object.values(effect?.p || {}));
-    for (const mask of layer?.masks || []) properties.push(...Object.values(mask?.p || {}));
-    if (layer?.type === 'shader') properties.push(...Object.values(layer?.d?.uniforms || {}));
-    if (layer?.type === 'extension') properties.push(...Object.values(layer?.d?.params || {}));
-    for (const field of ['transitionIn', 'transitionOut']) properties.push(...Object.values(layer?.[field]?.p || {}));
-    return properties;
-  };
+
 
   const ensureRoot = () => {
     if (rootProject === PM.proj && flatLayers) return;
@@ -93,7 +96,7 @@ export function installProjectIndex(PM: PMRegistry): void {
     keyframes = new Map();
     keyframeLayers = new Map();
     for (const layer of flatLayers || []) {
-      for (const property of propertyChannels(layer)) {
+      for (const property of layerPropertyChannels(PM, layer)) {
         for (const key of property?.kf || []) {
           if (typeof key?.i !== 'string') continue;
           keyframes.set(key.i, key);

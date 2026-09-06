@@ -1,3 +1,4 @@
+import { registerRenderEncoder } from './render-encoder';
 import {
   app,
   BrowserWindow,
@@ -410,6 +411,7 @@ if (!hasSingleInstanceLock) {
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
+    registerRenderEncoder(ipcMain,ctx);
     app.once('will-quit', () => { void mediaProxies.dispose(); });
     // API pack handed to the agent every autonomous run: the extension guide
     // plus the frozen kernel/shared/type contracts.
@@ -449,6 +451,10 @@ if (!hasSingleInstanceLock) {
       isTrustedSender,
       codexBinaryPref: () => null, // a user-facing preference lands with the settings UI
       claudeBinaryPref: () => null,
+      agentToolServerPath: app.isPackaged
+        ? path.join(process.resourcesPath, 'agent-tools', 'mcp-server.mjs')
+        : path.join(app.getAppPath(), 'src/main/agent-tools/mcp-server.mjs'),
+      agentToolCommand: process.execPath,
       refreshExtensions: refreshRestoredExtensions,
       openExternal: async (url) => { await shell.openExternal(url); }
     });

@@ -1,6 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { agentWorkspaceRoot, sessionPathFor } from '../codex/workspace';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -48,6 +52,24 @@ function successfulChild(): EventEmitter & { stdout: PassThrough; stderr: PassTh
 }
 
 describe('Claude runner', () => {
+  it('retains the native session and workspace checkpoint when cancelled', async () => {
+    const userData = await mkdtemp(path.join(tmpdir(), 'claude-cancel-test-'));
+    try {
+      const runner = new ClaudeRunner();
+      const req = request({ mode: 'autonomous', access: 'project', projectJSON: '{}', threadId: 'thread-cancel' });
+      const sessionPath = sessionPathFor(agentWorkspaceRoot(userData, req.projectId), 'project', req.threadId, 'claude');
+      const pending = runner.run(req, {
+        userData, extensionsDir: path.join(userData, 'extensions'), apiPackFiles: async () => [],
+        binary: path.join(__dirname, '__fixtures__', 'fake-claude.sh'), timeoutMs: 5000,
+        spawnProcess: (cmd, args, options) => spawn(cmd, args, { ...options, env: { ...options.env, FAKE_CLAUDE_MODE: 'hang' } }),
+      });
+      await vi.waitFor(async () => expect((await readFile(sessionPath, 'utf8')).trim()).toBe('11111111-1111-4111-8111-111111111111'));
+      await runner.cancel(req.id);
+      expect(await pending).toMatchObject({ ok: false, cancelled: true });
+      expect((await readFile(sessionPath, 'utf8')).trim()).toBe('11111111-1111-4111-8111-111111111111');
+      expect(JSON.parse(await readFile(`${sessionPath}.checkpoint.json`, 'utf8')).projectId).toBe(req.projectId);
+    } finally { await rm(userData, { recursive: true, force: true }); }
+  });
   it('runs the official CLI in structured stream mode and returns schema output', async () => {
     const spawnProcess = vi.fn(() => successfulChild() as never);
     const runner = new ClaudeRunner();

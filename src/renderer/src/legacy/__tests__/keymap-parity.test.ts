@@ -84,7 +84,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+shift+d splits', { key: 'd', metaKey: true, shiftKey: true }, 'split'],
   ['cmd+c copies layers', { key: 'c', metaKey: true }, 'copyLayers'],
   ['cmd+shift+c precomposes', { key: 'c', metaKey: true, shiftKey: true }, 'precompose'],
-  ['cmd+v pastes layers', { key: 'v', metaKey: true }, 'pasteLayers'],
+  ['cmd+v routes paste by editing context', { key: 'v', metaKey: true }, 'contextPaste'],
   ['cmd+a selects all', { key: 'a', metaKey: true }, 'selectAll'],
   ['cmd+shift+a deselects all', { key: 'a', metaKey: true, shiftKey: true }, 'deselect'],
   ['cmd+i imports', { key: 'i', metaKey: true }, 'import'],
@@ -104,6 +104,14 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['Page Up steps back', { key: 'PageUp' }, 'prevFrame'],
   ['shift+Page Down steps ten frames', { key: 'PageDown', shiftKey: true }, 'stepFrames'],
   ['shift+Page Up steps back ten frames', { key: 'PageUp', shiftKey: true }, 'stepFrames'],
+  ['cmd+Left steps one frame', { key: 'ArrowLeft', metaKey: true }, 'prevFrame'],
+  ['cmd+shift+Left steps ten frames', { key: 'ArrowLeft', metaKey: true, shiftKey: true }, 'stepFrames'],
+  ['cmd+Right steps one frame', { key: 'ArrowRight', metaKey: true }, 'nextFrame'],
+  ['cmd+shift+Right steps ten frames', { key: 'ArrowRight', metaKey: true, shiftKey: true }, 'stepFrames'],
+  ['ctrl+Left steps one frame', { key: 'ArrowLeft', ctrlKey: true }, 'prevFrame'],
+  ['ctrl+shift+Left steps ten frames', { key: 'ArrowLeft', ctrlKey: true, shiftKey: true }, 'stepFrames'],
+  ['ctrl+Right steps one frame', { key: 'ArrowRight', ctrlKey: true }, 'nextFrame'],
+  ['ctrl+shift+Right steps ten frames', { key: 'ArrowRight', ctrlKey: true, shiftKey: true }, 'stepFrames'],
   ['ArrowRight nudges right', { key: 'ArrowRight' }, 'nudgeSelection'],
   ['shift+ArrowRight nudges right ten pixels', { key: 'ArrowRight', shiftKey: true }, 'nudgeSelection'],
   ['ArrowLeft nudges left', { key: 'ArrowLeft' }, 'nudgeSelection'],
@@ -128,8 +136,8 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['shift+f fits the composition', { key: 'f', shiftKey: true }, 'fitView'],
   ['j jumps to the previous visible event', { key: 'j' }, 'prevVisibleEvent'],
   ['k jumps to the next visible event', { key: 'k' }, 'nextVisibleEvent'],
-  ['shift+j jumps to the previous selected event', { key: 'j', shiftKey: true }, 'prevSelectedEvent'],
-  ['shift+k jumps to the next selected event', { key: 'k', shiftKey: true }, 'nextSelectedEvent'],
+  ['shift+j jumps to the previous keyframe', { key: 'j', shiftKey: true }, 'prevKeyframe'],
+  ['shift+k jumps to the next keyframe', { key: 'k', shiftKey: true }, 'nextKeyframe'],
   ['i goes to the selected layer In point', { key: 'i' }, 'gotoLayerIn'],
   ['o goes to the selected layer Out point', { key: 'o' }, 'gotoLayerOut'],
   ['left bracket moves the layer In point', { key: '[', code: 'BracketLeft' }, 'moveLayerIn'],
@@ -193,6 +201,27 @@ describe('AE-style keymap dispatch', () => {
     expect(ranArgs).toEqual([delta]);
     expect(event.defaultPrevented).toBe(true);
   });
+
+  for (const modifier of ['metaKey', 'ctrlKey']) {
+    for (const [key, direction] of [['ArrowLeft', -1], ['ArrowRight', 1]] as const) {
+      it(`repeats ${modifier}+Shift+${key} with the correct frame delta`, () => {
+        const init = { key, [modifier]: true, shiftKey: true };
+        press(init);
+        press({ ...init, repeat: true });
+        expect(ran).toEqual(['stepFrames', 'stepFrames']);
+        expect(ranArgs).toEqual([[direction * 10], [direction * 10]]);
+      });
+      it.each(['input', 'textarea', 'div'])(`preserves %s editing for ${modifier}+${key}`, (tag) => {
+        const field = document.createElement(tag);
+        if (tag === 'div') field.contentEditable = 'true';
+        document.body.append(field);
+        for (const shiftKey of [false, true]) {
+          expect(press({ key, [modifier]: true, shiftKey }, field).defaultPrevented).toBe(false);
+        }
+        expect(ran).toEqual([]);
+      });
+    }
+  }
 
   it('leaves plain F unbound, as the old handler did', () => {
     const event = press({ key: 'f' });
@@ -258,7 +287,7 @@ describe('AE-style keymap dispatch', () => {
     for (const binding of editorBindings) {
       expect(binding.ownerId).toBe('keymap-default');
       expect(binding.priority).toBe(100);
-      expect(binding.inFields).toBe(['save', 'saveAs', 'settings'].includes(binding.command));
+      expect(binding.inFields).toBe(['save', 'saveAs', 'settings', 'contextPaste'].includes(binding.command));
     }
     expect(bindings.find((binding: any) => binding.command === 'blurField')).toMatchObject({
       ownerId: 'keymap-default',

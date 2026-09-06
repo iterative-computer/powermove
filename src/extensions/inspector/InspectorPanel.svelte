@@ -10,6 +10,8 @@
   import LayerOptions from './LayerOptions.svelte';
   import MasksSection from './MasksSection.svelte';
   import ShaderUniforms from './ShaderUniforms.svelte';
+  import StructuredSection from './StructuredSection.svelte';
+  import RetimingSection from './RetimingSection.svelte';
   import TransformSection from './TransformSection.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
@@ -39,11 +41,12 @@
   {:else}
     {#if selectedLayers.length > 1}
       <div class="inspector-selection-note" role="status">
-        {selectedLayers.length} layers selected · editing {firstLayer.name}
+        {selectedLayers.length} layers selected · shared edits · drag to offset
       </div>
     {/if}
     <div class="inspector-layer" data-inspector-layer={firstLayer.id}>
       <ContentSection {PM} layer={firstLayer} {fontsVersion} />
+      <StructuredSection {PM} layer={firstLayer} />
       {#if firstLayer.type !== 'audio'}
         <TransformSection {PM} layer={firstLayer} />
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
@@ -51,6 +54,7 @@
         <EffectsSection {PM} layer={firstLayer} />
         <MasksSection {PM} layer={firstLayer} />
       {/if}
+      {#if firstLayer.type === 'video' || firstLayer.type === 'precomp'}<RetimingSection {PM} layer={firstLayer} />{/if}
       <LayerOptions {PM} layer={firstLayer} />
     </div>
   {/if}
@@ -88,6 +92,15 @@
     padding: 0 var(--pad) 24px;
   }
 
+  .insp :global(.row.split .k) {
+    width: 90px;
+    font-size: 11px;
+    line-height: 1.2;
+  }
+  .insp :global(.row.split) { gap: 6px; }
+  .insp :global(.row.split:has(textarea)) { height: auto; min-height: 54px; align-items: start; }
+  .insp :global(.property-stopwatch) { width: 18px; height: 24px; }
+
   .insp :global(.chip.wide) {
     margin: 0 4px 4px;
   }
@@ -119,6 +132,12 @@
     stroke: currentColor;
     stroke-width: 1.8;
   }
+
+  .insp :global(.property-stopwatch.at-key svg) { fill: currentColor; }
+
+  .insp :global(.stopwatch.property-stopwatch svg) { width: 14px; height: 14px; stroke-width: 1.5; }
+
+  .insp :global(.kf i) { width: 5px; height: 5px; }
 
   .insp :global(.grp) {
     margin-left: 0;

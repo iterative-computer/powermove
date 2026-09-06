@@ -1,3 +1,5 @@
+import { adjacentKeyframe } from '../../../../extensions/timeline/keyframe-navigation';
+import { evaluatedValue } from '../core/content-properties';
 /* Ported from js/ui/shortcuts.js — behavior-preserving.
  *
  * The command table lives in the kernel now:
@@ -8,7 +10,7 @@
  *     and dispatched by the one key listener the kernel installs.
  */
 import type { CommandDefinition } from '../../kernel/api';
-import { hasTextSelection } from '../../kernel/keychord';
+import { hasTextSelection, isFieldTarget } from '../../kernel/keychord';
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
 
@@ -41,9 +43,7 @@ const hidden = { when: () => false };
 
 const activeTextField = (): boolean => {
   if (typeof document === 'undefined') return false;
-  const active: any = document.activeElement;
-  const tag = typeof active?.tagName === 'string' ? active.tagName.toUpperCase() : '';
-  return tag === 'INPUT' || tag === 'TEXTAREA' || active?.isContentEditable === true;
+  return isFieldTarget(document.activeElement);
 };
 
 const nativeEdit = (action: string): unknown => {
@@ -110,6 +110,8 @@ def('toolShape', 'Shape tool', 'Q', () => {
   const next: any = PM.tool === 'shape' ? shapes[(shapes.indexOf(current) + 1) % shapes.length] : current;
   PM.setTool('shape', next);
 }, 'Tool');
+def('renderQueue', 'Render queue', '', () => PM.Export?.queueDialog?.(), 'File');
+def('toolPen', 'Pen tool', 'G', () => PM.setTool('pen'), 'Tool');
 def('toolText', 'Horizontal Type tool', '⌘T', () => PM.setTool('text'), 'Tool');
 def('centerAnchor', 'Center anchor point in layer content', '⌘⌥Home', () => {
   const commands: any[] = [];
@@ -149,7 +151,9 @@ PM.commandForAsset = (id?: any, at: any = PM.time) => {
   const type: any = a.kind === 'audio' ? 'audio' : a.kind === 'video' ? 'video' : 'image';
   const content: any = type === 'audio'
     ? { asset: id, trim: 0, gain: 1, fadeIn: 0, fadeOut: 0 }
-    : { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h };
+    : type === 'video'
+      ? { asset: id, trim: 0, speed: 1, embeddedAudio: a.hasAudio === true, w: a.w || PM.proj.w, h: a.h || PM.proj.h }
+      : { asset: id, w: a.w || PM.proj.w, h: a.h || PM.proj.h };
   return {
     type: 'add_layer', layerType: type, name: a.name,
     from: PM.snapF(at, PM.proj.fps),
@@ -178,6 +182,7 @@ def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () =>
 }), 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
 def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
+def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM, id), 'Edit', hidden);
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
 def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
@@ -245,6 +250,8 @@ def('nextEdge', 'Next edge', '⇧→', () => { const edge = PM.TL?.nextEdge?.();
 def('prevEdge', 'Previous edge', '⇧←', () => { const edge = PM.TL?.prevEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('nextVisibleEvent', 'Next visible timeline event', 'K', () => goToTimelineEvent(PM, 1), 'Transport');
 def('prevVisibleEvent', 'Previous visible timeline event', 'J', () => goToTimelineEvent(PM, -1), 'Transport');
+def('nextKeyframe', 'Next keyframe', '⇧K', () => { const time = adjacentKeyframe(PM, 1); if (time != null) PM.setTime(time); }, 'Transport');
+def('prevKeyframe', 'Previous keyframe', '⇧J', () => { const time = adjacentKeyframe(PM, -1); if (time != null) PM.setTime(time); }, 'Transport');
 def('nextSelectedEvent', 'Next selected timeline event', '⇧K', () => goToTimelineEvent(PM, 1, true), 'Transport');
 def('prevSelectedEvent', 'Previous selected timeline event', '⇧J', () => goToTimelineEvent(PM, -1, true), 'Transport');
 def('gotoLayerIn', 'Go to selected layer In point', 'I', () => goToSelectedLayerBoundary(PM, 'in'), 'Transport');
@@ -475,6 +482,35 @@ export function splitLayers(PM: PMRegistry): unknown {
   });
 }
 
+/** Turn a combined video clip into adjacent video and audio layers. The two
+ * source edits share one transaction, so Undo recombines them in one step. */
+export function separateVideoAudio(PM: PMRegistry, layerId?: any): unknown {
+  const video: any = layerId ? PM.L?.(layerId) : PM.firstSel?.();
+  if (!video || video.type !== 'video' || video.d?.embeddedAudio !== true || !video.d.asset) return false;
+  if (video.lock) {
+    PM.toast?.(`Layer “${video.name}” is locked`);
+    return false;
+  }
+  const layers = currentLayers(PM);
+  const index = layers.indexOf(video);
+  const result: any = PM.Edit.apply([
+    { type: 'set_content', target: video.id, patch: { embeddedAudio: false } },
+    {
+      type: 'add_layer', layerType: 'audio', name: `${video.name} Audio`,
+      from: video.from, duration: video.dur, index: index < 0 ? 0 : index,
+      content: {
+        asset: video.d.asset,
+        trim: Math.max(0, Number(video.d.trim) || 0),
+        gain: 1,
+        fadeIn: 0,
+        fadeOut: 0,
+      },
+      select: true,
+    },
+  ], { label: 'Separate audio', origin: 'command' });
+  return result;
+}
+
 /** Cut only unlocked selected layers and retain the cut payload for paste. */
 export function cutLayers(PM: PMRegistry, setClipboard: (value: any[]) => void = () => {}): unknown {
   const layers = currentLayers(PM);
@@ -545,7 +581,7 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
 export function toggleVisibility(PM: PMRegistry): unknown {
   const editable = selectedStackLayers(PM).filter((layer: any) => !layer.lock);
   if (!editable.length) return false;
-  const show = editable.every((layer: any) => layer.on === false);
+  const show = editable.every((layer: any) => evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') === false);
   const commands = editable.map((layer: any) => ({
     type: 'set_layer', target: layer.id, patch: { visible: show },
   }));
@@ -893,6 +929,7 @@ const VIEWER_MAX_ZOOM = 8;
 export function setViewerZoom(PM: PMRegistry, zoom: any): unknown {
   const viewer = PM.Viewer;
   if (!viewer || typeof zoom !== 'number' || !Number.isFinite(zoom)) return false;
+  if (typeof viewer.setZoom === 'function') return viewer.setZoom(zoom);
   const clamp = typeof PM.clamp === 'function'
     ? PM.clamp.bind(PM)
     : (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -952,8 +989,10 @@ export function deleteSelection(PM: PMRegistry): unknown {
     const ids = new Set(PM.sel.keys);
     if (!ids.size) return;
     return PM.hist.do('Delete keyframes', () => {
-      PM.proj.layers.forEach((layer: any) => PM.allProps(layer).forEach(({ prop }: any) => {
-        prop.kf = prop.kf.filter((key: any) => !ids.has(key.i));
+      PM.proj.layers.forEach((layer: any) => PM.allProps(layer).forEach(({ prop, key: path }: any) => {
+        const remaining = prop.kf.filter((key: any) => !ids.has(key.i));
+        if (prop.kf.length && !remaining.length) prop.v = PM.evP(layer, prop, PM.time, path);
+        prop.kf = remaining;
       }));
       PM.sel.keys = [];
       PM.touch(); PM.bus.emit('sel'); PM.invalidate();

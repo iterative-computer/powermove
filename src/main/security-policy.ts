@@ -1,6 +1,6 @@
-/** The privileged editor never evaluates project-authored JavaScript. */
+/** Trusted extensions can use the network; project-authored scripts run in a separate sandbox. */
 export const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' about: blob:";
+  "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self'; connect-src 'self' blob: http: https: ws: wss:; worker-src 'self' blob:; frame-src 'self' about: blob:";
 
 /** Generated scripts retain eval only inside the opaque, no-network sandbox. */
 export const SANDBOX_CONTENT_SECURITY_POLICY =

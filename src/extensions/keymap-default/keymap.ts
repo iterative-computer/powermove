@@ -32,7 +32,7 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
   ['d', 'duplicate', true], ['shift+d', 'split', true],
   ['c', 'copyLayers', true], ['shift+c', 'precompose', true],
   /* Paste and Projects explicitly rejected Shift. */
-  ['v', 'pasteLayers', false],
+  ['v', 'contextPaste', false],
   ['a', 'selectAll', true], ['shift+a', 'deselect', true],
   ['i', 'import', true], ['shift+i', 'import', true],
   ['s', 'save', false], ['shift+s', 'saveAs', false],
@@ -49,7 +49,7 @@ for (const [chord, command, looseModifiers] of MOD_CHORDS) {
   const loose = exactFileChord ? false : looseModifiers;
   bind(`cmd+${chord}`, command, loose);
   bind(`ctrl+${chord}`, command, loose);
-  if (command === 'save' || command === 'saveAs' || command === 'settings') {
+  if (command === 'save' || command === 'saveAs' || command === 'settings' || command === 'contextPaste') {
     KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 1]!.inFields = true;
     KEYMAP_DEFAULT[KEYMAP_DEFAULT.length - 2]!.inFields = true;
   }
@@ -117,12 +117,18 @@ for (const [chord, command] of TRANSPORT_CHORDS) {
 }
 bind('shift+pageup', 'stepFrames', false, [-10]);
 bind('shift+pagedown', 'stepFrames', false, [10]);
+for (const modifier of ['cmd', 'ctrl']) {
+  bind(`${modifier}+left`, 'prevFrame');
+  bind(`${modifier}+right`, 'nextFrame');
+  bind(`${modifier}+shift+left`, 'stepFrames', false, [-10]);
+  bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
+}
 
 /* Timeline navigation and layer timing use AE's native muscle memory. */
 bind('j', 'prevVisibleEvent');
 bind('k', 'nextVisibleEvent');
-bind('shift+j', 'prevSelectedEvent');
-bind('shift+k', 'nextSelectedEvent');
+bind('shift+j', 'prevKeyframe');
+bind('shift+k', 'nextKeyframe');
 bind('i', 'gotoLayerIn');
 bind('o', 'gotoLayerOut');
 bind('[', 'moveLayerIn');
@@ -148,7 +154,7 @@ bind('ctrl+shift+f9', 'easyEaseOut');
 /* Bare keys ignored alt/meta but preserved Shift. */
 const BARE_KEYS: Array<[string, string]> = [
   ['v', 'toolSelect'], ['h', 'toolHand'], ['z', 'toolZoom'],
-  ['w', 'toolRotate'], ['y', 'toolAnchor'], ['q', 'toolShape'],
+  ['w', 'toolRotate'], ['y', 'toolAnchor'], ['q', 'toolShape'], ['g','toolPen'],
   ['p', 'revealPos'], ['s', 'revealScale'], ['r', 'revealRot'],
   ['t', 'revealOpacity'], ['a', 'revealAnchor'], ['u', 'revealKeys'],
   ['b', 'workIn'], ['n', 'workOut'],

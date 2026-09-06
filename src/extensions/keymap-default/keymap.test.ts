@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(167);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(166);
+    expect(captured).toHaveLength(177);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(176);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
@@ -48,11 +48,19 @@ describe('keymap-default', () => {
     const repeatableCommands = new Set(repeatable.map(({ command }) => command));
 
     expect(repeatableCommands).toEqual(new Set(['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes']));
-    expect(repeatable).toHaveLength(16);
+    expect(repeatable).toHaveLength(24);
     expect(
       KEYMAP_DEFAULT.filter(({ command }) => !['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes'].includes(command)).every(({ repeat }) => repeat !== true)
     ).toBe(true);
     expect(KEYMAP_DEFAULT.filter(({ command }) => ['play', 'delete', 'nextEdge', 'prevEdge'].includes(command)).every(({ repeat }) => repeat !== true)).toBe(true);
+  });
+
+  it('routes primary paste through the native-aware context command', () => {
+    expect(KEYMAP_DEFAULT).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'cmd+v', command: 'contextPaste', inFields: true }),
+      expect.objectContaining({ key: 'ctrl+v', command: 'contextPaste', inFields: true })
+    ]));
+    expect(KEYMAP_DEFAULT.find(({ key, command }) => key === 'cmd+v' && command === 'pasteLayers')).toBeUndefined();
   });
 
   it('registers strict editor-style primary shortcuts and nudge deltas', () => {
@@ -134,7 +142,7 @@ describe('keymap-default', () => {
       ['shift+pageup', 'stepFrames'], ['shift+pagedown', 'stepFrames'],
       ['shift+home', 'gotoWorkIn'], ['shift+end', 'gotoWorkOut'],
       ['j', 'prevVisibleEvent'], ['k', 'nextVisibleEvent'],
-      ['shift+j', 'prevSelectedEvent'], ['shift+k', 'nextSelectedEvent'],
+      ['shift+j', 'prevKeyframe'], ['shift+k', 'nextKeyframe'],
       ['i', 'gotoLayerIn'], ['o', 'gotoLayerOut'],
       ['[', 'moveLayerIn'], [']', 'moveLayerOut'],
       ['alt+[', 'trimIn'], ['alt+]', 'trimOut'],

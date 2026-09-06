@@ -7,21 +7,12 @@ export interface AgentModResult {
 
 export function modResultForMessage(
   message: { role: string; text?: string; modResult?: AgentModResult },
-  records: Array<Record<string, any>>
+  panels: Array<{ ownerId?: string }>
 ): AgentModResult | null {
-  if (message.role !== 'assistant') return null;
   const result = message.modResult;
-  if (result && typeof result.id === 'string' && typeof result.name === 'string'
-    && ['created', 'updated', 'removed'].includes(result.action)
-    && ['ready', 'error', 'removed'].includes(result.status)) return result;
-  // Older app-generated change messages have no typed payload. Resolve only
-  // their exact historical form against an installed mod, never arbitrary prose.
-  const match = /^(Added|Updated) mod ([^\r\n]+)$/.exec(message.text || '');
-  if (!match) return null;
-  const record = records.find(item => item.manifest?.name === match[2] || item.id === match[2]);
-  return record ? {
-    id: record.id, name: record.manifest?.name || record.id,
-    action: match[1] === 'Added' ? 'created' : 'updated',
-    status: record.health?.error ? 'error' : 'ready'
-  } : null;
+  // Only successful typed agent results backed by registered panels get a card.
+  if (message.role !== 'assistant' || !result
+    || typeof result.id !== 'string' || typeof result.name !== 'string'
+    || !['created', 'updated'].includes(result.action) || result.status !== 'ready') return null;
+  return panels.some(panel => panel.ownerId === result.id) ? result : null;
 }

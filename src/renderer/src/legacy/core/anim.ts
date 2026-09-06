@@ -1,6 +1,9 @@
+import { structuredProperties } from './vector-paths';
 /* Ported from js/core/anim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
 import { compileExpression } from './expression';
+import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge';
 
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
@@ -11,6 +14,7 @@ let version = 0;
 let parentIndexes = new WeakMap<object, any>();
 PM.touch = () => {
   version++;
+  PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
   woMemo.clear(); wmMemo.clear(); memoT = null;
   parentIndexes = new WeakMap();
@@ -20,37 +24,48 @@ let memoT: any = null;
 const woMemo = new Map(), wmMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
-function evalKfs(kf: any, t: any) {
+function evalKfs(kf: any, t: any, interpolateColor = false) {
   const n = Array.isArray(kf) ? kf.length : 0;
   if (n === 0) return null;
   if (typeof t !== 'number' || !Number.isFinite(t)) return kf[0]?.v ?? null;
+  if (typeof kf[0].v === 'number' && typeof kf[n-1].v === 'number') return temporalEvaluate(kf,t,version,Ease.spring);
   if (t <= kf[0].t) return kf[0].v;
   if (t >= kf[n - 1].t) return kf[n - 1].v;
   let lo = 0, hi = n - 1;
   while (hi - lo > 1) { const m = (lo + hi) >> 1; kf[m].t <= t ? (lo = m) : (hi = m); }
+  temporalKeys(kf,version);
   const a = kf[lo], b = kf[hi];
   if (a.hold) return a.v;
-  /* Discrete channels (text, colors, toggles) step at the next key. */
-  if (typeof a.v !== 'number' || !Number.isFinite(a.v) ||
-      typeof b.v !== 'number' || !Number.isFinite(b.v)) return a.v;
+  const colors = interpolateColor && /^#[0-9a-f]{6}$/i.test(a.v) && /^#[0-9a-f]{6}$/i.test(b.v);
+  // Text and toggles remain discrete, including text that looks like a hex color.
+  if (!colors && (typeof a.v !== 'number' || !Number.isFinite(a.v) ||
+      typeof b.v !== 'number' || !Number.isFinite(b.v))) return a.v;
+  const mix = (amount: number) => colors
+    ? '#' + [1, 3, 5].map(index => {
+      const start = parseInt(a.v.slice(index, index + 2), 16), end = parseInt(b.v.slice(index, index + 2), 16);
+      return Math.round(clamp(start + (end - start) * amount, 0, 255)).toString(16).padStart(2, '0');
+    }).join('')
+    : a.v + (b.v - a.v) * amount;
   const span = b.t - a.t;
   const u = span <= 0 ? 0 : (t - a.t) / span;
   if (a.spring) {
     try {
       const amount = Ease.spring(u * span, a.spring);
-      if (Number.isFinite(amount)) return a.v + (b.v - a.v) * amount;
+      if (Number.isFinite(amount)) return mix(amount);
     } catch (e) { /* malformed spring data falls through to bezier */ }
   }
+  if (!colors) return temporalValue(kf,lo,t);
   const eo = Array.isArray(a.eo) && Number.isFinite(a.eo[0]) && Number.isFinite(a.eo[1]) ? a.eo : defaultHandles.eo;
   const ei = Array.isArray(b.ei) && Number.isFinite(b.ei[0]) && Number.isFinite(b.ei[1]) ? b.ei : defaultHandles.ei;
   try {
     const f = Ease.bezier(eo[0], eo[1], ei[0], ei[1]);
     const amount = f(u);
-    if (Number.isFinite(amount)) return a.v + (b.v - a.v) * amount;
+    if (Number.isFinite(amount)) return mix(amount);
   } catch (e) { /* a broken easing implementation must not poison evaluation */ }
-  return a.v + (b.v - a.v) * u;
+  return mix(u);
 }
 PM.evalKfs = evalKfs;
+PM.resolveContent = (layer: any, time = PM.time) => resolveContent(PM, layer, time);
 
 /** Normalize persisted keyframes without discarding extension-owned fields. */
 PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) => {
@@ -92,11 +107,12 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
     }
     else collapsed.push(clean);
   });
-  return collapsed;
+  return temporalKeys(collapsed);
 };
 
 /* ── expressions ───────────────────────────────────────── */
 PM.exprCache = new Map();
+PM.expressionErrors = new WeakMap();
 const EXPR_CACHE_MAX = 256;
 function compile(src: any) {
   let c = PM.exprCache.get(src);
@@ -119,17 +135,19 @@ PM.compileExpr = compile;
 function evalProp(prop: any, tLocal: any, ctx: any) {
   if (!prop || typeof prop !== 'object') return null;
   const keys = Array.isArray(prop.kf) ? prop.kf : [];
-  let v = keys.length ? evalKfs(keys, tLocal) : prop.v;
+  let v = keys.length ? evalKfs(keys, tLocal, ctx.key === 'c.color' || ctx.key === 'c.strokeColor') : prop.v;
   if (prop.expr) {
     const c = compile(prop.expr);
     if (c && c.f) {
       try {
         const r = c.f(tLocal, ctx.T, ctx.fps, v, ctx.layer, ctx.comp, ctx.param, ctx.key,
           c.needsIdx ? indexOfLayer(ctx.comp, ctx.layer) : 0);
-        if (typeof r === 'number' && isFinite(r)) v = r;
-        else if (typeof r === 'string') v = r;
-      } catch (e) { /* keep base value */ }
-    }
+        if ((typeof r === 'number' && isFinite(r)) || typeof r === 'string' || typeof r === 'boolean') { v = r; PM.expressionErrors.delete(prop); }
+        else PM.expressionErrors.set(prop,'Expression did not return a finite value.');
+      } catch (e) { PM.expressionErrors.set(prop, e instanceof Error ? e.message : 'Expression failed.'); }
+    } else PM.expressionErrors.set(prop,'Expression syntax is invalid.');
+  } else {
+    PM.expressionErrors.delete(prop);
   }
   return v;
 }
@@ -160,7 +178,7 @@ PM.evP = (L: any, prop: any, T: any, key: any) => {
 
 PM.active = (L: any, T: any) => {
   const start = Number(L?.from), duration = Number(L?.dur), time = Number(T);
-  if (!L?.on || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
+  if (!(isProperty(L?.on) ? PM.evP(L, L.on, T, 'l.on') : L?.on) || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
   const end = start + duration;
   if (time < start - 1e-6) return false;
   const compEnd = Number(PM.curComp()?.dur);
@@ -185,12 +203,9 @@ PM.localMatrix = (L: any, T: any) => {
   const r = PM.ev(L, 'rotation', T) * Math.PI / 180;
   const sk = Math.tan(PM.ev(L, 'skew', T) * Math.PI / 180);
   const c = Math.cos(r), s = Math.sin(r);
-  // translate(p) * rotate * skew * scale * translate(-a)
-  let m = [c, s, -s, c, px, py];
-  m = mul(m, [1, 0, sk, 1, 0, 0]);
-  m = mul(m, [sx, 0, 0, sy, 0, 0]);
-  m = mul(m, [1, 0, 0, 1, -ax, -ay]);
-  return m;
+  // Compose the affine transform directly, without three intermediate matrices per layer.
+  const a=c*sx,b=s*sx,cc=(c*sk-s)*sy,d=(s*sk+c)*sy;
+  return [a,b,cc,d,px-a*ax-cc*ay,py-b*ax-d*ay];
 };
 
 /* Cycle-safe parenting with per-timestamp memoization. Each query climbs the
@@ -259,28 +274,7 @@ PM.worldMatrix = (L: any, T: any) => {
   return m;
 };
 
-PM.worldOpacity = (L: any, T: any) => {
-  if (Object.is(memoT, T)) { const c = woMemo.get(L); if (c !== undefined) return c; }
-  const chain: any[] = [];
-  let cur = L, hit = undefined;
-  while (cur && chain.length < 256) {
-    if (chain.length > 8 && chain.includes(cur)) break;
-    chain.push(cur);
-    if (Object.is(memoT, T)) { const c = woMemo.get(cur); if (c !== undefined) { hit = c; break; } }
-    cur = parentOf(cur);
-  }
-  /* hit is the cached cumulative opacity of some ancestor — apply only the layers below it */
-  let o, i0;
-  if (hit !== undefined) { o = hit; i0 = chain.length - 2; }
-  else { o = 1; i0 = chain.length - 1; }
-  for (let i = i0; i >= 0; i--) {
-    o *= clamp(PM.ev(chain[i], 'opacity', T) / 100, 0, 1);
-    if (i > 0 && Object.is(memoT, T)) woMemo.set(chain[i], o);
-  }
-  o = clamp(o, 0, 1);
-  if (Object.is(memoT, T)) woMemo.set(L, o);
-  return o;
-};
+PM.worldOpacity = (L: any, T: any) => clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
 
 /* True when assigning parentId to L would create a parenting cycle. */
 PM.wouldCycle = (L: any, parentId: any) => {
@@ -310,10 +304,18 @@ PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any =
   let k = p.kf.find((k: any) => Math.abs(k.t - t) < .5 / safeFps);
   if (k) { k.v = value; }
   else { k = PM.KF(t, value, ease); p.kf.push(k); sortKf(p); }
+  temporalKeys(p.kf);
   PM.touch();
   return k;
 };
-PM.removeKey = (p: any, k: any) => { p.kf = p.kf.filter((x: any) => x !== k && x.i !== k.i); PM.touch(); };
+PM.removeKey = (p: any, k: any) => {
+  if (!k) return;
+  const remaining = p.kf.filter((x: any) => x !== k && x.i !== k.i);
+  // A single remaining key evaluates to its value everywhere. Keep that value
+  // when its removal turns this channel back into a static property.
+  if (p.kf.length && !remaining.length) p.v = p.kf[0].v;
+  p.kf = remaining; PM.touch();
+};
 PM.hasKeyAt = (L: any, p: any, T: any) => p.kf.find((k: any) => Math.abs(k.t - (T - L.from)) < .5 / PM.proj.fps) || null;
 
 PM.toggleStopwatch = (L: any, key: any, T: any) => {
@@ -324,6 +326,8 @@ PM.toggleStopwatch = (L: any, key: any, T: any) => {
 };
 
 PM.applyEaseTo = (keys: any, name: any) => {
+  const selected=new Set(keys);
+  for(const layer of PM.ProjectIndex?.allLayers?.() || PM.proj?.layers || [])for(const {prop} of PM.allProps(layer))if(prop.kf.some((key:any)=>selected.has(key)))temporalKeys(prop.kf);
   const { eo, ei } = Ease.handles(name);
   keys.forEach((k: any) => { k.eo = [...eo]; k.ei = [...ei]; k.hold = name === 'hold'; });
   PM.touch();
@@ -343,14 +347,13 @@ PM.animate = (L: any, key: any, points: any, opt: any = {}) => {
 PM.allProps = (L: any) => {
   const out = [];
   for (const k in L.p || {}) out.push({ key: k, prop: L.p[k], label: PM.CH[k] ? PM.CH[k].label : k, group: 'Transform' });
-  if (L.type === 'text') {
-    for (const [key, label] of [['boxWidth', 'Text Box Width'], ['boxHeight', 'Text Box Height']] as const) {
-      const prop = L.d?.[key];
-      if (prop && typeof prop === 'object' && Array.isArray(prop.kf)) out.push({ key: 'c.' + key, prop, label, group: 'Text' });
-    }
+  for (const [key, prop] of Object.entries(L.d || {})) {
+    if (canAnimateContent(L, key) && isProperty(prop)) out.push({ key: 'c.' + key, prop, label: contentLabel(key), group: 'Content' });
   }
-  (L.fx || []).forEach((fx: any) => { for (const k in fx.p || {}) out.push({ key: fx.id + '.' + k, prop: fx.p[k], label: k, group: fx.type }); });
+  for (const key of ['blend', 'mblur', 'matteMode']) if (isProperty(L[key])) out.push({ key: 'l.' + key, prop: L[key], label: key === 'blend' ? 'Blend mode' : 'Motion blur', group: 'Layer' });
+  (L.fx || []).forEach((fx: any) => { if (isProperty(fx.on)) out.push({ key: fx.id + '.$enabled', prop: fx.on, label: 'Enabled', group: fx.type }); for (const k in fx.p || {}) out.push({ key: fx.id + '.' + k, prop: fx.p[k], label: k, group: fx.type }); });
   (L.masks || []).forEach((m: any, i: any) => {
+    for (const key of ['shape', 'mode', 'on']) if (isProperty(m[key])) out.push({ key: `m.${m.id}.${key}`, prop: m[key], label: key, group: 'Mask ' + (i + 1) });
     for (const k in m.p) out.push({ key: 'm.' + m.id + '.' + k, prop: m.p[k], label: k, group: 'Mask ' + (i + 1) });
   });
   if (L.type === 'shader') for (const k in L.d?.uniforms || {}) out.push({ key: 'u.' + k, prop: L.d.uniforms[k], label: k, group: 'Shader' });
@@ -363,11 +366,17 @@ PM.allProps = (L: any) => {
     const transition = L[field];
     for (const k in transition?.p || {}) out.push({ key: `${field}.p.${k}`, prop: transition.p[k], label: k, group: label });
   }
+  out.push(...structuredProperties(L));
   return out;
 };
 PM.findProp = (L: any, key: any) => {
+  if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
-  if (key.startsWith('c.')) return L.d?.[key.slice(2)] || null;
+  if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;
+  if (key.startsWith('c.')) {
+    const value = L.d?.[key.slice(2)];
+    return isProperty(value) ? value : null;
+  }
   const transition = /^(transitionIn|transitionOut)\.p\.([a-zA-Z][a-zA-Z0-9]*)$/.exec(String(key));
   if (transition) {
     const field = transition[1]!, param = transition[2]!;
@@ -378,10 +387,10 @@ PM.findProp = (L: any, key: any) => {
   if (key.startsWith('m.')) {
     const [, mid, mk] = key.split('.');
     const m = (L.masks || []).find((x: any) => x.id === mid);
-    return m ? m.p[mk] : null;
+    return m ? m.p[mk] ?? (isProperty(m[mk]) ? m[mk] : null) : null;
   }
   const [fid, pk] = key.split('.');
   const fx = (L.fx || []).find((f: any) => f.id === fid);
-  return fx ? fx.p[pk] : null;
+  return fx ? pk === '$enabled' ? (isProperty(fx.on) ? fx.on : null) : fx.p[pk] : null;
 };
 }

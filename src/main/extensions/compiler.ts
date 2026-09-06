@@ -1,3 +1,4 @@
+import { EDITOR_HELPER_EXPORTS } from '../../shared/extension-runtime';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, rm, stat, writeFile, lstat } from 'node:fs/promises';
 import path from 'node:path';
@@ -85,9 +86,9 @@ async function importRuntimeNamespace(specifier: string): Promise<Record<string,
 }
 
 async function runtimeModule(specifier: string): Promise<string> {
-  if (specifier === 'powermove' || specifier === 'svelte/internal/disclose-version') return 'export {}';
+  if (specifier === 'svelte/internal/disclose-version') return 'export {}';
 
-  const keys = await namespaceKeys(specifier);
+  const keys = specifier === 'powermove' ? EDITOR_HELPER_EXPORTS : await namespaceKeys(specifier);
   const declarations = keys
     .filter((key) => key !== 'default' && /^[A-Za-z_$][\w$]*$/.test(key) && !RESERVED_BINDINGS.has(key))
     .map((key) => `export const ${key} = m.${key};`);
@@ -126,7 +127,7 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
       }
 
       const candidates = path.extname(unresolved)
-        ? [unresolved]
+        ? [unresolved, ...(unresolved.endsWith('.svelte') ? [unresolved+'.ts', unresolved+'.js'] : [])]
         : [unresolved, ...SOURCE_SUFFIXES.map((suffix) => `${unresolved}${suffix}`), ...SOURCE_SUFFIXES.map((suffix) => path.join(unresolved, `index${suffix}`))];
 
       for (const candidate of candidates) {

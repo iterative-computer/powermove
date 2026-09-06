@@ -124,6 +124,10 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 #toolbar-strip[hidden]{display:none}
 #toolbar{display:flex;align-items:center;gap:1px;width:max-content}
 #toolbar .iconbtn{width:26px;height:26px;border-radius:var(--r-sm)}
+#toolbar .tl-group{display:flex;align-items:center;gap:0}
+#toolbar .iconbtn.tl-more{width:12px;padding:0;color:var(--tx-3)}
+#toolbar .tl-more svg{width:8px;height:8px}
+#toolbar .tl-more:hover{color:var(--tx)}
 #toolbar .tl-sep{width:1px;height:14px;background:var(--line-2);margin:0 4px;flex:none}
 #toolbar .iconbtn.tl.on{color:var(--tx);background:var(--ctl-raised);box-shadow:var(--ctl-edge)}
 #toolbar .iconbtn.tg{color:var(--tx-3)}
@@ -662,7 +666,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-shell .agent-modelbar{max-width:100%;flex-wrap:wrap}
 .agent-shell .agent-modelbar select{max-width:100%}
 .agent-shell .agent-scroll{overflow-x:hidden}
-@container (max-width:280px){.agent-composer .agent-input-row{gap:3px}.agent-compose-context span{display:none}}
+@container (max-width:280px){.agent-composer .agent-input-row{gap:3px}}
 .agent-shell .agent-card-actions{flex-wrap:wrap}
 .agent-shell .agent-prompt-glow{left:0;right:0}
 /* messages */
@@ -781,8 +785,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 /* The draft and run options share one native inset surface. */
 .agent-composer{flex:none;display:flex;flex-direction:column;gap:7px;padding:8px;border-radius:var(--r-md);background:var(--bg-field);border:0;box-shadow:none;transition:background var(--dur-2)}
 .agent-composer:focus-within{background:color-mix(in srgb,var(--bg-field) 94%,var(--tx) 6%)}
-.agent-compose-context{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;padding:0 2px;color:var(--tx-3);font-size:var(--fs-xs);line-height:1.4}
-.agent-compose-context span{color:var(--tx-4)}
 .agent-composer.is-dropping{background:color-mix(in srgb,var(--accent) 10%,var(--bg-field))}
 .agent-input-row{display:flex;align-items:center;gap:6px}
 .agent-composer textarea{display:block;flex:1;min-width:0;min-height:32px;max-height:96px;resize:none;align-self:center;padding:4px 2px;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
@@ -956,7 +958,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .workspace-preview{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}.workspace-preview .workspace-map{width:280px;height:158px;aspect-ratio:auto}.workspace-preview p,.library-decision p,.library-save-dialog p{color:var(--tx-3);font-size:var(--fs-sm);line-height:1.5}
 .library-save-dialog{display:flex;flex-direction:column;gap:7px}.library-save-dialog p{margin:0 0 5px}.library-field-label{font-size:var(--fs-xs);color:var(--tx-3)}
 .library-editing{min-height:70px;display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:16px;border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));border-radius:var(--r-lg);background:var(--accent-dim)}.library-editing>div{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}.library-editing b{font-size:var(--fs-md)}.library-editing span{font-size:var(--fs-xs);color:var(--tx-3)}.library-editing .library-editing-kicker{color:var(--accent-tx);font-size:var(--fs-xs);font-weight:var(--fw-semibold);letter-spacing:.03em}
-.library-empty{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:44px 20px;text-align:center;color:var(--tx-3)}.library-empty>svg{width:30px;height:30px;margin-bottom:14px;color:var(--tx-4)}.library-empty b{font-size:var(--fs-lg);font-weight:var(--fw-medium);color:var(--tx);margin-bottom:5px}.library-empty span{max-width:44ch;font-size:var(--fs-md);line-height:1.55;text-wrap:pretty}.library-empty .btn{margin-top:15px}
+.library-grid.is-empty{display:flex;columns:auto;min-height:100%;align-items:center;justify-content:center}.library-empty{width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:44px 20px;text-align:center;color:var(--tx-3)}.library-empty>svg{width:32px;height:32px;flex:none;color:var(--tx-4)}.library-empty b{font-size:var(--fs-lg);font-weight:var(--fw-medium);color:var(--tx-3)}
 .library-card-hit{min-width:0;display:flex;flex-direction:column;padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .library-thumb-icon{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--tx-3)}.library-thumb-icon svg{width:26px;height:26px}
 .library-thumb-icon b{max-width:85%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-2)}
@@ -1033,3 +1035,14 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .fxb-add svg{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round}
 .fxb-row:hover .fxb-add,.fxb-row:focus-visible .fxb-add{opacity:1}
 .fxb-empty{padding:24px 8px;text-align:center;color:var(--tx-3);text-wrap:pretty}
+
+/* Viewer extensions may still mount controls with an inline background
+   shorthand. Keep arrow paint and inset together above those legacy styles. */
+#composition-zoom,#preview-controls select{
+  appearance:none;
+  padding-right:26px!important;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath d='m1 2.5 3 3 3-3' fill='none' stroke='%23808080' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")!important;
+  background-repeat:no-repeat!important;
+  background-position:right 10px center!important;
+  background-size:8px 8px!important;
+}

@@ -317,6 +317,7 @@ function helper(name: string, args: unknown[], context: ExpressionContext): unkn
 const HELPERS = new Set(['clamp', 'lerp', 'linear', 'ease', 'random', 'wiggle', 'bounce', 'loop', 'pingpong', 'param']);
 
 function identifier(name: string, context: ExpressionContext): unknown {
+  if (name === 'time') return context.T;
   if (name === 'PI') return Math.PI;
   if (name === 'Math') return MATH_VALUE;
   if (name === 't' || name === 'T' || name === 'fps' || name === 'value'
@@ -404,4 +405,23 @@ export function compileExpression(source: unknown): CompiledExpression | null {
   } catch {
     return null;
   }
+}
+
+export const EXPRESSION_NAMES = ['time','t','T','fps','value','layer','comp','ch','idx','PI','Math', ...HELPERS, ...Object.keys(MATH_FUNCTIONS)];
+
+/** Validate identifiers on the parsed tree; strings/member keys are not names. */
+export function expressionDiagnostic(source: unknown): string | null {
+  if (typeof source !== 'string' || source.length > MAX_SOURCE_CHARS) return `Use an expression of at most ${MAX_SOURCE_CHARS} characters.`;
+  try {
+    const tree = new Parser(new Lexer(source)).parse();
+    const known = new Set(EXPRESSION_NAMES);
+    const visit = (node: any): void => {
+      if (!node || typeof node !== 'object') return;
+      if (node.kind === 'identifier' && !known.has(node.name)) throw new Error(`Unknown name “${node.name}”. Use time, value, or a supported function.`);
+      if (node.kind === 'call' && node.callee.kind === 'identifier' && !HELPERS.has(node.callee.name) && !Object.hasOwn(MATH_FUNCTIONS,node.callee.name)) throw new Error(`“${node.callee.name}” is not a supported function.`);
+      if (node.kind === 'call' && node.callee.kind === 'member' && !(node.callee.object.kind === 'identifier' && node.callee.object.name === 'Math' && Object.hasOwn(MATH_FUNCTIONS,node.callee.property.value))) throw new Error('Only the documented Math functions can be called.');
+      for (const value of Object.values(node)) if (Array.isArray(value)) value.forEach(visit); else if (typeof value === 'object') visit(value);
+    };
+    visit(tree); return null;
+  } catch (error) { return error instanceof Error ? error.message : 'Check the expression syntax.'; }
 }

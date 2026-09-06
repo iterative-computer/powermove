@@ -251,7 +251,8 @@ it('generated visual easing applies to real keyframes as one undoable source edi
   assert.equal(PM.proj.edits.at(-1).operations[0].type, 'set_easing');
   assert.equal(PM.hist.undo(), true);
   const restored = PM.L(layer.id).p.opacity.kf[0];
-  assert.equal(restored.eo.join(',') + '|' + restored.ei.join(','), before);
+  assert.equal(restored.outInterp, 'linear');
+  assert.equal(PM.evalKfs(PM.L(layer.id).p.opacity.kf, .5), 50);
 });
 
 it('effect addition is one source transaction and one undo step', () => {

@@ -13,6 +13,10 @@ export const IPC = {
   projectOpen: 'project:open',
   projectConfirmClose: 'project:confirm-close',
 
+  renderStart: 'render:start',
+  renderWrite: 'render:write',
+  renderFinish: 'render:finish',
+  renderCancel: 'render:cancel',
   mediaProxyCreate: 'media-proxy:create',
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
@@ -23,6 +27,8 @@ export const IPC = {
   codexFixPrompt: 'codex:fix-prompt',
   codexRestoreChangeSet: 'codex:restore-change-set',
   codexEvent: 'codex:event', // main → renderer
+  agentToolRequest: 'agent-tool:request', // main → renderer
+  agentToolResponse: 'agent-tool:response', // renderer → main
   chatgptStatus: 'chatgpt:status',
   chatgptConnect: 'chatgpt:connect',
   chatgptDisconnect: 'chatgpt:disconnect',
@@ -102,7 +108,7 @@ export interface MediaProxyReadRequest {
 /* ── codex ───────────────────────────────────────────────── */
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
-export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type AgentProviderId = 'chatgpt' | 'claude';
 
 export interface CodexAttachment {
@@ -152,6 +158,10 @@ export type CodexRunResult =
       extensions?: AgentExtensionChange[];
       /** Durable app-owned rollback record for promoted extension changes. */
       extensionChangeSetId?: string;
+      /** The native provider used Powermove's live transactional tool layer. */
+      liveEditsApplied?: boolean;
+      /** One history entry containing every live edit made during this run. */
+      liveEditHistoryId?: string;
     }
   | { ok: false; error: string; cancelled: boolean };
 
@@ -197,6 +207,32 @@ export type CodexProgressEvent =
       kind: 'trace';
       step: CodexTraceEvent; // main-vetted structured activity
     };
+
+/* Native Codex/Claude harnesses call editor tools through main. The renderer
+   owns project state, rendering, and Undo, so main only brokers bounded calls
+   to the WebContents that owns the active agent run. */
+export type AgentToolContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: Uint8Array; mimeType: 'image/png' | 'image/jpeg' };
+
+export interface AgentToolRequestEvent {
+  runId: string;
+  callId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  baseRevision: number;
+}
+
+export interface AgentToolResponseEvent {
+  runId: string;
+  callId: string;
+  ok: boolean;
+  content: AgentToolContent[];
+  error?: string;
+  changed?: boolean;
+  revision?: number;
+  historyId?: string;
+}
 
 export type ChatGPTConnectionState = 'checking' | 'connected' | 'connecting' | 'disconnected' | 'unavailable';
 
@@ -297,6 +333,12 @@ export interface PowermoveBridge {
   openProjectFile(): Promise<ProjectOpenResult>;
   confirmProjectClose(name: string): Promise<CloseDecision>;
 
+  render: {
+    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string}):Promise<string>;
+    write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;
+    finish(token:string):Promise<{path?:string;cancelled?:boolean}>;
+    cancel(token:string):Promise<void>;
+  };
   media: {
     createPlaybackProxy(file: File): Promise<MediaProxyResult>;
     readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
@@ -314,6 +356,11 @@ export interface PowermoveBridge {
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
+  };
+
+  agentTools: {
+    onRequest(cb: (request: AgentToolRequestEvent) => void): () => void;
+    respond(response: AgentToolResponseEvent): void;
   };
 
   chatgpt: {

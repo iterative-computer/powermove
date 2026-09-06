@@ -92,7 +92,14 @@ describe('legacy Electron shim install', () => {
     ) => {
       onProgress?.('Researching on the web…');
       onTrace?.({ kind: 'tool-start', itemId: 'search-1', toolName: 'search', label: 'search · motion' });
-      return { ok: true, text: 'Finished ✓', access: 'editor', extensionChangeSetId: 'run-restore-1' };
+      return {
+        ok: true,
+        text: 'Finished ✓',
+        access: 'editor',
+        extensionChangeSetId: 'run-restore-1',
+        liveEditsApplied: true,
+        liveEditHistoryId: 'native-history-1'
+      };
     });
 
     const handlers = window.webkit.messageHandlers;
@@ -109,7 +116,7 @@ describe('legacy Electron shim install', () => {
     expect(bridge.codex.run.mock.calls[0]?.[0]).toMatchObject({
       mode: 'editor',
       access: 'editor',
-      reasoningEffort: 'high',
+      reasoningEffort: 'max',
     });
     const progress = (PM.CodexBridge.progress as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as {
       dataBase64: string;
@@ -118,6 +125,8 @@ describe('legacy Electron shim install', () => {
       ok: boolean;
       dataBase64: string;
       extensionChangeSetId?: string;
+      liveEditsApplied?: boolean;
+      liveEditHistoryId?: string;
     };
     expect(decodeBase64(progress.dataBase64)).toBe('Researching on the web…');
     expect(PM.CodexBridge.trace).toHaveBeenCalledExactlyOnceWith('request-1234', {
@@ -126,6 +135,8 @@ describe('legacy Electron shim install', () => {
     expect(result.ok).toBe(true);
     expect(decodeBase64(result.dataBase64)).toBe('Finished ✓');
     expect(result.extensionChangeSetId).toBe('run-restore-1');
+    expect(result.liveEditsApplied).toBe(true);
+    expect(result.liveEditHistoryId).toBe('native-history-1');
 
     handlers.pmCodex?.postMessage({
       id: 'request-5678',
@@ -138,7 +149,7 @@ describe('legacy Electron shim install', () => {
     expect(bridge.codex.run.mock.calls[1]?.[0]).toMatchObject({
       mode: 'autonomous',
       access: 'project',
-      reasoningEffort: 'high',
+      reasoningEffort: 'xhigh',
     });
   });
 

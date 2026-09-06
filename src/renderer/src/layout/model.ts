@@ -186,6 +186,9 @@ export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean
   const inst = PM.panelInst[id];
   const current = PM.Layout.ws && findPanel(PM.Layout.ws as Workspace, id);
   if (!inst?.el || !inst.body || !current?.spec) return false;
+  // Headless panels keep their controls inside the body. Collapsing it hides
+  // every way to reopen the panel; also repair saved states from older shells.
+  if ((PM.PANELS[id] ?? inst.def)?.headless) collapsed = false;
   current.spec.collapsed = !!collapsed;
   inst.el.dataset.collapsed = collapsed ? '1' : '0';
   inst.body.style.display = collapsed ? 'none' : '';

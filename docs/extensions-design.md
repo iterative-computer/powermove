@@ -109,20 +109,15 @@ project.
 - Disabled/errored extensions never affect boot; state in store key `extensions`.
 - **Explicit trust decision:** extensions are trusted code running in the app's
   main frame with access to the preload bridge (store, codex, save, capture).
-  This is personal software: the user (or their agent) authors what runs. The
-  remaining boundaries are structural — CSP `connect-src 'self'` blocks network
-  exfiltration, navigation guards and `setWindowOpenHandler` deny escapes, and
-  the compile step rejects imports outside the extension folder. We deliberately
-  do not sandbox extensions; error isolation, auto-disable, and one-click revert
-  are the safety story.
-- **Explicit trust decision:** extensions are trusted code running in the app's
-  main frame with access to the preload bridge (store, codex, save, capture).
-  This is personal software: the user (or their agent) authors what runs. The
-  boundaries that remain are the OS-level ones — CSP `connect-src 'self'`
-  blocks network exfiltration, navigation guards and `setWindowOpenHandler`
-  deny escapes, and the compile step rejects imports outside the extension
-  folder. We deliberately do not sandbox extensions; the recovery model
-  (isolation of errors + auto-disable + one-click revert) is the safety story.
+  This is personal software: the user (or their agent) authors what runs.
+  Extensions may use HTTP(S) requests and WebSockets through the renderer's
+  `connect-src` policy; normal browser CORS rules still apply. This network
+  permission is shared by the editor frame, not granted per extension.
+  Navigation guards and `setWindowOpenHandler` deny escapes, and the compile
+  step rejects imports outside the extension folder. We deliberately do not
+  sandbox extensions; error isolation, auto-disable, and one-click revert are
+  the recovery model. The separate generated-script sandbox retains
+  `connect-src 'none'`.
 - Hot reload: watcher → rebuild → `extensions:changed` → renderer deactivates,
   re-imports (cache-busted), reactivates.
 

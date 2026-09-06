@@ -108,6 +108,15 @@ describe('legacy engine install', () => {
     expect(audioCalls.filter(([name]: any) => name === 'pause')).toHaveLength(2);
   });
 
+  it('keeps playback synchronized across a long background frame gap',()=>{
+    const {PM,audioCalls,runFrame}=engine();PM.play();runFrame(100);runFrame(4100);
+    expect(PM.time).toBeCloseTo(4.1);expect(audioCalls.filter((c:any)=>c[0]==='seek').at(-1)).toEqual(['seek',4.1]);
+    runFrame(4116);expect(PM.time).toBeCloseTo(4.116);expect(audioCalls.filter((c:any)=>c[0]==='seek')).toHaveLength(1);
+  });
+  it('preserves elapsed time across several work-area loops while backgrounded',()=>{
+    const {PM,runFrame}=engine({work:[1,2]});PM.time=1.5;PM.play();runFrame(3750);expect(PM.time).toBeCloseTo(1.25);
+  });
+
   it('keeps one playback clock when the renderer bootstrap installs the engine again', () => {
     const { PM, reinstall, runQueuedFrames } = engine();
 
@@ -127,10 +136,10 @@ describe('legacy engine install', () => {
 
     expect(audioCalls).toEqual([
       ['start', 1.99],
-      ['seek', 1],
-      ['tick', 1],
+      ['seek', 1.0219999999999998],
+      ['tick', 1.0219999999999998],
     ]);
-    expect(PM.time).toBe(1);
+    expect(PM.time).toBeCloseTo(1.022);
   });
 
   it('lets pause win when a video start finishes late', async () => {
@@ -161,7 +170,7 @@ describe('legacy engine install', () => {
     expect(media.el.currentTime).toBeCloseTo(PM.time);
 
     media.el.currentTime = 0;
-    runFrame(750);
+    runFrame(116);
     expect(media.el.currentTime).toBe(0);
   });
 

@@ -30,7 +30,12 @@ test.describe('@viewer After Effects tool behavior', () => {
 
     const tools = await page.locator('#toolbar button[data-tool]').evaluateAll((buttons: HTMLElement[]) =>
       buttons.map((button) => button.dataset.tool));
-    expect(tools).toEqual(['select', 'hand', 'zoom', 'rotate', 'anchor', 'shape', 'text']);
+    expect(tools).toEqual(['select', 'hand', 'shape', 'text']);
+    await page.locator('#toolbar').screenshot({ path: '/private/tmp/powermove-toolbar.png' });
+    await page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click();
+    await expect(page.getByRole('menuitem', { name: 'Rotation Tool (W)', exact: true })).toBeVisible();
+    await page.screenshot({ path: '/private/tmp/powermove-toolbar-menu.png' });
+    await page.keyboard.press('Escape');
     await page.locator('#toolbar button[data-tool="shape"]').click();
     expect(await page.evaluate(() => [(window as any).PM.tool, (window as any).PM.toolShape])).toEqual(['shape', 'rect']);
 
@@ -164,7 +169,7 @@ test.describe('@viewer After Effects tool behavior', () => {
         type: layer.type,
         position: [layer.p['position.x'].v, layer.p['position.y'].v],
         box: [layer.d.boxWidth.v, layer.d.boxHeight.v],
-        channels: PM.allProps(layer).filter((item: any) => item.group === 'Text').map((item: any) => item.key),
+        channels: PM.allProps(layer).filter((item: any) => ['c.boxWidth', 'c.boxHeight'].includes(item.key)).map((item: any) => item.key),
       };
     });
     expect(paragraph).toEqual({
@@ -173,13 +178,15 @@ test.describe('@viewer After Effects tool behavior', () => {
     });
 
     // Zoom follows the pointer; Space temporarily pans and restores the active tool.
-    await page.locator('#toolbar button[data-tool="zoom"]').click();
+    await page.getByRole('button', { name: 'Navigation tools', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Zoom Tool (Z)', exact: true }).click();
     const zoomAt = await compositionPoint(page, 160, 90);
     await page.mouse.click(zoomAt.x, zoomAt.y);
     const zoomed = await page.evaluate(() => ({ tool: (window as any).PM.tool, fit: (window as any).PM.Viewer.fit, zoom: (window as any).PM.Viewer.zoom }));
     expect(zoomed.tool).toBe('zoom'); expect(zoomed.fit).toBe(false); expect(zoomed.zoom).toBeGreaterThan(0);
 
-    await page.locator('#toolbar button[data-tool="select"]').click();
+    await page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Selection Tool (V)', exact: true }).click();
     await page.mouse.move(zoomAt.x, zoomAt.y);
     await page.keyboard.down('Space');
     await expect(page.locator('#stage-inner')).toHaveCSS('cursor', 'grab');

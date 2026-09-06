@@ -14,7 +14,7 @@ import {
   agentWorkspaceRoot,
   clearSession,
   discardExtensionStage,
-  discardPartialRun,
+  preserveCancelledRun,
   prepareAgentWorkspace,
   readSession,
   sessionPathFor,
@@ -27,6 +27,7 @@ import { buildClaudeArgv } from './adapter';
 import { discoverClaudeBinary } from './env';
 import { ClaudeEventParser } from './events';
 import { isolatedClaudeEnvironment, prepareIsolatedClaudeHome } from './isolation';
+import type { NativeMcpServerConfig } from '../agent-tools/spec';
 
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
@@ -45,6 +46,7 @@ export interface ClaudeRunOptions {
   onWarning?: (text: string) => void;
   spawnProcess?: SpawnLike;
   consumeConsentToken?: (token: string) => boolean;
+  nativeTools?: NativeMcpServerConfig;
 }
 
 interface ActiveRun {
@@ -193,7 +195,8 @@ export class ClaudeRunner {
             artifactPath: `artifacts/${layout.runId}`,
             access: authority,
             extensionsDir: layout.extensionsDir
-          })
+          }),
+          nativeTools: options.nativeTools
         }), layout, options);
         if (this.cancelled.has(req.id)) {
           await this.cleanupCancelled(state, options.userData);
@@ -346,17 +349,7 @@ export class ClaudeRunner {
   }
 
   private async cleanupCancelled(state: ActiveRun, userData = state.userData): Promise<void> {
-    const authority = authorityForAccess(state.request.access);
-    const sessionPath = state.layout?.sessionPath ?? sessionPathFor(
-      agentWorkspaceRoot(userData, state.request.projectId),
-      authority,
-      state.request.threadId,
-      'claude'
-    );
     await state.sessionWrite;
-    await Promise.all([
-      clearSession(sessionPath),
-      state.layout ? discardPartialRun(state.layout) : Promise.resolve()
-    ]);
+    if (state.layout) await preserveCancelledRun(state.layout);
   }
 }

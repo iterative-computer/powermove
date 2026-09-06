@@ -52,15 +52,16 @@ test('selected agent text copies and pastes normally without copying layers', as
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('steering stays in the active run and renders as a compact continuation', async ({ session }, testInfo) => {
+test('steering stays in the active run and preserves the transcript before it', async ({ session }, testInfo) => {
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.SpatialAssistant.open();
     PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
     (window as any).__steeringProof = { requests: 0, steering: [] as string[] };
-    PM.CodexBridge.request = async () => {
+    PM.CodexBridge.request = async (_prompt: string, _schema: unknown, _images: unknown[], options: any) => {
       (window as any).__steeringProof.requests += 1;
+      options.onTrace({ kind: 'answer', text: 'I have started building the blur.' });
       return await new Promise(() => {});
     };
     PM.CodexBridge.steer = async (prompt: string) => {
@@ -74,6 +75,7 @@ test('steering stays in the active run and renders as a compact continuation', a
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Stop current run', exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).__steeringProof.requests)).toBe(1);
+  await expect(page.locator('.agent-trace-text')).toHaveText('I have started building the blur.');
 
   await composer.fill('continue');
   await composer.press('Enter');
@@ -82,8 +84,19 @@ test('steering stays in the active run and renders as a compact continuation', a
   await expect(userTurns).toHaveCount(2);
   await expect(userTurns.nth(1)).toHaveClass(/is-steering/);
   await expect(userTurns.nth(1).locator('.agent-bubble')).toHaveText('continue');
-  const boxes = await userTurns.evaluateAll((turns) => turns.map((turn) => turn.getBoundingClientRect().toJSON()));
-  expect(boxes[1].top - boxes[0].bottom).toBeLessThanOrEqual(10);
+  const transcriptOrder = await page.locator('.agent-scroll > :is(.agent-msg, .agent-trace.is-archived)').evaluateAll((items) =>
+    items.map((item) => item.textContent?.trim()).filter(Boolean));
+  expect(transcriptOrder).toEqual([
+    'Make a progressive blur effect',
+    'I have started building the blur.',
+    'continue'
+  ]);
+  const gap = await page.evaluate(() => {
+    const trace = document.querySelector('.agent-trace.is-archived')?.getBoundingClientRect();
+    const steer = document.querySelector('.agent-msg.user.is-steering')?.getBoundingClientRect();
+    return trace && steer ? steer.top - trace.bottom : Number.POSITIVE_INFINITY;
+  });
+  expect(gap).toBeLessThanOrEqual(10);
   expect(await page.evaluate(() => (window as any).__steeringProof.requests)).toBe(1);
   await testInfo.attach('hidden-agent-steering', { body: await page.screenshot(), contentType: 'image/png' });
   expect(session.diagnostics.pageErrors).toEqual([]);

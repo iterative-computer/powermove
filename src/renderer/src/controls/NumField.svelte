@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { sel } from '../state/selection.svelte';
+  import { tick, onDestroy } from 'svelte';
   import { doc } from '../state/document.svelte';
   import { transport } from '../state/transport.svelte';
   import { parseArithmetic } from './arith';
@@ -58,7 +59,8 @@
     return result + unit;
   };
 
-  const shown = $derived(editing ? draft : format(value));
+  const mixed = $derived((sel.layers,doc.tick.values, doc.tick.structure, doc.proj, transport.time, PM.inspectorMixed?.(edit,value) ?? false));
+  const shown = $derived(editing ? draft : mixed ? 'Mixed' : format(value));
 
   function openEditor(): void {
     draft = String(round(PM, Number(get()), 3));
@@ -91,30 +93,46 @@
     draft = '';
   }
 
+  let cancelScrub: (() => void) | undefined;
+  onDestroy(() => cancelScrub?.());
+
   function pointerdown(event: PointerEvent): void {
     if (editing || event.button !== 0) return;
     event.preventDefault();
     const start = Number(get());
     let moved = false;
-    gesture.begin();
-    PM.drag(event, {
+    const scrub = gesture;
+    let active = true;
+    const cleanup = () => { active = false; window.removeEventListener('keydown', escape, true); cancelScrub = undefined; };
+    const cancel = () => { if (!active) return; cleanup(); scrub.cancel(); };
+    const escape = (key: KeyboardEvent) => {
+      if (key.key !== 'Escape') return;
+      key.preventDefault(); key.stopImmediatePropagation();
+      handle?.cancel(); cancel();
+    };
+    cancelScrub = () => { handle?.cancel(); cancel(); };
+    window.addEventListener('keydown', escape, true);
+    scrub.begin();
+    const handle = PM.drag(event, {
       cursor: 'ew-resize',
       move: (dx: number, _dy: number, nextEvent: PointerEvent) => {
-        if (!moved && Math.abs(dx) < 3) return;
+        if (!active || (!moved && Math.abs(dx) < 3)) return;
         moved = true;
         const multiplier = nextEvent.shiftKey ? 10 : nextEvent.altKey ? 0.1 : 1;
         let next = start + dx * effectiveStep * multiplier * effectiveSpeed;
         if (min != null) next = Math.max(min, next);
         if (max != null) next = Math.min(max, next);
         next = round(PM, next, 3);
-        gesture.write(next);
+        scrub.write(next);
         onInput?.(next);
       },
       up: () => {
-        if (!moved) { openEditor(); gesture.cancel(); }
-        else { gesture.commit(); onCommit?.(Number(get())); }
+        if (!active) return;
+        cleanup();
+        if (!moved) { openEditor(); scrub.cancel(); }
+        else { scrub.commit(); onCommit?.(Number(get())); }
       },
-      cancel: () => gesture.cancel()
+      cancel
     });
   }
 

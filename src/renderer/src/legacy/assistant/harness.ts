@@ -1,5 +1,11 @@
+import { editVideo, videoAssets } from './video-editing';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import type {
+  AgentToolContent,
+  AgentToolRequestEvent,
+  AgentToolResponseEvent
+} from '../../../../shared/ipc';
 
 export function install(PM: PMRegistry): void {
 const MAX_COMMANDS = 80;
@@ -78,6 +84,8 @@ function projectState() {
       duration: p.dur, workArea: clone(p.work), background: p.backgroundFill || p.bg,
       playhead: PM.round(PM.time, 3), revision: Number(p.revision) || 0,
     },
+    mediaAssets: videoAssets(PM),
+    videoEditingTool: 'edit_video',
     selection: clone(PM.sel),
     layers: p.layers.slice(0, 120).map((layer: any, index: any) => ({
       index, id: layer.id, name: layer.name, type: layer.type, from: layer.from,
@@ -105,7 +113,7 @@ async function capture(times = defaultTimes(), width = 480) {
   const images = [];
   for (const time of chosen) {
     await new Promise((resolve: any) => window.requestAnimationFrame(resolve));
-    images.push(PM.Export.snapshot(time, width));
+    images.push(await (PM.Export.snapshotAsync?.(time, width) ?? PM.Export.snapshot(time, width)));
   }
   return { times: chosen, images };
 }
@@ -298,9 +306,220 @@ function rollback(checkpoint: any) {
   return !!json && !!PM.hist.restoreSnapshot(json, 'Undo agent run');
 }
 
+interface LiveToolTransaction {
+  baseRevision: number;
+  revision: number;
+  historyMark: unknown;
+  historyGroup: string;
+  snapshot: string;
+  label: string;
+  changed: boolean;
+}
+
+const liveToolTransactions = new Map<string, LiveToolTransaction>();
+
+function toolText(value: unknown): AgentToolContent {
+  return { type: 'text', text: JSON.stringify(value) };
+}
+
+function currentRevision(): number {
+  return Math.max(0, Number(PM.proj?.revision) || 0);
+}
+
+function beginLiveTransaction(request: AgentToolRequestEvent, label = 'Agent composition edit'): LiveToolTransaction {
+  const existing = liveToolTransactions.get(request.runId);
+  if (existing) return existing;
+  const revision = currentRevision();
+  if (revision !== request.baseRevision) {
+    throw new Error(`The project changed before the agent could edit it (expected revision ${request.baseRevision}, found ${revision}). Inspect the live project again and retry.`);
+  }
+  const transaction: LiveToolTransaction = {
+    baseRevision: revision,
+    revision,
+    historyMark: PM.hist.mark?.() ?? null,
+    historyGroup: PM.uid('native-agent-history-'),
+    snapshot: JSON.stringify(PM.proj),
+    label,
+    changed: false
+  };
+  liveToolTransactions.set(request.runId, transaction);
+  return transaction;
+}
+
+function dataUrlImage(value: unknown): AgentToolContent | null {
+  if (typeof value !== 'string') return null;
+  const match = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/.exec(value);
+  if (!match) return null;
+  const binary = window.atob(match[2]!);
+  const data = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) data[index] = binary.charCodeAt(index);
+  return { type: 'image', data, mimeType: match[1]! as 'image/png' | 'image/jpeg' };
+}
+
+function panelLayoutDigest() {
+  const workspace = PM.WS?.current;
+  return {
+    workspace: workspace ? { id: workspace.id, name: workspace.name } : null,
+    docks: (workspace?.layout?.docks || []).map((dock: any) => ({
+      id: String(dock.id || ''),
+      size: Number.isFinite(dock.size) ? dock.size : null,
+      panels: (dock.panels || []).map((panel: any) => ({
+        id: String(panel.id || ''),
+        title: String(panel.title || PM.PANELS?.[panel.id]?.title || panel.id || ''),
+        collapsed: panel.collapsed === true,
+        flex: panel.flex === true,
+        size: Number.isFinite(panel.size) ? panel.size : null
+      }))
+    })),
+    registeredPanels: Object.values(PM.PANELS || {}).map((panel: any) => ({
+      id: String(panel.id || ''),
+      title: String(panel.title || panel.id || '')
+    })).filter((panel: any) => panel.id)
+  };
+}
+
+async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promise<void> {
+  if (!transaction.changed) return;
+  const revision = currentRevision();
+  if (revision !== transaction.revision) {
+    throw new Error('The project changed after the agent edit, so Powermove left both the user work and the agent transaction intact instead of restoring an older snapshot.');
+  }
+  if (!PM.hist.restoreSnapshot(transaction.snapshot, 'Roll back agent changes')) {
+    throw new Error('Powermove could not restore the pre-agent project snapshot.');
+  }
+  transaction.baseRevision = currentRevision();
+  transaction.revision = transaction.baseRevision;
+  transaction.historyMark = PM.hist.mark?.() ?? null;
+  transaction.historyGroup = PM.uid('native-agent-history-');
+  transaction.snapshot = JSON.stringify(PM.proj);
+  transaction.changed = false;
+}
+
+async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
+  if (request.tool === 'get_project_state') {
+    return { ok: true, content: [toolText(projectState())], revision: currentRevision() };
+  }
+  if (request.tool === 'get_panel_layout') {
+    return { ok: true, content: [toolText(panelLayoutDigest())], revision: currentRevision() };
+  }
+  if (request.tool === 'render_frames') {
+    const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
+    const times = rawTimes?.slice(0, 5).map(Number).filter(Number.isFinite);
+    const width = PM.clamp(Math.round(Number(request.arguments.width) || 720), 160, 1280);
+    const frames = await capture(times, width);
+    const images = frames.images.map(dataUrlImage).filter((item: AgentToolContent | null): item is AgentToolContent => item !== null);
+    return {
+      ok: true,
+      content: [toolText({ times: frames.times, width, rendered: images.length }), ...images],
+      revision: currentRevision()
+    };
+  }
+  if (request.tool === 'apply_commands' || request.tool === 'edit_video') {
+    const rawCommands = Array.isArray(request.arguments.commands) ? request.arguments.commands : [];
+    const commands = rawCommands.slice(0, MAX_COMMANDS).map(cleanCommand).filter(Boolean);
+    if (request.tool === 'apply_commands' && !commands.length) throw new Error('No valid Powermove edit commands were supplied.');
+    const label = text(request.arguments.label, 'Agent composition edit', 80);
+    const transaction = beginLiveTransaction(request, label);
+    const revision = currentRevision();
+    if (revision !== transaction.revision) {
+      throw new Error(`The project changed during the agent run (expected revision ${transaction.revision}, found ${revision}). No commands were applied.`);
+    }
+    const editMeta = {
+      label,
+      origin: 'agent',
+      baseRevision: transaction.revision,
+      historyGroup: transaction.historyGroup
+    };
+    const applied = request.tool === 'edit_video'
+      ? editVideo(PM, request.arguments, editMeta)
+      : PM.Edit.apply(commands, editMeta);
+    if (!applied.ok) throw new Error(applied.message);
+    transaction.label = label;
+    transaction.revision = currentRevision();
+    transaction.changed = true;
+    return {
+      ok: true,
+      content: [toolText({
+        applied: commands.map(describeCommand),
+        clip: applied.data?.result ?? null,
+        message: applied.message || 'Applied editable Powermove commands.',
+        revision: transaction.revision
+      })],
+      changed: true,
+      revision: transaction.revision
+    };
+  }
+  if (request.tool === 'rollback_changes') {
+    const transaction = liveToolTransactions.get(request.runId);
+    if (transaction) await rollBackLiveTransaction(transaction);
+    return {
+      ok: true,
+      content: [toolText({ rolledBack: true, revision: currentRevision() })],
+      changed: false,
+      revision: currentRevision()
+    };
+  }
+  if (request.tool === '__finish_run') {
+    const transaction = liveToolTransactions.get(request.runId);
+    if (!transaction) {
+      return { ok: true, content: [toolText({ changed: false })], changed: false, revision: currentRevision() };
+    }
+    const commit = request.arguments.commit === true;
+    try {
+      let historyId: string | undefined;
+      if (!commit) {
+        await rollBackLiveTransaction(transaction);
+      } else if (transaction.changed) {
+        if (currentRevision() !== transaction.revision) {
+          throw new Error('The project changed after the agent edit. Powermove preserved all work but could not safely combine the agent changes into one Undo step.');
+        }
+        historyId = PM.hist.squash?.(
+          transaction.historyMark,
+          `Agent · ${transaction.label}`,
+          transaction.historyGroup
+        ) || undefined;
+      }
+      return {
+        ok: true,
+        content: [toolText({ changed: commit && transaction.changed, historyId: historyId || null })],
+        changed: commit && transaction.changed,
+        revision: currentRevision(),
+        ...(historyId ? { historyId } : {})
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        content: [],
+        error: error instanceof Error ? error.message : String(error),
+        changed: transaction.changed,
+        revision: currentRevision()
+      };
+    } finally {
+      liveToolTransactions.delete(request.runId);
+    }
+  }
+  throw new Error(`Unknown Powermove agent tool: ${request.tool}`);
+}
+
+const nativeAgentTools = typeof window === 'undefined' ? undefined : window.powermove?.agentTools;
+nativeAgentTools?.onRequest((request) => {
+  void handleLiveAgentTool(request).then(
+    (result) => nativeAgentTools.respond({ runId: request.runId, callId: request.callId, ...result }),
+    (error) => nativeAgentTools.respond({
+      runId: request.runId,
+      callId: request.callId,
+      ok: false,
+      content: [],
+      error: error instanceof Error ? error.message : String(error),
+      changed: liveToolTransactions.get(request.runId)?.changed === true,
+      revision: currentRevision()
+    })
+  );
+});
+
 PM.AgentHarness = {
   MAX_REPAIRS, projectState, defaultTimes, observe, capture, sanitizeProposal,
   describeCommand, sceneSchema, promptContext, execute, rollback, cleanCommand,
-  test: { cleanCommand, safeTimes, reviewSchema },
+  test: { cleanCommand, safeTimes, reviewSchema, handleLiveAgentTool },
 };
 }

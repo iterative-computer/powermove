@@ -1,0 +1,39 @@
+import { expect, test } from './helpers/app';
+import { importFixture } from './helpers/media';
+
+test('agent cuts imported footage, reviews decoded frames, and undoes the run', async ({ session }) => {
+  const { page } = session;
+  await importFixture(page, 'h264-aac.mp4');
+  await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'));
+  const result = await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    const clip = PM.proj.layers.find((l: any) => l.type === 'video');
+    PM.Edit.apply({ type: 'delete_layers', targets: PM.proj.layers.filter((l: any) => l.id !== clip.id).map((l: any) => l.id) });
+    PM.Edit.apply({ type: 'set_layer', target: clip.id, patch: { from: 0 } });
+    const before = JSON.stringify(PM.proj.layers);
+    const baseRevision = PM.proj.revision;
+    const call = (tool: string, args = {}) => PM.AgentHarness.test.handleLiveAgentTool({ runId: 'video-e2e', callId: tool, tool, arguments: args, baseRevision });
+    const state = await call('get_project_state');
+    const split = await call('edit_video', { operation: 'split', layerId: clip.id, at: 1 });
+    const tailId = JSON.parse(split.content[0].text).clip.tailId;
+    const tail = PM.L(tailId);
+    const sourceTrim = tail.d.trim.v;
+    const render = await call('render_frames', { times: [1.5], width: 320 });
+    const image = render.content.find((c: any) => c.type === 'image');
+    const blob = new Blob([image.data], { type: image.mimeType });
+    const bitmap = await createImageBitmap(blob);
+    const frame = document.createElement('canvas'); frame.width = bitmap.width; frame.height = bitmap.height;
+    const ctx = frame.getContext('2d')!; ctx.drawImage(bitmap, 0, 0); bitmap.close();
+    const pixel = [...ctx.getImageData(frame.width / 2, frame.height / 2, 1, 1).data];
+    const audio = await call('edit_video', { operation: 'separate_audio', layerId: tailId });
+    const finish = await call('__finish_run', { commit: true });
+    PM.hist.undo();
+    return { assets: JSON.parse(state.content[0].text).mediaAssets, split: split.ok, sourceTrim, pixel, images: render.content.filter((c: any) => c.type === 'image').length, audio: audio.ok, finished: finish.ok, historyId: finish.historyId, before: JSON.parse(before), after: JSON.parse(JSON.stringify(PM.proj.layers)) };
+  });
+  expect(result.assets.length).toBeGreaterThan(0);
+  expect(result).toMatchObject({ split: true, sourceTrim: 1, images: 1, audio: true, finished: true });
+  expect(result.after).toEqual(result.before);
+  expect(result.historyId).toBeTruthy();
+  expect(result.pixel[1]).toBeGreaterThan(225);
+  expect(result.pixel[0]).toBeLessThan(30);
+});
