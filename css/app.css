@@ -653,9 +653,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-connect-provider{position:relative;align-self:flex-start;max-width:100%;margin-bottom:12px;appearance:none;border:0;border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);padding:5px 24px 5px 9px}
 .agent-connect-mark{display:grid;place-items:center;width:32px;height:32px;flex:none;margin-bottom:8px;border:0;border-radius:14px;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg-float));box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 8%,transparent)}
 .agent-connect-mark svg{width:22px;height:22px}.agent-connect-gate>b{color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}.agent-connect-gate>span{max-width:260px;margin-top:6px;font-size:var(--fs-sm);line-height:1.5}.agent-connect-button{min-width:142px;margin-top:18px}.agent-connect-gate>small{max-width:240px;margin-top:10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.45}
-.agent-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;margin-right:calc(var(--panel-edge-inset) - 4px);padding:12px 0 14px var(--panel-edge-inset);scrollbar-gutter:stable;scrollbar-width:auto;scrollbar-color:var(--ink-3) transparent}
-.agent-scroll::-webkit-scrollbar{width:4px}
-.agent-scroll::-webkit-scrollbar-thumb{background:var(--ink-3);border-radius:var(--r-pill)}
+.agent-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:12px var(--panel-edge-inset) 14px;scrollbar-width:none}
+.agent-scroll::-webkit-scrollbar{display:none}
 .agent-scroll,.agent-scroll *{user-select:text;-webkit-user-select:text}
 /* Long commands, URLs and streamed word spans must contribute a shrinkable
    minimum width. Hiding the scrollbar alone leaves a horizontal scroll range. */
