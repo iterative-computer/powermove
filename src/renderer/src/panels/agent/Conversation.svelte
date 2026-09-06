@@ -1,6 +1,7 @@
 <script lang="ts">
   import { agentState } from './agent-state.svelte';
   import Timeline from './Timeline.svelte';
+  import WorkingTimer from './WorkingTimer.svelte';
   import Turn from './Turn.svelte';
   import ResultActions from './ResultActions.svelte';
   import AgentAtmosphere from './AgentAtmosphere.svelte';
@@ -41,8 +42,14 @@
   </div>
 {/if}
 {#each agentState.conversation as message, index (`${message.role}-${index}`)}
+  {#if agentState.workingStartedAt !== null && index === agentState.workingConversationIndex}
+    <WorkingTimer startedAt={agentState.workingStartedAt} />
+  {/if}
   <Turn {PM} {message} answering={index === answeringIndex} />
 {/each}
+{#if agentState.workingStartedAt !== null && agentState.workingConversationIndex === agentState.conversation.length}
+  <WorkingTimer startedAt={agentState.workingStartedAt} />
+{/if}
 {#if showTimeline || agentState.activity}
   <Timeline {PM} />
 {/if}

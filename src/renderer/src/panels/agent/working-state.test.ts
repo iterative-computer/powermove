@@ -16,3 +16,23 @@ it('preserves the start through progress snapshots and resets between runs', () 
   setAgentSnapshot({ ...snapshot, requestToken: 2 });
   expect(agentState.workingStartedAt).toBe(5000);
 });
+
+it('anchors the divider through repeated steering and resets for the next run', () => {
+  resetAgentState();
+  const snapshot = { ...agentState, legacyPhase: 'working', requestToken: 1,
+    conversation: [{ role: 'user' as const, text: 'Build it' }] };
+  setAgentSnapshot(snapshot);
+  expect(agentState.workingConversationIndex).toBe(1);
+  const conversation = [...snapshot.conversation,
+    { role: 'trace' as const, steps: [] },
+    { role: 'user' as const, text: 'Continue', steering: true }];
+  setAgentSnapshot({ ...snapshot, conversation });
+  expect(agentState.workingConversationIndex).toBe(1);
+  conversation.push({ role: 'user', text: 'Keep going', steering: true });
+  setAgentSnapshot({ ...snapshot, conversation });
+  expect(agentState.workingConversationIndex).toBe(1);
+  setAgentSnapshot({ ...snapshot, conversation, legacyPhase: 'idle' });
+  expect(agentState.workingConversationIndex).toBeNull();
+  setAgentSnapshot({ ...snapshot, conversation, requestToken: 2 });
+  expect(agentState.workingConversationIndex).toBe(conversation.length);
+});

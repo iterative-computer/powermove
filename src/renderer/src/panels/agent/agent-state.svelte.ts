@@ -76,6 +76,7 @@ interface AgentViewState extends AgentSnapshot {
   phase: AgentPhase;
   progressLines: string[];
   workingStartedAt: number | null;
+  workingConversationIndex: number | null;
   focusVersion: number;
   revision: number;
 }
@@ -115,6 +116,7 @@ export const agentState: AgentViewState = $state({
   ...EMPTY_SNAPSHOT,
   phase: 'idle',
   workingStartedAt: null,
+  workingConversationIndex: null,
   progressLines: [],
   focusVersion: 0,
   revision: 0
@@ -146,6 +148,10 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     phase,
     workingStartedAt: phase === 'running'
       ? (enteringRun || tokenChanged || (snapshot.threadId || '') !== agentState.threadId ? Date.now() : agentState.workingStartedAt)
+      : null,
+    workingConversationIndex: phase === 'running'
+      ? (enteringRun || tokenChanged || (snapshot.threadId || '') !== agentState.threadId
+        ? snapshot.conversation.length : agentState.workingConversationIndex)
       : null,
     uiPlacement: phase === 'running' && snapshot.uiPlacement ? { ...snapshot.uiPlacement } : null,
     plan: snapshot.plan ? { ...snapshot.plan } : null,
@@ -191,6 +197,7 @@ export function resetAgentState(): void {
   Object.assign(agentState, EMPTY_SNAPSHOT, {
     phase: 'idle',
     workingStartedAt: null,
+    workingConversationIndex: null,
     conversation: [],
     attachments: [],
     trace: [],

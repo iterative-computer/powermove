@@ -91,6 +91,14 @@ test('steering stays in the active run and preserves the transcript before it', 
     'I have started building the blur.',
     'continue'
   ]);
+  await expect(page.locator('.agent-working-timer')).toHaveCount(1);
+  expect(await page.locator('.agent-working-timer').evaluate((timer) => ({
+    previous: timer.previousElementSibling?.textContent?.trim(),
+    next: timer.nextElementSibling?.textContent?.trim(),
+  }))).toEqual({
+    previous: 'Make a progressive blur effect',
+    next: 'I have started building the blur.',
+  });
   const gap = await page.evaluate(() => {
     const trace = document.querySelector('.agent-trace.is-archived')?.getBoundingClientRect();
     const steer = document.querySelector('.agent-msg.user.is-steering')?.getBoundingClientRect();

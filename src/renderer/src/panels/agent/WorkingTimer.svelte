@@ -15,5 +15,5 @@
 <div class="agent-working-timer">Working for {duration}</div>
 
 <style>
-  .agent-working-timer{color:var(--tx-3);font-size:var(--fs-sm);line-height:1.5;font-variant-numeric:tabular-nums;padding:0 0 10px;margin:4px 0 12px;border-bottom:1px solid var(--line)}
+  .agent-working-timer{color:var(--tx-3);font-size:var(--fs-sm);line-height:1.5;font-variant-numeric:tabular-nums;padding:0 0 10px;margin:4px 0 0;border-bottom:1px solid var(--line)}
 </style>
