@@ -1,5 +1,4 @@
 <script lang="ts">
-  import AgentAtmosphere from './AgentAtmosphere.svelte';
   import { agentState } from './agent-state.svelte';
   import { relativeOpened } from './threads';
 
@@ -89,7 +88,6 @@
 
 {#if agentState.threadId}
   <div class="thread-bar" role="group" aria-label="Agent threads">
-    <AgentAtmosphere compact active={agentState.phase === 'running'} />
     <button
       class="thread-trigger"
       type="button"

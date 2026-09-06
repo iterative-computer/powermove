@@ -45,6 +45,14 @@ export function createExtensionSettingsControl(
 
   let alive = true;
   let stop = (): void => undefined;
+  let pendingDelete: string | null = null;
+  const busy = new Set<string>();
+  const expanded = new Set<string>();
+  const intro = document.createElement('p');
+  intro.className = 'settings-note';
+  intro.textContent = 'See what changes your workspace. Turn an extension off to compare it with the default interface.';
+  section.element.insertBefore(intro, list);
+
 
   const render = (records: ExtensionRecord[]): void => {
     if (!alive) return;
@@ -59,8 +67,19 @@ export function createExtensionSettingsControl(
       return;
     }
 
+    let previousGroup = '';
+    const resolveName = (id: string): string => nameOf(records.find(item => item.id === id) ?? { id } as ExtensionRecord);
     for (const record of sorted) {
+      const group = record.scope === 'builtin' ? 'Built into Powermove' : 'Added extensions';
+      if (group !== previousGroup) {
+        const heading = document.createElement('h3');
+        heading.className = 'settings-extension-group';
+        heading.textContent = group;
+        list.append(heading);
+        previousGroup = group;
+      }
       const state = displayState(record);
+      if (record.health.state === 'replaced') state.detail = `Replaced by ${resolveName(record.health.by)}`;
       const row = document.createElement('div');
       row.className = 'settings-extension-row';
       row.setAttribute('role', 'listitem');
@@ -91,10 +110,64 @@ export function createExtensionSettingsControl(
         copy.append(detail);
       }
 
+      const addLine = (label: string, text: string, className = ''): void => {
+        const line = document.createElement('div');
+        line.className = `settings-extension-impact ${className}`;
+        const title = document.createElement('strong');
+        title.textContent = `${label} `;
+        line.append(title, document.createTextNode(text));
+        copy.append(line);
+      };
+      const replaces = record.manifest?.replaces ?? [];
+      if (replaces.length) addLine(record.enabled && state.label === 'Active' ? 'Replaces' : 'When active, replaces', replaces.map(resolveName).join(', '), 'is-replacement');
+      const capabilities: Record<string, string> = { panels: 'Panels', commands: 'Commands', keybindings: 'Keyboard shortcuts', effects: 'Effects', transitions: 'Transitions', layers: 'Layer types', themes: 'Appearance', palette: 'Command search', menus: 'Menus', status: 'Status bar', hooks: 'Editor behavior' };
+      const declared = record.manifest?.contributes ?? [];
+      if (declared.length) addLine('Can change', declared.map(kind => capabilities[kind] ?? kind).join(' · '));
+      else if (!replaces.length) addLine('Interface changes', 'Not described by this extension.');
+      const dependencies = record.manifest?.dependsOn ?? [];
+      if (dependencies.length) addLine('Requires', dependencies.map(resolveName).join(', '));
+      const dependents = records.filter(item => item.enabled && item.manifest?.dependsOn?.includes(record.id));
+      if (dependents.length) addLine('Used by', dependents.map(nameOf).join(', '));
+
+      const details = document.createElement('details');
+      details.className = 'settings-extension-details';
+      details.open = expanded.has(record.id);
+      details.addEventListener('toggle', () => { if (details.open) expanded.add(record.id); else expanded.delete(record.id); });
+      const detailLabel = document.createElement('summary');
+      detailLabel.textContent = 'Details';
+      details.append(detailLabel);
+      const info = document.createElement('div');
+      info.textContent = `${record.id}${version}`;
+      details.append(info);
+      const kernel = (window as any).PM?.Kernel;
+      for (const [key, label] of [['panels', 'Panels'], ['commands', 'Commands'], ['keybindings', 'Shortcuts'], ['effects', 'Effects'], ['transitions', 'Transitions'], ['layerTypes', 'Layer types'], ['themes', 'Themes']] as const) {
+        const entries = kernel?.[key]?.entries?.() ?? [];
+        const owned = entries.filter((entry: any) => entry.ownerId === record.id);
+        if (!owned.length) continue;
+        const contribution = document.createElement('div');
+        contribution.textContent = `${label} registered now: ${owned.map((entry: any) => entry.item.title ?? entry.item.label ?? entry.item.key ?? entry.id).join(', ')}`;
+        details.append(contribution);
+      }
+      if (record.manifest?.forkedFrom) {
+        const origin = document.createElement('div');
+        origin.textContent = `Based on ${record.manifest.forkedFrom}`;
+        details.append(origin);
+      }
+      if (record.scope !== 'builtin') {
+        const reveal = document.createElement('button');
+        reveal.type = 'button'; reveal.className = 'btn'; reveal.textContent = 'Show in Finder';
+        reveal.onclick = async () => {
+          try { await api?.reveal({ id: record.id }); }
+          catch (error) { if (alive) summary.textContent = error instanceof Error ? error.message : 'Could not show extension files.'; }
+        };
+        details.append(reveal);
+      }
+      copy.append(details);
       const controls = document.createElement('div');
       controls.className = 'settings-extension-controls';
       const toggle = document.createElement('button');
       toggle.type = 'button';
+      toggle.disabled = busy.has(record.id);
       toggle.className = record.enabled ? 'toggle on' : 'toggle';
       toggle.setAttribute('aria-pressed', String(record.enabled));
       toggle.setAttribute('aria-label', `${record.enabled ? 'Disable' : 'Enable'} ${nameOf(record)}`);
@@ -105,26 +178,70 @@ export function createExtensionSettingsControl(
         if (!api || toggle.disabled) return;
         const next = !record.enabled;
         toggle.disabled = true;
+        busy.add(record.id);
         toggle.classList.toggle('on', next);
         toggle.setAttribute('aria-pressed', String(next));
         try {
-          render(await api.setEnabled({ id: record.id, enabled: next }));
+          const updated = await api.setEnabled({ id: record.id, enabled: next });
+          busy.delete(record.id);
+          render(updated);
         } catch (error) {
+          busy.delete(record.id);
           toggle.classList.toggle('on', record.enabled);
           toggle.setAttribute('aria-pressed', String(record.enabled));
           toggle.disabled = false;
           summary.textContent = error instanceof Error ? error.message : 'The extension could not be updated.';
         }
       });
-      /* The switch already reads on/off, so a pill only earns its place when
-         something needs the reader's attention. */
-      if (state.tone === 'warning') {
+      // Distinguish enabled intent from active, replaced, and failed extensions.
+      {
         const status = document.createElement('span');
-        status.className = 'settings-extension-status is-warning';
+        status.className = `settings-extension-status is-${state.tone}`;
         status.textContent = state.label;
         controls.append(status);
       }
       controls.append(toggle);
+      if (record.scope === 'user') {
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'settings-extension-delete';
+        remove.textContent = 'Delete…';
+        remove.setAttribute('aria-label', `Delete ${nameOf(record)}`);
+        remove.disabled = busy.has(record.id);
+        remove.onclick = () => { pendingDelete = record.id; render(records); };
+        controls.append(remove);
+      }
+      if (pendingDelete === record.id) {
+        const confirmation = document.createElement('div');
+        confirmation.className = 'settings-extension-confirm';
+        confirmation.setAttribute('role', 'group');
+        confirmation.setAttribute('aria-label', `Delete ${nameOf(record)}?`);
+        const explanation = document.createElement('p');
+        explanation.textContent = `Delete ${nameOf(record)} from this computer? Its extension files will be permanently removed.` +
+          (replaces.length ? ` ${replaces.map(resolveName).join(', ')} can take over again if enabled.` : '') +
+          (declared.some(kind => ['layers', 'effects', 'transitions'].includes(kind)) ? ' Projects using its layer types or effects may need it reinstalled to render correctly.' : '') +
+          (dependents.length ? ` ${dependents.map(nameOf).join(', ')} depend on it and may stop working.` : '');
+        const cancel = document.createElement('button');
+        cancel.type = 'button'; cancel.className = 'btn'; cancel.textContent = 'Cancel';
+        cancel.onclick = () => { pendingDelete = null; render(records); list.querySelector<HTMLButtonElement>(`[data-extension-id="${record.id}"] .settings-extension-delete`)?.focus(); };
+        const confirm = document.createElement('button');
+        confirm.type = 'button'; confirm.className = 'btn settings-extension-delete'; confirm.textContent = 'Delete extension';
+        confirm.disabled = cancel.disabled = busy.has(record.id);
+        confirm.onclick = async () => {
+          if (!api || busy.has(record.id)) return;
+          busy.add(record.id); confirm.disabled = cancel.disabled = true;
+          try {
+            const updated = await api.remove({ id: record.id });
+            busy.delete(record.id); pendingDelete = null; render(updated);
+          } catch (error) {
+            busy.delete(record.id); render(records);
+            summary.textContent = error instanceof Error ? error.message : 'The extension could not be deleted.';
+          }
+        };
+        confirmation.append(explanation, cancel, confirm);
+        copy.append(confirmation);
+        queueMicrotask(() => { if (alive && confirmation.isConnected) cancel.focus(); });
+      }
       row.append(copy, controls);
       list.append(row);
     }

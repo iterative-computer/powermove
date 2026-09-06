@@ -461,7 +461,7 @@ PM.fontField = (get: any, set: any, opt: any = {}) => {
             PM.Fonts && PM.Fonts.ensure(name, opt.weight ? opt.weight() : 400);
             opt.onChange && opt.onChange(name);
           },
-        }, name === get() ? '✓ ' : '', name);
+        }, name);
         results.appendChild(item);
       }
       if (!matches.length) results.appendChild(h('div.font-empty', 'No matching fonts'));

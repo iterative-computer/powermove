@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { PMRegistry } from '../legacy/registry';
   import { clampPanelHeight, resolvePairResize, transferPanelHeights } from './geometry';
   import { applyPanelSize, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
@@ -38,6 +39,23 @@
     const useBefore = !isFlexDock(beforeDock);
     return { target: useBefore ? beforeDock! : afterDock!, sign: useBefore ? 1 : -1 };
   };
+  // Column dividers are siblings of the docks, so native wheel scrolling
+  // cannot reach the adjacent side column from their hit area.
+  onMount(() => {
+    const onWheel = (event: WheelEvent): void => {
+      if (mode !== 'vertical' || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
+      const target = [beforeDock, afterDock].find((dock) => dock?.id === 'left' || dock?.id === 'right');
+      const dock = target && document.getElementById(`dock-${target.id}`);
+      if (!dock || dock.scrollHeight <= dock.clientHeight) return;
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? dock.clientHeight
+        : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+      event.preventDefault();
+      dock.scrollTop += event.deltaY * unit;
+    };
+    splitter.addEventListener('wheel', onWheel, { passive: false });
+    return () => splitter.removeEventListener('wheel', onWheel);
+  });
+
   const horizontalPair = () => {
     const before = beforeSpec!;
     const after = afterSpec!;

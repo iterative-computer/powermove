@@ -4,7 +4,6 @@
   import WorkingTimer from './WorkingTimer.svelte';
   import Turn from './Turn.svelte';
   import ResultActions from './ResultActions.svelte';
-  import AgentAtmosphere from './AgentAtmosphere.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -29,7 +28,6 @@
 {#if !agentState.conversation.length && !agentState.activity}
   <div class="agent-welcome">
     <div class="agent-welcome-heading">
-      <AgentAtmosphere compact />
       <div><b>Make your next move</b><span>{agentState.accessMode === 'editor'
         ? 'Your ideas. Editable motion.'
         : 'Create, research, and build with your project.'}</span></div>

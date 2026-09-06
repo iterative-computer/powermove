@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { PMRegistry } from '../legacy/registry';
   import Dock from './Dock.svelte';
   import type { DockSpec, PanelSpec, Workspace } from './model';
@@ -9,6 +10,31 @@
   let { PM }: { PM: PMRegistry } = $props();
   let manifest = $state.raw<Workspace | null>(null);
   let tick = $state(0);
+
+  onMount(() => {
+    const body = document.getElementById('body');
+    if (!body) return;
+    const onWheel = (event: WheelEvent): void => {
+      // Only the empty outer gutter belongs to this handler. Panel contents,
+      // dividers and overlays retain their own scrolling behavior.
+      if (event.target !== body || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
+      for (const side of ['left', 'right']) {
+        const dock = document.getElementById(`dock-${side}`);
+        if (!dock || !dock.clientHeight) continue;
+        const rect = dock.getBoundingClientRect();
+        if (event.clientY < rect.top || event.clientY >= rect.bottom) continue;
+        if (side === 'left' ? event.clientX >= rect.left : event.clientX < rect.right) continue;
+        if (dock.scrollHeight <= dock.clientHeight) return;
+        const unit = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? dock.clientHeight
+          : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+        event.preventDefault();
+        dock.scrollTop += event.deltaY * unit;
+        return;
+      }
+    };
+    body.addEventListener('wheel', onWheel, { passive: false });
+    return () => body.removeEventListener('wheel', onWheel);
+  });
 
   export function apply(workspace: Workspace): void {
     manifest = workspace;

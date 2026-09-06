@@ -159,6 +159,34 @@ export default function activate(api: PowermoveAPI) {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('settings explains an override and deletes it while restoring the built-in panel', async ({ session }) => {
+    await seedExtension(session.userData, 'settings-override', `export default function activate(api) {
+      api.panels.register({ id: 'timeline', title: 'Custom timeline', build(body) { body.textContent = 'Settings replacement'; } });
+    }`, { name: 'Interface cleanup', replaces: ['timeline'], contributes: ['panels', 'commands', 'keybindings'] });
+    await session.relaunch();
+    const { page } = session;
+    await expect(page.locator('#panel-timeline')).toContainText('Settings replacement');
+    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.getByRole('tab', { name: 'Extensions', exact: true }).click();
+    const row = settings.locator('[data-extension-id="settings-override"]');
+    await expect(row).toContainText('Replaces Timeline');
+    await expect(row).toContainText('Keyboard shortcuts');
+    await row.locator('summary').click();
+    await expect(row).toContainText('Panels registered now: Custom timeline');
+    await settings.screenshot({ path: '/private/tmp/powermove-extension-settings.png' });
+    await row.getByRole('button', { name: 'Delete Interface cleanup', exact: true }).click();
+    await expect(row).toContainText('permanently removed');
+    await row.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(row).toBeVisible();
+    await row.getByRole('button', { name: 'Delete Interface cleanup', exact: true }).click();
+    await row.getByRole('button', { name: 'Delete extension', exact: true }).click();
+    await expect(row).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('timeline');
+    await expect(page.locator('#panel-timeline #tl-canvas')).toHaveCount(1);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('a broken extension is contained: the app boots and reports the failure', async ({ session }) => {
     await seedExtension(
       session.userData,

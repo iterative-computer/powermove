@@ -47,6 +47,16 @@ test('selected layers show their transformed anchors at a constant screen size',
     }
   }
   await page.locator('#stage').screenshot({ path: '/private/tmp/powermove-selected-anchors.png' });
+  const deselectedArcs = await page.evaluate(() => {
+    const PM = (window as any).PM, ctx = PM.Viewer.octx, original = ctx.arc;
+    const ids = PM.selLayers().map((layer: any) => layer.id);
+    PM.selectLayers([]);
+    let count = 0;
+    ctx.arc = function(...args: any[]) { count++; return original.apply(this, args); };
+    try { PM.bus.emit('overlay'); } finally { ctx.arc = original; PM.selectLayers(ids); }
+    return count;
+  });
+  expect(deselectedArcs).toBe(0);
   const hiddenArcs = await page.evaluate(() => {
     const PM = (window as any).PM, ctx = PM.Viewer.octx, original = ctx.arc;
     let count = 0;

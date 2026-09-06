@@ -64,8 +64,21 @@ test.describe('@dock-layout Svelte DockLayout', () => {
     expect(initial.bodyBottom).toBeLessThanOrEqual(initial.statusTop + 1);
     expect(initial.lastBottom).toBeGreaterThan(initial.bodyBottom);
 
-    await page.locator('#dock-right').hover();
+    await page.locator('#body > .splitter').last().hover();
     await page.mouse.wheel(0, 480);
+    await expect.poll(() => page.locator('#dock-right').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
+
+    await page.mouse.wheel(0, -480);
+    await expect.poll(() => page.locator('#dock-right').evaluate((dock) => dock.scrollTop)).toBe(0);
+    const edge = await page.locator('#body').boundingBox();
+    expect(edge).not.toBeNull();
+    await page.mouse.move(edge!.x + edge!.width - 1, edge!.y + edge!.height / 2);
+    await page.mouse.wheel(0, 240);
+    await expect.poll(() => page.locator('#dock-right').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
+    await page.mouse.wheel(0, -10000);
+    await expect.poll(() => page.locator('#dock-right').evaluate((dock) => dock.scrollTop)).toBe(0);
+    await page.locator('#dock-right').hover();
+    await page.mouse.wheel(0, 240);
     await expect.poll(() => page.locator('#dock-right').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
 
     const scrolled = await page.evaluate((lastId) => {
@@ -82,6 +95,24 @@ test.describe('@dock-layout Svelte DockLayout', () => {
 
     expect(scrolled.scrollTop).toBeGreaterThan(0);
     expect(scrolled.lastBottom).toBeLessThanOrEqual(scrolled.bodyBottom + 1);
+    // Move the same overflowing stack left and exercise that divider too.
+    await page.evaluate((panelIds) => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((workspace: any) => {
+        for (const id of panelIds) PM.Layout.movePanel(workspace, id, 'left');
+      });
+    }, ids);
+    await expect(page.locator('#dock-left #panel-overflow-fixed-c')).toHaveCount(1);
+    await page.locator('#body > .splitter').first().hover();
+    await page.mouse.wheel(0, 240);
+    await expect.poll(() => page.locator('#dock-left').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
+    await page.mouse.wheel(0, -10000);
+    await expect.poll(() => page.locator('#dock-left').evaluate((dock) => dock.scrollTop)).toBe(0);
+    await page.mouse.move(edge!.x + 1, edge!.y + edge!.height / 2);
+    await page.mouse.wheel(0, 240);
+    await expect.poll(() => page.locator('#dock-left').evaluate((dock) => dock.scrollTop)).toBeGreaterThan(0);
+    await page.mouse.wheel(0, -10000);
+    await expect.poll(() => page.locator('#dock-left').evaluate((dock) => dock.scrollTop)).toBe(0);
     expect(diagnostics.pageErrors).toEqual([]);
   });
 

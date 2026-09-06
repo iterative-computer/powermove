@@ -837,8 +837,8 @@ function drawOverlay() {
     c.closePath();
     c.stroke();
   }
-  // Anchors are layer controls, visible with normal selection as well as the
-  // anchor tool. Use the evaluated local anchor through the full parent chain.
+  // Selected-layer anchors use the same accent as the transform box.
+  // Evaluate the local anchor through the full parent chain.
   c.save();
   const anchorUnit = 1 / Math.max(.02, V.shown);
   for (const layer of sels) {
@@ -854,7 +854,7 @@ function drawOverlay() {
     c.strokeStyle = 'rgba(0,0,0,.8)';
     c.lineWidth = 3 * anchorUnit;
     c.stroke();
-    c.strokeStyle = '#fff';
+    c.strokeStyle = 'rgba(255,107,26,.95)';
     c.lineWidth = anchorUnit;
     c.stroke();
   }

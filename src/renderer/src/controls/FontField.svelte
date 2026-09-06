@@ -129,7 +129,7 @@
           title={name}
           style:font-family={familyStyle(name)}
           onclick={() => choose(name)}
-        >{name === value ? '✓ ' : ''}{name}</button>
+        >{name}</button>
       {:else}
         <div class="font-empty">No matching fonts</div>
       {/each}

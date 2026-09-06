@@ -61,8 +61,7 @@ describe('extension settings control', () => {
     expect(control.element.querySelector('[data-extension-id="disabled-ext"] .toggle')?.getAttribute('aria-pressed')).toBe('false');
     expect(control.element.querySelector('[data-extension-id="builtin-ext"] .toggle')?.getAttribute('aria-pressed')).toBe('true');
     expect(control.element.querySelector('[data-extension-id="broken-ext"] .settings-extension-status')?.textContent).toBe('Needs attention');
-    /* A healthy row leans on its switch instead of repeating an "Active" pill. */
-    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .settings-extension-status')).toBeNull();
+    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .settings-extension-status')?.textContent).toBe('Active');
     expect(control.element.querySelector('[data-extension-id="old-timeline"]')?.textContent).toContain('Replaced by new-timeline');
     expect(control.element.querySelector('[data-extension-id="broken-ext"]')?.textContent).toContain('Invalid manifest');
 
@@ -88,6 +87,42 @@ describe('extension settings control', () => {
     await vi.waitFor(() => expect(harness.api.setEnabled).toHaveBeenCalledWith({ id: 'new-agent', enabled: false }));
     await vi.waitFor(() => expect(control.element
       .querySelector('[data-extension-id="new-agent"] .toggle')?.getAttribute('aria-pressed')).toBe('false'));
+    control.destroy();
+  });
+
+  it('explains replacements and dependencies and requires confirmation before deletion', async () => {
+    const base = record('viewer', { scope: 'builtin', manifest: { id: 'viewer', name: 'Composition viewer', version: '1.0.0', apiVersion: 1 } });
+    const custom = record('custom-viewer', { manifest: { id: 'custom-viewer', name: 'Custom viewer', version: '1.0.0', apiVersion: 1, replaces: ['viewer'], contributes: ['panels', 'keybindings'] } });
+    const harness = bridge([base, custom]);
+    harness.api.remove.mockResolvedValue([base]);
+    const control = createExtensionSettingsControl(harness.api);
+    await vi.waitFor(() => expect(control.element.textContent).toContain('Replaces Composition viewer'));
+    expect(control.element.textContent).toContain('Panels · Keyboard shortcuts');
+    expect(control.element.querySelector('[data-extension-id="viewer"] .settings-extension-delete')).toBeNull();
+    const remove = () => control.element.querySelector<HTMLButtonElement>('[aria-label="Delete Custom viewer"]')!;
+    remove().click();
+    expect(harness.api.remove).not.toHaveBeenCalled();
+    expect(control.element.textContent).toContain('permanently removed');
+    const buttons = () => Array.from(control.element.querySelectorAll<HTMLButtonElement>('.settings-extension-confirm button'));
+    buttons().find(button => button.textContent === 'Cancel')!.click();
+    expect(control.element.querySelector('.settings-extension-confirm')).toBeNull();
+    remove().click();
+    buttons().find(button => button.textContent === 'Delete extension')!.click();
+    await vi.waitFor(() => expect(harness.api.remove).toHaveBeenCalledExactlyOnceWith({ id: 'custom-viewer' }));
+    await vi.waitFor(() => expect(control.element.querySelector('[data-extension-id="custom-viewer"]')).toBeNull());
+    control.destroy();
+  });
+
+  it('keeps the extension and reports a failed delete', async () => {
+    const harness = bridge([record('failed')]);
+    harness.api.remove.mockRejectedValue(new Error('Permission denied'));
+    const control = createExtensionSettingsControl(harness.api);
+    await vi.waitFor(() => expect(control.element.querySelector('[aria-label="Delete failed"]')).not.toBeNull());
+    control.element.querySelector<HTMLButtonElement>('[aria-label="Delete failed"]')!.click();
+    control.element.querySelector<HTMLButtonElement>('.settings-extension-confirm .settings-extension-delete')!.click();
+    await vi.waitFor(() => expect(control.element.textContent).toContain('Permission denied'));
+    expect(control.element.querySelector('[data-extension-id="failed"]')).not.toBeNull();
+    expect(control.element.querySelector<HTMLButtonElement>('.settings-extension-confirm .settings-extension-delete')!.disabled).toBe(false);
     control.destroy();
   });
 

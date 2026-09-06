@@ -150,7 +150,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .dock#dock-center{flex:1 1 auto;min-width:200px}
 .dock#dock-left{flex:0 0 250px;min-width:200px}
 .dock#dock-right{flex:0 0 300px;min-width:220px}
-.dock:is(#dock-left,#dock-right){overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:none}
+/* Match panel radius and smoothing at the scroll boundary. Keep the panel's
+   own material without adding another outline around the clipped contents. */
+.dock:is(#dock-left,#dock-right){overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:none;border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing)}
 .dock:is(#dock-left,#dock-right)::-webkit-scrollbar{display:none}
 /* Side columns scroll as one surface when their panels no longer fit. Keep a
    fluid panel at its usable content height instead of crushing it against the
@@ -1046,3 +1048,23 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
   background-position:right 10px center!important;
   background-size:8px 8px!important;
 }
+
+/* Extension settings: expose workspace impact before technical details. */
+.settings-extension-group{margin:12px 0 2px;padding:0 10px;color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-semibold)}
+.settings-extension-group:first-child{margin-top:2px}
+.settings-extension-row{flex-shrink:0;align-items:flex-start;padding:12px 10px;border-radius:var(--r-md);background:var(--bg-field)}
+.settings-extension-row+.settings-extension-row{margin-top:4px}
+.settings-extension-copy{gap:6px}
+.settings-extension-copy>span{white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.settings-extension-controls{flex-wrap:wrap;justify-content:flex-end;max-width:110px;gap:10px;padding-top:1px}
+.settings-extension-impact{color:var(--tx-3);font-size:var(--fs-xs);line-height:1.5;overflow-wrap:anywhere}
+.settings-extension-impact strong{color:var(--tx-2);font-weight:var(--fw-medium)}
+.settings-extension-impact.is-replacement{color:var(--accent-tx)}
+.settings-extension-details{color:var(--tx-3);font-size:var(--fs-xs);line-height:1.5;overflow-wrap:anywhere}
+.settings-extension-details summary{width:fit-content;cursor:pointer;color:var(--tx-2)}
+.settings-extension-details>div{padding-top:5px}
+.settings-extension-delete{color:var(--danger);font-size:var(--fs-xs);padding:3px 0;background:transparent;cursor:pointer}
+.settings-extension-delete:disabled{opacity:.5;cursor:default}
+.settings-extension-confirm{padding:10px;border-radius:var(--r-sm);background:var(--bg-float);font-size:var(--fs-xs);line-height:1.5}
+.settings-extension-confirm p{margin:0 0 8px;color:var(--tx-2)}
+.settings-extension-confirm .btn{margin-right:8px;padding:5px 8px}
