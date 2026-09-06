@@ -654,7 +654,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:12px 12px 14px;scrollbar-width:thin;scrollbar-color:var(--ink-3) transparent}
 .agent-scroll::-webkit-scrollbar{width:4px}
 .agent-scroll::-webkit-scrollbar-thumb{background:var(--ink-3);border-radius:var(--r-pill)}
-.agent-scroll *{user-select:text;-webkit-user-select:text}
+.agent-scroll,.agent-scroll *{user-select:text;-webkit-user-select:text}
 /* Long commands, URLs and streamed word spans must contribute a shrinkable
    minimum width. Hiding the scrollbar alone leaves a horizontal scroll range. */
 .agent-shell{overflow-wrap:anywhere}

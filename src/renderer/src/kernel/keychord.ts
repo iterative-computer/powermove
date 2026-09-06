@@ -196,3 +196,16 @@ export function hasTextSelection(): boolean {
   const selection = window.getSelection();
   return Boolean(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.toString());
 }
+
+/** Explicit read-only text regions keep selection commands local to their text. */
+export function selectableTextRoot(target: EventTarget | null): HTMLElement | null {
+  const el = target as HTMLElement | null;
+  return el?.closest?.<HTMLElement>('[data-native-text]') ?? null;
+}
+export function selectTextContents(root: HTMLElement): void {
+  const selection = root.ownerDocument.getSelection();
+  const range = root.ownerDocument.createRange();
+  range.selectNodeContents(root);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}

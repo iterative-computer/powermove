@@ -81,7 +81,7 @@ describe('native Powermove agent tool bridge', () => {
 
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
-      'get_project_state', 'get_panel_layout', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
+      'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
     ]);
 
     const state = await rpc(child, {

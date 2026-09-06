@@ -10,7 +10,7 @@ import { evaluatedValue } from '../core/content-properties';
  *     and dispatched by the one key listener the kernel installs.
  */
 import type { CommandDefinition } from '../../kernel/api';
-import { hasTextSelection, isFieldTarget } from '../../kernel/keychord';
+import { hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents } from '../../kernel/keychord';
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
 
@@ -43,8 +43,12 @@ const hidden = { when: () => false };
 
 const activeTextField = (): boolean => {
   if (typeof document === 'undefined') return false;
-  return isFieldTarget(document.activeElement);
+  let active = document.activeElement;
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  return isFieldTarget(active);
 };
+
+const readingText = () => typeof document !== 'undefined' ? selectableTextRoot(document.activeElement) : null;
 
 const nativeEdit = (action: string): unknown => {
   const bridge: any = typeof window === 'undefined' ? null : (window as any).powermove;
@@ -214,12 +218,12 @@ def('pasteLayers', 'Paste layers', '⌘V', () => {
   if (PM.Inspector?.pasteCopiedEffects?.()) return;
   return pasteLayers(PM, () => layerClip);
 }, 'Edit');
-def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : PM.cmd('undo'), 'Edit', hidden);
-def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : PM.cmd('redo'), 'Edit', hidden);
-def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : PM.cmd('cutLayers'), 'Edit', hidden);
-def('contextCopy', 'Copy', null, () => activeTextField() || hasTextSelection() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
-def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : PM.cmd('pasteLayers'), 'Edit', hidden);
-def('contextSelectAll', 'Select all', null, () => activeTextField() ? nativeEdit('selectAll') : PM.cmd('selectAll'), 'Edit', hidden);
+def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : readingText() ? false : PM.cmd('undo'), 'Edit', hidden);
+def('contextRedo', 'Redo', null, () => activeTextField() ? nativeEdit('redo') : readingText() ? false : PM.cmd('redo'), 'Edit', hidden);
+def('contextCut', 'Cut', null, () => activeTextField() ? nativeEdit('cut') : readingText() ? false : PM.cmd('cutLayers'), 'Edit', hidden);
+def('contextCopy', 'Copy', null, () => activeTextField() || readingText() || hasTextSelection() ? nativeEdit('copy') : PM.cmd('copyLayers'), 'Edit', hidden);
+def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : readingText() ? false : PM.cmd('pasteLayers'), 'Edit', hidden);
+def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : PM.cmd('selectAll'); }, 'Edit', hidden);
 def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
 def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View');
 def('lockSelectedLayers', 'Lock selected layers', '⌘L', () => setLayerLocks(PM, true), 'Edit');

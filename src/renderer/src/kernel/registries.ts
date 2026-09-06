@@ -20,7 +20,7 @@ import type {
   ThemeDefinition,
   TransitionDefinition
 } from './api';
-import { chordMatches, chordModifierCount, chordOfEvent, hasTextSelection, isFieldTarget, normalizeChord } from './keychord';
+import { chordMatches, chordModifierCount, chordOfEvent, hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents, normalizeChord } from './keychord';
 import { Registry } from './registry';
 import * as glslHelpers from './glsl';
 import { validateEffect, validateTransition } from './glsl';
@@ -328,7 +328,15 @@ export function createKernel(): Kernel {
         if ((chord === 'cmd+c' || chord === 'ctrl+c') && hasTextSelection()) return;
         /* isFieldTarget also walks to an editable ancestor, so nested markup
            inside a panel editor stays in the native text-editing context. */
-        const field = isFieldTarget(event.target);
+        const field = isFieldTarget(event.target) || (event.composedPath?.() || []).some(isFieldTarget);
+        const textRoot = !field && selectableTextRoot(event.target);
+        if (textRoot) {
+          if (chord === 'cmd+a' || chord === 'ctrl+a') {
+            event.preventDefault(); selectTextContents(textRoot);
+          }
+          // Read-only conversation text must not cut, paste, select or nudge layers.
+          return;
+        }
         for (const binding of kernel.bindingsFor(chord)) {
           if (field && !binding.inFields) continue;
           if (event.repeat && !binding.repeat) continue;

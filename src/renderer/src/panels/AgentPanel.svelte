@@ -17,6 +17,11 @@
   let scroller = $state<HTMLDivElement>();
   let showJump = $state(false);
   let userScrolled = false;
+  let selectingText = false;
+  function hasConversationSelection(): boolean {
+    const selection = window.getSelection();
+    return selectingText || !!(selection && !selection.isCollapsed && scroller?.contains(selection.anchorNode));
+  }
   let accountStatus = $state<ChatGPTAccountStatus>({
     state: 'checking', email: null, planType: null, detail: null
   });
@@ -31,7 +36,10 @@
     // Panels mount before app.ts chooses the boot project. Synchronize on the
     // first frame so saved threads are present before the composer is usable.
     const frame = window.requestAnimationFrame(() => PM.AgentUI?.update?.({ flush: true }));
-    return () => window.cancelAnimationFrame(frame);
+    const endSelection = () => { selectingText = false; };
+    window.addEventListener('pointerup', endSelection);
+    window.addEventListener('pointercancel', endSelection);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener('pointerup', endSelection); window.removeEventListener('pointercancel', endSelection); };
   });
 
   function unavailable(error: unknown): ChatGPTAccountStatus {
@@ -107,10 +115,10 @@
 
   $effect(() => {
     agentState.revision;
-    if (!scroller) return;
+    if (!scroller || hasConversationSelection()) return;
     if (!userScrolled || distanceFromBottom() < 160) {
       const el = scroller;
-      window.requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight }));
+      window.requestAnimationFrame(() => { if (!hasConversationSelection()) el.scrollTo({ top: el.scrollHeight }); });
     }
   });
 
@@ -156,8 +164,12 @@
       <small>Sign-in is handled by the official {providerName === 'Claude' ? 'Claude Code' : 'Codex'} runtime. Powermove never sees your password.</small>
     </div>
   {:else}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
     <div
       class="agent-scroll"
+      data-native-text
+      tabindex="0"
+      onpointerdown={() => { selectingText = true; }}
       role="log"
       aria-label="Agent conversation"
       aria-live="polite"

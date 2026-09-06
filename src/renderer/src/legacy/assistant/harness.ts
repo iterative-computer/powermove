@@ -1,3 +1,4 @@
+import { openPanel, readPanel, interactPanel } from './panel-tools';
 import { editVideo, videoAssets } from './video-editing';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -314,6 +315,7 @@ interface LiveToolTransaction {
   snapshot: string;
   label: string;
   changed: boolean;
+  panelActions?: boolean;
 }
 
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
@@ -379,6 +381,7 @@ function panelLayoutDigest() {
 }
 
 async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promise<void> {
+  if (transaction.panelActions) throw new Error('Panel controls use their normal editor Undo. Their actions cannot be automatically rolled back; use the editor Undo command.');
   if (!transaction.changed) return;
   const revision = currentRevision();
   if (revision !== transaction.revision) {
@@ -397,10 +400,24 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
   if (request.tool === 'get_project_state') {
+    const transaction = liveToolTransactions.get(request.runId);
+    if (transaction?.panelActions) transaction.revision = currentRevision();
     return { ok: true, content: [toolText(projectState())], revision: currentRevision() };
   }
   if (request.tool === 'get_panel_layout') {
     return { ok: true, content: [toolText(panelLayoutDigest())], revision: currentRevision() };
+  }
+  if (request.tool === 'get_panel_state' || request.tool === 'open_panel' || request.tool === 'interact_panel') {
+    if (request.tool === 'open_panel') await openPanel(PM, request.arguments.panelId);
+    if (request.tool !== 'interact_panel') return { ok: true, content: [toolText(readPanel(PM, request.arguments.panelId))], revision: currentRevision() };
+    const transaction = beginLiveTransaction(request, 'Use panel');
+    if (currentRevision() !== transaction.revision) throw new Error('The project changed. Read get_project_state before using another panel control.');
+    // Arbitrary panel handlers may import asynchronously or use their own history.
+    // Keep their native Undo entries; never snapshot-rollback an external panel action.
+    const state = await interactPanel(PM, request.arguments, () => { transaction.panelActions = true; });
+    transaction.revision = currentRevision();
+    transaction.changed ||= transaction.revision !== transaction.baseRevision;
+    return { ok: true, content: [toolText(state)], changed: transaction.changed, revision: transaction.revision };
   }
   if (request.tool === 'render_frames') {
     const rawTimes = Array.isArray(request.arguments.times) ? request.arguments.times : undefined;
@@ -467,7 +484,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     const commit = request.arguments.commit === true;
     try {
       let historyId: string | undefined;
-      if (!commit) {
+      if (transaction.panelActions) {
+        transaction.changed ||= currentRevision() !== transaction.baseRevision;
+        if (!commit && transaction.changed) return { ok: false, content: [], changed: true, revision: currentRevision(), error: 'Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.' };
+      } else if (!commit) {
         await rollBackLiveTransaction(transaction);
       } else if (transaction.changed) {
         if (currentRevision() !== transaction.revision) {
@@ -481,8 +501,8 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       }
       return {
         ok: true,
-        content: [toolText({ changed: commit && transaction.changed, historyId: historyId || null })],
-        changed: commit && transaction.changed,
+        content: [toolText({ changed: (commit || transaction.panelActions) && transaction.changed, historyId: historyId || null })],
+        changed: (commit || transaction.panelActions === true) && transaction.changed,
         revision: currentRevision(),
         ...(historyId ? { historyId } : {})
       };

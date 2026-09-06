@@ -1,3 +1,4 @@
+import { installTextContextMenu } from './text-context-menu';
 import { registerRenderEncoder } from './render-encoder';
 import {
   app,
@@ -278,6 +279,7 @@ function createWindow(): BrowserWindow {
 
   mainWindow = window;
   installRendererMenuShortcutRouting(window.webContents);
+  installTextContextMenu(window.webContents);
 
   let closing = false, closePrepared = false;
   window.on('close', event => {
