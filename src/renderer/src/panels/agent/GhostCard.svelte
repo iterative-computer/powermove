@@ -1,12 +1,10 @@
 <script lang="ts">
   import { mountGhostEdgeField } from './ui-placement-ghost-field';
-  import { ghostRowCount, type GhostRect } from './ui-placement-geometry';
+  import { ghostRowCount } from './ui-placement-geometry';
   import type { UIPlacement } from './ui-placement';
 
-  /* Without a rect the card is a real slot in the dock, holding the space the
-     finished panel will take. With one it is pinned over the panel being
-     rebuilt, which keeps its own place in the layout. */
-  let { placement, rect = null }: { placement: UIPlacement; rect?: GhostRect | null } = $props();
+  // Existing panels own their overlay; new panels reserve a dock slot.
+  let { placement, pinned = false }: { placement: UIPlacement; pinned?: boolean } = $props();
 
   /* A preview of the shape that is coming: a label and a control on each row,
      at the uneven widths real controls have. Seven of them, so the pattern does
@@ -43,16 +41,12 @@
 
 <div
   class="ui-placement-ghost"
-  class:pinned={!!rect}
+  class:pinned
   class:new-panel={placement.kind === 'dock'}
   data-ui-placement-ghost={placement.id}
   role="status"
   aria-live="polite"
   aria-atomic="true"
-  style:left={rect ? `${rect.left}px` : null}
-  style:top={rect ? `${rect.top}px` : null}
-  style:width={rect ? `${rect.width}px` : null}
-  style:height={rect ? `${rect.height}px` : null}
 >
   <div use:ghostEdgeField class="ghost-edge-field" aria-hidden="true"></div>
   <header class="ghost-head">
@@ -93,11 +87,13 @@
   }
   /* A panel that already exists keeps its own frame; the ghost sits inside it. */
   .pinned {
-    position: fixed;
+    position: absolute;
+    inset: 0;
     z-index: 35;
     flex: none;
-    border: 1px solid var(--line-2);
-    border-radius: var(--r-md, 8px);
+    border: 0;
+    min-height: 0;
+    border-radius: inherit;
     box-shadow: none;
     animation: none;
   }

@@ -1,3 +1,4 @@
+import { captureFontAnchor } from './font-anchor';
 import { temporalKeys } from './temporal-bridge';
 import { validMatteSource } from './matte';
 import { canAnimateContent, evaluatedValue, isProperty } from './content-properties';
@@ -782,6 +783,11 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
 function runOne(sourceCommand: any, meta: any = {}) {
   const policy: any = policyCommand(sourceCommand, meta);
   const command: any = policy.command;
+  const fontLayer = findLayer(command.target || command.layer || command.targetId);
+  captureFontAnchor(PM, fontLayer, command);
+  const anchorEdit = fontLayer?.d?.fontAnchorBounds && command.type === 'set_property'
+    && ['anchor.x', 'anchor.y'].includes(command.path || command.channel);
+  const anchorRaster = anchorEdit ? PM.raster(fontLayer, 1, command.time ?? PM.time) : null;
   let data: any;
   switch (command.type) {
     case 'set_property': data = setProperty(command); break;
@@ -803,6 +809,18 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'create_section': data = createSection(command); break;
     case 'update_section': data = updateSection(command); break;
     default: throw new Error(`Unknown source edit: ${command.type}`);
+  }
+  if (anchorRaster?.fontOffset && anchorRaster.selection) {
+    // Pan Behind moves the pivot without introducing additional text movement.
+    const ref = fontLayer.d.fontAnchorBounds, bounds = anchorRaster.selection;
+    for (const axis of ['x', 'y']) {
+      const start = axis + '0', end = axis + '1';
+      const span = bounds[end] - bounds[start], referenceSpan = ref[end] - ref[start];
+      if (span <= 0) continue;
+      const anchor = PM.ev(fontLayer, 'anchor.' + axis, command.time ?? PM.time);
+      ref[start] = anchor - (anchor - bounds[start]) / span * referenceSpan;
+      ref[end] = ref[start] + referenceSpan;
+    }
   }
   if (['add_layer', 'delete_layers', 'reorder_layer'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {

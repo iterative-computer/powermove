@@ -83,6 +83,22 @@ function render(component: any, props: Record<string, unknown>): HTMLElement {
 const pointer = (type: string, init: PointerEventInit = {}) => new PointerEvent(type, { bubbles: true, button: 0, ...init });
 
 describe('NumField', () => {
+  it('adjusts from horizontal trackpad movement and commits one gesture', () => {
+    vi.useFakeTimers();
+    const { PM, Edit } = fakePM();
+    let current = 1000;
+    Edit.dispatch.mockImplementation((command: any) => { current = command.value; });
+    const target = render(NumField, { PM, get: () => current, edit: commandEdit(), step: 1 });
+    const input = target.querySelector<HTMLInputElement>('input')!;
+    input.dispatchEvent(new WheelEvent('wheel', { deltaX: 100, cancelable: true }));
+    input.dispatchEvent(new WheelEvent('wheel', { deltaX: -20, cancelable: true }));
+    expect(current).toBe(1040);
+    expect(Edit.begin).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(200);
+    expect(Edit.commit).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   it('scrubs through begin → writes → commit and opens editing after a click/cancel', async () => {
     const { PM, Edit, drag } = fakePM();
     let current = 10;

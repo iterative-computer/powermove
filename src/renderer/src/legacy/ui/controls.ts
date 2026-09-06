@@ -1,4 +1,5 @@
 /* Ported from js/ui/controls.js — behavior-preserving. */
+import { horizontalScrub } from '../../controls/horizontal-scrub';
 import type { PMRegistry } from '../registry';
 import { consumeMenuTriggerPress, markMenuDismissal } from '../../overlays/dismissal';
 
@@ -31,6 +32,18 @@ PM.numField = (get: any, set: any, opt: any = {}) => {
   };
   const sync = () => { if (!el.classList.contains('editing')) el.textContent = fmt(get()); };
   el.sync = sync; sync();
+  let wheelValue = 0;
+  horizontalScrub(el, {
+    enabled: () => !el.classList.contains('editing'),
+    begin: () => { wheelValue = Number(get()); begin(opt, opt.label || 'Adjust'); },
+    move: (delta, event) => {
+      wheelValue += delta * (opt.step || 1) * (opt.speed || .5) * (event.shiftKey ? 10 : event.altKey ? .1 : 1);
+      wheelValue = Math.max(opt.min ?? -Infinity, Math.min(opt.max ?? Infinity, wheelValue));
+      write(set, PM.round(wheelValue, 3), opt); sync();
+    },
+    commit: () => commit(opt, opt.label || 'Adjust'),
+    cancel: () => cancel(opt)
+  });
 
   el.addEventListener('pointerdown', (e: any) => {
     if (el.classList.contains('editing')) return;
@@ -39,6 +52,7 @@ PM.numField = (get: any, set: any, opt: any = {}) => {
     begin(opt, opt.label || 'Adjust');
     PM.drag(e, {
       cursor: 'ew-resize',
+      infinite: true,
       move: (dx: any, dy: any, ev: any) => {
         if (!moved && Math.abs(dx) < 3) return;
         moved = true;

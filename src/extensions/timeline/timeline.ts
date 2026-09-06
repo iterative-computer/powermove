@@ -4,7 +4,7 @@ import { adjacentKeyframe } from './keyframe-navigation';
 import { evaluatedValue } from 'powermove';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
-import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
+import { expandScaleKeyIds, graphHandleChannels, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
   bezierHandleAtPoint,
   keysForBezierHandleDrag,
@@ -1295,6 +1295,7 @@ function drawPlayhead(c: any, W: any, H: any) {
 
 /* ── graph editor ──────────────────────────────────────── */
 function drawGraph(c: any, W: any, H: any) {
+  T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
   const rows = PM.proj.layers.flatMap((L: any) => timelineProperties(PM, L)
@@ -1308,9 +1309,18 @@ function drawGraph(c: any, W: any, H: any) {
     c.fillText('Select an animated property to edit its curve', (W + T.gut) / 2, (H + T.ruler) / 2);
     c.textAlign = 'left'; c.restore(); return;
   }
-  const chosen = rows.filter((r:any)=> T.graphTracks ? T.graphTracks.includes(r.L.id+':'+r.key) : PM.sel.layers.includes(r.L.id));
-  const series = (Array.isArray(T.graphTracks)||chosen.length?chosen:[target]).flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L}))).filter((axis:any)=>typeof axis.prop.v==='number');
+  const selectedKeyIds = new Set(T.graphMarqueeIds ?? PM.sel.keys);
+  const series = rows
+    .flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L})))
+    .filter((axis:any)=>typeof axis.prop.v==='number' && axis.prop.kf.some((key:any)=>selectedKeyIds.has(key.i)));
+  if (!series.length) {
+    c.fillStyle = theme.tx3; c.font = '400 11.5px ' + fui(); c.textAlign = 'center';
+    c.fillText('Select keyframes in the timeline to edit their curves', (W + T.gut) / 2, (H + T.ruler) / 2);
+    c.textAlign = 'left'; c.restore(); return;
+  }
   const L = target.L, speedMode=T.graphType==='speed';
+  const viewKey = PM.proj.id + ':' + T.graphType + ':' + series.map((axis: any) => axis.L.id + ':' + axis.key).join('|');
+  if (T.graphViewKey !== viewKey) { T.graphViewKey = viewKey; T.graphViewBounds = null; }
   series.forEach((axis:any)=>temporalKeys(axis.prop.kf));
   let vmin = Infinity, vmax = -Infinity;
   series.forEach((axis:any)=> {
@@ -1324,8 +1334,9 @@ function drawGraph(c: any, W: any, H: any) {
   if (vmax - vmin < 1e-6) { vmax = vmin + 1; }
   const padv = (vmax - vmin) * .22;
   vmin -= padv; vmax += padv;
+  if (T.graphViewBounds) [vmin, vmax] = T.graphViewBounds;
   if (T.graphDragBounds) [vmin, vmax] = T.graphDragBounds;
-  const top = T.ruler + 16, bot = H - 16;
+  const top = T.ruler + 42, bot = Math.max(top + 1, H - 16);
   const v2y = (v: any) => bot - (v - vmin) / (vmax - vmin) * (bot - top);
   T._graph = { target, series, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null };
 
@@ -1354,9 +1365,10 @@ function drawGraph(c: any, W: any, H: any) {
   c.stroke();
   /* handles + keys */
   kf.forEach((k: any, i: any) => {
+    PM.UIState.setKeyHandles(k, { ho: null, hi: null, pt: null });
+    if (!selectedKeyIds.has(k.i)) return;
     const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSample(PM,axis,L.from+k.t,true) : k.v);
     const nx = kf[i + 1], pv = kf[i - 1];
-    PM.UIState.setKeyHandles(k, { ho: null, hi: null });
     c.strokeStyle = INK.sub; c.lineWidth = 1;
     if (nx && !k.hold && !speedMode) {
       const handle = visibleBezierHandle(k, nx, 'eo');
@@ -1378,10 +1390,6 @@ function drawGraph(c: any, W: any, H: any) {
     c.beginPath(); c.arc(x, y, 4.2, 0, 7); c.fill();
     PM.UIState.setKeyHandles(k, { pt: [x, y] });
   });
-  if (series.length > 1) {
-    c.fillStyle = curveColor; c.font = '500 10px ' + fui();
-    c.fillText(L.name+' · '+axis.label+(PM.CH[axis.key]?.unit?' ('+PM.CH[axis.key].unit+(speedMode?'/s':'')+')':speedMode?' /s':''), T.gut+10, T.ruler+14+axisIndex*14);
-  }
   });
   const graphPoints: any[] = series.flatMap((axis: any) => axis.prop.kf.map((key: any) => {
     const point = PM.UIState.getKeyHandles(key)?.pt;
@@ -1392,13 +1400,26 @@ function drawGraph(c: any, W: any, H: any) {
   T._graph.selectionBounds = graphSelectionBounds(graphPoints.filter(point => selectedIds.has(point.id)));
   if (T._graph.selectionBounds) {
     const bounds = T._graph.selectionBounds;
-    c.save(); c.strokeStyle = rgba(theme.accent, .9); c.lineWidth = 1;
+    c.save(); c.strokeStyle = rgba(theme.accent, .4); c.lineWidth = 1;
     c.setLineDash([3, 3]);
     c.strokeRect(bounds.x0 + .5, bounds.y0 + .5, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
     c.restore();
   }
-  c.fillStyle = theme.tx2; c.font = '500 11px ' + fui();
-  if(series.length===1)c.fillText(L.name + ' · ' + target.label+(speedMode?' · units/s':''), T.gut + 10, T.ruler + 12);
+  // Keep the legend in its own strip, clear of curves and value ticks.
+  c.fillStyle = theme.panel; c.fillRect(T.gut, T.ruler, W - T.gut, 28);
+  c.font = '500 10px ' + fui();
+  let legendX = T.gut + 12;
+  for (const [index, axis] of series.entries()) {
+    const label = axis.label === 'fontAxis.wght' ? 'Weight' : axis.label;
+    const unit = PM.CH[axis.key]?.unit;
+    const text = label + (unit ? ` (${unit}${speedMode ? '/s' : ''})` : speedMode ? ' /s' : '');
+    const width = c.measureText(text).width + 25;
+    if (legendX + width > W - 8) { c.fillStyle = theme.tx3; c.fillText('…', legendX, T.ruler + 17); break; }
+    c.fillStyle = [theme.accent,'#5495dc','#a276d4','#309886','#ba8541'][index % 5];
+    c.fillRect(legendX, T.ruler + 11, 10, 2);
+    c.fillStyle = theme.tx2; c.fillText(text, legendX + 15, T.ruler + 17);
+    legendX += width;
+  }
   c.restore();
 }
 
@@ -1501,7 +1522,12 @@ function bind(cv: any, wrap: any) {
     } else if (e.shiftKey) {
       T.scrollT += e.deltaY / T.pps;
     } else {
-      T.scrollY += e.deltaY;
+      if (T.graph && e.offsetX >= T.gut && T._graph && !T.graphDragBounds) {
+        const g = T._graph;
+        const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? T.hgt : 1);
+        const delta = g.y2v(pixels) - g.y2v(0);
+        T.graphViewBounds = [g.vmin + delta, g.vmax + delta];
+      } else if (!T.graph || e.offsetX < T.gut) T.scrollY += e.deltaY;
       T.scrollT += e.deltaX / T.pps;
     }
     T.scrollT = Math.max(-.4, T.scrollT);
@@ -1736,6 +1762,7 @@ function dragPropertyValue(event: any, row: any, rowIndex: number) {
   const cleanup = () => window.removeEventListener('keydown', cancelOnEscape, true);
   window.addEventListener('keydown', cancelOnEscape, true);
   control = beginDrag(event, {
+    infinite: true,
     cursor: 'ew-resize',
     move: (dx: number, _dy: number, ev: any) => {
       if (!editing && Math.abs(dx) < 3) return;
@@ -2037,6 +2064,7 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
 
 function graphDown(e: any, x: any, y: any) {
   const g = T._graph; if (!g) return;
+  if (y < T.ruler + 28) return;
   let L = g.target.L;
   const series = g.series as any[];
   // Pick the closest visible point/handle, not whichever axis was iterated first.
@@ -2045,13 +2073,15 @@ function graphDown(e: any, x: any, y: any) {
     const pt = PM.UIState.getKeyHandles(item.key)?.pt;
     return { ...item, i: item.key.i, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
   }).sort((a, b) => a.distance - b.distance);
-  const pointHit = pickKeyframeHit(pointHits, PM.sel.keys, item => item.distance, 8) ?? pointHits[0];
+  const closestDistance = pointHits[0]?.distance ?? Infinity;
+  const pointHit = pickKeyframeHit(pointHits.filter(item => item.distance <= closestDistance + 1), PM.sel.keys, item => item.distance, 8) ?? pointHits[0];
   if (!pointHit || pointHit.distance >= 6) {
     const handles = points.flatMap(item => (['eo', 'ei'] as const).map(which => {
       const pt = PM.UIState.getKeyHandles(item.key)?.[which === 'eo' ? 'ho' : 'hi'];
       return { ...item, which, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
     })).sort((a, b) => a.distance - b.distance);
-    const handle = handles[0];
+    const nearest = handles[0]?.distance ?? Infinity;
+    const handle = handles.find(item => item.distance <= nearest + 1 && PM.sel.keys.includes(item.key.i)) ?? handles[0];
     if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L);
   }
   if ((!pointHit || pointHit.distance >= 8) && pointInGraphSelection(g.selectionBounds, x, y)) {
@@ -2117,7 +2147,8 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
   });
 }
 function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any) {
-  const axes = g.target.channels ? trackChannels(g.target) : g.series.filter((axis: any) => axis.prop.kf === kf);
+  if (L.lock) return;
+  const axes = graphHandleChannels(timelineProperties(PM, L), kf);
   const candidates = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
   const targetKeys = new Set(keysForBezierHandleDrag(candidates.map((item: any) => item.key), k, PM.sel.keys));
   const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));
@@ -2129,7 +2160,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
   const clickedEnd: [number, number] = [t2x(L.from + clickedNext.t), g.v2y(clickedNext.v)];
   const start = visibleBezierHandle(k, which === 'eo' ? clickedNext : clickedPrevious, which);
   const originals = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({
-    key, eo: [...key.eo], ei: [...key.ei], bezierMode: key.bezierMode,
+    key, state: JSON.parse(JSON.stringify(key)),
   })));
   const split = Boolean(e.altKey || e.getModifierState?.('Alt'));
   const drags = memberAxes.map(({ axis, key }: any) => {
@@ -2162,7 +2193,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
   T.graphDragBounds = [g.vmin, g.vmax];
   let moved = false, prepared = false;
   beginDrag(e, {
-    move: (dx: any, dy: any) => {
+    move: (dx: any, dy: any, event: PointerEvent) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
       moved = true;
       if (!prepared) {
@@ -2175,7 +2206,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
           if (split) drag.key.bezierMode = 'split';
         });
       }
-      const handle = moveBezierHandle(start, [dx, dy], clickedStart, clickedEnd);
+      const handle = moveBezierHandle(start, [dx, dy], clickedStart, clickedEnd, shiftSnapping(event) ? which : undefined);
       drags.forEach((drag: any) => {
         drag.key[which] = handle.map((value: number) => PM.round(value, 4));
         if (!drag.opposite) return;
@@ -2192,9 +2223,9 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
     },
     up: () => { T.graphDragBounds = null; moved ? PM.hist.commit('Adjust easing') : PM.hist.cancel(); PM.invalidate(); },
     cancel: () => {
-      originals.forEach(({ key, eo, ei, bezierMode }: any) => {
-        key.eo = eo; key.ei = ei;
-        if (bezierMode == null) delete key.bezierMode; else key.bezierMode = bezierMode;
+      originals.forEach(({ key, state }: any) => {
+        for (const field of Object.keys(key)) if (!(field in state)) delete key[field];
+        Object.assign(key, state);
       });
       T.graphDragBounds = null; PM.hist.cancel(); PM.touch(); PM.invalidate();
     },
@@ -2255,13 +2286,18 @@ function marquee(e: any, opt: any = {}) {
   const additive = !!opt.additive;
   const baseKeys = additive ? [...PM.sel.keys] : [];
   const baseLayers = additive ? [...PM.sel.layers] : [];
+  const originalKeys = [...PM.sel.keys], originalLayers = [...PM.sel.layers];
+  const graphPoints = opt.graph ? [...(T._graph?.points ?? [])] : null;
+  if (graphPoints) T.graphMarqueeIds = originalKeys;
   let dragged = false;
   beginDrag(e, {
     move: (dx: any, dy: any) => {
       if (!dragged && Math.hypot(dx, dy) < 3) return;
       dragged = true;
       T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
-      const picked = keysInMarquee(T.marquee, !!opt.graph);
+      const picked = graphPoints
+        ? graphPoints.filter((point: any) => point.x >= T.marquee.x0 && point.x <= T.marquee.x1 && point.y >= T.marquee.y0 && point.y <= T.marquee.y1).map((point: any) => point.key)
+        : keysInMarquee(T.marquee);
       const pickedIds = uniqueKeyIds(picked);
       const nextKeys = selectionAfterMarquee(baseKeys, pickedIds, additive);
       setSelectedKeys(nextKeys, [...baseLayers, ...layersForKeys(nextKeys)]);
@@ -2284,9 +2320,12 @@ function marquee(e: any, opt: any = {}) {
         });
         PM.selectLayers([...baseLayers, ...picked]);
       }
+      T.graphMarqueeIds = null; T.marquee = null; PM.invalidate('timeline');
+    },
+    cancel: () => {
+      if (graphPoints) { T.graphMarqueeIds = null; setSelectedKeys(originalKeys, originalLayers); }
       T.marquee = null; PM.invalidate('timeline');
     },
-    cancel: () => { T.marquee = null; PM.invalidate('timeline'); },
   });
 }
 

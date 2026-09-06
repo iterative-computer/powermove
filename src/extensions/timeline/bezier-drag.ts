@@ -90,12 +90,13 @@ export function materializeLinearBezierSegment(previous: BezierKey, next: Bezier
 
 /** Both handles are normalized from the segment's earlier key to its later key.
  * In particular, the incoming handle is NOT measured backwards from its key. */
-export function moveBezierHandle(start: Point, delta: Point, segmentStart: Point, segmentEnd: Point): Point {
+export function moveBezierHandle(start: Point, delta: Point, segmentStart: Point, segmentEnd: Point, flatSide?: 'eo' | 'ei'): Point {
   const width = segmentEnd[0] - segmentStart[0];
   const height = segmentEnd[1] - segmentStart[1];
   const x = Math.abs(width) < EPSILON ? start[0] : start[0] + delta[0] / width;
   // A constant-value segment has no vertical amplitude to normalize against.
-  const y = Math.abs(height) < EPSILON ? start[1] : start[1] + delta[1] / height;
+  const y = flatSide ? (flatSide === 'eo' ? 0 : 1)
+    : Math.abs(height) < EPSILON ? start[1] : start[1] + delta[1] / height;
   return [Math.max(0, Math.min(1, x)), y];
 }
 

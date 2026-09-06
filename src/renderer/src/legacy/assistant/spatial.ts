@@ -1066,6 +1066,9 @@ function showComposer(draft: any = '') {
   const cancelBtn: any = h('button.spatial-action', { onclick: cancel }, 'Cancel');
   const sendBtn: any = h('button.spatial-action.pri.spatial-send', { 'aria-label': 'Press Enter to send', title: 'Press Enter to send', onclick: () => sendRequest(input) }, PM.icon('return'));
   input.addEventListener('keydown', (e: any) => {
+    // Electron's native paste is routed by the global field-aware keymap.
+    // Let it dispatch the real clipboard event for text and attachments.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'v') return;
     e.stopPropagation();
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendRequest(input); }
   });

@@ -24,7 +24,7 @@ function utilRegistry() {
     innerWidth: 1024,
     innerHeight: 768,
   };
-  const documentStub: any = { body: { style: {} } };
+  const documentStub: any = { body: { style: {} }, addEventListener: windowStub.addEventListener, removeEventListener: windowStub.removeEventListener };
   const consoleStub: any = { error: vi.fn(), warn: vi.fn() };
   windowStub.document = documentStub;
   windowStub.console = consoleStub;
@@ -81,4 +81,22 @@ describe('legacy util install', () => {
     expect(ups).toBe(0);
     expect((listeners.pointerup || []).length).toBe(0);
   });
+});
+
+it('continues scrubbing with a stationary cursor and releases pointer lock on mouseup', async () => {
+  const { PM, listeners } = utilRegistry();
+  const doc = window.document as any;
+  doc.body.requestPointerLock = vi.fn(() => { doc.pointerLockElement = doc.body; fire(listeners, 'pointerlockchange', {}); return Promise.resolve(); });
+  doc.exitPointerLock = vi.fn(() => { doc.pointerLockElement = null; });
+  const move = vi.fn(), up = vi.fn(), cancel = vi.fn();
+  PM.drag({ clientX: 5, clientY: 5, preventDefault() {} }, { infinite: true, move, up, cancel });
+  fire(listeners, 'pointermove', { clientX: 15, clientY: 5 });
+  fire(listeners, 'mousemove', { movementX: 2000, movementY: 0 });
+  expect(move).toHaveBeenLastCalledWith(2010, 0, expect.anything());
+  fire(listeners, 'mousemove', { movementX: -4000, movementY: 0 });
+  expect(move).toHaveBeenLastCalledWith(-1990, 0, expect.anything());
+  fire(listeners, 'mouseup', {});
+  expect(up).toHaveBeenCalledTimes(1);
+  expect(cancel).not.toHaveBeenCalled();
+  expect(doc.exitPointerLock).toHaveBeenCalledTimes(1);
 });

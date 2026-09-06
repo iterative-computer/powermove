@@ -210,7 +210,7 @@ PM.store = {
 /* Returns { cancel }. cancel() and a native pointercancel both end the drag
    without calling up(), so interrupted gestures can never wedge the cursor
    or leave ghost UI behind. */
-PM.drag = (e: any, { move, up, cancel, cursor }: any) => {
+PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
   e.preventDefault();
   const sx = e.clientX, sy = e.clientY;
   const pointerId = e.pointerId;
@@ -219,27 +219,70 @@ PM.drag = (e: any, { move, up, cancel, cursor }: any) => {
   const prevCur = window.document.body.style.cursor;
   if (cursor) window.document.body.style.cursor = cursor;
   let done = false;
+  let dx = 0, dy = 0, requested = false, locked = false;
+  const lockEl = infinite && e.pointerType !== 'touch' ? window.document.body : null;
+  const doc = window.document;
+  const lockChange = () => {
+    if (doc.pointerLockElement === lockEl && lockEl) {
+      if (done) { doc.exitPointerLock?.(); return; }
+      locked = true;
+    } else if (locked) pc();
+  };
+  const lockMove = (ev: any) => {
+    if (done || !locked) return;
+    dx += ev.movementX || 0; dy += ev.movementY || 0;
+    move?.(dx, dy, ev);
+  };
   const stop = () => {
     if (done) return false;
     done = true;
     window.removeEventListener('pointermove', mv, true);
     window.removeEventListener('pointerup', fin, true);
     window.removeEventListener('pointercancel', pc, true);
-    captureEl?.removeEventListener?.('lostpointercapture', pc);
+    captureEl?.removeEventListener?.('lostpointercapture', lostCapture);
+    window.removeEventListener('mousemove', lockMove, true);
+    window.removeEventListener('mouseup', fin, true);
+    window.removeEventListener('blur', pc);
+    doc.removeEventListener?.('pointerlockchange', lockChange);
+    if (locked && doc.pointerLockElement === lockEl) doc.exitPointerLock?.();
     try {
       if (captureEl?.hasPointerCapture?.(pointerId)) captureEl.releasePointerCapture(pointerId);
     } catch { }
     window.document.body.style.cursor = prevCur;
     return true;
   };
-  const mv = (ev: any) => { if (!done && move) move(ev.clientX - sx, ev.clientY - sy, ev); };
-  const fin = (ev: any) => { if (stop() && up) up(ev.clientX - sx, ev.clientY - sy, ev); };
+  const mv = (ev: any) => {
+    if (done || locked) return;
+    dx = ev.clientX - sx; dy = ev.clientY - sy;
+    move?.(dx, dy, ev);
+    // Wait for a real drag so clicking still enters the numeric editor.
+    if (!done && !requested && lockEl?.requestPointerLock && Math.abs(dx) >= 3) {
+      requested = true;
+      try {
+        Promise.resolve(lockEl.requestPointerLock()).then(() => {
+          if (done && doc.pointerLockElement === lockEl) doc.exitPointerLock?.();
+        }).catch(() => {}); // Keep ordinary dragging if lock is unavailable.
+      } catch { }
+    }
+  };
+  const fin = (ev: any) => {
+    const finalX = locked ? dx : ev.clientX - sx;
+    const finalY = locked ? dy : ev.clientY - sy;
+    if (stop() && up) up(finalX, finalY, ev);
+  };
   const pc = () => { if (stop() && cancel) cancel(); };
+  const lostCapture = () => { if (!requested) pc(); };
   try { captureEl?.setPointerCapture(pointerId); } catch { }
-  captureEl?.addEventListener?.('lostpointercapture', pc);
+  captureEl?.addEventListener?.('lostpointercapture', lostCapture);
   /* WKWebView can stop bubbling pointer movement while a canvas owns the
      gesture. Capture-phase listeners plus explicit pointer capture keep direct
      manipulation alive until the matching up/cancel event. */
+  if (infinite) {
+    doc.addEventListener?.('pointerlockchange', lockChange);
+    window.addEventListener('mousemove', lockMove, true);
+    window.addEventListener('mouseup', fin, true);
+    window.addEventListener('blur', pc);
+  }
   window.addEventListener('pointermove', mv, true);
   window.addEventListener('pointerup', fin, true);
   window.addEventListener('pointercancel', pc, true);

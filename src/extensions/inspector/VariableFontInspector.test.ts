@@ -114,3 +114,21 @@ describe('type settings', () => {
     expect(target.querySelector('input[type="range"]')).toBeNull();
   });
 });
+
+
+describe('text alignment', () => {
+  it('shows the current alignment and writes changes through the animated content binding', () => {
+    const { apply } = setup({ align: 'center' });
+    const center = target.querySelector<HTMLButtonElement>('[aria-label="Align center"]')!;
+    expect(center.getAttribute('aria-pressed')).toBe('true');
+    center.click();
+    expect(apply).not.toHaveBeenCalled();
+    for (const alignment of ['left', 'right']) {
+      target.querySelector<HTMLButtonElement>(`[aria-label="Align ${alignment}"]`)!.click();
+      expect(apply).toHaveBeenLastCalledWith(
+        { type: 'set_content', target: 'text-1', patch: { align: alignment } },
+        { label: 'Text alignment', origin: 'inspector' }
+      );
+    }
+  });
+});

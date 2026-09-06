@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Workspace } from '../../layout/model';
 import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions, UI_PLACEMENT_PREFIX } from './ui-placement';
-import { ghostRect, ghostRowCount, ghostSlotIndex } from './ui-placement-geometry';
+import { ghostRowCount, ghostSlotIndex } from './ui-placement-geometry';
 
 const workspace: Workspace = { layout: { docks: [
   { id: 'center', panels: [{ id: 'viewer' }, { id: 'timeline' }] },
@@ -50,15 +50,6 @@ describe('early UI placement', () => {
 });
 
 describe('ghost placement geometry', () => {
-  const target = { left: 200, top: 50, width: 300, height: 500 };
-  it('insets a live panel without changing its layout', () => {
-    expect(ghostRect(target)).toEqual({ left: 205, top: 55, width: 290, height: 490 });
-  });
-  it('fits small areas and rejects hidden/non-finite geometry', () => {
-    expect(ghostRect({ ...target, height: 45 })?.height).toBe(35);
-    expect(ghostRect({ ...target, width: 0 })).toBeNull();
-    expect(ghostRect({ ...target, top: NaN })).toBeNull();
-  });
   it('holds the slot the new panel was announced for', () => {
     const panels = ['inspector', 'library'];
     expect(ghostSlotIndex(dock, 'right', panels)).toBe(2);

@@ -6,6 +6,12 @@ export function trackChannels(row: any): any[] {
   return row.channels ?? [{ key: row.key, prop: row.prop, label: row.label }];
 }
 
+/** A handle belongs to its actual track, even when another graph is focused. */
+export function graphHandleChannels(rows: any[], keyframes: any[]): any[] {
+  const owner = rows.find(row => trackChannels(row).some(axis => axis.prop.kf === keyframes));
+  return owner ? trackChannels(owner) : [];
+}
+
 export function keyMembers(key: any): any[] {
   return key.members ?? [{ key }];
 }

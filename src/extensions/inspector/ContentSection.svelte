@@ -4,6 +4,7 @@
   import { onDestroy } from 'svelte';
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
   import TypeSettings from './TypeSettings.svelte';
+  import TextAlignment from './TextAlignment.svelte';
   import { axisContentKey } from 'powermove';
 
   const { api, doc, transport } = inspectorContext();
@@ -108,7 +109,7 @@
   <AnimatedRow {PM} {layer} label="Size" path="c.size"><NumField {PM} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
   <AnimatedRow {PM} {layer} label="Tracking" path="c.tracking"><NumField {PM} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
   <AnimatedRow {PM} {layer} label="Leading" path="c.leading"><NumField {PM} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
-  <AnimatedRow {PM} {layer} label="Align" path="c.align"><SelectField {PM} get={get('align', 'center')} edit={edit('align', 'Align')} options={['left', 'center', 'right']} label="Align" /></AnimatedRow>
+  <AnimatedRow {PM} {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
   <AnimatedRow {PM} {layer} label="Color" path="c.color"><ColorField {PM} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
   <TypeSettings {PM} {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} />
 {:else if (layer.type === 'solid' || layer.type === 'shape') && !layer.d.paths?.length}

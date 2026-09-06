@@ -63,6 +63,8 @@
   }
 
   function keydown(event: KeyboardEvent): void {
+    // The field-aware keymap dispatches Electron's native clipboard paste.
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'v') return;
     event.stopPropagation();
     if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'a') {
       /* Keep select-all local to the draft. Powermove also owns this chord for

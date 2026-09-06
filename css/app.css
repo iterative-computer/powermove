@@ -555,10 +555,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .spatial-compose{--spatial-frame-inset:8px;--spatial-input-radius:9px;--spatial-control-inset:3px;position:fixed;z-index:5;width:min(390px,calc(100vw - 28px));padding:var(--spatial-frame-inset);border:0;border-radius:calc(var(--spatial-input-radius) + var(--spatial-frame-inset));background:var(--bg-float);color:var(--tx);box-shadow:0 0 0 var(--hairline) var(--line-2),var(--shadow-float);cursor:default}
 /* Full-composition prompt is a pill: one surface, transparent input, controls
    inset 4px so the outer pill and the round send stay concentric. */
-.spatial-compose.full{--spatial-frame-inset:4px;padding:4px;border-radius:var(--r-pill)}
-.spatial-compose.full .spatial-input-row{min-height:36px;padding:3px 3px 3px 14px;border-radius:var(--r-pill);background:transparent}
+.spatial-compose.full{--spatial-frame-inset:7px;--tx:#f3f0ee;--tx-2:#c8c3bf;--tx-3:#99928e;--tx-4:#746e6a;--bg-panel:#282523;--bg-field:#302c29;--bg-float:#282523;--ink-rgb:255 255 255;padding:7px;border:0;border-radius:18px;background:#282523;color:var(--tx);box-shadow:0 20px 36px -8px rgb(0 0 0 / .34)}
+.spatial-compose.full .spatial-input-row{align-items:center;min-height:30px;padding:0 0 0 10px;border-radius:var(--r-pill);background:transparent}
 .spatial-compose.full .spatial-input-row:focus-within{background:transparent;box-shadow:none}
-.spatial-compose.full textarea{min-height:30px;height:30px;padding:6px 8px 6px 0}
+.spatial-compose.full textarea{min-height:30px;height:30px;padding:6px 0;font-size:13px;line-height:18px}
 .spatial-compose.full .spatial-input-row>.spatial-action.spatial-action.pri{width:30px;height:30px;border-radius:var(--r-pill)}
 .spatial-compose.conversation{width:min(430px,calc(100vw - 28px));padding:0;overflow:hidden;border:1px solid var(--line-2);border-radius:var(--r-xl)}
 .spatial-target{min-width:0;padding:1px 4px 6px;color:var(--tx-3);font-size:var(--fs-sm);font-family:var(--f-ui);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;user-select:none}
@@ -580,7 +580,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .spatial-attach svg{width:15px;height:15px}
 .spatial-attach:hover{color:var(--tx);background:var(--ink-1)}
 .spatial-attach:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
-.spatial-compose.full:has(.spatial-attach) .spatial-input-row{padding-left:3px}
+.spatial-compose.full:has(.spatial-attach) .spatial-input-row{padding-left:0}
 .spatial-attachment-rail{display:flex;flex-wrap:wrap;gap:6px;padding:8px 10px 4px}
 .spatial-attachment-rail[hidden]{display:none}
 .spatial-compose.full.has-attachments{border-radius:20px}

@@ -2,6 +2,8 @@ import { resolveContent } from 'powermove';
 export function editCanvasText(PM:any,V:any,layer:any,event?:MouseEvent):void {
   if(layer.lock)return;PM.finishCanvasText?.();PM.selectLayers(layer.id);PM.pause();
   const d=resolveContent(PM,layer,PM.time),m=PM.worldMatrix(layer,PM.time).map((v:number)=>v*V.shown),el=document.createElement('div');
+  const offset=PM.raster(layer,1,PM.time)?.fontOffset;
+  if(offset){m[4]+=m[0]*offset.x+m[2]*offset.y;m[5]+=m[1]*offset.x+m[3]*offset.y;}
   el.contentEditable='plaintext-only';el.setAttribute('role','textbox');el.setAttribute('aria-label','Edit text on canvas');el.spellcheck=false;
   el.textContent=String(d.text||'');
   Object.assign(el.style,{position:'absolute',left:'0',top:'0',transformOrigin:'0 0',transform:`matrix(${m.join(',')})`,fontFamily:`"${String(d.font).replaceAll('"','')}"`,fontWeight:String(d.weight||500),fontStyle:d.italic?'italic':'normal',fontVariationSettings:Object.keys(d).filter(k=>k.startsWith('fontAxis.')&&Number.isFinite(Number(d[k]))).map(k=>`"${k.slice(9)}" ${Number(d[k])}`).join(',')||'normal',fontSize:`${d.size}px`,lineHeight:String(d.leading||1.15),letterSpacing:`${d.tracking||0}px`,color:d.color||'white',caretColor:'white',whiteSpace:d.boxWidth?'pre-wrap':'pre',width:d.boxWidth?`${d.boxWidth}px`:'max-content',minWidth:'1em',minHeight:'1em',outline:'1px solid #70b7ff',textAlign:d.align||'left',zIndex:'8',padding:'0',margin:'0',userSelect:'text'});

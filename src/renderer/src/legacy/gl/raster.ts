@@ -1,3 +1,4 @@
+import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, textControlValues } from '../core/text-animation';
 import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
 import { createVariableFontRenderer, variationEntries, variationSettings } from '../../typography/font-renderer';
@@ -374,6 +375,19 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time) => {
   }
   e.used = ++tick;
   e.key = key;
+  if (L.type === 'text' && L.d.fontAnchorBounds && e.selection) {
+    // Character animator movement must not be canceled by typography anchoring.
+    const typeBounds = L.d.animators?.length
+      ? PM.raster({ ...L, d: { ...L.d, animators: [], fontAnchorBounds: null } }, scale, time).selection
+      : e.selection;
+    const offset = fontAnchorOffset(L.d.fontAnchorBounds, typeBounds,
+      PM.ev(L, 'anchor.x', time), PM.ev(L, 'anchor.y', time));
+    // Placement belongs to the layer; cached glyph pixels remain shareable.
+    return { ...e, anchorX: e.anchorX - offset.x, anchorY: e.anchorY - offset.y,
+      fontOffset: offset, selection: { ...e.selection,
+        x0: e.selection.x0 + offset.x, x1: e.selection.x1 + offset.x,
+        y0: e.selection.y0 + offset.y, y1: e.selection.y1 + offset.y } };
+  }
   return e;
 };
 PM.rasterStats = () => ({ size: cache.size, bytes: cacheBytes, maxBytes: MAX_BYTES });

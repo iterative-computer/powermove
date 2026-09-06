@@ -256,7 +256,6 @@ export function install(PM: PMRegistry): void {
       const entry = stack[idx--]!;
       entry.undo();
       publishProjectPatch(entry.backward);
-      PM.toast('Undo · ' + entry.label);
       publish();
       return true;
     },
@@ -265,7 +264,6 @@ export function install(PM: PMRegistry): void {
       const entry = stack[++idx]!;
       entry.redo();
       publishProjectPatch(entry.forward);
-      PM.toast('Redo · ' + entry.label);
       publish();
       return true;
     },

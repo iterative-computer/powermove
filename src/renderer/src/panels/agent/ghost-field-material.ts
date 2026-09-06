@@ -13,7 +13,7 @@ export const GHOST_BREATH_LEAD = GHOST_BREATH_SECONDS * 0.38;
 export const GHOST_LIGHT_GAIN = 2.0;
 
 /** Matches the ghost's CSS corner radius so the shader edge tracks the border. */
-export const GHOST_CORNER_RADIUS = 8;
+export const GHOST_CORNER_RADIUS = 12;
 
 /**
  * The field is synthesized light rather than captured pixels, so it is authored
@@ -144,10 +144,10 @@ fn frag(uv: vec2f) -> vec4f {
   let sweep = crest + echo;
 
   let pulse = mix(0.55, 1.0, breath);
-  let bodyAlpha = flow * interior * (0.13 + 0.21 * breath);
-  let rimAlpha = hairline * (0.16 + sweep * 0.60 * pulse)
-    + innerBloom * (0.07 + flow * 0.16) * pulse
-    + outerHaze * sweep * 0.09 * pulse;
+  let bodyAlpha = flow * interior * (0.045 + 0.07 * breath);
+  let rimAlpha = hairline * (0.08 + sweep * 0.25 * pulse)
+    + innerBloom * (0.025 + flow * 0.055) * pulse
+    + outerHaze * sweep * 0.035 * pulse;
 
   // Ember carries the body, the accent runs through the flow, and gold lifts
   // the filaments and the travelling crest.
@@ -155,7 +155,7 @@ fn frag(uv: vec2f) -> vec4f {
   color = mix(color, GHOST_GOLD, clamp(filament * 0.7 + sweep * 0.45, 0.0, 1.0));
   // The pale haze only ever appears as a broad defocused warmth behind the rim,
   // never as a crisp edge of its own.
-  color = color + GHOST_HAZE * innerBloom * breath * flow * 0.22;
+  color = color + GHOST_HAZE * innerBloom * breath * flow * 0.08;
 
   let alpha = clamp((bodyAlpha + rimAlpha) * entrance * motiongpuUniforms.uGain, 0.0, 0.62);
   // Motion GPU premultiplies at presentation, so the field stays straight-alpha.
@@ -167,6 +167,6 @@ fn frag(uv: vec2f) -> vec4f {
     uElapsed: 0,
     uGain: 1,
     uIntensity: 0,
-    uRadius: 8,
+    uRadius: 12,
   },
 });

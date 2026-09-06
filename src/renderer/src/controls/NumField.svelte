@@ -8,6 +8,7 @@
   import { rowLabelId } from './context';
   import { round } from './control-utils';
   import './controls.css';
+  import { horizontalScrub } from './horizontal-scrub';
 
   let {
     PM,
@@ -93,6 +94,21 @@
     draft = '';
   }
 
+  function trackpad(node: HTMLInputElement) {
+    let wheelGesture: EditGesture;
+    let current = 0;
+    return horizontalScrub(node, {
+      enabled: () => !editing && !cancelScrub,
+      begin: () => { current = Number(get()); wheelGesture = gesture; wheelGesture.begin(); },
+      move: (delta, event) => {
+        current = clampValue(current + delta * effectiveStep * effectiveSpeed * (event.shiftKey ? 10 : event.altKey ? 0.1 : 1));
+        wheelGesture.write(current); onInput?.(current);
+      },
+      commit: () => { wheelGesture.commit(); onCommit?.(Number(get())); },
+      cancel: () => wheelGesture.cancel()
+    });
+  }
+
   let cancelScrub: (() => void) | undefined;
   onDestroy(() => cancelScrub?.());
 
@@ -115,6 +131,7 @@
     scrub.begin();
     const handle = PM.drag(event, {
       cursor: 'ew-resize',
+      infinite: true,
       move: (dx: number, _dy: number, nextEvent: PointerEvent) => {
         if (!active || (!moved && Math.abs(dx) < 3)) return;
         moved = true;
@@ -170,6 +187,7 @@
 
 <input
   bind:this={input}
+  use:trackpad
   class="num"
   class:editing
   class:link

@@ -48,8 +48,10 @@ test.describe('@ui-placement early panel loading', () => {
         canvasIsCapped: canvas.width <= Math.ceil(canvas.getBoundingClientRect().width * 1.5)
       };
     });
-    expect(overlayState).toEqual({ inset: 5, followsTop: 5, pointerEvents: 'none', interceptsPointer: false, canvasIsCapped: true });
+    expect(overlayState).toEqual({ inset: 0, followsTop: 0, pointerEvents: 'none', interceptsPointer: false, canvasIsCapped: true });
     expect(await page.evaluate(() => JSON.stringify([(window as any).PM.proj, (window as any).PM.WS.current]))).toBe(baseline);
+    // The overlay belongs to the panel, so the dock clips it during scrolling.
+    expect(await ghost.evaluate(element => element.parentElement?.id)).toBe('panel-timeline');
     await page.screenshot({ path: testInfo.outputPath('timeline-loading.png') });
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -60,7 +62,36 @@ test.describe('@ui-placement early panel loading', () => {
       const PM = (window as any).PM;
       PM.WS.mutate((workspace: any) => PM.Layout.movePanel(workspace, 'timeline', 'left'));
     });
-    await expect.poll(async () => ghost.evaluate(element => Math.round(element.getBoundingClientRect().left - document.getElementById('panel-timeline')!.getBoundingClientRect().left))).toBe(5);
+    await expect.poll(async () => ghost.evaluate(element => Math.round(element.getBoundingClientRect().left - document.getElementById('panel-timeline')!.getBoundingClientRect().left))).toBe(0);
+    // Scroll the panel behind the dock's top edge. Probe hit testing with
+    // pointer events temporarily enabled to verify the actual paint clip.
+    await page.evaluate(() => {
+      const dock = document.getElementById('dock-left')!;
+      const panel = document.getElementById('panel-timeline')!;
+      dock.style.height = '180px';
+      dock.style.maxHeight = '180px';
+      dock.style.flex = '0 0 250px';
+      panel.style.minHeight = '600px';
+      dock.scrollTop = panel.getBoundingClientRect().top - dock.getBoundingClientRect().top + 100;
+    });
+    const clipping = await ghost.evaluate(element => {
+      const dock = document.getElementById('dock-left')!;
+      const bounds = dock.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
+      const overlay = element as HTMLElement;
+      overlay.style.pointerEvents = 'auto';
+      const inside = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + 30);
+      const outside = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top - 10);
+      overlay.style.removeProperty('pointer-events');
+      return {
+        scrolled: rect.top < bounds.top,
+        inside: inside === element || element.contains(inside),
+        outside: outside === element || element.contains(outside),
+        fullWidth: Math.round(rect.width) === Math.round(element.parentElement!.getBoundingClientRect().width),
+      };
+    });
+    expect(clipping).toEqual({ scrolled: true, inside: true, outside: false, fullWidth: true });
+    await page.screenshot({ path: testInfo.outputPath('scrolled-panel-loading.png') });
     await page.evaluate(() => {
       (window as any).__ghostRun.resolve({ text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) });
     });
