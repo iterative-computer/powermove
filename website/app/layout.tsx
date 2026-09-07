@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Powermove — From a thought. To a powermove.',
-  description: 'An AI-native motion editor for the ideas that won’t sit still. Start with a prompt. Shape every detail. Make it yours. In development.',
+  title: 'Powermove — Make your move.',
+  description: 'A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and room for your next big idea. In development.',
 };
 
 export default function RootLayout({
@@ -23,7 +23,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" data-theme="dark" className={`${geistSans.variable} ${geistMono.variable}`}>
+      <head><link rel="stylesheet" href="/editor-tokens.css" /></head>
       <body
         className={`${geistSans.className} antialiased`}
       >

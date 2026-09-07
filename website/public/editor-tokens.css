@@ -1,0 +1,193 @@
+/* Powermove — design tokens. Default theme is light; dark is the alternate.
+
+   The palette is small on purpose: three surfaces, one text color that every
+   hairline, wash, and muted tone is an alpha step of, one accent, three
+   semantic status hues. Everything else in the app derives from these. */
+:root{color-scheme:light}
+:root[data-theme="dark"]{color-scheme:dark}
+:root{
+  /* ── ink: the one color everything neutral is derived from ── */
+  --ink-rgb:20 22 28;
+  --paper-rgb:255 255 255;
+
+  /* ── surfaces (canvas → surface → elevated) ── */
+  --bg-window:#EEEEF1;   /* canvas */
+  --bg-rail:#F3F3F6;
+  --bg-panel:#FDFDFE;    /* surface */
+  --bg-panel-2:#F5F5F7;
+  --bg-sunken:#E6E6EA;
+  --bg-row:#F3F3F6;
+  --bg-row-hi:#EBEBEF;
+  --bg-field:#F3F3F6;
+  --bg-float:#FFFFFF;    /* elevated */
+
+  /* ── alpha ladder of ink: 4 / 7 / 12 / 20 ── */
+  --ink-1:rgb(var(--ink-rgb) / .045);
+  --ink-2:rgb(var(--ink-rgb) / .08);
+  --ink-3:rgb(var(--ink-rgb) / .16);
+
+  --line:rgb(var(--ink-rgb) / .07);
+  --line-2:rgb(var(--ink-rgb) / .11);
+  --line-strong:rgb(var(--ink-rgb) / .2);
+  --section-line:rgb(var(--ink-rgb) / .09);
+
+  /* ── text: primary, then alpha steps of primary ── */
+  --tx:#1B1D23;
+  --tx-2:rgb(var(--ink-rgb) / .66);
+  --tx-3:rgb(var(--ink-rgb) / .48);
+  --tx-4:rgb(var(--ink-rgb) / .32);
+
+  --accent:#F0580A;
+  --accent-hover:#FF6A24;
+  --accent-dim:rgba(240,88,10,.12);
+  --accent-tx:#D84E06;
+  --on-accent:#FFFFFF;
+
+  --danger:#D93025;
+  --warning:#A15C00;
+  --success:#148F5E;
+
+  --blue:#2B6FE3;
+  --blue-deep:#2B4FD8;
+  --cream:#A89B76;
+  --sand:#8D8163;
+  --violet:#4C5BD8;
+  --gray:#6E6E76;
+  --green:var(--success);
+  --red:var(--danger);
+  --yellow:var(--warning);
+
+  /* ── radius: one base, multiplied ── */
+  --r-base:4px;
+  --r-xs:var(--r-base);
+  --r-sm:calc(var(--r-base) * 1.5);  /* 6  */
+  --r-md:calc(var(--r-base) * 2);    /* 8  */
+  --r-lg:calc(var(--r-base) * 3);    /* 12 */
+  --r-xl:calc(var(--r-base) * 4);    /* 16 */
+  --r-pill:999px;
+
+  --fw-regular:400; --fw-medium:500; --fw-semibold:600;
+
+  /* ── metrics ── */
+  --row-h:30px;
+  --hdr-h:38px;
+  --ctl-h:28px;   /* default control height: buttons, chips, fields inline */
+  --gut:10px;
+  --panel-edge-inset:10px; /* inset panel-top controls, search rows, and footer cards */
+  --pad:12px;     /* uniform outer padding for the whole shell */
+  --gap:10px;     /* uniform gap between docks/panels */
+  --hit:28px;     /* minimum interactive target */
+  --val-w:128px;  /* inspector value column: wells share one right-aligned track */
+
+  --f-ui:"SF Pro Text",-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;
+  --f-mono:"SF Mono",ui-monospace,Menlo,monospace;
+
+  --fs-xs:11px; --fs-sm:12px; --fs-md:13px; --fs-lg:15px; --fs-xl:18px;
+  --lh:1.45;
+  --lh-tight:1.3;
+
+  /* ── control material: a hairline top highlight + soft depth, no borders ── */
+  --hairline:0.5px;
+  --ctl-edge:
+    inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .9),
+    inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
+    0 1px 1px -.5px rgb(var(--ink-rgb) / .06),
+    0 3px 3px -1.5px rgb(var(--ink-rgb) / .06);
+  --ctl-raised:linear-gradient(180deg,#FFFFFF 0%,#F9F9FA 100%);
+  --ctl-edge-inset:
+    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .06),
+    inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1);
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 60%,transparent);
+
+  --shadow-raise:0 1px 2px rgb(var(--ink-rgb) / .06),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  /* panel: hairline ring + tight contact shadow + soft ambient, and a paper
+     highlight along the top edge so the card reads as a lifted sheet. */
+  --shadow-panel:
+    0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09),
+    0 1px 1px rgb(var(--ink-rgb) / .04),
+    0 4px 10px -2px rgb(var(--ink-rgb) / .07),
+    inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .8);
+  --shadow-lift:0 4px 12px -2px rgb(var(--ink-rgb) / .1),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --shadow-float:0 16px 40px -8px rgb(var(--ink-rgb) / .22),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),inset 0 var(--hairline) 0 rgb(var(--paper-rgb) / .7);
+
+  /* ── motion: two durations, one curve ── */
+  --dur-1:75ms;    /* interaction: hover, press, selection */
+  --dur-2:100ms;   /* surface: menus, popovers, sheets */
+  --dur-3:160ms;   /* reveal: modals, large surfaces */
+  --ease:cubic-bezier(.22,1,.36,1);
+  --ease-io:cubic-bezier(.45,0,.2,1);
+
+  --disabled:.5;
+}
+:root[data-density="compact"]{ --row-h:26px; --hdr-h:32px; --ctl-h:24px; --fs-md:12px; --gut:7px; --pad:9px; --gap:8px; }
+:root[data-density="comfy"]{ --row-h:34px; --hdr-h:42px; --ctl-h:30px; --fs-md:14px; --gut:12px; --pad:14px; --gap:12px; }
+
+/* ── dark theme (alternate) ────────────────────────────── */
+:root[data-theme="dark"]{
+  --ink-rgb:245 245 244;
+  --paper-rgb:255 255 255;
+
+  /* Tailwind Stone, kept close to 950 so the dark theme stays truly dark. */
+  --bg-window:#0C0A09;
+  --bg-rail:#100E0D;
+  --bg-panel:#1C1917;
+  --bg-panel-2:#151311;
+  --bg-sunken:#090807;
+  --bg-row:#211E1C;
+  --bg-row-hi:#292524;
+  --bg-field:#171412;
+  --bg-float:#292524;
+
+  --ink-1:rgb(var(--ink-rgb) / .05);
+  --ink-2:rgb(var(--ink-rgb) / .09);
+  --ink-3:rgb(var(--ink-rgb) / .18);
+
+  --line:rgb(var(--ink-rgb) / .07);
+  --line-2:rgb(var(--ink-rgb) / .11);
+  --line-strong:rgb(var(--ink-rgb) / .2);
+  --section-line:rgb(var(--ink-rgb) / .08);
+
+  --tx:#F5F5F4;
+  --tx-2:rgb(var(--ink-rgb) / .62);
+  --tx-3:rgb(var(--ink-rgb) / .44);
+  --tx-4:rgb(var(--ink-rgb) / .28);
+
+  --accent:#FF6B1A;
+  --accent-hover:#FF7B33;
+  --accent-dim:rgba(255,107,26,.15);
+  --accent-tx:#FF8B4D;
+
+  --danger:#F36357;
+  --warning:#F59E0B;
+  --success:#3FCF8E;
+
+  --blue:#4C8DFF;
+  --blue-deep:#3B62E8;
+  --cream:#E8E2CF;
+  --sand:#D8CFAF;
+  --violet:#6C7BE8;
+  --gray:#A9A9AE;
+
+  /* Raised control: lit from above. Inner top light, inner bottom shade,
+     a hairline ring to cut it from the track, and a drop shadow beneath. */
+  --ctl-edge:
+    inset 0 1px 0 rgb(var(--ink-rgb) / .12),
+    inset 0 -1px 0 rgb(0 0 0 / .28),
+    0 0 0 var(--hairline) rgb(0 0 0 / .55),
+    0 1px 2px rgb(0 0 0 / .45),
+    0 2px 6px -1px rgb(0 0 0 / .35);
+  --ctl-raised:linear-gradient(180deg,#3A3634 0%,#2C2927 100%);
+  --ctl-edge-inset:
+    inset 0 var(--hairline) 0 rgb(0 0 0 / .3),
+    inset 0 calc(var(--hairline) * -1) 0 rgb(var(--ink-rgb) / .08);
+  --focus-ring:0 0 0 2px var(--bg-panel),0 0 0 4px color-mix(in srgb,var(--accent) 65%,transparent);
+
+  --shadow-raise:0 1px 2px rgb(0 0 0 / .4),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --shadow-panel:
+    0 0 0 var(--hairline) rgb(var(--ink-rgb) / .1),
+    0 1px 1px rgb(0 0 0 / .3),
+    0 6px 14px -4px rgb(0 0 0 / .45),
+    inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .07);
+  --shadow-lift:0 4px 14px -2px rgb(0 0 0 / .5),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .09);
+  --shadow-float:0 20px 48px -8px rgb(0 0 0 / .65),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .12),inset 0 var(--hairline) 0 rgb(var(--ink-rgb) / .1);
+}
