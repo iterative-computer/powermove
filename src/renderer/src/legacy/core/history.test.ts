@@ -57,3 +57,22 @@ describe('legacy history install', () => {
     expect(PM.proj.value).toBe(1);
   });
 });
+
+describe('selection history', () => {
+  it('restores selection without changing source and suppresses selection inside edits', () => {
+    const PM = historyRegistry();
+    PM.proj.layers = [{id:'a'}, {id:'b'}];
+    const before = {layers:['a'],keys:[],chan:null}, after = {layers:['b'],keys:[],chan:null};
+    PM.sel = after;
+    PM.hist.selection(before, after);
+    PM.hist.undo(); expect(PM.sel.layers).toEqual(['a']);
+    PM.hist.redo(); expect(PM.sel.layers).toEqual(['b']);
+    PM.hist.begin('Edit');
+    PM.hist.selection(after, before);
+    PM.proj.value = 2; PM.hist.commit();
+    expect(PM.hist.list()).toEqual(['Selection','Edit']);
+    PM.hist.selection(before,before);
+    expect(PM.hist.list()).toHaveLength(2);
+    expect(PM.autosave).toHaveBeenCalledTimes(1);
+  });
+});

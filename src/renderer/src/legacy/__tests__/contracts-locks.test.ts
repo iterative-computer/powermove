@@ -39,6 +39,9 @@ function fixture() {
 }
 
 const lockedCases = {
+  group_layers: ({layer}) => ({type:'group_layers',targets:[layer.id]}),
+  ungroup_layers: ({layer}) => ({type:'ungroup_layers',targets:[layer.id]}),
+  move_to_group: ({layer}) => ({type:'move_to_group',targets:[layer.id],group:null}),
   set_property: ({ layer }) => ({
     type: 'set_property', target: layer.id, path: 'position.x', value: 100,
     mode: 'static', preserveHandEdits: false,
@@ -85,8 +88,9 @@ const lockedCases = {
   },
 };
 
-it('the locked-layer operation matrix is frozen for all 19 operations', () => {
+it('the locked-layer operation matrix is frozen for all 22 operations', () => {
   const outcomes = {
+    group_layers: 'blocked', ungroup_layers: 'blocked', move_to_group: 'blocked',
     set_property: 'blocked',
     replace_keyframes: 'blocked',
     set_easing: 'blocked',
@@ -257,7 +261,7 @@ it('overrideLock is honored only for interface and inspector origins', () => {
     const recorded = PM.proj.edits.at(-1).operations[0];
     assert.equal(Object.hasOwn(recorded, 'overrideLock'), false);
     assert.equal(recorded.preserveHandEdits, false, 'provenance keeps the submitted overwrite request');
-    assert.equal(sanitized.data.results[0].command.preserveHandEdits, true, 'dispatch uses the forced policy');
+    assert.equal(sanitized.data.results[0].command.preserveHandEdits, origin !== 'agent', 'only agent requests can explicitly overwrite intent');
   }
 });
 
@@ -276,12 +280,14 @@ it('agent edits preserve the exact human-edited channel but not its sibling', ()
   assert.equal(blocked.ok, false);
   assert.equal(blocked.message, 'Preserved hand-edited position.x; explicitly allow overwrite to change it');
 
-  const rejectedOverride = PM.Edit.apply([{
+  const acceptedOverride = PM.Edit.apply([{
     type: 'set_property', target: layer.id, path: 'position.x', value: 250,
     mode: 'static', preserveHandEdits: false,
   }], { origin: 'agent' });
-  assert.equal(rejectedOverride.ok, false);
-  assert.equal(rejectedOverride.message, 'Preserved hand-edited position.x; explicitly allow overwrite to change it');
+  assert.equal(acceptedOverride.ok, true);
+  assert.equal(PM.L(layer.id).p['position.x'].v, 250);
+  PM.hist.undo();
+  assert.equal(PM.L(layer.id).p['position.x'].v, 100);
 
   const sibling = PM.Edit.apply([{
     type: 'set_property', target: layer.id, path: 'position.y', value: 300, mode: 'static',

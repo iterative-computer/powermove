@@ -1,3 +1,4 @@
+import { CHANNELS_3D } from '../../legacy/core/space-3d';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import {
@@ -24,6 +25,7 @@ import {
 type UnknownRecord = Record<string, unknown>;
 
 const TRANSFORM_DEFAULTS = {
+  ...CHANNELS_3D,
   'anchor.x': 0,
   'anchor.y': 0,
   'position.x': 0,
@@ -150,7 +152,7 @@ function freshTransformChannels(type: LayerType, comp: Pick<Comp, 'w' | 'h'>): T
     'position.x': comp.w / 2,
     'position.y': comp.h / 2
   };
-  if (type === 'solid' || type === 'adjustment' || type === 'shader' || type === 'extension' || type === 'precomp') {
+  if (type === 'group' || type === 'solid' || type === 'adjustment' || type === 'shader' || type === 'extension' || type === 'precomp') {
     defaults['position.x'] = 0;
     defaults['position.y'] = 0;
   }
@@ -420,6 +422,7 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
         comp: typeof source.comp === 'string' && source.comp ? source.comp : null,
         w: finite(source.w, comp.w), h: finite(source.h, comp.h)
       };
+    case 'group':
     case 'null':
       return source;
   }
@@ -454,8 +457,8 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     ? source.type as LayerType
     : 'null';
   const transformable = type !== 'audio';
-  const noEffects = type === 'audio';
-  const noMasks = type === 'audio';
+  const noEffects = type === 'audio' || type === 'group';
+  const noMasks = type === 'audio' || type === 'group';
   const id = nonEmptyStringOr(source.id, uid('L'));
   const blend = BLEND_MODES.includes(source.blend as (typeof BLEND_MODES)[number])
     ? source.blend as (typeof BLEND_MODES)[number]
@@ -464,19 +467,21 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     id,
     type,
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
-    from: Math.max(0, finite(source.from)),
+    from: Math.max(type === 'group' ? -Infinity : 0, finite(source.from)),
     dur: Math.max(0.01, finite(source.dur, 5)),
     on: isProperty(source.on) ? sanitizeLooseChannel(source.on, true) : source.on !== false,
     lock: !!source.lock,
     shy: !!source.shy,
+    threeD: type !== 'audio' && type !== 'adjustment' && !!source.threeD,
     solo: !!source.solo,
     matteSource: typeof source.matteSource === 'string' ? source.matteSource : null,
     matteMode: sanitizeLooseChannel(source.matteMode, 'alpha') as any,
+    group: typeof source.group === 'string' && source.group !== id ? source.group : null,
     collapsed: source.collapsed !== false,
     color: stringOr(source.color, TYPE_META[type].color),
     blend: type === 'audio' ? 'normal' : isProperty(source.blend) ? sanitizeLooseChannel(source.blend, 'normal') : blend,
     mblur: type === 'audio' ? false : isProperty(source.mblur) ? sanitizeLooseChannel(source.mblur, false) : !!source.mblur,
-    parent: type === 'audio' ? null : (typeof source.parent === 'string' && source.parent !== id ? source.parent : null),
+    parent: type === 'audio' || type === 'group' ? null : (typeof source.parent === 'string' && source.parent !== id ? source.parent : null),
     p: transformable ? sanitizeTransformChannels(source.p, type, comp) : {},
     fx: noEffects ? [] : (Array.isArray(source.fx) ? source.fx.map(sanitizeEffect).filter((item): item is Effect => item !== null) : []),
     transitionIn: sanitizeTransition(source.transitionIn),
@@ -653,6 +658,14 @@ export function sanitizeProject(raw: unknown): Project {
     ? source.layers.map((layer, index) => sanitizeLayer(layer, index, project))
     : [];
   const ids = new Set(project.layers.map(layer => layer.id));
+  const groups = new Map(project.layers.filter(layer => layer.type === 'group').map(layer => [layer.id, layer]));
+  for (const layer of project.layers) {
+    const seen = new Set([layer.id]); let id = layer.group;
+    while (id) {
+      if (seen.has(id) || !groups.has(id)) { layer.group = null; break; }
+      seen.add(id); id = groups.get(id)?.group;
+    }
+  }
   for (const layer of project.layers) {
     if (layer.parent && !ids.has(layer.parent)) layer.parent = null;
     if (layer.type === 'precomp' && (!layer.d.comp || !project.comps[layer.d.comp])) layer.d.comp = null;

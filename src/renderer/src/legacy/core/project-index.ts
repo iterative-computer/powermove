@@ -152,7 +152,7 @@ export function installProjectIndex(PM: PMRegistry): void {
         queue.push(...(index.children.get(child.id) || []));
       }
       return index.layers
-        .filter(candidate => !blocked.has(candidate.id))
+        .filter(candidate => !blocked.has(candidate.id) && PM.TYPE_META?.[candidate.type]?.transform !== false)
         .map(candidate => ({ v: candidate.id, label: String(candidate.name) }));
     },
     activeAt(time: number, comp: any = PM.curComp?.() || PM.proj) {

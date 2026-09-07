@@ -92,9 +92,9 @@ describe('NumField', () => {
     const input = target.querySelector<HTMLInputElement>('input')!;
     input.dispatchEvent(new WheelEvent('wheel', { deltaX: 100, cancelable: true }));
     input.dispatchEvent(new WheelEvent('wheel', { deltaX: -20, cancelable: true }));
-    expect(current).toBe(1040);
+    expect(current).toBe(1010);
     expect(Edit.begin).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(200);
+    vi.advanceTimersByTime(350);
     expect(Edit.commit).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });

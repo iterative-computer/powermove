@@ -47,6 +47,15 @@ export type ActivityRow =
    `mcp__github__search_issues`). Match on the FAMILY, not the exact name, so a
    new tool still produces a sentence instead of a raw identifier. */
 const ACTION_RULES: Array<[RegExp, string]> = [
+  [/^get_project_state$/, 'inspected the project'],
+  [/^get_panel_layout$/, 'checked the panel layout'],
+  [/^open_panel$/, 'opened a panel'],
+  [/^get_panel_state$/, 'checked panel controls'],
+  [/^interact_panel$/, 'used panel controls'],
+  [/^render_frames$/, 'previewed composition frames'],
+  [/^apply_commands$/, 'edited the composition'],
+  [/^edit_video$/, 'edited video clips'],
+  [/^rollback_changes$/, 'undid agent changes'],
   [/^(web|search|browse|fetch)|url/, 'searched the web'],
   [/^(bash|command|shell|terminal|exec|run|process)/, 'ran commands'],
   [/^(edit|write|create|patch|file|apply|delete|move)/, 'edited files'],
@@ -58,12 +67,12 @@ const ACTION_RULES: Array<[RegExp, string]> = [
 export function toolAction(toolName?: string): string {
   const name = String(toolName ?? '').trim().toLowerCase();
   if (!name) return 'used a tool';
+  // Strip provider namespaces before matching so native and MCP calls agree.
+  const short = name.startsWith('mcp__') ? (name.split('__').at(-1) || name) : name;
   for (const [pattern, action] of ACTION_RULES) {
-    if (pattern.test(name)) return action;
+    if (pattern.test(short)) return action;
   }
-  // `mcp__server__tool` reads as noise; the last segment is the useful part.
-  const short = name.startsWith('mcp') ? (name.split('__').at(-1) || name) : name;
-  return `used ${short}`;
+  return `used ${short.replace(/[_-]+/g, ' ')}`;
 }
 
 export function joinActions(actions: string[]): string {

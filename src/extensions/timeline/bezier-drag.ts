@@ -14,22 +14,13 @@ type SelectableBezierKey = {
 
 const EPSILON = 1e-6;
 
-function selectableKeyIds(key: SelectableBezierKey): string[] {
-  return [key.i, ...(key.members || []).map(member => member.key?.i)]
-    .filter((id): id is string => typeof id === 'string');
-}
-
-/** Dragging a handle on any selected key adjusts the matching handle on the
- * whole selection. An unselected key remains an isolated edit, except for a
- * grouped X/Y key at the same time which intentionally behaves as one point. */
+/** Handle drags edit only the clicked time in the owning track. Grouped X/Y
+ * keys at that time still behave as one point; selecting other keyframes does
+ * not link their handles. */
 export function keysForBezierHandleDrag<T extends SelectableBezierKey>(
-  keys: T[], clicked: T, selectedIds: string[],
+  keys: T[], clicked: T, _selectedIds: string[],
 ): T[] {
-  const selected = new Set(selectedIds);
-  const clickedIsSelected = selectableKeyIds(clicked).some(id => selected.has(id));
-  return clickedIsSelected
-    ? keys.filter(key => selectableKeyIds(key).some(id => selected.has(id)))
-    : keys.filter(key => key.t === clicked.t);
+  return keys.filter(key => key.t === clicked.t);
 }
 
 function finitePoint(value: unknown, fallback: Point): Point {

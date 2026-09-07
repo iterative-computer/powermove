@@ -21,6 +21,7 @@ export const TYPE_META = {
   shader: { icon: 'wand', color: '#FF6B1A', label: 'Shader' },
   extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
   null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: false },
+  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, effects: false, masks: false, pickable: false },
   precomp: { icon: 'layers', color: '#3FCF8E', label: 'Precomp' }
 } as const;
 
@@ -69,6 +70,9 @@ export interface Channel<T extends ChannelValue = ChannelValue> {
 }
 
 export type TransformChannelName =
+  | 'position.z' | 'anchor.z' | 'scale.z' | 'rotation.x' | 'rotation.y'
+  | 'perspective'
+  | 'orientation.x' | 'orientation.y' | 'orientation.z'
   | 'anchor.x'
   | 'anchor.y'
   | 'position.x'
@@ -247,9 +251,11 @@ interface LayerBase<T extends LayerType, D extends object> {
   solo?: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;
+  threeD?: boolean;
   color: string;
   blend: BlendMode;
   mblur: boolean;
+  group?: string | null;
   parent: string | null;
   p: T extends 'audio' ? Record<never, never> : TransformChannels;
   fx: Effect[];
@@ -284,6 +290,7 @@ export type Layer =
   | ShaderLayer
   | ExtensionLayer
   | NullLayer
+  | LayerBase<'group', NullContent>
   | PrecompLayer;
 
 export interface FillStop {

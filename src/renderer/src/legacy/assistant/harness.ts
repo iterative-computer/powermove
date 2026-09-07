@@ -15,13 +15,13 @@ const MAX_KEYFRAMES = 80;
 const SCENE_OPERATIONS = new Set([
   'set_property', 'replace_keyframes', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
-  'reorder_layer', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
+  'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect', 'set_effect', 'set_transition',
   'set_scene_parameter', 'add_marker', 'create_section', 'update_section',
   'transform_layers',
 ]);
 const FIELDS: any = {
-  set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold'],
-  replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression'],
+  set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
+  replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression', 'preserveHandEdits'],
   set_easing: ['type', 'keyframes', 'curve'],
   set_expression: ['type', 'target', 'path', 'expression'],
   set_content: ['type', 'target', 'patch'],
@@ -29,6 +29,9 @@ const FIELDS: any = {
   set_composition: ['type', 'patch'],
   add_layer: ['type', 'id', 'layerType', 'name', 'from', 'duration', 'content', 'properties', 'color', 'index', 'select', 'parent', 'blend', 'motionBlur', 'visible', 'shy', 'collapsed'],
   delete_layers: ['type', 'target', 'targets'],
+  group_layers: ['type', 'targets', 'name'],
+  ungroup_layers: ['type', 'targets'],
+  move_to_group: ['type', 'targets', 'group'],
   reorder_layer: ['type', 'target', 'index'],
   add_effect: ['type', 'target', 'effect', 'parameters', 'open'],
   remove_effect: ['type', 'target', 'effect'],
@@ -90,7 +93,7 @@ function projectState() {
     selection: clone(PM.sel),
     layers: p.layers.slice(0, 120).map((layer: any, index: any) => ({
       index, id: layer.id, name: layer.name, type: layer.type, from: layer.from,
-      duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent,
+      duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
       blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
       content: Object.fromEntries(Object.entries(layer.d || {}).map(([key, value]) => [
         key,
@@ -158,8 +161,8 @@ function cleanCommand(raw: any) {
     out.layers = out.layers.slice(0, 200);
   }
   if (out.type === 'delete_layers' && Array.isArray(out.targets)) out.targets = out.targets.slice(0, 20);
-  /* Model-authored edits never bypass layer locks or hand-authored intent. */
-  if (out.type === 'set_property' || out.type === 'replace_keyframes') out.preserveHandEdits = true;
+  /* Model-authored edits preserve hand intent by default; explicit overrides survive. */
+  if (out.type === 'set_property' || out.type === 'replace_keyframes') out.preserveHandEdits = out.preserveHandEdits !== false;
   return out;
 }
 
@@ -234,7 +237,7 @@ REVIEW CONTRACT
 - status=pass when there is no clear repair required.
 - status=repair only for an obvious, bounded defect you can fix with the typed edit language.
 - Each commands item must be one JSON-encoded source-edit object. Never output JavaScript, shell commands, or project JSON.
-- Preserve locked layers and hand-edited channels. Do not broaden the user's scope.
+- Preserve locked layers and hand-edited channels by default. When the user explicitly requests changing a hand-edited channel, use preserveHandEdits: false on that set_property or replace_keyframes command. Do not bypass this through inspector controls or broaden the user's scope.
 - This is repair pass ${pass + 1} of ${MAX_REPAIRS}. Return no repair commands after the limit.
 - Keep message and critique concise.`;
 }

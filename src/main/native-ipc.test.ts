@@ -9,7 +9,8 @@ const electronMocks = vi.hoisted(() => ({
   browserWindowFromWebContents: vi.fn(),
   dialogShowSave: vi.fn(),
   nativeTheme: { shouldUseDarkColors: false, themeSource: 'system' },
-  shellOpenExternal: vi.fn()
+  shellOpenExternal: vi.fn(),
+  shellShowItemInFolder: vi.fn()
 }));
 
 vi.mock('electron', () => ({
@@ -18,7 +19,7 @@ vi.mock('electron', () => ({
   },
   dialog: { showSaveDialog: electronMocks.dialogShowSave },
   nativeTheme: electronMocks.nativeTheme,
-  shell: { openExternal: electronMocks.shellOpenExternal }
+  shell: { openExternal: electronMocks.shellOpenExternal, showItemInFolder: electronMocks.shellShowItemInFolder }
 }));
 
 import { registerCaptureIpc } from './capture';
@@ -344,5 +345,15 @@ describe('external URL IPC', () => {
       invokes.get(IPC.openExternal)?.(invokeEvent(), 'https://example.com')
     ).rejects.toThrow('Unauthorized IPC sender');
     expect(electronMocks.shellOpenExternal).not.toHaveBeenCalled();
+  });
+
+  it('reveals validated absolute media paths for trusted renderer requests', async () => {
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerShellIpc(ipcMain, { isTrustedSender: () => true });
+
+    await invokes.get(IPC.mediaRevealSource)?.(invokeEvent(), '/Users/editor/../editor/source.mov');
+    expect(electronMocks.shellShowItemInFolder).toHaveBeenCalledWith('/Users/editor/source.mov');
+    expect(() => invokes.get(IPC.mediaRevealSource)?.(invokeEvent(), 'relative.mov'))
+      .toThrow('media:reveal-source: expected an absolute file path');
   });
 });

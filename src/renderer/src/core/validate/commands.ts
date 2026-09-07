@@ -56,14 +56,14 @@ export const MAX_EXPRESSION_CHARS = 2_000;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const COMMAND_TYPE_SET = new Set<string>(COMMAND_TYPES);
 const LAYER_TYPES = new Set<LayerType>([
-  'solid', 'text', 'shape', 'image', 'video', 'audio', 'adjustment', 'shader', 'extension', 'null', 'precomp'
+  'solid', 'text', 'shape', 'image', 'video', 'audio', 'adjustment', 'shader', 'extension', 'null', 'precomp', 'group'
 ]);
 const BLEND_MODES = new Set([
   'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
 ]);
 const LAYER_FIELDS = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'blend',
-  'motionBlur', 'parent', 'color', 'collapsed', 'scaleLinked'
+  'motionBlur', 'parent', 'color', 'collapsed', 'threeD', 'scaleLinked', 'solo'
 ]);
 const COMPOSITION_FIELDS = new Set([
   'name', 'width', 'height', 'fps', 'duration', 'background', 'backgroundFill',
@@ -97,6 +97,9 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
     'shy', 'collapsed'
   ],
   delete_layers: ['type', 'target', 'targets'],
+  group_layers: ['type', 'targets', 'name'],
+  ungroup_layers: ['type', 'targets'],
+  move_to_group: ['type', 'targets', 'group'],
   reorder_layer: ['type', 'target', 'index'],
   add_effect: ['type', 'target', 'effect', 'parameters', 'open', 'enabled'],
   remove_effect: ['type', 'target', 'effect'],
@@ -110,14 +113,17 @@ const COMMAND_FIELDS: Record<(typeof COMMAND_TYPES)[number], readonly string[]> 
 };
 
 const AGENT_COMMAND_FIELDS = {
-  set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold'],
-  replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression'],
+  set_property: ['type', 'target', 'path', 'value', 'time', 'mode', 'ease', 'hold', 'preserveHandEdits'],
+  replace_keyframes: ['type', 'target', 'path', 'keyframes', 'replace', 'expression', 'preserveHandEdits'],
   set_expression: COMMAND_FIELDS.set_expression,
   set_content: ['type', 'target', 'patch'],
   set_layer: COMMAND_FIELDS.set_layer,
   set_composition: COMMAND_FIELDS.set_composition,
   add_layer: COMMAND_FIELDS.add_layer,
   delete_layers: COMMAND_FIELDS.delete_layers,
+  group_layers: COMMAND_FIELDS.group_layers,
+  ungroup_layers: COMMAND_FIELDS.ungroup_layers,
+  move_to_group: COMMAND_FIELDS.move_to_group,
   reorder_layer: COMMAND_FIELDS.reorder_layer,
   add_effect: COMMAND_FIELDS.add_effect,
   remove_effect: COMMAND_FIELDS.remove_effect,
@@ -388,7 +394,7 @@ function parseLayerPatch(value: unknown): LayerPatch | ValidationError {
     if (number instanceof ValidationError) return number;
     out[key] = number;
   }
-  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'scaleLinked'] as const) {
+  for (const key of ['visible', 'locked', 'shy', 'motionBlur', 'collapsed', 'threeD', 'scaleLinked', 'solo'] as const) {
     if (patch[key] != null) out[key] = Boolean(patch[key]);
   }
   for (const key of ['name', 'color'] as const) if (patch[key] != null) out[key] = stringified(patch[key]);
@@ -694,6 +700,7 @@ function isLayerContent(type: LayerType, value: unknown): boolean {
       && isRecord(value.params) && Object.values(value.params).every(isChannel)
       && isRecord(value.data);
     case 'null': return true;
+    case 'group': return true;
     case 'precomp': return (value.comp === null || typeof value.comp === 'string') && numberFields('w', 'h');
   }
 }
@@ -977,6 +984,14 @@ function parseObject(source: Record<string, unknown>): EditCommand | ValidationE
     case 'set_composition': return parseSetComposition(source);
     case 'add_layer': return parseAddLayer(source);
     case 'delete_layers': return parseDeleteLayers(source);
+    case 'group_layers':
+    case 'ungroup_layers':
+    case 'move_to_group': {
+      if (!Array.isArray(source.targets) || !source.targets.length || source.targets.some(id => typeof id !== 'string' || !id)) return invalid('must contain layer IDs', 'targets');
+      if (source.name !== undefined && typeof source.name !== 'string') return invalid('must be a string', 'name');
+      if (source.type === 'move_to_group' && source.group !== null && typeof source.group !== 'string') return invalid('must be a group ID or null', 'group');
+      return { type: source.type, targets: source.targets as string[], ...(source.name !== undefined ? {name: source.name as string} : {}), ...(source.type === 'move_to_group' ? {group: source.group as string | null} : {}) };
+    }
     case 'reorder_layer': return parseReorderLayer(source);
     case 'add_effect': return parseAddEffect(source);
     case 'remove_effect': return parseRemoveEffect(source);
@@ -1006,7 +1021,7 @@ export function parseEditCommand(raw: unknown): EditCommand | ValidationError {
 
 /**
  * Agent proposals use the narrower allowlist from assistant/harness.js and can
- * never bypass locks or hand-authored intent. Editor/UI callers should use
+ * never bypass layer locks. Explicit hand-intent overrides remain available. Editor/UI callers should use
  * parseEditCommand so legitimate provenance fields survive unchanged.
  */
 export function parseAgentEditCommand(raw: unknown): EditCommand | ValidationError {
@@ -1024,7 +1039,7 @@ export function parseAgentEditCommand(raw: unknown): EditCommand | ValidationErr
   const command = parseEditCommand(selected);
   if (command instanceof ValidationError) return command;
   if (command.type === 'set_property' || command.type === 'replace_keyframes') {
-    command.preserveHandEdits = true;
+    command.preserveHandEdits = command.preserveHandEdits !== false;
   }
   return command;
 }

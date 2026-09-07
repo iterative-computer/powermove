@@ -1,3 +1,5 @@
+import { revealedProperties } from './property-reveal';
+import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
 import { temporalKeys } from 'powermove';
 import { adjacentKeyframe } from './keyframe-navigation';
@@ -241,6 +243,7 @@ const T: any = previous || {
   gut: 224, row: 40, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null, dropRow: null as number | null,
+  reorder: null as ReturnType<typeof layerDrop>,
   drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
@@ -258,6 +261,7 @@ PM.TL = T;
 T.keySelectionActive = !!(T.keySelectionActive || PM.sel?.keys?.length);
 T.graphFocus = T.graphFocus && typeof T.graphFocus.layerId === 'string' && typeof T.graphFocus.trackKey === 'string'
   ? T.graphFocus : null;
+T.groupSelectionFocus = null;
 T.focusGraph = (L: any, channel: string) => {
   const target = typeof PM.allProps === 'function'
     ? timelineProperties(PM, L).find((row: any) => trackSelected(row, channel))
@@ -469,9 +473,15 @@ function buildHead(head: any) {
     playBtn.replaceChildren(PM.icon(icon));
   };
   onBus('time', syncTime, headCleanups); onBus('transport', syncTransport, headCleanups);
+  onBus('project', () => {
+    syncTime();
+    syncTransport();
+    graph.classList.toggle('on', T.graph);
+  }, headCleanups);
   syncTime(); syncTransport();
   listen(time, 'pointerdown', (e: any) => {
-    beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(PM.time + dx / 12 / PM.proj.fps) });
+    const startTime = PM.time;
+    beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(startTime + dx / 12 / PM.proj.fps) });
   }, undefined, headCleanups);
 }
 
@@ -532,18 +542,48 @@ onBus('layout:applied', () => {
 let rowsDirty = true;
 let rowsAnimationVersion: number | undefined;
 let propertyLabelWidth: number | null = null;
+function syncGroupSelectionFocus() {
+  const groups = new Set<string>(), visible = new Set<string>();
+  for (const layer of PM.selLayers?.() || []) {
+    const ancestors = PM.groupAncestors?.(layer) || [];
+    if (!ancestors.length) continue;
+    visible.add(layer.id);
+    for (const group of ancestors) {
+      groups.add(group.id);
+      visible.add(group.id);
+      PM.UIState.setLayerCollapsed(group, false);
+    }
+  }
+  T.groupSelectionFocus = groups.size ? { groups, visible } : null;
+  rowsDirty = true;
+}
 function buildRows() {
   const animationVersion = PM.animVersion?.();
   if (!rowsDirty && rowsAnimationVersion === animationVersion && Array.isArray(T.rows)) return T.rows;
   const rows = [];
-  const layers = PM.proj.layers;
+  const source = PM.proj.layers;
+  const layers: any[] = [];
+  const seen = new Set<string>();
+  const visit = (parent: string | null) => {
+    for (const layer of source) {
+      if ((layer.group || null) !== parent || seen.has(layer.id)) continue;
+      seen.add(layer.id); layers.push(layer);
+      if (layer.type === 'group') visit(layer.id);
+    }
+  };
+  visit(null);
+  for (const layer of source) if (!seen.has(layer.id)) layers.push(layer);
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
+    const ancestors = PM.groupAncestors?.(L) || [];
+    const focusedGroup = !T.search && ancestors.some((group: any) => T.groupSelectionFocus?.groups?.has(group.id));
+    if (focusedGroup && !T.groupSelectionFocus.visible.has(L.id)) continue;
+    if (!T.search && ancestors.some((group: any) => PM.UIState.getLayerCollapsed(group))) continue;
     if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
-    const matching = query ? timelineProperties(PM,L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
+    const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
     if (query && !L.name.toLowerCase().includes(query) && !matching.length) continue;
-    rows.push({ kind: 'layer', L, i });
+    rows.push({ kind: 'layer', L, i: source.indexOf(L), depth: ancestors.length });
     if (!PM.UIState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
       props.forEach((p: any) => rows.push({ kind: 'prop', L, ...p }));
@@ -555,14 +595,8 @@ function buildRows() {
   propertyLabelWidth = null;
   return rows;
 }
-function alwaysShow(L: any, key: any) { return (PM.UIState.getReveal(L) || []).includes(key); }
-const commonTimelineControls = new Set([
-  'anchor.x', 'anchor.y', 'position.x', 'position.y', 'scale', 'rotation', 'opacity',
-]);
 function visibleProps(L: any) {
-  return timelineProperties(PM, L).filter(p => commonTimelineControls.has(p.key) || p.prop.kf.length || p.prop.expr
-    || trackSelected(p, PM.sel.chan) || alwaysShow(L, p.key)
-    || trackChannels(p).some(axis => alwaysShow(L, axis.key)));
+  return revealedProperties(PM, L, timelineProperties(PM, L));
 }
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
@@ -572,8 +606,15 @@ const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
 /* ── draw ──────────────────────────────────────────────── */
 onBus('draw:timeline', draw);
 onBus('layers', () => { rowsDirty = true; PM.invalidate('timeline'); });
-onBus('sel', () => { rowsDirty = true; PM.invalidate('timeline'); });
+onBus('sel', () => {
+  syncGroupSelectionFocus();
+  buildRows();
+  const selectedRow = T.rows.findIndex((row: any) => row.kind === 'layer' && PM.sel.layers.includes(row.L.id));
+  if (selectedRow >= 0) keepRowsVisible(selectedRow, 0);
+  PM.invalidate('timeline');
+});
 onBus('history', () => { rowsDirty = true; PM.invalidate('timeline'); });
+syncGroupSelectionFocus();
 
 function css(v: any) { return window.getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 let theme: any = null;
@@ -680,6 +721,23 @@ function drawInner(preview?: TimelinePreviewTarget) {
   if (T.graph) drawGraph(c, W, H);
   else { drawClips(c, W, H); drawDropGhost(c, W, H); }
   drawGutter(c, W, H);
+  if (T.reorder) {
+    const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
+    c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
+    c.strokeStyle = theme.accent; c.fillStyle = theme.accent; c.lineWidth = 2;
+    if (d.mode === 'inside') {
+      c.fillStyle = rgba(theme.accent, .16); c.fillRect(left - 12, y, W - left + 12, T.row);
+      c.strokeRect(left - 12, y + 1, W - left + 11, T.row - 2);
+    } else {
+      c.beginPath(); c.moveTo(left, y); c.lineTo(W, y); c.stroke();
+      c.beginPath(); c.arc(left, y, 3, 0, Math.PI * 2); c.fill();
+    }
+    const label = `${d.mode === 'inside' ? 'Move into' : d.mode === 'before' ? 'Move before' : 'Move after'} ${d.name}`;
+    c.font = '11px system-ui';
+    const width = c.measureText(label).width + 16, top = Math.max(T.ruler + 2, Math.min(H - 24, y - 24));
+    c.fillStyle = theme.accent; c.fillRect(T.gut + 10, top, width, 20);
+    c.fillStyle = '#fff'; c.fillText(label, T.gut + 18, top + 14); c.restore();
+  }
   drawRuler(c, W, H);
   drawPlayhead(c, W, H);
   drawScrollThumb(c, W, H, maxScroll);
@@ -711,7 +769,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     gut: T.gut, row: T.row, ruler: T.ruler, pps: T.pps,
     scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph,
     style: T.style, rows: T.rows, propertyValueX: T.propertyValueX,
-    hover: T.hover, marquee: T.marquee, dropRow: T.dropRow, drop: T.drop,
+    hover: T.hover, marquee: T.marquee, dropRow: T.dropRow, drop: T.drop, reorder: T.reorder,
   };
   try {
     T.gut = 224;
@@ -722,6 +780,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     T.marquee = null;
     T.dropRow = null;
     T.drop = null;
+    T.reorder = null;
     T.style = {
       clipRadius: 5, keyframeSize: 8, showLayerNumbers: true,
       showTypeBadges: true, toolbarDensity: 'compact'
@@ -861,7 +920,7 @@ function drawClips(c: any, W: any, H: any) {
     const y = rowY(i);
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
-    if (r.kind === 'layer') drawClip(c, r.L, y);
+    if (r.kind === 'layer') drawClip(c, r.L.type === 'group' ? { ...r.L, ...PM.groupSpan(r.L) } : r.L, y);
     else drawPropKeys(c, r, y);
   }
   c.restore();
@@ -1122,6 +1181,7 @@ function drawGutter(c: any, W: any, H: any) {
       /* Quiet card: controls surface on hover/selection or when they carry
          state (hidden or locked). Idle rows show number, tag, name. */
       const active = sel || T.hoverRow === i;
+      const indent = Math.min(48, (r.depth || 0) * 12);
       const collapsed = PM.UIState.getLayerCollapsed(L);
       c.font = '400 10px ' + fmono();
       c.fillStyle = INK.lo; c.textBaseline = 'middle';
@@ -1130,9 +1190,9 @@ function drawGutter(c: any, W: any, H: any) {
       if (active || !evaluatedValue(PM, L, L.on, PM.time, 'l.on')) icoEye(c, 30, y + T.row / 2, evaluatedValue(PM, L, L.on, PM.time, 'l.on'));
       if (active || L.lock) icoLock(c, 48, y + T.row / 2, L.lock);
       /* twirl */
-      if (active || !collapsed) {
+      if (active || !collapsed || L.type === 'group') {
         c.save();
-        c.translate(64, y + T.row / 2); c.rotate(collapsed ? 0 : Math.PI / 2);
+        c.translate(64 + indent, y + T.row / 2); c.rotate(collapsed ? 0 : Math.PI / 2);
         c.strokeStyle = active ? theme.tx2 : theme.tx3; c.lineWidth = 1.4; c.beginPath();
         c.moveTo(-1.6, -3.4); c.lineTo(2, 0); c.lineTo(-1.6, 3.4); c.stroke();
         c.restore();
@@ -1141,19 +1201,33 @@ function drawGutter(c: any, W: any, H: any) {
          bright tint, so the card and the clip share one material */
       const pal = clipPalette(L);
       const iy = y + T.row / 2;
-      c.fillStyle = pal.body; roundRect(c, 74, iy - 8, 16, 16, 3); c.fill();
+      c.fillStyle = pal.body; roundRect(c, 74 + indent, iy - 8, 16, 16, 3); c.fill();
       c.strokeStyle = pal.ring; c.lineWidth = 1; c.stroke();
       c.font = '600 8px ' + fui(); c.fillStyle = pal.primary; c.textAlign = 'center';
-      c.fillText((BADGE[L.type] || '·').toUpperCase().slice(0, 1), 82, iy + .5);
+      c.fillText((L.type === 'group' ? 'G' : BADGE[L.type] || '·').toUpperCase().slice(0, 1), 82 + indent, iy + .5);
       c.textAlign = 'left';
       c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      clipText(c, L.name, 96, iy, T.gut - 130);
-      if (L.solo) { c.fillStyle = theme.accent; c.fillText('●', T.gut - 38, iy); }
-      if (L.parent) { c.fillStyle = theme.tx3; c.font = '400 9.5px ' + fui(); c.fillText('↳', T.gut - 24, iy); }
+      const hasParentControl = L.type !== 'group' && PM.TYPE_META[L.type]?.transform !== false;
+      const showParentControl = hasParentControl && (active || !!L.parent);
+      const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur') ? 12 : 0);
+      const nameRight = T.gut - (hasParentControl ? 50 : 12) - statusWidth;
+      clipText(c, L.name, 96 + indent, iy, Math.max(0, nameRight - 96 - indent));
+      if (showParentControl) {
+        c.strokeStyle = L.parent ? theme.accent : theme.tx3; c.lineWidth = 1.2;
+        c.beginPath();
+        for (let step = 0; step <= 32; step++) {
+          const angle = step / 32 * Math.PI * 3, radius = 1 + step / 32 * 4;
+          const x = T.gut - 30 + Math.cos(angle) * radius, py = iy + Math.sin(angle) * radius;
+          if (!step) c.moveTo(x, py); else c.lineTo(x, py);
+        }
+        c.stroke();
+        c.beginPath(); c.moveTo(T.gut - 15, iy - 1.5); c.lineTo(T.gut - 12, iy + 1.5); c.lineTo(T.gut - 9, iy - 1.5); c.stroke();
+      }
+      let statusX = nameRight + 8;
+      if (L.solo) { c.fillStyle = theme.accent; c.fillText('●', statusX, iy); statusX += 12; }
       if (evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur')) {
-        /* motion-blur marker: quiet dot, not a shouting badge */
-        c.fillStyle = theme.accent; c.beginPath(); c.arc(T.gut - 12, iy, 2, 0, 7); c.fill();
+        c.fillStyle = theme.accent; c.beginPath(); c.arc(statusX, iy, 2, 0, 7); c.fill();
       }
     } else {
       const L = r.L;
@@ -1187,8 +1261,13 @@ function drawGutter(c: any, W: any, H: any) {
   c.restore();
 }
 function clipText(c: any, s: any, x: any, y: any, max: any) {
-  let t = s;
-  if (c.measureText(t).width > max) { while (t.length > 3 && c.measureText(t + '…').width > max) t = t.slice(0, -1); t += '…'; }
+  if (max <= 0) return;
+  let t = String(s);
+  if (c.measureText(t).width > max) {
+    if (c.measureText('…').width > max) return;
+    while (t.length && c.measureText(t + '…').width > max) t = t.slice(0, -1);
+    t += '…';
+  }
   c.fillText(t, x, y);
 }
 function icoAnimationDiamond(c: any, x: number, y: number, animated: boolean, current: boolean) {
@@ -1560,6 +1639,7 @@ function onMove(e: any) {
     return;
   }
   let cur = 'default';
+  let title = '';
   if (x > T.gut) {
     const workHit = workAreaHit(x, y);
     if (workHit) cur = workHit.kind === 'handle' ? 'ew-resize' : 'grab';
@@ -1577,13 +1657,18 @@ function onMove(e: any) {
   }
   if (x < T.gut && y >= T.ruler) {
     const row = hitRow(y)?.row;
-    if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
+    if (row?.kind === 'layer' && row.L.type !== 'group' && PM.TYPE_META[row.L.type]?.transform !== false && x >= T.gut - 40) {
+      cur = x < T.gut - 20 ? 'crosshair' : 'pointer';
+      const parent = row.L.parent ? PM.L(row.L.parent)?.name || 'Missing layer' : 'None';
+      title = x < T.gut - 20 ? `Parent: ${parent} · Drag to a layer` : `Parent: ${parent} · Choose parent`;
+    } else if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
       cur = adjacentKeyframe(PM, x < 40 ? -1 : 1, row) != null ? 'pointer' : 'default';
     } else if (row?.kind === 'prop' && !row.L.lock) {
       if (x >= 76 && x < 96) cur = 'pointer';
       else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof PM.evP(row.L, axis.prop, PM.time, axis.key) === 'number') ? 'ew-resize' : 'pointer';
     }
   }
+  T.cv.title = title;
   T.cv.style.cursor = cur;
 }
 
@@ -1606,6 +1691,7 @@ function releaseExternalFieldFocus() {
 }
 
 function onDown(e: any) {
+  if (e.button === 2) return;
   if (e.button === 1) { releaseExternalFieldFocus(); return panViewport(e); }
   if (e.button === 0) releaseExternalFieldFocus();
   const x = e.offsetX, y = e.offsetY;
@@ -1623,10 +1709,11 @@ function onDown(e: any) {
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
   const L = r.L;
-  const x0 = t2x(L.from), x1 = t2x(L.from + L.dur);
+  const span = L.type === 'group' ? PM.groupSpan(L) : L;
+  const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
   const onClip = x >= x0 - 5 && x <= x1 + 5;
   if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey });
-  if (!selectLayerForPointer(L, e.shiftKey || e.metaKey) || L.lock) return;
+  if (!selectLayerForPointer(L, e) || L.lock) return;
   if (Math.abs(x - x0) < 5) return trim(e, 'in');
   if (Math.abs(x - x1) < 5) return trim(e, 'out');
   if (x > x0 && x < x1) return slide(e);
@@ -1644,11 +1731,25 @@ function panViewport(e: PointerEvent) {
   });
 }
 
-function selectLayerForPointer(L: any, additive: any) {
+let layerSelectionAnchor: string | null = null;
+function selectLayerForPointer(L: any, event: PointerEvent) {
   T.keySelectionActive = false;
   PM.sel.keys = [];
   const selected = PM.sel.layers.includes(L.id);
-  if (!additive) {
+  const toggle = event.metaKey || event.ctrlKey;
+  if (event.shiftKey) {
+    const ids = buildRows().filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
+    // Keep the original anchor while the user extends or shrinks the range.
+    if (!layerSelectionAnchor || !ids.includes(layerSelectionAnchor) || !PM.sel.layers.includes(layerSelectionAnchor)) {
+      layerSelectionAnchor = PM.sel.layers.find((id: string) => ids.includes(id)) ?? L.id;
+    }
+    const from = ids.indexOf(layerSelectionAnchor), to = ids.indexOf(L.id);
+    const range = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
+    PM.selectLayers(toggle ? [...new Set([...PM.sel.layers, ...range])] : range);
+    return true;
+  }
+  layerSelectionAnchor = L.id;
+  if (!toggle) {
     if (!selected) PM.selectLayers(L.id);
     return true;
   }
@@ -1730,15 +1831,14 @@ function scrub(e: any) {
 
 function togglePropertyAnimation(row: any) {
   const axes = trackChannels(row);
-  const animated = axes.some(axis => axis.prop.kf.length);
-  const commands = axes.flatMap(axis => {
-    const value = PM.evP(row.L, axis.prop, PM.time, axis.key);
-    return animated ? [
-      { type: 'replace_keyframes', target: row.L.id, path: axis.key, keyframes: [], preserveHandEdits: false },
-      { type: 'set_property', target: row.L.id, path: axis.key, value, mode: 'static', preserveHandEdits: false }
-    ] : [{ type: 'set_property', target: row.L.id, path: axis.key, value, time: PM.time, mode: 'keyframe', preserveHandEdits: false }];
+  const remove = axes.every(axis => PM.hasKeyAt(row.L, axis.prop, PM.time));
+  PM.hist.do(remove ? 'Remove keyframe' : 'Add keyframe', () => {
+    for (const axis of axes) {
+      const at = PM.hasKeyAt(row.L, axis.prop, PM.time);
+      if (remove) PM.removeKey(axis.prop, at);
+      else if (!at) PM.setKeyOn(axis.prop, PM.time - row.L.from, PM.evP(row.L, axis.prop, PM.time, axis.key), 'linear', PM.proj.fps);
+    }
   });
-  PM.Edit.apply(commands, { label: `${animated ? 'Remove animation from' : 'Animate'} ${row.label}`, origin: 'timeline' });
   T.reveal(row.L, axes.map(axis => axis.key));
   rowsDirty = true; PM.invalidate();
 }
@@ -1835,10 +1935,17 @@ function gutterDown(e: any, x: any, y: any) {
   T.keySelectionActive = false;
   PM.sel.keys = [];
   const L = r.L;
+  if (L.type !== 'group' && PM.TYPE_META[L.type]?.transform !== false && x >= T.gut - 40) {
+    const ids = PM.sel.layers.includes(L.id) ? PM.sel.layers : [L.id];
+    if (x < T.gut - 20) PM.beginParentPick?.(e, ids);
+    else PM.showParentMenu?.(ids, e);
+    return;
+  }
   if (x < 22) { }
   else if (x < 40) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(PM, L, L.on, PM.time, 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
   else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
-  else if (x < 74) {
+  else if (x >= 58 + Math.min(48, (r.depth || 0) * 12) && x < 74 + Math.min(48, (r.depth || 0) * 12)) {
+    T.groupSelectionFocus = null;
     const collapsed = !PM.UIState.getLayerCollapsed(L);
     L.collapsed = collapsed;
     PM.UIState.setLayerCollapsed(L, collapsed);
@@ -1850,26 +1957,53 @@ function gutterDown(e: any, x: any, y: any) {
     PM.invalidate('timeline');
     return;
   }
-  if (!selectLayerForPointer(L, e.shiftKey || e.metaKey)) return;
-  /* drag to reorder */
-  const startIdx = PM.proj.layers.indexOf(L);
-  let done = false;
+  if (!selectLayerForPointer(L, e)) return;
+  const selected = PM.sel.layers.slice();
+  const moving = PM.expandGroups?.(selected) || selected;
+  if (moving.some((id: string) => PM.L(id)?.lock || PM.groupAncestors(PM.L(id)).some((g: any) => g.lock))) return;
+  let active = false;
+  const clear = () => { T.reorder = null; PM.invalidate('timeline'); };
   beginDrag(e, {
-    move: (dx: any, dy: any) => {
-      const delta = Math.round(dy / T.row);
-      const to = clamp(startIdx + delta, 0, PM.proj.layers.length - 1);
-      if (to !== PM.proj.layers.indexOf(L)) {
-        if (!done) { PM.Edit.begin('Reorder layer', { origin: 'timeline' }); done = true; }
-        PM.Edit.dispatch({ type: 'reorder_layer', target: L.id, index: to });
-      }
+    cursor: 'grabbing',
+    move: (dx: number, dy: number, ev: PointerEvent) => {
+      if (!active && Math.hypot(dx, dy) < 5) return;
+      active = true;
+      const rect = T.cv.getBoundingClientRect(), py = ev.clientY - rect.top;
+      const drop = layerDrop(T.rows, (py - T.ruler + T.scrollY) / T.row, ev.clientX - rect.left);
+      const target = drop && PM.L(drop.target);
+      T.reorder = drop && !moving.includes(drop.target) && !target.lock && !PM.groupAncestors(target).some((g: any) => g.lock) ? drop : null;
+      PM.invalidate('timeline');
     },
-    up: () => { if (done) PM.Edit.commit('Reorder layer'); },
-    cancel: () => { if (done) PM.Edit.cancel(); },
+    up: () => {
+      const drop = T.reorder; clear();
+      if (!drop) return;
+      const roots = PM.proj.layers.filter((layer: any) => selected.includes(layer.id) && !PM.groupAncestors(layer).some((g: any) => selected.includes(g.id)));
+      PM.Edit.mutate('Move layers', () => {
+        const changing = roots.filter((layer: any) => (layer.group || null) !== drop.group);
+        if (changing.length) PM.moveToGroup(changing.map((layer: any) => layer.id), drop.group);
+        const block = PM.proj.layers.filter((layer: any) => moving.includes(layer.id));
+        const remaining = PM.proj.layers.filter((layer: any) => !moving.includes(layer.id));
+        let index = remaining.findIndex((layer: any) => layer.id === drop.target);
+        if (drop.mode !== 'before') {
+          index++;
+          if (drop.mode === 'after') while (index < remaining.length && PM.groupAncestors(remaining[index]).some((g: any) => g.id === drop.target)) index++;
+        }
+        remaining.splice(index, 0, ...block); PM.proj.layers = remaining;
+        PM.normalizeGroupStack(); PM.touch(); PM.ProjectIndex?.invalidate(); PM.bus.emit('layers');
+      }, { origin: 'timeline' });
+      PM.invalidate();
+    },
+    cancel: clear,
   });
 }
 
 function slide(e: any) {
-  const layers = PM.selLayers().filter((l: any) => !l.lock);
+  const selectedIds = PM.expandGroups?.(PM.sel.layers) || PM.sel.layers;
+  if (PM.selLayers().some((layer: any) => layer.type === 'group') && PM.proj.layers.some((layer: any) => selectedIds.includes(layer.id) && layer.lock)) return;
+  const layers = PM.proj.layers.filter((l: any) => (PM.expandGroups?.(PM.sel.layers) || PM.sel.layers).includes(l.id) && l.type !== 'group' && !l.lock && !(PM.groupAncestors?.(l) || []).some((g: any) => g.lock));
+  const groupIds = PM.expandGroups?.(PM.sel.layers) || PM.sel.layers;
+  const groups = PM.proj.layers.filter((L: any) => groupIds.includes(L.id) && L.type === 'group' && !L.lock && !(PM.groupAncestors?.(L) || []).some((g: any) => g.lock));
+  const groupStart = groups.map((L: any) => ({L, from:L.from}));
   const start = layers.map((L: any) => ({ L, from: L.from }));
   PM.Edit.begin('Move clip', { origin: 'timeline' });
   let moved = false;
@@ -1879,33 +2013,37 @@ function slide(e: any) {
       moved = true;
       let dt = dx / T.pps;
       if (shiftSnapping(ev)) dt = snapDelta(start, dt);
+      dt = Math.max(dt, -Math.min(...start.map((item: any) => item.from)));
+      groupStart.forEach((s: any) => PM.Edit.dispatch({type:'set_layer',target:s.L.id,patch:{from:PM.snapF(s.from+dt,PM.proj.fps)}}));
       start.forEach((s: any) => PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: Math.max(0, PM.snapF(s.from + dt, PM.proj.fps)) } }));
     },
     up: () => { moved ? PM.Edit.commit('Move clip') : PM.Edit.cancel(); },
     cancel: () => PM.Edit.cancel(),
   });
 }
-function snapDelta(start: any, dt: any) {
+function snapDelta(start: any, dt: any, side?: 'in' | 'out') {
   const pts = [PM.time, 0, PM.proj.dur, ...(PM.proj.work || []), ...PM.proj.markers.map((m: any) => m.t)];
   PM.proj.layers.forEach((L: any) => { if (!start.some((s: any) => s.L === L)) { pts.push(L.from, L.from + L.dur); } });
   const tol = 8 / T.pps;
   let best = dt, bd = tol;
-  for (const s of start) for (const edge of [s.from + dt, s.from + s.L.dur + dt]) {
+  for (const s of start) for (const edge of (side === 'in' ? [s.from + dt] : side === 'out' ? [s.from + s.dur + dt] : [s.from + dt, s.from + s.L.dur + dt])) {
     for (const p of pts) { const d = Math.abs(edge - p); if (d < bd) { bd = d; best = dt + (p - edge); } }
   }
   return best;
 }
 
 function trim(e: any, side: any) {
-  const layers = PM.selLayers().filter((l: any) => !l.lock);
+  const layers = PM.proj.layers.filter((l: any) => (PM.expandGroups?.(PM.sel.layers) || PM.sel.layers).includes(l.id) && l.type !== 'group' && !l.lock && !(PM.groupAncestors?.(l) || []).some((g: any) => g.lock));
   const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
   PM.Edit.begin('Trim clip', { origin: 'timeline' });
   let moved = false;
   beginDrag(e, {
     cursor: 'ew-resize',
-    move: (dx: any) => {
+    move: (dx: any, _dy: any, ev: any) => {
       moved = true;
-      const dt = PM.snapF(dx / T.pps, PM.proj.fps);
+      let dt = dx / T.pps;
+      if (shiftSnapping(ev)) dt = snapDelta(start, dt, side);
+      dt = PM.snapF(dt, PM.proj.fps);
       start.forEach((s: any) => {
         if (side === 'in') {
           let nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / PM.proj.fps);
@@ -1921,12 +2059,6 @@ function trim(e: any, side: any) {
     up: () => { moved ? PM.Edit.commit('Trim clip') : PM.Edit.cancel(); },
     cancel: () => PM.Edit.cancel(),
   });
-}
-
-function trimInCommands(L: any, from: any) {
-  const commands: any[] = [{ type: 'set_layer', target: L.id, patch: { from, duration: L.dur - (from - L.from) } }];
-  if (PM.MediaTiming.isTimed(L)) commands.push({ type: 'set_content', target: L.id, patch: { trim: PM.MediaTiming.trimAtStart(L, from) } });
-  return commands;
 }
 
 function captureKeyframeGesture(entries: any[]) {
@@ -2289,6 +2421,7 @@ function marquee(e: any, opt: any = {}) {
   const originalKeys = [...PM.sel.keys], originalLayers = [...PM.sel.layers];
   const graphPoints = opt.graph ? [...(T._graph?.points ?? [])] : null;
   if (graphPoints) T.graphMarqueeIds = originalKeys;
+  let graphPickedIds: string[] = [];
   let dragged = false;
   beginDrag(e, {
     move: (dx: any, dy: any) => {
@@ -2299,7 +2432,11 @@ function marquee(e: any, opt: any = {}) {
         ? graphPoints.filter((point: any) => point.x >= T.marquee.x0 && point.x <= T.marquee.x1 && point.y >= T.marquee.y0 && point.y <= T.marquee.y1).map((point: any) => point.key)
         : keysInMarquee(T.marquee);
       const pickedIds = uniqueKeyIds(picked);
-      const nextKeys = selectionAfterMarquee(baseKeys, pickedIds, additive);
+      graphPickedIds = pickedIds;
+      // Keep the graph selection visible until the box is complete.
+      const nextKeys = graphPoints && !additive
+        ? [...new Set([...originalKeys, ...pickedIds])]
+        : selectionAfterMarquee(baseKeys, pickedIds, additive);
       setSelectedKeys(nextKeys, [...baseLayers, ...layersForKeys(nextKeys)]);
       PM.invalidate('timeline');
     },
@@ -2307,6 +2444,9 @@ function marquee(e: any, opt: any = {}) {
       if (!dragged) {
         // Empty track space selects; only the ruler scrubs the playhead.
         if (!additive) clearTimelineSelection();
+      } else if (graphPoints && !additive) {
+        const nextKeys = graphPickedIds.length ? graphPickedIds : originalKeys;
+        setSelectedKeys(nextKeys, layersForKeys(nextKeys));
       } else if (T.marquee && !PM.sel.keys.length) {
         const m = T.marquee;
         const picked: any[] = [];
@@ -2401,6 +2541,12 @@ function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
   });
 }
 
+T.layerAtPoint = (clientX: number, clientY: number) => {
+  const rect = T.cv?.getBoundingClientRect();
+  if (!rect || clientX < rect.left || clientX > rect.right || clientY < rect.top + T.ruler || clientY > rect.bottom) return null;
+  return hitRow(clientY - rect.top)?.row?.L || null;
+};
+
 function onCtx(e: any) {
   e.preventDefault();
   const x = e.offsetX, y = e.offsetY;
@@ -2427,34 +2573,8 @@ function onCtx(e: any) {
       items.push({ label: 'Clear all keyframes', disabled: !r.prop.kf.length, run: () => PM.hist.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = PM.evP(r.L, axis.prop, PM.time, axis.key); axis.prop.kf = []; }); PM.touch(); }) });
     }
   } else if (!T.graph && hr && hr.row.kind === 'layer') {
-    const L = hr.row.L;
-    if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
-    const inside = PM.time > L.from && PM.time < L.from + L.dur;
-    items.push({ header: L.name },
-      { label: L.solo ? 'Unsolo layer' : 'Solo layer', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { solo: !L.solo } }, { label: 'Solo layer', origin: 'timeline' }) },
-      { label: L.shy ? 'Unshy layer' : 'Shy layer', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { shy: !L.shy } }, { label: 'Shy layer', origin: 'timeline' }) },
-      { label: 'Duplicate', kb: '⌘D', run: () => PM.cmd('duplicate') },
-      { label: 'Precompose', kb: '⌘⇧C', run: () => PM.cmd('precompose') },
-      { label: 'Split at playhead', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
-      { label: 'Trim in to playhead', disabled: !inside, run: () => PM.Edit.apply(trimInCommands(L, PM.time), { label: 'Trim', origin: 'timeline' }) },
-      { label: 'Trim out to playhead', disabled: !inside, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { duration: Math.max(1 / PM.proj.fps, PM.time - L.from) } }, { label: 'Trim', origin: 'timeline' }) },
-      '-',
-      { label: 'Fit to composition', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { from: 0, duration: PM.proj.dur } }, { label: 'Fit', origin: 'timeline' }) });
-    if (L.type === 'video' && L.d?.embeddedAudio === true) {
-      items.push({ label: 'Separate audio', run: () => PM.cmd('separateAudio', L.id) });
-    }
-    if (L.type !== 'audio') {
-      items.push(
-        { label: evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur') ? 'Motion blur off' : 'Motion blur on', run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { motionBlur: !evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur') } }, { label: 'Motion blur', origin: 'timeline' }) },
-        '-',
-        { header: 'Parent to' },
-        { label: 'None', on: !L.parent, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: null } }, { label: 'Parent', origin: 'timeline' }) },
-        ...PM.proj.layers.filter((o: any) => o.id !== L.id && !PM.wouldCycle(L, o.id)).map((o: any) => ({
-          label: o.name, on: L.parent === o.id, run: () => PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { parent: o.id } }, { label: 'Parent', origin: 'timeline' }),
-        })),
-      );
-    }
-    items.push('-', { label: 'Delete', run: () => PM.cmd('delete') });
+    PM.showLayerMenu(hr.row.L, e, 'timeline');
+    return;
   } else if (!T.graph || y < T.ruler) {
     items.push({ label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
       { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },
@@ -2491,6 +2611,7 @@ T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max
 T.reveal = (L: any, keys: any) => {
   PM.UIState.setLayerCollapsed(L, false);
   PM.UIState.setReveal(L, keys);
+  rowsDirty = true;
   buildRows();
   const idx = T.rows.findIndex((r: any) => r.kind === 'layer' && r.L === L);
   if (idx >= 0) {

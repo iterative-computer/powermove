@@ -46,7 +46,7 @@ function baseProject(PM) {
   return p;
 }
 
-it('precompose retains editable parenting across the comp boundary', () => {
+it('grouping retains the existing editable parent chain', () => {
   const PM = projectModel();
   const p = baseProject(PM);
   const inner = PM.mkLayer('shape', { name: 'Inner' }, p);
@@ -54,8 +54,9 @@ it('precompose retains editable parenting across the comp boundary', () => {
   inner.parent = outer.id;          // parent outside the future group
   p.layers.push(outer, inner);
   const L = PM.precompose([inner.id], 'Group');
-  const sub = p.comps[L.d.comp];
-  assert.ok(sub.layers.find(l => l.id === sub.layers[0].parent && l.type === 'null'), 'inbound parent preserved as a rig');
+  assert.equal(inner.group, L.id);
+  assert.equal(inner.parent, outer.id);
+  assert.equal(p.layers.length, 3);
   assert.equal(outer.parent, null);
 });
 

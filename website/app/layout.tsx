@@ -23,7 +23,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" data-theme="dark" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" data-theme="light" className={`${geistSans.variable} ${geistMono.variable}`}>
       <head><link rel="stylesheet" href="/editor-tokens.css" /></head>
       <body
         className={`${geistSans.className} antialiased`}

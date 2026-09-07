@@ -1,3 +1,5 @@
+import { registerAgentNotifications } from './agent-notifications';
+import { installUpdates } from './updates';
 import { installTextContextMenu } from './text-context-menu';
 import { registerRenderEncoder } from './render-encoder';
 import {
@@ -410,6 +412,7 @@ if (!hasSingleInstanceLock) {
     registerShellIpc(ipcMain, ctx);
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
+    registerAgentNotifications(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
     registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
@@ -460,7 +463,8 @@ if (!hasSingleInstanceLock) {
       refreshExtensions: refreshRestoredExtensions,
       openExternal: async (url) => { await shell.openExternal(url); }
     });
-    installMenu(() => mainWindow);
+    const menu = installMenu(() => mainWindow);
+    if (!isBackgroundTest) installUpdates(menu);
 
     if (isBackgroundTest) app.dock?.hide();
     createWindow();

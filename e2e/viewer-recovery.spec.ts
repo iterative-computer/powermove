@@ -165,16 +165,11 @@ test.describe('@viewer composition recovery', () => {
     const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
 
     await page.mouse.dblclick(frame.x + setup.point.x * shown, frame.y + setup.point.y * shown);
-    expect(await page.evaluate(() => ({
-      selected: [...(window as any).PM.sel.layers],
-      inspectorTextareas: [...document.querySelectorAll('textarea[data-inspector-text-layer]')].map((node: any) => node.dataset.inspectorTextLayer),
-    }))).toMatchObject({ selected: [setup.textId], inspectorTextareas: [setup.textId] });
-    await expect(page.locator(`textarea[data-inspector-text-layer="${setup.textId}"]`)).toBeFocused();
-    expect(await page.locator(`textarea[data-inspector-text-layer="${setup.textId}"]`).evaluate((textarea: HTMLTextAreaElement) => ({
-      value: textarea.value,
-      start: textarea.selectionStart,
-      end: textarea.selectionEnd,
-    }))).toEqual({ value: setup.text, start: 0, end: setup.text.length });
+    const editor = page.getByRole('textbox', { name: 'Edit text on canvas' });
+    await expect(editor).toBeFocused();
+    await expect(editor).toHaveText(setup.text);
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(setup.text);
+    expect(await page.evaluate(() => [...(window as any).PM.sel.layers])).toEqual([setup.textId]);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });

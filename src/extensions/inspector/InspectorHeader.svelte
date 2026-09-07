@@ -37,7 +37,7 @@
       showNewLayerMenu(PM, event.currentTarget);
     }}
   ><Icon name="layers" /></button>
-  {#if layer?.type !== 'audio'}
+  {#if layer && PM.TYPE_META?.[layer.type]?.effects !== false}
     <button
       type="button"
       class="iconbtn"

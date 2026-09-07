@@ -79,11 +79,11 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+y makes a solid', { key: 'y', metaKey: true }, 'newSolid'],
   ['cmd+shift+y makes a shape', { key: 'y', metaKey: true, shiftKey: true }, 'newShape'],
   ['cmd+t picks the type tool', { key: 't', metaKey: true }, 'toolText'],
-  ['cmd+shift+g makes a shader layer', { key: 'g', metaKey: true, shiftKey: true }, 'newShader'],
+  ['cmd+shift+g ungroups', { key: 'g', metaKey: true, shiftKey: true }, 'ungroupLayers'],
   ['cmd+d duplicates', { key: 'd', metaKey: true }, 'duplicate'],
   ['cmd+shift+d splits', { key: 'd', metaKey: true, shiftKey: true }, 'split'],
   ['cmd+c copies layers', { key: 'c', metaKey: true }, 'copyLayers'],
-  ['cmd+shift+c precomposes', { key: 'c', metaKey: true, shiftKey: true }, 'precompose'],
+  ['cmd+shift+c groups', { key: 'c', metaKey: true, shiftKey: true }, 'groupLayers'],
   ['cmd+v routes paste by editing context', { key: 'v', metaKey: true }, 'contextPaste'],
   ['cmd+a selects all', { key: 'a', metaKey: true }, 'selectAll'],
   ['cmd+shift+a deselects all', { key: 'a', metaKey: true, shiftKey: true }, 'deselect'],
@@ -108,9 +108,9 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+shift+Left steps ten frames', { key: 'ArrowLeft', metaKey: true, shiftKey: true }, 'stepFrames'],
   ['cmd+Right steps one frame', { key: 'ArrowRight', metaKey: true }, 'nextFrame'],
   ['cmd+shift+Right steps ten frames', { key: 'ArrowRight', metaKey: true, shiftKey: true }, 'stepFrames'],
-  ['ctrl+Left steps one frame', { key: 'ArrowLeft', ctrlKey: true }, 'prevFrame'],
+  ['ctrl+Left jumps to the previous keyframe', { key: 'ArrowLeft', ctrlKey: true }, 'prevKeyframe'],
   ['ctrl+shift+Left steps ten frames', { key: 'ArrowLeft', ctrlKey: true, shiftKey: true }, 'stepFrames'],
-  ['ctrl+Right steps one frame', { key: 'ArrowRight', ctrlKey: true }, 'nextFrame'],
+  ['ctrl+Right jumps to the next keyframe', { key: 'ArrowRight', ctrlKey: true }, 'nextKeyframe'],
   ['ctrl+shift+Right steps ten frames', { key: 'ArrowRight', ctrlKey: true, shiftKey: true }, 'stepFrames'],
   ['ArrowRight nudges right', { key: 'ArrowRight' }, 'nudgeSelection'],
   ['shift+ArrowRight nudges right ten pixels', { key: 'ArrowRight', shiftKey: true }, 'nudgeSelection'],
@@ -133,7 +133,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['u reveals animated properties', { key: 'u' }, 'revealKeys'],
   ['b sets the work area in', { key: 'b' }, 'workIn'],
   ['n sets the work area out', { key: 'n' }, 'workOut'],
-  ['shift+f fits the composition', { key: 'f', shiftKey: true }, 'fitView'],
+  ['shift+f reveals feather', { key: 'f', shiftKey: true }, 'revealFeather'],
   ['j jumps to the previous visible event', { key: 'j' }, 'prevVisibleEvent'],
   ['k jumps to the next visible event', { key: 'k' }, 'nextVisibleEvent'],
   ['shift+j jumps to the previous keyframe', { key: 'j', shiftKey: true }, 'prevKeyframe'],
@@ -223,10 +223,10 @@ describe('AE-style keymap dispatch', () => {
     }
   }
 
-  it('leaves plain F unbound, as the old handler did', () => {
+  it('reveals mask feather with F', () => {
     const event = press({ key: 'f' });
-    expect(ran).toEqual([]);
-    expect(event.defaultPrevented).toBe(false);
+    expect(ran).toEqual(['revealFeather']);
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it('ignores every binding while a text field has focus', () => {

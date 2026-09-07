@@ -22,6 +22,21 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('groups and parents through live agent commands and exposes membership in project state', async () => {
+    const PM = harnessEditor(), a = PM.mkLayer('shape'), b = PM.mkLayer('shape'), rig = PM.mkLayer('null');
+    PM.proj.layers = [a,b,rig]; PM.ProjectIndex.invalidate();
+    const before = PM.worldMatrix(a, PM.time);
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({runId:'group-parent-run',callId:tool,tool,arguments:args,baseRevision:0});
+    const grouped = await call('apply_commands',{commands:[{type:'group_layers',targets:[a.id,b.id],name:'Agent group'}]});
+    expect(grouped.ok).toBe(true);
+    const group = PM.firstSel(); expect(group.type).toBe('group');
+    await call('apply_commands',{commands:[{type:'set_layer',target:a.id,patch:{parent:rig.id}}]});
+    expect(PM.L(a.id).parent).toBe(rig.id); expect(PM.worldMatrix(PM.L(a.id),PM.time)).toEqual(before);
+    const state = PM.AgentHarness.projectState(); expect(state.layers.find((layer:any)=>layer.id===a.id).group).toBe(group.id);
+    await call('rollback_changes');
+    expect(PM.proj.layers).toHaveLength(3); expect(PM.L(a.id).group).toBeUndefined(); expect(PM.L(a.id).parent).toBeNull();
+  });
+
   it('guards and rolls back video tool edits through the live run transaction', async () => {
     const PM = harnessEditor();
     const video = PM.mkLayer('video', { from: 0, dur: 5 });

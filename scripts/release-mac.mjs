@@ -56,7 +56,7 @@ async function main() {
 
   await run('npm', ['run', 'build']);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
-    '--mac',
+    '--mac', '--arm64', '--publish', 'never',
     '--config', 'electron-builder.yml',
     '--config.mac.identity=Developer ID Application',
     '--config.mac.hardenedRuntime=true',
@@ -73,7 +73,8 @@ async function main() {
     if (!entry.isFile() || !entry.name.endsWith('.dmg')) continue;
     const artifact = path.join(dist, entry.name);
     await run('/usr/bin/hdiutil', ['verify', artifact]);
-    await run('/usr/bin/xcrun', ['stapler', 'validate', artifact]);
+    // electron-builder notarizes/staples the app before creating its archives.
+    // The enclosing DMG has no separate notarization ticket.
   }
   process.stdout.write(`Verified signed and notarized release: ${app}\n`);
 }

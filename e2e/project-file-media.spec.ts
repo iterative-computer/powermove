@@ -1,5 +1,5 @@
 import { expect, test } from './helpers/app';
-import { importFixture } from './helpers/media';
+import { fixturePath, importFixture } from './helpers/media';
 import { readFile } from 'node:fs/promises';
 import { decodeProjectContainer } from '../src/shared/project-container';
 import path from 'node:path';
@@ -101,4 +101,75 @@ test('saved project files restore imported audio without the original session me
   expect(restored.bytes).toBeGreaterThan(0);
   expect(restored.duration).toBeGreaterThan(0);
   expect(restored.peaks).toBeGreaterThan(0);
+});
+
+test('closing a local project tab and reopening it keeps imported audio', async ({ session }) => {
+  const { page } = session;
+  await importFixture(page, 'tone.wav');
+  await page.waitForFunction(() => [...(window as any).PM.assets.map.values()]
+    .some((asset: any) => asset.name === 'tone.wav' && asset.audioBlob?.size > 0));
+  const project = await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    PM.Projects.markOpen(PM.proj.id);
+    await PM.flushProject();
+    return { id: PM.proj.id, name: PM.proj.name };
+  });
+
+  await page.locator(`[data-tab-id="${project.id}"] .project-doc-close`).click();
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).not.toBe(project.id);
+  await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
+  await page.locator('.ps-card').filter({ has: page.locator('.ps-name', { hasText: project.name }) }).click();
+
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).toBe(project.id);
+  await page.waitForFunction(() => [...(window as any).PM.assets.map.values()]
+    .some((asset: any) => asset.name === 'tone.wav' && asset.audioBlob?.size > 0));
+  const restored = await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    const layer = PM.proj.layers.find((item: any) => item.type === 'audio' && item.name === 'tone.wav');
+    const live = layer && PM.assets.get(layer.d.asset);
+    const decoded = live && await PM.Audio.decodeAsset(live);
+    return { layer: !!layer, bytes: live?.audioBlob?.size || 0, duration: decoded?.duration || 0 };
+  });
+  expect(restored.layer).toBe(true);
+  expect(restored.bytes).toBeGreaterThan(0);
+  expect(restored.duration).toBeGreaterThan(0);
+});
+
+test('local recovery keeps imported audio after closing and relaunching Powermove', async ({ session }) => {
+  await importFixture(session.page, 'tone.wav');
+  const projectId = await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    PM.Projects.markOpen(PM.proj.id);
+    await PM.flushProject();
+    return PM.proj.id;
+  });
+
+  await session.relaunch();
+  await expect.poll(() => session.page.evaluate(() => (window as any).PM.proj.id)).toBe(projectId);
+  await session.page.waitForFunction(() => [...(window as any).PM.assets.map.values()]
+    .some((asset: any) => asset.name === 'tone.wav' && asset.audioBlob?.size > 0));
+  const restored = await session.page.evaluate(async () => {
+    const PM = (window as any).PM;
+    const layer = PM.proj.layers.find((item: any) => item.type === 'audio' && item.name === 'tone.wav');
+    const live = layer && PM.assets.get(layer.d.asset);
+    const decoded = live && await PM.Audio.decodeAsset(live);
+    return { layer: !!layer, bytes: live?.audioBlob?.size || 0, duration: decoded?.duration || 0 };
+  });
+  expect(restored.layer).toBe(true);
+  expect(restored.bytes).toBeGreaterThan(0);
+  expect(restored.duration).toBeGreaterThan(0);
+});
+
+test('media library items reveal their original file in Finder', async ({ session }) => {
+  await session.app.evaluate(({ shell }) => {
+    shell.showItemInFolder = (filePath: string) => { (globalThis as any).__revealedMediaPath = filePath; };
+  });
+  await importFixture(session.page, 'tone.wav');
+
+  const card = session.page.locator('.asset-card').filter({ hasText: 'tone.wav' });
+  await card.hover();
+  await card.getByRole('button', { name: 'Reveal tone.wav in Finder' }).click();
+
+  await expect.poll(() => session.app.evaluate(() => (globalThis as any).__revealedMediaPath || ''))
+    .toBe(fixturePath('tone.wav'));
 });

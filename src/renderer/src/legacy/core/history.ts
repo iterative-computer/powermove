@@ -290,6 +290,19 @@ export function install(PM: PMRegistry): void {
         redo: () => { for (const entry of entries) entry.redo(); },
       });
     },
+    selection(before: any, after: any) {
+      if (pending || JSON.stringify(before) === JSON.stringify(after)) return null;
+      const previous = clone(before), next = clone(after), projectId = PM.proj.id;
+      const restoreSelection = (selection: any) => {
+        if (PM.proj.id !== projectId) return;
+        const ids = new Set((PM.curComp?.() || PM.proj).layers.map((layer: any) => layer.id));
+        Object.assign(PM.sel, clone(selection), { layers: selection.layers.filter((id: string) => ids.has(id)) });
+        if (PM.TL) PM.TL.keySelectionActive = !!PM.sel.keys.length;
+        PM.bus.emit('sel'); PM.invalidate();
+      };
+      return push({ label: 'Selection', bytes: encodedBytes(previous) + encodedBytes(next),
+        undo: () => restoreSelection(previous), redo: () => restoreSelection(next) });
+    },
     external(label: any, undo: any, redo: any) {
       if (typeof undo !== 'function' || typeof redo !== 'function') return null;
       return push({ label: label || 'Interface change', undo, redo, bytes: 256 });

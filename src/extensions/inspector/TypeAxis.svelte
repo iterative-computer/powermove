@@ -20,10 +20,13 @@
   ];
   const edit = $derived<EditBinding>({ mode: 'command', label: `${axis.label} axis`, origin: 'inspector', command: next => commands(next) });
   function toggle() {
-    PM.Edit.apply(animated ? [
-      { type: 'replace_keyframes', target: layer.id, path, keyframes: [], preserveHandEdits: false },
-      { type: 'set_property', target: layer.id, path, value, mode: 'static', preserveHandEdits: false }
-    ] : commands(value, 'keyframe'), { label: `${animated ? 'Remove animation from' : 'Animate'} ${axis.label}`, origin: 'inspector' });
+    if (property?.kf) {
+      PM.hist.do(current ? 'Remove keyframe' : 'Add keyframe', () => {
+        const at = PM.hasKeyAt(layer, property, transport.time);
+        if (at) PM.removeKey(property, at);
+        else PM.setKeyOn(property, transport.time - layer.from, value, 'linear', PM.proj.fps);
+      });
+    } else PM.Edit.apply(commands(value, 'keyframe'), { label: `Add keyframe for ${axis.label}`, origin: 'inspector' });
     PM.TL?.reveal?.(layer, [path]); PM.invalidate();
   }
 </script>
@@ -32,8 +35,8 @@
   <Row label={axis.label}>
     {#snippet left()}
       <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={current}
-        aria-label={`${animated ? 'Remove animation from' : 'Animate'} ${axis.label} · ${axis.tag}`}
-        aria-pressed={animated} onclick={toggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg></button>
+        aria-label={`${current ? 'Remove keyframe for' : 'Add keyframe for'} ${axis.label} · ${axis.tag}`}
+        aria-pressed={current} onclick={toggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg></button>
     {/snippet}
     <NumField {PM} get={() => value} {edit} label={`${axis.label} axis`} min={axis.min} max={axis.max} {step} speed={axis.min != null && axis.max != null ? Math.max(.01, (axis.max - axis.min) / 300) / step : 50} precision={2} />
   </Row>

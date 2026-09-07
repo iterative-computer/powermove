@@ -1,5 +1,11 @@
 import { canAnimateContent, evaluatedValue, isProperty } from 'powermove';
 
+/** A selected group owns its selected members for shared inspector edits. */
+export function inspectorSelection(PM: any, layers: any[]): any[] {
+  const ids = new Set(layers.map(layer => layer.id));
+  return layers.filter(layer => !(PM.groupAncestors?.(layer) || []).some((group: any) => ids.has(group.id)));
+}
+
 export function translatePath(primary: any, target: any, path: string): string | null {
   if (path.startsWith('c.')) return canAnimateContent(target, path.slice(2)) ? path : null;
   if (path.startsWith('l.')) return target.type === 'audio' && path !== 'l.on' ? null : path;
@@ -31,9 +37,27 @@ function currentValue(PM: any, layer: any, command: any) {
 export function inspectorPM(PM: any): any {
   let snapshot: Map<string,unknown> | null = null;
   let editing = false;
+  let keySnapshot = new Map<string, { base: number; keys: any[] }>();
+  const expandKeys = (commands: any[]) => commands.flatMap(command => {
+    if (command.type !== 'set_property' || typeof command.value !== 'number' || command.mode === 'static') return [command];
+    const layer = PM.L(command.target);
+    if (!layer || layer.lock) return [command];
+    const prop = PM.findProp?.(layer, command.path) || layer.p?.[command.path];
+    const selected = new Set(PM.sel.keys || []);
+    const keys = prop?.kf?.filter((key: any) => selected.has(key.i) && typeof key.v === 'number') || [];
+    if (keys.length < 2) return [command];
+    const id = `${layer.id}:${command.path}`;
+    if (!keySnapshot.has(id)) keySnapshot.set(id, {
+      base: currentValue(PM, layer, command),
+      keys: keys.map((key: any) => ({ ...key }))
+    });
+    const initial = keySnapshot.get(id)!;
+    return initial.keys.map(key => ({ ...command, mode: 'keyframe',
+      time: layer.from + key.t, value: key.v + command.value - initial.base }));
+  });
   const expand = (input: any, relative = false) => {
-    const selected = PM.selLayers().filter((l: any) => !l.lock);
-    const first = PM.firstSel();
+    const selected = inspectorSelection(PM, PM.selLayers()).filter((l: any) => !l.lock);
+    const first = inspectorSelection(PM, PM.selLayers())[0];
     return ([] as any[]).concat(input).flatMap(command => {
       if (!first || command.target !== first.id || PM.selLayers().length < 2) return [command];
       if (!['set_property','set_expression','replace_keyframes','set_content','set_layer'].includes(command.type)) return [command];
@@ -62,16 +86,16 @@ export function inspectorPM(PM: any): any {
     });
   };
   const edit = new Proxy(PM.Edit, { get(target,key) {
-    if (key === 'begin') return (...args: any[]) => { editing = true; snapshot = new Map(); return target.begin(...args); };
-    if (key === 'dispatch') return (commands: any) => {const next=expand(commands,editing);return target.dispatch(Array.isArray(commands)||next.length!==1?next:next[0]);};
-    if (key === 'apply') return (commands: any,...args: any[]) => {const next=expand(commands);return target.apply(Array.isArray(commands)||next.length!==1?next:next[0],...args);};
-    if (key === 'commit' || key === 'cancel') return (...args: any[]) => { editing = false; snapshot = null; return target[key](...args); };
+    if (key === 'begin') return (...args: any[]) => { editing = true; snapshot = new Map(); keySnapshot = new Map(); return target.begin(...args); };
+    if (key === 'dispatch') return (commands: any) => {const next=expandKeys(expand(commands,editing));return target.dispatch(Array.isArray(commands)||next.length!==1?next:next[0]);};
+    if (key === 'apply') return (commands: any,...args: any[]) => {keySnapshot = new Map(); const next=expandKeys(expand(commands));return target.apply(Array.isArray(commands)||next.length!==1?next:next[0],...args);};
+    if (key === 'commit' || key === 'cancel') return (...args: any[]) => { editing = false; snapshot = null; keySnapshot = new Map(); return target[key](...args); };
     return target[key];
   }});
   return new Proxy(PM, { get(target,key) {
     if (key === 'Edit') return edit;
     if(key==='inspectorApply')return PM.Edit.apply;
-    if(key==='inspectorTargets')return (layer:any,path:string)=>{const selected=PM.selLayers();return (selected.some((l:any)=>l.id===layer.id)?selected:[layer]).filter((l:any)=>!l.lock).flatMap((l:any)=>{const translated=translatePath(layer,l,path);return translated?[{layer:l,path:translated,prop:PM.findProp?.(l,translated)||l.p?.[translated]}]:[];});};
+    if(key==='inspectorTargets')return (layer:any,path:string)=>{const selected=inspectorSelection(PM,PM.selLayers());return (selected.some((l:any)=>l.id===layer.id)?selected:[layer]).filter((l:any)=>!l.lock).flatMap((l:any)=>{const translated=translatePath(layer,l,path);return translated?[{layer:l,path:translated,prop:PM.findProp?.(l,translated)||l.p?.[translated]}]:[];});};
     if (key === 'inspectorMixed') return (binding: any,value: any) => {
       if (!binding || binding.mode !== 'command' || typeof binding.command !== 'function') return false;
       if(PM.selLayers().filter((l:any)=>!l.lock).length<2)return false;

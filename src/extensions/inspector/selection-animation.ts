@@ -11,3 +11,17 @@ export function animateSelection(PM:any,layer:any,paths:string[],disable:boolean
   }
   return (PM.inspectorApply||PM.Edit.apply)(commands,{label,origin:'inspector'});
 }
+
+/** Add/remove only the playhead keys, preserving all other animation. */
+export function toggleSelectionKey(PM:any,layer:any,paths:string[],time:number,label:string,fallback?:any) {
+  const targets=selectionChannels(PM,layer,paths);
+  const remove=targets.length>0 && targets.every((t:any)=>t.prop && PM.hasKeyAt(t.layer,t.prop,time));
+  if(targets.some((t:any)=>!t.prop) || targets.every((t:any)=>!t.prop.kf.length)) return animateSelection(PM,layer,paths,false,time,label,fallback);
+  return PM.hist.do(label,()=>{
+    for(const target of targets){
+      const p=target.prop,at=PM.hasKeyAt(target.layer,p,time);
+      if(remove) PM.removeKey(p,at);
+      else if(!at) PM.setKeyOn(p,time-target.layer.from,PM.evP(target.layer,p,time,target.path),'linear',PM.proj.fps);
+    }
+  });
+}

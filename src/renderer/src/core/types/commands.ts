@@ -12,6 +12,9 @@ export const COMMAND_TYPES = [
   'add_layer',
   'delete_layers',
   'reorder_layer',
+  'group_layers',
+  'ungroup_layers',
+  'move_to_group',
   'add_effect',
   'remove_effect',
   'set_effect',
@@ -105,6 +108,7 @@ export interface LayerPatch {
   color?: string;
   collapsed?: boolean;
   scaleLinked?: boolean;
+  threeD?: boolean;
 }
 
 export interface SetLayerCommand extends LayerTargetedCommand {
@@ -258,7 +262,10 @@ export interface TransformLayersCommand {
   state?: Record<string, JsonValue>;
 }
 
+export interface GroupLayersCommand { type: 'group_layers' | 'ungroup_layers' | 'move_to_group'; targets: string[]; name?: string; group?: string | null; }
+
 export type EditCommand =
+  | GroupLayersCommand
   | SetPropertyCommand
   | ReplaceKeyframesCommand
   | SetEasingCommand

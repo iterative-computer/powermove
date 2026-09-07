@@ -1,0 +1,5 @@
+.canvas-text-editor::selection,
+.canvas-text-editor *::selection {
+  background: rgba(70, 155, 235, .4);
+  color: inherit;
+}

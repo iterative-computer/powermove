@@ -359,7 +359,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     }
     exportSizeRow.setEnabled(support.scale);
     const formatLabel = EXPORT_FORMAT_OPTIONS.find((item) => item.v === defaults.format)?.label ?? '';
-    exports.summary.textContent = defaults.format === 'json'
+    exports.summary.textContent = defaults.format === 'web' ? 'Web animation · full composition · code and assets' : defaults.format === 'json'
       ? formatLabel
       : `${formatLabel} · ${outW}×${outH}${support.fps ? ` · ${defaults.fps} fps` : ''}`;
   };

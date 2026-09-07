@@ -1,3 +1,6 @@
+import { createPropertyReveal, propertyShortcuts } from '../../../../extensions/timeline/property-reveal';
+import { installLayerMenu } from './layer-menu';
+import { installParentPickwhip } from './parent-pickwhip';
 import { adjacentKeyframe } from '../../../../extensions/timeline/keyframe-navigation';
 import { evaluatedValue } from '../core/content-properties';
 /* Ported from js/ui/shortcuts.js — behavior-preserving.
@@ -17,6 +20,8 @@ import type { PMRegistry } from '../registry';
 export const LEGACY_OWNER = 'legacy';
 
 export function install(PM: PMRegistry): void {
+installLayerMenu(PM);
+installParentPickwhip(PM);
 const h: any = PM.h;
 const kernel = ensureKernel(PM);
 
@@ -100,7 +105,7 @@ PM.addLayerCmd = addLayer;
 def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headline', p: center() }), 'Create');
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
-def('newShader', 'New shader layer', '⌘⇧G', () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms?.(L); PM.openShaderEditor(L); return L; }, 'Create');
+def('newShader', 'New shader layer', null, () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms?.(L); PM.openShaderEditor(L); return L; }, 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
@@ -178,26 +183,19 @@ def('addFromAsset', 'Add layer from asset', null, (id?: any) => {
 }, 'Create');
 
 /* ── editing ───────────────────────────────────────────── */
-def('duplicate', 'Duplicate layers', '⌘D', () => PM.hist.do('Duplicate', () => {
-  const sels: any = PM.selLayers(); if (!sels.length) return;
-  const ids: any = [];
-  sels.forEach((L: any) => { const c: any = PM.cloneLayer(L); PM.proj.layers.splice(PM.proj.layers.indexOf(L), 0, c); ids.push(c.id); });
-  PM.bus.emit('layers'); PM.selectLayers(ids);
-}), 'Edit');
+def('duplicate', 'Duplicate layers', '⌘D', () => {
+  const selected = selectedStackLayers(PM);
+  if (!selected.length || selected.some((layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock))) return;
+  return pasteLayers(PM, () => selected);
+}, 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
 def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
 def('separateAudio', 'Separate audio', null, (id?: any) => separateVideoAudio(PM, id), 'Edit', hidden);
 def('selectAll', 'Select all layers', '⌘A', () => PM.selectLayers(PM.proj.layers.map((l: any) => l.id)), 'Edit');
 def('deselect', 'Deselect', '⎋', () => { PM.selectLayers([]); PM.sel.keys = []; }, 'Edit');
-def('precompose', 'Precompose selected layers…', '⌘⇧C', () => {
-  const sels: any = PM.selLayers(); if (!sels.length) return PM.toast('Select layers to precompose');
-  const name: any = h('input', { value: 'Precomp' });
-  PM.modal({ title: 'Precompose ' + sels.length + (sels.length === 1 ? ' layer' : ' layers'), body: h('div.field', name), width: 400, actions: [
-    { label: 'Cancel' },
-    { label: 'Create', pri: true, run: () => PM.hist.do('Precompose', () => PM.precompose(sels.map((l: any) => l.id), name.value.trim() || undefined)) },
-  ] });
-  window.setTimeout(() => { name.focus(); name.select(); }, 30);
-}, 'Edit');
+def('groupLayers', 'Group layers', '⌘G', () => PM.Edit.apply({ type: 'group_layers', targets: PM.sel.layers }, { label: 'Group layers', origin: 'timeline' }), 'Edit');
+def('ungroupLayers', 'Ungroup layers', '⌘⇧G', () => PM.Edit.apply({ type: 'ungroup_layers', targets: PM.sel.layers }, { label: 'Ungroup layers', origin: 'timeline' }), 'Edit');
+def('precompose', 'Group layers', null, () => PM.cmd('groupLayers'), 'Edit', hidden);
 
 /* ── layer clipboard ───────────────────────────────────── */
 let layerClip: any = null;
@@ -254,8 +252,8 @@ def('nextEdge', 'Next edge', '⇧→', () => { const edge = PM.TL?.nextEdge?.();
 def('prevEdge', 'Previous edge', '⇧←', () => { const edge = PM.TL?.prevEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('nextVisibleEvent', 'Next visible timeline event', 'K', () => goToTimelineEvent(PM, 1), 'Transport');
 def('prevVisibleEvent', 'Previous visible timeline event', 'J', () => goToTimelineEvent(PM, -1), 'Transport');
-def('nextKeyframe', 'Next keyframe', '⇧K', () => { const time = adjacentKeyframe(PM, 1); if (time != null) PM.setTime(time); }, 'Transport');
-def('prevKeyframe', 'Previous keyframe', '⇧J', () => { const time = adjacentKeyframe(PM, -1); if (time != null) PM.setTime(time); }, 'Transport');
+def('nextKeyframe', 'Next keyframe', '⌃→ / ⇧K', () => { const time = adjacentKeyframe(PM, 1); if (time != null) PM.setTime(time); }, 'Transport');
+def('prevKeyframe', 'Previous keyframe', '⌃← / ⇧J', () => { const time = adjacentKeyframe(PM, -1); if (time != null) PM.setTime(time); }, 'Transport');
 def('nextSelectedEvent', 'Next selected timeline event', '⇧K', () => goToTimelineEvent(PM, 1, true), 'Transport');
 def('prevSelectedEvent', 'Previous selected timeline event', '⇧J', () => goToTimelineEvent(PM, -1, true), 'Transport');
 def('gotoLayerIn', 'Go to selected layer In point', 'I', () => goToSelectedLayerBoundary(PM, 'in'), 'Transport');
@@ -266,21 +264,11 @@ def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition'
 def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 
 /* ── reveal properties (AE muscle memory) ──────────────── */
-const reveal: any = (keys?: any) => () => {
-  const sels: any = PM.selLayers(); if (!sels.length) return;
-  sels.forEach((L: any) => { L.collapsed = false; L._reveal = keys; });
-  PM.sel.chan = keys[0];
-  PM.invalidate('timeline');
-};
-def('revealPos', 'Reveal position', 'P', reveal(['position.x', 'position.y']), 'Reveal');
-def('revealScale', 'Reveal scale', 'S', reveal(['scale.x', 'scale.y']), 'Reveal');
-def('revealRot', 'Reveal rotation', 'R', reveal(['rotation']), 'Reveal');
-def('revealOpacity', 'Reveal opacity', 'T', reveal(['opacity']), 'Reveal');
-def('revealAnchor', 'Reveal anchor point', 'A', reveal(['anchor.x', 'anchor.y']), 'Reveal');
-def('revealKeys', 'Reveal animated properties', 'U', () => {
-  PM.selLayers().forEach((L: any) => { L.collapsed = false; L._reveal = null; });
-  PM.invalidate('timeline');
-}, 'Reveal');
+const revealProperties = createPropertyReveal(PM);
+for (const [key, id, label] of propertyShortcuts) {
+  def(id, `Toggle ${label.toLowerCase()}`, key.toUpperCase(), (shift = false) => revealProperties(key, shift), 'Reveal');
+}
+def('revealAll', 'Toggle all layer properties', '⌘`', () => revealProperties('all'), 'Reveal');
 def('graph', 'Toggle graph editor', '⇧F3', () => { if (!PM.TL) return; PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
@@ -366,7 +354,7 @@ function currentLayers(PM: PMRegistry): any[] {
 
 function selectedStackLayers(PM: PMRegistry): any[] {
   const layers = currentLayers(PM);
-  const ids = new Set((PM.sel?.layers || []).filter(Boolean));
+  const ids = new Set(PM.expandGroups?.((PM.sel?.layers || []).filter(Boolean)) || (PM.sel?.layers || []).filter(Boolean));
   if (ids.size) return layers.filter((layer: any) => ids.has(layer.id));
   return typeof PM.selLayers === 'function' ? PM.selLayers().filter(Boolean) : [];
 }
@@ -441,6 +429,10 @@ export function splitLayers(PM: PMRegistry): unknown {
 
   const targets = (selectionRequested ? selected : layers.filter((layer: any) =>
     !layer.parent && layer.on !== false))
+    /* A group strip is the aggregate span of its editable members, not a
+       separate piece of footage. Splitting it therefore cuts its members and
+       keeps one group hierarchy instead of cloning an empty second group. */
+    .filter((layer: any) => layer.type !== 'group')
     .filter((layer: any) => !layer.lock && Number.isFinite(Number(layer.from))
       && Number.isFinite(Number(layer.dur))
       && T > Number(layer.from) && T < Number(layer.from) + Number(layer.dur));
@@ -571,9 +563,12 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
     const pasted = pairs.map(([source, clone]: any) => {
       if (source.parent && idMap.has(source.parent)) clone.parent = idMap.get(source.parent);
       else clone.parent = source.parent && currentIds.has(source.parent) ? source.parent : null;
+      clone.group = idMap.get(source.group) || (currentIds.has(source.group) ? source.group : null);
+      if (source.matteSource && idMap.has(source.matteSource)) clone.matteSource = idMap.get(source.matteSource);
       return clone;
     });
     layers.splice(insertAt, 0, ...pasted);
+    PM.normalizeGroupStack?.();
     selectLayerIds(PM, pasted.map((layer: any) => layer.id));
     finishLayerMutation(PM);
     PM.toast?.(`Pasted ${pasted.length} ${pasted.length === 1 ? 'layer' : 'layers'}`);
@@ -717,7 +712,8 @@ export function editSelectedLayerTiming(PM: PMRegistry, mode: LayerTimingEdit): 
   const now = Number(PM.time);
   if (!Number.isFinite(now)) return false;
   const commands: any[] = [];
-  for (const layer of selectedStackLayers(PM).filter((item: any) => !item.lock)) {
+  const targets = PM.transformRoots?.(PM.sel.layers) || selectedStackLayers(PM).filter((item: any) => !item.lock);
+  for (const layer of targets) {
     const from = Number(layer.from), duration = Number(layer.dur), out = from + duration;
     if (!Number.isFinite(from) || !Number.isFinite(duration)) continue;
     if (mode === 'moveIn') {
@@ -865,10 +861,8 @@ export function orderLayers(PM: PMRegistry, mode: LayerOrder): unknown {
 }
 
 function worldNudgeToLocal(PM: PMRegistry, layer: any, dx: number, dy: number): [number, number] {
-  if (!layer.parent || typeof PM.worldMatrix !== 'function') return [dx, dy];
-  const parent = PM.L?.(layer.parent);
-  if (!parent) return [dx, dy];
-  const matrix = PM.worldMatrix(parent, PM.time);
+  const parent = layer.parent && PM.L?.(layer.parent);
+  const matrix = PM.transformParentMatrix?.(layer,PM.time) || (parent && PM.worldMatrix?.(parent, PM.time));
   if (!Array.isArray(matrix) || matrix.length < 4) return [dx, dy];
   const determinant = matrix[0] * matrix[3] - matrix[1] * matrix[2];
   if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-9) return [0, 0];
@@ -906,7 +900,8 @@ export function nudgeSelection(PM: PMRegistry, dx?: any, dy?: any): unknown {
   if (typeof dx !== 'number' || typeof dy !== 'number'
     || !Number.isFinite(dx) || !Number.isFinite(dy) || (dx === 0 && dy === 0)) return false;
   const commands: any[] = [];
-  for (const layer of selectedStackLayers(PM).filter((item: any) => !item.lock)) {
+  const targets = PM.transformRoots?.(PM.sel.layers) || selectedStackLayers(PM).filter((item: any) => !item.lock);
+  for (const layer of targets) {
     const [localX, localY] = worldNudgeToLocal(PM, layer, dx, dy);
     for (const [path, delta] of [['position.x', localX], ['position.y', localY]] as const) {
       if (!delta || !layer.p?.[path]) continue;

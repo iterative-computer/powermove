@@ -47,18 +47,12 @@ describe('legacy model install', () => {
     project.layers.push(a, b, keep);
 
     const layer = PM.precompose([a.id, b.id], 'Group');
-    const sub = project.comps[layer.d.comp];
-
-    expect(layer.type).toBe('precomp');
-    expect(sub).toBeTruthy();
-    expect(sub.layers.map((item: any) => item.name)).toEqual(['A', 'B']);
-    expect(project.layers.map((item: any) => item.name)).toEqual(['Group', 'Keep']);
-    expect(layer.from).toBe(1);
-    expect(Math.abs(layer.dur - 4) < 1e-9).toBe(true);
-    expect(sub.dur).toBe(4);
-    expect(sub.work).toEqual([0, 4]);
-    expect(sub.layers.map((item: any) => item.from)).toEqual([0, 1]);
-    expect(PM.compOf(layer)).toBe(sub);
+    expect(layer.type).toBe('group');
+    expect(project.comps).toEqual({});
+    expect(project.layers.map((item: any) => item.name)).toEqual(['Group', 'A', 'B', 'Keep']);
+    expect([a.from, b.from]).toEqual([1, 2]);
+    expect([a.group, b.group]).toEqual([layer.id, layer.id]);
+    expect(PM.compOf(layer)).toBeNull();
   });
 
   it('refreshes keyframe ids in every cloned animation channel', () => {
@@ -93,8 +87,10 @@ describe('legacy model install', () => {
     PM.proj = project;
     const source = PM.mkLayer('shape', { name: 'A' }, project);
     project.layers.push(source);
-    const layer = PM.precompose([source.id], 'Group');
-    const compId = layer.d.comp;
+    const compId = 'legacy-comp';
+    project.comps[compId] = { layers: [source] };
+    const layer = PM.mkLayer('precomp', {d: {comp: compId}}, project);
+    project.layers = [layer];
 
     PM.removeLayers([layer.id]);
 

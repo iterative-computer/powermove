@@ -18,7 +18,7 @@ it('staggers new words without replaying existing words or changing inline layou
   const actions = words.map(node => revealText(node));
   expect(animations.map(a => a.options.delay)).toEqual([0, 28, 56]);
   expect(animations.every(a => a.frames.every((f: any) => !f.transform && !f.filter))).toBe(true);
-  words[2].textContent += '!';
+  words[2]!.textContent += '!';
   expect(actions.every(a => !('update' in a))).toBe(true);
   expect(animations).toHaveLength(3);
   await Promise.resolve();

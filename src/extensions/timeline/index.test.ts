@@ -120,10 +120,11 @@ describe('timeline extension', () => {
   });
 
   it('selects only the new right-hand segments after splitting', () => {
-    const left = { id: 'left', from: 2, dur: 6, d: {} };
+    const left = { id: 'left', from: 2, dur: 6, d: {}, p: { x: { kf: [{ t: 0, v: 10 }, { t: 6, v: 70 }] } } };
     const project = { layers: [left] };
     let selected: string[] = [left.id];
     const PM = {
+      allProps: (layer: any) => [{ prop: layer.p.x }],
       time: 5,
       proj: project,
       selLayers: () => [left],
@@ -140,6 +141,8 @@ describe('timeline extension', () => {
       { id: 'right', from: 5, dur: 3 },
       { id: 'left', from: 2, dur: 3 }
     ]);
+    expect(project.layers[0].p.x.kf).toEqual([{ t: -3, v: 10 }, { t: 3, v: 70 }]);
+    expect(left.p.x.kf).toEqual([{ t: 0, v: 10 }, { t: 6, v: 70 }]);
     expect(PM.ProjectIndex.invalidate).toHaveBeenCalledOnce();
     expect(selected).toEqual(['right']);
   });
@@ -180,6 +183,53 @@ describe('timeline extension', () => {
     panel?.build?.(second, { spec: {} });
     expect(PM.TL.cv).toBe(second.querySelector('#tl-canvas'));
     expect(second.querySelector('.tl-transport, button, .iconbtn')).not.toBeNull();
+  });
+
+  it('refreshes timecode and graph state when switching projects or changing frame rate', () => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    PM.tc = (time: number, fps: number) => `${time}:${fps}`;
+    activate({
+      host: { pm: PM },
+      panels: { register: (definition: PanelDefinition) => { panel = definition; } }
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+    const emit = (name: string) => PM.bus.on.mock.calls
+      .filter(([event]: [string]) => event === name)
+      .forEach(([, callback]: [string, () => void]) => callback());
+    PM.time = 2;
+    emit('time');
+    expect(body.querySelector('#tl-time')?.textContent).toBe('2:30');
+    PM.time = 0;
+    PM.proj.fps = 24;
+    PM.TL.graph = true;
+    emit('project');
+    expect(body.querySelector('#tl-time')?.textContent).toBe('0:24');
+    expect(body.querySelector('.tl-graph-slot button')?.classList.contains('on')).toBe(true);
+  });
+
+  it('scrubs time from the initial position instead of accumulating pointer offsets', () => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    let move: (dx: number) => void = () => {};
+    PM.drag = (_event: unknown, options: any) => { move = options.move; };
+    PM.setTime = (time: number) => { PM.time = time; };
+    activate({
+      host: { pm: PM },
+      panels: { register: (definition: PanelDefinition) => { panel = definition; } }
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+    PM.time = 2;
+    body.querySelector('#tl-time')!.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }));
+    move(120);
+    move(120);
+    expect(PM.time).toBeCloseTo(2 + 10 / 30);
+    move(0);
+    expect(PM.time).toBe(2);
   });
 
   it('places only the essential controls in the ruler gutter', () => {
@@ -337,7 +387,8 @@ describe('timeline extension', () => {
       PM.sel.layers = [layer.id];
       PM.sel.keys = ['key-1'];
       const x = T.gut + T.pps; // 1s, before the clip or any key.
-      const y = T.ruler + T.row / 2;
+      // The graph reserves 28px below the ruler for its toolbar.
+      const y = T.ruler + (area === 'graph' ? 28 : 0) + T.row / 2;
       const event = new PointerEvent('pointerdown', { clientX: x, clientY: y, [modifier]: true });
       Object.defineProperties(event, { offsetX: { value: x }, offsetY: { value: y } });
       T.cv.dispatchEvent(event);
@@ -345,6 +396,55 @@ describe('timeline extension', () => {
       expect(PM.sel.layers).toEqual(modifier === 'none' ? [] : [layer.id]);
       expect(PM.sel.keys).toEqual(modifier === 'none' ? [] : ['key-1']);
     }
+  });
+
+  it.each(['in', 'out'])('Shift-resizing the %s edge snaps and releasing Shift restores frame-only resizing', (side) => {
+    let panel: PanelDefinition | undefined;
+    const PM = timelinePM();
+    const layer = { id: 'clip', type: 'rect', from: 2, dur: 3, p: {}, d: {} };
+    PM.proj.layers = [layer];
+    PM.time = side === 'in' ? 3 : 6;
+    PM.sel = { layers: [layer.id], keys: [], chan: '' };
+    PM.bus.emit = vi.fn();
+    PM.closeMenus = vi.fn();
+    PM.selectLayers = vi.fn();
+    PM.snapF = (n: number, fps: number) => Math.round(n * fps) / fps;
+    PM.MediaTiming = { isTimed: () => false };
+    PM.Edit = {
+      begin: vi.fn(), commit: vi.fn(), cancel: vi.fn(),
+      dispatch: vi.fn(({ patch }) => {
+        if (patch.from !== undefined) layer.from = patch.from;
+        if (patch.duration !== undefined) layer.dur = patch.duration;
+      }),
+    };
+    let drag: any;
+    PM.drag = (_event: unknown, handlers: any) => { drag = handlers; return {}; };
+    activate({
+      host: { pm: PM },
+      panels: { register: (definition: PanelDefinition) => { panel = definition; } },
+      onDispose: vi.fn(),
+    } as unknown as PowermoveAPI);
+    const body = document.createElement('div');
+    document.body.append(body);
+    panel?.build?.(body, { spec: {} });
+    const T = PM.TL;
+    T.pps = 100;
+    T.scrollT = 0;
+    T.rows = [{ kind: 'layer', L: layer }];
+    const x = T.gut + (side === 'in' ? 2 : 5) * T.pps;
+    const y = T.ruler + T.row / 2;
+    const event = new PointerEvent('pointerdown', { clientX: x, clientY: y });
+    Object.defineProperties(event, { offsetX: { value: x }, offsetY: { value: y } });
+    T.cv.dispatchEvent(event);
+    const edge = () => side === 'in' ? layer.from : layer.from + layer.dur;
+    drag.move(95, 0, { shiftKey: true });
+    expect(edge()).toBe(PM.time);
+    drag.move(95, 0, { shiftKey: true });
+    expect(edge()).toBe(PM.time);
+    drag.move(95, 0, { shiftKey: false });
+    expect(edge()).toBeCloseTo(PM.time - 1 / 30);
+    drag.up();
+    expect(PM.Edit.commit).toHaveBeenCalledExactlyOnceWith('Trim clip');
   });
 
   it('releases an external text field when the timeline starts a pointer gesture', () => {

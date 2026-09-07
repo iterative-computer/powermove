@@ -1,13 +1,17 @@
+import { CHANNELS_3D } from './space-3d';
 /* Ported from js/core/model.js — behavior-preserving. */
 import { normalizeExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
+import { installLayerGroups } from './layer-groups';
 import { installProjectIndex } from './project-index';
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
+  const before = { ...PM.sel, layers: [...PM.sel.layers], keys: [...PM.sel.keys] };
   ids = ([] as any[]).concat(ids).filter(Boolean);
   if (PM.TL) PM.TL.keySelectionActive = false;
   PM.sel.layers = add ? [...new Set([...PM.sel.layers, ...ids])] : ids;
   if (!add) PM.sel.keys = [];
+  PM.hist?.selection?.(before, PM.sel);
   PM.bus.emit('sel');
   PM.invalidate();
 }
@@ -27,6 +31,8 @@ PM.KF = KF;
 
 /* ── channel schema ────────────────────────────────────── */
 const CH = {
+  ...Object.fromEntries(Object.keys(CHANNELS_3D).map(key => [key, { label: key.split('.').map(v => v.charAt(0).toUpperCase()+v.slice(1)).join(' '), group: 'Transform', unit: key.startsWith('scale') ? '%' : key.startsWith('position') || key.startsWith('anchor') ? 'px' : '°', step: 1 }])),
+  perspective: { label: 'Perspective', group: 'Transform', unit: 'mm', step: 1, min: 0.001 },
   'anchor.x':   { label: 'Anchor X', group: 'Transform', unit: 'px', step: 1 },
   'anchor.y':   { label: 'Anchor Y', group: 'Transform', unit: 'px', step: 1 },
   'position.x': { label: 'Position X', group: 'Transform', unit: 'px', step: 1 },
@@ -62,6 +68,7 @@ const TYPE_META: any = {
   shader: { icon: 'wand',   color: '#FF6B1A', label: 'Shader' },
   extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
   null:   { icon: 'dot',    color: '#6a6a70', label: 'Null', visual: false, pickable: false },
+  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, effects: false, masks: false, pickable: false },
   precomp:{ icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
 };
 PM.TYPE_META = TYPE_META;
@@ -89,6 +96,7 @@ function baseLayer(type: any, name: any, comp: any) {
     on: true, lock: false, shy: false, collapsed: true,
     color: TYPE_META[type].color, blend: 'normal', mblur: false, parent: null,
     p: transformable ? {
+      ...Object.fromEntries(Object.entries(CHANNELS_3D).map(([key, value]) => [key, P(value)])),
       'anchor.x': P(0), 'anchor.y': P(0),
       'position.x': P(w / 2), 'position.y': P(hgt / 2),
       'scale.x': P(100), 'scale.y': P(100),
@@ -125,6 +133,7 @@ const DEFAULTS: any = {
     L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0;
   },
   null:   (L: any) => { L.d = {}; },
+  group: (L: any) => { L.d = {}; L.p['position.x'].v = 0; L.p['position.y'].v = 0; L.scaleLinked = true; },
   precomp:(L: any, c: any) => { L.d = { comp: null, w: c.w, h: c.h }; L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0; },
 };
 
@@ -179,6 +188,7 @@ PM.mkProject = (o: any = {}) => ({
 /* ── lookups & mutation helpers ────────────────────────── */
 /* Render scope: while a nested composition renders, lookups resolve inside it.
    Empty stack = the main project (all UI/tool paths). */
+installLayerGroups(PM);
 PM.scope = [];
 PM.curComp = () => PM.scope[PM.scope.length - 1] || PM.proj;
 installProjectIndex(PM);
@@ -203,7 +213,7 @@ PM.addLayer = (L: any, at: any) => {
   return L;
 };
 PM.removeLayers = (ids: any) => {
-  ids = ([] as any[]).concat(ids);
+  ids = PM.expandGroups(([] as any[]).concat(ids));
   PM.proj.layers = PM.proj.layers.filter((l: any) => !ids.includes(l.id));
   PM.proj.layers.forEach((l: any) => { if (ids.includes(l.parent)) l.parent = null; });
   /* garbage-collect compositions that are no longer referenced by any precomp layer */
@@ -219,72 +229,8 @@ PM.removeLayers = (ids: any) => {
   PM.bus.emit('layers');
 };
 
-/* ── precompose: collapse layers into a nested composition (AE-style) ──
-   The nested comp shares the parent's dimensions, so layer coordinates stay
-   valid and the visual result is identical to the un-nested stack. */
-PM.precompose = (ids: any, name: any) => {
-  ids = ([] as any[]).concat(ids);
-  const sel = PM.proj.layers.filter((l: any) => ids.includes(l.id));
-  if (!sel.length) return null;
-  const compId = uid('C');
-  const sub = PM.mkProject({
-    name: name || 'Precomp', w: PM.proj.w, h: PM.proj.h,
-    fps: PM.proj.fps, dur: PM.proj.dur, bg: '#000000',
-  });
-  sub.id = compId;
-  const originalParents = new Map(sel.map((l: any) => [l.id,l.parent]));
-  sub.layers = [...sel];
-  const external = new Map<string, any>();
-  const rigCopy = (source: any) => {
-    const rig = PM.cloneLayer(source);
-    rig.type = 'null'; rig.name = source.name + ' · Rig'; rig.d = {};
-    rig.fx = []; rig.masks = []; rig.transitionIn = rig.transitionOut = null;
-    return rig;
-  };
-  const copyAncestors = (id: string | null): string | null => {
-    if (!id || ids.includes(id)) return id;
-    if (external.has(id)) return external.get(id).id;
-    const source = PM.proj.layers.find((l: any) => l.id === id);
-    if (!source) return null;
-    const rig = rigCopy(source); external.set(id,rig);
-    rig.parent = copyAncestors(source.parent); return rig.id;
-  };
-  sub.layers.forEach((l: any) => { l.parent = copyAncestors(l.parent); });
-  const outward = new Map<string, any>();
-  const preserveOutside = (id: string | null): string | null => {
-    if (!id || !ids.includes(id)) return id;
-    if (outward.has(id)) return outward.get(id).id;
-    const source = sel.find((l: any) => l.id === id);
-    const rig = rigCopy(source); outward.set(id,rig);
-    rig.parent = preserveOutside(originalParents.get(source.id) as string | null); return rig.id;
-  };
-  PM.proj.layers.filter((l: any) => !ids.includes(l.id)).forEach((l: any) => { l.parent = preserveOutside(l.parent); });
-  const preserveClock = external.size > 0 || outward.size > 0;
-  sub.layers.push(...external.values());
-  const start = Math.min(...sel.map((l: any) => l.from));
-  const end = Math.max(...sel.map((l: any) => l.from + l.dur));
-  const span = Math.max(.04, end - start);
-  /* Nested rendering receives layer-local time (T - precomp.from), so children
-     must be rebased to the nested composition's zero. Keeping root-relative
-     starts here made every non-zero precompose silently disappear. */
-  if (!preserveClock) sub.layers.forEach((l: any) => { l.from = Math.max(0, l.from - start); });
-  sub.dur = preserveClock ? PM.proj.dur : span;
-  sub.work = preserveClock ? [start,end] : [0,span];
-  const idx = Math.min(...sel.map((l: any) => PM.proj.layers.indexOf(l)));
-  const L = PM.mkLayer('precomp', { name: name || ('Precomp ' + (Object.keys(PM.proj.comps).length + 1)), d: { comp: compId, w: PM.proj.w, h: PM.proj.h } }, PM.proj);
-  L.from = Math.max(0, Math.min(start, end - .04));
-  L.dur = span;
-  if (preserveClock) L.d.trim = P(start);
-  PM.proj.comps[compId] = sub;
-  PM.proj.layers = PM.proj.layers.filter((l: any) => !ids.includes(l.id));
-  PM.proj.layers.push(...outward.values());
-  PM.sel.layers = [];
-  PM.proj.layers.splice(Math.min(idx, PM.proj.layers.length), 0, L);
-  PM.selectLayers(L.id);
-  PM.ProjectIndex.invalidate();
-  PM.bus.emit('layers');
-  return L;
-};
+// Compatibility entry point: new precomposes are editable timeline groups.
+PM.precompose = (ids: any, name: any) => PM.groupLayers(([] as any[]).concat(ids), name);
 
 /** Resolve a precomp layer to its nested project (null when unresolved). */
 PM.compOf = (L: any) => {

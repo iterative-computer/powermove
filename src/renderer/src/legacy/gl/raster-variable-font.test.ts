@@ -5,6 +5,19 @@ import { createVariableFontRenderer } from '../../typography/font-renderer';
 
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
 describe('variable font rendering',()=>{
+  it('uses packaged font bytes without local font access and releases its faces', () => {
+    const inspect = vi.spyOn(catalog, 'inspectFont');
+    class Face { status = 'loaded'; constructor(public family: string) {} }
+    const add = vi.fn(), remove = vi.fn();
+    vi.stubGlobal('FontFace', Face);
+    vi.stubGlobal('document', { fonts: { add, delete: remove } });
+    const render = createVariableFontRenderer(vi.fn(), () => new ArrayBuffer(4));
+    expect(render({ font: 'Bundled', 'fontAxis.wght': 500 })).not.toBeNull();
+    expect(inspect).not.toHaveBeenCalled();
+    expect(add).toHaveBeenCalledTimes(1);
+    render.dispose();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
   it('formats authored axis values deterministically',()=>{
     const content={'fontAxis.wght':620,'fontAxis.GRAD':40,ignored:1};
     expect(textVariationEntries(content)).toEqual([['GRAD',40],['wght',620]]);

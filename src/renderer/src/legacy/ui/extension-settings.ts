@@ -19,9 +19,9 @@ function displayState(record: ExtensionRecord): DisplayState {
 
 function sourceLabel(record: ExtensionRecord): string {
   if (record.scope === 'builtin') return 'Built in';
-  if (record.manifest?.author === 'agent') return 'Agent';
+  if (record.manifest?.author === 'agent') return 'AI-created';
   if (record.scope === 'project') return 'Project';
-  return 'User';
+  return 'Custom';
 }
 
 function nameOf(record: ExtensionRecord): string {
@@ -50,34 +50,25 @@ export function createExtensionSettingsControl(
   const expanded = new Set<string>();
   const intro = document.createElement('p');
   intro.className = 'settings-note';
-  intro.textContent = 'See what changes your workspace. Turn an extension off to compare it with the default interface.';
+  intro.textContent = 'Manage extensions and turn them on or off.';
   section.element.insertBefore(intro, list);
 
 
   const render = (records: ExtensionRecord[]): void => {
     if (!alive) return;
-    const sorted = [...records].sort(compareRecords);
-    summary.textContent = `${sorted.length} ${sorted.length === 1 ? 'extension' : 'extensions'} discovered`;
+    const sorted = records.filter(record => record.scope !== 'builtin').sort(compareRecords);
+    summary.textContent = `${sorted.length} ${sorted.length === 1 ? 'extension' : 'extensions'}`;
     list.replaceChildren();
     if (sorted.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'settings-extension-empty';
-      empty.textContent = 'No extensions were discovered.';
+      empty.textContent = 'No extensions installed.';
       list.append(empty);
       return;
     }
 
-    let previousGroup = '';
     const resolveName = (id: string): string => nameOf(records.find(item => item.id === id) ?? { id } as ExtensionRecord);
     for (const record of sorted) {
-      const group = record.scope === 'builtin' ? 'Built into Powermove' : 'Added extensions';
-      if (group !== previousGroup) {
-        const heading = document.createElement('h3');
-        heading.className = 'settings-extension-group';
-        heading.textContent = group;
-        list.append(heading);
-        previousGroup = group;
-      }
       const state = displayState(record);
       if (record.health.state === 'replaced') state.detail = `Replaced by ${resolveName(record.health.by)}`;
       const row = document.createElement('div');
@@ -91,9 +82,7 @@ export function createExtensionSettingsControl(
       const name = document.createElement('b');
       name.textContent = nameOf(record);
       heading.append(name);
-      /* Built in is the background state, so only extensions you or the agent
-         added carry a tag — nine identical "Built in" lines say nothing. */
-      if (record.scope !== 'builtin') {
+      if (record.scope !== 'builtin' && record.manifest?.author !== 'agent') {
         const tag = document.createElement('span');
         tag.className = 'settings-extension-tag';
         tag.textContent = sourceLabel(record);
@@ -110,20 +99,20 @@ export function createExtensionSettingsControl(
         copy.append(detail);
       }
 
+      const technicalInfo = document.createElement('div');
       const addLine = (label: string, text: string, className = ''): void => {
         const line = document.createElement('div');
         line.className = `settings-extension-impact ${className}`;
         const title = document.createElement('strong');
         title.textContent = `${label} `;
         line.append(title, document.createTextNode(text));
-        copy.append(line);
+        technicalInfo.append(line);
       };
       const replaces = record.manifest?.replaces ?? [];
       if (replaces.length) addLine(record.enabled && state.label === 'Active' ? 'Replaces' : 'When active, replaces', replaces.map(resolveName).join(', '), 'is-replacement');
       const capabilities: Record<string, string> = { panels: 'Panels', commands: 'Commands', keybindings: 'Keyboard shortcuts', effects: 'Effects', transitions: 'Transitions', layers: 'Layer types', themes: 'Appearance', palette: 'Command search', menus: 'Menus', status: 'Status bar', hooks: 'Editor behavior' };
       const declared = record.manifest?.contributes ?? [];
-      if (declared.length) addLine('Can change', declared.map(kind => capabilities[kind] ?? kind).join(' · '));
-      else if (!replaces.length) addLine('Interface changes', 'Not described by this extension.');
+      if (declared.length) addLine('Includes', declared.map(kind => capabilities[kind] ?? kind).join(' · '));
       const dependencies = record.manifest?.dependsOn ?? [];
       if (dependencies.length) addLine('Requires', dependencies.map(resolveName).join(', '));
       const dependents = records.filter(item => item.enabled && item.manifest?.dependsOn?.includes(record.id));
@@ -138,14 +127,14 @@ export function createExtensionSettingsControl(
       details.append(detailLabel);
       const info = document.createElement('div');
       info.textContent = `${record.id}${version}`;
-      details.append(info);
+      details.append(info, technicalInfo);
       const kernel = (window as any).PM?.Kernel;
       for (const [key, label] of [['panels', 'Panels'], ['commands', 'Commands'], ['keybindings', 'Shortcuts'], ['effects', 'Effects'], ['transitions', 'Transitions'], ['layerTypes', 'Layer types'], ['themes', 'Themes']] as const) {
         const entries = kernel?.[key]?.entries?.() ?? [];
         const owned = entries.filter((entry: any) => entry.ownerId === record.id);
         if (!owned.length) continue;
         const contribution = document.createElement('div');
-        contribution.textContent = `${label} registered now: ${owned.map((entry: any) => entry.item.title ?? entry.item.label ?? entry.item.key ?? entry.id).join(', ')}`;
+        contribution.textContent = `${label}: ${owned.map((entry: any) => entry.item.title ?? entry.item.label ?? entry.item.key ?? entry.id).join(', ')}`;
         details.append(contribution);
       }
       if (record.manifest?.forkedFrom) {
@@ -249,10 +238,10 @@ export function createExtensionSettingsControl(
 
   const refresh = async (): Promise<void> => {
     if (!api) {
-      summary.textContent = 'Restart Powermove once to inspect extensions.';
+      summary.textContent = 'Restart Powermove to manage extensions.';
       const empty = document.createElement('div');
       empty.className = 'settings-extension-empty';
-      empty.textContent = 'The extension bridge is not available yet.';
+      empty.textContent = 'Extensions are unavailable in this session.';
       list.replaceChildren(empty);
       return;
     }

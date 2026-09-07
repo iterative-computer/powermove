@@ -267,6 +267,47 @@ describe('legacy app install', () => {
     expect(PM.app.dirty).toBe(true);
   });
 
+  it('waits for an in-flight save before closing instead of rejecting the close', async () => {
+    const { PM, toasts } = appRegistry();
+    let finish!: (result: any) => void;
+    const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    const confirmProjectClose = vi.fn(async () => 'cancel');
+    (window as any).powermove = { saveFile, confirmProjectClose };
+    const saving = PM.saveProject();
+    await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
+
+    let closeFinished = false;
+    const closing = PM.confirmCloseProject('P1').then((result: boolean) => {
+      closeFinished = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(closeFinished).toBe(false);
+    expect(toasts).not.toContain('Please wait for the current save to finish.');
+
+    finish({ ok: true, path: '/tmp/Test.pmv' });
+    expect(await saving).toBe(true);
+    expect(PM.app.saving).toBe(false);
+    expect(await closing).toBe(true);
+    expect(confirmProjectClose).not.toHaveBeenCalled();
+  });
+
+  it('shows the unsaved prompt after an in-flight save is cancelled', async () => {
+    const { PM } = appRegistry();
+    let finish!: (result: any) => void;
+    const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+    const confirmProjectClose = vi.fn(async () => 'discard');
+    (window as any).powermove = { saveFile, confirmProjectClose };
+    const saving = PM.saveProject();
+    await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
+    const closing = PM.confirmCloseProject('P1');
+
+    finish({ ok: false, cancelled: true });
+    expect(await saving).toBe(false);
+    expect(await closing).toBe(true);
+    expect(confirmProjectClose).toHaveBeenCalledOnce();
+  });
+
   it('keeps the project open when the close prompt or its Save dialog is cancelled', async () => {
     const { PM } = appRegistry();
     (window as any).powermove = { confirmProjectClose: async () => 'cancel' };

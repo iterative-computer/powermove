@@ -317,9 +317,9 @@
     <Row {label} pair={isScale}>
       {#snippet left()}
         <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={keyAtPlayhead}
-          aria-label={`${animated ? 'Remove animation from' : 'Animate'} ${label}`}
-          aria-pressed={animated} title={animated ? `Remove animation from ${label} · keep current value` : `Animate ${label}`}
-          onclick={toggleStopwatch}>
+          aria-label={`${keyAtPlayhead ? 'Remove keyframe for' : 'Add keyframe for'} ${label}`}
+          aria-pressed={keyAtPlayhead} title={keyAtPlayhead ? 'Remove keyframe' : 'Add keyframe'}
+          onclick={diamondClick}>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg>
         </button>
       {/snippet}

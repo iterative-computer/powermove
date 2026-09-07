@@ -1,3 +1,4 @@
+import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane } from '../core/space-3d';
 import { pathValues, tracePath } from '../core/vector-paths';
 import { sourceTime } from '../core/retiming';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
@@ -404,13 +405,13 @@ void main(){
 }`;
 
 /* ── init ──────────────────────────────────────────────── */
-GL.init = (canvas: any) => {
+GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
   GL.canvas = canvas;
   const gl = canvas.getContext('webgl2', {
-    alpha: false, antialias: false, premultipliedAlpha: true,
+    alpha: options.alpha === true, antialias: false, premultipliedAlpha: true,
     preserveDrawingBuffer: true, powerPreference: 'high-performance', desynchronized: true,
   });
-  if (!gl) { window.alert('Powermove needs WebGL2.'); return false; }
+  if (!gl) { if (!options.quiet) window.alert('Powermove needs WebGL2.'); return false; }
   GL.gl = gl;
   gl.getExtension('EXT_color_buffer_half_float');
   gl.getExtension('EXT_color_buffer_float');
@@ -678,11 +679,20 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any) {
   if (!c) return false;
   const world = scaledWorld(L, T, W, H);
   const M = PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
+  let projected = m3(M);
+  if (is3DLayer(PM,L)) {
+    const h = planeMatrix(PM, L, T), [sx, sy] = outputScale(W, H);
+    projected = new Float32Array([
+      h[0]*c.w*sx,h[1]*c.w*sy,h[2]*c.w,
+      h[3]*c.h*sx,h[4]*c.h*sy,h[5]*c.h,
+      (h[6]-h[0]*c.ax-h[3]*c.ay)*sx,(h[7]-h[1]*c.ax-h[4]*c.ay)*sy,h[8]-h[2]*c.ax-h[5]*c.ay
+    ]);
+  }
   if (c.solid) {
     const p = program('solid', PM.FRAG_SOLID);
     if (!p) return false;
     const g = use(p);
-    g.u('u_m', m3(M)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+    g.u('u_m', projected); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
     g.u('u_color', c.solid[0] * alpha, c.solid[1] * alpha, c.solid[2] * alpha, alpha);
     draw();
     return true;
@@ -691,7 +701,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any) {
   if (!p) return false;
   const g = use(p);
   bindTex(0, c.tex); setI(p, 'u_tex', 0);
-  g.u('u_m', m3(M)); g.u('u_res', W, H);
+  g.u('u_m', projected); g.u('u_res', W, H);
   g.u('u_uv', c.uv[0], c.uv[1], c.uv[2], c.uv[3]);
   g.u('u_alpha', alpha);
   setI(p, 'u_fromFbo', c.fromFbo ? 1 : 0);
@@ -753,8 +763,19 @@ function applyPathMasks(L:any,T:number,srcF:any,W:number,H:number,masks:any[]) {
     else{c.beginPath();if(evaluatedValue(PM,L,m.shape,T,`m.${m.id}.shape`)==='ellipse')c.ellipse(0,0,Math.abs(ev('w'))/2,Math.abs(ev('h'))/2,0,0,Math.PI*2);else c.rect(-ev('w')/2,-ev('h')/2,ev('w'),ev('h'));}
     c.fill();ctx.globalCompositeOperation=mode(m)==='subtract'?'destination-out':'source-over';ctx.filter=`blur(${Math.max(0,ev('feather'))*Math.hypot(world[0],world[1])/2}px)`;ctx.drawImage(item,0,0);
   }
-  const out=grab(W,H);bind(out);clear();const p=program('pathMaskApply',PM.GLSL_PRE+'uniform sampler2D u_cov; void main(){o=texture(u_tex,v_st)*texture(u_cov,v_uv).a;}');
-  const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,texFor('path-mask:'+L.id,cv));setI(p,'u_cov',1);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);return out;
+  const out=grab(W,H);bind(out);clear();const p=program('pathMaskApply',PM.GLSL_PRE+'uniform sampler2D u_cov; uniform mat3 u_covTransform; void main(){vec3 q=u_covTransform*vec3(v_px,1.0);vec2 uv=q.xy/q.z/u_res;float coverage=(uv.x<0.0||uv.y<0.0||uv.x>1.0||uv.y>1.0)?0.0:texture(u_cov,uv).a;o=texture(u_tex,v_st)*coverage;}');
+  const g=use(p);
+  let coverageTransform = IDENT;
+  if (is3DLayer(PM,L)) {
+    const h=planeMatrix(PM,L,T),[sx,sy]=outputScale(W,H);
+    const inv=inversePlane([h[0]*sx,h[1]*sy,h[2],h[3]*sx,h[4]*sy,h[5],h[6]*sx,h[7]*sy,h[8]]);
+    if (inv) coverageTransform=new Float32Array([0,1,2].flatMap(i=>{
+      const x=inv[i*3]!,y=inv[i*3+1]!,w=inv[i*3+2]!;
+      return [world[0]*x+world[2]*y+world[4]*w,world[1]*x+world[3]*y+world[5]*w,w];
+    }));
+  }
+  g.u('u_covTransform',coverageTransform);
+  bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,texFor('path-mask:'+L.id,cv));setI(p,'u_cov',1);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);return out;
 }
 function applyTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:any) {
   const source=proj.layers.find((l:any)=>l.id===L.matteSource);
@@ -809,7 +830,13 @@ function applyMasks(L: any, T: any, srcF: any, W: any, H: any) {
     pm.u('u_m', fullQuad(W, H)); pm.u('u_res', W, H); pm.u('u_uv', 0, 0, 1, 1);
     /* setU receives its uniform arguments as a list; keep the matrix wrapped so
        it selects uniformMatrix3fv rather than treating nine scalars as vec4. */
-    setU(p, 'u_inv', [m3(inv)]);
+    let maskInverse = m3(inv);
+    if (is3DLayer(PM,L)) {
+      const h = planeMatrix(PM,L,T), [sx,sy] = outputScale(W,H);
+      const projectedInverse = inversePlane([h[0]*sx,h[1]*sy,h[2],h[3]*sx,h[4]*sy,h[5],h[6]*sx,h[7]*sy,h[8]]);
+      if (projectedInverse) maskInverse = new Float32Array(projectedInverse);
+    }
+    setU(p, 'u_inv', [maskInverse]);
     setI(p, 'u_cnt', cnt); setI(p, 'u_hasAdd', hasAdd);
     setU(p, 'u_g', [gArr]); setU(p, 'u_q', [qArr]);
     gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
@@ -935,7 +962,7 @@ function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: an
     opt.transparent skips the background fill (nested comps composite over). */
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl;
-  const layers = proj.layers;
+  const layers = depthOrderedLayers(PM, proj.layers, T);
   const solo = layers.some((layer: any) => layer.solo);
 
   let acc = grab(W, H);
@@ -963,7 +990,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     const L = layers[i];
     if(PM.canvasTextEditing===L.id && !opt.exporting)continue;
     if(!opt.mattePass && layers.some((l:any)=>l.matteSource===L.id))continue;
-    if (solo && !L.solo && !opt.mattePass) continue;
+    if (solo && !L.solo && !(PM.groupAncestors?.(L, layers) || []).some((group: any) => group.solo) && !opt.mattePass) continue;
     if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
     if (L.shy && opt.hideShy) continue;
@@ -1093,24 +1120,19 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
 };
 
 /* Hit test: which layer is under a comp-space point (top-most first). */
-GL.pick = (x: any, y: any, T: any) => {
-  const layers = PM.proj.layers;
+GL.pick = (x: any, y: any, T: any, options: { includeLocked?: boolean } = {}) => {
+  const layers = depthOrderedLayers(PM, PM.proj.layers, T);
   for (const L of layers) {
-    if (!PM.active(L, T) || L.lock || (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].pickable === false)) continue;
+    if (!PM.active(L, T) || !options.includeLocked && (L.lock || (PM.groupAncestors?.(L) || []).some((group: any) => group.lock)) || (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].pickable === false)) continue;
     const b = GL.bounds(L, T);
     if (!b) continue;
-    const m = PM.worldMatrix(L, T);
-    const det = m[0] * m[3] - m[1] * m[2];
-    if (Math.abs(det) < 1e-9) continue;
-    const dx = x - m[4], dy = y - m[5];
-    const lx = (dx * m[3] - dy * m[2]) / det;
-    const ly = (dy * m[0] - dx * m[1]) / det;
-    if (lx >= b.x0 && lx <= b.x1 && ly >= b.y0 && ly <= b.y1) return L;
+    if (planeContains(PM, L, T, x, y, b)) return L;
   }
   return null;
 };
 /** Layer-space bounds (before transform), relative to the layer anchor origin. */
 GL.bounds = (L: any, T: any) => {
+  if (L.type === 'group') return PM.groupBounds(L, T);
   const d = resolveContent(PM, L, T);
   let w, h, ax, ay;
   if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }

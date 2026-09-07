@@ -34,7 +34,9 @@ describe('legacy assistant harness install', () => {
     });
     const added = PM.AgentHarness.cleanCommand({ type: 'add_layer', layerType: 'text', name: 'Title' });
 
-    expect(cleaned.preserveHandEdits).toBe(true);
+    expect(cleaned.preserveHandEdits).toBe(false);
+    expect(replaced.preserveHandEdits).toBe(false);
+    expect(PM.AgentHarness.cleanCommand({ type: 'set_property', target: 'title', path: 'position.x', value: 12 }).preserveHandEdits).toBe(true);
     expect(Object.hasOwn(cleaned, 'unknownField')).toBe(false);
     expect(replaced.keyframes).toHaveLength(80);
     expect(Object.hasOwn(replaced, 'unknownField')).toBe(false);
@@ -46,4 +48,13 @@ describe('legacy assistant harness install', () => {
     })).toEqual({ type: 'create_section', section: { id: 'section-1', layers: [{ id: 'layer-1' }] } });
     expect(PM.AgentHarness.cleanCommand({ type: 'run_shell', command: 'whoami' })).toBeNull();
   });
+  it('keeps group commands available to live and returned agent edits', () => {
+    const PM = harnessRegistry();
+    for (const command of [
+      {type:'group_layers',targets:['a','b'],name:'Hero'},
+      {type:'ungroup_layers',targets:['g']},
+      {type:'move_to_group',targets:['a'],group:'g'},
+    ]) expect(PM.AgentHarness.cleanCommand(command)).toEqual(command);
+  });
+
 });

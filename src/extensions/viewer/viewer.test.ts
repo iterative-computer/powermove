@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  selectionOutlineColor,
   anchorMoveValues,
   calculateResize, composeLocalLinear, compositionFramePosition, compositionIsOutOfView, editableTextAtPoint,
   install, layerContainsPoint, layerWorldPivot,
@@ -374,5 +375,13 @@ describe('viewer runtime', () => {
     expect(flippedSolved?.skew).toBeCloseTo(flipped.skew);
     expect(solveLocalTransformForWorldLinear([1, 0, 0, 0], matrix)).toBeNull();
     expect(solveLocalTransformForWorldLinear(null, [0, 0, 1, 1])).toBeNull();
+  });
+});
+
+describe('canvas selection contrast', () => {
+  it('inverts both light and dark composition backgrounds', () => {
+    expect(selectionOutlineColor({bg:'#FFFFFF'})).toBe('#000000');
+    expect(selectionOutlineColor({bg:'#000000'})).toBe('#ffffff');
+    expect(selectionOutlineColor({bg:'#000000',backgroundFill:{type:'solid',stops:[{color:'#123456'}]}})).toBe('#edcba9');
   });
 });

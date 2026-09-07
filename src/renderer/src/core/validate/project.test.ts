@@ -196,18 +196,18 @@ describe('sanitizeProject', () => {
     expect(bad?.type).toBe('null');
     expect(bad).toMatchObject({ name: 'Layer 1', from: 0, dur: 5, parent: null, fx: [] });
     expect(Object.keys(bad?.p ?? {})).toEqual(Object.keys((project.layers[2] as Exclude<Layer, { type: 'audio' }>).p));
-    expect(bad && bad.type !== 'audio' ? bad.p.opacity.v : null).toBe(100);
-    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf : []).toHaveLength(1);
-    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null)
+    expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.v : null).toBe(100);
+    expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf : []).toHaveLength(1);
+    expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf[0] : null)
       .toMatchObject({
         inInterp: 'linear', outInterp: 'linear',
         inEase: { speed: 0, influence: 100 / 3 },
         outEase: { speed: 0, influence: 100 / 3 },
         autoBezier: false, continuous: false
       });
-    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('eo');
-    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('ei');
-    expect(bad && bad.type !== 'audio' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('hold');
+    expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('eo');
+    expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('ei');
+    expect(bad && bad.type !== 'audio' && bad.type !== 'group' ? bad.p.opacity.kf[0] : null).not.toHaveProperty('hold');
     expect(bad?.masks[0]).toMatchObject({ shape: 'rect', mode: 'add', on: true });
 
     const audio = project.layers[1];

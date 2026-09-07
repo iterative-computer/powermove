@@ -26,13 +26,24 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
 
     // Still frame: no frame rate / range / quality, transparency appears,
     // action button renames.
-    await dialog.getByText('Format').locator('..').getByRole('button').click();
-    await page.getByRole('menuitem', { name: 'Still frame (PNG)' }).dispatchEvent('click');
+    await dialog.getByRole('button', { name: 'Images', exact: true }).click();
     await expect(dialog.getByText('Quality', { exact: true })).toBeHidden();
     await expect(dialog.getByText('Frame rate', { exact: true })).toBeHidden();
     await expect(dialog.getByText('Transparent background')).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Export frame', exact: true })).toBeVisible();
 
+    await dialog.getByRole('button', { name: 'Code', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Export code', exact: true })).toBeVisible();
+    await expect(dialog.getByText('Resolution', { exact: true })).toBeHidden();
+    await expect(dialog.getByText('Frame rate', { exact: true })).toBeHidden();
+    await expect(dialog.getByText('Transparent background')).toBeHidden();
+    await expect(dialog).toContainText('-web.zip');
+
+    await expect(dialog.getByText('Agent handoff', { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel('Render preset name')).toBeHidden();
+    await page.screenshot({ path: 'e2e/test-results/export-code-dialog.png' });
+    await dialog.getByRole('button', { name: 'Video', exact: true }).click();
+    await expect(dialog.getByLabel('Export width in pixels')).toHaveValue('1000');
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session.close();

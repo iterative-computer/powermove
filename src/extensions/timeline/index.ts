@@ -56,6 +56,12 @@ export function splitSelectedLayersAtPlayhead(pm: Record<string, any>): string[]
     for (const layer of pm.selLayers?.() ?? []) {
       if (pm.time <= layer.from || pm.time >= layer.from + layer.dur) continue;
       const right = pm.cloneLayer(layer);
+      // Keyframe times are layer-local. Preserve their composition times
+      // when the tail gets a new in point, including keys before the cut.
+      const offset = pm.time - layer.from;
+      for (const { prop } of pm.allProps(right)) {
+        for (const key of prop.kf ?? []) key.t -= offset;
+      }
       right.from = pm.time;
       right.dur = layer.from + layer.dur - pm.time;
       if (pm.MediaTiming?.isTimed?.(layer)) right.d.trim = pm.MediaTiming.trimAtStart(layer, pm.time);
@@ -90,7 +96,7 @@ export default function activate(api: PowermoveAPI): void {
     label: 'Open / collapse layer strips',
     category: 'Timeline',
     kb: 'M',
-    run: () => toggleLayerStrips(pm)
+    run: () => pm.cmd('revealMasks')
   });
   api.keybindings?.bind({ key: 'm', command: 'toggleLayerStrips', priority: 90 });
   /* Kernel deactivation runs before replacement activation. Capture this

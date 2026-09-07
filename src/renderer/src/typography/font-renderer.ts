@@ -13,21 +13,21 @@ export const variationSettings = (content: any) => variationEntries(content).map
  * so a new animation sample never paints a temporary default-font frame.
  * Recycle a bounded pool of faces per family. Repeatedly decoding the binary
  * for every scrub sample can exhaust Chromium with large fonts such as SF Pro. */
-export function createVariableFontRenderer(invalidate: () => void) {
+export function createVariableFontRenderer(invalidate: () => void, packagedSource?: (family: string) => ArrayBuffer | undefined) {
   const sources = new Map<string, { data?: ArrayBuffer }>();
   const faceFamilies = new WeakMap<FontFace, string>();
   const faces = new Map<string, FontFace>();
   const instance = Math.random().toString(36).slice(2);
   let sequence = 0;
-  return (content: any): string | null => {
+  const render = (content: any): string | null => {
     const settings = variationSettings(content), family = String(content.font ?? '').trim();
     if (!settings || !family || typeof FontFace !== 'function') return null;
     let source = sources.get(family);
     if (!source) {
-      source = {};
+      source = { data: packagedSource?.(family) };
       sources.set(family, source);
       const pending = source;
-      void (async () => {
+      if (!source.data && !packagedSource) void (async () => {
         try {
           const font = await inspectFont(family);
           if (font.status !== 'variable' || !font.source) return;
@@ -45,11 +45,11 @@ export function createVariableFontRenderer(invalidate: () => void) {
       // this face. Detach before changing descriptors so font matching is refreshed.
       const reusable = [...faces].filter(([, candidate]) => faceFamilies.get(candidate) === family);
       if (reusable.length >= 8) {
-        const [oldKey, oldest] = reusable[0];
+        const [oldKey, oldest] = reusable[0]!;
         faces.delete(oldKey);
         document.fonts.delete(oldest);
         face = oldest;
-        face.variationSettings = settings;
+        (face as FontFace & { variationSettings: string }).variationSettings = settings;
         face.style = content.italic ? 'italic' : 'normal';
       } else {
         face = new FontFace(`Powermove Axis ${instance} ${++sequence}`, source.data, {
@@ -68,4 +68,10 @@ export function createVariableFontRenderer(invalidate: () => void) {
       return face.family;
     } catch { return null; }
   };
+  return Object.assign(render, {
+    dispose() {
+      for (const face of faces.values()) document.fonts.delete(face);
+      faces.clear(); sources.clear();
+    },
+  });
 }

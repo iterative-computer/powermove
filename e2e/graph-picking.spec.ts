@@ -139,3 +139,46 @@ test('marquee keeps its original graph targets and selected points still drag to
   await expect.poll(values).toEqual(before.values);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('drawing an empty graph marquee preserves selected keyframes', async ({ session }) => {
+  const { page } = session;
+  await graphFixture(page);
+  const before = await page.evaluate(() => {
+    const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
+    return { ids: [...PM.sel.keys], x: box.x + T.gut + 15, y: box.y + T.ruler + 45 };
+  });
+  await page.mouse.move(before.x, before.y); await page.mouse.down();
+  await page.mouse.move(before.x + 25, before.y + 25, { steps: 4 });
+  expect(await page.evaluate(() => Boolean((window as any).PM.TL.marquee))).toBe(true);
+  expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual(before.ids);
+  await page.mouse.up();
+  expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual(before.ids);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('a graph marquee selects a subset and moves only enclosed points', async ({ session }) => {
+  const { page } = session;
+  await graphFixture(page);
+  const target = await page.evaluate(() => {
+    const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
+    const p = T._graph.points.reduce((a: any, b: any) => a.y > b.y ? a : b);
+    return { id: p.key.i, x: box.x + p.x, y: box.y + p.y,
+      keys: PM.findProp(PM.proj.layers[0], 'c.fontAxis.wght').kf.map((k: any) => ({ id: k.i, t: k.t, v: k.v })) };
+  });
+  await page.mouse.move(target.x - 14, target.y - 14); await page.mouse.down();
+  await page.mouse.move(target.x + 14, target.y + 14, { steps: 6 }); await page.mouse.up();
+  expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual([target.id]);
+  const point = await page.evaluate(() => {
+    const T = (window as any).PM.TL, box = T.cv.getBoundingClientRect(), p = T._graph.points[0];
+    return { x: box.x + p.x, y: box.y + p.y };
+  });
+  await page.mouse.move(point.x, point.y); await page.mouse.down();
+  await page.mouse.move(point.x + 18, point.y - 10, { steps: 6 }); await page.mouse.up();
+  const after = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    return PM.findProp(PM.proj.layers[0], 'c.fontAxis.wght').kf.map((k: any) => ({ id: k.i, t: k.t, v: k.v }));
+  });
+  expect(after.find((k: any) => k.id === target.id)).not.toEqual(target.keys.find((k: any) => k.id === target.id));
+  expect(after.filter((k: any) => k.id !== target.id)).toEqual(target.keys.filter((k: any) => k.id !== target.id));
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

@@ -131,13 +131,15 @@ describe('timeline runtime', () => {
     )).toBe(focused);
   });
 
-  it('adjusts every selected Bézier handle while preserving unselected handles', () => {
+  it('adjusts only the clicked Bézier handle even with multiple selected keys', () => {
     const first = { i: 'first', t: 0 };
     const second = { i: 'second', t: 1 };
     const third = { i: 'third', t: 2 };
 
-    expect(keysForBezierHandleDrag([first, second, third], first, ['first', 'second'])).toEqual([first, second]);
+    expect(keysForBezierHandleDrag([first, second, third], first, ['first', 'second'])).toEqual([first]);
     expect(keysForBezierHandleDrag([first, second, third], third, ['first', 'second'])).toEqual([third]);
+    const paired = { i: 'paired', t: 0 };
+    expect(keysForBezierHandleDrag([first, paired, second], first, ['first', 'second'])).toEqual([first, paired]);
   });
 
   it('labels every clip except audio, which shows its waveform alone', () => {

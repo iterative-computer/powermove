@@ -441,6 +441,20 @@ describe('InspectorPanel', () => {
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
   });
 
+  it.each(['.property-stopwatch', '.kf[data-key="scale.x"]'])('toggles only playhead keys with %s', (selector) => {
+    const candidate = layer('A');
+    candidate.p['scale.x']!.kf = [{ t: 0, v: 50 }, { t: 2, v: 100 }];
+    candidate.p['scale.y']!.kf = [{ t: 0, v: 50 }, { t: 2, v: 100 }];
+    setup([candidate]);
+    transport.time = 1; doc.bump('values'); flushSync();
+    const button = channelRow('A', 'scale.x').querySelector<HTMLButtonElement>(selector)!;
+    button.click(); doc.bump('values'); flushSync();
+    expect(candidate.p['scale.x']!.kf.map((k: any) => k.t).sort()).toEqual([0, 1, 2]);
+    button.click(); doc.bump('values'); flushSync();
+    expect(candidate.p['scale.x']!.kf.map((k: any) => k.t)).toEqual([0, 2]);
+    expect(candidate.p['scale.y']!.kf.map((k: any) => k.t)).toEqual([0, 2]);
+  });
+
   it('selects a property without opening its timeline rows', () => {
     const candidate = layer('A');
     const { PM } = setup([candidate]);
@@ -676,8 +690,8 @@ describe('InspectorPanel', () => {
     transport.time = 2;
     flushSync();
 
-    const amount = target.querySelector<HTMLButtonElement>('[aria-label="Animate Amount"]');
-    const shadow = target.querySelector<HTMLButtonElement>('[aria-label="Animate Shadow"]');
+    const amount = target.querySelector<HTMLButtonElement>('[aria-label="Add keyframe for Amount"]');
+    const shadow = target.querySelector<HTMLButtonElement>('[aria-label="Add keyframe for Shadow"]');
     expect(amount).not.toBeNull();
     expect(shadow).not.toBeNull();
 

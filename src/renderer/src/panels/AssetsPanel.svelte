@@ -13,6 +13,8 @@
     size?: number;
     vertices?: number;
     triangles?: number;
+    sourcePath?: string;
+    path?: string;
   }
 
   let { panelId }: PanelProps = $props();
@@ -79,6 +81,10 @@
 
   function liveAsset(asset: Asset): Record<string, any> | undefined {
     return PM.assets.get(asset.id);
+  }
+
+  function finderPath(asset: Asset): string {
+    return asset.sourcePath || asset.path || '';
   }
 
   function videoSource(asset?: Record<string, any>): string {
@@ -148,6 +154,20 @@
     event.stopPropagation();
     PM.cmd('addFromAsset', asset.id);
     status = `Added ${asset.name} to the timeline`;
+  }
+
+  async function revealAsset(event: MouseEvent, asset: Asset): Promise<void> {
+    event.stopPropagation();
+    selectAsset(asset.id);
+    const sourcePath = finderPath(asset);
+    if (!sourcePath) return;
+    try {
+      await window.powermove.media.revealSource(sourcePath);
+      status = `Revealed ${asset.name} in Finder`;
+    } catch {
+      status = `Could not reveal ${asset.name} in Finder`;
+      PM.toast(`Could not reveal ${asset.name} in Finder`);
+    }
   }
 
   function deleteAsset(asset: Asset): void {
@@ -383,6 +403,11 @@
           {/if}
           {#if asset.dur}<span class="asset-badge">{mediaDuration(asset.dur)}</span>{/if}
           <span class="asset-actions">
+            {#if finderPath(asset)}
+              <button class="asset-reveal" type="button" title="Reveal in Finder" aria-label={`Reveal ${asset.name} in Finder`} onclick={(event) => revealAsset(event, asset)}>
+                <Icon {PM} name="project" />
+              </button>
+            {/if}
             <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
               <Icon {PM} name="plus" />
             </button>

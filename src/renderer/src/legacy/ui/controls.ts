@@ -37,9 +37,13 @@ PM.numField = (get: any, set: any, opt: any = {}) => {
     enabled: () => !el.classList.contains('editing'),
     begin: () => { wheelValue = Number(get()); begin(opt, opt.label || 'Adjust'); },
     move: (delta, event) => {
+      const previous = PM.round(wheelValue, 3);
       wheelValue += delta * (opt.step || 1) * (opt.speed || .5) * (event.shiftKey ? 10 : event.altKey ? .1 : 1);
       wheelValue = Math.max(opt.min ?? -Infinity, Math.min(opt.max ?? Infinity, wheelValue));
-      write(set, PM.round(wheelValue, 3), opt); sync();
+      const next = PM.round(wheelValue, 3);
+      if (next === previous) return false;
+      write(set, next, opt); sync();
+      return true;
     },
     commit: () => commit(opt, opt.label || 'Adjust'),
     cancel: () => cancel(opt)

@@ -20,6 +20,7 @@ export const IPC = {
   mediaProxyCreate: 'media-proxy:create',
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
+  mediaRevealSource: 'media:reveal-source',
 
   codexRun: 'codex:run',
   codexSteer: 'codex:steer',
@@ -326,6 +327,7 @@ export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'sel
 import type { ExtensionsBridge } from './extensions';
 
 export interface PowermoveBridge {
+  agentNotification(options: { sound: string; preview?: boolean }): Promise<void>;
   ping(): Promise<string>;
   versions: { electron: string; chrome: string; node: string };
 
@@ -340,6 +342,8 @@ export interface PowermoveBridge {
     cancel(token:string):Promise<void>;
   };
   media: {
+    sourcePath(file: File): string | null;
+    revealSource(sourcePath: string): Promise<void>;
     createPlaybackProxy(file: File): Promise<MediaProxyResult>;
     readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
     releasePlaybackProxy(token: string): Promise<void>;

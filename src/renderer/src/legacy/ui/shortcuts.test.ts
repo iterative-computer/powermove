@@ -203,6 +203,27 @@ describe('pro editor shortcut behavior', () => {
     expect(ids(PM)).toEqual(['parent', 'video', 'locked', 'outside']);
   });
 
+  it('splits a selected group through its members without cloning the group strip', () => {
+    const PM = editorRuntime();
+    const first = layer(PM, 'first', { from: 1, dur: 8 });
+    const second = layer(PM, 'second', { from: 2, dur: 6 });
+    const group = PM.groupLayers([first.id, second.id], 'Titles');
+    PM.time = 5;
+
+    PM.cmd('split');
+
+    expect(PM.proj.layers.filter((item: any) => item.type === 'group')).toEqual([group]);
+    const members = PM.proj.layers.filter((item: any) => item.group === group.id);
+    expect(members).toHaveLength(4);
+    expect(members.map((item: any) => [item.from, item.dur])).toEqual([
+      [5, 4], [1, 4], [5, 3], [2, 3],
+    ]);
+    expect(PM.sel.layers).toEqual([members[0].id, members[2].id]);
+    expect(PM.hist.list().at(-1)).toBe('Split');
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.layers.filter((item: any) => item.group === group.id).map((item: any) => item.id)).toEqual(['first', 'second']);
+  });
+
   it('keeps split audio source time without replaying internal edge fades', () => {
     const PM = editorRuntime();
     const audio = layer(PM, 'audio', {

@@ -101,8 +101,12 @@
       enabled: () => !editing && !cancelScrub,
       begin: () => { current = Number(get()); wheelGesture = gesture; wheelGesture.begin(); },
       move: (delta, event) => {
-        current = clampValue(current + delta * effectiveStep * effectiveSpeed * (event.shiftKey ? 10 : event.altKey ? 0.1 : 1));
-        wheelGesture.write(current); onInput?.(current);
+        const previous = clampValue(current);
+        current = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, current + delta * effectiveStep * effectiveSpeed * (event.shiftKey ? 10 : event.altKey ? 0.1 : 1)));
+        const next = clampValue(current);
+        if (next === previous) return false;
+        wheelGesture.write(next); onInput?.(next);
+        return true;
       },
       commit: () => { wheelGesture.commit(); onCommit?.(Number(get())); },
       cancel: () => wheelGesture.cancel()

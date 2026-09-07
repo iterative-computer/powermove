@@ -177,8 +177,10 @@ PM.evP = (L: any, prop: any, T: any, key: any) => {
 };
 
 PM.active = (L: any, T: any) => {
+  if (L?.group && PM.groupAncestors?.(L).some((group: any) => !(isProperty(group.on) ? PM.evP(group, group.on, T, 'l.on') : group.on))) return false;
   const start = Number(L?.from), duration = Number(L?.dur), time = Number(T);
   if (!(isProperty(L?.on) ? PM.evP(L, L.on, T, 'l.on') : L?.on) || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
+  if (L.type === 'group') return true;
   const end = start + duration;
   if (time < start - 1e-6) return false;
   const compEnd = Number(PM.curComp()?.dur);
@@ -252,6 +254,25 @@ PM.beginEval = (T: any) => {
   memoT = T;
 };
 
+/** Compose group transforms once, even when several members share a parent rig.
+ * Group membership changes the surrounding coordinate space, never the parent link. */
+PM.transformParentMatrix = (L: any, T: any, parent = parentOf(L)) => {
+  const chain: any[] = [], seen = new Set<any>([L]), groups = new Set<string>();
+  let matrix = [1,0,0,1,0,0];
+  const appendGroups = (layer: any) => {
+    for (const group of (PM.groupAncestors?.(layer) || []).slice().reverse()) {
+      if (groups.has(group.id)) continue;
+      groups.add(group.id); matrix = mul(matrix, PM.localMatrix(group, T));
+    }
+  };
+  appendGroups(L);
+  for (let cur = parent; cur && !seen.has(cur) && chain.length < 256; cur = parentOf(cur)) {
+    seen.add(cur); chain.push(cur); appendGroups(cur);
+  }
+  for (let i = chain.length - 1; i >= 0; i--) matrix = mul(matrix, PM.localMatrix(chain[i], T));
+  return matrix;
+};
+
 PM.worldMatrix = (L: any, T: any) => {
   if (Object.is(memoT, T)) { const c = wmMemo.get(L); if (c) return c; }
   const chain: any[] = [];
@@ -259,8 +280,13 @@ PM.worldMatrix = (L: any, T: any) => {
   while (cur && chain.length < 256) {
     if (chain.length > 8 && chain.includes(cur)) break;
     chain.push(cur);
-    if (Object.is(memoT, T)) { const c = wmMemo.get(cur); if (c) { hit = c; break; } }
+    if (Object.is(memoT, T) && !L.group && !cur.group) { const c = wmMemo.get(cur); if (c) { hit = c; break; } }
     cur = parentOf(cur);
+  }
+  if (chain.some(layer => layer.group)) {
+    const matrix = mul(PM.transformParentMatrix(L, T), PM.localMatrix(L, T));
+    if (Object.is(memoT, T)) wmMemo.set(L, matrix);
+    return matrix;
   }
   /* fold from the topmost ancestor down to L */
   let m, i0;
@@ -274,7 +300,7 @@ PM.worldMatrix = (L: any, T: any) => {
   return m;
 };
 
-PM.worldOpacity = (L: any, T: any) => clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
+PM.worldOpacity = (L: any, T: any) => (PM.groupAncestors?.(L) || []).reduce((opacity: number, group: any) => opacity * clamp(PM.ev(group, 'opacity', T) / 100, 0, 1), clamp(PM.ev(L, 'opacity', T) / 100, 0, 1));
 
 /* True when assigning parentId to L would create a parenting cycle. */
 PM.wouldCycle = (L: any, parentId: any) => {

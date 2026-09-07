@@ -13,6 +13,7 @@ interface AssetFixture {
   h?: number;
   dur?: number;
   size?: number;
+  sourcePath?: string;
 }
 
 const IMAGE: AssetFixture = {
@@ -22,7 +23,8 @@ const IMAGE: AssetFixture = {
   w: 1920,
   h: 1080,
   dur: 65.4,
-  size: 1.5 * 1024 * 1024
+  size: 1.5 * 1024 * 1024,
+  sourcePath: '/Users/editor/Backdrop.png'
 };
 const AUDIO: AssetFixture = {
   id: 'audio-1',
@@ -110,11 +112,14 @@ function setup(
     h: domHelper
   };
 
+  const revealSource = vi.fn(async () => undefined);
+  (window as any).powermove = { media: { revealSource } };
+
   (window as any).PM = PM;
   doc.replace(project as any);
   instance = mount(AssetsPanel, { target, props: { panelId: 'assets', spec: {} } });
   flushSync();
-  return { PM, project, events, removeAsset };
+  return { PM, project, events, removeAsset, revealSource };
 }
 
 function rows(): HTMLElement[] {
@@ -154,6 +159,7 @@ describe('AssetsPanel', () => {
     /* Import lives in the panel header (register-simple), not in the body. */
     expect([...target.querySelectorAll('button')].some((button) => button.textContent?.trim() === 'Import')).toBe(false);
     expect(target.querySelector('button[aria-label="Add Backdrop.png to timeline"]')).not.toBeNull();
+    expect(target.querySelector('button[aria-label="Reveal Backdrop.png in Finder"]')).not.toBeNull();
     expect(target.querySelector('button[aria-label="Delete Backdrop.png"]')).not.toBeNull();
   });
 
@@ -218,6 +224,16 @@ describe('AssetsPanel', () => {
 
     expect(PM.cmd).toHaveBeenNthCalledWith(1, 'addFromAsset', 'image-1');
     expect(PM.cmd).toHaveBeenNthCalledWith(2, 'addFromAsset', 'audio-1');
+  });
+
+  it('reveals the original media file in Finder without adding it to the timeline', async () => {
+    const { PM, revealSource } = setup();
+
+    target.querySelector<HTMLButtonElement>('button[aria-label="Reveal Backdrop.png in Finder"]')?.click();
+    await Promise.resolve();
+
+    expect(revealSource).toHaveBeenCalledWith('/Users/editor/Backdrop.png');
+    expect(PM.cmd).not.toHaveBeenCalled();
   });
 
   it('uses roving tabindex and supports arrows, Home, End, Space, and Enter', () => {

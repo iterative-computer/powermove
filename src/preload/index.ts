@@ -25,6 +25,7 @@ import {
 } from '../shared/extensions';
 
 const bridge: PowermoveBridge = {
+  agentNotification: options => ipcRenderer.invoke('agent:notification', options),
   ping: () => ipcRenderer.invoke(IPC.ping) as Promise<string>,
 
   versions: {
@@ -44,6 +45,8 @@ const bridge: PowermoveBridge = {
     cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
   },
   media: {
+    sourcePath: (file) => webUtils.getPathForFile(file) || null,
+    revealSource: (sourcePath) => ipcRenderer.invoke(IPC.mediaRevealSource, sourcePath) as Promise<void>,
     createPlaybackProxy: (file) => {
       const sourcePath = webUtils.getPathForFile(file);
       if (!sourcePath) return Promise.resolve({ ok: false, error: 'The original file is no longer available' });

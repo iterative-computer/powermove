@@ -6,7 +6,7 @@ export function showNewLayerMenu(PM: LegacyPM, anchor: HTMLElement): void {
     { label: 'Text', kb: '⌘T', run: () => PM.cmd('newText') },
     { label: 'Shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
     { label: 'Solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
-    { label: 'Shader', kb: '⌘⇧G', run: () => PM.cmd('newShader') },
+    { label: 'Shader', run: () => PM.cmd('newShader') },
     { label: 'Null', run: () => PM.cmd('newNull') },
     '-',
     { label: 'Import media…', kb: '⌘I', run: () => PM.cmd('import') }
@@ -15,7 +15,7 @@ export function showNewLayerMenu(PM: LegacyPM, anchor: HTMLElement): void {
 
 export function showFxMenu(PM: LegacyPM, anchor: HTMLElement, selected?: any): void {
   const layer = selected ?? PM.firstSel?.();
-  if (!layer) {
+  if (!layer || PM.TYPE_META?.[layer.type]?.effects === false) {
     PM.toast?.('Select a layer first');
     return;
   }

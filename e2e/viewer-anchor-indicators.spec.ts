@@ -92,6 +92,8 @@ test('clicking away commits canvas text and returns to Selection while explicit 
   expect(result).toEqual({ tool: 'select', count: 1, text: 'Keep this text' });
   const undone = await page.evaluate(() => {
     const PM = (window as any).PM;
+    // Click-away also records the now-undoable layer deselection.
+    PM.hist.undo();
     PM.hist.undo();
     return { count: PM.proj.layers.length, text: (PM.proj.layers[0].d.text?.v ?? PM.proj.layers[0].d.text) };
   });

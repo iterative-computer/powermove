@@ -1,6 +1,7 @@
 import { defineConfig } from 'electron-vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'node:path';
+import { playerBundlePlugin } from './scripts/player-bundle';
 
 export default defineConfig({
   // A sandboxed preload must be CommonJS; pin the format so a future
@@ -20,7 +21,7 @@ export default defineConfig({
   renderer: {
     root: 'src/renderer',
     publicDir: 'public',
-    plugins: [svelte()],
+    plugins: [svelte(), playerBundlePlugin()],
     resolve: { alias: { powermove: path.resolve(__dirname, 'src/renderer/src/kernel/api.ts') } },
     build: {
       outDir: 'out/renderer',

@@ -37,7 +37,9 @@ function audioLayers(project: any = PM.proj) {
   const visit: any = (comp: any, offset: any, windowStart: any, windowEnd: any, path: any, depth: any) => {
     if (!comp || !Array.isArray(comp.layers) || depth > MAX_PRECOMP_DEPTH) return;
     for (const layer of comp.layers) {
-      if (!layer || layer.on === false || (comp.layers.some((l: any) => l.solo) && !layer.solo)) continue;
+      if (!layer || layer.on === false || (comp.layers.some((l: any) => l.solo) && !layer.solo && !(PM.groupAncestors?.(layer, comp.layers) || []).some((group: any) => group.solo))) continue;
+      const groupChain = (PM.groupAncestors?.(layer, comp.layers) || []).map((group: any) => ({ group, offset }));
+      if (groupChain.some(({ group }: any) => group.on === false)) continue;
       const naturalStart: any = offset + Math.max(0, finite(layer.from));
       const start: any = Math.max(windowStart, naturalStart);
       const end: any = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
@@ -48,6 +50,7 @@ function audioLayers(project: any = PM.proj) {
           ...layer,
           id: itemPath,
           from: naturalStart,
+          _audioGroups: groupChain,
           _audioSourceId: layer.id,
           _audioWindowStart: start,
           _audioWindowEnd: end,
@@ -66,6 +69,7 @@ function audioLayers(project: any = PM.proj) {
             fadeIn: 0,
             fadeOut: 0,
           },
+          _audioGroups: groupChain,
           _audioSourceId: layer.id,
           _audioWindowStart: start,
           _audioWindowEnd: end,
@@ -298,6 +302,8 @@ function disposeAsset(asset: any) {
 }
 
 function gainAt(layer: any, localTime: any, audibleDuration: any) {
+  const time = finite(layer.from) + finite(localTime);
+  if ((layer._audioGroups || []).some(({ group, offset }: any) => !evaluatedValue(PM, group, group.on, time - offset, 'l.on'))) return 0;
   if (evaluatedValue(PM, layer, layer.on, finite(layer.from) + finite(localTime), 'l.on') === false) return 0;
   const data: any = resolveContent(PM, layer, finite(layer.from) + finite(localTime));
   const base: any = clamp(finite(data.gain, 1), 0, 4);
@@ -329,7 +335,7 @@ function envelopePoints(layer: any, localStart: any, duration: any, audibleDurat
   const fadeIn: any = Math.max(0, finite(data.fadeIn));
   const fadeOut: any = Math.max(0, finite(data.fadeOut));
   const times: any = [start, end];
-  if (isProperty(layer.on) || ['gain', 'fadeIn', 'fadeOut'].some(key => isProperty(layer.d?.[key]))) {
+  if ((layer._audioGroups || []).some(({ group }: any) => isProperty(group.on)) || isProperty(layer.on) || ['gain', 'fadeIn', 'fadeOut'].some(key => isProperty(layer.d?.[key]))) {
     const step = 1 / Math.max(30, Number(PM.proj?.fps) || 30);
     for (let local = start + step; local < end; local += step) times.push(local);
     for (const key of ['gain', 'fadeIn', 'fadeOut']) for (const frame of layer.d?.[key]?.kf || []) if (frame.t > start && frame.t < end) times.push(frame.t);
@@ -376,6 +382,7 @@ function voiceSignature(layer: any, asset: any) {
 }
 
 function publishState() {
+  if (PM.headlessPlayer) return;
   if (typeof window.document === 'undefined' || !window.document.documentElement) return;
   const root: any = window.document.documentElement;
   root.dataset.audioEngine = 'decoded-buffer-v2';
@@ -517,6 +524,7 @@ function sync(time: any, force: any = false) {
 }
 
 function start(time: any) {
+  if (PM.audioDisabled) return;
   state.running = true;
   state.project = PM.proj || null;
   const generation: any = ++state.generation;
@@ -547,7 +555,7 @@ function tick(time: any) { sync(time, false); }
 
 function reconcile() {
   state.project = PM.proj || null;
-  if (!PM.playing) { pause(); return; }
+  if (PM.audioDisabled || !PM.playing) { pause(); return; }
   state.generation++;
   sync(PM.time, true);
 }
@@ -796,6 +804,13 @@ function hasAudibleLayers(project: any = PM.proj) {
 }
 
 const Audio: any = PM.Audio = {
+  destroy() {
+    pause();
+    state.generation++;
+    if (state.context) void state.context.close();
+    state.context = null;
+    state.master = null;
+  },
   accepts,
   normalizeLayer,
   prepareAsset,

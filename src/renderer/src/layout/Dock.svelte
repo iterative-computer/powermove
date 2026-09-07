@@ -5,6 +5,7 @@
   import { ghostSlotIndex } from '../panels/agent/ui-placement-geometry';
   import type { DockSpec, PanelSpec } from './model';
   import { panelSlot } from './portal';
+  import { roundedScroll } from './rounded-scroll';
   import Splitter from './Splitter.svelte';
 
   let {
@@ -31,7 +32,7 @@
   const ghostSlot = $derived(ghostSlotIndex(ghost, dock.id, specs.map(spec => spec.id)));
 </script>
 
-<div class="dock col" id={`dock-${dock.id}`} data-dock={dock.id} style:flex={dockFlex}>
+<div class="dock col" id={`dock-${dock.id}`} data-dock={dock.id} style:flex={dockFlex} use:roundedScroll>
   {#each specs as spec, index (spec.id)}
     {#if index > 0}
       <Splitter

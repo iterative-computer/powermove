@@ -16,6 +16,7 @@ import {
 } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
 import { packProjectFile } from './project-file';
+import { buildWebExport, inspectWebExport } from '../../player/export-web';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -119,6 +120,7 @@ function muxWebM(frames: any, { width, height, fps, codecId = 'V_VP9', audio }: 
 /* ── export core ───────────────────────────────────────── */
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
+X.buildWeb = () => buildWebExport(PM);
 
 /* The project owns its delivery settings; the legacy global store only seeds
    projects saved before Settings › Project existed. */
@@ -129,6 +131,26 @@ X.dialog = () => {
   const p: any = PM.proj;
   const opts: any = Object.assign({}, X.defaults(), { name: p.name });
   const body: any = h('div.export-form');
+  const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
+  const remembered: Record<string, string> = { code: 'web', video: 'mp4', images: 'still', project: 'json' };
+  remembered[category(opts.format)] = opts.format;
+  const choices = h('div.export-destinations', { role: 'group', 'aria-label': 'Export type' });
+  const buttons: Record<string, HTMLButtonElement> = {};
+  for (const [id, title, description] of [
+    ['code', 'Code', 'Apps & agents'], ['video', 'Video', 'MP4, WebM, ProRes'],
+    ['images', 'Images', 'Still or sequence'], ['project', 'Project', 'Editable .pmv'],
+  ] as const) {
+    const button = h('button.export-destination', { type: 'button', 'aria-label': title }, h('b', title), h('span', description));
+    button.onclick = () => { remembered[category(opts.format)] = opts.format; opts.format = remembered[id]; sync(); };
+    buttons[id] = button; choices.append(button);
+  }
+  body.append(choices);
+  const codeDetails = h('div.export-code-details',
+    h('h3', 'Put your animation in an app'),
+    h('p', 'Export a live animation with playback controls and editable text and colors.'),
+    h('div.export-code-includes', h('span', 'JavaScript player'), h('span', 'React component'), h('span', 'Agent handoff')),
+    h('p.export-code-delivery', 'One ZIP with your scene, assets and generated effects. Give it to a developer or coding agent to integrate.'));
+  body.append(codeDetails);
   const rows: any = {};
   const mk: any = (key: any, label: any, ctl: any) => {
     const r: any = PM.row(label, ctl);
@@ -143,12 +165,14 @@ X.dialog = () => {
   const hasWC: any = typeof window.VideoEncoder !== 'undefined';
   const plan: any = () => planExport(opts, { w: p.w, h: p.h, dur: p.dur, work: p.work });
 
-  mk('format', 'Format', PM.selectField(() => opts.format, (v: any) => { opts.format = v; sync(); },
-    EXPORT_FORMAT_OPTIONS.map((o: any) => {
+  const formatOptions: any[] = [];
+  const formatField = PM.selectField(() => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
+  const allFormats = EXPORT_FORMAT_OPTIONS.map((o: any) => {
       if (o.v === 'mp4') return { v: o.v, label: (window as any).powermove?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
       if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
       return { ...o };
-    })));
+    });
+  mk('format', 'Format', formatField);
 
   /* Resolution: the common multiples of the composition, or any pixel size.
      Custom sizes keep the composition's aspect so nothing renders stretched. */
@@ -209,8 +233,9 @@ X.dialog = () => {
   const presetSelect=PM.selectField(()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows) as any[])r.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
   const presetName=h('input',{type:'text',placeholder:'Preset name','aria-label':'Render preset name',style:{width:'120px'}});
   const savePreset=h('button.chip','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
-  body.append(h('div',{style:{display:'flex',gap:'8px',alignItems:'center',marginTop:'12px'}},presetSelect,presetName,savePreset));
-  body.append(h('p',{style:{fontSize:'11px',color:'var(--tx-3)'}},'Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.'));
+  const presetRow = h('div',{style:{display:'flex',gap:'8px',alignItems:'center',marginTop:'12px'}},presetSelect,presetName,savePreset);
+  const colorNote = h('p',{style:{fontSize:'11px',color:'var(--tx-3)'}},'Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.');
+  body.append(presetRow, colorNote);
   const nfoMain: any = h('b');
   const nfoNote: any = h('span');
   const nfo: any = h('div.export-summary', nfoMain, nfoNote);
@@ -218,6 +243,13 @@ X.dialog = () => {
 
   let m: any = null;
   function sync() {
+    const kind = category(opts.format);
+    for (const [id, button] of Object.entries(buttons)) button.setAttribute('aria-pressed', String(id === kind));
+    codeDetails.hidden = kind !== 'code';
+    presetRow.hidden = colorNote.hidden = kind === 'code' || kind === 'project';
+    formatOptions.splice(0, formatOptions.length, ...allFormats.filter(o => category(o.v) === kind));
+    formatField.sync?.();
+    rows.format.classList.toggle('is-off', kind === 'code' || kind === 'project');
     const support: any = exportFieldSupport(opts.format);
     for (const key of Object.keys(rows)) {
       if (key === 'format' || key === 'size') continue;
@@ -230,7 +262,9 @@ X.dialog = () => {
       if (window.document.activeElement !== hIn) hIn.value = String(est.height);
       scaleField.sync?.();
     }
-    if (opts.format === 'json') {
+    if (opts.format === 'web') {
+      nfoMain.textContent = `${p.name || 'Untitled'}-web.zip`;
+    } else if (opts.format === 'json') {
       nfoMain.textContent = `${p.name || 'Untitled'}.pmv`;
     } else if (opts.format === 'still') {
       nfoMain.textContent = `${est.width}×${est.height} · frame at ${PM.tc(PM.time, p.fps)}`;
@@ -238,14 +272,19 @@ X.dialog = () => {
       nfoMain.textContent = `${est.frames} frames · ${PM.round(est.seconds, 2)}s · ${est.width}×${est.height}`;
     }
     nfoNote.textContent = est.note;
+    if (opts.format === 'web') {
+      const report = inspectWebExport(PM);
+      nfoNote.textContent = report.errors.length ? report.errors.join(' · ') : est.note + (report.fonts.size ? ' · System fonts may need to be supplied in your app' : '');
+    }
     const pri: any = m?.el?.querySelector('.mf .btn.pri');
     if (pri) pri.textContent = exportActionLabel(opts.format);
   }
   sync();
   m = PM.modal({
-    title: 'Export', body, width: 500,
+    title: 'Export', body, width: 580,
     actions: [{ label: 'Cancel' }, {label:'Queue',run:()=>{X.remember(opts);X.enqueue(opts);X.queueDialog();}},{ label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); run(opts); } }],
   });
+  sync();
 };
 
 /** Keep the dialog's last choices as this project's export settings. */
@@ -294,6 +333,29 @@ async function run(opts: any) {
   const p: any = PM.proj;
   const [t0, t1]: any = range(opts);
   const W: any = Math.round(p.w * opts.scale / 2) * 2, H: any = Math.round(p.h * opts.scale / 2) * 2;
+
+  if (opts.format === 'web') {
+    X.busy = true;
+    try {
+      await PM.app?.importQueue;
+      const result = await buildWebExport(PM);
+      const name = (p.name || 'powermove') + '-web.zip';
+      const bridge = (window as any).powermove;
+      if (bridge?.saveFile) {
+        const saved = await bridge.saveFile({ name, data: new Uint8Array(result.bytes) });
+        if (!saved.ok) {
+          if (saved.cancelled) return { cancelled: true };
+          throw new Error(saved.error || 'Could not save web animation');
+        }
+      } else await PM.download(new Blob([new Uint8Array(result.bytes)], { type: 'application/zip' }), name);
+      PM.toast(result.scene.warnings.length ? 'Web animation exported · see README for compatibility notes' : 'Web animation exported');
+      return { cancelled: false };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      PM.toast('Could not export web animation: ' + message, 8000);
+      return { error: message };
+    } finally { X.busy = false; }
+  }
 
   if (opts.format === 'json') {
     try {

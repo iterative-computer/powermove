@@ -19,8 +19,8 @@ void main(){
   v_uv = u_uv.xy + a_pos * u_uv.zw;
   v_st = vec2(a_pos.x, 1.0 - a_pos.y);
   vec3 p = u_m * vec3(a_pos, 1.0);
-  v_px = p.xy;
-  gl_Position = vec4((p.x / u_res.x) * 2.0 - 1.0, 1.0 - (p.y / u_res.y) * 2.0, 0.0, 1.0);
+  v_px = p.xy / p.z;
+  gl_Position = vec4((p.x / u_res.x) * 2.0 - p.z, p.z - (p.y / u_res.y) * 2.0, 0.0, p.z);
 }`;
 
 const PRE = `#version 300 es
@@ -121,7 +121,8 @@ uniform vec4 u_g[8];         // cx, cy, w, h   (layer px)
 uniform vec4 u_q[8];         // rotation rad, feather px, shape 0rect/1ellipse, mode 0add/1sub
 float sdBox(vec2 p, vec2 b){ vec2 d = abs(p) - b; return length(max(d, 0.)) + min(max(d.x, d.y), 0.); }
 void main(){
-  vec2 lp = (u_inv * vec3(v_px, 1.0)).xy;
+  vec3 local = u_inv * vec3(v_px, 1.0);
+  vec2 lp = local.xy / local.z;
   float cov = u_hasAdd == 1 ? 0.0 : 1.0;
   for (int i = 0; i < 8; i++) {
     if (i >= u_cnt) break;

@@ -31,7 +31,7 @@ const lockedLayerOps: any = () => lockedLayerOpsCache || (lockedLayerOpsCache = 
   Object.entries(Edit.operations).filter(([, def]: any) => def.target === 'layer').map(([type]: any) => type)));
 const LAYER_FIELDS: any = new Set([
   'name', 'from', 'duration', 'visible', 'locked', 'shy', 'solo', 'blend',
-  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'scaleLinked',
+  'motionBlur', 'parent', 'matteSource', 'color', 'collapsed', 'threeD', 'scaleLinked',
 ]);
 let live: any = null;
 
@@ -89,7 +89,7 @@ function layerPath(target: any): any[] | null {
 
 function commandScopes(command: any): any[][] {
   const type = command?.type;
-  if (['add_layer', 'delete_layers', 'reorder_layer'].includes(type)) return [['layers'], ['comps']];
+  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(type)) return [['layers'], ['comps']];
   if (type === 'set_composition') {
     return [['name'], ['w'], ['h'], ['fps'], ['dur'], ['bg'], ['backgroundFill'], ['shutter'], ['work']];
   }
@@ -376,7 +376,7 @@ function setLayer(command: any) {
     if (patch.motionBlur !== undefined && patch.motionBlur !== false) throw new Error('Audio layers do not support motion blur');
   }
   if (patch.name != null) layer.name = String(patch.name).trim() || layer.name;
-  if (patch.from != null) layer.from = Math.max(0, finite(patch.from, 'layer start'));
+  if (patch.from != null) layer.from = Math.max(layer.type === 'group' ? -Infinity : 0, finite(patch.from, 'layer start'));
   if (patch.duration != null) layer.dur = Math.max(1 / PM.proj.fps, finite(patch.duration, 'layer duration'));
   if (patch.visible != null) layer.on = !!patch.visible;
   if (patch.locked != null) layer.lock = !!patch.locked;
@@ -396,14 +396,20 @@ function setLayer(command: any) {
     layer.matteSource=patch.matteSource;layer.matteMode ||= PM.P('alpha');
   }
   if (patch.parent !== undefined) {
+    if (layer.type === 'group' && patch.parent != null) throw new Error('Move groups into another group to nest their transforms');
     const parent: any = patch.parent == null ? null : findLayer(patch.parent);
     if (patch.parent != null && (!parent || parent.id === layer.id)) throw new Error('Invalid parent layer');
+    if (parent && (parent.type === 'group' || PM.TYPE_META[parent.type]?.transform === false)) throw new Error('This layer cannot be a parent');
     if (parent && PM.wouldCycle(layer, parent.id)) throw new Error('Parenting would create a cycle');
     if (layer.parent !== (parent?.id ?? null)) preserveParentPose(PM, layer, parent, PM.time);
     layer.parent = parent ? parent.id : null;
   }
   if (patch.color != null) layer.color = String(patch.color);
   if (patch.collapsed != null) layer.collapsed = !!patch.collapsed;
+  if (patch.threeD != null) {
+    if (layer.type === 'audio' || layer.type === 'adjustment') throw new Error('This layer cannot be a 3D layer');
+    layer.threeD = !!patch.threeD;
+  }
   if (patch.scaleLinked != null) layer.scaleLinked = !!patch.scaleLinked;
   PM.touch();
   return { id: layer.id, keys: Object.keys(patch) };
@@ -501,7 +507,7 @@ function addLayer(command: any) {
   PM.addLayer(layer, command.index == null ? 0 : PM.clamp(Math.round(command.index), 0, PM.proj.layers.length));
   if (command.parent != null) {
     const parent: any = findLayer(command.parent);
-    if (!parent || parent.id === layer.id || PM.wouldCycle(layer, parent.id)) throw new Error('Invalid parent layer');
+    if (layer.type === 'group' || !parent || parent.type === 'group' || PM.TYPE_META[parent.type]?.transform === false || parent.id === layer.id || PM.wouldCycle(layer, parent.id)) throw new Error('Invalid parent layer');
     layer.parent = parent.id;
   }
   if (command.blend != null) {
@@ -531,8 +537,18 @@ function reorderLayer(command: any) {
   const from: any = PM.proj.layers.indexOf(layer);
   const to: any = PM.clamp(Math.round(finite(command.index, 'layer index')), 0, PM.proj.layers.length - 1);
   if (from !== to) {
-    PM.proj.layers.splice(from, 1);
-    PM.proj.layers.splice(to, 0, layer);
+    const ids = PM.expandGroups?.([layer.id]) || [layer.id];
+    const target = PM.proj.layers[to];
+    if (ids.includes(target?.id)) return { id: layer.id, index: from };
+    const block = PM.proj.layers.filter((item: any) => ids.includes(item.id));
+    const remaining = PM.proj.layers.filter((item: any) => !ids.includes(item.id));
+    const index = remaining.indexOf(target) + (to > from ? 1 : 0);
+    if (target?.lock || (PM.groupAncestors?.(target) || []).some((group: any) => group.lock)) throw new Error('Unlock the destination before moving layers');
+    const destination = target?.type === 'group' ? target.id : target?.group || null;
+    if ((layer.group || null) !== destination) PM.moveToGroup([layer.id], destination);
+    remaining.splice(Math.max(0, index), 0, ...block);
+    PM.proj.layers = remaining;
+    PM.normalizeGroupStack?.();
     PM.bus.emit('layers');
   }
   return { id: layer.id, index: to };
@@ -734,16 +750,24 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
      is constructed by trusted binding code, not by the manifest — the manifest
      button path strips these fields in workspace.js). That gesture may
      overwrite hand-intent, but it still cannot bypass the layer lock. */
-  if (isGeneratedOrigin(origin) && !(origin === 'generated-ui' && command.markIntent === 'human')) {
+  if (isGeneratedOrigin(origin) && origin !== 'agent' && !(origin === 'generated-ui' && command.markIntent === 'human')) {
     command.preserveHandEdits = true;
   }
 
+  if (['group_layers', 'ungroup_layers', 'move_to_group'].includes(command.type)) {
+    const targets = (command.targets || []).map(findLayer).filter(Boolean);
+    const locked = targets.find((layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock));
+    if (locked) throw new Error(lockedMessage(locked));
+  }
   if (command.type === 'delete_layers') {
     const refs: any = Array.isArray(command.targets) ? command.targets : [command.target || command.layer].filter(Boolean);
-    const layers: any = refs.length ? refs.map(findLayer).filter(Boolean) : PM.selLayers();
+    const base: any[] = refs.length ? refs.map(findLayer).filter(Boolean) : PM.selLayers();
+    const ids = PM.expandGroups?.(base.map(layer => layer.id));
+    const layers: any = ids ? ids.map(findLayer).filter(Boolean) : base;
     if (!layers.length) return { command };
     if (command.overrideLock === true) return { command };
-    const locked: any = layers.filter((layer: any) => layer.lock);
+    const locked: any = layers.filter((layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock));
+    if (locked.length && base.some(layer => layer.type === 'group')) throw new Error('Unlock the group and its contents before deleting');
     if (!locked.length) return { command };
     const editable: any = layers.filter((layer: any) => !layer.lock);
     const names: any = locked.map((layer: any) => `“${layer.name}”`).join(', ');
@@ -775,7 +799,7 @@ function policyCommand(sourceCommand: any, meta: any = {}) {
       && command.type === 'set_layer'
       && command.patch && typeof command.patch === 'object' && !Array.isArray(command.patch)
       && Object.keys(command.patch).length === 1 && command.patch.locked === false;
-    if (layer?.lock && command.overrideLock !== true && !unlockOnly) throw new Error(lockedMessage(layer));
+    if ((layer?.lock || layer && (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock)) && command.overrideLock !== true && !unlockOnly) throw new Error(lockedMessage(layer));
   }
   return { command };
 }
@@ -799,6 +823,9 @@ function runOne(sourceCommand: any, meta: any = {}) {
     case 'set_composition': data = setComposition(command); break;
     case 'add_layer': data = addLayer(command); break;
     case 'delete_layers': data = deleteLayers(command); break;
+    case 'group_layers': data = { id: PM.groupLayers(command.targets, command.name).id }; break;
+    case 'ungroup_layers': data = PM.ungroupLayers(command.targets); break;
+    case 'move_to_group': data = PM.moveToGroup(command.targets, command.group); break;
     case 'reorder_layer': data = reorderLayer(command); break;
     case 'add_effect': data = addEffect(command); break;
     case 'remove_effect': data = removeEffect(command); break;
@@ -822,7 +849,7 @@ function runOne(sourceCommand: any, meta: any = {}) {
       ref[end] = ref[start] + referenceSpan;
     }
   }
-  if (['add_layer', 'delete_layers', 'reorder_layer'].includes(command.type)
+  if (['add_layer', 'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group'].includes(command.type)
       || command.type === 'set_layer' && Object.keys(command.patch || {}).some((key: any) => ['name', 'from', 'duration', 'visible', 'parent'].includes(key))) {
     PM.ProjectIndex?.invalidate();
   } else if (['replace_keyframes', 'add_effect', 'remove_effect', 'set_transition'].includes(command.type)
@@ -946,7 +973,7 @@ function sourceCatalog() {
         });
       }
     }
-    return { id: layer.id, name: layer.name, type: layer.type, controls: [...fields, ...content, ...properties] };
+    return { id: layer.id, name: layer.name, type: layer.type, group: layer.group || null, parent: layer.parent, controls: [...fields, ...content, ...properties] };
   });
   return { target: '$composition', composition, layers, optionSets: { parentLayers: parentOptions }, operations: Object.keys(Edit.operations) };
 }
@@ -978,6 +1005,9 @@ const Edit: any = {
     add_layer: { target: 'project', fields: ['layerType', 'name', 'content', 'properties', 'parent', 'blend', 'motionBlur', 'visible', 'shy', 'collapsed'] },
     delete_layers: { target: 'project', fields: ['targets'] },
     reorder_layer: { target: 'layer', fields: ['index'] },
+    group_layers: { target: 'project', fields: ['targets', 'name'] },
+    ungroup_layers: { target: 'project', fields: ['targets'] },
+    move_to_group: { target: 'project', fields: ['targets', 'group'] },
     add_effect: { target: 'layer', fields: ['effect', 'parameters'] },
     remove_effect: { target: 'layer', fields: ['effect'] },
     set_effect: { target: 'layer', fields: ['effect', 'patch'] },

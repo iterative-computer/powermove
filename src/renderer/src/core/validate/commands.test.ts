@@ -78,10 +78,18 @@ const validCommands: unknown[] = [
       edits: [{ path: 'properties.opacity', value: { op: 'multiply', args: [{ ref: 'current' }, 0.5] } }]
     },
     state: { scale: 2 }
-  }
+  },
+
+  {type: 'group_layers', targets: ['a'], name: 'Group'},
+  {type: 'ungroup_layers', targets: ['g']},
+  {type: 'move_to_group', targets: ['a'], group: null},
+
 ];
 
 const invalidCommands: unknown[] = [
+  {type: 'group_layers', targets: []},
+  {type: 'ungroup_layers', targets: [12]},
+  {type: 'move_to_group', targets: ['a'], group: 12},
   { type: 'set_property', value: 42 },
   { type: 'replace_keyframes', path: 'opacity', keyframes: 'not-an-array' },
   { type: 'set_easing', keyframes: [], curve: [0, 0, 1, 1] },
@@ -105,6 +113,9 @@ const invalidCommands: unknown[] = [
 
 const huge = 'x'.repeat(50_001);
 const oversizedCommands: unknown[] = [
+  {type: 'group_layers', targets: ['x'.repeat(60000)]},
+  {type: 'ungroup_layers', targets: ['x'.repeat(60000)]},
+  {type: 'move_to_group', targets: ['x'.repeat(60000)], group: null},
   { type: 'set_property', path: 'opacity', value: huge },
   { type: 'replace_keyframes', path: 'opacity', keyframes: [{ time: 0, value: 0 }], expression: huge },
   { type: 'set_easing', keyframes: [huge], curve: [0, 0, 1, 1] },
@@ -149,6 +160,7 @@ function exhaustivelyName(command: EditCommand): string {
     case 'add_marker': return command.type;
     case 'create_section': return command.type;
     case 'update_section': return command.type;
+    case 'group_layers': case 'ungroup_layers': case 'move_to_group': return command.type;
     case 'transform_layers': return command.type;
     default: return assertNever(command);
   }
@@ -255,14 +267,14 @@ describe('parseEditCommand', () => {
     })).toMatchObject({ overrideLock: true });
   });
 
-  it('keeps the agent allowlist separate and forces hand-intent protection', () => {
+  it('keeps the agent allowlist separate and preserves explicit hand-intent overrides', () => {
     const parsed = parseAgentEditCommand({
       type: 'set_property', target: 'L-1', path: 'position.x', value: 1040,
       preserveHandEdits: false, markIntent: 'human', overrideLock: true
     });
     expect(parsed).toEqual({
       type: 'set_property', target: 'L-1', path: 'position.x', value: 1040,
-      preserveHandEdits: true
+      preserveHandEdits: false
     });
     expect(parseAgentEditCommand({ type: 'create_section', section: { id: 'section-1' } }))
       .toBeInstanceOf(ValidationError);
@@ -271,8 +283,8 @@ describe('parseEditCommand', () => {
     })).toEqual({ type: 'set_transition', layer: 'L-1', edge: 'out', transition: null });
   });
 
-  it('rejects the removed Solo layer feature', () => {
-    expect(parseEditCommand({ type: 'set_layer', patch: { solo: true } })).toBeInstanceOf(ValidationError);
+  it('supports Solo switches on existing layers', () => {
+    expect(parseEditCommand({ type: 'set_layer', patch: { solo: true } })).toEqual({type:'set_layer',patch:{solo:true}});
     expect(parseEditCommand({ type: 'add_layer', layerType: 'solid', solo: true })).toEqual({
       type: 'add_layer', layerType: 'solid'
     });
@@ -419,7 +431,7 @@ describe('parseEditCommands', () => {
       { type: 'create_section', section: { id: 'skip-me' } }
     ], { source: 'agent' });
     expect(parsed).toEqual([{
-      type: 'set_property', path: 'opacity', value: 20, preserveHandEdits: true
+      type: 'set_property', path: 'opacity', value: 20, preserveHandEdits: false
     }]);
   });
 });

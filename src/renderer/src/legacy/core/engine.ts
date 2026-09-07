@@ -195,16 +195,41 @@ window.document?.addEventListener?.('visibilitychange',resumeView);
 PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}) => {
   const cv = PM.GL.canvas;
   const ow = cv.width, oh = cv.height, oq = PM.quality;
-  PM.GL.resize(w, h);
-  PM.quality = 1;
-  const motionBlur = options.mblur !== false;
-  PM.GL.render(T, { mblur: motionBlur, mbSamples: motionBlur ? Math.max(1, Number(options.mbSamples) || 16) : 1, shutter: PM.proj.shutter || .5 });
-  const out = window.document.createElement('canvas');
-  out.width = w; out.height = h;
-  (out.getContext('2d') as any).drawImage(cv, 0, 0);
-  PM.quality = oq;
-  PM.GL.resize(ow, oh);
-  PM.invalidate('render');
-  return out;
+  // Capture borrows the visible WebGL canvas. Resizing it back clears its
+  // drawing buffer, and the next RAF may be delayed by another video capture.
+  // Retain the exact displayed pixels rather than re-rendering decoded media
+  // that may already have been sought to the agent's requested time.
+  const gl = PM.GL.gl as WebGL2RenderingContext;
+  const savedFrame = gl.createFramebuffer();
+  const savedColor = gl.createRenderbuffer();
+  try {
+    gl.bindRenderbuffer(gl.RENDERBUFFER, savedColor);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, ow, oh);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFrame);
+    gl.framebufferRenderbuffer(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, savedColor);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, ow, oh, 0, 0, ow, oh, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    PM.GL.resize(w, h);
+    PM.quality = 1;
+    const motionBlur = options.mblur !== false;
+    PM.GL.render(T, { mblur: motionBlur, mbSamples: motionBlur ? Math.max(1, Number(options.mbSamples) || 16) : 1, shutter: PM.proj.shutter || .5 });
+    const out = window.document.createElement('canvas');
+    out.width = w; out.height = h;
+    (out.getContext('2d') as any).drawImage(cv, 0, 0);
+    return out;
+  } finally {
+    PM.quality = oq;
+    PM.GL.resize(ow, oh);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, savedFrame);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, ow, oh, 0, 0, ow, oh, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    gl.viewport(0, 0, ow, oh);
+    gl.deleteFramebuffer(savedFrame);
+    gl.deleteRenderbuffer(savedColor);
+    PM.invalidate('render');
+  }
 };
 }

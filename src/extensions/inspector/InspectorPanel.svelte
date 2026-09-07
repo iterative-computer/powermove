@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { inspectorSelection } from './multi-edit';
   import type { PanelProps, PowermoveAPI } from 'powermove';
   import { provideInspectorContext } from './context';
   import CompositionSection from './CompositionSection.svelte';
@@ -21,7 +22,7 @@
 
   const selectedLayers = $derived<any[]>(
     (inspectorRefresh.version, doc.tick.structure, doc.proj,
-      sel.layers.map((id) => doc.proj?.layers?.find((layer: any) => layer.id === id)).filter(Boolean))
+      inspectorSelection(PM, sel.layers.map((id) => doc.proj?.layers?.find((layer: any) => layer.id === id)).filter(Boolean)))
   );
   const firstLayer = $derived(selectedLayers[0]);
 
@@ -45,10 +46,17 @@
       </div>
     {/if}
     <div class="inspector-layer" data-inspector-layer={firstLayer.id}>
-      <ContentSection {PM} layer={firstLayer} {fontsVersion} />
+      {#if firstLayer.type === 'group'}
+        <div class="group-actions">
+          <button class="chip" onclick={() => PM.selectLayers(PM.expandGroups([firstLayer.id]).filter((id: string) => id !== firstLayer.id))}>Select contents</button>
+          <button class="chip" onclick={() => PM.cmd('ungroupLayers')}>Ungroup</button>
+        </div>
+      {:else}
+        <ContentSection {PM} layer={firstLayer} {fontsVersion} />
+      {/if}
       <StructuredSection {PM} layer={firstLayer} />
-      {#if firstLayer.type !== 'audio'}
-        <TransformSection {PM} layer={firstLayer} />
+      {#if firstLayer.type !== 'audio'}<TransformSection {PM} layer={firstLayer} />{/if}
+      {#if firstLayer.type !== 'audio' && firstLayer.type !== 'group'}
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
         {#if firstLayer.type === 'extension'}<ExtensionLayerParams {PM} layer={firstLayer} />{/if}
         <EffectsSection {PM} layer={firstLayer} />
@@ -61,6 +69,7 @@
 </div>
 
 <style>
+  .group-actions { display:flex; gap:8px; padding:12px 16px 0; }
   .inspector-layer {
     display: flex;
     flex-direction: column;

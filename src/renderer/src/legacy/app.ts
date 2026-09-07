@@ -20,6 +20,7 @@ const document = window.document;
 type FileState = { path?: string; savedHash?: string; dirty: boolean; handle?: any };
 const fileStates = new Map<string, FileState>();
 const comparisonVersions = new Map<string, number>();
+let activeSave: Promise<boolean> | null = null;
 function fileState(id = PM.proj.id): FileState {
   let state = fileStates.get(id);
   if (!state) {
@@ -664,8 +665,7 @@ PM.autosave = () => {
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
 ['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
 
-PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) => {
-  if (APP.saving) return false;
+async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   APP.saving = true;
   try {
     (window.document.activeElement as HTMLElement | null)?.blur?.();
@@ -710,7 +710,19 @@ PM.saveProject = async ({ saveAs = false, projectId = PM.proj.id }: any = {}) =>
   } catch (error: any) {
     if (error.name === 'AbortError') return false;
     PM.toast('Could not save project: ' + (error.message || 'Save failed'), 6000); return false;
-  } finally { APP.saving = false; }
+  }
+}
+PM.saveProject = (options: any = {}) => {
+  if (activeSave) return Promise.resolve(false);
+  const save = saveProject(options);
+  activeSave = save;
+  void save.finally(() => {
+    if (activeSave === save) {
+      activeSave = null;
+      APP.saving = false;
+    }
+  });
+  return save;
 };
 PM.openProject = async () => {
   if (window.powermove?.openProjectFile) {
@@ -834,7 +846,10 @@ function switchProject(p: any) {
 PM.confirmCloseProject = async (id: string) => {
   PM.bus.emit('project:flush-edits');
   await APP.importQueue;
-  if (APP.saving) { PM.toast('Please wait for the current save to finish.'); return false; }
+  // Closing is a continuation of the user's current action. If a save is
+  // already running, join it and then re-check the document instead of making
+  // them retry Close after the file dialog or write completes.
+  if (activeSave) await activeSave;
   const project = id === PM.proj.id ? PM.proj : PM.Projects.get(id);
   if (!project || !await refreshFileDirty(project)) return true;
   if (!window.powermove?.confirmProjectClose) return window.confirm?.('Close without saving a project file?') ?? false;

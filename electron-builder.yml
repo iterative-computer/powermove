@@ -20,6 +20,8 @@ files:
   # install-time bin copy is the same executable and is not used by Powermove.
   - '!node_modules/esbuild/bin/esbuild'
 extraResources:
+  - from: resources/sounds
+    to: sounds
   - from: node_modules/ffmpeg-static/ffmpeg
     to: encoder/ffmpeg
   - from: node_modules/ffmpeg-static/LICENSE
@@ -48,6 +50,12 @@ extraMetadata:
   main: out/main/index.js
 
 afterPack: ./scripts/after-pack.mjs
+publish:
+  provider: github
+  owner: motionerapp
+  repo: powermove-releases
+  releaseType: prerelease
+
 artifactName: ${productName}-${version}-mac-${arch}.${ext}
 
 mac:

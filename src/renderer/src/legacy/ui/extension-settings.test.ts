@@ -43,7 +43,7 @@ function bridge(initial: ExtensionRecord[]) {
 }
 
 describe('extension settings control', () => {
-  it('shows agent, user, built-in, disabled, replaced, and malformed records', async () => {
+  it('shows added extensions and hides built-ins and group headings', async () => {
     const harness = bridge([
       record('builtin-ext', { scope: 'builtin', manifest: { id: 'builtin-ext', name: 'Builtin', version: '1.0.0', apiVersion: 1, author: 'powermove' } }),
       record('agent-ext', { manifest: { id: 'agent-ext', name: 'Agent tool', version: '2.0.0', apiVersion: 1, author: 'agent' } }),
@@ -53,15 +53,13 @@ describe('extension settings control', () => {
     ]);
     const control = createExtensionSettingsControl(harness.api);
 
-    await vi.waitFor(() => expect(control.element.querySelectorAll('[data-extension-id]')).toHaveLength(5));
-    expect(control.element.textContent).toContain('5 extensions discovered');
-    expect(control.element.querySelector('[data-extension-id="agent-ext"] .settings-extension-tag')?.textContent).toBe('Agent');
-    /* Built in is the default, so only added extensions carry a source tag. */
-    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .settings-extension-tag')).toBeNull();
+    await vi.waitFor(() => expect(control.element.querySelectorAll('[data-extension-id]')).toHaveLength(4));
+    expect(control.element.textContent).toContain('4 extensions');
+    expect(control.element.querySelector('[data-extension-id="agent-ext"] .settings-extension-tag')).toBeNull();
+    expect(control.element.querySelector('.settings-extension-group')).toBeNull();
+    expect(control.element.querySelector('[data-extension-id="builtin-ext"]')).toBeNull();
     expect(control.element.querySelector('[data-extension-id="disabled-ext"] .toggle')?.getAttribute('aria-pressed')).toBe('false');
-    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .toggle')?.getAttribute('aria-pressed')).toBe('true');
     expect(control.element.querySelector('[data-extension-id="broken-ext"] .settings-extension-status')?.textContent).toBe('Needs attention');
-    expect(control.element.querySelector('[data-extension-id="builtin-ext"] .settings-extension-status')?.textContent).toBe('Active');
     expect(control.element.querySelector('[data-extension-id="old-timeline"]')?.textContent).toContain('Replaced by new-timeline');
     expect(control.element.querySelector('[data-extension-id="broken-ext"]')?.textContent).toContain('Invalid manifest');
 

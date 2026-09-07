@@ -89,6 +89,20 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 /* The export dialog reuses the inspector row, whose 64px label column is sized
    for short property names; its option names need the room. */
 .export-form{display:flex;flex-direction:column;gap:4px}
+.export-destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:16px}
+.export-destination{display:flex;flex-direction:column;align-items:flex-start;gap:5px;padding:12px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);text-align:left;cursor:pointer}
+.export-destination b{font-size:13px;font-weight:600}
+.export-destination span{font-size:10px;color:var(--tx-3);white-space:nowrap}
+.export-destination:hover{border-color:var(--tx-3)}
+.export-destination[aria-pressed=true]{border-color:var(--accent,#4c8dff);background:color-mix(in srgb,var(--accent,#4c8dff) 10%,var(--bg-field));color:var(--tx-1)}
+.export-destination:focus-visible{outline:2px solid var(--accent,#4c8dff);outline-offset:2px}
+.export-form [hidden]{display:none!important}
+.export-code-details{padding:4px 0 8px}
+.export-code-details h3{margin:0 0 8px;font-size:16px;font-weight:600;color:var(--tx-1)}
+.export-code-details p{margin:0 0 14px;font-size:12px;line-height:1.6;color:var(--tx-2)}
+.export-code-includes{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+.export-code-includes span{border:1px solid var(--line);border-radius:5px;padding:5px 8px;color:var(--tx-2);font-size:11px}
+.export-code-details .export-code-delivery{color:var(--tx-3);margin-bottom:0}
 .export-form .row.split .k{width:132px}
 .export-form .row.split.is-off{display:none}
 .export-form .export-toggle{min-width:0;flex:1;display:flex;align-items:center;gap:8px}
@@ -415,15 +429,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .asset-preview.audio{background:#25473C}
 .asset-wave{position:absolute;inset:26px 0 3px;display:flex;align-items:flex-end;gap:0;padding:0 2px}
 .asset-wave i{flex:1;min-width:0;background:#5FC29C;opacity:.9}
-.asset-badge{position:absolute;left:4px;top:4px;z-index:2;height:16px;padding:0 4px;display:flex;align-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff;font-size:10px;font-variant-numeric:tabular-nums}
+.asset-badge{position:absolute;left:4px;top:4px;z-index:2;height:16px;padding:0 4px;display:flex;align-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff;font-size:10px;font-variant-numeric:tabular-nums;transition:opacity var(--dur-1)}
 .asset-copy{min-width:0;display:flex;flex-direction:column;gap:1px;padding:0 1px}
 .asset-copy b,.asset-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .asset-copy b{font-size:var(--fs-xs);font-weight:var(--fw-regular);color:var(--tx)}
 .asset-copy small{color:var(--tx-4);font-size:10px}
 .asset-actions{position:absolute;right:4px;top:4px;z-index:3;display:flex;gap:3px;opacity:0;transition:opacity var(--dur-1)}
 .asset-card:hover .asset-actions,.asset-card:focus-within .asset-actions{opacity:1}
-.asset-add,.asset-delete{width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff}
-.asset-add svg,.asset-delete svg{width:11px;height:11px}
+.asset-card:hover .asset-badge,.asset-card:focus-within .asset-badge{opacity:0}
+.asset-add,.asset-reveal,.asset-delete{width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff}
+.asset-add svg,.asset-reveal svg,.asset-delete svg{width:11px;height:11px}
+.asset-reveal:hover{background:var(--bg-float);color:var(--tx)}
 .asset-add:hover{background:var(--accent);color:var(--on-accent)}
 .asset-delete:hover{background:var(--red);color:#fff}
 .asset-empty{grid-column:1/-1;min-height:160px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px 16px;color:var(--tx-4);text-align:center}

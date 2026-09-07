@@ -12,12 +12,32 @@ it('groups horizontal movement, preserves vertical scrolling, and cancels on dis
   expect(wheel(20, 1).defaultPrevented).toBe(true);
   wheel(-10, 0);
   expect(options.begin).toHaveBeenCalledTimes(1);
-  expect(options.move).toHaveBeenLastCalledWith(-10, expect.anything());
-  vi.advanceTimersByTime(200);
+  expect(options.move).toHaveBeenLastCalledWith(-2.5, expect.anything());
+  vi.advanceTimersByTime(350);
   expect(options.commit).toHaveBeenCalledTimes(1);
   wheel(10, 0); action.destroy();
   vi.runAllTimers();
   expect(options.cancel).toHaveBeenCalledTimes(1);
   expect(options.commit).toHaveBeenCalledTimes(1);
+  vi.useRealTimers();
+});
+
+it('paces haptics and stays quiet when the value cannot change', () => {
+  vi.useFakeTimers();
+  const alignment = vi.fn();
+  Object.defineProperty(window, 'powermove', { configurable: true, value: { haptic: { alignment } } });
+  const node = document.createElement('div');
+  const move = vi.fn(() => true);
+  const action = horizontalScrub(node, { begin() {}, move, commit() {}, cancel() {} });
+  const wheel = () => node.dispatchEvent(new WheelEvent('wheel', { deltaX: 24 }));
+  wheel(); wheel();
+  expect(alignment).toHaveBeenCalledTimes(1);
+  vi.advanceTimersByTime(110); wheel();
+  expect(alignment).toHaveBeenCalledTimes(2);
+  move.mockReturnValue(false);
+  vi.advanceTimersByTime(110); wheel();
+  expect(alignment).toHaveBeenCalledTimes(2);
+  action.destroy();
+  delete (window as any).powermove;
   vi.useRealTimers();
 });

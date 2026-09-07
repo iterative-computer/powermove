@@ -168,6 +168,32 @@ describe('activityRows', () => {
 });
 
 describe('toolAction', () => {
+  it('describes the screenshot tool group in plain English', () => {
+    const rows = activityRows(['bash', 'get_panel_layout', 'get_project_state', 'get_panel_state']
+      .map((toolName, index) => tool({ id: String(index), toolName })));
+    expect(at(rows).label).toBe('Ran commands, checked the panel layout, inspected the project, and checked panel controls');
+  });
+
+  it.each([
+    ['get_project_state', 'inspected the project'],
+    ['get_panel_layout', 'checked the panel layout'],
+    ['open_panel', 'opened a panel'],
+    ['get_panel_state', 'checked panel controls'],
+    ['interact_panel', 'used panel controls'],
+    ['render_frames', 'previewed composition frames'],
+    ['apply_commands', 'edited the composition'],
+    ['edit_video', 'edited video clips'],
+    ['rollback_changes', 'undid agent changes']
+  ])('describes %s with and without its provider prefix', (name, action) => {
+    expect(toolAction(name)).toBe(action);
+    expect(toolAction(`mcp__powermove__${name}`)).toBe(action);
+  });
+
+  it('normalizes provider prefixes before matching families and humanizes unknown names', () => {
+    expect(toolAction('mcp__filesystem__read_file')).toBe('read files');
+    expect(toolAction('mcp__custom__special_action')).toBe('used special action');
+  });
+
   it('maps tool families to sentence fragments', () => {
     expect(toolAction('bash')).toBe('ran commands');
     expect(toolAction('run_command')).toBe('ran commands');

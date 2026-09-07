@@ -132,7 +132,13 @@ test('M opens and collapses the selected layer strip', async ({ session }) => {
 test('Command Shift D selects the new segment to the right of the playhead', async ({ session }) => {
   const { page } = session;
   const leftId = await scaleFixture(page);
+  const animation = () => page.evaluate(() => {
+    const PM = (window as any).PM, layer = PM.selLayers()[0] ?? PM.proj.layers[0];
+    return PM.allProps(layer).map(({ prop }: any) => prop.kf.map((k: any) => ({ t: k.t + layer.from, v: k.v })));
+  });
+  const before = await animation();
   await page.keyboard.press('Meta+Shift+d');
+  expect(await animation()).toEqual(before);
 
   expect(await page.evaluate((leftId) => {
     const PM = (window as any).PM;
@@ -151,6 +157,9 @@ test('Command Shift D selects the new segment to the right of the playhead', asy
     const PM = (window as any).PM;
     return PM.sel.layers.length === 1 && PM.sel.layers[0] !== PM.proj.layers.find((layer: any) => layer.from === 2)?.id;
   })).toBe(true);
+  await page.keyboard.press('Meta+z');
+  expect(await animation()).toEqual(before);
+  expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

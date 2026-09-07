@@ -89,6 +89,9 @@ self.onmessage = async event => {
       setProperty(target, path, value, options = {}) { return command('set_property', { target, path, value, ...copy(options) }); },
       replaceKeyframes(target, path, keyframes, options = {}) { return command('replace_keyframes', { target, path, keyframes, ...copy(options) }); },
       deleteLayers(targets) { return command('delete_layers', { targets: [].concat(targets || []) }); },
+      groupLayers(targets, name) { return command('group_layers', { targets, name }); },
+      ungroupLayers(targets) { return command('ungroup_layers', { targets }); },
+      moveToGroup(targets, group) { return command('move_to_group', { targets, group }); },
       reorderLayer(target, index) { return command('reorder_layer', { target, index }); },
       setComposition(patch) { return command('set_composition', { patch }); },
       addEffect(target, effect, parameters = {}) { return command('add_effect', { target, effect, parameters }); },
@@ -203,7 +206,7 @@ PM.Script = {
   catalog: () => ({
     language: 'sandboxed-javascript', maxSourceCharacters: LIMITS.source,
     maxCommands: LIMITS.commands, timeoutMs: LIMITS.runtime,
-    sdk: ['project', 'composition', 'input', 'layers', 'selectedLayers', 'uid', 'clone', 'assert', 'emit', 'addLayer', 'setLayer', 'setContent', 'setProperty', 'replaceKeyframes', 'deleteLayers', 'reorderLayer', 'setComposition', 'addEffect', 'transformLayers'],
+    sdk: ['project', 'composition', 'input', 'layers', 'selectedLayers', 'uid', 'clone', 'assert', 'emit', 'addLayer', 'setLayer', 'setContent', 'setProperty', 'replaceKeyframes', 'deleteLayers', 'reorderLayer', 'groupLayers', 'ungroupLayers', 'moveToGroup', 'setComposition', 'addEffect', 'transformLayers'],
     guarantees: ['opaque origin', 'network blocked', 'timeout worker', 'read-only snapshot', 'validated commands', 'atomic apply', 'one-step undo'],
   }),
   test: { normalizeCommands, validateLocks, selectedLayers, frameDocument, workerSource: WORKER_SOURCE },

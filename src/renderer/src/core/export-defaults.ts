@@ -6,7 +6,7 @@
  * relying on one global preference shared by every project.
  */
 
-export type ExportFormat = 'prores' | 'mp4' | 'webm' | 'rec' | 'png' | 'still' | 'json';
+export type ExportFormat = 'prores' | 'mp4' | 'webm' | 'rec' | 'png' | 'still' | 'json' | 'web';
 export type ExportQuality = 'draft' | 'high' | 'max';
 export type ExportRange = 'work' | 'all';
 
@@ -34,6 +34,7 @@ export const EXPORT_FORMAT_OPTIONS: Array<ExportOption<ExportFormat>> = [
   { v: 'rec', label: 'WebM · realtime capture' },
   { v: 'png', label: 'PNG sequence' },
   { v: 'still', label: 'Still frame (PNG)' },
+  { v: 'web', label: 'Web animation · Code + assets (.zip)' },
   { v: 'json', label: 'Project file (.pmv)' }
 ];
 
@@ -78,7 +79,8 @@ const FIELD_SUPPORT: Record<ExportFormat, ExportFieldSupport> = {
   rec: { ...NO_FIELDS, scale: true, fps: true, range: true, quality: true, mblur: true, audio: true },
   png: { ...NO_FIELDS, scale: true, fps: true, range: true, mblur: true, alpha: true },
   still: { ...NO_FIELDS, scale: true, mblur: true, alpha: true },
-  json: NO_FIELDS
+  json: NO_FIELDS,
+  web: NO_FIELDS
 };
 
 export function exportFieldSupport(format: ExportFormat): ExportFieldSupport {
@@ -96,6 +98,7 @@ export function exportActionLabel(format: ExportFormat): string {
     case 'png': return 'Export frames';
     case 'still': return 'Export frame';
     case 'json': return 'Save project file';
+    case 'web': return 'Export code';
     default: return 'Export video';
   }
 }
@@ -137,6 +140,8 @@ export function planExport(opts: ExportDefaults, comp: ExportCompositionInfo): E
     note = `${frames} PNG file${frames === 1 ? '' : 's'}${opts.alpha ? ' · transparent' : ''}`;
   } else if (opts.format === 'still') {
     note = `Single PNG${opts.alpha ? ' · transparent' : ''}`;
+  } else if (opts.format === 'web') {
+    note = 'Live animation · JavaScript player, React component, assets and agent handoff · full composition';
   } else {
     note = 'Packs the composition and its media into one .pmv file';
   }

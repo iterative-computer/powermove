@@ -1,3 +1,4 @@
+import { propertyShortcuts } from '../timeline/property-reveal';
 import type { KeybindingDefinition } from 'powermove';
 
 /**
@@ -28,9 +29,8 @@ const MOD_CHORDS: Array<[string, string, boolean]> = [
   /* The plain Y branch explicitly rejected both Shift and Alt. */
   ['y', 'newSolid', false], ['shift+y', 'newShape', true],
   ['t', 'toolText', true], ['shift+t', 'toolText', true],
-  ['shift+g', 'newShader', true],
   ['d', 'duplicate', true], ['shift+d', 'split', true],
-  ['c', 'copyLayers', true], ['shift+c', 'precompose', true],
+  ['c', 'copyLayers', true], ['shift+c', 'groupLayers', true], ['g', 'groupLayers', true], ['shift+g', 'ungroupLayers', true],
   /* Paste and Projects explicitly rejected Shift. */
   ['v', 'contextPaste', false],
   ['a', 'selectAll', true], ['shift+a', 'deselect', true],
@@ -118,8 +118,8 @@ for (const [chord, command] of TRANSPORT_CHORDS) {
 bind('shift+pageup', 'stepFrames', false, [-10]);
 bind('shift+pagedown', 'stepFrames', false, [10]);
 for (const modifier of ['cmd', 'ctrl']) {
-  bind(`${modifier}+left`, 'prevFrame');
-  bind(`${modifier}+right`, 'nextFrame');
+  bind(`${modifier}+left`, modifier === 'ctrl' ? 'prevKeyframe' : 'prevFrame');
+  bind(`${modifier}+right`, modifier === 'ctrl' ? 'nextKeyframe' : 'nextFrame');
   bind(`${modifier}+shift+left`, 'stepFrames', false, [-10]);
   bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
 }
@@ -155,16 +155,18 @@ bind('ctrl+shift+f9', 'easyEaseOut');
 const BARE_KEYS: Array<[string, string]> = [
   ['v', 'toolSelect'], ['h', 'toolHand'], ['z', 'toolZoom'],
   ['w', 'toolRotate'], ['y', 'toolAnchor'], ['q', 'toolShape'], ['g','toolPen'],
-  ['p', 'revealPos'], ['s', 'revealScale'], ['r', 'revealRot'],
-  ['t', 'revealOpacity'], ['a', 'revealAnchor'], ['u', 'revealKeys'],
   ['b', 'workIn'], ['n', 'workOut'],
 ];
 for (const [chord, command] of BARE_KEYS) {
   bind(chord, command);
   bind(`shift+${chord}`, command);
 }
-/* `case 'f': if (s) …` — plain F did nothing. */
-bind('shift+f', 'fitView');
+for (const [key, command] of propertyShortcuts) {
+  bind(key, command);
+  bind(`shift+${key}`, command, false, [true]);
+}
+bind('cmd+`', 'revealAll');
+bind('ctrl+`', 'revealAll');
 
 /* Escape inside a text field blurs it without triggering the editor-level
    deselect binding. The command itself remains in legacy shortcuts because it

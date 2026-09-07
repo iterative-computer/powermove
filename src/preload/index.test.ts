@@ -154,19 +154,22 @@ describe('preload bridge', () => {
     const created = { ok: true, token: 'a'.repeat(32), type: 'video/quicktime', size: 12 } as const;
     const bytes = new Uint8Array([1, 2, 3]);
     electronMocks.getPathForFile.mockReturnValue('/Users/editor/source.mov');
-    electronMocks.invoke.mockResolvedValueOnce(created).mockResolvedValueOnce(bytes).mockResolvedValueOnce(undefined);
+    electronMocks.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce(created).mockResolvedValueOnce(bytes).mockResolvedValueOnce(undefined);
 
+    expect(bridge().media.sourcePath(file)).toBe('/Users/editor/source.mov');
+    await bridge().media.revealSource('/Users/editor/source.mov');
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, IPC.mediaRevealSource, '/Users/editor/source.mov');
     await expect(bridge().media.createPlaybackProxy(file)).resolves.toEqual(created);
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, IPC.mediaProxyCreate, {
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(2, IPC.mediaProxyCreate, {
       sourcePath: '/Users/editor/source.mov',
       name: 'source.mov'
     });
     await expect(bridge().media.readPlaybackProxy('a'.repeat(32), 4, 3)).resolves.toEqual(bytes);
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(2, IPC.mediaProxyRead, {
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(3, IPC.mediaProxyRead, {
       token: 'a'.repeat(32), offset: 4, length: 3
     });
     await bridge().media.releasePlaybackProxy('a'.repeat(32));
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(3, IPC.mediaProxyRelease, 'a'.repeat(32));
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(4, IPC.mediaProxyRelease, 'a'.repeat(32));
   });
 
   it('exposes ChatGPT status, connect, disconnect, and sanitized status events', async () => {

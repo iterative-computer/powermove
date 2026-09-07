@@ -1,3 +1,4 @@
+import { CHANNELS_3D } from '../../renderer/src/legacy/core/space-3d';
 /** Presentation groups retain the real scalar channels and key IDs. No migration
  * or resampling is needed, including for old projects with unequal key times. */
 export const scalePaths = ['scale.x', 'scale.y'];
@@ -17,7 +18,7 @@ export function keyMembers(key: any): any[] {
 }
 
 export function timelineProperties(PM: any, layer: any): any[] {
-  const props = PM.allProps(layer);
+  const props = PM.allProps(layer).filter((p: any) => layer.threeD || !(p.key in CHANNELS_3D));
   const axes = scalePaths.map(path => props.find((p: any) => p.key === path)).filter(Boolean);
   if (axes.length !== 2) return props;
   const times = new Map<number, any[]>();

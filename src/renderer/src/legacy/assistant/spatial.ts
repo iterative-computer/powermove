@@ -1,3 +1,4 @@
+import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import type { CodexTraceEvent, ReasoningEffort } from '../../../../shared/ipc';
@@ -1526,6 +1527,7 @@ async function sendRequest(input: any) {
   try {
     if (autonomous) {
       await runAutonomousRequest({ request, token, controller, access: accessAtStart, focus, context, threadId: threadIdAtStart });
+      if (token === S.requestToken && !controller.signal.aborted) notifyAgentFinished();
       return;
     }
     /* Let the send handoff finish before the next progress render replaces the
@@ -1574,6 +1576,7 @@ async function sendRequest(input: any) {
     S.activity = ''; S.plan = plan; S.phase = 'conversation';
     if (plan.kind === 'panels' && S.autoApplyPanels) await applyPlan();
     else showPreview();
+    if (token === S.requestToken && !controller.signal.aborted) notifyAgentFinished();
   } catch (error: any) {
     if (token !== S.requestToken) return;
     if (error?.name === 'AbortError') return;

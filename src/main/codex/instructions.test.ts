@@ -15,8 +15,8 @@ function normalizeText(value: string): string {
 
 describe('autonomous agent contract', () => {
   it('keeps every distinct edit command reachable by the agent', () => {
-    expect(EDIT_COMMAND_TYPES).toHaveLength(19);
-    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(19);
+    expect(EDIT_COMMAND_TYPES).toHaveLength(22);
+    expect(new Set(EDIT_COMMAND_TYPES).size).toBe(22);
     expect(AGENT_COMMAND_TYPES).toEqual(EDIT_COMMAND_TYPES);
   });
 
@@ -92,7 +92,9 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('every user-editable project value as keyframeable by default');
     expect(instructions).toMatch(/effect, layer type, generated control, or extension/);
     expect(instructions).toMatch(/real editable property\/keyframe model.+set_property or replace_keyframes/s);
-    expect(instructions).toContain('Do not bake adjustable values into opaque code, flattened media, or a second source of truth');
+    expect(instructions).toContain('Never flatten adjustable values or duplicate state');
+    expect(instructions).toContain('preserveHandEdits: false');
+    expect(instructions).toContain('only for explicitly requested hand-edited channel changes');
   });
 
   it('defines required, bounded extension changes in the strict result schema', () => {

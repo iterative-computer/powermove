@@ -94,7 +94,8 @@ function evict(targetBytes: any = MAX_BYTES) {
 }
 
 /* ── text ──────────────────────────────────────────────── */
-const variationFontFamily = createVariableFontRenderer(() => { PM.rasterClear?.(); PM.invalidate?.(); });
+const variationFontFamily = createVariableFontRenderer(() => { PM.rasterClear?.(); PM.invalidate?.(); }, PM.fontSource);
+PM.rasterDispose = () => { variationFontFamily.dispose(); PM.rasterClear?.(); };
 
 function fontStr(d: any) {
   const variableFamily = variationFontFamily(d);
@@ -191,9 +192,9 @@ function textLayout(d: any) {
     const lineWidth = width(line);
     const startX = align === 'center' ? -lineWidth / 2 : align === 'right' ? -lineWidth : 0;
     const y = row * lh;
-    if (line.length) output.lines.push({ text: line, x: startX, y, line: row, index: lineIndex++ });
-
     const lineSource=Math.max(sourceOffset,String(d.text||'').indexOf(line,sourceOffset));
+    if (line.length) output.lines.push({ text: line, x: startX, y, line: row, sourceStart: lineSource, index: lineIndex++ });
+
     let prefix = '';let localWord=-1,wasSpace=true;
     for (const segment of graphemes(line)) {
       const x = segmentX(startX, prefix, segment);
@@ -208,7 +209,7 @@ function textLayout(d: any) {
     let match;
     while ((match = matcher.exec(line))) {
       const prefix = line.slice(0, match.index);
-      output.words.push({ text: match[0], x: segmentX(startX, prefix, match[0]), y, line: row, index: wordIndex++ });
+      output.words.push({ text: match[0], x: segmentX(startX, prefix, match[0]), y, line: row, sourceStart: lineSource + match.index, index: wordIndex++ });
     }
   });
   return output;
@@ -584,6 +585,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   };
   const kind = assetKind(file);
   if (!kind) throw new Error('Unsupported media file');
+  const sourcePath = window.powermove?.media?.sourcePath?.(file) || '';
   const fingerprint = await PM.MediaImport.fingerprint(file);
   assertCurrentProject();
   const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
@@ -618,6 +620,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   const persisted = persistedResult.value;
   const identity = {
     name: file.name, kind, fingerprint, storageKey,
+    ...(sourcePath ? { sourcePath } : {}),
     size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
     channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
     playbackProxy: prepared.playbackProxy === true,

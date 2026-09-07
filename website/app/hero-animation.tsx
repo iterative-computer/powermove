@@ -48,6 +48,6 @@ export function HeroAnimation() {
   }, []);
   return <div className="hero-art" role="group" aria-label="Made in Powermove: animated typography showcasing a gradient editor, 3D system, and shader">
     <svg ref={svg} className="hero-vector" viewBox="0 0 1920 1080" aria-hidden="true"/>
-    {failed && <div className="animation-fallback">Make a Powermove.</div>}
+    {failed && <div className="animation-fallback">Make your Powermove.</div>}
   </div>;
 }
