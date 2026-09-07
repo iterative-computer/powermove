@@ -88,10 +88,7 @@
     const remaining = [...(PM.Projects?.tabs?.() ?? [])] as string[];
     if (active) {
       if (remaining.length) openProject(remaining[0]!);
-      else {
-        const project = PM.mkProject?.({ name: 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' });
-        if (project) window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
-      }
+      else PM.ProjectsScreen?.show?.();
     }
     PM.bus?.emit?.('projects:tabs');
   }

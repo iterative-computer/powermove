@@ -27,4 +27,28 @@ test.describe('@shell Svelte shell', () => {
 
     expect(diagnostics.pageErrors).toEqual([]);
   });
+
+  test('closes the final project tab and can reopen it from Projects', async ({ session }) => {
+    const { page, diagnostics } = session;
+    await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
+    const activeId = await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const id = PM.proj.id as string;
+      for (const tabId of PM.Projects.tabs()) if (tabId !== id) PM.Projects.markClosed(tabId);
+      PM.confirmCloseProject = async () => true;
+      PM.bus.emit('projects:tabs');
+      return id;
+    });
+
+    await page.locator(`.project-doc[data-tab-id="${activeId}"] .project-doc-close`).click();
+
+    await expect(page.locator('#tabs .project-doc')).toHaveCount(0);
+    await expect(page.locator('#projects-screen')).toHaveClass(/\bon\b/);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#projects-screen')).toHaveClass(/\bon\b/);
+    await page.locator('#projects-screen .ps-card').first().click();
+    await expect(page.locator(`.project-doc[data-tab-id="${activeId}"]`)).toHaveCount(1);
+    await expect(page.locator('#projects-screen')).not.toHaveClass(/\bon\b/);
+    expect(diagnostics.pageErrors).toEqual([]);
+  });
 });

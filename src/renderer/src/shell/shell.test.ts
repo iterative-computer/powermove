@@ -244,6 +244,27 @@ describe('Svelte shell', () => {
     expect(target.querySelector<HTMLElement>('[data-tab-id="home"]')?.tabIndex).toBe(0);
   });
 
+  it('closes the last project tab and returns to Projects without creating a replacement', async () => {
+    const { PM } = fakePM();
+    PM.confirmCloseProject = vi.fn(async () => true);
+    const opened = vi.fn();
+    window.addEventListener('pm-open-project', opened);
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>('[data-tab-id="p2"] .project-doc-close')!.click();
+    await vi.waitFor(() => expect(target.querySelector('[data-tab-id="p2"]')).toBeNull());
+    target.querySelector<HTMLButtonElement>('[data-tab-id="p1"] .project-doc-close')!.click();
+    await vi.waitFor(() => expect(target.querySelectorAll('.project-doc')).toHaveLength(0));
+
+    expect(PM.confirmCloseProject).toHaveBeenCalledTimes(2);
+    expect(PM.ProjectsScreen.show).toHaveBeenCalledOnce();
+    expect(opened).not.toHaveBeenCalled();
+    expect(PM.Projects.put).toHaveBeenCalledWith(PM.proj);
+  });
+
   it('installs unconditionally when both shell mount targets exist', () => {
     const stored = fakePM().PM;
     stored.store.get = vi.fn(() => true);

@@ -786,6 +786,7 @@ PM.newProject = () => {
         ...values,
         exportDefaults: { ...(PM.proj ? readExportDefaults() : {}), fps: values.fps },
       }));
+      PM.ProjectsScreen?.hide?.();
     } },
   ] });
   window.setTimeout(() => form.focus(), 30);

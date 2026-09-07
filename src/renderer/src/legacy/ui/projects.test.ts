@@ -74,6 +74,7 @@ describe('legacy projects screen install', () => {
     const saveProject = vi.fn(async () => true);
     const put = vi.fn();
     const putState = vi.fn();
+    const markOpen = vi.fn();
     let PM: PMRegistry;
     const openProject = vi.fn(async () => { PM.proj = { id: 'P3' }; });
     PM = {
@@ -89,6 +90,7 @@ describe('legacy projects screen install', () => {
         getState: () => ({ time: 4, file: { path: '/tmp/Hero.pmv', savedHash: 'hash' } }),
         put,
         putState,
+        markOpen,
       },
       proj: { id: 'P1' },
       projectFileState: () => ({ path: '/tmp/Hero.pmv', dirty: true }),
@@ -118,6 +120,11 @@ describe('legacy projects screen install', () => {
     await menuItems.find(item => item?.label === 'Save As…').run();
     expect(saveProject).toHaveBeenNthCalledWith(1, { projectId: 'P1', saveAs: false });
     expect(saveProject).toHaveBeenNthCalledWith(2, { projectId: 'P1', saveAs: true });
+
+    const projectCard = elements.find(el => el.tag.startsWith('article.ps-card'))!;
+    projectCard.onclick();
+    expect(markOpen).toHaveBeenCalledWith('P1');
+    expect(PM.ProjectsScreen.isOpen).toBe(false);
 
     menuItems.find(item => item?.label === 'Duplicate').run();
     expect(put).toHaveBeenCalledWith(expect.objectContaining({ id: 'P-copy', name: 'Hero copy' }), undefined);

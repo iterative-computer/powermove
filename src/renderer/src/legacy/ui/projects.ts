@@ -22,7 +22,11 @@ PM.ProjectsScreen = {
     if (section && ['recents', 'projects', 'trash'].includes(section)) S.section = section;
     paint(); S.el.classList.add('on'); PM.bus.emit('projects:screen');
   },
-  hide() { if (S.el) S.el.classList.remove('on'); PM.bus.emit('projects:screen'); },
+  hide() {
+    if (!PM.Projects?.tabs?.().length) return;
+    if (S.el) S.el.classList.remove('on');
+    PM.bus.emit('projects:screen');
+  },
   toggle() { this.isOpen ? this.hide() : this.show(); },
 };
 
@@ -98,8 +102,8 @@ function paint() {
 }
 
 function card(m: any, trashed: any) {
-  const active = !trashed && m.id === PM.proj.id;
   const open = !trashed && PM.Projects.tabs().includes(m.id);
+  const active = open && m.id === PM.proj.id;
   const file = !trashed ? PM.projectFileState?.(m.id) : null;
   const raw = PM.Projects.get(m.id);
   const inner = h('div.ps-thumb-inner');
@@ -157,8 +161,11 @@ async function openProjectFromDisk() {
 function openLocalProject(m: any) {
   const project = PM.Projects.get(m.id);
   if (!project) return PM.toast('Could not open this project because its local data is missing.');
+  if (project.id === PM.proj.id) {
+    PM.Projects.markOpen?.(project.id);
+    PM.bus.emit('projects:tabs');
+  } else window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: project }));
   PM.ProjectsScreen.hide();
-  if (project.id !== PM.proj.id) window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: project }));
 }
 async function save(m: any, saveAs: boolean) {
   if (!PM.Projects.get(m.id)) return PM.toast('Could not save this project because its local data is missing.');
