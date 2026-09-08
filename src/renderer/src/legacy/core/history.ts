@@ -105,6 +105,7 @@ export function install(PM: PMRegistry): void {
     project?: boolean;
     forward?: Patch[];
     backward?: Patch[];
+    cleanup?: () => void;
   };
 
   let stack: Entry[] = [];
@@ -125,13 +126,17 @@ export function install(PM: PMRegistry): void {
     while (stack.length > MAX_ENTRIES || totalBytes > maxBytes && stack.length > 1) {
       const removed = stack.shift()!;
       totalBytes -= removed.bytes;
+      removed.cleanup?.();
       idx--;
     }
     idx = Math.min(idx, stack.length - 1);
   };
   const discardRedo = () => {
     if (idx >= stack.length - 1) return;
-    for (const entry of stack.slice(idx + 1)) totalBytes -= entry.bytes;
+    for (const entry of stack.slice(idx + 1)) {
+      totalBytes -= entry.bytes;
+      entry.cleanup?.();
+    }
     stack = stack.slice(0, idx + 1);
   };
   const push = (entry: Omit<Entry, 'id'> & { id?: string }) => {
@@ -288,6 +293,9 @@ export function install(PM: PMRegistry): void {
         project: true,
         undo: () => { for (let index = entries.length - 1; index >= 0; index--) entries[index]!.undo(); },
         redo: () => { for (const entry of entries) entry.redo(); },
+        cleanup: entries.some(entry => entry.cleanup)
+          ? () => { for (const entry of entries) entry.cleanup?.(); }
+          : undefined,
       });
     },
     selection(before: any, after: any) {
@@ -303,9 +311,13 @@ export function install(PM: PMRegistry): void {
       return push({ label: 'Selection', bytes: encodedBytes(previous) + encodedBytes(next),
         undo: () => restoreSelection(previous), redo: () => restoreSelection(next) });
     },
-    external(label: any, undo: any, redo: any) {
+    external(label: any, undo: any, redo: any, options: any = {}) {
       if (typeof undo !== 'function' || typeof redo !== 'function') return null;
-      return push({ label: label || 'Interface change', undo, redo, bytes: 256 });
+      return push({
+        label: label || 'Interface change', undo, redo,
+        bytes: Math.max(256, Number(options.bytes) || 0),
+        cleanup: typeof options.cleanup === 'function' ? options.cleanup : undefined,
+      });
     },
     undoIfTop(id: any) {
       if (!id || stack[idx]?.id !== id) return false;
@@ -319,6 +331,7 @@ export function install(PM: PMRegistry): void {
       return true;
     },
     clear() {
+      stack.forEach(entry => entry.cleanup?.());
       stack = [];
       idx = -1;
       pending = null;
@@ -338,6 +351,7 @@ export function install(PM: PMRegistry): void {
       while (totalBytes > target && stack.length > 1) {
         const removed = stack.shift()!;
         totalBytes -= removed.bytes;
+        removed.cleanup?.();
         idx--;
       }
       idx = Math.max(-1, Math.min(idx, stack.length - 1));

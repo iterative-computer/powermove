@@ -74,6 +74,11 @@ function setup(
     delete currentProject.assets[assetId as keyof typeof currentProject.assets];
     return options.removals?.[assetId] ?? { removedLayers: 0, removedLayerIds: [] };
   });
+  const liveAssets: any = new Map([
+    ['image-1', { url: 'blob:backdrop' }],
+    ['video-1', { el: { currentSrc: 'blob:product-video' } }]
+  ]);
+  liveAssets.replace = vi.fn(async () => ({ persisted: true }));
   const PM: Record<string, any> = {
     proj: project,
     ICONS: {
@@ -88,10 +93,7 @@ function setup(
       project: '<path data-test-icon="project"></path>',
       missing: '<path data-test-icon="missing"></path>'
     },
-    assets: new Map([
-      ['image-1', { url: 'blob:backdrop' }],
-      ['video-1', { el: { currentSrc: 'blob:product-video' } }]
-    ]),
+    assets: liveAssets,
     Viewer: { preview: { clear: vi.fn(), toggle: vi.fn(), playing: false } },
     pickFiles: vi.fn(),
     cmd: vi.fn(),
@@ -108,6 +110,7 @@ function setup(
       })
     },
     toast: vi.fn(),
+    menu: vi.fn(),
     modal: vi.fn(),
     h: domHelper
   };
@@ -234,6 +237,47 @@ describe('AssetsPanel', () => {
 
     expect(revealSource).toHaveBeenCalledWith('/Users/editor/Backdrop.png');
     expect(PM.cmd).not.toHaveBeenCalled();
+  });
+
+  it('opens media actions on right-click and replaces through a compatible single-file picker', async () => {
+    const { PM } = setup([IMAGE]);
+    const row = rows()[0]!;
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 37, clientY: 49 }));
+    flushSync();
+
+    expect(row.getAttribute('aria-selected')).toBe('true');
+    expect(PM.menu).toHaveBeenCalledOnce();
+    const [anchor, items, position] = PM.menu.mock.calls[0];
+    expect(anchor).toBe(row);
+    expect(position).toEqual({ x: 37, y: 49 });
+    expect(items.filter((item: any) => item?.label).map((item: any) => item.label)).toEqual([
+      'Add to timeline', 'Replace File…', 'Reveal in Finder', 'Delete media…'
+    ]);
+
+    items.find((item: any) => item?.label === 'Replace File…').run();
+    const input = document.querySelector<HTMLInputElement>('input[type="file"][aria-label="Replace Backdrop.png"]')!;
+    expect(input).not.toBeNull();
+    expect(input.accept).toBe('image/*,.svg');
+    expect(input.multiple).toBe(false);
+
+    const replacement = new File(['new pixels'], 'New Backdrop.png', { type: 'image/png' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [replacement] });
+    input.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(PM.assets.replace).toHaveBeenCalledWith('image-1', replacement));
+    await vi.waitFor(() => expect(PM.toast).toHaveBeenCalledWith('Replaced Backdrop.png with New Backdrop.png'));
+    expect(document.body.contains(input)).toBe(false);
+  });
+
+  it('does not mutate media when the replacement picker is cancelled', () => {
+    const { PM } = setup([AUDIO]);
+    rows()[0]!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    PM.menu.mock.calls[0][1].find((item: any) => item?.label === 'Replace File…').run();
+    const input = document.querySelector<HTMLInputElement>('input[type="file"][aria-label="Replace Theme.wav"]')!;
+
+    input.dispatchEvent(new Event('cancel'));
+
+    expect(PM.assets.replace).not.toHaveBeenCalled();
+    expect(document.body.contains(input)).toBe(false);
   });
 
   it('uses roving tabindex and supports arrows, Home, End, Space, and Enter', () => {

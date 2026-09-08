@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
+import { makePM } from '../__tests__/make-pm';
 import { install, videoImportFailureMessage, waitForPresentedVideoFrame } from './raster';
 
 function rasterRegistry(): PMRegistry {
@@ -134,5 +135,125 @@ describe('legacy raster install', () => {
       },
     }).selection;
     expect(Math.abs(centered.x0 + centered.x1)).toBeLessThan(1);
+  });
+
+  it('atomically replaces media in place and restores metadata plus runtime with one Undo and Redo', async () => {
+    const disposed: any[] = [];
+    const oldRuntime = { id: 'asset-1', name: 'old.wav', kind: 'audio', marker: 'old' };
+    const newRuntime = { id: 'asset-1', name: 'new.wav', kind: 'audio', marker: 'new', persistBlob: new Blob(['new']) };
+    vi.stubGlobal('window', {
+      document: { createElement: () => ({ getContext: () => ({}) }) },
+      navigator: { hardwareConcurrency: 4 },
+      URL: { createObjectURL: () => 'blob:test', revokeObjectURL: vi.fn() },
+      powermove: { media: { sourcePath: () => '/replacement/new.wav' } },
+      setTimeout, clearTimeout,
+    });
+    const PM = makePM('core/history', 'gl/raster');
+    const animatedLayer = {
+      id: 'layer-1', type: 'audio', from: 4, dur: 8,
+      d: { asset: 'asset-1', trim: 1.5 },
+      p: { opacity: { v: 100, kf: [{ i: 'key-1', t: 0, v: 35 }], expr: null } },
+    };
+    const layerBefore = JSON.stringify(animatedLayer);
+    const projectA = PM.proj = {
+      id: 'project-1', revision: 2,
+      assets: { 'asset-1': { id: 'asset-1', name: 'old.wav', kind: 'audio', storageKey: 'media:old', size: 3, persisted: true } },
+      layers: [animatedLayer], comps: {},
+    };
+    PM.assets.map.set('asset-1', oldRuntime);
+    PM.MediaImport = { fingerprint: vi.fn(async () => 'new-fingerprint'), storageKeyFor: (value: string) => `media:${value}` };
+    PM.MediaStore = { put: vi.fn(async () => true) };
+    PM.Audio = {
+      accepts: () => true,
+      prepareAsset: vi.fn(async () => newRuntime),
+      disposeAsset: vi.fn((asset: any) => disposed.push(asset)),
+      pause: vi.fn(), rebalanceCache: vi.fn(),
+    };
+    PM.touch = vi.fn();
+    PM.autosave = vi.fn();
+    PM.Viewer = { preview: { clear: vi.fn() } };
+    PM.sel = { layers: [], keys: [], chan: null };
+    PM.replaceProject = (project: any) => { PM.proj = project; };
+
+    const file = { name: 'new.wav', type: 'audio/wav', size: 3 };
+    await PM.assets.replace('asset-1', file);
+
+    expect(PM.proj.assets['asset-1']).toMatchObject({ id: 'asset-1', name: 'new.wav', kind: 'audio', sourcePath: '/replacement/new.wav', persisted: true });
+    expect(PM.assets.get('asset-1')).toBe(newRuntime);
+    expect(JSON.stringify(PM.proj.layers[0])).toBe(layerBefore);
+    expect(PM.hist.list()).toEqual(['Replace old.wav']);
+    PM.hist.do('Move existing layer', () => { PM.proj.layers[0].from = 7; });
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.layers[0].from).toBe(4);
+    PM.proj = JSON.parse(JSON.stringify(PM.proj));
+    expect(PM.proj).not.toBe(projectA);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.assets['asset-1']).toMatchObject({ id: 'asset-1', name: 'old.wav', storageKey: 'media:old' });
+    expect(PM.assets.get('asset-1')).toBe(oldRuntime);
+    expect(JSON.stringify(PM.proj.layers[0])).toBe(layerBefore);
+    expect(PM.hist.redo()).toBe(true);
+    expect(PM.proj.assets['asset-1'].name).toBe('new.wav');
+    expect(PM.assets.get('asset-1')).toBe(newRuntime);
+
+    const thirdRuntime = { id: 'asset-1', name: 'third.wav', kind: 'audio', marker: 'third', persistBlob: new Blob(['third']) };
+    PM.Audio.prepareAsset.mockResolvedValueOnce(thirdRuntime);
+    await PM.assets.replace('asset-1', { name: 'third.wav', type: 'audio/wav', size: 5 });
+    expect(PM.assets.get('asset-1')).toBe(thirdRuntime);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.assets.get('asset-1')).toBe(newRuntime);
+    PM.hist.do('New edit discards replacement redo', () => { PM.proj.layers[0].from = 6; });
+    expect(disposed).toEqual([thirdRuntime]);
+
+    PM.hist.clear();
+    expect(disposed).toEqual([thirdRuntime, oldRuntime]);
+    expect(PM.assets.get('asset-1')).toBe(newRuntime);
+  });
+
+  it('rejects incompatible, failed, and stale replacements without changing the original asset', async () => {
+    let resolvePreparation!: (value: any) => void;
+    const preparation = new Promise<any>((resolve) => { resolvePreparation = resolve; });
+    const disposed: any[] = [];
+    vi.stubGlobal('window', {
+      document: { createElement: () => ({ getContext: () => ({}) }) },
+      navigator: { hardwareConcurrency: 4 },
+      URL: { createObjectURL: () => 'blob:test', revokeObjectURL: vi.fn() },
+      powermove: { media: { sourcePath: () => '' } },
+      setTimeout, clearTimeout,
+    });
+    const PM = makePM('core/history', 'gl/raster');
+    const oldRuntime = { id: 'asset-1', name: 'old.wav', kind: 'audio' };
+    const projectA: any = {
+      id: 'A', assets: { 'asset-1': { id: 'asset-1', name: 'old.wav', kind: 'audio', storageKey: 'media:old' } }, layers: [], comps: {},
+    };
+    PM.proj = projectA;
+    PM.assets.map.set('asset-1', oldRuntime);
+    PM.MediaImport = { fingerprint: vi.fn(async () => 'replacement'), storageKeyFor: (value: string) => `media:${value}` };
+    PM.MediaStore = { put: vi.fn(async () => true) };
+    PM.Audio = {
+      accepts: (file: any) => String(file.type).startsWith('audio/'),
+      prepareAsset: vi.fn(() => preparation),
+      disposeAsset: vi.fn((asset: any) => disposed.push(asset)),
+      pause: vi.fn(), rebalanceCache: vi.fn(),
+    };
+    PM.touch = vi.fn();
+
+    await expect(PM.assets.replace('asset-1', { name: 'wrong.png', type: 'image/png', size: 4 }))
+      .rejects.toThrow('Choose an audio file');
+    expect(PM.Audio.prepareAsset).not.toHaveBeenCalled();
+    expect(PM.hist.list()).toEqual([]);
+
+    const replacing = PM.assets.replace('asset-1', { name: 'new.wav', type: 'audio/wav', size: 4 });
+    await Promise.resolve();
+    const projectB = { id: 'B', assets: {}, layers: [], comps: {} };
+    PM.proj = projectB;
+    PM.assets.clear();
+    const prepared = { id: 'asset-1', name: 'new.wav', kind: 'audio' };
+    resolvePreparation(prepared);
+
+    await expect(replacing).rejects.toThrow(/switched projects/);
+    expect(projectA.assets['asset-1'].name).toBe('old.wav');
+    expect(projectB.assets).toEqual({});
+    expect(PM.hist.list()).toEqual([]);
+    expect(disposed).toContain(prepared);
   });
 });

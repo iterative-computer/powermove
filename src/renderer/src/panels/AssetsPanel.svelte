@@ -87,6 +87,68 @@
     return asset.sourcePath || asset.path || '';
   }
 
+  function replacementAccept(kind: string): string {
+    if (kind === 'image') return 'image/*,.svg';
+    if (kind === 'video') return 'video/*,.mp4,.mov,.m4v,.webm';
+    if (kind === 'audio') return 'audio/*';
+    if (kind === 'model') return '.obj,model/obj,text/plain+obj';
+    return '';
+  }
+
+  function pickReplacement(asset: Asset): void {
+    const targetProject = PM.proj;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = replacementAccept(asset.kind);
+    input.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none';
+    input.setAttribute('aria-label', `Replace ${asset.name}`);
+    const cleanup = () => {
+      input.onchange = null;
+      input.remove();
+    };
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      cleanup();
+      if (!file) return;
+      if (PM.proj !== targetProject || !targetProject.assets?.[asset.id]) {
+        const message = 'Replacement stopped because you switched projects';
+        status = message;
+        PM.toast(message);
+        return;
+      }
+      status = `Replacing ${asset.name}…`;
+      try {
+        await PM.assets.replace(asset.id, file);
+        const message = `Replaced ${asset.name} with ${file.name}`;
+        status = message;
+        PM.toast(message);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : `Could not replace ${asset.name}`;
+        status = message;
+        PM.toast(message, 5000);
+      }
+    };
+    input.addEventListener('cancel', cleanup, { once: true });
+    document.body.appendChild(input);
+    input.click();
+  }
+
+  function showAssetMenu(event: MouseEvent, asset: Asset): void {
+    event.preventDefault();
+    event.stopPropagation();
+    selectAsset(asset.id, event.currentTarget as HTMLElement);
+    const sourcePath = finderPath(asset);
+    PM.menu(event.currentTarget, [
+      { header: asset.name },
+      { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
+      { label: 'Replace File…', run: () => pickReplacement(asset) },
+      ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
+      '-',
+      { label: 'Delete media…', run: () => requestDelete(asset) },
+    ], { x: event.clientX, y: event.clientY });
+    status = `Actions for ${asset.name}`;
+  }
+
   function videoSource(asset?: Record<string, any>): string {
     return String(asset?.url || asset?.el?.currentSrc || asset?.el?.src || '');
   }
@@ -159,6 +221,10 @@
   async function revealAsset(event: MouseEvent, asset: Asset): Promise<void> {
     event.stopPropagation();
     selectAsset(asset.id);
+    await revealAssetSource(asset);
+  }
+
+  async function revealAssetSource(asset: Asset): Promise<void> {
     const sourcePath = finderPath(asset);
     if (!sourcePath) return;
     try {
@@ -385,6 +451,7 @@
         data-asset-id={asset.id}
         title="Select media · double-click to add, or drag onto the timeline"
         onpointerdown={(event) => handleRowPointerDown(event, asset)}
+        oncontextmenu={(event) => showAssetMenu(event, asset)}
         ondblclick={(event) => handleRowDoubleClick(event, asset)}
         onkeydown={(event) => handleRowKeydown(event, asset, index)}
       >

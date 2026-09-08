@@ -415,12 +415,31 @@ function assetKind(file: any) {
   return null;
 }
 PM.assetKind = assetKind;
+const disposedAssets = new WeakSet<object>();
+const historyAssetRetains = new WeakMap<object, number>();
 function disposeAsset(a: any) {
   if (!a) return;
+  if (typeof a === 'object') {
+    if (disposedAssets.has(a)) return;
+    disposedAssets.add(a);
+  }
   if ((a.kind === 'audio' || a.audioBlob) && PM.Audio) PM.Audio.disposeAsset(a);
   try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
   try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
   if (a.url && String(a.url).startsWith('blob:')) window.URL.revokeObjectURL(a.url);
+}
+function retainHistoryAsset(asset: any) {
+  if (!asset || typeof asset !== 'object') return;
+  historyAssetRetains.set(asset, (historyAssetRetains.get(asset) || 0) + 1);
+}
+function releaseHistoryAsset(asset: any, id: any) {
+  if (!asset || typeof asset !== 'object') return;
+  const next = Math.max(0, (historyAssetRetains.get(asset) || 0) - 1);
+  if (next) historyAssetRetains.set(asset, next);
+  else {
+    historyAssetRetains.delete(asset);
+    if (PM.assets.map.get(id) !== asset) disposeAsset(asset);
+  }
 }
 function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
   return new Promise((resolve: any, reject: any) => {
@@ -572,6 +591,27 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
     throw error;
   }
 }
+
+function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint: any, storageKey: any, sourcePath: any, persisted: any, layerDefinition?: any) {
+  return {
+    id, name: file.name, kind, fingerprint, storageKey,
+    ...(sourcePath ? { sourcePath } : {}),
+    size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
+    channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
+    playbackProxy: prepared.playbackProxy === true,
+    persisted: persisted === true,
+    ...(kind === 'video' ? {
+      hasAudio: prepared.hasAudio === true,
+      audioDur: prepared.hasAudio ? prepared.audioDur || prepared.dur || 0 : 0,
+    } : {}),
+    ...(kind === 'model' ? {
+      format: prepared.format || 'obj',
+      vertices: prepared.vertices || 0,
+      triangles: prepared.triangles || 0,
+      layerDefinition: typeof layerDefinition === 'string' ? layerDefinition : undefined,
+    } : {}),
+  };
+}
 let assetEpoch = 0;
 async function ingestAsset(file: any, { silent = false, layerDefinition }: any = {}) {
   const targetProject = PM.proj;
@@ -618,23 +658,9 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   try { assertCurrentProject(); }
   catch (error) { disposeAsset(prepared); throw error; }
   const persisted = persistedResult.value;
-  const identity = {
-    name: file.name, kind, fingerprint, storageKey,
-    ...(sourcePath ? { sourcePath } : {}),
-    size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
-    channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
-    playbackProxy: prepared.playbackProxy === true,
-    ...(kind === 'video' ? {
-      hasAudio: prepared.hasAudio === true,
-      audioDur: prepared.hasAudio ? prepared.audioDur || prepared.dur || 0 : 0,
-    } : {}),
-    ...(kind === 'model' ? {
-      format: prepared.format || 'obj',
-      vertices: prepared.vertices || 0,
-      triangles: prepared.triangles || 0,
-      layerDefinition: typeof layerDefinition === 'string' ? layerDefinition : undefined,
-    } : {}),
-  };
+  const { id: _identityId, persisted: _identityPersisted, ...identity } = assetIdentity(
+    provisionalId, file, kind, prepared, fingerprint, storageKey, sourcePath, persisted, layerDefinition,
+  );
   const plan = PM.MediaImport.match(PM.proj, PM.assets.map, identity);
   const existingMeta = plan.canonicalId && PM.proj.assets[plan.canonicalId];
   const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
@@ -701,6 +727,89 @@ PM.assets = {
       if (results.some((result: any) => result.relinkedLayers)) PM.bus.emit('layers');
     }
     return results;
+  },
+  async replace(id: any, file: any) {
+    const targetProject = PM.proj;
+    const targetProjectId = targetProject?.id;
+    const targetEpoch = assetEpoch;
+    const currentMeta: any = targetProject?.assets?.[id];
+    if (!currentMeta) throw new Error('This media item is no longer in the project');
+    const kind = assetKind(file);
+    if (!kind) throw new Error('Unsupported media file');
+    if (kind !== currentMeta.kind) {
+      const article = currentMeta.kind === 'image' || currentMeta.kind === 'audio' ? 'an' : 'a';
+      throw new Error(`Choose ${article} ${currentMeta.kind} file to replace this ${currentMeta.kind} media`);
+    }
+    const assertCurrentProject = () => {
+      if (PM.proj !== targetProject || assetEpoch !== targetEpoch || PM.proj?.assets?.[id] !== currentMeta) {
+        const error = new Error('Replacement stopped because you switched projects · replace the file again in the intended project');
+        (error as any).code = 'STALE_MEDIA_REPLACEMENT';
+        throw error;
+      }
+    };
+    const sourcePath = window.powermove?.media?.sourcePath?.(file) || '';
+    const fingerprint = await PM.MediaImport.fingerprint(file);
+    assertCurrentProject();
+    const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
+    let prepared: any = null;
+    try {
+      prepared = await prepareAsset({ id, name: file.name, kind, blob: file });
+      const persistBlob = prepared.persistBlob || file;
+      delete prepared.persistBlob;
+      const persisted = await PM.MediaStore.put(storageKey, persistBlob, {
+        storageKey, fingerprint, type: persistBlob.type || file.type,
+      });
+      if (!persisted) throw new Error('Could not store the replacement media · the original file is unchanged');
+      assertCurrentProject();
+
+      const previousRuntime = PM.assets.map.get(id) || null;
+      const previousMeta = JSON.parse(JSON.stringify(currentMeta));
+      const nextMeta = assetIdentity(id, file, kind, prepared, fingerprint, storageKey, sourcePath, true, currentMeta.layerDefinition);
+      Object.assign(prepared, nextMeta);
+
+      const applyVersion = (meta: any, runtime: any) => {
+        if (!PM.proj || PM.proj.id !== targetProjectId || !PM.proj.assets?.[id]) return;
+        PM.Viewer?.preview?.clear?.();
+        if (kind === 'audio' || kind === 'video') PM.Audio?.pause?.();
+        PM.proj.assets[id] = JSON.parse(JSON.stringify(meta));
+        if (runtime) PM.assets.map.set(id, runtime);
+        else PM.assets.map.delete(id);
+        PM.rasterClear?.();
+        PM.GL?.dropTextures?.(`a:${id}`);
+        PM.GL?.dropMesh?.(id);
+        PM.preparedVideoFrames?.clear?.();
+        PM.touch();
+        PM.bus.emit('assets');
+        PM.bus.emit('layers');
+        PM.bus.emit('project');
+        PM.Inspector?.refresh?.();
+        PM.invalidate('all');
+        PM.autosave?.();
+      };
+
+      applyVersion(nextMeta, prepared);
+      const retainedRuntimes = [...new Set([previousRuntime, prepared].filter(Boolean))];
+      retainedRuntimes.forEach(retainHistoryAsset);
+      const historyId = PM.hist.external(
+        `Replace ${currentMeta.name || 'media'}`,
+        () => applyVersion(previousMeta, previousRuntime),
+        () => applyVersion(nextMeta, prepared),
+        {
+          bytes: Number(previousMeta.size || 0) + Number(nextMeta.size || 0),
+          cleanup: () => retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id)),
+        },
+      );
+      if (!historyId) {
+        applyVersion(previousMeta, previousRuntime);
+        retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id));
+        throw new Error('Could not add the replacement to Undo history · the original file is unchanged');
+      }
+      if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
+      return { asset: prepared, previous: previousRuntime, meta: nextMeta, persisted: true };
+    } catch (error) {
+      if (prepared && PM.assets.map.get(id) !== prepared) disposeAsset(prepared);
+      throw error;
+    }
   },
   get: (id: any) => PM.assets.map.get(id),
   clear() {
