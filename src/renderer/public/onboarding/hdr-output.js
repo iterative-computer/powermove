@@ -91,10 +91,17 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
     const vectorCanvas = document.createElement('canvas');
     const maskCanvas = document.createElement('canvas');
     const layerCanvas = document.createElement('canvas');
-    const vectorContext = vectorCanvas.getContext('2d');
-    const maskContext = maskCanvas.getContext('2d');
-    const layerContext = layerCanvas.getContext('2d');
+    const precise2d = { colorSpace: 'srgb', colorType: 'float16' };
+    const context2d = (surface) => {
+      try { return surface.getContext('2d', precise2d) || surface.getContext('2d'); }
+      catch { return surface.getContext('2d'); }
+    };
+    const vectorContext = context2d(vectorCanvas);
+    const maskContext = context2d(maskCanvas);
+    const layerContext = context2d(layerCanvas);
     if (!vectorContext || !maskContext || !layerContext) { device.destroy(); return null; }
+    const float16Canvas = [vectorContext, maskContext, layerContext]
+      .every((context2d) => context2d.getContextAttributes?.().colorType === 'float16');
     const context = canvas.getContext('webgpu');
     if (!context) { device.destroy(); return null; }
     const configuration = {
@@ -139,6 +146,7 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
       toneMapping: applied?.toneMapping?.mode ?? configuration.toneMapping.mode,
       alphaMode: applied?.alphaMode ?? configuration.alphaMode,
       extendedFloat: true,
+      sourcePrecision: float16Canvas ? 'float16' : 'unorm8',
       gain: HDR_GAIN
     };
     const statistics = { frames: 0, pixelWidth: 0, pixelHeight: 0, configuration: evidence };
@@ -157,7 +165,7 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
       sourceTexture?.destroy();
       sourceTexture = device.createTexture({
         size: [width, height],
-        format: 'rgba8unorm',
+        format: float16Canvas ? 'rgba16float' : 'rgba8unorm',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
       });
       bindGroup = device.createBindGroup({

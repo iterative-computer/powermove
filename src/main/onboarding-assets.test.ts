@@ -39,6 +39,9 @@ describe('onboarding export assets', () => {
   it('uses a validated extended-range float surface at native display resolution when HDR is available', async () => {
     const output = await readFile(path.join(root, 'hdr-output.js'), 'utf8');
     expect(output).toContain("format: 'rgba16float'");
+    expect(output).toContain("colorType: 'float16'");
+    expect(output).toContain("sourcePrecision: float16Canvas ? 'float16' : 'unorm8'");
+    expect(output).toContain("format: float16Canvas ? 'rgba16float' : 'rgba8unorm'");
     expect(output).toContain("toneMapping: { mode: 'extended' }");
     expect(output).toContain("alphaMode: 'premultiplied'");
     expect(output).toContain("clearValue: { r: 2, g: .25, b: 0, a: 1 }");
