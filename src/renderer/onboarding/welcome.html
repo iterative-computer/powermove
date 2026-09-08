@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="normal">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Welcome to Powermove</title>
+</head>
+<body>
+  <main class="welcome-card" aria-labelledby="welcome-title">
+    <svg class="welcome-mark" viewBox="0 0 141 116" aria-hidden="true">
+      <path d="M33.3885 106.544L5.19736 115.218C1.26974 116.426 -1.70853 111.636 1.11257 108.648L28.2054 79.9531C42.9061 64.3828 53.2117 45.1902 58.0699 24.3349L63.0183 3.09249C63.9876 -1.06813 69.929 -1.01597 70.8251 3.16102L74.1448 18.6367C79.385 43.0646 92.058 65.2717 110.424 82.2092L138.829 108.405C141.918 111.254 139.086 116.33 135.039 115.198L101.016 105.677C78.8565 99.4757 55.3816 99.7767 33.3885 106.544Z" />
+    </svg>
+    <h1 id="welcome-title">Welcome to Powermove</h1>
+    <button id="begin" type="button">Begin</button>
+    <p id="begin-status" role="status" aria-live="polite"></p>
+  </main>
+  <script type="module" src="../src/onboarding/welcome.ts"></script>
+</body>
+</html>

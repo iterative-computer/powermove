@@ -9,6 +9,10 @@
 export const IPC = {
   ping: 'app:ping',
 
+  onboardingAnimationComplete: 'onboarding:animation-complete',
+  onboardingAnimationFailed: 'onboarding:animation-failed',
+  onboardingBegin: 'onboarding:begin',
+
   fileSave: 'file:save',
   projectOpen: 'project:open',
   projectConfirmClose: 'project:confirm-close',
@@ -60,6 +64,12 @@ export const IPC = {
   nativeEdit: 'edit:native',
   menuCommand: 'menu:command' // main → renderer
 } as const;
+
+export interface OnboardingBridge {
+  animationComplete(): void;
+  animationFailed(message: string): void;
+  begin(): Promise<void>;
+}
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
 

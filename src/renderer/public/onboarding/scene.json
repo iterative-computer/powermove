@@ -1,0 +1,2239 @@
+{
+  "format": "powermove-web",
+  "version": 1,
+  "project": {
+    "id": "P62ml4og",
+    "name": "Onboarding",
+    "w": 1920,
+    "h": 1080,
+    "fps": 30,
+    "dur": 9.766666666666667,
+    "bg": "#F2F2F7",
+    "backgroundFill": {
+      "type": "solid",
+      "angle": 0,
+      "stops": [
+        {
+          "id": "stop-1",
+          "color": "#F2F2F7",
+          "position": 0
+        }
+      ]
+    },
+    "layers": [
+      {
+        "id": "Lczhapmm",
+        "type": "shape",
+        "name": "Powermove light 2",
+        "from": 3.848800000143237,
+        "dur": 4.918199999856762,
+        "on": true,
+        "lock": false,
+        "shy": false,
+        "collapsed": true,
+        "color": "#6C7BE8",
+        "blend": "normal",
+        "mblur": false,
+        "parent": null,
+        "p": {
+          "perspective": {
+            "v": 50,
+            "kf": [],
+            "expr": null
+          },
+          "position.z": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "anchor.z": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "scale.z": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          },
+          "rotation.x": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "rotation.y": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "orientation.x": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "orientation.y": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "orientation.z": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "anchor.x": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "anchor.y": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "position.x": {
+            "v": 960.717,
+            "kf": [],
+            "expr": null
+          },
+          "position.y": {
+            "v": 540.492,
+            "kf": [],
+            "expr": null
+          },
+          "scale.x": {
+            "v": 201.18325,
+            "kf": [
+              {
+                "t": -0.8333333333333334,
+                "v": 225.93325,
+                "i": "knwzmicp",
+                "outInterp": "bezier",
+                "outEase": {
+                  "speed": -126.4870505136986,
+                  "influence": 0.72
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              },
+              {
+                "t": 2.466666666666667,
+                "v": 167.152,
+                "i": "kwizr0o7",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "bezier",
+                "inEase": {
+                  "speed": -0.42757320205479565,
+                  "influence": 100
+                },
+                "autoBezier": false,
+                "continuous": false
+              }
+            ],
+            "expr": null
+          },
+          "scale.y": {
+            "v": 201.18325,
+            "kf": [
+              {
+                "t": -0.8333333333333334,
+                "v": 225.93325,
+                "i": "kn6yutu9",
+                "outInterp": "bezier",
+                "outEase": {
+                  "speed": -126.4870505136986,
+                  "influence": 0.72
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              },
+              {
+                "t": 2.466666666666667,
+                "v": 167.152,
+                "i": "kmfupj98",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "bezier",
+                "inEase": {
+                  "speed": -0.42757320205479565,
+                  "influence": 100
+                },
+                "autoBezier": false,
+                "continuous": false
+              }
+            ],
+            "expr": null
+          },
+          "rotation": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "opacity": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          },
+          "skew": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          }
+        },
+        "fx": [
+          {
+            "id": "fxn8yamb",
+            "type": "glow",
+            "on": true,
+            "p": {
+              "threshold": {
+                "v": 94.844,
+                "kf": [],
+                "expr": null
+              },
+              "radius": {
+                "v": 72.876,
+                "kf": [],
+                "expr": null
+              },
+              "intensity": {
+                "v": 400,
+                "kf": [
+                  {
+                    "t": 3.6,
+                    "v": 400,
+                    "i": "kga3a9tp",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  },
+                  {
+                    "t": 4.433333333333334,
+                    "v": 0,
+                    "i": "kvw92g3d",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  }
+                ],
+                "expr": null
+              },
+              "gradientStart": {
+                "v": "#FFBE9C",
+                "kf": [],
+                "expr": null
+              },
+              "gradientEnd": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientAngle": {
+                "v": 90,
+                "kf": [],
+                "expr": null
+              },
+              "gradientOffset": {
+                "v": 84.062,
+                "kf": [
+                  {
+                    "t": -0.3333333333333333,
+                    "v": 84.062,
+                    "i": "k13apupt",
+                    "outInterp": "bezier",
+                    "outEase": {
+                      "speed": -29.268307028722667,
+                      "influence": 5.050000000000001
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  },
+                  {
+                    "t": 3.033333333333333,
+                    "v": -134.188,
+                    "i": "kuack0wb",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "bezier",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 62.870000000000005
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  }
+                ],
+                "expr": null
+              },
+              "pulseAmount": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "pulseSpeed": {
+                "v": 8,
+                "kf": [],
+                "expr": null
+              },
+              "behindLayer": {
+                "v": true,
+                "kf": [],
+                "expr": null
+              },
+              "gradientMiddle": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientMiddlePosition": {
+                "v": 40.376,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPointCount": {
+                "v": 3,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint1Position": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint3Position": {
+                "v": 93.125,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint4": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint4Position": {
+                "v": 75,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint5": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint5Position": {
+                "v": 25,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint6": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint6Position": {
+                "v": 62.5,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint7": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint7Position": {
+                "v": 37.5,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint8": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint8Position": {
+                "v": 87.5,
+                "kf": [],
+                "expr": null
+              },
+              "gradientRepeat": {
+                "v": false,
+                "kf": [],
+                "expr": null
+              },
+              "gradientRepeatSize": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              }
+            }
+          }
+        ],
+        "transitionIn": null,
+        "transitionOut": null,
+        "masks": [],
+        "d": {
+          "shape": "rect",
+          "color": "#E8E2CF",
+          "w": 480,
+          "h": 480,
+          "radius": 24,
+          "stroke": 0,
+          "strokeColor": "#ffffff",
+          "points": 5,
+          "paths": [
+            {
+              "id": "path6jt0gwa",
+              "name": "Path 1",
+              "parent": null,
+              "vertices": [
+                {
+                  "id": "vem76rn5",
+                  "p": {
+                    "x": {
+                      "v": -37.1115,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 48.544,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 21.9931,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -6.767299999999992,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "v68lek8u",
+                  "p": {
+                    "x": {
+                      "v": -65.30264,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 57.218,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": -3.9276200000000046,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 1.2079999999999984,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vsqg4ivw",
+                  "p": {
+                    "x": {
+                      "v": -69.38743,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 50.647999999999996,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -2.8211000000000013,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 2.9879999999999995,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vy98mwxd",
+                  "p": {
+                    "x": {
+                      "v": -42.2946,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 21.953100000000006,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 14.700700000000005,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": -15.570300000000003,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vbig2f16",
+                  "p": {
+                    "x": {
+                      "v": -12.430100000000003,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -33.665099999999995,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -4.8581999999999965,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 20.855299999999993,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vlrwh0zs",
+                  "p": {
+                    "x": {
+                      "v": -7.4816999999999965,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -54.90751,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0.9692999999999969,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": -4.160619999999994,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vzgj2hlr",
+                  "p": {
+                    "x": {
+                      "v": 0.32510000000000616,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -54.83898,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -0.8961000000000041,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -4.1769900000000035,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vibi99cg",
+                  "p": {
+                    "x": {
+                      "v": 3.6448000000000036,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -39.363299999999995,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 5.2402000000000015,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 24.427899999999994,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtzglujq",
+                  "p": {
+                    "x": {
+                      "v": 39.92400000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 24.209199999999996,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -18.366,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -16.9375,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vi0gaor9",
+                  "p": {
+                    "x": {
+                      "v": 68.32900000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 50.405,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 3.0889999999999986,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 2.8490000000000038,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtjpzryc",
+                  "p": {
+                    "x": {
+                      "v": 64.53899999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 57.19799999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 4.0470000000000255,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 1.132000000000005,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vpf5j6oz",
+                  "p": {
+                    "x": {
+                      "v": 30.516000000000005,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 47.67700000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": -22.15950000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": -6.201300000000003,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                }
+              ],
+              "p": {
+                "x": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "y": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "rotation": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "scaleX": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "scaleY": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "closed": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                },
+                "fill": {
+                  "v": "#F2F2F7",
+                  "kf": [],
+                  "expr": null
+                },
+                "fillEnabled": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                },
+                "fillOpacity": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "stroke": {
+                  "v": "#000000",
+                  "kf": [],
+                  "expr": null
+                },
+                "strokeWidth": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "strokeOpacity": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "trimStart": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "trimEnd": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "trimOffset": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "copies": {
+                  "v": 1,
+                  "kf": [],
+                  "expr": null
+                },
+                "repeatX": {
+                  "v": 30,
+                  "kf": [],
+                  "expr": null
+                },
+                "repeatY": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "repeatRotation": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                }
+              }
+            }
+          ],
+          "svgSourceAsset": "azcgdicc",
+          "svgWidth": 141,
+          "svgHeight": 116,
+          "svgWarnings": []
+        },
+        "scaleLinked": true,
+        "solo": false
+      },
+      {
+        "id": "Le8s0um9",
+        "type": "shape",
+        "name": "Powermove light",
+        "from": 0,
+        "dur": 3.848800000143237,
+        "on": true,
+        "lock": false,
+        "shy": false,
+        "collapsed": false,
+        "color": "#6C7BE8",
+        "blend": "normal",
+        "mblur": false,
+        "parent": null,
+        "p": {
+          "perspective": {
+            "v": 50,
+            "kf": [],
+            "expr": null
+          },
+          "position.z": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "anchor.z": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "scale.z": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          },
+          "rotation.x": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "rotation.y": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "orientation.x": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "orientation.y": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "orientation.z": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "anchor.x": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "anchor.y": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "position.x": {
+            "v": 1029.4375,
+            "kf": [],
+            "expr": null
+          },
+          "position.y": {
+            "v": 579.440047,
+            "kf": [
+              {
+                "t": 0,
+                "v": 579.440047,
+                "i": "kdgcvuhk",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              },
+              {
+                "t": 3.8333333333333335,
+                "v": 905.315047,
+                "i": "k4ehzphu",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              }
+            ],
+            "expr": null
+          },
+          "scale.x": {
+            "v": 1456.2655,
+            "kf": [
+              {
+                "t": 0,
+                "v": 2160.953,
+                "i": "kekocbga",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              },
+              {
+                "t": 3.8333333333333335,
+                "v": 1654.11295,
+                "i": "k799dt3n",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              }
+            ],
+            "expr": null
+          },
+          "scale.y": {
+            "v": 1456.2655,
+            "kf": [
+              {
+                "t": 0,
+                "v": 2160.953,
+                "i": "kcs4vf4j",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              },
+              {
+                "t": 3.8333333333333335,
+                "v": 1654.11295,
+                "i": "k2zdqcrk",
+                "outInterp": "linear",
+                "outEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "inInterp": "linear",
+                "inEase": {
+                  "speed": 0,
+                  "influence": 33.333333333333336
+                },
+                "autoBezier": false,
+                "continuous": false
+              }
+            ],
+            "expr": null
+          },
+          "rotation": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          },
+          "opacity": {
+            "v": 100,
+            "kf": [],
+            "expr": null
+          },
+          "skew": {
+            "v": 0,
+            "kf": [],
+            "expr": null
+          }
+        },
+        "fx": [
+          {
+            "id": "fxn8yamb",
+            "type": "glow",
+            "on": true,
+            "p": {
+              "threshold": {
+                "v": 97.938,
+                "kf": [],
+                "expr": null
+              },
+              "radius": {
+                "v": 72.876,
+                "kf": [],
+                "expr": null
+              },
+              "intensity": {
+                "v": 0,
+                "kf": [
+                  {
+                    "t": 0,
+                    "v": 0,
+                    "i": "kixt7yy1",
+                    "outInterp": "bezier",
+                    "outEase": {
+                      "speed": 210.5263157894737,
+                      "influence": 33.33333333333333
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  },
+                  {
+                    "t": 1.9000000000000001,
+                    "v": 400,
+                    "i": "kbryx8ih",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "bezier",
+                    "inEase": {
+                      "speed": 3.031578947368414,
+                      "influence": 100
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  },
+                  {
+                    "t": 3.1333333333333333,
+                    "v": 400,
+                    "i": "kctw0gi8",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  },
+                  {
+                    "t": 3.8333333333333335,
+                    "v": 0,
+                    "i": "kw3n97q9",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  }
+                ],
+                "expr": null
+              },
+              "gradientStart": {
+                "v": "#FF5900",
+                "kf": [],
+                "expr": null
+              },
+              "gradientEnd": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientAngle": {
+                "v": 90,
+                "kf": [],
+                "expr": null
+              },
+              "gradientOffset": {
+                "v": 0,
+                "kf": [
+                  {
+                    "t": 0,
+                    "v": 0,
+                    "i": "kbheueoy",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  },
+                  {
+                    "t": 3.8666666666666667,
+                    "v": -361.2815,
+                    "i": "k9e88w14",
+                    "outInterp": "linear",
+                    "outEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "inInterp": "linear",
+                    "inEase": {
+                      "speed": 0,
+                      "influence": 33.333333333333336
+                    },
+                    "autoBezier": false,
+                    "continuous": false
+                  }
+                ],
+                "expr": null
+              },
+              "pulseAmount": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "pulseSpeed": {
+                "v": 8,
+                "kf": [],
+                "expr": null
+              },
+              "behindLayer": {
+                "v": true,
+                "kf": [],
+                "expr": null
+              },
+              "gradientMiddle": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientMiddlePosition": {
+                "v": 92.625,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPointCount": {
+                "v": 3,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint1Position": {
+                "v": 0,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint3Position": {
+                "v": 93.125,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint4": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint4Position": {
+                "v": 75,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint5": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint5Position": {
+                "v": 25,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint6": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint6Position": {
+                "v": 62.5,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint7": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint7Position": {
+                "v": 37.5,
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint8": {
+                "v": "#FFFFFF",
+                "kf": [],
+                "expr": null
+              },
+              "gradientPoint8Position": {
+                "v": 87.5,
+                "kf": [],
+                "expr": null
+              },
+              "gradientRepeat": {
+                "v": true,
+                "kf": [],
+                "expr": null
+              },
+              "gradientRepeatSize": {
+                "v": 100,
+                "kf": [],
+                "expr": null
+              }
+            }
+          }
+        ],
+        "transitionIn": null,
+        "transitionOut": null,
+        "masks": [],
+        "d": {
+          "shape": "rect",
+          "color": "#E8E2CF",
+          "w": 480,
+          "h": 480,
+          "radius": 24,
+          "stroke": 0,
+          "strokeColor": "#ffffff",
+          "points": 5,
+          "paths": [
+            {
+              "id": "path6jt0gwa",
+              "name": "Path 1",
+              "parent": null,
+              "vertices": [
+                {
+                  "id": "vem76rn5",
+                  "p": {
+                    "x": {
+                      "v": -37.1115,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 48.544,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 21.9931,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -6.767299999999992,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "v68lek8u",
+                  "p": {
+                    "x": {
+                      "v": -65.30264,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 57.218,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": -3.9276200000000046,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 1.2079999999999984,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vsqg4ivw",
+                  "p": {
+                    "x": {
+                      "v": -69.38743,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 50.647999999999996,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -2.8211000000000013,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 2.9879999999999995,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vy98mwxd",
+                  "p": {
+                    "x": {
+                      "v": -42.2946,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 21.953100000000006,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 14.700700000000005,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": -15.570300000000003,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vbig2f16",
+                  "p": {
+                    "x": {
+                      "v": -12.430100000000003,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -33.665099999999995,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -4.8581999999999965,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 20.855299999999993,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vlrwh0zs",
+                  "p": {
+                    "x": {
+                      "v": -7.4816999999999965,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -54.90751,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0.9692999999999969,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": -4.160619999999994,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vzgj2hlr",
+                  "p": {
+                    "x": {
+                      "v": 0.32510000000000616,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -54.83898,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -0.8961000000000041,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -4.1769900000000035,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vibi99cg",
+                  "p": {
+                    "x": {
+                      "v": 3.6448000000000036,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": -39.363299999999995,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 5.2402000000000015,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 24.427899999999994,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtzglujq",
+                  "p": {
+                    "x": {
+                      "v": 39.92400000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 24.209199999999996,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": -18.366,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": -16.9375,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vi0gaor9",
+                  "p": {
+                    "x": {
+                      "v": 68.32900000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 50.405,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 3.0889999999999986,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 2.8490000000000038,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vtjpzryc",
+                  "p": {
+                    "x": {
+                      "v": 64.53899999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 57.19799999999999,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 4.0470000000000255,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 1.132000000000005,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                },
+                {
+                  "id": "vpf5j6oz",
+                  "p": {
+                    "x": {
+                      "v": 30.516000000000005,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "y": {
+                      "v": 47.67700000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inX": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "inY": {
+                      "v": 0,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outX": {
+                      "v": -22.15950000000001,
+                      "kf": [],
+                      "expr": null
+                    },
+                    "outY": {
+                      "v": -6.201300000000003,
+                      "kf": [],
+                      "expr": null
+                    }
+                  }
+                }
+              ],
+              "p": {
+                "x": {
+                  "v": 0.4311063534973272,
+                  "kf": [],
+                  "expr": null
+                },
+                "y": {
+                  "v": 0.29533754974378823,
+                  "kf": [],
+                  "expr": null
+                },
+                "rotation": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "scaleX": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "scaleY": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "closed": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                },
+                "fill": {
+                  "v": "#F2F2F7",
+                  "kf": [],
+                  "expr": null
+                },
+                "fillEnabled": {
+                  "v": true,
+                  "kf": [],
+                  "expr": null
+                },
+                "fillOpacity": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "stroke": {
+                  "v": "#000000",
+                  "kf": [],
+                  "expr": null
+                },
+                "strokeWidth": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "strokeOpacity": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "trimStart": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "trimEnd": {
+                  "v": 100,
+                  "kf": [],
+                  "expr": null
+                },
+                "trimOffset": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "copies": {
+                  "v": 1,
+                  "kf": [],
+                  "expr": null
+                },
+                "repeatX": {
+                  "v": 30,
+                  "kf": [],
+                  "expr": null
+                },
+                "repeatY": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                },
+                "repeatRotation": {
+                  "v": 0,
+                  "kf": [],
+                  "expr": null
+                }
+              }
+            }
+          ],
+          "svgSourceAsset": "azcgdicc",
+          "svgWidth": 141,
+          "svgHeight": 116,
+          "svgWarnings": []
+        },
+        "scaleLinked": true,
+        "solo": false
+      },
+      {
+        "id": "Ll9pkcla",
+        "type": "audio",
+        "name": "powermove-logo-bold.wav",
+        "from": 0,
+        "dur": 7.3,
+        "on": true,
+        "lock": false,
+        "shy": false,
+        "collapsed": true,
+        "color": "#4C8DFF",
+        "blend": "normal",
+        "mblur": false,
+        "parent": null,
+        "p": {},
+        "fx": [],
+        "transitionIn": null,
+        "transitionOut": null,
+        "masks": [],
+        "d": {
+          "asset": "awojon75",
+          "trim": 0,
+          "gain": 1,
+          "fadeIn": 0,
+          "fadeOut": 0
+        },
+        "solo": false
+      }
+    ],
+    "assets": {
+      "awojon75": {
+        "id": "awojon75",
+        "name": "powermove-logo-bold.wav",
+        "kind": "audio",
+        "w": 0,
+        "h": 0,
+        "dur": 7.3,
+        "channels": 2,
+        "sampleRate": 48000
+      }
+    },
+    "params": {},
+    "shutter": 0.5,
+    "comps": {}
+  },
+  "assets": {
+    "awojon75": "assets/media-0.wav"
+  },
+  "fonts": [],
+  "effects": [
+    {
+      "id": "glow",
+      "label": "Glow",
+      "group": "Stylize",
+      "passes": 3,
+      "keepOrig": true,
+      "params": [
+        {
+          "k": "threshold",
+          "label": "Threshold",
+          "def": 55,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "radius",
+          "label": "Radius",
+          "def": 60,
+          "min": 0,
+          "max": 400,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "k": "intensity",
+          "label": "Intensity",
+          "def": 90,
+          "min": 0,
+          "max": 400,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientPointCount",
+          "label": "Gradient Points",
+          "def": 3,
+          "min": 2,
+          "max": 8,
+          "step": 1
+        },
+        {
+          "k": "gradientStart",
+          "label": "Gradient Point 1",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint1Position",
+          "label": "Point 1 Position",
+          "def": 0,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientMiddle",
+          "label": "Gradient Point 2",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientMiddlePosition",
+          "label": "Point 2 Position",
+          "def": 50,
+          "min": 1,
+          "max": 99,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientEnd",
+          "label": "Gradient Point 3",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint3Position",
+          "label": "Point 3 Position",
+          "def": 100,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientPoint4",
+          "label": "Gradient Point 4",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint4Position",
+          "label": "Point 4 Position",
+          "def": 75,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientPoint5",
+          "label": "Gradient Point 5",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint5Position",
+          "label": "Point 5 Position",
+          "def": 25,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientPoint6",
+          "label": "Gradient Point 6",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint6Position",
+          "label": "Point 6 Position",
+          "def": 62.5,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "gradientPoint7",
+          "label": "Gradient Point 7",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint7Position",
+          "label": "Point 7 Position",
+          "def": 37.5,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "gradientPoint8",
+          "label": "Gradient Point 8",
+          "def": "#FFFFFF",
+          "type": "color"
+        },
+        {
+          "k": "gradientPoint8Position",
+          "label": "Point 8 Position",
+          "def": 87.5,
+          "min": 0,
+          "max": 100,
+          "step": 0.5,
+          "unit": "%"
+        },
+        {
+          "k": "gradientAngle",
+          "label": "Gradient Angle",
+          "def": 0,
+          "min": -360,
+          "max": 360,
+          "step": 1,
+          "unit": "°"
+        },
+        {
+          "k": "gradientOffset",
+          "label": "Gradient Offset",
+          "def": 0,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "gradientRepeat",
+          "label": "Repeat Gradient",
+          "def": true,
+          "type": "toggle"
+        },
+        {
+          "k": "gradientRepeatSize",
+          "label": "Repeat Size",
+          "def": 100,
+          "min": 1,
+          "max": 1000,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "pulseAmount",
+          "label": "Pulse Amount",
+          "def": 0,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        },
+        {
+          "k": "pulseSpeed",
+          "label": "Pulse Speed",
+          "def": 1,
+          "min": 0,
+          "max": 8,
+          "step": 0.05,
+          "unit": "Hz"
+        },
+        {
+          "k": "behindLayer",
+          "label": "Behind Layer",
+          "def": true,
+          "type": "toggle"
+        }
+      ],
+      "frag": "\n      if (u_pass == 0) {\n        vec4 c = texture(u_tex, v_st);\n        float brightness = luma(c.rgb / max(c.a, .001));\n        float gate = smoothstep(u_threshold / 100. - .08, u_threshold / 100. + .08, brightness);\n        o = c * gate;\n        return;\n      }\n\n      vec2 direction = u_pass == 1 ? vec2(1., 0.) : vec2(0., 1.);\n      float radius = max(u_radius, .5);\n      float sigma = radius * .5;\n      vec4 bloom = vec4(0.);\n      float weightSum = 0.;\n      for (int i = -20; i <= 20; i++) {\n        float x = float(i) / 20. * radius;\n        float weight = exp(-(x * x) / (2. * sigma * sigma + 1e-4));\n        bloom += texture(u_tex, v_st + direction * u_texel * x) * weight;\n        weightSum += weight;\n      }\n      bloom /= max(weightSum, 1e-4);\n\n      if (u_pass == 2) {\n        float angle = radians(u_gradientAngle);\n        vec2 axis = vec2(cos(angle), sin(angle));\n        float shifted = dot(v_st - .5, axis) + .5 + u_gradientOffset / 100.;\n        float repeatPhase = shifted * 100. / max(u_gradientRepeatSize, 1.);\n        float gradient = u_gradientRepeat > .5\n          ? 1. - abs(mod(repeatPhase, 2.) - 1.)\n          : clamp(shifted, 0., 1.);\n\n        vec3 colors[8];\n        colors[0] = u_gradientStart;\n        colors[1] = u_gradientMiddle;\n        colors[2] = u_gradientEnd;\n        colors[3] = u_gradientPoint4;\n        colors[4] = u_gradientPoint5;\n        colors[5] = u_gradientPoint6;\n        colors[6] = u_gradientPoint7;\n        colors[7] = u_gradientPoint8;\n        float positions[8];\n        positions[0] = u_gradientPoint1Position / 100.;\n        positions[1] = u_gradientMiddlePosition / 100.;\n        positions[2] = u_gradientPoint3Position / 100.;\n        positions[3] = u_gradientPoint4Position / 100.;\n        positions[4] = u_gradientPoint5Position / 100.;\n        positions[5] = u_gradientPoint6Position / 100.;\n        positions[6] = u_gradientPoint7Position / 100.;\n        positions[7] = u_gradientPoint8Position / 100.;\n        int pointCount = int(clamp(floor(u_gradientPointCount + .5), 2., 8.));\n        for (int pass = 0; pass < 7; pass++) {\n          for (int i = 0; i < 7; i++) {\n            if (i >= pointCount - 1) continue;\n            if (positions[i] > positions[i + 1]) {\n              float oldPosition = positions[i];\n              positions[i] = positions[i + 1];\n              positions[i + 1] = oldPosition;\n              vec3 oldColor = colors[i];\n              colors[i] = colors[i + 1];\n              colors[i + 1] = oldColor;\n            }\n          }\n        }\n        vec3 tint = colors[0];\n        for (int i = 0; i < 7; i++) {\n          if (i >= pointCount - 1) break;\n          float start = positions[i];\n          float end = max(positions[i + 1], start + .0001);\n          if (gradient >= start) tint = mix(colors[i], colors[i + 1], clamp((gradient - start) / (end - start), 0., 1.));\n        }\n        float pulse = 1. - (u_pulseAmount / 100.) * .5\n                    + (u_pulseAmount / 100.) * .5 * sin(6.2831853 * u_time * u_pulseSpeed);\n        float strength = (u_intensity / 100.) * max(pulse, 0.);\n        vec4 original = texture(u_orig, v_st);\n        vec4 coloredGlow = vec4(bloom.rgb * tint, bloom.a) * strength;\n        o = u_behindLayer > .5\n          ? original + coloredGlow * (1. - original.a)\n          : original + coloredGlow;\n      } else {\n        o = bloom;\n      }"
+    }
+  ],
+  "transitions": [],
+  "layerTypes": [],
+  "warnings": []
+}

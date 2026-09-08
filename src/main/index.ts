@@ -7,6 +7,7 @@ import {
   BrowserWindow,
   ipcMain,
   protocol,
+  screen,
   session,
   shell,
   type WebContents
@@ -33,6 +34,7 @@ import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './secu
 import { createStore, installQuitFlush, registerStoreIpc } from './storage';
 import { DARK_BACKGROUND, registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
+import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
 
 const APP_ORIGIN = 'app://powermove';
 // Served with X-Content-Type-Options: nosniff, so anything not listed here is
@@ -95,6 +97,8 @@ if (userDataOverride && path.isAbsolute(userDataOverride)) {
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | null = null;
+let onboardingFlow: OnboardingFlow | null = null;
+let startupInitialized = false;
 let quitPrepared = () => false;
 async function prepareEditorClose(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
@@ -327,6 +331,14 @@ if (!hasSingleInstanceLock) {
 
   app.on('second-instance', () => {
     if (isBackgroundTest) return;
+    // The listener is installed before async startup finishes. Do not let an
+    // early second launch create the editor before the first-run gate decides
+    // whether onboarding owns startup.
+    if (!startupInitialized) return;
+    if (onboardingFlow) {
+      onboardingFlow.focus();
+      return;
+    }
     if (mainWindow === null) {
       createWindow();
       return;
@@ -467,10 +479,31 @@ if (!hasSingleInstanceLock) {
     if (!isBackgroundTest) installUpdates(menu);
 
     if (isBackgroundTest) app.dock?.hide();
-    createWindow();
+    const completedOnboarding = await onboardingCompleted(app.getPath('userData'));
+    if (onboardingEnabled(process.env, isBackgroundTest, completedOnboarding)) {
+      onboardingFlow = new OnboardingFlow(ipcMain, {
+        appOrigin: (devRendererUrl ?? APP_ORIGIN).replace(/\/$/, ''),
+        bounds: screen.getPrimaryDisplay().bounds,
+        backgroundTest: isBackgroundTest,
+        userData: app.getPath('userData'),
+        createEditor: () => {
+          onboardingFlow = null;
+          return createWindow();
+        },
+        secure: (window) => secureWebContents(window.webContents, devRendererUrl)
+      });
+      onboardingFlow.start();
+    } else {
+      createWindow();
+    }
+    startupInitialized = true;
 
     app.on('activate', () => {
       if (isBackgroundTest) return;
+      if (onboardingFlow) {
+        onboardingFlow.focus();
+        return;
+      }
       if (BrowserWindow.getAllWindows().length === 0) {
         createWindow();
       }

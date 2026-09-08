@@ -15,7 +15,13 @@ export default defineConfig({
   preload: {
     build: {
       outDir: 'out/preload',
-      rollupOptions: { output: { format: 'cjs', entryFileNames: '[name].js' } }
+      rollupOptions: {
+        input: {
+          index: path.resolve(__dirname, 'src/preload/index.ts'),
+          onboarding: path.resolve(__dirname, 'src/preload/onboarding.ts')
+        },
+        output: { format: 'cjs', entryFileNames: '[name].js' }
+      }
     }
   },
   renderer: {
@@ -26,6 +32,10 @@ export default defineConfig({
     build: {
       outDir: 'out/renderer',
       rollupOptions: {
+        input: {
+          index: path.resolve(__dirname, 'src/renderer/index.html'),
+          onboardingWelcome: path.resolve(__dirname, 'src/renderer/onboarding/welcome.html')
+        },
         output: {
           assetFileNames: (assetInfo) => {
             const name = assetInfo.names[0] ?? '';
