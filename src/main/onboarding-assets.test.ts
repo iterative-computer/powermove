@@ -26,10 +26,13 @@ describe('onboarding export assets', () => {
     expect(renderer).toContain("import { createEngine } from './player.js'");
     expect(renderer).toContain("svgNode('feGaussianBlur')");
     expect(renderer).toContain("candidate.type === effectDefinition.id");
+    expect(renderer).toContain('WARM_WHITE_TINT = .7');
     expect(html).toContain('<svg id="onboarding-svg"');
     expect(html).not.toContain('<canvas');
     expect(renderer).not.toContain("createElement('canvas')");
     expect(styles).toContain('background: transparent');
+    expect(styles).toContain('background: rgba(0, 0, 0, 0.45)');
+    expect(styles).toContain('animation: onboarding-dim-in 400ms ease-out both');
     expect(styles).toContain('width: min(100vw, calc(100vh * 16 / 9))');
   });
 

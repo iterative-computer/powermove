@@ -32,10 +32,12 @@ export interface OnboardingSvgPlayerOptions {
 
 export const EXPECTED_DURATION: number;
 export const SDR_EMISSIVE_GAIN: number;
+export const WARM_WHITE_TINT: number;
 export function createOnboardingSvgPlayer(options: OnboardingSvgPlayerOptions): Promise<OnboardingSvgPlayer>;
 export function pathData(engine: any, layer: any, path: any, time: number): string;
 export function pathMatrix(engine: any, layer: any, path: any, time: number): number[];
 export function combinedPathMatrix(engine: any, layer: any, path: any, time: number): number[];
 export function unmixWhite(color: string): { color: string; opacity: number };
+export function tintVisibleGlow(color: string, amount?: number): string;
 export function gradientState(engine: any, layer: any, effect: any, time: number): any;
 export function sourceGate(engine: any, layer: any, path: any, effect: any, time: number): number;

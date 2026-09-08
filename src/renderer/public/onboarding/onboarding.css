@@ -13,8 +13,14 @@ body { width: 100%; height: 100%; margin: 0; }
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: transparent;
+  background: rgba(0, 0, 0, 0.45);
+  animation: onboarding-dim-in 400ms ease-out both;
   pointer-events: none;
+}
+
+@keyframes onboarding-dim-in {
+  from { background-color: transparent; }
+  to { background-color: rgba(0, 0, 0, 0.45); }
 }
 
 #onboarding-svg {

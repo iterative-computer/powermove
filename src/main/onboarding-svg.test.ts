@@ -11,6 +11,7 @@ import {
   gradientState,
   pathData,
   sourceGate,
+  tintVisibleGlow,
   unmixWhite
 } from '../renderer/public/onboarding/svg-player.js';
 
@@ -41,6 +42,16 @@ describe('native SVG onboarding renderer', () => {
     expect(composite[0]).toBeCloseTo(1, 6);
     expect(composite[1]).toBeCloseTo(190 / 255, 2);
     expect(composite[2]).toBeCloseTo(156 / 255, 6);
+  });
+
+  it('tints visible orange 70% toward white without reviving transparent source white', () => {
+    expect(tintVisibleGlow('#FF5800')).toBe('#FFCDB3');
+    const engine = createEngine(structuredClone(scene.project));
+    const layer = engine.proj.layers.find((candidate: any) => candidate.type === 'shape');
+    const effect = layer.fx.find((candidate: any) => candidate.type === 'glow');
+    const stops = gradientState(engine, layer, effect, 2).stops;
+    expect(stops.find((stop: any) => stop.opacity > 0)?.color).toBe('#FFCDB3');
+    expect(stops.filter((stop: any) => stop.opacity === 0).every((stop: any) => stop.color === '#FFCDB3')).toBe(true);
   });
 
   it('evaluates cubic path geometry, transforms, opacity, and effects at sampled scene times', async () => {

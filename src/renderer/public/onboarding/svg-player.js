@@ -4,6 +4,7 @@ import { createOnboardingHdrOutput } from './hdr-output.js';
 const NS = 'http://www.w3.org/2000/svg';
 export const EXPECTED_DURATION = 9.766666666666667;
 export const SDR_EMISSIVE_GAIN = 3;
+export const WARM_WHITE_TINT = .7;
 
 const svgNode = (name) => document.createElementNS(NS, name);
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -61,6 +62,16 @@ export function unmixWhite(color) {
   };
 }
 
+export function tintVisibleGlow(color, amount = WARM_WHITE_TINT) {
+  const raw = String(color || '#000000').replace('#', '');
+  const value = /^[\da-f]{6}$/i.test(raw) ? raw : '000000';
+  const tint = clamp(finite(amount), 0, 1);
+  return `#${[0, 2, 4].map((offset) => {
+    const channel = Number.parseInt(value.slice(offset, offset + 2), 16);
+    return Math.round(channel + (255 - channel) * tint).toString(16).padStart(2, '0');
+  }).join('').toUpperCase()}`;
+}
+
 export function gradientState(engine, layer, effect, time) {
   const parameter = (key, fallback) => effect?.p[key]
     ? engine.evP(layer, effect.p[key], time, key)
@@ -68,10 +79,14 @@ export function gradientState(engine, layer, effect, time) {
   const count = clamp(Math.round(finite(parameter('gradientPointCount', 3), 3)), 2, 8);
   const colors = ['gradientStart', 'gradientMiddle', 'gradientEnd', 'gradientPoint4', 'gradientPoint5', 'gradientPoint6', 'gradientPoint7', 'gradientPoint8'];
   const positions = ['gradientPoint1Position', 'gradientMiddlePosition', 'gradientPoint3Position', 'gradientPoint4Position', 'gradientPoint5Position', 'gradientPoint6Position', 'gradientPoint7Position', 'gradientPoint8Position'];
-  const stops = Array.from({ length: count }, (_, index) => ({
-    ...unmixWhite(parameter(colors[index], '#ffffff')),
-    offset: clamp(finite(parameter(positions[index], index / Math.max(1, count - 1) * 100)) / 100, 0, 1)
-  })).sort((left, right) => left.offset - right.offset);
+  const stops = Array.from({ length: count }, (_, index) => {
+    const unmixed = unmixWhite(parameter(colors[index], '#ffffff'));
+    return {
+      ...unmixed,
+      color: unmixed.opacity > 1e-6 ? tintVisibleGlow(unmixed.color) : unmixed.color,
+      offset: clamp(finite(parameter(positions[index], index / Math.max(1, count - 1) * 100)) / 100, 0, 1)
+    };
+  }).sort((left, right) => left.offset - right.offset);
   // A fully transparent stop keeps its nearest colored hue to avoid a dark fringe.
   stops.forEach((stop, index) => {
     if (stop.opacity > 1e-6) return;
@@ -206,7 +221,7 @@ export async function createOnboardingSvgPlayer(options) {
       for (const [key, value] of Object.entries({ x1: state.x1, y1: state.y1, x2: state.x2, y2: state.y2 })) node.gradient.setAttribute(key, String(value));
       node.gradient.setAttribute('spreadMethod', state.spread); setStops(node.gradient, state.stops);
       node.blur.setAttribute('stdDeviation', String(state.radius * .5));
-      node.alphaSlope.setAttribute('slope', String(state.strength * SDR_EMISSIVE_GAIN));
+      node.alphaSlope.setAttribute('slope', String(state.strength));
       node.glowPath.setAttribute('opacity', String(sourceGate(engine, node.layer, path, effect, nextTime)));
       node.rect.setAttribute('opacity', String(engine.worldOpacity(node.layer, nextTime)));
     }

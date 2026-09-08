@@ -258,7 +258,7 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
         layerContext.filter = 'none'; layerContext.globalAlpha = 1;
         layerContext.globalCompositeOperation = 'source-over'; layerContext.clearRect(0, 0, canvas.width, canvas.height);
         layerContext.globalCompositeOperation = 'lighter';
-        const strength = Math.max(0, Number(slope.getAttribute('slope')) / (Number(svg.dataset.sdrGain) || 1));
+        const strength = Math.max(0, Number(slope.getAttribute('slope')));
         const whole = Math.floor(strength), fraction = strength - whole;
         for (let pass = 0; pass < whole; pass++) layerContext.drawImage(maskCanvas, 0, 0);
         if (fraction > 1e-4) { layerContext.globalAlpha = fraction; layerContext.drawImage(maskCanvas, 0, 0); }
