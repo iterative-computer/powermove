@@ -4,7 +4,8 @@ import { createOnboardingHdrOutput } from './hdr-output.js';
 const NS = 'http://www.w3.org/2000/svg';
 export const EXPECTED_DURATION = 9.766666666666667;
 export const SDR_EMISSIVE_GAIN = 3;
-export const WARM_WHITE_TINT = .7;
+export const WARM_WHITE_TINT = 0;
+export const POWERMOVE_ORANGE = '#FF6B1A';
 
 const svgNode = (name) => document.createElementNS(NS, name);
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -83,7 +84,7 @@ export function gradientState(engine, layer, effect, time) {
     const unmixed = unmixWhite(parameter(colors[index], '#ffffff'));
     return {
       ...unmixed,
-      color: unmixed.opacity > 1e-6 ? tintVisibleGlow(unmixed.color) : unmixed.color,
+      color: unmixed.opacity > 1e-6 ? tintVisibleGlow(POWERMOVE_ORANGE) : unmixed.color,
       offset: clamp(finite(parameter(positions[index], index / Math.max(1, count - 1) * 100)) / 100, 0, 1)
     };
   }).sort((left, right) => left.offset - right.offset);
@@ -204,6 +205,7 @@ export async function createOnboardingSvgPlayer(options) {
   const base = new URL(options.baseURL || document.baseURI, document.baseURI);
   const audio = options.audio === false || !audioLayer ? null : await readyAudio(new URL(scene.assets[audioLayer.d.asset], base));
   let dead = false, playing = false, frame = 0, time = 0, startTime = 0, origin = 0, hdrOutput = null;
+  let handoff = null;
 
   const render = (nextTime) => {
     time = nextTime; engine.time = nextTime; engine.beginEval?.(nextTime);
@@ -213,14 +215,37 @@ export async function createOnboardingSvgPlayer(options) {
       if (!active) continue;
       const path = node.layer.d.paths[0];
       const data = pathData(engine, node.layer, path, nextTime);
-      const transform = `matrix(${combinedPathMatrix(engine, node.layer, path, nextTime).join(' ')})`;
+      let presentationScale = 1;
+      let matrix = combinedPathMatrix(engine, node.layer, path, nextTime);
+      node.glowPath.setAttribute('d', data);
+      if (handoff) {
+        const box = node.glowPath.getBBox();
+        const [a, b, c, d, e, f] = matrix;
+        const corners = [[box.x, box.y], [box.x + box.width, box.y],
+          [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
+          .map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+        const left = Math.min(...corners.map(p => p[0])), right = Math.max(...corners.map(p => p[0]));
+        const top = Math.min(...corners.map(p => p[1])), bottom = Math.max(...corners.map(p => p[1]));
+        const viewport = svg.getBoundingClientRect();
+        const fit = Math.min(viewport.width / project.w, viewport.height / project.h);
+        const target = handoff.target, amount = handoff.progress;
+        const scale = 1 + (Math.min(target.width / (fit * (right - left)), target.height / (fit * (bottom - top))) - 1) * amount;
+        presentationScale = scale;
+        const cx = (left + right) / 2, cy = (top + bottom) / 2;
+        const tx = (target.x + target.width / 2 - viewport.x) / fit;
+        const ty = (target.y + target.height / 2 - viewport.y) / fit;
+        matrix = [a * scale, b * scale, c * scale, d * scale,
+          e * scale + cx * (1 - scale) + (tx - cx) * amount,
+          f * scale + cy * (1 - scale) + (ty - cy) * amount];
+      }
+      const transform = `matrix(${matrix.join(' ')})`;
       node.glowPath.setAttribute('d', data); node.glowPath.setAttribute('transform', transform);
       node.hollowPath.setAttribute('d', data); node.hollowPath.setAttribute('transform', transform);
       const effect = node.layer.fx.find((candidate) => candidate.type === effectDefinition.id);
       const state = gradientState(engine, node.layer, effect, nextTime);
       for (const [key, value] of Object.entries({ x1: state.x1, y1: state.y1, x2: state.x2, y2: state.y2 })) node.gradient.setAttribute(key, String(value));
       node.gradient.setAttribute('spreadMethod', state.spread); setStops(node.gradient, state.stops);
-      node.blur.setAttribute('stdDeviation', String(state.radius * .5));
+      node.blur.setAttribute('stdDeviation', String(state.radius * .5 * presentationScale));
       node.alphaSlope.setAttribute('slope', String(state.strength));
       node.glowPath.setAttribute('opacity', String(sourceGate(engine, node.layer, path, effect, nextTime)));
       node.rect.setAttribute('opacity', String(engine.worldOpacity(node.layer, nextTime)));
@@ -249,6 +274,10 @@ export async function createOnboardingSvgPlayer(options) {
         void audio.play().catch((error) => options.onError?.(error instanceof Error ? error : new Error(String(error))));
       }
       frame = requestAnimationFrame(tick);
+    },
+    setHandoffTarget(target, progress) {
+      if (!target || !['x', 'y', 'width', 'height'].every(key => Number.isFinite(target[key])) || target.width <= 0 || target.height <= 0 || !Number.isFinite(progress)) return;
+      handoff = { target: { ...target }, progress: clamp(progress, 0, 1) };
     },
     pause() { playing = false; cancelAnimationFrame(frame); pauseAudio(); },
     async seek(value) {

@@ -44,14 +44,14 @@ describe('native SVG onboarding renderer', () => {
     expect(composite[2]).toBeCloseTo(156 / 255, 6);
   });
 
-  it('tints visible orange 70% toward white without reviving transparent source white', () => {
-    expect(tintVisibleGlow('#FF5800')).toBe('#FFCDB3');
+  it('uses signature orange without reviving transparent source white', () => {
+    expect(tintVisibleGlow('#FF5800', .7)).toBe('#FFCDB3');
     const engine = createEngine(structuredClone(scene.project));
     const layer = engine.proj.layers.find((candidate: any) => candidate.type === 'shape');
     const effect = layer.fx.find((candidate: any) => candidate.type === 'glow');
     const stops = gradientState(engine, layer, effect, 2).stops;
-    expect(stops.find((stop: any) => stop.opacity > 0)?.color).toBe('#FFCDB3');
-    expect(stops.filter((stop: any) => stop.opacity === 0).every((stop: any) => stop.color === '#FFCDB3')).toBe(true);
+    expect(stops.find((stop: any) => stop.opacity > 0)?.color).toBe('#FF6B1A');
+    expect(stops.filter((stop: any) => stop.opacity === 0).every((stop: any) => stop.color === '#FF6B1A')).toBe(true);
   });
 
   it('evaluates cubic path geometry, transforms, opacity, and effects at sampled scene times', async () => {

@@ -10,7 +10,10 @@ export const IPC = {
   ping: 'app:ping',
 
   onboardingAnimationComplete: 'onboarding:animation-complete',
+  onboardingAnimationEnding: 'onboarding:animation-ending',
   onboardingAnimationFailed: 'onboarding:animation-failed',
+  onboardingLogoTarget: 'onboarding:logo-target',
+  onboardingLogoTargetReport: 'onboarding:logo-target-report',
   onboardingBegin: 'onboarding:begin',
   onboardingReplay: 'onboarding:replay',
 
@@ -66,9 +69,19 @@ export const IPC = {
   menuCommand: 'menu:command' // main → renderer
 } as const;
 
+export interface OnboardingLogoTarget {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface OnboardingBridge {
   animationComplete(): void;
+  animationEnding(): void;
   animationFailed(message: string): void;
+  reportLogoTarget(target: OnboardingLogoTarget): void;
+  onLogoTarget(callback: (target: OnboardingLogoTarget) => void): () => void;
   begin(): Promise<void>;
   replay(): Promise<void>;
 }

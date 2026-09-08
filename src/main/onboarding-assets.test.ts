@@ -23,16 +23,23 @@ describe('onboarding export assets', () => {
     const styles = await readFile(path.join(root, 'onboarding.css'), 'utf8');
     expect(animation).toContain('createOnboardingSvgPlayer');
     expect(animation).toContain('audio: true');
+    expect(animation).toContain('autoplay: false');
+    expect(animation).toContain("document.body.classList.add('onboarding-playing')");
+    expect(animation).toContain('player.play()');
+    expect(animation).toContain('player.currentTime >= 7');
+    expect(animation).toContain('window.onboarding.animationEnding()');
     expect(renderer).toContain("import { createEngine } from './player.js'");
     expect(renderer).toContain("svgNode('feGaussianBlur')");
     expect(renderer).toContain("candidate.type === effectDefinition.id");
-    expect(renderer).toContain('WARM_WHITE_TINT = .7');
+    expect(renderer).toContain('WARM_WHITE_TINT = 0');
     expect(html).toContain('<svg id="onboarding-svg"');
     expect(html).not.toContain('<canvas');
     expect(renderer).not.toContain("createElement('canvas')");
     expect(styles).toContain('background: transparent');
-    expect(styles).toContain('background: rgba(0, 0, 0, 0.45)');
-    expect(styles).toContain('animation: onboarding-dim-in 400ms ease-out both');
+    expect(styles).toContain('background-color: rgba(0, 0, 0, 0.45)');
+    expect(styles).toContain('.animation-stage.onboarding-playing');
+    expect(styles).toContain('animation: onboarding-dim-in 600ms ease-out both');
+    expect(styles).toContain('animation: onboarding-dim-out 900ms ease-in forwards');
     expect(styles).toContain('width: min(100vw, calc(100vh * 16 / 9))');
   });
 
@@ -42,7 +49,7 @@ describe('onboarding export assets', () => {
     expect(output).toContain("colorType: 'float16'");
     expect(output).toContain("sourcePrecision: float16Canvas ? 'float16' : 'unorm8'");
     expect(output).toContain("format: float16Canvas ? 'rgba16float' : 'rgba8unorm'");
-    expect(output).toContain("toneMapping: { mode: 'extended' }");
+    expect(output).toContain("toneMapping: { mode: highDynamicRange ? 'extended' : 'standard' }");
     expect(output).toContain("alphaMode: 'premultiplied'");
     expect(output).toContain("clearValue: { r: 2, g: .25, b: 0, a: 1 }");
     expect(output).toContain("await device.createRenderPipelineAsync(pipelineDescriptor)");
@@ -55,5 +62,16 @@ describe('onboarding export assets', () => {
     expect(output).toContain('statistics.frames += 1');
     expect(output).toContain('probeExtendedScene');
     expect(output).toContain('extended: max > 1');
+  });
+
+  it('keeps the welcome mark moving and reports its live path bounds during the handoff', async () => {
+    const welcome = await readFile(path.resolve(root, '../../src/onboarding/welcome.ts'), 'utf8');
+    const styles = await readFile(path.resolve(root, '../../src/onboarding/welcome.css'), 'utf8');
+    expect(welcome).toContain('mark.getBoundingClientRect()');
+    expect(welcome).toContain('document.fonts.ready.then(scheduleLogoTarget)');
+    expect(welcome).toContain('window.onboarding.reportLogoTarget');
+    expect(styles).toContain('animation: welcome-mark-float 4s ease-in-out 2.7s infinite');
+    expect(styles).toContain('translateY(-4px) rotate(-3deg)');
+    expect(styles).toContain('.welcome-mark { animation: none; }');
   });
 });

@@ -46,7 +46,7 @@ async function provesExtendedFloat(device) {
   }
 }
 
-const shader = /* wgsl */`
+const shader = (highDynamicRange) => /* wgsl */`
   struct VertexOut {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
@@ -69,16 +69,28 @@ const shader = /* wgsl */`
     return select(low, high, value > vec3f(.04045));
   }
 
+  fn grainHash(point: vec2f) -> f32 {
+    return fract(sin(dot(point, vec2f(127.1, 311.7))) * 43758.5453);
+  }
+
   @fragment fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
     let sample = textureSample(sourceTexture, sourceSampler, input.uv);
+    // Stable physical-pixel grain: faint texture plus sparse bright facets.
+    // Multiplication by the existing glow alpha keeps the desktop and cutout clean.
+    let grain = grainHash(floor(input.position.xy));
+    let facet = smoothstep(.985, 1., grainHash(floor(input.position.xy) + vec2f(73., 19.)));
+    let textureGain = .97 + grain * .06 + facet * .2;
     let straight = select(vec3f(0.), sample.rgb / max(sample.a, .00001), sample.a > .00001);
     let emissive = srgbToLinear(clamp(straight, vec3f(0.), vec3f(1.))) * ${HDR_GAIN};
-    return vec4f(emissive * sample.a, sample.a);
+    ${highDynamicRange
+      ? 'return vec4f(emissive * textureGain * sample.a, sample.a);'
+      : 'let alpha = min(sample.a * 3., 1.); return vec4f(min(straight * textureGain, vec3f(1.)) * alpha, alpha);'}
   }
 `;
 
 export async function createOnboardingHdrOutput(svg, onError = () => undefined) {
-  if (!navigator.gpu || !matchMedia('(dynamic-range: high)').matches) return null;
+  if (!navigator.gpu) return null;
+  const highDynamicRange = matchMedia('(dynamic-range: high)').matches;
   let device;
   try {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -91,6 +103,9 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
     const vectorCanvas = document.createElement('canvas');
     const maskCanvas = document.createElement('canvas');
     const layerCanvas = document.createElement('canvas');
+    // Supersample the sharp vector cutout separately from the full-display bloom.
+    const edgeCanvas = document.createElement('canvas');
+    const edgeContext = edgeCanvas.getContext('2d');
     const precise2d = { colorSpace: 'srgb', colorType: 'float16' };
     const context2d = (surface) => {
       try { return surface.getContext('2d', precise2d) || surface.getContext('2d'); }
@@ -99,7 +114,7 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
     const vectorContext = context2d(vectorCanvas);
     const maskContext = context2d(maskCanvas);
     const layerContext = context2d(layerCanvas);
-    if (!vectorContext || !maskContext || !layerContext) { device.destroy(); return null; }
+    if (!vectorContext || !maskContext || !layerContext || !edgeContext) { device.destroy(); return null; }
     const float16Canvas = [vectorContext, maskContext, layerContext]
       .every((context2d) => context2d.getContextAttributes?.().colorType === 'float16');
     const context = canvas.getContext('webgpu');
@@ -110,14 +125,14 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       alphaMode: 'premultiplied',
       colorSpace: 'srgb',
-      toneMapping: { mode: 'extended' }
+      toneMapping: { mode: highDynamicRange ? 'extended' : 'standard' }
     };
     context.configure(configuration);
     const applied = context.getConfiguration?.();
-    if (applied && (applied.format !== 'rgba16float' || applied.toneMapping?.mode !== 'extended')) {
-      throw new Error('Extended HDR canvas configuration was not applied');
+    if (applied && (applied.format !== 'rgba16float' || applied.toneMapping?.mode !== configuration.toneMapping.mode)) {
+      throw new Error('Onboarding canvas configuration was not applied');
     }
-    const shaderModule = device.createShaderModule({ code: shader });
+    const shaderModule = device.createShaderModule({ code: shader(highDynamicRange) });
     device.pushErrorScope('validation');
     const pipelineDescriptor = {
       layout: 'auto',
@@ -147,11 +162,14 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
       alphaMode: applied?.alphaMode ?? configuration.alphaMode,
       extendedFloat: true,
       sourcePrecision: float16Canvas ? 'float16' : 'unorm8',
-      gain: HDR_GAIN
+      highDynamicRange,
+      gain: highDynamicRange ? HDR_GAIN : 1,
+      opacityGain: highDynamicRange ? 1 : 3
     };
     const statistics = { frames: 0, pixelWidth: 0, pixelHeight: 0, configuration: evidence };
     let sourceTexture, bindGroup, dead = false, requested = false, drawing = null, firstFrame = false;
     const pathCache = new Map();
+    const pathBounds = new Map();
 
     const resize = () => {
       const width = Math.max(1, Math.round(window.innerWidth * devicePixelRatio));
@@ -230,6 +248,36 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
       context2d.setTransform(fit.scale * a, fit.scale * b, fit.scale * c, fit.scale * d,
         fit.x + fit.scale * e, fit.y + fit.scale * f);
     };
+    const cutOutVector = (node, path, data, fit) => {
+      let box = pathBounds.get(data);
+      if (!box) { box = node.getBBox(); pathBounds.set(data, box); }
+      const [a, b, c, d, e, f] = matrixFrom(node.getAttribute('transform'));
+      const corners = [[box.x, box.y], [box.x + box.width, box.y],
+        [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
+        .map(([x, y]) => [fit.x + fit.scale * (a * x + c * y + e),
+          fit.y + fit.scale * (b * x + d * y + f)]);
+      const left = Math.max(0, Math.floor(Math.min(...corners.map(p => p[0]))) - 2);
+      const top = Math.max(0, Math.floor(Math.min(...corners.map(p => p[1]))) - 2);
+      const right = Math.min(canvas.width, Math.ceil(Math.max(...corners.map(p => p[0]))) + 2);
+      const bottom = Math.min(canvas.height, Math.ceil(Math.max(...corners.map(p => p[1]))) + 2);
+      if (right <= left || bottom <= top) return;
+      const samples = 2, width = right - left, height = bottom - top;
+      if (edgeCanvas.width !== width * samples || edgeCanvas.height !== height * samples) {
+        edgeCanvas.width = width * samples; edgeCanvas.height = height * samples;
+      }
+      edgeContext.setTransform(1, 0, 0, 1, 0, 0);
+      edgeContext.clearRect(0, 0, edgeCanvas.width, edgeCanvas.height);
+      edgeContext.setTransform(samples * fit.scale * a, samples * fit.scale * b,
+        samples * fit.scale * c, samples * fit.scale * d,
+        samples * (fit.x + fit.scale * e - left), samples * (fit.y + fit.scale * f - top));
+      edgeContext.fillStyle = '#000'; edgeContext.fill(path);
+      layerContext.setTransform(1, 0, 0, 1, 0, 0);
+      layerContext.globalCompositeOperation = 'destination-out';
+      layerContext.globalAlpha = 1;
+      layerContext.imageSmoothingEnabled = true;
+      layerContext.imageSmoothingQuality = 'high';
+      layerContext.drawImage(edgeCanvas, left, top, width, height);
+    };
     const rasterizeVectorFrame = () => {
       const viewBox = svg.viewBox.baseVal;
       const scale = Math.min(canvas.width / viewBox.width, canvas.height / viewBox.height);
@@ -272,9 +320,7 @@ export async function createOnboardingHdrOutput(svg, onError = () => undefined) 
         if (fraction > 1e-4) { layerContext.globalAlpha = fraction; layerContext.drawImage(maskCanvas, 0, 0); }
         layerContext.globalAlpha = 1; layerContext.globalCompositeOperation = 'source-in';
         layerContext.fillStyle = makeGradient(gradientNode, fit); layerContext.fillRect(0, 0, canvas.width, canvas.height);
-        layerContext.globalCompositeOperation = 'destination-out';
-        layerContext.globalAlpha = 1; layerContext.fillStyle = '#000000';
-        setPathTransform(layerContext, hollow.getAttribute('transform'), fit); layerContext.fill(path);
+        cutOutVector(hollow, path, data, fit);
         vectorContext.globalAlpha = Number(rect.getAttribute('opacity') ?? 1);
         vectorContext.globalCompositeOperation = 'source-over'; vectorContext.drawImage(layerCanvas, 0, 0);
       }

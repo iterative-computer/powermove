@@ -2,7 +2,7 @@ import { BrowserWindow, type IpcMain, type Rectangle } from 'electron';
 import { access, mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { IPC } from '../shared/ipc';
+import { IPC, type OnboardingLogoTarget } from '../shared/ipc';
 import { DARK_BACKGROUND } from './theme';
 
 export const ONBOARDING_VERSION = 1;
@@ -44,6 +44,7 @@ export function onboardingOverlayOptions(
 ): Electron.BrowserWindowConstructorOptions {
   return {
     ...bounds,
+    ...(process.platform === 'darwin' ? { type: 'panel' as const } : {}),
     show: false,
     frame: false,
     transparent: true,
@@ -54,6 +55,7 @@ export function onboardingOverlayOptions(
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
+    enableLargerThanScreen: true,
     focusable: !backgroundTest,
     skipTaskbar: true,
     alwaysOnTop: !backgroundTest,
@@ -69,10 +71,19 @@ export function onboardingOverlayOptions(
   };
 }
 
-export function onboardingWelcomeOptions(backgroundTest: boolean): Electron.BrowserWindowConstructorOptions {
+export function onboardingWelcomeOptions(
+  backgroundTest: boolean,
+  displayBounds?: Rectangle
+): Electron.BrowserWindowConstructorOptions {
+  const width = 900;
+  const height = 640;
   return {
-    width: 900,
-    height: 640,
+    width,
+    height,
+    ...(displayBounds ? {
+      x: Math.round(displayBounds.x + (displayBounds.width - width) / 2),
+      y: Math.round(displayBounds.y + (displayBounds.height - height) / 2)
+    } : {}),
     minWidth: 720,
     minHeight: 520,
     show: false,
@@ -93,7 +104,7 @@ export function onboardingWelcomeOptions(backgroundTest: boolean): Electron.Brow
 
 export interface OnboardingFlowOptions {
   appOrigin: string;
-  bounds: Rectangle;
+  displayBounds(): Rectangle;
   backgroundTest: boolean;
   userData: string;
   createEditor(): BrowserWindow;
@@ -108,6 +119,7 @@ export class OnboardingFlow {
   private handlersRegistered = false;
   private generation = 0;
   private firstRunPending = false;
+  private currentDisplayBounds: Rectangle | null = null;
 
   constructor(
     private readonly ipc: Pick<IpcMain, 'handle' | 'on'>,
@@ -121,10 +133,21 @@ export class OnboardingFlow {
       if (!this.isMainFrameOf(event, this.animationWindow)) return;
       void this.showWelcome();
     });
+    this.ipc.on(IPC.onboardingAnimationEnding, (event) => {
+      if (!this.isMainFrameOf(event, this.animationWindow)) return;
+      void this.showWelcome(this.generation, true);
+    });
     this.ipc.on(IPC.onboardingAnimationFailed, (event, message: unknown) => {
       if (!this.isMainFrameOf(event, this.animationWindow)) return;
       console.warn('[onboarding] animation failed', String(message).slice(0, 500));
       void this.showWelcome();
+    });
+    this.ipc.on(IPC.onboardingLogoTargetReport, (event, target: unknown) => {
+      if (!this.isMainFrameOf(event, this.welcomeWindow)) return;
+      const converted = this.convertLogoTarget(target);
+      const animation = this.animationWindow;
+      if (!converted || !animation || animation.isDestroyed()) return;
+      animation.webContents.send(IPC.onboardingLogoTarget, converted);
     });
     this.ipc.handle(IPC.onboardingBegin, async (event) => {
       if (!this.isMainFrameOf(event, this.welcomeWindow)) {
@@ -174,13 +197,19 @@ export class OnboardingFlow {
     this.animationWindow = null;
     this.welcomeWindow = null;
 
-    const window = new BrowserWindow(onboardingOverlayOptions(this.options.bounds, this.options.backgroundTest));
+    const bounds = this.options.displayBounds();
+    this.currentDisplayBounds = { ...bounds };
+    const window = new BrowserWindow(onboardingOverlayOptions(bounds, this.options.backgroundTest));
     this.animationWindow = window;
     this.options.secure(window);
     window.setIgnoreMouseEvents(true);
     if (!this.options.backgroundTest) window.setAlwaysOnTop(true, 'screen-saver');
+    this.applyOverlayBounds(window, bounds);
     window.once('ready-to-show', () => {
-      if (!window.isDestroyed() && !this.options.backgroundTest) window.showInactive();
+      if (!window.isDestroyed() && !this.options.backgroundTest) {
+        if (!this.applyOverlayBounds(window, bounds)) console.warn('[onboarding] overlay bounds were constrained', window.getBounds(), bounds);
+        window.showInactive();
+      }
     });
     window.webContents.once('did-fail-load', () => void this.showWelcome(generation));
     window.once('closed', () => {
@@ -217,14 +246,62 @@ export class OnboardingFlow {
     this.watchdog = null;
   }
 
-  private async showWelcome(generation = this.generation): Promise<void> {
+  private applyOverlayBounds(window: BrowserWindow, bounds: Rectangle): boolean {
+    window.setBounds(bounds, false);
+    const actual = window.getBounds();
+    return actual.x === bounds.x && actual.y === bounds.y
+      && actual.width === bounds.width && actual.height === bounds.height;
+  }
+
+  private finishAnimation(generation: number): void {
     if (generation !== this.generation) return;
-    if (this.transitioning || this.welcomeWindow) return;
-    this.transitioning = true;
     this.clearWatchdog();
     const animation = this.animationWindow;
+    this.animationWindow = null;
+    if (animation && !animation.isDestroyed()) animation.destroy();
+  }
 
-    const window = new BrowserWindow(onboardingWelcomeOptions(this.options.backgroundTest));
+  private convertLogoTarget(target: unknown): OnboardingLogoTarget | null {
+    const welcome = this.welcomeWindow;
+    const animation = this.animationWindow;
+    if (!welcome || welcome.isDestroyed() || !animation || animation.isDestroyed()
+      || !target || typeof target !== 'object') return null;
+    const candidate = target as Record<string, unknown>;
+    const values = ['x', 'y', 'width', 'height'].map((key) => Number(candidate[key]));
+    if (!values.every(Number.isFinite)) return null;
+    const [x, y, width, height] = values as [number, number, number, number];
+    const welcomeContent = welcome.getContentBounds();
+    if (x < 0 || y < 0 || width <= 0 || height <= 0 || width > 512 || height > 512
+      || x + width > welcomeContent.width + 1 || y + height > welcomeContent.height + 1) return null;
+    const overlayContent = animation.getContentBounds();
+    const converted = {
+      x: welcomeContent.x + x - overlayContent.x,
+      y: welcomeContent.y + y - overlayContent.y,
+      width,
+      height
+    };
+    if (converted.x < -1 || converted.y < -1
+      || converted.x + width > overlayContent.width + 1
+      || converted.y + height > overlayContent.height + 1) return null;
+    return converted;
+  }
+
+  private async showWelcome(generation = this.generation, preserveAnimation = false): Promise<void> {
+    if (generation !== this.generation) return;
+    if (this.welcomeWindow) {
+      if (!preserveAnimation) this.finishAnimation(generation);
+      return;
+    }
+    if (this.transitioning) {
+      if (!preserveAnimation) this.finishAnimation(generation);
+      return;
+    }
+    this.transitioning = true;
+
+    const window = new BrowserWindow(onboardingWelcomeOptions(
+      this.options.backgroundTest,
+      this.currentDisplayBounds ?? undefined
+    ));
     this.welcomeWindow = window;
     this.options.secure(window);
     window.once('ready-to-show', () => {
@@ -246,8 +323,7 @@ export class OnboardingFlow {
         if (!window.isDestroyed()) window.destroy();
         return;
       }
-      this.animationWindow = null;
-      if (animation && !animation.isDestroyed()) animation.destroy();
+      if (!preserveAnimation) this.finishAnimation(generation);
       this.transitioning = false;
     }
   }
@@ -268,6 +344,7 @@ export class OnboardingFlow {
     if (generation !== this.generation) return;
     this.firstRunPending = false;
     this.options.createEditor();
+    this.finishAnimation(generation);
     const welcome = this.welcomeWindow;
     this.welcomeWindow = null;
     if (welcome && !welcome.isDestroyed()) welcome.destroy();

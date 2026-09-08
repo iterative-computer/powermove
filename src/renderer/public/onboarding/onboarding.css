@@ -13,9 +13,21 @@ body { width: 100%; height: 100%; margin: 0; }
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.45);
-  animation: onboarding-dim-in 400ms ease-out both;
+  background: transparent;
   pointer-events: none;
+}
+
+.animation-stage.onboarding-playing {
+  animation: onboarding-dim-in 600ms ease-out both;
+}
+
+.animation-stage.onboarding-ending {
+  animation: onboarding-dim-out 900ms ease-in forwards;
+}
+
+@keyframes onboarding-dim-out {
+  from { background-color: rgba(0, 0, 0, 0.45); }
+  to { background-color: transparent; }
 }
 
 @keyframes onboarding-dim-in {

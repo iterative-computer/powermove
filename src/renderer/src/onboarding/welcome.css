@@ -30,6 +30,14 @@ body {
   stroke-linejoin: round;
   stroke-width: 4;
   filter: drop-shadow(0 0 18px var(--accent-dim));
+  transform-origin: center;
+  animation: welcome-mark-float 4s ease-in-out 2.7s infinite;
+}
+
+@keyframes welcome-mark-float {
+  0%, 100% { transform: translateY(0) rotate(0); }
+  25% { transform: translateY(-4px) rotate(-3deg); }
+  75% { transform: translateY(2px) rotate(3deg); }
 }
 
 h1 {
@@ -87,4 +95,5 @@ h1 {
 
 @media (prefers-reduced-motion: reduce) {
   #begin { transition: none; }
+  .welcome-mark { animation: none; }
 }

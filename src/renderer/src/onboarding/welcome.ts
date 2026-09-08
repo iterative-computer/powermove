@@ -4,6 +4,26 @@ import './welcome.css';
 const button = document.querySelector<HTMLButtonElement>('#begin');
 const replay = document.querySelector<HTMLButtonElement>('#replay');
 const status = document.querySelector<HTMLElement>('#begin-status');
+const mark = document.querySelector<SVGPathElement>('.welcome-mark path');
+
+const reportLogoTarget = () => {
+  if (!mark) return;
+  const { x, y, width, height } = mark.getBoundingClientRect();
+  window.onboarding.reportLogoTarget({ x, y, width, height });
+};
+
+let scheduledReport = 0;
+const scheduleLogoTarget = () => {
+  if (scheduledReport) return;
+  scheduledReport = requestAnimationFrame(() => {
+    scheduledReport = 0;
+    reportLogoTarget();
+  });
+};
+
+void document.fonts.ready.then(scheduleLogoTarget);
+if (mark) new ResizeObserver(scheduleLogoTarget).observe(mark);
+window.addEventListener('resize', scheduleLogoTarget);
 
 button?.addEventListener('click', async () => {
   button.disabled = true;

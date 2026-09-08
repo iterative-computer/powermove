@@ -13,6 +13,7 @@ export interface OnboardingSvgPlayer {
   readonly duration: number;
   readonly currentTime: number;
   readonly playing: boolean;
+  setHandoffTarget(target: { x: number; y: number; width: number; height: number }, progress: number): void;
   play(): void;
   pause(): void;
   seek(seconds: number): Promise<void>;
@@ -33,6 +34,7 @@ export interface OnboardingSvgPlayerOptions {
 export const EXPECTED_DURATION: number;
 export const SDR_EMISSIVE_GAIN: number;
 export const WARM_WHITE_TINT: number;
+export const POWERMOVE_ORANGE: string;
 export function createOnboardingSvgPlayer(options: OnboardingSvgPlayerOptions): Promise<OnboardingSvgPlayer>;
 export function pathData(engine: any, layer: any, path: any, time: number): string;
 export function pathMatrix(engine: any, layer: any, path: any, time: number): number[];

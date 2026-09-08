@@ -477,7 +477,12 @@ if (!hasSingleInstanceLock) {
     });
     onboardingFlow = new OnboardingFlow(ipcMain, {
       appOrigin: (devRendererUrl ?? APP_ORIGIN).replace(/\/$/, ''),
-      bounds: screen.getPrimaryDisplay().bounds,
+      displayBounds: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          return screen.getDisplayMatching(mainWindow.getBounds()).bounds;
+        }
+        return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds;
+      },
       backgroundTest: isBackgroundTest,
       userData: app.getPath('userData'),
       createEditor: () => {
