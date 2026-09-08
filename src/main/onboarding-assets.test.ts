@@ -16,14 +16,38 @@ describe('onboarding export assets', () => {
     expect(wav.byteLength).toBe(1_401_644);
   });
 
-  it('uses original logo alpha only as the animated glow mask and keeps the desktop transparent', async () => {
+  it('uses live SVG vectors, transparent-white gradient stops, and keeps the desktop transparent', async () => {
     const animation = await readFile(path.join(root, 'animation.js'), 'utf8');
+    const renderer = await readFile(path.join(root, 'svg-player.js'), 'utf8');
+    const html = await readFile(path.join(root, 'animation.html'), 'utf8');
     const styles = await readFile(path.join(root, 'onboarding.css'), 'utf8');
-    expect(animation).toContain("glow.keepOrig !== true");
-    expect(animation).toContain("'o = coloredGlow * (1. - original.a);'");
-    expect(animation).toContain('transparent: true');
+    expect(animation).toContain('createOnboardingSvgPlayer');
     expect(animation).toContain('audio: true');
+    expect(renderer).toContain("import { createEngine } from './player.js'");
+    expect(renderer).toContain("svgNode('feGaussianBlur')");
+    expect(renderer).toContain("candidate.type === effectDefinition.id");
+    expect(html).toContain('<svg id="onboarding-svg"');
+    expect(html).not.toContain('<canvas');
+    expect(renderer).not.toContain("createElement('canvas')");
     expect(styles).toContain('background: transparent');
     expect(styles).toContain('width: min(100vw, calc(100vh * 16 / 9))');
+  });
+
+  it('uses a validated extended-range float surface at native display resolution when HDR is available', async () => {
+    const output = await readFile(path.join(root, 'hdr-output.js'), 'utf8');
+    expect(output).toContain("format: 'rgba16float'");
+    expect(output).toContain("toneMapping: { mode: 'extended' }");
+    expect(output).toContain("alphaMode: 'premultiplied'");
+    expect(output).toContain("clearValue: { r: 2, g: .25, b: 0, a: 1 }");
+    expect(output).toContain("await device.createRenderPipelineAsync(pipelineDescriptor)");
+    expect(output).toContain("window.innerWidth * devicePixelRatio");
+    expect(output).toContain("const pathCache = new Map()");
+    expect(output).toContain("new Path2D(data)");
+    expect(output).toContain("source: vectorCanvas");
+    expect(output).not.toContain('XMLSerializer');
+    expect(output).not.toContain('createImageBitmap');
+    expect(output).toContain('statistics.frames += 1');
+    expect(output).toContain('probeExtendedScene');
+    expect(output).toContain('extended: max > 1');
   });
 });
