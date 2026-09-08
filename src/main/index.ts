@@ -335,7 +335,7 @@ if (!hasSingleInstanceLock) {
     // early second launch create the editor before the first-run gate decides
     // whether onboarding owns startup.
     if (!startupInitialized) return;
-    if (onboardingFlow) {
+    if (onboardingFlow?.hasActiveWindow() || onboardingFlow?.isFirstRunPending()) {
       onboardingFlow.focus();
       return;
     }
@@ -475,23 +475,30 @@ if (!hasSingleInstanceLock) {
       refreshExtensions: refreshRestoredExtensions,
       openExternal: async (url) => { await shell.openExternal(url); }
     });
-    const menu = installMenu(() => mainWindow);
+    onboardingFlow = new OnboardingFlow(ipcMain, {
+      appOrigin: (devRendererUrl ?? APP_ORIGIN).replace(/\/$/, ''),
+      bounds: screen.getPrimaryDisplay().bounds,
+      backgroundTest: isBackgroundTest,
+      userData: app.getPath('userData'),
+      createEditor: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          if (!isBackgroundTest) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+          return mainWindow;
+        }
+        return createWindow();
+      },
+      secure: (window) => secureWebContents(window.webContents, devRendererUrl)
+    });
+    const menu = installMenu(() => mainWindow, () => onboardingFlow?.replay());
     if (!isBackgroundTest) installUpdates(menu);
 
     if (isBackgroundTest) app.dock?.hide();
     const completedOnboarding = await onboardingCompleted(app.getPath('userData'));
     if (onboardingEnabled(process.env, isBackgroundTest, completedOnboarding)) {
-      onboardingFlow = new OnboardingFlow(ipcMain, {
-        appOrigin: (devRendererUrl ?? APP_ORIGIN).replace(/\/$/, ''),
-        bounds: screen.getPrimaryDisplay().bounds,
-        backgroundTest: isBackgroundTest,
-        userData: app.getPath('userData'),
-        createEditor: () => {
-          onboardingFlow = null;
-          return createWindow();
-        },
-        secure: (window) => secureWebContents(window.webContents, devRendererUrl)
-      });
       onboardingFlow.start();
     } else {
       createWindow();
@@ -500,7 +507,7 @@ if (!hasSingleInstanceLock) {
 
     app.on('activate', () => {
       if (isBackgroundTest) return;
-      if (onboardingFlow) {
+      if (onboardingFlow?.hasActiveWindow() || onboardingFlow?.isFirstRunPending()) {
         onboardingFlow.focus();
         return;
       }

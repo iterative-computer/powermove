@@ -71,7 +71,8 @@ describe('application menu', () => {
 
   it('has the requested labels, accelerators, roles, and custom history commands', () => {
     const sent: MenuCommand[] = [];
-    const template = appMenuTemplate((command) => sent.push(command));
+    const replayOnboarding = vi.fn();
+    const template = appMenuTemplate((command) => sent.push(command), replayOnboarding);
     expect(template.map((item) => item.label)).toEqual([
       'Powermove',
       'File',
@@ -93,6 +94,13 @@ describe('application menu', () => {
       'Command+Alt+H'
     );
     expect(appItems.find((item) => item.role === 'quit')?.accelerator).toBe('Command+Q');
+    const replay = appItems.find((item) => item.id === 'replayOnboarding');
+    expect(replay).toMatchObject({
+      label: 'Replay Onboarding',
+      accelerator: 'CommandOrControl+Shift+O'
+    });
+    replay?.click?.({} as never, undefined, {} as never);
+    expect(replayOnboarding).toHaveBeenCalledOnce();
 
     const fileItems = submenu(topLevel(template, 'File'));
     expect(fileItems.map((item) => item.label ?? item.type)).toEqual([

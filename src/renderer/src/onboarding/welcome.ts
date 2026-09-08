@@ -2,6 +2,7 @@ import '../../../../css/tokens.css';
 import './welcome.css';
 
 const button = document.querySelector<HTMLButtonElement>('#begin');
+const replay = document.querySelector<HTMLButtonElement>('#replay');
 const status = document.querySelector<HTMLElement>('#begin-status');
 
 button?.addEventListener('click', async () => {
@@ -16,3 +17,14 @@ button?.addEventListener('click', async () => {
 });
 
 button?.focus();
+
+replay?.addEventListener('click', async () => {
+  replay.disabled = true;
+  if (status) status.textContent = 'Replaying…';
+  try {
+    await window.onboarding.replay();
+  } catch {
+    replay.disabled = false;
+    if (status) status.textContent = 'Could not replay the animation. Try again.';
+  }
+});

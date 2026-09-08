@@ -195,4 +195,51 @@ describe('first-run onboarding', () => {
     expect(createEditor).not.toHaveBeenCalled();
     await expect(onboardingCompleted(userData)).resolves.toBe(false);
   });
+
+  it('restarts replay in one controller without layering windows and reuses the existing editor', async () => {
+    const userData = await temporaryDirectory();
+    const { ipc, listeners, handlers } = fakeIpc();
+    const editor = {} as Electron.BrowserWindow;
+    const createEditor = vi.fn(() => editor);
+    const flow = new OnboardingFlow(ipc as never, {
+      appOrigin: 'app://powermove',
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+      backgroundTest: true,
+      userData,
+      createEditor,
+      secure: vi.fn()
+    });
+
+    const firstAnimation = flow.start() as unknown as InstanceType<typeof electronMocks.FakeBrowserWindow>;
+    const secondAnimation = flow.replay() as unknown as InstanceType<typeof electronMocks.FakeBrowserWindow>;
+    expect(firstAnimation.destroyed).toBe(true);
+    expect(secondAnimation.destroyed).toBe(false);
+    expect(flow.hasActiveWindow()).toBe(true);
+
+    const complete = listeners.get(IPC.onboardingAnimationComplete)!;
+    await complete({ sender: firstAnimation.webContents, senderFrame: firstAnimation.webContents.mainFrame });
+    await settle();
+    expect(electronMocks.FakeBrowserWindow.windows).toHaveLength(2);
+    await complete({ sender: secondAnimation.webContents, senderFrame: secondAnimation.webContents.mainFrame });
+    await settle();
+    const firstWelcome = electronMocks.FakeBrowserWindow.windows[2]!;
+
+    const replay = handlers.get(IPC.onboardingReplay)!;
+    await replay({ sender: firstWelcome.webContents, senderFrame: firstWelcome.webContents.mainFrame });
+    const thirdAnimation = electronMocks.FakeBrowserWindow.windows[3]!;
+    expect(firstWelcome.destroyed).toBe(true);
+    expect(thirdAnimation.destroyed).toBe(false);
+    expect(createEditor).not.toHaveBeenCalled();
+
+    await complete({ sender: thirdAnimation.webContents, senderFrame: thirdAnimation.webContents.mainFrame });
+    await settle();
+    const secondWelcome = electronMocks.FakeBrowserWindow.windows[4]!;
+    await handlers.get(IPC.onboardingBegin)!({
+      sender: secondWelcome.webContents,
+      senderFrame: secondWelcome.webContents.mainFrame
+    });
+    expect(createEditor).toHaveBeenCalledExactlyOnceWith();
+    expect(flow.hasActiveWindow()).toBe(false);
+    expect(flow.isFirstRunPending()).toBe(false);
+  });
 });

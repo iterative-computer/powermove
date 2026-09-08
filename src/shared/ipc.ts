@@ -12,6 +12,7 @@ export const IPC = {
   onboardingAnimationComplete: 'onboarding:animation-complete',
   onboardingAnimationFailed: 'onboarding:animation-failed',
   onboardingBegin: 'onboarding:begin',
+  onboardingReplay: 'onboarding:replay',
 
   fileSave: 'file:save',
   projectOpen: 'project:open',
@@ -69,6 +70,7 @@ export interface OnboardingBridge {
   animationComplete(): void;
   animationFailed(message: string): void;
   begin(): Promise<void>;
+  replay(): Promise<void>;
 }
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

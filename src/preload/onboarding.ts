@@ -7,7 +7,8 @@ import type { OnboardingBridge } from '../shared/ipc';
 const CHANNEL = {
   animationComplete: 'onboarding:animation-complete',
   animationFailed: 'onboarding:animation-failed',
-  begin: 'onboarding:begin'
+  begin: 'onboarding:begin',
+  replay: 'onboarding:replay'
 } as const;
 
 const bridge: OnboardingBridge = {
@@ -17,6 +18,9 @@ const bridge: OnboardingBridge = {
   },
   begin: async () => {
     await ipcRenderer.invoke(CHANNEL.begin);
+  },
+  replay: async () => {
+    await ipcRenderer.invoke(CHANNEL.replay);
   }
 };
 

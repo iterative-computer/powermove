@@ -106,6 +106,8 @@ export class OnboardingFlow {
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private transitioning = false;
   private handlersRegistered = false;
+  private generation = 0;
+  private firstRunPending = false;
 
   constructor(
     private readonly ipc: Pick<IpcMain, 'handle' | 'on'>,
@@ -130,6 +132,12 @@ export class OnboardingFlow {
       }
       await this.begin();
     });
+    this.ipc.handle(IPC.onboardingReplay, async (event) => {
+      if (!this.isMainFrameOf(event, this.welcomeWindow)) {
+        throw new Error('Unauthorized onboarding sender');
+      }
+      this.replay();
+    });
   }
 
   private isMainFrameOf(
@@ -143,6 +151,29 @@ export class OnboardingFlow {
 
   start(): BrowserWindow {
     this.registerIpc();
+    this.firstRunPending = true;
+    return this.replay();
+  }
+
+  isFirstRunPending(): boolean {
+    return this.firstRunPending;
+  }
+
+  hasActiveWindow(): boolean {
+    return !!((this.animationWindow && !this.animationWindow.isDestroyed())
+      || (this.welcomeWindow && !this.welcomeWindow.isDestroyed()));
+  }
+
+  replay(): BrowserWindow {
+    this.registerIpc();
+    const generation = ++this.generation;
+    this.clearWatchdog();
+    this.transitioning = false;
+    const previousAnimation = this.animationWindow;
+    const previousWelcome = this.welcomeWindow;
+    this.animationWindow = null;
+    this.welcomeWindow = null;
+
     const window = new BrowserWindow(onboardingOverlayOptions(this.options.bounds, this.options.backgroundTest));
     this.animationWindow = window;
     this.options.secure(window);
@@ -151,23 +182,25 @@ export class OnboardingFlow {
     window.once('ready-to-show', () => {
       if (!window.isDestroyed() && !this.options.backgroundTest) window.showInactive();
     });
-    window.webContents.once('did-fail-load', () => void this.showWelcome());
+    window.webContents.once('did-fail-load', () => void this.showWelcome(generation));
     window.once('closed', () => {
       if (this.animationWindow === window) this.animationWindow = null;
     });
     void window.loadURL(`${this.options.appOrigin}/onboarding/animation.html`)
-      .catch(() => this.showWelcome());
+      .catch(() => this.showWelcome(generation));
     this.watchdog = setTimeout(
-      () => void this.showWelcome(),
+      () => void this.showWelcome(generation),
       (ONBOARDING_ANIMATION_SECONDS + 20) * 1000
     );
+    if (previousAnimation && !previousAnimation.isDestroyed()) previousAnimation.destroy();
+    if (previousWelcome && !previousWelcome.isDestroyed()) previousWelcome.destroy();
     return window;
   }
 
   focus(): void {
     const window = this.welcomeWindow ?? this.animationWindow;
     if (!window || window.isDestroyed()) {
-      void this.showWelcome();
+      void this.showWelcome(this.generation);
       return;
     }
     if (this.options.backgroundTest) return;
@@ -184,7 +217,8 @@ export class OnboardingFlow {
     this.watchdog = null;
   }
 
-  private async showWelcome(): Promise<void> {
+  private async showWelcome(generation = this.generation): Promise<void> {
+    if (generation !== this.generation) return;
     if (this.transitioning || this.welcomeWindow) return;
     this.transitioning = true;
     this.clearWatchdog();
@@ -208,6 +242,10 @@ export class OnboardingFlow {
       console.error('[onboarding] welcome failed to load', error);
       if (!window.isDestroyed()) window.show();
     } finally {
+      if (generation !== this.generation) {
+        if (!window.isDestroyed()) window.destroy();
+        return;
+      }
       this.animationWindow = null;
       if (animation && !animation.isDestroyed()) animation.destroy();
       this.transitioning = false;
@@ -216,6 +254,7 @@ export class OnboardingFlow {
 
   private async begin(): Promise<void> {
     if (this.transitioning) return;
+    const generation = this.generation;
     this.transitioning = true;
     try {
       await persistOnboardingCompleted(this.options.userData);
@@ -224,6 +263,10 @@ export class OnboardingFlow {
       // persistence failed instead of trapping them on a broken disk.
       console.error('[onboarding] could not persist completion', error);
     }
+    // A native Replay command can arrive while the marker write is pending.
+    // Leave that newer animation and its audio/window lifecycle untouched.
+    if (generation !== this.generation) return;
+    this.firstRunPending = false;
     this.options.createEditor();
     const welcome = this.welcomeWindow;
     this.welcomeWindow = null;

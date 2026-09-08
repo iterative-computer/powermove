@@ -39,7 +39,16 @@ h1 {
   letter-spacing: -0.035em;
 }
 
-#begin {
+.welcome-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap);
+  -webkit-app-region: no-drag;
+}
+
+#begin,
+#replay {
   min-width: 124px;
   height: 42px;
   padding: 0 calc(var(--pad) * 2);
@@ -56,8 +65,18 @@ h1 {
 
 #begin:hover { background: var(--accent-hover); }
 #begin:active { transform: scale(0.98); }
-#begin:focus-visible { outline: 0; box-shadow: var(--focus-ring); }
-#begin:disabled { opacity: var(--disabled); }
+#begin:focus-visible,
+#replay:focus-visible { outline: 0; box-shadow: var(--focus-ring); }
+#begin:disabled,
+#replay:disabled { opacity: var(--disabled); }
+
+#replay {
+  color: var(--tx-2);
+  background: var(--ctl-raised);
+}
+
+#replay:hover { color: var(--tx); background: var(--bg-row-hi); }
+#replay:active { transform: scale(0.98); }
 
 #begin-status {
   min-height: 18px;
