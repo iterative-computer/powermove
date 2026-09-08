@@ -112,7 +112,7 @@ export async function buildWebExport(PM: any) {
     const extension = /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj)$/i.exec(meta.name || '')?.[1]?.toLowerCase() || 'bin';
     const location = `assets/media-${index++}.${extension}`;
     put(location, new Uint8Array(await blob.arrayBuffer())); scene.assets[id] = location;
-    metadata[id] = Object.fromEntries(['id', 'name', 'kind', 'w', 'h', 'dur', 'channels', 'sampleRate', 'type'].filter(k => meta[k] !== undefined).map(k => [k, meta[k]]));
+    metadata[id] = Object.fromEntries(['id', 'name', 'kind', 'format', 'w', 'h', 'dur', 'channels', 'sampleRate', 'type'].filter(k => meta[k] !== undefined).map(k => [k, meta[k]]));
     metadata[id].id = id;
   }
   // All runtime media lookups use the root registry; strip disk paths and unused assets.

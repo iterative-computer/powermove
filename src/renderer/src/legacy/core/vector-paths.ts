@@ -2,7 +2,7 @@ import { isProperty } from './content-properties';
 export type PathVertex = { id:string; p:Record<string,any> };
 export type VectorPath = { id:string; name:string; parent:string|null; vertices:PathVertex[]; p:Record<string,any> };
 export function makeVectorPath(PM:any,name='Path'):VectorPath {
-  const values={x:0,y:0,rotation:0,scaleX:100,scaleY:100,closed:false,fill:'#E8E2CF',fillEnabled:true,stroke:'#ffffff',strokeWidth:2,trimStart:0,trimEnd:100,trimOffset:0,copies:1,repeatX:30,repeatY:0,repeatRotation:0};
+  const values={x:0,y:0,rotation:0,scaleX:100,scaleY:100,closed:false,fill:'#E8E2CF',fillEnabled:true,fillOpacity:100,stroke:'#ffffff',strokeWidth:2,strokeOpacity:100,trimStart:0,trimEnd:100,trimOffset:0,copies:1,repeatX:30,repeatY:0,repeatRotation:0};
   return {id:PM.uid('path'),name,parent:null,vertices:[],p:Object.fromEntries(Object.entries(values).map(([k,v])=>[k,PM.P(v)]))};
 }
 export function makeVertex(PM:any,x:number,y:number):PathVertex {
@@ -87,9 +87,51 @@ export function rasterPaths(PM:any,layer:any,time:number,scale:number):any {
   for(const rec of records)for(let i=0;i<Math.min(256,Math.max(1,Math.round(rec.v.copies)));i++){
     ctx.save();ctx.transform(...rec.matrix as [number,number,number,number,number,number]);ctx.translate(i*rec.v.repeatX,i*rec.v.repeatY);ctx.rotate(i*rec.v.repeatRotation*Math.PI/180);
     tracePath(ctx,rec.v);ctx.fillStyle=rec.v.fill;ctx.strokeStyle=rec.v.stroke;ctx.lineWidth=Math.max(0,rec.v.strokeWidth);
-    if(rec.v.closed && rec.v.fillEnabled && rec.v.trimEnd-rec.v.trimStart>=99.999)ctx.fill();if(rec.v.strokeWidth>0)ctx.stroke();ctx.restore();
+    if(rec.v.closed && rec.v.fillEnabled && rec.v.trimEnd-rec.v.trimStart>=99.999){ctx.globalAlpha=Number.isFinite(Number(rec.v.fillOpacity))?PM.clamp(Number(rec.v.fillOpacity),0,100)/100:1;ctx.fill();}
+    if(rec.v.strokeWidth>0){ctx.globalAlpha=Number.isFinite(Number(rec.v.strokeOpacity))?PM.clamp(Number(rec.v.strokeOpacity),0,100)/100:1;ctx.stroke();}ctx.restore();
   }
   return {cv,w,h,anchorX:-x0,anchorY:-y0,selection:{x0,y0,x1,y1,w,h}};
+}
+
+/** Rasterize editable paths after their layer transform has been applied.
+ *
+ * The ordinary path raster is intentionally layer-local so it can be reused at
+ * many transforms. At extreme preview zooms that local bitmap eventually hits
+ * the texture-size ceiling and its pixels become visible. Full preview uses
+ * this viewport-space variant instead: only the visible composition crop is
+ * painted, at the exact backing resolution the viewer presents.
+ */
+export function rasterPathsToViewport(
+  PM:any, layer:any, time:number, width:number, height:number,
+  world:[number,number,number,number,number,number], previous?:any,
+):any {
+  const paths=(layer.d?.paths || []) as VectorPath[];
+  const records=paths.map(path=>({v:pathValues(PM,layer,path,time),matrix:groupMatrix(PM,layer,path,time)}));
+  const signature=JSON.stringify([width,height,world,records]);
+  if(previous?.signature===signature && previous.cv)return previous;
+
+  const cv=document.createElement('canvas');
+  cv.width=Math.max(1,Math.round(width));cv.height=Math.max(1,Math.round(height));
+  const ctx=cv.getContext('2d')!;
+  for(const rec of records)for(let i=0;i<Math.min(256,Math.max(1,Math.round(rec.v.copies)));i++){
+    ctx.save();
+    ctx.transform(...world);
+    ctx.transform(...rec.matrix as [number,number,number,number,number,number]);
+    ctx.translate(i*rec.v.repeatX,i*rec.v.repeatY);
+    ctx.rotate(i*rec.v.repeatRotation*Math.PI/180);
+    tracePath(ctx,rec.v);
+    ctx.fillStyle=rec.v.fill;ctx.strokeStyle=rec.v.stroke;ctx.lineWidth=Math.max(0,rec.v.strokeWidth);
+    if(rec.v.closed && rec.v.fillEnabled && rec.v.trimEnd-rec.v.trimStart>=99.999){
+      ctx.globalAlpha=Number.isFinite(Number(rec.v.fillOpacity))?PM.clamp(Number(rec.v.fillOpacity),0,100)/100:1;
+      ctx.fill();
+    }
+    if(rec.v.strokeWidth>0){
+      ctx.globalAlpha=Number.isFinite(Number(rec.v.strokeOpacity))?PM.clamp(Number(rec.v.strokeOpacity),0,100)/100:1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  return {cv,signature};
 }
 
 export function pathTargets(layer:any) {

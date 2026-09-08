@@ -313,6 +313,8 @@ Use inside compact panels for a standalone action.
 | Full width | `.chip.wide` | Empty-state or end-of-list action |
 | Primary | `.chip.solid` | Creation/apply action |
 
+Properties-panel chips use the flat `--bg-field` surface without raised edges or shadows. Full-width actions align to the content gutter with no horizontal margins. Hover uses `--bg-row-hi`; keyboard focus stays visible.
+
 Use `.btn` in modal/page action bars and `.chip` inside compact panel content. Do not mix them arbitrarily in the same group.
 
 ### Segmented control: `.segmented`

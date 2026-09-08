@@ -7,6 +7,7 @@ import { resolveContent } from '../core/content-properties';
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
+import { parseSvg } from '../core/svg-import';
 
 const VIDEO_READ_FAILURE = 'Could not read this video file';
 
@@ -237,9 +238,10 @@ function rasterText(d: any, scale: any) {
   const paragraphHeight = d.paragraph && Number.isFinite(Number(d.boxHeight)) ? Math.max(1, Number(d.boxHeight)) : 0;
   const w = Math.ceil(Math.max(wMax, paragraphWidth)) + pad * 2;
   const hh = Math.ceil(Math.max(lh * lines.length, paragraphHeight)) + pad * 2;
-  const cv = getCanvas(w * scale, hh * scale);
+  const density = Math.min(scale, 8192 / w, 8192 / hh);
+  const cv = getCanvas(w * density, hh * density);
   const c = cv.getContext('2d') as any;
-  c.scale(scale, scale);
+  c.scale(density, density);
   c.font = fontStr(d);
   if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
   c.textBaseline = 'alphabetic';
@@ -329,9 +331,10 @@ function rasterShape(d: any, scale: any) {
     x1: d.w / 2 + strokePad, y1: d.h / 2 + strokePad,
     w: d.w + strokePad * 2, h: d.h + strokePad * 2,
   };
-  const cv = getCanvas(w * scale, hh * scale);
+  const density = Math.min(scale, 8192 / w, 8192 / hh);
+  const cv = getCanvas(w * density, hh * density);
   const c = cv.getContext('2d') as any;
-  c.scale(scale, scale);
+  c.scale(density, density);
   c.translate(pad, pad);
   c.fillStyle = d.color; c.strokeStyle = d.strokeColor || '#fff'; c.lineWidth = d.stroke || 0;
   c.lineJoin = 'round';
@@ -410,7 +413,7 @@ function assetKind(file: any) {
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = (String(file.name || '').split('.').pop() as any).toLowerCase();
   if (ext === 'obj' || mime === 'model/obj' || mime === 'text/plain+obj') return 'model';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp'].includes(ext)) return 'image';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext)) return 'image';
   if (['mp4', 'mov', 'm4v', 'webm'].includes(ext)) return 'video';
   return null;
 }
@@ -504,13 +507,24 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
       triangles: mesh.triangleCount,
     };
   }
-  let sourceBlob = blob;
+  const imageFormat = kind === 'image' && (meta.format === 'svg'
+    || String(blob?.type || '').toLowerCase() === 'image/svg+xml'
+    || /\.svg$/i.test(String(name || ''))) ? 'svg' : meta.format;
+  /* macOS and drag/drop providers occasionally omit an SVG File's MIME type.
+     Give Chromium the type it needs for decode without altering the bytes. */
+  let sourceBlob = imageFormat === 'svg' && String(blob?.type || '').toLowerCase() !== 'image/svg+xml'
+    ? new window.Blob([blob], { type: 'image/svg+xml' })
+    : blob;
+  const svg = imageFormat === 'svg' ? parseSvg(await sourceBlob.text()) : null;
   let url = window.URL.createObjectURL(sourceBlob);
   let el: any, w = 0, hh = 0, dur = 0;
   let playbackProxyUsed = meta.playbackProxy === true;
   try {
     if (kind === 'image') {
-      if (window.createImageBitmap) {
+      /* Keep an SVG as a live vector image. createImageBitmap bakes it at its
+         intrinsic dimensions, which makes an otherwise vector layer soften as
+         soon as the user scales it in the composition. */
+      if (imageFormat !== 'svg' && window.createImageBitmap) {
         try { el = await window.createImageBitmap(blob); } catch (e) { }
         if (el) { w = el.width; hh = el.height; }
       }
@@ -554,6 +568,8 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
       dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
       playbackProxy: playbackProxyUsed,
       persistBlob: sourceBlob,
+      ...(imageFormat ? { format: imageFormat } : {}),
+      ...(svg ? { svg } : {}),
     };
     /* A video's soundtrack stays attached to the video asset until the user
        separates it. Sharing the durable blob avoids storing the whole movie a
@@ -600,6 +616,8 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
     playbackProxy: prepared.playbackProxy === true,
     persisted: persisted === true,
+    ...(prepared.format ? { format: prepared.format } : {}),
+    ...(prepared.svg ? { editablePaths: prepared.svg.paths.length } : {}),
     ...(kind === 'video' ? {
       hasAudio: prepared.hasAudio === true,
       audioDur: prepared.hasAudio ? prepared.audioDur || prepared.dur || 0 : 0,
@@ -844,7 +862,14 @@ PM.assets = {
       restored.forEach(disposeAsset);
       return { restored: [], missing: [], stale: true };
     }
-    restored.forEach((a: any) => PM.assets.map.set(a.id, a));
+    restored.forEach((a: any) => {
+      /* Older projects already preserve the original .svg bytes and name but
+         predate the explicit vector marker. Hydrate that marker in place so
+         the editor UI and subsequent web exports also identify the asset. */
+      const meta: any = project.assets?.[a.id];
+      if (a.format && meta && meta.format !== a.format) meta.format = a.format;
+      PM.assets.map.set(a.id, a);
+    });
     return { restored, missing };
   },
   /** Procedural placeholder so demo projects work with zero imports. */
@@ -860,5 +885,27 @@ PM.assets = {
     PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 };
     return a;
   },
+};
+
+/* SVG source remains in the durable asset store and in the live <img>. This
+   cache is only the final GPU sampling boundary, rebuilt in resolution buckets
+   chosen by the compositor from the layer's current display transform. */
+PM.rasterSvgAsset = (asset: any, requestedWidth: any, requestedHeight: any) => {
+  const width = Math.max(1, Math.round(Number(requestedWidth) || 1));
+  const height = Math.max(1, Math.round(Number(requestedHeight) || 1));
+  const key = `svg:${asset?.id || 'missing'}:${width}x${height}`;
+  let entry = cache.get(key);
+  if (entry) { entry.used = ++tick; return entry; }
+  const cv = getCanvas(width, height);
+  const context = cv.getContext('2d');
+  if (!context || !asset?.el) throw new Error('Could not rasterize this SVG file');
+  context.clearRect(0, 0, width, height);
+  context.drawImage(asset.el, 0, 0, width, height);
+  entry = { cv, w: width, h: height, key, used: ++tick, bytes: width * height * 4 };
+  cache.set(key, entry);
+  cacheBytes += entry.bytes;
+  evict();
+  PM.Memory?.maintain?.('raster');
+  return entry;
 };
 }

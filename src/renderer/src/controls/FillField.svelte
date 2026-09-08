@@ -4,6 +4,7 @@
   import { transport } from '../state/transport.svelte';
   import { EditGesture, type EditBinding } from './gesture';
   import { rowLabelId } from './context';
+  import { anchorPicker, mountOverlayOnBody } from './overlay';
   import {
     clamp,
     fillCss,
@@ -43,8 +44,6 @@
   let dialog = $state<HTMLElement>();
   let open = $state(false);
   let channelsOpen = $state(false);
-  let pickerLeft = $state(12);
-  let pickerTop = $state(52);
   let draft = $state<FillValue>({ type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: '#000000', position: 0 }] });
   let before = $state<FillValue>({ type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: '#000000', position: 0 }] });
   let previewing = $state(false);
@@ -66,11 +65,6 @@
     selected = draft.stops[0]!.id;
     channelsOpen = false;
     syncHsv();
-    const rect = trigger?.getBoundingClientRect();
-    const pickerWidth = 400;
-    const pickerHeight = Math.min(560, window.innerHeight - 64);
-    pickerLeft = clamp((rect?.right ?? pickerWidth + 12) - pickerWidth, 12, window.innerWidth - pickerWidth - 12);
-    pickerTop = clamp((rect?.bottom ?? 46) + 6, 52, window.innerHeight - pickerHeight - 12);
     open = true;
     void tick().then(() => dialog?.querySelector<HTMLButtonElement>('.fill-type.on')?.focus());
   }
@@ -197,8 +191,8 @@
 </button>
 
 {#if open}
-  <div class="fill-picker-layer" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) cancelPreview(); }}>
-    <div bind:this={dialog} class="fill-picker" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" style:left={`${pickerLeft}px`} style:top={`${pickerTop}px`} onkeydown={dialogKeydown}>
+  <div class="fill-picker-layer" role="presentation" use:mountOverlayOnBody onpointerdown={(event) => { if (event.target === event.currentTarget) cancelPreview(); }}>
+    <div bind:this={dialog} class="fill-picker" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" use:anchorPicker={trigger} onkeydown={dialogKeydown}>
       <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close fill picker" onclick={cancelPreview}>×</button></header>
       <div class="fill-picker-body">
         <div class="fill-types" role="group" aria-label="Fill type">

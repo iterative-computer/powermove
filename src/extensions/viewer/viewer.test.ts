@@ -6,7 +6,7 @@ import {
   calculateResize, composeLocalLinear, compositionFramePosition, compositionIsOutOfView, editableTextAtPoint,
   install, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
-  previewRenderSize, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
+  previewRenderSize, previewRenderViewport, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
   shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 
@@ -94,6 +94,16 @@ describe('viewer runtime', () => {
     expect(previewRenderSize(3840, 2160, 0.25, 2, 1)).toEqual({ width: 1920, height: 1080, scale: 0.5 });
     expect(previewRenderSize(7680, 4320, 0.1, 2, 0.5)).toEqual({ width: 768, height: 432, scale: 0.1 });
     expect(previewRenderSize(1920, 1080, 2, 2, 1)).toEqual({ width: 1920, height: 1080, scale: 1 });
+  });
+  it('renders only the visible high-zoom composition region at screen density', () => {
+    const viewport = previewRenderViewport(1920, 1080, 8, 1200, 800, -7080, -3920, 2, 1);
+    expect(viewport).toMatchObject({
+      x: 869, y: 474, width: 182, height: 132,
+      cssLeft: 6952, cssTop: 3792, cssWidth: 1456, cssHeight: 1056,
+      renderWidth: 2912, renderHeight: 2112,
+    });
+    expect(viewport!.renderWidth).toBeLessThan(1920 * 8);
+    expect(previewRenderViewport(1920, 1080, 1, 1200, 800, 0, 0, 2, 1)).toBeNull();
   });
   it('snaps to the nearest candidate and breaks ties by the shorter guide', () => {
     const V = viewerRegistry().Viewer;

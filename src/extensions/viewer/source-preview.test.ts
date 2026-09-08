@@ -49,9 +49,9 @@ describe('source preview', () => {
     expect(preview.show('video')).toBe(true);
     const root = document.querySelector<HTMLElement>('#source-preview')!;
     expect(root.dataset.open).toBe('true');
-    expect(root.querySelector('.sp-badge')?.textContent).toBe('Source \u00b7 Video');
+    expect(root.querySelector('.sp-badge')).toBeNull();
     expect(root.querySelector('.sp-name')?.textContent).toBe('b-roll.mov');
-    expect(root.querySelector('.sp-hint')?.textContent).toContain('Esc');
+    expect(root.querySelector('.sp-hint')).toBeNull();
     expect(root.querySelector<HTMLElement>('.sp-foot')?.hidden).toBe(false);
 
     root.querySelector<HTMLButtonElement>('.sp-close')!.click();
@@ -61,7 +61,7 @@ describe('source preview', () => {
     preview.dispose();
   });
 
-  it('gives audio a titled card instead of a black stage, with its own transport', () => {
+  it('shows the audio filename only once below the audio icon', () => {
     const PM = registry(
       { audio: { id: 'audio', kind: 'audio', name: 'score.wav' } },
       new Map([['audio', { audioBlob: new Blob(['sound'], { type: 'audio/wav' }) }]])
@@ -71,10 +71,12 @@ describe('source preview', () => {
     expect(preview.show('audio')).toBe(true);
     const root = document.querySelector<HTMLElement>('#source-preview')!;
     expect(root.querySelector('.sp-media > audio')).not.toBeNull();
-    expect(root.querySelector('.sp-audio b')?.textContent).toBe('score.wav');
+    expect(root.querySelector('.sp-audio .sp-name')?.textContent).toBe('score.wav');
+    expect(root.querySelectorAll('.sp-name')).toHaveLength(1);
+    expect(root.querySelector('.sp-foot')?.textContent).toBe('');
     expect(root.querySelector('.sp-media > img, .sp-media > video')).toBeNull();
     expect(root.querySelector<HTMLElement>('.sp-foot')?.hidden).toBe(false);
-    expect(root.querySelector('.sp-time')?.textContent).toBe('0:00');
+    expect(root.querySelector('.sp-time, .sp-dur')).toBeNull();
 
     preview.dispose();
   });
@@ -89,12 +91,32 @@ describe('source preview', () => {
     expect(preview.show('still')).toBe(true);
     const root = document.querySelector<HTMLElement>('#source-preview')!;
     const foot = root.querySelector<HTMLElement>('.sp-foot')!;
-    expect(foot.hidden).toBe(true);
-    /* The strip's own display:flex outranks the hidden attribute's UA rule,
-       so the stylesheet has to opt out explicitly. */
-    expect(window.getComputedStyle(foot).display).toBe('none');
-    expect(root.querySelector<HTMLElement>('.sp-status')?.hidden).toBe(true);
+    expect(foot.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>('.sp-play')?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('.sp-scrub')?.hidden).toBe(true);
+    expect(foot.textContent).toBe('plate.png');
 
+    preview.dispose();
+  });
+
+  it('seeks with the keyboard and keeps playback time accessible without visible timestamps', () => {
+    const PM = registry(
+      { video: { kind: 'video', name: 'clip.mov' } },
+      new Map([['video', { url: 'blob:video' }]])
+    );
+    const preview = installSourcePreview(PM, stage());
+    preview.show('video');
+    const video = document.querySelector('video')!;
+    Object.defineProperty(video, 'duration', { value: 12 });
+    video.currentTime = 10;
+    const scrub = document.querySelector<HTMLElement>('.sp-scrub')!;
+    scrub.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(video.currentTime).toBe(12);
+    expect(scrub.getAttribute('aria-valuetext')).toBe('0:12 of 0:12');
+    scrub.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    expect(video.currentTime).toBe(0);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(preview.activeId).toBeNull();
     preview.dispose();
   });
 

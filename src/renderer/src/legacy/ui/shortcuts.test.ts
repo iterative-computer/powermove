@@ -131,6 +131,32 @@ describe('legacy shortcut install', () => {
     expect(command.content).toMatchObject({ asset: 'video-1', embeddedAudio: true, trim: 0, speed: 1 });
   });
 
+  it('creates an editable Shape layer for a parsed SVG asset and keeps source provenance', () => {
+    const PM: any = editorRuntime();
+    PM.proj.assets.svg = { id: 'svg', name: 'Powermove light.svg', kind: 'image', format: 'svg', w: 141, h: 116 };
+    PM.assets = {
+      get: () => ({
+        ...PM.proj.assets.svg,
+        svg: {
+          width: 141, height: 116, warnings: [],
+          paths: [{ name: 'Path 1', closed: true, fill: '#FFFFFF', fillEnabled: true, stroke: '#000000', strokeWidth: 0, vertices: [{ x: -10, y: -10, inX: 0, inY: 0, outX: 0, outY: 0 }, { x: 10, y: 10, inX: 0, inY: 0, outX: 0, outY: 0 }] }],
+        },
+      }),
+    };
+
+    const command = PM.commandForAsset('svg');
+    const result = PM.Edit.apply(command, { label: 'Import file', origin: 'import' });
+    const imported = PM.L(result.data.results[0].data.id);
+
+    expect(command).toMatchObject({ layerType: 'shape', name: 'Powermove light' });
+    expect(imported.type).toBe('shape');
+    expect(imported.d.svgSourceAsset).toBe('svg');
+    expect(imported.d.paths[0].vertices).toHaveLength(2);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.layers).toHaveLength(0);
+    expect(PM.proj.assets.svg).toBeDefined();
+  });
+
   it('lets the active effect clipboard handle global paste before layers', () => {
     const PM = shortcutsRegistry();
     const pasteCopiedEffects = vi.fn(() => true);

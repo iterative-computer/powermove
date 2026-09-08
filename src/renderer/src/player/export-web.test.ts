@@ -62,13 +62,15 @@ describe('portable web export', () => {
 
   it('captures only used media and removes workstation-specific metadata', async () => {
     const PM = fixture();
-    PM.proj.assets = { image: { id: 'image', kind: 'image', name: 'image.png', path: '/private/a', storageKey: 'local-only' }, unused: { id: 'unused' } };
+    PM.proj.assets = { image: { id: 'image', kind: 'image', name: 'image.svg', format: 'svg', path: '/private/a', storageKey: 'local-only' }, unused: { id: 'unused' } };
     PM.proj.layers.push(PM.mkLayer('image', { d: { asset: 'image' } }, PM.proj));
-    PM.MediaStore.get = async () => new Blob(['pixels'], { type: 'image/png' });
+    PM.MediaStore.get = async () => new Blob(['<svg/>'], { type: 'image/svg+xml' });
     const result = await buildWebExport(PM);
     expect(Object.keys(result.scene.assets)).toEqual(['image']);
     expect(result.scene.project.assets.image).not.toHaveProperty('path');
     expect(result.scene.project.assets.image).not.toHaveProperty('storageKey');
+    expect(result.scene.project.assets.image).toMatchObject({ format: 'svg' });
+    expect(result.scene.assets.image).toMatch(/\.svg$/);
   });
 
   it('rejects unsafe zip entry paths', () => {

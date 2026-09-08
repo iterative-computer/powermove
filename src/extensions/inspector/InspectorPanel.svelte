@@ -54,8 +54,8 @@
       {:else}
         <ContentSection {PM} layer={firstLayer} {fontsVersion} />
       {/if}
-      <StructuredSection {PM} layer={firstLayer} />
       {#if firstLayer.type !== 'audio'}<TransformSection {PM} layer={firstLayer} />{/if}
+      <StructuredSection {PM} layer={firstLayer} />
       {#if firstLayer.type !== 'audio' && firstLayer.type !== 'group'}
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
         {#if firstLayer.type === 'extension'}<ExtensionLayerParams {PM} layer={firstLayer} />{/if}
@@ -77,10 +77,11 @@
     padding-bottom: 12px;
   }
 
-  /* Sections are full-bleed; the panel supplies the horizontal inset the
-     section rules subtract back out. */
+  /* Match Motioner's section rhythm: each property family starts on a clear,
+     full-width rule instead of reading as one continuous list. */
   .inspector-layer > :global(.sec) {
-    margin-top: 12px;
+    margin-top: 8px;
+    border-top-color: var(--section-line);
   }
 
   .inspector-layer > :global(.sec:first-child) {
@@ -110,8 +111,28 @@
   .insp :global(.row.split:has(textarea)) { height: auto; min-height: 54px; align-items: start; }
   .insp :global(.property-stopwatch) { width: 18px; height: 24px; }
 
+  /* Panel actions use the same flat material as property fields. */
+  .insp :global(.chip) {
+    min-width: 0;
+    max-width: 100%;
+    height: var(--ctl-h);
+    background: var(--bg-field);
+    box-shadow: none;
+    white-space: normal;
+  }
+
+  .insp :global(.chip:hover) { background: var(--bg-row-hi); color: var(--tx); }
+  .insp :global(.chip:active) { background: var(--bg-row); transform: none; }
+  .insp :global(.chip:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .insp :global(.chip:disabled) { opacity: var(--disabled); pointer-events: none; }
+  .insp :global(.chip.ghost) { background: transparent; }
+  .insp :global(.chip.ghost:hover) { background: var(--ink-1); }
+  .insp :global(.chip.solid) { background: var(--accent); color: var(--on-accent); }
+  .insp :global(.chip.solid:hover) { background: var(--accent-hover); }
+
   .insp :global(.chip.wide) {
-    margin: 0 4px 4px;
+    width: 100%;
+    margin: 0 0 4px;
   }
 
   .insp :global(.stopwatch) {

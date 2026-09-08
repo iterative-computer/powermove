@@ -61,10 +61,88 @@ describe('UI placement ghost', () => {
     snapshot(panel);
     const ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
     expect(ghost.textContent).toContain('Updating Timeline controls');
-    expect(ghost.style.left).toBe('105px');
-    expect(ghost.style.height).toBe('230px');
+    expect(ghost.parentElement).toBe(original);
+    expect(ghost.classList.contains('pinned')).toBe(true);
     expect(document.getElementById('panel-timeline')).toBe(original);
     expect(original?.querySelector('button')?.textContent).toBe('Play');
+  });
+
+  it('covers only a valid scoped target and restores temporary positioning on cleanup', () => {
+    const original = document.getElementById('panel-timeline')!;
+    original.innerHTML = '<section class="transport"><button>Play</button></section><section class="tracks"></section>';
+    const transport = original.querySelector<HTMLElement>('.transport')!;
+    vi.spyOn(window, 'getComputedStyle').mockReturnValue({ position: 'static' } as CSSStyleDeclaration);
+    snapshot({ ...panel, selector: '.transport' });
+    const ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+    expect(ghost.parentElement).toBe(transport);
+    expect(transport.style.position).toBe('relative');
+    expect(ghost.style.pointerEvents).toBe('');
+
+    snapshot(panel, 'result');
+    expect(transport.style.position).toBe('');
+    expect(original.querySelector('button')?.textContent).toBe('Play');
+  });
+
+  it('reserves a local section, follows a replaced target, and falls back for an invalid selector', () => {
+    const original = document.getElementById('panel-timeline')!;
+    original.innerHTML = '<section class="existing">Existing</section><section class="after">After</section>';
+    snapshot({ ...panel, selector: '.existing', insert: 'after', label: 'Easing section' });
+    let ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+    expect(ghost.textContent).toContain('Building Easing section');
+    expect(ghost.previousElementSibling?.className).toBe('existing');
+    expect(ghost.nextElementSibling?.className).toBe('after');
+    expect(ghost.classList.contains('section')).toBe(true);
+
+    original.querySelector('.existing')!.replaceWith(Object.assign(document.createElement('section'), { className: 'existing', textContent: 'Replacement' }));
+    flushSync();
+    ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+    expect(ghost.previousElementSibling?.textContent).toBe('Replacement');
+    expect(document.querySelectorAll('[data-ui-placement-ghost="timeline"]')).toHaveLength(1);
+
+    snapshot({ ...panel, selector: '[', label: 'Fallback' });
+    ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+    expect(ghost.parentElement).toBe(original);
+  });
+
+  it('does not retarget its own broad selector and repairs a moved insertion placeholder', async () => {
+    const original = document.getElementById('panel-timeline')!;
+    original.innerHTML = '<section class="section">Anchor</section><div class="destination"></div>';
+    snapshot({ ...panel, selector: '.section', insert: 'before', label: 'Local section' });
+    let ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+    const anchor = original.querySelector<HTMLElement>('section.section')!;
+    expect(ghost.nextElementSibling).toBe(anchor);
+
+    original.querySelector('.destination')!.append(ghost);
+    flushSync();
+    await vi.waitFor(() => {
+      ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+      expect(ghost.nextElementSibling).toBe(anchor);
+    });
+    expect(ghost.parentElement).toBe(original);
+    expect(document.querySelectorAll('[data-ui-placement-ghost="timeline"]')).toHaveLength(1);
+  });
+
+  it('does not overwrite a positioning change made while the scoped ghost is active', () => {
+    const original = document.getElementById('panel-timeline')!;
+    original.innerHTML = '<section class="transport"></section>';
+    const transport = original.querySelector<HTMLElement>('.transport')!;
+    vi.spyOn(window, 'getComputedStyle').mockReturnValue({ position: 'static' } as CSSStyleDeclaration);
+    snapshot({ ...panel, selector: '.transport' });
+    transport.style.position = 'sticky';
+    snapshot(panel, 'result');
+    expect(transport.style.position).toBe('sticky');
+  });
+
+  it('settles on the whole-panel fallback when an insertion selector is missing', async () => {
+    const original = document.getElementById('panel-timeline')!;
+    snapshot({ ...panel, selector: '.not-here', insert: 'after', label: 'Missing anchor' });
+    const ghost = document.querySelector<HTMLElement>('[data-ui-placement-ghost="timeline"]')!;
+    expect(ghost.parentElement).toBe(original);
+    original.append(document.createElement('div'));
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-ui-placement-ghost="timeline"]')).toBe(ghost);
+      expect(document.querySelectorAll('[data-ui-placement-ghost="timeline"]')).toHaveLength(1);
+    });
   });
 
   it.each(['result', 'conversation', 'idle'])('cleans up on terminal phase %s even with an older placement snapshot', phase => {

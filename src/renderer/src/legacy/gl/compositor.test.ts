@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PMRegistry } from '../registry';
 import {
   continuousRasterScale, effectParamValue, hasRenderableEffects, install, paramUniformName,
-  trackPresentedVideoFrames,
+  svgRasterDimensions, trackPresentedVideoFrames,
 } from './compositor';
 
 function compositorRegistry(): PMRegistry {
@@ -30,6 +30,23 @@ describe('legacy compositor install', () => {
     expect(continuousRasterScale([0, 3, -3, 0, 0, 0], 1)).toBe(3);
     expect(continuousRasterScale([4, 0, 0, 4, 0, 0], .5)).toBe(2);
     expect(continuousRasterScale([.25, 0, 0, .25, 0, 0], 1)).toBe(.25);
+    expect(continuousRasterScale([32, 0, 0, 32, 0, 0], 1)).toBe(32);
+    expect(continuousRasterScale([64, 0, 0, 64, 0, 0], 1)).toBe(32);
+  });
+
+  it('sizes SVG backing textures from their displayed box without changing source aspect ratio', () => {
+    expect(svgRasterDimensions(100, 50, 400, 200, [2, 0, 0, 2, 0, 0])).toEqual({
+      width: 800,
+      height: 400,
+      scale: 8,
+    });
+    expect(svgRasterDimensions(100, 50, 400, 400, [1, 0, 0, 1, 0, 0])).toEqual({
+      width: 800,
+      height: 400,
+      scale: 8,
+    });
+    const capped = svgRasterDimensions(100, 50, 20_000, 10_000, [1, 0, 0, 1, 0, 0]);
+    expect(capped).toEqual({ width: 8192, height: 4096, scale: 81.92 });
   });
 
   it('versions textures from each frame the browser presents', () => {

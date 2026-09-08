@@ -13,6 +13,7 @@
     size?: number;
     vertices?: number;
     triangles?: number;
+    format?: string;
     sourcePath?: string;
     path?: string;
   }
@@ -68,6 +69,7 @@
 
   function mediaDetails(asset: Asset): string {
     const parts: string[] = [];
+    if (asset.format === 'svg' || /\.svg$/i.test(asset.name)) parts.push('SVG');
     if (asset.kind !== 'audio' && asset.w && asset.h) parts.push(`${asset.w}×${asset.h}`);
     if (asset.dur) parts.push(mediaDuration(asset.dur));
     if (asset.kind === 'model' && asset.triangles) parts.push(`${asset.triangles.toLocaleString()} tris`);

@@ -91,6 +91,29 @@ function layer(id: string, opacity = 100): TestLayer {
   };
 }
 
+function shapeLayer(id: string): TestLayer {
+  const candidate = layer(id);
+  const property = (value: unknown) => ({ v: value, kf: [], expr: null });
+  candidate.type = 'shape';
+  candidate.name = 'Imported SVG';
+  candidate.d = {
+    paths: [{
+      id: 'path-1',
+      name: 'Powermove mark',
+      parent: null,
+      vertices: [],
+      p: Object.fromEntries(Object.entries({
+        x: 0, y: 0, rotation: 0, scaleX: 100, scaleY: 100,
+        closed: true, fill: '#FFFFFF', fillEnabled: true, fillOpacity: 100,
+        stroke: '#000000', strokeWidth: 0, strokeOpacity: 100,
+        trimStart: 0, trimEnd: 100, trimOffset: 0,
+        copies: 1, repeatX: 30, repeatY: 0, repeatRotation: 0
+      }).map(([key, value]) => [key, property(value)]))
+    }]
+  };
+  return candidate;
+}
+
 function project(layers: TestLayer[]) {
   return {
     id: 'project-1',
@@ -128,7 +151,7 @@ function setup(
     }])),
     BLENDS: ['normal', 'screen'],
     MASK_SHAPES: ['rect', 'ellipse'],
-    TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' } },
+    TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' }, shape: { label: 'Shape' } },
     FX: {
       blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', step: 1, min: 0, max: 100 }] },
       duotone: { label: 'Duotone', group: 'Color', params: [{ k: 'shadow', label: 'Shadow', type: 'color' }] }
@@ -141,7 +164,8 @@ function setup(
       begin: vi.fn(),
       dispatch: vi.fn(),
       commit: vi.fn(),
-      cancel: vi.fn()
+      cancel: vi.fn(),
+      mutate: vi.fn((_label: string, operation: () => void) => operation())
     },
     hist: {
       do: vi.fn((_label: string, operation: () => void) => operation()),
@@ -158,8 +182,11 @@ function setup(
     modal: vi.fn(),
     cmd: vi.fn(),
     toast: vi.fn(),
+    setTool: vi.fn(),
     touch: vi.fn(),
     invalidate: vi.fn(),
+    uid: vi.fn((prefix: string) => `${prefix}-new`),
+    P: vi.fn((value: unknown) => ({ v: value, kf: [], expr: null })),
     wouldCycle: vi.fn(() => false),
     curComp: () => currentProject,
     L: (id: string) => currentProject.layers.find((candidate) => candidate.id === id),
@@ -307,6 +334,24 @@ describe('InspectorPanel', () => {
 
     expect(target.querySelector('[data-inspector-header]')).toBeNull();
     expect(target.textContent).toContain('Composition');
+  });
+
+  it('presents imported SVG paths as Motioner-style property sections', () => {
+    const candidate = shapeLayer('SVG');
+    const { apply, PM } = setup([candidate]);
+    const headings = [...target.querySelectorAll('.sec')].map((section) => section.textContent?.trim());
+
+    expect(headings.slice(0, 5)).toEqual(['Transform', 'Path', 'Fill', 'Stroke', 'Effects']);
+    expect(target.querySelector('[aria-label="Edit Powermove mark vertices"]')).not.toBeNull();
+    expect(target.querySelector('details.advanced')?.hasAttribute('open')).toBe(false);
+    expect(target.querySelector('[aria-label="Remove Powermove mark"]')).toBeNull();
+
+    target.querySelector<HTMLButtonElement>('[aria-label="Add stroke"]')?.click();
+    expect(apply).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set_property', target: 'SVG', path: 'g.path-1.strokeWidth', value: 1 }),
+      { label: 'Add stroke', origin: 'inspector' }
+    );
+    expect(PM.setTool).not.toHaveBeenCalled();
   });
 
   it('updates a channel value on the values tick without remounting its row', () => {

@@ -4,7 +4,7 @@
   import type { UIPlacement } from './ui-placement';
 
   // Existing panels own their overlay; new panels reserve a dock slot.
-  let { placement, pinned = false }: { placement: UIPlacement; pinned?: boolean } = $props();
+  let { placement, pinned = false, section = false }: { placement: UIPlacement; pinned?: boolean; section?: boolean } = $props();
 
   /* A preview of the shape that is coming: a label and a control on each row,
      at the uneven widths real controls have. Seven of them, so the pattern does
@@ -42,6 +42,7 @@
 <div
   class="ui-placement-ghost"
   class:pinned
+  class:section
   class:new-panel={placement.kind === 'dock'}
   data-ui-placement-ghost={placement.id}
   role="status"
@@ -51,7 +52,7 @@
   <div use:ghostEdgeField class="ghost-edge-field" aria-hidden="true"></div>
   <header class="ghost-head">
     <i aria-hidden="true"></i>
-    <span>{placement.kind === 'dock' ? 'Building' : 'Updating'} {placement.label}…</span>
+    <span>{placement.kind === 'dock' || (placement.kind === 'panel' && placement.insert) ? 'Building' : 'Updating'} {placement.label}…</span>
   </header>
   <div class="ghost-rows" bind:this={body} aria-hidden="true">
     {#each rows as row, index}
@@ -102,6 +103,18 @@
     background: var(--bg-panel-2, #f5f5f7);
     box-shadow: none;
   }
+  /* A section placeholder participates in the panel's own flow and reserves a
+     compact, useful control group without pretending to be a full panel. */
+  .section:not(.pinned) {
+    width: 100%;
+    flex: 0 0 112px;
+    min-height: 88px;
+    border: 1px dashed color-mix(in srgb, var(--tx, #1b1d23) 13%, transparent);
+    background: var(--bg-panel-2, #f5f5f7);
+    box-shadow: none;
+  }
+  .section .ghost-head { height: 32px; }
+  .section .ghost-rows { padding-top: 2px; }
   /* The field is light, so it lifts a dark panel and tints a light one. */
   .ghost-edge-field {
     position: absolute;

@@ -2,10 +2,7 @@
    composition, the way an editor's source monitor does. Owned by the viewer
    panel; driven by the media panel (Space to play/pause, Esc to close).
 
-   The monitor is deliberately loud about being a monitor. Swapping the stage
-   for unrelated footage with no chrome reads as a broken composition, so the
-   overlay carries a titled header, its own transport, and an explicit way
-   back to the timeline. */
+   A quiet floating transport keeps playback controls together. */
 
 export interface SourcePreview {
   /** Show the asset (paused). Returns false if it can't be previewed. */
@@ -19,45 +16,28 @@ export interface SourcePreview {
 }
 
 const STYLES = `
-  #source-preview{position:absolute;inset:0;z-index:6;display:none;flex-direction:column;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}
-  #source-preview[data-open="true"]{display:flex;animation:sp-in 140ms var(--ease-io, ease-out) both}
-  @keyframes sp-in{from{opacity:0;transform:scale(.99)}to{opacity:1;transform:none}}
-  /* An accent ring frames the whole stage so the swapped picture reads as a
-     mode the user opened, not as the composition losing its render. */
-  #source-preview::after{content:"";position:absolute;inset:0;z-index:3;pointer-events:none;border-radius:inherit;box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--accent) 62%,transparent)}
-  #source-preview .sp-head{position:relative;z-index:2;flex:none;display:flex;align-items:center;gap:8px;height:28px;padding:0 6px 0 8px;background:var(--bg-panel-2);border-bottom:1px solid var(--line)}
-  #source-preview .sp-badge{flex:none;height:16px;display:flex;align-items:center;padding:0 5px;border-radius:var(--r-xs);background:var(--accent);color:var(--on-accent);font-size:9px;font-weight:var(--fw-medium);letter-spacing:.06em;text-transform:uppercase}
-  #source-preview .sp-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx);font-size:var(--fs-xs)}
-  #source-preview .sp-hint{flex:none;color:var(--tx-4);font-size:10px;white-space:nowrap}
-  #source-preview .sp-close{flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-3);background:transparent}
-  #source-preview .sp-close:hover{color:var(--tx);background:var(--bg-row)}
-  #source-preview .sp-close svg{width:12px;height:12px}
-  #source-preview .sp-media{position:relative;flex:1;min-height:0;display:grid;place-items:center;background:#000}
-  #source-preview .sp-media img,#source-preview .sp-media video{max-width:100%;max-height:100%;object-fit:contain;display:block}
-  /* Audio renders nothing on its own; a titled card keeps the stage from
-     looking like a failed frame while the sound plays. */
-  /* The picture area is always black, in both themes, so its labels carry
-     fixed light values rather than theme text colors. */
-  #source-preview .sp-audio{display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px;color:rgb(255 255 255 / .5);font-size:10px;text-align:center}
-  #source-preview .sp-audio svg{width:28px;height:28px;color:var(--accent)}
-  #source-preview .sp-audio b{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgb(255 255 255 / .92);font-size:var(--fs-xs);font-weight:var(--fw-medium)}
-  #source-preview .sp-status{position:absolute;color:rgb(255 255 255 / .55);font-size:10px}
-  #source-preview .sp-status[hidden]{display:none}
-  /* A flex display beats the hidden attribute's UA rule, and a still with a
-     transport under it is exactly the kind of dead control that reads broken. */
-  #source-preview .sp-foot[hidden]{display:none}
-  #source-preview .sp-foot{position:relative;z-index:2;flex:none;display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;background:var(--bg-panel-2);border-top:1px solid var(--line)}
-  #source-preview .sp-play{flex:none;width:20px;height:20px;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-2);background:transparent}
-  #source-preview .sp-play:hover{color:var(--tx);background:var(--bg-row)}
-  #source-preview .sp-play svg{width:11px;height:11px}
-  #source-preview .sp-time,#source-preview .sp-dur{flex:none;color:var(--tx-4);font-size:10px;font-variant-numeric:tabular-nums}
-  #source-preview .sp-scrub{flex:1;min-width:0;height:14px;display:flex;align-items:center;cursor:pointer;touch-action:none}
-  #source-preview .sp-scrub i{width:100%;height:3px;border-radius:2px;background:rgb(var(--ink-rgb, 10 10 12) / .22)}
+  #source-preview{position:absolute;inset:0;z-index:6;display:none;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}
+  #source-preview[data-open="true"]{display:block;animation:sp-in 140ms var(--ease-io, ease-out) both}
+  @keyframes sp-in{from{opacity:0}to{opacity:1}}
+  #source-preview .sp-media{position:absolute;inset:0;display:grid;place-items:center;background:#000}
+  #source-preview[data-kind="audio"] .sp-media{background:var(--bg-panel-2)}
+  #source-preview .sp-media img,#source-preview .sp-media video{width:100%;height:100%;min-height:0;object-fit:contain;display:block}
+  #source-preview .sp-audio{display:flex;flex-direction:column;align-items:center;gap:var(--gap);min-width:0;max-width:calc(100% - 2 * var(--pad));color:var(--tx-4)}
+  #source-preview .sp-audio svg{width:32px;height:32px}
+  #source-preview .sp-audio .sp-name{flex:none;max-width:100%;padding:0;text-align:center}
+  #source-preview .sp-foot{position:absolute;z-index:2;bottom:var(--pad);left:50%;transform:translateX(-50%);width:min(480px,calc(100% - 2 * var(--pad)));box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:6px;border-radius:calc(var(--r-sm) + 6px);background:var(--bg-float);box-shadow:var(--shadow-float)}
+  #source-preview .sp-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-medium);padding-left:4px}
+  #source-preview .sp-close,#source-preview .sp-play{flex:none;width:var(--hit);height:var(--hit);display:grid;place-items:center;border:0;border-radius:var(--r-sm);color:var(--tx-2);background:transparent;cursor:pointer}
+  #source-preview .sp-close:hover,#source-preview .sp-play:hover{color:var(--tx);background:var(--bg-row-hi)}
+  #source-preview .sp-close:active,#source-preview .sp-play:active{background:var(--bg-sunken)}
+  #source-preview :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  #source-preview .sp-close svg,#source-preview .sp-play svg{width:14px;height:14px}
+  #source-preview .sp-scrub{flex:1;min-width:24px;height:var(--hit);display:flex;align-items:center;cursor:pointer;touch-action:none;border-radius:var(--r-xs)}
+  #source-preview .sp-scrub i{width:100%;height:3px;border-radius:var(--r-pill);background:rgb(var(--ink-rgb) / .22)}
   #source-preview .sp-scrub i b{display:block;width:0;height:100%;border-radius:inherit;background:var(--accent)}
+  #source-preview [hidden]{display:none!important}
+  @media(prefers-reduced-motion:reduce){#source-preview[data-open="true"]{animation:none}}
 `;
-
-const KIND_LABEL: Record<string, string> = { video: 'Video', image: 'Image', audio: 'Audio' };
-const KIND_ICON: Record<string, string> = { video: 'film', image: 'image', audio: 'music' };
 
 /** Source media runs on its own clock, so it reads in wall time, not project frames. */
 function clock(seconds: number): string {
@@ -84,38 +64,22 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
   const styles = document.createElement('style');
   styles.textContent = STYLES;
 
-  const head = document.createElement('div');
-  head.className = 'sp-head';
-  const badge = document.createElement('span');
-  badge.className = 'sp-badge';
-  badge.textContent = 'Source';
   const name = document.createElement('span');
   name.className = 'sp-name';
-  const hint = document.createElement('span');
-  hint.className = 'sp-hint';
-  hint.textContent = 'Esc returns to the composition';
   const close = document.createElement('button');
   close.className = 'sp-close';
   close.type = 'button';
   close.title = 'Close source preview';
   close.setAttribute('aria-label', 'Close source preview');
   close.append(icon('x'));
-  head.append(badge, name, hint, close);
 
   const media = document.createElement('div');
   media.className = 'sp-media';
-  const status = document.createElement('span');
-  status.className = 'sp-status';
-  status.hidden = true;
-
   const foot = document.createElement('div');
   foot.className = 'sp-foot';
   const play = document.createElement('button');
   play.className = 'sp-play';
   play.type = 'button';
-  const elapsed = document.createElement('span');
-  elapsed.className = 'sp-time';
-  elapsed.textContent = '0:00';
   const scrub = document.createElement('div');
   scrub.className = 'sp-scrub';
   scrub.setAttribute('role', 'slider');
@@ -124,12 +88,9 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
   const fill = document.createElement('b');
   track.append(fill);
   scrub.append(track);
-  const total = document.createElement('span');
-  total.className = 'sp-dur';
-  total.textContent = '0:00';
-  foot.append(play, elapsed, scrub, total);
+  foot.append(play, name, scrub, close);
 
-  root.append(styles, head, media, foot);
+  root.append(styles, media, foot);
   (stage.querySelector('#stage-inner') || stage).appendChild(root);
 
   let activeId: string | null = null;
@@ -149,8 +110,9 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     const duration = Number(element.duration);
     const known = Number.isFinite(duration) && duration > 0;
     const at = Number(element.currentTime) || 0;
-    elapsed.textContent = clock(at);
-    total.textContent = known ? clock(duration) : '--:--';
+    scrub.setAttribute('aria-valuemin', '0');
+    scrub.setAttribute('aria-valuemax', String(known ? duration : 0));
+    scrub.setAttribute('aria-valuenow', String(at));
     fill.style.width = known ? `${Math.min(100, (at / duration) * 100)}%` : '0%';
     scrub.setAttribute('aria-valuetext', `${clock(at)} of ${known ? clock(duration) : 'unknown'}`);
   }
@@ -173,7 +135,6 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
   }
 
   function onLoaded(): void {
-    status.hidden = true;
     paint();
   }
 
@@ -203,8 +164,6 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     }
     if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
     element = null; activeId = null;
-    elapsed.textContent = '0:00';
-    total.textContent = '0:00';
     fill.style.width = '0%';
     media.replaceChildren();
     root.dataset.open = 'false';
@@ -219,6 +178,7 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     if (!record) return false;
     if (activeId === assetId) return true;
     clear();
+    foot.insertBefore(name, scrub);
     const kind = record.kind;
     const url = liveUrl(live);
     if (kind === 'image' && url) {
@@ -233,23 +193,18 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
       const audio = document.createElement('audio'); audio.src = audioUrl; audio.preload = 'auto';
       const card = document.createElement('div');
       card.className = 'sp-audio';
-      const title = document.createElement('b');
-      title.textContent = String(record.name || 'Audio');
-      const sub = document.createElement('small');
-      sub.textContent = 'Audio only — no picture';
-      card.append(icon('music'), title, sub);
+      const audioIcon = icon('music');
+      audioIcon.setAttribute('aria-hidden', 'true');
+      card.append(audioIcon, name);
       media.append(audio, card); bindElement(audio);
     } else {
       return false;
     }
-    /* Decoding takes a beat on some codecs. Naming the wait keeps an
-       undecoded first frame from reading as a dead render. */
-    status.textContent = 'Loading…';
-    status.hidden = !element;
-    media.append(status);
     name.textContent = String(record.name || assetId);
-    badge.textContent = `Source · ${KIND_LABEL[kind] || 'Media'}`;
-    foot.hidden = !element;
+    name.title = name.textContent;
+    root.dataset.kind = kind;
+    play.hidden = scrub.hidden = !element;
+    scrub.tabIndex = element ? 0 : -1;
     setPlayIcon();
     paint();
     activeId = assetId;
@@ -303,14 +258,23 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     if (scrub.hasPointerCapture?.(event.pointerId)) seekTo(event);
   };
   const handleScrubUp = (event: PointerEvent) => scrub.releasePointerCapture?.(event.pointerId);
+  const handleScrubKey = (event: KeyboardEvent) => {
+    if (!element || !Number.isFinite(element.duration)) return;
+    const offsets: Record<string, number> = { ArrowLeft: -5, ArrowRight: 5 };
+    if (!(event.key in offsets) && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault(); event.stopPropagation();
+    element.currentTime = event.key === 'Home' ? 0 : event.key === 'End' ? element.duration
+      : Math.max(0, Math.min(element.duration, element.currentTime + offsets[event.key]));
+    paint();
+  };
   const handleKeydown = (event: KeyboardEvent) => {
     if (event.key === 'Escape' && activeId) { clear(); event.stopPropagation(); }
   };
   media.addEventListener('pointerdown', handleMediaPointerDown);
-  head.addEventListener('pointerdown', handleHeadPointerDown);
   foot.addEventListener('pointerdown', handleHeadPointerDown);
   close.addEventListener('click', handleClose);
   play.addEventListener('click', handlePlay);
+  scrub.addEventListener('keydown', handleScrubKey);
   scrub.addEventListener('pointerdown', handleScrubDown);
   scrub.addEventListener('pointermove', handleScrubMove);
   scrub.addEventListener('pointerup', handleScrubUp);
@@ -319,10 +283,10 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
   function dispose(): void {
     clear();
     media.removeEventListener('pointerdown', handleMediaPointerDown);
-    head.removeEventListener('pointerdown', handleHeadPointerDown);
     foot.removeEventListener('pointerdown', handleHeadPointerDown);
     close.removeEventListener('click', handleClose);
     play.removeEventListener('click', handlePlay);
+    scrub.removeEventListener('keydown', handleScrubKey);
     scrub.removeEventListener('pointerdown', handleScrubDown);
     scrub.removeEventListener('pointermove', handleScrubMove);
     scrub.removeEventListener('pointerup', handleScrubUp);

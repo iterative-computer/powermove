@@ -146,4 +146,72 @@ test.describe('@ui-placement early panel loading', () => {
     await expect(page.locator('[data-ui-placement-ghost]')).toHaveCount(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
+
+  test('targets one panel area, then reserves a local new section without persisting layout', async ({ session }, testInfo) => {
+    const { page } = session;
+    await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.SpatialAssistant.open();
+      PM.AgentUI.setAccess('project');
+      PM.CodexBridge.request = (_prompt: string, _schema: any, _images: any, options: any) => new Promise((_resolve, reject) => {
+        (window as any).__scopedGhost = { options, reject };
+      });
+      PM.AgentUI.submit('Update the timeline transport and add controls beneath it');
+    });
+    await page.waitForFunction(() => Boolean((window as any).__scopedGhost));
+    const baseline = await page.evaluate(() => JSON.stringify([(window as any).PM.proj, (window as any).PM.WS.current]));
+
+    await page.evaluate(() => (window as any).__scopedGhost.options.onTrace({
+      kind: 'answer',
+      text: 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","selector":".tl-transport","label":"Transport controls"}'
+    }));
+    const ghost = page.locator('[data-ui-placement-ghost="timeline"]');
+    await expect(ghost).toBeVisible();
+    await expect(ghost).toContainText('Updating Transport controls');
+    expect(await ghost.evaluate(element => ({
+      parentMatches: element.parentElement?.matches('.tl-transport'),
+      pointerEvents: getComputedStyle(element).pointerEvents,
+      matchesTargetBounds: (() => {
+        const ghostRect = element.getBoundingClientRect();
+        const targetRect = element.parentElement!.getBoundingClientRect();
+        return Math.abs(ghostRect.left - targetRect.left) < 0.5
+          && Math.abs(ghostRect.top - targetRect.top) < 0.5
+          && Math.abs(ghostRect.width - targetRect.width) < 0.5
+          && Math.abs(ghostRect.height - targetRect.height) < 0.5;
+      })(),
+      smallerThanPanel: element.getBoundingClientRect().width < element.closest('.panel')!.getBoundingClientRect().width,
+      siblingsRemain: Boolean(element.parentElement?.querySelector('button'))
+    }))).toEqual({ parentMatches: true, pointerEvents: 'none', matchesTargetBounds: true, smallerThanPanel: true, siblingsRemain: true });
+    await page.screenshot({ path: testInfo.outputPath('scoped-transport-loading.png') });
+
+    const canvasTop = await page.locator('#tl-canvas-wrap').evaluate(element => element.getBoundingClientRect().top);
+
+    await page.evaluate(() => (window as any).__scopedGhost.options.onTrace({
+      kind: 'answer',
+      text: 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","selector":"#tl-canvas-wrap","insert":"before","label":"Playback options"}'
+    }));
+    await expect(ghost).toContainText('Building Playback options');
+    expect(await ghost.evaluate(element => ({
+      precedesCanvas: element.nextElementSibling?.matches('#tl-canvas-wrap'),
+      staysInPanel: element.closest('.panel')?.id,
+      isSection: element.classList.contains('section'),
+      pointerEvents: getComputedStyle(element).pointerEvents,
+      reservesSpace: element.getBoundingClientRect().height > 0
+    }))).toEqual({ precedesCanvas: true, staysInPanel: 'panel-timeline', isSection: true, pointerEvents: 'none', reservesSpace: true });
+    // Wait through the 160ms slot-opening animation, then verify the reserved
+    // box and the downstream layout displacement agree exactly.
+    await expect.poll(async () => {
+      const height = await ghost.evaluate(element => Math.round(element.getBoundingClientRect().height));
+      const nextTop = await page.locator('#tl-canvas-wrap').evaluate(element => Math.round(element.getBoundingClientRect().top));
+      return { height, shift: nextTop - Math.round(canvasTop) };
+    }).toEqual({ height: 112, shift: 112 });
+    expect(await page.evaluate(() => JSON.stringify([(window as any).PM.proj, (window as any).PM.WS.current]))).toBe(baseline);
+    await page.screenshot({ path: testInfo.outputPath('reserved-timeline-section.png') });
+
+    await page.evaluate(() => (window as any).__scopedGhost.reject(new Error('Generation failed')));
+    await expect(ghost).toHaveCount(0);
+    expect(await page.locator('#tl-canvas-wrap').evaluate(element => element.getBoundingClientRect().top)).toBe(canvasTop);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
 });

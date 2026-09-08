@@ -1,5 +1,5 @@
 import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane } from '../core/space-3d';
-import { pathValues, tracePath } from '../core/vector-paths';
+import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { sourceTime } from '../core/retiming';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
@@ -52,7 +52,7 @@ export function trackPresentedVideoFrames(el: any, onFrame: () => void): { versi
  * Quarter-step buckets keep animated scale from creating a new cache entry on
  * every frame while remaining visually indistinguishable at preview size. */
 export function continuousRasterScale(
-  matrix: readonly number[], density = 1, maxScale = 8,
+  matrix: readonly number[], density = 1, maxScale = 32,
 ): number {
   const m0 = Number(matrix?.[0]) || 0, m1 = Number(matrix?.[1]) || 0;
   const m2 = Number(matrix?.[2]) || 0, m3 = Number(matrix?.[3]) || 0;
@@ -62,14 +62,44 @@ export function continuousRasterScale(
   const discriminant = Math.sqrt(Math.max(0, (aa - cc) ** 2 + 4 * bb * bb));
   const largest = Math.sqrt(Math.max(0, (aa + cc + discriminant) / 2));
   const requested = largest * Math.max(.01, Number(density) || 1);
-  const bounded = Math.max(.25, Math.min(Math.max(.25, Number(maxScale) || 8), requested));
+  const bounded = Math.max(.25, Math.min(Math.max(.25, Number(maxScale) || 32), requested));
   return Math.ceil(bounded * 4 - 1e-9) / 4;
+}
+
+/** Backing dimensions for a vector asset at its current display density.
+ * The texture retains the SVG's source aspect ratio so existing cover/contain
+ * UV behavior stays identical to raster images. */
+export function svgRasterDimensions(
+  sourceWidth: number,
+  sourceHeight: number,
+  boxWidth: number,
+  boxHeight: number,
+  matrix: readonly number[],
+  maxDimension = 8192,
+): { width: number; height: number; scale: number } {
+  const sw = Math.max(1, Number(sourceWidth) || 1);
+  const sh = Math.max(1, Number(sourceHeight) || 1);
+  const bw = Math.max(1, Number(boxWidth) || sw);
+  const bh = Math.max(1, Number(boxHeight) || sh);
+  const limit = Math.max(1, Number(maxDimension) || 8192);
+  const boxDensity = Math.max(bw / sw, bh / sh);
+  const maxScale = Math.max(.25, limit / Math.max(sw, sh));
+  const requestedScale = continuousRasterScale(matrix, boxDensity, maxScale);
+  let width = Math.max(1, Math.ceil(sw * requestedScale));
+  let height = Math.max(1, Math.ceil(sh * requestedScale));
+  if (Math.max(width, height) > limit) {
+    const ratio = limit / Math.max(width, height);
+    width = Math.max(1, Math.floor(width * ratio));
+    height = Math.max(1, Math.floor(height * ratio));
+  }
+  return { width, height, scale: width / sw };
 }
 
 export function install(PM: PMRegistry): void {
 
 const GL: any = {
   gl: null, canvas: null, w: 0, h: 0,
+  previewViewport: null,
   progs: new Map(), texes: new Map(), meshes: new Map(), pool: [], quad: null,
   stats: { draws: 0, passes: 0, ms: 0, progs: 0 },
   errors: new Map(),
@@ -81,6 +111,9 @@ let poolBytes = 0;
 let textureBytes = 0;
 let resourceTick = 0;
 const presentedVideoFrames = new WeakMap<any, { version: number; supported: boolean }>();
+const viewportPathRasters = new Map<string, any>();
+let viewportPathFrame = 0;
+let viewportPathVersion = 0;
 
 function videoTextureVersion(el: any): number {
   let state = presentedVideoFrames.get(el);
@@ -245,14 +278,29 @@ function clear(r = 0, g = 0, b = 0, a = 0) {
 const IDENT = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 function m3(m: any) { return new Float32Array([m[0], m[1], 0, m[2], m[3], 0, m[4], m[5], 1]); }
 function fullQuad(w: any, h: any) { return new Float32Array([w, 0, 0, 0, h, 0, 0, 0, 1]); }
+let previewViewportActive = false;
+function activePreviewViewport(W: number, H: number): any {
+  return previewViewportActive && PM.curComp?.() === PM.proj
+    && W === GL.canvas.width && H === GL.canvas.height ? GL.previewViewport : null;
+}
 function outputScale(W: number, H: number): [number, number] {
+  const viewport = activePreviewViewport(W, H);
+  if (viewport) return [W / Math.max(1e-6, viewport.width), H / Math.max(1e-6, viewport.height)];
   const comp = PM.curComp?.() || PM.proj;
   return [W / Math.max(1, Number(comp?.w) || W), H / Math.max(1, Number(comp?.h) || H)];
 }
 function scaledWorld(layer: any, time: any, W: number, H: number): [number, number, number, number, number, number] {
   const world = PM.worldMatrix(layer, time);
   const [sx, sy] = outputScale(W, H);
-  return [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, world[4] * sx, world[5] * sy];
+  const viewport = activePreviewViewport(W, H);
+  return [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, (world[4] - (viewport?.x || 0)) * sx, (world[5] - (viewport?.y || 0)) * sy];
+}
+
+function backgroundView(W: number, H: number): [number, number, number, number] {
+  const viewport = activePreviewViewport(W, H);
+  return viewport
+    ? [viewport.x / viewport.compWidth, viewport.y / viewport.compHeight, viewport.width / viewport.compWidth, viewport.height / viewport.compHeight]
+    : [0, 0, 1, 1];
 }
 
 /* ── content textures ──────────────────────────────────── */
@@ -302,6 +350,15 @@ GL.dropTextures = (prefix = '') => {
     GL.texes.delete(key);
   }
 };
+
+function trimViewportPathRasters() {
+  for (const [id, entry] of viewportPathRasters) {
+    if (entry.frame >= viewportPathFrame - 1) continue;
+    entry.cv.width = 0; entry.cv.height = 0;
+    viewportPathRasters.delete(id);
+    GL.dropTextures('viewport-path:' + id);
+  }
+}
 
 function dropMesh(id: string) {
   const entry = GL.meshes.get(id);
@@ -425,7 +482,8 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
   return true;
 };
 
-GL.resize = (w: any, h: any) => {
+GL.resize = (w: any, h: any, previewViewport: any = null) => {
+  GL.previewViewport = previewViewport;
   if (GL.canvas.width === w && GL.canvas.height === h) return;
   GL.canvas.width = w; GL.canvas.height = h;
   GL.pool.forEach((f: any) => disposeFbo(f));
@@ -513,6 +571,21 @@ function contentQuad(L: any, T: any, W: any, H: any) {
   if (L.type === 'solid') {
     return { solid: PM.hex2rgb(d.color), w: d.w || W, h: d.h || H, ax: 0, ay: 0 };
   }
+  if (L.type === 'shape' && L.d.paths?.length && activePreviewViewport(W, H)
+      && (PM.previewResolution === '1' || PM.perf?.auto === false && PM.quality === 1)) {
+    const world = scaledWorld(L, T, W, H);
+    const previous = viewportPathRasters.get(L.id);
+    const raster = rasterPathsToViewport(PM, L, T, W, H, world, previous);
+    if (raster !== previous) {
+      if (previous?.cv) { previous.cv.width = 0; previous.cv.height = 0; }
+      raster.version = ++viewportPathVersion;
+      viewportPathRasters.set(L.id, raster);
+    }
+    raster.frame = viewportPathFrame;
+    GL.stats.viewportVectors = (GL.stats.viewportVectors || 0) + 1;
+    const tex = texFor('viewport-path:' + L.id, raster.cv, { version: raster.version });
+    return { tex, w: W, h: H, ax: 0, ay: 0, uv: [0, 0, 1, 1], screenSpace: true };
+  }
   if (L.type === 'text' || L.type === 'shape') {
     /* Render editable text/shape source at the density it occupies in this
        output. This is continuous rasterization: no fixed-resolution layer
@@ -534,9 +607,17 @@ function contentQuad(L: any, T: any, W: any, H: any) {
       if (!PM.playing && Math.abs(el.currentTime - vt) > .02) { try { el.currentTime = vt; } catch (e) { } }
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
-    const videoVersion = L.type === 'video' ? (el===a.el?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
-    const tex = texFor('a:' + a.id + (el===a.el?'':':'+L.id+'@'+T), el, { version: videoVersion });
     const bw = d.w || W, bh = d.h || H;
+    let textureSource = el;
+    let textureKey = 'a:' + a.id + (el===a.el?'':':'+L.id+'@'+T);
+    if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
+      const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
+      const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
+      textureSource = raster.cv;
+      textureKey = 'r:' + raster.key;
+    }
+    const videoVersion = L.type === 'video' ? (el===a.el?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
+    const tex = texFor(textureKey, textureSource, { version: videoVersion });
     let uv = [0, 0, 1, 1];
     if (d.fit === 'cover' || d.fit === 'contain') {
       const ar = sw / sh, br = bw / bh;
@@ -678,7 +759,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any) {
   const c: any = contentQuad(L, T, W, H);
   if (!c) return false;
   const world = scaledWorld(L, T, W, H);
-  const M = PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
+  const M = c.screenSpace ? [W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
   let projected = m3(M);
   if (is3DLayer(PM,L)) {
     const h = planeMatrix(PM, L, T), [sx, sy] = outputScale(W, H);
@@ -981,7 +1062,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
         while (packed.length < 32) packed.push(0, 0, 0, 1);
         g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
         setI(p, 'u_count', fill.stops.length); setI(p, 'u_type', fill.type === 'radial' ? 2 : 1);
-        g.u('u_angle', fill.angle); g.u('u_stops', packed); draw();
+        g.u('u_angle', fill.angle); g.u('u_stops', packed); g.u('u_view', ...backgroundView(W, H)); draw();
       }
     }
   }
@@ -1071,16 +1152,19 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 GL.render = (T: any, opt: any = {}) => {
   const gl = GL.gl; if (!gl) return;
   const t0 = window.performance.now();
-  GL.stats.draws = 0; GL.stats.passes = 0;
+  GL.stats.draws = 0; GL.stats.passes = 0; GL.stats.viewportVectors = 0;
+  viewportPathFrame++;
   const W = GL.canvas.width, H = GL.canvas.height;
 
   PM.beginEval(T);
   PM.scope.push(PM.proj);
+  previewViewportActive = !!GL.previewViewport;
   let acc;
   try {
     acc = GL.renderProject(PM.proj, T, W, H, opt);
   } finally {
     PM.scope.pop();
+    previewViewportActive = false;
   }
 
   /* present */
@@ -1095,6 +1179,7 @@ GL.render = (T: any, opt: any = {}) => {
   GL.pool.forEach((f: any) => f.busy = false);
   trimPool();
   trimTextures();
+  trimViewportPathRasters();
   GL.stats.ms = window.performance.now() - t0;
 };
 
@@ -1116,6 +1201,8 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   GL.pool.forEach((f: any) => f.busy = false);
   trimPool();
   trimTextures();
+  viewportPathFrame++;
+  trimViewportPathRasters();
   return px;
 };
 

@@ -14,6 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: 'Powermove — Make your move.',
+  icons: { icon: '/favicon.svg' },
   description: 'A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and room for your next big idea. In development.',
 };
 

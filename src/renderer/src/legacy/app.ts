@@ -871,7 +871,7 @@ PM.prepareToClose = async () => {
 PM.pickFiles = () => {
   const targetProject = PM.proj;
   const inp = h('input', {
-    type: 'file', multiple: true, accept: 'image/*,video/*,audio/*,.obj,.pmv',
+    type: 'file', multiple: true, accept: 'image/*,.svg,video/*,audio/*,.obj,.pmv',
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
   });
   const cleanup = () => { inp.onchange = null; inp.remove(); };
@@ -921,8 +921,15 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     PM.autosave();
     if (placement === null) PM.bus.emit('assets');
     const parts: any = [];
-    if (layerResults.length) parts.push(layerResults.length === 1 ? `Imported ${layerResults[0].asset.name}` : `Imported ${layerResults.length} files`);
+    if (layerResults.length) {
+      const editableSvg = layerResults.length === 1 && layerResults[0].asset.format === 'svg' && layerResults[0].asset.svg?.paths?.length;
+      parts.push(layerResults.length === 1
+        ? `Imported ${layerResults[0].asset.name}${editableSvg ? ' as editable paths' : ''}`
+        : `Imported ${layerResults.length} files`);
+    }
     if (relinked.length) parts.push(`relinked ${relinked.length} missing ${relinked.length === 1 ? 'asset' : 'assets'}`);
+    const svgWarnings = layerResults.flatMap((result: any) => result.asset.svg?.warnings || []);
+    if (svgWarnings.length) parts.push(`${svgWarnings.length} SVG ${svgWarnings.length === 1 ? 'feature needs' : 'features need'} review`);
     if (volatile.length) parts.push('durable storage unavailable');
     PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400);
   }

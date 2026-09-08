@@ -41,15 +41,15 @@ select.sel {
 }
 
 .color-picker {
-  width: 384px;
+  width: 352px;
 }
 
-/* After Effects-style workbench: SV field, hue ribbon, then readouts. */
+/* Match inspector field density while keeping the color surface dominant. */
 .color-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 18px 128px;
+  grid-template-columns: minmax(0, 1fr) 12px 92px;
   gap: 8px;
-  height: 196px;
+  height: 176px;
 }
 
 .color-sv,
@@ -66,8 +66,10 @@ select.sel {
 
 .color-compare {
   display: grid;
-  grid-template-rows: 1fr 1fr;
-  height: 46px;
+  grid-template-columns: 1fr 1fr;
+  width: 48px;
+  height: var(--ctl-h);
+  flex: none;
   border-radius: var(--r-sm);
   overflow: hidden;
   box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18);
@@ -107,7 +109,7 @@ select.sel {
   grid-template-columns: 12px minmax(0, 1fr) 10px;
   align-items: center;
   gap: 6px;
-  height: 20px;
+  height: var(--ctl-h);
   color: var(--tx-3);
   font-size: var(--fs-xs);
 }
@@ -121,14 +123,14 @@ select.sel {
 .color-channel input {
   width: 100%;
   min-width: 0;
-  height: 20px;
+  height: var(--ctl-h);
   padding: 0 5px;
   border: 0;
   border-radius: var(--r-xs);
   background: var(--bg-field);
   box-shadow: var(--ctl-edge-inset);
   color: var(--tx);
-  font: var(--fs-xs) var(--f-mono);
+  font: var(--fs-sm) var(--f-mono);
   text-align: right;
 }
 
@@ -161,7 +163,67 @@ select.sel {
 }
 
 .color-dialog .color-hex {
-  height: 28px;
+  height: var(--ctl-h);
   font-size: var(--fs-xs);
   text-transform: uppercase;
+}
+
+.color-dialog .color-eyedropper {
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  flex: none;
+  border-radius: var(--r-sm);
+  background: var(--bg-field);
+  box-shadow: var(--ctl-edge-inset);
+  color: var(--tx-2);
+}
+
+.color-dialog .color-eyedropper:hover {
+  color: var(--tx);
+  background: var(--bg-row-hi);
+}
+
+.color-dialog .color-eyedropper:disabled {
+  opacity: var(--disabled);
+}
+
+/* Scoped overlay chrome: shared theme, density and focus treatment. */
+.fill-picker.color-picker > header {
+  height: var(--hdr-h);
+  flex: none;
+  padding-inline: var(--pad);
+}
+.fill-picker.color-picker > header b { font-weight: var(--fw-medium); }
+.color-picker .color-dialog { padding: var(--pad); gap: 8px; }
+.color-picker .color-workbench { height: calc(6 * var(--ctl-h)); }
+.color-picker .color-channels { gap: 0; }
+.color-picker .color-channel { gap: 4px; }
+.color-picker .color-channel input { height: calc(var(--ctl-h) - 2px); border-radius: var(--r-sm); }
+.color-picker .color-sv { border-radius: var(--r-sm); }
+.color-picker .color-hue { border-radius: var(--r-pill); }
+.color-picker .color-hex { min-width: 0; color: var(--tx); font-size: var(--fs-sm); }
+.color-picker .color-dialog-value { gap: 8px; }
+.color-picker .color-compare-swatch.is-before { box-shadow: inset var(--hairline) 0 0 rgb(var(--ink-rgb) / .18); }
+.color-picker :is(button,input,[role="slider"]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Flat fields and swatches follow the inspector's borderless controls. */
+.color-picker :is(.color-channel input, .color-hex, .color-eyedropper,
+  .color-compare, .color-compare-swatch.is-before, .color-choice, .color-choice.on) {
+  box-shadow: none;
+  border: 0;
+}
+.color-picker .color-choice { position: relative; }
+.color-picker .color-choice.on::after {
+  content: '';
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  left: calc(50% - 2px);
+  bottom: 3px;
+  border-radius: 50%;
+  background: white;
+  mix-blend-mode: difference;
 }

@@ -6,6 +6,7 @@
   import { EditGesture, type EditBinding } from './gesture';
   import { rowLabelId } from './context';
   import { clamp, hexToRgb, hsvToRgb, normalizeHex, rgbToHex, rgbToHsv } from './control-utils';
+  import { anchorPicker, mountOverlayOnBody } from './overlay';
   import './controls.css';
 
   let {
@@ -28,19 +29,19 @@
   const presets = ['#09090A', '#FFFFFF', '#FF6B1A', '#FFB000', '#34C759', '#0A84FF', '#6E5AE6', '#FF375F'];
   const hsvChannels = [['h', 'H', '°', 359], ['s', 'S', '%', 100], ['v', 'B', '%', 100]] as const;
   const rgbChannels = [['r', 'R'], ['g', 'G'], ['b', 'B']] as const;
+  type EyeDropperConstructor = new () => { open(): Promise<{ sRGBHex: string }> };
 
   let trigger = $state<HTMLButtonElement>();
   let dialog = $state<HTMLDivElement>();
   let hexInput = $state<HTMLInputElement>();
   let open = $state(false);
-  let pickerLeft = $state(12);
-  let pickerTop = $state(52);
   /* `chosen` stays authoritative so typed hex/RGB never drifts through an HSV round trip. */
   let chosen = $state('#808080');
   let before = $state('#808080');
   let hsv = $state({ h: 0, s: 0, v: 50 });
   let draft = $state('#808080');
   let previewing = $state(false);
+  let sampling = $state(false);
 
   const rgb = $derived(hexToRgb(chosen) ?? { r: 0, g: 0, b: 0 });
   const hueColor = $derived(rgbToHex(hsvToRgb({ h: hsv.h, s: 100, v: 100 })));
@@ -72,6 +73,24 @@
 
   function typeHex(): void {
     if (/^#?[0-9a-f]{6}$/i.test(draft.trim()) && commitHex(draft)) previewChosen();
+  }
+
+  async function sampleScreenColor(): Promise<void> {
+    const EyeDropper = (window as Window & { EyeDropper?: EyeDropperConstructor }).EyeDropper;
+    if (!EyeDropper) {
+      PM.toast?.('Eyedropper is not available on this system');
+      return;
+    }
+    if (sampling) return;
+    sampling = true;
+    try {
+      const result = await new EyeDropper().open();
+      setHex(result.sRGBHex);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) PM.toast?.('Could not sample that color');
+    } finally {
+      sampling = false;
+    }
   }
 
   function fromHsv(next: { h: unknown; s: unknown; v: unknown }): void {
@@ -133,13 +152,11 @@
     previewing = false;
     before = normalizeHex(value) ?? '#808080';
     setHex(before, false);
-    const rect = trigger?.getBoundingClientRect();
-    const pickerWidth = 384;
-    const pickerHeight = 316;
-    pickerLeft = clamp((rect?.right ?? pickerWidth + 12) - pickerWidth, 12, window.innerWidth - pickerWidth - 12);
-    pickerTop = clamp((rect?.bottom ?? 46) + 6, 52, window.innerHeight - pickerHeight - 12);
     open = true;
-    void tick().then(() => { hexInput?.focus(); hexInput?.select(); });
+    void tick().then(() => {
+      hexInput?.focus();
+      hexInput?.select();
+    });
   }
 
   function finishClose(): void {
@@ -207,9 +224,9 @@
 </button>
 
 {#if open}
-  <div class="fill-picker-layer" role="presentation" onpointerdown={(event) => { if (event.target === event.currentTarget) commitAndClose(); }}>
-    <div bind:this={dialog} class="fill-picker color-picker" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" style:left={`${pickerLeft}px`} style:top={`${pickerTop}px`} onkeydown={keydown}>
-      <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close color picker" onclick={commitAndClose}>×</button></header>
+  <div class="fill-picker-layer" role="presentation" use:mountOverlayOnBody onpointerdown={(event) => { if (event.target === event.currentTarget) commitAndClose(); }}>
+    <div bind:this={dialog} class="fill-picker color-picker" role="dialog" aria-modal="true" aria-label={label} tabindex="-1" use:anchorPicker={trigger} onkeydown={keydown}>
+      <header><b>{label}</b><button type="button" class="iconbtn" aria-label="Close color picker" onclick={commitAndClose}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17" /></svg></button></header>
       <div class="fill-picker-body color-dialog">
         <div class="color-workbench">
           <div
@@ -239,18 +256,6 @@
           ><i aria-hidden="true" style:top={`${hsv.h / 359 * 100}%`}></i></div>
 
           <div class="color-side">
-            <div class="color-compare" aria-label="New and original color">
-              <span class="color-compare-swatch" title={`New ${chosen}`} style={`--sw-color:${chosen}`}></span>
-              <button
-                type="button"
-                class="color-compare-swatch is-before"
-                title={`Original ${before} — click to restore`}
-                aria-label={`Restore original color ${before}`}
-                style={`--sw-color:${before}`}
-                onclick={() => setHex(before)}
-              ></button>
-            </div>
-
             <div class="color-channels">
               {#each hsvChannels as [key, text, unit, max]}
                 <label class="color-channel">
@@ -265,7 +270,7 @@
                   <em>{unit}</em>
                 </label>
               {/each}
-              <hr aria-hidden="true" />
+
               {#each rgbChannels as [key, text]}
                 <label class="color-channel">
                   <span>{text}</span>
@@ -284,6 +289,17 @@
         </div>
 
         <div class="color-dialog-value">
+            <div class="color-compare" aria-label="New and original color">
+              <span class="color-compare-swatch" title={`New ${chosen}`} style={`--sw-color:${chosen}`}></span>
+              <button
+                type="button"
+                class="color-compare-swatch is-before"
+                title={`Original ${before} — click to restore`}
+                aria-label={`Restore original color ${before}`}
+                style={`--sw-color:${before}`}
+                onclick={() => setHex(before)}
+              ></button>
+            </div>
           <input
             bind:this={hexInput}
             bind:value={draft}
@@ -292,6 +308,19 @@
             spellcheck="false"
             oninput={typeHex}
           />
+          <button
+            type="button"
+            class="iconbtn color-eyedropper"
+            aria-label="Sample screen color"
+            title="Sample color from screen"
+            aria-busy={sampling}
+            disabled={sampling}
+            onclick={sampleScreenColor}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="m15 6 3.4-3.4a2.1 2.1 0 0 1 3 3L18 9m-3-3-6.5 6.5 3 3L18 9m-6.5 6.5L6 21H3v-3l5.5-5.5" />
+            </svg>
+          </button>
         </div>
 
         <div class="color-grid" role="group" aria-label="Color presets">

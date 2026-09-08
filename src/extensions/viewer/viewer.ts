@@ -33,6 +33,40 @@ export function previewRenderSize(width: number, height: number, zoom: number, d
   };
 }
 
+export type PreviewViewport = {
+  x: number; y: number; width: number; height: number;
+  compWidth: number; compHeight: number;
+  cssLeft: number; cssTop: number; cssWidth: number; cssHeight: number;
+  renderWidth: number; renderHeight: number;
+};
+
+/** Render only the visible portion of a magnified composition. A full 8×
+ * 4K buffer is hundreds of megapixels; a viewport-sized buffer gives vector
+ * edges one backing pixel per screen pixel without that memory cost. */
+export function previewRenderViewport(
+  compWidth: number, compHeight: number, zoom: number,
+  stageWidth: number, stageHeight: number, frameX: number, frameY: number,
+  dpr: number, quality: number, overscan = 128,
+): PreviewViewport | null {
+  const z = Number(zoom) || 0;
+  if (!(z > 1 && compWidth > 0 && compHeight > 0 && stageWidth > 0 && stageHeight > 0)) return null;
+  const displayWidth = compWidth * z, displayHeight = compHeight * z;
+  const visibleLeft = Math.max(0, -frameX), visibleTop = Math.max(0, -frameY);
+  const visibleRight = Math.min(displayWidth, stageWidth - frameX), visibleBottom = Math.min(displayHeight, stageHeight - frameY);
+  if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return null;
+  const pad = Math.max(0, Number(overscan) || 0);
+  const cssLeft = Math.max(0, visibleLeft - pad), cssTop = Math.max(0, visibleTop - pad);
+  const cssRight = Math.min(displayWidth, visibleRight + pad), cssBottom = Math.min(displayHeight, visibleBottom + pad);
+  const cssWidth = cssRight - cssLeft, cssHeight = cssBottom - cssTop;
+  const density = Math.min(2, Math.max(1, Number(dpr) || 1)) * Math.max(.25, Math.min(1, Number(quality) || 1));
+  return {
+    x: cssLeft / z, y: cssTop / z, width: cssWidth / z, height: cssHeight / z,
+    compWidth, compHeight, cssLeft, cssTop, cssWidth, cssHeight,
+    renderWidth: Math.max(2, Math.round(cssWidth * density)),
+    renderHeight: Math.max(2, Math.round(cssHeight * density)),
+  };
+}
+
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 type Point = { x: number; y: number };
@@ -670,6 +704,7 @@ V.attach = (stage: HTMLElement) => {
 /* ── layout / sizing ───────────────────────────────────── */
 V.layout = () => {
   if (!V.el || !V.stage) return;
+  const gl = V.el as HTMLCanvasElement;
   const p = PM.proj;
   const r = V.stage.getBoundingClientRect();
   if (r.width < 8 || r.height < 8) return;
@@ -698,8 +733,25 @@ V.layout = () => {
   V.inner.style.top = position.y + 'px';
   V.inner.style.transform = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const renderSize = PM.previewResolution && PM.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*PM.quality)),height:Math.max(2,Math.round(p.h*PM.quality))} : previewRenderSize(p.w, p.h, z, dpr, PM.quality);
-  PM.GL.resize(renderSize.width, renderSize.height);
+  /* Cropped high-zoom rendering is exact for ordinary 2D source layers. Keep
+     complex full-frame/3D pipelines on the established full-composition path
+     until their coordinate-dependent effects can consume a viewport origin. */
+  const viewportSafe = p.layers.every((layer: any) => !layer.threeD
+    && !(layer.fx || []).some((effect: any) => effect?.on !== false)
+    && !(layer.masks || []).length && !layer.matteSource && !layer.transitionIn && !layer.transitionOut
+    && !['adjustment', 'shader', 'extension', 'precomp'].includes(layer.type));
+  const viewport = viewportSafe
+    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, PM.quality)
+    : null;
+  if (viewport) {
+    gl.style.position = 'absolute'; gl.style.left = viewport.cssLeft + 'px'; gl.style.top = viewport.cssTop + 'px';
+    gl.style.width = viewport.cssWidth + 'px'; gl.style.height = viewport.cssHeight + 'px';
+    PM.GL.resize(viewport.renderWidth, viewport.renderHeight, viewport);
+  } else {
+    gl.style.position = ''; gl.style.left = ''; gl.style.top = ''; gl.style.width = '100%'; gl.style.height = '100%';
+    const renderSize = PM.previewResolution && PM.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*PM.quality)),height:Math.max(2,Math.round(p.h*PM.quality))} : previewRenderSize(p.w, p.h, z, dpr, PM.quality);
+    PM.GL.resize(renderSize.width, renderSize.height, null);
+  }
   V.ov.width = Math.round(r.width * dpr); V.ov.height = Math.round(r.height * dpr);
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   V.updateRecovery?.();

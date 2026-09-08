@@ -98,8 +98,9 @@ uniform vec4 u_stops[8];
 uniform int u_count;
 uniform int u_type;
 uniform float u_angle;
+uniform vec4 u_view;
 void main(){
-  vec2 p=v_st-vec2(.5);
+  vec2 p=u_view.xy+v_st*u_view.zw-vec2(.5);
   float a=radians(u_angle);
   float t=u_type==2 ? clamp(length(p)*1.4142,0.,1.) : clamp(dot(p,vec2(cos(a),sin(a)))+.5,0.,1.);
   vec3 color=u_stops[0].rgb;

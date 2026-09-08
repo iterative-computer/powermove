@@ -312,6 +312,13 @@
     gap: 4px;
   }
 
+  /* The heading is wrapped by this component, so the global :first-child
+     reset would otherwise erase the divider between Stroke and Effects. */
+  .effects-section :global(.sec) {
+    margin-top: 8px;
+    border-top: 1px solid var(--section-line);
+  }
+
   .fx-head {
     margin-top: 4px;
     background: var(--ink-1);

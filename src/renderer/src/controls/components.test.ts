@@ -17,6 +17,7 @@ const mounted: object[] = [];
 afterEach(async () => {
   for (const component of mounted.splice(0)) await unmount(component);
   document.body.replaceChildren();
+  delete (window as Window & { EyeDropper?: unknown }).EyeDropper;
 });
 
 function fakePM() {
@@ -290,7 +291,7 @@ describe('picker drafts', () => {
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
 
-    const sv = target.querySelector<HTMLElement>('.color-sv')!;
+    const sv = document.body.querySelector<HTMLElement>('.color-sv')!;
     vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
       toJSON: () => ({})
@@ -304,7 +305,7 @@ describe('picker drafts', () => {
     expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#802020' }));
     expect(PM.invalidate).toHaveBeenLastCalledWith('render');
 
-    target.querySelector<HTMLElement>('.color-picker')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.body.querySelector<HTMLElement>('.color-picker')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(Edit.cancel).toHaveBeenCalledOnce();
     expect(Edit.commit).not.toHaveBeenCalled();
   });
@@ -314,18 +315,55 @@ describe('picker drafts', () => {
     const target = render(ColorField, { PM, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
-    expect(target.querySelector<HTMLElement>('.color-picker')!.style.top).not.toBe('0px');
-    const hex = target.querySelector<HTMLInputElement>('.color-hex')!;
+    expect(document.body.querySelector<HTMLElement>('.color-picker')!.style.top).not.toBe('0px');
+    const hex = document.body.querySelector<HTMLInputElement>('.color-hex')!;
     hex.value = '#34c759';
     hex.dispatchEvent(new InputEvent('input', { bubbles: true }));
     flushSync();
-    expect(target.querySelector('.color-picker footer')).toBeNull();
-    target.querySelector<HTMLElement>('.fill-picker-layer')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    expect(document.body.querySelector('.color-picker footer')).toBeNull();
+    document.body.querySelector<HTMLElement>('.fill-picker-layer')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     flushSync();
     expect(Edit.begin).toHaveBeenCalledWith('Color', { origin: 'inspector' });
     expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#34C759' }));
     expect(Edit.commit).toHaveBeenCalledWith('Color');
-    expect(target.querySelector('.color-picker')).toBeNull();
+    expect(document.body.querySelector('.color-picker')).toBeNull();
+  });
+
+  it('ColorField samples a screen color through the system eyedropper', async () => {
+    const open = vi.fn().mockResolvedValue({ sRGBHex: '#0a84ff' });
+    (window as Window & { EyeDropper?: new () => { open: typeof open } }).EyeDropper = class {
+      open() { return open(); }
+    };
+    const { PM, Edit } = fakePM();
+    const target = render(ColorField, { PM, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
+    target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+
+    document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!.click();
+    await vi.waitFor(() => expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' })));
+    expect(open).toHaveBeenCalledOnce();
+    expect(document.body.querySelector<HTMLInputElement>('.color-hex')!.value).toBe('#0A84FF');
+  });
+
+  it('mounts color and fill picker overlays above clipped panel contents', async () => {
+    const { PM } = fakePM();
+    const colorTarget = render(ColorField, { PM, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
+    colorTarget.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+    expect(document.body.querySelector('.fill-picker-layer')?.parentElement).toBe(document.body);
+
+    document.body.querySelector<HTMLButtonElement>('.color-picker [aria-label="Close color picker"]')!.click();
+    await tick();
+
+    const fillTarget = render(FillField, {
+      PM,
+      get: () => ({ type: 'solid', angle: 0, stops: [{ id: 'orange', color: '#FF6B1A', position: 0 }] }),
+      edit: commandEdit('Fill'),
+      label: 'Fill'
+    });
+    fillTarget.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+    expect(document.body.querySelector('.fill-picker-layer')?.parentElement).toBe(document.body);
   });
 
   it('FillField previews color continuously across pointer moves', async () => {
@@ -339,7 +377,7 @@ describe('picker drafts', () => {
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
 
-    const sv = target.querySelector<HTMLElement>('.fill-sv')!;
+    const sv = document.body.querySelector<HTMLElement>('.fill-sv')!;
     vi.spyOn(sv, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100,
       toJSON: () => ({})
@@ -353,7 +391,7 @@ describe('picker drafts', () => {
     }));
     expect(PM.invalidate).toHaveBeenLastCalledWith('render');
 
-    target.querySelector<HTMLButtonElement>('footer .pri')!.click();
+    document.body.querySelector<HTMLButtonElement>('.fill-picker footer .pri')!.click();
     expect(Edit.commit).toHaveBeenCalledWith('Fill');
     expect(Edit.apply).not.toHaveBeenCalled();
   });
@@ -369,8 +407,8 @@ describe('picker drafts', () => {
     });
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
-    expect(target.querySelector<HTMLElement>('.fill-picker')!.style.top).not.toBe('0px');
-    target.querySelector<HTMLButtonElement>('footer .pri')!.click();
+    expect(document.body.querySelector<HTMLElement>('.fill-picker')!.style.top).not.toBe('0px');
+    document.body.querySelector<HTMLButtonElement>('.fill-picker footer .pri')!.click();
     expect(normalizeFill).toHaveBeenCalled();
     const command = Edit.apply.mock.calls[0]![0] as any;
     expect(command.value).toMatchObject({ type: 'linear', angle: 180 });
@@ -393,10 +431,10 @@ describe('picker drafts', () => {
     });
     target.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
-    const stop = target.querySelector<HTMLInputElement>('.fill-stop-color')!;
+    const stop = document.body.querySelector<HTMLInputElement>('.fill-stop-color')!;
     stop.value = '#12';
     stop.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    target.querySelector<HTMLButtonElement>('footer .pri')!.click();
+    document.body.querySelector<HTMLButtonElement>('.fill-picker footer .pri')!.click();
     const command = Edit.apply.mock.calls[0]![0] as any;
     expect(command.value.stops[0].color).toBe('#FF0000');
   });

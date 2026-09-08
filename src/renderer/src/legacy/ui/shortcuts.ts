@@ -3,6 +3,7 @@ import { installLayerMenu } from './layer-menu';
 import { installParentPickwhip } from './parent-pickwhip';
 import { adjacentKeyframe } from '../../../../extensions/timeline/keyframe-navigation';
 import { evaluatedValue } from '../core/content-properties';
+import { materializeSvgPaths } from '../core/svg-import';
 /* Ported from js/ui/shortcuts.js — behavior-preserving.
  *
  * The command table lives in the kernel now:
@@ -145,7 +146,8 @@ def('centerAnchor', 'Center anchor point in layer content', '⌘⌥Home', () => 
   return PM.Edit.apply(commands, { label: 'Center anchor point', origin: 'command' });
 }, 'Tool');
 PM.commandForAsset = (id?: any, at: any = PM.time) => {
-  const a: any = PM.proj.assets[id]; if (!a) return;
+  const meta: any = PM.proj.assets[id]; if (!meta) return;
+  const a: any = PM.assets?.get?.(id) || meta;
   if (a.kind === 'model') {
     const definition = a.layerDefinition || 'powermove.3d.obj-model';
     if (!PM.layerDefinition?.(definition)) return;
@@ -154,6 +156,21 @@ PM.commandForAsset = (id?: any, at: any = PM.time) => {
       from: PM.snapF(at, PM.proj.fps),
       duration: Math.max(1 / PM.proj.fps, PM.proj.dur - at),
       content: { definition, data: { assetId: id, objects: [{ id: 'model', assetId: id }] } },
+      select: true,
+    };
+  }
+  if (a.kind === 'image' && a.format === 'svg' && a.svg?.paths?.length) {
+    return {
+      type: 'add_layer', layerType: 'shape', name: String(a.name || 'SVG').replace(/\.svg$/i, ''),
+      from: PM.snapF(at, PM.proj.fps),
+      duration: Math.max(1 / PM.proj.fps, PM.proj.dur - at),
+      content: {
+        paths: materializeSvgPaths(PM, a.svg),
+        svgSourceAsset: id,
+        svgWidth: a.svg.width,
+        svgHeight: a.svg.height,
+        svgWarnings: a.svg.warnings,
+      },
       select: true,
     };
   }

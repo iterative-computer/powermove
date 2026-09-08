@@ -18,6 +18,10 @@ describe('early UI placement', () => {
     expect(parseUIPlacement(message(dock), workspace)).toEqual(dock);
     expect(parseUIPlacement(message({ ...dock, beforePanelId: 'inspector' }), workspace))
       .toEqual({ ...dock, beforePanelId: 'inspector' });
+    expect(parseUIPlacement(message({ ...panel, selector: '.tl-transport' }), workspace))
+      .toEqual({ ...panel, selector: '.tl-transport' });
+    expect(parseUIPlacement(message({ ...panel, selector: '[data-section="easing"]', insert: 'after' }), workspace))
+      .toEqual({ ...panel, selector: '[data-section="easing"]', insert: 'after' });
   });
 
   it.each([
@@ -25,7 +29,9 @@ describe('early UI placement', () => {
     { ...panel, id: 'timeline"] div' }, { ...panel, label: '' },
     { ...panel, label: 'x'.repeat(65) }, { ...panel, kind: 'window' },
     { ...dock, id: 'hidden' }, { ...dock, beforePanelId: 'viewer' },
-    { ...dock, beforePanelId: {} }, null, []
+    { ...dock, beforePanelId: {} }, { ...panel, selector: '' },
+    { ...panel, selector: 'x'.repeat(161) }, { ...panel, insert: 'after' },
+    { ...panel, selector: '.row', insert: 'inside' }, null, []
   ])('ignores invalid or unreachable targets: %j', value => {
     expect(parseUIPlacement(message(value), workspace)).toBeNull();
   });
@@ -42,6 +48,8 @@ describe('early UI placement', () => {
     const prompt = uiPlacementInstructions(workspace);
     expect(prompt).toContain('Before editing files or building controls');
     expect(prompt).toContain('standalone public commentary');
+    expect(prompt).toContain("Inspect the panel's DOM or source early");
+    expect(prompt).toContain('insert=before or insert=after');
     expect(prompt).toContain('scene/media-only');
     expect(prompt).toContain('Never restart or reopen');
     expect(prompt).toContain('"id":"timeline"');

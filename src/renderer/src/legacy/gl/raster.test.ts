@@ -40,6 +40,14 @@ afterEach(() => {
 });
 
 describe('legacy raster install', () => {
+  it('recognizes SVG files even when the native picker omits their MIME type', () => {
+    const PM = rasterRegistry();
+
+    expect(PM.assetKind({ name: 'wordmark.svg', type: '' })).toBe('image');
+    expect(PM.assetKind({ name: 'wordmark.SVG', type: 'application/octet-stream' })).toBe('image');
+    expect(PM.assetKind({ name: 'wordmark', type: 'image/svg+xml' })).toBe('image');
+  });
+
   it('selects actionable codec warnings for mov and mp4 decode failures', () => {
     const mov = videoImportFailureMessage('prores-4444.MOV', {
       code: 4,
