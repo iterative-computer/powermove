@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../Icon.svelte';
+  import { activatePromptAttachment } from './attachments';
 
   let {
     PM,
@@ -18,14 +19,22 @@
 
 {#each normalized as item, index (item.id ?? `${item.name}-${index}`)}
   <span class="agent-attachment">
-    {#if item.dataUrl}
-      <img src={item.dataUrl} alt="" />
-    {:else}
-      <span class="agent-attachment-type">{(item.name?.split('.').pop() || 'file').slice(0, 5).toUpperCase()}</span>
-    {/if}
-    <span class="agent-attachment-name">{item.name}</span>
+    <button
+      class="agent-attachment-open"
+      type="button"
+      aria-label={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`}
+      title={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`}
+      onclick={() => void activatePromptAttachment(PM, item)}
+    >
+      {#if item.dataUrl}
+        <img src={item.dataUrl} alt={item.name} />
+      {:else}
+        <span class="agent-attachment-type">{(item.name?.split('.').pop() || 'file').slice(0, 5).toUpperCase()}</span>
+      {/if}
+      <span class="agent-attachment-name">{item.name}</span>
+    </button>
     {#if removable}
-      <button type="button" aria-label={`Remove ${item.name}`} title={`Remove ${item.name}`} onclick={() => onRemove?.(item.id)}>
+      <button class="agent-attachment-remove" type="button" aria-label={`Remove ${item.name}`} title={`Remove ${item.name}`} onclick={() => onRemove?.(item.id)}>
         <Icon {PM} name="x" />
       </button>
     {/if}

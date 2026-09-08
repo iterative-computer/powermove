@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 import {
   IPC,
   type ArtifactFile,
+  type AttachmentRevealRequest,
   type CaptureResult,
   type ChatGPTAccountStatus,
   type ClaudeAccountStatus,
@@ -59,6 +60,10 @@ const bridge: PowermoveBridge = {
       ipcRenderer.invoke(IPC.mediaProxyRead, { token, offset, length }) as Promise<Uint8Array>,
     releasePlaybackProxy: (token) =>
       ipcRenderer.invoke(IPC.mediaProxyRelease, token) as Promise<void>
+  },
+  attachments: {
+    reveal: (request: AttachmentRevealRequest) =>
+      ipcRenderer.invoke(IPC.attachmentReveal, request) as Promise<void>
   },
 
   codex: {

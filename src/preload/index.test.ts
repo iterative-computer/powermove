@@ -172,6 +172,12 @@ describe('preload bridge', () => {
     expect(electronMocks.invoke).toHaveBeenNthCalledWith(4, IPC.mediaProxyRelease, 'a'.repeat(32));
   });
 
+  it('sends bytes-only attachments to the dedicated reveal channel', async () => {
+    const request = { name: 'brief.pdf', data: new Uint8Array([1, 2, 3]) };
+    await bridge().attachments.reveal(request);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.attachmentReveal, request);
+  });
+
   it('exposes ChatGPT status, connect, disconnect, and sanitized status events', async () => {
     const connected = {
       state: 'connected' as const,

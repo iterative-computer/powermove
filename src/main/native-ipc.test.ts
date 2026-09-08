@@ -356,4 +356,21 @@ describe('external URL IPC', () => {
     expect(() => invokes.get(IPC.mediaRevealSource)?.(invokeEvent(), 'relative.mov'))
       .toThrow('media:reveal-source: expected an absolute file path');
   });
+
+  it('materializes bounded attachment bytes under app-owned cache storage before revealing', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'powermove-attachment-test-'));
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerShellIpc(ipcMain, { isTrustedSender: () => true, attachmentCacheDirectory: directory });
+    try {
+      await invokes.get(IPC.attachmentReveal)?.(invokeEvent(), { name: 'brief.pdf', data: new Uint8Array([1, 2, 3]) });
+      const revealed = electronMocks.shellShowItemInFolder.mock.calls.at(-1)?.[0] as string;
+      expect(path.relative(directory, revealed)).not.toMatch(/^\.\./);
+      expect(path.basename(revealed)).toBe('brief.pdf');
+      expect([...await readFile(revealed)]).toEqual([1, 2, 3]);
+      await expect(invokes.get(IPC.attachmentReveal)?.(invokeEvent(), { name: '../secret', data: new Uint8Array() }))
+        .rejects.toThrow('attachment:reveal: expected a safe name');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

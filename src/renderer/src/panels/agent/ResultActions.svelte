@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../Icon.svelte';
+  import { isPreviewableImageType, openImagePreview } from './attachments';
   import { agentState, describePanelAction } from './agent-state.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
@@ -26,13 +27,32 @@
     return 'FILE';
   }
 
+  async function openArtifact(artifact: Record<string, any>): Promise<void> {
+    if (!isPreviewableImageType(artifact.mime)) {
+      PM.AgentUI?.revealArtifact(artifact);
+      return;
+    }
+    try {
+      const file = await PM.AgentArtifacts.load(artifact);
+      const src = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error(`Could not preview ${artifact.name}.`));
+        reader.readAsDataURL(file);
+      });
+      openImagePreview(PM, artifact.name || artifact.path, src);
+    } catch (error) {
+      PM.toast(error instanceof Error ? error.message : `Could not preview ${artifact.name}.`, 6000);
+    }
+  }
+
 </script>
 
 {#snippet frames()}
   {#if run?.frames?.images?.length}
     <div class="spatial-frame-grid">
       {#each run.frames.images as src, index}
-        <figure><img {src} alt={`Rendered composition at ${run.frames.times[index]} seconds`} /><figcaption>{run.frames.times[index]}s</figcaption></figure>
+        <figure><button type="button" aria-label={`View rendered composition at ${run.frames.times[index]} seconds`} onclick={() => openImagePreview(PM, `Rendered composition at ${run.frames.times[index]} seconds`, src)}><img {src} alt={`Rendered composition at ${run.frames.times[index]} seconds`} /></button><figcaption>{run.frames.times[index]}s</figcaption></figure>
       {/each}
     </div>
   {/if}
@@ -69,8 +89,10 @@
         <div class="agent-artifact-list">
         {#each run.artifacts as artifact}
           <div class="agent-artifact">
-            <span class="agent-file-type">{artifactType(artifact)}</span>
-            <span class="agent-artifact-copy"><b title={artifact.name || artifact.path}>{artifact.name || artifact.path}</b></span>
+            <button class="agent-artifact-open" type="button" aria-label={isPreviewableImageType(artifact.mime) ? `View ${artifact.name || artifact.path}` : `Reveal ${artifact.name || artifact.path} in Finder`} onclick={() => void openArtifact(artifact)}>
+              <span class="agent-file-type">{artifactType(artifact)}</span>
+              <span class="agent-artifact-copy"><b title={artifact.name || artifact.path}>{artifact.name || artifact.path}</b></span>
+            </button>
             <small class="agent-file-size">{artifactSize(artifact.size)}</small>
             <div class="agent-file-actions">
             {#if PM.assetKind({ name: artifact.name, type: artifact.mime })}

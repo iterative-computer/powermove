@@ -409,7 +409,7 @@ if (!hasSingleInstanceLock) {
     const ctx = { isTrustedSender, isTrustedSenderContents };
     registerSaveIpc(ipcMain, { ...ctx, projects: new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json')) });
     registerCaptureIpc(ipcMain, ctx);
-    registerShellIpc(ipcMain, ctx);
+    registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);

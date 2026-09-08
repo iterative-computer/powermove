@@ -21,6 +21,7 @@ export const IPC = {
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
   mediaRevealSource: 'media:reveal-source',
+  attachmentReveal: 'attachment:reveal',
 
   codexRun: 'codex:run',
   codexSteer: 'codex:steer',
@@ -271,6 +272,11 @@ export interface ArtifactFile {
   data: Uint8Array;
 }
 
+export interface AttachmentRevealRequest {
+  name: string;
+  data: Uint8Array;
+}
+
 /* ── capture ─────────────────────────────────────────────── */
 export type CaptureResult = Uint8Array | null; // PNG bytes
 
@@ -347,6 +353,10 @@ export interface PowermoveBridge {
     createPlaybackProxy(file: File): Promise<MediaProxyResult>;
     readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
     releasePlaybackProxy(token: string): Promise<void>;
+  };
+  attachments: {
+    /** Materialize bytes in app-owned cache storage and reveal that file. */
+    reveal(request: AttachmentRevealRequest): Promise<void>;
   };
 
   codex: {

@@ -8,12 +8,14 @@ export interface PromptAttachment {
   dataUrl?: string;
   dataBase64?: string;
   content?: string;
+  /** Native path captured from the File at picker/drop time. */
+  sourcePath?: string;
 }
 
 export async function readPromptAttachment(file: File, id: string): Promise<PromptAttachment> {
-  const imageTypes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+  const imageTypes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml', avif: 'image/avif', bmp: 'image/bmp' };
   const type = file.type || imageTypes[file.name.split('.').pop()?.toLowerCase() || ''] || 'application/octet-stream';
-  const image = /^image\/(png|jpeg|webp|gif)$/.test(type);
+  const image = isPreviewableImageType(type);
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
@@ -22,8 +24,11 @@ export async function readPromptAttachment(file: File, id: string): Promise<Prom
     reader.readAsDataURL(file);
   });
   const item: PromptAttachment = { id, name: file.name || 'Attachment', type, size: file.size };
+  let sourcePath: string | null = null;
+  try { sourcePath = window.powermove?.media?.sourcePath?.(file) || null; } catch { /* Clipboard-backed Files have no native path. */ }
+  if (sourcePath) item.sourcePath = sourcePath;
   if (image) item.dataUrl = dataUrl.replace(/^data:[^;]*;/, `data:${type};`);
-  else {
+  if (!isAgentImageType(type)) {
     // Preserve binary bytes, including zero-byte files. Never attach just a filename.
     item.dataBase64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
     if (type.startsWith('text/') || /\.(txt|md|json|js|ts|tsx|jsx|css|html?|svg|xml|csv|log)$/i.test(file.name)) {
@@ -31,6 +36,66 @@ export async function readPromptAttachment(file: File, id: string): Promise<Prom
     }
   }
   return item;
+}
+
+export function isPreviewableImageType(type: unknown): boolean {
+  return typeof type === 'string' && /^image\/(?:png|jpeg|webp|gif|svg\+xml|avif|bmp)$/i.test(type);
+}
+
+export function isAgentImageType(type: unknown): boolean {
+  return typeof type === 'string' && /^image\/(?:png|jpeg|webp|gif)$/i.test(type);
+}
+
+export function isAgentImageAttachment(item: Record<string, any>): boolean {
+  return typeof item.dataUrl === 'string' && isAgentImageType(item.type);
+}
+
+export function openImagePreview(PM: Record<string, any>, name: string, src: string): void {
+  const body = document.createElement('div');
+  body.className = 'agent-image-preview';
+  const image = document.createElement('img');
+  image.src = src;
+  image.alt = name;
+  body.append(image);
+  PM.modal({
+    title: name,
+    body,
+    width: Math.min(900, Math.max(320, window.innerWidth - 48)),
+    actions: [{ label: 'Close' }]
+  });
+}
+
+function attachmentBytes(item: Partial<PromptAttachment>): Uint8Array | null {
+  const encoded = typeof item.dataBase64 === 'string'
+    ? item.dataBase64
+    : (typeof item.dataUrl === 'string' && item.dataUrl.includes(',') ? item.dataUrl.slice(item.dataUrl.indexOf(',') + 1) : null);
+  if (encoded !== null) {
+    try { return Uint8Array.from(window.atob(encoded), character => character.charCodeAt(0)); }
+    catch { return null; }
+  }
+  if (typeof item.content === 'string') return new TextEncoder().encode(item.content);
+  return null;
+}
+
+export async function activatePromptAttachment(PM: Record<string, any>, item: Record<string, any>): Promise<void> {
+  if (item.dataUrl && isPreviewableImageType(item.type || item.dataUrl.slice(5, item.dataUrl.indexOf(';')))) {
+    openImagePreview(PM, item.name, item.dataUrl);
+    return;
+  }
+  try {
+    if (item.sourcePath) {
+      await window.powermove.media.revealSource(item.sourcePath);
+      return;
+    }
+    const data = attachmentBytes(item);
+    if (data) {
+      await window.powermove.attachments.reveal({ name: item.name, data });
+      return;
+    }
+    PM.toast(`The original location for ${item.name} is no longer available.`);
+  } catch (error) {
+    PM.toast(error instanceof Error ? error.message : `Could not reveal ${item.name} in Finder`, 6000);
+  }
 }
 
 export function requestFileAttachments(items: PromptAttachment[]) {
@@ -60,11 +125,17 @@ export function mountPromptAttachments(PM: Record<string, any>, card: HTMLElemen
     rail.replaceChildren();
     for (const item of items()) {
       const chip = document.createElement('span'); chip.className = 'agent-attachment';
-      if (item.dataUrl) { const img = document.createElement('img'); img.src = item.dataUrl; img.alt = ''; chip.append(img); }
+      const open = document.createElement('button'); open.type = 'button'; open.className = 'agent-attachment-open';
+      open.setAttribute('aria-label', item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`);
+      open.title = open.getAttribute('aria-label') || '';
+      open.onclick = () => { void activatePromptAttachment(PM, item); };
+      if (item.dataUrl) { const img = document.createElement('img'); img.src = item.dataUrl; img.alt = item.name; open.append(img); }
+      else { const type = document.createElement('span'); type.className = 'agent-attachment-type'; type.textContent = (item.name.split('.').pop() || 'file').slice(0, 5).toUpperCase(); open.append(type); }
       const name = document.createElement('span'); name.className = 'agent-attachment-name'; name.textContent = item.name; name.title = item.name;
-      const remove = document.createElement('button'); remove.type = 'button'; remove.setAttribute('aria-label', `Remove ${item.name}`); remove.append(PM.icon('x'));
+      open.append(name);
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'agent-attachment-remove'; remove.setAttribute('aria-label', `Remove ${item.name}`); remove.append(PM.icon('x'));
       remove.onclick = () => { PM.AgentUI.removeAttachment(item.id); refresh(); textarea.focus(); };
-      chip.append(name, remove); rail.append(chip);
+      chip.append(open, remove); rail.append(chip);
     }
     rail.hidden = !items().length;
     card.classList.toggle('has-attachments', !!items().length);

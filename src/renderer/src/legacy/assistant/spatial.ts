@@ -8,7 +8,7 @@ import { registerAgentPanel } from '../../panels/register-agent';
 import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions } from '../../panels/agent/ui-placement';
 import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
-import { mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
+import { isAgentImageAttachment, mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../panels/agent/threads';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
@@ -1448,7 +1448,7 @@ async function sendRequest(input: any) {
     const steeringMessage: any = {
       role: 'user', text: typedRequest || `Attached ${steeringAttachments.length} file${steeringAttachments.length === 1 ? '' : 's'}`,
       steering: true,
-      attachments: steeringAttachments.map((item: any) => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })),
+      attachments: steeringAttachments.map((item: any) => ({ ...item })),
       entering: true,
     };
     S.conversation.push(steeringMessage);
@@ -1464,7 +1464,7 @@ async function sendRequest(input: any) {
       content: item.content ? String(item.content).slice(0, 30_000) : undefined,
     }));
     const steeringImages: any = steeringAttachments
-      .filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl).slice(0, 6);
+      .filter(isAgentImageAttachment).map((item: any) => item.dataUrl).slice(0, 6);
     const accepted: any = await PM.CodexBridge.steer(
       `${request}\n\nThis is new direction for the active run. Incorporate it into the same final editable result.\n\nATTACHED FILES\n${JSON.stringify(attachmentContext)}`,
       steeringImages,
@@ -1492,7 +1492,7 @@ async function sendRequest(input: any) {
     role: 'user', text: typedRequest || `Attached ${S.requestAttachments.length} file${S.requestAttachments.length === 1 ? '' : 's'}`,
     steering,
     focusLabels: focus.panels.map(panel => panel.title),
-    attachments: S.requestAttachments.map((item: any) => ({ name: item.name, type: item.type, dataUrl: item.dataUrl })), entering: true,
+    attachments: S.requestAttachments.map((item: any) => ({ ...item })), entering: true,
   });
   threads.active.updatedAt = Date.now();
   persistThreads();
@@ -1541,7 +1541,7 @@ async function sendRequest(input: any) {
     if (token !== S.requestToken) return;
     S.steps[0].status = 'complete'; S.steps[1].status = 'active';
     S.activity = steering ? 'Reworking the editable change…' : 'Designing an editable change…'; PM.AgentUI?.update({ focusComposer: true });
-    const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
+    const userImages: any = S.requestAttachments.filter(isAgentImageAttachment).map((item: any) => item.dataUrl);
     const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
     const raw: any = await PM.CodexBridge.request(
       agentPrompt(request, observation, steering, focus, context), responseSchema(), attachedImages,
