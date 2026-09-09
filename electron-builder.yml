@@ -9,6 +9,8 @@ electronLanguages:
   - en
 files:
   - out/**
+  - "!**/* [2-9].*"
+  - "!**/* [2-9]"
   - '!node_modules/ffmpeg-static/ffmpeg'
   # The native agent runtimes are copied once below, at the paths used by the
   # packaged binary resolvers. Keep their npm wrappers/metadata, but do not let
@@ -28,10 +30,17 @@ extraResources:
     to: encoder/LICENSE
   - from: node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin
     to: codex
+    filter:
+      - "**/*"
+      - "!**/* [2-9]"
+      - "!**/* [2-9].*"
   - from: node_modules/@anthropic-ai/claude-code-darwin-arm64/claude
     to: claude/bin/claude
   - from: src/extensions
     to: builtin-extensions
+    filter:
+      - "**/*"
+      - "!inspector/StructuredSection 2.svelte"
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
   - from: docs/background-testing.md

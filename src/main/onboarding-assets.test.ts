@@ -28,6 +28,7 @@ describe('onboarding export assets', () => {
     expect(animation).toContain('player.play()');
     expect(animation).toContain('player.currentTime >= 7');
     expect(animation).toContain('window.onboarding.animationEnding()');
+    expect(animation).not.toContain('setHandoffTarget');
     expect(renderer).toContain("import { createEngine } from './player.js'");
     expect(renderer).toContain("svgNode('feGaussianBlur')");
     expect(renderer).toContain("candidate.type === effectDefinition.id");
@@ -64,14 +65,14 @@ describe('onboarding export assets', () => {
     expect(output).toContain('extended: max > 1');
   });
 
-  it('keeps the welcome mark moving and reports its live path bounds during the handoff', async () => {
+  it('uses the website typography and reports the logo bounds during the handoff', async () => {
     const welcome = await readFile(path.resolve(root, '../../src/onboarding/welcome.ts'), 'utf8');
     const styles = await readFile(path.resolve(root, '../../src/onboarding/welcome.css'), 'utf8');
     expect(welcome).toContain('mark.getBoundingClientRect()');
     expect(welcome).toContain('document.fonts.ready.then(scheduleLogoTarget)');
     expect(welcome).toContain('window.onboarding.reportLogoTarget');
-    expect(styles).toContain('animation: welcome-mark-float 4s ease-in-out 2.7s infinite');
-    expect(styles).toContain('translateY(-4px) rotate(-3deg)');
-    expect(styles).toContain('.welcome-mark { animation: none; }');
+    expect(styles).toContain("font-family: 'Geist', sans-serif");
+    expect(styles).toContain('fill: var(--tx)');
+    expect(styles).toContain('.welcome-card > * { animation: none; }');
   });
 });

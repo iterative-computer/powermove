@@ -14,11 +14,7 @@ async function start() {
     onComplete: () => window.onboarding.animationComplete(),
     onError: (error) => window.onboarding.animationFailed(error?.message ?? String(error))
   });
-  let logoTarget = null, handoffStart = null, endingSent = false;
-  const stopLogoTarget = window.onboarding.onLogoTarget((target) => {
-    logoTarget = target;
-    if (handoffStart === null) handoffStart = player.currentTime;
-  });
+  let endingSent = false;
   document.body.classList.add('onboarding-playing');
   player.play();
   let endingFrame = 0;
@@ -27,10 +23,6 @@ async function start() {
       endingSent = true;
       document.body.classList.add('onboarding-ending');
       window.onboarding.animationEnding();
-    }
-    if (logoTarget && handoffStart !== null) {
-      const progress = Math.min(1, Math.max(0, (player.currentTime - handoffStart) / 1.1));
-      player.setHandoffTarget(logoTarget, progress * progress * (3 - 2 * progress));
     }
     endingFrame = requestAnimationFrame(observeEnding);
   };
@@ -41,7 +33,6 @@ async function start() {
   window.addEventListener('pagehide', () => {
     window.clearTimeout(timeout);
     cancelAnimationFrame(endingFrame);
-    stopLogoTarget();
     player.destroy();
   }, { once: true });
 }

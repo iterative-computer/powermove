@@ -15,7 +15,6 @@ export const IPC = {
   onboardingLogoTarget: 'onboarding:logo-target',
   onboardingLogoTargetReport: 'onboarding:logo-target-report',
   onboardingBegin: 'onboarding:begin',
-  onboardingReplay: 'onboarding:replay',
 
   fileSave: 'file:save',
   projectOpen: 'project:open',
@@ -83,7 +82,6 @@ export interface OnboardingBridge {
   reportLogoTarget(target: OnboardingLogoTarget): void;
   onLogoTarget(callback: (target: OnboardingLogoTarget) => void): () => void;
   begin(): Promise<void>;
-  replay(): Promise<void>;
 }
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];

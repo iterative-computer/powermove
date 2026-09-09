@@ -55,8 +55,7 @@ const commandItem = (
 });
 
 export function appMenuTemplate(
-  send: (command: MenuCommand) => void,
-  replayOnboarding: () => void = () => undefined
+  send: (command: MenuCommand) => void
 ): MenuItemConstructorOptions[] {
   const viewItems: MenuItemConstructorOptions[] = [
     commandItem('Zoom In', 'CommandOrControl+=', 'zoomIn', send, false),
@@ -80,13 +79,6 @@ export function appMenuTemplate(
       label: app.name,
       submenu: [
         { role: 'about' },
-        { type: 'separator' },
-        {
-          id: 'replayOnboarding',
-          label: 'Replay Onboarding',
-          accelerator: 'CommandOrControl+Shift+O',
-          click: replayOnboarding
-        },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -142,15 +134,13 @@ export function appMenuTemplate(
 }
 
 export function buildAppMenu(
-  send: (command: MenuCommand) => void,
-  replayOnboarding: () => void = () => undefined
+  send: (command: MenuCommand) => void
 ): Menu {
-  return Menu.buildFromTemplate(appMenuTemplate(send, replayOnboarding));
+  return Menu.buildFromTemplate(appMenuTemplate(send));
 }
 
 export function installMenu(
-  getWindow: () => BrowserWindowType | null,
-  replayOnboarding: () => void = () => undefined
+  getWindow: () => BrowserWindowType | null
 ): Menu {
   const menu = buildAppMenu((command) => {
     const focusedWindow = BrowserWindow.getFocusedWindow();
@@ -158,7 +148,7 @@ export function installMenu(
     const target = command.startsWith('context') ? (focusedWindow ?? editorWindow) : editorWindow;
     if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return;
     target.webContents.send(IPC.menuCommand, command);
-  }, replayOnboarding);
+  });
   Menu.setApplicationMenu(menu);
   return menu;
 }

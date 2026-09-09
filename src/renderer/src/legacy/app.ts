@@ -96,11 +96,17 @@ PM.theme = (() => {
 })();
 
 /* ── project boot / migration ───────────────────────────── */
+let homeProjectId: string | null = null;
+function emptyHomeProject() {
+  const project = PM.mkProject();
+  homeProjectId = project.id;
+  return project;
+}
 function loadBootProject() {
   const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null) });
-  if (!raw) return demo();
+  if (!raw) return emptyHomeProject();
   try { return hydrate(raw); }
-  catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return demo(); }
+  catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return emptyHomeProject(); }
 }
 function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
@@ -300,83 +306,6 @@ function hydrate(p: any) {
 }
 /* Shared project boundary for import/open flows and deterministic regression tests. */
 PM.hydrateProject = hydrate;
-function demo() {
-  const p = PM.mkProject({ name: 'Velocity Study', w: 1920, h: 1080, fps: 30, dur: 8, bg: '#080809' });
-  p.shutter = .5;
-  const add = (L: any) => { p.layers.push(L); return L; };
-  const key = (L: any, ch: any, list: any) => { const prop = L.p[ch]; list.forEach(([t,v,e='power']: any) => prop.kf.push(PM.KF(t,v,e))); };
-
-  const eyebrow = add(PM.mkLayer('text', { name: 'Kicker', from: .35, dur: 6.1, d: {
-    text: 'DESIGN  /  MOTION  /  SYSTEM', font: 'SF Mono', weight: 560, size: 28, tracking: 8, leading: 1, color: '#FF8A47', align: 'center',
-  }, p: { 'position.x': 960, 'position.y': 404 } }, p));
-  key(eyebrow, 'opacity', [[0,0,'power'],[.45,100,'power'],[5.3,100,'easeIn'],[5.8,0,'easeIn']]);
-  key(eyebrow, 'position.y', [[0,430,'power'],[.58,404,'power']]);
-
-  const title = add(PM.mkLayer('text', { name: 'Powermove', from: .45, dur: 6, d: {
-    text: 'Make the move.', font: 'SF Pro Display', weight: 650, size: 164, tracking: -7, leading: 1, color: '#F1F0EC', align: 'center',
-  }, p: { 'position.x': 960, 'position.y': 535 } }, p));
-  key(title, 'opacity', [[0,0,'power'],[.6,100,'power'],[5.05,100,'easeIn'],[5.62,0,'easeIn']]);
-  key(title, 'position.y', [[0,630,'power'],[.72,535,'power'],[5.05,535,'easeIn'],[5.62,475,'easeIn']]);
-  key(title, 'scale.x', [[0,94,'glide'],[.8,100,'glide']]);
-  key(title, 'scale.y', [[0,94,'glide'],[.8,100,'glide']]);
-
-  const sub = add(PM.mkLayer('text', { name: 'Descriptor', from: 1.1, dur: 5, d: {
-    text: 'A design-aware motion instrument.', font: 'SF Pro Display', weight: 430, size: 42, tracking: -.4, leading: 1.1, color: '#9C9A97', align: 'center',
-  }, p: { 'position.x': 960, 'position.y': 660 } }, p));
-  key(sub, 'opacity', [[0,0,'glide'],[.65,100,'glide'],[4.3,100,'easeIn'],[4.85,0,'easeIn']]);
-
-  const signal = add(PM.mkLayer('shape', { name: 'Signal', from: .15, dur: 7.85, d: {
-    shape: 'ellipse', color: '#FF6B1A', w: 110, h: 110, radius: 0, stroke: 0, strokeColor: '#FFFFFF', points: 5,
-  }, p: { 'position.x': 960, 'position.y': 540 } }, p));
-  signal.blend = 'screen'; signal.mblur = true;
-  key(signal, 'scale.x', [[0,0,'power'],[.7,100,'backOut'],[5.2,100,'glide'],[7.1,1800,'expoIn']]);
-  key(signal, 'scale.y', [[0,0,'power'],[.7,100,'backOut'],[5.2,100,'glide'],[7.1,1800,'expoIn']]);
-  key(signal, 'opacity', [[0,0,'power'],[.25,100,'power'],[5.65,100,'linear'],[7.2,92,'linear']]);
-  /* Built-in effects activate after the legacy app hydrates. Keep the demo's
-     glow as a recoverable placeholder during that short boot window. */
-  const glow = PM.mkEffect('glow') || {
-    id: PM.uid('f'), type: 'glow', on: true, missing: true,
-    p: { threshold: PM.P(18), radius: PM.P(120), intensity: PM.P(165) }
-  };
-  glow.p.threshold.v = 18; glow.p.radius.v = 120; glow.p.intensity.v = 165; signal.fx.push(glow);
-
-  const bg = add(PM.mkLayer('shader', { name: 'Atmosphere', from: 0, dur: 8, d: {
-    code: `uniform float uSpeed; // @param 0.16 0 2
-uniform float uScale; // @param 2.1 0.4 8
-uniform vec3 uEmber; // @param #FF6B1A
-uniform float uEnergy; // @param 0.75 0 2
-void main(){
-  vec2 p=(uv-.5)*vec2(iResolution.x/iResolution.y,1.);
-  float t=iTime*uSpeed;
-  float a=fbm(p*uScale+vec2(t,-t*.34));
-  float b=fbm(rot(.82)*p*uScale*1.6+vec2(-t*.5,t*.72)+13.7);
-  float field=smoothstep(.42,.83,a*.72+b*.4);
-  vec3 col=mix(vec3(.015,.014,.017),uEmber,field*.52*uEnergy);
-  col+=uEmber*pow(field,8.)*.26;
-  float halo=exp(-length(p-vec2(.0,.05))*2.7);
-  col+=uEmber*halo*.035;
-  col*=1.-dot(p,p)*.3;
-  fragColor=vec4(col,1.);
-}`, w: 1920, h: 1080, uniforms: {},
-  } }, p));
-  PM.syncShaderUniforms?.(bg);
-  p.markers = [{ t: .45, name: 'Reveal' }, { t: 5.55, name: 'Expansion' }, { t: 7.25, name: 'Resolve' }];
-  p.notes = 'One continuous signal becomes the field. Keep the hierarchy singular, restrained, and physical.';
-  return p;
-}
-
-/* Dev safety: while the app is being built, a malformed persisted snapshot can boot
-   into a blank/off-looking project. Bump PM.bootVersion to force a one-time reset to
-   the known-good demo on next launch. This never discards real saved projects (⌘S),
-   only the volatile in-progress autosave. */
-(function resetIfStale() {
-  const bv = PM.store.get('bootVersion', 0);
-  if (bv !== PM.bootVersion) {
-    PM.store.del('autosave');
-    PM.store.set('bootVersion', PM.bootVersion);
-  }
-})();
-
 /* Boot hygiene: repeated launches can leave several untouched "Untitled" projects
    in the registry and the tab strip. Keep at most one, and none at all while real
    projects exist. */
@@ -599,6 +528,7 @@ function projectThumb() {
   try { return PM.Export.snapshot(PM.time, 320); } catch (e) { return undefined; }
 }
 function persistCurrent(withThumb: any) {
+  if (PM.proj.id === homeProjectId) return true;
   try {
     const thumb = withThumb ? projectThumb() : undefined;
     if (withThumb && PM.Projects.recover) PM.Projects.recover(PM.proj, thumb);
@@ -608,7 +538,7 @@ function persistCurrent(withThumb: any) {
 }
 
 function captureProjectSession() {
-  if (!PM.proj?.id) return true;
+  if (!PM.proj?.id || PM.proj.id === homeProjectId) return true;
   PM.bus.emit('project:flush-edits');
   const saved = persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
@@ -640,6 +570,7 @@ function closeProjectTransients() {
   if (PM.WS.editing) PM.WS.cancelEdit();
 }
 PM.autosave = () => {
+  if (PM.proj.id === homeProjectId) return;
   APP.dirty = true;
   fileState().dirty = true;
   comparisonVersions.set(PM.proj.id, (comparisonVersions.get(PM.proj.id) || 0) + 1);
@@ -713,6 +644,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
   }
 }
 PM.saveProject = (options: any = {}) => {
+  if (PM.proj.id === homeProjectId) return Promise.resolve(false);
   if (activeSave) return Promise.resolve(false);
   const save = saveProject(options);
   activeSave = save;
@@ -844,6 +776,7 @@ function switchProject(p: any) {
 }
 
 PM.confirmCloseProject = async (id: string) => {
+  if (id === homeProjectId) return true;
   PM.bus.emit('project:flush-edits');
   await APP.importQueue;
   // Closing is a continuation of the user's current action. If a save is
@@ -965,10 +898,15 @@ window.addEventListener('pm-open-project', (e: any) => {
   if (p && typeof p === 'object') switchProject(p);
 });
 
-/* boot registration: the startup project becomes the first tab */
-PM.Projects.markOpen(PM.proj.id);
-persistCurrent(false);
-void refreshFileDirty();
+/* A fresh profile has no document tabs or recovery entries. */
+if (PM.proj.id === homeProjectId) {
+  PM.ProjectsScreen.show('recents');
+  document.title = 'Powermove';
+} else {
+  PM.Projects.markOpen(PM.proj.id);
+  persistCurrent(false);
+  void refreshFileDirty();
+}
 for (const id of PM.Projects.tabs()) {
   if (id === PM.proj.id) continue;
   const project = PM.Projects.get(id);

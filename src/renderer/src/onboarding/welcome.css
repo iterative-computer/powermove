@@ -1,3 +1,10 @@
+@font-face {
+  font-family: 'Geist';
+  src: url('../../../../assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 * { box-sizing: border-box; }
 
 html,
@@ -9,42 +16,45 @@ body {
   overflow: hidden;
   color: var(--tx);
   background: var(--bg-window);
-  font-family: var(--f-ui);
+  font-family: 'Geist', sans-serif;
+  -webkit-font-smoothing: antialiased;
   -webkit-app-region: drag;
 }
 
 .welcome-card {
-  width: min(520px, calc(100vw - 96px));
+  width: min(640px, calc(100vw - 96px));
   padding: calc(var(--pad) * 2) calc(var(--pad) * 3);
   text-align: center;
+}
+
+.welcome-card > * {
+  animation: welcome-enter 800ms cubic-bezier(0.16, 1, 0.3, 1) both paused;
+}
+.welcome-entering .welcome-card > * { animation-play-state: running; }
+.welcome-card > :nth-child(2) { animation-delay: 120ms; }
+.welcome-card > :nth-child(3) { animation-delay: 240ms; }
+.welcome-card > :nth-child(4) { animation-delay: 360ms; }
+
+@keyframes welcome-enter {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .welcome-mark {
   width: 70px;
   height: 58px;
-  margin-bottom: calc(var(--gap) * 2);
+  margin-bottom: 32px;
   overflow: visible;
-  fill: none;
-  stroke: var(--accent);
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 4;
-  filter: drop-shadow(0 0 18px var(--accent-dim));
-  transform-origin: center;
-  animation: welcome-mark-float 4s ease-in-out 2.7s infinite;
+  fill: var(--tx);
 }
 
-@keyframes welcome-mark-float {
-  0%, 100% { transform: translateY(0) rotate(0); }
-  25% { transform: translateY(-4px) rotate(-3deg); }
-  75% { transform: translateY(2px) rotate(3deg); }
-}
 
 h1 {
-  margin: 0 0 calc(var(--gap) * 3);
-  font-size: 34px;
-  font-weight: var(--fw-semibold);
-  letter-spacing: -0.035em;
+  margin: 0 0 32px;
+  font-size: clamp(44px, 6vw, 60px);
+  line-height: 1.08;
+  font-weight: 400;
+  letter-spacing: -0.025em;
 }
 
 .welcome-actions {
@@ -55,36 +65,29 @@ h1 {
   -webkit-app-region: no-drag;
 }
 
-#begin,
-#replay {
-  min-width: 124px;
+#begin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
   height: 42px;
-  padding: 0 calc(var(--pad) * 2);
+  padding: 0;
   border: 0;
-  border-radius: var(--r-md);
+  border-radius: var(--r-sm);
   color: var(--on-accent);
   background: var(--accent);
-  box-shadow: var(--ctl-edge);
-  font: var(--fw-medium) var(--fs-md) var(--f-ui);
+  box-shadow: var(--shadow-raise);
+  font: 500 14px 'Geist', sans-serif;
   -webkit-app-region: no-drag;
   cursor: default;
   transition: background var(--dur-2) var(--ease), transform var(--dur-1) var(--ease);
 }
 
 #begin:hover { background: var(--accent-hover); }
-#begin:active { transform: scale(0.98); }
-#begin:focus-visible,
-#replay:focus-visible { outline: 0; box-shadow: var(--focus-ring); }
-#begin:disabled,
-#replay:disabled { opacity: var(--disabled); }
-
-#replay {
-  color: var(--tx-2);
-  background: var(--ctl-raised);
-}
-
-#replay:hover { color: var(--tx); background: var(--bg-row-hi); }
-#replay:active { transform: scale(0.98); }
+#begin:active { transform: translateY(1px); }
+#begin:focus { outline: none; box-shadow: var(--shadow-raise); }
+#begin:focus-visible { background: var(--accent-hover); }
+#begin:disabled { opacity: var(--disabled); }
 
 #begin-status {
   min-height: 18px;
@@ -95,5 +98,5 @@ h1 {
 
 @media (prefers-reduced-motion: reduce) {
   #begin { transition: none; }
-  .welcome-mark { animation: none; }
+  .welcome-card > * { animation: none; }
 }

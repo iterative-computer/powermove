@@ -34,7 +34,7 @@ import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './secu
 import { createStore, installQuitFlush, registerStoreIpc } from './storage';
 import { DARK_BACKGROUND, registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
-import { OnboardingFlow, onboardingCompleted, onboardingEnabled } from './onboarding';
+import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
 
 const APP_ORIGIN = 'app://powermove';
 // Served with X-Content-Type-Options: nosniff, so anything not listed here is
@@ -262,10 +262,11 @@ function isTrustedSenderContents(sender: WebContents): boolean {
   return !!win && !win.isDestroyed() && isAllowedNavigation(sender.getURL(), devRendererUrl);
 }
 
-function createWindow(): BrowserWindow {
+function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWindow {
   const testOptions = backgroundWindowOptions(isBackgroundTest);
   const window = new BrowserWindow({
     ...testOptions,
+    ...(entrance ? { show: false } : {}),
     width: 1440,
     height: 900,
     minWidth: 980,
@@ -308,6 +309,37 @@ function createWindow(): BrowserWindow {
       mainWindow = null;
     }
   });
+
+  if (entrance) {
+    window.webContents.once('did-finish-load', () => {
+      void window.webContents.executeJavaScript(`
+        document.fonts.ready.then(() => {
+          if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+          const home = document.querySelector('#projects-screen.on');
+          const selector = home
+            ? '#titlebar > *, .ps-sidebar, .ps-search, .ps-nav > *, .ps-sidefoot, .ps-main, .ps-top > *, .ps-view > *, .ps-grid > :not(.ps-empty), .ps-empty > *'
+            : '#titlebar, #body > *, #status';
+          const targets = [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length);
+          const animations = targets.map((el, index) => {
+            const animation = el.animate([
+              { opacity: 0, transform: 'translateY(18px)' },
+              { opacity: 1, transform: 'translateY(0)' }
+            ], { duration: 650, delay: (home ? 300 : 60) + index * 45, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'backwards' });
+            animation.pause();
+            return animation;
+          });
+          const play = () => animations.forEach(animation => {
+            if (animation.playState === 'paused') animation.play();
+          });
+          window.addEventListener('focus', play, { once: true });
+          setTimeout(play, 150);
+        })
+      `).catch(error => console.error('[onboarding] entrance failed', error)).finally(() => {
+        if (!window.isDestroyed() && !isBackgroundTest) { window.show(); window.focus(); }
+        onEntranceReady?.();
+      });
+    });
+  }
 
   if (devRendererUrl) {
     void window.loadURL(devRendererUrl);
@@ -494,16 +526,26 @@ if (!hasSingleInstanceLock) {
           }
           return mainWindow;
         }
-        return createWindow();
+        return new Promise<BrowserWindow>((resolve, reject) => {
+          const editor = createWindow(true, () => resolve(editor));
+          editor.webContents.once('did-fail-load', (_event, _code, description) => {
+            editor.destroy();
+            reject(new Error(description));
+          });
+        });
       },
       secure: (window) => secureWebContents(window.webContents, devRendererUrl)
     });
-    const menu = installMenu(() => mainWindow, () => onboardingFlow?.replay());
+    const menu = installMenu(() => mainWindow);
     if (!isBackgroundTest) installUpdates(menu);
 
     if (isBackgroundTest) app.dock?.hide();
     const completedOnboarding = await onboardingCompleted(app.getPath('userData'));
     if (onboardingEnabled(process.env, isBackgroundTest, completedOnboarding)) {
+      // Record the first launch, even if the welcome is closed before Begin.
+      await persistOnboardingCompleted(app.getPath('userData')).catch(error => {
+        console.error('[onboarding] could not persist first launch', error);
+      });
       onboardingFlow.start();
     } else {
       createWindow();

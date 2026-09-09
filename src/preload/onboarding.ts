@@ -10,8 +10,7 @@ const CHANNEL = {
   animationFailed: 'onboarding:animation-failed',
   logoTarget: 'onboarding:logo-target',
   logoTargetReport: 'onboarding:logo-target-report',
-  begin: 'onboarding:begin',
-  replay: 'onboarding:replay'
+  begin: 'onboarding:begin'
 } as const;
 
 const bridge: OnboardingBridge = {
@@ -28,9 +27,6 @@ const bridge: OnboardingBridge = {
   },
   begin: async () => {
     await ipcRenderer.invoke(CHANNEL.begin);
-  },
-  replay: async () => {
-    await ipcRenderer.invoke(CHANNEL.replay);
   }
 };
 

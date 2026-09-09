@@ -3,7 +3,7 @@ import { access, mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { IPC, type OnboardingLogoTarget } from '../shared/ipc';
-import { DARK_BACKGROUND } from './theme';
+import { LIGHT_BACKGROUND } from './theme';
 
 export const ONBOARDING_VERSION = 1;
 export const ONBOARDING_ANIMATION_SECONDS = 9.766666666666667;
@@ -91,7 +91,7 @@ export function onboardingWelcomeOptions(
     focusable: !backgroundTest,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 15 },
-    backgroundColor: DARK_BACKGROUND,
+    backgroundColor: LIGHT_BACKGROUND,
     webPreferences: {
       preload: path.join(__dirname, '../preload/onboarding.js'),
       contextIsolation: true,
@@ -107,7 +107,7 @@ export interface OnboardingFlowOptions {
   displayBounds(): Rectangle;
   backgroundTest: boolean;
   userData: string;
-  createEditor(): BrowserWindow;
+  createEditor(): BrowserWindow | Promise<BrowserWindow>;
   secure(window: BrowserWindow): void;
 }
 
@@ -155,12 +155,7 @@ export class OnboardingFlow {
       }
       await this.begin();
     });
-    this.ipc.handle(IPC.onboardingReplay, async (event) => {
-      if (!this.isMainFrameOf(event, this.welcomeWindow)) {
-        throw new Error('Unauthorized onboarding sender');
-      }
-      this.replay();
-    });
+
   }
 
   private isMainFrameOf(
@@ -342,8 +337,13 @@ export class OnboardingFlow {
     // A native Replay command can arrive while the marker write is pending.
     // Leave that newer animation and its audio/window lifecycle untouched.
     if (generation !== this.generation) return;
+    try {
+      await this.options.createEditor();
+    } catch (error) {
+      this.transitioning = false;
+      throw error;
+    }
     this.firstRunPending = false;
-    this.options.createEditor();
     this.finishAnimation(generation);
     const welcome = this.welcomeWindow;
     this.welcomeWindow = null;

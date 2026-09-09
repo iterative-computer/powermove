@@ -149,7 +149,8 @@ describe('first-run onboarding', () => {
   it('moves from animation to welcome, rejects subframe Begin, then persists before creating the editor', async () => {
     const userData = await temporaryDirectory();
     const { ipc, listeners, handlers } = fakeIpc();
-    const createEditor = vi.fn(() => ({}) as Electron.BrowserWindow);
+    let ready!: (window: Electron.BrowserWindow) => void;
+    const createEditor = vi.fn(() => new Promise<Electron.BrowserWindow>(resolve => { ready = resolve; }));
     const flow = new OnboardingFlow(ipc as never, {
       appOrigin: 'app://powermove',
       displayBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
@@ -172,7 +173,12 @@ describe('first-run onboarding', () => {
 
     const begin = handlers.get(IPC.onboardingBegin)!;
     await expect(begin({ sender: welcome.webContents, senderFrame: {} })).rejects.toThrow('Unauthorized');
-    await begin({ sender: welcome.webContents, senderFrame: welcome.webContents.mainFrame });
+    const opening = begin({ sender: welcome.webContents, senderFrame: welcome.webContents.mainFrame });
+    await vi.waitFor(() => expect(createEditor).toHaveBeenCalledOnce());
+    expect(welcome.destroyed).toBe(false);
+    expect(flow.isFirstRunPending()).toBe(true);
+    ready({} as Electron.BrowserWindow);
+    await opening;
     expect(createEditor).toHaveBeenCalledOnce();
     expect(welcome.destroyed).toBe(true);
     await expect(onboardingCompleted(userData)).resolves.toBe(true);
@@ -334,8 +340,7 @@ describe('first-run onboarding', () => {
     const firstWelcome = electronMocks.FakeBrowserWindow.windows[2]!;
     expect(secondAnimation.destroyed).toBe(false);
 
-    const replay = handlers.get(IPC.onboardingReplay)!;
-    await replay({ sender: firstWelcome.webContents, senderFrame: firstWelcome.webContents.mainFrame });
+    flow.replay();
     const thirdAnimation = electronMocks.FakeBrowserWindow.windows[3]!;
     expect(firstWelcome.destroyed).toBe(true);
     expect(secondAnimation.destroyed).toBe(true);
