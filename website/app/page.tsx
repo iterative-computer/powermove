@@ -17,9 +17,9 @@ export default function Home() {
   return <main id="top">
     <header className="navigation"><Logo/><nav aria-label="Main navigation"><a href="#editor">Editor</a><a href="#features">Features</a></nav><a className="button" href="#preview">Explore Powermove <ArrowDown size={13}/></a></header>
     <section className="hero" aria-labelledby="headline">
-      <h1 id="headline" className="sr-only">Make your Powermove.</h1>
+      <h1 id="headline" className="sr-only">Shape your video editor</h1>
       <HeroAnimation/>
-      <div className="hero-intro"><p>Powermove is the versatile motion design software that lets you shape its feature set.</p><a className="button primary" href="mailto:hello@motioner.app?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={14}/></a></div>
+      <div className="hero-intro"><p>Powermove is the versatile video software that lets you shape its feature set.</p><a className="button primary" href="mailto:hello@motioner.app?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={14}/></a></div>
     </section>
     <section className="editor-section" id="editor" aria-label="Powermove editor preview">
       <figure className="editor-window" id="preview"><img src="/editor-0.png" alt="Powermove editor with a cinematic title, layer stack, property inspector, AI agent, and keyframe timeline." width={1600} height={1000} loading="lazy"/></figure>
