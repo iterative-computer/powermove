@@ -90,6 +90,13 @@ describe('safeAgentComponent', () => {
 });
 
 describe('prepareAgentWorkspace', () => {
+  it('preserves a 30 MB project snapshot in the agent workspace', async () => {
+    const projectJSON = JSON.stringify({ layers: [], data: 'x'.repeat(30 * 1024 * 1024) });
+    const layout = await prepareAgentWorkspace(request({ projectJSON }), await temporaryDirectory(),
+      'project', agentResultSchema(), workspaceOptions(), 'large-project');
+    expect(await readFile(path.join(layout.inputsDirectory, 'powermove-project.json'), 'utf8')).toBe(projectJSON);
+  });
+
   it('creates the complete per-run layout with binary inputs', async () => {
     const userData = await temporaryDirectory();
     const options = workspaceOptions();

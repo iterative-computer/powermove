@@ -99,7 +99,7 @@ export async function prepareAgentWorkspace(
 ): Promise<AgentWorkspace> {
   if (req.projectJSON === null) throw new Error('Autonomous runs require a project snapshot.');
   if (byteLength(req.projectJSON) > LIMITS.codexProjectJsonBytes) {
-    throw new Error('The project snapshot is larger than 24 MB.');
+    throw new Error(`The project snapshot exceeds the ${LIMITS.codexProjectJsonBytes / (1024 * 1024)} MiB agent limit.`);
   }
   if (!path.isAbsolute(options.extensionsDir)) {
     throw new Error('The user extensions directory must be an absolute path.');

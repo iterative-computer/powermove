@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { CodexRunRequest } from '../../shared/ipc';
+import { LIMITS, type CodexRunRequest } from '../../shared/ipc';
 import {
   codexErrorFromStdout,
   CodexRunner,
@@ -58,6 +58,14 @@ it('validates optional thread ids without accepting paths or unbounded input', (
   for (const threadId of ['', '../outside', 'a/b', 'x'.repeat(121), 12]) {
     expect(isCodexRunRequest({...request(),threadId})).toBe(false);
   }
+});
+
+it('accepts every persistable project snapshot and rejects oversized UTF-8 input', () => {
+  const projectJSON = JSON.stringify({ data: 'x'.repeat(LIMITS.storeValueBytes - 11) });
+  expect(Buffer.byteLength(projectJSON)).toBe(LIMITS.storeValueBytes);
+  expect(isCodexRunRequest(request({ projectJSON }))).toBe(true);
+  expect(isCodexRunRequest(request({ projectJSON: projectJSON + ' ' }))).toBe(false);
+  expect(isCodexRunRequest(request({ projectJSON: 'é'.repeat(LIMITS.storeValueBytes / 2 + 1) }))).toBe(false);
 });
 
 it('accepts image and file bytes above the old attachment caps', () => {

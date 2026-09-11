@@ -87,6 +87,9 @@ export interface OnboardingBridge {
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
 
 /* ── limits enforced in main ─────────────────────────────── */
+// Agent context must accept the same complete snapshots as project persistence.
+const PROJECT_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+
 export const LIMITS = {
   fileSaveBytes: 256 * 1024 * 1024, // larger payloads stream via File System Access
   artifactBytes: 64 * 1024 * 1024,
@@ -95,10 +98,10 @@ export const LIMITS = {
   codexAttachments: 6,
   codexAttachmentBytes: 100 * 1024,
   codexPromptChars: 200_000,
-  codexProjectJsonBytes: 24 * 1024 * 1024,
+  codexProjectJsonBytes: PROJECT_SNAPSHOT_BYTES,
   codexProgressChars: 320,
   codexTraceChars: 2_000,
-  storeValueBytes: 32 * 1024 * 1024,
+  storeValueBytes: PROJECT_SNAPSHOT_BYTES,
   logChars: 8_000
 } as const;
 
