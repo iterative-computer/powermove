@@ -2,7 +2,11 @@
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
+const diagnostics: Array<{ time: string; tag: string; message: string }> = [];
+(PM as any).agentDiagnostics = diagnostics;
 const report = (tag: any, e: any) => {
+    diagnostics.push({ time: new Date().toISOString(), tag: String(tag), message: String(e?.message || e).slice(0, 2000) });
+    if (diagnostics.length > 30) diagnostics.shift();
     try {
       const msg = e && e.message ? e.message : String(e);
       const stack = e && e.stack ? String(e.stack).split('\n').slice(0, 3).join(' | ') : '';

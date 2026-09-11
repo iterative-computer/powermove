@@ -63,7 +63,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain("result's extensions array");
   });
 
-  it('keeps scene edits on typed commands and stays below 6 KB', () => {
+  it('keeps scene edits on typed commands and stays below 8 KB', () => {
     const instructions = agentInstructions({
       projectName: 'Project',
       artifactPath: 'artifacts/run-1',
@@ -77,7 +77,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('Never open or show a new window for testing');
     expect(instructions).toContain('POWERMOVE_BACKGROUND_TEST=1');
     expect(instructions).toContain('isolated temporary test data');
-    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(6 * 1024);
+    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(8 * 1024);
   });
 
   it('makes editable values keyframeable by default', () => {

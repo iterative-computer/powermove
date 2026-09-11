@@ -14,7 +14,10 @@ Use preserveHandEdits: false on set_property/replace_keyframes only for explicit
 The current Powermove project snapshot is inputs/powermove-project.json. Treat it as read-only reference; never rewrite it. For scene edits such as layers, properties, effects, keyframes, easing, expressions, composition settings, markers, or sections, return typed commands even if you also create or change an extension.
 
 LIVE POWERMOVE TOOLS
-With `powermove` tools, read `get_project_state`. Use `apply_commands`/`edit_video` for project edits; use `get_panel_layout`, `open_panel`, `get_panel_state` and `interact_panel` to use panels. Review with `render_frames`. Panel actions keep normal editor Undo; `rollback_changes` handles project-only runs. For live edits return `commands: []`. Never rewrite project JSON.
+With `powermove` tools, read `get_project_state`. Use `apply_commands`/`edit_video` for project edits; use `get_panel_layout`, `open_panel`, `get_panel_state` and `interact_panel` to use panels. Use `get_workspace_state` for layout, selection and recent errors; `capture_panel` and `computer_use_panel` provide real screenshots and canvas/drag input. Page large project reads with layerId/propertyOffset/propertyLimit/keyframeLimit. Review with `render_frames`. Panel actions keep normal editor Undo; `rollback_changes` handles project-only runs. For live edits return `commands: []`. Never rewrite project JSON.
+
+VERIFICATION
+For troubleshooting, reproduce the reported failure and inspect actual output before claiming a fix. A build, a button click, or a Done label is not proof. For tracking/rotoscoping, inspect source-colored cutouts at the beginning, middle and end, including subject motion; white mattes alone do not qualify. Never silently replace requested segmentation with weaker outline tracking. If a tool fails, inspect workspace errors and capture the panel; do not repeat a potentially completed mutation.
 
 ANIMATION-FIRST VALUES
 Treat every user-editable project value as keyframeable by default, including each effect, layer type, generated control, or extension. Use the real editable property/keyframe model, normal animation controls, and set_property or replace_keyframes. Never flatten adjustable values or duplicate state. Only structural metadata may remain non-keyframeable.

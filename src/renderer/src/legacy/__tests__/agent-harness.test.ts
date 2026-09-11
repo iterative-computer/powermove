@@ -22,6 +22,19 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('pages large animated properties without silently losing their counts', () => {
+    const PM = harnessEditor(), layer = PM.mkLayer('shape');
+    PM.proj.layers = [layer];
+    const properties = PM.allProps(layer);
+    properties[0].prop.kf = Array.from({ length: 240 }, (_, t) => ({ t: t / 30, v: t }));
+    const state = PM.AgentHarness.projectState({ layerId: layer.id, propertyLimit: 1, keyframeLimit: 3, keyframeOffset: 100 });
+    expect(state.layers).toHaveLength(1);
+    expect(state.layers[0].propertyCount).toBe(properties.length);
+    expect(state.layers[0].properties).toHaveLength(1);
+    expect(state.layers[0].properties[0].keyframeCount).toBe(240);
+    expect(state.layers[0].properties[0].keyframes.map((k: any) => k.value)).toEqual([100, 101, 102]);
+  });
+
   it('groups and parents through live agent commands and exposes membership in project state', async () => {
     const PM = harnessEditor(), a = PM.mkLayer('shape'), b = PM.mkLayer('shape'), rig = PM.mkLayer('null');
     PM.proj.layers = [a,b,rig]; PM.ProjectIndex.invalidate();

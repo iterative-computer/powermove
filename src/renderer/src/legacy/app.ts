@@ -17,7 +17,7 @@ export function install(PM: PMRegistry): void {
 const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
 const document = window.document;
-type FileState = { path?: string; savedHash?: string; dirty: boolean; handle?: any };
+type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any };
 const fileStates = new Map<string, FileState>();
 const comparisonVersions = new Map<string, number>();
 let activeSave: Promise<boolean> | null = null;
@@ -25,8 +25,18 @@ function fileState(id = PM.proj.id): FileState {
   let state = fileStates.get(id);
   if (!state) {
     const saved = PM.Projects.getState(id)?.file;
-    state = { path: saved?.path, savedHash: saved?.savedHash, dirty: true };
+    state = { path: saved?.path, savedHash: saved?.savedHash, baselineHash: saved?.baselineHash, dirty: true };
     fileStates.set(id, state);
+    // A local project can be unchanged without ever having been saved to a
+    // file. Keep its original baseline across recovery and tab switches.
+    const project = id === PM.proj?.id ? PM.proj : PM.Projects.get(id);
+    if (!state.savedHash && !state.baselineHash && project) {
+      const initialState = state;
+      initialState.baselineReady = projectFingerprint(JSON.stringify(project)).then(hash => {
+        initialState.baselineHash = hash;
+        rememberFile(id, initialState);
+      });
+    }
   }
   return state;
 }
@@ -39,15 +49,21 @@ async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   const state = fileState(project.id), json = JSON.stringify(project);
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
+  await state.baselineReady;
   const hash = await projectFingerprint(json);
   // A newer edit wins over an in-flight comparison.
-  if (comparisonVersions.get(project.id) !== version || JSON.stringify(project) !== json) return true;
-  state.dirty = !state.savedHash || state.savedHash !== hash;
+  if (JSON.stringify(project) !== json) return true;
+  const baseline = state.savedHash || state.baselineHash;
+  const dirty = !baseline || baseline !== hash;
+  // Concurrent comparisons of the same content are not edits. Only the
+  // latest comparison may publish state, but both can answer Close correctly.
+  if (comparisonVersions.get(project.id) !== version) return dirty;
+  state.dirty = dirty;
   if (PM.proj.id === project.id) fileUI();
   return state.dirty;
 }
 function rememberFile(id: string, state: FileState) {
-  PM.Projects.putState(id, { ...PM.Projects.getState(id), file: { path: state.path, savedHash: state.savedHash } });
+  PM.Projects.putState(id, { ...PM.Projects.getState(id), file: { path: state.path, savedHash: state.savedHash, baselineHash: state.baselineHash } });
 }
 PM.projectFileState = (id: string) => fileState(id);
 let saveGeneration = 0;

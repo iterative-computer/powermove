@@ -1,3 +1,4 @@
+import { animateExportPreview } from './export-preview';
 import { prepareFrame } from './frame-preparation';
 import { installRenderQueue, wavBytes } from './render-queue';
 /* Ported from js/core/exporter.js — behavior-preserving. */
@@ -131,6 +132,24 @@ X.dialog = () => {
   const p: any = PM.proj;
   const opts: any = Object.assign({}, X.defaults(), { name: p.name });
   const body: any = h('div.export-form');
+  body.addEventListener('keydown', (event: KeyboardEvent) => event.stopPropagation());
+  // Native selects stay inside the modal's focus and inert boundary.
+  const select = (get: any, set: any, options: any[]) => {
+    const field = h('select.sel.export-select');
+    field.sync = () => {
+      field.replaceChildren(...options.map((option: any) => h('option', { value: String(option.v) }, option.label)));
+      field.value = String(get());
+    };
+    field.onchange = () => { const option = options.find(o => String(o.v) === field.value); if (option) set(option.v); field.sync(); };
+    field.sync();
+    return field;
+  };
+  const toggle = (get: any, set: any, opt: any) => {
+    const field = h('button.toggle', { type: 'button', role: 'switch', 'aria-label': opt.label }, h('i'));
+    field.sync = () => { field.classList.toggle('on', !!get()); field.setAttribute('aria-checked', String(!!get())); };
+    field.onclick = () => { set(!get()); field.sync(); };
+    field.sync(); return field;
+  };
   const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
   const remembered: Record<string, string> = { code: 'web', video: 'mp4', images: 'still', project: 'json' };
   remembered[category(opts.format)] = opts.format;
@@ -150,10 +169,15 @@ X.dialog = () => {
     h('p', 'Export a live animation with playback controls and editable text and colors.'),
     h('div.export-code-includes', h('span', 'JavaScript player'), h('span', 'React component'), h('span', 'Agent handoff')),
     h('p.export-code-delivery', 'One ZIP with your scene, assets and generated effects. Give it to a developer or coding agent to integrate.'));
-  body.append(codeDetails);
+  const projectDetails = h('div.export-code-details',
+    h('h3', 'Keep every layer editable'),
+    h('p', 'Save a portable Powermove project with its media, effects, keyframes and composition settings.'),
+    h('div.export-code-includes', h('span', 'Editable layers'), h('span', 'Original media'), h('span', 'Animation & effects')));
+  body.append(codeDetails, projectDetails);
   const rows: any = {};
   const mk: any = (key: any, label: any, ctl: any) => {
     const r: any = PM.row(label, ctl);
+    ctl.setAttribute?.('aria-label', label);
     rows[key] = r;
     body.appendChild(r);
     return r;
@@ -166,7 +190,7 @@ X.dialog = () => {
   const plan: any = () => planExport(opts, { w: p.w, h: p.h, dur: p.dur, work: p.work });
 
   const formatOptions: any[] = [];
-  const formatField = PM.selectField(() => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
+  const formatField = select(() => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
   const allFormats = EXPORT_FORMAT_OPTIONS.map((o: any) => {
       if (o.v === 'mp4') return { v: o.v, label: (window as any).powermove?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
       if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
@@ -179,7 +203,7 @@ X.dialog = () => {
   const CUSTOM: any = '__custom__';
   const presetScales: any = EXPORT_SCALE_OPTIONS.map((o: any) => o.v);
   let customOpen: any = !presetScales.includes(opts.scale);
-  const scaleField: any = PM.selectField(
+  const scaleField: any = select(
     () => (customOpen ? CUSTOM : opts.scale),
     (v: any) => {
       customOpen = v === CUSTOM;
@@ -213,24 +237,25 @@ X.dialog = () => {
     if (e.key === 'Enter') inp.blur();
   });
 
-  mk('fps', 'Frame rate', PM.selectField(() => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: (Number.isInteger(f)?f:f.toFixed(3)) + ' fps' }))));
+  mk('fps', 'Frame rate', select(() => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: (Number.isInteger(f)?f:f.toFixed(3)) + ' fps' }))));
   const hasWork: any = !!(p.work && p.work[1] > p.work[0]);
-  mk('range', 'Range', PM.selectField(() => opts.range, (v: any) => { opts.range = v; sync(); },
+  mk('range', 'Range', select(() => opts.range, (v: any) => { opts.range = v; sync(); },
     EXPORT_RANGE_OPTIONS.map((o: any) => o.v === 'work' && !hasWork
       ? { v: o.v, label: 'Work area · not set' } : { ...o })));
-  mk('quality', 'Quality', PM.selectField(() => opts.quality, (v: any) => { opts.quality = v; sync(); }, EXPORT_QUALITY_OPTIONS.map((o: any) => ({ ...o }))));
-  mk('mblur', 'Motion blur', PM.toggleField(() => opts.mblur, (v: any) => { opts.mblur = v; sync(); }, { label: 'Motion blur' }));
+  mk('quality', 'Quality', select(() => opts.quality, (v: any) => { opts.quality = v; sync(); }, EXPORT_QUALITY_OPTIONS.map((o: any) => ({ ...o }))));
+  mk('mblur', 'Motion blur', toggle(() => opts.mblur, (v: any) => { opts.mblur = v; sync(); }, { label: 'Motion blur', local: true }));
   const hasAudio: any = PM.Audio.hasAudibleLayers(p);
   mk('audio', 'Include audio', withHint(
-    PM.toggleField(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, { label: 'Include audio' }),
+    toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, { label: 'Include audio', local: true }),
     hasAudio ? 'Mixes composition audio into the video' : 'No audio layers in this project'));
   mk('alpha', 'Transparent background', withHint(
-    PM.toggleField(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background' }),
+    toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background', local: true }),
     'Keeps the background see-through'));
 
   let presets=PM.store.get('renderPresets',[]);
   let chosenPreset='';const presetOptions=[{v:'',label:'Choose saved preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
-  const presetSelect=PM.selectField(()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows) as any[])r.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
+  const presetSelect=select(()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows) as any[])r.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
+  presetSelect.setAttribute('aria-label', 'Saved preset');
   const presetName=h('input',{type:'text',placeholder:'Preset name','aria-label':'Render preset name',style:{width:'120px'}});
   const savePreset=h('button.chip','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
   const presetRow = h('div',{style:{display:'flex',gap:'8px',alignItems:'center',marginTop:'12px'}},presetSelect,presetName,savePreset);
@@ -246,6 +271,8 @@ X.dialog = () => {
     const kind = category(opts.format);
     for (const [id, button] of Object.entries(buttons)) button.setAttribute('aria-pressed', String(id === kind));
     codeDetails.hidden = kind !== 'code';
+    projectDetails.hidden = kind !== 'project';
+    body.querySelectorAll('select, [role=switch]').forEach((field: any) => field.sync?.());
     presetRow.hidden = colorNote.hidden = kind === 'code' || kind === 'project';
     formatOptions.splice(0, formatOptions.length, ...allFormats.filter(o => category(o.v) === kind));
     formatField.sync?.();
@@ -282,8 +309,9 @@ X.dialog = () => {
   sync();
   m = PM.modal({
     title: 'Export', body, width: 580,
-    actions: [{ label: 'Cancel' }, {label:'Queue',run:()=>{X.remember(opts);X.enqueue(opts);X.queueDialog();}},{ label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); run(opts); } }],
+    actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
   });
+  m.el.classList.add('export-modal');
   sync();
 };
 
@@ -304,16 +332,22 @@ function progressUI(total: any) {
   const label: any = h('span', 'Preparing…');
   const eta: any = h('span');
   const prev: any = h('canvas.export-preview');
+  const scan = h('canvas.export-scan', { 'aria-hidden': 'true' });
+  let stopPreview = () => {};
   const body: any = h('div.export-progress',
-    prev, h('div.bar', { style: { height: '4px' } }, bar), h('div.export-progress-label', label, eta));
+    h('div.export-preview-stage', prev, scan), h('div.bar', { role: 'progressbar', 'aria-label': 'Export progress', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', style: { height: '4px' } }, bar), h('div.export-progress-label', label, eta));
   const mod: any = PM.modal({
-    title: 'Exporting', body, width: 460,
+    title: 'Exporting ' + (PM.proj.name || 'Untitled'), body, width: 580,
+    onClose: () => { X.cancel = true; stopPreview(); },
     actions: [{ label: 'Cancel', run: () => { X.cancel = true; } }],
   });
+  mod.el.classList.add('export-modal');
+  try { stopPreview = animateExportPreview(scan); } catch { scan.hidden = true; }
   const started: any = window.performance.now();
   return {
     mod, prev,
     set(i: any, extra: any) {
+      bar.parentElement.setAttribute('aria-valuenow', String(Math.round(i / total * 100)));
       bar.style.width = (i / total * 100).toFixed(1) + '%';
       label.textContent = `Frame ${i} / ${total}  ·  ${(i / total * 100).toFixed(0)}%` + (extra ? '  ·  ' + extra : '');
       const elapsed: any = (window.performance.now() - started) / 1000;
@@ -358,12 +392,14 @@ async function run(opts: any) {
   }
 
   if (opts.format === 'json') {
+    X.busy = true;
     try {
       await PM.app?.importQueue;
       const data = await packProjectFile(PM.serialize(), PM.MediaStore);
-      PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), (p.name || 'powermove') + '.pmv');
+      await PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), (p.name || 'powermove') + '.pmv');
       PM.toast('Project exported');return {cancelled:false};
     } catch (error) { const message=error instanceof Error?error.message:String(error);PM.toast('Could not export project: '+message,6000);return {error:message}; }
+    finally { X.busy = false; }
   }
   if (opts.format === 'still') {
     const wasPlaying=PM.playing,at=PM.time;PM.pause();X.busy=true;
@@ -377,16 +413,19 @@ async function run(opts: any) {
   }
 
   X.busy = true; X.cancel = false;
-  const wasPlaying: any = PM.playing; PM.pause();
+  const wasPlaying: any = PM.playing;
   const oldT: any = PM.time, oldQ: any = PM.quality;
   const total: any = Math.max(1, Math.round((t1 - t0) * opts.fps));
-  const ui: any = progressUI(total);
-  const pctx: any = ui.prev.getContext('2d');
-  ui.prev.width = 320; ui.prev.height = Math.round(320 * H / W);
+  let ui: any;
   const bitrate: any = exportBitrateMbps(opts.quality) * 1e6;
   const t: any = window.performance.now();
 
   try {
+    PM.pause();
+    ui = progressUI(total);
+    const pctx = ui.prev.getContext('2d');
+    if (!pctx) throw new Error('Could not create export preview');
+    ui.prev.width = 640; ui.prev.height = Math.round(640 * H / W);
     const wantsAudio: any = opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj);
     const needsRecorderAudio: any = opts.format === 'webm' && wantsAudio && !(await PM.Audio.supportsOpus());
     if(opts.format==='prores'||(opts.format==='mp4'&&(window as any).powermove?.render)){
@@ -407,7 +446,7 @@ async function run(opts: any) {
     return {error:e.message};
   } finally {
     X.busy = false;
-    ui.mod.close();
+    ui?.mod.close();
     PM.preparedVideoFrames=null;
     PM.quality = oldQ;
     PM.setTime(oldT, { force: true });
@@ -455,7 +494,7 @@ function alphaFrame(T: any, W: any, H: any, mblur: any) {
 
 async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
   const bridge=(window as any).powermove?.render;if(!bridge)throw new Error('The native encoder requires the updated desktop runtime.');
-  const token=await bridge.start({width:W,height:H,fps:opts.fps,format:opts.format,alpha:!!opts.alpha,name:opts.name||PM.proj.name});let released=false;
+  const token=await bridge.start({width:W,height:H,fps:opts.fps,format:opts.format,alpha:!!opts.alpha,bitrateMbps:exportBitrateMbps(opts.quality),name:opts.name||PM.proj.name});let released=false;
   const chunks=async(bytes:Uint8Array,audio=false)=>{for(let at=0;at<bytes.length;at+=4*1024*1024)await bridge.write(token,bytes.slice(at,at+4*1024*1024),audio);};
   try{for(let i=0;i<total;i++){if(X.cancel)break;const T=t0+i/opts.fps;await prepareFrame(PM,T);const cv=opts.alpha?alphaFrame(T,W,H,opts.mblur):PM.renderFrameTo(T,W,H,{mblur:opts.mblur});const bytes=new Uint8Array(cv.getContext('2d').getImageData(0,0,W,H).data);await chunks(bytes);pctx.drawImage(cv,0,0,ui.prev.width,ui.prev.height);ui.set(i+1,opts.format==='prores'?'ProRes 4444':'H.264');await new Promise(r=>setTimeout(r,0));}
     if(X.cancel)return;if(opts.audio!==false&&PM.Audio.hasAudibleLayers(PM.proj)){const mix=await PM.Audio.renderOffline(t0,t1);if(mix)await chunks(wavBytes(mix),true);}const result=await bridge.finish(token);released=true;if(result.cancelled)X.cancel=true;
@@ -465,14 +504,16 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
 async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: any) {
   const frames: any = [];
   let configured: any = false;
+  let encoderError: Error | null = null;
   const enc: any = new window.VideoEncoder({
     output: (chunk: any) => {
       const data: any = new Uint8Array(chunk.byteLength);
       chunk.copyTo(data);
       frames.push({ ts: chunk.timestamp, key: chunk.type === 'key', data });
     },
-    error: (e: any) => { throw e; },
+    error: (e: any) => { encoderError = e; },
   });
+  try {
   const cfgs: any = [
     { codec: 'vp09.00.31.08', id: 'V_VP9' },
     { codec: 'vp8', id: 'V_VP8' },
@@ -491,16 +532,16 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     await prepareFrame(PM,T);
     const cv: any = renderInto(T, W, H, opts.mblur);
     const frame: any = new window.VideoFrame(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
-    enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 });
-    frame.close();
+    try { if (encoderError) throw encoderError; enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 }); } finally { frame.close(); }
     if (i % 3 === 0) {
       pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
-      ui.set(i + 1, chosen.id + ' · queue ' + enc.encodeQueueSize);
+      ui.set(i + 1, 'Rendering');
       await new Promise((r: any) => window.setTimeout(r, 0));
     }
     if (enc.encodeQueueSize > 12) await new Promise((r: any) => window.setTimeout(r, 6));
   }
   await enc.flush();
+  if (encoderError) throw encoderError;
   enc.close();
   if (X.cancel) return;
   ui.set(total, 'muxing…');
@@ -516,7 +557,8 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     }
   }
   const blob: any = muxWebM(frames, { width: W, height: H, fps: opts.fps, codecId: chosen.id, audio: audioPayload });
-  PM.download(blob, `${PM.proj.name || 'powermove'}.webm`);
+  await PM.download(blob, `${PM.proj.name || 'powermove'}.webm`);
+  } finally { if (enc.state !== 'closed') enc.close(); }
 }
 
 async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: any) {

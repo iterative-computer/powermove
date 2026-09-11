@@ -5,16 +5,17 @@ import { randomUUID } from 'node:crypto';
 import { app, dialog, type IpcMain } from 'electron';
 import { IPC } from '../shared/ipc';
 
-export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string};
+export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
 type Job={dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
 export function encoderArgs(options:EncoderOptions,output:string):string[]{
   return ['-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','rgba','-video_size',`${options.width}x${options.height}`,'-framerate',String(options.fps),'-i','pipe:0','-an',
     '-vf','scale=in_range=full:out_range=limited:out_color_matrix=bt709',
-    ...(options.format==='prores'?['-c:v','prores_ks','-profile:v','4','-pix_fmt',options.alpha?'yuva444p10le':'yuv444p10le','-alpha_bits','16']:['-c:v','libx264','-pix_fmt','yuv420p','-crf','18']),
+    ...(options.format==='prores'?['-c:v','prores_ks','-profile:v','4','-pix_fmt',options.alpha?'yuva444p10le':'yuv444p10le','-alpha_bits','16']:['-c:v','libx264','-pix_fmt','yuv420p','-b:v',`${options.bitrateMbps ?? 16}M`]),
     '-color_primaries','bt709','-color_trc','iec61966-2-1','-colorspace','bt709','-color_range','tv','-movflags','+faststart','-y',output];
 }
 export function validateEncoderOptions(raw:any):EncoderOptions {
   if(!raw || ![raw.width,raw.height].every(n=>Number.isInteger(n)&&n>=2&&n<=8192&&n%2===0)||!Number.isFinite(raw.fps)||raw.fps<=0||raw.fps>240||!['mp4','prores'].includes(raw.format)||typeof raw.name!=='string'||raw.name.length>240)throw new Error('Invalid render settings');
+  if(raw.bitrateMbps!==undefined&&(!Number.isFinite(raw.bitrateMbps)||raw.bitrateMbps<1||raw.bitrateMbps>100))throw new Error('Invalid video bitrate');
   return {...raw,alpha:raw.format==='prores'&&!!raw.alpha};
 }
 export class RenderEncoder {

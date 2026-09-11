@@ -1090,3 +1090,27 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .settings-extension-confirm{padding:10px;border-radius:var(--r-sm);background:var(--bg-float);font-size:var(--fs-xs);line-height:1.5}
 .settings-extension-confirm p{margin:0 0 8px;color:var(--tx-2)}
 .settings-extension-confirm .btn{margin-right:8px;padding:5px 8px}
+
+/* Export uses the same quiet fields, type and orange accent as the inspector. */
+.export-modal{top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}
+.export-form{gap:6px}
+.export-destinations{gap:3px;padding:4px;border-radius:var(--r-md);background:var(--bg-field);margin-bottom:14px}
+.export-destination{border:0;background:transparent;padding:10px 9px;border-radius:var(--r-sm)}
+.export-destination[aria-pressed=true]{background:var(--ink-2);box-shadow:inset 0 -2px var(--accent);color:var(--tx)}
+.export-destination span{font-size:10px}
+.export-form .row.split{min-height:34px}
+.export-form select.export-select{appearance:auto;cursor:pointer;text-align:left;font-family:var(--f-ui);height:32px;padding:0 10px;color:var(--tx);background:var(--bg-field);border:1px solid var(--line);border-radius:var(--r-sm)}
+.export-form select.export-select:hover{background:var(--ink-2)}
+.export-form select.export-select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.export-form .export-summary{margin-top:14px;padding:12px;background:transparent;border-top:1px solid var(--line);border-right:0;border-bottom:0;border-left:0;border-radius:0}
+.export-preview-stage{position:relative;overflow:hidden;border-radius:var(--r-md);background:var(--bg-field)}
+.export-preview{max-height:52vh;object-fit:contain;border-radius:0}
+.export-scan{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.export-progress .bar{overflow:hidden;border-radius:2px;background:var(--ink-2)}
+.export-progress .bar i{display:block;height:100%;background:var(--accent);transition:width .12s linear}
+.export-progress-label{line-height:1.5}
+.export-form select.export-select{appearance:none;-webkit-appearance:none;padding-right:28px;background-image:linear-gradient(45deg,transparent 50%,var(--tx-3) 50%),linear-gradient(135deg,var(--tx-3) 50%,transparent 50%);background-position:calc(100% - 14px) 14px,calc(100% - 10px) 14px;background-size:4px 4px;background-repeat:no-repeat}
+.export-modal .mf .btn:not(.pri),.export-form .chip{appearance:none;-webkit-appearance:none;background:var(--ink-2);color:var(--tx);box-shadow:none;border:1px solid var(--line)}
+.export-form .toggle{appearance:none;-webkit-appearance:none;background:var(--ink-3)}
+.export-form .toggle.on{background:var(--accent)}
+.export-form .toggle i{background:var(--tx)}

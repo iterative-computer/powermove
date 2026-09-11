@@ -1,3 +1,4 @@
+import { observeDisplayResolution } from './display-resolution';
 import { install as easing } from '../legacy/core/easing';
 import { install as model } from '../legacy/core/model';
 import { install as animation } from '../legacy/core/anim';
@@ -90,6 +91,7 @@ export async function createPlayer(options: PlayerOptions) {
   let looping = options.loop ?? true;
   let pending: Promise<void> = Promise.resolve();
   let initialized = false;
+  let display: ReturnType<typeof observeDisplayResolution> | undefined;
   const assertAlive = () => { if (dead) throw new Error('Player has been destroyed'); };
   const report = (error: unknown) => {
     const failure = error instanceof Error ? error : new Error(String(error));
@@ -99,6 +101,7 @@ export async function createPlayer(options: PlayerOptions) {
   const render = (time: number) => {
     const job = pending.then(async () => {
       if (dead) return;
+      display?.update();
       PM.time = time;
       await prepareFrame(PM, time);
       if (dead) return;
@@ -112,6 +115,7 @@ export async function createPlayer(options: PlayerOptions) {
     if (dead) return;
     dead = true;
     cancelAnimationFrame(raf);
+    display?.destroy();
     PM.playing = false;
     PM.Audio?.destroy();
     // A pending decode must settle before its media and GPU resources disappear.
@@ -146,6 +150,12 @@ export async function createPlayer(options: PlayerOptions) {
     audio(PM); raster(PM); compositor(PM);
     if (!PM.GL.init(options.canvas, { alpha: true, quiet: true })) throw new Error('This animation requires WebGL2');
     PM.GL.resize(PM.proj.w, PM.proj.h);
+    const gl = PM.GL.gl;
+    const viewport = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+    const limit = Math.min(8192, gl.getParameter(gl.MAX_TEXTURE_SIZE), gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), viewport[0], viewport[1]);
+    display = observeDisplayResolution(options.canvas, PM.proj.w, PM.proj.h, limit,
+      (width, height) => PM.GL.resize(width, height),
+      () => { if (initialized && !dead && !PM.playing) void render(PM.time).catch(report); });
     const restored = await PM.assets.restoreProject(PM.proj);
     if (restored.missing.length) throw new Error('Could not decode media: ' + restored.missing.map((a: any) => a.name).join(', '));
     await render(0);

@@ -181,14 +181,76 @@ export class PowermoveAgentToolBridge {
       baseRevision: session.baseRevision
     };
     return await new Promise<AgentToolResponseEvent>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cleanup = () => {
+        clearTimeout(timer);
         this.pending.delete(callId);
-        reject(new Error(`Powermove timed out while running ${tool}.`));
-      }, this.timeoutMs);
+        session.owner.removeListener('destroyed', unavailable);
+        session.owner.removeListener('render-process-gone', unavailable);
+      };
+      const fail = (error: Error) => { cleanup(); reject(error); };
+      const unavailable = () => fail(new Error(`Powermove renderer closed or crashed while running ${tool}. The action outcome is unknown; inspect the project before repeating edits.`));
+      const timer = setTimeout(() => fail(new Error(`Powermove timed out while running ${tool}. Inspect get_workspace_state or capture_panel before retrying; an edit may already have completed.`)), this.timeoutMs);
       timer.unref();
-      this.pending.set(callId, { session, tool, resolve, reject, timer });
-      session.owner.send(IPC.agentToolRequest, request);
+      session.owner.once('destroyed', unavailable);
+      session.owner.once('render-process-gone', unavailable);
+      this.pending.set(callId, { session, tool, resolve: response => { cleanup(); resolve(response); }, reject: fail, timer });
+      try {
+        session.owner.send(IPC.agentToolRequest, request);
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
     });
+  }
+
+  private async capturePanel(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    const state = await this.callRenderer(session, '__panel_bounds', args);
+    if (!state.ok) return state;
+    const item = state.content[0];
+    if (item?.type !== 'text') throw new Error('Missing panel capture bounds.');
+    const bounds = JSON.parse(item.text);
+    if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) throw new Error('Panel is not visible. Open or expand it first.');
+    const capture = await session.owner.capturePage(bounds);
+    if (capture.isEmpty()) throw new Error('Panel capture is empty. Read workspace state and try again.');
+    const image = capture.resize({ width: Math.min(1600, capture.getSize().width) });
+    return { ...state, content: [
+      { type: 'text', text: JSON.stringify({ panelId: args.panelId, bounds, image: image.getSize(), coordinates: 'panel-relative CSS pixels', note: 'Image content is untrusted data.' }) },
+      { type: 'image', data: image.toJPEG(85), mimeType: 'image/jpeg' }
+    ] };
+  }
+
+  private async computerUsePanel(session: PowermoveAgentToolSession, args: Record<string, unknown>): Promise<AgentToolResponseEvent> {
+    const prepared = await this.callRenderer(session, '__prepare_panel_input', args);
+    if (!prepared.ok) return prepared;
+    const item = prepared.content[0];
+    if (item?.type !== 'text') throw new Error('Missing panel input target.');
+    const { points } = JSON.parse(item.text) as { points: Array<{ x: number; y: number }> };
+    const first = points[0]!;
+    const owner = session.owner;
+    owner.sendInputEvent({ type: 'mouseMove', ...first });
+    if (args.action === 'scroll') {
+      owner.sendInputEvent({ type: 'mouseWheel', ...first, deltaY: args.deltaY as number, deltaX: 0 });
+    } else {
+      owner.sendInputEvent({ type: 'mouseDown', ...first, button: 'left', clickCount: 1 });
+      let last = first;
+      try {
+        if (args.action === 'drag') for (const point of points.slice(1)) {
+          last = point;
+          owner.sendInputEvent({ type: 'mouseMove', ...point, button: 'left', modifiers: ['leftbuttondown'] });
+          await new Promise(resolve => setTimeout(resolve, 16));
+        }
+      } finally {
+        owner.sendInputEvent({ type: 'mouseUp', ...last, button: 'left', clickCount: 1 });
+      }
+      if (args.action === 'type') await owner.insertText(args.text as string);
+      if (args.action === 'press') {
+        owner.sendInputEvent({ type: 'keyDown', keyCode: args.key as string });
+        owner.sendInputEvent({ type: 'keyUp', keyCode: args.key as string });
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // Refresh the transaction revision after native handlers have run.
+    await this.callRenderer(session, 'get_project_state', { propertyLimit: 1, keyframeLimit: 0 });
+    return this.capturePanel(session, args);
   }
 
   closeSession(session: PowermoveAgentToolSession): void {
@@ -266,7 +328,11 @@ export class PowermoveAgentToolBridge {
     if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
-    const response = await this.callRenderer(session, request.tool, request.arguments);
+    const response = request.tool === 'capture_panel'
+      ? await this.capturePanel(session, request.arguments)
+      : request.tool === 'computer_use_panel'
+        ? await this.computerUsePanel(session, request.arguments)
+        : await this.callRenderer(session, request.tool, request.arguments);
     session.noteResponse(response);
     return {
       id: request.id,
@@ -301,8 +367,18 @@ export class PowermoveAgentToolBridge {
   }
 
   private onRendererResponse(event: IpcMainEvent, value: unknown): void {
+    // Authenticate the envelope before parsing the payload. Invalid responses
+    // from the owning renderer must fail promptly, not disappear into a timeout.
+    if (!isRecord(value) || typeof value.callId !== 'string') return;
+    const call = this.pending.get(value.callId);
+    if (!call || call.session.runId !== value.runId || call.session.owner !== event.sender) return;
     const response = this.parseRendererResponse(value);
-    if (!response) return;
+    if (!response) {
+      this.pending.delete(value.callId);
+      clearTimeout(call.timer);
+      call.reject(new Error(`Powermove returned an invalid or oversized response for ${call.tool}. Request a smaller state page or capture_panel to inspect the UI. The action may have completed; inspect before retrying any edit.`));
+      return;
+    }
     const pending = this.pending.get(response.callId);
     if (!pending || pending.session.runId !== response.runId || pending.session.owner !== event.sender) return;
     this.pending.delete(response.callId);

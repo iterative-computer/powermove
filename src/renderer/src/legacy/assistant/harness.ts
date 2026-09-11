@@ -1,4 +1,5 @@
-import { openPanel, readPanel, interactPanel } from './panel-tools';
+import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
+import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -66,11 +67,16 @@ function defaultTimes() {
   return safeTimes(candidates, [PM.time]);
 }
 
-function propertyDigest(layer: any) {
-  return PM.allProps(layer).map((item: any) => ({
+function propertyDigest(layer: any, options: any = {}) {
+  const offset = Math.max(0, Math.trunc(Number(options.propertyOffset) || 0));
+  const limit = Math.max(1, Math.min(100, Math.trunc(Number(options.propertyLimit) || 100)));
+  const keys = options.keyframeLimit === undefined ? 8 : Math.max(0, Math.min(MAX_KEYFRAMES, Math.trunc(Number(options.keyframeLimit) || 0)));
+  const keyOffset = Math.max(0, Math.trunc(Number(options.keyframeOffset) || 0));
+  return PM.allProps(layer).slice(offset, offset + limit).map((item: any) => ({
     path: item.key,
     value: PM.evP(layer, item.prop, PM.time, item.key),
-    keyframes: item.prop.kf.slice(0, MAX_KEYFRAMES).map((key: any) => ({
+    keyframeCount: item.prop.kf.length,
+    keyframes: item.prop.kf.slice(keyOffset, keyOffset + keys).map((key: any) => ({
       time: PM.round(key.t, 3), compositionTime: PM.round(layer.from + key.t, 3),
       value: clone(key.v), hold: !!key.hold,
     })),
@@ -79,27 +85,32 @@ function propertyDigest(layer: any) {
   }));
 }
 
-function projectState() {
+function projectState(options: any = {}) {
   const p = PM.proj;
   const selectedIds = new Set(PM.sel?.layers || []);
+  const layerOffset = Math.max(0, Math.trunc(Number(options.layerOffset) || 0));
+  const layerLimit = Math.max(1, Math.min(20, Math.trunc(Number(options.layerLimit) || 12)));
   return {
     composition: {
       id: p.id, name: p.name, width: p.w, height: p.h, fps: p.fps,
       duration: p.dur, workArea: clone(p.work), background: p.backgroundFill || p.bg,
       playhead: PM.round(PM.time, 3), revision: Number(p.revision) || 0,
     },
+    layerCount: p.layers.length,
     mediaAssets: videoAssets(PM),
     videoEditingTool: 'edit_video',
     selection: clone(PM.sel),
-    layers: p.layers.slice(0, 120).map((layer: any, index: any) => ({
-      index, id: layer.id, name: layer.name, type: layer.type, from: layer.from,
+    layers: p.layers.filter((layer: any) => !options.layerId || layer.id === options.layerId).slice(layerOffset, layerOffset + layerLimit).map((layer: any) => ({
+      index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
       blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
       content: Object.fromEntries(Object.entries(layer.d || {}).map(([key, value]) => [
         key,
         typeof value === 'string' ? value.slice(0, key === 'code' ? 8000 : 500) : clone(value),
       ])),
-      properties: propertyDigest(layer),
+      masks: (layer.masks || []).map((m: any) => ({ id: m.id, shape: m.shape, mode: m.mode, hasPath: !!m.path, vertices: m.path?.vertices?.length || 0 })),
+      propertyCount: PM.allProps(layer).length,
+      properties: propertyDigest(layer, options),
       effects: (layer.fx || []).map((effect: any) => ({ id: effect.id, type: effect.type, enabled: effect.on })),
       textLayout: layer.type === 'text' && selectedIds.has(layer.id) && PM.textLayout
         ? PM.textLayout(layer, PM.time) : null,
@@ -108,7 +119,7 @@ function projectState() {
     markers: clone(p.markers || []),
     availableOperations: [...SCENE_OPERATIONS],
     availableCapabilities: PM.Capabilities?.catalog?.() || null,
-    editableSource: PM.Edit?.sourceCatalog?.() || null,
+    pagination: { layerOffset, layerLimit, keyframeOffset: Number(options.keyframeOffset) || 0, propertyOffset: Number(options.propertyOffset) || 0, propertyLimit: Math.min(100, Number(options.propertyLimit) || 100), note: 'Properties and keyframes are sampled. Use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit for focused reads. Full source is in inputs/powermove-project.json (run-start snapshot).' },
   };
 }
 
@@ -324,7 +335,9 @@ interface LiveToolTransaction {
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
 
 function toolText(value: unknown): AgentToolContent {
-  return { type: 'text', text: JSON.stringify(value) };
+  const serialized = JSON.stringify(value);
+  if (serialized.length > 1_900_000) throw new Error('State exceeds the response budget. Read a single layerId with propertyLimit: 10 and keyframeLimit: 0, then page the properties/keyframes. Use capture_panel for visual inspection.');
+  return { type: 'text', text: serialized };
 }
 
 function currentRevision(): number {
@@ -405,7 +418,36 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   if (request.tool === 'get_project_state') {
     const transaction = liveToolTransactions.get(request.runId);
     if (transaction?.panelActions) transaction.revision = currentRevision();
-    return { ok: true, content: [toolText(projectState())], revision: currentRevision() };
+    return { ok: true, content: [toolText(projectState(request.arguments))], revision: currentRevision() };
+  }
+  if (request.tool === 'get_workspace_state') {
+    const file = PM.projectFileState?.(PM.proj.id);
+    const projects = PM.Projects?.list?.() || [];
+    const state = {
+      project: {
+        id: PM.proj.id, name: PM.proj.name, revision: currentRevision(),
+        layerCount: PM.proj.layers.length, file: file?.path || null, unsaved: file?.dirty ?? null,
+      },
+      openProjects: (PM.Projects?.tabs?.() || []).map((id: string) => ({
+        id, name: projects.find((p: any) => p.id === id)?.name || null, active: id === PM.proj.id,
+      })),
+      extensions: extensionRecords().map(record => ({
+        id: record.id, version: record.manifest?.version, enabled: record.enabled, health: record.health,
+      })),
+      projectsScreenOpen: PM.ProjectsScreen?.isOpen || false,
+      selection: clone(PM.sel), layout: panelLayoutDigest(),
+      viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+      errors: PM.agentDiagnostics || [],
+    };
+    return { ok: true, content: [toolText(state)], revision: currentRevision() };
+  }
+  if (request.tool === '__panel_bounds') return { ok: true, content: [toolText(panelBounds(PM, request.arguments.panelId))], revision: currentRevision() };
+  if (request.tool === '__prepare_panel_input') {
+    const target = preparePanelInput(PM, request.arguments);
+    const transaction = beginLiveTransaction(request, 'Use panel');
+    if (currentRevision() !== transaction.revision) throw new Error('The project changed. Read get_project_state before using another panel control.');
+    transaction.panelActions = true;
+    return { ok: true, content: [toolText(target)], revision: currentRevision() };
   }
   if (request.tool === 'get_panel_layout') {
     return { ok: true, content: [toolText(panelLayoutDigest())], revision: currentRevision() };

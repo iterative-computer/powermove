@@ -264,7 +264,7 @@ player.loop = false;
 // player.destroy();
 \`\`\`
 
-Canvas CSS controls display size; its drawing resolution is the composition size. Omit transparent to preserve the composition background. autoplay defaults to false; loop defaults to true; audio defaults to true. Web audio may require a user gesture. Calls after destroy are invalid. seek clamps to the last frame. Playback stops on the last frame when loop is false.
+Canvas CSS controls display size; the drawing buffer follows that size and screen pixel density, within GPU limits. Omit transparent to preserve the composition background. autoplay defaults to false; loop defaults to true; audio defaults to true. Web audio may require a user gesture. Calls after destroy are invalid. seek clamps to the last frame. Playback stops on the last frame when loop is false.
 
 Use await player.setParameter(name, value) for the composition parameters listed below. These drive existing param(name) expressions; changing an unreferenced parameter does not change the picture. await player.setText(layerId, text) overrides a root text layer's text animation for this player instance. Both operate on a private copy, leaving scene.json unchanged.
 

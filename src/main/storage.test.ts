@@ -222,6 +222,32 @@ describe('file store', () => {
     expect(store.snapshot()).toEqual({});
   });
 
+  it('persists take history larger than the ordinary settings limit', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory);
+    await store.load();
+    const takes = [{ id: 'large-take', json: 'x'.repeat(LIMITS.storeValueBytes) }];
+    store.set('takes', takes);
+    await store.flushAll();
+    const reopened = createStore(directory);
+    await reopened.load();
+    expect((reopened.snapshot().takes as typeof takes)[0]!.json.length).toBe(LIMITS.storeValueBytes);
+  });
+
+  it('round-trips the 168720601-byte take history reported by the editor', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory);
+    await store.load();
+    const takes = [{ id: 'reported-history', json: '' }];
+    takes[0]!.json = 'x'.repeat(168720601 - Buffer.byteLength(JSON.stringify(takes)));
+    store.set('takes', takes);
+    await store.flushAll();
+    expect((await fs.stat(path.join(directory, 'takes.json'))).size).toBe(168720601);
+    const reopened = createStore(directory);
+    await reopened.load();
+    expect(reopened.snapshot().takes).toEqual(takes);
+  }, 30_000);
+
   it('flushAll waits for an active write and a newer pending write', async () => {
     const directory = await temporaryDirectory();
     let release!: () => void;

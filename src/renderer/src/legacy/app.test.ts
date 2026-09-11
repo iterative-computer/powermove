@@ -10,7 +10,7 @@ afterEach(() => {
   else delete (globalThis as any).window;
 });
 
-function appRegistry(withExtensionSurfaces = true, bootProject?: any): {
+function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?: any): {
   PM: PMRegistry;
   memory: Map<string, any>;
   listeners: Map<string, any[]>;
@@ -95,6 +95,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any): {
     id: 'P1', name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',
     layers: [], assets: {}, markers: [], params: {}, comps: {},
   };
+  const states = new Map<string, any>(bootFile ? [[raw.id, { file: bootFile }]] : []);
   const projects = new Map<string, any>([[raw.id, raw]]);
   const busHandlers = new Map<string, any[]>();
   let nextId = 0;
@@ -121,8 +122,8 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any): {
       get: (id: string) => projects.get(id) || null,
       put: (project: any) => projects.set(project.id, project),
       remove: (id: string) => projects.delete(id),
-      getState: () => null,
-      putState() {},
+      getState: (id: string) => states.get(id) || null,
+      putState: (id: string, state: any) => states.set(id, state),
       tabs: () => [raw.id],
       markOpen() {},
       markClosed() {},
@@ -227,6 +228,65 @@ describe('legacy app install', () => {
     expect(Object.hasOwn(layer.d.data, 'constructor')).toBe(false);
   });
 
+  it('closes an unchanged project without a file or a save prompt', async () => {
+    const { PM } = appRegistry();
+    const confirmProjectClose = vi.fn(async () => 'cancel');
+    (window as any).powermove = { confirmProjectClose };
+    expect(await PM.confirmCloseProject('P1')).toBe(true);
+    expect(confirmProjectClose).not.toHaveBeenCalled();
+  });
+
+  it('prompts for edits to a project without a file, but not after reverting them', async () => {
+    const { PM } = appRegistry();
+    const confirmProjectClose = vi.fn(async () => 'cancel');
+    (window as any).powermove = { confirmProjectClose };
+    PM.proj.name = 'Edited';
+    PM.autosave();
+    expect(await PM.confirmCloseProject('P1')).toBe(false);
+    expect(confirmProjectClose).toHaveBeenCalledOnce();
+    PM.proj.name = 'Test';
+    PM.autosave();
+    expect(await PM.confirmCloseProject('P1')).toBe(true);
+    expect(confirmProjectClose).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the original unsaved baseline across recovery', async () => {
+    const first = appRegistry().PM;
+    await first.confirmCloseProject('P1');
+    const file = first.Projects.getState('P1').file;
+    expect(file.baselineHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(file.savedHash).toBeUndefined();
+    const recovered = JSON.parse(JSON.stringify(first.proj));
+    recovered.name = 'Recovered edits';
+    const { PM } = appRegistry(true, recovered, file);
+    const confirmProjectClose = vi.fn(async () => 'cancel');
+    (window as any).powermove = { confirmProjectClose };
+    expect(await PM.confirmCloseProject('P1')).toBe(false);
+    expect(confirmProjectClose).toHaveBeenCalledOnce();
+  });
+
+  it('does not prompt after a no-op autosave on a saved project', async () => {
+    const { PM, timers } = appRegistry();
+    const confirmProjectClose = vi.fn(async () => 'cancel');
+    (window as any).powermove = {
+      saveFile: async () => ({ ok: true, path: '/tmp/Test.pmv' }), confirmProjectClose,
+    };
+    await PM.saveProject();
+    PM.autosave();
+    const recovery = timers.get(PM.app.saveTimer)();
+    expect(await PM.confirmCloseProject('P1')).toBe(true);
+    await recovery;
+    expect(confirmProjectClose).not.toHaveBeenCalled();
+  });
+
+  it('does not treat overlapping unchanged comparisons as edits', async () => {
+    const { PM } = appRegistry();
+    const confirmProjectClose = vi.fn(async () => 'cancel');
+    (window as any).powermove = { confirmProjectClose };
+    expect(await Promise.all([PM.confirmCloseProject('P1'), PM.confirmCloseProject('P1')])).toEqual([true, true]);
+    expect(confirmProjectClose).not.toHaveBeenCalled();
+  });
+
   it('saves named projects with an identity, preserves dirty state through autosave, and supports Save As', async () => {
     const { PM, timers } = appRegistry();
     const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
@@ -294,6 +354,8 @@ describe('legacy app install', () => {
 
   it('shows the unsaved prompt after an in-flight save is cancelled', async () => {
     const { PM } = appRegistry();
+    PM.proj.name = 'Edited';
+    PM.autosave();
     let finish!: (result: any) => void;
     const saveFile = vi.fn(() => new Promise(resolve => { finish = resolve; }));
     const confirmProjectClose = vi.fn(async () => 'discard');
@@ -310,6 +372,8 @@ describe('legacy app install', () => {
 
   it('keeps the project open when the close prompt or its Save dialog is cancelled', async () => {
     const { PM } = appRegistry();
+    PM.proj.name = 'Edited';
+    PM.autosave();
     (window as any).powermove = { confirmProjectClose: async () => 'cancel' };
     expect(await PM.prepareToClose()).toBe(false);
     (window as any).powermove = {

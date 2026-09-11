@@ -8,7 +8,8 @@ test('agent cuts imported footage, reviews decoded frames, and undoes the run', 
   const result = await page.evaluate(async () => {
     const PM = (window as any).PM;
     const clip = PM.proj.layers.find((l: any) => l.type === 'video');
-    PM.Edit.apply({ type: 'delete_layers', targets: PM.proj.layers.filter((l: any) => l.id !== clip.id).map((l: any) => l.id) });
+    const others = PM.proj.layers.filter((l: any) => l.id !== clip.id).map((l: any) => l.id);
+    if (others.length) PM.Edit.apply({ type: 'delete_layers', targets: others });
     PM.Edit.apply({ type: 'set_layer', target: clip.id, patch: { from: 0 } });
     const before = JSON.stringify(PM.proj.layers);
     const baseRevision = PM.proj.revision;

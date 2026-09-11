@@ -856,7 +856,10 @@ function applyPathMasks(L:any,T:number,srcF:any,W:number,H:number,masks:any[]) {
     }));
   }
   g.u('u_covTransform',coverageTransform);
-  bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,texFor('path-mask:'+L.id,cv));setI(p,'u_cov',1);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);return out;
+  // Uploading a canvas binds texture unit 0. Complete the upload before
+  // binding the source, or u_tex samples the white coverage instead of video.
+  const coverage = texFor('path-mask:'+L.id,cv);
+  bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,coverage);setI(p,'u_cov',1);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);return out;
 }
 function applyTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:any) {
   const source=proj.layers.find((l:any)=>l.id===L.matteSource);

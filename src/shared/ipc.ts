@@ -365,7 +365,7 @@ export interface PowermoveBridge {
   confirmProjectClose(name: string): Promise<CloseDecision>;
 
   render: {
-    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string}):Promise<string>;
+    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string>;
     write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;
     finish(token:string):Promise<{path?:string;cancelled?:boolean}>;
     cancel(token:string):Promise<void>;

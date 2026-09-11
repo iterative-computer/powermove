@@ -81,7 +81,7 @@ describe('native Powermove agent tool bridge', () => {
 
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
-      'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
+      'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
     ]);
 
     const state = await rpc(child, {
@@ -118,6 +118,33 @@ describe('native Powermove agent tool bridge', () => {
 
     expect(first).toEqual(second);
     expect(owner.requests.filter((request) => request.tool === '__finish_run')).toHaveLength(1);
+  });
+
+  it('rejects oversized owning-renderer responses immediately instead of timing out', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    owner.send = (_channel, request) => {
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
+        runId: request.runId, callId: request.callId, ok: true,
+        content: [{ type: 'text', text: 'x'.repeat(2_000_001) }]
+      }));
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', timeoutMs: 60_000 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-large', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('oversized response');
+    owner.destroyed = true;
+  });
+
+  it('ends an in-flight request immediately if the renderer crashes', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    owner.send = () => { queueMicrotask(() => owner.emit('render-process-gone')); };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', timeoutMs: 60_000 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-crash', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callRenderer(session, 'interact_panel', {})).rejects.toThrow('outcome is unknown');
+    expect(owner.listenerCount('render-process-gone')).toBe(0);
+    owner.destroyed = true;
   });
 
   it('rejects unknown tools before they reach the renderer', async () => {

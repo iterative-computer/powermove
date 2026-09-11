@@ -22,7 +22,7 @@ await player.seek(0.5);
 player.destroy();
 ```
 
-`play`, `pause`, `seek` (seconds), and `loop` control playback. `setParameter` updates existing composition parameters referenced by expressions. `setText` overrides a root text layer by its stable ID. Every player owns a private scene copy. Canvas CSS controls display size; drawing resolution remains the composition size. The React example owns a separate canvas per effect lifecycle, including Strict Mode cleanup.
+`play`, `pause`, `seek` (seconds), and `loop` control playback. `setParameter` updates existing composition parameters referenced by expressions. `setText` overrides a root text layer by its stable ID. Every player owns a private scene copy. Canvas CSS controls display size; the drawing buffer follows that size and screen pixel density, within GPU limits. Vector layers are rasterized again at the resulting resolution, including after resizing or browser zoom. The React example owns a separate canvas per effect lifecycle, including Strict Mode cleanup.
 
 ## Rendering and generated effects
 

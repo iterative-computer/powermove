@@ -45,6 +45,6 @@ describe('agent panel controls', () => {
     await openPanel(PM, 'footage');
     expect(PM.Layout.addPanel).not.toHaveBeenCalled();
     expect(ws.layout.docks[0]!.panels[0]!.collapsed).toBe(false);
-    expect(() => readPanel(PM, 'agent')).toThrow('permission');
+    await expect(interactPanel(PM, { panelId: 'agent', action: 'click' })).rejects.toThrow('permission');
   });
 });

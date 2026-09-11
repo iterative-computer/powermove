@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PMRegistry } from '../registry';
 import { install } from './exporter';
 
-function exporter(): any {
+function exporter(overrides: any = {}): any {
   (globalThis as any).window = globalThis;
   const PM: PMRegistry = {
     version: 'test',
@@ -17,6 +17,7 @@ function exporter(): any {
     renderFrameTo: () => null,
     GL: { canvas: { width: 2, height: 2 }, resize() {}, render() {} },
   };
+  Object.assign(PM, overrides);
   install(PM);
   return PM.Export;
 }
@@ -78,5 +79,24 @@ describe('legacy exporter install', () => {
     }
 
     expect(clusters).toBeGreaterThanOrEqual(2);
+  });
+});
+
+
+describe('export lifecycle', () => {
+  it('releases the export lock when progress setup throws, allowing retry', async () => {
+    let attempts = 0;
+    const X = exporter({
+      proj: { name: 'Retry', w: 64, h: 64, fps: 30, dur: 1 },
+      pause() {}, setTime() {},
+      h() { attempts++; throw new Error('Preview setup failed'); }
+    });
+    const first = await X.run({ format: 'webm' });
+    expect(first.error).toBe('Preview setup failed');
+    expect(X.busy).toBe(false);
+    const retry = await X.run({ format: 'webm' });
+    expect(retry.error).toBe('Preview setup failed');
+    expect(attempts).toBe(2);
+    expect(X.busy).toBe(false);
   });
 });

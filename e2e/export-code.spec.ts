@@ -135,7 +135,9 @@ test('web export plays independently and matches editor frames', async ({ sessio
     await page.locator('#play').click();
     const actual = await page.evaluate(async () => {
       const { createPlayer } = await import(/* @vite-ignore */ location.origin + '/player.js');
-      const canvas = document.createElement('canvas'); document.body.append(canvas);
+      const canvas = document.createElement('canvas');
+      canvas.style.width = '320px'; canvas.style.height = '180px';
+      document.body.append(canvas);
       const player = await createPlayer({ canvas, scene: './scene.json', audio: false });
       (window as any).testPlayer = player;
       (window as any).testCanvas = canvas;
@@ -164,6 +166,14 @@ test('web export plays independently and matches editor frames', async ({ sessio
       await testInfo.attach(`frame-${i}-comparison`, { body: JSON.stringify({ time: [0, .5, 1][i], averageChannelError: averageError, tolerance: 1 }), contentType: 'application/json' });
       expect(averageError).toBeLessThan(1);
     }
+    await page.evaluate(() => {
+      const canvas = (window as any).testCanvas;
+      canvas.style.width = '640px'; canvas.style.height = '360px';
+    });
+    await expect.poll(() => page.evaluate(() => {
+      const canvas = (window as any).testCanvas;
+      return [canvas.width, canvas.height];
+    })).toEqual([640, 360]);
     const controls = await page.evaluate(async textId => {
       const player = (window as any).testPlayer;
       await player.seek(.5);
@@ -189,6 +199,16 @@ test('web export plays independently and matches editor frames', async ({ sessio
       return { advanced, stopped, looped, rejected, changed };
     }, exported.textId);
     expect(controls).toEqual({ advanced: true, stopped: true, looped: true, rejected: true, changed: true });
+    const retina = await browser.newPage({ deviceScaleFactor: 2 });
+    await retina.goto(`http://127.0.0.1:${port}`);
+    await expect(retina.locator('#play')).toBeEnabled();
+    const retinaSize = await retina.locator('canvas').evaluate((canvas: HTMLCanvasElement) => ({
+      actual: [canvas.width, canvas.height],
+      expected: [Math.round(canvas.getBoundingClientRect().width * devicePixelRatio),
+        Math.round(canvas.getBoundingClientRect().height * devicePixelRatio)],
+    }));
+    expect(retinaSize.actual).toEqual(retinaSize.expected);
+    await retina.close();
     expect(errors).toEqual([]);
   } finally { await browser.close(); await new Promise<void>(resolve => server.close(() => resolve())); }
 

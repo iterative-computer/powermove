@@ -16,6 +16,9 @@ import { parseStoreKey, storeFileName } from '../shared/store-keys';
 
 const WRITE_DELAY_MS = 150;
 const QUIT_FLUSH_CEILING_MS = 5_000;
+// Takes retain up to 24 complete editable snapshots; large tracked projects
+// can exceed the ordinary settings limit without being corrupt.
+const MAX_TAKES_BYTES = 24 * LIMITS.storeValueBytes;
 
 export type StoreFileSystem = Pick<
   typeof nodeFs,
@@ -118,10 +121,11 @@ class FileStore implements Store {
       throw new IpcValidationError(IPC.storeSet, 'value is not JSON-serialisable');
     }
     const byteLength = Buffer.byteLength(serialized, 'utf8');
-    if (byteLength > LIMITS.storeValueBytes) {
+    const byteLimit = key === 'takes' ? MAX_TAKES_BYTES : LIMITS.storeValueBytes;
+    if (byteLength > byteLimit) {
       throw new IpcValidationError(
         IPC.storeSet,
-        `serialised value is ${byteLength} bytes (maximum ${LIMITS.storeValueBytes})`
+        `serialised value is ${byteLength} bytes (maximum ${byteLimit})`
       );
     }
 
