@@ -2,6 +2,7 @@
   import { ArrowUpRight, Bot, FileCode2, History, Layers2, Puzzle, Sparkles, Undo2, Wand2, Zap } from '@lucide/svelte';
   import Header from '$lib/Header.svelte';
   import HeroAnimation from '$lib/HeroAnimation.svelte';
+  import LogoCloud from '$lib/LogoCloud.svelte';
 
   type Feature = { id: string; rail: string; label: string; lead: string; text: string; points: { icon: typeof Bot; label: string }[] };
 
@@ -72,12 +73,7 @@
     <figure class="stage" id="editor">
       <img src="/editor-hero.png" alt="Powermove editor over a desert night sky, with a cinematic title, layer stack, property inspector, agent panel, and keyframe timeline." width="1920" height="1280" fetchpriority="high" />
     </figure>
-    <p class="works-with" aria-label="Works with">
-      <span>Runs your agent</span>
-      <strong>Codex</strong>
-      <strong>Claude Code</strong>
-      <span>macOS · Apple Silicon</span>
-    </p>
+    <LogoCloud />
   </section>
 
   <section class="features" aria-labelledby="features-title">
