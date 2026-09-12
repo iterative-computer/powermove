@@ -73,8 +73,8 @@ h1 .muted{color:var(--tx-3)}
 }
 
 /* ---- hero ---- */
-.hero{padding-top:88px;padding-bottom:0}
-@media(min-width:1024px){.hero{padding-top:96px}}
+.hero{padding-top:144px;padding-bottom:0}
+@media(min-width:1024px){.hero{padding-top:192px}}
 .hero-art{position:relative;width:min(100%,840px);height:clamp(72px,8vw,104px);margin-inline:auto;overflow:hidden}
 .hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 @media(max-width:600px){.hero-art{height:72px}}
