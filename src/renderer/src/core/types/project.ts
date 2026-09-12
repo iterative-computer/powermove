@@ -364,6 +364,8 @@ export interface EditLogEntry {
   label: string;
   summary: string[];
   operations: EditLogOperation[];
+  /** Large historical payloads were omitted; current source and Undo are separate. */
+  payloadOmitted?: boolean;
 }
 
 /**

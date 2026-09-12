@@ -121,7 +121,12 @@ class FileStore implements Store {
       throw new IpcValidationError(IPC.storeSet, 'value is not JSON-serialisable');
     }
     const byteLength = Buffer.byteLength(serialized, 'utf8');
-    const byteLimit = key === 'takes' ? MAX_TAKES_BYTES : LIMITS.storeValueBytes;
+    const parsedKey = parseStoreKey(key);
+    // Editable project snapshots must support the same size as project files;
+    // the ordinary settings cap rejects valid media-heavy projects on autosave.
+    const isProject = parsedKey?.kind === 'dynamic' && parsedKey.prefix === 'project';
+    const byteLimit = key === 'takes' ? MAX_TAKES_BYTES
+      : isProject ? LIMITS.fileSaveBytes : LIMITS.storeValueBytes;
     if (byteLength > byteLimit) {
       throw new IpcValidationError(
         IPC.storeSet,

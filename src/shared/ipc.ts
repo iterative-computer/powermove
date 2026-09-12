@@ -87,7 +87,7 @@ export interface OnboardingBridge {
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
 
 /* ── limits enforced in main ─────────────────────────────── */
-// Agent context must accept the same complete snapshots as project persistence.
+// Default store and agent-context allowance. Project persistence uses fileSaveBytes.
 const PROJECT_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
 export const LIMITS = {
@@ -125,7 +125,7 @@ export interface MediaProxyRequest {
   name: string;
 }
 export type MediaProxyResult =
-  | { ok: true; token: string; type: 'video/quicktime'; size: number }
+  | { ok: true; token: string; type: 'video/webm'; size: number }
   | { ok: false; error: string };
 export interface MediaProxyReadRequest {
   token: string;

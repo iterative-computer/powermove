@@ -4,11 +4,11 @@ import { validMatteSource } from './matte';
 import { canAnimateContent, evaluatedValue, isProperty } from './content-properties';
 import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
+import { compactEditLog } from '../../core/edit-log';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
-const MAX_EDITS: any = 200;
 const FORBIDDEN_KEYS: any = new Set(['__proto__', 'prototype', 'constructor']);
 const AUDIO_CONTENT_FIELDS: any = new Set(['asset', 'trim', 'gain', 'fadeIn', 'fadeOut']);
 /* Trust classification for every command origin. Trust decisions use the RAW
@@ -166,17 +166,17 @@ function rememberLive(command: any) {
 function record(label: any, origin: any, applied: any, detail: any = {}) {
   PM.proj.revision = Math.max(0, Number(PM.proj.revision) || 0) + 1;
   PM.proj.edits = Array.isArray(PM.proj.edits) ? PM.proj.edits : [];
-  PM.proj.edits.push({
+  const entry = compactEditLog([{
     id: PM.uid('edit'),
     revision: PM.proj.revision,
     at: Date.now(),
     origin: origin || 'interface',
     label: label || 'Edit source',
     summary: detail.summary || applied.map(summarize),
-    operations: clone(applied),
-    ...(detail.structural ? { structural: clone(detail.structural) } : {}),
-  });
-  if (PM.proj.edits.length > MAX_EDITS) PM.proj.edits.splice(0, PM.proj.edits.length - MAX_EDITS);
+    operations: applied,
+    ...(detail.structural ? { structural: detail.structural } : {}),
+  }])[0];
+  PM.proj.edits = compactEditLog([...PM.proj.edits, clone(entry)]);
 }
 
 function setProperty(command: any) {

@@ -151,7 +151,7 @@ describe('preload bridge', () => {
 
   it('resolves selected media paths only in preload and reads proxies in bounded requests', async () => {
     const file = { name: 'source.mov' } as File;
-    const created = { ok: true, token: 'a'.repeat(32), type: 'video/quicktime', size: 12 } as const;
+    const created = { ok: true, token: 'a'.repeat(32), type: 'video/webm', size: 12 } as const;
     const bytes = new Uint8Array([1, 2, 3]);
     electronMocks.getPathForFile.mockReturnValue('/Users/editor/source.mov');
     electronMocks.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce(created).mockResolvedValueOnce(bytes).mockResolvedValueOnce(undefined);

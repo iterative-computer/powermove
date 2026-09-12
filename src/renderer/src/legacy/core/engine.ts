@@ -144,7 +144,10 @@ PM.bus.on('draw', () => { needsDraw = true; });
 
 function frame(now: any) {
   window.requestAnimationFrame(frame);
-  if (PM.agentFrameCapture) return;
+  // Offline renderers own the shared video decoders and canvas until done.
+  // Redrawing the preview here seeks them back to the editor playhead between
+  // export frames, producing repeated/frozen frames in the encoded video.
+  if (PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active) return;
   const p = PM.proj;
   if (PM.playing) {
     const gap = (now-clock.last)/1000;

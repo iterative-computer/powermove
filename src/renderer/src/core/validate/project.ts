@@ -1,6 +1,7 @@
 import { CHANNELS_3D } from '../../legacy/core/space-3d';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
+import { compactEditLog } from '../edit-log';
 import {
   BLEND_MODES,
   TYPE_META,
@@ -41,7 +42,6 @@ const MASK_DEFAULTS = { x: 0, y: 0, w: 0, h: 0, rotation: 0, feather: 24 } as co
 const MASK_SHAPES = ['rect', 'ellipse'] as const;
 const FONT_AXIS_PREFIX = 'fontAxis.';
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
-const MAX_EDITS = 200;
 const EFFECT_TYPES = new Set([
   'blur', 'motionblurDir', 'sharpen', 'glow', 'color', 'levels', 'duotone', 'grain',
   'vignette', 'chroma', 'pixelate', 'posterize', 'displace', 'shadow', 'invert'
@@ -547,7 +547,7 @@ function sanitizeMarkers(raw: unknown): Project['markers'] {
 
 function sanitizeEdits(raw: unknown): EditLogEntry[] {
   if (!Array.isArray(raw)) return [];
-  return raw.filter(isRecord).slice(-MAX_EDITS).map(entry => {
+  return compactEditLog(raw.filter(isRecord)).map(entry => {
     const operations = (Array.isArray(entry.operations) ? entry.operations : [])
       .map(operation => sanitizeJsonValue(operation, new Set()))
       .filter((operation): operation is EditLogOperation => isRecord(operation));
@@ -560,7 +560,8 @@ function sanitizeEdits(raw: unknown): EditLogEntry[] {
       summary: Array.isArray(entry.summary)
         ? entry.summary.filter((item): item is string => typeof item === 'string')
         : [],
-      operations
+      operations,
+      ...(entry.payloadOmitted === true ? { payloadOmitted: true } : {})
     };
   });
 }

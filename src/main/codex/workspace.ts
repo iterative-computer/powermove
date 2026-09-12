@@ -181,8 +181,11 @@ export async function prepareAgentWorkspace(
   }
   // Remove stale pack files individually (never rm -rf: a concurrent run on the
   // same project may be reading the directory).
-  for (const entry of await readdir(apiPackDirectory)) {
-    if (!apiPackNames.has(entry)) await rm(path.join(apiPackDirectory, entry), { force: true });
+  for (const entry of await readdir(apiPackDirectory, { withFileTypes: true })) {
+    if (entry.isDirectory()) continue;
+    if (!apiPackNames.has(entry.name)) {
+      await rm(path.join(apiPackDirectory, entry.name), { force: true });
+    }
   }
 
   for (const [index, attachment] of req.attachments.entries()) {

@@ -681,8 +681,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-shell :is(pre,code,textarea){white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%;min-width:0}
 .agent-shell :is(.agent-word,.agent-thinking-word){max-width:100%;overflow-wrap:anywhere}
 .agent-shell .agent-option-bar{flex-wrap:wrap}
-.agent-shell .agent-modelbar{max-width:100%;flex-wrap:wrap}
-.agent-shell .agent-modelbar select{max-width:100%}
+.agent-shell .agent-modelbar{max-width:100%;flex-wrap:nowrap;overflow:hidden}
+.agent-shell .agent-modelbar select{max-width:100%;flex:none}
 .agent-shell .agent-scroll{overflow-x:hidden}
 @container (max-width:280px){.agent-composer .agent-input-row{gap:3px}}
 .agent-shell .agent-card-actions{flex-wrap:wrap}
@@ -824,13 +824,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-stop{background:var(--tx);color:var(--bg-panel)}
 .agent-stop:hover{opacity:.9}
 .agent-stop>i{width:9px;height:9px;border-radius:2px;background:currentColor}
-/* Model and focus choices wrap within the composer at narrow dock widths. */
-.agent-option-bar{display:flex;align-items:center;gap:2px;min-width:0;padding:5px 0 0;flex-wrap:wrap;margin-top:0}
-.agent-option-bar .sp{flex:1}
-.agent-modelbar{display:flex;align-items:center;gap:2px;min-width:0;padding:0;border-radius:var(--r-sm);color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-regular);white-space:nowrap;transition:background var(--dur-1),color var(--dur-1)}
+/* Model and focus choices share one line; the model selects size to the
+   chosen label (not the longest option) so short names leave no dead gap. */
+.agent-option-bar{display:flex;align-items:center;gap:0;min-width:0;max-width:100%;padding:5px 0 0;flex-wrap:nowrap;overflow:hidden;margin-top:0}
+.agent-option-bar .sp{flex:1 1 6px;min-width:6px}
+.agent-modelbar{display:flex;align-items:center;gap:0;flex:0 1 auto;min-width:0;max-width:100%;flex-wrap:nowrap;overflow:hidden;padding:0;border-radius:var(--r-sm);color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-regular);white-space:nowrap;transition:background var(--dur-1),color var(--dur-1)}
 .agent-modelbar select:hover,.agent-modelbar select:focus-visible{background:var(--ink-1);color:var(--tx)}
-.agent-modelbar select{min-width:0;appearance:none;border:0;outline:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-overflow:ellipsis;border-radius:var(--r-sm);padding:2px 5px}
-.agent-modelbar select.effort{opacity:.8;text-transform:capitalize}
+.agent-modelbar select{flex:0 1 auto;width:auto;min-width:0;max-width:130px;field-sizing:content;appearance:none;border:0;outline:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;border-radius:var(--r-sm);padding:2px 4px}
+.agent-modelbar select.provider{flex:none;max-width:92px}
+.agent-modelbar select.effort{flex:none;max-width:82px;opacity:.8;text-transform:capitalize}
 .agent-modelbar select.provider{font-weight:var(--fw-medium);color:var(--tx-2)}
 #library-screen.panel-library{width:min(500px,calc(100vw - 32px));height:auto;max-height:min(680px,calc(100vh - 36px));background:var(--bg-panel)}
 .panel-library-head{display:flex;align-items:center;gap:8px;padding:12px 12px 8px 16px;flex:none}

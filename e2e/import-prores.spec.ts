@@ -3,6 +3,8 @@ import { importFixture } from './helpers/media';
 
 test.describe('@import-prores automatic playback proxy', () => {
   test('converts ProRes once, presents video frames, and restores the durable proxy', async ({ session }) => {
+    await session.page.evaluate(() => (window as any).PM.newProject());
+    await session.page.getByRole('button', { name: 'Create', exact: true }).click();
     await importFixture(session.page, 'prores422.mov');
     await session.page.waitForFunction(() => {
       const PM = (window as any).PM;

@@ -1,7 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@groups timeline selection and strip editing', () => {
-  test('selecting a grouped layer opens a focused group, while disclosure restores all children', async ({ session }) => {
+  test('selecting grouped layers reveals ancestors without hiding siblings', async ({ session }) => {
     const { page } = session;
     const ids = await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -16,17 +16,25 @@ test.describe('@groups timeline selection and strip editing', () => {
       return { group: group.id, first: first.id, second: second.id };
     });
 
-    await page.waitForFunction(({ group, first }) => {
+    await page.waitForFunction(({ group, first, second }) => {
       const PM = (window as any).PM;
       return PM.UIState.getLayerCollapsed(PM.L(group)) === false
-        && PM.TL.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id).join(',') === `${group},${first}`;
+        && PM.TL.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id).join(',') === `${group},${first},${second}`;
     }, ids);
+
+    for (const selected of [ids.second, ids.group, ids.first]) {
+      await page.evaluate(id => (window as any).PM.selectLayers(id), selected);
+      await expect.poll(() => page.evaluate(() => (window as any).PM.TL.rows
+        .filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id))).toEqual([ids.group, ids.first, ids.second]);
+    }
 
     const twirl = await page.evaluate(() => {
       const T = (window as any).PM.TL, rect = T.cv.getBoundingClientRect();
       return { x: rect.left + 64, y: rect.top + T.ruler + T.row / 2 - T.scrollY };
     });
     await page.mouse.click(twirl.x, twirl.y);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.TL.rows
+      .filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id))).toEqual([ids.group]);
     await page.mouse.click(twirl.x, twirl.y);
     await page.waitForFunction(({ group, first, second }) => {
       const rows = (window as any).PM.TL.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);

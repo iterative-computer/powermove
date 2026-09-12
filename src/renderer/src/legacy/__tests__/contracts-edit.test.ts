@@ -84,6 +84,21 @@ function applyOne(PM, command, label = command.type) {
   return result;
 }
 
+it('bulk keyframes remain editable and undoable when their log payload is omitted', () => {
+  const { PM, text } = fixture();
+  const before = JSON.parse(JSON.stringify(text.p.opacity.kf));
+  const keyframes = Array.from({ length: 5000 }, (_, index) => ({ time: index / 30, value: index % 100, ease: 'linear' }));
+  applyOne(PM, { type: 'replace_keyframes', target: text.id, path: 'opacity', keyframes });
+  const after = JSON.parse(JSON.stringify(PM.proj.layers.find(layer => layer.id === text.id).p.opacity.kf));
+  assert.equal(after.length, 5000);
+  assert.equal(PM.proj.edits.at(-1).payloadOmitted, true);
+  assert.deepEqual(PM.proj.edits.at(-1).operations, []);
+  assert.equal(PM.hist.undo(), true);
+  assert.deepEqual(PM.proj.layers.find(layer => layer.id === text.id).p.opacity.kf, before);
+  assert.equal(PM.hist.redo(), true);
+  assert.deepEqual(PM.proj.layers.find(layer => layer.id === text.id).p.opacity.kf, after);
+}, 20_000);
+
 it('Edit.operations freezes the complete source-edit vocabulary', () => {
   const { PM } = fixture();
   assert.deepEqual(JSON.parse(JSON.stringify(PM.Edit.operations)), OPERATION_CONTRACT);

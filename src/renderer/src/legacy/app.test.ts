@@ -205,6 +205,15 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
 }
 
 describe('legacy app install', () => {
+  it('compacts oversized provenance when reopening without removing source', () => {
+    const { PM } = appRegistry();
+    const source = { ...PM.proj, edits: [{ id: 'bulk', summary: ['Cut out subject'], operations: [{ value: 'x'.repeat(200_000) }] }] };
+    const layers = JSON.stringify(source.layers);
+    const hydrated = PM.hydrateProject(source);
+    expect(JSON.stringify(hydrated.layers)).toBe(layers);
+    expect(hydrated.edits).toEqual([{ id: 'bulk', summary: ['Cut out subject'], operations: [], payloadOmitted: true }]);
+  });
+
   it('hydrates extension layers without needing their renderer and preserves safe structured data', () => {
     const bootProject = {
       id: 'P1', name: 'Hybrid', w: 1920, h: 1080, fps: 30, dur: 10, bg: '#000000',

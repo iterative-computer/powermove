@@ -90,8 +90,8 @@
 </div>
 
 <style>
-  .panel-focus-row { display: flex; align-items: center; min-width: 0; }
-  .panel-focus-trigger { display: flex; align-items: center; gap: 4px; min-width: 0; border: 0; border-radius: var(--r-md); padding: 2px 8px; background: transparent; color: var(--tx-3); font: var(--fw-regular) var(--fs-sm)/1.4 var(--f-ui); }
+  .panel-focus-row { display: flex; align-items: center; min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .panel-focus-trigger { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; border: 0; border-radius: var(--r-md); padding: 2px 6px 2px 2px; background: transparent; color: var(--tx-3); font: var(--fw-regular) var(--fs-xs)/1.4 var(--f-ui); }
   .panel-focus-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .panel-focus-trigger:hover { color: var(--tx); background: var(--ink-1); }
   .panel-focus-trigger:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }

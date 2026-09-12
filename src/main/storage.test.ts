@@ -222,6 +222,20 @@ describe('file store', () => {
     expect(store.snapshot()).toEqual({});
   });
 
+  it('round-trips the 59351487-byte project reported by the editor', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory);
+    await store.load();
+    const project = { id: 'large-project', editableSource: '' };
+    project.editableSource = 'x'.repeat(59351487 - Buffer.byteLength(JSON.stringify(project)));
+    store.set('project.large-project', project);
+    await store.flushAll();
+    expect((await fs.stat(path.join(directory, 'project.large-project.json'))).size).toBe(59351487);
+    const reopened = createStore(directory);
+    await reopened.load();
+    expect(reopened.snapshot()['project.large-project']).toEqual(project);
+  }, 30_000);
+
   it('persists take history larger than the ordinary settings limit', async () => {
     const directory = await temporaryDirectory();
     const store = createStore(directory);

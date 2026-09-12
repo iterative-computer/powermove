@@ -24,7 +24,7 @@ import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
-import { MediaProxyService, registerMediaProxyIpc } from './media-proxy';
+import { MediaProxyService, playbackConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
 import { registerSaveIpc } from './save';
@@ -395,7 +395,10 @@ if (!hasSingleInstanceLock) {
   });
 
   void app.whenReady().then(async () => {
-    const mediaProxies = new MediaProxyService(app.getPath('temp'));
+    const proxyEncoder = app.isPackaged
+      ? path.join(process.resourcesPath, 'encoder', 'ffmpeg')
+      : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
+    const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder));
     registerAppProtocol();
     installPermissionHandlers();
 

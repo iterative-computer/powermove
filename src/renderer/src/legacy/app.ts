@@ -1,6 +1,7 @@
 import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
+import { compactEditLog } from '../core/edit-log';
 import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
@@ -127,6 +128,7 @@ function loadBootProject() {
 function hydrate(p: any) {
   const base = PM.mkProject({ name: p.name, w: p.w, h: p.h, fps: p.fps, dur: p.dur, bg: p.bg });
   Object.assign(base, p);
+  base.edits = compactEditLog(Array.isArray(p.edits) ? p.edits : []);
   base.backgroundFill = PM.normalizeFill(p.backgroundFill, p.bg || '#000000');
   base.bg = base.backgroundFill.stops[0].color;
   base.layers = Array.isArray(p.layers) ? p.layers : [];
@@ -313,6 +315,7 @@ function hydrate(p: any) {
     c.bg = typeof c.bg === 'string' ? c.bg : '#000000';
     c.params = sanitizeParams(c.params);
     c.layers = Array.isArray(c.layers) ? c.layers : [];
+    c.edits = compactEditLog(Array.isArray(c.edits) ? c.edits : []);
     sanitizeLayers(c.layers, c);
   });
   sanitizeLayers(base.layers, base);
@@ -820,7 +823,9 @@ PM.prepareToClose = async () => {
 PM.pickFiles = () => {
   const targetProject = PM.proj;
   const inp = h('input', {
-    type: 'file', multiple: true, accept: 'image/*,.svg,video/*,audio/*,.obj,.pmv',
+    // Chromium's video/* picker omits codecs it cannot decode natively.
+    // These containers also support the native playback conversion path.
+    type: 'file', multiple: true, accept: 'image/*,.svg,video/*,.mov,.mp4,.m4v,.webm,audio/*,.obj,.pmv',
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
   });
   const cleanup = () => { inp.onchange = null; inp.remove(); };

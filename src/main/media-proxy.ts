@@ -24,17 +24,20 @@ export const MAX_PROXY_CHUNK_BYTES = 4 * 1024 * 1024;
 type ProxyEntry = { directory: string; file: string; size: number };
 type Convert = (source: string, output: string) => Promise<void>;
 
-async function avconvert(source: string, output: string): Promise<void> {
-  await execFileAsync('/usr/bin/avconvert', [
-    '--source', source,
-    '--preset', 'PresetHighestQuality',
-    '--output', output,
-    '--replace',
-    '--disableMetadataFilter'
-  ], {
-    timeout: TRANSCODE_TIMEOUT_MS,
-    maxBuffer: 1024 * 1024
-  });
+export function playbackConverter(binary: string): Convert {
+  return async (source, output) => {
+    // Chromium decodes VP9 alpha; H.264 proxies flatten ProRes 4444 cutouts.
+    // Keep full dimensions, timing, and optional audio, with bounded workers.
+    await execFileAsync(binary, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', source,
+      '-map', '0:v:0', '-map', '0:a:0?',
+      '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '18',
+      // Bound random seeks to half a second of decode at 30 fps. Long GOPs
+      // make timeline scrubbing and frame-by-frame exports decode seconds repeatedly.
+      '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
+      '-c:a', 'libopus', '-b:a', '192k', '-f', 'webm', '-y', output
+    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+  };
 }
 
 export class MediaProxyService {
@@ -42,7 +45,7 @@ export class MediaProxyService {
 
   constructor(
     private readonly tempRoot: string,
-    private readonly convert: Convert = avconvert
+    private readonly convert: Convert
   ) {}
 
   async create(sourcePath: string): Promise<{ token: string; size: number }> {
@@ -56,7 +59,7 @@ export class MediaProxyService {
     }
 
     const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-media-proxy-'));
-    const output = path.join(directory, 'playback.mov');
+    const output = path.join(directory, 'playback.webm');
     try {
       await this.convert(resolved, output);
       const converted = await stat(output);
@@ -132,7 +135,7 @@ export function registerMediaProxyIpc(
       return {
         ok: true,
         token: proxy.token,
-        type: 'video/quicktime',
+        type: 'video/webm',
         size: proxy.size
       };
     } catch (error) {

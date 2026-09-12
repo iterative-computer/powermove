@@ -519,6 +519,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
   let url = window.URL.createObjectURL(sourceBlob);
   let el: any, w = 0, hh = 0, dur = 0;
   let playbackProxyUsed = meta.playbackProxy === true;
+  let playbackProxyVersion = Number(meta.playbackProxyVersion) || 0;
   try {
     if (kind === 'image') {
       /* Keep an SVG as a live vector image. createImageBitmap bakes it at its
@@ -544,17 +545,25 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
         await ready;
         w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
       };
-      await openVideo();
+      const canProxy = !playbackProxyUsed && /\.(mov|mp4|m4v)$/i.test(String(name || ''));
+      let needsProxy = false;
+      try { await openVideo(); }
+      catch (error) {
+        if (!canProxy) throw error;
+        needsProxy = true;
+      }
       /* A MOV can expose valid dimensions and advance its audio clock even when
          Chromium cannot decode a single video frame (notably Apple ProRes).
-         Probe one presented frame, then stream a macOS-native H.264 proxy only
-         when that proof fails. Known proxies skip the probe on project restore. */
-      if (!playbackProxyUsed && /\.mov$/i.test(String(name || ''))
-        && !await waitForPresentedVideoFrame(el)) {
+         Probe one presented frame, then stream an alpha-preserving VP9 proxy
+         if metadata or frame decoding fails. Known proxies skip the probe on restore. */
+      if (canProxy && (needsProxy || !await waitForPresentedVideoFrame(el))) {
         try { el.pause(); } catch (e) { }
+        el.removeAttribute('src');
+        el.load();
         window.URL.revokeObjectURL(url);
         sourceBlob = await playbackProxy(blob, name);
         playbackProxyUsed = true;
+        playbackProxyVersion = 3;
         url = window.URL.createObjectURL(sourceBlob);
         await openVideo();
         if (!await waitForPresentedVideoFrame(el)) {
@@ -567,6 +576,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
       w: w || meta.w || 0, h: hh || meta.h || 0,
       dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
       playbackProxy: playbackProxyUsed,
+      playbackProxyVersion,
       persistBlob: sourceBlob,
       ...(imageFormat ? { format: imageFormat } : {}),
       ...(svg ? { svg } : {}),
@@ -615,6 +625,7 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     size: prepared.size, dur: prepared.dur, w: prepared.w, h: prepared.h,
     channels: prepared.channels || 0, sampleRate: prepared.sampleRate || 0,
     playbackProxy: prepared.playbackProxy === true,
+    playbackProxyVersion: Number(prepared.playbackProxyVersion) || 0,
     persisted: persisted === true,
     ...(prepared.format ? { format: prepared.format } : {}),
     ...(prepared.svg ? { editablePaths: prepared.svg.paths.length } : {}),
@@ -652,7 +663,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   /* Images/audio can persist while they decode. Video preparation may replace
      an unsupported source with a much smaller playback proxy, so wait for that
      decision before writing any video bytes to durable storage. */
-  const mayNeedPlaybackProxy = kind === 'video' && /\.mov$/i.test(String(file.name || ''));
+  const mayNeedPlaybackProxy = kind === 'video' && /\.(mov|mp4|m4v)$/i.test(String(file.name || ''));
   const eagerPersist = mayNeedPlaybackProxy ? null
     : PM.MediaStore.put(storageKey, file, { storageKey, fingerprint, type: file.type });
   const preparedResult: any = await Promise.resolve(preparation).then(
@@ -682,12 +693,16 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   const plan = PM.MediaImport.match(PM.proj, PM.assets.map, identity);
   const existingMeta = plan.canonicalId && PM.proj.assets[plan.canonicalId];
   const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
-  if (existingLive?.playbackProxy) identity.playbackProxy = true;
   const wasMissing = !!(existingMeta && !existingLive);
   const id = plan.canonicalId || provisionalId;
   let asset = prepared;
-  const upgradesPlayback = !!(existingLive && prepared.playbackProxy && !existingLive.playbackProxy);
+  const upgradesPlayback = !!(existingLive && prepared.playbackProxy
+    && (!existingLive.playbackProxy || prepared.playbackProxyVersion > (existingLive.playbackProxyVersion || 0)));
   if (existingLive && !upgradesPlayback) {
+    if (existingLive.playbackProxy) {
+      identity.playbackProxy = true;
+      identity.playbackProxyVersion = Number(existingLive.playbackProxyVersion) || 0;
+    }
     disposeAsset(prepared);
     asset = existingLive;
   } else {

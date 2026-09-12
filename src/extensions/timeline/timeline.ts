@@ -261,7 +261,6 @@ PM.TL = T;
 T.keySelectionActive = !!(T.keySelectionActive || PM.sel?.keys?.length);
 T.graphFocus = T.graphFocus && typeof T.graphFocus.layerId === 'string' && typeof T.graphFocus.trackKey === 'string'
   ? T.graphFocus : null;
-T.groupSelectionFocus = null;
 T.focusGraph = (L: any, channel: string) => {
   const target = typeof PM.allProps === 'function'
     ? timelineProperties(PM, L).find((row: any) => trackSelected(row, channel))
@@ -542,19 +541,14 @@ onBus('layout:applied', () => {
 let rowsDirty = true;
 let rowsAnimationVersion: number | undefined;
 let propertyLabelWidth: number | null = null;
-function syncGroupSelectionFocus() {
-  const groups = new Set<string>(), visible = new Set<string>();
+// Selection reveals its ancestor groups without filtering out sibling rows.
+// Only the disclosure control should hide children in an expanded group.
+function revealSelectedAncestors() {
   for (const layer of PM.selLayers?.() || []) {
-    const ancestors = PM.groupAncestors?.(layer) || [];
-    if (!ancestors.length) continue;
-    visible.add(layer.id);
-    for (const group of ancestors) {
-      groups.add(group.id);
-      visible.add(group.id);
+    for (const group of PM.groupAncestors?.(layer) || []) {
       PM.UIState.setLayerCollapsed(group, false);
     }
   }
-  T.groupSelectionFocus = groups.size ? { groups, visible } : null;
   rowsDirty = true;
 }
 function buildRows() {
@@ -576,8 +570,6 @@ function buildRows() {
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
     const ancestors = PM.groupAncestors?.(L) || [];
-    const focusedGroup = !T.search && ancestors.some((group: any) => T.groupSelectionFocus?.groups?.has(group.id));
-    if (focusedGroup && !T.groupSelectionFocus.visible.has(L.id)) continue;
     if (!T.search && ancestors.some((group: any) => PM.UIState.getLayerCollapsed(group))) continue;
     if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
@@ -607,14 +599,14 @@ const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
 onBus('draw:timeline', draw);
 onBus('layers', () => { rowsDirty = true; PM.invalidate('timeline'); });
 onBus('sel', () => {
-  syncGroupSelectionFocus();
+  revealSelectedAncestors();
   buildRows();
   const selectedRow = T.rows.findIndex((row: any) => row.kind === 'layer' && PM.sel.layers.includes(row.L.id));
   if (selectedRow >= 0) keepRowsVisible(selectedRow, 0);
   PM.invalidate('timeline');
 });
 onBus('history', () => { rowsDirty = true; PM.invalidate('timeline'); });
-syncGroupSelectionFocus();
+revealSelectedAncestors();
 
 function css(v: any) { return window.getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 let theme: any = null;
@@ -1945,7 +1937,6 @@ function gutterDown(e: any, x: any, y: any) {
   else if (x < 40) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(PM, L, L.on, PM.time, 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
   else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
   else if (x >= 58 + Math.min(48, (r.depth || 0) * 12) && x < 74 + Math.min(48, (r.depth || 0) * 12)) {
-    T.groupSelectionFocus = null;
     const collapsed = !PM.UIState.getLayerCollapsed(L);
     L.collapsed = collapsed;
     PM.UIState.setLayerCollapsed(L, collapsed);
