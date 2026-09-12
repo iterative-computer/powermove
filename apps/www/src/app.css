@@ -125,6 +125,8 @@ h1 .muted{color:var(--tx-3)}
 @media(min-width:768px){.block{grid-template-columns:2fr 3fr;gap:48px}}
 .copy{display:flex;flex-direction:column;justify-content:space-between;gap:32px;padding-bottom:16px}
 .copy h3{margin-bottom:20px;font-size:var(--fs-md);font-weight:500;color:var(--tx-3)}
+@media(min-width:768px){.copy .lead{font-size:21px;line-height:1.45;max-width:30ch}}
+@media(min-width:1024px){.copy .lead{font-size:23px}}
 .points{color:var(--tx-2);font-size:var(--fs-md)}
 .points li{display:flex;align-items:center;gap:12px;padding-block:12px;border-top:1px solid var(--line)}
 .points li:last-child{border-bottom:1px solid var(--line)}
