@@ -10,7 +10,7 @@ describe('general settings control', () => {
       .map((node) => node.textContent);
     expect(headings).toEqual(['Accounts', 'Application']);
     const accounts = control.element.querySelector('.settings-section-body');
-    expect(accounts?.querySelectorAll('.settings-provider')).toHaveLength(2);
+    expect(accounts?.querySelectorAll('.settings-provider')).toHaveLength(3);
     control.destroy();
   });
 

@@ -4,6 +4,13 @@ import { ensureDockFill, keepPanelAtSetHeight } from '../../layout/model';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
+function persistProjectWorkspace() {
+  if (!PM.proj?.id || !WS.current || WS.editing) return;
+  const workspace = WS.snapshot();
+  if (PM.store.separateHistory !== true) {
+    PM.Projects?.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), workspace });
+  } else PM.store.set(`projectWorkspace.${PM.proj.id}`, workspace);
+}
 
 const dock: any = (id: any, panels: any, size: any) => ({ id, size, panels });
 const p: any = (id: any, o: any = {}) => ({ id, ...o });
@@ -251,7 +258,9 @@ function normalizeWorkspace(workspace: any, fallback?: any) {
       usedPanels.add(id);
       const clean: any = { id };
       if (q.flex) clean.flex = true;
-      if (q.collapsed) clean.collapsed = true;
+      // Headless panels have no external control to expand their body. Repair
+      // their saved state before persistence, rather than during DOM mounting.
+      if (q.collapsed && id !== 'viewer' && !PM.PANELS?.[id]?.headless) clean.collapsed = true;
       if (finite(q.size)) clean.size = PM.clamp(q.size, 56, 1600);
       if (finite(q.min)) clean.min = PM.clamp(q.min, 32, 800);
       if (text(q.title)) clean.title = text(q.title);
@@ -432,6 +441,7 @@ WS.activate = (id: any, silent: any) => {
   applyFeatures(w);
   PM.Layout.apply(w);
   PM.store.set('workspace', id);
+  if (!silent) persistProjectWorkspace();
   PM.bus.emit('workspaces');
   if (!silent) PM.toast('Workspace · ' + w.name);
 };
@@ -475,6 +485,9 @@ function applyFeatures(w: any) {
 
 WS.save = () => {
   PM.store.set('workspaces', WS.all);
+  // Persist layout separately from the large project/history snapshot. Closing
+  // a panel must survive a restart even if the document has not been edited.
+  persistProjectWorkspace();
   PM.bus.emit('workspaces');
 };
 

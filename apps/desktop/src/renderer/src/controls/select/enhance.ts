@@ -27,7 +27,10 @@ export function enhanceSelect(select: HTMLSelectElement): () => void {
   let menu: MenuHandle | null = null;
 
   function sync(): void {
-    trigger.className = `pm-select ${select.className}`.trim();
+    trigger.className = `pm-select ${Array.from(select.classList).filter(name => name !== 'pm-select-native').join(' ')}`.trim();
+    // Legacy controls position and size the select inline. The visible trigger
+    // must inherit that layout too, including later updates from its owner.
+    trigger.style.cssText = select.style.cssText;
     const title = select.getAttribute('aria-label') ?? select.title;
     if (title) trigger.setAttribute('aria-label', title); else trigger.removeAttribute('aria-label');
     const by = select.getAttribute('aria-labelledby');
@@ -68,7 +71,8 @@ export function enhanceSelect(select: HTMLSelectElement): () => void {
   trigger.addEventListener('click', (event) => { event.stopPropagation(); if (menu) menu.close(); else open(); });
   trigger.addEventListener('pointerdown', (event) => event.stopPropagation());
   trigger.addEventListener('keydown', (event) => {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ') {
+    const globalSpaceShortcut = event.key === ' ' && select.dataset.globalSpaceShortcut !== undefined;
+    if (!globalSpaceShortcut && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ')) {
       event.preventDefault(); event.stopPropagation(); open();
     }
   });

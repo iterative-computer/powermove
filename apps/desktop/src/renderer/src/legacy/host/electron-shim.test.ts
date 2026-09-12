@@ -13,7 +13,7 @@ function decodeBase64(value: string): string {
   return Buffer.from(value, 'base64').toString('utf8');
 }
 
-function loadShim(options: { snapshotError?: Error } = {}) {
+function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean } = {}) {
   const PM: PMRegistry = {
     uid: vi.fn((prefix: string) => `${prefix}test`),
     toast: vi.fn(),
@@ -34,7 +34,8 @@ function loadShim(options: { snapshotError?: Error } = {}) {
     store: {
       snapshotSync: options.snapshotError
         ? vi.fn(() => { throw options.snapshotError; })
-        : vi.fn(() => ({ 'project.demo': { layers: [{ id: 'one' }] } })),
+        : vi.fn(() => ({ 'project.demo': { layers: [{ id: 'one' }] }, __powermoveAsyncStore: options.nativeAsyncStore === true })),
+      ...(options.serializedBridge ? { setSerialized: vi.fn(async () => undefined) } : {}),
       set: vi.fn(),
       delete: vi.fn(),
       flush: vi.fn(),
@@ -71,6 +72,22 @@ afterEach(() => {
 });
 
 describe('legacy Electron shim install', () => {
+  it('requires agreement from native storage and preload before migrating undo history', () => {
+    expect(loadShim({ serializedBridge: true }).PM.store.separateHistory).toBe(false);
+    expect(loadShim({ nativeAsyncStore: true }).PM.store.separateHistory).toBe(false);
+    expect(loadShim({ nativeAsyncStore: true, serializedBridge: true }).PM.store.separateHistory).toBe(true);
+  });
+
+  it('flushes the newest asynchronous history snapshot before native storage', async () => {
+    const { PM, bridge } = loadShim({ nativeAsyncStore: true, serializedBridge: true });
+    void PM.store.setAsync('projectHistory.demo', { entries: ['older'] });
+    void PM.store.setAsync('projectHistory.demo', { entries: ['newest'] });
+    await PM.store.flush();
+    expect(bridge.store.setSerialized).toHaveBeenCalledTimes(1);
+    expect(bridge.store.setSerialized).toHaveBeenCalledWith('projectHistory.demo', '{"entries":["newest"]}');
+    expect(bridge.store.flush).toHaveBeenCalledOnce();
+  });
+
   it('connects native menu commands before DOM readiness or font discovery', () => {
     const { PM, bridge, window } = loadShim();
     expect(window.document.readyState).toBe('loading');

@@ -1,5 +1,6 @@
 import { createChatGPTSettingsControl, createClaudeSettingsControl } from './chatgpt-settings';
 import { createSettingsSection } from './settings-tabs';
+import { createCompatibleSettingsControl } from './compatible-settings';
 
 /** The slice of PM.theme the Settings modal needs. */
 export interface ThemePreference {
@@ -40,8 +41,9 @@ export function createGeneralSettingsControl(theme: ThemePreference): GeneralSet
 
   const chatgpt = createChatGPTSettingsControl();
   const claude = createClaudeSettingsControl();
+  const compatible = createCompatibleSettingsControl();
   const accounts = createSettingsSection('Accounts');
-  accounts.body.append(chatgpt.element, claude.element);
+  accounts.body.append(chatgpt.element, claude.element, compatible.element);
 
   const appearance = document.createElement('select');
   appearance.className = 'settings-appearance';
@@ -64,6 +66,6 @@ export function createGeneralSettingsControl(theme: ThemePreference): GeneralSet
   return {
     element,
     focus: () => chatgpt.focus(),
-    destroy: () => { chatgpt.destroy(); claude.destroy(); }
+    destroy: () => { chatgpt.destroy(); claude.destroy(); compatible.destroy(); }
   };
 }

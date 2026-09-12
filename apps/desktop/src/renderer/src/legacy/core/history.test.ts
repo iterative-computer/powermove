@@ -46,6 +46,22 @@ describe('legacy history install', () => {
     expect(stats.maxBytes).toBe(256 * 1024 * 1024);
   });
 
+  it('publishes whether a project patch came from the agent or the interface', () => {
+    const PM = historyRegistry();
+    PM.proj.id = 'project-1';
+    PM.hist.begin('Agent edit', null, 'agent');
+    PM.proj.value = 2;
+    PM.hist.commit();
+    expect(PM.bus.emit).toHaveBeenLastCalledWith('history:project-patch', expect.objectContaining({
+      projectId: 'project-1', origin: 'agent',
+    }));
+
+    PM.hist.do('Interface edit', () => { PM.proj.value = 3; });
+    expect(PM.bus.emit).toHaveBeenLastCalledWith('history:project-patch', expect.objectContaining({
+      projectId: 'project-1', origin: 'interface',
+    }));
+  });
+
   it('retains a deep run of compact edits instead of discarding them at 120 steps', () => {
     const PM = historyRegistry();
     for (let value = 2; value <= 302; value++) {

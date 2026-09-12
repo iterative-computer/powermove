@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PanelDefinition, PowermoveAPI } from 'powermove';
 
-import activate, { splitSelectedLayersAtPlayhead, toggleLayerStrips } from './index';
+import activate, { toggleLayerStrips } from './index';
 
 function domHelper(selector: string, attrs?: unknown, ...children: unknown[]): HTMLElement {
   const element = document.createElement(selector.match(/^[^.#]+/)?.[0] ?? 'div');
@@ -119,45 +119,19 @@ describe('timeline extension', () => {
     expect(PM.invalidate).toHaveBeenCalledWith('timeline');
   });
 
-  it('selects only the new right-hand segments after splitting', () => {
-    const left = { id: 'left', from: 2, dur: 6, d: {}, p: { x: { kf: [{ t: 0, v: 10 }, { t: 6, v: 70 }] } } };
-    const project = { layers: [left] };
-    let selected: string[] = [left.id];
-    const PM = {
-      allProps: (layer: any) => [{ prop: layer.p.x }],
-      time: 5,
-      proj: project,
-      selLayers: () => [left],
-      cloneLayer: (layer: any) => ({ ...structuredClone(layer), id: 'right' }),
-      MediaTiming: { isTimed: () => false },
-      hist: { do: (_label: string, run: () => void) => run() },
-      bus: { emit: vi.fn() },
-      ProjectIndex: { invalidate: vi.fn() },
-      selectLayers: (ids: string[]) => { selected = ids; }
-    };
-
-    expect(splitSelectedLayersAtPlayhead(PM)).toEqual(['right']);
-    expect(project.layers.map((layer) => ({ id: layer.id, from: layer.from, dur: layer.dur }))).toEqual([
-      { id: 'right', from: 5, dur: 3 },
-      { id: 'left', from: 2, dur: 3 }
-    ]);
-    expect(project.layers[0].p.x.kf).toEqual([{ t: -3, v: 10 }, { t: 3, v: 70 }]);
-    expect(left.p.x.kf).toEqual([{ t: 0, v: 10 }, { t: 6, v: 70 }]);
-    expect(PM.ProjectIndex.invalidate).toHaveBeenCalledOnce();
-    expect(selected).toEqual(['right']);
-  });
-
   it('registers the M timeline keybinding outside text fields', () => {
-    let command: Record<string, any> | undefined;
+    const commands: Record<string, any>[] = [];
     let binding: Record<string, any> | undefined;
     activate({
       host: { pm: { h: vi.fn(), clamp: vi.fn(), bus: { on: vi.fn() }, invalidate: vi.fn() } },
       panels: { register: vi.fn() },
-      commands: { register: vi.fn((definition) => void (command = definition)) },
+      commands: { register: vi.fn((definition) => void commands.push(definition)) },
       keybindings: { bind: vi.fn((definition) => void (binding = definition)) }
     } as unknown as PowermoveAPI);
 
-    expect(command).toMatchObject({ id: 'toggleLayerStrips', kb: 'M' });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({ id: 'toggleLayerStrips', kb: 'M' });
+    expect(commands.some((command) => command.id === 'split')).toBe(false);
     expect(binding).toEqual({ key: 'm', command: 'toggleLayerStrips', priority: 90 });
     expect(binding).not.toHaveProperty('inFields');
   });

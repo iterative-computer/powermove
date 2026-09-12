@@ -50,6 +50,7 @@ import type { Component } from 'svelte';
 import { chordOfEvent } from './keychord';
 import { runKernelCommand, type Kernel } from './registries';
 import { mountComponent } from './runtime-globals';
+import { performanceMonitor } from '../runtime/performance-monitor';
 
 export interface PanelsBackend {
   open(id: string, dock?: 'left' | 'center' | 'right'): void;
@@ -111,12 +112,23 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
   /** Wrap an extension callback so a throw is attributed, logged, and reported. */
   function guard<A extends unknown[], R>(fn: (...args: A) => R, label: string, fallback: R): (...args: A) => R {
     return (...args: A): R => {
-      try {
-        return fn(...args);
-      } catch (error) {
+      if (disposed && label !== 'onDispose handler') return fallback;
+      const start = performance.now();
+      const fail = (error: unknown): R => {
         log('error', `${label} threw`, error);
-        deps.reportRuntimeError(id, error);
+        if (!disposed) deps.reportRuntimeError(id, error);
         return fallback;
+      };
+      try {
+        const result = fn(...args);
+        if (result && typeof (result as any).then === 'function') {
+          return Promise.resolve(result).catch(fail) as R;
+        }
+        return result;
+      } catch (error) {
+        return fail(error);
+      } finally {
+        if (record.scope !== 'builtin') performanceMonitor.record({ id: `extension:${id}`, name: `${manifest.name} · ${label}`, kind: 'extension' }, performance.now() - start);
       }
     };
   }

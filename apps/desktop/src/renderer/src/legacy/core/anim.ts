@@ -257,19 +257,25 @@ PM.beginEval = (T: any) => {
 /** Compose group transforms once, even when several members share a parent rig.
  * Group membership changes the surrounding coordinate space, never the parent link. */
 PM.transformParentMatrix = (L: any, T: any, parent = parentOf(L)) => {
-  const chain: any[] = [], seen = new Set<any>([L]), groups = new Set<string>();
+  const groups = new Set<string>();
   let matrix = [1,0,0,1,0,0];
+  const appendParents = (layer: any, firstParent = parentOf(layer)) => {
+    const chain: any[] = [], seen = new Set<any>([layer]);
+    for (let cur = firstParent; cur && !seen.has(cur) && chain.length < 256; cur = parentOf(cur)) {
+      seen.add(cur); chain.push(cur); appendGroups(cur);
+    }
+    for (let i = chain.length - 1; i >= 0; i--) matrix = mul(matrix, PM.localMatrix(chain[i], T));
+  };
   const appendGroups = (layer: any) => {
     for (const group of (PM.groupAncestors?.(layer) || []).slice().reverse()) {
       if (groups.has(group.id)) continue;
-      groups.add(group.id); matrix = mul(matrix, PM.localMatrix(group, T));
+      groups.add(group.id);
+      appendParents(group);
+      matrix = mul(matrix, PM.localMatrix(group, T));
     }
   };
   appendGroups(L);
-  for (let cur = parent; cur && !seen.has(cur) && chain.length < 256; cur = parentOf(cur)) {
-    seen.add(cur); chain.push(cur); appendGroups(cur);
-  }
-  for (let i = chain.length - 1; i >= 0; i--) matrix = mul(matrix, PM.localMatrix(chain[i], T));
+  appendParents(L, parent);
   return matrix;
 };
 
@@ -302,13 +308,15 @@ PM.worldMatrix = (L: any, T: any) => {
 
 PM.worldOpacity = (L: any, T: any) => (PM.groupAncestors?.(L) || []).reduce((opacity: number, group: any) => opacity * clamp(PM.ev(group, 'opacity', T) / 100, 0, 1), clamp(PM.ev(L, 'opacity', T) / 100, 0, 1));
 
-/* True when assigning parentId to L would create a parenting cycle. */
+/* True when assigning parentId to L would create a parenting or group-space cycle. */
 PM.wouldCycle = (L: any, parentId: any) => {
   if (!parentId) return false;
   if (parentId === L.id) return true;
+  if ((PM.groupAncestors?.(L) || []).some((group: any) => group.id === parentId)) return true;
   let cur = PM.L(parentId), guard = 0;
   while (cur && guard++ < 256) {
     if (cur.id === L.id) return true;
+    if (L.type === 'group' && (PM.groupAncestors?.(cur) || []).some((group: any) => group.id === L.id)) return true;
     cur = cur.parent ? PM.L(cur.parent) : null;
   }
   return false;

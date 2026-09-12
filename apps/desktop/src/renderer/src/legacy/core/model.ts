@@ -67,8 +67,8 @@ const TYPE_META: any = {
   adjustment: { icon: 'wand', color: '#A78BFA', label: 'Adjustment', pickable: false },
   shader: { icon: 'wand',   color: '#FF6B1A', label: 'Shader' },
   extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
-  null:   { icon: 'dot',    color: '#6a6a70', label: 'Null', visual: false, pickable: false },
-  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, effects: false, masks: false, pickable: false },
+  null:   { icon: 'dot',    color: '#6a6a70', label: 'Null', visual: false, pickable: true },
+  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, pickable: false },
   precomp:{ icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
 };
 PM.TYPE_META = TYPE_META;
@@ -132,7 +132,10 @@ const DEFAULTS: any = {
     L.d = { definition: '', version: 1, w: c.w, h: c.h, params: {}, data: {} };
     L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0;
   },
-  null:   (L: any) => { L.d = {}; },
+  null:   (L: any) => {
+    L.d = { color: '#6A6A70', w: 100, h: 100, radius: 0 };
+    L.p['anchor.x'].v = 50; L.p['anchor.y'].v = 50; L.p.opacity.v = 0;
+  },
   group: (L: any) => { L.d = {}; L.p['position.x'].v = 0; L.p['position.y'].v = 0; L.scaleLinked = true; },
   precomp:(L: any, c: any) => { L.d = { comp: null, w: c.w, h: c.h }; L.p['anchor.x'].v = 0; L.p['anchor.y'].v = 0; },
 };

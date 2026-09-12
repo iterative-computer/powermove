@@ -12,6 +12,16 @@ function setup(){
 }
 function close(actual:number[],expected:number[]){expect(actual.length).toBe(expected.length);actual.forEach((v,i)=>expect(v).toBeCloseTo(expected[i]!,5));}
 describe('2.5D groups',()=>{
+ it('inherits a 3D parent through the group without jumping its contents',()=>{
+  const {PM,a,g}=setup();
+  const rig=PM.mkLayer('null',{name:'Rig'});rig.threeD=true;rig.p['position.z'].v=-80;rig.p['rotation.y'].v=-20;
+  PM.proj.layers.push(rig);PM.touch();
+  const groupBefore=world3D(PM,g,0),childBefore=world3D(PM,a,0);
+  const result=PM.Edit.apply({type:'set_layer',target:g.id,patch:{parent:rig.id}});
+  expect(result.ok,result.message).toBe(true);
+  close(world3D(PM,g,0),groupBefore);close(world3D(PM,a,0),childBefore);
+ });
+
  it('animates shared perspective and preserves it through ungroup and save',()=>{
   const {PM,a,g}=setup();g.p.perspective.kf=[PM.KF(0,20),PM.KF(2,200)];PM.touch();
   const times=[0,1,2],before=times.map(t=>planeMatrix(PM,a,t));

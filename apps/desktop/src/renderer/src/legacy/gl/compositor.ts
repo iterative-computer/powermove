@@ -1,3 +1,5 @@
+import { GPUTiming } from './gpu-timing';
+import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane } from '../core/space-3d';
 import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { sourceTime } from '../core/retiming';
@@ -20,6 +22,20 @@ export function paramUniformName(pd: { k: string; type?: string }, index: number
 /** Missing placeholders preserve project data but have no shader to render. */
 export function hasRenderableEffects(effects: Array<{ on?: boolean; missing?: boolean }>, PM?: any, layer?: any, time?: number): boolean {
   return effects.some((effect: any) => (PM ? evaluatedValue(PM, layer, effect.on, time!, `${effect.id}.$enabled`) : effect.on) && effect.missing !== true);
+}
+
+/** Groups are composited as nested stacks. Only direct members belong to a
+ * pass; nested groups recursively own their descendants. */
+export function compositingLevel(layers: any[], parentGroup: string | null): any[] {
+  return layers.filter((layer: any) => (layer.group || null) === parentGroup);
+}
+
+/** A group remains in a solo render when the solo switch lives on any nested
+ * member. Without this, the containing pass would be skipped before reaching
+ * that member. */
+export function groupContainsSolo(group: any, layers: any[], ancestors: (layer: any) => any[]): boolean {
+  return group?.type === 'group' && layers.some((layer: any) => layer.solo
+    && ancestors(layer).some((candidate: any) => candidate.id === group.id));
 }
 
 /** Evaluate a persisted effect channel, falling back when an extension adds a
@@ -118,6 +134,40 @@ let resourceTick = 0;
    while the editor's next animation frame is still queued. */
 let presentedFrame: any = null;
 const presentedVideoFrames = new WeakMap<any, { version: number; supported: boolean }>();
+let gpuTiming: GPUTiming | null = null;
+const framePrograms = new Set<any>();
+let parallelShaderCompile: any = null;
+let allowParallelCompile = false;
+let compileSubmitMs = 0;
+const pendingPrograms = new Map<any, { pr: any; v: any; f: any }>();
+let compilePollTimer: ReturnType<typeof setTimeout> | undefined;
+const watchedCanvases = new WeakSet<HTMLCanvasElement>();
+function pollCompiles() {
+  if (compilePollTimer !== undefined || !pendingPrograms.size) return;
+  compilePollTimer = setTimeout(() => {
+    compilePollTimer = undefined;
+    for (const [key, pending] of pendingPrograms) {
+      if (GL.gl.getProgramParameter(pending.pr, parallelShaderCompile.COMPLETION_STATUS_KHR)) completeProgram(key, pending);
+    }
+    GL.compiling = pendingPrograms.size;
+    PM.invalidate('render'); PM.invalidate('status');
+    pollCompiles();
+  }, 16);
+}
+function completeProgram(key: any, pending: { pr: any; v: any; f: any }) {
+  const gl = GL.gl;
+  let result: any = null;
+  if (gl.getProgramParameter(pending.pr, gl.LINK_STATUS)) {
+    result = { pr: pending.pr, u: new Map(), a: gl.getAttribLocation(pending.pr, 'a_pos') };
+    GL.errors.delete(key);
+  } else {
+    GL.errors.set(key, gl.getProgramInfoLog(pending.pr) || gl.getShaderInfoLog(pending.f) || 'Shader compilation failed');
+    gl.deleteProgram(pending.pr);
+  }
+  gl.deleteShader(pending.v); gl.deleteShader(pending.f);
+  pendingPrograms.delete(key); GL.progs.set(key, result); GL.compiling = pendingPrograms.size;
+  return result;
+}
 const viewportPathRasters = new Map<string, any>();
 let viewportPathFrame = 0;
 let viewportPathVersion = 0;
@@ -146,21 +196,50 @@ function shader(gl: any, type: any, src: any) {
   return s;
 }
 function program(key: any, frag: any, vert?: any) {
+  framePrograms.add(key);
   const gl = GL.gl;
+  const pending = pendingPrograms.get(key);
+  if (pending) {
+    if (allowParallelCompile && !gl.getProgramParameter(pending.pr, parallelShaderCompile.COMPLETION_STATUS_KHR)) return null;
+    return completeProgram(key, pending);
+  }
   let p = GL.progs.get(key);
-  if (p !== undefined) return p;
+  if (p !== undefined) { GL.progs.delete(key); GL.progs.set(key, p); return p; }
+  if (allowParallelCompile && parallelShaderCompile && /^(sh:|extension:|fx:|tr:)/.test(key)) {
+    if (compileSubmitMs >= 4 || pendingPrograms.size >= 8) { pollCompiles(); return null; }
+    const started = performance.now();
+    const v = gl.createShader(gl.VERTEX_SHADER), f = gl.createShader(gl.FRAGMENT_SHADER), pr = gl.createProgram();
+    if (!v || !f || !pr) {
+      if (v) gl.deleteShader(v); if (f) gl.deleteShader(f); if (pr) gl.deleteProgram(pr);
+      GL.errors.set(key, 'GPU resources unavailable'); GL.progs.set(key, null); return null;
+    }
+    // Do not ask for compile/link status here: those queries wait for the GPU
+    // process and can freeze the editor for hundreds of milliseconds.
+    gl.shaderSource(v, vert || PM.VERT); gl.compileShader(v);
+    gl.shaderSource(f, frag); gl.compileShader(f);
+    gl.attachShader(pr, v); gl.attachShader(pr, f); gl.linkProgram(pr);
+    pendingPrograms.set(key, { pr, v, f }); GL.compiling = pendingPrograms.size;
+    performanceMonitor.record({ id: `compile:${key}`, name: `Shader compilation · ${key}`, kind: 'shader' }, performance.now() - started);
+    compileSubmitMs += performance.now() - started;
+    pollCompiles(); PM.invalidate('status'); return null;
+  }
+  let v: any = null, f: any = null, pr: any = null;
+  const started = performance.now();
   try {
-    const v = shader(gl, gl.VERTEX_SHADER, vert || PM.VERT);
-    const f = shader(gl, gl.FRAGMENT_SHADER, frag);
-    const pr = gl.createProgram();
+    v = shader(gl, gl.VERTEX_SHADER, vert || PM.VERT);
+    f = shader(gl, gl.FRAGMENT_SHADER, frag);
+    pr = gl.createProgram();
     gl.attachShader(pr, v); gl.attachShader(pr, f); gl.linkProgram(pr);
     if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(pr));
-    gl.deleteShader(v); gl.deleteShader(f);
     p = { pr, u: new Map(), a: gl.getAttribLocation(pr, 'a_pos') };
     GL.errors.delete(key);
   } catch (e: any) {
     GL.errors.set(key, String(e.message || e).trim());
+    if (pr) gl.deleteProgram(pr);
     p = null;
+  } finally {
+    if (v) gl.deleteShader(v); if (f) gl.deleteShader(f);
+    if (/^(sh:|extension:|fx:)/.test(key)) performanceMonitor.record({ id: `compile:${key}`, name: `Shader compilation · ${key}`, kind: 'shader' }, performance.now() - started);
   }
   GL.progs.set(key, p);
   GL.stats.progs = GL.progs.size;
@@ -168,12 +247,17 @@ function program(key: any, frag: any, vert?: any) {
 }
 GL.compileError = (key: any) => GL.errors.get(key) || null;
 GL.dropProgram = (key: any) => {
+  const pending = pendingPrograms.get(key);
+  if (pending) {
+    GL.gl.deleteProgram(pending.pr); GL.gl.deleteShader(pending.v); GL.gl.deleteShader(pending.f);
+    pendingPrograms.delete(key); GL.compiling = pendingPrograms.size;
+  }
   const p = GL.progs.get(key);
   if (p && p.pr) GL.gl.deleteProgram(p.pr);
   GL.progs.delete(key); GL.errors.delete(key);
 };
 GL.dropPrograms = (prefix: string) => {
-  for (const key of [...GL.progs.keys()]) if (String(key).startsWith(prefix)) GL.dropProgram(key);
+  for (const key of new Set([...GL.progs.keys(), ...pendingPrograms.keys()])) if (String(key).startsWith(prefix)) GL.dropProgram(key);
 };
 
 function uloc(p: any, name: any) {
@@ -478,7 +562,28 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
     preserveDrawingBuffer: true, powerPreference: 'high-performance', desynchronized: true,
   });
   if (!gl) { if (!options.quiet) window.alert('Powermove needs WebGL2.'); return false; }
+  gpuTiming?.dispose();
   GL.gl = gl;
+  gpuTiming = new GPUTiming(gl);
+  parallelShaderCompile = gl.getExtension('KHR_parallel_shader_compile');
+  if (!watchedCanvases.has(canvas)) {
+    watchedCanvases.add(canvas);
+    canvas.addEventListener('webglcontextlost', (event: Event) => {
+      event.preventDefault();
+      clearTimeout(compilePollTimer); compilePollTimer = undefined;
+      pendingPrograms.clear(); GL.compiling = 0;
+      gpuTiming?.dispose(); gpuTiming = null;
+      GL.progs.clear(); GL.texes.clear(); GL.meshes.clear(); GL.pool = [];
+      GL.errors.clear(); viewportPathRasters.clear();
+      poolBytes = 0; textureBytes = 0; presentedFrame = null; boundFbo = null;
+      GL.gl = null; GL.contextLost = true;
+      PM.invalidate('status');
+      PM.toast?.('The GPU was interrupted. Restoring the preview…');
+    });
+    canvas.addEventListener('webglcontextrestored', () => {
+      if (GL.init(canvas, options)) { GL.contextLost = false; PM.invalidate(); }
+    });
+  }
   gl.getExtension('EXT_color_buffer_half_float');
   gl.getExtension('EXT_color_buffer_float');
   gl.getExtension('OES_texture_float_linear');
@@ -719,7 +824,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
       else setU(p, un, [Number(val) || 0]);
     }
     GL.gl.disable(GL.gl.BLEND);
-    draw();
+    gpuTiming ? gpuTiming.measure({ id: `shader:${L.id}`, name: L.name || 'Custom shader', kind: 'shader', layerId: L.id }, draw) : draw();
     GL.gl.enable(GL.gl.BLEND);
     bind(target);
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
@@ -768,7 +873,9 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
       else if (param.type === 'toggle') setI(p, 'u_' + param.k, value ? 1 : 0);
       else setU(p, 'u_' + param.k, [Number(value) || 0]);
     }
-    GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND);
+    GL.gl.disable(GL.gl.BLEND);
+    gpuTiming ? gpuTiming.measure({ id: `shader:${L.id}`, name: L.name || definition?.label || 'Extension shader', kind: 'shader', layerId: L.id }, draw) : draw();
+    GL.gl.enable(GL.gl.BLEND);
     bind(target);
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
   }
@@ -873,7 +980,7 @@ function runEffects(L: any, T: any, srcF: any, W: any, H: any) {
       setI(p, 'u_pass', pass);
       def.params.forEach((pd: any, i: any) => setParam(p, pd, i, effectParamValue(PM, L, fx, pd, T)));
       GL.gl.disable(GL.gl.BLEND);
-      draw();
+      gpuTiming ? gpuTiming.measure({ id: `effect:${L.id}:${fx.id}:${pass}`, name: `${L.name} · ${def.label || fx.type}`, kind: 'effect', layerId: L.id }, draw) : draw();
       GL.gl.enable(GL.gl.BLEND);
       GL.stats.passes++;
       if (input !== cur) free(input);
@@ -921,7 +1028,7 @@ function applyTrackMatte(L:any,T:number,srcF:any,W:number,H:number,proj:any,opt:
   const source=proj.layers.find((l:any)=>l.id===L.matteSource);
   const mode=evaluatedValue(PM,L,L.matteMode,T,'l.matteMode')||'alpha';
   if(!source || (opt.matteDepth||0)>=8)return srcF;
-  const matte=GL.renderProject({...proj,layers:[{...source,on:true}]},T,W,H,{...opt,transparent:true,mattePass:true,matteDepth:(opt.matteDepth||0)+1,matteProject:proj});
+  const matte=GL.renderProject({...proj,layers:[{...source,on:true}]},T,W,H,{...opt,transparent:true,mattePass:true,explicitLayers:true,matteDepth:(opt.matteDepth||0)+1,matteProject:proj});
   const out=grab(W,H);bind(out);clear();const p=program('trackMatte',PM.GLSL_PRE+'uniform sampler2D u_matte; uniform int u_luma; uniform int u_invert; void main(){vec4 m=texture(u_matte,v_st);float a=u_luma==1?dot(m.rgb,vec3(.2126,.7152,.0722)):m.a;if(u_invert==1)a=1.-a;o=texture(u_tex,v_st)*clamp(a,0.,1.);}');
   const g=use(p);bindTex(0,srcF.tex);setI(p,'u_tex',0);bindTex(1,matte.tex);setI(p,'u_matte',1);setI(p,'u_luma',mode.startsWith('luma')?1:0);setI(p,'u_invert',mode.endsWith('inverted')?1:0);g.u('u_m',fullQuad(W,H));g.u('u_res',W,H);g.u('u_uv',0,0,1,1);GL.gl.disable(GL.gl.BLEND);draw();GL.gl.enable(GL.gl.BLEND);free(matte);return out;
 }
@@ -1013,6 +1120,17 @@ function copyFbo(srcF: any, W: any, H: any) {
   return out;
 }
 
+function drawFbo(srcF: any, W: any, H: any, alpha = 1) {
+  const p = program('copyA', PM.FRAG_DRAW);
+  if (!p) return false;
+  const g = use(p);
+  bindTex(0, srcF.tex); setI(p, 'u_tex', 0);
+  g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+  g.u('u_alpha', alpha); setI(p, 'u_fromFbo', 1);
+  draw();
+  return true;
+}
+
 /** Apply an adjustment layer to the composition accumulated beneath it.
  * The layer contributes no pixels of its own: the normal editable effect chain
  * processes the full lower image, masks constrain the processed result, and
@@ -1055,8 +1173,9 @@ function compositeAdjustment(
 }
 
 function activeTransition(L: any, T: any) {
-  const start = Number(L.from) || 0;
-  const length = Math.max(0, Number(L.dur) || 0);
+  const groupSpan = L.type === 'group' ? PM.groupSpan?.(L) : null;
+  const start = Number(groupSpan?.from ?? L.from) || 0;
+  const length = Math.max(0, Number(groupSpan?.dur ?? L.dur) || 0);
   const end = start + length;
   const at = (transition: any, edge: 'in' | 'out') => {
     if (!transition || transition.missing || typeof transition.type !== 'string') return null;
@@ -1073,6 +1192,33 @@ function activeTransition(L: any, T: any) {
     return null;
   };
   return at(L.transitionIn, 'in') || at(L.transitionOut, 'out');
+}
+
+function groupCreatesCompositingBoundary(L: any, T: any, opt: any): boolean {
+  if (L.type !== 'group') return false;
+  const opacity = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
+  const blend = isProperty(L.blend) ? PM.evP(L, L.blend, T, 'l.blend') : L.blend;
+  const motionBlur = isProperty(L.mblur) ? PM.evP(L, L.mblur, T, 'l.mblur') : L.mblur;
+  return opacity < 1 - 1e-6
+    || hasRenderableEffects(L.fx || [], PM, L, T)
+    || (L.masks || []).some((mask: any) => evaluatedValue(PM, L, mask.on, T, `m.${mask.id}.on`) !== false)
+    || !!L.matteSource
+    || !!(blend && blend !== 'normal')
+    || !!(motionBlur && opt.mblur !== false)
+    || !!activeTransition(L, T);
+}
+
+/** Default groups remain a zero-pass transform/organization feature. A group
+ * becomes an offscreen boundary only on frames where one of its visual layer
+ * properties needs the combined descendant image. */
+function compositingPass(layers: any[], parentGroup: string | null, T: any, opt: any): any[] {
+  const result: any[] = [];
+  for (const layer of compositingLevel(layers, parentGroup)) {
+    if (layer.type === 'group' && !groupCreatesCompositingBoundary(layer, T, opt)) {
+      result.push(...compositingPass(layers, layer.id, T, opt));
+    } else result.push(layer);
+  }
+  return result;
 }
 
 function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: any, W: any, H: any) {
@@ -1102,11 +1248,13 @@ function runTransition(L: any, T: any, activeTr: any, before: any, withLayer: an
     opt.transparent skips the background fill (nested comps composite over). */
 GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl;
-  const layers = depthOrderedLayers(PM, proj.layers, T);
-  const solo = layers.some((layer: any) => layer.solo);
+  const orderedLayers = depthOrderedLayers(PM, proj.layers, T);
+  const parentGroup = typeof opt.groupParent === 'string' ? opt.groupParent : null;
+  const layers = opt.explicitLayers ? orderedLayers : compositingPass(orderedLayers, parentGroup, T, opt);
+  const solo = orderedLayers.some((layer: any) => layer.solo);
   // Rebuild per composition/pass so edits and nested mattes cannot leave a
   // stale index. One scan replaces a full stack scan for every rendered layer.
-  const matteSources = new Set(layers.map((layer: any) => layer.matteSource));
+  const matteSources = new Set(orderedLayers.map((layer: any) => layer.matteSource));
 
   // Only local, ordinary 2D compositing is eligible. Effects, mattes and
   // non-normal blends can depend on pixels hidden by an opaque layer later.
@@ -1159,11 +1307,16 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     const L = layers[i];
     if(PM.canvasTextEditing===L.id && !opt.exporting)continue;
     if (!opt.mattePass && matteSources.has(L.id)) continue;
-    if (solo && !L.solo && !(PM.groupAncestors?.(L, layers) || []).some((group: any) => group.solo) && !opt.mattePass) continue;
-    if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
+    const groupAncestors = PM.groupAncestors?.(L, orderedLayers) || [];
+    if (solo && !L.solo && !groupAncestors.some((group: any) => group.solo)
+        && !groupContainsSolo(L, orderedLayers, (layer: any) => PM.groupAncestors?.(layer, orderedLayers) || [])
+        && !opt.mattePass) continue;
+    if (L.type !== 'group' && PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
     if (L.shy && opt.hideShy) continue;
-    const alpha = PM.worldOpacity(L, T);
+    /* Each group owns an offscreen compositing boundary, so opacity is applied
+       once at its own level instead of being multiplied into every descendant. */
+    const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
     if (alpha <= .001) continue;
 
     const hasFx = hasRenderableEffects(L.fx, PM, L, T);
@@ -1181,7 +1334,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     }
 
     /* fast path: no masks, no effects, normal blend, no motion blur → straight into acc */
-    if (!hasMasks && !hasFx && !blend && !mb && !transition && !L.matteSource) {
+    if (L.type !== 'group' && !hasMasks && !hasFx && !blend && !mb && !transition && !L.matteSource) {
       bind(acc);
       const cover = covers[i];
       if (cover) {
@@ -1196,15 +1349,32 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       continue;
     }
 
-    const lf = grab(W, H);
-    bind(lf); clear();
-    if (mb) {
-      const n = opt.mbSamples || 10, shutter = (opt.shutter || .5) / proj.fps;
-      for (let s = 0; s < n; s++) {
-        const dt = ((s + .5) / n - .5) * shutter;
-        drawContent(L, T + dt, W, H, alpha / n);
+    let lf: any;
+    if (L.type === 'group') {
+      if (mb) {
+        lf = grab(W, H); bind(lf); clear();
+        const n = opt.mbSamples || 10, shutter = (opt.shutter || .5) / proj.fps;
+        for (let s = 0; s < n; s++) {
+          const dt = ((s + .5) / n - .5) * shutter;
+          const sample = GL.renderProject(proj, T + dt, W, H, {
+            ...opt, transparent: true, groupParent: L.id, mblur: false,
+          });
+          bind(lf); drawFbo(sample, W, H, 1 / n); free(sample);
+        }
+      } else {
+        lf = GL.renderProject(proj, T, W, H, { ...opt, transparent: true, groupParent: L.id });
       }
-    } else drawContent(L, T, W, H, alpha);
+    } else {
+      lf = grab(W, H);
+      bind(lf); clear();
+      if (mb) {
+        const n = opt.mbSamples || 10, shutter = (opt.shutter || .5) / proj.fps;
+        for (let s = 0; s < n; s++) {
+          const dt = ((s + .5) / n - .5) * shutter;
+          drawContent(L, T + dt, W, H, alpha / n);
+        }
+      } else drawContent(L, T, W, H, alpha);
+    }
 
     let res = lf;
     if (hasMasks) res = applyMasks(L, T, res, W, H);
@@ -1212,15 +1382,11 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     if (L.matteSource) {const prior=res;res=applyTrackMatte(L,T,res,W,H,opt.matteProject||proj,opt);if(prior!==lf && prior!==res)free(prior);}
 
     let withLayer = acc;
+    const compositeAlpha = L.type === 'group' ? alpha : 1;
     if (!blend) {
       if (transition) withLayer = copyFbo(acc, W, H);
       bind(withLayer);
-      const p = program('copyA', PM.FRAG_DRAW);
-      const g = use(p);
-      bindTex(0, res.tex); setI(p, 'u_tex', 0);
-      g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
-      g.u('u_alpha', 1); setI(p, 'u_fromFbo', 1);
-      draw();
+      drawFbo(res, W, H, compositeAlpha);
     } else {
       const nxt = grab(W, H);
       bind(nxt); clear();
@@ -1229,7 +1395,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       bindTex(0, res.tex); setI(p, 'u_tex', 0);
       bindTex(1, acc.tex); setI(p, 'u_dst', 1);
       g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
-      g.u('u_alpha', 1); setI(p, 'u_blend', blend);
+      g.u('u_alpha', compositeAlpha); setI(p, 'u_blend', blend);
       gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
       withLayer = nxt;
       if (!transition) { free(acc); acc = nxt; }
@@ -1247,7 +1413,9 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 };
 
 GL.render = (T: any, opt: any = {}) => {
+  framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;
+  gpuTiming?.poll();
   const t0 = window.performance.now();
   GL.stats.draws = 0; GL.stats.passes = 0; GL.stats.viewportVectors = 0;
   viewportPathFrame++;
@@ -1259,9 +1427,11 @@ GL.render = (T: any, opt: any = {}) => {
   // Full sources remain available as a reference for pixel/performance checks.
   previewSourceClipping = opt.sourceClipping !== false && !opt.exporting;
   let acc;
+  const priorParallel = allowParallelCompile; allowParallelCompile = !opt.exporting;
   try {
     acc = GL.renderProject(PM.proj, T, W, H, opt);
   } finally {
+    allowParallelCompile = priorParallel;
     PM.scope.pop();
     previewViewportActive = false;
     previewSourceClipping = false;
@@ -1281,6 +1451,13 @@ GL.render = (T: any, opt: any = {}) => {
   trimPool();
   trimTextures();
   trimViewportPathRasters();
+  // Keep every program used by this frame: an active scene larger than the
+  // cache target must not recompile its shaders on every scrub.
+  for (const key of GL.progs.keys()) {
+    if (GL.progs.size <= 256) break;
+    if (!framePrograms.has(key)) GL.dropProgram(key);
+  }
+  GL.stats.progs = GL.progs.size;
   GL.stats.ms = window.performance.now() - t0;
   if (GL.previewViewport && !opt.exporting) PM.bus?.emit?.('preview:presented', { viewport: GL.previewViewport, time: T, version: PM.animVersion?.(), project: PM.proj, quality: PM.quality });
 };
@@ -1351,6 +1528,7 @@ GL.bounds = (L: any, T: any) => {
   const d = resolveContent(PM, L, T);
   let w, h, ax, ay;
   if (L.type === 'solid' || L.type === 'shader' || L.type === 'extension') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
+  else if (L.type === 'null') { w = d.w || 100; h = d.h || 100; ax = 0; ay = 0; }
   else if (L.type === 'precomp') { w = d.w || PM.proj.w; h = d.h || PM.proj.h; ax = 0; ay = 0; }
   else if (L.type === 'text') {
     const r = PM.raster(L, 1, T);

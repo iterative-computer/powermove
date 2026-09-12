@@ -9,9 +9,9 @@ export function inspectSvgExport(project: any) {
     const label = layer.name || layer.id;
     const reject = (reason: string) => reasons.add(`${label}: ${reason}`);
     if (!['text', 'solid', 'shape', 'group'].includes(layer.type)) reject(`${layer.type} layers require WebGL`);
-    if (layer.blend && layer.blend !== 'normal') reject('blend mode requires WebGL');
-    if (layer.mblur) reject('motion blur requires WebGL');
-    if (layer.masks?.length || layer.matte || layer.trackMatte) reject('masks or mattes require WebGL');
+    if (!fixed(layer.blend, 'normal')) reject('blend mode requires WebGL');
+    if (!fixed(layer.mblur, false)) reject('motion blur requires WebGL');
+    if (layer.masks?.length || layer.matteSource || layer.matte || layer.trackMatte) reject('masks or mattes require WebGL');
     if (layer.transitionIn || layer.transitionOut) reject('transitions require WebGL');
     if (layer.fx?.some((fx: any) => !fx.missing && !fixed(fx.on, false))) reject('effects require WebGL');
     for (const key of ['position.z', 'anchor.z', 'rotation.x', 'rotation.y', 'orientation.x', 'orientation.y', 'orientation.z']) {

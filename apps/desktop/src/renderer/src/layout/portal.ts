@@ -94,7 +94,7 @@ export function panelSlot(node: HTMLElement, initial: PanelSlotParams) {
     applyPanelSize(inst.el, params.spec, inst.def);
     inst.el.style.minHeight = `${params.spec.min || 56}px`;
     inst.el.querySelector('.ptitle')?.replaceChildren(params.spec.title || inst.def.title);
-    setPanelCollapsed(params.PM, params.id, !!params.spec.collapsed, false);
+    setPanelCollapsed(params.PM, params.id, !!findPanel(params.PM.Layout.ws as Workspace, params.id)?.spec.collapsed, false);
     movePreservingFocus(inst.el, node);
   };
 

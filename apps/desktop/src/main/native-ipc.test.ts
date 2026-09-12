@@ -119,6 +119,35 @@ describe('save IPC', () => {
     }
   });
 
+  it('bounds uploads to their sender, rejects incomplete writes and cleans up after repeated saves', async () => {
+    const { EventEmitter } = await import('node:events');
+    const sender = new EventEmitter(), other = new EventEmitter();
+    const directory = await mkdtemp(path.join(tmpdir(), 'pm-upload-'));
+    const destination = path.join(directory, 'chunks.pmv');
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true,
+      dialogs: { showSave: async () => ({ canceled: false, filePath: destination }) } });
+    const call = (channel: string, value: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), value);
+    try {
+      for (let i = 0; i < 12; i++) {
+        const uploadId = await call(IPC.fileSaveUpload, 3);
+        expect(() => call(IPC.fileSaveChunk, { uploadId, data: new Uint8Array([1]) }, other)).toThrow('Invalid save chunk');
+        await expect(call(IPC.fileSave, { uploadId, name: 'chunks.pmv' })).rejects.toThrow('incomplete');
+        call(IPC.fileSaveChunk, { uploadId, data: new Uint8Array([1, 2]) });
+        call(IPC.fileSaveChunk, { uploadId, data: new Uint8Array([3]) });
+        expect(await call(IPC.fileSave, { uploadId, name: 'chunks.pmv' })).toMatchObject({ ok: true });
+      }
+      expect([...await readFile(destination)]).toEqual([1, 2, 3]);
+      expect(sender.listenerCount('destroyed')).toBe(1);
+      await call(IPC.fileSaveUpload, 3);
+      sender.emit('destroyed');
+      const finalUpload = await call(IPC.fileSaveUpload, 3);
+      expect(finalUpload).toBeTypeOf('string');
+      await call(IPC.fileSaveAbort, finalUpload);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('returns the streaming-export error before opening a sheet', async () => {
     const oversized = new Uint8Array(0);
     Object.defineProperty(oversized, 'byteLength', { value: LIMITS.fileSaveBytes + 1 });

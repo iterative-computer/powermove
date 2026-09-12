@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import {
-  continuousRasterScale, effectParamValue, hasRenderableEffects, install, paramUniformName,
-  svgRasterDimensions, trackPresentedVideoFrames,
+  compositingLevel, continuousRasterScale, effectParamValue, groupContainsSolo,
+  hasRenderableEffects, install, paramUniformName, svgRasterDimensions, trackPresentedVideoFrames,
 } from './compositor';
 
 function compositorRegistry(): PMRegistry {
@@ -25,6 +25,13 @@ function compositorRegistry(): PMRegistry {
 }
 
 describe('legacy compositor install', () => {
+  it('gives transparent null objects a compact canvas hit target', () => {
+    const PM = compositorRegistry();
+    expect(PM.GL.bounds({ type: 'null', d: { w: 100, h: 100 } }, 0)).toEqual({
+      x0: -0, y0: -0, x1: 100, y1: 100, w: 100, h: 100, ax: 0, ay: 0
+    });
+  });
+
   it('measures primitive selection bounds without allocating a source bitmap', () => {
     const PM = compositorRegistry();
     PM.raster = vi.fn(() => { throw new Error('Bounds must not rasterize a primitive'); });
@@ -95,6 +102,36 @@ describe('legacy compositor install', () => {
 
     expect(source).toMatch(/L\.type === ["']adjustment["']/);
     expect(source).toContain('compositeAdjustment(L, T, acc, W, H, alpha, hasMasks, blend)');
+  });
+
+  it('builds nested compositing levels and retains a group containing the solo layer', () => {
+    const outer = { id: 'outer', type: 'group', group: null };
+    const child = { id: 'child', type: 'shape', group: 'outer' };
+    const inner = { id: 'inner', type: 'group', group: 'outer' };
+    const solo = { id: 'solo', type: 'text', group: 'inner', solo: true };
+    const top = { id: 'top', type: 'shape', group: null };
+    const layers = [outer, child, inner, solo, top];
+    const ancestors = (layer: any) => layer === solo ? [inner, outer]
+      : layer === child || layer === inner ? [outer] : [];
+
+    expect(compositingLevel(layers, null)).toEqual([outer, top]);
+    expect(compositingLevel(layers, 'outer')).toEqual([child, inner]);
+    expect(compositingLevel(layers, 'inner')).toEqual([solo]);
+    expect(groupContainsSolo(outer, layers, ancestors)).toBe(true);
+    expect(groupContainsSolo(inner, layers, ancestors)).toBe(true);
+    expect(groupContainsSolo(top, layers, ancestors)).toBe(false);
+  });
+
+  it('renders group contents into their own effect, mask, blend, matte, motion-blur and transition pass', () => {
+    const PM = compositorRegistry();
+    const source = String(PM.GL.renderProject);
+
+    expect(source).toMatch(/L\.type !== ["']group["']/);
+    expect(source).toContain('groupParent: L.id');
+    expect(source).toMatch(/runEffects\(L, T, res, W, H\)/);
+    expect(source).toMatch(/applyMasks\(L, T, res, W, H\)/);
+    expect(source).toMatch(/applyTrackMatte\(L, T, res, W, H/);
+    expect(source).toMatch(/compositeAlpha = L\.type === ["']group["'] \? alpha : 1/);
   });
 });
 

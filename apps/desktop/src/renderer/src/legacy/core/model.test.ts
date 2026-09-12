@@ -20,6 +20,20 @@ function projectModel(): PMRegistry {
 }
 
 describe('legacy model install', () => {
+  it('creates null objects as compact transparent, canvas-pickable controls', () => {
+    const PM = projectModel();
+    const project = PM.mkProject({ name: 'T', w: 1920, h: 1080, fps: 30, dur: 10 });
+    PM.proj = project;
+
+    const layer = PM.mkLayer('null', { name: 'Null' }, project);
+
+    expect(layer.d).toEqual({ color: '#6A6A70', w: 100, h: 100, radius: 0 });
+    expect(layer.p.opacity.v).toBe(0);
+    expect(layer.p['anchor.x'].v).toBe(50);
+    expect(layer.p['anchor.y'].v).toBe(50);
+    expect(PM.TYPE_META.null).toMatchObject({ visual: false, pickable: true });
+  });
+
   it('creates a full-comp adjustment layer with editable transform source', () => {
     const PM = projectModel();
     const project = PM.mkProject({ name: 'T', w: 1920, h: 1080, fps: 30, dur: 10 });
@@ -35,6 +49,18 @@ describe('legacy model install', () => {
     expect(layer.p['position.y'].v).toBe(0);
     expect(layer.p.opacity.v).toBe(100);
     expect(PM.TYPE_META.adjustment).toMatchObject({ label: 'Adjustment', pickable: false });
+  });
+
+  it('creates groups with the standard visual compositing capabilities', () => {
+    const PM = projectModel();
+    const project = PM.mkProject({ name: 'T' });
+    PM.proj = project;
+
+    const group = PM.mkLayer('group', { name: 'Cards' }, project);
+
+    expect(group).toMatchObject({ type: 'group', fx: [], masks: [], blend: 'normal', mblur: false });
+    expect(PM.TYPE_META.group.effects).not.toBe(false);
+    expect(PM.TYPE_META.group.masks).not.toBe(false);
   });
 
   it('precomposes layers with the original span and stack order', () => {

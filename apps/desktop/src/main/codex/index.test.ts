@@ -166,6 +166,8 @@ describe('registerCodexIpc', () => {
       IPC.claudeStatus,
       IPC.claudeConnect,
       IPC.claudeDisconnect,
+      IPC.compatibleStatus,
+      IPC.compatibleConfigure,
       IPC.codexRun,
       IPC.codexSteer,
       IPC.codexCancel,

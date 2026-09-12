@@ -44,6 +44,7 @@ describe('UI-state oracle survivors', () => {
     PM.UIState.setShaderMeta(layer, { shaderKey: 'shader:old' });
     PM.UIState.setFxOpen(effect, true);
     PM.UIState.setLayerCollapsed(layer, true);
+    PM.UIState.setGroupCollapsed(layer, false);
 
     PM.proj = PM.mkProject({ name: 'Next project', w: 1280, h: 720, fps: 24, dur: 3 });
     PM.bus.emit('project');
@@ -53,5 +54,6 @@ describe('UI-state oracle survivors', () => {
     expect(PM.UIState.shaderMeta.size).toBe(0);
     expect(PM.UIState.fxOpen.size).toBe(0);
     expect(PM.UIState.layerCollapsed.size).toBe(0);
+    expect(PM.UIState.groupCollapsed.size).toBe(0);
   });
 });

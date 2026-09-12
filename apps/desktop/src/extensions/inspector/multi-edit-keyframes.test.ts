@@ -11,7 +11,7 @@ function fixture() {
     }
   });
   const PM = { sel: { keys: ['a', 'b'] }, time: 6, selLayers: () => [layer], L: () => layer,
-    evP: () => (keys[0].v + keys[1].v) / 2,
+    evP: () => (keys[0]!.v + keys[1]!.v) / 2,
     Edit: { begin: vi.fn(), dispatch, apply: dispatch, commit: vi.fn(), cancel: vi.fn() } };
   return { api: inspectorPM(PM), keys, PM, dispatch,
     command: (value: number) => ({ type: 'set_property', target: 'layer', path: 'x', value, time: 6, mode: 'auto' }) };
@@ -22,7 +22,7 @@ describe('selected keyframe numeric editing', () => {
     const f = fixture();
     f.api.Edit.apply(f.command(25));
     expect(f.keys.map(key => key.v)).toEqual([15, 35, 90]);
-    expect(f.dispatch.mock.calls[0][0].map((c: any) => c.time)).toEqual([5, 7]);
+    expect(f.dispatch.mock.calls[0]![0].map((c: any) => c.time)).toEqual([5, 7]);
   });
   it('uses the gesture starting values across repeated scrubs and resets after commit', () => {
     const f = fixture();

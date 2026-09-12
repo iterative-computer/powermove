@@ -56,7 +56,7 @@
       {/if}
       {#if firstLayer.type !== 'audio'}<TransformSection {PM} layer={firstLayer} />{/if}
       <StructuredSection {PM} layer={firstLayer} />
-      {#if firstLayer.type !== 'audio' && firstLayer.type !== 'group'}
+      {#if firstLayer.type !== 'audio'}
         {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
         {#if firstLayer.type === 'extension'}<ExtensionLayerParams {PM} layer={firstLayer} />{/if}
         <EffectsSection {PM} layer={firstLayer} />

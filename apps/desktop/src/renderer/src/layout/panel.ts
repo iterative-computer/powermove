@@ -73,7 +73,7 @@ export function syncPanelManifest(PM: PMRegistry, id: string, spec: PanelSpec, d
   applyPanelSize(inst.el, spec, inst.def);
   inst.el.style.minHeight = `${spec.min || 56}px`;
   inst.el.querySelector('.ptitle')?.replaceChildren(spec.title || inst.def.title);
-  setPanelCollapsed(PM, id, !!spec.collapsed, false);
+  setPanelCollapsed(PM, id, !!findPanel(PM.Layout.ws as Workspace, id)?.spec.collapsed, false);
   return inst.el;
 }
 

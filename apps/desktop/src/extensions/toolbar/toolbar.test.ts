@@ -65,8 +65,11 @@ describe('toolbar', () => {
 
     body.querySelector<HTMLButtonElement>('[aria-label="Add layer or media"]')?.click();
     const createItems = menu.mock.lastCall![1];
-    expect(createItems).toHaveLength(4);
-    for (const [index, command] of ['import', 'newSolid', 'newShader', 'newNull'].entries()) {
+    expect(createItems).toHaveLength(3);
+    expect(createItems.map((item: any) => item.label)).toEqual([
+      'Import media (Command+I)', 'New solid (Command+Y)', 'New null object (Command+Option+Shift+Y)'
+    ]);
+    for (const [index, command] of ['import', 'newSolid', 'newNull'].entries()) {
       createItems[index].run();
       expect(run).toHaveBeenLastCalledWith(command);
     }

@@ -29,6 +29,7 @@ export interface Store {
   load(): Promise<void>;
   snapshot(): StoreSnapshot;
   set(key: string, value: unknown): void;
+  setSerialized?(key: string, serialized: string): void;
   delete(key: string): void;
   flushAll(): Promise<void>;
   onError(cb: (event: StoreErrorEvent) => void): () => void;
@@ -108,6 +109,12 @@ class FileStore implements Store {
   set(key: string, value: unknown): void {
     this.fileNameFor(key, IPC.storeSet);
 
+    // Old renderers send session metadata without history. Such a partial
+    // update must never erase the last recoverable undo stack.
+    const previous = this.values.get(key);
+    if (key.startsWith('projectState.') && isRecord(value) && !Object.hasOwn(value, 'history') && isRecord(previous) && previous.history !== undefined) {
+      value = { ...value, history: previous.history };
+    }
     let cloned: unknown;
     let serialized: string | undefined;
     try {
@@ -122,9 +129,10 @@ class FileStore implements Store {
     }
     const byteLength = Buffer.byteLength(serialized, 'utf8');
     const parsedKey = parseStoreKey(key);
-    // Editable project snapshots must support the same size as project files;
-    // the ordinary settings cap rejects valid media-heavy projects on autosave.
-    const isProject = parsedKey?.kind === 'dynamic' && parsedKey.prefix === 'project';
+    // Project snapshots and sessions (including undo/redo history) must support
+    // the same size as project files, including during autosave and save completion.
+    const isProject = parsedKey?.kind === 'dynamic'
+      && (parsedKey.prefix === 'project' || parsedKey.prefix === 'projectState' || parsedKey.prefix === 'projectHistory');
     const byteLimit = key === 'takes' ? MAX_TAKES_BYTES
       : isProject ? LIMITS.fileSaveBytes : LIMITS.storeValueBytes;
     if (byteLength > byteLimit) {
@@ -135,6 +143,20 @@ class FileStore implements Store {
     }
 
     this.values.set(key, cloned);
+    this.schedule(key, { kind: 'set', serialized });
+  }
+
+  setSerialized(key: string, serialized: string): void {
+    this.fileNameFor(key, IPC.storeSetSerialized);
+    const parsed = parseStoreKey(key);
+    const large = parsed?.kind === 'dynamic' && ['project', 'projectState', 'projectHistory'].includes(parsed.prefix);
+    const limit = key === 'takes' ? MAX_TAKES_BYTES : large ? LIMITS.fileSaveBytes : LIMITS.storeValueBytes;
+    if (typeof serialized !== 'string' || Buffer.byteLength(serialized) > limit) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
+    let value: unknown;
+    try { value = JSON.parse(serialized); }
+    catch { throw new IpcValidationError(IPC.storeSetSerialized, 'invalid JSON'); }
+    if (key.startsWith('projectState.')) { this.set(key, value); return; }
+    this.values.set(key, value);
     this.schedule(key, { kind: 'set', serialized });
   }
 
@@ -316,7 +338,14 @@ export function registerStoreIpc(
 
   ipcMain.handle(IPC.storeSnapshot, (event) => {
     requireTrusted(event, IPC.storeSnapshot);
-    return store.snapshot();
+    return { ...store.snapshot(), __powermoveAsyncStore: true };
+  });
+
+  ipcMain.handle(IPC.storeSetSerialized, (event, payload: unknown) => {
+    requireTrusted(event, IPC.storeSetSerialized);
+    if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeSetSerialized, 'expected key and serialized JSON');
+    if (store.setSerialized) store.setSerialized(payload.key, payload.serialized);
+    else store.set(payload.key, JSON.parse(payload.serialized));
   });
 
   ipcMain.on(IPC.storeSnapshotSync, (event) => {
@@ -324,7 +353,7 @@ export function registerStoreIpc(
       event.returnValue = {};
       return;
     }
-    event.returnValue = store.snapshot();
+    event.returnValue = { ...store.snapshot(), __powermoveAsyncStore: true };
   });
 
   ipcMain.on(IPC.storeSet, (event, payload: unknown) => {

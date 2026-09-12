@@ -6,7 +6,7 @@ async function scaleFixture(page: Page) {
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
   return page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.replaceProject(PM.mkProject({ name: 'Timeline QA', dur: 10 }));
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Timeline QA', dur: 10 }) })); PM.ProjectsScreen.hide();
     const layer = PM.mkLayer('solid', { name: 'Scale QA', from: 2, dur: 3 });
     PM.proj.layers.push(layer);
     layer.scaleLinked = false;
@@ -381,7 +381,7 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
   const ids = await page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.replaceProject(PM.mkProject({ name: 'Graph focus QA', dur: 10 }));
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Graph focus QA', dur: 10 }) })); PM.ProjectsScreen.hide();
     const focused = PM.mkLayer('solid', { name: 'Focused curve' });
     const other = PM.mkLayer('solid', { name: 'Other layer' });
     PM.proj.layers.push(focused, other);
@@ -512,7 +512,7 @@ test('Shift pressed during a playhead drag snaps live to clip edges and keyframe
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
   const points = await page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.replaceProject(PM.mkProject({ name: 'Shift snap QA', dur: 8 }));
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Shift snap QA', dur: 8 }) })); PM.ProjectsScreen.hide();
     const layer = PM.mkLayer('solid', { name: 'Snap targets', from: 2, dur: 3 });
     PM.proj.layers.push(layer);
     PM.setKey(layer, 'opacity', 3.4, 50);

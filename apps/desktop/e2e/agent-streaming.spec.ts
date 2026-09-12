@@ -10,6 +10,8 @@ test('streamed text stays inline and keeps existing nodes as chunks arrive', asy
       (window as any).__agentAnimations.push({ text: this.textContent, prompt: this.classList.contains('agent-prompt'), frames, options });
       return animate.call(this, frames, options);
     };
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Agent streaming' }) }));
+    PM.ProjectsScreen.hide();
     PM.SpatialAssistant.open();
     PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
     PM.CodexBridge.request = async (_p: unknown, _s: unknown, _i: unknown, options: any) => {

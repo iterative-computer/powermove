@@ -91,6 +91,17 @@ afterEach(() => {
 });
 
 describe('legacy engine install', () => {
+  it('does not render the same project frame twice on a high refresh display', () => {
+    const { PM, runFrame } = engine();
+    PM.GL.gl = {}; PM.GL.render = vi.fn(); PM.animVersion = () => 1;
+    PM.play(); runFrame(1); runFrame(8); runFrame(16); runFrame(24);
+    expect(PM.GL.render).toHaveBeenCalledTimes(1);
+    runFrame(40);
+    expect(PM.GL.render).toHaveBeenCalledTimes(2);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    PM.bus.emit('quality'); runFrame(48);
+    expect(PM.GL.render).toHaveBeenCalledTimes(3);
+  });
   it('keeps a navigation redraw pending until refinement and never defers playback', () => {
     const { PM, runFrame } = engine();
     PM.GL.gl = {}; PM.GL.render = vi.fn();
@@ -121,12 +132,14 @@ describe('legacy engine install', () => {
     runFrame(10000);
     PM.play();
     for (let frame = 1; frame <= 32; frame++) runFrame(10000 + frame * 16);
-    expect(PM.perf.fps).toBeGreaterThanOrEqual(60);
+    expect(PM.perf.fps).toBeGreaterThanOrEqual(28);
+    expect(PM.perf.fps).toBeLessThanOrEqual(32);
     PM.pause();
     expect(PM.perf.fps).toBe(0);
     runFrame(30000); PM.play();
     for (let frame = 1; frame <= 32; frame++) runFrame(30000 + frame * 16);
-    expect(PM.perf.fps).toBeGreaterThanOrEqual(60);
+    expect(PM.perf.fps).toBeGreaterThanOrEqual(28);
+    expect(PM.perf.fps).toBeLessThanOrEqual(32);
   });
 
   it('delegates transport start, timeline tick, seek, and pause to PM.Audio', () => {

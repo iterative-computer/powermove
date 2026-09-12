@@ -330,6 +330,27 @@ describe('loader boot', () => {
 /* ── reload & bridge changes ─────────────────────────────── */
 
 describe('loader reload', () => {
+  it('does not retry a failed activation on health echoes, but retries changed source', async () => {
+    const { deps, toasts } = fakeDeps();
+    const bridge = fakeBridge([builtinRec('bad')]);
+    let broken = true;
+    const activate = vi.fn(() => { if (broken) throw new Error('Unavailable module'); });
+    const loader = createLoader({ kernel, bridge: bridge.bridge, deps, builtins: { bad: async () => ({ default: activate }) } });
+    await loader.boot();
+    for (let i = 0; i < 3; i++) {
+      bridge.emit({ ids: ['bad'], reason: 'health' });
+      await loader.whenIdle();
+    }
+    expect(activate).toHaveBeenCalledTimes(1);
+    expect(toasts).toHaveLength(1);
+    broken = false;
+    bridge.emit({ ids: ['bad'], reason: 'watch' });
+    await loader.whenIdle();
+    expect(activate).toHaveBeenCalledTimes(2);
+    expect(loader.activeIds()).toEqual(['bad']);
+    await loader.dispose();
+  });
+
   it('reloads an extension by deactivating and re-activating from a fresh record', async () => {
     const log: string[] = [];
     const { deps } = fakeDeps();

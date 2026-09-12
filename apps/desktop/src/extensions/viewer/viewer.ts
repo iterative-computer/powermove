@@ -1,4 +1,4 @@
-import { is3DLayer, planeMatrix, planeContains, projectPoint, inversePlane } from '../../renderer/src/legacy/core/space-3d';
+import { is3DLayer, planeMatrix, planeContains, projectPoint, inversePlane } from 'powermove';
 export function visualSelection(PM: any): any[] {
   const selected = PM.selLayers?.() || [];
   const ids = new Set(selected.map((layer: any) => layer.id));
@@ -384,6 +384,10 @@ function handlesFromCorners(corners: Point[]): Record<ResizeHandle, Point> {
   };
 }
 
+export function selectionBoundsCenter(selection: Pick<SelectionGeometry, 'corners'>): Point {
+  return midpoint(selection.corners[0]!, selection.corners[2]!);
+}
+
 function layerIsTransformable(PM: any, layer: any, T: number): boolean {
   return !!layer && !layer.lock && !(PM.groupAncestors?.(layer) || []).some((group: any) => group.lock) && PM.active(layer, T) && (layer.type === 'group' || PM.TYPE_META?.[layer.type]?.pickable !== false);
 }
@@ -713,6 +717,7 @@ V.attach = (stage: HTMLElement) => {
       }
 
     }
+    zoomControl.dataset.globalSpaceShortcut = '';
     // Share the panel chrome row with its move handle, outside the clipped stage.
     zoomHost.append(zoomControl);
     zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
@@ -931,7 +936,7 @@ function drawOverlay() {
   c.save(); c.translate((frame.left - stage.left) * dpr, (frame.top - stage.top) * dpr); c.scale(S, S);
   c.lineWidth = 1 / S;
 
-  drawSnapLines(c, S);
+  drawSnapLines(c);
   if(V.showControls !== false && !visualSelection(PM).some((layer: any) => is3DLayer(PM,layer)))drawEditablePaths(PM,c,S);
 
   if (V.toolRect) {
@@ -999,6 +1004,35 @@ function drawOverlay() {
     c.stroke();
   }
   c.restore();
+  /* Groups and multi-selections align by their visual bounds, which can be
+     somewhere other than any layer's transform anchor. Mark that bounds
+     center explicitly so the point used by snapping is visible before drag. */
+  if (selection && (selection.mode === 'common' || selection.layers[0]?.type === 'group')) {
+    const center = selectionBoundsCenter(selection);
+    const unit = 1 / Math.max(.02, V.shown), radius = 5 * unit;
+    const pivotDistance = Math.hypot(center.x - selection.pivotWorld.x, center.y - selection.pivotWorld.y);
+    c.save();
+    if (pivotDistance > 12 * unit) {
+      c.setLineDash([3 * unit, 3 * unit]);
+      c.strokeStyle = selectionInk;
+      c.globalAlpha = .7;
+      c.lineWidth = unit;
+      c.beginPath(); c.moveTo(selection.pivotWorld.x, selection.pivotWorld.y); c.lineTo(center.x, center.y); c.stroke();
+      c.setLineDash([]);
+      c.globalAlpha = 1;
+    }
+    c.fillStyle = 'rgba(0,0,0,.72)';
+    c.strokeStyle = 'rgba(0,0,0,.8)';
+    c.lineWidth = 3 * unit;
+    c.beginPath();
+    c.moveTo(center.x, center.y - radius); c.lineTo(center.x + radius, center.y);
+    c.lineTo(center.x, center.y + radius); c.lineTo(center.x - radius, center.y); c.closePath();
+    c.stroke(); c.fill();
+    c.strokeStyle = selectionInk;
+    c.lineWidth = unit;
+    c.stroke();
+    c.restore();
+  }
   if (selection) {
     c.strokeStyle = selectionInk;
     c.lineWidth = 1.4 / Math.max(.02, V.shown);
@@ -1048,22 +1082,45 @@ function rotationHandlePoint(selection: SelectionGeometry): Point {
   };
 }
 
-function drawSnapLines(c: any, S: any) {
+function drawSnapLines(c: any) {
   const lines: SnapLine[] = V.snapLines;
   if (!lines || !lines.length) return;
-  const cross = 3 / S;
+  const unit = 1 / Math.max(.02, V.shown), cross = 3 * unit;
+  const centerSnaps = lines.filter((line) =>
+    line.targetScope === 'composition' && line.targetRole === 'center' && line.axis,
+  );
   c.save();
   c.strokeStyle = SNAP_COLOR;
-  c.lineWidth = 1 / S;
+  c.lineWidth = unit;
   c.beginPath();
-  for (const line of lines) { c.moveTo(line.from.x, line.from.y); c.lineTo(line.to.x, line.to.y); }
+  for (const line of lines) {
+    if (line.targetScope === 'composition' && line.targetRole === 'center' && line.axis === 'x') {
+      c.moveTo(line.to.x, 0); c.lineTo(line.to.x, PM.proj.h);
+    } else if (line.targetScope === 'composition' && line.targetRole === 'center' && line.axis === 'y') {
+      c.moveTo(0, line.to.y); c.lineTo(PM.proj.w, line.to.y);
+    } else {
+      c.moveTo(line.from.x, line.from.y); c.lineTo(line.to.x, line.to.y);
+    }
+  }
   c.stroke();
   c.beginPath();
-  for (const line of lines) for (const point of [line.from, line.to]) {
+  for (const line of lines) for (const point of centerSnaps.includes(line) ? [line.from] : [line.from, line.to]) {
     c.moveTo(point.x - cross, point.y - cross); c.lineTo(point.x + cross, point.y + cross);
     c.moveTo(point.x - cross, point.y + cross); c.lineTo(point.x + cross, point.y - cross);
   }
   c.stroke();
+  /* A center-to-center snap used to collapse into a zero-length segment. A
+     fixed-size bullseye makes the composition center legible even when both
+     axes and both points perfectly overlap. */
+  const center = centerSnaps[0]?.to;
+  if (center) {
+    const radius = 6 * unit;
+    c.fillStyle = 'rgba(0,0,0,.72)';
+    c.beginPath(); c.arc(center.x, center.y, radius, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = SNAP_COLOR; c.lineWidth = 1.5 * unit; c.stroke();
+    c.fillStyle = SNAP_COLOR;
+    c.beginPath(); c.arc(center.x, center.y, 1.5 * unit, 0, Math.PI * 2); c.fill();
+  }
   c.restore();
 }
 
@@ -1073,28 +1130,40 @@ function drawSnapLines(c: any, S: any) {
    to the target instead of across the whole composition. Everything stays in
    composition pixels; the threshold is converted from a constant on-screen
    distance by the caller. */
-type SnapAxisCandidate = { value: number; point: Point };
+type SnapPointRole = 'corner' | 'center';
+type SnapPointScope = 'layer' | 'composition';
+type SnapPoint = Point & { snapRole?: SnapPointRole; snapScope?: SnapPointScope };
+type SnapAxisCandidate = { value: number; point: SnapPoint };
 type SnapCandidates = { x: SnapAxisCandidate[]; y: SnapAxisCandidate[] };
-type SnapLine = { from: Point; to: Point };
-type SnapTarget = { offset: number; distance: number; sourcePoint: Point; targetPoint: Point };
+type SnapLine = {
+  from: Point; to: Point; axis?: 'x' | 'y';
+  sourceRole?: SnapPointRole; targetRole?: SnapPointRole; targetScope?: SnapPointScope;
+};
+type SnapTarget = { offset: number; distance: number; sourcePoint: SnapPoint; targetPoint: SnapPoint };
 type SnapResult = { dx: number; dy: number; lines: SnapLine[] };
 
 const SNAP_COLOR = '#F43535';
 /** How close, in CSS pixels, a candidate has to be before a gesture snaps to it. */
 const SNAP_DISTANCE = 8;
 
-function snapCandidatesFromPoints(points: Point[]): SnapCandidates {
+function snapCandidatesFromPoints(points: SnapPoint[]): SnapCandidates {
   return {
     x: points.map((point) => ({ value: point.x, point })),
     y: points.map((point) => ({ value: point.y, point })),
   };
 }
 
-/** The four corners of an axis-aligned box plus its center. */
-function boxSnapPoints(b: { x0: number; x1: number; y0: number; y1: number }): Point[] {
+/** The four corners of an axis-aligned box plus its semantic center. */
+function boxSnapPoints(
+  b: { x0: number; x1: number; y0: number; y1: number },
+  scope: SnapPointScope = 'layer',
+): SnapPoint[] {
   return [
-    { x: b.x0, y: b.y0 }, { x: b.x1, y: b.y0 }, { x: b.x1, y: b.y1 }, { x: b.x0, y: b.y1 },
-    { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2 },
+    { x: b.x0, y: b.y0, snapRole: 'corner', snapScope: scope },
+    { x: b.x1, y: b.y0, snapRole: 'corner', snapScope: scope },
+    { x: b.x1, y: b.y1, snapRole: 'corner', snapScope: scope },
+    { x: b.x0, y: b.y1, snapRole: 'corner', snapScope: scope },
+    { x: (b.x0 + b.x1) / 2, y: (b.y0 + b.y1) / 2, snapRole: 'center', snapScope: scope },
   ];
 }
 
@@ -1137,10 +1206,14 @@ function snapBox(
   if (xSnap) lines.push({
     from: { x: xSnap.sourcePoint.x + xSnap.offset, y: xSnap.sourcePoint.y + (ySnap?.offset ?? 0) },
     to: xSnap.targetPoint,
+    axis: 'x', sourceRole: xSnap.sourcePoint.snapRole,
+    targetRole: xSnap.targetPoint.snapRole, targetScope: xSnap.targetPoint.snapScope,
   });
   if (ySnap) lines.push({
     from: { x: ySnap.sourcePoint.x + (xSnap?.offset ?? 0), y: ySnap.sourcePoint.y + ySnap.offset },
     to: ySnap.targetPoint,
+    axis: 'y', sourceRole: ySnap.sourcePoint.snapRole,
+    targetRole: ySnap.targetPoint.snapRole, targetScope: ySnap.targetPoint.snapScope,
   });
   return { dx: xSnap?.offset ?? 0, dy: ySnap?.offset ?? 0, lines };
 }
@@ -1148,7 +1221,9 @@ function snapBox(
 /** True when the guides now point somewhere new, which is when the haptic fires. */
 function snapLinesChanged(previous: SnapLine[] | null, next: SnapLine[] | null): boolean {
   if (!next || !next.length) return false;
-  const key = (lines: SnapLine[]) => lines.map((l) => `${l.to.x},${l.to.y}`).sort().join('|');
+  const key = (lines: SnapLine[]) => lines.map((line) => [
+    line.axis, line.sourceRole, line.targetScope, line.targetRole, line.to.x, line.to.y,
+  ].join(':')).sort().join('|');
   return !previous || key(previous) !== key(next);
 }
 
@@ -1177,7 +1252,9 @@ function unionBounds(layers: any, T: any) {
  */
 function snapshotSnapCandidates(T: any, selectionLayers: any[]): SnapCandidates {
   const selectedIds = new Set(selectionLayers.map((L: any) => L.id));
-  const points: Point[] = boxSnapPoints({ x0: 0, y0: 0, x1: PM.proj.w, y1: PM.proj.h });
+  const points: SnapPoint[] = boxSnapPoints(
+    { x0: 0, y0: 0, x1: PM.proj.w, y1: PM.proj.h }, 'composition',
+  );
   const parentIds = new Set(selectionLayers.map((L: any) => L.parent || null));
   const parentId = parentIds.size === 1 ? [...parentIds][0] : null;
   const visible = (L: any) => PM.active(L, T);

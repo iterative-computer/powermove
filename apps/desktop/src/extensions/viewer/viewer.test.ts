@@ -7,7 +7,7 @@ import {
   install, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
   previewRenderSize, previewRenderViewport, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
-  shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
+  selectionBoundsCenter, shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 
 const originalWindow = (globalThis as any).window;
@@ -126,7 +126,7 @@ describe('viewer runtime', () => {
           if (edge === 'right') x = 600-width-offset;
           if (edge === 'top') y = offset;
           if (edge === 'bottom') y = 400-height-offset;
-          const view = previewRenderViewport(1920,1080,zoom,600,400,x,y,dpr,quality,128,previous)!;
+          const view: NonNullable<ReturnType<typeof previewRenderViewport>> = previewRenderViewport(1920,1080,zoom,600,400,x,y,dpr,quality,128,previous)!;
           expect(view.renderWidth).toBe(Math.round(856*dpr*quality));
           expect(view.renderHeight).toBe(Math.round(656*dpr*quality));
           expect(view.cssLeft).toBeGreaterThanOrEqual(0);
@@ -161,12 +161,30 @@ describe('viewer runtime', () => {
     expect(both.dx).toBe(-3);
     expect(both.dy).toBe(-2);
     expect(both.lines).toEqual([
-      { from: { x: 200, y: 50 }, to: { x: 200, y: 0 } },
-      { from: { x: 200, y: 50 }, to: { x: 400, y: 50 } },
+      expect.objectContaining({ axis: 'x', from: { x: 200, y: 50 }, to: { x: 200, y: 0 } }),
+      expect.objectContaining({ axis: 'y', from: { x: 200, y: 50 }, to: { x: 400, y: 50 } }),
     ]);
 
     const locked = V.snapBox(moving, candidates, 6, { x: true, y: false });
-    expect(locked).toEqual({ dx: -3, dy: 0, lines: [{ from: { x: 200, y: 52 }, to: { x: 200, y: 0 } }] });
+    expect(locked.dx).toBe(-3);
+    expect(locked.dy).toBe(0);
+    expect(locked.lines).toEqual([
+      expect.objectContaining({ axis: 'x', from: { x: 200, y: 52 }, to: { x: 200, y: 0 } }),
+    ]);
+  });
+
+  it('preserves enough snap-point context to render an unmistakable composition center', () => {
+    const V = viewerRegistry().Viewer;
+    const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 270, x1: 370, y0: 140, y1: 220 }));
+    const composition = V.snapCandidatesFromPoints(V.boxSnapPoints(
+      { x0: 0, x1: 640, y0: 0, y1: 360 }, 'composition',
+    ));
+
+    const snap = V.snapBox(moving, composition, 1);
+    expect(snap.lines).toEqual([
+      expect.objectContaining({ axis: 'x', sourceRole: 'center', targetRole: 'center', targetScope: 'composition' }),
+      expect.objectContaining({ axis: 'y', sourceRole: 'center', targetRole: 'center', targetScope: 'composition' }),
+    ]);
   });
 
   it('keeps sibling alignment targets for a multi-selection inside one parent', () => {
@@ -196,6 +214,10 @@ describe('viewer runtime', () => {
     expect(V.snapLinesChanged(a, b)).toBe(true);
     expect(V.snapLinesChanged(a, [...a, ...b])).toBe(true);
     expect(V.snapLinesChanged(a, null)).toBe(false);
+    expect(V.snapLinesChanged(
+      [{ ...a[0], axis: 'x', targetRole: 'corner', targetScope: 'layer' }],
+      [{ ...a[0], axis: 'x', targetRole: 'center', targetScope: 'composition' }],
+    )).toBe(true);
   });
 
   it('keeps click jitter below the move-drag threshold', () => {
@@ -344,6 +366,20 @@ describe('viewer runtime', () => {
     expect(selection?.bounds).toEqual({ x0: 90, y0: 115, x1: 225, y1: 190, w: 135, h: 75 });
     expect(selection?.handles.nw).toEqual({ x: 90, y: 115 });
     expect(selection?.handles.se).toEqual({ x: 225, y: 190 });
+  });
+
+  it('keeps a group bounds center explicit when its transform anchor is offset', () => {
+    const group = { id: 'group', type: 'group', parent: null };
+    const PM = {
+      active: () => true, TYPE_META: { group: {} }, L: () => null,
+      GL: { bounds: () => ({ x0: -70, y0: -40, x1: 70, y1: 40, w: 140, h: 80 }) },
+      worldMatrix: () => [1, 0, 0, 1, 320, 180],
+      ev: (_layer: any, path: string) => path === 'anchor.x' ? 10 : path === 'anchor.y' ? -20 : 0,
+    };
+
+    const selection = resolveSelectionGeometry(PM, [group], 0)!;
+    expect(selectionBoundsCenter(selection)).toEqual({ x: 320, y: 180 });
+    expect(selection.pivotWorld).toEqual({ x: 330, y: 160 });
   });
 
   it('keeps locked members in common chrome while disabling the whole transform', () => {

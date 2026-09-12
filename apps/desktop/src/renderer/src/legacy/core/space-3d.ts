@@ -56,20 +56,27 @@ export function local3D(PM: any, L: any, T: number): Mat4 {
     return multiply(multiply(m, scale), translation(-ev('anchor.x'), -ev('anchor.y'), -ev('anchor.z')));
 }
 export function parent3D(PM: any, L: any, T: number, parent = L.parent ? PM.L(L.parent) : null): Mat4 {
-    const chain: any[] = [], seen = new Set<any>(), groups = new Set<string>();
+    const groups = new Set<string>();
     let m = identity();
-    for (let cur = L; cur && !seen.has(cur) && chain.length < 256; cur = cur === L ? parent : cur.parent ? PM.L(cur.parent) : null) {
-        seen.add(cur);
-        chain.push(cur);
-    }
-    for (const layer of chain)
+    const appendParents = (layer: any, firstParent = layer.parent ? PM.L(layer.parent) : null) => {
+        const chain: any[] = [], seen = new Set<any>([layer]);
+        for (let cur = firstParent; cur && !seen.has(cur) && chain.length < 256; cur = cur.parent ? PM.L(cur.parent) : null) {
+            seen.add(cur);
+            chain.push(cur);
+            appendGroups(cur);
+        }
+        for (const item of chain.reverse()) m = multiply(m, local3D(PM, item, T));
+    };
+    const appendGroups = (layer: any) => {
         for (const group of (PM.groupAncestors?.(layer) || []).slice().reverse())
             if (!groups.has(group.id)) {
                 groups.add(group.id);
+                appendParents(group);
                 m = multiply(m, local3D(PM, group, T));
             }
-    for (const layer of chain.reverse())
-        if (layer !== L) m = multiply(m, local3D(PM, layer, T));
+    };
+    appendGroups(L);
+    appendParents(L, parent);
     return m;
 }
 export function world3D(PM: any, L: any, T: number, positioning = false): Mat4 {

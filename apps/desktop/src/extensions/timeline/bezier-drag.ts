@@ -15,8 +15,8 @@ type SelectableBezierKey = {
 const EPSILON = 1e-6;
 
 /** Handle drags edit only the clicked time in the owning track. Grouped X/Y
- * keys at that time still behave as one point; selecting other keyframes does
- * not link their handles. */
+ * keys at that time still behave as one point; the Graph Editor separately
+ * links the same selected key ordinal across matching properties on layers. */
 export function keysForBezierHandleDrag<T extends SelectableBezierKey>(
   keys: T[], clicked: T, _selectedIds: string[],
 ): T[] {

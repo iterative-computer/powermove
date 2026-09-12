@@ -77,6 +77,27 @@ function serializedLegacyDemo(): string {
 }
 
 describe('sanitizeProject', () => {
+  it('preserves group effects and masks as editable project source', () => {
+    const PM = legacyModel();
+    const source = PM.mkProject({ dur: 4 });
+    PM.proj = source;
+    const group = PM.mkLayer('group', { name: 'Styled group' }, source) as any;
+    group.from = -0.5;
+    group.fx = [{ id: 'fx-group', type: 'blur', on: true, p: { amount: { v: 18, kf: [], expr: null } } }];
+    group.masks = [PM.mkMask('ellipse', source)];
+    source.layers = [group];
+
+    const project = sanitizeProject(source);
+    const restored = project.layers[0]!;
+
+    expect(restored.type).toBe('group');
+    expect(restored.from).toBe(-0.5);
+    expect(restored.fx).toHaveLength(1);
+    expect(restored.fx[0]).toMatchObject({ id: 'fx-group', type: 'blur', on: true });
+    expect(restored.masks).toHaveLength(1);
+    expect(restored.masks[0]).toMatchObject({ shape: 'ellipse', mode: 'add', on: true });
+  });
+
   it('hydrates a VM-generated legacy model project and its nested composition', () => {
     const project = sanitizeProject(serializedLegacyDemo());
 

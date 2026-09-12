@@ -78,7 +78,7 @@ export function createPropertyReveal(PM: any) {
         }
         PM.UIState.setReveal(L, keys);
         PM.UIState.setLayerCollapsed(L, close || (shift && !keys.length));
-        for (const group of PM.groupAncestors?.(L) || []) PM.UIState.setLayerCollapsed(group, false);
+        for (const group of PM.groupAncestors?.(L) || []) PM.UIState.setGroupCollapsed(group, false);
       });
       last = double ? undefined : { key, shift, time: now, layers: [...layers], before };
     }

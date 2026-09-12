@@ -50,47 +50,9 @@ export function toggleLayerStrips(pm: Record<string, any>): void {
   pm.invalidate?.('timeline');
 }
 
-export function splitSelectedLayersAtPlayhead(pm: Record<string, any>): string[] {
-  const rightIds: string[] = [];
-  pm.hist.do('Split', () => {
-    for (const layer of pm.selLayers?.() ?? []) {
-      if (pm.time <= layer.from || pm.time >= layer.from + layer.dur) continue;
-      const right = pm.cloneLayer(layer);
-      // Keyframe times are layer-local. Preserve their composition times
-      // when the tail gets a new in point, including keys before the cut.
-      const offset = pm.time - layer.from;
-      for (const { prop } of pm.allProps(right)) {
-        for (const key of prop.kf ?? []) key.t -= offset;
-      }
-      right.from = pm.time;
-      right.dur = layer.from + layer.dur - pm.time;
-      if (pm.MediaTiming?.isTimed?.(layer)) right.d.trim = pm.MediaTiming.trimAtStart(layer, pm.time);
-      layer.dur = pm.time - layer.from;
-      pm.proj.layers.splice(pm.proj.layers.indexOf(layer), 0, right);
-      rightIds.push(right.id);
-    }
-    pm.bus.emit('layers');
-    if (rightIds.length) {
-      // The project index intentionally avoids rescanning large layer stacks
-      // on every lookup. This command mutates the array directly, so retire
-      // the old index before resolving the newly-created selection.
-      pm.ProjectIndex?.invalidate?.();
-      pm.selectLayers(rightIds);
-    }
-  });
-  return rightIds;
-}
-
 export default function activate(api: PowermoveAPI): void {
   const pm = api.host.pm as Record<string, any>;
   const timeline = createTimelineRuntime(pm);
-  api.commands?.register({
-    id: 'split',
-    label: 'Split at playhead',
-    category: 'Edit',
-    kb: '⌘⇧D',
-    run: () => splitSelectedLayersAtPlayhead(pm)
-  });
   api.commands?.register({
     id: 'toggleLayerStrips',
     label: 'Open / collapse layer strips',

@@ -38,7 +38,7 @@
   {#if agentState.reasoningEfforts.length}
   <select class="effort" aria-label="Reasoning effort" use:fancySelect={agentState.reasoningEffort} value={agentState.reasoningEffort} onchange={changeEffort} onkeydown={keydown}>
     {#each agentState.reasoningEfforts as effort (effort)}
-      <option value={effort}>{effort}</option>
+      <option value={effort}>{effort === 'xhigh' ? 'XHigh' : effort.charAt(0).toUpperCase() + effort.slice(1)}</option>
     {/each}
   </select>
   {/if}

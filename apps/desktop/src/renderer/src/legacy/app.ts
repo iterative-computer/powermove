@@ -5,6 +5,7 @@ import { compactEditLog } from '../core/edit-log';
 import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
+import { stringifyAsync } from './core/serialize-async';
 import { createExtensionSettingsControl } from './ui/extension-settings';
 import { createGeneralSettingsControl } from './ui/general-settings';
 import {
@@ -25,7 +26,7 @@ let activeSave: Promise<boolean> | null = null;
 function fileState(id = PM.proj.id): FileState {
   let state = fileStates.get(id);
   if (!state) {
-    const saved = PM.Projects.getState(id)?.file;
+    const saved = PM.Projects.getState(id, { history: false })?.file;
     state = { path: saved?.path, savedHash: saved?.savedHash, baselineHash: saved?.baselineHash, dirty: true };
     fileStates.set(id, state);
     // A local project can be unchanged without ever having been saved to a
@@ -47,13 +48,14 @@ function fileUI() {
   document.title = `${APP.dirty ? '• ' : ''}${PM.proj.name} — Powermove`;
 }
 async function refreshFileDirty(project = PM.proj): Promise<boolean> {
-  const state = fileState(project.id), json = JSON.stringify(project);
+  const state = fileState(project.id);
+  const json = await stringifyAsync(project);
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
   await state.baselineReady;
   const hash = await projectFingerprint(json);
   // A newer edit wins over an in-flight comparison.
-  if (JSON.stringify(project) !== json) return true;
+  if (await stringifyAsync(project) !== json) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the
@@ -64,7 +66,7 @@ async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   return state.dirty;
 }
 function rememberFile(id: string, state: FileState) {
-  PM.Projects.putState(id, { ...PM.Projects.getState(id), file: { path: state.path, savedHash: state.savedHash, baselineHash: state.baselineHash } });
+  PM.Projects.putState(id, { ...PM.Projects.getState(id, { history: false }), file: { path: state.path, savedHash: state.savedHash, baselineHash: state.baselineHash } });
 }
 PM.projectFileState = (id: string) => fileState(id);
 let saveGeneration = 0;
@@ -238,7 +240,8 @@ function hydrate(p: any) {
     layers.forEach((L: any, li: any) => {
       L.id = typeof L.id === 'string' && L.id ? L.id : PM.uid('L');
       if (!L.name || typeof L.name !== 'string') L.name = 'Layer ' + (li + 1);
-      L.from = Math.max(0, num(L.from, 0)); L.dur = Math.max(.01, num(L.dur, 5));
+      L.from = L.type === 'group' ? num(L.from, 0) : Math.max(0, num(L.from, 0));
+      L.dur = Math.max(.01, num(L.dur, 5));
       if (L.type != null && !PM.TYPE_META[L.type]) L.type = 'null';
       L.on = isProperty(L.on) ? L.on : L.on !== false; L.lock = !!L.lock; L.solo = !!L.solo; L.shy = !!L.shy;
       L.collapsed = L.collapsed !== false; L.fx = Array.isArray(L.fx) ? L.fx : []; L.p = L.p && typeof L.p === 'object' ? L.p : {}; L.d = L.d && typeof L.d === 'object' ? L.d : {};
@@ -430,7 +433,8 @@ PM.Kernel?.transitions?.onChange?.(revalidateContributionPlaceholders);
 
 PM.WS.init();
 const bootSession = PM.Projects.getState(PM.proj.id);
-if (bootSession?.workspace) PM.WS.restoreSnapshot(bootSession.workspace);
+const bootWorkspace = PM.store.get(`projectWorkspace.${PM.proj.id}`, null) || bootSession?.workspace;
+if (bootWorkspace) PM.WS.restoreSnapshot(bootWorkspace);
 PM.selectLayers((bootSession?.selection?.layers || []).filter((id: any) => PM.L(id)).length
   ? bootSession.selection.layers.filter((id: any) => PM.L(id))
   : PM.proj.layers.find((l: any) => l.name === 'Powermove')?.id || []);
@@ -443,7 +447,7 @@ if (bootSession?.timeline && PM.TL) {
   PM.TL.scrollY = Number.isFinite(bootSession.timeline.scrollY) ? bootSession.timeline.scrollY : PM.TL.scrollY;
   PM.TL.graph = !!bootSession.timeline.graph;
 }
-PM.hist.clear();
+PM.hist.import?.(bootSession?.history);
 restoreProjectAssets(PM.proj);
 
 /* ── shell ─────────────────────────────────────────────── */
@@ -545,7 +549,7 @@ let thumbRetry = 0;
 function projectThumb() {
   const now = Date.now();
   if (now - lastThumbAt < 5000) return undefined;
-  if (PM.Viewer?.isNavigating?.() || PM.playing || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active) {
+  if (PM.interactionActive?.() || PM.Viewer?.isNavigating?.() || PM.playing || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active) {
     window.clearTimeout(thumbRetry);
     const project = PM.proj;
     thumbRetry = window.setTimeout(() => {
@@ -557,7 +561,23 @@ function projectThumb() {
   }
   window.clearTimeout(thumbRetry); thumbRetry = 0;
   lastThumbAt = now;
-  try { return PM.Export.snapshot(PM.time, 320); } catch (e) { return undefined; }
+  // Never render a second composition or synchronously readPixels for recovery.
+  // Capture the already-presented canvas asynchronously; metadata can arrive later.
+  const canvas = PM.GL?.canvas, project = PM.proj;
+  if (canvas?.toBlob && typeof createImageBitmap === 'function') {
+    canvas.toBlob((blob: Blob | null) => {
+      if (!blob || PM.proj !== project) return;
+      void createImageBitmap(blob, { resizeWidth: 320, resizeHeight: Math.max(1, Math.round(320 * canvas.height / canvas.width)) }).then(bitmap => {
+        try {
+          if (PM.proj !== project) return;
+          const thumbnail = document.createElement('canvas'); thumbnail.width = bitmap.width; thumbnail.height = bitmap.height;
+          thumbnail.getContext('2d')!.drawImage(bitmap, 0, 0);
+          PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), thumb: thumbnail.toDataURL('image/jpeg', .7) });
+        } finally { bitmap.close(); }
+      }).catch(() => undefined);
+    }, 'image/jpeg', .7);
+  }
+  return undefined;
 }
 function persistCurrent(withThumb: any) {
   if (PM.proj.id === homeProjectId) return true;
@@ -574,8 +594,9 @@ function captureProjectSession() {
   PM.bus.emit('project:flush-edits');
   const saved = persistCurrent(false);
   PM.Projects.putState(PM.proj.id, {
-    ...PM.Projects.getState(PM.proj.id),
+    ...PM.Projects.getState(PM.proj.id, { history: false }),
     lastActiveAt: Date.now(),
+    history: PM.hist.export?.({ copy: false }),
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
     timeline: PM.TL
@@ -612,6 +633,7 @@ PM.autosave = () => {
   APP.saveTimer = window.setTimeout(async () => {
     try {
       if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
+      PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
       await PM.store.flush?.();
       if (generation !== saveGeneration || projectId !== PM.proj.id) return;
       // Local recovery is not the user's .pmv file and must never mark it saved.
@@ -629,19 +651,31 @@ PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); })
 ['layers','project','assets','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
-  APP.saving = true;
+  APP.saving = true; PM.invalidate('status');
   try {
     (window.document.activeElement as HTMLElement | null)?.blur?.();
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
-    const projectJSON = JSON.stringify(project);
-    const snapshot = { v: PM.version, proj: project,
-      ws: projectId === PM.proj.id ? PM.WS.current : PM.Projects.getState(projectId)?.workspace };
+    let projectJSON: string, snapshot: any, serialized: string;
+    // Edits can arrive between serialization slices. Retry a changed snapshot
+    // instead of writing a mixture of two document revisions to disk.
+    for (;;) {
+      const generation = comparisonVersions.get(projectId) || 0;
+      const editVersion = PM.animVersion?.();
+      const current = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId) || project;
+      snapshot = { v: PM.version, proj: current,
+        history: projectId === PM.proj.id ? PM.hist.export?.({ copy: false }) : PM.Projects.getState(projectId)?.history,
+        ws: projectId === PM.proj.id ? PM.WS.snapshot() : PM.Projects.getState(projectId)?.workspace };
+      projectJSON = await stringifyAsync(current);
+      const historyJSON = await stringifyAsync(snapshot.history ?? null);
+      serialized = `{"v":${JSON.stringify(PM.version ?? null)},"proj":${projectJSON},"history":${historyJSON},"ws":${JSON.stringify(snapshot.ws ?? null)}}`;
+      if (editVersion === PM.animVersion?.() && generation === (comparisonVersions.get(projectId) || 0) && (projectId !== PM.proj.id || current === PM.proj)) break;
+    }
     const state = fileState(projectId);
     const suggestedName = safeName(project.name) + '.pmv';
-    const data = await packProjectFile(snapshot, PM.MediaStore);
+    const data = await packProjectFile(snapshot, PM.MediaStore, serialized);
     const finish = async (path?: string) => {
       state.path = path || state.path;
       state.savedHash = await projectFingerprint(projectJSON);
@@ -653,8 +687,21 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName));
       return true;
     };
-    if (window.powermove?.saveFile) {
-      const result = await window.powermove.saveFile({ name: suggestedName, projectId, saveAs, data });
+    if (typeof window.powermove?.saveFile === 'function') {
+      const metadata = { name: suggestedName, projectId, saveAs };
+      const upload = window.powermove.fileUpload;
+      const result = await (async () => {
+        if (!upload || data.length <= 4 * 1024 * 1024) return window.powermove!.saveFile({ ...metadata, data });
+        const token = await upload.begin(data.length);
+        try {
+          for (let offset = 0; offset < data.length; offset += 1024 * 1024) {
+            // A subarray still owns the complete backing buffer. Electron's
+            // context bridge would clone the entire project for every slice.
+            await upload.chunk(token, data.slice(offset, offset + 1024 * 1024));
+          }
+          return await upload.finish(token, metadata);
+        } finally { await upload.abort(token).catch(() => undefined); }
+      })();
       if (result.ok) return await finish(result.path);
       if (!result.cancelled) throw new Error(result.error || 'Save failed');
       return false;
@@ -715,7 +762,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     const rememberedWorkspace = filePath && fileState().path === filePath
       ? PM.WS.snapshot()
       : filePath ? PM.Projects.list()
-        .map((item: any) => PM.Projects.getState(item.id))
+        .map((item: any) => ({ ...PM.Projects.getState(item.id, { history: false }), workspace: PM.store.get(`projectWorkspace.${item.id}`, null) || PM.Projects.getState(item.id, { history: false })?.workspace }))
         .filter((session: any) => session?.file?.path === filePath && session?.workspace?.layout?.docks)
         .sort((a: any, b: any) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0))[0]?.workspace
         : undefined;
@@ -726,7 +773,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     const previousProjectId = filePath && fileState().path === filePath
       ? PM.proj.id
       : filePath ? PM.Projects.list()
-        .map((item: any) => ({ id: item.id, session: PM.Projects.getState(item.id) }))
+        .map((item: any) => ({ id: item.id, session: PM.Projects.getState(item.id, { history: false }) }))
         .filter((item: any) => item.session?.file?.path === filePath)
         .sort((a: any, b: any) => (b.session.lastActiveAt || 0) - (a.session.lastActiveAt || 0))[0]?.id
         : undefined;
@@ -734,7 +781,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (archive && PM.store.set(`agentThreads.${project.id}`, archive) === false) {
       throw new Error('Could not restore agent threads: project storage is unavailable or full');
     }
-    switchProject(project);
+    switchProject(project, o.history || { version: 1, index: -1, entries: [] });
     const state = fileState(project.id);
     state.path = association?.path;
     state.savedHash = association ? await projectFingerprint(JSON.stringify(PM.proj)) : undefined;
@@ -767,7 +814,7 @@ PM.newProject = () => {
   ] });
   window.setTimeout(() => form.focus(), 30);
 };
-function switchProject(p: any) {
+function switchProject(p: any, history?: any) {
   PM.pause();
   if (PM.proj?.id && PM.proj.id !== p.id) captureProjectSession();
   closeProjectTransients();
@@ -775,8 +822,10 @@ function switchProject(p: any) {
   PM.Projects.markOpen(PM.proj.id);
   const session = PM.Projects.getState(PM.proj.id);
   PM.Projects.putState(PM.proj.id, { ...session, lastActiveAt: Date.now() });
-  if (session?.workspace) PM.WS.restoreSnapshot(session.workspace);
+  const projectWorkspace = PM.store.get(`projectWorkspace.${PM.proj.id}`, null) || session?.workspace;
+  if (projectWorkspace) PM.WS.restoreSnapshot(projectWorkspace);
   else PM.WS.activate('design', true);
+  PM.hist.import?.(history ?? session?.history);
   persistCurrent(false);
   PM.bus.emit('projects:tabs');
   PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
@@ -790,7 +839,6 @@ function switchProject(p: any) {
     PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
     PM.TL.graph = !!session?.timeline?.graph;
   }
-  PM.hist.clear();
   PM.rasterClear();
   PM.assets.clear();
   APP.fileHandle = null;

@@ -355,6 +355,41 @@ describe('Svelte DockLayout panel pool', () => {
     expect(splitter.getAttribute('aria-valuenow')).toBe('88');
   });
 
+  it.each([0, 1])('resizes only adjacent panels at right-dock divider %i', (divider) => {
+    register(PM, 'viewer', { headless: true, hideMoveHandle: true });
+    for (const id of ['inspector', 'fxbrowser', 'pexels']) register(PM, id, { min: 88 });
+    const specs = [{ id: 'inspector', flex: true }, { id: 'fxbrowser', size: 200 }, { id: 'pexels', flex: true }];
+    PM.WS.current.layout.docks = [
+      { id: 'center', flex: true, panels: [{ id: 'viewer', flex: true }] },
+      { id: 'right', size: 300, panels: specs }
+    ];
+    installSvelteLayout(PM);
+    PM.Layout.apply(PM.WS.current);
+    const heights = [180, 200, 320];
+    const initialSpecs = specs.map(spec => ({ ...spec }));
+    const elements = specs.map((spec, index) => {
+      const element = document.getElementById(`panel-${spec.id}`)!;
+      element.getBoundingClientRect = () => ({ width: 300, height: heights[index]!, left: 0, right: 300, top: 0, bottom: heights[index]!, x: 0, y: 0, toJSON() {} });
+      return element;
+    });
+    const untouched = divider === 0 ? 2 : 0;
+    const original = { ...specs[untouched] };
+    const originalFlex = elements[untouched]!.style.flex;
+    const splitter = document.querySelectorAll<HTMLElement>('#dock-right [role="separator"]')[divider]!;
+    let dragOptions: any;
+    vi.mocked(PM.drag).mockImplementation(((_event: PointerEvent, options: any) => { dragOptions = options; return { cancel: vi.fn() }; }) as any);
+    splitter.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }) as unknown as PointerEvent);
+    dragOptions.move(0, -1000, new MouseEvent('pointermove') as unknown as PointerEvent);
+
+    expect(specs[divider]).toEqual({ id: specs[divider]!.id, size: 88, collapsed: false });
+    expect(specs[divider + 1]).toEqual({ id: specs[divider + 1]!.id, size: heights[divider]! + heights[divider + 1]! - 88, collapsed: false });
+    expect(specs[untouched]).toEqual(original);
+    expect(elements[untouched]!.style.flex).toBe(originalFlex);
+
+    dragOptions.cancel();
+    expect(specs).toEqual(initialSpecs);
+  });
+
   it('restores both panel specs when a horizontal resize is cancelled', () => {
     register(PM, 'alpha');
     register(PM, 'viewer', { headless: true, hideMoveHandle: true });

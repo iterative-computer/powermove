@@ -26,6 +26,10 @@ import {
 } from '../shared/extensions';
 
 const bridge: PowermoveBridge = {
+  compatible: {
+    status: () => ipcRenderer.invoke(IPC.compatibleStatus),
+    configure: input => ipcRenderer.invoke(IPC.compatibleConfigure, input),
+  },
   agentNotification: options => ipcRenderer.invoke('agent:notification', options),
   ping: () => ipcRenderer.invoke(IPC.ping) as Promise<string>,
 
@@ -35,7 +39,23 @@ const bridge: PowermoveBridge = {
     node: process.versions.node
   },
 
-  saveFile: (req) => ipcRenderer.invoke(IPC.fileSave, req) as Promise<FileSaveResult>,
+  fileUpload: {
+    begin: size => ipcRenderer.invoke(IPC.fileSaveUpload, size),
+    chunk: (uploadId, data) => ipcRenderer.invoke(IPC.fileSaveChunk, { uploadId, data }),
+    finish: (uploadId, metadata) => ipcRenderer.invoke(IPC.fileSave, { ...metadata, uploadId }),
+    abort: uploadId => ipcRenderer.invoke(IPC.fileSaveAbort, uploadId),
+  },
+  saveFile: async (req) => {
+    if (req.data.byteLength <= 4 * 1024 * 1024) return ipcRenderer.invoke(IPC.fileSave, req) as Promise<FileSaveResult>;
+    const uploadId: string = await ipcRenderer.invoke(IPC.fileSaveUpload, req.data.byteLength);
+    try {
+      for (let offset = 0; offset < req.data.byteLength; offset += 1024 * 1024) {
+        await ipcRenderer.invoke(IPC.fileSaveChunk, { uploadId, data: req.data.slice(offset, offset + 1024 * 1024) });
+      }
+      const { data, ...metadata } = req;
+      return await ipcRenderer.invoke(IPC.fileSave, { ...metadata, uploadId }) as FileSaveResult;
+    } finally { await ipcRenderer.invoke(IPC.fileSaveAbort, uploadId).catch(() => undefined); }
+  },
   openProjectFile: () => ipcRenderer.invoke(IPC.projectOpen),
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
 
@@ -133,6 +153,7 @@ const bridge: PowermoveBridge = {
   captureWindow: () => ipcRenderer.invoke(IPC.captureWindow) as Promise<CaptureResult>,
 
   store: {
+    setSerialized: (key, serialized) => ipcRenderer.invoke(IPC.storeSetSerialized, { key, serialized }),
     snapshotSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSync) as StoreSnapshot,
     snapshot: () => ipcRenderer.invoke(IPC.storeSnapshot) as Promise<StoreSnapshot>,
     set: (key, value) => {

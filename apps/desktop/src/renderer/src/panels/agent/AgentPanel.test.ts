@@ -187,7 +187,7 @@ describe('AgentPanel', () => {
       flushSync();
       expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent).toBe('Connect ChatGPT');
     });
-    expect(target.querySelector('[aria-label="Message composer"]')).toBeNull();
+    expect(target.querySelector('[aria-label="Message composer"]')).toBeTruthy();
 
     target.querySelector<HTMLButtonElement>('.agent-connect-button')!.click();
     await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());

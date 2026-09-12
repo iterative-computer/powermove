@@ -59,6 +59,13 @@
   const horizontalPair = () => {
     const before = beforeSpec!;
     const after = afterSpec!;
+    // In a multi-panel dock, changing one neighbour back to flex redistributes
+    // space to unrelated siblings. Pin both neighbours and conserve their
+    // combined measured height so only this divider's pair can move.
+    const dock = splitter?.closest('.dock');
+    if ((dock?.querySelectorAll(':scope > .panel-slot').length ?? 0) > 2) {
+      return { resize: { mode: 'transfer' as const }, spec: before, other: after, sign: 1 as const };
+    }
     const resize = resolvePairResize(isFlexPanel(before), isFlexPanel(after));
     if (resize.mode === 'transfer') return { resize, spec: before, other: after, sign: 1 as const };
     const spec = resize.target === 'before' ? before : after;
@@ -118,7 +125,7 @@
     if (!element || !otherElement) return null;
     const start = element.getBoundingClientRect().height;
     const otherStart = otherElement.getBoundingClientRect().height;
-    const gap = Number.parseFloat(window.getComputedStyle(splitter).height) || 8;
+    const gap = resize.mode === 'transfer' ? 0 : Number.parseFloat(window.getComputedStyle(splitter).height) || 8;
     return {
       resize, spec, other, sign, element, otherElement, start, otherStart,
       pairHeight: start + otherStart, gap, min: panelMin(spec), otherMin: panelMin(other)
