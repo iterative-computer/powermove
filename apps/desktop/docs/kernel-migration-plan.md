@@ -90,14 +90,14 @@ back-references. Names below are final unless the orchestrator amends this file.
 | `api.model` | `P, CH, KF, BLENDS, TYPE_META, MASK_SHAPES, mkLayer, mkMask, mkProject, layerDefinition, curComp, layer(id) (was L), byName` | `legacy/core/model.ts`, `kernel/install.ts` |
 | `api.selection` | `get(), layers(), first(), keys(), chan(), set(partial), select(ids, add), resolveSelectedKeys, keySelectionActive get/set` | `legacy/core/model.ts`, `selection.ts` |
 | `api.groups` | `ancestors, transformRoots, span, expand, normalizeStack, moveToGroup` | `legacy/core/layer-groups.ts` |
-| `api.transport` | `time, setTime, play, pause, toggle, playing, step, quality get/set, perf, invalidate, previewResolution` | `legacy/core/engine.ts`, `util.ts` |
+| `api.transport` | `time(), setTime(t, opt?), play, pause, toggle, playing(), step, quality get/set, perf, invalidate(what?), previewResolution get/set` | `legacy/core/engine.ts`, `util.ts` |
 | `api.history` | `do, begin, commit, cancel, undo, redo, external, selection` | `legacy/core/history.ts` |
 | `api.edit` | `apply, begin, commit, cancel, dispatch, mutate` | `legacy/core/editing.ts` |
 | `api.media` | `timing.{isTimed, rate, earliestStart}, importFiles, commandForAsset, audio.drawWaveform, assets (raster asset store: get/add/kind), fonts` | `media.ts`, `app.ts`, `shortcuts.ts`, `audio.ts`, `raster.ts`, `fonts.ts` |
 | `api.render` | `gl.{bounds, pick, init, resize, previewViewport, context}, raster, renderFrameTo, snapshot` | `legacy/gl/*`, `engine.ts` |
 | `api.uiState` | `getLayerCollapsed, setLayerCollapsed, getKeyHandles, setKeyHandles, getFxOpen, setFxOpen, getReveal, setReveal, setShaderMeta` | `legacy/core/ui-state.ts` |
 | `api.ui` (additions) | `drag, closeMenus, showLayerMenu, showParentMenu, beginParentPick, openShaderEditor, gesture (EditGesture class)` | `util.ts`, overlays, `layer-menu.ts`, `parent-pickwhip.ts`, `controls/gesture.ts` |
-| `api.dnd` | `MEDIA_MIME, FX_MIME, mediaDrag get/set, onMediaDrop(handler), onFxDrop(handler), payloadFor(assetId)` | `panels/install.ts`, `AssetsPanel.svelte` |
+| `api.dnd` | `ASSET_MIME, FX_MIME, startAssetDrag(dt, payload), mediaDrag get/set, hasAssetDrag, hasFileDrag, hasMediaDrag, readAssetDrag, hasFxDrag, readFxDrag, applyFxDrop` with `AssetDragPayload {id,name,kind,dur?}` and `FxDragPayload {kind,id,label}` | `fx/drop.ts`, `panels/install.ts`, `AssetsPanel.svelte` |
 | `api.workspace` | `current(), mutate(fn), hasPanel, addPanel(id, dock, index?), movePanel(id, dock, index), removePanel, hidePanel, restorePanel, refresh` | `legacy/core/workspace.ts`, `layout/model.ts` |
 | `api.panels.open` | gains optional `{ dock, index }` | same |
 | `api.util` | `round, clamp, lerp, snapF, tc, parseTc, uid, hex2rgb, rgb2hex` | `util.ts` |
@@ -108,14 +108,16 @@ back-references. Names below are final unless the orchestrator amends this file.
 
 Service interfaces (consumed by legacy through the kernel, provided by extensions):
 
-- `TimelineService`: `graph, cv, pps, scrollY, scrollT, keySelectionActive, frameView, reveal(layerId, path)`.
-- `ViewerService`: `pan, zoom, fit, shown, showControls, preview, layout, stage, attach, worldBounds, snapshotSnapCandidates, deferNavigationRender, overlay`.
+- `TimelineService`: `graph, cv, pps, scrollY, scrollT, keySelectionActive, frameView(), reveal(layer, keys: string[])`.
+- `ViewerService`: `pan, zoom, fit, shown, showControls, preview, layout(panOnly?), stage, ov, attach, worldBounds, snapshotSnapCandidates, deferNavigationRender`.
 - `InspectorService`: `refresh, syncs, focusText, copySelectedEffects, pasteCopiedEffects, body`.
 - `ToolService`: `tool, toolShape, setTool`.
 - `ShaderHooks`: `syncShaderUniforms`.
 
 Legacy reads every service through a null-safe getter. Nothing in legacy may
 assume a service exists (the e2e "timeline off and on" case depends on this).
+
+Signature sheet used for Phase 1: `/tmp/luna-sigs-report.md` (Luna, 2026-09-12), derived from the code; the code wins on any conflict.
 
 ## 5. File ownership
 
