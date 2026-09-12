@@ -1,7 +1,6 @@
 <script lang="ts">
   // Sticky, scroll-driven: the section is several viewports tall, the card
   // pins, and scroll progress picks which shape the body should be.
-  import { onMount } from 'svelte';
   import LightsCard from './lights/LightsCard.svelte';
 
   const STEPS = [
@@ -11,42 +10,38 @@
     { key: 'terminal', title: 'Mods on save', text: 'Build a panel or effect from the command line. Save, and it hot-reloads in place.' },
   ];
 
-  let section = $state<HTMLElement>();
-  let target = $state(0);
-  let shown = $state(0);
+  let active = $state(0);
+  let blocks = $state<Record<number, HTMLElement | undefined>>({});
 
-  onMount(() => {
-    let raf = 0;
-    const update = () => {
-      raf = 0;
-      if (!section) return;
-      const r = section.getBoundingClientRect();
-      const travel = r.height - window.innerHeight;
-      const p = travel > 0 ? Math.min(1, Math.max(0, -r.top / travel)) : 0;
-      target = Math.min(STEPS.length - 1, Math.floor(p * STEPS.length));
-    };
-    const onScroll = () => { if (!raf) raf = requestAnimationFrame(update); };
-    update();
-    addEventListener('scroll', onScroll, { passive: true });
-    addEventListener('resize', onScroll);
-    return () => { removeEventListener('scroll', onScroll); removeEventListener('resize', onScroll); if (raf) cancelAnimationFrame(raf); };
+  // Same driver as the Product rail: the block nearest the reading line wins.
+  $effect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+        const next = visible[0]?.target.getAttribute('data-step');
+        if (next != null) active = Number(next);
+      },
+      { rootMargin: '-35% 0px -45% 0px', threshold: [0.15, 0.35, 0.55, 0.75] },
+    );
+    for (let i = 0; i < STEPS.length; i++) { const el = blocks[i]; if (el) observer.observe(el); }
+    return () => observer.disconnect();
   });
 </script>
 
-<section class="showcase" bind:this={section} aria-labelledby="showcase-title">
-  <div class="showcase-sticky">
-    <div class="wrap showcase-layout">
-      <LightsCard {target} onshow={(i) => (shown = i)} />
-      <div class="showcase-copy">
-        <h2 id="showcase-title"><span class="strong">One editor, many shapes.</span><br />Every surface is a mod.</h2>
-        <ol class="showcase-steps">
-          {#each STEPS as s, i (s.key)}
-            <li data-active={shown === i ? '' : undefined}>
-              <span class="strong">{s.title}.</span> {s.text}
-            </li>
-          {/each}
-        </ol>
-      </div>
+<section class="showcase" aria-labelledby="showcase-title">
+  <div class="wrap showcase-layout">
+    <div class="showcase-stick">
+      <LightsCard target={active} />
+    </div>
+    <div class="showcase-copy">
+      <h2 id="showcase-title"><span class="strong">One editor, many shapes.</span><br />Every surface is a mod.</h2>
+      <ol class="showcase-steps">
+        {#each STEPS as s, i (s.key)}
+          <li data-step={i} bind:this={blocks[i]} data-active={active === i ? '' : undefined}>
+            <span class="strong">{s.title}.</span> {s.text}
+          </li>
+        {/each}
+      </ol>
     </div>
   </div>
 </section>

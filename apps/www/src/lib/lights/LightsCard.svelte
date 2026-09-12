@@ -5,14 +5,14 @@
   import { onMount } from 'svelte';
   import { buildLayers, rollPalette, type Layer } from './mask';
 
-  type Variant = { key: string; radius: number | 'pill'; light?: boolean; control?: boolean };
+  type Variant = { key: string; radius: number | 'pill'; well?: boolean; control?: boolean };
   // Ordered so the body never makes the same kind of move twice running:
-  // a pill, a wide node, a short row, then the light panel.
+  // a pill, a wide node, a short row, then the sunken terminal.
   const VARIANTS: Variant[] = [
     { key: 'prompt', radius: 'pill', control: true },
     { key: 'node', radius: 12 },
     { key: 'progress', radius: 20 },
-    { key: 'terminal', radius: 10, light: true },
+    { key: 'terminal', radius: 10, well: true },
   ];
 
   const PULSE_MS = 1600;
@@ -20,11 +20,11 @@
   const MORPH_MS = 380;
   const SETTLE_MS = 80;
   /** How far into a pulse the handover starts when the scroll asks for a new shape. */
-  const HANDOVER_AT = 300;
+  const HANDOVER_AT = 140;
   /** Idle pulses while resting on a shape. */
   const IDLE_GAP_MS = 2600;
 
-  let { target = 0, onshow }: { target?: number; onshow?: (slot: number) => void } = $props();
+  let { target = 0 }: { target?: number } = $props();
 
   let card = $state<HTMLElement>();
   let body = $state<HTMLElement>();
@@ -100,7 +100,6 @@
           gen++;
           showing = true;
           busy = false;
-          onshow?.(slot);
           if (target !== slot) handover(); else scheduleIdle();
         });
       });
@@ -202,7 +201,7 @@
       <span class="ai-lights-layer" style:inset={`${-l.pad}px`} style:mask-image={`url(${l.mask})`} style:-webkit-mask-image={`url(${l.mask})`}></span>
       <span class="ai-lights-layer mirror" style:inset={`${-l.pad}px`} style:mask-image={`url(${l.mask})`} style:-webkit-mask-image={`url(${l.mask})`}></span>
     {/each}
-    <div class="lc-face" class:light={variant.light}>
+    <div class="lc-face" class:well={variant.well}>
       {#key gen}
         <div class="lc-face-pad lc-contents" class:control={variant.control} style:opacity={showing ? 1 : 0} style:content-visibility={morphing ? 'hidden' : undefined} style:--f={`${FADE_OUT_MS}ms`}>
           {@render content(variant.key)}

@@ -108,14 +108,14 @@ h1 .muted{color:var(--tx-3)}
 .brand-soon:hover,.brand-soon:hover .brand-name{color:var(--tx-2)}
 
 /* ---- showcase (sticky scroll, one body that becomes four surfaces) ---- */
-.showcase{height:380vh;padding:0}
-.showcase-sticky{position:sticky;top:0;height:100vh;display:flex;align-items:center}
-.showcase-layout{display:grid;gap:40px;width:100%}
-@media(min-width:1024px){.showcase-layout{grid-template-columns:7fr 5fr;gap:80px;align-items:center}}
-.showcase-copy{order:-1}
-@media(min-width:1024px){.showcase-copy{order:0}}
+.showcase-layout{display:grid;gap:40px}
+@media(min-width:1024px){.showcase-layout{grid-template-columns:7fr 5fr;gap:80px;align-items:start}}
+.showcase-stick{position:sticky;top:0;display:flex;align-items:center;height:100vh}
+@media(max-width:1023px){.showcase-stick{height:auto;padding-top:24px}}
+.showcase-copy{padding-block:calc(50vh - 120px)}
 .showcase-steps{list-style:none;padding:0;margin-top:40px;color:var(--tx-3);font-size:15px;line-height:1.55;text-wrap:pretty}
 .showcase-steps li{position:relative;padding:12px 0 12px 18px;transition:color .4s}
+.showcase-steps li+li{margin-top:min(28vh,220px)}
 .showcase-steps li::before{content:'';position:absolute;left:0;top:19px;width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:0;transform:scale(.5);transition:opacity .3s,transform .3s var(--ease)}
 .showcase-steps li .strong{color:var(--tx-3);font-weight:500;transition:color .4s}
 .showcase-steps li[data-active]{color:var(--tx-2)}
@@ -136,7 +136,6 @@ h1 .muted{color:var(--tx-3)}
 .lights-card{
   --s-line:rgb(255 255 255 / .1);--s-face:#1c1917;--s-raised:#292524;--s-well:#141211;
   --s-text:#f5f5f4;--s-text-2:#c7c2bd;--s-text-3:#8a847e;--s-text-4:#5e5954;
-  --s-paper:#f3efe8;--s-paper-ink:#1f1b18;--s-paper-ink-2:#6b645c;
   position:relative;display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:4/3;max-height:70vh;overflow:hidden;user-select:none;
   border-radius:var(--r-xl);border:1px solid var(--line);
   background:radial-gradient(120% 90% at 50% 100%,var(--ai-bg1) 0%,var(--ai-bg2) 50%,var(--ai-bg3) 100%);
@@ -161,7 +160,7 @@ h1 .muted{color:var(--tx-3)}
   100%{opacity:0;--ai-a:30deg;--ai-s1:6deg;--ai-s2:11deg;--ai-s3:17deg;--ai-s4:40deg;--ai-s5:90deg;--ai-s6:120deg}
 }
 .lc-face{position:relative;width:100%;height:100%;overflow:hidden;border-radius:calc(var(--r) - 1px);background:var(--s-face);box-shadow:inset 0 0 0 1px var(--s-line);transition:background-color var(--m) cubic-bezier(.22,1,.36,1),color var(--m)}
-.lc-face.light{background:var(--s-paper);color:var(--s-paper-ink-2)}
+.lc-face.well{background:var(--s-well)}
 .lc-face-pad{padding:14px 18px}
 .lc-face-pad.control{padding:8px 8px 8px 18px}
 .lc-contents{position:relative;width:100%;height:100%;box-sizing:border-box;transition:opacity var(--f) ease-out}
@@ -194,11 +193,11 @@ h1 .muted{color:var(--tx-3)}
 @keyframes ai-ring{0%{opacity:.8;transform:scale(.7)}100%{opacity:0;transform:scale(1.5)}}
 .lc-step-label{font-size:13px;line-height:1;color:var(--s-text-2)}
 .lc-step[data-state=next] .lc-step-label{color:var(--s-text-4)}
-/* terminal: the one variant that inverts, paper on a dark card */
+/* terminal: sunken, the deepest surface in the set */
 .lc-terminal{display:flex;flex-direction:column;gap:7px;width:250px;font-family:var(--font-geist-mono),ui-monospace,monospace}
-.lc-cmd{font-size:12.5px;line-height:1;color:var(--s-paper-ink-2)}
-.lc-prompt-sign{color:var(--s-text-3);margin-right:2px}
-.lc-out{font-size:12.5px;color:var(--s-paper-ink)}
+.lc-cmd{font-size:12.5px;line-height:1;color:var(--s-text-3)}
+.lc-prompt-sign{color:var(--s-text-4);margin-right:2px}
+.lc-out{font-size:12.5px;color:var(--s-text)}
 @media(prefers-reduced-motion:reduce){
   .ai-lights-layer{display:none}
   .lc-word{animation-name:ai-word-fade}
