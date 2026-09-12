@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import net from 'node:net';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -101,6 +102,48 @@ describe('native Powermove agent tool bridge', () => {
     const finish = await session.finish(true);
     expect(finish).toEqual({ changed: true, revision: 1, historyId: 'agent-history-1' });
     expect(owner.requests.at(-1)?.tool).toBe('__finish_run');
+  });
+
+  it('survives a tool client that resets the connection mid-request', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    owner.send = () => {}; // never answers, so the request is still pending when the client resets
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      command: process.execPath,
+      mcpServerPath: path.join(__dirname, 'mcp-server.mjs'),
+      timeoutMs: 500
+    });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-reset', owner: owner as never, baseRevision: 1 });
+    const port = Number(session.mcpConfig.env.POWERMOVE_AGENT_TOOL_PORT);
+
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => { uncaught.push(error); };
+    process.on('uncaughtException', onUncaught);
+    try {
+      const client = net.createConnection({ host: '127.0.0.1', port });
+      await new Promise<void>((resolve) => client.once('connect', () => resolve()));
+      client.write(`${JSON.stringify({
+        token: session.mcpConfig.env.POWERMOVE_AGENT_TOOL_TOKEN, runId: 'native-run-reset', tool: 'get_project_state', arguments: {}
+      })}\n`);
+      // Reset (RST) instead of a clean FIN so the server-side socket errors.
+      client.resetAndDestroy();
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    } finally {
+      process.off('uncaughtException', onUncaught);
+    }
+    expect(uncaught).toEqual([]);
+
+    // The bridge is still healthy for subsequent clients.
+    const child = spawn(session.mcpConfig.command, session.mcpConfig.args, {
+      env: { ...process.env, ...session.mcpConfig.env },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    children.push(child);
+    await expect(rpc(child, {
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } }
+    })).resolves.toMatchObject({ id: 1, result: { serverInfo: { name: 'powermove' } } });
   });
 
   it('deduplicates concurrent finish requests from runner cleanup and window cleanup', async () => {
