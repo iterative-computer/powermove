@@ -2,6 +2,11 @@ import { expect, test } from './helpers/app';
 
 test('graph editor exposes its state and keeps value and speed navigation usable', async ({ session }, info) => {
   const { page } = session;
+  const viewerPixel = () => page.evaluate(() => {
+    const PM = (window as any).PM, gl = PM.GL.gl, pixel = new Uint8Array(4);
+    gl.readPixels(Math.floor(gl.drawingBufferWidth / 2), Math.floor(gl.drawingBufferHeight / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    return Array.from(pixel);
+  });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.waitForFunction(() => Boolean((window as any).PM.TL.cv));
   await page.evaluate(() => {
@@ -25,6 +30,8 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   await page.waitForFunction(() => (window as any).PM.TL._graph?.series.length === 2);
   await page.screenshot({ path: info.outputPath('value-graph.png') });
   await expect(graph).toHaveAttribute('aria-pressed', 'true');
+  const initialPixel = await viewerPixel();
+  expect(initialPixel).toEqual([96, 123, 255, 255]);
   await page.keyboard.press('Shift+F3');
   await expect(graph).toHaveAttribute('aria-pressed', 'false');
   await page.keyboard.press('Shift+F3');
@@ -71,6 +78,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   await page.getByRole('menuitem', { name: 'Value graph', exact: true }).click();
   await page.screenshot({ path: info.outputPath('value-graph-fitted.png') });
   console.log('GRAPH_SAMPLES', samples);
-  console.log('GRAPH_FINAL', await page.evaluate(() => { const PM = (window as any).PM, L = PM.proj.layers[0]; return { time: PM.time, on: L.on, active: PM.active(L, PM.time), matrix: PM.worldMatrix(L, PM.time), draws: PM.GL.stats.draws, dirty: PM.dirty, selected: PM.sel.layers }; }));
+  expect(await viewerPixel()).toEqual(initialPixel);
+  await page.locator('.panel[data-panel="timeline"]').screenshot({ path: info.outputPath('graph-panel.png') });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
