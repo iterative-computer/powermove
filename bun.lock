@@ -10,9 +10,12 @@
       "version": "1.0.0",
       "dependencies": {
         "@anthropic-ai/claude-code": "2.1.261",
+        "@anthropic-ai/claude-code-darwin-arm64": "2.1.261",
         "@motion-core/motion-gpu": "0.15.1",
         "@openai/codex": "0.153.4",
+        "@openai/codex-darwin-arm64": "npm:@openai/codex@0.153.4-darwin-arm64",
         "@powermove/macos-haptics": "workspace:*",
+        "@powermove/player": "workspace:*",
         "@powermove/tokens": "workspace:*",
         "electron-updater": "6.8.3",
         "esbuild": "0.25.12",
@@ -37,6 +40,13 @@
     "packages/macos-haptics": {
       "name": "@powermove/macos-haptics",
       "version": "1.0.0",
+    },
+    "packages/player": {
+      "name": "@powermove/player",
+      "version": "0.0.0",
+      "devDependencies": {
+        "esbuild": "0.25.12",
+      },
     },
     "packages/tokens": {
       "name": "@powermove/tokens",
@@ -226,6 +236,8 @@
     "@powermove/desktop": ["@powermove/desktop@workspace:apps/desktop"],
 
     "@powermove/macos-haptics": ["@powermove/macos-haptics@workspace:packages/macos-haptics"],
+
+    "@powermove/player": ["@powermove/player@workspace:packages/player"],
 
     "@powermove/tokens": ["@powermove/tokens@workspace:packages/tokens"],
 

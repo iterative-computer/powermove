@@ -18,9 +18,12 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.261",
+    "@anthropic-ai/claude-code-darwin-arm64": "2.1.261",
     "@motion-core/motion-gpu": "0.15.1",
     "@openai/codex": "0.153.4",
+    "@openai/codex-darwin-arm64": "npm:@openai/codex@0.153.4-darwin-arm64",
     "@powermove/macos-haptics": "workspace:*",
+    "@powermove/player": "workspace:*",
     "@powermove/tokens": "workspace:*",
     "electron-updater": "6.8.3",
     "esbuild": "0.25.12",
