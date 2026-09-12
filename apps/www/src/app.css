@@ -75,10 +75,10 @@ h1 .muted{color:var(--tx-3)}
 /* ---- hero ---- */
 .hero{padding-top:88px;padding-bottom:0}
 @media(min-width:1024px){.hero{padding-top:96px}}
-.hero-art{position:relative;height:clamp(300px,42svh,440px);overflow:hidden}
-.hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible;transform:translateY(clamp(-40px,-4svh,-16px))}
-@media(max-width:600px){.hero-vector{width:125%;max-width:none;left:-12.5%}}
-.hero-intro{display:flex;flex-direction:column;align-items:center;text-align:center;margin-top:-64px}
+.hero-art{position:relative;height:clamp(100px,12vw,172px);overflow:hidden}
+.hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+@media(max-width:600px){.hero-art{height:104px}}
+.hero-intro{display:flex;flex-direction:column;align-items:center;text-align:center;margin-top:20px}
 .hero-intro .lede{margin-top:0;max-width:44ch}
 .hero-intro .cta{margin-top:28px}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
