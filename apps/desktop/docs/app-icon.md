@@ -1,14 +1,15 @@
 # Powermove app icon
 
 `resources/icon/Powermove.icon` is the editable Apple Icon Composer document. Both appearances
-use the updated `Powermove light.svg` geometry, with identical size and centering.
+use the brand mark geometry from `assets/brand/powermove-light.svg` at the repository root,
+with identical size and centering.
 The document supplies the graphite/light, silver/dark, and mono treatments.
 
 `resources/icon.icns` is the actual macOS packaging asset, already selected by
 `mac.icon` in `electron-builder.yml`. It contains the default/light appearance
 at all ten standard sizes, with transparent margins for normal Dock proportions.
 
-After editing the Composer document, regenerate the packaging asset on macOS:
+After editing the Composer document, regenerate the packaging asset on macOS from `apps/desktop`:
 
 ```sh
 swift scripts/export-app-icon.swift

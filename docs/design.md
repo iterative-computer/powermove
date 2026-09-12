@@ -11,7 +11,7 @@ For nearly every feature:
 1. Find the closest existing surface in the component map below.
 2. Let the dock system create panel chrome. Do not draw another card or title bar inside it.
 3. Use `api.ui.controls` for fields and inspector-style controls.
-4. Use tokens from `css/tokens.css`; never introduce a private palette, type scale, shadow system, or spacing system.
+4. Use tokens from `@powermove/tokens/tokens.css` (`packages/tokens/tokens.css`); never introduce a private palette, type scale, shadow system, or spacing system.
 5. Use the existing icon set through `api.ui.icon(name)`.
 6. Route document changes through `api.project.apply(...)`, a shared edit binding, or `PM.Edit.apply(...)`. One user action must equal one Undo step.
 7. Implement resting, hover, active, selected, disabled, empty, loading, error, narrow, light, and dark states.
@@ -30,9 +30,11 @@ existing component
 
 When this guide and the source differ, the current source wins. Update this guide with the same change.
 
+Paths in this guide are relative to the desktop package, `apps/desktop/`, except `packages/...`, which is relative to the repository root.
+
 | Layer | Source of truth | What it owns |
 |---|---|---|
-| Theme foundations | `css/tokens.css` | Color, surfaces, text, radii, type, density, shadows, motion |
+| Theme foundations | `packages/tokens/tokens.css` (`@powermove/tokens`) | Color, surfaces, text, radii, type, density, shadows, motion |
 | Shared app patterns | `css/app.css` | Shell, docks, panels, buttons, rows, lists, overlays, agent UI, project/library surfaces |
 | Shared field behavior | `src/renderer/src/controls/` | Svelte fields, edit gestures, labeling, keyboard behavior |
 | Panel helpers | `src/renderer/src/panels/` | Panel registration, simple lists, generated panels, media, agent and specialized panels |
@@ -835,7 +837,7 @@ Before handing off:
 - [ ] Verify keyboard navigation and focus restoration.
 - [ ] Verify Apply, Cancel, one-step Undo, and Redo.
 - [ ] Verify the existing visible app updated in place; do not restart it.
-- [ ] Run focused unit tests, `npm run typecheck`, and the hidden Electron harness as appropriate.
+- [ ] Run focused unit tests, `bun run typecheck`, and the hidden Electron harness as appropriate.
 - [ ] Keep all test windows hidden and use isolated `POWERMOVE_USER_DATA`.
 - [ ] Review the diff for hardcoded color, spacing, radius, shadow, icon, and direct document mutation.
 

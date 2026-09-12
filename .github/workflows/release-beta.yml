@@ -14,21 +14,26 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # Node stays available for electron-builder, the desktop release script,
+      # and the native addon build; bun is the package manager and script runner.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
       - name: Validate beta tag and Apple Silicon runner
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           test "$(uname -m)" = arm64
           node -e 'if (!/^v\d+\.\d+\.\d+-beta\.\d+$/.test(process.env.RELEASE_TAG)) throw Error("Select a vX.Y.Z-beta.N tag")'
-      - run: npm ci
+      - run: bun install --frozen-lockfile
       - name: Set release version
-        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+        working-directory: apps/desktop
+        run: bun pm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
       - name: Test update and session lifecycle
-        run: npx vitest run src/main/updates.test.ts src/main/menu.test.ts src/main/storage.test.ts
+        run: bun run --cwd apps/desktop test -- src/main/updates.test.ts src/main/menu.test.ts src/main/storage.test.ts
       - name: Write notarization key
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -37,7 +42,7 @@ jobs:
           umask 077
           printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
       - name: Build, sign, notarize, and verify
-        run: npm run dist:release
+        run: bun run dist:release
         env:
           CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -46,16 +51,16 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
       - name: Verify update manifest
         run: |
-          test -s dist/beta-mac.yml
-          test -s "dist/Powermove-${GITHUB_REF_NAME#v}-mac-arm64.zip"
+          test -s apps/desktop/dist/beta-mac.yml
+          test -s "apps/desktop/dist/Powermove-${GITHUB_REF_NAME#v}-mac-arm64.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: powermove-${{ github.ref_name }}
           path: |
-            dist/*.dmg
-            dist/*.zip
-            dist/*.blockmap
-            dist/beta-mac.yml
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.zip
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/beta-mac.yml
           if-no-files-found: error
       - name: Publish complete beta
         env:
@@ -64,7 +69,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --repo motionerapp/powermove-releases \
             --draft --prerelease --title "Powermove ${GITHUB_REF_NAME#v}" \
             --notes 'Apple Silicon macOS beta. Drag Powermove to Applications before opening. Updates download automatically and install when you quit.' \
-            dist/*.dmg dist/*.zip dist/*.blockmap dist/beta-mac.yml
+            apps/desktop/dist/*.dmg apps/desktop/dist/*.zip apps/desktop/dist/*.blockmap apps/desktop/dist/beta-mac.yml
           gh release edit "$GITHUB_REF_NAME" --repo motionerapp/powermove-releases --draft=false
       - name: Remove notarization key
         if: always()

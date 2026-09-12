@@ -156,7 +156,7 @@ The bundled **3D Layers** extension provides this as **Import OBJ Model…**. Po
 
 **Override just a piece** — don't fork; register the same panel/command/effect `id`. The latest registration wins; disabling yours restores the original.
 
-## Theme tokens (subset; see css/tokens.css)
+## Theme tokens (subset; the full set is `@powermove/tokens/tokens.css`)
 
 ### Native panels by default
 

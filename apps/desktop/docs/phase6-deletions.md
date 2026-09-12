@@ -1,5 +1,12 @@
 # Phase 6 deletion manifest
 
+Historical note: this manifest describes the repository as it was during Phase 6,
+before the bun workspace monorepo. The desktop app now lives at `apps/desktop`,
+so paths below are relative to that package unless stated otherwise. The
+`spikes/fixtures/` media now lives at `apps/desktop/e2e/fixtures/`; the native
+haptics addon (formerly `native/macos-haptics`) now lives at
+`packages/macos-haptics`.
+
 Lane TESTS ports the surviving behavioral oracle coverage before any legacy
 files are removed. This manifest is the deletion boundary for Lanes B and C.
 
@@ -31,10 +38,13 @@ TypeScript instruction and result-schema builders directly with their goldens.
 
 ## Must survive
 
-- `apps/desktop/e2e/fixtures/` — Playwright end-to-end coverage consumes these fixtures.
+- `spikes/fixtures/` — Playwright end-to-end coverage consumes these fixtures.
+  Now lives at `apps/desktop/e2e/fixtures/`.
 - `tests-vitest/fixtures/` — committed Vitest goldens, DOM contract data, and
   the TypeScript-engine performance baseline live here.
 - `src/renderer/src/legacy/__tests__/` — behavior-level oracle transplants and
   their real-installer `makePM` harness.
 
 Do not delete the whole `spikes/` tree: only `spikes/probe/` is approved.
+(The `spikes/` tree was later retired once its fixtures moved to
+`apps/desktop/e2e/fixtures/`.)

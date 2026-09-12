@@ -54,7 +54,7 @@ async function main() {
     return;
   }
 
-  await run('npm', ['run', 'build']);
+  await run('bun', ['run', 'build']);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
     '--mac', '--arm64', '--publish', 'never',
     '--config', 'electron-builder.yml',

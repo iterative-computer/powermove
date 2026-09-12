@@ -4,14 +4,14 @@ Powermove currently produces Apple Silicon development-distribution artifacts wi
 
 ## Build
 
-Use Node 22 or newer, install the locked dependencies, and run:
+Use bun 1.3 or newer, install the locked dependencies from the repository root, and run the desktop package's lane:
 
 ```sh
-npm ci
-npm run dist:mac
+bun install --frozen-lockfile   # repo root
+bun run dist:mac                # repo root, or from apps/desktop
 ```
 
-Artifacts are written to `dist/`:
+Artifacts are written to `apps/desktop/dist/` (`dist/` relative to this package):
 
 - `Powermove-<version>-mac-arm64.dmg`
 - `Powermove-<version>-mac-arm64.zip`
@@ -41,7 +41,7 @@ Alternatively, electron-builder supports `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWOR
 Run:
 
 ```sh
-npm run dist:release
+bun run dist:release
 ```
 
 This dedicated lane refuses to build when signing or notarization credentials
@@ -49,7 +49,7 @@ are incomplete. It enables Developer ID signing, hardened runtime, and
 notarization together, then verifies the app with strict `codesign`, Gatekeeper,
 and stapler checks and verifies every generated DMG with `hdiutil`.
 The notarization ticket is stapled to the enclosed app, not the DMG.
-`npm run dist:mac` remains the credential-free, ad-hoc development package.
+`bun run dist:mac` remains the credential-free, ad-hoc development package.
 
 ## Electron fuses
 
@@ -64,7 +64,7 @@ The notarization ticket is stapled to the enclosed app, not the DMG.
 The last two settings depend on `asar: true` and electron-builder's embedded ASAR integrity metadata. Inspect a packed app at any time with:
 
 ```sh
-npx @electron/fuses read --app dist/mac-arm64/Powermove.app
+bunx @electron/fuses read --app apps/desktop/dist/mac-arm64/Powermove.app
 ```
 
 Fuses are one-way release hardening in practice: rebuild from Electron rather than trying to mutate a distributed app.
@@ -77,9 +77,12 @@ metadata are public at https://github.com/motionerapp/powermove-releases/release
 These betas target **Apple Silicon Macs only**. A public feed means anyone with
 the link can download the beta; it is not an access-controlled tester program.
 
-`.github/workflows/release-beta.yml` runs on tags like `v1.0.0-beta.1`.
-It uses an arm64 macOS runner, derives the app version from the tag, tests the
-update/session lifecycle, signs and notarizes the app, and verifies the result.
+`.github/workflows/release-beta.yml` at the repository root runs on tags like
+`v1.0.0-beta.1`. It uses an arm64 macOS runner, installs the workspace with bun
+(`bun install --frozen-lockfile`), writes the tag's version into
+`apps/desktop/package.json` with `bun pm version`, tests the update/session
+lifecycle with the desktop Vitest subset, signs and notarizes the app through
+`bun run dist:release`, and verifies the result in `apps/desktop/dist/`.
 It uploads the DMG, ZIP, blockmaps, and `beta-mac.yml` into a draft before
 publishing the complete GitHub prerelease. Nothing is published by the packager
 itself. Never publish a partial release or replace assets on an existing tag.

@@ -1,6 +1,12 @@
-# Electron migration codec fixtures
+# Desktop e2e media fixtures
 
-This directory contains tiny, deterministic media files for codec/container migration probes. Run `./gen.sh` from any working directory to regenerate every fixture and `fixtures.json`. The script uses only generated FFmpeg filter sources; it does not depend on external media.
+This directory (`apps/desktop/e2e/fixtures/`, formerly `spikes/fixtures/` at the repository root) contains tiny, deterministic media files consumed by the desktop Playwright suite in `apps/desktop/e2e/` for import, export, and codec/container coverage. Run `./gen.sh` from any working directory to regenerate every fixture and `fixtures.json`. The script uses only generated FFmpeg filter sources; it does not depend on external media.
+
+Run the specs that use them from `apps/desktop` (or `bun run --cwd apps/desktop test:e2e -- <spec>` from the repository root):
+
+```sh
+bun run test:e2e -- e2e/import-mp4.spec.ts e2e/import-prores.spec.ts
+```
 
 ## Video contract
 
