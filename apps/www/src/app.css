@@ -31,7 +31,7 @@ h2{font-size:clamp(30px,3.6vw,44px);max-width:28ch}
 h1 .muted{color:var(--tx-3)}
 .strong,h2 .strong{color:var(--tx)}
 .lede{margin-top:24px;max-width:38ch;font-size:clamp(16px,1.3vw,19px);line-height:1.55;color:var(--tx-2);text-wrap:pretty}
-.lead{font-size:18px;line-height:1.5;color:var(--tx-2);text-wrap:pretty}
+.lead{font-size:17px;line-height:1.5;color:var(--tx-2);text-wrap:pretty;max-width:34ch}
 .lead .strong{font-weight:500}
 
 /* ---- buttons ---- */
@@ -53,7 +53,9 @@ h1 .muted{color:var(--tx-3)}
 .links{position:absolute;inset:0;margin:auto;width:fit-content;height:fit-content;display:flex;gap:28px;font-size:var(--fs-md)}
 .links a{color:var(--tx-2);transition:color var(--dur-1)}
 .links a:hover{color:var(--tx)}
-.actions{display:flex;gap:8px}
+.actions{display:flex;align-items:center;gap:8px}
+.icon-button{display:grid;place-items:center;width:32px;height:32px;margin-right:4px;border-radius:var(--r-sm);color:var(--tx-2);transition:color var(--dur-1),background var(--dur-1)}
+.icon-button:hover{color:var(--tx);background:var(--bg-row)}
 .menu{position:relative;display:none;width:36px;height:36px;margin-right:-8px}
 .menu .lines{position:absolute;inset:0;margin:auto;display:flex;flex-direction:column;justify-content:center;gap:6px;width:18px;height:18px;transition:transform var(--dur-2) var(--ease),opacity var(--dur-2)}
 .menu .lines i{display:block;height:2px;border-radius:1px;background:var(--tx)}
@@ -75,6 +77,10 @@ h1 .muted{color:var(--tx-3)}
 /* ---- hero ---- */
 .hero{padding-top:124px;padding-bottom:0}
 @media(min-width:1024px){.hero{padding-top:160px}}
+.eyebrow{display:flex;align-items:center;justify-content:center;gap:8px;width:fit-content;margin:0 auto 28px;font-size:var(--fs-md);font-weight:500;color:var(--tx);transition:color var(--dur-1)}
+.eyebrow .muted{font-weight:400;color:var(--tx-3);transition:color var(--dur-1)}
+.eyebrow:hover .muted{color:var(--tx-2)}
+.eyebrow-sep{width:1px;height:12px;background:var(--line-strong)}
 .hero-art{position:relative;width:min(100%,840px);height:clamp(72px,8vw,104px);margin-inline:auto;overflow:hidden}
 .hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 @media(max-width:600px){.hero-art{height:72px}}
@@ -105,8 +111,11 @@ h1 .muted{color:var(--tx-3)}
 @media(min-width:1024px){
   .rail{display:flex;flex-direction:column;position:sticky;top:104px;height:fit-content;gap:2px}
   .rail-title{font-size:var(--fs-md);color:var(--tx-3);margin-bottom:12px}
-  .rail a{padding:6px 0;font-size:var(--fs-md);color:var(--tx-3);transition:color var(--dur-1)}
-  .rail a:hover{color:var(--tx)}
+  .rail-item{position:relative;text-align:left;padding:7px 0 7px 16px;font-size:var(--fs-md);color:var(--tx-3);transition:color var(--dur-1)}
+  .rail-item::before{content:'';position:absolute;left:0;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:var(--accent);opacity:0;transform:scale(.5);transition:opacity var(--dur-2),transform var(--dur-2) var(--ease)}
+  .rail-item:hover{color:var(--tx-2)}
+  .rail-item[data-active]{color:var(--tx)}
+  .rail-item[data-active]::before{opacity:1;transform:none}
 }
 .blocks{display:flex;flex-direction:column;gap:72px}
 @media(min-width:768px){.blocks{gap:128px}}
