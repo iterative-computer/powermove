@@ -18,11 +18,11 @@
   const MORPH_MS = 380;
   const SETTLE_MS = 80;
   /** How far into a pulse the handover starts when the scroll asks for a new shape. */
-  const HANDOVER_AT = 520;
+  const HANDOVER_AT = 300;
   /** Idle pulses while resting on a shape. */
   const IDLE_GAP_MS = 2600;
 
-  let { target = 0 }: { target?: number } = $props();
+  let { target = 0, onshow }: { target?: number; onshow?: (slot: number) => void } = $props();
 
   let card = $state<HTMLElement>();
   let body = $state<HTMLElement>();
@@ -97,6 +97,7 @@
           gen++;
           showing = true;
           busy = false;
+          onshow?.(slot);
           if (target !== slot) handover(); else scheduleIdle();
         });
       });
@@ -157,8 +158,8 @@
     </span>
   {:else if key === 'progress'}
     <span class="lc-row lc-progress">
-      {@render rising('Rendering', 'lc-body-text')}
-      <span class="lc-trail lc-fade" style:animation-delay="120ms">45%</span>
+      {@render rising('Rendering frames', 'lc-body-text')}
+      <span class="lc-trail lc-fade" style:animation-delay="120ms">142 / 300</span>
       <svg viewBox="0 0 16 16" class="lc-spin" aria-hidden="true"><circle cx="8" cy="8" r="6" class="lc-spin-track" /><path d="M8 2A6 6 0 0 1 14 8" class="lc-spin-arc" /></svg>
     </span>
   {:else if key === 'terminal'}
@@ -168,7 +169,7 @@
     </span>
   {:else}
     <span class="lc-row lc-prompt">
-      {@render rising('push the title in slowly', 'lc-muted-text')}
+      {@render rising('Push the title in slowly', 'lc-muted-text')}
       <span class="lc-send"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5 9 5.5" /></svg></span>
     </span>
   {/if}

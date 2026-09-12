@@ -5,14 +5,15 @@
   import LightsCard from './lights/LightsCard.svelte';
 
   const STEPS = [
-    { key: 'node', title: 'Agent passes', text: 'A run is a chain of typed edits you can open, reorder, or redo.' },
-    { key: 'progress', title: 'Background renders', text: 'Frames render while you keep editing. Nothing blocks the timeline.' },
-    { key: 'terminal', title: 'Mods on save', text: 'Build a panel, save, and it hot-reloads in place.' },
-    { key: 'prompt', title: 'Ask in words', text: 'Describe the change. It lands as an undoable edit.' },
+    { key: 'node', title: 'Agent passes', text: 'Every run is three steps you can watch: read the project, render frames to check, then edit.' },
+    { key: 'progress', title: 'Frames in the background', text: 'The agent renders frames to check its own work while you keep editing.' },
+    { key: 'terminal', title: 'Mods on save', text: 'Build a panel or effect from the command line. Save, and it hot-reloads in place.' },
+    { key: 'prompt', title: 'Ask in words', text: 'Describe the change in the agent bar. It lands as an undoable edit.' },
   ];
 
   let section = $state<HTMLElement>();
   let target = $state(0);
+  let shown = $state(0);
 
   onMount(() => {
     let raf = 0;
@@ -36,16 +37,16 @@
   <div class="showcase-sticky">
     <div class="wrap showcase-layout">
       <div class="showcase-copy">
-        <h2 id="showcase-title"><span class="strong">One body.</span><br />Any surface the work needs.</h2>
+        <h2 id="showcase-title"><span class="strong">One editor, many shapes.</span><br />Every surface is the same kind of mod.</h2>
         <ol class="showcase-steps">
           {#each STEPS as s, i (s.key)}
-            <li data-active={target === i ? '' : undefined}>
+            <li data-active={shown === i ? '' : undefined}>
               <span class="strong">{s.title}.</span> {s.text}
             </li>
           {/each}
         </ol>
       </div>
-      <LightsCard {target} />
+      <LightsCard {target} onshow={(i) => (shown = i)} />
     </div>
   </div>
 </section>
