@@ -288,6 +288,28 @@ describe('pro editor shortcut behavior', () => {
     expect(PM.hist.list()).toEqual(['Split']);
   });
 
+  it('remaps nested group membership into the new tail hierarchy', () => {
+    const PM = editorRuntime();
+    const first = layer(PM, 'nested-first');
+    const second = layer(PM, 'nested-second');
+    const sibling = layer(PM, 'outer-sibling');
+    const inner = PM.groupLayers([first.id, second.id], 'Inner');
+    const outer = PM.groupLayers([inner.id, sibling.id], 'Outer');
+    PM.hist.clear();
+    PM.time = 5;
+
+    PM.cmd('split');
+
+    const tailOuter = PM.firstSel();
+    const tailInner = PM.proj.layers.find((item: any) => item.type === 'group' && item.group === tailOuter.id);
+    expect(tailOuter).toMatchObject({ type: 'group', from: 5, dur: 5 });
+    expect(tailInner).toMatchObject({ type: 'group', group: tailOuter.id, from: 5, dur: 5 });
+    expect(PM.proj.layers.filter((item: any) => item.group === tailInner.id)).toHaveLength(2);
+    expect(PM.proj.layers.filter((item: any) => item.group === tailOuter.id && item.type !== 'group')).toHaveLength(1);
+    expect(PM.proj.layers.filter((item: any) => item.type === 'group')).toHaveLength(4);
+    expect(PM.hist.list()).toEqual(['Split']);
+  });
+
   it('keeps split audio source time without replaying internal edge fades', () => {
     const PM = editorRuntime();
     const audio = layer(PM, 'audio', {

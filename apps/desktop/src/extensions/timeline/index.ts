@@ -55,7 +55,7 @@ export default function activate(api: PowermoveAPI): void {
   const timeline = createTimelineRuntime(pm);
   api.commands?.register({
     id: 'toggleLayerStrips',
-    label: 'Open / collapse layer strips',
+    label: 'Reveal mask properties',
     category: 'Timeline',
     kb: 'M',
     run: () => pm.cmd('revealMasks')

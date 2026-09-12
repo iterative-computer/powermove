@@ -6,6 +6,7 @@ test.beforeEach(async ({ session }) => {
     const PM = (window as any).PM;
     const project = PM.mkProject({ name: 'Pro shortcut proof', w: 640, h: 360, dur: 8, fps: 30 });
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
+    PM.ProjectsScreen.hide();
     for (const [index, name] of ['Back', 'Middle', 'Front'].entries()) {
       const result = PM.Edit.apply({
         type: 'add_layer', layerType: 'solid', name, from: 0, duration: 8, index,
@@ -13,9 +14,9 @@ test.beforeEach(async ({ session }) => {
       }, { label: `Add ${name}`, origin: 'test' });
       if (!result.ok) throw new Error(result.message);
     }
-    PM.hist.clear();
     PM.setTime(4);
     PM.selectLayers([PM.proj.layers[1].id]);
+    PM.hist.clear();
   });
 });
 
