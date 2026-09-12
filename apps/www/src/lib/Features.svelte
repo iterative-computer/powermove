@@ -138,25 +138,70 @@
             </div>
             <div class="panel">
               {#if f.id === 'agent'}
-                <div class="mock composer" aria-hidden="true">
-                  <div class="composer-text">Give the title a slow push-in and fade the kicker out at 2s.</div>
-                  <div class="composer-row">
-                    <span class="chip">All panels</span>
-                    <span class="chip">Claude Code</span>
-                    <span class="send"><ArrowUpRight size={14} /></span>
+                <div class="ed ed-agent" aria-hidden="true">
+                  <div class="ed-pane ed-thread">
+                    <div class="ed-head"><span>Powermove agent</span><span class="ed-dim">Claude Code</span></div>
+                    <div class="ed-msg you">Give the title a slow push-in and fade the kicker out at 2s.</div>
+                    <div class="ed-msg">
+                      <div class="ed-msg-title">Edited 2 layers</div>
+                      <div class="ed-edit"><i></i>Powermove <span class="ed-dim">Scale 100 → 108 · 0:00–0:06</span></div>
+                      <div class="ed-edit"><i></i>Kicker <span class="ed-dim">Opacity 100 → 0 · 0:02</span></div>
+                      <div class="ed-msg-foot">Rendered 3 frames to check · Undo</div>
+                    </div>
+                    <div class="ed-composer">
+                      <div class="ed-composer-text">Describe what you want</div>
+                      <div class="ed-composer-row"><span>All panels</span><span>Claude Code</span><span class="ed-send"><ArrowUpRight size={11} /></span></div>
+                    </div>
+                  </div>
+                  <div class="ed-pane ed-view">
+                    <div class="ed-frame"><span class="ed-kicker">DESIGN / MOTION / SYSTEM</span><span class="ed-title">Make the move.</span></div>
                   </div>
                 </div>
-                <div class="mock result" aria-hidden="true">
-                  <div class="result-title">Edited 2 layers</div>
-                  <div class="result-row"><i></i>Powermove · Scale 100 → 108 over 0:00–0:06</div>
-                  <div class="result-row"><i></i>Kicker · Opacity 100 → 0 at 0:02</div>
-                  <div class="result-foot">Undo available</div>
-                </div>
               {:else if f.id === 'timeline'}
-                <img src="/editor-2.png" alt="" width="1600" height="1000" loading="lazy" class="shot shot-timeline" />
+                <div class="ed ed-timeline" aria-hidden="true">
+                  <div class="ed-pane ed-view">
+                    <div class="ed-frame"><span class="ed-kicker">DESIGN / MOTION / SYSTEM</span><span class="ed-title">Make the move.</span></div>
+                  </div>
+                  <div class="ed-pane ed-tl">
+                    <div class="ed-tl-bar"><span class="ed-tl-play"></span><span class="ed-tab on">Curves</span><span class="ed-tab">Fit keys</span><span class="ed-tab">Shy</span></div>
+                    <div class="ed-tl-body">
+                      <div class="ed-tl-layers">
+                        <div class="ed-tl-ruler"></div>
+                        <div class="ed-tl-layer"><b class="ed-badge blue">T</b>Kicker</div>
+                        <div class="ed-tl-layer on"><b class="ed-badge accent">T</b>Powermove</div>
+                        <div class="ed-tl-layer"><b class="ed-badge sand">S</b>Signal</div>
+                        <div class="ed-tl-layer"><b class="ed-badge violet">F</b>Atmosphere</div>
+                        <div class="ed-tl-layer"><b class="ed-badge sand">E</b>Grain</div>
+                        <div class="ed-tl-layer"><b class="ed-badge blue">A</b>Music</div>
+                      </div>
+                      <div class="ed-tl-tracks">
+                        <div class="ed-tl-ruler"><span>0:00</span><span>0:01</span><span>0:02</span><span>0:03</span><span>0:04</span><span>0:05</span></div>
+                        <div class="ed-tl-row"><span class="ed-bar blue" style="left:4%;width:56%"><i style="left:0"></i><i style="left:66%"></i></span></div>
+                        <div class="ed-tl-row"><span class="ed-bar accent on" style="left:4%;width:88%"><i style="left:0"></i><i style="left:100%"></i></span></div>
+                        <div class="ed-tl-row"><span class="ed-bar sand" style="left:0;width:100%"></span></div>
+                        <div class="ed-tl-row"><span class="ed-bar violet" style="left:0;width:100%"></span></div>
+                        <div class="ed-tl-row"><span class="ed-bar sand" style="left:0;width:100%"></span></div>
+                        <div class="ed-tl-row"><span class="ed-bar blue" style="left:0;width:74%"><i style="left:0"></i><i style="left:100%"></i></span></div>
+                        <div class="ed-playhead" style="left:36%"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               {:else if f.id === 'mods'}
-                <div class="mock manifest" aria-hidden="true">
-                  <div class="file-tab">manifest.json</div>
+                <div class="ed ed-mods" aria-hidden="true">
+                  <div class="ed-pane ed-ext">
+                    <div class="ed-head"><span>Extensions</span><span class="ed-dim">8 installed</span></div>
+                    <div class="ed-ext-row on"><span>Quiet timeline</span><span class="ed-dim">replaces timeline</span><span class="ed-switch on"></span></div>
+                    <div class="ed-ext-row"><span>Dusk theme</span><span class="ed-dim">theme</span><span class="ed-switch on"></span></div>
+                    <div class="ed-ext-row"><span>Vim keymap</span><span class="ed-dim">keymap</span><span class="ed-switch on"></span></div>
+                    <div class="ed-ext-row"><span>Film grain</span><span class="ed-dim">effect</span><span class="ed-switch"></span></div>
+                    <div class="ed-ext-row"><span>Whip pan</span><span class="ed-dim">transition</span><span class="ed-switch on"></span></div>
+                    <div class="ed-ext-row"><span>Frame checker</span><span class="ed-dim">agent tool</span><span class="ed-switch on"></span></div>
+                    <div class="ed-ext-row"><span>Lottie import</span><span class="ed-dim">importer</span><span class="ed-switch"></span></div>
+                    <div class="ed-ext-row"><span>Inspector, minimal</span><span class="ed-dim">replaces inspector</span><span class="ed-switch"></span></div>
+                  </div>
+                  <div class="ed-pane ed-code">
+                    <div class="ed-head"><span>manifest.json</span><span class="ed-dim">hot reload</span></div>
 <pre><code>{`{
   "id": "quiet-timeline",
   "name": "Quiet timeline",
@@ -164,13 +209,22 @@
   "replaces": "timeline",
   "main": "index.ts"
 }`}</code></pre>
-                </div>
-                <div class="mock toggle" aria-hidden="true">
-                  <span>Quiet timeline</span><span class="switch on"></span>
+                  </div>
                 </div>
               {:else}
-                <div class="mock manifest handoff" aria-hidden="true">
-                  <div class="file-tab">main.js</div>
+                <div class="ed ed-export" aria-hidden="true">
+                  <div class="ed-pane ed-out">
+                    <div class="ed-head"><span>Export</span><span class="ed-dim">Powermove.pm</span></div>
+                    <div class="ed-seg"><span>Video</span><span class="on">Web player</span><span>SVG</span></div>
+                    <div class="ed-field"><span>Scene</span><b>scene.json</b></div>
+                    <div class="ed-field"><span>Player</span><b>player.js · ESM</b></div>
+                    <div class="ed-field"><span>Size</span><b>1920 × 1080</b></div>
+                    <div class="ed-field"><span>Loop</span><span class="ed-switch on"></span></div>
+                    <div class="ed-field"><span>Fonts</span><b>Subset, inline</b></div>
+                    <div class="ed-action">Export scene</div>
+                  </div>
+                  <div class="ed-pane ed-code">
+                    <div class="ed-head"><span>main.js</span><span class="ed-dim">your site</span></div>
 <pre><code>{`import { createPlayer } from './player.js';
 
 const player = await createPlayer({
@@ -179,9 +233,7 @@ const player = await createPlayer({
   loop: true,
 });
 player.setText('title', 'Make your move.');`}</code></pre>
-                </div>
-                <div class="mock toggle" aria-hidden="true">
-                  <span>scene.json · player.js</span><span class="chip">ESM</span>
+                  </div>
                 </div>
               {/if}
             </div>
