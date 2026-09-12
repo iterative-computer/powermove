@@ -348,6 +348,16 @@ export function registerStoreIpc(
     else store.set(payload.key, JSON.parse(payload.serialized));
   });
 
+  // JSON values cross IPC and contextBridge without recursively copying and
+  // freezing each history object. Keep one string per key so the entire store
+  // does not have to fit in V8's maximum single-string length.
+  ipcMain.on(IPC.storeSnapshotSerializedSync, (event) => {
+    event.returnValue = ctx.isTrustedSender(event)
+      ? Object.fromEntries(Object.entries({ ...store.snapshot(), __powermoveAsyncStore: true })
+        .map(([key, value]) => [key, JSON.stringify(value)]))
+      : {};
+  });
+
   ipcMain.on(IPC.storeSnapshotSync, (event) => {
     if (!ctx.isTrustedSender(event)) {
       event.returnValue = {};

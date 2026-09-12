@@ -13,7 +13,7 @@ function decodeBase64(value: string): string {
   return Buffer.from(value, 'base64').toString('utf8');
 }
 
-function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean } = {}) {
+function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string> } = {}) {
   const PM: PMRegistry = {
     uid: vi.fn((prefix: string) => `${prefix}test`),
     toast: vi.fn(),
@@ -35,6 +35,7 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
       snapshotSync: options.snapshotError
         ? vi.fn(() => { throw options.snapshotError; })
         : vi.fn(() => ({ 'project.demo': { layers: [{ id: 'one' }] }, __powermoveAsyncStore: options.nativeAsyncStore === true })),
+      ...(options.snapshotJSON !== undefined ? { snapshotSerializedSync: vi.fn(() => options.snapshotJSON) } : {}),
       ...(options.serializedBridge ? { setSerialized: vi.fn(async () => undefined) } : {}),
       set: vi.fn(),
       delete: vi.fn(),
@@ -249,6 +250,17 @@ describe('legacy Electron shim install', () => {
     }) => void;
     onError({ key: 'not-registered', error: 'unknown store key: not-registered' });
     expect(store.get('not-registered', null)).toBeNull();
+  });
+
+  it('restores serialized recovery without requesting the bridged object tree', () => {
+    const history = { undo: [{ layers: [{ id: 'one', name: 'Restored' }] }], redo: [] };
+    const { PM, bridge } = loadShim({ snapshotJSON: {
+      'projectHistory.demo': JSON.stringify(history), takes: JSON.stringify([{ name: 'Original', json: '{"layers":[]}' }]), __powermoveAsyncStore: 'true',
+    }, serializedBridge: true });
+    expect(bridge.store.snapshotSync).not.toHaveBeenCalled();
+    expect(PM.store.get('projectHistory.demo')).toEqual(history);
+    expect(PM.store.get('takes')).toEqual([{ name: 'Original', json: '{"layers":[]}' }]);
+    expect(PM.store.separateHistory).toBe(true);
   });
 
   it('survives a failed sync snapshot and preserves bounded log severity', () => {

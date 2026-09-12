@@ -370,13 +370,23 @@ describe('store IPC and quit integration', () => {
     const set = vi.fn((key: string) => {
       if (key === '../theme') throw new IpcValidationError(IPC.storeSet, `unknown store key: ${key}`);
     });
-    const store = storeStub({ set });
+    const recovery = { 'projectHistory.demo': { undo: [{ layers: [{ id: 'one' }] }], redo: [] }, takes: [{ name: 'Saved', json: '{"layers":[]}' }] };
+    const store = storeStub({ set, snapshot: () => recovery });
     registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, {
       isTrustedSender: (event) => Boolean((event as unknown as { trusted?: boolean }).trusted)
     });
     const send = vi.fn();
     const trustedEvent = { trusted: true, sender: { send }, returnValue: undefined };
     const untrustedEvent = { trusted: false, sender: { send }, returnValue: undefined };
+
+    listeners.get(IPC.storeSnapshotSerializedSync)?.(trustedEvent);
+    expect(Object.values(trustedEvent.returnValue as unknown as Record<string, string>).every(value => typeof value === 'string')).toBe(true);
+    expect(Object.fromEntries(Object.entries(trustedEvent.returnValue as unknown as Record<string, string>)
+      .map(([key, value]) => [key, JSON.parse(value)]))).toEqual({ ...recovery, __powermoveAsyncStore: true });
+    listeners.get(IPC.storeSnapshotSerializedSync)?.(untrustedEvent);
+    expect(untrustedEvent.returnValue).toEqual({});
+    listeners.get(IPC.storeSnapshotSync)?.(trustedEvent);
+    expect(trustedEvent.returnValue).toEqual({ ...recovery, __powermoveAsyncStore: true });
 
     listeners.get(IPC.storeSet)?.(untrustedEvent, { key: 'theme', value: 'dark' });
     listeners.get(IPC.storeSet)?.(trustedEvent, { key: '../theme', value: 'dark' });
