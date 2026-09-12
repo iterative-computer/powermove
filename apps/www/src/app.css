@@ -146,8 +146,13 @@ h1 .muted{color:var(--tx-3)}
 .ed-switch::after{content:'';position:absolute;top:2px;left:2px;width:9px;height:9px;border-radius:50%;background:var(--tx-3)}
 .ed-switch.on{background:var(--accent)}
 .ed-switch.on::after{left:auto;right:2px;background:#fff}
-.ed pre{padding:10px 12px;font:11px/1.6 var(--font-geist-mono),ui-monospace,monospace;color:var(--tx);overflow:hidden}
+.ed pre{padding:10px 12px;font:11px/1.6 var(--font-geist-mono),ui-monospace,monospace;color:var(--tx-2);overflow:hidden}
 .ed-code{flex:1}
+.tok-key{color:var(--blue)}
+.tok-str{color:var(--sand)}
+.tok-num{color:var(--success)}
+.tok-kw{color:var(--violet)}
+.tok-fn{color:var(--tx)}
 
 /* agent */
 .ed-agent{left:6%;top:8%;width:130%;height:100%}
@@ -224,28 +229,25 @@ h1 .muted{color:var(--tx-3)}
 .principle-list li:last-child{border-bottom:1px solid var(--line)}
 .principle-list svg{flex-shrink:0;margin-top:3px;color:var(--tx-3)}
 .principle-list .strong{font-weight:500}
-/* Stack of slabs. Each sits on the one below; the top one is the reader's, the bottom one is the only thing that isn't a mod. */
-.stack{display:flex;flex-direction:column;gap:6px;max-width:520px;margin-inline:auto;width:100%}
-.slab{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:18px 20px;border-radius:var(--r-lg);background:var(--bg-panel);box-shadow:var(--ctl-edge);font-size:var(--fs-md);transition:transform var(--dur-2) var(--ease)}
+/* Stack of slabs, seen from slightly above. Each sits on the one below with a sliver of its edge showing,
+   so the pile reads as depth rather than a list. Slabs settle in from the kernel up when the section arrives;
+   hovering a slab slides it out, since any of them can be swapped. The kernel stays put. */
+.stack{display:flex;flex-direction:column;max-width:520px;margin-inline:auto;width:100%;padding-top:8px;perspective:1200px}
+.slab{position:relative;display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-top:-6px;padding:20px 22px 22px;border-radius:var(--r-lg);background:var(--bg-panel);box-shadow:var(--ctl-edge),0 12px 24px -12px rgb(0 0 0 / .6);font-size:var(--fs-md);z-index:calc(var(--i) + 1);opacity:0;transform:translate3d(0,-28px,40px);transition:transform .7s cubic-bezier(.22,1,.36,1),opacity .5s ease-out,box-shadow var(--dur-2)}
+.slab:first-child{margin-top:0}
+.stack[data-in] .slab{opacity:1;transform:none;transition-delay:calc((4 - var(--i)) * 90ms),calc((4 - var(--i)) * 90ms),0s}
 .slab-name{font-weight:500;color:var(--tx);white-space:nowrap}
 .slab-note{color:var(--tx-3);text-align:right;text-wrap:balance}
-.slab.yours{background:color-mix(in srgb,var(--accent) 10%,var(--bg-panel));box-shadow:var(--ctl-edge),inset 0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent)}
+.slab.yours{background:color-mix(in srgb,var(--accent) 10%,var(--bg-panel));box-shadow:var(--ctl-edge),inset 0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent),0 16px 32px -12px rgb(0 0 0 / .7)}
 .slab.yours .slab-name{color:var(--accent)}
 .slab.kernel{background:var(--bg-panel-2);color:var(--tx-3)}
 .slab.kernel .slab-name{color:var(--tx-2)}
-.stack:hover .slab.yours{transform:translateY(-4px)}
-@media(prefers-reduced-motion:reduce){.stack:hover .slab.yours{transform:none}}
-
-/* ---- facts (two column with stats) ---- */
-.two{display:grid;gap:24px}
-@media(min-width:768px){.two{grid-template-columns:1fr 1fr;gap:48px}}
-.facts-body{display:flex;flex-direction:column;gap:72px}
-@media(min-width:1280px){.facts-body{gap:120px}}
-.stats{display:grid;gap:32px}
-@media(min-width:768px){.stats{grid-template-columns:repeat(3,1fr)}}
-.stats>div{padding-top:20px;border-top:1px solid var(--line-strong)}
-.stat{font-size:32px;font-weight:500;letter-spacing:-.03em;line-height:1}
-.stats p{margin-top:12px;font-size:var(--fs-md);line-height:1.5;color:var(--tx-2)}
+.stack[data-in] .slab:not(.kernel):hover{transform:translate3d(14px,0,0);transition-delay:0s;box-shadow:var(--ctl-edge),0 16px 32px -10px rgb(0 0 0 / .7)}
+.stack[data-in] .slab.yours:hover{transform:translate3d(0,-8px,0)}
+@media(prefers-reduced-motion:reduce){
+  .slab{opacity:1;transform:none;transition:none}
+  .stack[data-in] .slab:hover{transform:none}
+}
 
 /* ---- final ---- */
 .final .wrap{text-align:center}

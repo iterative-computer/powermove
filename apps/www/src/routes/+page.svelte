@@ -7,6 +7,19 @@
 
 
   const year = new Date().getFullYear();
+
+  let stack = $state<HTMLElement | undefined>();
+  let stackIn = $state(false);
+
+  $effect(() => {
+    if (!stack) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) { stackIn = true; observer.disconnect(); } },
+      { threshold: 0.5 },
+    );
+    observer.observe(stack);
+    return () => observer.disconnect();
+  });
 </script>
 
 <svelte:head>
@@ -47,26 +60,12 @@
           <li><FileCode2 size={16} strokeWidth={1.75} aria-hidden="true" /><div><span class="strong">Yours on disk.</span> Projects save as files with embedded media and a kept backup.</div></li>
         </ul>
       </div>
-      <div class="stack" aria-hidden="true">
-        <div class="slab yours"><span class="slab-name">Your mods</span><span class="slab-note">Same API as everything below</span></div>
-        <div class="slab"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
-        <div class="slab"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
-        <div class="slab"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
-        <div class="slab kernel"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="facts" aria-labelledby="facts-title">
-    <div class="wrap two">
-      <h2 id="facts-title"><span class="strong">Small kernel.</span><br />Everything else is replaceable.</h2>
-      <div class="facts-body">
-        <p class="lead">The kernel owns the project store, a typed edit boundary with undo and revision checks, the GPU compositor, and the registries. The default theme, keymap, panels, effects, and transitions sit on top, as extensions.</p>
-        <div class="stats">
-          <div><div class="stat">Typed</div><p>One command boundary for people and agents</p></div>
-          <div><div class="stat">Hot</div><p>Mods compile on save and reload in place</p></div>
-          <div><div class="stat">Open</div><p>Source on GitHub. The editor, the site, and the player in one repo</p></div>
-        </div>
+      <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
+        <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Same API as everything below</span></div>
+        <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
+        <div class="slab" style="--i:2"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
+        <div class="slab" style="--i:1"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
+        <div class="slab kernel" style="--i:0"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
       </div>
     </div>
   </section>
