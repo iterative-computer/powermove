@@ -292,7 +292,9 @@ export function install(PM: PMRegistry): void {
 
   let snapshot = {};
   try {
-    snapshot = bridge.store.snapshotSync() || {};
+    snapshot = bridge.store.snapshotSerializedSync
+      ? Object.fromEntries(Object.entries(bridge.store.snapshotSerializedSync() as Record<string, string>).map(([key, value]) => [key, JSON.parse(value)]))
+      : bridge.store.snapshotSync() || {};
   } catch (error) {
     bridge.log('error', `store snapshot failed: ${errorText(error, 'unknown error')}`);
   }
