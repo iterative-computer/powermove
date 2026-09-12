@@ -7,3 +7,7 @@ native/PowermoveNative/artifacts/
 e2e/test-results/
 e2e/playwright-report/
 e2e/tmp/
+native/macos-renderer/build/
+website/.svelte-kit/
+website/build/
+**/.DS_Store
