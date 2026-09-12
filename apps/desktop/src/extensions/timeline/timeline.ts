@@ -1,6 +1,7 @@
 import { revealedProperties } from './property-reveal';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
+import { createGraphSampleCache } from './graph-sample-cache';
 import { temporalKeys } from 'powermove';
 import { adjacentKeyframe } from './keyframe-navigation';
 import { evaluatedValue } from 'powermove';
@@ -381,6 +382,7 @@ T.__timelineRuntimeDisposed = false;
 const runtimeCleanups: Array<() => void> = [];
 let headCleanups: Array<() => void> = [];
 let canvasCleanups: Array<() => void> = [];
+let syncGraphControls = () => {};
 const frameIds = new Set<number>();
 const timerIds = new Set<number>();
 const activeDrags = new Set<any>();
@@ -534,8 +536,31 @@ function buildHead(head: any) {
   const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
   const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (Shift+F3)' }, PM.icon('bezier'));
-  listen(graph, 'click', () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); PM.invalidate('timeline'); }, undefined, headCleanups);
-  const graphSlot = h('div.tl-group.tl-graph-slot', graph);
+  listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); PM.invalidate('timeline'); }, undefined, headCleanups);
+  const graphOptions = btn('more', () => PM.menu(graphOptions, [
+    { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; PM.invalidate('timeline'); } },
+    { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; PM.invalidate('timeline'); } },
+    { label: 'Fit selected curves', disabled: !T._graph, run: () => {
+      const points = T._graph?.points || [];
+      if (!points.length) return;
+      const times = points.map((point: any) => point.axis.L.from + point.key.t);
+      const first = Math.min(...times), last = Math.max(...times);
+      T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / PM.proj.fps, last - first), 4, 4000);
+      T.scrollT = Math.max(-.4, first - 24 / T.pps);
+      T.graphViewBounds = null; PM.invalidate('timeline');
+    } },
+  ]), 'Graph options');
+  let graphShown: boolean | undefined;
+  syncGraphControls = () => {
+    const shown = Boolean(T.graph);
+    if (graphShown === shown) return;
+    graphShown = shown;
+    graph.classList.toggle('on', shown);
+    graph.setAttribute('aria-pressed', String(shown));
+    graphOptions.hidden = !shown;
+    graphOptions.style.display = shown ? '' : 'none';
+  };
+  const graphSlot = h('div.tl-group.tl-graph-slot', graph, graphOptions);
   const transport = h('div.tl-group.tl-transport',
     playBtn,
     time,
@@ -568,7 +593,8 @@ function buildHead(head: any) {
     }));
   }, undefined, headCleanups);
   const syncTime = () => {
-    time.textContent = PM.tc(PM.time, PM.proj.fps);
+    const text = PM.tc(PM.time, PM.proj.fps);
+    if (time.textContent !== text) time.textContent = text;
   };
   const syncTransport = () => {
     /* Keep the icon node stable while playback frames update the timecode.
@@ -582,9 +608,9 @@ function buildHead(head: any) {
   onBus('project', () => {
     syncTime();
     syncTransport();
-    graph.classList.toggle('on', T.graph);
+    syncGraphControls();
   }, headCleanups);
-  syncTime(); syncTransport();
+  syncTime(); syncTransport(); syncGraphControls(); syncHeadGeometry(head);
   listen(time, 'pointerdown', (e: any) => {
     const startTime = PM.time;
     beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(startTime + dx / 12 / PM.proj.fps) });
@@ -592,6 +618,7 @@ function buildHead(head: any) {
 }
 
 function refreshTimelineManifest() {
+  syncGraphControls();
   const raw = PM.WS?.current?.chrome?.timeline || {};
   const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
     rowHeight: 30, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
@@ -601,8 +628,10 @@ function refreshTimelineManifest() {
   T.style = config;
   const head = PM.$('#tl-head');
   if (head) {
-    head.dataset.density = config.toolbarDensity;
-    syncHeadGeometry(head);
+    if (head.dataset.density !== config.toolbarDensity) head.dataset.density = config.toolbarDensity;
+    // The draw resolves the minimum width of property columns before syncing
+    // the header. Publishing the narrower configured gutter here and widening
+    // it again below forced layout twice on every playback/scrub frame.
   }
   return config;
 }
@@ -1367,14 +1396,21 @@ function drawGutter(c: any, W: any, H: any) {
   }
   c.restore();
 }
+const clippedLabels = new Map<string, string>();
+listen(document.fonts, 'loadingdone', () => { clippedLabels.clear(); PM.invalidate('timeline'); });
 function clipText(c: any, s: any, x: any, y: any, max: any) {
   if (max <= 0) return;
+  const key = JSON.stringify([c.font, c.letterSpacing, String(s), max]);
+  const cached = clippedLabels.get(key);
+  if (cached !== undefined) { c.fillText(cached, x, y); return; }
   let t = String(s);
   if (c.measureText(t).width > max) {
     if (c.measureText('…').width > max) return;
     while (t.length && c.measureText(t + '…').width > max) t = t.slice(0, -1);
     t += '…';
   }
+  if (clippedLabels.size >= 1024) clippedLabels.clear();
+  clippedLabels.set(key, t);
   c.fillText(t, x, y);
 }
 function fittedPropertyValue(c: any, value: any, unit: string, maxWidth: number) {
@@ -1527,7 +1563,9 @@ function drawQuickOffset(c: any, W: number, H: number) {
 }
 
 /* ── graph editor ──────────────────────────────────────── */
+const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(PM, axis, time, speed));
 function drawGraph(c: any, W: any, H: any) {
+  graphSamples.begin(PM.proj, [PM.animVersion?.(), PM.proj.fps, T.pps, T.scrollT, W, T.graphType].join(':'));
   T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
@@ -1560,7 +1598,7 @@ function drawGraph(c: any, W: any, H: any) {
     const keys=axis.prop.kf;
     for(let i=0;i<keys.length;i++) for(let sample=0;sample<=48;sample++) {
       const t=axis.L.from+keys[i].t+((keys[i+1]?.t ?? keys[i].t)-keys[i].t)*sample/48;
-      const v=graphSample(PM,axis,t,speedMode); if(Number.isFinite(v)){vmin=Math.min(vmin,v);vmax=Math.max(vmax,v);}
+      const v=graphSamples.sample(axis,t,speedMode); if(Number.isFinite(v)){vmin=Math.min(vmin,v);vmax=Math.max(vmax,v);}
     }
   });
   if (!isFinite(vmin)) { vmin = 0; vmax = 1; }
@@ -1591,7 +1629,7 @@ function drawGraph(c: any, W: any, H: any) {
   const x1 = Math.min(W, t2x(L.from + Math.max(L.dur, ...kf.map((key: any) => key.t))));
   for (let x = x0; x <= x1; x += 1.5) {
     const tl = x2t(x) - L.from;
-    const v = graphSample(PM,axis,tl+L.from,speedMode);
+    const v = graphSamples.sample(axis,tl+L.from,speedMode);
     const y = v2y(v == null ? 0 : v);
     x === x0 ? c.moveTo(x, y) : c.lineTo(x, y);
   }
@@ -1600,7 +1638,7 @@ function drawGraph(c: any, W: any, H: any) {
   kf.forEach((k: any, i: any) => {
     PM.UIState.setKeyHandles(k, { ho: null, hi: null, pt: null });
     if (!selectedKeyIds.has(k.i)) return;
-    const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSample(PM,axis,L.from+k.t,true) : k.v);
+    const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSamples.sample(axis,L.from+k.t,true) : k.v);
     const nx = kf[i + 1], pv = kf[i - 1];
     c.strokeStyle = INK.sub; c.lineWidth = 1;
     if (nx && !k.hold && !speedMode) {
@@ -2002,18 +2040,23 @@ function workAreaMove(e: any) {
 }
 
 function scrub(e: any) {
-  const targets: number[] = [];
-  for (const L of PM.proj.layers) {
-    targets.push(L.from, L.from + L.dur);
-    for (const item of PM.allProps?.(L) || []) {
-      for (const key of item.prop?.kf || []) targets.push(L.from + key.t);
-    }
-  }
+  // Most drags do not snap. Enumerate the project's property/keyframe graph
+  // only if Shift is actually pressed, including midway through a drag.
+  let targets: number[] | undefined;
   let rawTime = 0;
   let lockedTarget: number | null = null;
   const apply = () => {
     const time = clamp(rawTime, 0, PM.proj.dur);
     if (!shiftSnapping()) { lockedTarget = null; PM.setTime(time); return; }
+    if (!targets) {
+      targets = [];
+      for (const L of PM.proj.layers) {
+        targets.push(L.from, L.from + L.dur);
+        for (const item of PM.allProps?.(L) || []) {
+          for (const key of item.prop?.kf || []) targets.push(L.from + key.t);
+        }
+      }
+    }
     const tolerance = 10 / Math.max(1, T.pps);
     const resolved = resolveTimelineSnap(time, targets, tolerance, lockedTarget, 15 / Math.max(1, T.pps));
     lockedTarget = resolved.target;

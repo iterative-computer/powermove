@@ -16,12 +16,12 @@ PM.touch = () => {
   version++;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
-  woMemo.clear(); wmMemo.clear(); memoT = null;
+  woMemo.clear(); wmMemo.clear(); lmMemo.clear(); memoT = null;
   parentIndexes = new WeakMap();
 };
 PM.animVersion = () => version;
 let memoT: any = null;
-const woMemo = new Map(), wmMemo = new Map();
+const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
 function evalKfs(kf: any, t: any, interpolateColor = false) {
@@ -163,6 +163,10 @@ PM.ev = (L: any, key: any, T: any) => {
   const prop = L.p[key];
   if (!prop) return 0;
   const tl = T - L.from;
+  if (!prop.expr) {
+    PM.expressionErrors.delete(prop);
+    return prop.kf?.length ? evalKfs(prop.kf, tl, key === 'c.color' || key === 'c.strokeColor') : prop.v;
+  }
   const comp = PM.curComp();
   return evalProp(prop, tl, {
     T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet, key,
@@ -170,6 +174,11 @@ PM.ev = (L: any, key: any, T: any) => {
 };
 /** Evaluate an effect / uniform param (also layer-local). */
 PM.evP = (L: any, prop: any, T: any, key: any) => {
+  if (!prop || typeof prop !== 'object') return null;
+  if (!prop.expr) {
+    PM.expressionErrors.delete(prop);
+    return prop.kf?.length ? evalKfs(prop.kf, T - L.from, key === 'c.color' || key === 'c.strokeColor') : prop.v;
+  }
   const comp = PM.curComp();
   return evalProp(prop, T - L.from, {
     T, fps: comp.fps || PM.proj.fps, layer: L, comp, param: paramGet, key,
@@ -199,6 +208,7 @@ function mul(m: any, n: any) {
 PM.mul = mul;
 
 PM.localMatrix = (L: any, T: any) => {
+  if (Object.is(memoT, T)) { const cached = lmMemo.get(L); if (cached) return cached; }
   const px = PM.ev(L, 'position.x', T), py = PM.ev(L, 'position.y', T);
   const ax = PM.ev(L, 'anchor.x', T), ay = PM.ev(L, 'anchor.y', T);
   const sx = PM.ev(L, 'scale.x', T) / 100, sy = PM.ev(L, 'scale.y', T) / 100;
@@ -207,7 +217,9 @@ PM.localMatrix = (L: any, T: any) => {
   const c = Math.cos(r), s = Math.sin(r);
   // Compose the affine transform directly, without three intermediate matrices per layer.
   const a=c*sx,b=s*sx,cc=(c*sk-s)*sy,d=(s*sk+c)*sy;
-  return [a,b,cc,d,px-a*ax-cc*ay,py-b*ax-d*ay];
+  const matrix = [a,b,cc,d,px-a*ax-cc*ay,py-b*ax-d*ay];
+  if (Object.is(memoT, T)) lmMemo.set(L, matrix);
+  return matrix;
 };
 
 /* Cycle-safe parenting with per-timestamp memoization. Each query climbs the
@@ -250,7 +262,7 @@ const indexOfLayer = (comp: any, layer: any) => {
 
 /** Start a fresh evaluation window (called by the compositor per frame). */
 PM.beginEval = (T: any) => {
-  if (!Object.is(memoT, T)) { woMemo.clear(); wmMemo.clear(); }
+  if (!Object.is(memoT, T)) { woMemo.clear(); wmMemo.clear(); lmMemo.clear(); }
   memoT = T;
 };
 

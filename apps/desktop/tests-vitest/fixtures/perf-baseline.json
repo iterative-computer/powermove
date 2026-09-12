@@ -1,9 +1,10 @@
 {
-  "calibrationMs": 1.339,
-  "evalMedianMs": 114.341,
-  "exprMedianMs": 66.26,
-  "evalRatio": 85.39283047050037,
-  "exprRatio": 49.484690067214345,
-  "recordedAt": "2026-08-27T03:54:42.301Z",
-  "node": "v24.18.0"
+  "workload": "1000-layers-60-keys-30-distinct-frames",
+  "calibrationMs": 1.473,
+  "evalMedianMs": 210.708,
+  "exprMedianMs": 213.007,
+  "evalRatio": 143.0468431771894,
+  "exprRatio": 144.60760353021044,
+  "recordedAt": "2026-09-12T23:05:24.119Z",
+  "node": "v26.7.0"
 }
