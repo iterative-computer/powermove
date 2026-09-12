@@ -75,7 +75,8 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('Return each command as one JSON-encoded string');
     expect(instructions).toContain('externalActions');
     expect(instructions).toContain('Never open or show a new window for testing');
-    expect(instructions).toContain('POWERMOVE_BACKGROUND_TEST=1');
+    expect(instructions).toContain('source checkout, package scripts, and Electron test harness are not available');
+    expect(instructions).not.toMatch(/src\/extensions|npm run|bun run/u);
     expect(instructions).toContain('isolated temporary test data');
     expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(8 * 1024);
   });

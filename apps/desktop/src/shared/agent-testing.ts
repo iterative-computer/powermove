@@ -1,7 +1,7 @@
 /** Included in every run, including resumes and editor-only requests. */
 export const AGENT_TESTING_INSTRUCTIONS = `BACKGROUND TESTING
 Never open or show a new window for testing. Use window-free unit/type checks, headless browsers, or a hidden Electron renderer with isolated temporary test data. Never launch a headed browser, detached DevTools, or a visible second copy of Powermove for verification.
-For this repository, npm test and npm run typecheck are window-free; npm run test:e2e uses the hidden Electron test harness. For custom Electron tests, set POWERMOVE_BACKGROUND_TEST=1, POWERMOVE_DEVTOOLS=0, and POWERMOVE_USER_DATA to a new absolute temporary directory. Use the hidden renderer for clicks, screenshots, persistence, and editable Apply/Undo checks. Never point tests at the user's live profile or change the live document just to test.
+Powermove's source checkout, package scripts, and Electron test harness are not available; do not search for them or build a substitute launcher. Verify through the live powermove tools (panel state, interaction, capture, workspace errors, render_frames) and the extension compile report. Never point tests at the user's live profile or change the live document just to test.
 Keep the user's existing Powermove process, window, and editing session open. Apply interface changes through renderer or extension hot reload only; do not quit, relaunch, or reload the whole window. If background testing is unavailable, report what remains unverified instead of falling back to a visible test window. Distinguish automated, hidden-renderer, and visible-app evidence. Native dialogs, focus, and other OS-only behavior require explicit user coordination.
 
 TOOL RELIABILITY
