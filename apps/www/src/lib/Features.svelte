@@ -202,13 +202,13 @@
                   </div>
                   <div class="ed-pane ed-code">
                     <div class="ed-head"><span>manifest.json</span><span class="ed-dim">hot reload</span></div>
-<pre><code>{`{
-  "id": "quiet-timeline",
-  "name": "Quiet timeline",
-  "apiVersion": 1,
-  "replaces": "timeline",
-  "main": "index.ts"
-}`}</code></pre>
+<pre><code>{'{'}
+  <span class="tok-key">"id"</span>: <span class="tok-str">"quiet-timeline"</span>,
+  <span class="tok-key">"name"</span>: <span class="tok-str">"Quiet timeline"</span>,
+  <span class="tok-key">"apiVersion"</span>: <span class="tok-num">1</span>,
+  <span class="tok-key">"replaces"</span>: <span class="tok-str">"timeline"</span>,
+  <span class="tok-key">"main"</span>: <span class="tok-str">"index.ts"</span>
+{'}'}</code></pre>
                   </div>
                 </div>
               {:else}
@@ -225,14 +225,14 @@
                   </div>
                   <div class="ed-pane ed-code">
                     <div class="ed-head"><span>main.js</span><span class="ed-dim">your site</span></div>
-<pre><code>{`import { createPlayer } from './player.js';
+<pre><code><span class="tok-kw">import</span> {'{'} <span class="tok-fn">createPlayer</span> {'}'} <span class="tok-kw">from</span> <span class="tok-str">'./player.js'</span>;
 
-const player = await createPlayer({
-  canvas: document.querySelector('canvas'),
-  scene: './scene.json',
-  loop: true,
-});
-player.setText('title', 'Make your move.');`}</code></pre>
+<span class="tok-kw">const</span> player = <span class="tok-kw">await</span> <span class="tok-fn">createPlayer</span>({'{'}
+  <span class="tok-key">canvas</span>: document.<span class="tok-fn">querySelector</span>(<span class="tok-str">'canvas'</span>),
+  <span class="tok-key">scene</span>: <span class="tok-str">'./scene.json'</span>,
+  <span class="tok-key">loop</span>: <span class="tok-kw">true</span>,
+{'}'});
+player.<span class="tok-fn">setText</span>(<span class="tok-str">'title'</span>, <span class="tok-str">'Make your move.'</span>);</code></pre>
                   </div>
                 </div>
               {/if}

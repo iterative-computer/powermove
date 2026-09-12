@@ -107,6 +107,103 @@ h1 .muted{color:var(--tx-3)}
 .brand-soon .brand-name{color:var(--tx-3)}
 .brand-soon:hover,.brand-soon:hover .brand-name{color:var(--tx-2)}
 
+/* ---- showcase (sticky scroll, one body that becomes four surfaces) ---- */
+.showcase{height:380vh;padding:0}
+.showcase-sticky{position:sticky;top:0;height:100vh;display:flex;align-items:center}
+.showcase-layout{display:grid;gap:40px;width:100%}
+@media(min-width:1024px){.showcase-layout{grid-template-columns:5fr 7fr;gap:80px;align-items:center}}
+.showcase-steps{list-style:none;padding:0;margin-top:40px;color:var(--tx-3);font-size:15px;line-height:1.55;text-wrap:pretty}
+.showcase-steps li{padding-block:12px;border-top:1px solid var(--line);transition:color .4s}
+.showcase-steps li:last-child{border-bottom:1px solid var(--line)}
+.showcase-steps li .strong{color:var(--tx-3);font-weight:500;transition:color .4s}
+.showcase-steps li[data-active]{color:var(--tx-2)}
+.showcase-steps li[data-active] .strong{color:var(--tx)}
+
+/* The card scopes its own light-theme tokens so it never restyles the page.
+   No brand accent: a saturated hue fights a rainbow rim. */
+@property --ai-a{syntax:'<angle>';inherits:false;initial-value:180deg}
+@property --ai-s1{syntax:'<angle>';inherits:false;initial-value:16deg}
+@property --ai-s2{syntax:'<angle>';inherits:false;initial-value:30deg}
+@property --ai-s3{syntax:'<angle>';inherits:false;initial-value:43deg}
+@property --ai-s4{syntax:'<angle>';inherits:false;initial-value:59deg}
+@property --ai-s5{syntax:'<angle>';inherits:false;initial-value:72deg}
+@property --ai-s6{syntax:'<angle>';inherits:false;initial-value:84deg}
+@property --ai-bg1{syntax:'<color>';inherits:true;initial-value:#f7f9fc}
+@property --ai-bg2{syntax:'<color>';inherits:true;initial-value:#eef4fb}
+@property --ai-bg3{syntax:'<color>';inherits:true;initial-value:#e6f0fa}
+.lights-card{
+  --s-border-1:#dedede;--s-surface-1:#fbfbfb;--s-surface-2:#ffffff;--s-surface-3:#f2f2f2;
+  --s-text-primary:#111;--s-text-body:#2f2f2f;--s-text-muted:#6b6b6b;--s-text-subtle:#9a9a9a;--s-text-inverse:#fff;
+  position:relative;display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:4/3;max-height:70vh;overflow:hidden;user-select:none;
+  border-radius:var(--r-xl);border:1px solid rgb(255 255 255 / .08);
+  background:linear-gradient(180deg,var(--ai-bg1) 0%,var(--ai-bg2) 55%,var(--ai-bg3) 100%);
+  transition:--ai-bg1 1.2s var(--ease),--ai-bg2 1.2s var(--ease),--ai-bg3 1.2s var(--ease);
+  font-family:var(--font-geist-sans),Geist,sans-serif;color:var(--s-text-body)}
+@media(min-width:1024px){.lights-card{aspect-ratio:1344/900}}
+.lc-probe{position:absolute;top:0;left:0;visibility:hidden;pointer-events:none;z-index:-1}
+.lc-probe [data-probe]{display:inline-block}
+
+/* The body: carries the glow, morphs width, height and radius. Ease out, short. */
+.ai-lights{position:relative;padding:1px;border-radius:var(--r);box-shadow:0 1px 2px rgb(12 38 77 / .06),0 8px 24px rgb(12 38 77 / .08);transition:width var(--m) cubic-bezier(.22,1,.36,1),height var(--m) cubic-bezier(.22,1,.36,1),border-radius var(--m) cubic-bezier(.22,1,.36,1)}
+.ai-lights-layer{position:absolute;pointer-events:none;opacity:0;mask-size:100% 100%;mask-repeat:no-repeat;-webkit-mask-size:100% 100%;-webkit-mask-repeat:no-repeat;
+  background:conic-gradient(from var(--ai-a),var(--ai-c1,#005bf6) 0deg,var(--ai-c2,#b0c6e9) var(--ai-s1),var(--ai-c3,#feca00) var(--ai-s2),var(--ai-c4,#ff1c11) var(--ai-s3),var(--ai-c5,#ff00ea) var(--ai-s4),var(--ai-c6,#ffa2fbcc) var(--ai-s5),transparent var(--ai-s6),transparent 324deg,var(--ai-tail,#95c1ffa1) 349deg,var(--ai-c1,#005bf6) 360deg)}
+.ai-lights-layer.mirror{transform:scaleX(-1)}
+.ai-lights[data-playing=true] .ai-lights-layer{animation:ai-pulse 1.6s cubic-bezier(.26,.94,.6,1) both}
+.ai-lights[data-morphing] .ai-lights-layer{display:none}
+/* One shot. As it fades the start angle swings backwards and the stops push out, so the wedge tightens at its head and blooms at its tail. */
+@keyframes ai-pulse{
+  0%{opacity:0;--ai-a:180deg;--ai-s1:16deg;--ai-s2:30deg;--ai-s3:43deg;--ai-s4:59deg;--ai-s5:72deg;--ai-s6:84deg}
+  10%{opacity:1}
+  30%{opacity:1}
+  100%{opacity:0;--ai-a:30deg;--ai-s1:6deg;--ai-s2:11deg;--ai-s3:17deg;--ai-s4:40deg;--ai-s5:90deg;--ai-s6:120deg}
+}
+.lc-face{position:relative;width:100%;height:100%;overflow:hidden;border-radius:calc(var(--r) - 1px);background:var(--s-surface-2);transition:background-color var(--m) cubic-bezier(.22,1,.36,1)}
+.lc-face.dark{background:#1e1e1e}
+.lc-face-pad{padding:14px 20px}
+.lc-face-pad.control{padding:10px 10px 10px 20px}
+.lc-contents{position:relative;width:100%;height:100%;box-sizing:border-box;transition:opacity var(--f) ease-out}
+
+/* contents rise in per character */
+.lc-rise{display:block;line-height:1;white-space:nowrap;min-width:0;flex:1}
+.lc-ch{display:inline-block;vertical-align:middle;animation:ai-char .3s cubic-bezier(.66,0,.34,1) both}
+.lc-fade{animation:ai-char-fade .3s ease both}
+@keyframes ai-char{from{opacity:0;transform:translateY(16px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
+@keyframes ai-char-fade{from{opacity:0}to{opacity:1}}
+.lc-row{display:flex;align-items:center;gap:8px}
+.lc-progress{width:246px}
+.lc-prompt{width:282px}
+.lc-body-text{font-size:16px;color:var(--s-text-body)}
+.lc-muted-text{font-size:16px;color:var(--s-text-muted)}
+.lc-trail{flex-shrink:0;font-size:13px;line-height:1;font-variant-numeric:tabular-nums;color:var(--s-text-subtle)}
+.lc-spin{width:14px;height:14px;flex-shrink:0}
+.lc-spin-track{fill:none;stroke:var(--s-border-1);stroke-width:2}
+.lc-spin-arc{fill:none;stroke:var(--s-text-body);stroke-width:2;stroke-linecap:round;transform-origin:8px 8px;animation:ai-spin .9s linear infinite}
+@keyframes ai-spin{to{transform:rotate(360deg)}}
+.lc-send{display:grid;place-items:center;flex-shrink:0;width:32px;height:32px;border-radius:9px;background:var(--s-text-primary)}
+.lc-send svg{width:16px;height:16px;fill:none;stroke:var(--s-text-inverse);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+/* workflow node: three steps on a hairline track, the live one ringed */
+.lc-node{position:relative;display:flex;align-items:flex-start;width:268px}
+.lc-track{position:absolute;top:7px;left:16.667%;right:16.667%;height:1px;background:var(--s-border-1);animation:ai-char-fade .3s ease both}
+.lc-step{display:flex;flex:1;flex-direction:column;align-items:center;gap:8px}
+.lc-dot{position:relative;display:grid;place-items:center;width:14px;height:14px}
+.lc-dot::before{content:'';width:12px;height:12px;border-radius:4px;background:var(--s-text-primary)}
+.lc-step[data-state=done] .lc-dot::before{background:var(--s-text-subtle)}
+.lc-step[data-state=next] .lc-dot::before{background:var(--s-surface-3);box-shadow:inset 0 0 0 1px var(--s-border-1)}
+.lc-ring{position:absolute;inset:-3px;border-radius:6px;border:1px solid var(--s-text-primary);animation:ai-ring 1.8s ease-out infinite}
+@keyframes ai-ring{0%{opacity:.8;transform:scale(.7)}100%{opacity:0;transform:scale(1.5)}}
+.lc-step-label{font-size:14px;line-height:1;color:var(--s-text-body)}
+.lc-step[data-state=next] .lc-step-label{color:var(--s-text-subtle)}
+/* terminal: the one variant that inverts */
+.lc-terminal{display:flex;flex-direction:column;gap:8px;width:242px;font-family:var(--font-geist-mono),ui-monospace,monospace}
+.lc-cmd{font-size:14px;line-height:1;color:#8c8c8c}
+.lc-prompt-sign{color:#5f5f5f}
+.lc-out{font-size:14px;color:#d6d6d6}
+@media(prefers-reduced-motion:reduce){
+  .ai-lights-layer{display:none}
+  .lc-ch{animation-name:ai-char-fade}
+  .lc-ring,.lc-spin-arc{animation:none}
+}
+
 /* ---- features (sticky rail + stacked blocks) ---- */
 .feature-layout{display:grid;gap:24px;margin-top:64px}
 @media(min-width:1024px){.feature-layout{grid-template-columns:220px 1fr;gap:48px;margin-top:112px}}

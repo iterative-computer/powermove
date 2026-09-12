@@ -4,6 +4,7 @@
   import HeroAnimation from '$lib/HeroAnimation.svelte';
   import LogoCloud from '$lib/LogoCloud.svelte';
   import Features from '$lib/Features.svelte';
+  import Showcase from '$lib/Showcase.svelte';
 
 
   const year = new Date().getFullYear();
@@ -46,6 +47,8 @@
     </figure>
     <LogoCloud />
   </section>
+
+  <Showcase />
 
   <Features />
 
