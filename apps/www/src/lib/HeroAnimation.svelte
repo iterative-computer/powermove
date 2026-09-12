@@ -72,11 +72,11 @@
 <div class="hero-art" role="group" aria-label="Made in Powermove: animated typography showcasing a gradient editor, 3D system, and shader">
   {#if !ready}
     <!-- Still frame from scene.json at 14s, present in the prerendered HTML before hydration. -->
-    <svg class="hero-vector hero-poster" viewBox="0 0 1920 1080" aria-hidden="true">
-      <g fill="#1B1D23" font-family="Geist, sans-serif" font-size="128" letter-spacing="-2" style="font-variation-settings:'wght' 398.334">
+    <svg class="hero-vector hero-poster" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <g fill="#F5F5F4" font-family="Geist, sans-serif" font-size="128" letter-spacing="-4" style="font-variation-settings:'wght' 398.334">
         <text x="960" y="575.13599" text-anchor="middle">Shape your video editor</text>
       </g>
     </svg>
   {/if}
-  <svg bind:this={root} class="hero-vector" viewBox="0 0 1920 1080" aria-hidden="true" style:visibility={ready ? 'visible' : 'hidden'}></svg>
+  <svg bind:this={root} class="hero-vector" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice" aria-hidden="true" style:visibility={ready ? 'visible' : 'hidden'}></svg>
 </div>
