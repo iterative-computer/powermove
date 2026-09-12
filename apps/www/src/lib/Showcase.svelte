@@ -23,7 +23,9 @@
   $effect(() => {
     const el = railItems[active];
     if (!el || !marker) return;
-    const y = el.offsetTop + el.offsetHeight / 2;
+    // Sit beside the title line, not the middle of the two-line block.
+    const title = el.querySelector<HTMLElement>('.strong') ?? el;
+    const y = title.offsetTop + title.offsetHeight / 2;
     if (markerY === undefined) { markerY = y; marker.style.transform = `translateY(${y}px)`; return; }
     if (y === markerY) return;
     let fromX = 0, fromY = markerY;
