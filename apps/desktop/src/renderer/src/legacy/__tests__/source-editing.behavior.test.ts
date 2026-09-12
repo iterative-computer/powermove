@@ -18,7 +18,7 @@ function editor() {
   for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   PM.proj = PM.mkProject({ name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   return { PM, events: [] };
 }
 

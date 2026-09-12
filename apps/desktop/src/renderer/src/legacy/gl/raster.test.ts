@@ -266,7 +266,8 @@ describe('legacy raster install', () => {
     };
     PM.touch = vi.fn();
     PM.autosave = vi.fn();
-    PM.Viewer = { preview: { clear: vi.fn() } };
+    const viewer = { preview: { clear: vi.fn() } };
+    PM.Kernel.services.register('viewer', viewer);
     PM.sel = { layers: [], keys: [], chan: null };
     PM.replaceProject = (project: any) => { PM.proj = project; };
 

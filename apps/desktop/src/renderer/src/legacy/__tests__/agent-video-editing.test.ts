@@ -6,7 +6,7 @@ function editor() {
   const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
   PM.proj = PM.mkProject({ name: 'Video edit', fps: 30, dur: 30 });
   PM.time = 0;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   PM.mkEffect = () => null;
   const video = PM.mkLayer('video', { from: 2, dur: 8, d: { asset: 'footage', trim: PM.P(1), speed: PM.P(2), embeddedAudio: true } });
   PM.proj.layers.push(video);

@@ -24,9 +24,10 @@ css parse error in `compiler.test.ts`).
 The coupling is bidirectional. Legacy calls back into extension-owned members:
 `PM.TL` (graph, scrollY, scrollT, pps, keySelectionActive, frameView), `PM.Viewer`
 (pan, zoom, showControls, shown, preview, layout, fit, deferNavigationRender),
-`PM.Inspector.refresh`, `PM.syncShaderUniforms`, `PM.tool/toolShape/setTool`, and
-the timeline's override of `PM.allProps`. `legacy/ui/shortcuts.ts` imports
-timeline modules directly.
+`PM.Inspector.refresh`, `PM.syncShaderUniforms`, and `PM.tool/toolShape/setTool`.
+`legacy/ui/shortcuts.ts` imports timeline modules directly. (An earlier draft
+listed a timeline override of `PM.allProps`; verified in Phase 2, the timeline
+only reads it.)
 
 ## 2. End state
 
@@ -60,8 +61,8 @@ No extension code changes yet except the minimal import swaps that close the
 boundary violations. After this phase `api.ts` is frozen for the fan-out.
 
 ### Phase 2: invert the reverse seams
-Legacy stops touching `PM.TL`, `PM.Viewer`, `PM.Inspector`, `PM.allProps`
-override, `PM.syncShaderUniforms`, `PM.tool*`. It reads them through
+Legacy stops touching `PM.TL`, `PM.Viewer`, `PM.Inspector`,
+`PM.syncShaderUniforms`, `PM.tool*`. It reads them through
 `kernel.services.get(...)` with typed interfaces and null-safe defaults.
 Extensions register the services. `shortcuts.ts` drops its timeline imports.
 Gate adds: `rg "PM\.(TL|Viewer|Inspector|syncShaderUniforms|setTool|toolShape)\b" src/renderer` returns 0.

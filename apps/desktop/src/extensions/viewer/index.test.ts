@@ -1,9 +1,37 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { PanelDefinition, PowermoveAPI } from 'powermove';
+import type { PanelDefinition, PowermoveAPI, ServicesAPI } from 'powermove';
 
-import activate from './index';
+import activateExtension from './index';
+
+function serviceHarness(): { services: ServicesAPI; disposeAll(): void } {
+  const implementations = new Map<string, unknown>();
+  const disposers: Array<() => void> = [];
+  return {
+    services: {
+      register<T>(name: string, implementation: T) {
+        implementations.set(name, implementation);
+        const dispose = (): void => {
+          if (implementations.get(name) === implementation) implementations.delete(name);
+        };
+        disposers.push(dispose);
+        return { dispose };
+      },
+      get<T>(name: string): T | null {
+        return (implementations.get(name) as T | undefined) ?? null;
+      }
+    },
+    disposeAll(): void {
+      for (const dispose of disposers.reverse()) dispose();
+    }
+  };
+}
+
+function activate(api: PowermoveAPI): void {
+  if (!(api as any).services) (api as any).services = serviceHarness().services;
+  activateExtension(api);
+}
 
 const testSpace3d = { is3DLayer: () => false } as unknown as PowermoveAPI['space3d'];
 
@@ -23,8 +51,9 @@ describe('viewer extension', () => {
     vi.restoreAllMocks();
   });
 
-  it('registers and builds the composition panel through the extension API', () => {
+  it('registers the live viewer service and builds the composition panel', () => {
     let panel: PanelDefinition | undefined;
+    const harness = serviceHarness();
     const PM: Record<string, any> = {
       clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
       bus: { on: vi.fn(() => () => {}) },
@@ -36,6 +65,7 @@ describe('viewer extension', () => {
     const api = {
       host: { pm: PM },
       space3d: testSpace3d,
+      services: harness.services,
       onDispose: vi.fn(),
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
     } as unknown as PowermoveAPI;
@@ -47,6 +77,7 @@ describe('viewer extension', () => {
       headless: true, hideMoveHandle: false
     });
     expect(PM.Viewer).toBeDefined();
+    expect(harness.services.get('viewer')).toBe(PM.Viewer);
     expect(PM.setOrKey).toBeTypeOf('function');
 
     const body = document.createElement('div');
@@ -59,6 +90,8 @@ describe('viewer extension', () => {
     expect(body.querySelectorAll('#stage, #stage-inner, #gl, #overlay, #composition-recovery')).toHaveLength(5);
     expect(PM.GL.init).toHaveBeenCalledWith(body.querySelector('#gl'));
     expect(PM.Viewer.ov).toBe(body.querySelector('#overlay'));
+    harness.disposeAll();
+    expect(harness.services.get('viewer')).toBeNull();
   });
 
   it('keeps the original WebGL host when a panel rebuild attempts to attach a second stage', () => {

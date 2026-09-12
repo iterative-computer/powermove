@@ -47,6 +47,13 @@ export default function activate(api: PowermoveAPI): void {
     if (tool === 'shape' && detail) PM.toolShape = detail;
     PM.bus?.emit?.('tool');
   };
+  api.services?.register('tool', {
+    get tool() { return PM.tool!; },
+    set tool(value: string) { PM.tool = value; },
+    get toolShape() { return PM.toolShape!; },
+    set toolShape(value: string) { PM.toolShape = value; },
+    setTool(tool: string, detail?: string): void { PM.setTool?.(tool, detail); }
+  });
 
   api.panels.register({
     id: 'toolbar',

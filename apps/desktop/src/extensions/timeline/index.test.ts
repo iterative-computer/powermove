@@ -1,9 +1,37 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { PanelDefinition, PowermoveAPI } from 'powermove';
+import type { PanelDefinition, PowermoveAPI, ServicesAPI } from 'powermove';
 
-import activate, { splitSelectedLayersAtPlayhead, toggleLayerStrips } from './index';
+import activateExtension, { splitSelectedLayersAtPlayhead, toggleLayerStrips } from './index';
+
+function serviceHarness(): { services: ServicesAPI; disposeAll(): void } {
+  const implementations = new Map<string, unknown>();
+  const disposers: Array<() => void> = [];
+  return {
+    services: {
+      register<T>(name: string, implementation: T) {
+        implementations.set(name, implementation);
+        const dispose = (): void => {
+          if (implementations.get(name) === implementation) implementations.delete(name);
+        };
+        disposers.push(dispose);
+        return { dispose };
+      },
+      get<T>(name: string): T | null {
+        return (implementations.get(name) as T | undefined) ?? null;
+      }
+    },
+    disposeAll(): void {
+      for (const dispose of disposers.reverse()) dispose();
+    }
+  };
+}
+
+function activate(api: PowermoveAPI): void {
+  if (!(api as any).services) (api as any).services = serviceHarness().services;
+  activateExtension(api);
+}
 
 function domHelper(selector: string, attrs?: unknown, ...children: unknown[]): HTMLElement {
   const element = document.createElement(selector.match(/^[^.#]+/)?.[0] ?? 'div');
@@ -70,8 +98,9 @@ describe('timeline extension', () => {
     vi.restoreAllMocks();
   });
 
-  it('registers the timeline panel with the legacy layout contract', () => {
+  it('registers the live timeline service and panel with automatic disposal', () => {
     let panel: PanelDefinition | undefined;
+    const harness = serviceHarness();
     const PM = {
       h: vi.fn(),
       clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
@@ -80,6 +109,7 @@ describe('timeline extension', () => {
     };
     const api = {
       host: { pm: PM },
+      services: harness.services,
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
     } as unknown as PowermoveAPI;
 
@@ -96,6 +126,9 @@ describe('timeline extension', () => {
     });
     expect(panel?.build).toEqual(expect.any(Function));
     expect((PM as Record<string, any>).TL).toBeDefined();
+    expect(harness.services.get('timeline')).toBe((PM as Record<string, any>).TL);
+    harness.disposeAll();
+    expect(harness.services.get('timeline')).toBeNull();
   });
 
   it('binds M to open mixed layer strips together and collapse an open selection', () => {

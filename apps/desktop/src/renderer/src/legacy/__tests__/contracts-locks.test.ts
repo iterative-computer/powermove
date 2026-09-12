@@ -20,7 +20,7 @@ function fixture() {
   for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   PM.proj = PM.mkProject({ name: 'Lock fixture', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
 
   const layer = PM.mkLayer('text', { name: 'Locked title' });
   layer.id = 'locked-title';

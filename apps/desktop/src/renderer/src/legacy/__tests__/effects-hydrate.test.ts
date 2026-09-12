@@ -35,7 +35,7 @@ function bootWith(fx, { registerBefore = false } = {}) {
   );
   if (registerBefore) registerEffects(PM);
   PM.proj = PM.mkProject({ name: 'Effects', w: 1920, h: 1080, fps: 30, dur: 10 });
-  PM.syncShaderUniforms = noop;
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms: noop });
   const layer = PM.mkLayer('shape', { name: 'Signal', from: 0, dur: 5 });
   layer.id = 'signal';
   layer.fx = fx;
@@ -60,14 +60,16 @@ function bootWith(fx, { registerBefore = false } = {}) {
       tabs: () => [raw.id], rename: noop
     },
     WS: { init: noop, restoreSnapshot: noop, snapshot: () => ({}), editing: false },
-    TL: { pps: 90, scrollT: 0, scrollY: 0, graph: false, frameView: noop },
     setTime(value) { PM.time = value; },
     Audio: { normalizeLayer: noop },
     rasterClear: noop,
     assets: { restoreProject: async () => ({ stale: true, missing: [] }), clear: noop },
-    Inspector: { refresh: noop }, Viewer: { layout: noop }, Export: { snapshot: () => '' },
+    Export: { snapshot: () => '' },
     h: () => element(), $: () => element(), icon: element, PANELS: {}, perf: {}
   });
+  PM.Kernel.services.register('timeline', { pps: 90, scrollT: 0, scrollY: 0, graph: false, frameView: noop });
+  PM.Kernel.services.register('viewer', { layout: noop });
+  PM.Kernel.services.register('inspector', { refresh: noop });
   installApp(PM);
   return PM;
 }

@@ -36,6 +36,7 @@ export default function activate(api: PowermoveAPI): void {
   const runtime = createViewerRuntime(PM, api.space3d);
   const disposeRuntime = runtime.dispose as () => void;
   api.onDispose(() => disposeRuntime());
+  api.services.register('viewer', runtime);
 
   api.panels.register({
     id: 'viewer',

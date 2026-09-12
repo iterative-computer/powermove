@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { PMRegistry } from '../registry';
 import { makePM } from './make-pm';
 
-function libraryModel(): PMRegistry {
+function libraryModel() {
   const historyLabels: string[] = [];
   const PM = makePM('core/easing', 'core/model', 'core/library', 'gl/shaders');
   PM.time = 0;
@@ -14,7 +14,7 @@ function libraryModel(): PMRegistry {
       return mutate();
     },
   };
-  PM.syncShaderUniforms = (layer: any) => {
+  const shaderHooks = { syncShaderUniforms(layer: any) {
     const definitions = PM.parseUniforms(layer.d.code);
     layer._udefs = definitions;
     const uniforms = layer.d.uniforms;
@@ -24,9 +24,10 @@ function libraryModel(): PMRegistry {
     for (const name in uniforms) {
       if (!definitions.some((definition: any) => definition.name === name)) delete uniforms[name];
     }
-  };
+  } };
+  PM.Kernel.services.register('shaderHooks', shaderHooks);
   PM.__historyLabels = historyLabels;
-  return PM;
+  return { PM, shaderHooks };
 }
 
 function baseProject(PM: PMRegistry): any {
@@ -37,7 +38,7 @@ function baseProject(PM: PMRegistry): any {
 
 describe('legacy library behavior survivors', () => {
   it('promotes a saved version without mutating older versions', () => {
-    const PM = libraryModel();
+    const { PM } = libraryModel();
     const project = baseProject(PM);
     const first = PM.mkLayer('shape', { name: 'A' }, project);
     const second = PM.mkLayer('text', { name: 'B' }, project);
@@ -52,7 +53,7 @@ describe('legacy library behavior survivors', () => {
   });
 
   it('inserts sections with fresh identities and shifts them to the playhead', () => {
-    const PM = libraryModel();
+    const { PM } = libraryModel();
     const project = baseProject(PM);
     const inner = PM.mkLayer('shape', { name: 'Inner' }, project);
     const outer = PM.mkLayer('null', { name: 'Outer' }, project);
@@ -77,11 +78,11 @@ describe('legacy library behavior survivors', () => {
   });
 
   it('round-trips shader code and uniform values through a saved look', () => {
-    const PM = libraryModel();
+    const { PM, shaderHooks } = libraryModel();
     const project = baseProject(PM);
     const shader = PM.mkLayer('shader', { name: 'Ember' }, project);
     shader.d.code = 'uniform vec3 uTint; void main(){ fragColor = vec4(uTint, 1.); }';
-    PM.syncShaderUniforms(shader);
+    shaderHooks.syncShaderUniforms(shader);
     shader.d.uniforms.uTint.v = '#123456';
     project.layers.push(shader);
 
@@ -98,7 +99,7 @@ describe('legacy library behavior survivors', () => {
   });
 
   it('recovers trashed sections and bounds project library storage at 24', () => {
-    const PM = libraryModel();
+    const { PM } = libraryModel();
     baseProject(PM);
     const layer = PM.mkLayer('solid', { name: 'A' }, PM.proj);
     PM.proj.layers.push(layer);
@@ -121,7 +122,7 @@ describe('legacy library behavior survivors', () => {
   });
 
   it('retains an editable source reference on inserted section layers', () => {
-    const PM = libraryModel();
+    const { PM } = libraryModel();
     const project = baseProject(PM);
     const layer = PM.mkLayer('shape', { name: 'Editable source' }, project);
     project.layers.push(layer);
@@ -137,7 +138,7 @@ describe('legacy library behavior survivors', () => {
   });
 
   it('combines project-owned sections across the global library scope', () => {
-    const PM = libraryModel();
+    const { PM } = libraryModel();
     const first = baseProject(PM);
     first.name = 'Velocity Study';
     const firstLayer = PM.mkLayer('shape', { name: 'Hero' }, first);

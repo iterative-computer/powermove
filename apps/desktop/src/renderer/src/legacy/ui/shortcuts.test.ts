@@ -82,7 +82,7 @@ describe('legacy shortcut install', () => {
     const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'ui/shortcuts');
     PM.proj = PM.mkProject();
     const layer = PM.mkLayer('solid'); PM.proj.layers = [layer];
-    PM.TL = { keySelectionActive: false };
+    PM.Kernel.services.register('timeline', { keySelectionActive: false });
     PM.setKey(layer, 'scale.x', 0, 100);
     PM.setKey(layer, 'scale.y', 0, 50);
     PM.sel.layers = [layer.id];
@@ -160,7 +160,7 @@ describe('legacy shortcut install', () => {
   it('lets the active effect clipboard handle global paste before layers', () => {
     const PM = shortcutsRegistry();
     const pasteCopiedEffects = vi.fn(() => true);
-    PM.Inspector = { pasteCopiedEffects };
+    PM.Kernel.services.register('inspector', { pasteCopiedEffects });
 
     PM.cmd('pasteLayers');
 
@@ -170,7 +170,7 @@ describe('legacy shortcut install', () => {
   it('lets selected effects handle global copy before layers', () => {
     const PM = shortcutsRegistry();
     const copySelectedEffects = vi.fn(() => true);
-    PM.Inspector = { copySelectedEffects };
+    PM.Kernel.services.register('inspector', { copySelectedEffects });
 
     PM.cmd('copyLayers');
 
@@ -185,6 +185,25 @@ describe('pro editor shortcut behavior', () => {
     expect(PM.cmd('removed-command')).toBe(false);
     expect(warning).toHaveBeenCalledWith('no cmd', 'removed-command');
     warning.mockRestore();
+  });
+
+  it('delegates legacy timeline aliases through registered kernel commands', () => {
+    const PM = shortcutsRegistry();
+    const reveal = vi.fn(() => true);
+    const previous = vi.fn(() => true);
+
+    expect(PM.cmd('revealPos')).toBe(false);
+    PM.Kernel.commands.register('timeline-test', {
+      id: 'timeline.revealProperty:p', label: 'Reveal position', run: reveal,
+    });
+    PM.Kernel.commands.register('timeline-test', {
+      id: 'timeline.adjacentKeyframe:prev', label: 'Previous keyframe', run: previous,
+    });
+
+    expect(PM.cmd('revealPos')).toBe(true);
+    expect(reveal).toHaveBeenCalledExactlyOnceWith(false);
+    expect(PM.cmd('prevKeyframe')).toBe(true);
+    expect(previous).toHaveBeenCalledOnce();
   });
 
   it('splits selected unlocked active layers, preserves media trim, and selects tails', () => {
@@ -494,8 +513,10 @@ describe('pro editor shortcut behavior', () => {
     const PM = editorRuntime();
     const layout = vi.fn();
     const frameView = vi.fn();
-    PM.Viewer = { fit: true, zoom: 1, shown: 2, layout };
-    PM.TL = { frameView };
+    const viewer = { fit: true, zoom: 1, shown: 2, pan: [0, 0], layout };
+    const timeline = { frameView };
+    PM.Kernel.services.register('viewer', viewer);
+    PM.Kernel.services.register('timeline', timeline);
     expect(PM.commands.split.kb).toBe('⌘⇧D');
     expect(PM.commands.cutLayers.kb).toBe('⌘X');
     expect(PM.commands.toggleVisibility.kb).toBeNull();
@@ -507,20 +528,29 @@ describe('pro editor shortcut behavior', () => {
     expect(PM.commands.fitComposition.kb).toBe('⇧/');
 
     PM.cmd('zoomIn');
-    expect(PM.Viewer).toMatchObject({ fit: false, zoom: 2.5 });
-    PM.Viewer.shown = 100;
+    expect(viewer).toMatchObject({ fit: false, zoom: 2.5 });
+    viewer.shown = 100;
     PM.cmd('zoomIn');
-    expect(PM.Viewer.zoom).toBe(8);
-    PM.Viewer.shown = .001;
+    expect(viewer.zoom).toBe(8);
+    viewer.shown = .001;
     PM.cmd('zoomOut');
-    expect(PM.Viewer.zoom).toBe(.05);
+    expect(viewer.zoom).toBe(.05);
     PM.cmd('actualSize');
-    expect(PM.Viewer).toMatchObject({ fit: false, zoom: 1 });
+    expect(viewer).toMatchObject({ fit: false, zoom: 1 });
     expect(layout).toHaveBeenCalledTimes(4);
     expect(frameView).not.toHaveBeenCalled();
-    PM.Viewer.pan = [4, 8];
+    viewer.pan = [4, 8];
     PM.cmd('fitComposition');
-    expect(PM.Viewer).toMatchObject({ fit: true, pan: [0, 0] });
+    expect(viewer).toMatchObject({ fit: true, pan: [0, 0] });
     expect(frameView).not.toHaveBeenCalled();
+  });
+
+  it('returns false for viewer shortcuts when no viewer service is registered', () => {
+    const PM = editorRuntime();
+    let result: unknown;
+
+    expect(() => { result = PM.cmd('fitComposition'); }).not.toThrow();
+    expect(result).toBe(false);
+    expect(PM.cmd('toggleLayerControls')).toBe(false);
   });
 });

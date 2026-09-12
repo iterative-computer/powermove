@@ -743,6 +743,9 @@ export interface TimelineService {
   scrollY: number;
   scrollT: number;
   keySelectionActive: boolean;
+  nextEdge(): number;
+  prevEdge(): number;
+  layerAtPoint(clientX: number, clientY: number): Layer | null;
   frameView(): void;
   reveal(layer: Layer, keys: string[]): void;
 }
@@ -759,13 +762,17 @@ export interface ViewerService {
   attach(stage: HTMLElement): ViewerService | void;
   worldBounds(layer: Layer, time: number): Bounds | null;
   snapshotSnapCandidates(time: number, selectionLayers: Layer[]): SnapCandidates;
+  isNavigating(): boolean;
   deferNavigationRender(now: number): boolean;
+  setZoom(zoom: number): number | false;
+  layerAtPoint?(clientX: number, clientY: number): Layer | null;
 }
 export interface InspectorService {
   refresh(): void;
   syncs: unknown[];
   focusText(layer: Layer): void;
   copySelectedEffects(): boolean;
+  clearEffectClipboard(): void;
   pasteCopiedEffects(): boolean;
   body: HTMLElement | null;
 }

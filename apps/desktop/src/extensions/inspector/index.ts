@@ -17,7 +17,7 @@ export default function activate(api: PowermoveAPI): void {
   const PM = api.host.pm as LegacyPM;
   let activeEffectSelection: { layerId: string; ids: string[] } | null = null;
 
-  PM.syncShaderUniforms = (layer: any): void => {
+  const syncShaderUniforms = (layer: any): void => {
     const definitions = PM.parseUniforms(layer.d.code);
     PM.UIState.setShaderMeta(layer, { udefs: definitions });
     const uniforms = layer.d.uniforms;
@@ -28,8 +28,9 @@ export default function activate(api: PowermoveAPI): void {
       if (!definitions.some((definition: any) => definition.name === name)) delete uniforms[name];
     }
   };
+  PM.syncShaderUniforms = syncShaderUniforms;
 
-  PM.Inspector = {
+  const inspector = {
     refresh(): void {
       inspectorRefresh.bump();
     },
@@ -90,6 +91,9 @@ export default function activate(api: PowermoveAPI): void {
       return true;
     }
   };
+  PM.Inspector = inspector;
+  api.services?.register('inspector', inspector);
+  api.services?.register('shaderHooks', { syncShaderUniforms });
 
   PM.fxMenu = (anchor: HTMLElement) => showFxMenu(PM, anchor);
 
@@ -100,7 +104,7 @@ export default function activate(api: PowermoveAPI): void {
     for (const layer of container?.layers ?? []) {
       if (layer?.type !== 'shader') continue;
       try {
-        PM.syncShaderUniforms(layer);
+        syncShaderUniforms(layer);
       } catch (error) {
         api.log('warn', `could not synchronize shader uniforms for ${String(layer.id ?? 'unknown')}`, error);
       }

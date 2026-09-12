@@ -90,7 +90,8 @@ describe('After Effects shortcut fundamentals', () => {
 
   it('hides layer controls without hiding or mutating any layer', () => {
     const layer = add(PM, 'visible', 0, 10);
-    PM.Viewer = {};
+    const viewer: { showControls?: boolean } = {};
+    PM.Kernel.services.register('viewer', viewer);
 
     expect(toggleLayerControls(PM)).toBe(false);
     expect(layer.on).toBe(true);

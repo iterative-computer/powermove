@@ -1,9 +1,8 @@
-import { createPropertyReveal, propertyShortcuts } from '../../../../extensions/timeline/property-reveal';
 import { installLayerMenu } from './layer-menu';
 import { installParentPickwhip } from './parent-pickwhip';
-import { adjacentKeyframe } from '../../../../extensions/timeline/keyframe-navigation';
 import { evaluatedValue } from '../core/content-properties';
 import { materializeSvgPaths } from '../core/svg-import';
+import { inspectorService, shaderHooks, timelineService, toolService, viewerService } from '../core/services';
 /* Ported from js/ui/shortcuts.js — behavior-preserving.
  *
  * The command table lives in the kernel now:
@@ -41,11 +40,20 @@ const def: any = (id?: any, label?: any, kb?: any, run?: any, cat: any = 'Genera
     /* The kernel key listener treats a `false` return as "not handled" and
        skips preventDefault. Legacy always prevented the default, so a command
        that happens to return false must not change that. */
-    run: (...a: any[]) => { const result = run(...a); return result === false ? undefined : result; },
+    run: (...a: any[]) => {
+      const result = run(...a);
+      return opts.preserveFalse ? result : result === false ? undefined : result;
+    },
     ...(opts.when ? { when: opts.when } : {})
   });
 };
 const hidden = { when: () => false };
+const preserveFalse = { preserveFalse: true };
+
+const delegateCommand = (id: string, ...args: unknown[]): unknown => {
+  const command = kernel.commands.get(id);
+  return command ? command.run(...args) : false;
+};
 
 const activeTextField = (): boolean => {
   if (typeof document === 'undefined') return false;
@@ -106,23 +114,31 @@ PM.addLayerCmd = addLayer;
 def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headline', p: center() }), 'Create');
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
-def('newShader', 'New shader layer', null, () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms?.(L); PM.openShaderEditor(L); return L; }, 'Create');
+def('newShader', 'New shader layer', null, () => { const L: any = addLayer('shader', { name: 'Shader' }); if (L) shaderHooks(PM)?.syncShaderUniforms(L); PM.openShaderEditor(L); return L; }, 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
-def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
-def('toolHand', 'Hand tool', 'H', () => PM.setTool('hand'), 'Tool');
-def('toolZoom', 'Zoom tool', 'Z', () => PM.setTool('zoom'), 'Tool');
-def('toolRotate', 'Rotation tool', 'W', () => PM.setTool('rotate'), 'Tool');
-def('toolAnchor', 'Pan Behind (Anchor Point) tool', 'Y', () => PM.setTool('anchor'), 'Tool');
+const selectTool = (tool: string, detail?: string): boolean => {
+  const tools = toolService(PM);
+  if (!tools) return false;
+  tools.setTool(tool, detail);
+  return true;
+};
+def('toolSelect', 'Selection tool', 'V', () => selectTool('select'), 'Tool');
+def('toolHand', 'Hand tool', 'H', () => selectTool('hand'), 'Tool');
+def('toolZoom', 'Zoom tool', 'Z', () => selectTool('zoom'), 'Tool');
+def('toolRotate', 'Rotation tool', 'W', () => selectTool('rotate'), 'Tool');
+def('toolAnchor', 'Pan Behind (Anchor Point) tool', 'Y', () => selectTool('anchor'), 'Tool');
 def('toolShape', 'Shape tool', 'Q', () => {
+  const tools = toolService(PM);
+  if (!tools) return false;
   const shapes: any[] = ['rect', 'rounded', 'ellipse', 'polygon', 'star'];
-  const current: any = shapes.includes(PM.toolShape) ? PM.toolShape : 'rect';
-  const next: any = PM.tool === 'shape' ? shapes[(shapes.indexOf(current) + 1) % shapes.length] : current;
-  PM.setTool('shape', next);
+  const current: any = shapes.includes(tools.toolShape) ? tools.toolShape : 'rect';
+  const next: any = tools.tool === 'shape' ? shapes[(shapes.indexOf(current) + 1) % shapes.length] : current;
+  tools.setTool('shape', next);
 }, 'Tool');
 def('renderQueue', 'Render queue', '', () => PM.Export?.queueDialog?.(), 'File');
-def('toolPen', 'Pen tool', 'G', () => PM.setTool('pen'), 'Tool');
-def('toolText', 'Horizontal Type tool', '⌘T', () => PM.setTool('text'), 'Tool');
+def('toolPen', 'Pen tool', 'G', () => selectTool('pen'), 'Tool');
+def('toolText', 'Horizontal Type tool', '⌘T', () => selectTool('text'), 'Tool');
 def('centerAnchor', 'Center anchor point in layer content', '⌘⌥Home', () => {
   const commands: any[] = [];
   for (const layer of PM.selLayers().filter((item: any) => !item.lock)) {
@@ -217,12 +233,13 @@ def('precompose', 'Group layers', null, () => PM.cmd('groupLayers'), 'Edit', hid
 /* ── layer clipboard ───────────────────────────────────── */
 let layerClip: any = null;
 def('copyLayers', 'Copy layers', '⌘C', () => {
-  if (PM.Inspector?.copySelectedEffects?.()) return;
+  const inspector = inspectorService(PM);
+  if (inspector?.copySelectedEffects()) return;
   const sels: any = selectedStackLayers(PM); if (!sels.length) return;
   /* An explicit layer copy becomes the active app-local clipboard payload.
      Effect rows stop propagation before this command, so copying an effect
      keeps the effect payload active while the user selects its destination. */
-  PM.Inspector?.clearEffectClipboard?.();
+  inspector?.clearEffectClipboard();
   layerClip = sels.map((L: any) => JSON.parse(JSON.stringify(L)));
   PM.toast(`Copied ${layerClip.length} ${layerClip.length === 1 ? 'layer' : 'layers'}`);
 }, 'Edit');
@@ -230,7 +247,7 @@ def('cutLayers', 'Cut layers', '⌘X', () => cutLayers(PM, (value: any[]) => { l
 def('pasteLayers', 'Paste layers', '⌘V', () => {
   /* Effect paste deliberately routes through the ordinary global shortcut:
      select effect → ⌘C → select destination layer → ⌘V. */
-  if (PM.Inspector?.pasteCopiedEffects?.()) return;
+  if (inspectorService(PM)?.pasteCopiedEffects()) return;
   return pasteLayers(PM, () => layerClip);
 }, 'Edit');
 def('contextUndo', 'Undo', null, () => activeTextField() ? nativeEdit('undo') : readingText() ? false : PM.cmd('undo'), 'Edit', hidden);
@@ -240,7 +257,7 @@ def('contextCopy', 'Copy', null, () => activeTextField() || readingText() || has
 def('contextPaste', 'Paste', null, () => activeTextField() ? nativeEdit('paste') : readingText() ? false : PM.cmd('pasteLayers'), 'Edit', hidden);
 def('contextSelectAll', 'Select all', null, () => { const root = readingText(); return activeTextField() ? nativeEdit('selectAll') : root ? selectTextContents(root) : PM.cmd('selectAll'); }, 'Edit', hidden);
 def('toggleVisibility', 'Hide/show selected layers', null, () => toggleVisibility(PM), 'Edit');
-def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View');
+def('toggleLayerControls', 'Show/hide layer controls', '⌘⇧H', () => toggleLayerControls(PM), 'View', preserveFalse);
 def('lockSelectedLayers', 'Lock selected layers', '⌘L', () => setLayerLocks(PM, true), 'Edit');
 def('unlockAllLayers', 'Unlock all layers', '⌘⇧L', () => setLayerLocks(PM, false, true), 'Edit');
 def('selectPreviousLayer', 'Select previous layer', '⌘↑', () => selectAdjacentLayer(PM, -1), 'Edit');
@@ -265,12 +282,12 @@ def('stepFrames', 'Step frames', null, (frames?: any) => {
   if (!Number.isFinite(Number(frames)) || Number(frames) === 0) return false;
   return PM.step(Number(frames));
 }, 'Transport', hidden);
-def('nextEdge', 'Next edge', '⇧→', () => { const edge = PM.TL?.nextEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
-def('prevEdge', 'Previous edge', '⇧←', () => { const edge = PM.TL?.prevEdge?.(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
+def('nextEdge', 'Next edge', '⇧→', () => { const edge = timelineService(PM)?.nextEdge(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
+def('prevEdge', 'Previous edge', '⇧←', () => { const edge = timelineService(PM)?.prevEdge(); if (Number.isFinite(edge)) PM.setTime(edge); }, 'Transport');
 def('nextVisibleEvent', 'Next visible timeline event', 'K', () => goToTimelineEvent(PM, 1), 'Transport');
 def('prevVisibleEvent', 'Previous visible timeline event', 'J', () => goToTimelineEvent(PM, -1), 'Transport');
-def('nextKeyframe', 'Next keyframe', '⌃→ / ⇧K', () => { const time = adjacentKeyframe(PM, 1); if (time != null) PM.setTime(time); }, 'Transport');
-def('prevKeyframe', 'Previous keyframe', '⌃← / ⇧J', () => { const time = adjacentKeyframe(PM, -1); if (time != null) PM.setTime(time); }, 'Transport');
+def('nextKeyframe', 'Next keyframe', '⌃→ / ⇧K', () => delegateCommand('timeline.adjacentKeyframe:next'), 'Transport', preserveFalse);
+def('prevKeyframe', 'Previous keyframe', '⌃← / ⇧J', () => delegateCommand('timeline.adjacentKeyframe:prev'), 'Transport', preserveFalse);
 def('nextSelectedEvent', 'Next selected timeline event', '⇧K', () => goToTimelineEvent(PM, 1, true), 'Transport');
 def('prevSelectedEvent', 'Previous selected timeline event', '⇧J', () => goToTimelineEvent(PM, -1, true), 'Transport');
 def('gotoLayerIn', 'Go to selected layer In point', 'I', () => goToSelectedLayerBoundary(PM, 'in'), 'Transport');
@@ -281,12 +298,18 @@ def('workIn', 'Work area in', 'B', () => PM.Edit.apply({ type: 'set_composition'
 def('workOut', 'Work area out', 'N', () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'command' }), 'Transport');
 
 /* ── reveal properties (AE muscle memory) ──────────────── */
-const revealProperties = createPropertyReveal(PM);
+const propertyShortcuts = [
+  ['p', 'revealPos', 'Position'], ['s', 'revealScale', 'Scale'],
+  ['r', 'revealRot', 'Rotation'], ['t', 'revealOpacity', 'Opacity'],
+  ['a', 'revealAnchor', 'Anchor point'], ['u', 'revealKeys', 'Animated properties'],
+  ['m', 'revealMasks', 'Mask controls'], ['f', 'revealFeather', 'Mask feather'],
+  ['e', 'revealEffects', 'Effects'], ['l', 'revealAudio', 'Audio levels'],
+] as const;
 for (const [key, id, label] of propertyShortcuts) {
-  def(id, `Toggle ${label.toLowerCase()}`, key.toUpperCase(), (shift = false) => revealProperties(key, shift), 'Reveal');
+  def(id, `Toggle ${label.toLowerCase()}`, key.toUpperCase(), (shift = false) => delegateCommand(`timeline.revealProperty:${key}`, shift), 'Reveal', preserveFalse);
 }
-def('revealAll', 'Toggle all layer properties', '⌘`', () => revealProperties('all'), 'Reveal');
-def('graph', 'Toggle graph editor', '⇧F3', () => { if (!PM.TL) return; PM.TL.graph = !PM.TL.graph; PM.invalidate('timeline'); }, 'Reveal');
+def('revealAll', 'Toggle all layer properties', '⌘`', () => delegateCommand('timeline.revealAll'), 'Reveal', preserveFalse);
+def('graph', 'Toggle graph editor', '⇧F3', () => { const timeline = timelineService(PM); if (!timeline) return; timeline.graph = !timeline.graph; PM.invalidate('timeline'); }, 'Reveal');
 
 /* ── keyframes ─────────────────────────────────────────── */
 /* sel.keys holds keyframe ids (Phase 3a); easing needs the live objects */
@@ -309,22 +332,27 @@ function allSelKeys() {
 
 /* ── view / files ──────────────────────────────────────── */
 def('fitView', 'Fit composition and timeline', '⇧F', () => {
-  if (PM.Viewer) {
-    PM.Viewer.fit = true;
-    if (Array.isArray(PM.Viewer.pan)) PM.Viewer.pan = [0, 0];
-    PM.Viewer.layout?.();
+  const viewer = viewerService(PM);
+  const timeline = timelineService(PM);
+  if (!viewer && !timeline) return false;
+  if (viewer) {
+    viewer.fit = true;
+    if (Array.isArray(viewer.pan)) viewer.pan = [0, 0];
+    viewer.layout();
   }
-  PM.TL?.frameView?.();
-}, 'View');
+  timeline?.frameView();
+  return true;
+}, 'View', preserveFalse);
 def('fitComposition', 'Fit composition', '⇧/', () => {
-  if (!PM.Viewer) return false;
-  PM.Viewer.fit = true;
-  if (Array.isArray(PM.Viewer.pan)) PM.Viewer.pan = [0, 0];
-  PM.Viewer.layout?.();
-}, 'View');
-def('zoomIn', 'Zoom in', '.', () => zoomViewer(PM, 1.25), 'View');
-def('zoomOut', 'Zoom out', ',', () => zoomViewer(PM, .8), 'View');
-def('actualSize', 'Actual size', '/', () => setViewerZoom(PM, 1), 'View');
+  const viewer = viewerService(PM);
+  if (!viewer) return false;
+  viewer.fit = true;
+  if (Array.isArray(viewer.pan)) viewer.pan = [0, 0];
+  viewer.layout();
+}, 'View', preserveFalse);
+def('zoomIn', 'Zoom in', '.', () => zoomViewer(PM, 1.25), 'View', preserveFalse);
+def('zoomOut', 'Zoom out', ',', () => zoomViewer(PM, .8), 'View', preserveFalse);
+def('actualSize', 'Actual size', '/', () => setViewerZoom(PM, 1), 'View', preserveFalse);
 def('palette', 'Command palette', '⌘K', () => PM.palette(), 'View');
 def('agent', 'Ask Powermove agent', '⌘⇧K', () => PM.SpatialAssistant?.open?.(), 'View');
 def('settings', 'Settings…', '⌘,', () => PM.SettingsUI?.open?.(), 'View');
@@ -613,10 +641,11 @@ export function toggleVisibility(PM: PMRegistry): unknown {
 
 /** Hide selection boxes and handles without changing layer visibility. */
 export function toggleLayerControls(PM: PMRegistry): unknown {
-  if (!PM.Viewer) return false;
-  PM.Viewer.showControls = PM.Viewer.showControls === false;
+  const viewer = viewerService(PM);
+  if (!viewer) return false;
+  viewer.showControls = viewer.showControls === false;
   PM.invalidate?.('render');
-  return PM.Viewer.showControls;
+  return viewer.showControls;
 }
 
 /** Lock the selection, or unlock every layer in the current composition. */
@@ -943,7 +972,7 @@ const VIEWER_MIN_ZOOM = .05;
 const VIEWER_MAX_ZOOM = 8;
 
 export function setViewerZoom(PM: PMRegistry, zoom: any): unknown {
-  const viewer = PM.Viewer;
+  const viewer = viewerService(PM);
   if (!viewer || typeof zoom !== 'number' || !Number.isFinite(zoom)) return false;
   if (typeof viewer.setZoom === 'function') return viewer.setZoom(zoom);
   const clamp = typeof PM.clamp === 'function'
@@ -958,7 +987,7 @@ export function setViewerZoom(PM: PMRegistry, zoom: any): unknown {
 }
 
 export function zoomViewer(PM: PMRegistry, factor: any): unknown {
-  const viewer = PM.Viewer;
+  const viewer = viewerService(PM);
   if (!viewer || typeof factor !== 'number' || !Number.isFinite(factor) || factor <= 0) return false;
   const current = Number.isFinite(Number(viewer.shown)) ? Number(viewer.shown)
     : Number.isFinite(Number(viewer.zoom)) ? Number(viewer.zoom) : 1;
@@ -1000,8 +1029,9 @@ function commandView(kernel: ReturnType<typeof ensureKernel>, id: string, put: (
 /** A keyframe deletion never falls through to its owning layer, including a
  * held Delete key after the first keyframe has already been removed. */
 export function deleteSelection(PM: PMRegistry): unknown {
-  if (PM.sel.keys.length || PM.TL?.keySelectionActive) {
-    if (PM.TL) PM.TL.keySelectionActive = true;
+  const timeline = timelineService(PM);
+  if (PM.sel.keys.length || timeline?.keySelectionActive) {
+    if (timeline) timeline.keySelectionActive = true;
     const ids = new Set(PM.sel.keys);
     if (!ids.size) return;
     return PM.hist.do('Delete keyframes', () => {

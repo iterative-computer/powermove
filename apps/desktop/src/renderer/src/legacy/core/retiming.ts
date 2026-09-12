@@ -1,4 +1,5 @@
 import { evaluatedValue, isProperty, resolveContent } from './content-properties';
+import { inspectorService, timelineService } from './services';
 
 const integrals=new WeakMap<object,{version:number;step:number;sums:number[]}>();
 
@@ -27,5 +28,5 @@ export function enableTimeRemap(PM: any, layer: any, mode: 'remap'|'freeze'|'rev
     } else { const key=PM.setKeyOn(layer.d.sourceTime,PM.time-layer.from,current,'linear',PM.proj.fps);key.hold=true; }
     PM.touch();
   },{origin:'inspector'});
-  PM.TL?.reveal?.(layer,['c.sourceTime']); PM.Inspector?.refresh?.(); PM.invalidate();
+  timelineService(PM)?.reveal(layer,['c.sourceTime']); inspectorService(PM)?.refresh(); PM.invalidate();
 }

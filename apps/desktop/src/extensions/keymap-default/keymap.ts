@@ -121,13 +121,6 @@ for (const modifier of ['cmd', 'ctrl']) {
   const next = modifier === 'ctrl' ? 'timeline.adjacentKeyframe:next' : 'nextFrame';
   bind(`${modifier}+left`, previous);
   bind(`${modifier}+right`, next);
-  if (modifier === 'ctrl') {
-    /* Phase 1 compatibility: a focused legacy harness may mount the keymap
-       without the timeline. Missing commands fall through to these ids; the
-       timeline-owned commands win whenever that extension is active. */
-    bind(`${modifier}+left`, 'prevKeyframe');
-    bind(`${modifier}+right`, 'nextKeyframe');
-  }
   bind(`${modifier}+shift+left`, 'stepFrames', false, [-10]);
   bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
 }
@@ -137,8 +130,6 @@ bind('j', 'prevVisibleEvent');
 bind('k', 'nextVisibleEvent');
 bind('shift+j', 'timeline.adjacentKeyframe:prev');
 bind('shift+k', 'timeline.adjacentKeyframe:next');
-bind('shift+j', 'prevKeyframe');
-bind('shift+k', 'nextKeyframe');
 bind('i', 'gotoLayerIn');
 bind('o', 'gotoLayerOut');
 bind('[', 'moveLayerIn');
@@ -171,22 +162,14 @@ for (const [chord, command] of BARE_KEYS) {
   bind(chord, command);
   bind(`shift+${chord}`, command);
 }
-const PROPERTY_SHORTCUTS = [
-  ['p', 'revealPos'], ['s', 'revealScale'], ['r', 'revealRot'], ['t', 'revealOpacity'],
-  ['a', 'revealAnchor'], ['u', 'revealKeys'], ['m', 'revealMasks'], ['f', 'revealFeather'],
-  ['e', 'revealEffects'], ['l', 'revealAudio']
-] as const;
-for (const [key, legacyCommand] of PROPERTY_SHORTCUTS) {
+const PROPERTY_SHORTCUTS = ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l'] as const;
+for (const key of PROPERTY_SHORTCUTS) {
   const command = `timeline.revealProperty:${key}`;
   bind(key, command);
   bind(`shift+${key}`, command, false, [true]);
-  bind(key, legacyCommand);
-  bind(`shift+${key}`, legacyCommand);
 }
 bind('cmd+`', 'timeline.revealAll');
 bind('ctrl+`', 'timeline.revealAll');
-bind('cmd+`', 'revealAll');
-bind('ctrl+`', 'revealAll');
 
 /* Escape inside a text field blurs it without triggering the editor-level
    deselect binding. The command itself remains in legacy shortcuts because it

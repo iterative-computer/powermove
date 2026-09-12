@@ -154,14 +154,16 @@ describe('pro shortcut helper contracts', () => {
   it('clamps viewer zoom without framing the timeline or accepting invalid input', () => {
     const PM = runtime();
     const layout = vi.fn();
-    PM.Viewer = { fit: true, zoom: 1, shown: 1, pan: [12, 8], layout };
-    PM.TL = { frameView: vi.fn() };
+    const viewer = { fit: true, zoom: 1, shown: 1, pan: [12, 8], layout };
+    const timeline = { frameView: vi.fn() };
+    PM.Kernel.services.register('viewer', viewer);
+    PM.Kernel.services.register('timeline', timeline);
 
     expect(setViewerZoom(PM, 100)).toBe(8);
-    expect(PM.Viewer).toMatchObject({ fit: false, zoom: 8, pan: [0, 0] });
+    expect(viewer).toMatchObject({ fit: false, zoom: 8, pan: [0, 0] });
     expect(setViewerZoom(PM, -100)).toBe(.05);
     expect(setViewerZoom(PM, Number.NaN)).toBe(false);
     expect(layout).toHaveBeenCalledTimes(2);
-    expect(PM.TL.frameView).not.toHaveBeenCalled();
+    expect(timeline.frameView).not.toHaveBeenCalled();
   });
 });

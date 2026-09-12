@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createServicesRegistry } from '../../kernel/services';
 import type { PMRegistry } from '../registry';
 import { install } from './history';
 
 function historyRegistry(): PMRegistry {
   let nextId = 0;
   const PM: PMRegistry = {
+    Kernel: { services: createServicesRegistry() },
     proj: { value: 1, layers: [] },
     uid: (prefix: any) => `${prefix}-${++nextId}`,
     replaceProject(project: any) { PM.proj = project; },
@@ -59,6 +61,21 @@ describe('legacy history install', () => {
 });
 
 describe('selection history', () => {
+  it('restores selection when no timeline service is registered', () => {
+    const PM = historyRegistry();
+    PM.proj.layers = [{ id: 'a' }, { id: 'b' }];
+    const before = { layers: ['a'], keys: ['key-a'], chan: 'opacity' };
+    const after = { layers: ['b'], keys: ['key-b'], chan: 'position.x' };
+    PM.sel = after;
+
+    expect(PM.Kernel.services.get('timeline')).toBeNull();
+    PM.hist.selection(before, after);
+    expect(() => PM.hist.undo()).not.toThrow();
+    expect(PM.sel).toEqual(before);
+    expect(PM.hist.redo()).toBe(true);
+    expect(PM.sel).toEqual(after);
+  });
+
   it('restores selection without changing source and suppresses selection inside edits', () => {
     const PM = historyRegistry();
     PM.proj.layers = [{id:'a'}, {id:'b'}];

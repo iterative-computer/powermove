@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(214);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(213);
+    expect(captured).toHaveLength(188);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(187);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
@@ -180,14 +180,16 @@ describe('keymap-default', () => {
       expect.objectContaining({ key: 'cmd+`', command: 'timeline.revealAll' }),
       expect.objectContaining({ key: 'ctrl+`', command: 'timeline.revealAll' })
     ]));
-    /* The timeline-owned id is tried first. Legacy ids are Phase 1 fallbacks
-       for hosts that mount the keymap before (or without) the timeline. */
     for (const key of ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l']) {
-      const bindings = KEYMAP_DEFAULT.filter(({ key: chord }) => chord === key);
-      expect(bindings[0]?.command).toBe(`timeline.revealProperty:${key}`);
-      expect(bindings[0]?.priority).toBe(100);
-      expect(bindings[1]?.priority).toBe(100);
+      expect(KEYMAP_DEFAULT.filter(({ key: chord, command }) =>
+        chord === key && command.startsWith('timeline.revealProperty:')
+      )).toEqual([expect.objectContaining({ command: `timeline.revealProperty:${key}`, priority: 100 })]);
     }
+    expect(KEYMAP_DEFAULT.filter(({ command }) => [
+      'prevKeyframe', 'nextKeyframe', 'revealPos', 'revealScale', 'revealRot',
+      'revealOpacity', 'revealAnchor', 'revealKeys', 'revealMasks',
+      'revealFeather', 'revealEffects', 'revealAudio', 'revealAll'
+    ].includes(command))).toEqual([]);
   });
 
   it('uses the browser plus key chord and does not alias Cmd+Shift+N to newProject', () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createServicesRegistry } from '../kernel/services';
 import type { PMRegistry } from './registry';
 import { install } from './app';
 
@@ -160,14 +161,11 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
     resolveSelectedKeys: () => [],
     setTime(value: number) { PM.time = value; },
     time: 0,
-    TL: { pps: 90, scrollT: 0, scrollY: 0, graph: false },
     hist: { clear() {} },
     assets: {
       restoreProject: async () => ({ stale: false, missing: [] }),
       clear() {},
     },
-    Inspector: { refresh() {} },
-    Viewer: { layout() {} },
     h(selector: string, ...args: any[]) {
       const node = element();
       const attrs = args[0];
@@ -192,12 +190,13 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   };
   PM.__busHandlers = busHandlers;
   PM.__normalizationCalls = normalizationCalls;
+  PM.Kernel = { services: createServicesRegistry() };
 
-  if (!withExtensionSurfaces) {
-    delete PM.TL;
-    delete PM.Viewer;
-    delete PM.Inspector;
-    delete PM.syncShaderUniforms;
+  if (withExtensionSurfaces) {
+    PM.Kernel.services.register('timeline', { pps: 90, scrollT: 0, scrollY: 0, graph: false });
+    PM.Kernel.services.register('viewer', { layout() {} });
+    PM.Kernel.services.register('inspector', { refresh() {} });
+    PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   }
 
   install(PM);

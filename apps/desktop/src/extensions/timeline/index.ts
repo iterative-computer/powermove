@@ -132,6 +132,7 @@ export default function activate(api: PowermoveAPI): void {
      leave its bus, window, observer, or DOM listeners alive. */
   const disposeRuntime = timeline.disposeRuntime;
   api.onDispose?.(() => disposeRuntime());
+  api.services.register('timeline', timeline);
 
   api.panels.register({
     id: 'timeline',

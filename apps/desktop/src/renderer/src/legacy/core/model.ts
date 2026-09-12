@@ -4,11 +4,13 @@ import { normalizeExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
 import { installLayerGroups } from './layer-groups';
 import { installProjectIndex } from './project-index';
+import { timelineService } from './services';
 
 export function selectLayers(PM: PMRegistry, ids: any, add = false): void {
   const before = { ...PM.sel, layers: [...PM.sel.layers], keys: [...PM.sel.keys] };
   ids = ([] as any[]).concat(ids).filter(Boolean);
-  if (PM.TL) PM.TL.keySelectionActive = false;
+  const timeline = timelineService(PM);
+  if (timeline) timeline.keySelectionActive = false;
   PM.sel.layers = add ? [...new Set([...PM.sel.layers, ...ids])] : ids;
   if (!add) PM.sel.keys = [];
   PM.hist?.selection?.(before, PM.sel);
