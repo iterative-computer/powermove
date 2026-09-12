@@ -1,0 +1,32 @@
+{
+  "name": "@powermove/player",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Powermove web player and SVG adapter, bundled from the desktop app's player sources for browsers.",
+  "type": "module",
+  "exports": {
+    "./player": {
+      "types": "./dist/player.d.ts",
+      "default": "./dist/player.js"
+    },
+    "./svg-player": {
+      "types": "./dist/svg-player.d.ts",
+      "default": "./dist/svg-player.js"
+    },
+    "./build": {
+      "types": "./build.d.mts",
+      "default": "./build.mjs"
+    }
+  },
+  "files": [
+    "dist",
+    "build.mjs",
+    "build.d.mts"
+  ],
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

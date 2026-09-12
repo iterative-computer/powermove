@@ -1,0 +1,31 @@
+{
+  "name": "@powermove/www",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Powermove marketing website (SvelteKit, prerendered static output).",
+  "type": "module",
+  "scripts": {
+    "predev": "bun run --cwd ../../packages/player build",
+    "dev": "vite dev",
+    "prebuild": "bun run --cwd ../../packages/player build",
+    "build": "vite build",
+    "preview": "vite preview",
+    "precheck": "bun run --cwd ../../packages/player build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "typecheck": "bun run check"
+  },
+  "dependencies": {
+    "@lucide/svelte": "1.45.0",
+    "@powermove/tokens": "workspace:*",
+    "@powermove/player": "workspace:*"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "3.0.10",
+    "@sveltejs/kit": "2.70.3",
+    "@sveltejs/vite-plugin-svelte": "6.2.4",
+    "svelte": "5.56.10",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  }
+}
