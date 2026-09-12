@@ -83,6 +83,171 @@ describe('installKernel', () => {
     expect(installed.loader).toBeNull();
   });
 
+  it('publishes every Phase 1 adapter member', () => {
+    const PM = fakePM();
+    installed = installKernel(PM);
+    const api = installed.api('contracts');
+
+    expect(Object.keys(api.anim)).toEqual(expect.arrayContaining([
+      'ev', 'evP', 'active', 'findProp', 'allProps', 'hasKeyAt', 'setKey', 'setKeyOn', 'removeKey',
+      'applyEaseTo', 'wouldCycle', 'resolveContent', 'expressionErrors', 'version', 'touch', 'worldMatrix',
+      'localMatrix', 'transformParentMatrix', 'mul'
+    ]));
+    expect(Object.keys(api.model)).toEqual(expect.arrayContaining([
+      'P', 'CH', 'KF', 'BLENDS', 'TYPE_META', 'MASK_SHAPES', 'mkLayer', 'mkMask', 'mkProject',
+      'layerDefinition', 'curComp', 'layer', 'byName'
+    ]));
+    expect(Object.keys(api.selection)).toEqual(expect.arrayContaining([
+      'get', 'layers', 'first', 'keys', 'chan', 'set', 'select', 'resolveSelectedKeys', 'keySelectionActive'
+    ]));
+    expect(Object.keys(api.groups)).toEqual(expect.arrayContaining(['ancestors', 'transformRoots', 'span', 'expand', 'normalizeStack', 'moveToGroup']));
+    expect(Object.keys(api.transport)).toEqual(expect.arrayContaining(['time', 'setTime', 'play', 'pause', 'toggle', 'playing', 'step', 'quality', 'perf', 'invalidate', 'previewResolution']));
+    expect(Object.keys(api.history)).toEqual(expect.arrayContaining(['do', 'begin', 'commit', 'cancel', 'undo', 'redo', 'external', 'selection']));
+    expect(Object.keys(api.edit)).toEqual(expect.arrayContaining(['apply', 'begin', 'commit', 'cancel', 'dispatch', 'mutate']));
+    expect(Object.keys(api.media)).toEqual(expect.arrayContaining(['timing', 'importFiles', 'commandForAsset', 'audio', 'assets', 'fonts']));
+    expect(Object.keys(api.render)).toEqual(expect.arrayContaining(['gl', 'raster', 'renderFrameTo', 'snapshot']));
+    expect(Object.keys(api.uiState)).toHaveLength(9);
+    expect(Object.keys(api.ui)).toEqual(expect.arrayContaining(['drag', 'closeMenus', 'showLayerMenu', 'showParentMenu', 'beginParentPick', 'openShaderEditor', 'gesture']));
+    expect(Object.keys(api.dnd)).toEqual(expect.arrayContaining([
+      'ASSET_MIME', 'FX_MIME', 'startAssetDrag', 'mediaDrag', 'hasAssetDrag', 'hasFileDrag',
+      'hasMediaDrag', 'readAssetDrag', 'hasFxDrag', 'readFxDrag', 'applyFxDrop'
+    ]));
+    expect(Object.keys(api.workspace)).toEqual(expect.arrayContaining(['current', 'mutate', 'hasPanel', 'addPanel', 'movePanel', 'removePanel', 'hidePanel', 'restorePanel', 'refresh']));
+    expect(Object.keys(api.util)).toEqual(expect.arrayContaining(['round', 'clamp', 'lerp', 'snapF', 'tc', 'parseTc', 'uid', 'hex2rgb', 'rgb2hex']));
+    expect(Object.keys(api.ease)).toEqual(expect.arrayContaining(['nameOf', 'PRESETS']));
+    expect(Object.keys(api.space3d)).toEqual(expect.arrayContaining(['CHANNELS_3D', 'local3D', 'parent3D', 'world3D', 'is3DLayer', 'perspectiveAmount', 'planeMatrix', 'projectPoint', 'inversePlane', 'planeContains']));
+    expect(Object.keys(api.services)).toEqual(['register', 'get']);
+  });
+
+  it('forwards Phase 1 adapter calls and mutable properties to PM', async () => {
+    const PM = fakePM();
+    const call = (...args: unknown[]) => args;
+    for (const name of ['ev', 'evP', 'active', 'findProp', 'allProps', 'hasKeyAt', 'setKey', 'setKeyOn', 'removeKey',
+      'applyEaseTo', 'wouldCycle', 'resolveContent', 'animVersion', 'touch', 'worldMatrix', 'localMatrix',
+      'transformParentMatrix', 'mul', 'P', 'KF', 'mkLayer', 'mkMask', 'mkProject', 'curComp', 'L', 'byName',
+      'firstSel', 'selectLayers', 'resolveSelectedKeys', 'groupAncestors', 'transformRoots', 'groupSpan',
+      'expandGroups', 'normalizeStack', 'moveToGroup', 'toggle', 'step', 'invalidate', 'importFiles',
+      'commandForAsset', 'assetKind', 'raster', 'renderFrameTo', 'round', 'clamp', 'lerp', 'snapF', 'tc',
+      'parseTc', 'uid', 'hex2rgb', 'rgb2hex', 'drag', 'closeMenus', 'showLayerMenu', 'showParentMenu',
+      'beginParentPick', 'openShaderEditor'] as const) PM[name] = vi.fn(call);
+    PM.animVersion = vi.fn(() => 9);
+    PM.active = vi.fn(() => true);
+    PM.wouldCycle = vi.fn(() => true);
+    PM.round = vi.fn(() => 2);
+    PM.clamp = vi.fn(() => 3);
+    PM.lerp = vi.fn(() => 4);
+    PM.snapF = vi.fn(() => 5);
+    PM.tc = vi.fn(() => 'tc');
+    PM.parseTc = vi.fn(() => 6);
+    PM.uid = vi.fn(() => 'id');
+    PM.rgb2hex = vi.fn(() => '#fff');
+    PM.CH = { opacity: { label: 'Opacity', group: 'Transform' } };
+    PM.BLENDS = ['normal'];
+    PM.TYPE_META = { solid: { icon: 'grid', color: '#fff', label: 'Solid' } };
+    PM.MASK_SHAPES = ['rect'];
+    PM.expressionErrors = new WeakMap();
+    PM.quality = 1;
+    PM.previewResolution = 'auto';
+    PM.perf = { fps: 30, ms: 2, drops: 0, budget: 16, auto: true };
+    PM.TL = { keySelectionActive: false };
+    PM.MediaTiming = { isTimed: vi.fn(() => true), rate: vi.fn(() => 2), earliestStart: vi.fn(() => 3) };
+    PM.Audio = { drawWaveform: vi.fn(() => true) };
+    PM.assets = { get: vi.fn(call), add: vi.fn(async (...args: unknown[]) => args) };
+    PM.Fonts = { bundled: [], system: [], families: [], setSystemFamilies: vi.fn(), options: vi.fn(() => []), ensure: vi.fn(async () => {}) };
+    PM.GL = {
+      bounds: vi.fn(call), pick: vi.fn(call), init: vi.fn(() => true), resize: vi.fn(() => true),
+      previewViewport: { x: 1 }, gl: { drawingBufferWidth: 1 }
+    };
+    PM.Export.snapshot = vi.fn(() => 'snapshot');
+    PM.UIState = Object.fromEntries(['getLayerCollapsed', 'setLayerCollapsed', 'getKeyHandles', 'setKeyHandles', 'getFxOpen', 'setFxOpen', 'getReveal', 'setReveal', 'setShaderMeta'].map((name) => [name, vi.fn(call)]));
+    PM.Ease = { nameOf: vi.fn(() => 'linear'), PRESETS: { linear: [0, 0, 1, 1] } };
+    PM.Edit = Object.fromEntries(['apply', 'begin', 'commit', 'cancel', 'dispatch', 'mutate'].map((name) => [name, vi.fn(call)]));
+    PM.hist = Object.fromEntries(['do', 'begin', 'commit', 'cancel', 'undo', 'redo', 'external', 'selection'].map((name) => [name, vi.fn(call)]));
+    PM.WS.current = {
+      schemaVersion: 1, id: 'design', name: 'Design', scope: 'global', projectId: null,
+      density: 'normal', theme: {}, chrome: {}, features: {}, custom: [], hiddenPanels: [],
+      layout: { docks: [{ id: 'center', panels: [{ id: 'viewer' }] }] }
+    };
+    PM.WS.mutate = vi.fn((fn: (workspace: unknown) => void, options?: unknown) => {
+      fn(PM.WS.current);
+      return options ? PM.WS.current : PM.WS.current;
+    });
+    PM.Layout.refresh = vi.fn();
+
+    installed = installKernel(PM);
+    const api = installed.api('forwarding');
+    const layer = { id: 'L1', from: 0, parent: null, threeD: false, p: {}, d: {} } as any;
+    const prop = { v: 1, kf: [], expr: null } as any;
+    const key = { i: 'k1', t: 0, v: 1 } as any;
+
+    api.anim.ev(layer, 'x', 1); expect(PM.ev).toHaveBeenLastCalledWith(layer, 'x', 1);
+    api.anim.evP(layer, prop, 1, 'x'); expect(PM.evP).toHaveBeenLastCalledWith(layer, prop, 1, 'x');
+    api.anim.active(layer, 1); api.anim.findProp(layer, 'x'); api.anim.allProps(layer); api.anim.hasKeyAt(layer, prop, 1);
+    api.anim.setKey(layer, 'x', 1, 2, 'linear'); api.anim.setKeyOn(prop, 1, 2, 'linear', 30);
+    api.anim.removeKey(prop, key); api.anim.applyEaseTo([key], 'linear'); api.anim.wouldCycle(layer, 'L2');
+    api.anim.resolveContent(layer, 1); api.anim.version(); api.anim.touch(); api.anim.worldMatrix(layer, 1);
+    api.anim.localMatrix(layer, 1); api.anim.transformParentMatrix(layer, 1, null); api.anim.mul([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 2, 3]);
+    expect(PM.setKey).toHaveBeenLastCalledWith(layer, 'x', 1, 2, 'linear');
+    expect(api.anim.expressionErrors).toBe(PM.expressionErrors);
+
+    api.model.P(1, { expr: 'x' }); api.model.KF(1, 2, 'linear'); api.model.mkLayer('solid', {}, PM.proj);
+    api.model.mkMask('rect', PM.proj); api.model.mkProject({ name: 'P' } as any); api.model.curComp(); api.model.layer('L1'); api.model.byName('Layer');
+    expect(PM.P).toHaveBeenLastCalledWith(1, { expr: 'x' });
+    expect(api.model.CH).toBe(PM.CH); expect(api.model.BLENDS).toBe(PM.BLENDS); expect(api.model.TYPE_META).toBe(PM.TYPE_META); expect(api.model.MASK_SHAPES).toBe(PM.MASK_SHAPES);
+
+    api.selection.get(); api.selection.layers(); api.selection.first(); api.selection.keys(); api.selection.chan();
+    api.selection.select(['L1'], true); api.selection.resolveSelectedKeys(); api.selection.keySelectionActive = true;
+    expect(PM.selectLayers).toHaveBeenLastCalledWith(['L1'], true); expect(PM.TL.keySelectionActive).toBe(true);
+    const sameSelection = PM.sel; api.selection.set({ chan: 'opacity' }); expect(PM.sel).toBe(sameSelection);
+    expect(PM.hist.selection).toHaveBeenCalled(); expect(PM.bus.emit).toBeTypeOf('function'); expect(PM.invalidate).toHaveBeenCalled();
+
+    api.groups.ancestors(layer, [layer]); api.groups.transformRoots(['L1']); api.groups.span(layer);
+    api.groups.expand(['L1']); api.groups.normalizeStack(); api.groups.moveToGroup(['L1'], 'G1');
+    expect(PM.groupAncestors).toHaveBeenLastCalledWith(layer, [layer]);
+
+    api.transport.setTime(4, { raw: true }); api.transport.play(); api.transport.pause(); api.transport.toggle(); api.transport.step(2); api.transport.invalidate('render');
+    api.transport.quality = .5; api.transport.previewResolution = '0.5';
+    expect(PM.setTime).toHaveBeenLastCalledWith(4, { raw: true }); expect(PM.quality).toBe(.5); expect(PM.previewResolution).toBe('0.5'); expect(api.transport.perf).toBe(PM.perf);
+
+    const fn = vi.fn();
+    api.history.do('Do', fn); api.history.begin('Begin', 'g'); api.history.commit('Commit'); api.history.cancel(); api.history.undo(); api.history.redo(); api.history.external('External', fn, fn, { bytes: 4 }); api.history.selection(PM.sel, PM.sel);
+    expect(PM.hist.external).toHaveBeenLastCalledWith('External', fn, fn, { bytes: 4 });
+    api.edit.apply({ type: 'delete_layers', targets: [] }); api.edit.begin('Begin', { origin: 'test' }); api.edit.commit('Commit'); api.edit.cancel(); api.edit.dispatch({ type: 'delete_layers', targets: [] }); api.edit.mutate('Mutate', fn, { origin: 'test' });
+    expect(PM.Edit.mutate).toHaveBeenLastCalledWith('Mutate', fn, { origin: 'test' });
+
+    await api.media.importFiles([], { placement: null }); api.media.commandForAsset('a', 2); api.media.timing.isTimed(layer); api.media.timing.rate(layer); api.media.timing.earliestStart(layer);
+    const canvas = document.createElement('canvas'); api.media.audio.drawWaveform(canvas.getContext('2d')!, layer, { color: 'red' }); api.media.assets.get('a'); await api.media.assets.add(new File(['x'], 'x.png'), { persist: true }); api.media.assets.kind(new File(['x'], 'x.png'));
+    expect(PM.importFiles).toHaveBeenLastCalledWith([], { placement: null }); expect(PM.Audio.drawWaveform).toHaveBeenCalled(); expect(api.media.fonts).toBe(PM.Fonts);
+
+    api.render.gl.bounds(layer, 1); api.render.gl.pick(1, 2, 3, { includeLocked: true }); api.render.gl.init(canvas, { alpha: true }); api.render.gl.resize(100, 50, null);
+    api.render.raster(layer, 2, 3, fn, { x: 1 }); api.render.renderFrameTo(1, 100, 50, { alpha: true }); api.render.snapshot(1, 480);
+    expect(PM.GL.pick).toHaveBeenLastCalledWith(1, 2, 3, { includeLocked: true }); expect(api.render.gl.previewViewport).toBe(PM.GL.previewViewport); expect(api.render.gl.context).toBe(PM.GL.gl);
+
+    for (const name of Object.keys(PM.UIState)) (api.uiState as any)[name](layer, {});
+    api.ui.drag(new PointerEvent('pointerdown'), { move: fn }); api.ui.closeMenus(); api.ui.showLayerMenu(layer, { clientX: 1, clientY: 2 }, 'timeline'); api.ui.showParentMenu(['L1'], { clientX: 1, clientY: 2 }); api.ui.beginParentPick(new PointerEvent('pointerdown'), ['L1']); api.ui.openShaderEditor(layer);
+    expect(PM.showLayerMenu).toHaveBeenLastCalledWith(layer, { clientX: 1, clientY: 2 }, 'timeline');
+    const gesture = new api.ui.gesture({ mode: 'command', label: 'Gesture', command: { type: 'delete_layers', targets: [] } }); gesture.begin(); gesture.write(1); gesture.commit(); gesture.cancel(); gesture.once(2);
+    expect(PM.Edit.begin).toHaveBeenCalledWith('Gesture', { origin: 'interface' });
+
+    api.dnd.mediaDrag = { id: 'a', name: 'A', kind: 'image' }; expect(PM.mediaDrag).toEqual({ id: 'a', name: 'A', kind: 'image' });
+    const transfer = new DataTransfer(); api.dnd.startAssetDrag(transfer, PM.mediaDrag); expect(api.dnd.readAssetDrag(transfer)).toEqual(PM.mediaDrag); expect(api.dnd.hasAssetDrag(transfer)).toBe(true); expect(api.dnd.hasMediaDrag(transfer)).toBe(true); api.dnd.hasFileDrag(transfer); api.dnd.hasFxDrag(transfer); api.dnd.readFxDrag(transfer);
+    api.dnd.applyFxDrop({ kind: 'effect', id: 'blur', label: 'Blur' }, 'L1', 'in');
+
+    const mutateOptions = { inPlace: true }; api.workspace.mutate(() => {}, mutateOptions); expect(PM.WS.mutate).toHaveBeenLastCalledWith(expect.any(Function), mutateOptions);
+    api.panels.open('indexed', { dock: 'right', index: 0 });
+    expect(PM.WS.current.layout.docks.find((dock: any) => dock.id === 'right')?.panels[0]?.id).toBe('indexed');
+    api.workspace.hasPanel('viewer'); api.workspace.addPanel('notes', 'right', 0); expect(api.workspace.hasPanel('notes')).toBe(true);
+    expect(api.workspace.movePanel('notes', 'center', 1)).toBe(true); api.workspace.hidePanel('notes'); api.workspace.restorePanel('notes'); api.workspace.removePanel('notes'); api.workspace.refresh('viewer'); expect(PM.Layout.refresh).toHaveBeenCalledWith('viewer');
+
+    api.util.round(1, 2); api.util.clamp(1, 0, 2); api.util.lerp(0, 2, .5); api.util.snapF(1, 30); api.util.tc(1, 30, true); api.util.parseTc('1', 30); api.util.uid('x'); api.util.hex2rgb('#fff'); api.util.rgb2hex(1, 1, 1);
+    expect(PM.lerp).toHaveBeenLastCalledWith(0, 2, .5); api.ease.nameOf([0, 0], [1, 1]); expect(PM.Ease.nameOf).toHaveBeenCalledWith([0, 0], [1, 1]); expect(api.ease.PRESETS).toBe(PM.Ease.PRESETS);
+
+    api.space3d.local3D(layer, 1); api.space3d.parent3D(layer, 1, null); api.space3d.world3D(layer, 1); api.space3d.is3DLayer(layer); api.space3d.perspectiveAmount(layer, 1); api.space3d.planeMatrix(layer, 1); api.space3d.projectPoint([1, 0, 0, 0, 1, 0, 0, 0, 1], { x: 1, y: 2 }); api.space3d.inversePlane([1, 0, 0, 0, 1, 0, 0, 0, 1]); api.space3d.planeContains(layer, 1, 1, 2, { x0: 0, x1: 3, y0: 0, y1: 3 });
+    expect(PM.localMatrix).toHaveBeenCalledWith(layer, 1); expect(api.space3d.CHANNELS_3D).toHaveProperty('position.z');
+
+    const service = { value: 1 }; const handle = api.services.register('demo', service); expect(installed.services.get('demo')).toBe(service); handle.dispose(); expect(api.services.get('demo')).toBeNull();
+  });
+
   it('builds a project façade over PM and forces the extension origin', async () => {
     const PM = fakePM();
     installed = installKernel(PM);
@@ -245,7 +410,7 @@ describe('installKernel', () => {
     expect(PM.palette).toHaveBeenCalledWith('fx');
   });
 
-  it('tolerates an empty PM without throwing', () => {
+  it('tolerates an empty PM without throwing', async () => {
     const PM: LegacyPM = {};
     installed = installKernel(PM);
     const api = installed.api('demo');
@@ -258,6 +423,63 @@ describe('installKernel', () => {
     expect(() => api.panels.open('x')).not.toThrow();
     expect(api.ui.icon('play')).toBe('');
     expect(installed.bridge).toBeNull();
+
+    const layer = { id: 'L1', from: 0, parent: null, threeD: false, p: {}, d: {} } as any;
+    const prop = { v: 0, kf: [], expr: null } as any;
+    const key = { i: 'k1', t: 0, v: 0 } as any;
+    expect(() => {
+      api.anim.ev(layer, 'x', 0); api.anim.evP(layer, prop, 0, 'x'); api.anim.active(layer, 0);
+      api.anim.findProp(layer, 'x'); api.anim.allProps(layer); api.anim.hasKeyAt(layer, prop, 0);
+      api.anim.setKey(layer, 'x', 0, 1); api.anim.setKeyOn(prop, 0, 1); api.anim.removeKey(prop, key);
+      api.anim.applyEaseTo([key], 'linear'); api.anim.wouldCycle(layer, null); api.anim.resolveContent(layer);
+      void api.anim.expressionErrors; api.anim.version(); api.anim.touch(); api.anim.worldMatrix(layer, 0);
+      api.anim.localMatrix(layer, 0); api.anim.transformParentMatrix(layer, 0); api.anim.mul([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0]);
+      api.model.P(0); api.model.KF(0, 0); void api.model.CH; void api.model.BLENDS; void api.model.TYPE_META;
+      void api.model.MASK_SHAPES; api.model.mkLayer('solid'); api.model.mkMask(); api.model.mkProject();
+      api.model.layerDefinition('x'); api.model.curComp(); api.model.layer('x'); api.model.byName('x');
+      api.selection.get(); api.selection.layers(); api.selection.first(); api.selection.keys(); api.selection.chan();
+      api.selection.set({ layers: [] }); api.selection.select([]); api.selection.resolveSelectedKeys();
+      void api.selection.keySelectionActive; api.selection.keySelectionActive = false;
+      api.groups.ancestors(layer); api.groups.transformRoots([]); api.groups.span(layer); api.groups.expand([]);
+      api.groups.normalizeStack(); api.groups.moveToGroup([], null);
+      api.transport.time(); api.transport.setTime(0); api.transport.play(); api.transport.pause(); api.transport.toggle();
+      api.transport.playing(); api.transport.step(1); void api.transport.quality; api.transport.quality = 1;
+      void api.transport.perf; api.transport.invalidate(); void api.transport.previewResolution; api.transport.previewResolution = null;
+      api.history.do('x', () => {}); api.history.begin('x'); api.history.commit(); api.history.cancel();
+      api.history.undo(); api.history.redo(); api.history.external('x', () => {}, () => {}); api.history.selection({ layers: [], keys: [], chan: null }, { layers: [], keys: [], chan: null });
+      api.edit.apply([]); api.edit.begin('x'); api.edit.commit(); api.edit.cancel();
+      api.edit.dispatch({ type: 'delete_layers', targets: [] }); api.edit.mutate('x', () => {});
+      api.media.timing.isTimed(layer); api.media.timing.rate(layer); api.media.timing.earliestStart(layer);
+      api.media.commandForAsset(); api.media.audio.drawWaveform(document.createElement('canvas').getContext('2d')!, layer);
+      api.media.assets.get('x'); api.media.assets.kind(new File([], 'x')); void api.media.fonts;
+      api.render.gl.bounds(layer, 0); api.render.gl.pick(0, 0, 0); api.render.gl.init(document.createElement('canvas'));
+      api.render.gl.resize(1, 1); void api.render.gl.previewViewport; void api.render.gl.context;
+      api.render.raster(layer); api.render.renderFrameTo(0, 1, 1); api.render.snapshot(0);
+      api.uiState.getLayerCollapsed(layer); api.uiState.setLayerCollapsed(layer, false); api.uiState.getKeyHandles(key);
+      api.uiState.setKeyHandles(key, {}); api.uiState.getFxOpen({} as any); api.uiState.setFxOpen({} as any, false);
+      api.uiState.getReveal(layer); api.uiState.setReveal(layer, []); api.uiState.setShaderMeta(layer, {});
+      api.ui.drag(new PointerEvent('pointerdown'), { move: () => {} }); api.ui.closeMenus();
+      api.ui.showLayerMenu(layer, { clientX: 0, clientY: 0 }); api.ui.showParentMenu([], { clientX: 0, clientY: 0 });
+      api.ui.beginParentPick(new PointerEvent('pointerdown'), []); api.ui.openShaderEditor();
+      const gesture = new api.ui.gesture({ mode: 'local', label: 'x', set: () => {} }); gesture.begin(); gesture.write(1); gesture.commit(); gesture.cancel(); gesture.once(1);
+      void api.dnd.ASSET_MIME; void api.dnd.FX_MIME; api.dnd.startAssetDrag(null, { id: 'x', name: 'x', kind: 'image' });
+      void api.dnd.mediaDrag; api.dnd.mediaDrag = null; api.dnd.hasAssetDrag(null); api.dnd.hasFileDrag(null);
+      api.dnd.hasMediaDrag(null); api.dnd.readAssetDrag(null); api.dnd.hasFxDrag(null); api.dnd.readFxDrag(null);
+      api.dnd.applyFxDrop({ kind: 'effect', id: 'x', label: 'x' }, null);
+      api.workspace.current(); api.workspace.mutate(() => {}); api.workspace.hasPanel('x'); api.workspace.addPanel('x');
+      api.workspace.movePanel('x', 'center', 0); api.workspace.removePanel('x'); api.workspace.hidePanel('x');
+      api.workspace.restorePanel('x'); api.workspace.refresh('x');
+      api.util.round(0); api.util.clamp(0, 0, 1); api.util.lerp(0, 1, .5); api.util.snapF(0, 30);
+      api.util.tc(0); api.util.parseTc('0'); api.util.uid(); api.util.hex2rgb('#000'); api.util.rgb2hex(0, 0, 0);
+      api.ease.nameOf([0, 0], [1, 1]); void api.ease.PRESETS;
+      void api.space3d.CHANNELS_3D; api.space3d.local3D(layer, 0); api.space3d.parent3D(layer, 0);
+      api.space3d.world3D(layer, 0); api.space3d.is3DLayer(layer); api.space3d.perspectiveAmount(layer, 0);
+      api.space3d.planeMatrix(layer, 0); api.space3d.projectPoint([1, 0, 0, 0, 1, 0, 0, 0, 1], { x: 0, y: 0 });
+      api.space3d.inversePlane([1, 0, 0, 0, 1, 0, 0, 0, 1]); api.space3d.planeContains(layer, 0, 0, 0, { x0: 0, x1: 1, y0: 0, y1: 1 });
+      const service = api.services.register('x', {}); api.services.get('x'); service.dispose();
+    }).not.toThrow();
+    await expect(api.media.importFiles([])).resolves.toBeUndefined();
+    await expect(api.media.assets.add(new File([], 'x'))).resolves.toBeUndefined();
   });
 
   it('bootExtensions creates the loader and activates the given built-ins', async () => {

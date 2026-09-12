@@ -1,7 +1,7 @@
 import { revealedProperties } from './property-reveal';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
-import { temporalKeys } from 'powermove';
+import { temporalKeys, type Space3DAPI } from 'powermove';
 import { adjacentKeyframe } from './keyframe-navigation';
 import { evaluatedValue } from 'powermove';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
@@ -187,7 +187,7 @@ export function applyKeyframeMovePlan<Property>(
 }
 
 export function install(pm: any): void {
-createTimelineRuntime(pm);
+createTimelineRuntime(pm, pm.space3d);
 }
 
 /** A new ESM instance gets a new token. It can recognize and dispose a
@@ -217,10 +217,10 @@ return layerType !== 'audio';
 
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
 export function createTimeline(pm: any): any {
-return createTimelineRuntime(pm);
+return createTimelineRuntime(pm, pm.space3d);
 }
 
-export function createTimelineRuntime(pm: any): any {
+export function createTimelineRuntime(pm: any, space3d?: Space3DAPI): any {
 const PM = pm;
 const previous = PM.TL;
 if (previous?.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN && !previous.__timelineRuntimeDisposed) return previous;
@@ -263,7 +263,7 @@ T.graphFocus = T.graphFocus && typeof T.graphFocus.layerId === 'string' && typeo
   ? T.graphFocus : null;
 T.focusGraph = (L: any, channel: string) => {
   const target = typeof PM.allProps === 'function'
-    ? timelineProperties(PM, L).find((row: any) => trackSelected(row, channel))
+    ? timelineProperties(PM, L, space3d).find((row: any) => trackSelected(row, channel))
     : null;
   T.graphFocus = { layerId: L.id, trackKey: target?.key || channel };
   PM.invalidate('timeline');
@@ -588,7 +588,7 @@ function buildRows() {
   return rows;
 }
 function visibleProps(L: any) {
-  return revealedProperties(PM, L, timelineProperties(PM, L));
+  return revealedProperties(PM, L, timelineProperties(PM, L, space3d));
 }
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
@@ -1230,8 +1230,8 @@ function drawGutter(c: any, W: any, H: any) {
       c.fillStyle = selected ? theme.accent : theme.tx3;
       const labelX = 100, valueX = T.propertyValueX;
       if (r.prop.kf.length) {
-        drawKeyArrow(c, 28, y + T.row / 2, -1, adjacentKeyframe(PM, -1, r) != null);
-        drawKeyArrow(c, 52, y + T.row / 2, 1, adjacentKeyframe(PM, 1, r) != null);
+        drawKeyArrow(c, 28, y + T.row / 2, -1, adjacentKeyframe(PM, -1, r, space3d) != null);
+        drawKeyArrow(c, 52, y + T.row / 2, 1, adjacentKeyframe(PM, 1, r, space3d) != null);
       }
       icoAnimationDiamond(c, 85, y + T.row / 2, trackChannels(r).some(axis => axis.prop.kf.length > 0), trackChannels(r).some(axis => !!PM.hasKeyAt(r.L, axis.prop, PM.time)));
       clipText(c, r.label, labelX, y + T.row / 2, valueX - labelX - 12);
@@ -1272,7 +1272,7 @@ function drawKeyArrow(c: any, x: number, y: number, direction: number, enabled: 
   c.beginPath(); c.moveTo(x - direction * 2, y - 4); c.lineTo(x + direction * 2, y); c.lineTo(x - direction * 2, y + 4); c.stroke(); c.restore();
 }
 function navigateKeyframe(direction: -1 | 1, row?: any) {
-  const time = adjacentKeyframe(PM, direction, row);
+  const time = adjacentKeyframe(PM, direction, row, space3d);
   if (time != null) PM.setTime(time);
 }
 function clearTimelineSelection() {
@@ -1369,7 +1369,7 @@ function drawGraph(c: any, W: any, H: any) {
   T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
-  const rows = PM.proj.layers.flatMap((L: any) => timelineProperties(PM, L)
+  const rows = PM.proj.layers.flatMap((L: any) => timelineProperties(PM, L, space3d)
     .map((row: any) => ({ kind: 'prop', L, ...row })))
     .filter((r: any) => trackSelected(r, PM.sel.chan) || r.prop.kf.length);
   const target = resolveGraphTarget(rows, T.graphFocus, PM.sel.layers, (r: any) => trackSelected(r, PM.sel.chan));
@@ -1654,7 +1654,7 @@ function onMove(e: any) {
       const parent = row.L.parent ? PM.L(row.L.parent)?.name || 'Missing layer' : 'None';
       title = x < T.gut - 20 ? `Parent: ${parent} · Drag to a layer` : `Parent: ${parent} · Choose parent`;
     } else if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
-      cur = adjacentKeyframe(PM, x < 40 ? -1 : 1, row) != null ? 'pointer' : 'default';
+      cur = adjacentKeyframe(PM, x < 40 ? -1 : 1, row, space3d) != null ? 'pointer' : 'default';
     } else if (row?.kind === 'prop' && !row.L.lock) {
       if (x >= 76 && x < 96) cur = 'pointer';
       else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof PM.evP(row.L, axis.prop, PM.time, axis.key) === 'number') ? 'ew-resize' : 'pointer';
@@ -2271,7 +2271,7 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
 }
 function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any) {
   if (L.lock) return;
-  const axes = graphHandleChannels(timelineProperties(PM, L), kf);
+  const axes = graphHandleChannels(timelineProperties(PM, L, space3d), kf);
   const candidates = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
   const targetKeys = new Set(keysForBezierHandleDrag(candidates.map((item: any) => item.key), k, PM.sel.keys));
   const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));

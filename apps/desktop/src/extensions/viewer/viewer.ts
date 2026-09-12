@@ -1,4 +1,6 @@
-import { is3DLayer, planeMatrix, planeContains, projectPoint, inversePlane } from '../../renderer/src/legacy/core/space-3d';
+import type { Space3DAPI } from 'powermove';
+
+type ViewerSpace3D = Pick<Space3DAPI, 'is3DLayer' | 'planeMatrix' | 'planeContains' | 'projectPoint' | 'inversePlane'>;
 export function visualSelection(PM: any): any[] {
   const selected = PM.selLayers?.() || [];
   const ids = new Set(selected.map((layer: any) => layer.id));
@@ -410,10 +412,10 @@ export function selectionTransformRoots(PM: any, layers: any[], T: number): any[
   });
 }
 
-export function layerWorldBounds(PM: any, layer: any, T: number): WorldBounds | null {
-  if (layer.type === 'group' && is3DLayer(PM,layer)) {
+export function layerWorldBounds(PM: any, layer: any, T: number, space3d: ViewerSpace3D): WorldBounds | null {
+  if (layer.type === 'group' && space3d.is3DLayer(layer)) {
     const members = PM.curComp().layers.filter((child: any) => child.type !== 'group' && child.type !== 'audio' && PM.active(child,T) && (PM.groupAncestors(child) || []).some((group: any) => group.id === layer.id));
-    const boxes = members.map((child: any) => layerWorldBounds(PM,child,T)).filter(Boolean) as WorldBounds[];
+    const boxes = members.map((child: any) => layerWorldBounds(PM,child,T,space3d)).filter(Boolean) as WorldBounds[];
     if (!boxes.length) return null;
     const x0=Math.min(...boxes.map(b=>b.x0)),y0=Math.min(...boxes.map(b=>b.y0));
     const x1=Math.max(...boxes.map(b=>b.x1)),y1=Math.max(...boxes.map(b=>b.y1));
@@ -424,7 +426,7 @@ export function layerWorldBounds(PM: any, layer: any, T: number): WorldBounds | 
   const points = [
     { x: bounds.x0, y: bounds.y0 }, { x: bounds.x1, y: bounds.y0 },
     { x: bounds.x1, y: bounds.y1 }, { x: bounds.x0, y: bounds.y1 },
-  ].map((point) => is3DLayer(PM,layer) ? projectPoint(planeMatrix(PM,layer,T),point) : applyMatrix(matrix, point));
+  ].map((point) => space3d.is3DLayer(layer) ? space3d.projectPoint(space3d.planeMatrix(layer,T),point) : applyMatrix(matrix, point));
   const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
   const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
   return { x0, x1, y0, y1, w: x1 - x0, h: y1 - y0, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
@@ -432,8 +434,8 @@ export function layerWorldBounds(PM: any, layer: any, T: number): WorldBounds | 
 
 /** The real world-space anchor. Matrix translation is the transformed local
     origin, so it is not the rotation pivot when Anchor X/Y are non-zero. */
-export function layerWorldPivot(PM: any, layer: any, T: number): Point {
-  if (is3DLayer(PM,layer)) return projectPoint(planeMatrix(PM,layer,T,true), {x: PM.ev(layer,'position.x',T), y: PM.ev(layer,'position.y',T)});
+export function layerWorldPivot(PM: any, layer: any, T: number, space3d: ViewerSpace3D): Point {
+  if (space3d.is3DLayer(layer)) return space3d.projectPoint(space3d.planeMatrix(layer,T,true), {x: PM.ev(layer,'position.x',T), y: PM.ev(layer,'position.y',T)});
   return applyMatrix(PM.worldMatrix(layer, T), {
     x: PM.ev(layer, 'anchor.x', T),
     y: PM.ev(layer, 'anchor.y', T),
@@ -452,7 +454,7 @@ export function transformPointAround(
 }
 
 /** One geometry source for overlay drawing, hit-testing, and transforms. */
-export function resolveSelectionGeometry(PM: any, selected: any[], T: number): SelectionGeometry | null {
+export function resolveSelectionGeometry(PM: any, selected: any[], T: number, space3d: ViewerSpace3D): SelectionGeometry | null {
   const layers = visibleSelectionLayers(PM, selected, T);
   if (!layers.length) return null;
   /* A selection is one atomic transform target. Locked or unpickable visual
@@ -460,24 +462,24 @@ export function resolveSelectionGeometry(PM: any, selected: any[], T: number): S
   const transformable = layers.every((layer) => layerIsTransformable(PM, layer, T));
   const roots = transformable ? selectionTransformRoots(PM, layers, T) : [];
 
-  if (layers.length === 1 && layers[0].type === 'group' && is3DLayer(PM,layers[0])) {
-    const box=layerWorldBounds(PM,layers[0],T);if(!box)return null;
+  if (layers.length === 1 && layers[0].type === 'group' && space3d.is3DLayer(layers[0])) {
+    const box=layerWorldBounds(PM,layers[0],T,space3d);if(!box)return null;
     const corners=[{x:box.x0,y:box.y0},{x:box.x1,y:box.y0},{x:box.x1,y:box.y1},{x:box.x0,y:box.y1}];
-    return {mode:'common',layers,roots,transformable,bounds:box,matrix:[1,0,0,1,0,0],corners,handles:handlesFromCorners(corners),pivotWorld:layerWorldPivot(PM,layers[0],T)};
+    return {mode:'common',layers,roots,transformable,bounds:box,matrix:[1,0,0,1,0,0],corners,handles:handlesFromCorners(corners),pivotWorld:layerWorldPivot(PM,layers[0],T,space3d)};
   }
   if (layers.length === 1) {
     const layer = layers[0]!;
     const bounds = PM.GL.bounds(layer, T); if (!bounds) return null;
     const matrix = PM.worldMatrix(layer, T) as AffineMatrix;
     const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const)
-      .map((corner) => is3DLayer(PM,layer) ? projectPoint(planeMatrix(PM,layer,T),pointInBounds(bounds,corner)) : applyMatrix(matrix, pointInBounds(bounds, corner)));
+      .map((corner) => space3d.is3DLayer(layer) ? space3d.projectPoint(space3d.planeMatrix(layer,T),pointInBounds(bounds,corner)) : applyMatrix(matrix, pointInBounds(bounds, corner)));
     return {
       mode: 'single', layers, roots, transformable, bounds, matrix, corners,
-      handles: handlesFromCorners(corners), pivotWorld: layerWorldPivot(PM, layer, T),
+      handles: handlesFromCorners(corners), pivotWorld: layerWorldPivot(PM, layer, T, space3d),
     };
   }
 
-  const measured = layers.map((layer) => layerWorldBounds(PM, layer, T)).filter(Boolean) as WorldBounds[];
+  const measured = layers.map((layer) => layerWorldBounds(PM, layer, T, space3d)).filter(Boolean) as WorldBounds[];
   if (!measured.length) return null;
   const x0 = Math.min(...measured.map((bounds) => bounds.x0));
   const x1 = Math.max(...measured.map((bounds) => bounds.x1));
@@ -558,33 +560,34 @@ export function calculateResize(
 }
 
 /** Compatibility entry point for registry-based tests and legacy installers. */
-export function install(PM: any): void {
-  createViewerRuntime(PM);
+export function install(PM: any, space3d: Space3DAPI = PM.space3d): void {
+  if (!space3d) throw new Error('Viewer requires the space3d API');
+  createViewerRuntime(PM, space3d);
 }
 
 /** Geometry hit test for selection-preserving direct manipulation. The active
     selection owns a drag inside its visible transform box even when a
     full-frame layer is stacked above it. */
-export function layerContainsPoint(PM: any, L: any, x: number, y: number, T: number): boolean {
+export function layerContainsPoint(PM: any, L: any, x: number, y: number, T: number, space3d: ViewerSpace3D): boolean {
   const b = PM.GL.bounds(L, T); if (!b) return false;
-  return planeContains(PM, L, T, x, y, b);
+  return space3d.planeContains(L, T, x, y, b);
 }
 
 /** Text editing follows the visible selection before the topmost pixel pick.
     This keeps a selected title editable even when a full-frame adjustment or
     overlay layer sits above it in the render stack. */
-export function editableTextAtPoint(PM: any, x: number, y: number, T: number): any | null {
+export function editableTextAtPoint(PM: any, x: number, y: number, T: number, space3d: ViewerSpace3D): any | null {
   const selected = visualSelection(PM).filter((layer: any) =>
     layer?.type === 'text' && !layer.lock && PM.active?.(layer, T) !== false);
   for (let index = selected.length - 1; index >= 0; index -= 1) {
-    if (layerContainsPoint(PM, selected[index], x, y, T)) return selected[index];
+    if (layerContainsPoint(PM, selected[index], x, y, T, space3d)) return selected[index];
   }
   const picked = PM.GL?.pick?.(x, y, T);
   return picked?.type === 'text' && !picked.lock ? picked : null;
 }
 
 /** Install the legacy viewer controller against the host registry. */
-export function createViewerRuntime(PM: any): any {
+export function createViewerRuntime(PM: any, space3d: Space3DAPI): any {
 const existing = PM.Viewer;
 if (existing?._runtimeToken === VIEWER_RUNTIME_TOKEN) return existing;
 const existingStage = existing?.stage as HTMLElement | undefined;
@@ -932,7 +935,7 @@ function drawOverlay() {
   c.lineWidth = 1 / S;
 
   drawSnapLines(c, S);
-  if(V.showControls !== false && !visualSelection(PM).some((layer: any) => is3DLayer(PM,layer)))drawEditablePaths(PM,c,S);
+  if(V.showControls !== false && !visualSelection(PM).some((layer: any) => space3d.is3DLayer(layer)))drawEditablePaths(PM,c,S);
 
   if (V.toolRect) {
     const box = V.toolRect.box as DragBox;
@@ -960,7 +963,7 @@ function drawOverlay() {
   }
 
   const sels = visualSelection(PM).filter((L: any) => PM.active(L, PM.time) && L.id !== PM.canvasTextEditing);
-  const selection = resolveSelectionGeometry(PM, sels, PM.time);
+  const selection = resolveSelectionGeometry(PM, sels, PM.time, space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
   if (sels.length > 1 || !selection) for (const L of sels) {
@@ -968,7 +971,7 @@ function drawOverlay() {
     if (!b) continue;
     const m = PM.worldMatrix(L, PM.time);
     const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map((corner) =>
-      is3DLayer(PM,L) ? projectPoint(planeMatrix(PM,L,PM.time),pointInBounds(b,corner)) : applyMatrix(m, pointInBounds(b, corner)));
+      space3d.is3DLayer(L) ? space3d.projectPoint(space3d.planeMatrix(L,PM.time),pointInBounds(b,corner)) : applyMatrix(m, pointInBounds(b, corner)));
     c.strokeStyle = selectionInk;
     c.lineWidth = 1 / Math.max(.02, V.shown);
     c.beginPath();
@@ -983,7 +986,7 @@ function drawOverlay() {
   const anchorUnit = 1 / Math.max(.02, V.shown);
   for (const layer of sels) {
     if (!PM.GL.bounds(layer, PM.time)) continue;
-    const pivot = layerWorldPivot(PM, layer, PM.time);
+    const pivot = layerWorldPivot(PM, layer, PM.time, space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
     c.beginPath();
     c.arc(pivot.x, pivot.y, 5 * anchorUnit, 0, Math.PI * 2);
@@ -1007,7 +1010,7 @@ function drawOverlay() {
     selection.corners.slice(1).forEach((point) => c.lineTo(point.x, point.y));
     c.closePath();
     c.stroke();
-    if (!selection.transformable || selection.layers.some((layer: any) => is3DLayer(PM,layer))) { c.restore(); return; }
+    if (!selection.transformable || selection.layers.some((layer: any) => space3d.is3DLayer(layer))) { c.restore(); return; }
     const rotate = rotationHandlePoint(selection);
     c.beginPath();
     c.moveTo(selection.handles.n.x, selection.handles.n.y);
@@ -1153,7 +1156,7 @@ function snapLinesChanged(previous: SnapLine[] | null, next: SnapLine[] | null):
 }
 
 function worldBounds(L: any, T: any) {
-  const bounds = layerWorldBounds(PM, L, T);
+  const bounds = layerWorldBounds(PM, L, T, space3d);
   if (!bounds) return null;
   const { x0, x1, y0, y1, cx, cy } = bounds;
   return { x0, x1, y0, y1, cx, cy };
@@ -1208,11 +1211,11 @@ Object.assign(V, {
   snapCandidatesFromPoints, snapLinesChanged, passedMoveDragThreshold, calculateResize, resizeCursorForHandle,
   resizeLocksAspect,
   resolveSelectionGeometry: (layers: any = visualSelection(PM), T: any = PM.time) =>
-    resolveSelectionGeometry(PM, layers, T),
+    resolveSelectionGeometry(PM, layers, T, space3d),
   selectionTransformRoots: (layers: any = visualSelection(PM), T: any = PM.time) =>
     selectionTransformRoots(PM, layers, T),
-  layerWorldPivot: (layer: any, T: any = PM.time) => layerWorldPivot(PM, layer, T),
-  layerContainsPoint: (L: any, x: any, y: any, T: any) => layerContainsPoint(PM, L, x, y, T),
+  layerWorldPivot: (layer: any, T: any = PM.time) => layerWorldPivot(PM, layer, T, space3d),
+  layerContainsPoint: (L: any, x: any, y: any, T: any) => layerContainsPoint(PM, L, x, y, T, space3d),
 });
 
 /* ── direct manipulation ───────────────────────────────── */
@@ -1289,13 +1292,13 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
   listen(fenceLegacyListeners ? stage : inner, 'dblclick', guarded((e: any) => {
     if(PM.tool==='pen'){const L=PM.firstSel(),path=L?.d?.paths?.find((p:any)=>p.id===PM.activePath)||L?.masks?.find((m:any)=>m.path?.id===PM.activePath)?.path;if(path&&!L.lock){PM.Edit.mutate('Close path',()=>{if(path.p.closed.kf.length)PM.setKeyOn(path.p.closed,PM.time-L.from,true);else path.p.closed.v=true;PM.activePath=null;},{origin:'canvas'});PM.invalidate();PM.Inspector?.refresh?.();}e.preventDefault();e.stopPropagation();return;}
     const [x, y] = toComp(e);
-    let L = editableTextAtPoint(PM, x, y, PM.time);
+    let L = editableTextAtPoint(PM, x, y, PM.time, space3d);
     const remembered = V.textDoubleClickCandidate;
     if (!L && remembered && Date.now() - remembered.at < 700) {
       const candidate = PM.L?.(remembered.id);
       if (candidate?.type === 'text' && !candidate.lock
         && PM.active?.(candidate, PM.time) !== false
-        && layerContainsPoint(PM, candidate, x, y, PM.time)) L = candidate;
+        && layerContainsPoint(PM, candidate, x, y, PM.time, space3d)) L = candidate;
     }
     V.textDoubleClickCandidate = null;
     if (L) {
@@ -1356,7 +1359,7 @@ function updateStageCursor(e: any) {
   if (tool === 'shape') { setStageCursor('crosshair'); return; }
   if (tool === 'text') { setStageCursor('text'); return; }
   const [x, y] = toComp(e), T = PM.time;
-  const selection = resolveSelectionGeometry(PM, visualSelection(PM), T);
+  const selection = resolveSelectionGeometry(PM, visualSelection(PM), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) { setStageCursor(cursorForHit(selection, hit)); return; }
@@ -1402,7 +1405,7 @@ function onDown(e: any) {
     const candidate = visualSelection(PM).find((layer: any) =>
       layer?.type === 'text' && !layer.lock
       && PM.active?.(layer, PM.time) !== false
-      && layerContainsPoint(PM, layer, point.x, point.y, PM.time));
+      && layerContainsPoint(PM, layer, point.x, point.y, PM.time, space3d));
     if (candidate) V.textDoubleClickCandidate = {
       id: candidate.id, at: Date.now(), clientX: e.clientX, clientY: e.clientY,
     };
@@ -1411,7 +1414,7 @@ function onDown(e: any) {
   const tool = V.temporaryTool || PM.tool || 'select';
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') return startZoom(e);
-  if (tool === 'pen' && visualSelection(PM).some((layer: any) => is3DLayer(PM,layer))) { PM.toast('Turn off 3D temporarily to edit path vertices'); return; }
+  if (tool === 'pen' && visualSelection(PM).some((layer: any) => space3d.is3DLayer(layer))) { PM.toast('Turn off 3D temporarily to edit path vertices'); return; }
   if (tool === 'pen') return startPathEdit(PM,e,pointerComp,beginDrag,V.shown);
   if (tool === 'shape') return startShape(e);
   if (tool === 'text') return startText(e);
@@ -1421,7 +1424,7 @@ function onDown(e: any) {
   const [x, y] = toComp(e);
   const T = PM.time;
 
-  const selection = resolveSelectionGeometry(PM, visualSelection(PM), T);
+  const selection = resolveSelectionGeometry(PM, visualSelection(PM), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) return startTransform(e, selection, hit, T);
@@ -1452,7 +1455,7 @@ function onDown(e: any) {
     return;
   }
   PM.selectLayers(L.id, e.shiftKey);
-  const nextSelection = resolveSelectionGeometry(PM, visualSelection(PM), T);
+  const nextSelection = resolveSelectionGeometry(PM, visualSelection(PM), T, space3d);
   if (nextSelection) startMove(e, nextSelection.roots, T, { selectionLayers: nextSelection.layers });
 }
 
@@ -1518,7 +1521,7 @@ function startSelectionMarquee(e: any): void {
       }
       const enclosed = PM.proj.layers.filter((layer: any) => {
         if (!PM.active(layer, PM.time) || PM.TYPE_META?.[layer.type]?.pickable === false) return false;
-        const bounds = layerWorldBounds(PM, layer, PM.time);
+        const bounds = layerWorldBounds(PM, layer, PM.time, space3d);
         return !!bounds && bounds.x0 >= box.x0 && bounds.x1 <= box.x1 && bounds.y0 >= box.y0 && bounds.y1 <= box.y1;
       }).map((layer: any) => layer.id);
       if (!e.shiftKey) PM.selectLayers(enclosed);
@@ -1567,9 +1570,9 @@ function createShape(box: DragBox): void {
     && (variant === 'rect' || variant === 'ellipse');
   if (canMask) {
     const matrix = PM.worldMatrix(selected, PM.time) as AffineMatrix;
-    const inv = is3DLayer(PM,selected) ? inversePlane(planeMatrix(PM,selected,PM.time)) : null;
-    const first = inv ? projectPoint(inv, {x:box.x0,y:box.y0}) : invertPoint(matrix, { x: box.x0, y: box.y0 });
-    const second = inv ? projectPoint(inv, {x:box.x1,y:box.y1}) : invertPoint(matrix, { x: box.x1, y: box.y1 });
+    const inv = space3d.is3DLayer(selected) ? space3d.inversePlane(space3d.planeMatrix(selected,PM.time)) : null;
+    const first = inv ? space3d.projectPoint(inv, {x:box.x0,y:box.y0}) : invertPoint(matrix, { x: box.x0, y: box.y0 });
+    const second = inv ? space3d.projectPoint(inv, {x:box.x1,y:box.y1}) : invertPoint(matrix, { x: box.x1, y: box.y1 });
     if (!first || !second) return;
     PM.Edit.mutate('Draw mask', () => {
       const mask = PM.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect');
@@ -1649,24 +1652,24 @@ function startText(e: any): void {
 
 function selectionForTransformTool(e: any): SelectionGeometry | null {
   const point = pointerComp(e);
-  let selection = resolveSelectionGeometry(PM, visualSelection(PM), PM.time);
+  let selection = resolveSelectionGeometry(PM, visualSelection(PM), PM.time, space3d);
   if (selection && pointInSelection(selection, point.x, point.y)) return selection;
   const layer = PM.GL.pick(point.x, point.y, PM.time);
   if (!layer) return null;
   PM.selectLayers(layer.id, e.shiftKey);
-  selection = resolveSelectionGeometry(PM, visualSelection(PM), PM.time);
+  selection = resolveSelectionGeometry(PM, visualSelection(PM), PM.time, space3d);
   return selection;
 }
 
 function startRotationTool(e: any): void {
   const selection = selectionForTransformTool(e);
-  if (selection?.layers.some((layer: any) => is3DLayer(PM,layer))) { PM.toast('Use X, Y and Z Rotation in Transform for 3D layers'); return; }
+  if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { PM.toast('Use X, Y and Z Rotation in Transform for 3D layers'); return; }
   if (selection?.transformable) startTransform(e, selection, { rotate: true }, PM.time);
 }
 
 function startAnchorTool(e: any): void {
   const selection = selectionForTransformTool(e);
-  if (selection?.layers.some((layer: any) => is3DLayer(PM,layer))) { PM.toast('Use Anchor X, Y and Z in Transform for 3D layers'); return; }
+  if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { PM.toast('Use Anchor X, Y and Z in Transform for 3D layers'); return; }
   if (!selection?.transformable || selection.layers.length !== 1) return;
   const pointer = pointerComp(e);
   if (Math.hypot(pointer.x - selection.pivotWorld.x, pointer.y - selection.pivotWorld.y) > 12 / Math.max(.02, V.shown)) return;
@@ -1721,11 +1724,11 @@ function pointInSelection(selection: SelectionGeometry, x: number, y: number): b
     const bounds = selection.bounds;
     return x >= bounds.x0 && x <= bounds.x1 && y >= bounds.y0 && y <= bounds.y1;
   }
-  return layerContainsPoint(PM, selection.layers[0], x, y, PM.time);
+  return layerContainsPoint(PM, selection.layers[0], x, y, PM.time, space3d);
 }
 
 function handleAt(selection: SelectionGeometry, x: any, y: any) {
-  if (selection.layers.some((layer: any) => is3DLayer(PM,layer))) return null;
+  if (selection.layers.some((layer: any) => space3d.is3DLayer(layer))) return null;
   const tolerance = 9 / Math.max(.02, V.shown);
   const rotate = rotationHandlePoint(selection);
   if (Math.hypot(x - rotate.x, y - rotate.y) <= tolerance * 1.2) return { rotate: true };
@@ -1744,13 +1747,13 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
   const start = layers.map((L: any) => {
     const x = PM.ev(L, 'position.x', T), y = PM.ev(L, 'position.y', T);
-    const m = is3DLayer(PM,L) ? planeMatrix(PM,L,T,true) : null;
-    return {L,x,y,inverse:m ? inversePlane(m) : null,pivot:m ? projectPoint(m,{x,y}) : null};
+    const m = space3d.is3DLayer(L) ? space3d.planeMatrix(L,T,true) : null;
+    return {L,x,y,inverse:m ? space3d.inversePlane(m) : null,pivot:m ? space3d.projectPoint(m,{x,y}) : null};
   });
   const moveDelta = (s: any, dx: number, dy: number): [number,number] => {
-    if (!is3DLayer(PM,s.L)) return worldDeltaToLocal(s.L,T,dx,dy);
+    if (!space3d.is3DLayer(s.L)) return worldDeltaToLocal(s.L,T,dx,dy);
     if (!s.inverse) return [0,0];
-    const p = projectPoint(s.inverse,{x:s.pivot.x+dx,y:s.pivot.y+dy});
+    const p = space3d.projectPoint(s.inverse,{x:s.pivot.x+dx,y:s.pivot.y+dy});
     return [p.x-s.x,p.y-s.y];
   };
   const selectionLayers = options.selectionLayers || layers;
@@ -1780,7 +1783,7 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
          snapping for precise free movement. Keeping those jobs separate also
          lets an unconstrained drag align both axes at once. */
       let snap: SnapResult = { dx: 0, dy: 0, lines: [] };
-      const box = !(ev.metaKey || ev.ctrlKey) && !selectionLayers.some((layer: any) => is3DLayer(PM,layer)) ? unionBounds(selectionLayers, T) : null;
+      const box = !(ev.metaKey || ev.ctrlKey) && !selectionLayers.some((layer: any) => space3d.is3DLayer(layer)) ? unionBounds(selectionLayers, T) : null;
       if (box) {
         snap = snapBox(snapCandidatesFromPoints(boxSnapPoints(box)), candidates,
           SNAP_DISTANCE / Math.max(.02, V.shown), axes);
@@ -1955,7 +1958,7 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
     sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T),
     rotation: PM.ev(L, 'rotation', T),
     skew: PM.ev(L, 'skew', T),
-    pivotWorld: layerWorldPivot(PM, L, T),
+    pivotWorld: layerWorldPivot(PM, L, T, space3d),
     parentLinear: (() => {
       const matrix = parentWorldMatrix(L, T);
       return matrix ? [matrix[0], matrix[1], matrix[2], matrix[3]] as LinearMatrix : null;

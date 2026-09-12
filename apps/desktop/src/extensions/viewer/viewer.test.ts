@@ -10,8 +10,23 @@ import {
   shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 import type { PreviewViewport } from './viewer';
+import type { Space3DAPI } from 'powermove';
 
 const originalWindow = (globalThis as any).window;
+
+function testSpace3d(PM: Record<string, any>): Space3DAPI {
+  return {
+    is3DLayer: () => false,
+    planeContains: (layer: any, time: number, x: number, y: number, bounds: any) => {
+      const [a, b, c, d, tx, ty] = PM.worldMatrix(layer, time);
+      const determinant = a * d - b * c;
+      if (Math.abs(determinant) < 1e-10) return false;
+      const localX = (d * (x - tx) - c * (y - ty)) / determinant;
+      const localY = (-b * (x - tx) + a * (y - ty)) / determinant;
+      return localX >= bounds.x0 && localX <= bounds.x1 && localY >= bounds.y0 && localY <= bounds.y1;
+    }
+  } as unknown as Space3DAPI;
+}
 
 afterEach(() => {
   if (originalWindow === undefined) delete (globalThis as any).window;
@@ -27,7 +42,8 @@ function viewerRegistry(): Record<string, any> {
     bus: { on() {} },
     GL: {},
   };
-  install(PM);
+  PM.space3d = testSpace3d(PM);
+  install(PM, PM.space3d);
   return PM;
 }
 
@@ -227,8 +243,9 @@ describe('viewer runtime', () => {
       ? [1, 0, 0, 1, 960, 800]
       : [1, 0, 0, 1, 0, 0];
 
-    expect(layerContainsPoint(PM, selected, 960, 800, 0)).toBe(true);
-    expect(layerContainsPoint(PM, selected, 700, 800, 0)).toBe(false);
+    const space3d = testSpace3d(PM);
+    expect(layerContainsPoint(PM, selected, 960, 800, 0, space3d)).toBe(true);
+    expect(layerContainsPoint(PM, selected, 700, 800, 0, space3d)).toBe(false);
   });
 
   it('edits selected text beneath a full-frame top layer before using pixel pick', () => {
@@ -243,8 +260,9 @@ describe('viewer runtime', () => {
       worldMatrix: () => [1, 0, 0, 1, 500, 350],
     };
 
-    expect(editableTextAtPoint(PM, 500, 350, 0)).toBe(selected);
-    expect(editableTextAtPoint(PM, 800, 350, 0)).toBeNull();
+    const space3d = testSpace3d(PM);
+    expect(editableTextAtPoint(PM, 500, 350, 0, space3d)).toBe(selected);
+    expect(editableTextAtPoint(PM, 800, 350, 0, space3d)).toBeNull();
   });
 
   it('resizes edge handles on one axis and preserves the opposite midpoint', () => {
@@ -340,7 +358,7 @@ describe('viewer runtime', () => {
       ev: () => 0,
     };
 
-    const selection = resolveSelectionGeometry(PM, [left, right], 0);
+    const selection = resolveSelectionGeometry(PM, [left, right], 0, testSpace3d(PM));
     expect(selection?.mode).toBe('common');
     expect(selection?.roots).toEqual([left, right]);
     expect(selection?.bounds).toEqual({ x0: 90, y0: 115, x1: 225, y1: 190, w: 135, h: 75 });
@@ -358,7 +376,7 @@ describe('viewer runtime', () => {
       ev: () => 0,
     };
 
-    const selection = resolveSelectionGeometry(PM, [left, locked], 0);
+    const selection = resolveSelectionGeometry(PM, [left, locked], 0, testSpace3d(PM));
     expect(selection?.layers).toEqual([left, locked]);
     expect(selection?.bounds).toEqual({ x0: 40, y0: 90, x1: 160, y1: 110, w: 120, h: 20 });
     expect(selection?.transformable).toBe(false);
@@ -372,7 +390,7 @@ describe('viewer runtime', () => {
       ev: (_layer: any, path: string) => path === 'anchor.x' ? 10 : 20,
     };
 
-    expect(layerWorldPivot(PM, layer, 0)).toEqual({ x: 80, y: 210 });
+    expect(layerWorldPivot(PM, layer, 0, testSpace3d(PM))).toEqual({ x: 80, y: 210 });
   });
 
   it('scales and rotates relative positions around the common fixed pivot', () => {

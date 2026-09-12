@@ -164,6 +164,55 @@ describe('timeline extension', () => {
     expect(binding).not.toHaveProperty('inFields');
   });
 
+  it('owns the property-reveal and adjacent-keyframe command ids', () => {
+    const layer = {
+      id: 'layer-1', from: 0, collapsed: true, reveal: null,
+      p: { 'position.x': { v: 0, kf: [{ i: 'key-1', t: 2 }] } }
+    };
+    const PM: Record<string, any> = {
+      h: vi.fn(),
+      clamp: vi.fn(),
+      bus: { on: vi.fn(), emit: vi.fn() },
+      invalidate: vi.fn(),
+      proj: { dur: 10, layers: [layer] },
+      sel: { layers: [layer.id], keys: [], chan: null },
+      selLayers: () => [layer],
+      allProps: (target: any) => Object.entries(target.p).map(([key, prop]) => ({ key, prop })),
+      groupAncestors: () => [],
+      UIState: {
+        getReveal: (target: any) => target.reveal,
+        setReveal: (target: any, reveal: string[]) => { target.reveal = reveal; },
+        getLayerCollapsed: (target: any) => target.collapsed,
+        setLayerCollapsed: (target: any, collapsed: boolean) => { target.collapsed = collapsed; }
+      },
+      time: 0,
+      setTime: vi.fn()
+    };
+    const commands = new Map<string, Record<string, any>>();
+    activate({
+      host: { pm: PM },
+      space3d: { CHANNELS_3D: {} },
+      panels: { register: vi.fn() },
+      commands: { register: vi.fn((definition) => void commands.set(definition.id, definition)) },
+      keybindings: { bind: vi.fn() }
+    } as unknown as PowermoveAPI);
+
+    expect([...commands.keys()].filter((id) => id.startsWith('timeline.revealProperty:'))).toEqual([
+      'timeline.revealProperty:p', 'timeline.revealProperty:s', 'timeline.revealProperty:r',
+      'timeline.revealProperty:t', 'timeline.revealProperty:a', 'timeline.revealProperty:u',
+      'timeline.revealProperty:m', 'timeline.revealProperty:f', 'timeline.revealProperty:e',
+      'timeline.revealProperty:l'
+    ]);
+    expect(commands.has('timeline.revealAll')).toBe(true);
+    expect(commands.has('timeline.adjacentKeyframe:prev')).toBe(true);
+    expect(commands.has('timeline.adjacentKeyframe:next')).toBe(true);
+
+    commands.get('timeline.revealProperty:p')?.run();
+    expect(layer.reveal).toEqual(['position.x']);
+    commands.get('timeline.adjacentKeyframe:next')?.run();
+    expect(PM.setTime).toHaveBeenCalledWith(2);
+  });
+
   it('builds the exact canvas skeleton and rebinds the runtime to replacement hosts', () => {
     let panel: PanelDefinition | undefined;
     const PM = timelinePM();

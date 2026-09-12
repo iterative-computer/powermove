@@ -1,4 +1,3 @@
-import { propertyShortcuts } from '../timeline/property-reveal';
 import type { KeybindingDefinition } from 'powermove';
 
 /**
@@ -118,8 +117,17 @@ for (const [chord, command] of TRANSPORT_CHORDS) {
 bind('shift+pageup', 'stepFrames', false, [-10]);
 bind('shift+pagedown', 'stepFrames', false, [10]);
 for (const modifier of ['cmd', 'ctrl']) {
-  bind(`${modifier}+left`, modifier === 'ctrl' ? 'prevKeyframe' : 'prevFrame');
-  bind(`${modifier}+right`, modifier === 'ctrl' ? 'nextKeyframe' : 'nextFrame');
+  const previous = modifier === 'ctrl' ? 'timeline.adjacentKeyframe:prev' : 'prevFrame';
+  const next = modifier === 'ctrl' ? 'timeline.adjacentKeyframe:next' : 'nextFrame';
+  bind(`${modifier}+left`, previous);
+  bind(`${modifier}+right`, next);
+  if (modifier === 'ctrl') {
+    /* Phase 1 compatibility: a focused legacy harness may mount the keymap
+       without the timeline. Missing commands fall through to these ids; the
+       timeline-owned commands win whenever that extension is active. */
+    bind(`${modifier}+left`, 'prevKeyframe');
+    bind(`${modifier}+right`, 'nextKeyframe');
+  }
   bind(`${modifier}+shift+left`, 'stepFrames', false, [-10]);
   bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
 }
@@ -127,6 +135,8 @@ for (const modifier of ['cmd', 'ctrl']) {
 /* Timeline navigation and layer timing use AE's native muscle memory. */
 bind('j', 'prevVisibleEvent');
 bind('k', 'nextVisibleEvent');
+bind('shift+j', 'timeline.adjacentKeyframe:prev');
+bind('shift+k', 'timeline.adjacentKeyframe:next');
 bind('shift+j', 'prevKeyframe');
 bind('shift+k', 'nextKeyframe');
 bind('i', 'gotoLayerIn');
@@ -161,10 +171,20 @@ for (const [chord, command] of BARE_KEYS) {
   bind(chord, command);
   bind(`shift+${chord}`, command);
 }
-for (const [key, command] of propertyShortcuts) {
+const PROPERTY_SHORTCUTS = [
+  ['p', 'revealPos'], ['s', 'revealScale'], ['r', 'revealRot'], ['t', 'revealOpacity'],
+  ['a', 'revealAnchor'], ['u', 'revealKeys'], ['m', 'revealMasks'], ['f', 'revealFeather'],
+  ['e', 'revealEffects'], ['l', 'revealAudio']
+] as const;
+for (const [key, legacyCommand] of PROPERTY_SHORTCUTS) {
+  const command = `timeline.revealProperty:${key}`;
   bind(key, command);
   bind(`shift+${key}`, command, false, [true]);
+  bind(key, legacyCommand);
+  bind(`shift+${key}`, legacyCommand);
 }
+bind('cmd+`', 'timeline.revealAll');
+bind('ctrl+`', 'timeline.revealAll');
 bind('cmd+`', 'revealAll');
 bind('ctrl+`', 'revealAll');
 

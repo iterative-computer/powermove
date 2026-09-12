@@ -177,6 +177,16 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
           }
 
           const source = (await readFile(args.path)).toString('utf8');
+          if (args.path.endsWith('.css')) {
+            return {
+              contents: [
+                'const style = document.createElement("style");',
+                `style.textContent = ${JSON.stringify(source)};`,
+                'document.head.appendChild(style);'
+              ].join('\n'),
+              loader: 'js'
+            };
+          }
           if (args.path.endsWith('.svelte')) {
             const compiler = await getSvelteCompiler();
             const compiled = compiler.compile(source, {

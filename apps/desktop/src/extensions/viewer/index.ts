@@ -33,7 +33,7 @@ export default function activate(api: PowermoveAPI): void {
 
   // Install at activation time so legacy consumers retain the PM.Viewer and
   // PM.setOrKey contracts even before the panel has mounted.
-  const runtime = createViewerRuntime(PM);
+  const runtime = createViewerRuntime(PM, api.space3d);
   const disposeRuntime = runtime.dispose as () => void;
   api.onDispose(() => disposeRuntime());
 
@@ -72,7 +72,7 @@ export default function activate(api: PowermoveAPI): void {
       stage.append(inner, overlay, styles);
       body.replaceChildren(stage);
 
-      createViewerRuntime(PM).attach(stage);
+      createViewerRuntime(PM, api.space3d).attach(stage);
       installSourcePreview(PM, stage);
     }
   });

@@ -28,17 +28,15 @@ afterEach(async () => {
 });
 
 describe('compileExtension', () => {
-  it('compiles the Phase 0 source-heavy built-in without a deferred boundary escape', async () => {
+  it('compiles every source-heavy built-in through the same forkable extension pipeline', async () => {
     const outDir = await temporaryDirectory();
-    const id = 'inspector';
-    const dir = path.resolve('src/extensions', id);
-    const result = await compileExtension({ dir, entry: 'index.ts', outDir });
-    if (!result.ok) throw new Error(`${id}: ${result.error}`);
-    expect(result.bundlePath).toBe(path.join(outDir, id, 'bundle.js'));
+    for (const id of ['viewer', 'timeline', 'inspector']) {
+      const dir = path.resolve('src/extensions', id);
+      const result = await compileExtension({ dir, entry: 'index.ts', outDir });
+      if (!result.ok) throw new Error(`${id}: ${result.error}`);
+      expect(result.bundlePath).toBe(path.join(outDir, id, 'bundle.js'));
+    }
   });
-
-  it.todo('Phase 1: timeline compiles after its boundary escape is migrated to the kernel API');
-  it.todo('Phase 1: viewer compiles through the forkable extension pipeline');
 
   it('bundles TypeScript to the atomic target and returns its SHA-256 prefix', async () => {
     const { dir, outDir } = await fixture();
@@ -56,6 +54,21 @@ describe('compileExtension', () => {
     const output = await readFile(result.bundlePath);
     expect(result.hash).toBe(createHash('sha256').update(output).digest('hex').slice(0, 16));
     expect(output.toString()).toContain('message = "hello"');
+    expect(await readdir(path.dirname(result.bundlePath))).toEqual(['bundle.js']);
+  });
+
+  it('injects imported CSS into the single JavaScript bundle', async () => {
+    const { dir, outDir } = await fixture('styled-extension');
+    await writeFile(path.join(dir, 'panel.css'), '.compiler-css-fixture { color: rebeccapurple; }');
+    await writeFile(path.join(dir, 'index.ts'), "import './panel.css'; export default () => undefined;");
+
+    const result = await compileExtension({ dir, entry: 'index.ts', outDir });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const output = await readFile(result.bundlePath, 'utf8');
+    expect(output).toContain('document.createElement("style")');
+    expect(output).toContain('.compiler-css-fixture { color: rebeccapurple; }');
     expect(await readdir(path.dirname(result.bundlePath))).toEqual(['bundle.js']);
   });
 

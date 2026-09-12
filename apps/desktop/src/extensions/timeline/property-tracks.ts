@@ -1,4 +1,16 @@
-import { CHANNELS_3D } from '../../renderer/src/legacy/core/space-3d';
+import type { Space3DAPI } from 'powermove';
+
+const COMPATIBILITY_3D_CHANNELS = {
+  perspective: 50,
+  'position.z': 0,
+  'anchor.z': 0,
+  'scale.z': 100,
+  'rotation.x': 0,
+  'rotation.y': 0,
+  'orientation.x': 0,
+  'orientation.y': 0,
+  'orientation.z': 0,
+} as const;
 /** Presentation groups retain the real scalar channels and key IDs. No migration
  * or resampling is needed, including for old projects with unequal key times. */
 export const scalePaths = ['scale.x', 'scale.y'];
@@ -17,8 +29,9 @@ export function keyMembers(key: any): any[] {
   return key.members ?? [{ key }];
 }
 
-export function timelineProperties(PM: any, layer: any): any[] {
-  const props = PM.allProps(layer).filter((p: any) => layer.threeD || !(p.key in CHANNELS_3D));
+export function timelineProperties(PM: any, layer: any, space3d?: Pick<Space3DAPI, 'CHANNELS_3D'>): any[] {
+  const channels3d = space3d?.CHANNELS_3D ?? PM.space3d?.CHANNELS_3D ?? COMPATIBILITY_3D_CHANNELS;
+  const props = PM.allProps(layer).filter((p: any) => layer.threeD || !(p.key in channels3d));
   const axes = scalePaths.map(path => props.find((p: any) => p.key === path)).filter(Boolean);
   if (axes.length !== 2) return props;
   const times = new Map<number, any[]>();

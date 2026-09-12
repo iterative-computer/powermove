@@ -5,6 +5,8 @@ import type { PanelDefinition, PowermoveAPI } from 'powermove';
 
 import activate from './index';
 
+const testSpace3d = { is3DLayer: () => false } as unknown as PowermoveAPI['space3d'];
+
 describe('viewer extension', () => {
   beforeEach(() => {
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
@@ -33,6 +35,7 @@ describe('viewer extension', () => {
     };
     const api = {
       host: { pm: PM },
+      space3d: testSpace3d,
       onDispose: vi.fn(),
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
     } as unknown as PowermoveAPI;
@@ -70,6 +73,7 @@ describe('viewer extension', () => {
     };
     activate({
       host: { pm: PM },
+      space3d: testSpace3d,
       onDispose: vi.fn(),
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
     } as unknown as PowermoveAPI);
@@ -110,6 +114,7 @@ describe('viewer extension', () => {
     };
     activate({
       host: { pm: PM },
+      space3d: testSpace3d,
       onDispose: vi.fn((dispose: () => void) => void (firstDispose = dispose)),
       panels: { register: vi.fn((definition: PanelDefinition) => void (firstPanel = definition)) }
     } as unknown as PowermoveAPI);
@@ -129,6 +134,7 @@ describe('viewer extension', () => {
     let replacementDispose: (() => void) | undefined;
     activate({
       host: { pm: PM },
+      space3d: testSpace3d,
       onDispose: vi.fn((dispose: () => void) => void (replacementDispose = dispose)),
       panels: { register: vi.fn((definition: PanelDefinition) => void (replacementPanel = definition)) }
     } as unknown as PowermoveAPI);
@@ -172,6 +178,7 @@ describe('viewer extension', () => {
     let firstDispose: (() => void) | undefined;
     activate({
       host: { pm: PM },
+      space3d: testSpace3d,
       onDispose: vi.fn((dispose: () => void) => void (firstDispose = dispose)),
       panels: { register: vi.fn() },
     } as unknown as PowermoveAPI);
@@ -182,7 +189,7 @@ describe('viewer extension', () => {
     firstDispose?.();
     addListener.mockClear();
     activate({
-      host: { pm: PM }, onDispose: vi.fn(), panels: { register: vi.fn() },
+      host: { pm: PM }, space3d: testSpace3d, onDispose: vi.fn(), panels: { register: vi.fn() },
     } as unknown as PowermoveAPI);
     expect(addListener.mock.calls.find(([event]) => event === 'pointerdown')?.[2]).toBe(true);
   });

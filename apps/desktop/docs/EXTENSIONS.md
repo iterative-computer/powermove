@@ -70,7 +70,7 @@ inside the extension folder. No npm packages, no `..` escapes.
 
 Full types: `powermove.d.ts` (next to this file). Summary:
 
-- **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)`, `close`, `isOpen`, `refresh`, `list`.
+- **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)` or `open(id, { dock, index })`, `close`, `isOpen`, `refresh`, `list`.
   `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.
 - **commands** — `register({ id, label, category, run, when? })`, `run(id, …args)`, `has`, `list`. Commands appear in the palette (⌘K).
 - **keybindings** — `bind({ key, command, args?, inFields?, looseModifiers?, repeat?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through. Repeated browser keydowns are ignored by default; set `repeat: true` only for continuous, repeat-safe actions such as frame stepping or nudging. Suppressed repeats do not prevent the browser's default behavior.
@@ -86,13 +86,28 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
 - **project** — `get()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`.
   `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
-- **ui** — `toast`, `confirm`, `menu`, `modal`, `icon`; `ui.controls` exposes
-  the kernel's versioned field/row/section components and built-in binding helpers.
+- **anim** — channel evaluation, property/keyframe edits, easing, expression errors, animation versioning, and 2D transform matrices.
+- **model** — property/keyframe/layer/project factories, model schema tables, current composition, and layer lookups.
+- **selection** — live selection reads, mutation with legacy events/invalidation, selected-key resolution, and key-selection mode.
+- **groups** — hierarchy queries, selection expansion, stack normalization, and pose-preserving reparenting.
+- **transport** — time, playback, stepping, quality/performance, preview resolution, and render/UI invalidation.
+- **history** — raw transaction begin/commit/cancel, undo/redo, external entries, and transaction-aware selection history.
+- **edit** — validated one-shot edits, gesture transactions, dispatch, cancel/rollback, and structural mutation.
+- **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading.
+- **render** — WebGL bounds/picking/setup, raster access, offscreen frame rendering, and snapshots.
+- **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata.
+- **ui** — controls, overlays, menus, pointer drag, parent picking, shader editor opening, and PM-bound `gesture` construction.
+- **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
+- **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations.
+- **util** — numeric interpolation/snapping, timecode, ids, and colour conversion.
+- **ease** — easing preset lookup and handle-name matching.
+- **space3d** — PM-bound 3D transforms, perspective planes, projection, inversion, and containment.
+- **services** — LIFO typed runtime service registration; disposing an override restores the previous implementation.
 - **storage** — per-extension `get/set/delete` (persisted).
 - **events / on** — `project:changed`, `selection`, `time`, `transport`, `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
 - **extensions** — introspection: `list`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
-- **host.pm** — UNSTABLE escape hatch to the legacy `PM` object. Use when the typed surface genuinely lacks something; prefer typed APIs.
-- **host.state** — UNSTABLE escape hatch to the renderer's `doc`, `sel`,
+- **host.pm** — **Deprecated**, unstable escape hatch to the legacy `PM` object; use the typed namespaces above.
+- **host.state** — **Deprecated**, unstable escape hatch to the renderer's `doc`, `sel`,
   `transport`, and `perf` rune stores for built-in UI migrations.
 
 ## Patterns

@@ -25,6 +25,7 @@ import { Registry } from './registry';
 import * as glslHelpers from './glsl';
 import { validateEffect, validateTransition } from './glsl';
 import { validateExtensionLayerDefinition } from './extension-layers';
+import { createServicesRegistry, type ServicesRegistry } from './services';
 
 /* ── keybindings ─────────────────────────────────────────── */
 
@@ -125,6 +126,7 @@ export interface Kernel {
   readonly layerTypes: Registry<ExtensionLayerDefinition>;
   readonly themes: Registry<ThemeDefinition>;
   readonly status: Registry<StatusItem>;
+  readonly services: ServicesRegistry;
   readonly events: EventBus;
   readonly theme: ThemeState;
   /**
@@ -168,6 +170,7 @@ export function createKernel(): Kernel {
   const layerTypes = new Registry<ExtensionLayerDefinition>();
   const themes = new Registry<ThemeDefinition>();
   const status = new Registry<StatusItem>();
+  const services = createServicesRegistry();
   const events = new EventBus();
   const theme: ThemeState = { activeId: 'default', scheme: 'system' };
 
@@ -184,6 +187,7 @@ export function createKernel(): Kernel {
     layerTypes,
     themes,
     status,
+    services,
     events,
     theme,
     glsl: glslHelpers,
@@ -406,6 +410,7 @@ export function createKernel(): Kernel {
       layerTypes.clear();
       themes.clear();
       status.clear();
+      services.clear();
       paletteProviders.length = 0;
       menus.clear();
       events.clear();

@@ -1,9 +1,9 @@
 <script lang="ts">
   import { inspectorContext } from './context';
-  import { type EditBinding } from '../../renderer/src/controls/gesture';
   import { axisContentKey, axisPath, type FontAxis } from 'powermove';
   const { api, doc, transport } = inspectorContext();
   const { NumField, Row } = api.ui.controls;
+  type EditBinding = ConstructorParameters<typeof api.ui.gesture>[0];
   let { PM, layer, axis }: { PM: Record<string, any>; layer: any; axis: Pick<FontAxis, 'tag' | 'label' | 'default'> & Partial<FontAxis> } = $props();
   const key = $derived(axisContentKey(axis.tag)), path = $derived(axisPath(axis.tag));
   const property = $derived((doc.tick.values, doc.tick.history, doc.proj, layer.d[key]));

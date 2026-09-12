@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(188);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(187);
+    expect(captured).toHaveLength(214);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(213);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
@@ -142,7 +142,7 @@ describe('keymap-default', () => {
       ['shift+pageup', 'stepFrames'], ['shift+pagedown', 'stepFrames'],
       ['shift+home', 'gotoWorkIn'], ['shift+end', 'gotoWorkOut'],
       ['j', 'prevVisibleEvent'], ['k', 'nextVisibleEvent'],
-      ['shift+j', 'prevKeyframe'], ['shift+k', 'nextKeyframe'],
+      ['shift+j', 'timeline.adjacentKeyframe:prev'], ['shift+k', 'timeline.adjacentKeyframe:next'],
       ['i', 'gotoLayerIn'], ['o', 'gotoLayerOut'],
       ['[', 'moveLayerIn'], [']', 'moveLayerOut'],
       ['alt+[', 'trimIn'], ['alt+]', 'trimOut'],
@@ -158,6 +158,36 @@ describe('keymap-default', () => {
     expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'i', command: 'trimIn' }));
     expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'k', command: 'transportPause' }));
     expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'g', command: 'graph' }));
+    expect(KEYMAP_DEFAULT).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'ctrl+left', command: 'timeline.adjacentKeyframe:prev' }),
+      expect.objectContaining({ key: 'ctrl+right', command: 'timeline.adjacentKeyframe:next' })
+    ]));
+  });
+
+  it('binds property disclosure only through timeline command ids', () => {
+    for (const key of ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l']) {
+      expect(KEYMAP_DEFAULT).toContainEqual(expect.objectContaining({
+        key,
+        command: `timeline.revealProperty:${key}`
+      }));
+      expect(KEYMAP_DEFAULT).toContainEqual(expect.objectContaining({
+        key: `shift+${key}`,
+        command: `timeline.revealProperty:${key}`,
+        args: [true]
+      }));
+    }
+    expect(KEYMAP_DEFAULT).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'cmd+`', command: 'timeline.revealAll' }),
+      expect.objectContaining({ key: 'ctrl+`', command: 'timeline.revealAll' })
+    ]));
+    /* The timeline-owned id is tried first. Legacy ids are Phase 1 fallbacks
+       for hosts that mount the keymap before (or without) the timeline. */
+    for (const key of ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l']) {
+      const bindings = KEYMAP_DEFAULT.filter(({ key: chord }) => chord === key);
+      expect(bindings[0]?.command).toBe(`timeline.revealProperty:${key}`);
+      expect(bindings[0]?.priority).toBe(100);
+      expect(bindings[1]?.priority).toBe(100);
+    }
   });
 
   it('uses the browser plus key chord and does not alias Cmd+Shift+N to newProject', () => {

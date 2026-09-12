@@ -1,6 +1,8 @@
 import type { PowermoveAPI } from 'powermove';
 
 import { createTimelineRuntime, timelinePanelOptions } from './timeline';
+import { adjacentKeyframe } from './keyframe-navigation';
+import { createPropertyReveal, propertyShortcuts } from './property-reveal';
 
 /* Vite can update a child runtime module without considering this extension
    entry itself changed. Accept that child explicitly and ask the kernel to
@@ -83,7 +85,33 @@ export function splitSelectedLayersAtPlayhead(pm: Record<string, any>): string[]
 
 export default function activate(api: PowermoveAPI): void {
   const pm = api.host.pm as Record<string, any>;
-  const timeline = createTimelineRuntime(pm);
+  const timeline = createTimelineRuntime(pm, api.space3d);
+  const revealProperty = createPropertyReveal(pm);
+  for (const [key, , label] of propertyShortcuts) {
+    api.commands?.register({
+      id: `timeline.revealProperty:${key}`,
+      label: `Reveal ${label}`,
+      category: 'Timeline',
+      run: (shift?: unknown) => revealProperty(key, shift === true)
+    });
+  }
+  api.commands?.register({
+    id: 'timeline.revealAll',
+    label: 'Reveal all properties',
+    category: 'Timeline',
+    run: () => revealProperty('all')
+  });
+  for (const [direction, step] of [['prev', -1], ['next', 1]] as const) {
+    api.commands?.register({
+      id: `timeline.adjacentKeyframe:${direction}`,
+      label: `${direction === 'prev' ? 'Previous' : 'Next'} adjacent keyframe`,
+      category: 'Timeline',
+      run: () => {
+        const time = adjacentKeyframe(pm, step, undefined, api.space3d);
+        if (time != null) pm.setTime(time);
+      }
+    });
+  }
   api.commands?.register({
     id: 'split',
     label: 'Split at playhead',
