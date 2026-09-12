@@ -46,7 +46,7 @@ function ensure() {
   sort.value = S.sort;
   sort.onchange = () => { S.sort = sort.value; PM.store.set('projectsSort', S.sort); paint(); };
   const top = h('div.ps-top', h('div.ps-title', S.title, S.count), view, sort,
-    h('button.chip', { onclick: openProjectFromDisk }, 'Open Project…'),
+    h('button.btn', { onclick: openProjectFromDisk }, 'Open Project…'),
     h('button.btn.pri', { onclick: () => { PM.ProjectsScreen.hide(); PM.newProject(); } }, PM.icon('plus'), 'New Project'));
   S.grid = h('div.ps-grid');
   S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, h('div.ps-content', S.grid)));
