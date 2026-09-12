@@ -129,6 +129,9 @@ export function planeContains(PM: any, L: any, T: number, x: number, y: number, 
  * Sorting each member's anchor independently lets a tilted card background hide
  * its own text. Different surfaces still sort by depth within each 2D barrier. */
 export function depthOrderedLayers(PM: any, layers: any[], T: number): any[] {
+    // Preserve the stable stack identity for 2D scenes so hierarchy indexes
+    // remain reusable instead of being rebuilt against a new array per frame.
+    if (!layers.some(layer => is3DLayer(PM, layer))) return layers;
     const result = layers.slice();
     let start = 0;
     while (start < result.length) {

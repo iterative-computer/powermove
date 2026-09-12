@@ -2,6 +2,7 @@ import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane } from '../core/space-3d';
 import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
+import { createPreviewWarmup } from './preview-warmup';
 import { sourceTime } from '../core/retiming';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
 /* Ported from js/gl/compositor.js — behavior-preserving. */
@@ -128,6 +129,7 @@ const MAX_TEXTURE_ENTRIES = 4096;
 let poolBytes = 0;
 let textureBytes = 0;
 let resourceTick = 0;
+let sourceGeneration = 0;
 /* Keep the composited FBO alive until the next frame. Resizing a canvas clears
    its drawing buffer synchronously; retaining this texture lets resize()
    present the last complete image at the new size instead of exposing black
@@ -375,6 +377,12 @@ function activePreviewViewport(W: number, H: number): any {
   return previewViewportActive && PM.curComp?.() === PM.proj
     && W === GL.canvas.width && H === GL.canvas.height ? GL.previewViewport : null;
 }
+function canClipPreviewSources(W: number, H: number): boolean {
+  // A fitted composition has a full-frame viewport even when the viewer does
+  // not need a zoom crop. Large parented artwork must still be clipped there.
+  return previewSourceClipping && PM.curComp?.() === PM.proj
+    && W === GL.canvas.width && H === GL.canvas.height;
+}
 function outputScale(W: number, H: number): [number, number] {
   const viewport = activePreviewViewport(W, H);
   if (viewport) return [W / Math.max(1e-6, viewport.width), H / Math.max(1e-6, viewport.height)];
@@ -396,7 +404,10 @@ function backgroundView(W: number, H: number): [number, number, number, number] 
 }
 
 /* ── content textures ──────────────────────────────────── */
+const visibleTextures = new Set<string>();
+let preparingSource = false;
 function texFor(key: any, source: any, opts: any = {}) {
+  if (!preparingSource) visibleTextures.add(key);
   const gl = GL.gl;
   let t = GL.texes.get(key);
   if (!t) {
@@ -424,18 +435,19 @@ function texFor(key: any, source: any, opts: any = {}) {
   PM.Memory?.maintain?.('textures', GL.texes.size > MAX_TEXTURE_ENTRIES);
   return t.tex;
 }
-function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES) {
+function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES, protectedKeys?: ReadonlySet<string>) {
   if (textureBytes <= targetBytes && GL.texes.size <= MAX_TEXTURE_ENTRIES) return;
   const entries = [...GL.texes.entries()].sort((a: any, b: any) => a[1].used - b[1].used);
   for (const [key, entry] of entries) {
     if (textureBytes <= targetBytes && GL.texes.size <= MAX_TEXTURE_ENTRIES || GL.texes.size <= 1) break;
-    if (boundTex.includes(entry.tex)) continue;
+    if (boundTex.includes(entry.tex) || protectedKeys?.has(key)) continue;
     GL.gl?.deleteTexture?.(entry.tex);
     textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
     GL.texes.delete(key);
   }
 }
 GL.dropTextures = (prefix = '') => {
+  sourceGeneration++;
   for (const [key, entry] of GL.texes) {
     if (!key.startsWith(prefix)) continue;
     if (GL.gl && entry.tex) GL.gl.deleteTexture(entry.tex);
@@ -564,6 +576,7 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
   if (!gl) { if (!options.quiet) window.alert('Powermove needs WebGL2.'); return false; }
   gpuTiming?.dispose();
   GL.gl = gl;
+  sourceGeneration++;
   gpuTiming = new GPUTiming(gl);
   parallelShaderCompile = gl.getExtension('KHR_parallel_shader_compile');
   if (!watchedCanvases.has(canvas)) {
@@ -728,9 +741,10 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
        a different output resolution. */
     const ss = continuousRasterScale(scaledWorld(L, T, W, H));
     let crop: RasterWindow | undefined;
-    if (previewSourceClipping && !L.d.paths?.length && activePreviewViewport(W, H)
+    if (canClipPreviewSources(W, H) && !L.d.paths?.length
         && !is3DLayer(PM, L) && !hasRenderableEffects(L.fx, PM, L, T)
-        && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut) {
+        && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut
+        && !(PM.groupAncestors?.(L) || []).some((group: any) => hasRenderableEffects(group.fx, PM, group, T))) {
       const visibleWorld = scaledWorld(L, T, W, H);
       if (clip) { visibleWorld[4] -= clip.x; visibleWorld[5] -= clip.y; }
       if (L.type === 'shape') {
@@ -1307,9 +1321,9 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     const L = layers[i];
     if(PM.canvasTextEditing===L.id && !opt.exporting)continue;
     if (!opt.mattePass && matteSources.has(L.id)) continue;
-    const groupAncestors = PM.groupAncestors?.(L, orderedLayers) || [];
+    const groupAncestors = PM.groupAncestors?.(L, proj.layers) || [];
     if (solo && !L.solo && !groupAncestors.some((group: any) => group.solo)
-        && !groupContainsSolo(L, orderedLayers, (layer: any) => PM.groupAncestors?.(layer, orderedLayers) || [])
+        && !groupContainsSolo(L, orderedLayers, (layer: any) => PM.groupAncestors?.(layer, proj.layers) || [])
         && !opt.mattePass) continue;
     if (L.type !== 'group' && PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
@@ -1412,7 +1426,42 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   return acc;
 };
 
+const requestSourceWarmup = createPreviewWarmup(
+  () => ({
+    project: PM.proj, time: PM.time,
+    key: JSON.stringify([sourceGeneration, PM.animVersion?.(), GL.canvas?.width, GL.canvas?.height, GL.previewViewport, PM.quality]),
+    blocked: !GL.gl || !PM.playing || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active || PM.agentFrameCapture,
+  }),
+  (layer, time) => {
+    // Speculation must fit the existing cache and leave room for the next
+    // visible frame. A large source keeps the normal demand-driven path.
+    if (layer.d.paths?.length || is3DLayer(PM, layer)) return;
+    const W = GL.canvas.width, H = GL.canvas.height;
+    PM.scope.push(PM.proj); PM.beginEval(time);
+    previewViewportActive = !!GL.previewViewport; previewSourceClipping = true; preparingSource = true;
+    try {
+      if (!PM.active(layer, time)) return;
+      const scale = continuousRasterScale(scaledWorld(layer, time, W, H));
+      const geometry = layer.type === 'shape' ? shapeRasterGeometry(resolveContent(PM, layer, time), scale)
+        : PM.textRasterGeometry(layer, scale, time);
+      const bytes = geometry.width * geometry.height * 4;
+      if (bytes > 4 * 1024 * 1024) return;
+      // Old zoom/animation variants are disposable; the last visible frame's
+      // sources are not. Reclaim only unused variants for speculative uploads.
+      const target = MAX_TEXTURE_BYTES - bytes - 4 * 1024 * 1024;
+      if (textureBytes > target) trimTextures(target, visibleTextures);
+      if (textureBytes <= target) contentQuad(layer, time, W, H);
+    } finally {
+      bindTex(0, null);
+      previewViewportActive = false; previewSourceClipping = false; preparingSource = false;
+      PM.scope.pop(); PM.beginEval(PM.time);
+    }
+  },
+  run => window.requestIdleCallback?.(run),
+);
+
 GL.render = (T: any, opt: any = {}) => {
+  visibleTextures.clear();
   framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;
   gpuTiming?.poll();
@@ -1459,6 +1508,7 @@ GL.render = (T: any, opt: any = {}) => {
   }
   GL.stats.progs = GL.progs.size;
   GL.stats.ms = window.performance.now() - t0;
+  if (!opt.exporting && typeof window.requestIdleCallback === 'function') requestSourceWarmup();
   if (GL.previewViewport && !opt.exporting) PM.bus?.emit?.('preview:presented', { viewport: GL.previewViewport, time: T, version: PM.animVersion?.(), project: PM.proj, quality: PM.quality });
 };
 

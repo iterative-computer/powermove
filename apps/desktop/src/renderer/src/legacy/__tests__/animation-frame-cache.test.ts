@@ -16,4 +16,21 @@ describe('animation frame cache', () => {
       expect(PM.worldOpacity(child, t)).toBeCloseTo(1);
     }
   });
+
+  it('reuses local transforms within a frame and invalidates them after edits', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/anim');
+    PM.proj = PM.mkProject({ dur: 5 });
+    const layer = PM.mkLayer('solid');
+    PM.proj.layers = [layer];
+    PM.animate(layer, 'position.x', [{ t: 0, v: 0 }, { t: 2, v: 200 }], { ease: 'linear' });
+    PM.beginEval(1);
+    const before = PM.localMatrix(layer, 1);
+    expect(PM.localMatrix(layer, 1)).toBe(before);
+    expect(before[4]).toBeCloseTo(100);
+    layer.p['position.x'].kf[1].v = 400;
+    PM.touch(); PM.beginEval(1);
+    expect(PM.localMatrix(layer, 1)[4]).toBeCloseTo(200);
+    PM.beginEval(.5);
+    expect(PM.localMatrix(layer, .5)[4]).toBeCloseTo(100);
+  });
 });

@@ -6,6 +6,7 @@ import type { PMRegistry } from '../registry';
 import { makePM } from './make-pm';
 
 const baselinePath = path.join(process.cwd(), 'tests-vitest/fixtures/perf-baseline.json');
+const WORKLOAD = '1000-layers-60-keys-30-distinct-frames';
 const CALIBRATION_ITERATIONS = 2_000_000;
 const calibrationValues = Float64Array.from(
   { length: 1024 },
@@ -13,6 +14,7 @@ const calibrationValues = Float64Array.from(
 );
 
 interface PerformanceBaseline {
+  workload: string;
   calibrationMs: number;
   evalMedianMs: number;
   exprMedianMs: number;
@@ -129,6 +131,7 @@ describe('animation evaluation scale', () => {
     const evalRatio = evalMedianMs / calibrationMs;
     const exprRatio = exprMedianMs / calibrationMs;
     const current = {
+      workload: WORKLOAD,
       calibrationMs,
       evalMedianMs,
       exprMedianMs,
@@ -154,6 +157,7 @@ describe('animation evaluation scale', () => {
       + 'run PM_RECORD_BASELINE=1 npx vitest run src/renderer/src/legacy/__tests__/scale.test.ts to record it intentionally',
     ).toBe(true);
     const baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as PerformanceBaseline;
+    expect(baseline.workload, 'Re-record the baseline when the measured workload changes').toBe(WORKLOAD);
     for (const field of ['calibrationMs', 'evalMedianMs', 'exprMedianMs', 'evalRatio', 'exprRatio'] as const) {
       const value = baseline[field];
       expect(
@@ -172,5 +176,5 @@ describe('animation evaluation scale', () => {
       `expression evaluation ratio ${exprRatio.toFixed(2)} exceeded baseline ${baseline.exprRatio.toFixed(2)} x 1.5 `
       + `(raw ${exprMedianMs.toFixed(2)}ms / calibration ${calibrationMs.toFixed(2)}ms)`,
     ).toBeLessThanOrEqual(baseline.exprRatio * 1.5);
-  });
+  }, 30_000);
 });
