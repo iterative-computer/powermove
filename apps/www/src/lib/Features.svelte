@@ -63,18 +63,29 @@
     const y = el.offsetTop + el.offsetHeight / 2;
     if (markerY === undefined) { markerY = y; marker.style.transform = `translateY(${y}px)`; return; }
     if (y === markerY) return;
-    const from = markerY; markerY = y;
+    let fromX = 0, fromY = markerY;
+    markerY = y;
     const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Interrupted mid-flight: pick up from where the dot actually is and keep
+    // its momentum (ease-out) instead of stopping and winding up again.
+    const midFlight = flight?.playState === 'running';
+    if (midFlight) {
+      const m = new DOMMatrix(getComputedStyle(marker).transform);
+      fromX = m.m41; fromY = m.m42;
+    }
     flight?.cancel();
     if (reduce) { marker.style.transform = `translateY(${y}px)`; return; }
     const steps = 24;
     const frames = Array.from({ length: steps + 1 }, (_, i) => {
       const p = i / steps;
-      const x = -10 * Math.sin(Math.PI * p);
-      return { transform: `translate(${x.toFixed(2)}px, ${(from + (y - from) * p).toFixed(2)}px)` };
+      const x = fromX * (1 - p) - 10 * Math.sin(Math.PI * p);
+      return { transform: `translate(${x.toFixed(2)}px, ${(fromY + (y - fromY) * p).toFixed(2)}px)` };
     });
     marker.style.transform = `translateY(${y}px)`;
-    flight = marker.animate(frames, { duration: 520, easing: 'cubic-bezier(.4,0,.2,1)' });
+    flight = marker.animate(frames, {
+      duration: midFlight ? 420 : 520,
+      easing: midFlight ? 'cubic-bezier(.2,.6,.2,1)' : 'cubic-bezier(.4,0,.2,1)',
+    });
   });
 
   $effect(() => {
