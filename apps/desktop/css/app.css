@@ -928,6 +928,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 /* The titlebar and sidebar share the window colour as one piece of chrome; the library itself is an inset panel. */
 #projects-screen{position:fixed;inset:44px 0 0;z-index:35;background:var(--bg-window);display:none;min-height:0;padding:0 10px 10px 0}
 #projects-screen.on{display:flex}
+/* The editor panels under the home screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
+body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-sidebar{width:236px;flex:none;padding:6px 12px 18px;display:flex;flex-direction:column;gap:14px}
 .ps-search{height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-3);transition:box-shadow var(--dur-1)}
 .ps-search:focus-within{outline:0;box-shadow:var(--focus-ring)}
@@ -937,7 +939,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .ps-navbtn:hover{background:var(--bg-row);color:var(--tx)}.ps-navbtn.on{background:var(--ink-2);color:var(--tx)}
 .ps-navbtn svg{width:14px;height:14px}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
 .ps-sidefoot{margin-top:auto;padding:0 10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.5}
-.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-panel);box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
+.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window));box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
 .ps-title{min-width:0;flex:1;display:flex;align-items:baseline;gap:9px}.ps-title b{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}.ps-title span{font-size:var(--fs-xs);color:var(--tx-4)}
 .ps-view{display:flex;align-items:center;gap:3px}.ps-view button{width:32px;height:32px;display:grid;place-items:center;border-radius:var(--r-md);color:var(--tx-3)}.ps-view button:hover{background:var(--bg-row);color:var(--tx)}.ps-view button.on{background:var(--ink-2);color:var(--tx)}.ps-view svg{width:15px;height:15px}
 .ps-sort{height:32px;min-width:132px;padding:0 28px 0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);outline:0}.ps-sort:focus-visible{box-shadow:var(--focus-ring)}
