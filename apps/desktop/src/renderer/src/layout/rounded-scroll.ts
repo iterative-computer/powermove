@@ -3,7 +3,7 @@ export function panelClipPath(width: number, top: number, bottom: number, radius
   const r = Math.min(radius, width / 2, Math.max(0, bottom - top) / 2);
   const power = 2 / Math.pow(2, smoothing);
   const points: string[] = [];
-  const corners = [
+  const corners: ReadonlyArray<readonly [number, number, number]> = [
     [width - r, top + r, -Math.PI / 2],
     [width - r, bottom - r, 0],
     [r, bottom - r, Math.PI / 2],

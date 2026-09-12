@@ -62,7 +62,7 @@ describe('After Effects shortcut fundamentals', () => {
     PM.time = 5;
     expect(editSelectedLayerTiming(PM, 'moveIn')).toMatchObject({ ok: true });
     expect(PM.proj.layers.map((layer: any) => [layer.from, layer.dur])).toEqual([[5, 4], [5, 5]]);
-    expect(PM.hist.list()).toEqual(['Move layer In point']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Move layer In point']);
     expect(PM.hist.undo()).toBe(true);
 
     PM.time = 4;
@@ -112,10 +112,10 @@ describe('After Effects shortcut fundamentals', () => {
 
     expect(setLayerLocks(PM, true)).toMatchObject({ ok: true });
     expect([first.lock, second.lock, third.lock]).toEqual([true, true, false]);
-    expect(PM.hist.list()).toEqual(['Lock layers']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Selection', 'Selection', 'Lock layers']);
 
     expect(setLayerLocks(PM, false, true)).toMatchObject({ ok: true });
     expect([first.lock, second.lock, third.lock]).toEqual([false, false, false]);
-    expect(PM.hist.list()).toEqual(['Lock layers', 'Unlock layers']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Selection', 'Selection', 'Lock layers', 'Unlock layers']);
   });
 });

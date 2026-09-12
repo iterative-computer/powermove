@@ -263,8 +263,13 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     const offsets: Record<string, number> = { ArrowLeft: -5, ArrowRight: 5 };
     if (!(event.key in offsets) && event.key !== 'Home' && event.key !== 'End') return;
     event.preventDefault(); event.stopPropagation();
-    element.currentTime = event.key === 'Home' ? 0 : event.key === 'End' ? element.duration
-      : Math.max(0, Math.min(element.duration, element.currentTime + offsets[event.key]));
+    if (event.key === 'Home') element.currentTime = 0;
+    else if (event.key === 'End') element.currentTime = element.duration;
+    else {
+      const offset = offsets[event.key];
+      if (offset === undefined) return;
+      element.currentTime = Math.max(0, Math.min(element.duration, element.currentTime + offset));
+    }
     paint();
   };
   const handleKeydown = (event: KeyboardEvent) => {

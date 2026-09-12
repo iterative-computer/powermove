@@ -43,7 +43,7 @@ export function inspectorPM(PM: any): any {
     const layer = PM.L(command.target);
     if (!layer || layer.lock) return [command];
     const prop = PM.findProp?.(layer, command.path) || layer.p?.[command.path];
-    const selected = new Set(PM.sel.keys || []);
+    const selected = new Set(PM.sel?.keys || []);
     const keys = prop?.kf?.filter((key: any) => selected.has(key.i) && typeof key.v === 'number') || [];
     if (keys.length < 2) return [command];
     const id = `${layer.id}:${command.path}`;

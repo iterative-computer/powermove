@@ -30,6 +30,7 @@ test.describe('@extensions user extensions load through the kernel', () => {
     const source = (label: string) => `export default function activate(api) { api.panels.register({ id:'reload-panel', title:'Reload panel', build(body) { body.textContent = '${label}'; } }); }`;
     await seedExtension(session.userData, 'reload-panel', source('Before edit'));
     await session.relaunch();
+    await session.openEditor();
     const { page, app } = session;
     await page.waitForFunction(() => Boolean((window as any).PM.PANELS['reload-panel']));
     await page.evaluate(() => {
@@ -67,6 +68,7 @@ export default function activate(api: PowermoveAPI) {
 `
     );
     await session.relaunch();
+    await session.openEditor();
     const { page } = session;
 
     // Wait for the kernel to finish booting extensions (compile is async in main).
@@ -119,6 +121,7 @@ export default function activate(api: PowermoveAPI) {
       { replaces: ['timeline'] }
     );
     await session.relaunch();
+    await session.openEditor();
     const { page, app } = session;
     await expect(page.locator('#body #panel-timeline [data-timeline-replacement="active"]')).toBeVisible();
     const before = await page.evaluate(() => {
@@ -164,6 +167,7 @@ export default function activate(api: PowermoveAPI) {
       api.panels.register({ id: 'timeline', title: 'Custom timeline', build(body) { body.textContent = 'Settings replacement'; } });
     }`, { name: 'Interface cleanup', replaces: ['timeline'], contributes: ['panels', 'commands', 'keybindings'] });
     await session.relaunch();
+    await session.openEditor();
     const { page } = session;
     await expect(page.locator('#panel-timeline')).toContainText('Settings replacement');
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
@@ -173,7 +177,7 @@ export default function activate(api: PowermoveAPI) {
     await expect(row).toContainText('Replaces Timeline');
     await expect(row).toContainText('Keyboard shortcuts');
     await row.locator('summary').click();
-    await expect(row).toContainText('Panels registered now: Custom timeline');
+    await expect(row).toContainText('Panels: Custom timeline');
     await settings.screenshot({ path: '/private/tmp/powermove-extension-settings.png' });
     await row.getByRole('button', { name: 'Delete Interface cleanup', exact: true }).click();
     await expect(row).toContainText('permanently removed');
@@ -194,6 +198,7 @@ export default function activate(api: PowermoveAPI) {
       `export default function activate() { throw new Error('e2e intentional failure'); }\n`
     );
     await session.relaunch();
+    await session.openEditor();
     const { page } = session;
 
     // The app must be fully alive despite the failing extension.
@@ -233,6 +238,7 @@ export default function activate(api: PowermoveAPI) {
   });
 
   test('turning the built-in timeline off and on restores its live panel in place', async ({ session }) => {
+    await session.openEditor();
     const { page, app } = session;
     await expect(page.locator('#panel-timeline')).toBeVisible();
     const pid = app.process().pid;

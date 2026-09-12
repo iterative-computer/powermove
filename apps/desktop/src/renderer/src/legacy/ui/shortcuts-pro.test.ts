@@ -56,7 +56,7 @@ describe('pro shortcut helper contracts', () => {
     PM.cmd('contextPaste');
     expect(PM.proj.layers).toHaveLength(2);
     expect(PM.firstSel()?.name).toBe('a 1');
-    expect(PM.hist.list()).toEqual(['Cut layers', 'Paste layers']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Cut layers', 'Paste layers']);
     PM.cmd('contextUndo');
     expect(PM.proj.layers).toHaveLength(1);
     PM.cmd('contextRedo');
@@ -137,7 +137,7 @@ describe('pro shortcut helper contracts', () => {
 
     orderLayers(PM, 'front');
     expect(PM.proj.layers.map((layer: any) => layer.id)).toEqual(['b', 'a', 'locked', 'c']);
-    expect(PM.hist.list()).toEqual(['Bring to front']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Bring to front']);
     expect(PM.proj.revision).toBe(1);
     expect(PM.proj.edits.at(-1)).toMatchObject({
       origin: 'command', label: 'Bring to front', operations: [],

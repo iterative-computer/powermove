@@ -9,6 +9,7 @@ import {
   previewRenderSize, previewRenderViewport, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
   shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
+import type { PreviewViewport } from './viewer';
 
 const originalWindow = (globalThis as any).window;
 
@@ -126,7 +127,8 @@ describe('viewer runtime', () => {
           if (edge === 'right') x = 600-width-offset;
           if (edge === 'top') y = offset;
           if (edge === 'bottom') y = 400-height-offset;
-          const view = previewRenderViewport(1920,1080,zoom,600,400,x,y,dpr,quality,128,previous)!;
+          const view: PreviewViewport | null = previewRenderViewport(1920,1080,zoom,600,400,x,y,dpr,quality,128,previous);
+          if (!view) throw new Error('high-zoom viewport unexpectedly missing');
           expect(view.renderWidth).toBe(Math.round(856*dpr*quality));
           expect(view.renderHeight).toBe(Math.round(656*dpr*quality));
           expect(view.cssLeft).toBeGreaterThanOrEqual(0);

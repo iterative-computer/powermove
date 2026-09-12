@@ -328,6 +328,7 @@ it('section creation and updates cross the same undoable source transaction boun
 it('a failed multi-command edit rolls the entire source back', () => {
   const { PM } = editor();
   const layer = addText(PM);
+  PM.hist.clear();
   const before = JSON.stringify(PM.proj);
   const result = PM.Edit.apply([
     { type: 'set_property', target: layer.id, path: 'opacity', value: 40, mode: 'static', preserveHandEdits: false },

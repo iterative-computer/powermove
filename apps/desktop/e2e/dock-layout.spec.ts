@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@dock-layout Svelte DockLayout', () => {
   test('keeps overfilled side panels usable between the titlebar and status bar', async ({ session }) => {
+    await session.openEditor();
     const { page, diagnostics } = session;
     const ids = ['overflow-flex', 'overflow-fixed-a', 'overflow-fixed-b', 'overflow-fixed-c'];
 

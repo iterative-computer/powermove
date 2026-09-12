@@ -222,7 +222,7 @@ describe('pro editor shortcut behavior', () => {
     expect(locked.dur).toBe(8);
     expect(outside.dur).toBe(4);
     expect(PM.sel.layers).toEqual([tail.id]);
-    expect(PM.hist.list()).toEqual(['Split']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Split']);
     expect(PM.proj.revision).toBe(1);
     expectStructuralReplay(beforeSplit, PM, 'Split');
     expect(PM.hist.undo()).toBe(true);
@@ -286,7 +286,7 @@ describe('pro editor shortcut behavior', () => {
       name: 'Interview Audio', type: 'audio', from: 1, dur: 8,
       d: { asset: 'video-asset', trim: 2, gain: 1, fadeIn: 0, fadeOut: 0 },
     });
-    expect(PM.hist.list()).toEqual(['Separate audio']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Separate audio']);
     expect(PM.autosave).toHaveBeenCalledOnce();
     expect(PM.hist.undo()).toBe(true);
     expect(ids(PM)).toEqual([video.id]);
@@ -310,11 +310,11 @@ describe('pro editor shortcut behavior', () => {
     PM.time = visible.from;
     PM.cmd('split');
     expect(ids(PM)).toHaveLength(7);
-    expect(PM.hist.list()).toEqual([]);
+    expect(PM.hist.list()).toEqual(['Selection']);
     PM.time = visible.from + visible.dur;
     PM.cmd('split');
     expect(ids(PM)).toHaveLength(7);
-    expect(PM.hist.list()).toEqual([]);
+    expect(PM.hist.list()).toEqual(['Selection']);
   });
 
   it('cuts only editable selected layers and pastes in stack order beside the topmost selection', () => {
@@ -335,7 +335,7 @@ describe('pro editor shortcut behavior', () => {
     expect(pasted[0].parent).toBeNull();
     expect(pasted[1].parent).toBe(pasted[0].id);
     expect(PM.sel.layers).toEqual(pasted.map((value: any) => value.id));
-    expect(PM.hist.list()).toEqual(['Paste layers']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Selection', 'Paste layers']);
     expectStructuralReplay(beforePaste, PM, 'Paste layers');
 
     PM.hist.clear();
@@ -345,7 +345,7 @@ describe('pro editor shortcut behavior', () => {
     expect(ids(PM)).toEqual(['locked', pasted[0].id, pasted[1].id, pasted[2].id, target.id]);
     expect(PM.L(locked.id)).toBeTruthy();
     expect(PM.sel.layers).toEqual([locked.id]);
-    expect(PM.hist.list()).toEqual(['Cut layers']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Cut layers']);
     expectStructuralReplay(beforeCut, PM, 'Cut layers');
     PM.cmd('pasteLayers');
     const cutPaste = PM.proj.layers.filter((value: any) =>
@@ -387,7 +387,7 @@ describe('pro editor shortcut behavior', () => {
     expect([PM.L(shown.id).on, PM.L(hidden.id).on, PM.L(locked.id).on]).toEqual([false, false, true]);
     PM.cmd('toggleVisibility');
     expect([PM.L(shown.id).on, PM.L(hidden.id).on, PM.L(locked.id).on]).toEqual([true, true, true]);
-    expect(PM.hist.list()).toEqual(['Hide layers', 'Show layers']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Hide layers', 'Show layers']);
     PM.hist.undo();
     expect([PM.L(shown.id).on, PM.L(hidden.id).on, PM.L(locked.id).on]).toEqual([false, false, true]);
   });
@@ -431,7 +431,7 @@ describe('pro editor shortcut behavior', () => {
     expect(movable.p['position.x'].kf.at(-1).v).toBe(105);
     expect(PM.evP(movable, movable.p['position.y'], PM.time, 'position.y')).toBe(-2);
     expect(locked.p['position.x'].v).toBe(0);
-    expect(PM.hist.list()).toEqual(['Nudge selection']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection']);
     expect(PM.cmd('nudgeSelection', 0, 0)).toBeUndefined();
     expect(PM.cmd('nudgeSelection', Infinity, 1)).toBeUndefined();
     apply.mockRestore();
@@ -450,7 +450,7 @@ describe('pro editor shortcut behavior', () => {
     const after = PM.worldMatrix(child, PM.time);
     expect(after[4] - before[4]).toBeCloseTo(10, 6);
     expect(after[5] - before[5]).toBeCloseTo(0, 6);
-    expect(PM.hist.list()).toEqual(['Nudge selection']);
+    expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection']);
   });
 
   it('treats nudging as a human edit after canvas intent has been recorded', () => {
@@ -478,10 +478,10 @@ describe('pro editor shortcut behavior', () => {
       PM.cmd('nudgeSelection', 1, 0);
       PM.cmd('nudgeSelection', 1, 0);
       PM.cmd('nudgeSelection', 1, 0);
-      expect(PM.hist.list()).toEqual(['Nudge selection', 'Nudge selection', 'Nudge selection']);
+      expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection', 'Nudge selection', 'Nudge selection']);
       vi.advanceTimersByTime(180);
 
-      expect(PM.hist.list()).toEqual(['Nudge selection']);
+      expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection']);
       expect(PM.ev(movable, 'position.x', PM.time)).toBe(3);
       expect(PM.hist.undo()).toBe(true);
       expect(PM.ev(PM.L(movable.id), 'position.x', PM.time)).toBe(0);

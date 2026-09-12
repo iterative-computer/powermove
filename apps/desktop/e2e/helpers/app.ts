@@ -34,6 +34,9 @@ export type LaunchedApp = {
   readonly userData: string;
   readonly diagnostics: RendererDiagnostics;
   relaunch(): Promise<void>;
+  /** A fresh profile boots to the Projects home screen. Specs that exercise
+   * editor panels open an empty composition first, the way a user would. */
+  openEditor(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -137,6 +140,18 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       active = await startElectron(userData, env, diagnostics);
       session.app = active.app;
       session.page = active.page;
+    },
+    async openEditor() {
+      const { page } = session;
+      await page.waitForFunction(() => Boolean((window as any).PM?.ProjectsScreen && (window as any).PM?.mkProject));
+      await page.evaluate(() => {
+        const PM = (window as any).PM;
+        if (!PM.ProjectsScreen.isOpen) return;
+        window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'E2E composition' }) }));
+        PM.ProjectsScreen.hide();
+      });
+      await page.waitForFunction(() => !(window as any).PM.ProjectsScreen.isOpen);
+      await page.waitForSelector('#body .dock', { state: 'visible' });
     },
     async close() {
       if (closed) return;

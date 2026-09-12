@@ -141,7 +141,9 @@ describe('timeline extension', () => {
       { id: 'right', from: 5, dur: 3 },
       { id: 'left', from: 2, dur: 3 }
     ]);
-    expect(project.layers[0].p.x.kf).toEqual([{ t: -3, v: 10 }, { t: 3, v: 70 }]);
+    const right = project.layers[0];
+    if (!right) throw new Error('split did not create the right-hand layer');
+    expect(right.p.x.kf).toEqual([{ t: -3, v: 10 }, { t: 3, v: 70 }]);
     expect(left.p.x.kf).toEqual([{ t: 0, v: 10 }, { t: 6, v: 70 }]);
     expect(PM.ProjectIndex.invalidate).toHaveBeenCalledOnce();
     expect(selected).toEqual(['right']);

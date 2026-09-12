@@ -330,9 +330,9 @@ describe('picker drafts', () => {
   });
 
   it('ColorField samples a screen color through the system eyedropper', async () => {
-    const open = vi.fn().mockResolvedValue({ sRGBHex: '#0a84ff' });
-    (window as Window & { EyeDropper?: new () => { open: typeof open } }).EyeDropper = class {
-      open() { return open(); }
+    const openMock = vi.fn().mockResolvedValue({ sRGBHex: '#0a84ff' });
+    (window as Window & { EyeDropper?: new () => { open: typeof openMock } }).EyeDropper = class {
+      open = openMock;
     };
     const { PM, Edit } = fakePM();
     const target = render(ColorField, { PM, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
@@ -341,7 +341,7 @@ describe('picker drafts', () => {
 
     document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!.click();
     await vi.waitFor(() => expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' })));
-    expect(open).toHaveBeenCalledOnce();
+    expect(openMock).toHaveBeenCalledOnce();
     expect(document.body.querySelector<HTMLInputElement>('.color-hex')!.value).toBe('#0A84FF');
   });
 

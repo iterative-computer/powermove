@@ -18,8 +18,8 @@ describe('keymap-default', () => {
     activate({ keybindings: { bind } } as unknown as PowermoveAPI);
 
     expect(captured).toEqual(KEYMAP_DEFAULT);
-    expect(captured).toHaveLength(177);
-    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(176);
+    expect(captured).toHaveLength(188);
+    expect(captured.filter(({ command }) => command !== 'blurField')).toHaveLength(187);
     expect(captured.find(({ command }) => command === 'blurField')).toEqual({
       key: 'escape',
       command: 'blurField',
@@ -48,7 +48,7 @@ describe('keymap-default', () => {
     const repeatableCommands = new Set(repeatable.map(({ command }) => command));
 
     expect(repeatableCommands).toEqual(new Set(['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes']));
-    expect(repeatable).toHaveLength(24);
+    expect(repeatable).toHaveLength(22);
     expect(
       KEYMAP_DEFAULT.filter(({ command }) => !['nextFrame', 'prevFrame', 'stepFrames', 'nudgeSelection', 'nudgeKeyframes'].includes(command)).every(({ repeat }) => repeat !== true)
     ).toBe(true);
