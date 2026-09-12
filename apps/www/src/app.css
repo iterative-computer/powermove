@@ -325,23 +325,24 @@ h1 .muted{color:var(--tx-3)}
 .principle-list li:last-child{border-bottom:1px solid var(--line)}
 .principle-list svg{flex-shrink:0;margin-top:3px;color:var(--tx-3)}
 .principle-list .strong{font-weight:500}
-/* Stack of slabs, seen from slightly above. Each sits on the one below with a sliver of its edge showing,
-   so the pile reads as depth rather than a list. Slabs settle in from the kernel up when the section arrives;
-   hovering a slab slides it out, since any of them can be swapped. The kernel stays put. */
-.stack{display:flex;flex-direction:column;max-width:520px;margin-inline:auto;width:100%;padding-top:8px}
-.slab{position:relative;display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-top:-6px;padding:20px 22px 22px;border-radius:var(--r-lg);background:var(--bg-panel);box-shadow:var(--ctl-edge),0 12px 24px -12px rgb(0 0 0 / .6);font-size:var(--fs-md);z-index:calc(var(--i) + 1);opacity:0;transition:transform .35s cubic-bezier(.22,1,.36,1),box-shadow .35s}
-.slab:first-child{margin-top:0}
-.stack[data-in] .slab{animation:slab-in .6s cubic-bezier(.22,1,.36,1) both;animation-delay:calc((4 - var(--i)) * 70ms)}
-@keyframes slab-in{from{opacity:0;translate:0 14px}to{opacity:1;translate:0 0}}
+/* Stack of slabs seen head-on: the kernel is the widest plate, each layer above is a little narrower,
+   and the top one is an outlined slot rather than a filled plate, because it's the reader's to fill.
+   Slabs settle in from the kernel up when the section arrives. */
+.stack{display:flex;flex-direction:column;align-items:center;gap:6px;max-width:520px;margin-inline:auto;width:100%}
+.slab{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:16px 20px;border-radius:var(--r-md);background:var(--bg-panel);box-shadow:var(--ctl-edge);font-size:var(--fs-md);opacity:0;transition:transform .3s cubic-bezier(.22,1,.36,1),box-shadow .3s}
+.slab{width:calc(100% - var(--i) * 7%)}
+.stack[data-in] .slab{animation:slab-in .55s cubic-bezier(.22,1,.36,1) both;animation-delay:calc((4 - var(--i)) * 70ms)}
+@keyframes slab-in{from{opacity:0;translate:0 10px}to{opacity:1;translate:0 0}}
 .slab-name{font-weight:500;color:var(--tx);white-space:nowrap}
-.slab-note{color:var(--tx-3);text-align:right;text-wrap:balance}
-.slab.yours{background:color-mix(in srgb,var(--accent) 10%,var(--bg-panel));box-shadow:var(--ctl-edge),inset 0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent),0 16px 32px -12px rgb(0 0 0 / .7)}
+.slab-note{color:var(--tx-3);font-size:var(--fs-sm);text-align:right;text-wrap:balance}
+.slab.yours{background:transparent;box-shadow:none;outline:1px dashed color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:-1px}
 .slab.yours .slab-name{color:var(--accent)}
-.slab.kernel{background:var(--bg-panel-2);color:var(--tx-3)}
+.slab.yours .slab-note{color:var(--tx-2)}
+.slab.kernel{background:var(--bg-panel-2);box-shadow:var(--ctl-edge),0 10px 24px -8px rgb(0 0 0 / .6)}
 .slab.kernel .slab-name{color:var(--tx-2)}
 @media(hover:hover){
-  .slab:not(.kernel):hover{transform:translateX(10px);box-shadow:var(--ctl-edge),0 16px 32px -10px rgb(0 0 0 / .7)}
-  .slab.yours:hover{transform:translateY(-6px)}
+  .slab:hover{transform:translateY(-2px)}
+  .slab.yours:hover{outline-style:solid}
 }
 @media(prefers-reduced-motion:reduce){
   .slab,.stack[data-in] .slab{opacity:1;animation:none;transition:none}

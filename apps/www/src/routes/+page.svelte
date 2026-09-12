@@ -64,7 +64,7 @@
         </ul>
       </div>
       <div class="stack" bind:this={stack} data-in={stackIn ? '' : undefined} aria-hidden="true">
-        <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Same API as everything below</span></div>
+        <div class="slab yours" style="--i:4"><span class="slab-name">Your mods</span><span class="slab-note">Yours to add. Same API as everything below</span></div>
         <div class="slab" style="--i:3"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
         <div class="slab" style="--i:2"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
         <div class="slab" style="--i:1"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
