@@ -84,8 +84,7 @@ h1 .muted{color:var(--tx-3)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .stage{margin:56px auto 0;max-width:1280px;padding-inline:8px}
 @media(min-width:768px){.stage{margin-top:72px}}
-.frame{padding:8px;border-radius:calc(var(--r-lg) + 8px);background:var(--bg-panel);box-shadow:var(--shadow-panel)}
-.frame img{border-radius:var(--r-lg)}
+.stage img{border-radius:var(--r-xl);box-shadow:var(--shadow-panel)}
 .works-with{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px 28px;padding:40px 24px 0;color:var(--tx-3);font-size:var(--fs-md)}
 .works-with strong{font-weight:500;color:var(--tx-2);letter-spacing:-.01em;font-size:15px}
 

@@ -70,9 +70,7 @@
       </div>
     </div>
     <figure class="stage" id="editor">
-      <div class="frame">
-        <img src="/editor-0.png" alt="Powermove editor with a cinematic title, layer stack, property inspector, agent panel, and keyframe timeline." width="1600" height="1000" fetchpriority="high" />
-      </div>
+      <img src="/editor-hero.png" alt="Powermove editor over a desert night sky, with a cinematic title, layer stack, property inspector, agent panel, and keyframe timeline." width="1920" height="1280" fetchpriority="high" />
     </figure>
     <p class="works-with" aria-label="Works with">
       <span>Runs your agent</span>
