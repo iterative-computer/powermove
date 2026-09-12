@@ -115,6 +115,33 @@ describe('viewer runtime', () => {
     expect(previewRenderViewport(1920, 1080, 8, 1300, 800, -7080, -3920, 2, 1, 128, first)).not.toBe(first);
     expect(previewRenderViewport(3840, 2160, 8, 1200, 800, -7080, -3920, 2, 1, 128, first)).not.toBe(first);
   });
+  it('keeps a fixed bounded allocation through all four composition edges', () => {
+    for (const zoom of [1.1, 2.51184505912942, 8]) for (const dpr of [1, 2]) for (const quality of [.5, 1]) {
+      const width = 1920 * zoom, height = 1080 * zoom;
+      for (const edge of ['left', 'right', 'top', 'bottom']) {
+        let previous: ReturnType<typeof previewRenderViewport> = null;
+        for (let offset = -150; offset <= 350; offset += 2.7) {
+          let x = (600-width)/2, y = (400-height)/2;
+          if (edge === 'left') x = offset;
+          if (edge === 'right') x = 600-width-offset;
+          if (edge === 'top') y = offset;
+          if (edge === 'bottom') y = 400-height-offset;
+          const view = previewRenderViewport(1920,1080,zoom,600,400,x,y,dpr,quality,128,previous)!;
+          expect(view.renderWidth).toBe(Math.round(856*dpr*quality));
+          expect(view.renderHeight).toBe(Math.round(656*dpr*quality));
+          expect(view.cssLeft).toBeGreaterThanOrEqual(0);
+          expect(view.cssTop).toBeGreaterThanOrEqual(0);
+          expect(view.cssLeft+view.cssWidth).toBeLessThanOrEqual(width+1e-8);
+          expect(view.cssTop+view.cssHeight).toBeLessThanOrEqual(height+1e-8);
+          expect(view.cssLeft).toBeLessThanOrEqual(Math.max(0,-x)+1e-8);
+          expect(view.cssTop).toBeLessThanOrEqual(Math.max(0,-y)+1e-8);
+          expect(view.cssLeft+view.cssWidth).toBeGreaterThanOrEqual(Math.min(width,600-x)-1e-8);
+          expect(view.cssTop+view.cssHeight).toBeGreaterThanOrEqual(Math.min(height,400-y)-1e-8);
+          previous=view;
+        }
+      }
+    }
+  });
   it('snaps to the nearest candidate and breaks ties by the shorter guide', () => {
     const V = viewerRegistry().Viewer;
     const source = V.snapCandidatesFromPoints([{ x: 103, y: 10 }]);

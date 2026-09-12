@@ -148,3 +148,44 @@ test('fractional pans reuse covered pixels while crop changes and independent re
   await page.evaluate(async () => await (window as any).PM.flushProject());
   await session.app.evaluate(({app})=>app.exit(0)).catch(()=>undefined);
 });
+
+test('native outward pans keep GPU allocation stable at every composition edge', async ({session}) => {
+  const {page}=session;
+  await page.evaluate(()=>{
+    const PM=(window as any).PM;
+    const project=PM.mkProject({name:'Edge pan allocation',w:1920,h:1080,fps:30,dur:3});
+    project.layers=[PM.mkLayer('shape',{d:{shape:'rect',w:1900,h:1060,radius:20,color:'#dd5522'},p:{'position.x':960,'position.y':540}})];
+    window.dispatchEvent(new CustomEvent('pm-open-project',{detail:project}));PM.ProjectsScreen.hide();PM.agentFrameCapture=true;
+  });
+  await page.waitForFunction(()=>Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  for(const edge of ['left','right','top','bottom']) {
+    const gesture=await page.evaluate(edge=>{
+      const PM=(window as any).PM,V=PM.Viewer,r=V.stage.getBoundingClientRect(),z=2.51184505912942;
+      let x=(r.width-PM.proj.w*z)/2,y=(r.height-PM.proj.h*z)/2,dx=0,dy=0;
+      if(edge==='left'){x=-150;dx=180;}if(edge==='right'){x=r.width-PM.proj.w*z+150;dx=-180;}
+      if(edge==='top'){y=-150;dy=180;}if(edge==='bottom'){y=r.height-PM.proj.h*z+150;dy=-180;}
+      V.fit=false;V.zoom=z;V.pan=[x-(r.width-PM.proj.w*z)/2,y-(r.height-PM.proj.h*z)/2];V.layout();PM.GL.render(0,{mblur:false});
+      const resize=PM.GL.resize; (window as any).__edgeResizes=[];
+      (window as any).__restoreEdge=()=>{PM.GL.resize=resize;};
+      PM.GL.resize=(...args:any[])=>{const resized=resize(...args);if(resized)(window as any).__edgeResizes.push(args.slice(0,2));return resized;};
+      PM.agentFrameCapture=false;
+      return {x:r.left+r.width/2,y:r.top+r.height/2,dx,dy,pan:[...V.pan]};
+    },edge);
+    await page.mouse.move(gesture.x,gesture.y);
+    await page.mouse.down({button:'middle'});
+    await page.mouse.move(gesture.x+gesture.dx,gesture.y+gesture.dy,{steps:30});
+    await page.mouse.up({button:'middle'});
+    const result=await page.evaluate(()=>{
+      const PM=(window as any).PM;
+      (window as any).__restoreEdge();
+      return {resizes:(window as any).__edgeResizes,pan:[...PM.Viewer.pan],quality:PM.quality};
+    });
+    expect(result.resizes).toEqual([]);
+    expect(result.pan[0]-gesture.pan[0]).toBeCloseTo(gesture.dx,0);
+    expect(result.pan[1]-gesture.pan[1]).toBeCloseTo(gesture.dy,0);
+    expect(result.quality).toBe(1);
+  }
+  expect(session.diagnostics.pageErrors).toEqual([]);
+  await page.evaluate(async()=>await (window as any).PM.flushProject());
+  await session.app.evaluate(({app})=>app.exit(0)).catch(()=>undefined);
+});

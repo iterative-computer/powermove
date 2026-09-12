@@ -4,6 +4,7 @@ import { test, expect } from './helpers/app';
 test.skip(!process.env.PM_PERF_PROJECT, 'Set PM_PERF_PROJECT to a copied project');
 for (const camera of [
   {name:'timeline', zoom:4.371588852276498, pan:[298.525348951279, -471.9744386396628]},
+  {name:'top-edge outward',zoom:2.51184505912942,pan:[1625.9500044340953,966.7594946944603],outward:true},
   {name:'media and shadow', zoom:3.1223372814366486, pan:[2142.9624206302624,1263.2672596867947]},
 ]) test(`pan the reported ${camera.name} region at fractional Retina zoom`, async ({ session }, testInfo) => {
   test.setTimeout(120000);
@@ -34,7 +35,7 @@ for (const camera of [
         await new Promise(requestAnimationFrame);
         const now = performance.now(); frames.push(now - previous); previous = now;
         const rect = V.stage.getBoundingClientRect();
-        const direction = Math.floor(i / 45) % 2 ? -1 : 1;
+        const direction = (Math.floor(i / 45) % 2 ? -1 : 1) * (camera.outward ? -1 : 1);
         V.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7.3 * direction, deltaY: 2.7 * direction, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 }));
 
       }

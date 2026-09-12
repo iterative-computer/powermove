@@ -55,9 +55,14 @@ export function previewRenderViewport(
   const visibleRight = Math.min(displayWidth, stageWidth - frameX), visibleBottom = Math.min(displayHeight, stageHeight - frameY);
   if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return null;
   const pad = Math.max(0, Number(overscan) || 0);
-  const cssLeft = Math.max(0, visibleLeft - pad), cssTop = Math.max(0, visibleTop - pad);
-  const cssRight = Math.min(displayWidth, visibleRight + pad), cssBottom = Math.min(displayHeight, visibleBottom + pad);
-  const cssWidth = cssRight - cssLeft, cssHeight = cssBottom - cssTop;
+  // Keep allocation independent of pan, including at composition edges.
+  // Trimming each overscan margin to the visible intersection changed the
+  // canvas size on every input event near an edge, clearing/reallocating GPU
+  // buffers. Shift the bounded window inward instead of shrinking it.
+  const cssWidth = Math.min(displayWidth, stageWidth + pad * 2);
+  const cssHeight = Math.min(displayHeight, stageHeight + pad * 2);
+  const cssLeft = Math.max(0, Math.min(displayWidth - cssWidth, visibleLeft - pad));
+  const cssTop = Math.max(0, Math.min(displayHeight - cssHeight, visibleTop - pad));
   const density = Math.min(2, Math.max(1, Number(dpr) || 1)) * Math.max(.25, Math.min(1, Number(quality) || 1));
   // The overscan is a pan buffer. Retain its composition coordinates while
   // it covers the view, so input can move the already-presented image instead
