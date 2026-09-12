@@ -16,9 +16,11 @@
   ];
 
   const PULSE_MS = 1600;
-  const FADE_OUT_MS = 160;
-  const MORPH_MS = 380;
-  const SETTLE_MS = 80;
+  const FADE_OUT_MS = 120;
+  const MORPH_MS = 320;
+  const SETTLE_MS = 60;
+  /** Contents start rising this long before the morph lands, so the shape and its contents arrive together. */
+  const REVEAL_LEAD_MS = 90;
   /** How far into a pulse the handover starts when the scroll asks for a new shape. */
   const HANDOVER_AT = 140;
   /** Idle pulses while resting on a shape. */
@@ -83,7 +85,7 @@
   // new contents rise in once it has settled. Scrolling ahead never skips or
   // redirects a beat: the card finishes the shape it is on, dwells just long
   // enough to be seen, then steps one shape at a time toward the target.
-  const DWELL_MS = 420;
+  const DWELL_MS = 360;
   const clamp = (n: number) => Math.max(0, Math.min(VARIANTS.length - 1, n));
 
   function handover() {
@@ -100,11 +102,13 @@
         body?.removeAttribute('data-playing');
         morphing = true;
         slot = next;
-        after(MORPH_MS + SETTLE_MS, () => {
-          rebuildMask();
+        after(MORPH_MS - REVEAL_LEAD_MS, () => {
           morphing = false;
           gen++;
           showing = true;
+        });
+        after(MORPH_MS + SETTLE_MS, () => {
+          rebuildMask();
           if (clamp(target) !== slot) {
             after(DWELL_MS, () => { busy = false; handover(); });
           } else {
@@ -146,7 +150,7 @@
     };
   });
 
-  const WORD_MS = 45;
+  const WORD_MS = 24;
 </script>
 
 {#snippet rising(text: string, cls: string, delay = 0)}
@@ -160,11 +164,11 @@
 {#snippet content(key: string)}
   {#if key === 'node'}
     <span class="lc-node">
-      <span class="lc-track" style:animation-delay="60ms"></span>
+      <span class="lc-track" style:animation-delay="30ms"></span>
       {#each [['Read', 'done'], ['Render', 'live'], ['Edit', 'next']] as [label, state], i (label)}
         <span class="lc-step" data-state={state}>
-          <span class="lc-dot lc-fade" style:animation-delay={`${100 + i * 70}ms`}>{#if state === 'live'}<span class="lc-ring"></span>{/if}</span>
-          <span class="lc-step-label lc-fade" style:animation-delay={`${160 + i * 70}ms`}>{label}</span>
+          <span class="lc-dot lc-fade" style:animation-delay={`${40 + i * 45}ms`}>{#if state === 'live'}<span class="lc-ring"></span>{/if}</span>
+          <span class="lc-step-label lc-fade" style:animation-delay={`${80 + i * 45}ms`}>{label}</span>
         </span>
       {/each}
     </span>
@@ -172,20 +176,20 @@
     <span class="lc-progress">
       <span class="lc-row">
         {@render rising('Rendering frames', 'lc-body-text')}
-        <span class="lc-trail lc-fade" style:animation-delay="120ms">142 / 300</span>
+        <span class="lc-trail lc-fade" style:animation-delay="80ms">142 / 300</span>
       </span>
-      <span class="lc-bar lc-fade" style:animation-delay="180ms"><i></i></span>
+      <span class="lc-bar lc-fade" style:animation-delay="120ms"><i></i></span>
     </span>
   {:else if key === 'terminal'}
     <span class="lc-terminal">
       <span class="lc-cmd lc-fade"><span class="lc-prompt-sign">$</span> pm build quiet-timeline</span>
-      <span class="lc-cmd lc-fade" style:animation-delay="80ms"><span class="lc-prompt-sign">·</span> 3 files, 41 ms</span>
-      {@render rising('Hot reloaded in place', 'lc-out', 160)}
+      <span class="lc-cmd lc-fade" style:animation-delay="50ms"><span class="lc-prompt-sign">·</span> 3 files, 41 ms</span>
+      {@render rising('Hot reloaded in place', 'lc-out', 100)}
     </span>
   {:else}
     <span class="lc-row lc-prompt">
       {@render rising('Push the title in slowly', 'lc-body-text')}
-      <span class="lc-send lc-fade" style:animation-delay="200ms"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5 9 5.5" /></svg></span>
+      <span class="lc-send lc-fade" style:animation-delay="120ms"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5 9 5.5" /></svg></span>
     </span>
   {/if}
 {/snippet}

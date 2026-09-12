@@ -167,9 +167,9 @@ h1 .muted{color:var(--tx-3)}
 
 /* contents rise in per word */
 .lc-rise{display:block;line-height:1.2;white-space:nowrap;min-width:0;flex:1}
-.lc-word{display:inline-block;animation:ai-word .42s cubic-bezier(.2,.7,.2,1) both}
-.lc-fade{animation:ai-word-fade .3s ease both}
-@keyframes ai-word{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.lc-word{display:inline-block;animation:ai-word .32s cubic-bezier(.2,.7,.2,1) both}
+.lc-fade{animation:ai-word-fade .24s ease-out both}
+@keyframes ai-word{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 @keyframes ai-word-fade{from{opacity:0}to{opacity:1}}
 .lc-row{display:flex;align-items:center;gap:10px}
 .lc-prompt{width:250px}
