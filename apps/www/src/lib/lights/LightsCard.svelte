@@ -5,12 +5,14 @@
   import { onMount } from 'svelte';
   import { buildLayers, rollPalette, type Layer } from './mask';
 
-  type Variant = { key: string; radius: number; dark?: boolean; control?: boolean };
+  type Variant = { key: string; radius: number | 'pill'; light?: boolean; control?: boolean };
+  // Ordered so the body never makes the same kind of move twice running:
+  // a pill, a wide node, a short row, then the light panel.
   const VARIANTS: Variant[] = [
-    { key: 'node', radius: 16 },
-    { key: 'progress', radius: 15 },
-    { key: 'terminal', radius: 16, dark: true },
-    { key: 'prompt', radius: 18, control: true },
+    { key: 'prompt', radius: 'pill', control: true },
+    { key: 'node', radius: 12 },
+    { key: 'progress', radius: 20 },
+    { key: 'terminal', radius: 10, light: true },
   ];
 
   const PULSE_MS = 1600;
@@ -38,7 +40,8 @@
 
   const variant = $derived(VARIANTS[slot]);
   const size = $derived(sizes?.[slot]);
-  const radius = $derived(size ? Math.min(variant.radius, (size.h + 2) / 2) : 0);
+  // Resolve every radius to a real number against the box, so a pill travels linearly instead of snapping from 9999px.
+  const radius = $derived(size ? (variant.radius === 'pill' ? (size.h + 2) / 2 : Math.min(variant.radius, (size.h + 2) / 2)) : 0);
 
   let busy = false;
   let onScreen = false;
@@ -64,7 +67,7 @@
 
   function pulse() {
     if (!body || !card || reduced || !onScreen) return;
-    rollPalette(card);
+    rollPalette(card, true);
     body.dataset.playing = 'false';
     // Two frames, or the writes coalesce and nothing restarts.
     requestAnimationFrame(() => requestAnimationFrame(() => { if (body && !reduced) body.dataset.playing = 'true'; }));
@@ -134,13 +137,13 @@
     };
   });
 
-  const CHAR_MS = 20;
+  const WORD_MS = 45;
 </script>
 
 {#snippet rising(text: string, cls: string, delay = 0)}
   <span class="lc-rise {cls}">
-    {#each Array.from(text) as ch, i (i)}
-      <span class="lc-ch" style:animation-delay={`${delay + (reduced ? 0 : i * CHAR_MS)}ms`} style:width={ch === ' ' ? '.28em' : undefined}>{ch === ' ' ? ' ' : ch}</span>
+    {#each text.split(' ') as word, i (i)}
+      <span class="lc-word" style:animation-delay={`${delay + (reduced ? 0 : i * WORD_MS)}ms`}>{word}</span>{' '}
     {/each}
   </span>
 {/snippet}
@@ -157,20 +160,24 @@
       {/each}
     </span>
   {:else if key === 'progress'}
-    <span class="lc-row lc-progress">
-      {@render rising('Rendering frames', 'lc-body-text')}
-      <span class="lc-trail lc-fade" style:animation-delay="120ms">142 / 300</span>
-      <svg viewBox="0 0 16 16" class="lc-spin" aria-hidden="true"><circle cx="8" cy="8" r="6" class="lc-spin-track" /><path d="M8 2A6 6 0 0 1 14 8" class="lc-spin-arc" /></svg>
+    <span class="lc-progress">
+      <span class="lc-row">
+        {@render rising('Rendering frames', 'lc-body-text')}
+        <span class="lc-trail lc-fade" style:animation-delay="120ms">142 / 300</span>
+      </span>
+      <span class="lc-bar lc-fade" style:animation-delay="180ms"><i></i></span>
     </span>
   {:else if key === 'terminal'}
     <span class="lc-terminal">
-      <span class="lc-cmd"><span class="lc-prompt-sign">$</span> pm build quiet-timeline</span>
-      {@render rising('hot reloaded', 'lc-out', 60)}
+      <span class="lc-cmd lc-fade"><span class="lc-prompt-sign">$</span> pm build quiet-timeline</span>
+      <span class="lc-cmd lc-fade" style:animation-delay="80ms"><span class="lc-prompt-sign">·</span> 3 files, 41 ms</span>
+      {@render rising('Hot reloaded in place', 'lc-out', 160)}
     </span>
   {:else}
     <span class="lc-row lc-prompt">
-      {@render rising('Push the title in slowly', 'lc-muted-text')}
-      <span class="lc-send"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5 9 5.5" /></svg></span>
+      {@render rising('Push the title in slowly', 'lc-body-text')}
+      <span class="lc-chip lc-fade" style:animation-delay="140ms">Claude Code</span>
+      <span class="lc-send lc-fade" style:animation-delay="200ms"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5 9 5.5" /></svg></span>
     </span>
   {/if}
 {/snippet}
@@ -195,7 +202,7 @@
       <span class="ai-lights-layer" style:inset={`${-l.pad}px`} style:mask-image={`url(${l.mask})`} style:-webkit-mask-image={`url(${l.mask})`}></span>
       <span class="ai-lights-layer mirror" style:inset={`${-l.pad}px`} style:mask-image={`url(${l.mask})`} style:-webkit-mask-image={`url(${l.mask})`}></span>
     {/each}
-    <div class="lc-face" class:dark={variant.dark}>
+    <div class="lc-face" class:light={variant.light}>
       {#key gen}
         <div class="lc-face-pad lc-contents" class:control={variant.control} style:opacity={showing ? 1 : 0} style:content-visibility={morphing ? 'hidden' : undefined} style:--f={`${FADE_OUT_MS}ms`}>
           {@render content(variant.key)}

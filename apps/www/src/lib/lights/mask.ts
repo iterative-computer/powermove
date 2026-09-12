@@ -134,7 +134,7 @@ function hsl(h: number, s: number, l: number, a = 1): string {
   return a === 1 ? `hsl(${hue.toFixed(1)} ${s}% ${l}%)` : `hsl(${hue.toFixed(1)} ${s}% ${l}% / ${a})`;
 }
 
-export function rollPalette(el: HTMLElement) {
+export function rollPalette(el: HTMLElement, dark = false) {
   const anchor = Math.random() * 360;
   const arc = (ARC_MIN + Math.random() * (ARC_MAX - ARC_MIN)) * (Math.random() < 0.5 ? -1 : 1);
   const at = (t: number) => anchor + arc * t;
@@ -146,7 +146,13 @@ export function rollPalette(el: HTMLElement) {
   s.setProperty('--ai-c5', hsl(at(0.88), 94, 50));
   s.setProperty('--ai-c6', hsl(at(1), 90, 72, 0.8));
   s.setProperty('--ai-tail', hsl(at(-0.12), 70, 76, 0.63));
-  s.setProperty('--ai-bg1', hsl(at(0), 62, 97));
-  s.setProperty('--ai-bg2', hsl(at(0.5), 54, 95));
-  s.setProperty('--ai-bg3', hsl(at(1), 58, 93));
+  if (dark) {
+    s.setProperty('--ai-bg1', hsl(at(0), 18, 11));
+    s.setProperty('--ai-bg2', hsl(at(0.5), 14, 8));
+    s.setProperty('--ai-bg3', hsl(at(1), 16, 6));
+  } else {
+    s.setProperty('--ai-bg1', hsl(at(0), 62, 97));
+    s.setProperty('--ai-bg2', hsl(at(0.5), 54, 95));
+    s.setProperty('--ai-bg3', hsl(at(1), 58, 93));
+  }
 }
