@@ -49,7 +49,7 @@ h1 .muted{color:var(--tx-3)}
 .site-header nav{max-width:1280px;margin-inline:auto;padding-inline:16px}
 .bar{position:relative;display:flex;align-items:center;justify-content:space-between;gap:24px;padding-block:12px}
 .logo{display:inline-flex;align-items:center;gap:10px;font-size:15px;font-weight:500;letter-spacing:-.02em}
-.logo img{filter:invert(1)}
+
 .links{position:absolute;inset:0;margin:auto;width:fit-content;height:fit-content;display:flex;gap:28px;font-size:var(--fs-md)}
 .links a{color:var(--tx-2);transition:color var(--dur-1)}
 .links a:hover{color:var(--tx)}
@@ -173,3 +173,4 @@ footer{padding:96px 0 48px}
 .foot-copy{grid-column:1/-1;margin-top:24px;color:var(--tx-3);font-size:var(--fs-sm)}
 
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}}
+@media(max-width:639px){.manifest pre{padding:12px;font-size:11px}.handoff{transform:translateY(-14%)}.toggle{left:8%;bottom:6%}}
