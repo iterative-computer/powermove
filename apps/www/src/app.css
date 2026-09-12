@@ -231,7 +231,7 @@ h1 .muted{color:var(--tx-3)}
 .points li:last-child{border-bottom:1px solid var(--line)}
 .points li svg{flex-shrink:0;color:var(--tx-3)}
 .panel{position:relative;display:flex;aspect-ratio:1;overflow:hidden;padding:12px;border-radius:var(--r-xl);border:1px solid var(--line);background:color-mix(in srgb,var(--tx) 2%,transparent)}
-.hero-vector-type{font-family:var(--font-geist-sans),Geist,sans-serif;font-size:128px;font-weight:400;font-variation-settings:'wght' 398.334;letter-spacing:-2px}
+.hero-vector-type{font-family:var(--font-geist-sans),Geist,sans-serif;font-size:128px;font-weight:400;font-variation-settings:'wght' 398.334;letter-spacing:-4px}
 
 /* editor-chrome mocks: each panel crops a slice of the editor, like the hero demo */
 .ed{position:absolute;display:flex;gap:4px;padding:4px;border-radius:var(--r-md);background:var(--bg-window);box-shadow:var(--shadow-panel);font-size:11px;line-height:1.4;color:var(--tx-2);--row:26px}
