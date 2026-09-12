@@ -1,5 +1,4 @@
-import { propertyShortcuts } from '../timeline/property-reveal';
-import type { KeybindingDefinition } from 'powermove';
+import { propertyShortcuts, type KeybindingDefinition } from 'powermove';
 
 /**
  * The built-in editor keymap: legacy AE-style controls plus strict

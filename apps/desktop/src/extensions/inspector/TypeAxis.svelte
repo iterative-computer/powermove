@@ -1,7 +1,6 @@
 <script lang="ts">
   import { inspectorContext } from './context';
-  import { type EditBinding } from '../../renderer/src/controls/gesture';
-  import { axisContentKey, axisPath, type FontAxis } from 'powermove';
+  import { axisContentKey, axisPath, type FontAxis, type ControlEditBinding } from 'powermove';
   const { api, doc, transport } = inspectorContext();
   const { NumField, Row } = api.ui.controls;
   let { PM, layer, axis }: { PM: Record<string, any>; layer: any; axis: Pick<FontAxis, 'tag' | 'label' | 'default'> & Partial<FontAxis> } = $props();
@@ -18,7 +17,7 @@
     ...(!layer.d[key] ? [{ type: 'set_content', target: layer.id, patch: { [key]: PM.P(initial) } }] : []),
     { type: 'set_property', target: layer.id, path, value: Number(next), time: transport.time, mode, preserveHandEdits: false }
   ];
-  const edit = $derived<EditBinding>({ mode: 'command', label: `${axis.label} axis`, origin: 'inspector', command: next => commands(next) });
+  const edit = $derived<ControlEditBinding>({ mode: 'command', label: `${axis.label} axis`, origin: 'inspector', command: next => commands(next) });
   function toggle() {
     if (property?.kf) {
       PM.hist.do(current ? 'Remove keyframe' : 'Add keyframe', () => {
