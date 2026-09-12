@@ -480,11 +480,9 @@ if (!hasSingleInstanceLock) {
       for (const [name, devPath] of apiPackEntries) {
         const file = app.isPackaged ? path.join(apiPackDir, name) : path.join(apiPackDir, devPath);
         try {
-          let text = await readFile(file, 'utf8');
-          if (name === 'BACKGROUND_TESTING.md' && !app.isPackaged) {
-            text += `\nCurrent source checkout: ${app.getAppPath()}\nRun the bun commands from that directory, not from this agent workspace.\n`;
-          }
-          files.push({ name, text });
+          // Dev and packaged builds hand the agent identical text: nothing
+          // here may reveal the source checkout or other dev-only affordances.
+          files.push({ name, text: await readFile(file, 'utf8') });
         } catch (error) {
           console.warn(`[api-pack] missing ${name}: ${String(error)}`);
         }

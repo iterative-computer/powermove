@@ -1,21 +1,13 @@
 # Agent testing without visible windows
 
-Run checks from the Powermove source checkout, not an Agent Workspace (which does not contain the app's package scripts). The desktop app lives in `apps/desktop` of the bun workspace; run its scripts from that directory (or with `bun run --cwd apps/desktop <script>` from the repository root):
+Verify work against the running Powermove instance through the `powermove` tools, not by launching another copy of the app. An Agent Workspace contains the API pack, the project snapshot, and staged extensions; it does not contain Powermove's source, package scripts, or test harness, and none of those are available to an agent.
 
-```sh
-bun run test
-bun run typecheck
-bun run test:e2e -- e2e/agent-threads.spec.ts
-```
+For extensions, the staged folder is compiled and validated when the run's result lists it in `extensions`. Powermove reloads it in the live editor, and the run report shows compile errors. Use `get_panel_layout`, `open_panel`, `get_panel_state`, `interact_panel`, `capture_panel`, and `computer_use_panel` to exercise a panel and take real screenshots. Use `get_workspace_state` for layout, selection, and recent errors. Use `render_frames` to review composition output.
 
-Use the package scripts, not `bunx vitest`: `bunx vitest` runs Vitest under bun's runtime instead of Node and skews a calibrated performance test. Pass Vitest files or flags after `--`, for example `bun run test -- src/main/storage.test.ts`.
+Never open a new window for testing. Never launch a headed browser, DevTools, or a second visible copy of Powermove, and never point anything at the user's live profile. If a check cannot be performed with the tools above, report it as unverified instead of building a substitute harness.
 
-The Electron helper in `e2e/helpers/app.ts` always enables background testing. It creates a temporary profile, renders the real app with `show: false`, disables focus, taskbar presence, and DevTools, and keeps painting active. Playwright can still click controls, type, inspect editable project data, capture screenshots, and test persistence by restarting only its isolated copy. The HTML report never opens automatically. Deterministic media fixtures for import and export coverage live in `e2e/fixtures/`.
-
-Custom launchers must set `POWERMOVE_BACKGROUND_TEST=1`, `POWERMOVE_DEVTOOLS=0`, and `POWERMOVE_USER_DATA` to a new absolute temporary directory. Use the helper whenever possible. Never launch a headed browser or visible copy as a fallback, and never supply a live profile. Background mode refuses the default/live profile. It is a window-launch guard for this app, not an OS sandbox for arbitrary shell commands or third-party apps.
-
-Report exactly what was tested. Hidden-renderer screenshots and interactions prove renderer behavior, not native focus, file dialogs, permission prompts, or the already-open desktop instance. Those require explicit user coordination.
+Report exactly what was tested. Panel screenshots and interactions prove renderer behavior, not native focus, file dialogs, permission prompts, or OS behavior. Those require explicit user coordination.
 
 Thread controls save separate conversations, drafts, attachments, and focus choices per project. Titles come from the first user message. A thread keeps its own Codex session for each authority. Finish or stop a run before switching. Pending edits/checkpoints are retained during a switch only while the document revision is unchanged, and are not restored across app launches.
 
-Component and extension hot updates are the preferred path for the live editor. When a core engine change has no safe hot replacement, preserve the current editing session, report the pending update, and ask before restarting. Do not mistake a successful background check for a live update.
+Component and extension hot updates are the preferred path for the live editor. When a core engine change has no safe hot replacement, preserve the current editing session, report the pending update, and ask before restarting. Do not mistake a successful compile for a live update.
