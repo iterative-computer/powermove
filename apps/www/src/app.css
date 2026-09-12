@@ -35,10 +35,13 @@ h1 .muted{color:var(--tx-3)}
 .lead .strong{font-weight:500}
 
 /* ---- buttons ---- */
-.button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:32px;padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);box-shadow:var(--ctl-edge);font-size:var(--fs-sm);font-weight:500;white-space:nowrap;transition:background var(--dur-1),transform var(--dur-1) var(--ease)}
-.button:hover{background:var(--bg-row-hi)}
+/* The raised background is a gradient, which can't be transitioned, so hover lifts it with an overlay that fades in. */
+.button{position:relative;isolation:isolate;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:32px;padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);box-shadow:var(--ctl-edge);font-size:var(--fs-sm);font-weight:500;white-space:nowrap;transition:transform var(--dur-1) var(--ease)}
+.button::after{content:'';position:absolute;inset:0;z-index:-1;border-radius:inherit;background:rgb(var(--ink-rgb) / .06);opacity:0;transition:opacity var(--dur-2)}
+.button:hover::after{opacity:1}
 .button:active{transform:translateY(1px)}
-.button.primary{background:var(--accent);color:var(--on-accent);box-shadow:var(--shadow-raise)}
+.button.primary{background:var(--accent);color:var(--on-accent);box-shadow:var(--shadow-raise);transition:background var(--dur-2),transform var(--dur-1) var(--ease)}
+.button.primary::after{display:none}
 .button.primary:hover{background:var(--accent-hover)}
 .button.lg{min-height:40px;padding:0 16px;font-size:14px}
 .cta{display:flex;flex-wrap:wrap;gap:10px;margin-top:32px}
