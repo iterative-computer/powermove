@@ -291,6 +291,10 @@ export class PowermoveAgentToolBridge {
   private handleSocket(socket: Socket): void {
     socket.setEncoding('utf8');
     socket.setTimeout(this.timeoutMs + 5_000, () => socket.destroy());
+    // A tool client can disconnect mid-request (for example when the agent is
+    // stopped); without a listener the socket error (ECONNRESET) would surface
+    // as an uncaught exception in the main process.
+    socket.on('error', () => socket.destroy());
     let input = '';
     let handled = false;
     socket.on('data', (chunk: string) => {
@@ -425,7 +429,7 @@ export class PowermoveAgentToolBridge {
   }
 
   private writeSocket(socket: Socket, value: Record<string, unknown>): void {
-    if (socket.destroyed) return;
+    if (socket.destroyed || !socket.writable) return;
     socket.end(`${JSON.stringify(value)}\n`);
   }
 }
