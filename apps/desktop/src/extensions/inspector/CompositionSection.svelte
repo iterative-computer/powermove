@@ -18,7 +18,7 @@
   };
 
   const compEdit = (field: string, label: string): EditBinding =>
-    compositionBinding(PM, field as any, { label, origin: 'inspector' });
+    compositionBinding(field as any, { label, origin: 'inspector' });
   const paramEdit = (param: SceneParamView): EditBinding => ({
     mode: 'command',
     label: param.label,

@@ -694,14 +694,13 @@ export interface ControlsAPI {
    */
   readonly binding: {
     channelBinding(
-      pm: Record<string, any>,
       layerId: string,
       channel: string,
       options?: ControlBindingOptions & { time?: number | (() => number) }
     ): ControlEditBinding;
-    layerFieldBinding(pm: Record<string, any>, layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
-    contentBinding(pm: Record<string, any>, layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
-    compositionBinding(pm: Record<string, any>, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    layerFieldBinding(layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    contentBinding(layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    compositionBinding(field: string, options?: ControlBindingOptions): ControlEditBinding;
   };
 }
 
@@ -766,6 +765,8 @@ export interface ViewerService {
   deferNavigationRender(now: number): boolean;
   setZoom(zoom: number): number | false;
   layerAtPoint?(clientX: number, clientY: number): Layer | null;
+  /** Layer id whose source text is being edited on the canvas; the compositor skips drawing it. */
+  canvasTextEditing?: string | null;
 }
 export interface InspectorService {
   refresh(): void;

@@ -19,19 +19,19 @@ import { perf, transport } from '../../renderer/src/state/transport.svelte';
 import * as fontCatalog from '../../renderer/src/typography/font-catalog';
 import VariableFontHarness from './VariableFontHarness.svelte';
 
-const controls: ControlsAPI = {
+const controlsFor = (PM: Record<string, any>): ControlsAPI => ({
   NumField: NumField as ControlsAPI['NumField'], ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'], FontField: FontField as ControlsAPI['FontField'],
   SelectField: SelectField as ControlsAPI['SelectField'], TextField: TextField as ControlsAPI['TextField'],
   ToggleField: ToggleField as ControlsAPI['ToggleField'], Row: Row as ControlsAPI['Row'],
   Section: Section as ControlsAPI['Section'],
   binding: {
-    channelBinding,
-    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options),
-    contentBinding,
-    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
+    channelBinding: (layerId, channel, options) => channelBinding(PM, layerId, channel, options),
+    compositionBinding: (field, options) => compositionBinding(PM, field as any, options),
+    contentBinding: (layerId, field, options) => contentBinding(PM, layerId, field, options),
+    layerFieldBinding: (layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
   },
-};
+});
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
@@ -65,7 +65,7 @@ function setup(content: Record<string, any>) {
   const api = {
     id: 'inspector', apiVersion: 1,
     manifest: { id: 'inspector', name: 'Inspector', version: '1', apiVersion: 1 },
-    ui: { controls, icon: () => '<svg></svg>' },
+    ui: { controls: controlsFor(PM), icon: () => '<svg></svg>' },
     host: { pm: PM, state: { doc, sel, transport, perf }, mount: vi.fn() },
   } as unknown as PowermoveAPI;
   instance = mount(VariableFontHarness, { target, props: { api, layer } });

@@ -3,7 +3,7 @@
 
   let { value = 'center', layer }: { value?: string; layer: any } = $props();
   const { PM, api, doc, sel, transport } = inspectorContext();
-  const binding = $derived(api.ui.controls.binding.contentBinding(PM, layer.id, 'align', { label: 'Text alignment', origin: 'inspector' }));
+  const binding = $derived(api.ui.controls.binding.contentBinding(layer.id, 'align', { label: 'Text alignment', origin: 'inspector' }));
   const mixed = $derived((sel.layers, doc.tick.values, doc.proj, transport.time, PM.inspectorMixed?.(binding, value) ?? false));
   const options = ['left', 'center', 'right'] as const;
 

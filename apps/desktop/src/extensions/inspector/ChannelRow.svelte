@@ -75,7 +75,7 @@
   ));
   const meta = $derived(PM.CH?.[channel] ?? {});
   const edit = $derived.by((): EditBinding => {
-    if (!property) return channelBinding(PM, layer.id, channel, {
+    if (!property) return channelBinding(layer.id, channel, {
       label: isScale && !scaleLinked ? 'Scale X' : label,
       origin: 'inspector',
       time: () => transport.time
@@ -95,7 +95,7 @@
       })
     };
   });
-  const scaleYEdit = $derived(channelBinding(PM, layer.id, 'scale.y', {
+  const scaleYEdit = $derived(channelBinding(layer.id, 'scale.y', {
     label: scaleLinked ? 'Scale' : 'Scale Y',
     origin: 'inspector',
     time: () => transport.time

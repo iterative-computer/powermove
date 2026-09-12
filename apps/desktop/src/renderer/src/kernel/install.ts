@@ -127,13 +127,21 @@ const controls: ControlsAPI = {
   ToggleField: ToggleField as unknown as ControlsAPI['ToggleField'],
   Row: Row as unknown as ControlsAPI['Row'],
   Section: Section as unknown as ControlsAPI['Section'],
-  binding: {
-    channelBinding,
-    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
-    contentBinding,
-    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options)
-  }
+  binding: null as unknown as ControlsAPI['binding']
 };
+
+/** Binding helpers close over the host registry so extensions never hold PM. */
+function boundControls(PM: LegacyPM): ControlsAPI {
+  return {
+    ...controls,
+    binding: {
+      channelBinding: (layerId, channel, options) => channelBinding(PM, layerId, channel, options),
+      layerFieldBinding: (layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
+      contentBinding: (layerId, field, options) => contentBinding(PM, layerId, field, options),
+      compositionBinding: (field, options) => compositionBinding(PM, field as any, options)
+    }
+  };
+}
 
 /* ── PM-backed capability adapters ───────────────────────── */
 
@@ -463,7 +471,7 @@ function makeUI(PM: LegacyPM): UIAPI {
     constructor(binding: EditBinding) { super(gesturePM, binding); }
   }
   return {
-    controls,
+    controls: boundControls(PM),
     toast: (text, opts) => PM?.toast?.(text, opts?.sticky ? 8000 : 2200, opts ?? {}),
     confirm: (title, body) =>
       new Promise<boolean>((resolve) => {

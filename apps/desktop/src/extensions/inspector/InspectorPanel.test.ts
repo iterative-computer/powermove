@@ -31,7 +31,7 @@ const CHANNELS = [
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
 
-const controls: ControlsAPI = {
+const controlsFor = (PM: Record<string, any>): ControlsAPI => ({
   NumField: NumField as ControlsAPI['NumField'],
   ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'],
@@ -42,12 +42,12 @@ const controls: ControlsAPI = {
   Row: Row as ControlsAPI['Row'],
   Section: Section as ControlsAPI['Section'],
   binding: {
-    channelBinding,
-    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options),
-    contentBinding,
-    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options)
+    channelBinding: (layerId, channel, options) => channelBinding(PM, layerId, channel, options),
+    compositionBinding: (field, options) => compositionBinding(PM, field as any, options),
+    contentBinding: (layerId, field, options) => contentBinding(PM, layerId, field, options),
+    layerFieldBinding: (layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options)
   }
-};
+});
 
 function apiFor(PM: Record<string, any>, register = vi.fn()): PowermoveAPI {
   return {
@@ -56,7 +56,7 @@ function apiFor(PM: Record<string, any>, register = vi.fn()): PowermoveAPI {
     manifest: { id: 'inspector', name: 'Inspector', version: '1.0.0', apiVersion: 1 },
     panels: { register },
     ui: {
-      controls,
+      controls: controlsFor(PM),
       icon: (name: string) => `<svg data-icon="${name}" aria-hidden="true"><path/></svg>`
     },
     host: {

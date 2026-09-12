@@ -1,4 +1,5 @@
 import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane } from '../core/space-3d';
+import { viewerService } from '../core/services';
 import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { sourceTime } from '../core/retiming';
 import { evaluatedValue, isProperty, resolveContent } from '../core/content-properties';
@@ -1121,7 +1122,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       covers[i] = largest;
       const layer = layers[i];
       if (layer.type !== 'shape' || layer.d.paths?.length || !PM.active(layer, T)
-          || PM.canvasTextEditing === layer.id || layer.shy && opt.hideShy || PM.worldOpacity(layer, T) < 1) continue;
+          || viewerService(PM)?.canvasTextEditing === layer.id || layer.shy && opt.hideShy || PM.worldOpacity(layer, T) < 1) continue;
       const d = resolveContent(PM, layer, T), m = scaledWorld(layer, T, W, H);
       if (d.shape !== 'rect' || !/^#[0-9a-f]{6}$/i.test(d.color) || Math.abs(m[1]) > 1e-9 || Math.abs(m[2]) > 1e-9) continue;
       const geometry = shapeRasterGeometry(d, continuousRasterScale(m));
@@ -1157,7 +1158,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
-    if(PM.canvasTextEditing===L.id && !opt.exporting)continue;
+    if(viewerService(PM)?.canvasTextEditing===L.id && !opt.exporting)continue;
     if (!opt.mattePass && matteSources.has(L.id)) continue;
     if (solo && !L.solo && !(PM.groupAncestors?.(L, layers) || []).some((group: any) => group.solo) && !opt.mattePass) continue;
     if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;

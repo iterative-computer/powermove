@@ -13,7 +13,7 @@
   const value = (field: string) => (doc.tick.values, transport.time, isProperty(layer[field]) ? PM.evP(layer, layer[field], transport.time, `l.${field}`) : layer[field]);
   const animatedEdit = (field: string, label: string): EditBinding => ({ mode: 'command', label, origin: 'inspector', command: (value) => ({ type: 'set_property', target: layer.id, path: `l.${field}`, value: value as any, time: transport.time, mode: 'auto', preserveHandEdits: false }) });
   const edit = (field: string, label: string): EditBinding =>
-    layerFieldBinding(PM, layer.id, field as any, { label, origin: 'inspector' });
+    layerFieldBinding(layer.id, field as any, { label, origin: 'inspector' });
   const parentingLayers = () => (PM.sel.layers.includes(layer.id) ? PM.selLayers() : [layer])
     .filter((item: any) => item.type !== 'group' && PM.TYPE_META[item.type]?.transform !== false);
   const parentEdit: EditBinding = { mode:'command', label:'Parent layers', origin:'inspector', command: (parent) => parentingLayers().map((item: any) => ({ type:'set_layer', target:item.id, patch:{parent} })) };

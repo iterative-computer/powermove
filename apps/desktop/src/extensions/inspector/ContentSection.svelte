@@ -31,7 +31,7 @@
 
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
   const edit = (key: string, label: string): EditBinding =>
-    contentBinding(PM, layer.id, key, { label, origin: 'inspector' });
+    contentBinding(layer.id, key, { label, origin: 'inspector' });
 
   function beginText(): void {
     if (editingText) return;
