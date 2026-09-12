@@ -107,20 +107,20 @@ h1 .muted{color:var(--tx-3)}
 .brand-soon .brand-name{color:var(--tx-3)}
 .brand-soon:hover,.brand-soon:hover .brand-name{color:var(--tx-2)}
 
-/* ---- showcase (sticky scroll, one body that becomes four surfaces) ---- */
-.showcase-layout{display:grid;gap:40px}
-@media(min-width:1024px){.showcase-layout{grid-template-columns:7fr 5fr;gap:80px;align-items:start}}
-.showcase-stick{position:sticky;top:0;display:flex;align-items:center;height:100vh}
-@media(max-width:1023px){.showcase-stick{height:auto;padding-top:24px}}
-.showcase-copy{padding-block:calc(50vh - 120px)}
-.showcase-steps{list-style:none;padding:0;margin-top:40px;color:var(--tx-3);font-size:15px;line-height:1.55;text-wrap:pretty}
-.showcase-steps li{position:relative;padding:12px 0 12px 18px;transition:color .4s}
-.showcase-steps li+li{margin-top:min(28vh,220px)}
-.showcase-steps li::before{content:'';position:absolute;left:0;top:19px;width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:0;transform:scale(.5);transition:opacity .3s,transform .3s var(--ease)}
-.showcase-steps li .strong{color:var(--tx-3);font-weight:500;transition:color .4s}
-.showcase-steps li[data-active]{color:var(--tx-2)}
-.showcase-steps li[data-active] .strong{color:var(--tx)}
-.showcase-steps li[data-active]::before{opacity:1;transform:none}
+/* ---- showcase (pinned; scroll progress picks the step, the rail dot arcs to it, the card follows) ---- */
+.showcase{height:360vh;padding:0}
+.showcase-sticky{position:sticky;top:0;height:100vh;display:flex;align-items:center}
+.showcase-layout{display:grid;gap:40px;width:100%}
+@media(min-width:1024px){.showcase-layout{grid-template-columns:5fr 7fr;gap:80px;align-items:center}}
+.showcase-rail{position:relative;display:flex;flex-direction:column;gap:6px;margin-top:40px}
+.showcase-rail .rail-marker{position:absolute;left:0;top:-3px;width:6px;height:6px;border-radius:50%;background:var(--accent);will-change:transform}
+.showcase-step{display:flex;flex-direction:column;gap:3px;padding:8px 0 8px 18px;font-size:15px;line-height:1.45;color:var(--tx-3);transition:color .3s}
+.showcase-step .strong{color:var(--tx-3);font-weight:500;transition:color .3s}
+.showcase-step-text{color:var(--tx-4);transition:color .3s}
+.showcase-step[data-active]{color:var(--tx-2)}
+.showcase-step[data-active] .strong{color:var(--tx)}
+.showcase-step[data-active] .showcase-step-text{color:var(--tx-3)}
+@media(max-width:1023px){.showcase{height:auto}.showcase-sticky{position:static;height:auto;padding-block:64px}}
 
 /* The card carries its own surface tokens, scoped here so it never restyles the page. */
 @property --ai-a{syntax:'<angle>';inherits:false;initial-value:180deg}
