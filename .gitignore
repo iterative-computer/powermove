@@ -1,9 +1,26 @@
 .DS_Store
 *.log
 node_modules/
+
+# build output
 out/
 dist/
-native/PowermoveNative/artifacts/
-e2e/test-results/
-e2e/playwright-report/
-e2e/tmp/
+build/
+.svelte-kit/
+.vite/
+
+# desktop e2e artifacts
+apps/desktop/e2e/test-results/
+apps/desktop/e2e/playwright-report/
+apps/desktop/e2e/tmp/
+
+# native addon build output
+packages/macos-haptics/build/
+
+# generated packages
+packages/player/dist/
+
+# local environment
+.env
+.env.*
+!.env.example
