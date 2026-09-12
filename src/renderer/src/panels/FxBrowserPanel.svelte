@@ -1,17 +1,18 @@
 <script lang="ts">
   import { kernelSignals } from '../kernel/signals.svelte';
-  import { fxBrowser } from './fx-browser.svelte';
+  import { fxBrowser, pushRecent, readRecent } from './fx-browser.svelte';
   import type { PanelProps } from './registerSveltePanel';
 
-  type Kind = 'effect' | 'transition';
-  interface Item { kind: Kind; id: string; label: string; group: string }
+  interface Item { id: string; label: string; group: string }
 
   let { panelId }: PanelProps = $props();
 
   const PM = window.PM as Record<string, any>;
-  const kind = $derived(fxBrowser.kind);
   const query = $derived(fxBrowser.query);
+  const category = $derived(fxBrowser.category);
+  let recent = $state<string[]>(readRecent());
   let status = $state('');
+  let rail: HTMLDivElement | undefined = $state();
   let list: HTMLDivElement | undefined = $state();
   let searchEl: HTMLInputElement | undefined = $state();
 
@@ -22,48 +23,56 @@
   const effects = $derived.by<Item[]>(() => {
     kernelSignals.effects;
     return Object.entries((PM.FX ?? {}) as Record<string, { label: string; group: string }>).map(
-      ([id, definition]) => ({ kind: 'effect', id, label: definition.label ?? id, group: definition.group ?? 'Other' })
+      ([id, definition]) => ({ id, label: definition.label ?? id, group: definition.group ?? 'Other' })
     );
   });
 
-  const transitions = $derived.by<Item[]>(() => {
-    kernelSignals.transitions;
-    const found = new Map<string, any>();
-    try {
-      for (const definition of PM.Kernel?.transitions?.list?.() ?? []) {
-        if (definition?.id && !found.has(definition.id)) found.set(definition.id, definition);
-      }
-    } catch {
-      // An extension registry must not take the browser down with it.
-    }
-    for (const [id, definition] of Object.entries(PM.TRANSITIONS ?? {}) as Array<[string, any]>) {
-      if (!found.has(id)) found.set(id, { id, ...definition });
-    }
-    return [...found.values()].map((definition) => ({
-      kind: 'transition',
-      id: definition.id,
-      label: definition.label ?? definition.id,
-      group: definition.group ?? 'Transitions'
-    }));
-  });
-
-  const items = $derived(kind === 'effect' ? effects : transitions);
+  const items = $derived(effects);
   const categories = $derived([...new Set(items.map((item) => item.group))]);
+  const recentItems = $derived(recent.map((id) => items.find((item) => item.id === id)).filter((item): item is Item => !!item));
+  /* The rail: every family, plus Recent once something has been used. A
+     category that disappears (extension unloaded) falls back to All. */
+  const rails = $derived([
+    { id: 'all', label: 'All' },
+    ...(recentItems.length ? [{ id: 'recent', label: 'Recent' }] : []),
+    ...categories.map((group) => ({ id: group, label: group }))
+  ]);
+  const activeCategory = $derived(rails.some((entry) => entry.id === category) ? category : 'all');
+  const searching = $derived(query.trim().length > 0);
   const shown = $derived.by(() => {
     const needle = query.trim().toLowerCase();
-    return items.filter(
-      (item) => !needle || item.label.toLowerCase().includes(needle) || item.id.toLowerCase().includes(needle)
-    );
+    if (needle) return items.filter((item) => item.label.toLowerCase().includes(needle) || item.id.toLowerCase().includes(needle));
+    if (activeCategory === 'recent') return recentItems;
+    if (activeCategory === 'all') return items;
+    return items.filter((item) => item.group === activeCategory);
   });
-  /* Grouped when browsing; a search is one flat list. */
+  /* All browses by family; a chosen family, Recent, and any search are one flat list. */
   const sections = $derived.by<Array<{ group: string | null; items: Item[] }>>(() => {
-    if (query.trim()) return [{ group: null, items: shown }];
+    if (searching || activeCategory !== 'all') return [{ group: null, items: shown }];
     return categories
       .map((group) => ({ group, items: shown.filter((item) => item.group === group) }))
       .filter((section) => section.items.length);
   });
 
-  const key = (item: Item): string => `${item.kind}:${item.id}`;
+  function pick(id: string): void {
+    fxBrowser.category = id;
+    if (fxBrowser.query) fxBrowser.query = '';
+  }
+
+  function railKey(event: KeyboardEvent): void {
+    const buttons = [...(rail?.querySelectorAll<HTMLButtonElement>('.fxb-cat') ?? [])];
+    const index = buttons.indexOf(event.currentTarget as HTMLButtonElement);
+    if (index < 0) return;
+    const map: Record<string, number> = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: buttons.length - 1 };
+    const next = map[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const target = buttons[Math.min(buttons.length - 1, Math.max(0, next))];
+    target?.focus();
+    if (target?.dataset.category) pick(target.dataset.category);
+  }
+
+  const key = (item: Item): string => item.id;
 
   function apply(event: MouseEvent | KeyboardEvent, item: Item): void {
     if ('detail' in event && event.detail > 1) return;
@@ -73,20 +82,17 @@
       PM.toast?.(status);
       return;
     }
-    const command =
-      item.kind === 'effect'
-        ? { type: 'add_effect', target: layer.id, effect: item.id }
-        : { type: 'set_transition', layer: layer.id, edge: 'in', transition: { type: item.id } };
-    PM.Edit.apply(command, { label: `Add ${item.label}`, origin: 'fx-browser' });
+    PM.Edit.apply({ type: 'add_effect', target: layer.id, effect: item.id }, { label: `Add ${item.label}`, origin: 'fx-browser' });
     PM.Inspector?.refresh?.();
     PM.invalidate();
+    recent = pushRecent(item.id);
     status = `Added ${item.label}`;
   }
 
   function dragStart(event: DragEvent, item: Item): void {
     event.dataTransfer?.setData(
       'application/x-powermove-fx',
-      JSON.stringify({ kind: item.kind, id: item.id, label: item.label })
+      JSON.stringify({ kind: 'effect', id: item.id, label: item.label })
     );
     if (event.dataTransfer) event.dataTransfer.effectAllowed = 'copy';
   }
@@ -110,24 +116,41 @@
         bind:this={searchEl}
         class="fxb-search"
         type="search"
-        placeholder="Search {kind === 'effect' ? 'effects' : 'transitions'}"
-        aria-label="Search {kind === 'effect' ? 'effects' : 'transitions'}"
+        placeholder="Search effects"
+        aria-label="Search effects"
         bind:value={fxBrowser.query}
         onkeydown={(event) => { if (event.key === 'Escape') { fxBrowser.searchOpen = false; fxBrowser.query = ''; } }}
       />
     </div>
   {/if}
 
-  <div class="fxb-list" bind:this={list} role="group" aria-label={kind === 'effect' ? 'Effects' : 'Transitions'}>
+  <div class="fxb-body">
+    <div class="fxb-rail" bind:this={rail} role="tablist" aria-label="Effect categories" aria-orientation="vertical">
+      {#each rails as entry (entry.id)}
+        <button
+          type="button"
+          class="fxb-cat"
+          class:on={entry.id === activeCategory && !searching}
+          role="tab"
+          aria-selected={entry.id === activeCategory && !searching}
+          tabindex={entry.id === activeCategory ? 0 : -1}
+          data-category={entry.id}
+          onclick={() => pick(entry.id)}
+          onkeydown={railKey}
+        >{entry.label}</button>
+      {/each}
+    </div>
+
+  <div class="fxb-list" bind:this={list} role="group" aria-label="Effects">
     {#each sections as section (section.group ?? '')}
-      {#if section.group}<div class="sec fxb-sec">{section.group}</div>{/if}
+      {#if section.group}<div class="fxb-sec">{section.group}</div>{/if}
       {#each section.items as item, index (key(item))}
         <button
           type="button"
           class="fxb-row"
           draggable="true"
           tabindex={index === 0 && section === sections[0] ? 0 : -1}
-          data-kind={item.kind}
+          data-kind="effect"
           data-id={item.id}
           title="Click to add to the selected layer · drag onto a layer"
           onclick={(event) => apply(event, item)}
@@ -141,8 +164,9 @@
         </button>
       {/each}
     {:else}
-      <div class="fxb-empty">No {kind === 'effect' ? 'effects' : 'transitions'} match “{query}”</div>
+      <div class="fxb-empty">{searching ? `No effects match “${query}”` : 'Nothing here yet'}</div>
     {/each}
+  </div>
   </div>
 
   <span class="panel-sr-only" role="status">{status}</span>

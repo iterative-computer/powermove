@@ -38,7 +38,7 @@ const labels = (target: HTMLElement) => [...target.querySelectorAll('.fxb-label'
 const secs = (target: HTMLElement) => [...target.querySelectorAll('.fxb-sec')].map((node) => node.textContent);
 
 afterEach(() => {
-  fxBrowser.kind = 'effect'; fxBrowser.query = ''; fxBrowser.searchOpen = false;
+  fxBrowser.query = ''; fxBrowser.searchOpen = false;
   document.body.replaceChildren();
   delete window.PM;
   vi.clearAllMocks();
@@ -88,31 +88,7 @@ describe('FxBrowserPanel', () => {
     await unmount(component);
   });
 
-  it('switches to transitions merged from the kernel and PM.TRANSITIONS and applies set_transition', async () => {
-    const kernel = createKernel();
-    const signals = installKernelSignals(kernel);
-    kernel.registerTransition?.('ext:wipe', { id: 'wipe', label: 'Wipe', group: 'Wipes', params: [], frag: 'void main(){gl_FragColor=mix(texture2D(u_from,v_uv),texture2D(u_to,v_uv),u_prog);}' } as any);
-    const PM = basePM({ Kernel: kernel });
-    window.PM = PM as any;
-    const { target, component } = mountPanel();
-
-    flushSync(() => { fxBrowser.kind = 'transition'; });
-    const shown = labels(target);
-    expect(shown).toContain('Fade');
-
-    const fade = [...target.querySelectorAll<HTMLButtonElement>('.fxb-row')].find((b) => b.textContent?.includes('Fade'))!;
-    flushSync(() => fade.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 })));
-    expect(PM.Edit.apply).toHaveBeenCalledWith(
-      { type: 'set_transition', layer: 'layer-1', edge: 'in', transition: { type: 'fade' } },
-      { label: 'Add Fade', origin: 'fx-browser' }
-    );
-
-    signals.dispose();
-    resetKernelSignals();
-    await unmount(component);
-  });
-
-  it('mounts the segmented control into the panel header and drives the list from it', async () => {
+  it('mounts only the search action into the panel header', () => {
     const PM = basePM({ PANELS: {}, registerPanel: vi.fn(), icon: () => document.createElement('span'), pickFiles: vi.fn() });
     PM.registerPanel = (id: string, def: any) => { PM.PANELS[id] = def; };
     window.PM = PM as any;
@@ -121,16 +97,8 @@ describe('FxBrowserPanel', () => {
     hdr.append(Object.assign(document.createElement('span'), { className: 'ptitle' }));
     document.body.append(hdr);
     PM.PANELS.fxbrowser.header(hdr, {});
-    const tabs = hdr.querySelectorAll<HTMLButtonElement>('[role="tab"]');
-    expect(tabs).toHaveLength(2);
+    expect(hdr.querySelectorAll('[role="tab"]')).toHaveLength(0);
     expect(hdr.querySelector('.iconbtn[aria-label="Search"]')).not.toBeNull();
-
-    const { target, component } = mountPanel();
-    flushSync(() => tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })));
-    expect(fxBrowser.kind).toBe('transition');
-    expect(tabs[1]!.classList.contains('on')).toBe(true);
-    expect(labels(target)).toEqual(['Fade']);
-    await unmount(component);
   });
 
   it('reports when no layer is selected and toasts', async () => {
@@ -204,7 +172,7 @@ describe('FxBrowserPanel', () => {
 
     expect([...definitions].map(([id, definition]) => [id, definition.title, definition.size])).toEqual([
       ['assets', 'Media', 200],
-      ['fxbrowser', 'Effects & Transitions', 240],
+      ['fxbrowser', 'Effects', 240],
       ['workspaces', 'Workspaces', 200],
       ['takes', 'Takes', 180],
       ['notes', 'Notes', 180]

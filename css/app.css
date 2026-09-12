@@ -512,14 +512,29 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .new-project-form{display:flex;flex-direction:column;gap:2px}
 .new-project-field{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:38px}
 .new-project-field>span{color:var(--tx-2);font-size:var(--fs-sm)}
-#palette{top:14vh;left:50%;transform:translateX(-50%);width:min(620px,92vw);max-height:64vh}
-#palette .field{height:44px;border-radius:0;box-shadow:none;border-bottom:1px solid var(--line);font-size:var(--fs-lg)}
-.plist{overflow:auto;padding:6px}
-.pitem{display:flex;align-items:center;gap:10px;height:32px;padding:0 10px;border-radius:var(--r-sm);font-size:var(--fs-md);color:var(--tx-2);transition:background var(--dur-1),color var(--dur-1)}
-.pitem:hover{background:var(--ink-1);color:var(--tx)}
-.pitem.on{background:var(--ink-2);color:var(--tx)}
+/* Palette: same language as the panel library — matte shell, bare search row,
+   deeper well with a light hairline edge, concentric radii. */
+#palette{--pal-gutter:8px;--pal-r:24px;top:14vh;left:50%;transform:translateX(-50%);width:min(620px,92vw);max-height:64vh;
+  padding:0 var(--pal-gutter) var(--pal-gutter);border-radius:var(--pal-r)}
+:root[data-theme="dark"] #palette{background:#0A0A0A;box-shadow:0 24px 60px -12px rgb(0 0 0 / .8),0 0 0 1px rgb(255 255 255 / .09)}
+#palette .field{flex:none;height:46px;border-radius:0;box-shadow:none;background:transparent;padding:0 12px;gap:10px;font-size:var(--fs-lg)}
+#palette .field:focus-within{background:transparent;box-shadow:none}
+#palette .field .psearch{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;color:var(--tx-4)}
+.plist{scrollbar-width:none}.plist::-webkit-scrollbar{display:none}
+/* The shell is a superellipse; a circular well inside it reads larger than its
+   number, so every nested surface takes the same curve to stay concentric. */
+.plist,.pitem,.pglider{corner-shape:var(--ui-corner-smoothing)}
+.plist{position:relative;overflow:auto;padding:6px;min-height:0;border-radius:calc(var(--pal-r) - var(--pal-gutter));background:var(--bg-field);box-shadow:0 0 0 1px var(--line)}
+:root[data-theme="dark"] .plist{background:#141414;box-shadow:0 0 0 1px rgb(255 255 255 / .07)}
+.pgroup{padding:8px 10px 4px;font-size:var(--fs-sm);color:var(--tx-4)}
+.pgroup:first-child{padding-top:6px}
+.pitem{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:calc(var(--pal-r) - var(--pal-gutter) - 6px);font-size:var(--fs-md);color:var(--tx)}
+.pitem{position:relative;z-index:1}
+.pglider{position:absolute;left:6px;right:6px;top:0;height:0;opacity:0;pointer-events:none;border-radius:calc(var(--pal-r) - var(--pal-gutter) - 6px);background:#242424;box-shadow:0 0 0 1px rgb(255 255 255 / .07),inset 0 1px 0 rgb(255 255 255 / .04);transition:transform var(--dur-3) var(--ease),height var(--dur-3) var(--ease),opacity var(--dur-1)}
+.pglider.on{opacity:1}
+:root:not([data-theme="dark"]) .pglider{background:var(--bg-float);box-shadow:var(--ctl-edge)}
 .pitem .kb{margin-left:auto;font-family:var(--f-mono);font-size:var(--fs-xs);color:var(--tx-4)}
-.pitem .cat{font-size:var(--fs-xs);color:var(--tx-4)}
+.plist .empty{padding:22px 16px}
 
 /* ── misc ──────────────────────────────────────────────── */
 #status{height:22px;flex:none;display:flex;align-items:center;gap:14px;padding:0 calc(var(--pad) + 4px) 2px;color:var(--tx-4);
@@ -763,6 +778,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 /* Live row — a slow left-to-right sweep of light across the text itself. */
 .shimmer-text{background:linear-gradient(100deg,var(--tx-3) 30%,var(--tx) 50%,var(--tx-3) 70%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer-sweep 1.6s linear infinite}
 @keyframes shimmer-sweep{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){.panel-library-glider,.pglider{transition:none}}
 @media (prefers-reduced-motion:reduce){
   .shimmer-text{animation:none;background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--tx-2)}
   .agent-trace .is-pulsing{animation:none}
@@ -805,7 +821,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-composer:focus-within{background:color-mix(in srgb,var(--bg-field) 94%,var(--tx) 6%)}
 .agent-composer.is-dropping{background:color-mix(in srgb,var(--accent) 10%,var(--bg-field))}
 .agent-input-row{display:flex;align-items:center;gap:6px}
-.agent-composer textarea{display:block;flex:1;min-width:0;min-height:32px;max-height:96px;resize:none;align-self:center;padding:4px 2px;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
+.agent-composer textarea{display:block;flex:1;min-width:0;min-height:28px;max-height:96px;resize:none;align-self:center;padding:4px 2px;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
 .agent-composer textarea::-webkit-scrollbar{display:none}
 .agent-composer textarea::placeholder{color:var(--tx-4)}
 .agent-round{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:var(--r-xs);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
@@ -1035,30 +1051,44 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .segmented{display:inline-flex;padding:2px;gap:1px;background:var(--ink-2);border-radius:var(--r-md)}
 .segmented button{height:calc(var(--ctl-h) - 4px);padding:0 10px;border-radius:calc(var(--r-md) - 2px);color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;transition:color var(--dur-1) var(--ease)}
 .segmented button:hover{color:var(--tx)}.segmented button.on{background:var(--ctl-raised);box-shadow:var(--ctl-edge);color:var(--tx)}.segmented button:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-/* The header carries the segmented control as its title; the body is only
-   the list. Search is a row that appears under the header on demand. */
-.panel > header:has(> .fxb-kind){padding-inline:var(--panel-edge-inset)}
-.panel > header:has(> .fxb-kind) .grip{display:none}
-#panel-fxbrowser > header .ptitle{display:none}
-#panel-fxbrowser > header .fxb-kind{display:inline-flex}
-#panel-fxbrowser > header .segmented button{height:22px;padding:0 10px;font-size:var(--fs-sm)}
 .fxb{height:100%;min-height:0;display:flex;flex-direction:column;font-size:var(--fs-sm)}
-.fxb-searchrow{flex:none;padding:8px var(--panel-edge-inset) 2px}
-.fxb-search{width:100%;height:var(--ctl-h);padding:0 9px;border:0;border-radius:var(--r-sm);background:var(--bg-field);color:var(--tx);font-size:var(--fs-sm);box-shadow:var(--ctl-edge-inset)}
+/* Search sits in the list's own column so the field and the rows share one left edge. */
+.fxb-searchrow{position:relative;flex:none;padding:8px var(--panel-edge-inset) 4px}
+.fxb-searchicon{position:absolute;left:calc(var(--panel-edge-inset) + 8px);top:calc(50% + 2px);width:12px;height:12px;translate:0 -50%;fill:none;stroke:var(--tx-4);stroke-width:1.5;stroke-linecap:round;pointer-events:none}
+.fxb-search{width:100%;height:26px;padding:0 9px 0 26px;border:0;border-radius:var(--r-sm);background:var(--bg-field);color:var(--tx);font-size:var(--fs-sm);box-shadow:var(--ctl-edge-inset);transition:box-shadow var(--dur-1)}
 .fxb-search::placeholder{color:var(--tx-4)}
 .fxb-search:focus{outline:0;box-shadow:var(--ctl-edge-inset),0 0 0 1px var(--accent)}
-.fxb-list{min-height:0;flex:1;overflow:auto;padding:4px 6px 10px;display:flex;flex-direction:column}
-.fxb-sec{height:auto;margin:10px 8px 2px;padding:0;border-top:0;color:var(--tx-4);font-weight:var(--fw-medium)}
-.fxb-sec:first-child{margin-top:4px}
-.fxb-row{display:flex;align-items:center;gap:8px;height:24px;padding:0 6px 0 8px;border-radius:var(--r-sm);color:var(--tx-2);font-size:var(--fs-sm);text-align:left;cursor:grab;transition:background var(--dur-1),color var(--dur-1)}
+.fxb-search::-webkit-search-cancel-button{-webkit-appearance:none}
+/* Category rail beside the list, the way effects libraries in editing suites are
+   laid out: the family is chosen once on the left, names are scanned on the right.
+   The rail's selected state is a raised neutral surface, never accent. */
+.fxb-body{display:flex;flex:1;min-height:0}
+.fxb-rail{flex:none;width:112px;display:flex;flex-direction:column;gap:1px;padding:6px 4px 10px 6px;overflow:auto;border-right:1px solid var(--line);scrollbar-width:none}
+.fxb-rail::-webkit-scrollbar{display:none}
+.fxb-cat{display:block;width:100%;height:24px;padding:0 7px;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1)}
+.fxb-cat:hover{color:var(--tx)}
+.fxb-cat.on{background:var(--bg-float);color:var(--tx);box-shadow:var(--ctl-edge)}
+.fxb-cat:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+.fxb-list{min-height:0;flex:1;overflow:auto;padding:6px 6px 10px 6px;display:flex;flex-direction:column;scrollbar-width:thin}
+.fxb-sec{height:auto;margin:0;padding:10px 8px 3px;border-top:0;color:var(--tx-4);font-size:var(--fs-xs);font-weight:var(--fw-medium);letter-spacing:0}
+.fxb-sec:first-child{padding-top:2px}
+.fxb-row{display:flex;align-items:center;gap:8px;height:24px;padding:0 4px 0 8px;border-radius:var(--r-sm);color:var(--tx-2);font-size:var(--fs-sm);text-align:left;cursor:grab;transition:background var(--dur-1),color var(--dur-1)}
 .fxb-row:hover,.fxb-row:focus-visible{background:var(--ink-1);color:var(--tx)}
 .fxb-row:active{cursor:grabbing;background:var(--ink-2)}
 .fxb-row:focus-visible{outline:0;box-shadow:var(--focus-ring)}
 .fxb-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fxb-add{width:16px;height:16px;flex:none;display:grid;place-items:center;color:var(--tx-3);opacity:0;transition:opacity var(--dur-1)}
+.fxb-add{width:18px;height:18px;flex:none;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-3);opacity:0;transition:opacity var(--dur-1),background var(--dur-1)}
 .fxb-add svg{width:11px;height:11px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round}
 .fxb-row:hover .fxb-add,.fxb-row:focus-visible .fxb-add{opacity:1}
+.fxb-add:hover{background:var(--ink-2);color:var(--tx)}
 .fxb-empty{padding:24px 8px;text-align:center;color:var(--tx-3);text-wrap:pretty}
+/* Too narrow for two columns: the rail becomes a chip row above the list. */
+.fxb{container-type:inline-size}
+@container (max-width:230px){
+  .fxb-body{flex-direction:column}
+  .fxb-rail{width:auto;flex-direction:row;flex-wrap:wrap;gap:2px;padding:6px 8px 2px;border-right:0;border-bottom:1px solid var(--line)}
+  .fxb-cat{width:auto;height:22px;padding:0 8px;font-size:var(--fs-xs)}
+}
 
 /* Viewer extensions may still mount controls with an inline background
    shorthand. Keep arrow paint and inset together above those legacy styles. */

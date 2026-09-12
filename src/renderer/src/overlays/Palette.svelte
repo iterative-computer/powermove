@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
 
   import { paletteEntries, type PaletteEntry } from './palette-model';
   import type { OverlayPM } from './types';
@@ -7,9 +7,23 @@
   let { PM, onclose }: { PM: OverlayPM; onclose: () => void } = $props();
   let palette: HTMLElement;
   let input: HTMLInputElement;
+  let list: HTMLElement;
+  let glider: HTMLElement;
+  let gliderOn = $state(false);
   let query = $state('');
   let selected = $state(0);
   let items = $derived(paletteEntries(PM, query));
+  // Group consecutive entries by category while keeping the flat index that
+  // keyboard navigation and aria-activedescendant rely on.
+  let groups = $derived.by(() => {
+    const out: { cat: string; rows: { item: PaletteEntry; index: number }[] }[] = [];
+    items.forEach((item, index) => {
+      const last = out[out.length - 1];
+      if (last && last.cat === item.cat) last.rows.push({ item, index });
+      else out.push({ cat: item.cat, rows: [{ item, index }] });
+    });
+    return out;
+  });
   const listId = 'pm-command-palette-list';
 
   export function element(): HTMLElement {
@@ -52,6 +66,24 @@
   }
 
   onMount(() => input.focus({ preventScroll: true }));
+
+  // One highlight surface glides to the selected row; hover and keyboard both
+  // write `selected`, so a single fill is ever visible.
+  $effect(() => {
+    const index = selected;
+    void items;
+    tick().then(() => {
+      const row = list?.querySelector<HTMLElement>(`#pm-palette-item-${index}`);
+      if (!row || !glider) { gliderOn = false; return; }
+      const first = !untrack(() => gliderOn);
+      if (first) glider.style.transition = 'none';
+      glider.style.transform = `translateY(${row.offsetTop}px)`;
+      glider.style.height = `${row.offsetHeight}px`;
+      if (first) { void glider.offsetHeight; glider.style.transition = ''; }
+      gliderOn = true;
+      row.scrollIntoView({ block: 'nearest' });
+    });
+  });
 </script>
 
 <div
@@ -64,6 +96,9 @@
   data-svelte-overlay-palette="true"
 >
   <div class="field">
+    <svg class="psearch" viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" />
+    </svg>
     <input
       bind:this={input}
       value={query}
@@ -78,25 +113,28 @@
       onkeydown={keydown}
     />
   </div>
-  <div class="plist" id={listId} role="listbox" aria-label="Command results">
-    {#each items as item, index (index)}
-      <div
-        class:pitem={true}
-        class:on={index === selected}
-        id={`pm-palette-item-${index}`}
-        role="option"
-        tabindex="-1"
-        aria-selected={index === selected}
-        onclick={() => run(item)}
-        onkeydown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') run(item);
-        }}
-        onpointermove={() => selected = index}
-      >
-        <span class="cat">{item.cat}</span>
-        <span>{item.label}</span>
-        {#if item.kb}<span class="kb">{item.kb}</span>{/if}
-      </div>
+  <div class="plist" id={listId} role="listbox" aria-label="Command results" bind:this={list}>
+    <div class="pglider" class:on={gliderOn} bind:this={glider} aria-hidden="true"></div>
+    {#each groups as group (group.cat + group.rows[0]?.index)}
+      <div class="pgroup" role="presentation">{group.cat}</div>
+      {#each group.rows as { item, index } (index)}
+        <div
+          class:pitem={true}
+          class:on={index === selected}
+          id={`pm-palette-item-${index}`}
+          role="option"
+          tabindex="-1"
+          aria-selected={index === selected}
+          onclick={() => run(item)}
+          onkeydown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') run(item);
+          }}
+          onpointermove={() => selected = index}
+        >
+          <span>{item.label}</span>
+          {#if item.kb}<span class="kb">{item.kb}</span>{/if}
+        </div>
+      {/each}
     {:else}
       <div class="empty">No matches</div>
     {/each}
