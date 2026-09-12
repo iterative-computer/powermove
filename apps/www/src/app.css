@@ -115,22 +115,8 @@ h1 .muted{color:var(--tx-3)}
   .rail-item{text-align:left;padding:7px 0 7px 16px;font-size:var(--fs-md);color:var(--tx-3);transition:color var(--dur-1)}
   .rail-item:hover{color:var(--tx-2)}
   .rail-item[data-active]{color:var(--tx)}
-  /* Marker slides vertically; the inner dot swings out and back on the same clock, so the path reads as an arc with a small drop at the end. */
-  .rail-marker{position:absolute;left:0;top:-3px;width:6px;height:6px;will-change:transform}
-  .rail-marker[data-ready]{transition:transform .6s cubic-bezier(.45,0,.2,1)}
-  .rail-drop{display:block;width:6px;height:6px;border-radius:50%;background:var(--accent);animation:rail-arc .6s cubic-bezier(.45,0,.2,1) both}
-  @keyframes rail-arc{
-    0%{transform:translateX(0) scale(1)}
-    25%{transform:translateX(7px) scale(1)}
-    50%{transform:translateX(10px) scale(1)}
-    80%{transform:translateX(2px) scale(1)}
-    90%{transform:translateX(0) scale(1.18,.82)}
-    100%{transform:translateX(0) scale(1)}
-  }
-  @media(prefers-reduced-motion:reduce){
-    .rail-marker[data-ready]{transition:none}
-    .rail-drop{animation:none}
-  }
+  /* Positioned by Features.svelte, which animates it along an arc with the Web Animations API. */
+  .rail-marker{position:absolute;left:0;top:-3px;width:6px;height:6px;border-radius:50%;background:var(--accent);will-change:transform}
 }
 .blocks{display:flex;flex-direction:column;gap:72px}
 @media(min-width:768px){.blocks{gap:128px}}

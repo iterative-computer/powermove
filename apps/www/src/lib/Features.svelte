@@ -50,17 +50,31 @@
   let active = $state<string>(features[0].id);
   let blocks = $state<Record<string, HTMLElement | undefined>>({});
   let railItems = $state<Record<string, HTMLButtonElement | undefined>>({});
-  let markerY = $state(0);
-  let hops = $state(0);
-  let ready = $state(false);
+  let marker = $state<HTMLElement | undefined>();
+  let markerY: number | undefined;
+  let flight: Animation | undefined;
   let lockUntil = 0;
 
+  // One animation drives both axes, so the dot traces a real arc: it swings
+  // outward (left, away from the labels) and lands without a second clock.
   $effect(() => {
     const el = railItems[active];
-    if (!el) return;
+    if (!el || !marker) return;
     const y = el.offsetTop + el.offsetHeight / 2;
-    if (!ready) { markerY = y; ready = true; return; }
-    if (y !== markerY) { markerY = y; hops++; }
+    if (markerY === undefined) { markerY = y; marker.style.transform = `translateY(${y}px)`; return; }
+    if (y === markerY) return;
+    const from = markerY; markerY = y;
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    flight?.cancel();
+    if (reduce) { marker.style.transform = `translateY(${y}px)`; return; }
+    const steps = 24;
+    const frames = Array.from({ length: steps + 1 }, (_, i) => {
+      const p = i / steps;
+      const x = -10 * Math.sin(Math.PI * p);
+      return { transform: `translate(${x.toFixed(2)}px, ${(from + (y - from) * p).toFixed(2)}px)` };
+    });
+    marker.style.transform = `translateY(${y}px)`;
+    flight = marker.animate(frames, { duration: 520, easing: 'cubic-bezier(.4,0,.2,1)' });
   });
 
   $effect(() => {
@@ -91,9 +105,7 @@
       <div class="rail">
         <div class="rail-title">Product</div>
         <div class="rail-items">
-          <span class="rail-marker" data-ready={ready ? '' : undefined} style:transform={`translateY(${markerY}px)`} aria-hidden="true">
-            {#key hops}<i class="rail-drop"></i>{/key}
-          </span>
+          <span class="rail-marker" bind:this={marker} aria-hidden="true"></span>
           {#each features as f (f.id)}
             <button type="button" class="rail-item" bind:this={railItems[f.id]} data-active={active === f.id ? '' : undefined} onclick={() => jump(f.id)}>{f.rail}</button>
           {/each}
