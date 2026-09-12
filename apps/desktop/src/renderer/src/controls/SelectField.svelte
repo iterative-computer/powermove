@@ -5,6 +5,7 @@
   import { EditGesture, type EditBinding } from './gesture';
   import { rowLabelId } from './context';
   import './controls.css';
+  import { fancySelect } from './select/enhance';
 
   export type SelectOption = string | { v: unknown; label: string };
 
@@ -45,6 +46,7 @@
 
 <select
   class="sel"
+  use:fancySelect={mixed ? -1 : selectedIndex}
   aria-labelledby={labelledBy}
   aria-label={labelledBy ? undefined : (label ?? edit.label)}
   value={mixed?-1:selectedIndex}

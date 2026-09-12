@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fancySelect } from '../controls/select/enhance';
   import type { ShaderLayer } from '../core/types/project';
   import { EditGesture, type EditBinding } from '../controls/gesture';
   import { doc } from '../state/document.svelte';
@@ -64,6 +65,7 @@
         <select
           id={presetId}
           class="sel preset-select"
+          use:fancySelect
           value=""
           onchange={applyPreset}
           onpointerdown={(event) => event.stopPropagation()}

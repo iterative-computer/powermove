@@ -1,5 +1,6 @@
 <script lang="ts">
   import { agentState } from './agent-state.svelte';
+  import { fancySelect } from '../../controls/select/enhance';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -24,18 +25,18 @@
 </script>
 
 <div class="agent-modelbar" title="Model and reasoning effort">
-  <select class="provider" aria-label="Provider" value={agentState.provider} onchange={changeProvider} onkeydown={keydown}>
+  <select class="provider" aria-label="Provider" use:fancySelect={agentState.provider} value={agentState.provider} onchange={changeProvider} onkeydown={keydown}>
     {#each agentState.providers as provider (provider.id)}
       <option value={provider.id}>{provider.label}</option>
     {/each}
   </select>
-  <select aria-label="Model" value={agentState.model} onchange={changeModel} onkeydown={keydown}>
+  <select aria-label="Model" use:fancySelect={agentState.model} value={agentState.model} onchange={changeModel} onkeydown={keydown}>
     {#each agentState.models as model (model.id)}
       <option value={model.id}>{model.label}</option>
     {/each}
   </select>
   {#if agentState.reasoningEfforts.length}
-  <select class="effort" aria-label="Reasoning effort" value={agentState.reasoningEffort} onchange={changeEffort} onkeydown={keydown}>
+  <select class="effort" aria-label="Reasoning effort" use:fancySelect={agentState.reasoningEffort} value={agentState.reasoningEffort} onchange={changeEffort} onkeydown={keydown}>
     {#each agentState.reasoningEfforts as effort (effort)}
       <option value={effort}>{effort}</option>
     {/each}

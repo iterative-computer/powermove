@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fancySelect } from '../controls/select/enhance';
   import type { ChatGPTAccountStatus } from '../../../shared/ipc';
   import type { PanelProps } from './registerSveltePanel';
   import Composer from './agent/Composer.svelte';
@@ -143,7 +144,7 @@
   <ThreadPicker {PM} />
   {#if showConnectionGate}
     <div class="agent-connect-gate" role="status" aria-live="polite">
-      <select class="agent-connect-provider" aria-label="Provider" value={agentState.provider} onchange={changeGateProvider}>
+      <select class="agent-connect-provider" aria-label="Provider" use:fancySelect={agentState.provider} value={agentState.provider} onchange={changeGateProvider}>
         {#each agentState.providers as provider (provider.id)}
           <option value={provider.id}>{provider.label}</option>
         {/each}
