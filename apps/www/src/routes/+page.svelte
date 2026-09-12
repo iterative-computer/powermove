@@ -39,7 +39,7 @@
     {
       id: 'export', rail: 'Export', label: 'Leave as pixels or as code',
       lead: 'Render video, or ship the motion itself.',
-      text: 'Export video through the built-in encoder, or hand off a scene as a self-contained web player or SVG. The type below is a Powermove scene running in this page.',
+      text: 'Export video through the built-in encoder, or hand off a scene as a self-contained web player or SVG. The headline at the top of this page is a Powermove scene running live.',
       points: [
         { icon: Zap, label: 'Video encoding with bundled ffmpeg' },
         { icon: FileCode2, label: 'Web player export with React and Svelte examples' },
@@ -60,10 +60,11 @@
 
 <main id="top">
   <section class="hero" aria-labelledby="headline">
-    <div class="wrap">
-      <h1 id="headline"><span class="muted">Powermove is the video editor</span> you shape yourself.</h1>
+    <h1 id="headline" class="sr-only">Shape your video editor</h1>
+    <HeroAnimation />
+    <div class="wrap hero-intro">
       <p class="lede">A motion editor with an agent in the loop and you in the driver’s seat. Real layers, editable keyframes, and an interface that rewrites itself around the work.</p>
-      <div class="cta">
+      <div class="cta center">
         <a class="button primary lg" href="mailto:hello@motioner.app?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={15} /></a>
         <a class="button lg" href="#editor">See the editor</a>
       </div>
@@ -105,7 +106,7 @@
                   {/each}
                 </ul>
               </div>
-              <div class="panel" class:panel-scene={f.id === 'export'}>
+              <div class="panel">
                 {#if f.id === 'agent'}
                   <div class="mock composer" aria-hidden="true">
                     <div class="composer-text">Give the title a slow push-in and fade the kicker out at 2s.</div>
@@ -138,7 +139,20 @@
                     <span>Quiet timeline</span><span class="switch on"></span>
                   </div>
                 {:else}
-                  <HeroAnimation />
+                  <div class="mock manifest handoff" aria-hidden="true">
+                    <div class="file-tab">main.js</div>
+<pre><code>{`import { createPlayer } from './player.js';
+
+const player = await createPlayer({
+  canvas: document.querySelector('canvas'),
+  scene: './scene.json',
+  loop: true,
+});
+player.setText('title', 'Make your move.');`}</code></pre>
+                  </div>
+                  <div class="mock toggle" aria-hidden="true">
+                    <span>scene.json · player.js</span><span class="chip">ESM</span>
+                  </div>
                 {/if}
               </div>
             </article>
