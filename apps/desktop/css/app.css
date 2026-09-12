@@ -954,6 +954,35 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-grid.list .ps-card{height:62px;display:flex;align-items:center;padding:5px 8px;border-radius:var(--r-lg)}.ps-grid.list .ps-thumb{width:82px;flex:none}.ps-grid.list .ps-meta{flex:1;padding:0 10px}.ps-grid.list .ps-more{opacity:1}
 .ps-empty{grid-column:1/-1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;text-align:center;color:var(--tx-3)}.ps-empty > svg{width:30px;height:30px;margin-bottom:14px;color:var(--tx-4)}.ps-empty b{font-size:var(--fs-lg);font-weight:var(--fw-medium);color:var(--tx);margin-bottom:5px}.ps-empty span{font-size:var(--fs-md);max-width:38ch;line-height:1.55;text-wrap:pretty}.ps-empty button{margin-top:15px}
 
+/* ── select (trigger + floating listbox) ───────────────── */
+/* The native <select> stays in the DOM as the source of truth but never paints; the trigger wears its classes. */
+select.pm-select-native{position:absolute!important;width:1px!important;height:1px!important;margin:0!important;padding:0!important;opacity:0!important;pointer-events:none!important;flex:0 0 0!important;min-width:0!important}
+.pm-select{position:relative;display:inline-flex;align-items:center;justify-content:space-between;gap:8px;cursor:default;text-align:left;font:inherit;color:inherit;appearance:none;-webkit-appearance:none;background-image:none;padding-right:26px}
+.pm-select-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm-select[data-empty]{color:var(--tx-3)}
+.pm-select-chevron{position:absolute;right:8px;top:50%;width:12px;height:12px;margin-top:-6px;color:var(--tx-3);flex:none;transition:color var(--dur-1)}
+.pm-select:hover .pm-select-chevron,.pm-select[aria-expanded=true] .pm-select-chevron{color:var(--tx-2)}
+.pm-select:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+.pm-select:disabled{opacity:.5;pointer-events:none}
+.pm-select.sel{height:28px;padding:0 24px 0 8px}
+.pm-select.sel .pm-select-chevron{right:6px;width:11px;height:11px;margin-top:-5.5px}
+.pm-select.ps-sort,.pm-select.settings-select,.pm-select.settings-appearance,.pm-select.export-select{border:0;box-shadow:inset 0 0 0 1px var(--line)}
+.pm-menu{position:fixed;z-index:600;overflow:auto;padding:4px;border-radius:var(--r-md);background:var(--bg-float);box-shadow:var(--shadow-float),0 0 0 var(--hairline) var(--line-strong);outline:0;font-size:var(--fs-sm);color:var(--tx);scrollbar-width:thin}
+.pm-menu[data-side=bottom]{transform-origin:top center}
+.pm-menu[data-side=top]{transform-origin:bottom center}
+.pm-menu[data-state=open]{animation:pm-menu-in .15s cubic-bezier(.16,1,.3,1) both}
+.pm-menu[data-state=closed]{animation:pm-menu-out .1s ease-in both;pointer-events:none}
+@keyframes pm-menu-in{from{opacity:0;transform:scale(.95) translateY(var(--pm-menu-slide,-6px))}to{opacity:1;transform:none}}
+@keyframes pm-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.97)}}
+.pm-menu[data-side=top]{--pm-menu-slide:6px}
+.pm-menu-item{position:relative;display:flex;align-items:center;gap:8px;min-height:28px;padding:0 28px 0 8px;border-radius:var(--r-xs);color:var(--tx);white-space:nowrap;cursor:default;user-select:none}
+.pm-menu-item[data-active]{background:var(--bg-row-hi)}
+.pm-menu-item[aria-disabled=true]{color:var(--tx-4);pointer-events:none}
+.pm-menu-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
+.pm-menu-check{position:absolute;right:8px;width:13px;height:13px;color:var(--tx);opacity:0}
+.pm-menu-item[aria-selected=true] .pm-menu-check{opacity:1}
+@media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}}
+
 /* ── titlebar tabs ─────────────────────────────────────── */
 
 /* ── searchable reusable Library ───────────────────────── */
@@ -1138,7 +1167,7 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .export-form .row.split{min-height:34px}
 .export-form select.export-select{appearance:auto;cursor:pointer;text-align:left;font-family:var(--f-ui);height:32px;padding:0 10px;color:var(--tx);background:var(--bg-field);border:1px solid var(--line);border-radius:var(--r-sm)}
 .export-form select.export-select:hover{background:var(--ink-2)}
-.export-form select.export-select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.export-form select.export-select:focus-visible{outline:0;box-shadow:var(--focus-ring)}
 .export-form .export-summary{margin-top:14px;padding:12px;background:transparent;border-top:1px solid var(--line);border-right:0;border-bottom:0;border-left:0;border-radius:0}
 .export-preview-stage{position:relative;overflow:hidden;border-radius:var(--r-md);background:var(--bg-field)}
 .export-preview{max-height:52vh;object-fit:contain;border-radius:0}
@@ -1146,7 +1175,7 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .export-progress .bar{overflow:hidden;border-radius:2px;background:var(--ink-2)}
 .export-progress .bar i{display:block;height:100%;background:var(--accent);transition:width .12s linear}
 .export-progress-label{line-height:1.5}
-.export-form select.export-select{appearance:none;-webkit-appearance:none;padding-right:28px;background-image:linear-gradient(45deg,transparent 50%,var(--tx-3) 50%),linear-gradient(135deg,var(--tx-3) 50%,transparent 50%);background-position:calc(100% - 14px) 14px,calc(100% - 10px) 14px;background-size:4px 4px;background-repeat:no-repeat}
+.export-form select.export-select{appearance:none;-webkit-appearance:none;padding-right:28px}
 .export-modal .mf .btn:not(.pri),.export-form .chip{appearance:none;-webkit-appearance:none;background:var(--ink-2);color:var(--tx);box-shadow:none;border:1px solid var(--line)}
 .export-form .toggle{appearance:none;-webkit-appearance:none;background:var(--ink-3)}
 .export-form .toggle.on{background:var(--accent)}
