@@ -116,3 +116,82 @@ describe('CodexAppServerRunner steering', () => {
     await expect(runner.steer({ id: 'missing-run', prompt: 'continue', images: [] })).resolves.toBe(false);
   });
 });
+
+it('returns startup failures as results and permits a later retry', async () => {
+  const child = new FakeAppServer();
+  const discoverBinary = vi.fn().mockRejectedValueOnce(new Error('Binary unavailable')).mockResolvedValue('/fake/codex');
+  const runner = new CodexAppServerRunner({ discoverBinary, prepareHome: async () => '/tmp/pm-test',
+    spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams });
+  try {
+    await expect(runner.run(request(), { userData: '/tmp/pm-test' })).resolves.toMatchObject({ ok: false, error: 'Binary unavailable' });
+    const run = runner.run(request(), { userData: '/tmp/pm-test' });
+    await vi.waitFor(() => expect(child.messages.some(m => m.method === 'turn/start')).toBe(true));
+    await runner.cancel(request().id);
+    await expect(run).resolves.toMatchObject({ cancelled: true });
+  } finally { await runner.shutdown(); }
+});
+
+it('honors cancellation during startup without starting a turn', async () => {
+  const child = new FakeAppServer();
+  let ready!: (binary: string) => void;
+  const runner = new CodexAppServerRunner({
+    discoverBinary: () => new Promise(resolve => { ready = resolve; }),
+    prepareHome: async () => '/tmp/pm-test', spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams
+  });
+  const run = runner.run(request(), { userData: '/tmp/pm-test' });
+  const cancelled = await runner.cancel(request().id);
+  ready('/fake/codex');
+  await vi.waitFor(() => expect(child.messages.some(m => m.method === 'initialize')).toBe(true));
+  if (!cancelled) await runner.cancel(request().id);
+  try {
+    expect(cancelled).toBe(true);
+    await expect(run).resolves.toMatchObject({ cancelled: true });
+    expect(child.messages.some(m => m.method === 'turn/start')).toBe(false);
+  } finally { await runner.shutdown(); await run; }
+});
+
+it('ignores a delayed exit from an older process after reconnecting', async () => {
+  const children = [new FakeAppServer(), new FakeAppServer()];
+  const runner = new CodexAppServerRunner({ discoverBinary: async () => '/fake/codex', prepareHome: async () => '/tmp/pm-test',
+    spawnProcess: vi.fn().mockImplementationOnce(() => children[0]).mockImplementationOnce(() => children[1]) });
+  const first = runner.run(request(), { userData: '/tmp/pm-test' });
+  await vi.waitFor(() => expect(children[0]!.messages.some(m => m.method === 'turn/start')).toBe(true));
+  children[0]!.emit('error', new Error('Connection closed'));
+  await expect(first).resolves.toMatchObject({ ok: false });
+  const second = runner.run(request(), { userData: '/tmp/pm-test' });
+  await vi.waitFor(() => expect(children[1]!.messages.some(m => m.method === 'turn/start')).toBe(true));
+  children[0]!.emit('exit', 1, null);
+  children[1]!.notify('item/completed', { threadId: 'thr_123', turnId: 'turn_456', item: { type: 'agentMessage', text: '{"ok":true}' } });
+  children[1]!.notify('turn/completed', { threadId: 'thr_123', turn: { id: 'turn_456', status: 'completed' } });
+  try { await expect(second).resolves.toMatchObject({ ok: true }); }
+  finally { await runner.shutdown(); }
+});
+
+it('releases a timed-out turn and preserves the timeout result while interrupting it', async () => {
+  const child = new FakeAppServer();
+  const runner = new CodexAppServerRunner({ discoverBinary: async () => '/fake/codex', prepareHome: async () => '/tmp/pm-test',
+    spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams, turnTimeoutMs: 30 });
+  try {
+    await expect(runner.run(request(), { userData: '/tmp/pm-test' })).resolves.toMatchObject({
+      ok: false, cancelled: false, error: expect.stringContaining('too long')
+    });
+    expect(child.messages.some(m => m.method === 'turn/interrupt')).toBe(true);
+    await expect(runner.steer({ id: request().id, prompt: 'continue', images: [] })).resolves.toBe(false);
+  } finally { await runner.shutdown(); }
+});
+
+it('terminates an unresponsive startup before launching another process', async () => {
+  const stuck = new FakeAppServer();
+  stuck.stdin.removeAllListeners('data');
+  const next = new FakeAppServer();
+  const runner = new CodexAppServerRunner({ discoverBinary: async () => '/fake/codex', prepareHome: async () => '/tmp/pm-test',
+    spawnProcess: vi.fn().mockReturnValueOnce(stuck).mockReturnValueOnce(next), requestTimeoutMs: 30 });
+  try {
+    await expect(runner.run(request(), { userData: '/tmp/pm-test' })).resolves.toMatchObject({ ok: false });
+    expect(stuck.killed).toBe(true);
+    const run = runner.run(request(), { userData: '/tmp/pm-test' });
+    await vi.waitFor(() => expect(next.messages.some(m => m.method === 'turn/start')).toBe(true));
+    await runner.cancel(request().id);
+    await expect(run).resolves.toMatchObject({ cancelled: true });
+  } finally { await runner.shutdown(); }
+});

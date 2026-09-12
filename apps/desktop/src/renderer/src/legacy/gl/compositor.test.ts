@@ -25,6 +25,14 @@ function compositorRegistry(): PMRegistry {
 }
 
 describe('legacy compositor install', () => {
+  it('measures primitive selection bounds without allocating a source bitmap', () => {
+    const PM = compositorRegistry();
+    PM.raster = vi.fn(() => { throw new Error('Bounds must not rasterize a primitive'); });
+    const bounds = PM.GL.bounds({ type: 'shape', d: { w: 3000, h: 2000, stroke: 10 } }, 0);
+    expect(bounds).toEqual({ x0: -1505, y0: -1005, x1: 1505, y1: 1005, w: 3010, h: 2010, ax: 1509, ay: 1009 });
+    expect(PM.raster).not.toHaveBeenCalled();
+  });
+
   it('continuously rasterizes editable vector sources at their displayed scale', () => {
     expect(continuousRasterScale([4, 0, 0, 4, 0, 0], 1)).toBe(4);
     expect(continuousRasterScale([0, 3, -3, 0, 0, 0], 1)).toBe(3);

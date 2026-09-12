@@ -8,6 +8,8 @@ type ModalInstance = ReturnType<typeof mount> & {
   element(): HTMLElement;
   bodyElement(): HTMLElement;
   focusInitial(): void;
+  setPending(value: boolean): void;
+  setError(value: unknown): void;
 };
 
 let modalId = 0;
@@ -40,6 +42,7 @@ export class ModalController {
     scrim.classList.add('on');
     const titleId = `pm-modal-title-${++modalId}`;
     let handle!: ModalHandle;
+    let pending = false;
     const instance = mount(Modal, {
       target: document.body,
       props: {
@@ -50,9 +53,30 @@ export class ModalController {
         fill: options.fill ?? false,
         titleId,
         onaction: (index: number) => {
+          if (pending) return;
           const action = options.actions?.[index];
-          if (action?.run?.() === false) return;
-          handle.close();
+          instance.setError(null);
+          const failed = (error: unknown): void => {
+            if (handle.el.isConnected) {
+              instance.setError(error instanceof Error ? error.message : String(error));
+              flushSync();
+            }
+          };
+          try {
+            const result = action?.run?.();
+            if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+              pending = true;
+              instance.setPending(true);
+              flushSync();
+              void Promise.resolve(result).then(value => {
+                if (value !== false) handle.close();
+              }, failed).finally(() => {
+                pending = false;
+                instance.setPending(false);
+                flushSync();
+              });
+            } else if (result !== false) handle.close();
+          } catch (error) { failed(error); }
         },
         onclose: () => handle.close()
       }

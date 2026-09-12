@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorNotice from '../errors/ErrorNotice.svelte';
   import { onMount } from 'svelte';
 
   import type { ModalAction } from './types';
@@ -22,6 +23,11 @@
     onaction: (index: number) => void;
     onclose: () => void;
   } = $props();
+
+  let pending = $state(false);
+  let actionError = $state<unknown>(null);
+  export function setPending(value: boolean): void { pending = value; }
+  export function setError(value: unknown): void { actionError = value; }
 
   let dialog: HTMLElement;
   let body: HTMLElement;
@@ -85,6 +91,7 @@
   class="modal"
   role="dialog"
   aria-modal="true"
+  aria-busy={pending}
   aria-labelledby={title ? titleId : undefined}
   aria-label={title ? undefined : 'Dialog'}
   tabindex="-1"
@@ -97,11 +104,16 @@
 >
   {#if title}<h3 id={titleId}>{title}</h3>{/if}
   <div bind:this={body} class="mb"></div>
+  {#if actionError}<div class="modal-action-error"><ErrorNotice error={actionError} /></div>{/if}
   {#if actions.length}
     <div class="mf">
       {#each actions as action, index}
-        <button type="button" class:btn={true} class:pri={!!action.pri} onclick={() => onaction(index)}>{action.label}</button>
+        <button type="button" class:btn={true} class:pri={!!action.pri} disabled={pending} onclick={() => onaction(index)}>{action.label}</button>
       {/each}
     </div>
   {/if}
 </div>
+
+<style>
+  .modal-action-error{padding:0 20px 14px}
+</style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorNotice from '../../errors/ErrorNotice.svelte';
 
   import { onMount } from 'svelte';
   import type { AgentMessage } from './agent-state.svelte';
@@ -59,7 +60,9 @@
   </div>
 {:else}
   <div class="agent-msg assistant" class:is-error={message.error}>
-    {#if modResult}
+    {#if message.error}
+      <ErrorNotice error={message.text} live={Boolean(message.entering)} />
+    {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}
       <p>{#each (message.text || '').split(/(\s+)/) as word, index (index)}<span use:revealText={Boolean(message.entering) && Boolean(word.trim())}>{word}</span>{/each}</p>

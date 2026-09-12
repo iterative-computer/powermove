@@ -5,6 +5,7 @@ import { evaluatedValue, isProperty, resolveContent } from '../core/content-prop
 /* Ported from js/gl/compositor.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { extensionLayerFragment } from '../../kernel/extension-layers';
+import { uncoveredRasterRegions, previewShapeRaster, rasterIntersectsViewport, shapeRasterGeometry, type RasterWindow } from './shape-raster-window';
 
 /**
  * Which uniform an effect/transition param binds to. Kernel-generated shaders
@@ -107,9 +108,15 @@ const GL: any = {
 PM.GL = GL;
 const MAX_FBO_BYTES = PM.Memory?.budget?.('framebuffers') || 384 * 1024 * 1024;
 const MAX_TEXTURE_BYTES = PM.Memory?.budget?.('textures') || 192 * 1024 * 1024;
+const MAX_TEXTURE_ENTRIES = 4096;
 let poolBytes = 0;
 let textureBytes = 0;
 let resourceTick = 0;
+/* Keep the composited FBO alive until the next frame. Resizing a canvas clears
+   its drawing buffer synchronously; retaining this texture lets resize()
+   present the last complete image at the new size instead of exposing black
+   while the editor's next animation frame is still queued. */
+let presentedFrame: any = null;
 const presentedVideoFrames = new WeakMap<any, { version: number; supported: boolean }>();
 const viewportPathRasters = new Map<string, any>();
 let viewportPathFrame = 0;
@@ -279,6 +286,7 @@ const IDENT = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 function m3(m: any) { return new Float32Array([m[0], m[1], 0, m[2], m[3], 0, m[4], m[5], 1]); }
 function fullQuad(w: any, h: any) { return new Float32Array([w, 0, 0, 0, h, 0, 0, 0, 1]); }
 let previewViewportActive = false;
+let previewSourceClipping = false;
 function activePreviewViewport(W: number, H: number): any {
   return previewViewportActive && PM.curComp?.() === PM.proj
     && W === GL.canvas.width && H === GL.canvas.height ? GL.previewViewport : null;
@@ -329,13 +337,14 @@ function texFor(key: any, source: any, opts: any = {}) {
   const bytes = Math.max(0, width * height * 4);
   textureBytes += bytes - (t.bytes || 0);
   t.bytes = bytes;
-  PM.Memory?.maintain?.('textures');
+  PM.Memory?.maintain?.('textures', GL.texes.size > MAX_TEXTURE_ENTRIES);
   return t.tex;
 }
 function trimTextures(targetBytes: number = MAX_TEXTURE_BYTES) {
+  if (textureBytes <= targetBytes && GL.texes.size <= MAX_TEXTURE_ENTRIES) return;
   const entries = [...GL.texes.entries()].sort((a: any, b: any) => a[1].used - b[1].used);
   for (const [key, entry] of entries) {
-    if (textureBytes <= targetBytes || GL.texes.size <= 1) break;
+    if (textureBytes <= targetBytes && GL.texes.size <= MAX_TEXTURE_ENTRIES || GL.texes.size <= 1) break;
     if (boundTex.includes(entry.tex)) continue;
     GL.gl?.deleteTexture?.(entry.tex);
     textureBytes = Math.max(0, textureBytes - (entry.bytes || 0));
@@ -484,10 +493,31 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
 
 GL.resize = (w: any, h: any, previewViewport: any = null) => {
   GL.previewViewport = previewViewport;
-  if (GL.canvas.width === w && GL.canvas.height === h) return;
+  if (GL.canvas.width === w && GL.canvas.height === h) return false;
+  const previous = presentedFrame;
+  /* All pooled targets except the retained presentation are invalid at the
+     new output size. Dispose them before allocating another full frame. */
+  for (let index = GL.pool.length - 1; index >= 0; index--) {
+    const f = GL.pool[index];
+    if (f === previous) continue;
+    GL.pool.splice(index, 1);
+    disposeFbo(f);
+  }
   GL.canvas.width = w; GL.canvas.height = h;
-  GL.pool.forEach((f: any) => disposeFbo(f));
-  GL.pool.length = 0;
+  if (previous) {
+    /* The retained texture is a fully composited frame, so the same present
+       shader can scale it into the freshly-created default drawing buffer. */
+    bind(null);
+    const p = program('present', PM.FRAG_COPY);
+    const g = use(p);
+    bindTex(0, previous.tex); setI(p, 'u_tex', 0);
+    g.u('u_m', fullQuad(w, h)); g.u('u_res', w, h); g.u('u_uv', 0, 0, 1, 1);
+    GL.gl.disable(GL.gl.BLEND); draw(); GL.gl.enable(GL.gl.BLEND);
+    bindTex(0, null);
+    /* Keep it until a newly rendered frame replaces it. A wheel/trackpad
+       gesture can deliver several resize events before the next rAF. */
+  }
+  return true;
 };
 
 GL.memoryStats = () => ({
@@ -565,7 +595,7 @@ function meshExtensionQuad(L: any, T: any, w: number, h: number, targetW: number
   return { tex: f.tex, w, h, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
 }
 
-function contentQuad(L: any, T: any, W: any, H: any) {
+function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
   /* returns {tex, w, h, ax, ay, uv:[ox,oy,sx,sy], fromFbo, solid, tmp} */
   const d = resolveContent(PM, L, T);
   if (L.type === 'solid') {
@@ -592,11 +622,37 @@ function contentQuad(L: any, T: any, W: any, H: any) {
        bitmap is enlarged when the layer is scaled, parented, or previewed at
        a different output resolution. */
     const ss = continuousRasterScale(scaledWorld(L, T, W, H));
-    const r = PM.raster(L, ss, T);
+    let crop: RasterWindow | undefined;
+    if (previewSourceClipping && !L.d.paths?.length && activePreviewViewport(W, H)
+        && !is3DLayer(PM, L) && !hasRenderableEffects(L.fx, PM, L, T)
+        && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut) {
+      const visibleWorld = scaledWorld(L, T, W, H);
+      if (clip) { visibleWorld[4] -= clip.x; visibleWorld[5] -= clip.y; }
+      if (L.type === 'shape') {
+        const plan = previewShapeRaster(d, ss, visibleWorld, clip?.width ?? W, clip?.height ?? H);
+        if (plan.kind === 'outside') return null;
+        if (plan.kind === 'solid') return { solid: PM.hex2rgb(d.color), w: W, h: H, ax: 0, ay: 0, screenSpace: true };
+        if (plan.kind === 'crop') crop = plan.window;
+      } else if (!L.d.animators?.length && !L.d.styles?.length && !L.d.fontAnchorBounds
+          && !rasterIntersectsViewport(PM.textRasterGeometry(L, ss, T), visibleWorld, clip?.width ?? W, clip?.height ?? H)) {
+        // Keep visible text on the original full-bitmap path: cropping a glyph
+        // can change Canvas antialiasing even with an integer pixel offset.
+        return null;
+      }
+    }
+    // CPU bitmaps and uploaded textures have independent memory budgets. A
+    // bitmap evicted under CPU pressure need not be drawn and uploaded again
+    // while its identical GPU source is still available.
+    const r = PM.raster(L, ss, T, (key: string) => GL.texes.get('r:' + key)?.raster, crop);
     const tex = texFor('r:' + r.key, r.cv, { version: 1 });
+    const uploaded = GL.texes.get('r:' + r.key);
+    if (!uploaded.raster && !r.fontOffset) {
+      const { cv: _canvas, ...metadata } = r;
+      uploaded.raster = metadata;
+    }
     const ax = L.type === 'shape' && !L.d.paths?.length ? r.w / 2 : r.anchorX;
     const ay = L.type === 'shape' && !L.d.paths?.length ? r.h / 2 : r.anchorY;
-    return { tex, w: r.w, h: r.h, ax, ay, uv: [0, 0, 1, 1] };
+    return { tex, w: r.w, h: r.h, ax, ay, uv: r.uv || [0, 0, 1, 1] };
   }
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
@@ -755,8 +811,8 @@ function pmScopePop() { PM.scope.pop(); pcDepth--; }
 function hashStr(s: any) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; }
 
 /* Draw one layer's content (with transform) into the bound target. */
-function drawContent(L: any, T: any, W: any, H: any, alpha: any) {
-  const c: any = contentQuad(L, T, W, H);
+function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWindow) {
+  const c: any = contentQuad(L, T, W, H, clip);
   if (!c) return false;
   const world = scaledWorld(L, T, W, H);
   const M = c.screenSpace ? [W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
@@ -1048,6 +1104,35 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl;
   const layers = depthOrderedLayers(PM, proj.layers, T);
   const solo = layers.some((layer: any) => layer.solo);
+  // Rebuild per composition/pass so edits and nested mattes cannot leave a
+  // stale index. One scan replaces a full stack scan for every rendered layer.
+  const matteSources = new Set(layers.map((layer: any) => layer.matteSource));
+
+  // Only local, ordinary 2D compositing is eligible. Effects, mattes and
+  // non-normal blends can depend on pixels hidden by an opaque layer later.
+  const covers: Array<RasterWindow | undefined> = [];
+  if (!solo && !opt.exporting && opt.occlusionCulling !== false && previewSourceClipping && activePreviewViewport(W, H)
+      && layers.every((layer: any) => !layer.threeD && !layer.fx?.length && !layer.masks?.length
+        && !layer.matteSource && !layer.transitionIn && !layer.transitionOut && !layer.mblur
+        && (!layer.blend || layer.blend === 'normal')
+        && ['shape','text','image','video','audio','group','solid'].includes(layer.type))) {
+    let largest: RasterWindow | undefined, area = 0;
+    for (let i = 0; i < layers.length; i++) {
+      covers[i] = largest;
+      const layer = layers[i];
+      if (layer.type !== 'shape' || layer.d.paths?.length || !PM.active(layer, T)
+          || PM.canvasTextEditing === layer.id || layer.shy && opt.hideShy || PM.worldOpacity(layer, T) < 1) continue;
+      const d = resolveContent(PM, layer, T), m = scaledWorld(layer, T, W, H);
+      if (d.shape !== 'rect' || !/^#[0-9a-f]{6}$/i.test(d.color) || Math.abs(m[1]) > 1e-9 || Math.abs(m[2]) > 1e-9) continue;
+      const geometry = shapeRasterGeometry(d, continuousRasterScale(m));
+      const inset = Math.max(0, Math.min(Number(d.radius) || 0, d.w / 2, d.h / 2))
+        + Math.max(0, Number(d.stroke) || 0) / 2 + 8 / geometry.density;
+      const hw = (d.w / 2 - inset) * Math.abs(m[0]), hh = (d.h / 2 - inset) * Math.abs(m[3]);
+      const x = Math.max(0, Math.ceil(m[4] - hw)), y = Math.max(0, Math.ceil(m[5] - hh));
+      const width = Math.min(W, Math.floor(m[4] + hw)) - x, height = Math.min(H, Math.floor(m[5] + hh)) - y;
+      if (width > 0 && height > 0 && width * height > area) { largest = {x,y,width,height}; area = width * height; }
+    }
+  }
 
   let acc = grab(W, H);
   bind(acc);
@@ -1073,7 +1158,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
     if(PM.canvasTextEditing===L.id && !opt.exporting)continue;
-    if(!opt.mattePass && layers.some((l:any)=>l.matteSource===L.id))continue;
+    if (!opt.mattePass && matteSources.has(L.id)) continue;
     if (solo && !L.solo && !(PM.groupAncestors?.(L, layers) || []).some((group: any) => group.solo) && !opt.mattePass) continue;
     if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
@@ -1098,7 +1183,16 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
     /* fast path: no masks, no effects, normal blend, no motion blur → straight into acc */
     if (!hasMasks && !hasFx && !blend && !mb && !transition && !L.matteSource) {
       bind(acc);
-      drawContent(L, T, W, H, alpha);
+      const cover = covers[i];
+      if (cover) {
+        gl.enable(gl.SCISSOR_TEST);
+        try {
+          for (const region of uncoveredRasterRegions(W, H, cover)) {
+            gl.scissor(region.x, H - region.y - region.height, region.width, region.height);
+            drawContent(L, T, W, H, alpha, region);
+          }
+        } finally { gl.disable(gl.SCISSOR_TEST); }
+      } else drawContent(L, T, W, H, alpha);
       continue;
     }
 
@@ -1162,12 +1256,15 @@ GL.render = (T: any, opt: any = {}) => {
   PM.beginEval(T);
   PM.scope.push(PM.proj);
   previewViewportActive = !!GL.previewViewport;
+  // Full sources remain available as a reference for pixel/performance checks.
+  previewSourceClipping = opt.sourceClipping !== false && !opt.exporting;
   let acc;
   try {
     acc = GL.renderProject(PM.proj, T, W, H, opt);
   } finally {
     PM.scope.pop();
     previewViewportActive = false;
+    previewSourceClipping = false;
   }
 
   /* present */
@@ -1178,12 +1275,14 @@ GL.render = (T: any, opt: any = {}) => {
   bindTex(0, acc.tex); setI(p, 'u_tex', 0);
   g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
   gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
-  free(acc);
-  GL.pool.forEach((f: any) => f.busy = false);
+  if (presentedFrame && presentedFrame !== acc) free(presentedFrame);
+  presentedFrame = acc;
+  GL.pool.forEach((f: any) => f.busy = f === presentedFrame);
   trimPool();
   trimTextures();
   trimViewportPathRasters();
   GL.stats.ms = window.performance.now() - t0;
+  if (GL.previewViewport && !opt.exporting) PM.bus?.emit?.('preview:presented', { viewport: GL.previewViewport, time: T, version: PM.animVersion?.(), project: PM.proj, quality: PM.quality });
 };
 
 /** Render one frame and read back raw RGBA pixels (bottom-up, premultiplied).
@@ -1191,22 +1290,48 @@ GL.render = (T: any, opt: any = {}) => {
 GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl; if (!gl) return null;
   PM.beginEval(T);
-  PM.scope.push(PM.proj);
   let acc;
-  try { acc = GL.renderProject(PM.proj, T, W, H, opt); }
-  finally { PM.scope.pop(); }
-  bind(acc);
-  const px = new Uint8Array(W * H * 4);
-  const floats=new Float32Array(W*H*4);
-  gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,floats);
-  for(let i=0;i<px.length;i++)px[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
-  free(acc);
-  GL.pool.forEach((f: any) => f.busy = false);
-  trimPool();
-  trimTextures();
-  viewportPathFrame++;
-  trimViewportPathRasters();
-  return px;
+  try {
+    PM.scope.push(PM.proj);
+    try { acc = GL.renderProject(PM.proj, T, W, H, opt); }
+    finally { PM.scope.pop(); }
+    bind(acc);
+    const px = new Uint8Array(W * H * 4);
+    if (opt.opaque) {
+      // Match the visible RGBA8 presentation's quantization without touching its
+      // canvas, viewport metadata, or retained frame. Read just the capture size.
+      const target = gl.createFramebuffer(), color = gl.createRenderbuffer();
+      try {
+        gl.bindRenderbuffer(gl.RENDERBUFFER, color);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+        gl.viewport(0, 0, W, H);
+        const p = program('present', PM.FRAG_COPY), g = use(p);
+        bindTex(0, acc.tex); setI(p, 'u_tex', 0);
+        g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
+        gl.disable(gl.BLEND); draw(); gl.enable(gl.BLEND);
+        gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      } finally {
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        gl.deleteFramebuffer(target); gl.deleteRenderbuffer(color);
+        bind(null);
+      }
+    } else {
+      const floats=new Float32Array(W*H*4);
+      gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,floats);
+      for(let i=0;i<px.length;i++)px[i]=Math.round(Math.max(0,Math.min(1,floats[i]!))*255);
+    }
+    return px;
+  } finally {
+    if (acc) free(acc);
+    GL.pool.forEach((f: any) => f.busy = f === presentedFrame);
+    trimPool();
+    trimTextures();
+    viewportPathFrame++;
+    trimViewportPathRasters();
+    bind(null);
+  }
 };
 
 /* Hit test: which layer is under a comp-space point (top-most first). */
@@ -1233,6 +1358,10 @@ GL.bounds = (L: any, T: any) => {
     w = r.w; h = r.h; ax = r.anchorX; ay = r.anchorY;
   }
   else if (L.type === 'shape') {
+    if (!L.d.paths?.length) {
+      const geometry = shapeRasterGeometry(d, 1);
+      return { ...geometry.selection, ax: geometry.w / 2, ay: geometry.h / 2 };
+    }
     const r = PM.raster(L, 1, T);
     if (r.selection) return { ...r.selection, ax: L.d.paths?.length?r.anchorX:r.w / 2, ay: L.d.paths?.length?r.anchorY:r.h / 2 };
     w = r.w; h = r.h;

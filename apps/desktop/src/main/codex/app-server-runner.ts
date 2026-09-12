@@ -71,6 +71,7 @@ export class CodexAppServerRunner {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly active = new Map<string, ActiveTurn>();
   private stderr = '';
+  private readonly preparing = new Map<string, { cancelled: boolean }>();
 
   constructor(dependencies: Partial<AppServerRunnerDependencies> = {}) {
     this.deps = {
@@ -93,11 +94,16 @@ export class CodexAppServerRunner {
     }
   ): Promise<CodexRunResult> {
     if (req.mode !== 'editor') return { ok: false, error: 'App Server editor transport received a non-editor run.', cancelled: false };
-    if (this.active.has(req.id)) return { ok: false, error: `A Codex run with id ${req.id} is already active.`, cancelled: false };
+    if (this.active.has(req.id) || this.preparing.has(req.id)) return { ok: false, error: `A Codex run with id ${req.id} is already active.`, cancelled: false };
 
-    await this.ensureStarted(options.userData, options.codexBinaryPref ?? null);
-    const directory = await mkdtemp(path.join(tmpdir(), 'powermove-codex-app-'));
+    const preparation = { cancelled: false };
+    this.preparing.set(req.id, preparation);
+    let directory: string | null = null;
+    const cancelled = (): CodexRunResult => ({ ok: false, error: 'The Codex run was cancelled.', cancelled: true });
     try {
+      await this.ensureStarted(options.userData, options.codexBinaryPref ?? null);
+      if (preparation.cancelled) return cancelled();
+      directory = await mkdtemp(path.join(tmpdir(), 'powermove-codex-app-'));
       const input: Array<Record<string, string>> = [{ type: 'text', text: req.prompt }];
       for (const [index, image] of req.images.entries()) {
         const extension = image[0] === 0x89 && image[1] === 0x50 ? 'png' : 'jpg';
@@ -110,6 +116,7 @@ export class CodexAppServerRunner {
          history. A fresh ephemeral App Server thread prevents that history
          from being duplicated across turns while still enabling live steering
          inside this run. */
+      if (preparation.cancelled) return cancelled();
       const startedThread = await this.request('thread/start', {
         cwd: directory,
         approvalPolicy: 'never',
@@ -122,11 +129,16 @@ export class CodexAppServerRunner {
         throw new Error('Codex App Server did not return a thread id.');
       }
       const threadId = startedThread.thread.id;
+      if (preparation.cancelled) return cancelled();
+      const turnDirectory = directory;
 
       return await new Promise<CodexRunResult>((resolve) => {
         const timer = setTimeout(() => {
-          void this.cancel(req.id);
-          resolve({ ok: false, error: 'The coding agent took too long to respond.', cancelled: false });
+          turn.cancelRequested = true;
+          if (turn.turnId !== null) {
+            void this.request('turn/interrupt', { threadId, turnId: turn.turnId }).catch(() => undefined);
+          }
+          this.finish(turn, { ok: false, error: 'The coding agent took too long to respond.', cancelled: false });
         }, this.deps.turnTimeoutMs);
         timer.unref();
         const turn: ActiveTurn = {
@@ -134,7 +146,7 @@ export class CodexAppServerRunner {
           threadId,
           turnId: null,
           finalText: '',
-          directory,
+          directory: turnDirectory,
           queuedSteering: [],
           cancelRequested: false,
           resolve,
@@ -170,8 +182,11 @@ export class CodexAppServerRunner {
         });
       });
     } catch (error) {
-      await rm(directory, { recursive: true, force: true });
+      if (preparation.cancelled) return cancelled();
       return { ok: false, error: error instanceof Error ? error.message : String(error), cancelled: false };
+    } finally {
+      this.preparing.delete(req.id);
+      if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -187,8 +202,10 @@ export class CodexAppServerRunner {
   }
 
   async cancel(id: string): Promise<boolean> {
+    const preparation = this.preparing.get(id);
+    if (preparation) preparation.cancelled = true;
     const turn = this.active.get(id);
-    if (!turn) return false;
+    if (!turn) return Boolean(preparation);
     turn.cancelRequested = true;
     if (turn.turnId !== null) {
       try {
@@ -202,7 +219,7 @@ export class CodexAppServerRunner {
   }
 
   async cancelAll(): Promise<void> {
-    await Promise.all([...this.active.keys()].map((id) => this.cancel(id)));
+    await Promise.all([...new Set([...this.preparing.keys(), ...this.active.keys()])].map((id) => this.cancel(id)));
   }
 
   async shutdown(): Promise<void> {
@@ -234,7 +251,6 @@ export class CodexAppServerRunner {
     if (this.active.get(turn.requestId) !== turn) return;
     this.active.delete(turn.requestId);
     clearTimeout(turn.timer);
-    void rm(turn.directory, { recursive: true, force: true });
     turn.resolve(result);
   }
 
@@ -259,17 +275,28 @@ export class CodexAppServerRunner {
     });
     this.child = child;
     this.stderr = '';
-    readline.createInterface({ input: child.stdout }).on('line', (line) => this.receive(line));
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => { this.stderr = `${this.stderr}${chunk}`.slice(-4_000); });
-    child.once('error', (error) => this.handleExit(error));
-    child.once('exit', (code, signal) => this.handleExit(new Error(
-      `Codex App Server stopped: ${this.stderr.trim() || `exit ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}`}`
-    )));
-    await this.requestStarted('initialize', {
-      clientInfo: { name: 'powermove_agent', title: 'Powermove Agent', version: '1.0.0' }
+    readline.createInterface({ input: child.stdout }).on('line', (line) => {
+      if (this.child === child) this.receive(line);
     });
-    this.notify('initialized', {});
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => { if (this.child === child) this.stderr = `${this.stderr}${chunk}`.slice(-4_000); });
+    child.once('error', (error) => { if (this.child === child) this.handleExit(error); });
+    child.stdin.on('error', (error) => { if (this.child === child) this.handleExit(error); });
+    child.once('exit', (code, signal) => {
+      if (this.child === child) this.handleExit(new Error(
+        `Codex App Server stopped: ${this.stderr.trim() || `exit ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}`}`
+      ));
+    });
+    try {
+      await this.requestStarted('initialize', {
+        clientInfo: { name: 'powermove_agent', title: 'Powermove Agent', version: '1.0.0' }
+      });
+      this.notify('initialized', {});
+    } catch (error) {
+      if (this.child === child) this.handleExit(error instanceof Error ? error : new Error(String(error)));
+      if (!child.killed) child.kill();
+      throw error;
+    }
   }
 
   private async request(method: string, params: Record<string, unknown>): Promise<unknown> {

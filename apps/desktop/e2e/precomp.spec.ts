@@ -1,6 +1,14 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@groups editable timeline groups', () => {
+  test.beforeEach(async ({session}) => {
+    await session.page.evaluate(() => {
+      const PM = (window as any).PM;
+      window.dispatchEvent(new CustomEvent('pm-open-project', {detail: PM.mkProject({name:'Regression fixture'})}));
+      PM.ProjectsScreen.hide();
+    });
+  });
+
   test('grouping preserves rendered pixels, time, parent rigs, save data and Undo', async ({ session }) => {
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.TL?.rows));

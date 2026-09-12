@@ -77,6 +77,8 @@ interface ActiveRun {
   killTimer: NodeJS.Timeout | null;
   userData: string;
   sessionWrite: Promise<void>;
+  done: Promise<void>;
+  timedOut: boolean;
 }
 
 interface AttemptResult {
@@ -122,6 +124,13 @@ export function isCodexRunRequest(value: unknown): value is CodexRunRequest {
 
 function failure(error: string, cancelled = false): CodexRunResult {
   return { ok: false, error, cancelled };
+}
+
+function cancelledResult(state: ActiveRun): CodexRunResult {
+  if (!state.timedOut) return failure('The Codex run was cancelled.', true);
+  return failure(state.layout
+    ? 'The coding agent took too long to respond. Your partial work was kept; retry to continue.'
+    : 'The coding agent took too long to respond. Try sending your request again.');
 }
 
 function errorMessageFromValue(value: unknown, depth = 0): string | null {
@@ -207,6 +216,12 @@ export function humanizeCodexFailure(diagnostic: string, fallback = 'ChatGPT gen
   if (/ENOENT|command not found|No such file/i.test(text)) {
     return 'The Codex CLI could not be launched. Check that `codex` is installed and on your PATH.';
   }
+  if (/already has an active writer/i.test(text)) {
+    return 'The saved agent session couldn’t reopen. Try again to reconnect the agent; if it repeats, restart Powermove.';
+  }
+  if (/ECONNRESET|ENOTFOUND|fetch failed|network|connection (?:closed|refused)|stream disconnected/i.test(text)) {
+    return 'The connection to the agent was interrupted. Check your internet connection, then retry.';
+  }
   if (/rate.?limit|\b429\b|overloaded/i.test(text)) {
     return 'The model is rate-limited right now. Wait a moment and retry.';
   }
@@ -263,7 +278,8 @@ function codexTurnStarted(stdout: string): boolean {
     try {
       const event: unknown = JSON.parse(line);
       if (!isRecord(event) || typeof event.type !== 'string') continue;
-      if (event.type === 'turn.started' || event.type.startsWith('item.')) return true;
+      if (event.type === 'turn.started' || (event.type.startsWith('item.') &&
+        !(isRecord(event.item) && event.item.type === 'error'))) return true;
     } catch {
       // Non-JSON notices are diagnostics, not evidence that a turn began.
     }
@@ -307,6 +323,20 @@ export class CodexRunner {
     const req = rawRequest;
     if (this.active.has(req.id)) return failure(`A Codex run with id ${req.id} is already active.`);
 
+    // Reserve the conversation before any asynchronous setup can race a second request.
+    if (req.mode === 'autonomous') {
+      const previous = [...this.active.values()].find(state => state.userData === options.userData &&
+        state.request.mode === 'autonomous' && state.request.projectId === req.projectId &&
+        state.request.threadId === req.threadId && authorityForAccess(state.request.access) === authorityForAccess(req.access));
+      if (previous) {
+        if (this.cancelled.has(previous.request.id)) {
+          await previous.done;
+          return this.run(req, options);
+        }
+        return failure('An agent is already running in this conversation. Stop it or wait for it to finish, then retry.');
+      }
+    }
+
     if (req.access === 'computer') {
       const consume = options.consumeConsentToken ?? consumeToken;
       if (req.consentToken === null || !consume(req.consentToken)) {
@@ -314,28 +344,32 @@ export class CodexRunner {
       }
     }
 
+    let release!: () => void;
+    const done = new Promise<void>(resolve => { release = resolve; });
     const state: ActiveRun = {
       request: req,
       child: null,
       layout: null,
       killTimer: null,
       userData: options.userData,
-      sessionWrite: Promise.resolve()
+      sessionWrite: Promise.resolve(),
+      done,
+      timedOut: false
     };
     this.active.set(req.id, state);
     let editorDirectory: string | null = null;
     let timeout: NodeJS.Timeout | null = null;
 
     try {
-      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+      if (this.cancelled.has(req.id)) return cancelledResult(state);
 
       const binary = options.binary ?? await discoverCodexBinary(options.codexBinaryPref ?? null);
-      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+      if (this.cancelled.has(req.id)) return cancelledResult(state);
       const [codexHome, disabledSkillPaths] = await Promise.all([
         prepareIsolatedCodexHome(options.userData),
         (options.discoverDisabledSkillPaths ?? discoverUserSkillFiles)()
       ]);
-      if (this.cancelled.has(req.id)) return failure('The Codex run was cancelled.', true);
+      if (this.cancelled.has(req.id)) return cancelledResult(state);
 
       if (req.mode === 'editor') {
         const input = await writeEditorInputs(req);
@@ -354,7 +388,7 @@ export class CodexRunner {
         });
         if (this.cancelled.has(req.id)) {
           await this.cleanupCancelled(state);
-          return failure('The Codex run was cancelled.', true);
+          return cancelledResult(state);
         }
         if (attempt.code !== 0) return failure(diagnosticText(attempt, 'ChatGPT generation failed.'));
         try {
@@ -381,7 +415,7 @@ export class CodexRunner {
       state.layout = layout;
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);
-        return failure('The Codex run was cancelled.', true);
+        return cancelledResult(state);
       }
 
       let resumeId = await readSession(layout.sessionPath);
@@ -412,13 +446,13 @@ export class CodexRunner {
         });
         if (this.cancelled.has(req.id)) {
           await this.cleanupCancelled(state, options.userData);
-          return failure('The Codex run was cancelled.', true);
+          return cancelledResult(state);
         }
         const diagnostic = attemptOutput(attempt);
         const silentFailureBeforeTurn = attempt.code !== 0 &&
           !codexTurnStarted(attempt.stdout) && !attemptHasDiagnostic(attempt);
-        const canRetryFresh = tryIndex === 0 && attempt.code !== 0 &&
-          ((resuming && isUnknownSession(diagnostic)) || silentFailureBeforeTurn);
+        const canRetryFresh = tryIndex === 0 && attempt.code !== 0 && !codexTurnStarted(attempt.stdout) &&
+          ((resuming && (isUnknownSession(diagnostic) || /already has an active writer/i.test(diagnostic))) || silentFailureBeforeTurn);
         if (canRetryFresh) {
           options.onProgress?.(resuming
             ? 'The saved agent thread could not be resumed — starting a fresh run…'
@@ -463,7 +497,7 @@ export class CodexRunner {
     } catch (error) {
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);
-        return failure('The Codex run was cancelled.', true);
+        return cancelledResult(state);
       }
       return failure(error instanceof Error ? error.message : String(error));
     } finally {
@@ -472,6 +506,7 @@ export class CodexRunner {
       state.child = null;
       this.active.delete(req.id);
       this.cancelled.delete(req.id);
+      release();
       if (editorDirectory) await rm(editorDirectory, { recursive: true, force: true });
     }
   }
@@ -551,6 +586,7 @@ export class CodexRunner {
 
     const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     const timer = setTimeout(() => {
+      state.timedOut = true;
       this.cancelled.add(req.id);
       this.terminate(state);
     }, timeoutMs);

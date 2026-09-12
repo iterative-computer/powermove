@@ -4,6 +4,7 @@ import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
 import { createVariableFontRenderer, variationEntries, variationSettings } from '../../typography/font-renderer';
 export { variationEntries as textVariationEntries, variationSettings as formatFontVariationSettings } from '../../typography/font-renderer';
 import { resolveContent } from '../core/content-properties';
+import { shapeRasterGeometry, type RasterWindow } from './shape-raster-window';
 /* Ported from js/gl/raster.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
@@ -66,7 +67,9 @@ export function install(PM: PMRegistry): void {
 
 const cache = new Map<any, any>();       // key -> {cv, w, h, used}
 let tick = 0;
-const MAX = 96;
+// Small icons and waveform bars should be limited by bytes, not discarded
+// every frame merely because a composition has more than 96 unique sources.
+const MAX = 4096;
 const MAX_BYTES = PM.Memory?.budget?.('raster') || 192 * 1024 * 1024;
 let cacheBytes = 0;
 
@@ -80,7 +83,8 @@ function release(key: any, entry: any) {
   if (!entry) return;
   cache.delete(key);
   cacheBytes = Math.max(0, cacheBytes - (entry.bytes || 0));
-  PM.GL?.dropTextures?.('r:' + key);
+  // Uploaded textures own their storage and are evicted by the GPU budget.
+  // Dropping one here turns CPU cache pressure into repeated GPU uploads.
   if (entry.cv) { entry.cv.width = 0; entry.cv.height = 0; }
 }
 
@@ -217,7 +221,13 @@ function textLayout(d: any) {
 }
 PM.textLayout = (input: any, time = PM.time) => textLayout(resolvedTextContent(input, time));
 
-function rasterText(d: any, scale: any) {
+// Font measurements are independent of zoom. Keep this small metadata cache
+// separate from bitmap eviction so panning does not repeatedly measure text.
+const textGeometryCache = new Map<string, any>();
+function textGeometry(d: any) {
+  const key = JSON.stringify([d.text, d.boxWidth, d.boxHeight, d.paragraph, d.font, d.weight, d.size, d.tracking, d.leading, d.align, d.italic, variationSettings(d)]);
+  const cached = textGeometryCache.get(key);
+  if (cached) { textGeometryCache.delete(key); textGeometryCache.set(key, cached); return cached; }
   const size = Math.max(1, Number(d.size) || 16);
   const pad = Math.ceil(size * .6) + 24;
   const meas = getCanvas(8, 8).getContext('2d') as any;
@@ -238,15 +248,6 @@ function rasterText(d: any, scale: any) {
   const paragraphHeight = d.paragraph && Number.isFinite(Number(d.boxHeight)) ? Math.max(1, Number(d.boxHeight)) : 0;
   const w = Math.ceil(Math.max(wMax, paragraphWidth)) + pad * 2;
   const hh = Math.ceil(Math.max(lh * lines.length, paragraphHeight)) + pad * 2;
-  const density = Math.min(scale, 8192 / w, 8192 / hh);
-  const cv = getCanvas(w * density, hh * density);
-  const c = cv.getContext('2d') as any;
-  c.scale(density, density);
-  c.font = fontStr(d);
-  if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
-  c.textBaseline = 'alphabetic';
-  c.textAlign = align;
-  c.fillStyle = d.color || '#fff';
   const x = d.align === 'center' ? w / 2 : d.align === 'right' ? w - pad : pad;
   const anchorX = d.align === 'center' ? w / 2 : d.align === 'right' ? w - pad : pad;
   const anchorY = pad;
@@ -254,7 +255,6 @@ function rasterText(d: any, scale: any) {
   lines.forEach((line, i) => {
     const baseline = pad + lh * i + size * .82;
     const measured = metrics[i];
-    c.fillText(line, x, baseline);
 
     const fallbackLeft = d.align === 'center' ? x - measured.width / 2 : d.align === 'right' ? x - measured.width : x;
     const fallbackRight = fallbackLeft + measured.width;
@@ -289,7 +289,31 @@ function rasterText(d: any, scale: any) {
   }
   selection.w = selection.x1 - selection.x0;
   selection.h = selection.y1 - selection.y0;
-  return { cv, w, h: hh, anchorX, anchorY, selection };
+  const geometry = { w, h: hh, anchorX, anchorY, selection, lines, lh, size, pad, x, align };
+  textGeometryCache.set(key, geometry);
+  if (textGeometryCache.size > 512) textGeometryCache.delete(textGeometryCache.keys().next().value!);
+  return geometry;
+}
+
+function textRasterGeometry(d: any, scale: number) {
+  const geometry = textGeometry(d);
+  const density = Math.min(scale, 8192 / geometry.w, 8192 / geometry.h);
+  return { ...geometry, density, width: Math.max(1, Math.ceil(geometry.w * density)), height: Math.max(1, Math.ceil(geometry.h * density)) };
+}
+// The compositor uses this only for ordinary text. Animated glyphs and font
+// anchoring continue through their existing complete-source rendering path.
+PM.textRasterGeometry = (layer: any, scale: number, time = PM.time) => textRasterGeometry(resolvedTextContent(layer, time), scale);
+
+function rasterText(d: any, scale: number) {
+  const g = textRasterGeometry(d, scale);
+  const cv = getCanvas(g.width, g.height);
+  const c = cv.getContext('2d') as any;
+  c.scale(g.density, g.density);
+  c.font = fontStr(d);
+  if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
+  c.textBaseline = 'alphabetic'; c.textAlign = g.align; c.fillStyle = d.color || '#fff';
+  g.lines.forEach((line: string, i: number) => c.fillText(line, g.x, g.pad + g.lh * i + g.size * .82));
+  return { cv, w: g.w, h: g.h, anchorX: g.anchorX, anchorY: g.anchorY, selection: g.selection };
 }
 
 function rasterAnimatedText(layer:any,d:any,time:number,scale:number) {
@@ -322,18 +346,12 @@ function rr(c: any, x: any, y: any, w: any, h: any, r: any) {
   c.closePath();
 }
 
-function rasterShape(d: any, scale: any) {
-  const pad = Math.ceil((d.stroke || 0) / 2) + 4;
-  const w = d.w + pad * 2, hh = d.h + pad * 2;
-  const strokePad = Math.max(0, Number(d.stroke) || 0) / 2;
-  const selection = {
-    x0: -d.w / 2 - strokePad, y0: -d.h / 2 - strokePad,
-    x1: d.w / 2 + strokePad, y1: d.h / 2 + strokePad,
-    w: d.w + strokePad * 2, h: d.h + strokePad * 2,
-  };
-  const density = Math.min(scale, 8192 / w, 8192 / hh);
-  const cv = getCanvas(w * density, hh * density);
+function rasterShape(d: any, scale: any, crop?: RasterWindow) {
+  const { pad, w, h: hh, density, width, height, selection } = shapeRasterGeometry(d, scale);
+  const uv = crop ? [-crop.x / crop.width, -crop.y / crop.height, width / crop.width, height / crop.height] : undefined;
+  const cv = getCanvas(crop?.width ?? width, crop?.height ?? height);
   const c = cv.getContext('2d') as any;
+  if (crop) c.translate(-crop.x, -crop.y);
   c.scale(density, density);
   c.translate(pad, pad);
   c.fillStyle = d.color; c.strokeStyle = d.strokeColor || '#fff'; c.lineWidth = d.stroke || 0;
@@ -352,23 +370,33 @@ function rasterShape(d: any, scale: any) {
   } else if (d.shape === 'line') {
     c.beginPath(); c.moveTo(0, H / 2); c.lineTo(W, H / 2);
     c.lineWidth = Math.max(1, d.stroke || 6); c.strokeStyle = d.color; c.lineCap = 'round'; c.stroke();
-    return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection };
+    return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection, uv };
   } else rr(c, 0, 0, W, H, d.radius || 0);
   c.fill();
   if (d.stroke > 0) c.stroke();
-  return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection };
+  return { cv, w, h: hh, anchorX: pad, anchorY: pad, selection, uv };
 }
 
 /** Get (and cache) a rasterized bitmap for a layer. `scale` = render supersample. */
-PM.raster = (L: any, scale: any = 1, time: any = PM.time) => {
+PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: string) => any, crop?: RasterWindow) => {
   const d = L.type === 'text' ? resolvedTextContent(L, time) : resolveContent(PM, L, time);
   const controls=L.type==='text'?textControlValues(PM,L,time):null;
-  const key = L.d.paths?.length ? 'paths|'+JSON.stringify(L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})))+'|'+scale : L.type === 'text'
-    ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, variationSettings(d), JSON.stringify(controls), scale].join('|')
-    : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.stroke, d.strokeColor, d.points, scale].join('|');
-  let e = cache.get(key);
+  // Above the bitmap dimension limit, different requested zoom densities
+  // produce identical pixels. Key those sources by their effective density
+  // so pinch gestures do not rebuild/upload the same capped bitmap repeatedly.
+  const rasterScale = L.type === 'shape' && !L.d.paths?.length ? shapeRasterGeometry(d, scale).density
+    : L.type === 'text' && !L.d.animators?.length && !L.d.styles?.length ? textRasterGeometry(d, scale).density
+    : scale;
+  const key = (L.d.paths?.length ? 'paths|'+JSON.stringify(L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})))+'|'+scale : L.type === 'text'
+    ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, variationSettings(d), JSON.stringify(controls), rasterScale].join('|')
+    : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.stroke, d.strokeColor, d.points, rasterScale].join('|'))
+    + (crop ? `|crop:${crop.x},${crop.y},${crop.width},${crop.height}` : '');
+  // Typography anchoring may need a separate, unanimated CPU measurement.
+  // Keep that path intact; otherwise the renderer can reuse uploaded pixels
+  // and their geometry without retaining a second canvas in memory.
+  let e = cache.get(key) || (!L.d.fontAnchorBounds && uploaded?.(key));
   if (!e) {
-    e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (L.d.animators?.length||L.d.styles?.length ? rasterAnimatedText(L,d,time,scale) : rasterText(d, scale)) : rasterShape(d, scale);
+    e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (L.d.animators?.length||L.d.styles?.length ? rasterAnimatedText(L,d,time,scale) : rasterText(d, scale)) : rasterShape(d, scale, crop);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
@@ -396,6 +424,7 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time) => {
 };
 PM.rasterStats = () => ({ size: cache.size, bytes: cacheBytes, maxBytes: MAX_BYTES });
 PM.rasterClear = () => {
+  textGeometryCache.clear();
   for (const [key, entry] of [...cache]) release(key, entry);
   PM.GL && PM.GL.dropTextures && PM.GL.dropTextures('r:');
 };

@@ -105,6 +105,16 @@ describe('viewer runtime', () => {
     expect(viewport!.renderWidth).toBeLessThan(1920 * 8);
     expect(previewRenderViewport(1920, 1080, 1, 1200, 800, 0, 0, 2, 1)).toBeNull();
   });
+  it('retains the presented viewport through pans covered by its overscan', () => {
+    const first = previewRenderViewport(1920, 1080, 8, 1200, 800, -7080, -3920, 2, 1)!;
+    expect(previewRenderViewport(1920, 1080, 8, 1200, 800, -7048, -3944, 2, 1, 128, first)).toBe(first);
+    expect(previewRenderViewport(1920, 1080, 8, 1200, 800, -6900, -3920, 2, 1, 128, first)).not.toBe(first);
+    expect(previewRenderViewport(1920, 1080, 4, 1200, 800, -7080, -3920, 2, 1, 128, first)).not.toBe(first);
+    expect(previewRenderViewport(1920, 1080, 8, 1200, 800, -7080, -3920, 1, 1, 128, first)).not.toBe(first);
+    expect(previewRenderViewport(1920, 1080, 8, 1200, 800, -7080, -3920, 2, .5, 128, first)).not.toBe(first);
+    expect(previewRenderViewport(1920, 1080, 8, 1300, 800, -7080, -3920, 2, 1, 128, first)).not.toBe(first);
+    expect(previewRenderViewport(3840, 2160, 8, 1200, 800, -7080, -3920, 2, 1, 128, first)).not.toBe(first);
+  });
   it('snaps to the nearest candidate and breaks ties by the shorter guide', () => {
     const V = viewerRegistry().Viewer;
     const source = V.snapCandidatesFromPoints([{ x: 103, y: 10 }]);

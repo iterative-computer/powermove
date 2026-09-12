@@ -5,6 +5,14 @@ import path from 'node:path';
 import {fixturePath} from './helpers/media';
 
 test.describe('@import-mp4 H.264 import smoke', () => {
+  test.beforeEach(async ({session}) => {
+    await session.page.evaluate(() => {
+      const PM = (window as any).PM;
+      window.dispatchEvent(new CustomEvent('pm-open-project', {detail: PM.mkProject({name:'Regression fixture'})}));
+      PM.ProjectsScreen.hide();
+    });
+  });
+
   test('keeps imported video playable after the source is removed and the app closes',async({session}) => {
     const source=path.join(session.userData,'temporary-import.mp4');
     await copyFile(fixturePath('h264-aac.mp4'),source);

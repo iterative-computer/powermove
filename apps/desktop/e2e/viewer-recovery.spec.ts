@@ -1,6 +1,13 @@
 import { expect, test } from './helpers/app';
 
 async function waitForViewer(page: any): Promise<void> {
+  // A fresh profile starts on Projects, whose overlay intercepts wheel/drag
+  // input even though the viewer canvas has already initialized behind it.
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Viewer recovery', w: 1920, h: 1080, fps: 30, dur: 4 }) }));
+    PM.ProjectsScreen.hide();
+  });
   await page.waitForFunction(() => Boolean(
     (window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl
       && document.querySelector('#composition-recovery'),
@@ -81,6 +88,48 @@ test.describe('@viewer composition recovery', () => {
     expect(Math.max(...screenDrift.map((point) => point.x)), JSON.stringify(screenDrift)).toBeLessThan(1);
     expect(Math.max(...screenDrift.map((point) => point.y)), JSON.stringify(screenDrift)).toBeLessThan(1);
     await expect(page.locator('#composition-recovery')).toBeHidden();
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('keeps the last composition frame visible while zoom resizes its drawing buffer', async ({ session }) => {
+    const { page } = session;
+    await waitForViewer(page);
+    const pixels = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const project = PM.mkProject({
+        name: 'Zoom presentation', w: 640, h: 360, fps: 30, dur: 4, bg: '#D92D20',
+      });
+      PM.replaceProject(project);
+      PM.Viewer.returnToComposition();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      const sample = () => {
+        const gl = PM.GL.gl as WebGL2RenderingContext;
+        const rgba = new Uint8Array(4);
+        gl.readPixels(
+          Math.floor(PM.GL.canvas.width / 2), Math.floor(PM.GL.canvas.height / 2),
+          1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba,
+        );
+        return [...rgba];
+      };
+      const before = sample();
+      const duringResize = [];
+      /* Stress more than one input event per animation frame and cross the
+         full-frame/cropped-viewport boundary in both directions. */
+      for (let index = 0; index < 8; index++) {
+        PM.Viewer.setZoom(PM.Viewer.shown * 1.35);
+        duringResize.push(sample());
+      }
+      for (let index = 0; index < 8; index++) {
+        PM.Viewer.setZoom(PM.Viewer.shown / 1.35);
+        duringResize.push(sample());
+      }
+      return { before, duringResize };
+    });
+
+    expect(pixels.before.slice(0, 3)).toEqual([217, 45, 32]);
+    for (const pixel of pixels.duringResize) {
+      expect(pixel.slice(0, 3)).toEqual(pixels.before.slice(0, 3));
+    }
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 

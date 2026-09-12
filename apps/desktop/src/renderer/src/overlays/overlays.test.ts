@@ -471,9 +471,9 @@ describe('installSvelteOverlays', () => {
     expect(target.getAttribute('aria-live')).toBe('polite');
     expect((target as HTMLElement).style.zIndex).toBe('402');
     expect(document.querySelectorAll('.toast')).toHaveLength(1);
-    expect(document.querySelector('.toast [data-icon="x"]')).toBeTruthy();
+    expect(document.querySelector('.toast [role="alert"]')).toBeTruthy();
     expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(false);
-    document.querySelector<HTMLButtonElement>('.toast[data-toast-error="true"] button')?.click();
+    document.querySelector<HTMLButtonElement>('.toast[data-toast-error="true"] > button')?.click();
     flushSync();
     expect(document.querySelector('.toast')).toBeNull();
 
@@ -502,15 +502,15 @@ describe('installSvelteOverlays', () => {
     expect(document.querySelector('.toast')).toBeNull();
   });
 
-  it('keeps regex-inferred dismiss buttons backward compatible without making errors sticky', () => {
+  it('keeps errors available until dismissed', () => {
     vi.useFakeTimers();
     PM.toast('Save failed', 100);
     flushSync();
 
     expect(document.querySelector('.toast button')).toBeTruthy();
-    vi.advanceTimersByTime(360);
+    vi.advanceTimersByTime(10_000);
     flushSync();
-    expect(document.querySelector('.toast')).toBeNull();
+    expect(document.querySelector('.toast')).not.toBeNull();
   });
 
   it('routes the installed palette command through keyboard-style navigation and PM.cmd', () => {
@@ -580,4 +580,54 @@ describe('paletteEntries legacy grouping and cap', () => {
     expect(entries.filter((entry) => entry.cat === 'Command')).toHaveLength(commandsKept);
     expect(entries.filter((entry) => entry.cat === 'Workspace')).toHaveLength(workspacesKept);
   });
+});
+
+it('preserves distinct failures across success notifications and deduplicates repeated errors', () => {
+  PM.toast('Could not import first.mov');
+  PM.toast('Could not import second.mov');
+  PM.toast('Could not import first.mov');
+  PM.toast('Saved project');
+  flushSync();
+  expect(document.querySelectorAll('[data-toast-error]')).toHaveLength(2);
+  expect(document.querySelectorAll('.toast')).toHaveLength(3);
+  expect(document.querySelector('#toasts')?.textContent).toContain('first.mov');
+  expect(document.querySelector('#toasts')?.textContent).toContain('second.mov');
+});
+
+it('waits for asynchronous modal validation without closing or submitting twice', async () => {
+  let finish!: (result: boolean) => void;
+  const run = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));
+  const handle = PM.modal({ title: 'Save project', actions: [{ label: 'Save', run }] });
+  flushSync();
+  const button = handle.el.querySelector('button') as HTMLButtonElement;
+  button.click();
+  flushSync();
+  expect(handle.el.isConnected).toBe(true);
+  expect(button.disabled).toBe(true);
+  button.click();
+  expect(run).toHaveBeenCalledOnce();
+  finish(false);
+  await Promise.resolve();
+  await Promise.resolve();
+  flushSync();
+  expect(handle.el.isConnected).toBe(true);
+  expect(button.disabled).toBe(false);
+});
+
+it('keeps failed modal actions open with useful feedback', async () => {
+  const run = vi.fn().mockRejectedValueOnce(new Error('ENOSPC: no space left on device')).mockResolvedValueOnce(true);
+  const handle = PM.modal({ title: 'Save project', actions: [{ label: 'Save', run }] });
+  flushSync();
+  const button = handle.el.querySelector('.mf button') as HTMLButtonElement;
+  button.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  flushSync();
+  expect(handle.el.isConnected).toBe(true);
+  expect(handle.el.querySelector('[role="alert"]')?.textContent).toContain('Your disk is full');
+  expect(button.disabled).toBe(false);
+  button.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(handle.el.isConnected).toBe(false);
 });

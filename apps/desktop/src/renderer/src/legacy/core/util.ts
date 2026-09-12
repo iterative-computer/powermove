@@ -182,18 +182,20 @@ bus.off = (ev: any, fn: any) => { const s = bus.m.get(ev); if (s) s.delete(fn); 
 bus.emit = (ev: any, a: any, b: any) => { const s = bus.m.get(ev); if (s) for (const fn of [...s]) { try { fn(a, b); } catch (e) { window.console.error('[bus]', ev, e); } } };
 PM.bus = bus;
 
-/* Coalesced invalidation — everything redraws on one rAF. */
+/* Rendering demand is visible to the frame loop immediately, while the more
+   expensive UI/timeline notifications remain coalesced on one rAF. The frame
+   loop itself still coalesces repeated draw requests with a boolean. */
 const dirty = new Set();
 let rafId = 0;
 PM.invalidate = (what = 'all') => {
-  if (what === 'all') { dirty.add('render'); dirty.add('ui'); dirty.add('timeline'); }
-  else dirty.add(what);
+  if (what === 'all' || what === 'render') bus.emit('draw');
+  if (what === 'all') { dirty.add('ui'); dirty.add('timeline'); }
+  else if (what !== 'render') dirty.add(what);
   if (!rafId) rafId = window.requestAnimationFrame(flush);
 };
 function flush() {
   rafId = 0;
   const d = new Set(dirty); dirty.clear();
-  if (d.has('render')) bus.emit('draw');
   if (d.has('timeline')) bus.emit('draw:timeline');
   if (d.has('ui')) bus.emit('draw:ui');
   if (d.has('status')) bus.emit('draw:status');

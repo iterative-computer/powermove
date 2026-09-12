@@ -1,6 +1,6 @@
 // @ts-nocheck -- faithful behavioral transplant of exported spatial pure/adapter seams.
 import assert from 'node:assert/strict';
-import { afterEach, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 
 import { makePM } from './make-pm';
 import { install as installElectronShim } from '../host/electron-shim';
@@ -771,4 +771,18 @@ it('forwards typed extension changes through the Electron shim payload', async (
   });
   await vi.waitFor(() => assert.equal(resolve.mock.calls.length, 1));
   assert.deepEqual(resolve.mock.calls[0][1].extensions, extensions);
+});
+
+it('sending an agent message does not clone or rewrite the saved Takes archive', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'checkpoint-project', name: 'Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.takes = { save: vi.fn(() => ({ id: 'old-archive-take' })), all: vi.fn(() => []) };
+  PM.AgentHarness = { observe: vi.fn(async () => ({ state: {}, times: [], images: [] })), cleanCommand: vi.fn(c => c) };
+  PM.CodexBridge.request = vi.fn(async () => ({ text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] }));
+  PM.AgentUI.submit('Continue');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  expect(PM.takes.save).not.toHaveBeenCalled();
+  expect(PM.takes.all).not.toHaveBeenCalled();
+  expect(JSON.stringify(PM.AgentUI.state.run.checkpoint)).not.toContain('layers');
 });

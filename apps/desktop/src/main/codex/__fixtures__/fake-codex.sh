@@ -34,6 +34,16 @@ if [ "${FAKE_CODEX_MODE:-success}" = 'stale-resume' ] && [ "$resuming" -eq 1 ]; 
   exit 17
 fi
 
+if [ "${FAKE_CODEX_MODE:-success}" = 'writer-resume' ] && [ "$resuming" -eq 1 ]; then
+  printf '%s\n' 'Error: thread/resume: thread/resume failed: thread stale-thread already has an active writer (code -32600)' >&2
+  exit 17
+fi
+
+if [ "${FAKE_CODEX_MODE:-success}" = 'missing-after-turn' ]; then
+  printf '%s\n' '{"type":"turn.started"}' '{"type":"turn.failed","error":{"message":"thread not found during tool execution"}}'
+  exit 17
+fi
+
 if [ "${FAKE_CODEX_MODE:-success}" = 'silent-stale-resume' ] && [ "$resuming" -eq 1 ]; then
   exit 17
 fi

@@ -46,7 +46,7 @@ export type PreviewViewport = {
 export function previewRenderViewport(
   compWidth: number, compHeight: number, zoom: number,
   stageWidth: number, stageHeight: number, frameX: number, frameY: number,
-  dpr: number, quality: number, overscan = 128,
+  dpr: number, quality: number, overscan = 128, previous?: PreviewViewport | null,
 ): PreviewViewport | null {
   const z = Number(zoom) || 0;
   if (!(z > 1 && compWidth > 0 && compHeight > 0 && stageWidth > 0 && stageHeight > 0)) return null;
@@ -59,6 +59,18 @@ export function previewRenderViewport(
   const cssRight = Math.min(displayWidth, visibleRight + pad), cssBottom = Math.min(displayHeight, visibleBottom + pad);
   const cssWidth = cssRight - cssLeft, cssHeight = cssBottom - cssTop;
   const density = Math.min(2, Math.max(1, Number(dpr) || 1)) * Math.max(.25, Math.min(1, Number(quality) || 1));
+  // The overscan is a pan buffer. Retain its composition coordinates while
+  // it covers the view, so input can move the already-presented image instead
+  // of pinning old pixels to the screen until a replacement frame arrives.
+  if (previous && previous.compWidth === compWidth && previous.compHeight === compHeight
+      && Math.abs(previous.cssWidth / previous.width - z) < 1e-9
+      && Math.abs(previous.cssHeight / previous.height - z) < 1e-9
+      && previous.renderWidth === Math.max(2, Math.round(previous.cssWidth * density))
+      && previous.renderHeight === Math.max(2, Math.round(previous.cssHeight * density))
+      && Math.abs(previous.cssWidth - cssWidth) < 1e-7 && Math.abs(previous.cssHeight - cssHeight) < 1e-7
+      && visibleLeft >= previous.cssLeft && visibleTop >= previous.cssTop
+      && visibleRight <= previous.cssLeft + previous.cssWidth
+      && visibleBottom <= previous.cssTop + previous.cssHeight) return previous;
   return {
     x: cssLeft / z, y: cssTop / z, width: cssWidth / z, height: cssHeight / z,
     compWidth, compHeight, cssLeft, cssTop, cssWidth, cssHeight,
@@ -604,6 +616,27 @@ let disposed = false;
 let unbindStage: (() => void) | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let activeDrag: { cancel(): void } | null = null;
+let presentedViewport: PreviewViewport | null = null;
+let requestedViewport: PreviewViewport | null = null;
+let visibleRegion: { x: number; y: number; right: number; bottom: number } | null = null;
+let zoomGestureUntil = 0;
+let navigationUntil = 0;
+V.isNavigating = () => !disposed && (!!activeDrag || window.performance.now() < navigationUntil);
+let presentation: { time: number; version: number | undefined; project: any; quality: number } | null = null;
+V.deferNavigationRender = (now: number) => {
+  if (disposed || now >= zoomGestureUntil || PM.playing || !requestedViewport || !presentedViewport
+      || requestedViewport === presentedViewport || !visibleRegion || !presentation
+      || presentation.version === undefined || presentation.version !== PM.animVersion?.()
+      || presentation.time !== PM.time || presentation.project !== PM.proj || presentation.quality !== PM.quality) return false;
+  return visibleRegion.x >= presentedViewport.x && visibleRegion.y >= presentedViewport.y
+    && visibleRegion.right <= presentedViewport.x + presentedViewport.width
+    && visibleRegion.bottom <= presentedViewport.y + presentedViewport.height;
+};
+const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / viewport.width) => {
+  const gl = V.el as HTMLCanvasElement;
+  gl.style.position = 'absolute'; gl.style.left = viewport.x * zoom + 'px'; gl.style.top = viewport.y * zoom + 'px';
+  gl.style.width = viewport.width * zoom + 'px'; gl.style.height = viewport.height * zoom + 'px';
+};
 const busOffs: Array<() => void> = [];
 
 const disposeRuntime = () => {
@@ -702,7 +735,8 @@ V.attach = (stage: HTMLElement) => {
 };
 
 /* ── layout / sizing ───────────────────────────────────── */
-V.layout = () => {
+V.layout = (panOnly = false) => {
+  if (panOnly === true) navigationUntil = window.performance.now() + 250;
   if (!V.el || !V.stage) return;
   const gl = V.el as HTMLCanvasElement;
   const p = PM.proj;
@@ -741,21 +775,45 @@ V.layout = () => {
     && !(layer.masks || []).length && !layer.matteSource && !layer.transitionIn && !layer.transitionOut
     && !['adjustment', 'shader', 'extension', 'precomp'].includes(layer.type));
   const viewport = viewportSafe
-    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, PM.quality)
+    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, PM.quality, 128, PM.GL.previewViewport)
     : null;
+  requestedViewport = viewport;
+  visibleRegion = viewport ? { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
+    right: Math.min(p.w, (r.width - position.x) / z), bottom: Math.min(p.h, (r.height - position.y) / z) } : null;
   if (viewport) {
-    gl.style.position = 'absolute'; gl.style.left = viewport.cssLeft + 'px'; gl.style.top = viewport.cssTop + 'px';
-    gl.style.width = viewport.cssWidth + 'px'; gl.style.height = viewport.cssHeight + 'px';
+    // While a new crop is pending, keep the old pixels in their own source
+    // coordinates. Commit the new CSS placement with its GL presentation.
+    const retain = presentedViewport && presentedViewport.compWidth === p.w && presentedViewport.compHeight === p.h;
+    displayViewport(retain ? presentedViewport! : viewport, z);
     PM.GL.resize(viewport.renderWidth, viewport.renderHeight, viewport);
   } else {
+    presentedViewport = null;
     gl.style.position = ''; gl.style.left = ''; gl.style.top = ''; gl.style.width = '100%'; gl.style.height = '100%';
     const renderSize = PM.previewResolution && PM.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*PM.quality)),height:Math.max(2,Math.round(p.h*PM.quality))} : previewRenderSize(p.w, p.h, z, dpr, PM.quality);
     PM.GL.resize(renderSize.width, renderSize.height, null);
   }
-  V.ov.width = Math.round(r.width * dpr); V.ov.height = Math.round(r.height * dpr);
+  const overlayWidth = Math.round(r.width * dpr);
+  const overlayHeight = Math.round(r.height * dpr);
+  /* Assigning either canvas dimension clears the bitmap even when the value is
+     unchanged. Zoom does not resize the stage, so retain its controls between
+     frames and only clear for a real panel-size or density change. */
+  if (V.ov.width !== overlayWidth) V.ov.width = overlayWidth;
+  if (V.ov.height !== overlayHeight) V.ov.height = overlayHeight;
   V.ov.style.width = r.width + 'px'; V.ov.style.height = r.height + 'px';
   V.updateRecovery?.();
-  PM.invalidate();
+  /* Geometry changes immediately during zoom/pan. Repaint handles and paths in
+     the same event so they never lag or blink while the GL frame catches up. */
+  drawOverlay();
+  /* Zoom, pan, and panel geometry are view-only. Avoid waking inspector/UI and
+     timeline redraws for every wheel event. */
+  // A pan inside the already-presented overscan only moves existing pixels.
+  // Do not submit the entire layer stack again. This is deliberately scoped
+  // to pan input: independent draw requests (assets, fonts, edits, context
+  // recovery, etc.) remain pending and are never swallowed here.
+  const reusePan = panOnly === true && !PM.playing && viewport && viewport === presentedViewport
+    && presentation && presentation.version !== undefined && presentation.version === PM.animVersion?.()
+    && presentation.time === PM.time && presentation.project === p && presentation.quality === PM.quality;
+  if (!reusePan) PM.invalidate('render');
 };
 V.setZoom = (zoom: number) => {
   if (!Number.isFinite(zoom)) return false;
@@ -825,6 +883,11 @@ function leaveFitMode(): void {
 /* ── overlay drawing ───────────────────────────────────── */
 for (const [event, handler] of [
   ['overlay', drawOverlay],
+  ['preview:presented', (frame: { viewport: PreviewViewport; time: number; version: number | undefined; project: any; quality: number }) => {
+    if (frame.viewport && frame.viewport === requestedViewport && V.el) {
+      presentedViewport = frame.viewport; presentation = frame; displayViewport(frame.viewport);
+    }
+  }],
   ['sel', () => PM.invalidate('render')],
 ] as const) {
   const off = PM.bus.on(event, handler);
@@ -1183,6 +1246,8 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
   listen(stage, 'wheel', guarded((e: any) => {
     e.preventDefault();
     if (viewerWheelMode(e) === 'zoom') {
+      zoomGestureUntil = window.performance.now() + 80;
+      navigationUntil = window.performance.now() + 250;
       const factor = clamp(Math.exp(-wheelZoomDelta(e) * .0015), .5, 2);
       zoomAtEvent(e, factor);
       return;
@@ -1191,7 +1256,7 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
     const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
     V.pan = [V.pan[0] - dx, V.pan[1] - dy];
-    V.layout();
+    V.layout(true);
   }), fenceLegacyListeners ? { capture: true, passive: false } : { passive: false });
   if (V.recovery) listen(V.recovery, 'pointerdown', ((e: any) => {
     e.preventDefault();
@@ -1303,7 +1368,7 @@ function startPan(e: any) {
     move: (dx: any, dy: any, ev: any) => {
       const speed = ev.shiftKey ? 2 : 1;
       V.pan = [start[0] + dx * speed, start[1] + dy * speed];
-      V.layout();
+      V.layout(true);
     },
   });
 }

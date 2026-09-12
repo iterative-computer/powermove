@@ -316,11 +316,11 @@ describe('CodexRunner lifecycle', () => {
       timeoutMs: 25
     });
 
-    expect(result).toEqual({ ok: false, error: 'The Codex run was cancelled.', cancelled: true });
+    expect(result).toMatchObject({ ok: false, cancelled: false, error: expect.stringContaining('too long') });
     expect(await readFile(sessionPath, 'utf8')).toBe('editor-session');
   });
 
-  it('clears an unknown resumed session and retries exactly once fresh', async () => {
+  it.each(['stale-resume', 'writer-resume'])('recovers a %s session exactly once before starting work', async (mode) => {
     const userData = await temporaryDirectory('runner-stale');
     const invocationFile = path.join(userData, 'invocations.txt');
     const root = agentWorkspaceRoot(userData, 'runner-project');
@@ -331,7 +331,7 @@ describe('CodexRunner lifecycle', () => {
     const progress: string[] = [];
     const result = await new CodexRunner().run(request({ id: 'stale-run-1234' }), {
       ...fakeOptions(userData, {
-        FAKE_CODEX_MODE: 'stale-resume',
+        FAKE_CODEX_MODE: mode,
         FAKE_CODEX_INVOCATIONS: invocationFile
       }),
       onProgress: (text) => progress.push(text)
@@ -503,4 +503,56 @@ describe('humanizeCodexFailure', () => {
     const { humanizeCodexFailure } = await import('./runner');
     expect(humanizeCodexFailure('', 'The autonomous agent failed.')).toBe('The autonomous agent failed.');
   });
+});
+
+it('never replays work after a turn has started, even if its error mentions a missing thread', async () => {
+  const userData = await temporaryDirectory('runner-no-replay');
+  const invocationFile = path.join(userData, 'invocations.txt');
+  const sessionPath = sessionPathFor(agentWorkspaceRoot(userData, 'runner-project'), 'project');
+  await mkdir(path.dirname(sessionPath), { recursive: true });
+  await writeFile(sessionPath, 'existing-thread');
+  const result = await new CodexRunner().run(request(), fakeOptions(userData, {
+    FAKE_CODEX_MODE: 'missing-after-turn', FAKE_CODEX_INVOCATIONS: invocationFile
+  }));
+  expect(result.ok).toBe(false);
+  expect((await readFile(invocationFile, 'utf8')).trim().split('\n')).toEqual(['resume']);
+});
+
+it('prevents two requests from writing to the same conversation at once', async () => {
+  const userData = await temporaryDirectory('runner-concurrent');
+  const pidFile = path.join(userData, 'fake.pid');
+  const runner = new CodexRunner();
+  const first = runner.run(request({ id: 'first-run' }), fakeOptions(userData, {
+    FAKE_CODEX_MODE: 'hang', FAKE_CODEX_PID_FILE: pidFile
+  }));
+  await waitForFile(pidFile);
+  try {
+    const result = await runner.run(request({ id: 'second-run' }), fakeOptions(userData, {}));
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('already running') });
+  } finally {
+    await runner.cancel('first-run');
+    await first;
+  }
+});
+
+it('waits for a stopped writer to exit before resuming a replacement request', async () => {
+  const userData = await temporaryDirectory('runner-replacement');
+  const pidFile = path.join(userData, 'fake.pid');
+  const runner = new CodexRunner();
+  const first = runner.run(request({ id: 'stopped-run' }), fakeOptions(userData, {
+    FAKE_CODEX_MODE: 'hang', FAKE_CODEX_PID_FILE: pidFile
+  }));
+  await waitForFile(pidFile);
+  const pid = Number(await readFile(pidFile, 'utf8'));
+  const cancellation = runner.cancel('stopped-run');
+  const options = fakeOptions(userData, {});
+  const spawnProcess = options.spawnProcess!;
+  options.spawnProcess = (command, args, settings) => {
+    expect(() => process.kill(pid, 0)).toThrow();
+    return spawnProcess(command, args, settings);
+  };
+  const next = runner.run(request({ id: 'replacement-run' }), options);
+  await cancellation;
+  await expect(first).resolves.toMatchObject({ cancelled: true });
+  await expect(next).resolves.toMatchObject({ ok: true });
 });

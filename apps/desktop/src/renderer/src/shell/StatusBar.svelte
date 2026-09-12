@@ -2,7 +2,7 @@
   import { kernelSignals } from '../kernel/signals.svelte';
   import { frameBus } from '../runtime/frame-bus';
   import { doc } from '../state/document.svelte';
-  import { perf } from '../state/transport.svelte';
+  import { perf, transport } from '../state/transport.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
   let refreshToken = $state(0);
@@ -32,7 +32,13 @@
     refreshToken;
     return !!PM.GL?.gl;
   });
-  const displayFps = $derived.by(() => perf.fps || '—');
+  const playbackStatus = $derived.by(() => {
+    refreshToken;
+    if (PM.Preview?.preparing) return 'Preparing preview';
+    if (PM.Preview?.active) return 'Cached preview';
+    if (!transport.playing) return 'Playback paused';
+    return perf.fps > 0 ? `Preview ${perf.fps} fps` : 'Measuring FPS…';
+  });
   const frameMs = $derived.by(() => {
     const value = perf.ms || 0;
     return typeof PM.round === 'function'
@@ -81,8 +87,8 @@
 <span class="status-field">
   {#if webglLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
 </span>
-<span class="status-field">{displayFps} fps</span>
-<span class="status-field">{frameMs} ms</span>
+<span class="status-field" title="Measured preview redraws per second during playback">{playbackStatus}</span>
+<span class="status-field" title="Preview render time">{frameMs} ms</span>
 <span class="status-field">{dimensions}</span>
 {#each rightItems as entry (entry.item.id)}
   {@render statusItem(entry)}

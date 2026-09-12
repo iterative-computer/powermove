@@ -4,7 +4,7 @@ import type { PMRegistry } from '../registry';
 import { makePM } from '../__tests__/make-pm';
 import { install, videoImportFailureMessage, waitForPresentedVideoFrame } from './raster';
 
-function rasterRegistry(): PMRegistry {
+function rasterRegistry(extra: Partial<PMRegistry> = {}): PMRegistry {
   const context2d: any = {
     font: '', letterSpacing: '', textBaseline: '', textAlign: '', fillStyle: '',
     scale() {}, fillText() {},
@@ -29,6 +29,7 @@ function rasterRegistry(): PMRegistry {
   });
   const PM: PMRegistry = {
     clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
+    ...extra,
   };
   install(PM);
   return PM;
@@ -40,6 +41,92 @@ afterEach(() => {
 });
 
 describe('legacy raster install', () => {
+  it('reuses identical capped text bitmaps at larger zoom levels without changing lower-density sources', () => {
+    const PM = rasterRegistry();
+    const layer = { type: 'text', d: { text: 'W'.repeat(128), font: 'sans-serif', size: 18, color: '#ffffff' } };
+    const low = PM.raster(layer, 1), capped = PM.raster(layer, 8);
+    expect(capped.cv.width).toBe(8192);
+    expect(PM.raster(layer, 16)).toBe(capped);
+    expect(PM.raster(layer, 32)).toBe(capped);
+    expect(low.key).not.toBe(capped.key);
+    expect(PM.raster(layer, 1)).toBe(low);
+    expect(low.selection).toEqual(capped.selection);
+  });
+
+  it('measures plain text without allocating its zoomed bitmap and invalidates changed typography', () => {
+    const PM = rasterRegistry();
+    const layer = { type: 'text', d: { text: 'Zoomed typography', font: 'sans-serif', size: 18, color: '#ffffff' } };
+    const first = PM.textRasterGeometry(layer, 16);
+    expect(PM.rasterStats().bytes).toBe(0);
+    const full = PM.raster(layer, 16);
+    expect(first).toMatchObject({ w: full.w, h: full.h, anchorX: full.anchorX, anchorY: full.anchorY, selection: full.selection });
+    expect(first.width).toBe(full.cv.width);
+    expect(first.height).toBe(full.cv.height);
+    expect(PM.textRasterGeometry(layer, 2).selection).toBe(first.selection);
+    layer.d.text += ' longer';
+    expect(PM.textRasterGeometry(layer, 16).w).toBeGreaterThan(first.w);
+    layer.d.text = 'Zoomed typography';
+    PM.rasterClear();
+    expect(PM.textRasterGeometry(layer, 16).selection).not.toBe(first.selection);
+    expect(PM.textRasterGeometry(layer, 16).selection).toEqual(first.selection);
+  });
+
+  it('keeps hundreds of small sources warm without exceeding the byte budget', () => {
+    const PM = rasterRegistry();
+    const layers = Array.from({ length: 670 }, (_, index) => ({
+      type: 'text', d: { text: `Icon ${index}`, font: 'sans-serif', size: 8, color: '#ffffff' },
+    }));
+    const first = layers.map(layer => PM.raster(layer, .25));
+    expect(PM.rasterStats().size).toBe(670);
+    expect(PM.rasterStats().bytes).toBeLessThan(PM.rasterStats().maxBytes);
+    layers.forEach((layer, index) => expect(PM.raster(layer, .25)).toBe(first[index]));
+  });
+
+  it('releases CPU canvases under pressure while allowing uploaded pixels to be reused', () => {
+    let provider: any;
+    const dropTextures = vi.fn();
+    const PM = rasterRegistry({
+      GL: { dropTextures },
+      Memory: { budget: () => 1024 * 1024, register: (_name: string, value: any) => { provider = value; } },
+    });
+    const layer = (text: string) => ({ type: 'text', d: { text, font: 'sans-serif', size: 8, color: '#ffffff' } });
+    const first = layer('First'), second = layer('Second');
+    const raster = PM.raster(first);
+    const { cv, ...uploaded } = raster;
+    PM.raster(second);
+    provider.trim(0);
+    expect(cv.width).toBe(0);
+    expect(PM.rasterStats().size).toBe(1);
+    expect(dropTextures).not.toHaveBeenCalled();
+    const reuse = vi.fn((key: string) => key === uploaded.key ? uploaded : undefined);
+    expect(PM.raster(first, 1, 0, reuse)).toBe(uploaded);
+    expect(PM.rasterStats().size).toBe(1);
+    // Picking/export callers that require an actual bitmap still get one.
+    expect(PM.raster(first).cv.width).toBeGreaterThan(0);
+    first.d.text = 'Changed';
+    expect(PM.raster(first, 1, 0, reuse).key).not.toBe(uploaded.key);
+    PM.rasterClear();
+    expect(dropTextures).toHaveBeenCalledWith('r:');
+    expect(PM.rasterStats()).toMatchObject({ size: 0, bytes: 0 });
+  });
+
+  it('remeasures anchored typography instead of reapplying an uploaded anchor offset', () => {
+    const PM = rasterRegistry({ ev: () => 0 });
+    const layer = { type: 'text', d: {
+      text: 'Anchored', font: 'sans-serif', size: 20, color: '#ffffff',
+      fontAnchorBounds: { x0: -20, y0: -10, x1: 100, y1: 30 },
+    } };
+    const before = PM.raster(layer);
+    const { cv: _canvas, ...uploaded } = before;
+    PM.rasterClear();
+    const reuse = vi.fn(() => uploaded);
+    const after = PM.raster(layer, 1, 0, reuse);
+    expect(reuse).not.toHaveBeenCalled();
+    expect(after.cv.width).toBeGreaterThan(0);
+    expect(after.selection).toEqual(before.selection);
+    expect(after.fontOffset).toEqual(before.fontOffset);
+  });
+
   it('recognizes SVG files even when the native picker omits their MIME type', () => {
     const PM = rasterRegistry();
 

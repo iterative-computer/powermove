@@ -1,3 +1,4 @@
+import { createAgentCheckpoint } from './checkpoint';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -1327,15 +1328,7 @@ async function applyExtensionChanges(extensions: any) {
 async function runAutonomousRequest({ request, token, controller, access, focus, context, threadId }: any) {
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpointLabel: any = `Before autonomous agent · ${request.slice(0, 42)}`;
-  const checkpoint: any = {
-    id: PM.uid('agent-checkpoint'),
-    label: checkpointLabel,
-  };
-  try { checkpoint.takeId = PM.takes?.save(checkpointLabel)?.id || null; }
-  catch { checkpoint.takeId = null; }
-  // The take already owns the fallback project snapshot. Keep that large JSON
-  // out of reactive agent-panel state unless durable take storage is unavailable.
-  if (!checkpoint.takeId) checkpoint.json = JSON.stringify(PM.proj);
+  const checkpoint = createAgentCheckpoint(PM, checkpointLabel);
   const historyMark: any = PM.hist.mark();
   const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
   const [observation]: any = await Promise.all([
@@ -1583,7 +1576,7 @@ async function sendRequest(input: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     archiveTrace();
     S.activity = ''; S.phase = 'conversation';
-    S.conversation.push({ entering: true, role: 'assistant', error: true, text: String(error.message || error).slice(0, 300) });
+    S.conversation.push({ entering: true, role: 'assistant', error: true, text: String(error.message || error).slice(0, 4000) });
     PM.AgentUI?.update({ focusComposer: true });
   } finally {
     if (token === S.requestToken) {

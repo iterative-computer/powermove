@@ -1,3 +1,4 @@
+import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
@@ -257,12 +258,7 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
   const historyMark = PM.hist.mark?.() || null;
   const historyGroup = PM.uid('agent-history');
   const editStart = Array.isArray(PM.proj.edits) ? PM.proj.edits.length : 0;
-  const checkpoint: any = {
-    id: PM.uid('agent-checkpoint'),
-    label: `Before agent · ${text(request, 'composition edit', 42)}`,
-  };
-  try { checkpoint.takeId = PM.takes?.save(checkpoint.label)?.id || null; } catch { checkpoint.takeId = null; }
-  if (!checkpoint.takeId) checkpoint.json = JSON.stringify(PM.proj);
+  const checkpoint = createAgentCheckpoint(PM, `Before agent · ${text(request, 'composition edit', 42)}`);
   progress('Applying structured source edit…');
   const first = PM.Edit.apply(proposal.commands, {
     label: proposal.label, origin: 'agent', baseRevision: proposal.baseRevision, historyGroup,

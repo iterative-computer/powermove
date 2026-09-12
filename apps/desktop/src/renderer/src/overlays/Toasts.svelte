@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ErrorNotice from '../errors/ErrorNotice.svelte';
   import Icon from '../panels/Icon.svelte';
   import type { ToastOptions } from './types';
 
@@ -20,17 +21,23 @@
   export function push(message: unknown, milliseconds = 2200, options: ToastOptions = {}): void {
     if (message == null) return;
     const inferredError = isErrorToast(message);
-    clear();
+    const text = String(message);
+    const existing = queue.find(item => item.message === text && item.error === inferredError);
+    if (existing) return;
+    // Routine status updates replace each other. Errors remain available to read.
+    for (const item of [...queue]) {
+      if (!item.error && !item.sticky) dismiss(item.id);
+    }
     const item: ToastItem = {
       id: nextId++,
       message: String(message),
       icon: options.icon || toastIcon(message, inferredError),
       error: inferredError,
-      sticky: options.sticky ?? false,
+      sticky: options.sticky ?? inferredError,
       dismissible: options.dismissible ?? inferredError,
       timeout: 0
     };
-    queue = [item];
+    queue = [...queue, item];
     if (!item.sticky) item.timeout = window.setTimeout(() => dismiss(item.id), milliseconds);
   }
 
@@ -49,7 +56,7 @@
   }
 
   export function isErrorToast(message: unknown): boolean {
-    return /\b(error|failed|failure|invalid|unsupported|unable)\b|could not|can(?:no|')t|larger than|stopped because/i.test(String(message));
+    return message instanceof Error || /\b(error|failed|failure|invalid|unsupported|unable|ENOSPC|EACCES|EPERM|ENOENT)\b|could not|couldn[’']t|can(?:no|')t|larger than|stopped because/i.test(String(message));
   }
 
   /** Keep legacy string-only calls expressive without making every caller choose an icon. */
@@ -78,14 +85,26 @@
 {#each queue as item (item.id)}
   <div
     class="toast"
-    role={item.error ? 'alert' : 'status'}
+    role={item.error ? undefined : 'status'}
     data-toast-id={item.id}
     data-toast-error={item.error ? 'true' : undefined}
   >
-    <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
-    <span>{item.message}</span>
+    {#if item.error}
+      <ErrorNotice error={item.message} />
+    {:else}
+      <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
+      <span>{item.message}</span>
+    {/if}
     {#if item.dismissible}
       <button type="button" aria-label="Dismiss notification" onclick={() => dismiss(item.id)}>×</button>
     {/if}
   </div>
 {/each}
+
+<style>
+  .toast[data-toast-error]{align-items:flex-start;padding:0 6px 0 0;width:min(440px,calc(100vw - 32px));gap:0}
+  .toast[data-toast-error] :global(.error-notice){border:0;background:transparent}
+  .toast[data-toast-error]>button{margin-top:8px}
+  :global(.toastwrap){max-height:45vh;max-width:calc(100vw - 24px);overflow-y:auto;overscroll-behavior:contain;padding:8px;pointer-events:none}
+  .toast{pointer-events:auto;flex-shrink:0}
+</style>

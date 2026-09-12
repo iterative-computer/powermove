@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { frameBus } from '../runtime/frame-bus';
 import { doc } from '../state/document.svelte';
-import { perf } from '../state/transport.svelte';
+import { perf, transport } from '../state/transport.svelte';
 import StatusBar from './StatusBar.svelte';
 import Titlebar from './Titlebar.svelte';
 import { installShell, unmountShell } from './install';
@@ -66,6 +66,7 @@ describe('Svelte shell', () => {
     window.history.replaceState({}, '', '/');
     perf.fps = 0;
     perf.ms = 0;
+    transport.playing = false;
   });
 
   afterEach(async () => {
@@ -161,8 +162,19 @@ describe('Svelte shell', () => {
       perf.fps = 58;
       perf.ms = 4.26;
     });
-    expect(status.textContent).toContain('58 fps');
+    expect(status.textContent).toContain('Playback paused');
+    expect(status.textContent).not.toContain('58 fps');
+    flushSync(() => { transport.playing = true; perf.fps = 0; });
+    expect(status.textContent).toContain('Measuring FPS…');
+    flushSync(() => { perf.fps = 58; });
+    expect(status.textContent).toContain('Preview 58 fps');
     expect(status.textContent).toContain('4.3 ms');
+    flushSync(() => { transport.playing = false; });
+    expect(status.textContent).not.toContain('58 fps');
+    flushSync(() => { PM.Preview = { active: true }; frameBus.emit('status'); });
+    expect(status.textContent).toContain('Cached preview');
+    flushSync(() => { PM.Preview = { preparing: true }; frameBus.emit('status'); });
+    expect(status.textContent).toContain('Preparing preview');
 
     flushSync(() => {
       PM.app.dirty = true;

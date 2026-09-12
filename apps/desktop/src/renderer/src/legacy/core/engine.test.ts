@@ -91,6 +91,44 @@ afterEach(() => {
 });
 
 describe('legacy engine install', () => {
+  it('keeps a navigation redraw pending until refinement and never defers playback', () => {
+    const { PM, runFrame } = engine();
+    PM.GL.gl = {}; PM.GL.render = vi.fn();
+    PM.Viewer = { deferNavigationRender: vi.fn(() => true) };
+    runFrame(16); runFrame(32);
+    expect(PM.GL.render).not.toHaveBeenCalled();
+    PM.Viewer.deferNavigationRender.mockReturnValue(false);
+    runFrame(48);
+    expect(PM.GL.render).toHaveBeenCalledTimes(1);
+    runFrame(64);
+    expect(PM.GL.render).toHaveBeenCalledTimes(1);
+    PM.Viewer.deferNavigationRender.mockReturnValue(true);
+    PM.play(); runFrame(80);
+    expect(PM.GL.render).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not report sparse paused redraws as low playback FPS', () => {
+    const { PM, runFrame } = engine();
+    PM.GL.gl = {}; PM.GL.render = vi.fn();
+    runFrame(10000);
+    PM.bus.emit('draw'); runFrame(11000);
+    expect(PM.perf.fps).toBe(0);
+  });
+
+  it('starts a fresh FPS sample on playback and clears it when paused', () => {
+    const { PM, runFrame } = engine();
+    PM.GL.gl = {}; PM.GL.render = vi.fn();
+    runFrame(10000);
+    PM.play();
+    for (let frame = 1; frame <= 32; frame++) runFrame(10000 + frame * 16);
+    expect(PM.perf.fps).toBeGreaterThanOrEqual(60);
+    PM.pause();
+    expect(PM.perf.fps).toBe(0);
+    runFrame(30000); PM.play();
+    for (let frame = 1; frame <= 32; frame++) runFrame(30000 + frame * 16);
+    expect(PM.perf.fps).toBeGreaterThanOrEqual(60);
+  });
+
   it('delegates transport start, timeline tick, seek, and pause to PM.Audio', () => {
     const { PM, audioCalls, runFrame } = engine();
 

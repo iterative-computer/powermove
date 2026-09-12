@@ -119,6 +119,10 @@ PM.play = () => {
   PM.preparedVideoFrames=null;
   PM.playing = true;
   clock.last = window.performance.now();
+  // Paused redraws are demand-driven. Start a new measurement window here so
+  // idle time and the previous playback session cannot depress the FPS readout.
+  clock.t0 = clock.last; clock.frames = 0; E.fps = 0;
+  PM.invalidate('status');
   clock.base = PM.time;
   clock.origin=clock.last;clock.cycle=0;
   PM.Audio.start(PM.time);
@@ -128,6 +132,7 @@ PM.play = () => {
 PM.pause = () => {
   const wasPlaying = PM.playing;
   PM.playing = false;
+  E.fps = 0; clock.frames = 0;
   PM.Audio.pause(); scrubVideos(PM.time);
   if (!wasPlaying) return;
   PM.bus.emit('transport');
@@ -168,6 +173,10 @@ function frame(now: any) {
     scrubVideos(t);
   }
   if (!needsDraw || !PM.GL.gl) return;
+  // During a paused zoom gesture the viewer can transform valid presented
+  // pixels immediately. Keep the redraw pending until refinement is needed;
+  // playback and content/time changes always bypass this navigation-only path.
+  if (!PM.playing && PM.Viewer?.deferNavigationRender?.(now)) return;
   needsDraw = false;
   const t0 = window.performance.now();
   const renderTime=PM.playing ? Math.floor(PM.time*(PM.previewFps||p.fps))/(PM.previewFps||p.fps) : PM.time;
@@ -178,8 +187,10 @@ function frame(now: any) {
   PM.bus.emit('overlay');
   const ms = window.performance.now() - t0;
   E.ms = E.ms * .85 + ms * .15;
-  clock.frames++;
-  if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
+  if (PM.playing) {
+    clock.frames++;
+    if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
+  }
   /* adaptive quality while playing so scrubbing never stutters */
   if (E.auto && PM.playing) {
     if (E.ms > 22 && PM.quality > .5) { PM.quality = Math.max(.5, PM.quality - .25); PM.bus.emit('quality'); }
@@ -196,43 +207,30 @@ window.document?.addEventListener?.('visibilitychange',resumeView);
 
 /* ── offscreen frame render (agent `look`, exporter, thumbnails) ── */
 PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}) => {
-  const cv = PM.GL.canvas;
-  const ow = cv.width, oh = cv.height, oq = PM.quality;
-  // Capture borrows the visible WebGL canvas. Resizing it back clears its
-  // drawing buffer, and the next RAF may be delayed by another video capture.
-  // Retain the exact displayed pixels rather than re-rendering decoded media
-  // that may already have been sought to the agent's requested time.
-  const gl = PM.GL.gl as WebGL2RenderingContext;
-  const savedFrame = gl.createFramebuffer();
-  const savedColor = gl.createRenderbuffer();
+  const quality = PM.quality;
   try {
-    gl.bindRenderbuffer(gl.RENDERBUFFER, savedColor);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, ow, oh);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFrame);
-    gl.framebufferRenderbuffer(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, savedColor);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-    gl.blitFramebuffer(0, 0, ow, oh, 0, 0, ow, oh, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    PM.GL.resize(w, h);
     PM.quality = 1;
     const motionBlur = options.mblur !== false;
-    PM.GL.render(T, { mblur: motionBlur, mbSamples: motionBlur ? Math.max(1, Number(options.mbSamples) || 16) : 1, shutter: PM.proj.shutter || .5 });
+    // Capture into an offscreen target. Resizing the visible canvas used to
+    // destroy its large preview buffers twice for every small thumbnail.
+    const pixels = PM.GL.renderToPixels(T, w, h, {
+      mblur: motionBlur, mbSamples: motionBlur ? Math.max(1, Number(options.mbSamples) || 16) : 1,
+      shutter: PM.proj.shutter || .5, opaque: true,
+    });
     const out = window.document.createElement('canvas');
     out.width = w; out.height = h;
-    (out.getContext('2d') as any).drawImage(cv, 0, 0);
+    const context = out.getContext('2d')!;
+    const image = context.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      image.data.set(pixels.subarray((h - y - 1) * w * 4, (h - y) * w * 4), y * w * 4);
+    }
+    // The established capture API is opaque, with transparency over black,
+    // just like copying the alpha:false WebGL presentation canvas.
+    for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255;
+    context.putImageData(image, 0, 0);
     return out;
   } finally {
-    PM.quality = oq;
-    PM.GL.resize(ow, oh);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, savedFrame);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-    gl.blitFramebuffer(0, 0, ow, oh, 0, 0, ow, oh, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-    gl.viewport(0, 0, ow, oh);
-    gl.deleteFramebuffer(savedFrame);
-    gl.deleteRenderbuffer(savedColor);
-    PM.invalidate('render');
+    PM.quality = quality;
   }
 };
 }

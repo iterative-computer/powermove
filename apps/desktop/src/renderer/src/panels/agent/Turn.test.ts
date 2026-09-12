@@ -116,3 +116,13 @@ describe('assistant word reveal', () => {
     expect(target.textContent).toContain('move the panel');
   });
 });
+
+it('shows a readable error with the raw diagnostic behind details', () => {
+  const raw = 'The agent failed: Error: thread/resume: thread/resume failed: thread abc already has an active writer (code -32600)';
+  render({ role: 'assistant', error: true, text: raw, entering: true });
+  expect(target.querySelector('[role="alert"]')).toBeTruthy();
+  expect(target.querySelector('strong')?.textContent).toBe('Agent session couldn’t reopen');
+  expect(target.querySelector('details')?.open).toBe(false);
+  expect(target.querySelector('pre')?.textContent).toBe(raw);
+  expect(target.querySelector('p')?.textContent).not.toContain('-32600');
+});

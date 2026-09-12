@@ -45,6 +45,20 @@ afterEach(() => {
 });
 
 describe('legacy util install', () => {
+  it('signals rendering immediately while leaving UI work coalesced', () => {
+    const { PM } = utilRegistry();
+    const draw = vi.fn();
+    const ui = vi.fn();
+    PM.bus.on('draw', draw);
+    PM.bus.on('draw:ui', ui);
+
+    PM.invalidate('render');
+    PM.invalidate('render');
+
+    expect(draw).toHaveBeenCalledTimes(2);
+    expect(ui).not.toHaveBeenCalled();
+  });
+
   it('routes pointerup once and ignores later drag events', () => {
     const { PM, listeners } = utilRegistry();
     let ups = 0;
