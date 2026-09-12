@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "bun run --cwd apps/desktop dev",
-    "dev:web": "bun run --cwd apps/website dev",
+    "dev:www": "bun run --cwd apps/www dev",
     "build": "bun run --filter '*' build",
     "test": "bun run --filter '*' test",
     "typecheck": "bun run --filter '*' typecheck",

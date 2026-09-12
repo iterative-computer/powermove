@@ -29,5 +29,5 @@ gitignored; rebuild after changing anything under the desktop player sources.
 
 - `apps/desktop`: imports `@powermove/player/build` from
   `scripts/player-bundle.ts` to embed the player text into exported zips.
-- `apps/website`: animates its hero with `createSvgPlayer` and a `scene.json`
+- `apps/www`: animates its hero with `createSvgPlayer` and a `scene.json`
   exported from the desktop app.

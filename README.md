@@ -9,7 +9,7 @@ This repository is a bun workspace monorepo containing the desktop editor, the m
 ```text
 apps/
   desktop/            @powermove/desktop   Electron editor (Svelte 5, electron-vite, Vitest, Playwright)
-  website/            @powermove/website   SvelteKit marketing site (adapter-static)
+  www/                @powermove/www       SvelteKit marketing site (adapter-static)
 packages/
   tokens/             @powermove/tokens    tokens.css, the design tokens shared by desktop and website
   player/             @powermove/player    browser bundle of the web player and SVG player, built from the desktop sources
@@ -34,7 +34,7 @@ Each workspace has its own `package.json`; the root `package.json` only holds wo
 ```sh
 bun install            # installs every workspace and builds the native addon
 bun run dev            # desktop editor: Electron + renderer hot reload
-bun run dev:web        # website dev server
+bun run dev:www        # website dev server
 bun run build          # build every workspace
 bun run test           # run every workspace's test script
 bun run typecheck      # run every workspace's typecheck script
@@ -48,6 +48,6 @@ To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or 
 ## Further reading
 
 - [Desktop editor](apps/desktop/README.md): architecture, kernel and extensions, project files, development, and release notes.
-- [Website](apps/website/README.md): the SvelteKit marketing site.
+- [Website](apps/www/README.md): the SvelteKit marketing site.
 - [Design language](docs/design.md): the implementation guide for every Powermove interface.
 - [macOS release process](apps/desktop/docs/release.md): signing, notarization, and the beta workflow.

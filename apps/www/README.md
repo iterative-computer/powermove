@@ -1,4 +1,4 @@
-# @powermove/website
+# @powermove/www
 
 The Powermove marketing site. SvelteKit + Svelte 5 (runes), prerendered to
 static HTML with `@sveltejs/adapter-static`.
@@ -9,10 +9,10 @@ Run from the repo root (bun workspaces) or from this directory:
 
 ```sh
 bun install                       # once, from the repo root
-bun run --cwd apps/website dev    # http://localhost:5173
-bun run --cwd apps/website build  # static output in apps/website/build/
-bun run --cwd apps/website preview
-bun run --cwd apps/website check  # svelte-check (alias: typecheck)
+bun run --cwd apps/www dev    # http://localhost:5173
+bun run --cwd apps/www build  # static output in apps/www/build/
+bun run --cwd apps/www preview
+bun run --cwd apps/www check  # svelte-check (alias: typecheck)
 ```
 
 ## Where things come from

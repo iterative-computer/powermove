@@ -1,5 +1,5 @@
 {
-  "name": "@powermove/website",
+  "name": "@powermove/www",
   "version": "0.0.0",
   "private": true,
   "description": "Powermove marketing website (SvelteKit, prerendered static output).",

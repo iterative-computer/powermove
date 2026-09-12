@@ -38,8 +38,8 @@
         "vitest": "4.1.11",
       },
     },
-    "apps/website": {
-      "name": "@powermove/website",
+    "apps/www": {
+      "name": "@powermove/www",
       "version": "0.0.0",
       "dependencies": {
         "@lucide/svelte": "1.45.0",
@@ -264,7 +264,7 @@
 
     "@powermove/tokens": ["@powermove/tokens@workspace:packages/tokens"],
 
-    "@powermove/website": ["@powermove/website@workspace:apps/website"],
+    "@powermove/www": ["@powermove/www@workspace:apps/www"],
 
     "@rollup/rollup-android-arm-eabi": ["@rollup/rollup-android-arm-eabi@4.63.2", "", { "os": "android", "cpu": "arm" }, "sha512-Xa6RDoWa+hNiX6PgsljlH6W75RaONx3y6PVlbLhkEWW+GaPQ3dP5gwbL/erAzQHWwkvW5UxdD5l87Qx2FAQ/4A=="],
 
