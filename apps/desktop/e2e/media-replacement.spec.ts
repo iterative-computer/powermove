@@ -113,7 +113,7 @@ for (const media of [{ original: 'tone.wav', replacement: 'tone.mp3', kind: 'aud
     await page.locator('.asset-card').filter({ hasText: media.original }).click({ button: 'right' });
     const chooser = page.waitForEvent('filechooser');
     await page.getByRole('menuitem', { name: /Replace File/i }).click();
-    await (await chooser).setFiles(path.join(__dirname, '../spikes/fixtures', media.replacement));
+    await (await chooser).setFiles(path.join(__dirname, './fixtures', media.replacement));
     await expect.poll(() => page.evaluate(id => (window as any).PM.proj.assets[id]?.name, before.id)).toBe(media.replacement);
     const after = await page.evaluate(async id => {
       const PM = (window as any).PM, live = PM.assets.get(id);

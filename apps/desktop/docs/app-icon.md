@@ -1,6 +1,6 @@
-# PowerMove app icon
+# Powermove app icon
 
-`PowerMove.icon` is the editable Apple Icon Composer document. Both appearances
+`resources/icon/Powermove.icon` is the editable Apple Icon Composer document. Both appearances
 use the updated `Powermove light.svg` geometry, with identical size and centering.
 The document supplies the graphite/light, silver/dark, and mono treatments.
 
@@ -16,13 +16,13 @@ swift scripts/export-app-icon.swift
 
 The script uses Apple's Icon Composer `ictool`, AppKit, and `iconutil`; it does
 not modify or flatten the editable source. Set `ICTOOL_PATH` if Icon Composer
-is installed in a nonstandard location. `PowerMove Exports/` contains Composer
+is installed in a nonstandard location. `resources/icon/exports/` contains Composer
 preview exports; these are not the padded packaging asset.
 
 Builds currently use the static ICNS. Adaptive Liquid Glass app icons require
 Xcode 26+ and its `actool` compiler, which the standalone Icon Composer install
 does not include. Once that compiler is available, electron-builder supports
-setting `mac.icon` to `PowerMove.icon` to compile the native appearance catalog.
+setting `mac.icon` to `Powermove.icon` to compile the native appearance catalog.
 
 Replacing the packaging asset takes effect in newly packaged apps; it does not
 replace the icon of an already-running Electron development session.

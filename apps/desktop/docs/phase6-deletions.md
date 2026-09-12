@@ -31,7 +31,7 @@ TypeScript instruction and result-schema builders directly with their goldens.
 
 ## Must survive
 
-- `spikes/fixtures/` — Playwright end-to-end coverage consumes these fixtures.
+- `apps/desktop/e2e/fixtures/` — Playwright end-to-end coverage consumes these fixtures.
 - `tests-vitest/fixtures/` — committed Vitest goldens, DOM contract data, and
   the TypeScript-engine performance baseline live here.
 - `src/renderer/src/legacy/__tests__/` — behavior-level oracle transplants and

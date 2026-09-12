@@ -1,4 +1,4 @@
-import '../../../../css/tokens.css';
+import '@powermove/tokens/tokens.css';
 import './welcome.css';
 
 const button = document.querySelector<HTMLButtonElement>('#begin');

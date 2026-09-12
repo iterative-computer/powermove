@@ -14,7 +14,7 @@ export default defineConfig({
     // workers otherwise turn its calibrated budget into a CPU-contention test.
     fileParallelism: false,
     include: ['src/**/*.{test,spec}.ts'],
-    exclude: ['**/node_modules/**', 'out/**', 'tests/**', 'spikes/**'],
+    exclude: ['**/node_modules/**', 'out/**', 'tests/**'],
     passWithNoTests: true
     // Renderer tests that need a DOM declare `// @vitest-environment happy-dom`.
   }

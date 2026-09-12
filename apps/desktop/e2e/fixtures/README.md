@@ -19,7 +19,7 @@ A 2.0 s, 48 kHz, stereo, 16-bit PCM WAV is 384,000 bytes before its header and c
 ## Regeneration
 
 ```bash
-cd spikes/fixtures
+cd apps/desktop/e2e/fixtures
 ./gen.sh
 ```
 

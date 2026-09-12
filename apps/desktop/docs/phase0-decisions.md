@@ -2,7 +2,7 @@
 
 The Phase 0 probe implementation and captured result files were retired in
 Phase 6 after their decisions were incorporated. The media fixtures remain in
-`spikes/fixtures/` for end-to-end coverage. Each row records the original
+`apps/desktop/e2e/fixtures/` for end-to-end coverage. Each row records the original
 go/no-go decision for the Electron platform layer (Phase 1).
 
 | # | Question | Result | Decision |

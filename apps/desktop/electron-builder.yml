@@ -40,7 +40,6 @@ extraResources:
     to: builtin-extensions
     filter:
       - "**/*"
-      - "!inspector/StructuredSection 2.svelte"
   - from: docs/EXTENSIONS.md
     to: api-pack/EXTENSIONS.md
   - from: docs/background-testing.md

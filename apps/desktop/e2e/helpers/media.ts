@@ -5,7 +5,7 @@ import type { Page } from 'playwright';
 import { repoRoot } from './app';
 
 export function fixturePath(name: string): string {
-  return path.join(repoRoot, 'spikes/fixtures', name);
+  return path.join(repoRoot, 'e2e/fixtures', name);
 }
 
 export async function importFixture(page: Page, name: string): Promise<void> {

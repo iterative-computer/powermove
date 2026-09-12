@@ -1,0 +1,13 @@
+{
+  "name": "@powermove/tokens",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Powermove design tokens: the single CSS source of truth shared by the desktop editor and the website.",
+  "type": "module",
+  "exports": {
+    "./tokens.css": "./tokens.css"
+  },
+  "files": [
+    "tokens.css"
+  ]
+}

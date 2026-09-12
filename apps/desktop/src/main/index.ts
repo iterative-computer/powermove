@@ -482,7 +482,7 @@ if (!hasSingleInstanceLock) {
         try {
           let text = await readFile(file, 'utf8');
           if (name === 'BACKGROUND_TESTING.md' && !app.isPackaged) {
-            text += `\nCurrent source checkout: ${app.getAppPath()}\nRun the npm commands from that directory, not from this agent workspace.\n`;
+            text += `\nCurrent source checkout: ${app.getAppPath()}\nRun the bun commands from that directory, not from this agent workspace.\n`;
           }
           files.push({ name, text });
         } catch (error) {

@@ -28,11 +28,11 @@ let temp = fm.temporaryDirectory.appendingPathComponent("powermove-icon-\(UUID()
 try fm.createDirectory(at: temp, withIntermediateDirectories: true)
 defer { try? fm.removeItem(at: temp) }
 let rendered = temp.appendingPathComponent("render.png")
-try run(ictool, [root.appendingPathComponent("PowerMove.icon").path,
+try run(ictool, [root.appendingPathComponent("resources/icon/Powermove.icon").path,
     "--export-image", "--output-file", rendered.path, "--platform", "macOS",
     "--rendition", "Default", "--width", "1024", "--height", "1024", "--scale", "1"])
 guard let image = NSImage(contentsOf: rendered) else { fatalError("Icon Composer produced no image") }
-let iconset = temp.appendingPathComponent("PowerMove.iconset")
+let iconset = temp.appendingPathComponent("Powermove.iconset")
 try fm.createDirectory(at: iconset, withIntermediateDirectories: true)
 for points in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {
@@ -58,4 +58,4 @@ for points in [16, 32, 128, 256, 512] {
 let output = temp.appendingPathComponent("icon.icns")
 try run("/usr/bin/iconutil", ["-c", "icns", iconset.path, "-o", output.path])
 try Data(contentsOf: output).write(to: root.appendingPathComponent("resources/icon.icns"), options: .atomic)
-print("Updated resources/icon.icns from PowerMove.icon (10 sizes, 16–1024 pixels).")
+print("Updated resources/icon.icns from resources/icon/Powermove.icon (10 sizes, 16–1024 pixels).")
