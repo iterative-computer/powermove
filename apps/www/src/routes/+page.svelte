@@ -37,18 +37,22 @@
   <Features />
 
   <section class="principles" aria-labelledby="principles-title">
-    <div class="wrap">
-      <h2 id="principles-title"><span class="strong">Yours to change.</span><br />Every layer of it.</h2>
-      <div class="wide">
-        <div class="wide-inner">
-          <img src="/editor-1.png" alt="Powermove inspector and timeline with keyframes selected." width="1600" height="1000" loading="lazy" />
-        </div>
+    <div class="wrap principles-layout">
+      <div class="principles-copy">
+        <h2 id="principles-title"><span class="strong">Yours to change.</span><br />Every layer of it.</h2>
+        <ul class="principle-list">
+          <li><Undo2 size={16} strokeWidth={1.75} aria-hidden="true" /><div><span class="strong">Undoable.</span> Agent edits and yours share one history. Nothing happens off the record.</div></li>
+          <li><Layers2 size={16} strokeWidth={1.75} aria-hidden="true" /><div><span class="strong">Real layers.</span> Generated work is an ordinary composition, not a rendered clip.</div></li>
+          <li><Puzzle size={16} strokeWidth={1.75} aria-hidden="true" /><div><span class="strong">Personal software.</span> Built-in panels are mods. Fork one, or ask for a new one.</div></li>
+          <li><FileCode2 size={16} strokeWidth={1.75} aria-hidden="true" /><div><span class="strong">Yours on disk.</span> Projects save as files with embedded media and a kept backup.</div></li>
+        </ul>
       </div>
-      <div class="grid4">
-        <p><span class="strong"><Undo2 size={15} class="inline" aria-hidden="true" /> Undoable.</span> Agent edits and yours share one history. Nothing happens off the record.</p>
-        <p><span class="strong"><Layers2 size={15} class="inline" aria-hidden="true" /> Real layers.</span> Generated work is an ordinary composition, not a rendered clip.</p>
-        <p><span class="strong"><Puzzle size={15} class="inline" aria-hidden="true" /> Personal software.</span> Built-in panels are mods. Fork one, or ask for a new one.</p>
-        <p><span class="strong"><FileCode2 size={15} class="inline" aria-hidden="true" /> Yours on disk.</span> Projects save as files with embedded media and a kept backup.</p>
+      <div class="stack" aria-hidden="true">
+        <div class="slab yours"><span class="slab-name">Your mods</span><span class="slab-note">Same API as everything below</span></div>
+        <div class="slab"><span class="slab-name">Panels</span><span class="slab-note">Timeline, inspector, agent, media</span></div>
+        <div class="slab"><span class="slab-name">Effects and transitions</span><span class="slab-note">Blur, grain, whip pan, dissolve</span></div>
+        <div class="slab"><span class="slab-name">Theme and keymap</span><span class="slab-note">Dusk, Vim, yours</span></div>
+        <div class="slab kernel"><span class="slab-name">Kernel</span><span class="slab-note">Project store, typed edits, undo, compositor</span></div>
       </div>
     </div>
   </section>

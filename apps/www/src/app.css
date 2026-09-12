@@ -216,15 +216,25 @@ h1 .muted{color:var(--tx-3)}
 .ed-field b{font-weight:400;padding:3px 8px;border-radius:var(--r-xs);background:var(--bg-row);color:var(--tx);white-space:nowrap;font-family:var(--font-geist-mono),ui-monospace,monospace;font-size:10px}
 .ed-action{margin:10px;padding:6px;border-radius:var(--r-sm);background:var(--accent);color:var(--on-accent);text-align:center;font-weight:500}
 
-/* ---- principles (wide shot + 4-col statements) ---- */
-.wide{position:relative;margin:48px -24px 0;padding:12px 12px 0;overflow:hidden;mask-image:linear-gradient(to bottom,#000 70%,transparent)}
-@media(min-width:768px){.wide{margin-inline:-32px}}
-.wide-inner{min-width:720px;border-radius:var(--r-lg) var(--r-lg) 0 0;overflow:hidden;box-shadow:var(--shadow-panel);background:var(--bg-panel)}
-.grid4{display:grid;gap:14px;margin-top:48px;font-size:15px;line-height:1.55;color:var(--tx-2);text-wrap:pretty}
-.grid4 .strong{font-weight:500}
-@media(min-width:640px){.grid4{grid-template-columns:1fr 1fr;gap:24px}}
-@media(min-width:1024px){.grid4{grid-template-columns:repeat(4,1fr);gap:24px;margin-top:96px}}
-@media(max-width:639px){.grid4 p:not(:last-child){padding-bottom:14px;border-bottom:1px solid var(--line)}}
+/* ---- principles (headline + list beside a layer stack) ---- */
+.principles-layout{display:grid;gap:56px}
+@media(min-width:1024px){.principles-layout{grid-template-columns:1fr 1fr;gap:96px;align-items:center}}
+.principle-list{margin-top:48px;color:var(--tx-2);font-size:15px;line-height:1.55;text-wrap:pretty}
+.principle-list li{display:flex;gap:14px;padding-block:16px;border-top:1px solid var(--line)}
+.principle-list li:last-child{border-bottom:1px solid var(--line)}
+.principle-list svg{flex-shrink:0;margin-top:3px;color:var(--tx-3)}
+.principle-list .strong{font-weight:500}
+/* Stack of slabs. Each sits on the one below; the top one is the reader's, the bottom one is the only thing that isn't a mod. */
+.stack{display:flex;flex-direction:column;gap:6px;max-width:520px;margin-inline:auto;width:100%}
+.slab{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:18px 20px;border-radius:var(--r-lg);background:var(--bg-panel);box-shadow:var(--ctl-edge);font-size:var(--fs-md);transition:transform var(--dur-2) var(--ease)}
+.slab-name{font-weight:500;color:var(--tx);white-space:nowrap}
+.slab-note{color:var(--tx-3);text-align:right;text-wrap:balance}
+.slab.yours{background:color-mix(in srgb,var(--accent) 10%,var(--bg-panel));box-shadow:var(--ctl-edge),inset 0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent)}
+.slab.yours .slab-name{color:var(--accent)}
+.slab.kernel{background:var(--bg-panel-2);color:var(--tx-3)}
+.slab.kernel .slab-name{color:var(--tx-2)}
+.stack:hover .slab.yours{transform:translateY(-4px)}
+@media(prefers-reduced-motion:reduce){.stack:hover .slab.yours{transform:none}}
 
 /* ---- facts (two column with stats) ---- */
 .two{display:grid;gap:24px}
