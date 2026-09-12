@@ -242,13 +242,14 @@ h1 .muted{color:var(--tx-3)}
 .ed-switch::after{content:'';position:absolute;top:2px;left:2px;width:9px;height:9px;border-radius:50%;background:var(--tx-3)}
 .ed-switch.on{background:var(--accent)}
 .ed-switch.on::after{left:auto;right:2px;background:#fff}
-.ed pre{padding:10px 12px;font:11px/1.6 var(--font-geist-mono),ui-monospace,monospace;color:var(--tx-2);overflow:hidden}
+/* Code: one ink ramp plus the accent. Punctuation recedes, names read, literals carry the one colour. */
+.ed pre{padding:10px 12px;font:11px/1.6 var(--font-geist-mono),ui-monospace,monospace;color:var(--tx-4);overflow:hidden}
 .ed-code{flex:1}
-.tok-key{color:var(--blue)}
-.tok-str{color:var(--sand)}
-.tok-num{color:var(--success)}
-.tok-kw{color:var(--violet)}
-.tok-fn{color:var(--tx)}
+.tok-key{color:var(--tx-3)}
+.tok-str{color:var(--tx)}
+.tok-num{color:var(--accent)}
+.tok-kw{color:var(--accent)}
+.tok-fn{color:var(--tx-2)}
 
 /* agent */
 .ed-agent{left:6%;top:8%;width:130%;height:100%}
