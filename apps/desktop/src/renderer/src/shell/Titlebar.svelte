@@ -325,12 +325,14 @@
 <div class="titlebar-drag" aria-hidden="true"></div>
 <ToolbarMount {PM} />
 <div class="tb-right" id="tb-right">
-  <button class="btn tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
-    <Icon {PM} name="export" />Export
-  </button>
-  <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
-    <Icon {PM} name="grid" />
-  </button>
+  {#if !homeOpen}
+    <button class="btn tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
+      <Icon {PM} name="export" />Export
+    </button>
+    <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
+      <Icon {PM} name="grid" />
+    </button>
+  {/if}
   <button class="iconbtn" type="button" title="Settings" aria-label="Open settings" onclick={() => PM.SettingsUI?.open?.()}>
     <Icon {PM} name="gear" />
   </button>
