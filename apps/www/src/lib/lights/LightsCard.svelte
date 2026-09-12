@@ -80,31 +80,17 @@
 
   // Three beats that never overlap: the light pulses, the contents fade out
   // while the body is still the old shape, then the empty body morphs and the
-  // new contents rise in once it has settled. If the target changes while the
-  // body is already moving, the morph is retargeted in flight rather than
-  // finishing and starting over, so a fast scroll reads as one motion.
-  let settle: number | null = null;
+  // new contents rise in once it has settled. Scrolling ahead never skips or
+  // redirects a beat: the card finishes the shape it is on, dwells just long
+  // enough to be seen, then steps one shape at a time toward the target.
+  const DWELL_MS = 420;
   const clamp = (n: number) => Math.max(0, Math.min(VARIANTS.length - 1, n));
-
-  function land() {
-    settle = null;
-    rebuildMask();
-    morphing = false;
-    gen++;
-    showing = true;
-    busy = false;
-    if (clamp(target) !== slot) handover(); else scheduleIdle();
-  }
-
-  function morphTo(next: number) {
-    slot = next;
-    if (settle !== null) window.clearTimeout(settle);
-    settle = window.setTimeout(land, MORPH_MS + SETTLE_MS);
-  }
 
   function handover() {
     if (busy || !sizes) return;
-    if (clamp(target) === slot) return;
+    const goal = clamp(target);
+    if (goal === slot) return;
+    const next = slot + Math.sign(goal - slot);
     busy = true;
     if (idle !== null) { window.clearTimeout(idle); idle = null; }
     pulse();
@@ -113,17 +99,24 @@
       after(FADE_OUT_MS, () => {
         body?.removeAttribute('data-playing');
         morphing = true;
-        morphTo(clamp(target));
+        slot = next;
+        after(MORPH_MS + SETTLE_MS, () => {
+          rebuildMask();
+          morphing = false;
+          gen++;
+          showing = true;
+          if (clamp(target) !== slot) {
+            after(DWELL_MS, () => { busy = false; handover(); });
+          } else {
+            busy = false;
+            scheduleIdle();
+          }
+        });
       });
     });
   }
 
-  $effect(() => {
-    const next = clamp(target);
-    if (!sizes) return;
-    if (morphing) { if (next !== slot) morphTo(next); }
-    else handover();
-  });
+  $effect(() => { target; if (sizes) handover(); });
 
   onMount(() => {
     const mq = matchMedia('(prefers-reduced-motion: reduce)');
@@ -150,7 +143,6 @@
       document.removeEventListener('visibilitychange', onVis);
       clearTimers();
       if (idle !== null) window.clearTimeout(idle);
-      if (settle !== null) window.clearTimeout(settle);
     };
   });
 
