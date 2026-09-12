@@ -6,7 +6,6 @@ export function showNewLayerMenu(PM: LegacyPM, anchor: HTMLElement): void {
     { label: 'Text', kb: '⌘T', run: () => PM.cmd('newText') },
     { label: 'Shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
     { label: 'Solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
-    { label: 'Shader', run: () => PM.cmd('newShader') },
     { label: 'Null', run: () => PM.cmd('newNull') },
     '-',
     { label: 'Import media…', kb: '⌘I', run: () => PM.cmd('import') }

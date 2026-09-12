@@ -85,6 +85,17 @@ function harness(kernel: Kernel = createKernel()) {
 }
 
 describe('createExtensionAPI', () => {
+  it('contains asynchronous command failures and ignores disposed callbacks', async () => {
+    const { kernel, deps, reported } = harness();
+    const handle = createExtensionAPI(kernel, record(), deps);
+    const run = vi.fn(async () => { throw new Error('late failure'); });
+    handle.api.commands.register({ id: 'async-failure', label: 'Fail', run });
+    const callback = kernel.commands.get('async-failure')!.run;
+    await expect(Promise.resolve(callback())).resolves.toBeUndefined();
+    expect(reported[0]?.error).toEqual(new Error('late failure'));
+    handle.disposeAll(); await callback();
+    expect(run).toHaveBeenCalledTimes(1);
+  });
   it('exposes the frozen surface scoped to the extension id', () => {
     const { kernel, deps } = harness();
     const { api } = createExtensionAPI(kernel, record(), deps);

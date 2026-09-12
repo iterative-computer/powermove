@@ -1,11 +1,4 @@
-/** Timeline presentation only: these shortcuts never mutate animation data. */
-export const propertyShortcuts = [
-  ['p', 'revealPos', 'Position'], ['s', 'revealScale', 'Scale'],
-  ['r', 'revealRot', 'Rotation'], ['t', 'revealOpacity', 'Opacity'],
-  ['a', 'revealAnchor', 'Anchor point'], ['u', 'revealKeys', 'Animated properties'],
-  ['m', 'revealMasks', 'Mask controls'], ['f', 'revealFeather', 'Mask feather'],
-  ['e', 'revealEffects', 'Effects'], ['l', 'revealAudio', 'Audio levels'],
-] as const;
+export { propertyShortcuts } from 'powermove';
 
 export function revealedProperties(PM: any, layer: any, props: any[]): any[] {
   const reveal = PM.UIState.getReveal(layer);
@@ -78,7 +71,7 @@ export function createPropertyReveal(PM: any) {
         }
         PM.UIState.setReveal(L, keys);
         PM.UIState.setLayerCollapsed(L, close || (shift && !keys.length));
-        for (const group of PM.groupAncestors?.(L) || []) PM.UIState.setLayerCollapsed(group, false);
+        for (const group of PM.groupAncestors?.(L) || []) PM.UIState.setGroupCollapsed(group, false);
       });
       last = double ? undefined : { key, shift, time: now, layers: [...layers], before };
     }

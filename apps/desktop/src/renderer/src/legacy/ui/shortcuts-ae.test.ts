@@ -55,6 +55,7 @@ describe('After Effects shortcut fundamentals', () => {
     const first = add(PM, 'first', 2, 4);
     const second = add(PM, 'second', 3, 5);
     PM.selectLayers([first.id, second.id]);
+    PM.hist.clear(); // Start the command history after selecting its targets.
 
     expect(goToSelectedLayerBoundary(PM, 'in')).toBe(2);
     expect(goToSelectedLayerBoundary(PM, 'out')).toBe(8);
@@ -110,6 +111,7 @@ describe('After Effects shortcut fundamentals', () => {
     expect(selectAdjacentLayer(PM, 1, true)).toBe(second);
     expect(PM.sel.layers).toEqual([first.id, second.id]);
 
+    PM.hist.clear(); // The navigation above already verified its selection changes.
     expect(setLayerLocks(PM, true)).toMatchObject({ ok: true });
     expect([first.lock, second.lock, third.lock]).toEqual([true, true, false]);
     expect(PM.hist.list()).toEqual(['Lock layers']);

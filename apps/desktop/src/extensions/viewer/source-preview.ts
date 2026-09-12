@@ -264,7 +264,7 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     if (!(event.key in offsets) && event.key !== 'Home' && event.key !== 'End') return;
     event.preventDefault(); event.stopPropagation();
     element.currentTime = event.key === 'Home' ? 0 : event.key === 'End' ? element.duration
-      : Math.max(0, Math.min(element.duration, element.currentTime + offsets[event.key]));
+      : Math.max(0, Math.min(element.duration, element.currentTime + (offsets[event.key] ?? 0)));
     paint();
   };
   const handleKeydown = (event: KeyboardEvent) => {

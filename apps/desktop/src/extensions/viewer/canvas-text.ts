@@ -1,5 +1,4 @@
 import { resolveContent } from 'powermove';
-import './canvas-text.css';
 export function editCanvasText(PM:any,V:any,layer:any,event?:MouseEvent,selectAll=false):void {
   if(layer.lock)return;PM.finishCanvasText?.();PM.selectLayers(layer.id);PM.pause();
   const d=resolveContent(PM,layer,PM.time),m=PM.worldMatrix(layer,PM.time).map((v:number)=>v*V.shown),el=document.createElement('div');
@@ -40,7 +39,12 @@ export function editCanvasText(PM:any,V:any,layer:any,event?:MouseEvent,selectAl
     const toolButton=(e.target as Element)?.closest?.('#toolbar button[data-tool]');
     if(PM.tool==='text'&&!toolButton)PM.setTool?.('select');
   };
-  PM.finishCanvasText=finish;el.addEventListener('input',update);el.addEventListener('keydown',e=>{e.stopPropagation();if(e.key==='Escape'){e.preventDefault();finish(true);}else if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();finish();}});el.addEventListener('pointerdown',e=>e.stopPropagation());
+  PM.finishCanvasText=finish;el.addEventListener('input',update);el.addEventListener('keydown',e=>{
+    // Let keydowns bubble to the field-aware global keymap. It suppresses
+    // editor commands for contenteditable targets and routes native editing
+    // shortcuts (notably Electron paste) through the focused WebContents.
+    if(e.key==='Escape'){e.preventDefault();finish(true);}else if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();finish();}
+  });el.addEventListener('pointerdown',e=>e.stopPropagation());
   document.addEventListener('selectionchange',capture);document.addEventListener('pointerdown',outside,true);el.focus();
   const range=document.createRange();range.selectNodeContents(el);if(!selectAll)range.collapse(false);const selection=window.getSelection();selection?.removeAllRanges();selection?.addRange(range);
   if(event){const caret=(document as any).caretRangeFromPoint?.(event.clientX,event.clientY);if(caret&&el.contains(caret.startContainer)){selection?.removeAllRanges();selection?.addRange(caret);}}

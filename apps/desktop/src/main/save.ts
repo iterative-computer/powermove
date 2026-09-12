@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import {
   BrowserWindow,
@@ -73,6 +74,33 @@ export function saveFiltersForName(name: string): FileFilter[] | undefined {
 
 export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcContext): void {
   const pending = new Set<object>();
+  const watchedOwners = new WeakSet<object>();
+  const uploads = new Map<object, { id: string; size: number; received: number; chunks: Buffer[]; timer: ReturnType<typeof setTimeout> }>();
+  const discardUpload = (owner: object) => { const upload = uploads.get(owner); if (upload) clearTimeout(upload.timer); uploads.delete(owner); };
+  ipcMain.handle(IPC.fileSaveUpload, (event, size: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 1 || size > LIMITS.fileSaveBytes) throw new Error('Invalid save size');
+    if (uploads.has(event.sender) || pending.has(event.sender)) throw new Error('A save is already in progress.');
+    const id = randomUUID();
+    const timer = setTimeout(() => discardUpload(event.sender), 120_000); timer.unref();
+    uploads.set(event.sender, { id, size, received: 0, chunks: [], timer });
+    if (!watchedOwners.has(event.sender)) {
+      watchedOwners.add(event.sender);
+      event.sender.once('destroyed', () => discardUpload(event.sender));
+    }
+    return id;
+  });
+  ipcMain.handle(IPC.fileSaveChunk, (event, payload: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const upload = uploads.get(event.sender);
+    if (!upload || !isRecord(payload) || payload.uploadId !== upload.id || !(payload.data instanceof Uint8Array)
+      || payload.data.byteLength < 1 || payload.data.byteLength > 1024 * 1024 || upload.received + payload.data.byteLength > upload.size) throw new Error('Invalid save chunk');
+    upload.chunks.push(Buffer.from(payload.data)); upload.received += payload.data.byteLength;
+  });
+  ipcMain.handle(IPC.fileSaveAbort, (event, id: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (uploads.get(event.sender)?.id === id) discardUpload(event.sender);
+  });
   ipcMain.handle(IPC.fileSave, async (event, payload: unknown): Promise<FileSaveResult> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!isRecord(payload)) throw new IpcValidationError(IPC.fileSave, 'expected an object');
@@ -87,7 +115,13 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       throw new IpcValidationError(IPC.fileSave, 'invalid saveAs');
     }
 
-    const data = payload['data'];
+    let data = payload['data'];
+    if (payload.uploadId !== undefined) {
+      const upload = uploads.get(event.sender);
+      if (!upload || payload.uploadId !== upload.id || upload.received !== upload.size) throw new Error('The save upload is incomplete.');
+      data = Buffer.concat(upload.chunks, upload.size);
+      discardUpload(event.sender);
+    }
     if (!(data instanceof Uint8Array)) {
       throw new IpcValidationError(IPC.fileSave, 'data must be Uint8Array');
     }

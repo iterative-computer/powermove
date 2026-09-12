@@ -17,7 +17,8 @@
     PM,
     message,
     answering = false,
-  }: { PM: Record<string, any>; message: AgentMessage; answering?: boolean } = $props();
+    messageIndex,
+  }: { PM: Record<string, any>; message: AgentMessage; answering?: boolean; messageIndex?: number } = $props();
 
   let modRevision = $state(0);
   onMount(() => {
@@ -62,6 +63,7 @@
   <div class="agent-msg assistant" class:is-error={message.error}>
     {#if message.error}
       <ErrorNotice error={message.text} live={Boolean(message.entering)} />
+      <button type="button" class="btn" onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}

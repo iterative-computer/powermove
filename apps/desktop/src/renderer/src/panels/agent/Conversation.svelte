@@ -43,7 +43,7 @@
   {#if agentState.workingStartedAt !== null && index === agentState.workingConversationIndex}
     <WorkingTimer startedAt={agentState.workingStartedAt} />
   {/if}
-  <Turn {PM} {message} answering={index === answeringIndex} />
+  <Turn {PM} {message} messageIndex={index} answering={index === answeringIndex} />
 {/each}
 {#if agentState.workingStartedAt !== null && agentState.workingConversationIndex === agentState.conversation.length}
   <WorkingTimer startedAt={agentState.workingStartedAt} />

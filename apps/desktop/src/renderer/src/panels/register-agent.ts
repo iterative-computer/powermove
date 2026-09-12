@@ -17,6 +17,7 @@ export interface AgentLegacyBridge {
   submit(value: string): void;
   stop(): void;
   setDraft(value: string): void;
+  retry?(messageIndex?: number): void;
   setStepsExpanded(expanded: boolean): void;
   setModel(model: string, effort: string): void;
   setProvider?(provider: string): void;
@@ -79,6 +80,7 @@ export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): voi
     },
     submit: bridge.submit,
     stop: bridge.stop,
+    retry: bridge.retry,
     setDraft(value: string, focus = false) {
       bridge.setDraft(value);
       setAgentComposerDraft(value);

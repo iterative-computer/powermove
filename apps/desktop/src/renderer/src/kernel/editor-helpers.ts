@@ -6,4 +6,6 @@ export { enableTimeRemap } from '../legacy/core/retiming';
 export { validMatteSource, MATTE_MODES } from '../legacy/core/matte';
 export { expressionDiagnostic, EXPRESSION_NAMES } from '../legacy/core/expression';
 export { axisContentKey, axisPath, isAxisTag, inspectFont } from '../typography/font-catalog';
+export { CHANNELS_3D, is3DLayer, planeMatrix, planeContains, projectPoint, inversePlane } from '../legacy/core/space-3d';
 export type { FontAxis, FontInspection } from '../typography/font-catalog';
+export { propertyShortcuts } from './property-shortcuts';

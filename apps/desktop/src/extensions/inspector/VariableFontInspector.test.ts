@@ -48,7 +48,7 @@ function setup(content: Record<string, any>) {
   const project = { id: 'p', w: 1920, h: 1080, fps: 30, dur: 5, assets: {}, layers: [layer] };
   const apply = vi.fn(() => ({ ok: true }));
   const PM: Record<string, any> = {
-    proj: project,
+    proj: project, sel: { layers: [layer.id], keys: [], chan: null },
     selLayers: () => [layer], firstSel: () => layer, L: () => layer,
     findProp: (_layer: any, path: string) => (layer.d as any)[path.slice(2)],
     hasKeyAt: () => null,

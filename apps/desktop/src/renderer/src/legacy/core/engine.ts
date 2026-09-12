@@ -118,6 +118,7 @@ PM.play = () => {
   if (PM.playing) return;
   PM.preparedVideoFrames=null;
   PM.playing = true;
+  lastRenderTime = NaN;
   clock.last = window.performance.now();
   // Paused redraws are demand-driven. Start a new measurement window here so
   // idle time and the previous playback session cannot depress the FPS readout.
@@ -145,6 +146,15 @@ const clock = { last: 0, base: 0, origin:0, cycle:0, acc: 0, frames: 0, t0: 0 };
 
 /* ── the single frame loop ─────────────────────────────── */
 let needsDraw = true;
+let contentGeneration = 0, renderedGeneration = -1;
+let lastRenderTime = NaN, lastProject: any = null;
+let interactionUntil = 0, refinePending = false, lastQualityChange = -Infinity;
+let inputUntil = 0;
+PM.interactionActive = () => window.performance.now() < Math.max(inputUntil, interactionUntil);
+for (const event of ['pointerdown', 'pointermove', 'wheel', 'keydown']) window.document?.addEventListener?.(event, () => { inputUntil = window.performance.now() + 500; }, { passive: true });
+PM.bus.on('time', () => { if (!PM.playing) { interactionUntil = window.performance.now() + 150; refinePending = true; } });
+for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event, () => { contentGeneration++; });
+
 PM.bus.on('draw', () => { needsDraw = true; });
 
 function frame(now: any) {
@@ -155,6 +165,7 @@ function frame(now: any) {
   if (PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active) return;
   const p = PM.proj;
   if (PM.playing) {
+    if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
     const gap = (now-clock.last)/1000;
     clock.last = now;
     let t = clock.base+Math.max(0,(now-clock.origin)/1000);
@@ -172,29 +183,36 @@ function frame(now: any) {
     PM.invalidate('timeline');
     scrubVideos(t);
   }
+  const interactive = !PM.playing && now < interactionUntil;
+  if (refinePending && !interactive && !PM.playing) { needsDraw = true; refinePending = false; }
   if (!needsDraw || !PM.GL.gl) return;
   // During a paused zoom gesture the viewer can transform valid presented
   // pixels immediately. Keep the redraw pending until refinement is needed;
   // playback and content/time changes always bypass this navigation-only path.
   if (!PM.playing && PM.Viewer?.deferNavigationRender?.(now)) return;
+  const renderTime=PM.playing ? Math.floor(PM.time*(PM.previewFps||p.fps))/(PM.previewFps||p.fps) : PM.time;
+  if (PM.playing && renderTime === lastRenderTime && p === lastProject && renderedGeneration === contentGeneration) {
+    PM.bus.emit('overlay');
+    return;
+  }
+  if (!PM.playing && !interactive && PM.quality < 1 && E.auto) { PM.quality = 1; PM.bus.emit('quality'); }
   needsDraw = false;
   const t0 = window.performance.now();
-  const renderTime=PM.playing ? Math.floor(PM.time*(PM.previewFps||p.fps))/(PM.previewFps||p.fps) : PM.time;
   PM.GL.render(renderTime, {
-    mblur: true, mbSamples: PM.playing ? 6 : 12,
+    mblur: !interactive, mbSamples: PM.playing ? 6 : 12,
     shutter: p.shutter || .5, hideShy: false,
   });
+  lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration;
   PM.bus.emit('overlay');
   const ms = window.performance.now() - t0;
   E.ms = E.ms * .85 + ms * .15;
   if (PM.playing) {
     clock.frames++;
-    if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
   }
   /* adaptive quality while playing so scrubbing never stutters */
-  if (E.auto && PM.playing) {
-    if (E.ms > 22 && PM.quality > .5) { PM.quality = Math.max(.5, PM.quality - .25); PM.bus.emit('quality'); }
-    else if (E.ms < 9 && PM.quality < 1) { PM.quality = Math.min(1, PM.quality + .25); PM.bus.emit('quality'); }
+  if (E.auto && (PM.playing || interactive) && now - lastQualityChange > 750) {
+    if (E.ms > 22 && PM.quality > .5) { PM.quality = Math.max(.5, PM.quality - .25); lastQualityChange = now; PM.bus.emit('quality'); }
+    else if (E.ms < 9 && PM.quality < 1) { PM.quality = Math.min(1, PM.quality + .25); lastQualityChange = now; PM.bus.emit('quality'); }
   }
 }
 window.requestAnimationFrame(frame);

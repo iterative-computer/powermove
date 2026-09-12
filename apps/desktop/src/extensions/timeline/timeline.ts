@@ -6,7 +6,7 @@ import { adjacentKeyframe } from './keyframe-navigation';
 import { evaluatedValue } from 'powermove';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
-import { expandScaleKeyIds, graphHandleChannels, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
+import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
   bezierHandleAtPoint,
   keysForBezierHandleDrag,
@@ -34,6 +34,8 @@ export interface KeyframeMoveSnapshotItem<Property = unknown> {
   maxTime?: number;
   selected: boolean;
   order?: number;
+  offsetIndex?: number;
+  offsetCount?: number;
 }
 
 export interface KeyframeMovePlan<Property = unknown> {
@@ -55,6 +57,110 @@ export interface KeyframeGroupSnapLock {
 export interface KeyframeGroupSnapResolution {
   delta: number;
   lock: KeyframeGroupSnapLock | null;
+}
+
+export interface QuickOffsetTimingItem {
+  time: number;
+  offsetIndex: number;
+  offsetCount: number;
+  minTime?: number;
+  maxTime?: number;
+}
+
+export interface QuickOffsetTimingPlan {
+  total: number;
+  perGroup: number;
+  times: number[];
+}
+
+export interface PropertyValueColumn {
+  left: number;
+  right: number;
+  width: number;
+}
+
+/** Keep property values aligned and visibly separated from one another and
+    from trailing row actions such as the Scale link control. */
+export function propertyValueColumns(
+  valueX: number, gutter: number, count: number, actionWidth = 0, gap = 8,
+): PropertyValueColumn[] {
+  const columns = Math.max(1, Math.floor(count) || 1);
+  const rightEdge = Math.max(valueX, gutter - 8 - Math.max(0, actionWidth));
+  const available = Math.max(0, rightEdge - valueX - gap * (columns - 1));
+  const width = available / columns;
+  return Array.from({ length: columns }, (_, index) => {
+    const left = valueX + index * (width + gap);
+    return { left, right: left + width, width };
+  });
+}
+
+export function toggleTimelineDisclosure(PM: any, layer: any): boolean {
+  if (layer.type === 'group') {
+    const collapsed = !PM.UIState.getGroupCollapsed(layer);
+    PM.UIState.setGroupCollapsed(layer, collapsed);
+    return collapsed;
+  }
+  const collapsed = !PM.UIState.getLayerCollapsed(layer);
+  layer.collapsed = collapsed;
+  PM.UIState.setLayerCollapsed(layer, collapsed);
+  return collapsed;
+}
+
+export function toggleTimelineScaleLink(PM: any, layer: any): void {
+  PM.Edit.apply(
+    { type: 'set_layer', target: layer.id, patch: { scaleLinked: !layer.scaleLinked } },
+    { label: 'Link scale axes', origin: 'timeline' },
+  );
+}
+
+/** Distribute one pointer delta across an ordered set of groups. The first
+    selected group is the anchor, the last follows the pointer, and everything
+    between receives an equal share. Items may repeat an index when one layer
+    group owns several clips or selected keyframes. */
+export function planQuickOffsetTiming(
+  items: QuickOffsetTimingItem[], requestedTotal: number,
+): QuickOffsetTimingPlan {
+  const totalGroups = Math.max(0, ...items.map(item => Number(item.offsetCount) || 0));
+  if (totalGroups < 2 || !items.length) {
+    return { total: 0, perGroup: 0, times: items.map(item => item.time) };
+  }
+  let total = Number.isFinite(requestedTotal) ? requestedTotal : 0;
+  for (const item of items) {
+    const factor = item.offsetIndex / (totalGroups - 1);
+    if (!(factor > 0) || !Number.isFinite(item.time)) continue;
+    const minTime = Number.isFinite(item.minTime) ? item.minTime! : 0;
+    total = Math.max(total, (minTime - item.time) / factor);
+    if (Number.isFinite(item.maxTime)) total = Math.min(total, (item.maxTime! - item.time) / factor);
+  }
+  if (Object.is(total, -0)) total = 0;
+  return {
+    total,
+    perGroup: total / (totalGroups - 1),
+    times: items.map(item => item.time + item.offsetIndex / (totalGroups - 1) * total),
+  };
+}
+
+/** Quick Offset keeps each layer's selected keys rigid while staggering the
+    layers themselves. Unlike an ordinary key drag, its advertised precision
+    includes subframes, so the total is intentionally not frame-rounded. */
+export function planQuickOffsetKeyframes<Property>(
+  items: Array<KeyframeMoveSnapshotItem<Property>>, requestedTotal: number, _fps: number,
+): KeyframeMovePlan<Property> {
+  const selected = items.filter(item => item.selected && item.offsetIndex != null && item.offsetCount != null);
+  const timing = planQuickOffsetTiming(selected.map(item => ({
+    time: item.time,
+    offsetIndex: item.offsetIndex!,
+    offsetCount: item.offsetCount!,
+    minTime: item.minTime,
+    maxTime: item.maxTime,
+  })), requestedTotal);
+  const moves = selected.map((item, index) => ({ item, time: timing.times[index]! }));
+  const removed: Array<KeyframeMoveSnapshotItem<Property>> = [];
+  for (const fixed of items) {
+    if (fixed.selected) continue;
+    if (moves.some(move => move.item.property === fixed.property && Math.abs(move.time - fixed.time) < 1e-9)) removed.push(fixed);
+  }
+  return { delta: timing.total, moves, removed };
 }
 
 /** Resolve a temporary Shift-snap without letting two nearby targets make the
@@ -244,6 +350,7 @@ const T: any = previous || {
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null, dropRow: null as number | null,
   reorder: null as ReturnType<typeof layerDrop>,
+  quickOffset: null as null | { total: number; perGroup: number; x: number; y: number },
   drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
@@ -546,7 +653,7 @@ let propertyLabelWidth: number | null = null;
 function revealSelectedAncestors() {
   for (const layer of PM.selLayers?.() || []) {
     for (const group of PM.groupAncestors?.(layer) || []) {
-      PM.UIState.setLayerCollapsed(group, false);
+      PM.UIState.setGroupCollapsed(group, false);
     }
   }
   rowsDirty = true;
@@ -570,7 +677,7 @@ function buildRows() {
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
     const ancestors = PM.groupAncestors?.(L) || [];
-    if (!T.search && ancestors.some((group: any) => PM.UIState.getLayerCollapsed(group))) continue;
+    if (!T.search && ancestors.some((group: any) => PM.UIState.getGroupCollapsed(group))) continue;
     if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
     const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
@@ -601,8 +708,8 @@ onBus('layers', () => { rowsDirty = true; PM.invalidate('timeline'); });
 onBus('sel', () => {
   revealSelectedAncestors();
   buildRows();
-  const selectedRow = T.rows.findIndex((row: any) => row.kind === 'layer' && PM.sel.layers.includes(row.L.id));
-  if (selectedRow >= 0) keepRowsVisible(selectedRow, 0);
+  /* Selection can originate in the composition canvas, marquee, inspector,
+     or another panel. Never move the user's timeline viewport to chase it. */
   PM.invalidate('timeline');
 });
 onBus('history', () => { rowsDirty = true; PM.invalidate('timeline'); });
@@ -732,6 +839,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
   }
   drawRuler(c, W, H);
   drawPlayhead(c, W, H);
+  drawQuickOffset(c, W, H);
   drawScrollThumb(c, W, H, maxScroll);
   if ((window as any).__tlDebug) {
     const px = t2x(PM.time);
@@ -762,6 +870,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph,
     style: T.style, rows: T.rows, propertyValueX: T.propertyValueX,
     hover: T.hover, marquee: T.marquee, dropRow: T.dropRow, drop: T.drop, reorder: T.reorder,
+    quickOffset: T.quickOffset,
   };
   try {
     T.gut = 224;
@@ -773,6 +882,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     T.dropRow = null;
     T.drop = null;
     T.reorder = null;
+    T.quickOffset = null;
     T.style = {
       clipRadius: 5, keyframeSize: 8, showLayerNumbers: true,
       showTypeBadges: true, toolbarDensity: 'compact'
@@ -1174,7 +1284,9 @@ function drawGutter(c: any, W: any, H: any) {
          state (hidden or locked). Idle rows show number, tag, name. */
       const active = sel || T.hoverRow === i;
       const indent = Math.min(48, (r.depth || 0) * 12);
-      const collapsed = PM.UIState.getLayerCollapsed(L);
+      const collapsed = L.type === 'group'
+        ? PM.UIState.getGroupCollapsed(L)
+        : PM.UIState.getLayerCollapsed(L);
       c.font = '400 10px ' + fmono();
       c.fillStyle = INK.lo; c.textBaseline = 'middle';
       if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
@@ -1200,7 +1312,7 @@ function drawGutter(c: any, W: any, H: any) {
       c.textAlign = 'left';
       c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      const hasParentControl = L.type !== 'group' && PM.TYPE_META[L.type]?.transform !== false;
+      const hasParentControl = PM.TYPE_META[L.type]?.transform !== false;
       const showParentControl = hasParentControl && (active || !!L.parent);
       const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur') ? 12 : 0);
       const nameRight = T.gut - (hasParentControl ? 50 : 12) - statusWidth;
@@ -1237,15 +1349,18 @@ function drawGutter(c: any, W: any, H: any) {
       clipText(c, r.label, labelX, y + T.row / 2, valueX - labelX - 12);
       /* value at playhead */
       const values = trackChannels(r).map(axis => PM.evP(L, axis.prop, PM.time, axis.key));
-      const v = r.channels ? values.map(value => PM.round(value, 1)).join(', ') + '%' : values[0];
+      const v = values[0];
       c.font = '400 10px ' + fmono();
       c.fillStyle = theme.accent;
-      c.textAlign = 'left';
-      if (r.channels) {
-        const width = (T.gut - valueX - 8) / values.length;
-        values.forEach((value, index) => c.fillText(`${PM.round(value, 1)}%`, valueX + index * width, y + T.row / 2, width - 4));
-      } else c.fillText(typeof v === 'number' ? PM.round(v, 1) : String(v).slice(0, 20), valueX, y + T.row / 2,
-        Math.max(24, T.gut - valueX - 8));
+      c.textAlign = 'right';
+      const actionWidth = isScaleTrack(r) ? 24 : 0;
+      const columns = propertyValueColumns(valueX, T.gut, values.length, actionWidth);
+      values.forEach((value, index) => {
+        const column = columns[index]!;
+        const text = fittedPropertyValue(c, value, r.channels ? '%' : '', column.width);
+        c.fillText(text, column.right, y + T.row / 2);
+      });
+      if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, y + T.row / 2, !!L.scaleLinked);
       c.textAlign = 'left';
       if (r.prop.expr) { c.fillStyle = theme.accent; c.fillText('ƒ', 70, y + T.row / 2); }
     }
@@ -1262,10 +1377,31 @@ function clipText(c: any, s: any, x: any, y: any, max: any) {
   }
   c.fillText(t, x, y);
 }
+function fittedPropertyValue(c: any, value: any, unit: string, maxWidth: number) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const candidates = [
+      `${PM.round(value, 1)}${unit}`,
+      `${PM.round(value, 0)}${unit}`,
+      ...(Math.abs(value) >= 1000 ? [`${PM.round(value / 1000, 1)}k${unit}`] : []),
+    ];
+    return candidates.find(candidate => c.measureText(candidate).width <= maxWidth) ?? candidates.at(-1)!;
+  }
+  let text = String(value).slice(0, 20);
+  if (c.measureText(text).width <= maxWidth) return text;
+  while (text.length && c.measureText(text + '…').width > maxWidth) text = text.slice(0, -1);
+  return text ? text + '…' : '…';
+}
 function icoAnimationDiamond(c: any, x: number, y: number, animated: boolean, current: boolean) {
   c.save(); c.strokeStyle = animated ? theme.accent : theme.tx3; c.fillStyle = theme.accent; c.lineWidth = 1.2;
   c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 4, y); c.lineTo(x, y + 5); c.lineTo(x - 4, y); c.closePath();
   if (current) c.fill(); else c.stroke(); c.restore();
+}
+function icoScaleLink(c: any, x: number, y: number, linked: boolean) {
+  c.save(); c.translate(x, y); c.rotate(-Math.PI / 4);
+  c.strokeStyle = linked ? theme.accent : theme.tx3; c.lineWidth = 1.3;
+  roundRect(c, -7, -4, 9, 5, 2.5); c.stroke();
+  roundRect(c, -2, -1, 9, 5, 2.5); c.stroke();
+  c.restore();
 }
 function drawKeyArrow(c: any, x: number, y: number, direction: number, enabled: boolean) {
   c.save(); c.strokeStyle = enabled ? theme.tx2 : theme.tx3; c.globalAlpha = enabled ? 1 : .3; c.lineWidth = 1.4;
@@ -1364,6 +1500,32 @@ function drawPlayhead(c: any, W: any, H: any) {
   c.restore();
 }
 
+function formatOffsetTime(seconds: number): string {
+  const sign = seconds < 0 ? '−' : '+';
+  return sign + PM.tc(Math.abs(seconds), PM.proj.fps);
+}
+
+function drawQuickOffset(c: any, W: number, H: number) {
+  const offset = T.quickOffset;
+  if (!offset) return;
+  const width = 214, height = 45;
+  const left = clamp(offset.x + 14, T.gut + 8, Math.max(T.gut + 8, W - width - 8));
+  const top = clamp(offset.y + 14, T.ruler + 8, Math.max(T.ruler + 8, H - height - 8));
+  c.save();
+  c.fillStyle = theme.float;
+  c.strokeStyle = theme.line;
+  c.lineWidth = 1;
+  roundRect(c, left, top, width, height, 7); c.fill(); c.stroke();
+  c.textBaseline = 'middle';
+  c.font = '400 10px ' + fui(); c.fillStyle = theme.tx3;
+  c.fillText('TOTAL OFFSET', left + 10, top + 14);
+  c.fillText('PER LAYER', left + 112, top + 14);
+  c.font = '500 11px ' + fmono(); c.fillStyle = theme.tx;
+  c.fillText(formatOffsetTime(offset.total), left + 10, top + 31);
+  c.fillText(formatOffsetTime(offset.perGroup), left + 112, top + 31);
+  c.restore();
+}
+
 /* ── graph editor ──────────────────────────────────────── */
 function drawGraph(c: any, W: any, H: any) {
   T._graph = null;
@@ -1382,7 +1544,7 @@ function drawGraph(c: any, W: any, H: any) {
   }
   const selectedKeyIds = new Set(T.graphMarqueeIds ?? PM.sel.keys);
   const series = rows
-    .flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L})))
+    .flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L,trackKey:r.key})))
     .filter((axis:any)=>typeof axis.prop.v==='number' && axis.prop.kf.some((key:any)=>selectedKeyIds.has(key.i)));
   if (!series.length) {
     c.fillStyle = theme.tx3; c.font = '400 11.5px ' + fui(); c.textAlign = 'center';
@@ -1649,14 +1811,17 @@ function onMove(e: any) {
   }
   if (x < T.gut && y >= T.ruler) {
     const row = hitRow(y)?.row;
-    if (row?.kind === 'layer' && row.L.type !== 'group' && PM.TYPE_META[row.L.type]?.transform !== false && x >= T.gut - 40) {
+    if (row?.kind === 'layer' && PM.TYPE_META[row.L.type]?.transform !== false && x >= T.gut - 40) {
       cur = x < T.gut - 20 ? 'crosshair' : 'pointer';
       const parent = row.L.parent ? PM.L(row.L.parent)?.name || 'Missing layer' : 'None';
       title = x < T.gut - 20 ? `Parent: ${parent} · Drag to a layer` : `Parent: ${parent} · Choose parent`;
     } else if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
       cur = adjacentKeyframe(PM, x < 40 ? -1 : 1, row) != null ? 'pointer' : 'default';
     } else if (row?.kind === 'prop' && !row.L.lock) {
-      if (x >= 76 && x < 96) cur = 'pointer';
+      if (isScaleTrack(row) && x >= T.gut - 24) {
+        cur = 'pointer';
+        title = row.L.scaleLinked ? 'Adjust Scale X and Y separately' : 'Link Scale X and Y';
+      } else if (x >= 76 && x < 96) cur = 'pointer';
       else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof PM.evP(row.L, axis.prop, PM.time, axis.key) === 'number') ? 'ew-resize' : 'pointer';
     }
   }
@@ -1705,6 +1870,10 @@ function onDown(e: any) {
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
   const onClip = x >= x0 - 5 && x <= x1 + 5;
   if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (quickOffsetModifiers(e) && PM.sel.layers.includes(L.id) && quickOffsetLayerGroups().length > 1) {
+    if (L.lock) return;
+    return quickOffsetLayers(e);
+  }
   if (!selectLayerForPointer(L, e) || L.lock) return;
   if (Math.abs(x - x0) < 5) return trim(e, 'in');
   if (Math.abs(x - x1) < 5) return trim(e, 'out');
@@ -1724,6 +1893,52 @@ function panViewport(e: PointerEvent) {
 }
 
 let layerSelectionAnchor: string | null = null;
+function quickOffsetModifiers(event: any) {
+  return !!event?.altKey && !!(event?.metaKey || event?.ctrlKey);
+}
+
+function quickOffsetLayerGroups() {
+  const selected = new Set(PM.sel.layers);
+  return PM.sel.layers.map((id: string) => PM.L(id)).filter((layer: any) => layer
+    && !PM.groupAncestors?.(layer).some((group: any) => selected.has(group.id)));
+}
+
+function quickOffsetLayers(e: any) {
+  const roots = quickOffsetLayerGroups();
+  if (roots.length < 2) return;
+  const groups = roots.map((root: any) => {
+    const ids = root.type === 'group' ? PM.expandGroups([root.id]) : [root.id];
+    return ids.map((id: string) => PM.L(id)).filter(Boolean);
+  });
+  if (groups.some((members: any[]) => members.some((layer: any) => layer.lock
+      || PM.groupAncestors?.(layer).some((group: any) => group.lock)))) return;
+  const timing = groups.flatMap((members: any[], offsetIndex: number) => members.map((L: any) => ({
+    L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: 0,
+  })));
+  PM.Edit.begin('Quick offset layers', { origin: 'timeline' });
+  let moved = false;
+  const clear = () => { T.quickOffset = null; PM.invalidate('timeline'); };
+  beginDrag(e, {
+    cursor: 'ew-resize',
+    move: (dx: number, _dy: number, event: PointerEvent) => {
+      if (!moved && Math.abs(dx) < 3) return;
+      moved = true;
+      const plan = planQuickOffsetTiming(timing, dx / T.pps);
+      timing.forEach((item: any, index: number) => PM.Edit.dispatch({
+        type: 'set_layer', target: item.L.id, patch: { from: PM.round(plan.times[index], 6) },
+      }));
+      const rect = T.cv.getBoundingClientRect();
+      T.quickOffset = {
+        total: plan.total, perGroup: plan.perGroup,
+        x: event.clientX - rect.left, y: event.clientY - rect.top,
+      };
+      PM.invalidate('timeline');
+    },
+    up: () => { clear(); moved ? PM.Edit.commit('Quick offset layers') : PM.Edit.cancel(); },
+    cancel: () => { clear(); PM.Edit.cancel(); },
+  });
+}
+
 function selectLayerForPointer(L: any, event: PointerEvent) {
   T.keySelectionActive = false;
   PM.sel.keys = [];
@@ -1835,6 +2050,10 @@ function togglePropertyAnimation(row: any) {
   rowsDirty = true; PM.invalidate();
 }
 
+function isScaleTrack(row: any) {
+  return row?.key === 'scale' && trackChannels(row).length === 2;
+}
+
 function dragPropertyValue(event: any, row: any, rowIndex: number) {
   let axes = trackChannels(row).map(axis => ({ ...axis, value: PM.evP(row.L, axis.prop, PM.time, axis.key), meta: propertyMetadata(PM, row.L, axis.key) }));
   if (!axes.every(axis => typeof axis.value === 'number')) {
@@ -1920,6 +2139,7 @@ function gutterDown(e: any, x: any, y: any) {
     PM.selectLayers(r.L.id); T.keySelectionActive = true; PM.invalidate('timeline');
     if (r.prop.kf.length && x >= 16 && x < 64) { navigateKeyframe(x < 40 ? -1 : 1, r); return; }
     if (r.L.lock) return;
+    if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(PM, r.L); return; }
     if (x >= 76 && x < 96) { togglePropertyAnimation(r); return; }
     if (x >= T.propertyValueX - 4) dragPropertyValue(e, r, hr.i);
     return;
@@ -1927,7 +2147,7 @@ function gutterDown(e: any, x: any, y: any) {
   T.keySelectionActive = false;
   PM.sel.keys = [];
   const L = r.L;
-  if (L.type !== 'group' && PM.TYPE_META[L.type]?.transform !== false && x >= T.gut - 40) {
+  if (PM.TYPE_META[L.type]?.transform !== false && x >= T.gut - 40) {
     const ids = PM.sel.layers.includes(L.id) ? PM.sel.layers : [L.id];
     if (x < T.gut - 20) PM.beginParentPick?.(e, ids);
     else PM.showParentMenu?.(ids, e);
@@ -1937,12 +2157,19 @@ function gutterDown(e: any, x: any, y: any) {
   else if (x < 40) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(PM, L, L.on, PM.time, 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
   else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
   else if (x >= 58 + Math.min(48, (r.depth || 0) * 12) && x < 74 + Math.min(48, (r.depth || 0) * 12)) {
-    const collapsed = !PM.UIState.getLayerCollapsed(L);
-    L.collapsed = collapsed;
-    PM.UIState.setLayerCollapsed(L, collapsed);
+    const collapsed = toggleTimelineDisclosure(PM, L);
     rowsDirty = true;
     if (!collapsed) {
-      const kids = visibleProps(L).length;
+      buildRows();
+      let kids = visibleProps(L).length;
+      if (L.type === 'group') {
+        kids = 0;
+        for (let index = hr.i + 1; index < T.rows.length; index++) {
+          const child = T.rows[index];
+          if (child.kind === 'layer' && (child.depth || 0) <= (r.depth || 0)) break;
+          kids++;
+        }
+      }
       keepRowsVisible(hr.i, kids);
     }
     PM.invalidate('timeline');
@@ -2054,6 +2281,12 @@ function trim(e: any, side: any) {
 
 function captureKeyframeGesture(entries: any[]) {
   const selected = new Set(entries.map((entry: any) => entry.key));
+  const entryLayerIds = new Set(entries.map((entry: any) => entry.L.id));
+  const layerOrder = [
+    ...PM.sel.layers.filter((id: string) => entryLayerIds.has(id)),
+    ...PM.proj.layers.map((layer: any) => layer.id).filter((id: string) => entryLayerIds.has(id)),
+  ].filter((id: string, index: number, ids: string[]) => ids.indexOf(id) === index);
+  const offsetIndex = new Map(layerOrder.map((id: string, index: number) => [id, index]));
   const layerByProperty = new Map(entries.map((entry: any) => [entry.prop, entry.L]));
   const props = [...new Set(entries.map((entry: any) => entry.prop))];
   const properties = props.map((prop: any) => ({
@@ -2078,6 +2311,8 @@ function captureKeyframeGesture(entries: any[]) {
     ),
     selected: selected.has(entry.key),
     order: entry.order,
+    offsetIndex: offsetIndex.get(layerByProperty.get(prop)?.id) ?? 0,
+    offsetCount: layerOrder.length,
     key: entry.key,
     value: entry.value,
   })));
@@ -2144,11 +2379,12 @@ function applyKeyframeGesture(
 }
 
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
-  const additive = e.shiftKey || e.metaKey;
   const hit = pickKeyframeHit(
     r.prop.kf, PM.sel.keys,
     (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
   );
+  const quickModifier = quickOffsetModifiers(e);
+  const additive = !quickModifier && (e.shiftKey || e.metaKey);
   if (!hit) return marquee(e, { additive });
   PM.sel.chan = r.key;
   T.focusGraph(r.L, r.key);
@@ -2160,25 +2396,38 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, additive, true));
   const entries = selectedKeyEntries();
   const snapshot = captureKeyframeGesture(entries);
+  const quickOffset = quickModifier && new Set(snapshot.items
+    .filter((item: any) => item.selected).map((item: any) => item.offsetIndex)).size > 1;
   let snapLock: KeyframeGroupSnapLock | null = null;
   let moved = false;
+  const clearQuickOffset = () => { T.quickOffset = null; };
   beginDrag(e, {
     move: (dx: any, dy: any, event: PointerEvent) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { moved = true; PM.hist.begin('Move keyframe'); }
+      if (!moved) { moved = true; PM.hist.begin(quickOffset ? 'Quick offset keyframes' : 'Move keyframe'); }
       let delta = dx / T.pps;
-      if (shiftSnapping(event)) {
+      if (!quickOffset && shiftSnapping(event)) {
         const snap = snapKeyframeGesture(snapshot, delta, snapLock);
         delta = snap.delta; snapLock = snap.lock;
       } else snapLock = null;
-      applyKeyframeGesture(snapshot, delta);
+      const plan = applyKeyframeGesture(snapshot, delta, null, quickOffset ? planQuickOffsetKeyframes : planKeyframeMove);
+      if (quickOffset) {
+        const count = Math.max(0, ...snapshot.items.map((item: any) => item.offsetCount || 0));
+        const rect = T.cv.getBoundingClientRect();
+        T.quickOffset = {
+          total: plan.delta, perGroup: count > 1 ? plan.delta / (count - 1) : 0,
+          x: event.clientX - rect.left, y: event.clientY - rect.top,
+        };
+      }
     },
     up: () => {
-      if (moved) PM.hist.commit('Move keyframe');
+      clearQuickOffset();
+      if (moved) PM.hist.commit(quickOffset ? 'Quick offset keyframes' : 'Move keyframe');
       else if (additive && wasSelected) setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, true, false));
       PM.invalidate('timeline');
     },
     cancel: () => {
+      clearQuickOffset();
       if (moved) { restoreKeyframeGesture(snapshot); PM.hist.cancel(); PM.touch(); }
       PM.invalidate('timeline');
     },
@@ -2205,7 +2454,7 @@ function graphDown(e: any, x: any, y: any) {
     })).sort((a, b) => a.distance - b.distance);
     const nearest = handles[0]?.distance ?? Infinity;
     const handle = handles.find(item => item.distance <= nearest + 1 && PM.sel.keys.includes(item.key.i)) ?? handles[0];
-    if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L);
+    if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L, handle.axis);
   }
   if ((!pointHit || pointHit.distance >= 8) && pointInGraphSelection(g.selectionBounds, x, y)) {
     return dragGraphSelection(e, g, L);
@@ -2269,13 +2518,20 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
     },
   });
 }
-function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any) {
+function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any, clickedAxis: any) {
   if (L.lock) return;
-  const axes = graphHandleChannels(timelineProperties(PM, L), kf);
+  const trackKey = clickedAxis?.trackKey ?? clickedAxis?.key;
+  const axes = g.series.filter((axis: any) => (axis.trackKey ?? axis.key) === trackKey && !axis.L.lock);
   const candidates = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
-  const targetKeys = new Set(keysForBezierHandleDrag(candidates.map((item: any) => item.key), k, PM.sel.keys));
-  const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));
   const clickedIndex = kf.indexOf(k);
+  const explicitlySelected = new Set(PM.sel.keys);
+  const owningKeys = candidates.filter((item: any) => item.axis.L === L).map((item: any) => item.key);
+  const targetKeys = new Set([
+    ...keysForBezierHandleDrag(owningKeys, k, PM.sel.keys),
+    ...axes.filter((axis: any) => axis.L !== L).map((axis: any) => axis.prop.kf[clickedIndex])
+      .filter((key: any) => key && keyMembers(key).some(member => explicitlySelected.has(member.key.i))),
+  ]);
+  const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));
   const clickedPrevious = which === 'eo' ? k : kf[clickedIndex - 1];
   const clickedNext = which === 'eo' ? kf[clickedIndex + 1] : k;
   if (!clickedPrevious || !clickedNext) return;
@@ -2292,25 +2548,25 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
     const previous = which === 'eo' ? key : keys[index - 1];
     const next = which === 'eo' ? keys[index + 1] : key;
     if (!previous || !next) return null;
-    const segmentStart: [number, number] = [t2x(L.from + previous.t), g.v2y(previous.v)];
-    const segmentEnd: [number, number] = [t2x(L.from + next.t), g.v2y(next.v)];
+    const segmentStart: [number, number] = [t2x(axis.L.from + previous.t), g.v2y(previous.v)];
+    const segmentEnd: [number, number] = [t2x(axis.L.from + next.t), g.v2y(next.v)];
     const oppositeWhich: 'eo' | 'ei' = which === 'eo' ? 'ei' : 'eo';
     const oppositeNeighbor = which === 'eo' ? keys[index - 1] : keys[index + 1];
     let opposite: any = null;
     if (oppositeNeighbor && key.bezierMode !== 'split' && !split) {
       const oppositeStart = which === 'eo'
-        ? [t2x(L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number]
-        : [t2x(L.from + key.t), g.v2y(key.v)] as [number, number];
+        ? [t2x(axis.L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number]
+        : [t2x(axis.L.from + key.t), g.v2y(key.v)] as [number, number];
       const oppositeEnd = which === 'eo'
-        ? [t2x(L.from + key.t), g.v2y(key.v)] as [number, number]
-        : [t2x(L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number];
+        ? [t2x(axis.L.from + key.t), g.v2y(key.v)] as [number, number]
+        : [t2x(axis.L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number];
       const oppositeHandle = visibleBezierHandle(key, oppositeNeighbor, oppositeWhich);
       opposite = { which: oppositeWhich, segmentStart: oppositeStart, segmentEnd: oppositeEnd,
         previous: which === 'eo' ? oppositeNeighbor : key,
         next: which === 'eo' ? key : oppositeNeighbor,
         point: pointForBezierHandle(oppositeHandle, oppositeStart, oppositeEnd), fallback: oppositeHandle };
     }
-    return { key, previous, next, segmentStart, segmentEnd, opposite };
+    return { axis, key, previous, next, segmentStart, segmentEnd, opposite };
   }).filter(Boolean);
   PM.hist.begin('Adjust easing');
   T.graphDragBounds = [g.vmin, g.vmax];
@@ -2333,7 +2589,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
       drags.forEach((drag: any) => {
         drag.key[which] = handle.map((value: number) => PM.round(value, 4));
         if (!drag.opposite) return;
-        const keyPoint: [number, number] = [t2x(L.from + drag.key.t), g.v2y(drag.key.v)];
+        const keyPoint: [number, number] = [t2x(drag.axis.L.from + drag.key.t), g.v2y(drag.key.v)];
         const draggedPoint = pointForBezierHandle(handle, drag.segmentStart, drag.segmentEnd);
         const mirroredPoint = mirroredBezierHandlePoint(keyPoint, draggedPoint, drag.opposite.point);
         const oppositeHandle = bezierHandleAtPoint(
@@ -2601,7 +2857,13 @@ T.nextEdge = nextEdge; T.prevEdge = prevEdge;
 T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, PM.proj.dur), 4, 4000); PM.invalidate('timeline'); };
 T.reveal = (L: any, keys: any) => {
   PM.UIState.setLayerCollapsed(L, false);
-  PM.UIState.setReveal(L, keys);
+  const current = PM.UIState.getReveal(L);
+  const alreadyVisible = current == null
+    ? timelineProperties(PM, L).flatMap((row: any) => trackChannels(row)
+      .filter((axis: any) => axis.prop.kf.length || axis.prop.expr)
+      .map((axis: any) => axis.key))
+    : current;
+  PM.UIState.setReveal(L, alreadyVisible.includes('*') ? alreadyVisible : [...new Set([...alreadyVisible, ...keys])]);
   rowsDirty = true;
   buildRows();
   const idx = T.rows.findIndex((r: any) => r.kind === 'layer' && r.L === L);

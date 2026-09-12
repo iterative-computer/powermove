@@ -54,4 +54,17 @@ describe('legacy ui-state install', () => {
     expect(PM.UIState.getFxOpen(effect)).toBe(false);
     expect(JSON.stringify(PM.proj).includes('"open"')).toBe(false);
   });
+
+  it('keeps group hierarchy disclosure separate from property disclosure', () => {
+    const { PM, layer } = uiStateRegistry();
+    layer.type = 'group';
+    PM.UIState.prune(PM.proj);
+
+    expect(PM.UIState.getLayerCollapsed(layer)).toBe(true);
+    expect(PM.UIState.getGroupCollapsed(layer)).toBe(false);
+    PM.UIState.setGroupCollapsed(layer, true);
+
+    expect(PM.UIState.getGroupCollapsed(layer)).toBe(true);
+    expect(PM.UIState.getLayerCollapsed(layer)).toBe(true);
+  });
 });

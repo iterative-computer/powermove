@@ -6,6 +6,11 @@ const canonical = (value: unknown) => JSON.parse(JSON.stringify(value,
   (key, value) => key === 'collapsed' && value === false ? undefined : value));
 
 test('restores each project layout after quit and when reopening its saved file', async ({ session }) => {
+  await session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Panel layout' }) }));
+    PM.ProjectsScreen.hide();
+  });
   const filePath = path.join(session.userData, 'Panel layout.pmv');
   await session.app.evaluate(({ dialog }, filePath) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath });
@@ -20,7 +25,7 @@ test('restores each project layout after quit and when reopening its saved file'
       PM.Layout.movePanel(ws, 'agent', 'right');
       PM.Layout.hidePanel(ws, 'assets');
       ws.layout.docks.find((dock: any) => dock.id === 'right').panels.find((panel: any) => panel.id === 'agent').size = 290;
-      ws.layout.docks.find((dock: any) => dock.id === 'center').panels.find((panel: any) => panel.id === 'timeline').collapsed = true;
+      ws.layout.docks.find((dock: any) => dock.id === 'right').panels.find((panel: any) => panel.id === 'fxbrowser').collapsed = true;
     });
     return { id: PM.proj.id, workspace: PM.WS.snapshot() };
   });

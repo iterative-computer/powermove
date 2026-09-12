@@ -396,10 +396,9 @@ function setLayer(command: any) {
     layer.matteSource=patch.matteSource;layer.matteMode ||= PM.P('alpha');
   }
   if (patch.parent !== undefined) {
-    if (layer.type === 'group' && patch.parent != null) throw new Error('Move groups into another group to nest their transforms');
     const parent: any = patch.parent == null ? null : findLayer(patch.parent);
     if (patch.parent != null && (!parent || parent.id === layer.id)) throw new Error('Invalid parent layer');
-    if (parent && (parent.type === 'group' || PM.TYPE_META[parent.type]?.transform === false)) throw new Error('This layer cannot be a parent');
+    if (parent && PM.TYPE_META[parent.type]?.transform === false) throw new Error('This layer cannot be a parent');
     if (parent && PM.wouldCycle(layer, parent.id)) throw new Error('Parenting would create a cycle');
     if (layer.parent !== (parent?.id ?? null)) preserveParentPose(PM, layer, parent, PM.time);
     layer.parent = parent ? parent.id : null;
@@ -507,7 +506,7 @@ function addLayer(command: any) {
   PM.addLayer(layer, command.index == null ? 0 : PM.clamp(Math.round(command.index), 0, PM.proj.layers.length));
   if (command.parent != null) {
     const parent: any = findLayer(command.parent);
-    if (layer.type === 'group' || !parent || parent.type === 'group' || PM.TYPE_META[parent.type]?.transform === false || parent.id === layer.id || PM.wouldCycle(layer, parent.id)) throw new Error('Invalid parent layer');
+    if (!parent || PM.TYPE_META[parent.type]?.transform === false || parent.id === layer.id || PM.wouldCycle(layer, parent.id)) throw new Error('Invalid parent layer');
     layer.parent = parent.id;
   }
   if (command.blend != null) {
@@ -1039,7 +1038,7 @@ const Edit: any = {
       } catch (error: any) { return fail(String(error.message || error)); }
     }
     const selection: any = clone(PM.sel);
-    PM.hist.beginScoped(meta.label || 'Edit source', meta.historyGroup || null);
+    PM.hist.beginScoped(meta.label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
       trackCommands(list);
       const executed: any = list.map((command: any) => runOne(command, meta));
@@ -1066,7 +1065,7 @@ const Edit: any = {
     if (live) return fail('Finish the active source edit before changing structure');
     if (typeof action !== 'function') return fail('A structural edit action is required');
     const selection: any = clone(PM.sel);
-    const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null);
+    const before: any = PM.hist.begin(label || 'Edit source', meta.historyGroup || null, meta.origin || 'interface');
     try {
       const result: any = action();
       PM.ProjectIndex?.invalidate();
@@ -1105,7 +1104,7 @@ const Edit: any = {
 
   begin(label: any, meta: any = {}) {
     if (live) throw new Error('A source edit is already active');
-    PM.hist.beginScoped(label || 'Edit source');
+    PM.hist.beginScoped(label || 'Edit source', null, meta.origin || 'interface');
     PM.hist.track([['revision'], ['edits']]);
     live = { label: label || 'Edit source', origin: meta.origin || 'interface', selection: clone(PM.sel), commands: [] };
   },

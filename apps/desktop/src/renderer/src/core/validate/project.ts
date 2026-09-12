@@ -422,8 +422,15 @@ function staticContentFor(type: LayerType, raw: unknown, comp: Pick<Comp, 'w' | 
         comp: typeof source.comp === 'string' && source.comp ? source.comp : null,
         w: finite(source.w, comp.w), h: finite(source.h, comp.h)
       };
-    case 'group':
     case 'null':
+      return {
+        ...source,
+        color: stringOr(source.color, '#6A6A70'),
+        w: Math.max(1, finite(source.w, 100)),
+        h: Math.max(1, finite(source.h, 100)),
+        radius: Math.max(0, finite(source.radius))
+      };
+    case 'group':
       return source;
   }
 }
@@ -457,8 +464,8 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     ? source.type as LayerType
     : 'null';
   const transformable = type !== 'audio';
-  const noEffects = type === 'audio' || type === 'group';
-  const noMasks = type === 'audio' || type === 'group';
+  const noEffects = type === 'audio';
+  const noMasks = type === 'audio';
   const id = nonEmptyStringOr(source.id, uid('L'));
   const blend = BLEND_MODES.includes(source.blend as (typeof BLEND_MODES)[number])
     ? source.blend as (typeof BLEND_MODES)[number]
@@ -481,7 +488,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     color: stringOr(source.color, TYPE_META[type].color),
     blend: type === 'audio' ? 'normal' : isProperty(source.blend) ? sanitizeLooseChannel(source.blend, 'normal') : blend,
     mblur: type === 'audio' ? false : isProperty(source.mblur) ? sanitizeLooseChannel(source.mblur, false) : !!source.mblur,
-    parent: type === 'audio' || type === 'group' ? null : (typeof source.parent === 'string' && source.parent !== id ? source.parent : null),
+    parent: type === 'audio' ? null : (typeof source.parent === 'string' && source.parent !== id ? source.parent : null),
     p: transformable ? sanitizeTransformChannels(source.p, type, comp) : {},
     fx: noEffects ? [] : (Array.isArray(source.fx) ? source.fx.map(sanitizeEffect).filter((item): item is Effect => item !== null) : []),
     transitionIn: sanitizeTransition(source.transitionIn),

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from './registry';
 import { install } from './app';
+import { install as installHistory } from './core/history';
+import { unpackProjectFile } from './core/project-file';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
@@ -482,4 +484,34 @@ describe('legacy app install', () => {
     expect(shader.d.uniforms.strength.kf[0]).toMatchObject({ t: 0, v: 3 });
     expect(PM.__normalizationCalls.length).toBeGreaterThanOrEqual(5);
   });
+});
+
+it('saves real undo and redo history in the native file and local session', async () => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn();
+  PM.rasterClear = vi.fn();
+  PM.WS.activate = vi.fn();
+  PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  PM.hist.do('Rename one', () => { PM.proj.name = 'One'; });
+  PM.hist.do('Rename two', () => { PM.proj.name = 'Two'; });
+  PM.hist.undo();
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
+  (window as any).powermove = { saveFile };
+  expect(await PM.saveProject()).toBe(true);
+  const saved = unpackProjectFile(saveFile.mock.calls[0]![0].data);
+  expect(saved.history.index).toBe(0);
+  expect(saved.history.entries.map((entry: any) => entry.label)).toEqual(['Rename one', 'Rename two']);
+  expect(PM.Projects.getState('P1').history).toEqual(saved.history);
+  (window as any).powermove.openProjectFile = async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data: saveFile.mock.calls[0]![0].data });
+  await PM.openProject();
+  expect(toasts).not.toEqual(expect.arrayContaining([expect.stringContaining('Could not open')]));
+  expect(PM.proj.id).toBe('reopened');
+  expect(PM.hist.canUndo()).toBe(true);
+  expect(PM.hist.canRedo()).toBe(true);
+  PM.hist.redo();
+  expect(PM.proj.name).toBe('Two');
+  PM.hist.undo();
+  expect(PM.proj.name).toBe('One');
 });

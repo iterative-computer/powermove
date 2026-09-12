@@ -5,8 +5,13 @@ import {
   createTimelineRuntime,
   pickKeyframeHit,
   planKeyframeMove,
+  planQuickOffsetKeyframes,
+  planQuickOffsetTiming,
+  propertyValueColumns,
   resolveTimelineSnap,
   shouldDrawClipLabel,
+  toggleTimelineDisclosure,
+  toggleTimelineScaleLink,
   type KeyframeMoveSnapshotItem,
 } from './timeline';
 import { expandScaleKeyIds, timelineProperties } from './property-tracks';
@@ -33,11 +38,13 @@ function timelineRegistry(): Record<string, any> {
   });
   vi.stubGlobal('document', { documentElement: { dataset: { theme: 'light' } } });
 
+  const listeners = new Map<string, (...args: any[]) => void>();
   const PM: Record<string, any> = {
     h() {},
     clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, value)); },
     registerPanel() {},
-    bus: { on() {} },
+    bus: { on(name: string, listener: (...args: any[]) => void) { listeners.set(name, listener); } },
+    __timelineListeners: listeners,
     invalidate() {}
   };
   createTimelineRuntime(PM);
@@ -47,6 +54,95 @@ function timelineRegistry(): Record<string, any> {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('timeline runtime', () => {
+  it('opens a group hierarchy without opening its property strip', () => {
+    const group = { id: 'group', type: 'group', collapsed: true };
+    const state = { groupCollapsed: true, layerCollapsed: true };
+    const PM = { UIState: {
+      getGroupCollapsed: () => state.groupCollapsed,
+      setGroupCollapsed: (_layer: any, value: boolean) => { state.groupCollapsed = value; },
+      getLayerCollapsed: () => state.layerCollapsed,
+      setLayerCollapsed: (_layer: any, value: boolean) => { state.layerCollapsed = value; },
+    } };
+
+    expect(toggleTimelineDisclosure(PM, group)).toBe(false);
+    expect(state).toEqual({ groupCollapsed: false, layerCollapsed: true });
+    expect(group.collapsed).toBe(true);
+  });
+
+  it('never scrolls the timeline viewport to chase an external selection', () => {
+    const PM = timelineRegistry();
+    const layers = Array.from({ length: 20 }, (_, index) => ({
+      id: `layer-${index}`, type: 'text', name: `Layer ${index}`,
+      group: null, shy: false, collapsed: true, p: {},
+    }));
+    PM.proj = { layers };
+    PM.sel = { layers: [layers[0]!.id], keys: [], chan: '' };
+    PM.selLayers = () => [layers[0]!];
+    PM.groupAncestors = () => [];
+    PM.UIState = {
+      getLayerCollapsed: () => true,
+      getGroupCollapsed: () => true,
+      setGroupCollapsed() {},
+      getReveal: () => null,
+    };
+    PM.animVersion = () => 0;
+    PM.allProps = () => [];
+    PM.TL.hgt = 160;
+    PM.TL.scrollY = 300;
+
+    PM.__timelineListeners.get('sel')?.();
+
+    expect(PM.TL.scrollY).toBe(300);
+  });
+
+  it('keeps existing property rows revealed when keyframing another property', () => {
+    const PM = timelineRegistry();
+    const layer = { id: 'layer', type: 'solid', name: 'Layer', group: null, shy: false, collapsed: false, p: {} };
+    const properties = [
+      { key: 'position.y', label: 'Position Y', prop: { v: 540, kf: [{ i: 'position-key', t: 0, v: 540 }], expr: null } },
+      { key: 'scale.x', label: 'Scale X', prop: { v: 95, kf: [{ i: 'scale-x-key', t: 0, v: 95 }], expr: null } },
+      { key: 'scale.y', label: 'Scale Y', prop: { v: 95, kf: [{ i: 'scale-y-key', t: 0, v: 95 }], expr: null } },
+    ];
+    let reveal = properties.map(property => property.key);
+    PM.proj = { layers: [layer] };
+    PM.sel = { layers: [layer.id], keys: [], chan: '' };
+    PM.groupAncestors = () => [];
+    PM.animVersion = () => 0;
+    PM.allProps = () => properties;
+    PM.UIState = {
+      getLayerCollapsed: () => false,
+      setLayerCollapsed() {},
+      getReveal: () => reveal,
+      setReveal: (_layer: any, keys: string[]) => { reveal = keys; },
+    };
+
+    PM.TL.reveal(layer, ['scale.x', 'scale.y']);
+
+    expect(reveal).toEqual(['position.y', 'scale.x', 'scale.y']);
+  });
+
+  it('toggles linked Scale axes from the timeline with the standard layer command', () => {
+    const apply = vi.fn();
+    const layer = { id: 'layer', scaleLinked: false };
+
+    toggleTimelineScaleLink({ Edit: { apply } }, layer);
+
+    expect(apply).toHaveBeenCalledExactlyOnceWith(
+      { type: 'set_layer', target: 'layer', patch: { scaleLinked: true } },
+      { label: 'Link scale axes', origin: 'timeline' },
+    );
+  });
+
+  it('gives every property value a right-aligned column with a readable gap', () => {
+    expect(propertyValueColumns(160, 280, 1)).toEqual([
+      { left: 160, right: 272, width: 112 },
+    ]);
+    expect(propertyValueColumns(160, 280, 2, 24)).toEqual([
+      { left: 160, right: 200, width: 40 },
+      { left: 208, right: 248, width: 40 },
+    ]);
+  });
+
   it('groups Scale without altering unequal legacy key times or values', () => {
     const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim');
     PM.proj = PM.mkProject();
@@ -354,6 +450,31 @@ describe('keyframe move planning', () => {
     expect(plan.removed).toEqual([]);
     expect(applyKeyframeMovePlan([selected, overlap], plan).map((item) => item.id))
       .toEqual(['selected', 'overlap']);
+  });
+
+  it('quick-offsets ordered layer groups from a fixed first item to the full dragged last item', () => {
+    const plan = planQuickOffsetTiming([
+      { time: 1, offsetIndex: 0, offsetCount: 4, minTime: 0 },
+      { time: 1, offsetIndex: 1, offsetCount: 4, minTime: 0 },
+      { time: 1, offsetIndex: 2, offsetCount: 4, minTime: 0 },
+      { time: 1, offsetIndex: 3, offsetCount: 4, minTime: 0 },
+    ], 3);
+
+    expect(plan).toEqual({ total: 3, perGroup: 1, times: [1, 2, 3, 4] });
+  });
+
+  it('clamps a negative quick offset at zero without disturbing spacing inside a keyframe group', () => {
+    const items = [
+      { ...key('a', 'x', 1, true), offsetIndex: 0, offsetCount: 3 },
+      { ...key('b', 'x', 2, true), offsetIndex: 1, offsetCount: 3 },
+      { ...key('c', 'x', 4, true), offsetIndex: 1, offsetCount: 3 },
+      { ...key('d', 'x', 1, true), offsetIndex: 2, offsetCount: 3 },
+    ];
+    const plan = planQuickOffsetKeyframes(items, -4, 30);
+
+    expect(plan.delta).toBe(-1);
+    expect(plan.moves.map(move => move.time)).toEqual([1, 1.5, 3.5, 0]);
+    expect(plan.moves[2]!.time - plan.moves[1]!.time).toBe(2);
   });
 
   it('moves a graph selection together without deleting an occupied key', () => {

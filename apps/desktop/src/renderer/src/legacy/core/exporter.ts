@@ -395,7 +395,7 @@ async function run(opts: any) {
     X.busy = true;
     try {
       await PM.app?.importQueue;
-      const data = await packProjectFile(PM.serialize(), PM.MediaStore);
+      const data = await packProjectFile({ ...JSON.parse(PM.serialize()), history: PM.hist.export?.() }, PM.MediaStore);
       await PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), (p.name || 'powermove') + '.pmv');
       PM.toast('Project exported');return {cancelled:false};
     } catch (error) { const message=error instanceof Error?error.message:String(error);PM.toast('Could not export project: '+message,6000);return {error:message}; }

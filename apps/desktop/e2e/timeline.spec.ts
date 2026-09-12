@@ -6,9 +6,9 @@ async function scaleFixture(page: Page) {
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
   return page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.replaceProject(PM.mkProject({ name: 'Timeline QA', dur: 10 }));
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Timeline QA', dur: 10 }) })); PM.ProjectsScreen.hide();
     const layer = PM.mkLayer('solid', { name: 'Scale QA', from: 2, dur: 3 });
-    PM.proj.layers.push(layer);
+    PM.proj.layers = [...PM.proj.layers, layer];
     layer.scaleLinked = false;
     PM.setKey(layer, 'scale.x', 3, 100);
     PM.setKey(layer, 'scale.x', 4, 200);
@@ -35,6 +35,18 @@ async function scaleKeyPoint(page: Page, time: number) {
     return { x: box.x + T.gut + (time - T.scrollT) * T.pps,
       y: box.y + T.ruler + index * T.row - T.scrollY + T.row / 2, pps: T.pps };
   }, time);
+}
+
+async function openGraph(page: Page) {
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    if (!PM.sel.keys.length) {
+      PM.sel.keys = PM.selLayers().flatMap((layer: any) => PM.allProps(layer).flatMap(({ prop }: any) => prop.kf.map((key: any) => key.i)));
+      PM.TL.keySelectionActive = true;
+    }
+    PM.bus.emit('sel'); PM.invalidate('timeline');
+  });
+  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
 }
 
 test('Scale keys move outside the layer, delete together, and never delete their layer', async ({ session }) => {
@@ -107,7 +119,7 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('M opens and collapses the selected layer strip', async ({ session }) => {
+test('the disclosure opens and collapses the selected layer strip', async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
   await expect.poll(() => page.evaluate((id) => {
@@ -115,13 +127,14 @@ test('M opens and collapses the selected layer strip', async ({ session }) => {
     return PM.UIState.getLayerCollapsed(PM.L(id));
   }, id)).toBe(false);
 
-  await page.keyboard.press('m');
+  const disclosure = await page.evaluate(() => { const T = (window as any).PM.TL, b = T.cv.getBoundingClientRect(); return { x: b.x + 64, y: b.y + T.ruler + T.row / 2 }; });
+  await page.mouse.click(disclosure.x, disclosure.y);
   await expect.poll(() => page.evaluate((id) => {
     const PM = (window as any).PM;
     return PM.UIState.getLayerCollapsed(PM.L(id));
   }, id)).toBe(true);
 
-  await page.keyboard.press('m');
+  await page.mouse.click(disclosure.x, disclosure.y);
   await expect.poll(() => page.evaluate((id) => {
     const PM = (window as any).PM;
     return PM.UIState.getLayerCollapsed(PM.L(id));
@@ -172,7 +185,7 @@ for (const descending of [false, true]) test(`incoming Bézier handles follow th
     PM.L(id).p['scale.y'].kf[1].v = 0;
     PM.touch(); PM.invalidate();
   }, id);
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await page.waitForFunction((id) => {
     const PM = (window as any).PM;
     return PM.TL._graph?.series?.length === 2 && PM.UIState.getKeyHandles(PM.L(id).p['scale.x'].kf[1])?.hi;
@@ -209,7 +222,7 @@ for (const descending of [false, true]) test(`incoming Bézier handles follow th
 test('editing one Bézier handle keeps the neighboring handle visible', async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await page.waitForFunction((layerId) => {
     const PM = (window as any).PM;
     return Boolean(PM.UIState.getKeyHandles(PM.L(layerId).p['scale.x'].kf[1])?.hi);
@@ -240,9 +253,10 @@ test('continuous Bézier handles stay joined unless Option-drag splits them', as
     const PM = (window as any).PM;
     PM.setKey(PM.L(layerId), 'scale.x', 5, 140);
     PM.setKey(PM.L(layerId), 'scale.y', 5, 70);
+    for (const key of ['scale.x', 'scale.y']) PM.L(layerId).p[key].kf[1].continuous = true;
     PM.touch(); PM.invalidate();
   }, id);
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await page.waitForFunction((layerId) => Boolean(
     (window as any).PM.UIState.getKeyHandles((window as any).PM.L(layerId).p['scale.x'].kf[1])?.ho
   ), id);
@@ -267,7 +281,7 @@ test('continuous Bézier handles stay joined unless Option-drag splits them', as
   }, id)).toEqual({
     incoming: expect.not.arrayContaining([1, 1]),
     outgoing: expect.not.arrayContaining([0, 0]),
-    mode: null,
+    mode: 'continuous',
   });
 
   await page.keyboard.press('Meta+z');
@@ -286,7 +300,7 @@ test('continuous Bézier handles stay joined unless Option-drag splits them', as
 test('marquee-selected graph keyframes move together from inside their transform box', async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await page.waitForFunction((layerId) => {
     const PM = (window as any).PM, layer = PM.L(layerId);
     return ['scale.x', 'scale.y'].every(path => layer.p[path].kf.every((key: any) => PM.UIState.getKeyHandles(key)?.pt));
@@ -331,7 +345,7 @@ test('marquee-selected graph keyframes move together from inside their transform
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('one selected Bézier handle adjusts every selected keyframe handle', async ({ session }) => {
+test('a Bézier handle adjusts paired Scale axes without changing other selected times', async ({ session }) => {
   const { page } = session;
   const id = await scaleFixture(page);
   await page.evaluate((layerId) => {
@@ -345,7 +359,7 @@ test('one selected Bézier handle adjusts every selected keyframe handle', async
     PM.TL.keySelectionActive = true;
     PM.bus.emit('sel'); PM.touch(); PM.invalidate();
   }, id);
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await page.waitForFunction((layerId) => {
     const PM = (window as any).PM, layer = PM.L(layerId);
     return Boolean(PM.UIState.getKeyHandles(layer.p['scale.x'].kf[0])?.ho);
@@ -365,8 +379,8 @@ test('one selected Bézier handle adjusts every selected keyframe handle', async
     const layer = (window as any).PM.L(layerId);
     return ['scale.x', 'scale.y'].map(path => layer.p[path].kf.map((key: any) => key.eo));
   }, id)).toEqual([
-    [expect.not.arrayContaining([0, 0]), expect.not.arrayContaining([0, 0]), [0, 0]],
-    [expect.not.arrayContaining([0, 0]), expect.not.arrayContaining([0, 0]), [0, 0]],
+    [expect.not.arrayContaining([0, 0]), [0, 0], [0, 0]],
+    [expect.not.arrayContaining([0, 0]), [0, 0], [0, 0]],
   ]);
   await page.keyboard.press('Meta+z');
   expect(await page.evaluate((layerId) => {
@@ -381,10 +395,10 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
   const ids = await page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.replaceProject(PM.mkProject({ name: 'Graph focus QA', dur: 10 }));
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Graph focus QA', dur: 10 }) })); PM.ProjectsScreen.hide();
     const focused = PM.mkLayer('solid', { name: 'Focused curve' });
     const other = PM.mkLayer('solid', { name: 'Other layer' });
-    PM.proj.layers.push(focused, other);
+    PM.proj.layers = [...PM.proj.layers, focused, other];
     PM.setKey(focused, 'opacity', 0, 0);
     PM.setKey(focused, 'opacity', 1, 100);
     PM.setKey(other, 'opacity', 0, 100);
@@ -395,7 +409,7 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
     PM.invalidate();
     return { focused: focused.id, other: other.id };
   });
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph?.target?.L?.name)).toBe('Focused curve');
   const otherRow = await page.evaluate((otherId) => {
     const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
@@ -404,15 +418,14 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
   }, ids.other);
   await page.mouse.click(otherRow.x, otherRow.y);
   expect(await page.evaluate((otherId) => (window as any).PM.sel.layers)).toEqual([ids.other]);
-  expect(await page.evaluate(() => ({
-    layer: (window as any).PM.TL._graph.target.L.name,
-    key: (window as any).PM.TL._graph.target.key,
-  }))).toEqual({ layer: 'Focused curve', key: 'opacity' });
+  expect(await page.evaluate(() => (window as any).PM.TL.graphFocus)).toEqual({ layerId: ids.focused, trackKey: 'opacity' });
+  expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual([]);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
 test('project rename is available from the tab menu and persists the live document', async ({ session }) => {
   const { page } = session;
+  await scaleFixture(page);
   const tab = page.locator('#tabs .project-doc.on');
   const id = await tab.getAttribute('data-tab-id');
   await tab.click({ button: 'right' });
@@ -450,7 +463,7 @@ test('empty timeline clicks preserve the playhead and marquee selection still wo
   await page.mouse.up();
   expect(await page.evaluate(() => (window as any).PM.sel.keys.length)).toBe(2);
   expect(await page.evaluate(() => (window as any).PM.time)).toBe(3);
-  await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
+  await openGraph(page);
   await page.waitForFunction(() => Boolean((window as any).PM.TL._graph));
   await page.mouse.click(points.prop.x, points.prop.y);
   expect(await page.evaluate(() => (window as any).PM.time)).toBe(3);
@@ -461,7 +474,8 @@ test('empty timeline clicks preserve the playhead and marquee selection still wo
 test('clicking the ruler moves the playhead', async ({ session }) => {
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
-  await page.waitForTimeout(800);
+  await scaleFixture(page);
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const box = await page.locator('#tl-canvas').boundingBox();
   if (!box) throw new Error('no canvas');
   const gut = await page.evaluate(() => (window as any).PM.TL.gut);
@@ -510,15 +524,19 @@ test('middle-button dragging pans the timeline viewport horizontally', async ({ 
 test('Shift pressed during a playhead drag snaps live to clip edges and keyframes', async ({ session }) => {
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
-  const points = await page.evaluate(() => {
+  await page.evaluate(() => {
     const PM = (window as any).PM;
-    PM.replaceProject(PM.mkProject({ name: 'Shift snap QA', dur: 8 }));
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Shift snap QA', dur: 8 }) })); PM.ProjectsScreen.hide();
     const layer = PM.mkLayer('solid', { name: 'Snap targets', from: 2, dur: 3 });
-    PM.proj.layers.push(layer);
+    PM.proj.layers = [...PM.proj.layers, layer];
     PM.setKey(layer, 'opacity', 3.4, 50);
     PM.TL.pps = 100;
     PM.TL.scrollT = 0;
     PM.invalidate('timeline');
+  });
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const points = await page.evaluate(() => {
+    const PM = (window as any).PM;
     const box = PM.TL.cv.getBoundingClientRect();
     const point = (raw: number, target: number) => ({
       x: box.x + PM.TL.gut + raw * PM.TL.pps,
@@ -546,6 +564,7 @@ test('Shift pressed during a playhead drag snaps live to clip edges and keyframe
 
 test('clicking the transport button pauses playback', async ({ session }) => {
   const { page } = session;
+  await scaleFixture(page);
   const transport = page.getByRole('button', { name: 'Play / Pause (Space)' });
 
   await transport.click();

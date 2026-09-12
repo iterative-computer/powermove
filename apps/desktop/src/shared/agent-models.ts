@@ -4,6 +4,7 @@ import type { ReasoningEffort } from './ipc';
 // Sources: developers.openai.com/api/docs/models/gpt-6-astra and
 // code.claude.com/docs/en/model-config (2026-09-05).
 export const AGENT_MODELS = {
+  compatible: [{ id: 'configured', label: 'Connected model' }],
   chatgpt: [
     { id: 'gpt-6-astra', label: 'GPT 6 Astra' },
     { id: 'gpt-5.6-sol', label: '5.6 Sol' },
@@ -30,6 +31,7 @@ export const AGENT_MODELS = {
 export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function modelEfforts(provider: string, model: string | null): ReasoningEffort[] {
+  if (provider === 'compatible') return [];
   if (provider !== 'claude') return REASONING_EFFORTS;
   if (model?.includes('haiku')) return [];
   if (model === 'claude-opus-4-6' || model === 'claude-sonnet-4-6') {

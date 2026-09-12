@@ -112,7 +112,7 @@
   <AnimatedRow {PM} {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
   <AnimatedRow {PM} {layer} label="Color" path="c.color"><ColorField {PM} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
   <TypeSettings {PM} {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} />
-{:else if (layer.type === 'solid' || layer.type === 'shape') && !layer.d.paths?.length}
+{:else if (layer.type === 'solid' || layer.type === 'shape' || layer.type === 'null') && !layer.d.paths?.length}
   <AnimatedRow {PM} {layer} label="Fill" path="c.color"><ColorField {PM} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
   {#if layer.type === 'shape'}
     <AnimatedRow {PM} {layer} label="Shape" path="c.shape"><SelectField {PM} get={get('shape', 'rect')} edit={edit('shape', 'Shape')} options={['rect', 'ellipse', 'polygon', 'star', 'line']} label="Shape" /></AnimatedRow>

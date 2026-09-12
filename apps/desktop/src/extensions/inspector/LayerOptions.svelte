@@ -15,11 +15,11 @@
   const edit = (field: string, label: string): EditBinding =>
     layerFieldBinding(PM, layer.id, field as any, { label, origin: 'inspector' });
   const parentingLayers = () => (PM.sel.layers.includes(layer.id) ? PM.selLayers() : [layer])
-    .filter((item: any) => item.type !== 'group' && PM.TYPE_META[item.type]?.transform !== false);
+    .filter((item: any) => PM.TYPE_META[item.type]?.transform !== false);
   const parentEdit: EditBinding = { mode:'command', label:'Parent layers', origin:'inspector', command: (parent) => parentingLayers().map((item: any) => ({ type:'set_layer', target:item.id, patch:{parent} })) };
   const parentOptions = $derived<SelectOption[]>((doc.tick.structure, doc.proj, sel.layers, [
     { v: null, label: 'None' },
-    ...(PM.proj?.layers || []).filter((candidate: any) => candidate.type !== 'group' && PM.TYPE_META[candidate.type]?.transform !== false && parentingLayers().every((item: any) => item.id !== candidate.id && !PM.wouldCycle(item, candidate.id)))
+    ...(PM.proj?.layers || []).filter((candidate: any) => PM.TYPE_META[candidate.type]?.transform !== false && parentingLayers().every((item: any) => item.id !== candidate.id && !PM.wouldCycle(item, candidate.id)))
       .map((candidate: any) => ({v:candidate.id,label:String(candidate.name)}))
   ]));
 </script>
@@ -30,7 +30,7 @@
 
 <Row label="Visible"><ToggleField {PM} get={() => value('on')} edit={edit('visible', 'Visibility')} label="Visibility" /></Row>
 
-{#if layer.type === 'audio' || layer.type === 'group'}
+{#if layer.type === 'audio'}
   <Row label="Color"><ColorField {PM} get={() => layer.color} edit={edit('color', 'Label color')} label="Label color" /></Row>
 {:else}
   <AnimatedRow {PM} {layer} path="l.blend" label="Blend mode"><SelectField {PM} get={() => value('blend')} edit={animatedEdit('blend', 'Blend')} options={PM.BLENDS ?? []} label="Blend" /></AnimatedRow>

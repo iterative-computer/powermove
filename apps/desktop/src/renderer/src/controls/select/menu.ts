@@ -74,7 +74,7 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     let i = active;
     for (let n = 0; n < items.length; n++) {
       i = (i + delta + items.length) % items.length;
-      if (!req.options[i].disabled) { setActive(i); return; }
+      if (req.options[i] && !req.options[i]!.disabled) { setActive(i); return; }
     }
   }
 
@@ -86,14 +86,16 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     typedAt = now;
     const start = typed.length === 1 ? active + 1 : active;
     for (let n = 0; n < items.length; n++) {
-      const i = (start + n) % items.length;
-      if (req.options[i].label.toLowerCase().startsWith(typed.toLowerCase()) && !req.options[i].disabled) { setActive(i); return; }
+      const i = ((start + n) % items.length + items.length) % items.length;
+      const option = req.options[i];
+      if (option && option.label.toLowerCase().startsWith(typed.toLowerCase()) && !option.disabled) { setActive(i); return; }
     }
   }
 
   let closed = false;
   function pick(i: number): void {
     const option = req.options[i];
+    if (!option || option.disabled) return;
     close();
     req.onPick(option.value);
   }

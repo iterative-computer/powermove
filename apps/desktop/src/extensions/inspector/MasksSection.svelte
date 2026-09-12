@@ -31,7 +31,19 @@
   const enabled = (mask: any) => (doc.tick.values, doc.proj, transport.time, evaluatedValue(PM, layer, mask.on, transport.time, `m.${mask.id}.on`) !== false);
 
   function addMask(): void {
-    mutate('Add mask', () => layer.masks.push(PM.mkMask('rect', PM.curComp())));
+    mutate('Add mask', () => {
+      const mask = PM.mkMask('rect', PM.curComp());
+      if (layer.type === 'group') {
+        const bounds = PM.groupBounds?.(layer, transport.time);
+        if (bounds) {
+          mask.p.x.v = (bounds.x0 + bounds.x1) / 2;
+          mask.p.y.v = (bounds.y0 + bounds.y1) / 2;
+          mask.p.w.v = Math.max(1, bounds.w);
+          mask.p.h.v = Math.max(1, bounds.h);
+        }
+      }
+      layer.masks.push(mask);
+    });
   }
 
   function propertyBinding(maskId: string | number, key: string, label: string): EditBinding {

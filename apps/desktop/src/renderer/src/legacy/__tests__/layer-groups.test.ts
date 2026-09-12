@@ -127,6 +127,33 @@ describe('editable timeline groups',()=>{
     expect(PM.Edit.apply({type:'set_layer',target:group.id,patch:{from:-.5}}).ok).toBe(true);
     expect(sanitizeProject(JSON.parse(PM.serialize()).proj).layers.find(l=>l.id===group.id)?.from).toBe(-.5);
   });
+  it('parents a group to a transform layer without jumping and rejects its own contents', () => {
+    const {PM,a,b,c}=editor(); a.parent=null;
+    const group=PM.groupLayers([a.id,b.id]);
+    const groupPose=PM.worldMatrix(group,2), childPose=PM.worldMatrix(a,2);
+    expect(PM.Edit.apply({type:'set_layer',target:group.id,patch:{parent:c.id}}).ok).toBe(true);
+    expect(group.parent).toBe(c.id);
+    PM.worldMatrix(group,2).forEach((value:number,index:number)=>expect(value).toBeCloseTo(groupPose[index]));
+    PM.worldMatrix(a,2).forEach((value:number,index:number)=>expect(value).toBeCloseTo(childPose[index]));
+    expect(sanitizeProject(JSON.parse(PM.serialize()).proj).layers.find(layer=>layer.id===group.id)?.parent).toBe(c.id);
+    expect(PM.Edit.apply({type:'set_layer',target:group.id,patch:{parent:a.id}}).ok).toBe(false);
+    expect(group.parent).toBe(c.id);
+  });
+  it('parents a layer to a group without changing group membership or jumping', () => {
+    const {PM,a,b,c}=editor(); a.parent=null;
+    const group=PM.groupLayers([a.id,b.id]);
+    const before=PM.worldMatrix(c,2);
+    const result=PM.Edit.apply({type:'set_layer',target:c.id,patch:{parent:group.id}});
+    expect(result.ok,result.message).toBe(true);
+    expect(c.parent).toBe(group.id);
+    expect(c.group ?? null).toBeNull();
+    PM.worldMatrix(c,2).forEach((value:number,index:number)=>expect(value).toBeCloseTo(before[index]));
+    group.p['position.x'].v+=40; PM.touch();
+    expect(PM.worldMatrix(c,2)[4]).toBeCloseTo(before[4]+40);
+    const saved=sanitizeProject(JSON.parse(PM.serialize()).proj);
+    expect(saved.layers.find(layer=>layer.id===c.id)?.parent).toBe(group.id);
+    expect(PM.Edit.apply({type:'set_layer',target:a.id,patch:{parent:group.id}}).ok).toBe(false);
+  });
   it('ungroups animation into editable frame keys without losing motion', () => {
     const {PM,a,b}=editor(), group=PM.groupLayers([a.id,b.id]);
     PM.Edit.apply([
@@ -149,6 +176,15 @@ describe('editable timeline groups',()=>{
     const group=PM.groupLayers([a.id,b.id]), source=JSON.stringify([a.p,b.p]);
     expect(PM.Edit.apply({type:'ungroup_layers',targets:[group.id]}).ok).toBe(true);
     expect(JSON.stringify([a.p,b.p])).toBe(source);
+  });
+  it('refuses to silently discard a group compositing boundary when ungrouping',()=>{
+    const {PM,a,b}=editor(); const group=PM.groupLayers([a.id,b.id]);
+    group.fx.push({id:'fx',type:'blur',on:true,p:{}});
+    const before=PM.serialize();
+    const result=PM.Edit.apply({type:'ungroup_layers',targets:[group.id]});
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('Remove visual compositing');
+    expect(PM.serialize()).toBe(before);
   });
   it('bakes a group scale animation that starts at zero',()=>{
     const {PM,a,b}=editor(),group=PM.groupLayers([a.id,b.id]);

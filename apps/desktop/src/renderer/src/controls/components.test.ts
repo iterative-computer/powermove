@@ -331,7 +331,7 @@ describe('picker drafts', () => {
 
   it('ColorField samples a screen color through the system eyedropper', async () => {
     const open = vi.fn().mockResolvedValue({ sRGBHex: '#0a84ff' });
-    (window as Window & { EyeDropper?: new () => { open: typeof open } }).EyeDropper = class {
+    (window as Window & { EyeDropper?: new () => { open: () => ReturnType<typeof open> } }).EyeDropper = class {
       open() { return open(); }
     };
     const { PM, Edit } = fakePM();

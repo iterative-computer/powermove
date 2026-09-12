@@ -9,6 +9,7 @@ const shaderMeta: any = new Map();
 const fxOpen: any = new Map();
 const layerCollapsed: any = new Map();
 const layerCollapsedBase: any = new Map();
+const groupCollapsed: any = new Map();
 let activeProject: any = null;
 
 const idOf = (value: any) => typeof value === 'string' ? value : value && (value.i || value.id);
@@ -20,6 +21,7 @@ const clear = () => {
   fxOpen.clear();
   layerCollapsed.clear();
   layerCollapsedBase.clear();
+  groupCollapsed.clear();
 };
 
 function setKeyPatch(id: any, patch: any) {
@@ -80,7 +82,10 @@ function installEffectCompat(effect: any) {
 function syncLayerCollapsed(layer: any) {
   const id = idOf(layer);
   if (!id) return;
-  const persistent = layer.collapsed !== false;
+  /* Before hierarchy disclosure had its own state, a group's `collapsed`
+     field represented its children. Do not reinterpret an open legacy group
+     as a request to expose its transform properties. */
+  const persistent = layer.type === 'group' ? true : layer.collapsed !== false;
   if (!layerCollapsedBase.has(id)) {
     layerCollapsedBase.set(id, persistent);
     if (!layerCollapsed.has(id)) layerCollapsed.set(id, persistent);
@@ -153,6 +158,7 @@ function prune(proj: any) {
   for (const id of fxOpen.keys()) if (!ids.effects.has(id)) fxOpen.delete(id);
   for (const id of layerCollapsed.keys()) if (!ids.layers.has(id)) layerCollapsed.delete(id);
   for (const id of layerCollapsedBase.keys()) if (!ids.layers.has(id)) layerCollapsedBase.delete(id);
+  for (const id of groupCollapsed.keys()) if (!ids.layers.has(id)) groupCollapsed.delete(id);
   return UIState;
 }
 
@@ -166,6 +172,7 @@ const UIState = PM.UIState = {
   shaderMeta,
   fxOpen,
   layerCollapsed,
+  groupCollapsed,
   prune,
 
   getKeyHandles(key: any) {
@@ -229,10 +236,34 @@ const UIState = PM.UIState = {
     if (!id) return true;
     const next = !!collapsed;
     if (layer && typeof layer === 'object') {
-      if (!layerCollapsedBase.has(id)) layerCollapsedBase.set(id, layer.collapsed !== false);
-      if ((layer.collapsed !== false) === next) layerCollapsedBase.set(id, next);
+      const persistent = layer.type === 'group' ? true : layer.collapsed !== false;
+      if (!layerCollapsedBase.has(id)) layerCollapsedBase.set(id, persistent);
+      if (persistent === next) layerCollapsedBase.set(id, next);
     }
     layerCollapsed.set(id, next);
+    return next;
+  },
+
+  /* Group hierarchy disclosure is independent from a group's own property
+     strip. Opening a group reveals its child layers without also exposing
+     every transform row on the group itself. */
+  getGroupCollapsed(layer: any) {
+    current();
+    const id = idOf(layer);
+    if (!id) return true;
+    if (!groupCollapsed.has(id)) {
+      /* Preserve the old hierarchy state during the one-time split from the
+         legacy shared disclosure field. */
+      groupCollapsed.set(id, layer && typeof layer === 'object' ? layer.collapsed !== false : true);
+    }
+    return groupCollapsed.get(id);
+  },
+  setGroupCollapsed(layer: any, collapsed: any) {
+    current();
+    const id = idOf(layer);
+    if (!id) return true;
+    const next = !!collapsed;
+    groupCollapsed.set(id, next);
     return next;
   },
 };

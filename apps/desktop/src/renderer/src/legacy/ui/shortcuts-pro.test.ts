@@ -48,6 +48,7 @@ describe('pro shortcut helper contracts', () => {
     const a = add(PM, 'a');
     add(PM, 'b');
     PM.selectLayers([a.id]);
+    PM.hist.clear(); // Start the command history after selecting its targets.
 
     PM.cmd('contextCopy');
     PM.cmd('contextCut');
@@ -134,6 +135,7 @@ describe('pro shortcut helper contracts', () => {
     add(PM, 'locked', true);
     const c = add(PM, 'c');
     PM.selectLayers([b.id, c.id]);
+    PM.hist.clear(); // Start the command history after selecting its targets.
 
     orderLayers(PM, 'front');
     expect(PM.proj.layers.map((layer: any) => layer.id)).toEqual(['b', 'a', 'locked', 'c']);

@@ -154,9 +154,12 @@ export function install(PM: PMRegistry): void {
     const next = applyPatch(PM.proj, patches);
     PM.replaceProject(next, { selection });
   };
-  const publishProjectPatch = (patches?: Patch[]) => {
+  const publishProjectPatch = (patches?: Patch[], origin: any = 'interface') => {
     if (!patches?.length || !PM.proj?.id) return;
-    PM.bus.emit('history:project-patch', { projectId: PM.proj.id, revision: PM.proj.revision || 0, patches: clone(patches) });
+    PM.bus.emit('history:project-patch', {
+      projectId: PM.proj.id, revision: PM.proj.revision || 0,
+      origin: origin === 'agent' ? 'agent' : 'interface', patches: clone(patches),
+    });
   };
 
   const scopedPatches = (current: any) => {
@@ -174,14 +177,14 @@ export function install(PM: PMRegistry): void {
   const pathKey = (path: PathPart[]) => JSON.stringify(path);
 
   const H: any = {
-    begin(label: any, group: any = null) {
+    begin(label: any, group: any = null, origin: any = 'interface') {
       if (depth++ > 0) return pending?.before || null;
-      pending = { label, before: snap(), group };
+      pending = { label, before: snap(), group, origin };
       return pending.before;
     },
-    beginScoped(label: any, group: any = null) {
+    beginScoped(label: any, group: any = null, origin: any = 'interface') {
       if (depth++ > 0) return false;
-      pending = { label, group, scoped: true, scopes: new Map() };
+      pending = { label, group, origin, scoped: true, scopes: new Map() };
       return true;
     },
     track(paths: PathPart[][]) {
@@ -230,7 +233,7 @@ export function install(PM: PMRegistry): void {
         undo: () => restorePatches(patches.backward),
         redo: () => restorePatches(patches.forward),
       });
-      publishProjectPatch(patches.forward);
+      publishProjectPatch(patches.forward, current.origin);
       PM.touch();
       PM.autosave?.();
       return true;
@@ -250,8 +253,8 @@ export function install(PM: PMRegistry): void {
     },
     pendingSnapshot: () => pending?.before || null,
     /** Wrap a legacy direct mutation. PM.Edit uses the same compact patch entry. */
-    do(label: any, fn: any) {
-      H.begin(label);
+    do(label: any, fn: any, origin: any = 'interface') {
+      H.begin(label, null, origin);
       try { return fn(); }
       catch (error) { H.rollback(); throw error; }
       finally { if (pending) H.commit(label); }
@@ -260,7 +263,7 @@ export function install(PM: PMRegistry): void {
       if (idx < 0) return false;
       const entry = stack[idx--]!;
       entry.undo();
-      publishProjectPatch(entry.backward);
+      publishProjectPatch(entry.backward, 'interface');
       publish();
       return true;
     },
@@ -268,7 +271,7 @@ export function install(PM: PMRegistry): void {
       if (idx >= stack.length - 1) return false;
       const entry = stack[++idx]!;
       entry.redo();
-      publishProjectPatch(entry.forward);
+      publishProjectPatch(entry.forward, 'interface');
       publish();
       return true;
     },
@@ -291,6 +294,8 @@ export function install(PM: PMRegistry): void {
         label,
         bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
         project: true,
+        forward: entries.flatMap(entry => entry.forward || []),
+        backward: [...entries].reverse().flatMap(entry => entry.backward || []),
         undo: () => { for (let index = entries.length - 1; index >= 0; index--) entries[index]!.undo(); },
         redo: () => { for (const entry of entries) entry.redo(); },
         cleanup: entries.some(entry => entry.cleanup)
@@ -323,11 +328,48 @@ export function install(PM: PMRegistry): void {
       if (!id || stack[idx]?.id !== id) return false;
       return H.undo();
     },
-    restoreSnapshot(json: any, label: any = 'Restore checkpoint') {
+    restoreSnapshot(json: any, label: any = 'Restore checkpoint', origin: any = 'interface') {
       let parsed: any;
       try { parsed = JSON.parse(json); } catch { return false; }
       if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.layers)) return false;
-      H.do(label, () => PM.replaceProject(parsed));
+      H.do(label, () => PM.replaceProject(parsed), origin);
+      return true;
+    },
+    /** Persist document edits; runtime UI callbacks belong to this session only. */
+    export(options: { copy?: boolean } = {}) {
+      const entries = stack.filter(entry => entry.project && entry.forward && entry.backward);
+      const saved = { version: 1,
+        index: stack.slice(0, idx + 1).filter(entry => entry.project && entry.forward && entry.backward).length - 1,
+        entries: entries.map(entry => ({ label: entry.label, forward: entry.forward, backward: entry.backward })),
+      };
+      // History patches are immutable after publication. Internal serializers can
+      // read them without cloning the entire undo history before every save.
+      return options.copy === false ? saved : clone(saved);
+    },
+    import(saved: any) {
+      H.clear();
+      const validPatches = (patches: any) => Array.isArray(patches) && patches.every(patch =>
+        patch && Array.isArray(patch.path) && typeof patch.exists === 'boolean'
+        && patch.path.every((part: any) => typeof part === 'string'
+          ? !['__proto__', 'prototype', 'constructor'].includes(part)
+          : Number.isSafeInteger(part) && part >= 0));
+      if (saved?.version !== 1 || !Array.isArray(saved.entries) || saved.entries.length > MAX_ENTRIES
+          || !Number.isInteger(saved.index) || saved.index < -1 || saved.index >= saved.entries.length
+          || !saved.entries.every((entry: any) => typeof entry?.label === 'string'
+            && validPatches(entry.forward) && validPatches(entry.backward))) return false;
+      for (const source of saved.entries) {
+        const { label, forward, backward } = clone(source);
+        stack.push({ id: PM.uid('history'), label, project: true, forward, backward,
+          bytes: encodedBytes(forward) + encodedBytes(backward),
+          undo: () => restorePatches(backward), redo: () => restorePatches(forward) });
+      }
+      idx = saved.index;
+      totalBytes = stack.reduce((sum, entry) => sum + entry.bytes, 0);
+      // Remove distant redo entries first when reopening under a smaller budget.
+      while (totalBytes > maxBytes && stack.length > idx + 1) totalBytes -= stack.pop()!.bytes;
+      trim();
+      idx = Math.max(-1, idx);
+      publish();
       return true;
     },
     clear() {

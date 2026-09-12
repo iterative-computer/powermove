@@ -399,7 +399,7 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
   if (revision !== transaction.revision) {
     throw new Error('The project changed after the agent edit, so Powermove left both the user work and the agent transaction intact instead of restoring an older snapshot.');
   }
-  if (!PM.hist.restoreSnapshot(transaction.snapshot, 'Roll back agent changes')) {
+  if (!PM.hist.restoreSnapshot(transaction.snapshot, 'Roll back agent changes', 'agent')) {
     throw new Error('Powermove could not restore the pre-agent project snapshot.');
   }
   transaction.baseRevision = currentRevision();

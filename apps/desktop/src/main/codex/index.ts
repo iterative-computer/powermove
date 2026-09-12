@@ -1,3 +1,4 @@
+import { CompatibleProvider } from '../compatible-provider';
 /**
  * Bootstrap contract: call `registerCodexIpc(ipcMain, { extensionsDir,
  * apiPackFiles, ... })`. `extensionsDir` is the writable user-extension root.
@@ -206,6 +207,7 @@ export function registerCodexIpc(
   }),
   appServerRunner: CodexAppServerRunner = new CodexAppServerRunner()
 ): void {
+  const compatible = new CompatibleProvider(ctx.userData);
   const runner = new CodexRunner();
   const claudeRunner = new ClaudeRunner();
   const owners = new Map<string, WebContents>();
@@ -260,6 +262,9 @@ export function registerCodexIpc(
     return claudeAccount.disconnect();
   });
 
+  ipcMain.handle(IPC.compatibleStatus, async (event) => { requireTrusted(event, ctx); return compatible.status(); });
+  ipcMain.handle(IPC.compatibleConfigure, async (event, input) => { requireTrusted(event, ctx); return compatible.configure(input); });
+
   ipcMain.handle(IPC.codexRun, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     const req = requireRunRequest(rawRequest);
@@ -269,6 +274,7 @@ export function registerCodexIpc(
     owners.set(req.id, owner);
     let toolSession: PowermoveAgentToolSession | null = null;
     const rendererDestroyed = (): void => {
+      compatible.cancel(req.id);
       void Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
       void toolSession?.finish(false).catch(() => undefined);
     };
@@ -284,7 +290,10 @@ export function registerCodexIpc(
           baseRevision: projectRevision(req.projectJSON)
         });
       }
-      let result = await selectedRunner.run(req, {
+      let result = req.provider === 'compatible'
+        ? await compatible.run(req, step => { if (!owner.isDestroyed()) owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step }); },
+          toolSession && toolBridge ? (name, args) => toolBridge.callRenderer(toolSession!, name, args) : undefined)
+        : await selectedRunner.run(req, {
         userData: ctx.userData,
         extensionsDir: ctx.extensionsDir,
         apiPackFiles: ctx.apiPackFiles,
@@ -340,6 +349,7 @@ export function registerCodexIpc(
     requireTrusted(event, ctx);
     const req = requireCancelRequest(rawRequest);
     if (owners.get(req.id) === event.sender) {
+      compatible.cancel(req.id);
       await Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
     }
   });
@@ -384,6 +394,7 @@ export function registerCodexIpc(
   });
 
   app.once('before-quit', () => {
+    compatible.cancelAll();
     void runner.cancelAll();
     void appServerRunner.shutdown();
     void claudeRunner.cancelAll();

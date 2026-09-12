@@ -1,4 +1,4 @@
-import { CHANNELS_3D } from '../../renderer/src/legacy/core/space-3d';
+import { CHANNELS_3D } from 'powermove';
 /** Presentation groups retain the real scalar channels and key IDs. No migration
  * or resampling is needed, including for old projects with unequal key times. */
 export const scalePaths = ['scale.x', 'scale.y'];

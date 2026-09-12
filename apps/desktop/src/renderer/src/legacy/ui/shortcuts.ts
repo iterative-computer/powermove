@@ -106,7 +106,6 @@ PM.addLayerCmd = addLayer;
 def('newText', 'New text layer', '⌘T', () => addLayer('text', { name: 'Headline', p: center() }), 'Create');
 def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }), 'Create');
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
-def('newShader', 'New shader layer', null, () => { const L: any = addLayer('shader', { name: 'Shader' }); PM.syncShaderUniforms?.(L); PM.openShaderEditor(L); return L; }, 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
 def('toolSelect', 'Selection tool', 'V', () => PM.setTool('select'), 'Tool');
@@ -432,6 +431,41 @@ function rebaseTailAnimation(PM: PMRegistry, layer: any, offset: number): void {
      Keyframes, by contrast, are rebased so their value is continuous. */
 }
 
+function splitSpan(PM: PMRegistry, layer: any): { from: number; dur: number } {
+  const value = layer?.type === 'group' && typeof PM.groupSpan === 'function'
+    ? PM.groupSpan(layer)
+    : layer;
+  return { from: Number(value?.from), dur: Number(value?.dur) };
+}
+
+function crossesPlayhead(span: { from: number; dur: number }, time: number): boolean {
+  return Number.isFinite(span.from) && Number.isFinite(span.dur)
+    && time > span.from && time < span.from + span.dur;
+}
+
+function splitLayerClone(PM: PMRegistry, layer: any, tail: any, time: number): void {
+  const sourceEnd = Number(layer.from) + Number(layer.dur);
+  const sourceOffset = time - Number(layer.from);
+  tail.from = time;
+  tail.dur = sourceEnd - time;
+  rebaseTailAnimation(PM, tail, sourceOffset);
+  if (PM.MediaTiming?.isTimed?.(layer)) {
+    tail.d = tail.d && typeof tail.d === 'object' ? tail.d : {};
+    if (typeof PM.MediaTiming.trimAtStart === 'function') {
+      tail.d.trim = PM.MediaTiming.trimAtStart(layer, time);
+    }
+  }
+  /* The cut is an internal boundary, not a new entrance/exit. Keep the
+     original entrance on the head and the original exit on the tail. */
+  layer.transitionOut = null;
+  tail.transitionIn = null;
+  if (layer.type === 'audio') {
+    if (layer.d && typeof layer.d === 'object') layer.d.fadeOut = 0;
+    if (tail.d && typeof tail.d === 'object') tail.d.fadeIn = 0;
+  }
+  layer.dur = time - Number(layer.from);
+}
+
 /**
  * Split the selected active layers, or all visible active root layers when
  * there is no selection. The tail is inserted immediately above its source,
@@ -440,58 +474,100 @@ function rebaseTailAnimation(PM: PMRegistry, layer: any, offset: number): void {
 export function splitLayers(PM: PMRegistry): unknown {
   const layers = currentLayers(PM);
   const selected = selectedStackLayers(PM);
-  const selectionRequested = Boolean((PM.sel?.layers || []).length || selected.length);
+  const selectedIds = (PM.sel?.layers || []).filter(Boolean);
+  const selectionRequested = Boolean(selectedIds.length || selected.length);
   const T = Number(PM.time);
   if (!Number.isFinite(T)) return false;
 
-  const targets = (selectionRequested ? selected : layers.filter((layer: any) =>
-    !layer.parent && layer.on !== false))
-    /* A group strip is the aggregate span of its editable members, not a
-       separate piece of footage. Splitting it therefore cuts its members and
-       keeps one group hierarchy instead of cloning an empty second group. */
-    .filter((layer: any) => layer.type !== 'group')
-    .filter((layer: any) => !layer.lock && Number.isFinite(Number(layer.from))
-      && Number.isFinite(Number(layer.dur))
-      && T > Number(layer.from) && T < Number(layer.from) + Number(layer.dur));
-  if (!targets.length) return false;
+  const explicit = selectionRequested
+    ? layers.filter((layer: any) => selectedIds.includes(layer.id))
+    : layers.filter((layer: any) => !layer.parent && layer.on !== false);
+  const explicitSet = new Set(explicit.map((layer: any) => layer.id));
+  const groupRoots = explicit.filter((layer: any) => layer.type === 'group'
+    && !(PM.groupAncestors?.(layer) || []).some((group: any) => explicitSet.has(group.id)));
+  const groupedIds = new Set(groupRoots.flatMap((group: any) => PM.expandGroups?.([group.id]) || [group.id]));
+  const ordinaryTargets = (selectionRequested ? selected : explicit)
+    .filter((layer: any) => layer.type !== 'group' && !groupedIds.has(layer.id))
+    .filter((layer: any) => !layer.lock && crossesPlayhead(splitSpan(PM, layer), T));
+  const groupPlans = groupRoots.map((root: any) => {
+    const ids = new Set(PM.expandGroups?.([root.id]) || [root.id]);
+    const hierarchy = layers.filter((layer: any) => ids.has(layer.id));
+    return { root, hierarchy };
+  }).filter(({ root, hierarchy }: any) => crossesPlayhead(splitSpan(PM, root), T)
+    && hierarchy.length > 1
+    && !hierarchy.some((layer: any) => layer.lock
+      || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock && !hierarchy.includes(group))));
+  if (!ordinaryTargets.length && !groupPlans.length) return false;
 
   return runAtomic(PM, 'Split', () => {
-    const tails: any[] = [];
+    const selectedTails: any[] = [];
     const used = new Set(layers.map((layer: any) => layer.id));
-    /* `targets` follows stack order so each source/tail pair stays adjacent
-       even when several selected layers are split in one operation. */
-    for (const layer of targets) {
+    for (const { root, hierarchy } of groupPlans) {
+      const hierarchyIds = new Set(hierarchy.map((layer: any) => layer.id));
+      const side = new Map<any, 'head' | 'tail' | 'both'>();
+      for (const layer of hierarchy) {
+        const span = splitSpan(PM, layer);
+        side.set(layer, crossesPlayhead(span, T) ? 'both'
+          : span.from >= T ? 'tail' : 'head');
+      }
+
+      /* Crossing rows get a real tail copy. Rows wholly after the playhead
+         move into that tail hierarchy, while rows wholly before it stay in
+         the head. This keeps staggered and nested groups as two coherent
+         strips instead of leaving future-only rows attached to the head. */
+      const tailById = new Map<any, any>();
+      const clonePairs: Array<[any, any]> = [];
+      for (const layer of hierarchy) {
+        if (side.get(layer) === 'tail') {
+          tailById.set(layer.id, layer);
+          continue;
+        }
+        if (side.get(layer) !== 'both') continue;
+        const index = layers.indexOf(layer);
+        if (index < 0) continue;
+        const tail = cloneForCommand(PM, layer);
+        ensureLayerId(PM, tail, used, layer);
+        splitLayerClone(PM, layer, tail, T);
+        layers.splice(index, 0, tail);
+        tailById.set(layer.id, tail);
+        clonePairs.push([layer, tail]);
+      }
+
+      for (const layer of hierarchy) {
+        if (side.get(layer) !== 'tail') continue;
+        const tailGroup = tailById.get(layer.group);
+        if (tailGroup) layer.group = tailGroup.id;
+        const tailParent = tailById.get(layer.parent);
+        if (tailParent) layer.parent = tailParent.id;
+        const tailMatte = tailById.get(layer.matteSource);
+        if (tailMatte) layer.matteSource = tailMatte.id;
+      }
+      for (const [source, tail] of clonePairs) {
+        tail.group = tailById.get(source.group)?.id
+          || (hierarchyIds.has(source.group) ? null : source.group);
+        tail.parent = tailById.get(source.parent)?.id || source.parent || null;
+        if (source.matteSource) tail.matteSource = tailById.get(source.matteSource)?.id || source.matteSource;
+      }
+      const tailRoot = tailById.get(root.id);
+      if (tailRoot) selectedTails.push(tailRoot);
+    }
+
+    /* Ordinary layer targets follow stack order so each source/tail pair stays
+       adjacent even when several selected layers are split in one operation. */
+    for (const layer of ordinaryTargets) {
       const index = layers.indexOf(layer);
       if (index < 0) continue;
-      const sourceEnd = Number(layer.from) + Number(layer.dur);
       const tail = cloneForCommand(PM, layer);
       ensureLayerId(PM, tail, used, layer);
-      const sourceOffset = T - Number(layer.from);
-      tail.from = T;
-      tail.dur = sourceEnd - T;
-      rebaseTailAnimation(PM, tail, sourceOffset);
-      if (PM.MediaTiming?.isTimed?.(layer)) {
-        tail.d = tail.d && typeof tail.d === 'object' ? tail.d : {};
-        if (typeof PM.MediaTiming.trimAtStart === 'function') {
-          tail.d.trim = PM.MediaTiming.trimAtStart(layer, T);
-        }
-      }
-      /* The cut is an internal boundary, not a new entrance/exit. Keep the
-         original entrance on the head and the original exit on the tail. */
-      layer.transitionOut = null;
-      tail.transitionIn = null;
-      if (layer.type === 'audio') {
-        if (layer.d && typeof layer.d === 'object') layer.d.fadeOut = 0;
-        if (tail.d && typeof tail.d === 'object') tail.d.fadeIn = 0;
-      }
-      layer.dur = T - Number(layer.from);
+      splitLayerClone(PM, layer, tail, T);
       layers.splice(index, 0, tail);
-      tails.push(tail);
+      selectedTails.push(tail);
     }
-    if (!tails.length) return false;
-    selectLayerIds(PM, tails.map((layer: any) => layer.id));
+    if (!selectedTails.length) return false;
+    PM.normalizeGroupStack?.();
+    selectLayerIds(PM, selectedTails.map((layer: any) => layer.id));
     finishLayerMutation(PM);
-    return tails;
+    return selectedTails;
   });
 }
 

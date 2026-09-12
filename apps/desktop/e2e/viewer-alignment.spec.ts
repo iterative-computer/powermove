@@ -8,6 +8,47 @@ async function compositionPoint(page: any, x: number, y: number) {
 }
 
 test.describe('@viewer alignment snapping', () => {
+  test('renders the composition center as full-axis guides with a fixed bullseye', async ({ session }) => {
+    const { page } = session;
+    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.octx));
+    const rendering = await page.evaluate(() => {
+      const PM = (window as any).PM, V = PM.Viewer;
+      PM.replaceProject(PM.mkProject({ name: 'Center guide', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' }));
+      V.fit = true; V.layout();
+      const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 270, x1: 370, y0: 140, y1: 220 }));
+      const composition = V.snapCandidatesFromPoints(V.boxSnapPoints(
+        { x0: 0, x1: 640, y0: 0, y1: 360 }, 'composition',
+      ));
+      V.snapLines = V.snapBox(moving, composition, 1).lines;
+
+      const segments: Array<[number, number, number, number]> = [], arcs: Array<[number, number, number]> = [];
+      const ctx = V.octx, moveTo = ctx.moveTo, lineTo = ctx.lineTo, arc = ctx.arc;
+      let start: [number, number] | null = null;
+      ctx.moveTo = function(x: number, y: number) { start = [x, y]; return moveTo.call(this, x, y); };
+      ctx.lineTo = function(x: number, y: number) {
+        if (start) segments.push([start[0], start[1], x, y]);
+        start = [x, y];
+        return lineTo.call(this, x, y);
+      };
+      ctx.arc = function(x: number, y: number, radius: number, ...rest: any[]) {
+        arcs.push([x, y, radius * V.shown]);
+        return arc.call(this, x, y, radius, ...rest);
+      };
+      try { PM.bus.emit('overlay'); } finally {
+        ctx.moveTo = moveTo; ctx.lineTo = lineTo; ctx.arc = arc; V.snapLines = null;
+      }
+      return { segments, arcs };
+    });
+
+    expect(rendering.segments).toContainEqual([320, 0, 320, 360]);
+    expect(rendering.segments).toContainEqual([0, 180, 640, 180]);
+    expect(rendering.arcs).toEqual(expect.arrayContaining([
+      [320, 180, 6],
+      [320, 180, 1.5],
+    ]));
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('aligns both axes during an ordinary layer drag and allows Command to bypass snapping', async ({ session }) => {
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));

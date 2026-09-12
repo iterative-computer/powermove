@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, stat } from 'node:fs/promises';
+import { access, open, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 export const PACKAGED_CODEX_RELATIVE_PATH = path.join('codex', 'bin', 'codex');
@@ -51,6 +51,31 @@ async function executable(candidate: string | null | undefined): Promise<string 
   }
 }
 
+/**
+ * Codex delegates shell and MCP work to a companion executable beside the
+ * main binary. iCloud can leave that large companion as a dataless placeholder
+ * while keeping the small launcher executable, which otherwise makes runtime
+ * discovery succeed and every tool call fail during its handshake.
+ */
+async function executableRuntime(candidate: string | null | undefined): Promise<string | null> {
+  const binary = await executable(candidate);
+  if (binary === null) return null;
+  const host = path.join(path.dirname(binary), 'codex-code-mode-host');
+  const companion = await executable(host);
+  if (companion === null) return null;
+  let file;
+  try {
+    file = await open(companion, 'r');
+    const probe = Buffer.allocUnsafe(1);
+    const { bytesRead } = await file.read(probe, 0, 1, 0);
+    return bytesRead === 1 ? binary : null;
+  } catch {
+    return null;
+  } finally {
+    await file?.close().catch(() => undefined);
+  }
+}
+
 async function probeLoginShell(): Promise<string | null> {
   if (loginShellProbe === null) {
     loginShellProbe = (async () => {
@@ -82,6 +107,8 @@ export async function discoverCodex(
   codexBinary: string | null,
   options: CodexDiscoveryOptions = {}
 ): Promise<string> {
+  // Explicit binaries may be npm/shell launchers whose companion lives in the
+  // package they resolve internally rather than beside the launcher itself.
   const environmentBinary = await executable(process.env.CODEX_BINARY);
   if (environmentBinary !== null) return environmentBinary;
 
@@ -89,7 +116,7 @@ export async function discoverCodex(
   if (preferredBinary !== null) return preferredBinary;
 
   for (const candidate of options.bundledCandidates ?? bundledCodexCandidates()) {
-    const found = await executable(candidate);
+    const found = await executableRuntime(candidate);
     if (found !== null) return found;
   }
 
@@ -97,7 +124,7 @@ export async function discoverCodex(
   if (shellBinary !== null) return shellBinary;
 
   for (const candidate of KNOWN_CODEX_PATHS) {
-    const found = await executable(candidate);
+    const found = await executableRuntime(candidate);
     if (found !== null) return found;
   }
   throw new Error(CODEX_NOT_FOUND_MESSAGE);
