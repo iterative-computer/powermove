@@ -48,12 +48,26 @@
   ];
 
   let active = $state<string>(features[0].id);
-  let blocks: Record<string, HTMLElement | undefined> = {};
+  let blocks = $state<Record<string, HTMLElement | undefined>>({});
+  let railItems = $state<Record<string, HTMLButtonElement | undefined>>({});
+  let markerY = $state(0);
+  let hops = $state(0);
+  let ready = $state(false);
+  let lockUntil = 0;
+
+  $effect(() => {
+    const el = railItems[active];
+    if (!el) return;
+    const y = el.offsetTop + el.offsetHeight / 2;
+    if (!ready) { markerY = y; ready = true; return; }
+    if (y !== markerY) { markerY = y; hops++; }
+  });
 
   $effect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         const visible = entries.filter((e) => e.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio);
+        if (Date.now() < lockUntil) return;
         const next = visible[0]?.target.id;
         if (next) active = next;
       },
@@ -64,8 +78,9 @@
   });
 
   function jump(id: string) {
-    blocks[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    lockUntil = Date.now() + 900;
     active = id;
+    blocks[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 </script>
 
@@ -75,9 +90,14 @@
     <div class="feature-layout">
       <div class="rail">
         <div class="rail-title">Product</div>
-        {#each features as f (f.id)}
-          <button type="button" class="rail-item" data-active={active === f.id ? '' : undefined} onclick={() => jump(f.id)}>{f.rail}</button>
-        {/each}
+        <div class="rail-items">
+          <span class="rail-marker" data-ready={ready ? '' : undefined} style:transform={`translateY(${markerY}px)`} aria-hidden="true">
+            {#key hops}<i class="rail-drop"></i>{/key}
+          </span>
+          {#each features as f (f.id)}
+            <button type="button" class="rail-item" bind:this={railItems[f.id]} data-active={active === f.id ? '' : undefined} onclick={() => jump(f.id)}>{f.rail}</button>
+          {/each}
+        </div>
       </div>
       <div class="blocks">
         {#each features as f (f.id)}
