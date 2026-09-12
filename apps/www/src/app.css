@@ -88,12 +88,15 @@ h1 .muted{color:var(--tx-3)}
 .logo-cloud{padding:56px 24px 0;text-align:center}
 .logo-cloud-caption{font-size:var(--fs-sm);letter-spacing:.02em;color:var(--tx-3)}
 .logo-cloud-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:20px 56px;margin-top:22px;color:var(--tx-3)}
-.brand{display:inline-flex;align-items:center;gap:12px;transition:color var(--dur-2)}
+.brand{display:inline-flex;align-items:center;gap:12px;cursor:default;user-select:none;transition:color var(--dur-2)}
 .brand:hover{color:var(--tx)}
 .brand svg{flex-shrink:0}
 .brand-name{display:flex;flex-direction:column;align-items:flex-start;line-height:1.1;font-size:17px;font-weight:500;letter-spacing:-.02em;color:var(--tx-2)}
 .brand:hover .brand-name{color:var(--tx)}
 .brand-by{font-size:var(--fs-xs);font-weight:400;letter-spacing:0;color:var(--tx-4);margin-top:3px}
+.brand-slot{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;border:1px dashed var(--line-strong);color:var(--tx-4)}
+.brand-soon .brand-name{color:var(--tx-3)}
+.brand-soon:hover,.brand-soon:hover .brand-name{color:var(--tx-2)}
 
 /* ---- features (sticky rail + stacked blocks) ---- */
 .feature-layout{display:grid;gap:24px;margin-top:64px}
