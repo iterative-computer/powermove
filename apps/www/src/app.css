@@ -172,13 +172,12 @@ h1 .muted{color:var(--tx-3)}
 @keyframes ai-word{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes ai-word-fade{from{opacity:0}to{opacity:1}}
 .lc-row{display:flex;align-items:center;gap:10px}
-.lc-prompt{width:300px}
+.lc-prompt{width:250px}
 .lc-progress{display:flex;flex-direction:column;gap:10px;width:236px}
 .lc-body-text{font-size:15px;color:var(--s-text)}
 .lc-trail{flex-shrink:0;font-size:12px;line-height:1;font-variant-numeric:tabular-nums;color:var(--s-text-3)}
 .lc-bar{display:block;height:3px;border-radius:2px;background:var(--s-well);overflow:hidden}
 .lc-bar i{display:block;width:47%;height:100%;border-radius:inherit;background:var(--s-text-2)}
-.lc-chip{flex-shrink:0;padding:5px 8px;border-radius:var(--r-pill);background:var(--s-raised);font-size:11px;line-height:1;color:var(--s-text-3)}
 .lc-send{display:grid;place-items:center;flex-shrink:0;width:30px;height:30px;border-radius:50%;background:var(--s-text)}
 .lc-send svg{width:14px;height:14px;fill:none;stroke:var(--s-face);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 /* workflow node: three steps on a hairline track, the live one ringed */

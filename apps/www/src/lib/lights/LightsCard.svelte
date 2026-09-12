@@ -175,7 +175,6 @@
   {:else}
     <span class="lc-row lc-prompt">
       {@render rising('Push the title in slowly', 'lc-body-text')}
-      <span class="lc-chip lc-fade" style:animation-delay="140ms">Claude Code</span>
       <span class="lc-send lc-fade" style:animation-delay="200ms"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 9.5V2.5M6 2.5 3 5.5M6 2.5 9 5.5" /></svg></span>
     </span>
   {/if}
