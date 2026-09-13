@@ -100,9 +100,14 @@ export class PowermoveAgentToolSession {
 
   isClosed(): boolean { return this.closed; }
 
-  stagingDirectory(forkId: string): Promise<string> {
-    if (!this.resolveStagingDirectory) throw new Error('Fork rebase staging is unavailable for this run.');
-    return this.resolveStagingDirectory(forkId);
+  /** Staging dir for a fork rebase: the run's resolver when the host supplied
+   * one, otherwise the stage already discovered for this session. */
+  async rebaseStagingDirectory(forkId: string, workspace: string): Promise<string> {
+    if (this.resolveStagingDirectory) return this.resolveStagingDirectory(forkId);
+    if (this.stagingDirectory) return this.stagingDirectory;
+    const discovered = await resolveCurrentStagingDirectory(workspace, this.openedAt);
+    this.stagingDirectory = discovered;
+    return discovered;
   }
 }
 
@@ -359,7 +364,7 @@ export class PowermoveAgentToolBridge {
       };
     }
     const response = request.tool === 'stage_fork_rebase'
-      ? await this.callStageForkRebase(session, request.arguments)
+      ? await this.callStageForkRebase(session, request.arguments, request.workspace)
       : request.tool === 'capture_panel'
       ? await this.capturePanel(session, request.arguments)
       : request.tool === 'computer_use_panel'
@@ -382,7 +387,8 @@ export class PowermoveAgentToolBridge {
 
   private async callStageForkRebase(
     session: PowermoveAgentToolSession,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    workspace: string
   ): Promise<AgentToolResponseEvent> {
     if (Object.keys(args).length !== 1 || typeof args.id !== 'string' || !EXTENSION_ID.test(args.id)) {
       throw new Error('stage_fork_rebase expects { id } with a valid extension id.');
@@ -390,7 +396,7 @@ export class PowermoveAgentToolBridge {
     if (!this.options.stageForkRebase) throw new Error('Fork rebase staging is unavailable.');
     const result = await this.options.stageForkRebase({
       forkId: args.id,
-      stagingDirectory: await session.stagingDirectory(args.id)
+      stagingDirectory: await session.rebaseStagingDirectory(args.id, workspace)
     });
     return {
       runId: session.runId,
