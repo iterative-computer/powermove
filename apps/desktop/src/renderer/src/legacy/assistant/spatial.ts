@@ -1359,9 +1359,9 @@ function sealTrace() {
 }
 
 /* Move the finished run's trace into the conversation so the activity trail
-   stays visible above its summary (supermove keeps per-message steps). Final
-   traces drop text because the answer lands in its own conversation turn;
-   steering checkpoints retain text because no replacement turn exists yet. */
+   stays visible (supermove keeps per-message steps). Text is kept whenever it
+   is the reply — a run that spoke, or a steering checkpoint — and dropped only
+   when a separate assistant turn replaces it (stop, plans, errors). */
 function archiveTrace(preserveText = false) {
   sealTrace();
   const steps: any = preserveText ? [...S.trace] : S.trace.filter((step: any) => step.kind !== 'text');
@@ -1655,8 +1655,12 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
     const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
     finishSteps();
-    archiveTrace();
-    S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
+    // The prose the model streamed during the run IS the reply; the structured
+    // `summary` is a terse restatement for the result card. Keep the prose in
+    // place (chronology intact) and only add the summary when nothing was said.
+    const spoke: any = S.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
+    archiveTrace(spoke);
+    if (!spoke) S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
     S.conversation.push(...extensionTurns);
     S.run = {
       autonomous: true, summary: result.summary, checkpoint,

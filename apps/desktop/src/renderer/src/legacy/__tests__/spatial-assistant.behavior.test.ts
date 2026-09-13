@@ -381,6 +381,53 @@ it('reloads typed extension changes during the autonomous request flow', async (
   assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Added mod New Mod'));
 });
 
+it('keeps the prose the model streamed as the reply instead of replacing it with the structured summary', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn((command) => command),
+  };
+  const spoken = '## What I did\n\nManifest and **TypeScript checks passed**. See [Commons](https://example.com).';
+  PM.CodexBridge.request = vi.fn(async (_prompt, _s, _i, options) => {
+    options.onTrace({ kind: 'tool-start', itemId: 'edit-1', toolName: 'edit', label: 'Edit', detail: 'panel.tsx' });
+    options.onTrace({ kind: 'tool-end', itemId: 'edit-1', isError: false });
+    options.onTrace({ kind: 'answer', text: spoken });
+    return { text: JSON.stringify({ summary: 'Updated the panel.', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] };
+  });
+
+  PM.AgentUI.submit('Add the portrait');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+
+  const conversation = PM.AgentUI.state.conversation;
+  const trace = conversation.find(turn => turn.role === 'trace');
+  assert.ok(trace, 'the run archives its trail');
+  assert.deepEqual(trace.steps.map((step) => step.kind), ['tool', 'text']);
+  assert.equal(trace.steps[1].text, spoken);
+  assert.ok(!conversation.some(turn => turn.role === 'assistant' && turn.text === 'Updated the panel.'), 'no duplicate summary turn');
+  assert.equal(PM.AgentUI.state.run.summary, 'Updated the panel.');
+});
+
+it('falls back to the structured summary when the run streamed no prose', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn((command) => command),
+  };
+  PM.CodexBridge.request = vi.fn(async (_prompt, _s, _i, options) => {
+    options.onTrace({ kind: 'tool-start', itemId: 'edit-1', toolName: 'edit', label: 'Edit' });
+    options.onTrace({ kind: 'tool-end', itemId: 'edit-1', isError: false });
+    return { text: JSON.stringify({ summary: 'Updated the panel.', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] };
+  });
+
+  PM.AgentUI.submit('Add the portrait');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.ok(PM.AgentUI.state.conversation.some(turn => turn.role === 'assistant' && turn.text === 'Updated the panel.'));
+});
+
 it('recognizes native live edits without applying final commands a second time', async () => {
   const { PM } = spatialHarness();
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
