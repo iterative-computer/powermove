@@ -9,10 +9,11 @@ async function compositionPoint(page: any, x: number, y: number) {
 
 test.describe('@viewer alignment snapping', () => {
   test('renders the composition center as full-axis guides with a fixed bullseye', async ({ session }) => {
+  await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.octx));
+    await page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.services?.get('viewer')?.octx));
     const rendering = await page.evaluate(() => {
-      const PM = (window as any).PM, V = PM.Viewer;
+      const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
       PM.replaceProject(PM.mkProject({ name: 'Center guide', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' }));
       V.fit = true; V.layout();
       const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 270, x1: 370, y0: 140, y1: 220 }));
@@ -50,6 +51,7 @@ test.describe('@viewer alignment snapping', () => {
   });
 
   test('aligns both axes during an ordinary layer drag and allows Command to bypass snapping', async ({ session }) => {
+  await session.openEditor();
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });

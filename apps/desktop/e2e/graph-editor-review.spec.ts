@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('graph editor exposes its state and keeps value and speed navigation usable', async ({ session }, info) => {
+  await session.openEditor();
   const { page } = session;
   const viewerPixel = () => page.evaluate(() => {
     const PM = (window as any).PM, gl = PM.GL.gl, pixel = new Uint8Array(4);
@@ -8,7 +9,7 @@ test('graph editor exposes its state and keeps value and speed navigation usable
     return Array.from(pixel);
   });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.waitForFunction(() => Boolean((window as any).PM.TL.cv));
+  await page.waitForFunction(() => Boolean((window as any).PM.Kernel.services.get('timeline').cv));
   await page.evaluate(() => {
     const PM = (window as any).PM;
     const project = PM.mkProject({ name: 'Graph editor review', w: 1280, h: 720, dur: 8 });
@@ -20,14 +21,14 @@ test('graph editor exposes its state and keeps value and speed navigation usable
       PM.animate(layer, path, values.map((v, i) => ({ t: 1 + i * 2, v })), { ease: 'power' });
     }
     PM.selectLayers(layer.id); PM.sel.chan = 'scale';
-    PM.TL.reveal(layer, ['scale.x', 'scale.y']);
+    PM.Kernel.services.get('timeline').reveal(layer, ['scale.x', 'scale.y']);
     PM.sel.keys = ['scale.x', 'scale.y'].flatMap(path => layer.p[path].kf.map((key: any) => key.i));
-    PM.TL.keySelectionActive = true; PM.TL.pps = 90; PM.TL.scrollT = 0;
+    PM.Kernel.services.get('timeline').keySelectionActive = true; PM.Kernel.services.get('timeline').pps = 90; PM.Kernel.services.get('timeline').scrollT = 0;
     PM.setTime(2); PM.hist.clear(); PM.invalidate();
   });
   const graph = page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true });
   await graph.click();
-  await page.waitForFunction(() => (window as any).PM.TL._graph?.series.length === 2);
+  await page.waitForFunction(() => (window as any).PM.Kernel.services.get('timeline')._graph?.series.length === 2);
   await page.screenshot({ path: info.outputPath('value-graph.png') });
   await expect(graph).toHaveAttribute('aria-pressed', 'true');
   const initialPixel = await viewerPixel();
@@ -51,19 +52,19 @@ test('graph editor exposes its state and keeps value and speed navigation usable
   const options = page.getByRole('button', { name: 'Graph options', exact: true });
   await options.click();
   await page.getByRole('menuitem', { name: 'Speed graph', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL.graphType)).toBe('speed');
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').graphType)).toBe('speed');
   await page.screenshot({ path: info.outputPath('speed-graph.png') });
   const canvas = await page.locator('#tl-canvas').boundingBox();
-  const gutter = await page.evaluate(() => (window as any).PM.TL.gut);
+  const gutter = await page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').gut);
   await page.mouse.move(canvas!.x + gutter + 100, canvas!.y + 160);
   await page.mouse.wheel(0, 150);
-  await expect.poll(() => page.evaluate(() => Boolean((window as any).PM.TL.graphViewBounds))).toBe(true);
+  await expect.poll(() => page.evaluate(() => Boolean((window as any).PM.Kernel.services.get('timeline').graphViewBounds))).toBe(true);
   await options.click();
   await page.getByRole('menuitem', { name: 'Fit selected curves', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL.graphViewBounds)).toBeNull();
+  await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('timeline').graphViewBounds)).toBeNull();
   const before = await page.evaluate(() => (window as any).PM.proj.layers[0].p['scale.x'].kf.map((key: any) => ({ t: key.t, v: key.v, speed: key.outEase.speed })));
   const point = await page.evaluate(() => {
-    const PM = (window as any).PM, key = PM.proj.layers[0].p['scale.x'].kf[1], b = PM.TL.cv.getBoundingClientRect();
+    const PM = (window as any).PM, key = PM.proj.layers[0].p['scale.x'].kf[1], b = PM.Kernel.services.get('timeline').cv.getBoundingClientRect();
     const point = PM.UIState.getKeyHandles(key).pt;
     return { x: b.x + point[0], y: b.y + point[1] };
   });
