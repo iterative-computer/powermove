@@ -76,6 +76,48 @@ function request(): CodexRunRequest {
 }
 
 describe('CodexAppServerRunner steering', () => {
+  it('configures the editor thread with required live-inspection tools only', async () => {
+    const child = new FakeAppServer();
+    const runner = new CodexAppServerRunner({
+      discoverBinary: async () => '/fake/codex',
+      prepareHome: async () => '/tmp/powermove-app-server-test',
+      spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams,
+      requestTimeoutMs: 500,
+      turnTimeoutMs: 5_000
+    });
+    const nativeTools = {
+      command: '/test/electron',
+      args: ['/test/mcp-server.mjs'],
+      env: { POWERMOVE_AGENT_TOOL_TOKEN: 'secret' }
+    };
+    const run = runner.run(request(), {
+      userData: '/tmp/powermove-app-server-test',
+      nativeTools
+    });
+    await vi.waitFor(() => expect(child.messages.some((message) => message.method === 'thread/start')).toBe(true));
+
+    const started = child.messages.find((message) => message.method === 'thread/start');
+    expect(started?.params.config).toEqual({
+      mcp_servers: {
+        powermove: {
+          ...nativeTools,
+          startup_timeout_sec: 10,
+          tool_timeout_sec: 120,
+          required: true,
+          enabled_tools: [
+            'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state',
+            'capture_panel', 'get_workspace_state', 'render_frames'
+          ],
+          default_tools_approval_mode: 'approve'
+        }
+      }
+    });
+
+    await runner.cancel(request().id);
+    await expect(run).resolves.toMatchObject({ cancelled: true });
+    await runner.shutdown();
+  });
+
   it('appends steering to the same active turn and returns that turn result', async () => {
     const child = new FakeAppServer();
     const runner = new CodexAppServerRunner({

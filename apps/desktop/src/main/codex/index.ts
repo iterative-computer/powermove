@@ -283,7 +283,7 @@ export function registerCodexIpc(
       const selectedRunner = req.provider === 'claude'
         ? claudeRunner
         : (req.mode === 'editor' ? appServerRunner : runner);
-      if (req.mode === 'autonomous' && toolBridge) {
+      if (toolBridge) {
         toolSession = await toolBridge.openSession({
           runId: req.id,
           owner,
@@ -315,13 +315,13 @@ export function registerCodexIpc(
         const changedBeforeFinish = toolSession.changed;
         const finish = await toolSession.finish(result.ok);
         toolSession = null;
-        if (result.ok) {
+        if (result.ok && req.mode === 'autonomous') {
           result = {
             ...result,
             text: amendLiveResult(result.text, changedBeforeFinish || finish.changed, finish.warning)
           };
         }
-        if (result.ok && finish.changed) {
+        if (result.ok && req.mode === 'autonomous' && finish.changed) {
           result = {
             ...result,
             liveEditsApplied: true,

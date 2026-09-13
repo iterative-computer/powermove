@@ -38,6 +38,35 @@ it('keeps keys out of status, does not forward saved keys to another provider, a
   expect(call).toHaveBeenCalledWith('get_project_state', {});
   expect(result.ok && JSON.parse(result.text).summary).toBe('Ready to edit.');
 });
+it('exposes only live inspection tools to compatible editor runs and forwards captured images', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-provider-editor-')); directories.push(directory);
+  const requests: any[] = [];
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    const body = JSON.parse(options.body); requests.push(body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'capture-1', function: { name: 'capture_panel', arguments: '{"panelId":"inspector"}' } }] }, 'tool_calls'));
+    return streamed(event({ content: '{"kind":"panels"}' }, 'stop'));
+  }) as unknown as typeof fetch;
+  const provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: true });
+  const call = vi.fn(async () => ({
+    runId: 'editor-run', callId: 'capture-1', ok: true,
+    content: [{ type: 'image' as const, mimeType: 'image/png' as const, data: new Uint8Array([137, 80, 78, 71]) }]
+  }));
+  const result = await provider.run({
+    id: 'editor-run', mode: 'editor', access: 'editor', prompt: 'Inspect it', schema: { type: 'object' },
+    images: [], attachments: []
+  } as any, () => {}, call);
+
+  const firstTurn = requests.find((body) => body.stream && body.messages.length === 2);
+  const toolNames = firstTurn.tools.map((tool: any) => tool.function.name);
+  expect(toolNames).toContain('capture_panel');
+  expect(toolNames).not.toContain('apply_commands');
+  expect(toolNames).not.toContain('computer_use_panel');
+  expect(requests.at(-1).messages.at(-1).content[0].image_url.url).toBe('data:image/png;base64,iVBORw==');
+  expect(call).toHaveBeenCalledWith('capture_panel', { panelId: 'inspector' });
+  expect(result).toMatchObject({ ok: true, text: '{"kind":"panels"}', access: 'editor' });
+});
 it('allows local HTTP and rejects credentials, insecure remote hosts and URL fragments', () => {
   expect(providerUrl('http://localhost:11434/v1/')).toBe('http://localhost:11434/v1');
   for (const url of ['http://example.com/v1', 'https://key@example.com', 'https://example.com/#key', 'file:///tmp/model']) expect(() => providerUrl(url)).toThrow();
