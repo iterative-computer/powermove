@@ -131,7 +131,9 @@ describe('Timeline', () => {
   it('shows each call as icon, label, and a mono argument chip, and expands its output', () => {
     render(trace([
       { kind: 'tool', id: 'x1', toolName: 'bash', label: 'Run', detail: 'npm test', output: '✓ 34 checks passed', status: 'done', startedAt: 0, endedAt: 1_200 },
-      { kind: 'tool', id: 'x2', toolName: 'edit', label: 'Edit', detail: 'Timeline.svelte', status: 'done' }
+      { kind: 'tool', id: 'x2', toolName: 'edit', label: 'Edit', detail: 'Timeline.svelte', status: 'done' },
+      // Prose after the group means the agent moved on: the group has settled.
+      { kind: 'text', id: 'm0', text: 'Done.' }
     ]));
     const rows = [...target.querySelectorAll('.agent-tool-details > div')];
     expect(rows).toHaveLength(2);
@@ -166,6 +168,46 @@ describe('Timeline', () => {
       .toBe('Ran commands and edited files\nnpm test\nTimeline.svelte');
   });
 
+  it('keeps the newest group open between calls while the run is live, and settles it once prose follows', () => {
+    // Every call has finished but the run has not: the agent is between calls.
+    render(trace([
+      { kind: 'tool', id: 'x1', toolName: 'read', label: 'Read', status: 'done', startedAt: 0, endedAt: 500 },
+      { kind: 'tool', id: 'x2', toolName: 'bash', label: 'Run', status: 'done', startedAt: 500, endedAt: 900 }
+    ]));
+    const group = target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!;
+    expect(group.open).toBe(true);
+    expect(group.querySelector('summary')?.textContent?.trim()).toBe('2 tool calls');
+    expect(group.querySelector('summary em')).toBeNull();
+
+    // A third call lands: still open, still no settled meta.
+    Object.assign(agentState, { trace: [...agentState.trace,
+      { kind: 'tool', id: 'x3', toolName: 'edit', label: 'Edit', detail: 'a.ts', status: 'done', startedAt: 900, endedAt: 1_200 }] });
+    flushSync();
+    expect(target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!.open).toBe(true);
+    expect(target.querySelector('.agent-tool-file')).toBeNull();
+
+    // Prose after the group: the agent moved on, the group settles closed.
+    Object.assign(agentState, { trace: [...agentState.trace, { kind: 'text', id: 'm0', text: 'Here is what I found.' }] });
+    flushSync();
+    const settled = target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!;
+    expect(settled.open).toBe(false);
+    expect(settled.querySelector('summary em')?.textContent).toBe('1s');
+    expect(target.querySelector('.agent-tool-file')?.textContent).toBe('a.ts');
+  });
+
+  it('lets a manual toggle win over the live rule', () => {
+    render(trace([{ kind: 'tool', id: 'x1', toolName: 'read', label: 'Read', status: 'done' }]));
+    const group = target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!;
+    expect(group.open).toBe(true);
+    group.open = false;
+    group.dispatchEvent(new Event('toggle'));
+    flushSync();
+    Object.assign(agentState, { trace: [...agentState.trace,
+      { kind: 'tool', id: 'x2', toolName: 'bash', label: 'Run', status: 'running' }] });
+    flushSync();
+    expect(target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!.open).toBe(false);
+  });
+
   it('shows the real active action and its live work log while running', () => {
     render(trace([
       { kind: 'tool', id: 'x1', toolName: 'bash', label: 'bash · npm test', status: 'done' },
@@ -187,7 +229,8 @@ describe('Timeline', () => {
   it('makes completed work primary when one action failed', () => {
     render(trace([
       { kind: 'tool', id: 'x1', toolName: 'bash', label: 'bash · npm test', status: 'done' },
-      { kind: 'tool', id: 'x2', toolName: 'web_search', label: 'search · motion references', status: 'error' }
+      { kind: 'tool', id: 'x2', toolName: 'web_search', label: 'search · motion references', status: 'error' },
+      { kind: 'text', id: 'm0', text: 'Moving on.' }
     ]));
 
     const row = target.querySelector('details.agent-trace-tool')!;

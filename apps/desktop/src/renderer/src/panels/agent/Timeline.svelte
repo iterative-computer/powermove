@@ -53,7 +53,7 @@
       {#if row.kind === 'text'}
         <TextRow text={row.text} streaming={index === streamingIndex} animated />
       {:else}
-        <ToolActivity {row} animated />
+        <ToolActivity {row} animated live={running && index === rows.length - 1} />
       {/if}
     {/each}
   </div>

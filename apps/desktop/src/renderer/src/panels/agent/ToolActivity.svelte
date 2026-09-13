@@ -11,13 +11,28 @@
      show expand under a hairline; the chevron takes the glyph's place on
      hover. Edited files close the group as mono chips. */
 
-  let { row, animated = false }: { row: ToolsRow & { pulsing?: boolean }; animated?: boolean } = $props();
+  let { row, animated = false, live = false }: {
+    row: ToolsRow & { pulsing?: boolean };
+    animated?: boolean;
+    /** This group is the run's newest activity and the run is still going. */
+    live?: boolean;
+  } = $props();
 
+  /* Disclosure follows the RUN, not the instant: while this group is the
+     newest thing in a live run it stays open even between calls (a call
+     ending is not the agent moving on). It settles closed once prose lands
+     after it or the run ends. A manual toggle wins for the group's lifetime. */
+  let manualOpen = $state<boolean | null>(null);
+  const open = $derived(manualOpen ?? live);
+  function onToggle(event: Event): void {
+    const element = event.currentTarget as HTMLDetailsElement;
+    if (element.open !== open) manualOpen = element.open;
+  }
   const isRunning = $derived(row.status === 'running');
   /* Reasoning alone needs no header: the thought row is its own disclosure. */
   const headerless = $derived(row.toolCount === 0);
   const span = $derived(row.startedAt !== undefined && row.endedAt !== undefined ? durationLabel(row.endedAt - row.startedAt) : '');
-  const meta = $derived(isRunning ? '' : [
+  const meta = $derived(live || isRunning ? '' : [
     row.status === 'partial' ? `${row.failedCount} failed` : '',
     span
   ].filter(Boolean).join(' · '));
@@ -97,7 +112,7 @@
       </div>
     {/each}
   </div>
-  {#if row.files.length && !isRunning}
+  {#if row.files.length && !live && !isRunning}
     <div class="agent-tool-files">
       {#each row.files as file, index (file)}
         <code class="agent-tool-file" style="--i:{index}">{file}</code>
@@ -117,12 +132,13 @@
     class:is-partial={row.status === 'partial'}
     class:is-running={isRunning}
     class:is-pulsing={animated && row.pulsing}
-    open={isRunning}
+    {open}
+    ontoggle={onToggle}
     title={row.detail?.length ? row.detail.join('\n') : undefined}
   >
     <summary>
       <svg class="agent-tool-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
-      <span class:shimmer-text={isRunning && animated}>{row.label}{#if row.status === 'error'} <em>Failed</em>{:else if meta} <em>{meta}</em>{/if}</span>
+      <span class:shimmer-text={(live || isRunning) && animated}>{row.label}{#if row.status === 'error'} <em>Failed</em>{:else if meta} <em>{meta}</em>{/if}</span>
     </summary>
     {#if row.details.length}{@render rows()}{/if}
   </details>
