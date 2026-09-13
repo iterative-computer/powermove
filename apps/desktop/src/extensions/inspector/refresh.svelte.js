@@ -1,4 +1,4 @@
-/* Reactive bridge for imperative engines that invoke PM.Inspector.refresh(). */
+/* Reactive bridge for the inspector service's imperative refresh hook. */
 class InspectorRefresh {
   version = $state(0);
 

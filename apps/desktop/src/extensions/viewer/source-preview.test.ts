@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { installSourcePreview } from './source-preview';
+import type { PowermoveAPI, ViewerService } from 'powermove';
 
 function stage(): HTMLElement {
   const host = document.createElement('div');
@@ -13,14 +14,18 @@ function stage(): HTMLElement {
   return host;
 }
 
-function registry(records: Record<string, any>, live: Map<string, any>): Record<string, any> {
-  return {
-    proj: { assets: records },
-    assets: { get: (id: string) => live.get(id) },
-    Viewer: {},
-    bus: { emit: vi.fn() },
-    playing: false,
-  };
+function harness(records: Record<string, { id?: string; kind: string; name?: string }>, live: Map<string, any>) {
+  let playing = false;
+  const pause = vi.fn(() => { playing = false; });
+  const play = vi.fn(() => { playing = true; });
+  const viewer = { preview: undefined, layout: vi.fn() } as unknown as ViewerService;
+  const api = {
+    project: { get: () => ({ assets: records }) },
+    media: { assets: { get: (id: string) => live.get(id) } },
+    transport: { playing: () => playing, pause, play },
+    ui: { icon: () => '<svg></svg>' },
+  } as unknown as PowermoveAPI;
+  return { api, viewer, pause, play, setPlaying(value: boolean) { playing = value; } };
 }
 
 beforeEach(() => {
@@ -40,11 +45,11 @@ afterEach(() => {
 
 describe('source preview', () => {
   it('names the source and offers a way back so the stage never reads as a broken composition', () => {
-    const PM = registry(
+    const ctx = harness(
       { video: { id: 'video', kind: 'video', name: 'b-roll.mov' } },
       new Map([['video', { url: 'blob:video' }]])
     );
-    const preview = installSourcePreview(PM, stage());
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
 
     expect(preview.show('video')).toBe(true);
     const root = document.querySelector<HTMLElement>('#source-preview')!;
@@ -62,11 +67,11 @@ describe('source preview', () => {
   });
 
   it('shows the audio filename only once below the audio icon', () => {
-    const PM = registry(
+    const ctx = harness(
       { audio: { id: 'audio', kind: 'audio', name: 'score.wav' } },
       new Map([['audio', { audioBlob: new Blob(['sound'], { type: 'audio/wav' }) }]])
     );
-    const preview = installSourcePreview(PM, stage());
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
 
     expect(preview.show('audio')).toBe(true);
     const root = document.querySelector<HTMLElement>('#source-preview')!;
@@ -82,11 +87,11 @@ describe('source preview', () => {
   });
 
   it('hides the transport for a still image, which has nothing to play', () => {
-    const PM = registry(
+    const ctx = harness(
       { still: { id: 'still', kind: 'image', name: 'plate.png' } },
       new Map([['still', { url: 'blob:image' }]])
     );
-    const preview = installSourcePreview(PM, stage());
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
 
     expect(preview.show('still')).toBe(true);
     const root = document.querySelector<HTMLElement>('#source-preview')!;
@@ -100,11 +105,11 @@ describe('source preview', () => {
   });
 
   it('seeks with the keyboard and keeps playback time accessible without visible timestamps', () => {
-    const PM = registry(
+    const ctx = harness(
       { video: { kind: 'video', name: 'clip.mov' } },
       new Map([['video', { url: 'blob:video' }]])
     );
-    const preview = installSourcePreview(PM, stage());
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
     preview.show('video');
     const video = document.querySelector('video')!;
     Object.defineProperty(video, 'duration', { value: 12 });
@@ -121,28 +126,28 @@ describe('source preview', () => {
   });
 
   it('pauses the composition once instead of restarting it behind the monitor', () => {
-    const PM = registry(
+    const ctx = harness(
       { video: { id: 'video', kind: 'video' } },
       new Map([['video', { url: 'blob:video' }]])
     );
-    PM.playing = true;
-    PM.pause = vi.fn(() => { PM.playing = false; });
-    PM.play = vi.fn();
-    const preview = installSourcePreview(PM, stage());
+    ctx.setPlaying(true);
+    // pause is provided by the typed transport fake.
+    // play is provided by the typed transport fake.
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
 
     expect(preview.show('video')).toBe(true);
-    expect(PM.pause).toHaveBeenCalledOnce();
-    expect(PM.play).not.toHaveBeenCalled();
+    expect(ctx.pause).toHaveBeenCalledOnce();
+    expect(ctx.play).not.toHaveBeenCalled();
 
     preview.dispose();
   });
 
   it('restores video preview from the live media element when its cached url field is absent', () => {
-    const PM = registry(
+    const ctx = harness(
       { video: { id: 'video', kind: 'video' } },
       new Map([['video', { el: { currentSrc: 'blob:video-frame' } }]])
     );
-    const preview = installSourcePreview(PM, stage());
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
 
     expect(preview.show('video')).toBe(true);
     expect(document.querySelector<HTMLVideoElement>('#source-preview video')?.src).toBe('blob:video-frame');
@@ -151,18 +156,18 @@ describe('source preview', () => {
   });
 
   it('replaces only the preview controller during a hot update', () => {
-    const PM = registry({}, new Map());
+    const ctx = harness({}, new Map());
     const host = stage();
-    const first = installSourcePreview(PM, host);
+    const first = installSourcePreview(ctx.api, ctx.viewer, host);
     const firstRoot = host.querySelector('#source-preview');
     const dispose = vi.spyOn(first, 'dispose');
 
-    const second = installSourcePreview(PM, host);
+    const second = installSourcePreview(ctx.api, ctx.viewer, host);
 
     expect(dispose).toHaveBeenCalledOnce();
     expect(host.querySelectorAll('#source-preview')).toHaveLength(1);
     expect(host.querySelector('#source-preview')).not.toBe(firstRoot);
-    expect(PM.Viewer.preview).toBe(second);
+    expect(ctx.viewer.preview).toBe(second);
     second.dispose();
   });
 });

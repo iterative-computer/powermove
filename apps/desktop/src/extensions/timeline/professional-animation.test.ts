@@ -37,26 +37,26 @@ describe('professional timeline gestures', () => {
   });
 
   it('jumps to clamped work-area boundaries without editing the work area', () => {
-    const PM: any = {
+    const legacy: any = {
       proj: { dur: 10, work: [-1, 12] },
       time: 4,
       setTime(time: number) { this.time = time; },
     };
 
-    expect(goToWorkAreaBoundary(PM, 'in')).toBe(0);
-    expect(goToWorkAreaBoundary(PM, 'out')).toBe(10);
-    expect(PM.proj.work).toEqual([-1, 12]);
+    expect(goToWorkAreaBoundary(legacy, 'in')).toBe(0);
+    expect(goToWorkAreaBoundary(legacy, 'out')).toBe(10);
+    expect(legacy.proj.work).toEqual([-1, 12]);
   });
 
   it('keeps selected-event navigation scoped to selected layer events', () => {
     const key = { t: 1 };
     const layer = { id: 'selected', from: 2, dur: 5, prop: { kf: [key] } };
-    const PM: any = {
+    const legacy: any = {
       proj: { dur: 10, work: [1, 9], markers: [{ t: 4 }], layers: [layer] },
       sel: { layers: [layer.id] },
       allProps(target: any) { return [{ prop: target.prop }]; },
     };
 
-    expect(timelineEventTimes(PM, true)).toEqual([2, 3, 7]);
+    expect(timelineEventTimes(legacy, true)).toEqual([2, 3, 7]);
   });
 });

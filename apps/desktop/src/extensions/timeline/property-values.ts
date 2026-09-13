@@ -1,11 +1,28 @@
-export function propertyMetadata(PM: any, layer: any, path: string): any {
-  if (PM.CH?.[path]) return PM.CH[path];
-  if (path.startsWith('x.')) return PM.layerDefinition?.(layer.d?.definition)?.params?.find((p: any) => p.k === path.slice(2)) ?? {};
-  if (path.startsWith('u.')) return PM.UIState?.getShaderMeta?.(layer)?.udefs?.find((p: any) => p.name === path.slice(2)) ?? {};
+import type { PowermoveAPI } from 'powermove';
+
+function shaderUniforms(code: unknown): Array<{ name: string; min?: number; max?: number }> {
+  const result: Array<{ name: string; min?: number; max?: number }> = [];
+  const pattern = /uniform\s+(?:float|vec2|vec3|vec4|int|bool)\s+(\w+)\s*;\s*(?:\/\/\s*@param\s*([^\n]*))?/g;
+  for (const match of String(code ?? '').matchAll(pattern)) {
+    if (/^i(Resolution|Time|GlobalTime|Progress|Frame|Mouse)$/.test(match[1]!)) continue;
+    const values = (match[2] ?? '').trim().split(/\s+/).filter(Boolean);
+    result.push({
+      name: match[1]!,
+      ...(values[1] !== undefined && Number.isFinite(Number(values[1])) ? { min: Number(values[1]) } : {}),
+      ...(values[2] !== undefined && Number.isFinite(Number(values[2])) ? { max: Number(values[2]) } : {}),
+    });
+  }
+  return result;
+}
+
+export function propertyMetadata(api: Pick<PowermoveAPI, 'effects' | 'model'>, layer: any, path: string): any {
+  if (api.model.CH?.[path]) return api.model.CH[path];
+  if (path.startsWith('x.')) return api.model.layerDefinition?.(layer.d?.definition)?.params?.find((p: any) => p.k === path.slice(2)) ?? {};
+  if (path.startsWith('u.')) return shaderUniforms(layer.d?.code).find((property) => property.name === path.slice(2)) ?? {};
   const effect = layer.fx?.find((fx: any) => path.startsWith(`${fx.id}.`));
-  if (effect) return PM.FX?.[effect.type]?.params?.find((p: any) => p.k === path.slice(effect.id.length + 1)) ?? {};
+  if (effect) return api.effects.get(effect.type)?.params.find((property) => property.k === path.slice(effect.id.length + 1)) ?? {};
   const key = path.replace(/^c\./, '');
-  const metadata: Record<string, any> = {
+  const metadata: Record<string, { step?: number; min?: number; max?: number }> = {
     w: { step: 1, min: 1 }, h: { step: 1, min: 1 }, size: { step: 1, min: 4 },
     tracking: { step: .5 }, leading: { step: .02 }, radius: { step: 1, min: 0 },
     stroke: { step: .5, min: 0 }, points: { step: 1, min: 3, max: 24 },

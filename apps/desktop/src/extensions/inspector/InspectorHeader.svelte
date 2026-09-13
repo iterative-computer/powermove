@@ -3,20 +3,14 @@
   import { inspectorContext } from './context';
   import { showFxMenu, showNewLayerMenu } from './actions';
 
-  const { doc } = inspectorContext();
+  const { api, doc } = inspectorContext();
 
-  let {
-    PM,
-    layer
-  }: {
-    PM: Record<string, any>;
-    layer?: any;
-  } = $props();
+  let { layer }: { layer?: any } = $props();
 
   const layerName = $derived((doc.tick.structure, doc.proj, layer?.name ?? 'Properties'));
   const typeLabel = $derived((doc.tick.structure, doc.proj, layer
-    ? (layer.type === 'extension' ? PM.layerDefinition?.(layer.d?.definition)?.label : null)
-      || PM.TYPE_META?.[layer.type]?.label
+    ? (layer.type === 'extension' ? api.model.layerDefinition(String(layer.d?.definition ?? ''))?.label : null)
+      || (api.model.TYPE_META as Record<string, { label?: string }>)[layer.type]?.label
     : ''));
 </script>
 
@@ -34,10 +28,10 @@
     aria-label="New layer"
     onpointerdown={(event) => {
       event.preventDefault();
-      showNewLayerMenu(PM, event.currentTarget);
+      showNewLayerMenu(api, event.currentTarget);
     }}
   ><Icon name="layers" /></button>
-  {#if layer && PM.TYPE_META?.[layer.type]?.effects !== false}
+  {#if layer && !('effects' in ((api.model.TYPE_META as Record<string, object>)[layer.type] ?? {}) && ((api.model.TYPE_META as Record<string, { effects?: boolean }>)[layer.type]?.effects === false))}
     <button
       type="button"
       class="iconbtn"
@@ -45,7 +39,7 @@
       aria-label="Add effect"
       onpointerdown={(event) => {
         event.preventDefault();
-        showFxMenu(PM, event.currentTarget, layer);
+        showFxMenu(api, event.currentTarget, layer);
       }}
     ><Icon name="plus" /></button>
   {/if}

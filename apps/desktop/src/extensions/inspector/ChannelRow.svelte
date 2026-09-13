@@ -6,14 +6,14 @@
   import { animateSelection, selectionChannels } from './selection-animation';
   import Icon from './Icon.svelte';
   import { expressionDiagnostic, EXPRESSION_NAMES } from 'powermove';
+  import type { ChannelDefinition, EditCommand, MenuContribution } from 'powermove';
   import { inspectorContext, type EditBinding } from './context';
 
-  const { api, doc, transport } = inspectorContext();
+  const { api, doc, transport, controlProps, edit: inspectorEdit, inspector, timeline } = inspectorContext();
   const { NumField, Row } = api.ui.controls;
   const { channelBinding } = api.ui.controls.binding;
 
   let {
-    PM,
     layer,
     channel,
     label,
@@ -29,11 +29,10 @@
     compact = false,
     prefix
   }: {
-    PM: Record<string, any>;
-    layer: Record<string, any>;
+    layer: any;
     channel: string;
     label: string;
-    property?: Record<string, any>;
+    property?: any;
     getValue?: (time: number) => unknown;
     step?: number;
     min?: number;
@@ -57,10 +56,10 @@
     getValue
       ? getValue(transport.time)
       : property
-        ? PM.evP(layer, prop, transport.time, channel)
-        : PM.ev(layer, channel, transport.time)
+        ? api.anim.evP(layer, prop, transport.time, channel)
+        : api.anim.ev(layer, channel, transport.time)
   ));
-  const runtimeError=$derived((void value,transport.time,doc.tick.values,prop?.expr ? PM.expressionErrors?.get(prop) : null));
+  const runtimeError=$derived((void value,transport.time,doc.tick.values,prop?.expr ? api.anim.expressionErrors?.get(prop) : null));
   const scaleLinked = $derived((doc.tick.history, doc.tick.values, doc.proj, !!layer.scaleLinked));
   const isScale = $derived(!property && !compact && channel === 'scale.x');
   const channels = $derived(isScale ? ['scale.x', 'scale.y'] : [channel]);
@@ -71,9 +70,9 @@
     doc.tick.history, doc.tick.values,
     doc.proj,
     transport.time,
-    properties.every((p) => !!(p && PM.hasKeyAt(layer, p, transport.time)))
+    properties.every((p) => !!(p && api.anim.hasKeyAt(layer, p, transport.time)))
   ));
-  const meta = $derived(PM.CH?.[channel] ?? {});
+  const meta = $derived((api.model.CH[channel] ?? {}) as ChannelDefinition);
   const edit = $derived.by((): EditBinding => {
     if (!property) return channelBinding(layer.id, channel, {
       label: isScale && !scaleLinked ? 'Scale X' : label,
@@ -102,23 +101,23 @@
   }));
 
   function refreshValues(): void {
-    PM.Inspector?.refresh?.();
-    PM.invalidate?.();
+    inspector()?.refresh();
+    api.transport.invalidate?.();
   }
 
   function toggleStopwatch(event: MouseEvent): void {
     event.stopPropagation();
     const time = transport.time;
-    animateSelection(PM,layer,channels,animated,time,`Animate ${label}`);
-    PM.touch?.();
-    PM.TL?.reveal?.(layer, channels);
+    animateSelection(api,layer,channels,animated,time,`Animate ${label}`);
+    api.anim.touch?.();
+    timeline()?.reveal(layer, channels);
     refreshValues();
   }
 
   function toggleKey(event: MouseEvent): void {
     event.stopPropagation();
     const time = transport.time;
-    const targets=selectionChannels(PM,layer,channels);PM.hist.do('Keyframe',()=>{for(const target of targets){const p=target.prop;if(!p)continue;const at=PM.hasKeyAt(target.layer,p,time);if(keyAtPlayhead)PM.removeKey(p,at);else if(!at)PM.setKeyOn(p,time-target.layer.from,PM.evP(target.layer,p,time,target.path),'linear',PM.proj.fps);}});
+    const targets=selectionChannels(api,layer,channels);api.history.do('Keyframe',()=>{for(const target of targets){const p=target.prop;if(!p)continue;const at=api.anim.hasKeyAt(target.layer,p,time);if(keyAtPlayhead&&at)api.anim.removeKey(p,at);else if(!at)api.anim.setKeyOn(p,time-target.layer.from,api.anim.evP(target.layer,p,time,target.path)!,'linear',api.project.get().fps);}});
     refreshValues();
   }
 
@@ -132,35 +131,36 @@
 
   function addKeyframe(): void {
     const time = transport.time;
-    PM.hist.do('Keyframe', () => {
-      properties.forEach((p, index) => PM.setKeyOn(
+    api.history.do('Keyframe', () => {
+      properties.forEach((p, index) => api.anim.setKeyOn(
         p,
         time - layer.from,
-        PM.evP(layer, p, time, channels[index]),
+        api.anim.evP(layer, p, time, channels[index]!)!,
         'linear',
-        PM.proj.fps
+        api.project.get().fps
       ));
     });
-    PM.invalidate?.();
+    api.transport.invalidate?.();
   }
 
   function selectChannel(): void {
     // The legacy transform rows selected on pointerdown. Generic property rows
     // (shader uniforms/effect parameters) selected only through their menu.
     if (property) return;
-    PM.sel.chan = channel;
-    PM.TL?.focusGraph?.(layer, channel);
+    api.selection.set({ chan: channel });
+    timeline()?.focusGraph?.(layer, channel);
   }
 
   function showGraphEditor(): void {
-    PM.sel.chan = channel;
-    if (PM.TL) PM.TL.graph = true;
-    PM.TL?.focusGraph?.(layer, channel);
-    PM.TL?.reveal?.(layer, channels);
+    api.selection.set({ chan: channel });
+    const service = timeline();
+    if (service) service.graph = true;
+    service?.focusGraph?.(layer, channel);
+    service?.reveal(layer, channels);
   }
 
   function applyExpression(expression: string | null, editLabel: string): void {
-    PM.Edit.apply(
+    inspectorEdit.apply(
       channels.length > 1
         ? channels.map((path) => ({ type: 'set_expression', target: layer.id, path, expression }))
         : { type: 'set_expression', target: layer.id, path: channel, expression },
@@ -201,7 +201,7 @@
     };
     body.append(completion,diagnostic);
 
-    PM.modal({
+    api.ui.modal({
       title: `Expression · ${layer.name} · ${label}`,
       body,
       width: 540,
@@ -221,7 +221,7 @@
   }
 
   function resetChannel(): void {
-    const commands = channels.map((path) => ({
+    const commands: EditCommand[] = channels.map((path) => ({
       type: 'replace_keyframes',
       target: layer.id,
       path,
@@ -229,7 +229,7 @@
       expression: null,
       preserveHandEdits: false
     }));
-    PM.Edit.apply(commands.length > 1 ? commands : commands[0], { label: 'Reset', origin: 'inspector' });
+    inspectorEdit.apply(commands.length > 1 ? commands : commands[0]!, { label: 'Reset', origin: 'inspector' });
     refreshValues();
   }
 
@@ -237,17 +237,17 @@
     if (!allowContextMenu || !prop) return;
     event.preventDefault();
     const easing = ['power', 'linear', 'easeInOut', 'expoOut', 'backOut', 'glide', 'snap'];
-    PM.menu(window.document.body, [
+    const items: Array<MenuContribution | null> = [
       { header: label },
       { label: 'Add keyframe at playhead', run: addKeyframe },
-      animated ? { label: 'Remove animation', run: (e: MouseEvent) => toggleStopwatch(e ?? new MouseEvent('click')) } : null,
+      animated ? { label: 'Remove animation', run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in graph editor', run: showGraphEditor },
       '-',
       { header: 'Easing for all keys' },
       ...easing.map((name) => ({
         label: name,
         disabled: !animated,
-        run: () => PM.hist.do('Ease', () => properties.forEach((p) => PM.applyEaseTo(p.kf, name)))
+        run: () => api.history.do('Ease', () => properties.forEach((p) => api.anim.applyEaseTo(p.kf, name)))
       })),
       '-',
       { label: expression ? 'Edit expression…' : 'Add expression…', run: editExpression },
@@ -256,14 +256,16 @@
         run: () => applyExpression(null, 'Remove expression')
       } : null,
       { label: 'Reset', run: resetChannel }
-    ].filter(Boolean), { x: event.clientX, y: event.clientY });
+    ];
+    api.ui.menu({ x: event.clientX, y: event.clientY }, items.filter((item): item is MenuContribution => item !== null));
   }
 </script>
 
 {#snippet well(key: string, fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
   <div class="well" class:has-kf={showDiamond && animated} data-prefix={gutter}>
     <NumField
-      {PM}
+      {...controlProps}
+
       get={getter}
       edit={fieldEdit}
       label={fieldLabel}
@@ -325,13 +327,13 @@
       {/snippet}
       {@render well(channel, isScale ? 'Scale X' : label, edit, () => value, !!prop?.expr, isScale ? 'X' : prefix)}
       {#if isScale}
-        {@render well('scale.y', 'Scale Y', scaleYEdit, () => PM.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
+        {@render well('scale.y', 'Scale Y', scaleYEdit, () => api.anim.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
       {/if}
       {#snippet action()}
         {#if isScale}
           <button type="button" class="kf link-axes" class:on={scaleLinked} aria-label="Link Scale X and Y" aria-pressed={scaleLinked}
             title={scaleLinked ? 'Adjust X and Y separately' : 'Adjust X and Y together · preserve proportions'}
-            onclick={() => PM.Edit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}><Icon name="link" /></button>
+            onclick={() => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}><Icon name="link" /></button>
         {/if}
       {/snippet}
     </Row>

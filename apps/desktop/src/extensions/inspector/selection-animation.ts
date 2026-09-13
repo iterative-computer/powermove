@@ -1,27 +1,56 @@
-export function selectionChannels(PM:any,layer:any,paths:string[]) {
-  return paths.flatMap(path=>PM.inspectorTargets?PM.inspectorTargets(layer,path):[{layer,path,prop:PM.findProp(layer,path)}]);
+import type { ChannelValue, EditCommand, Layer, PowermoveAPI } from 'powermove';
+import { inspectorTargets } from './multi-edit';
+import type { InspectorAPI } from './multi-edit';
+
+type SelectionAnimationAPI = InspectorAPI & {
+  anim: InspectorAPI['anim'] & Pick<PowermoveAPI['anim'], 'hasKeyAt' | 'removeKey' | 'setKeyOn'>;
+  history: Pick<PowermoveAPI['history'], 'do'>;
+  project: Pick<PowermoveAPI['project'], 'get'>;
+};
+
+export function selectionChannels(api: InspectorAPI, layer: Layer, paths: string[]) {
+  return paths.flatMap((path) => inspectorTargets(api, layer, path));
 }
-export function animateSelection(PM:any,layer:any,paths:string[],disable:boolean,time:number,label:string,fallback?:any) {
-  const commands:any[]=[];
-  for(const target of selectionChannels(PM,layer,paths)){
-    const p=target.prop,value=p?PM.evP(target.layer,p,time,target.path):fallback;
-    if(value===undefined)continue;
-    if(disable)commands.push({type:'replace_keyframes',target:target.layer.id,path:target.path,keyframes:[],preserveHandEdits:false});
-    commands.push({type:'set_property',target:target.layer.id,path:target.path,value,time,mode:disable?'static':'keyframe',preserveHandEdits:false});
+
+export function animateSelection(
+  api: InspectorAPI,
+  layer: Layer,
+  paths: string[],
+  disable: boolean,
+  time: number,
+  label: string,
+  fallback?: unknown
+) {
+  const commands: EditCommand[] = [];
+  for (const target of selectionChannels(api, layer, paths)) {
+    const value = target.prop ? api.anim.evP(target.layer, target.prop, time, target.path) : fallback;
+    if (value === undefined) continue;
+    if (disable) commands.push({ type: 'replace_keyframes', target: target.layer.id, path: target.path, keyframes: [], preserveHandEdits: false });
+    commands.push({ type: 'set_property', target: target.layer.id, path: target.path, value: value as ChannelValue, time, mode: disable ? 'static' : 'keyframe', preserveHandEdits: false });
   }
-  return (PM.inspectorApply||PM.Edit.apply)(commands,{label,origin:'inspector'});
+  return api.edit.apply(commands, { label, origin: 'inspector' });
 }
 
 /** Add/remove only the playhead keys, preserving all other animation. */
-export function toggleSelectionKey(PM:any,layer:any,paths:string[],time:number,label:string,fallback?:any) {
-  const targets=selectionChannels(PM,layer,paths);
-  const remove=targets.length>0 && targets.every((t:any)=>t.prop && PM.hasKeyAt(t.layer,t.prop,time));
-  if(targets.some((t:any)=>!t.prop) || targets.every((t:any)=>!t.prop.kf.length)) return animateSelection(PM,layer,paths,false,time,label,fallback);
-  return PM.hist.do(label,()=>{
-    for(const target of targets){
-      const p=target.prop,at=PM.hasKeyAt(target.layer,p,time);
-      if(remove) PM.removeKey(p,at);
-      else if(!at) PM.setKeyOn(p,time-target.layer.from,PM.evP(target.layer,p,time,target.path),'linear',PM.proj.fps);
+export function toggleSelectionKey(
+  api: SelectionAnimationAPI,
+  layer: Layer,
+  paths: string[],
+  time: number,
+  label: string,
+  fallback?: unknown
+) {
+  const targets = selectionChannels(api, layer, paths);
+  const remove = targets.length > 0 && targets.every((target) => target.prop && api.anim.hasKeyAt(target.layer, target.prop, time));
+  if (targets.some((target) => !target.prop) || targets.every((target) => !target.prop?.kf.length)) {
+    return animateSelection(api, layer, paths, false, time, label, fallback);
+  }
+  return api.history.do(label, () => {
+    for (const target of targets) {
+      const prop = target.prop!;
+      const at = api.anim.hasKeyAt(target.layer, prop, time);
+      if (remove && at) api.anim.removeKey(prop, at);
+      else if (!at) api.anim.setKeyOn(prop, time - target.layer.from, api.anim.evP(target.layer, prop, time, target.path)!, 'linear', api.project.get().fps);
     }
   });
 }

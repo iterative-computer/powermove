@@ -1,14 +1,14 @@
-import { temporalKeys } from 'powermove';
+import { temporalKeys, type PowermoveAPI } from 'powermove';
 
-export function graphSample(PM: any, axis: any, time: number, speed: boolean): number {
-  if (!speed) return Number(PM.evP(axis.L,axis.prop,time,axis.key));
-  const h = 1/(Math.max(1,PM.proj.fps)*20);
-  return (Number(PM.evP(axis.L,axis.prop,time+h,axis.key))-Number(PM.evP(axis.L,axis.prop,time-h,axis.key)))/(2*h);
+export function graphSample(api: Pick<PowermoveAPI, 'anim' | 'project'>, axis: any, time: number, speed: boolean): number {
+  if (!speed) return Number(api.anim.evP(axis.L,axis.prop,time,axis.key));
+  const h = 1/(Math.max(1,api.project.get().fps)*20);
+  return (Number(api.anim.evP(axis.L,axis.prop,time+h,axis.key))-Number(api.anim.evP(axis.L,axis.prop,time-h,axis.key)))/(2*h);
 }
 
-export function velocityDialog(PM: any, entries: any[]): void {
+export function velocityDialog(api: Pick<PowermoveAPI, 'anim' | 'history' | 'transport' | 'ui'>, entries: any[]): void {
   entries = entries.filter(e => typeof e.key.v === 'number' && !e.L?.lock);
-  if (!entries.length) { PM.toast('Select numeric keyframes first'); return; }
+  if (!entries.length) { api.ui.toast('Select numeric keyframes first'); return; }
   entries.forEach(e => temporalKeys(e.prop.kf));
   const body = document.createElement('div');
   const fields: Record<string,HTMLInputElement> = {};
@@ -22,36 +22,36 @@ export function velocityDialog(PM: any, entries: any[]): void {
     label.append(input); body.append(label); fields[side+field]=input;
   }
   const message = document.createElement('div'); message.setAttribute('role','status'); body.append(message);
-  PM.modal({title:`Keyframe Velocity · ${entries.length} keys`,body,actions:[{label:'Cancel'},{label:'Apply',pri:true,run:()=>{
+  api.ui.modal({title:`Keyframe Velocity · ${entries.length} keys`,body,actions:[{label:'Cancel'},{label:'Apply',pri:true,run:()=>{
     if (Object.values(fields).some(input => !input.checkValidity() || !Number.isFinite(input.valueAsNumber))) { message.textContent='Enter finite speeds and influences from 0.1% to 100%.'; return false; }
-    PM.hist.do('Keyframe velocity',()=>{
+    api.history.do('Keyframe velocity',()=>{
       for (const e of entries) for (const side of ['in','out']) {
         e.key[side+'Interp']='bezier'; e.key[side+'Ease']={speed:fields[side+'speed']!.valueAsNumber,influence:fields[side+'influence']!.valueAsNumber};
         e.key.autoBezier=false;
       }
-      PM.touch();
-    }); PM.invalidate();
+      api.anim.touch();
+    }); api.transport.invalidate();
   }}]});
 }
 
-export function scaleGraphDialog(PM: any, entries: any[]): void {
+export function scaleGraphDialog(api: Pick<PowermoveAPI, 'anim' | 'history' | 'project' | 'transport' | 'ui' | 'util'>, entries: any[]): void {
   entries = entries.filter(e => typeof e.key.v==='number' && !e.L.lock);
-  if (!entries.length) { PM.toast('Select keyframes first'); return; }
+  if (!entries.length) { api.ui.toast('Select keyframes first'); return; }
   const body=document.createElement('div'), time=document.createElement('input'), value=document.createElement('input');
   for (const [input,label] of [[time,'Time scale (%)'],[value,'Value scale (%)']] as const) {
     input.type='number';input.value='100'; input.setAttribute('aria-label',label);
     const row=document.createElement('label');row.textContent=label;row.append(input);body.append(row);
   }
-  PM.modal({title:'Scale selected keyframes',body,actions:[{label:'Cancel'},{label:'Apply',pri:true,run:()=>{
+  api.ui.modal({title:'Scale selected keyframes',body,actions:[{label:'Cancel'},{label:'Apply',pri:true,run:()=>{
     const ts=time.valueAsNumber/100, vs=value.valueAsNumber/100;
     if (!Number.isFinite(ts)||!Number.isFinite(vs)||ts<=0) return false;
     const t0=Math.min(...entries.map(e=>e.L.from+e.key.t)), v0=Math.min(...entries.map(e=>e.key.v));
-    const plan=entries.map(e=>({...e,t:PM.snapF(t0+(e.L.from+e.key.t-t0)*ts-e.L.from,PM.proj.fps)}));
-    if (plan.some((e,i)=>plan.some((other,j)=>i!==j&&e.prop===other.prop&&Math.abs(e.t-other.t)<.5/PM.proj.fps)) || plan.some(e=>e.t<0 || e.t>e.L.dur || e.prop.kf.some((k:any)=>!entries.some(a=>a.key===k)&&Math.abs(k.t-e.t)<.5/PM.proj.fps))) { PM.toast('Scaling would overlap another key or exceed a layer boundary.'); return false; }
-    PM.hist.do('Scale keyframes',()=>{
+    const plan=entries.map(e=>({...e,t:api.util.snapF(t0+(e.L.from+e.key.t-t0)*ts-e.L.from,api.project.get().fps)}));
+    if (plan.some((e,i)=>plan.some((other,j)=>i!==j&&e.prop===other.prop&&Math.abs(e.t-other.t)<.5/api.project.get().fps)) || plan.some(e=>e.t<0 || e.t>e.L.dur || e.prop.kf.some((k:any)=>!entries.some(a=>a.key===k)&&Math.abs(k.t-e.t)<.5/api.project.get().fps))) { api.ui.toast('Scaling would overlap another key or exceed a layer boundary.'); return false; }
+    api.history.do('Scale keyframes',()=>{
       for (const e of plan) { e.key.t=e.t; e.key.v=v0+(e.key.v-v0)*vs; for (const side of ['in','out']) if(e.key[side+'Ease'])e.key[side+'Ease'].speed*=vs/ts; }
       for (const prop of new Set(entries.map(e=>e.prop))) prop.kf.sort((a:any,b:any)=>a.t-b.t);
-      PM.touch();
-    });PM.invalidate();
+      api.anim.touch();
+    });api.transport.invalidate();
   }}]});
 }

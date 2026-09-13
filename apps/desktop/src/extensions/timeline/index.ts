@@ -3,6 +3,9 @@ import type { PowermoveAPI } from 'powermove';
 import { createTimelineRuntime, timelinePanelOptions } from './timeline';
 import { adjacentKeyframe } from './keyframe-navigation';
 import { createPropertyReveal, propertyShortcuts } from './property-reveal';
+import { cloneLayer, selectedLayers, trimAtStart } from './api-helpers';
+
+let activeApi: PowermoveAPI | null = null;
 
 /* Vite can update a child runtime module without considering this extension
    entry itself changed. Accept that child explicitly and ask the kernel to
@@ -10,10 +13,10 @@ import { createPropertyReveal, propertyShortcuts } from './property-reveal';
    placement, current project, and editing session. */
 if (import.meta.hot) {
   import.meta.hot.accept('./timeline', async () => {
-    try { await window.PM?.Kernel?.loader?.reload('timeline'); }
+    try { await activeApi?.extensions.reload('timeline'); }
     catch (error) {
       console.error('[timeline hot update]', error);
-      window.PM?.toast?.('Timeline update failed. Your editing session is still open.');
+      activeApi?.ui.toast('Timeline update failed. Your editing session is still open.');
     }
   });
 }
@@ -39,54 +42,54 @@ const TIMELINE_STYLES = `
 #tl-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 `;
 
-export function toggleLayerStrips(pm: Record<string, any>): void {
-  const layers = pm.selLayers?.() ?? [];
+export function toggleLayerStrips(api: PowermoveAPI): void {
+  const layers = selectedLayers(api);
   if (!layers.length) return;
   /* A mixed selection opens together; only an entirely open selection
      collapses. This avoids leaving selected layers in contradictory states. */
-  const collapsed = layers.every((layer: any) => !pm.UIState?.getLayerCollapsed?.(layer));
+  const collapsed = layers.every((layer) => !api.uiState.getLayerCollapsed(layer));
   for (const layer of layers) {
     layer.collapsed = collapsed;
-    pm.UIState?.setLayerCollapsed?.(layer, collapsed);
+    api.uiState.setLayerCollapsed(layer, collapsed);
   }
-  pm.invalidate?.('timeline');
+  api.transport.invalidate('timeline');
 }
 
-export function splitSelectedLayersAtPlayhead(pm: Record<string, any>): string[] {
+export function splitSelectedLayersAtPlayhead(api: PowermoveAPI): string[] {
   const rightIds: string[] = [];
-  pm.hist.do('Split', () => {
-    for (const layer of pm.selLayers?.() ?? []) {
-      if (pm.time <= layer.from || pm.time >= layer.from + layer.dur) continue;
-      const right = pm.cloneLayer(layer);
+  api.history.do('Split', () => {
+    for (const layer of selectedLayers(api)) {
+      if (api.transport.time() <= layer.from || api.transport.time() >= layer.from + layer.dur) continue;
+      const right = cloneLayer(api, layer);
       // Keyframe times are layer-local. Preserve their composition times
       // when the tail gets a new in point, including keys before the cut.
-      const offset = pm.time - layer.from;
-      for (const { prop } of pm.allProps(right)) {
+      const offset = api.transport.time() - layer.from;
+      for (const { prop } of api.anim.allProps(right)) {
         for (const key of prop.kf ?? []) key.t -= offset;
       }
-      right.from = pm.time;
-      right.dur = layer.from + layer.dur - pm.time;
-      if (pm.MediaTiming?.isTimed?.(layer)) right.d.trim = pm.MediaTiming.trimAtStart(layer, pm.time);
-      layer.dur = pm.time - layer.from;
-      pm.proj.layers.splice(pm.proj.layers.indexOf(layer), 0, right);
+      right.from = api.transport.time();
+      right.dur = layer.from + layer.dur - api.transport.time();
+      if (api.media.timing.isTimed(layer)) {
+        (right.d as LayerWithTrim['d']).trim = trimAtStart(api, layer, api.transport.time());
+      }
+      layer.dur = api.transport.time() - layer.from;
+      api.project.get().layers.splice(api.project.get().layers.indexOf(layer), 0, right);
       rightIds.push(right.id);
     }
-    pm.bus.emit('layers');
-    if (rightIds.length) {
-      // The project index intentionally avoids rescanning large layer stacks
-      // on every lookup. This command mutates the array directly, so retire
-      // the old index before resolving the newly-created selection.
-      pm.ProjectIndex?.invalidate?.();
-      pm.selectLayers(rightIds);
-    }
+    api.anim.touch();
   });
+  // history.do publishes the structural change and retires the project index;
+  // resolve the new ids only after that transaction has closed.
+  if (rightIds.length) api.selection.select(rightIds);
   return rightIds;
 }
 
+type LayerWithTrim = { d: { trim?: number } };
+
 export default function activate(api: PowermoveAPI): void {
-  const pm = api.host.pm as Record<string, any>;
-  const timeline = createTimelineRuntime(pm, api.space3d);
-  const revealProperty = createPropertyReveal(pm);
+  activeApi = api;
+  const timeline = createTimelineRuntime(api);
+  const revealProperty = createPropertyReveal(api);
   for (const [key, , label] of propertyShortcuts) {
     api.commands?.register({
       id: `timeline.revealProperty:${key}`,
@@ -95,7 +98,7 @@ export default function activate(api: PowermoveAPI): void {
       run: (shift?: unknown) => revealProperty(key, shift === true)
     });
   }
-  api.commands?.register({
+  api.commands.register({
     id: 'timeline.revealAll',
     label: 'Reveal all properties',
     category: 'Timeline',
@@ -107,8 +110,8 @@ export default function activate(api: PowermoveAPI): void {
       label: `${direction === 'prev' ? 'Previous' : 'Next'} adjacent keyframe`,
       category: 'Timeline',
       run: () => {
-        const time = adjacentKeyframe(pm, step, undefined, api.space3d);
-        if (time != null) pm.setTime(time);
+        const time = adjacentKeyframe(api, step, undefined, api.space3d);
+        if (time != null) api.transport.setTime(time);
       }
     });
   }
@@ -117,21 +120,24 @@ export default function activate(api: PowermoveAPI): void {
     label: 'Split at playhead',
     category: 'Edit',
     kb: '⌘⇧D',
-    run: () => splitSelectedLayersAtPlayhead(pm)
+    run: () => splitSelectedLayersAtPlayhead(api)
   });
   api.commands?.register({
     id: 'toggleLayerStrips',
     label: 'Open / collapse layer strips',
     category: 'Timeline',
     kb: 'M',
-    run: () => pm.cmd('revealMasks')
+    run: () => revealProperty('m')
   });
   api.keybindings?.bind({ key: 'm', command: 'toggleLayerStrips', priority: 90 });
   /* Kernel deactivation runs before replacement activation. Capture this
      module instance's disposer so disabling/reloading the extension cannot
      leave its bus, window, observer, or DOM listeners alive. */
   const disposeRuntime = timeline.disposeRuntime;
-  api.onDispose?.(() => disposeRuntime());
+  api.onDispose(() => {
+    if (activeApi === api) activeApi = null;
+    disposeRuntime();
+  });
   api.services.register('timeline', timeline);
 
   api.panels.register({

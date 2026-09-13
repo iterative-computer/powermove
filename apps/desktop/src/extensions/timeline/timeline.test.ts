@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -7,6 +8,7 @@ import {
   planKeyframeMove,
   resolveTimelineSnap,
   shouldDrawClipLabel,
+  timelineWorkArea,
   type KeyframeMoveSnapshotItem,
 } from './timeline';
 import { expandScaleKeyIds, timelineProperties } from './property-tracks';
@@ -24,49 +26,37 @@ import {
   resolveGraphTarget,
   selectionAfterMarquee,
 } from './graph-selection';
-import { makePM } from '../../renderer/src/legacy/__tests__/make-pm';
+import { fakePowermoveAPI } from './fake-api.test-helper';
 
-function timelineRegistry(): Record<string, any> {
-  vi.stubGlobal('window', {
-    addEventListener() {},
-    getComputedStyle() { return { getPropertyValue() { return ''; } }; }
-  });
-  vi.stubGlobal('document', { documentElement: { dataset: { theme: 'light' } } });
-
-  const PM: Record<string, any> = {
-    h() {},
-    clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, value)); },
-    registerPanel() {},
-    bus: { on() {} },
-    invalidate() {}
-  };
-  createTimelineRuntime(PM);
-  return PM;
+function timelineHarness() {
+  const harness = fakePowermoveAPI(vi);
+  harness.state.project = { id: 'project-1', w: 1920, h: 1080, fps: 30, dur: 10, work: [0, 10], layers: [], markers: [] };
+  harness.state.timeline = createTimelineRuntime(harness.api);
+  return harness;
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('timeline runtime', () => {
   it('groups Scale without altering unequal legacy key times or values', () => {
-    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim');
-    PM.proj = PM.mkProject();
-    const layer = PM.mkLayer('solid');
-    PM.proj.layers = [layer];
-    PM.setKey(layer, 'scale.x', 0, 100, 'power');
-    PM.setKey(layer, 'scale.x', 2, 200, 'linear');
-    PM.setKey(layer, 'scale.y', 0, 50, 'linear');
-    PM.setKey(layer, 'scale.y', 1, 80, 'backOut');
+    const harness = fakePowermoveAPI(vi);
+    const key = (i: string, t: number, v: number) => ({ i, t, v, eo: [0, 0], ei: [1, 1], hold: false });
+    const layer: any = { id: 'solid', threeD: false, p: {
+      'scale.x': { v: 100, expr: null, kf: [key('x0', 0, 100), key('x2', 2, 200)] },
+      'scale.y': { v: 50, expr: null, kf: [key('y0', 0, 50), key('y1', 1, 80)] },
+    } };
+    harness.state.project.layers = [layer];
     const before = JSON.stringify(layer.p);
-    const rows = timelineProperties(PM, layer);
+    const rows = timelineProperties(harness.api, layer);
     const scale = rows.find(row => row.key === 'scale');
     expect(rows.filter(row => row.key.startsWith('scale'))).toHaveLength(1);
     expect(scale.label).toBe('Scale');
     expect(scale.prop.kf.map((key: any) => key.t)).toEqual([0, 1, 2]);
     expect(scale.prop.kf[0].members.map((member: any) => member.key.v)).toEqual([100, 50]);
-    expect(expandScaleKeyIds(PM, [layer.p['scale.y'].kf[0].i])).toEqual([
+    expect(expandScaleKeyIds(harness.api, [layer.p['scale.y'].kf[0].i])).toEqual([
       layer.p['scale.y'].kf[0].i, layer.p['scale.x'].kf[0].i
     ]);
-    expect(expandScaleKeyIds(PM, [scale.prop.kf[1]])).toEqual([layer.p['scale.y'].kf[1].i]);
+    expect(expandScaleKeyIds(harness.api, [scale.prop.kf[1]])).toEqual([layer.p['scale.y'].kf[1].i]);
     expect(JSON.stringify(layer.p)).toBe(before);
   });
 
@@ -169,55 +159,47 @@ describe('timeline runtime', () => {
   });
 
   it('extends the composition when the out marker passes its end', () => {
-    const math = timelineRegistry().TimelineWorkArea;
-    const patch = math.resize([0, 10], 1, 14.5, 10, 1 / 30);
+    const patch = timelineWorkArea.resize([0, 10], 1, 14.5, 10, 1 / 30);
 
     expect(patch.duration).toBe(14.5);
     expect(patch.workArea).toEqual([0, 14.5]);
   });
 
   it('keeps work-area markers at least one frame apart', () => {
-    const math = timelineRegistry().TimelineWorkArea;
-    const left = math.resize([2, 8], 0, 20, 10, 1 / 30);
-    const right = math.resize([2, 8], 1, 0, 10, 1 / 30);
+    const left = timelineWorkArea.resize([2, 8], 0, 20, 10, 1 / 30);
+    const right = timelineWorkArea.resize([2, 8], 1, 0, 10, 1 / 30);
 
     expect(left.workArea[0]).toBeCloseTo(8 - 1 / 30, 10);
     expect(right.workArea[1]).toBeCloseTo(2 + 1 / 30, 10);
   });
 
   it('preserves the span and stops a moved work area at composition edges', () => {
-    const math = timelineRegistry().TimelineWorkArea;
-
-    expect(math.move([2, 6], 3, 10, 1 / 30).workArea).toEqual([5, 9]);
-    expect(math.move([2, 6], 20, 10, 1 / 30).workArea).toEqual([6, 10]);
-    expect(math.move([2, 6], -20, 10, 1 / 30).workArea).toEqual([0, 4]);
+    expect(timelineWorkArea.move([2, 6], 3, 10, 1 / 30).workArea).toEqual([5, 9]);
+    expect(timelineWorkArea.move([2, 6], 20, 10, 1 / 30).workArea).toEqual([6, 10]);
+    expect(timelineWorkArea.move([2, 6], -20, 10, 1 / 30).workArea).toEqual([0, 4]);
   });
 
   it('restores the current project timeline session when activated after hydration', () => {
-    const PM = timelineRegistry();
-    delete PM.TL;
-    PM.proj = { id: 'project-1' };
-    PM.Projects = {
-      getState: () => ({ timeline: { pps: 144, scrollT: 2.5, scrollY: 64, graph: true } })
-    };
-
-    const timeline = createTimelineRuntime(PM);
+    const harness = fakePowermoveAPI(vi);
+    harness.state.project.id = 'project-1';
+    harness.api.storage.set('session:project-1', { pps: 144, scrollT: 2.5, scrollY: 64, graph: true });
+    const timeline = createTimelineRuntime(harness.api);
 
     expect(timeline).toMatchObject({ pps: 144, scrollT: 2.5, scrollY: 64, graph: true });
   });
 
   it('is idempotent within one module instance', () => {
-    const PM = timelineRegistry();
-    const first = PM.TL;
+    const harness = timelineHarness();
+    const first: any = harness.state.timeline!;
     const attachHead = first.attachHead;
 
-    expect(createTimelineRuntime(PM)).toBe(first);
+    expect(createTimelineRuntime(harness.api)).toBe(first);
     expect(first.attachHead).toBe(attachHead);
   });
 
   it('disposes stale module closures while retaining the timeline state object', () => {
-    const PM = timelineRegistry();
-    const timeline = PM.TL;
+    const harness = timelineHarness();
+    const timeline: any = harness.state.timeline!;
     timeline.pps = 237;
     timeline.scrollT = 4.5;
     const staleAttach = timeline.attachHead;
@@ -226,7 +208,7 @@ describe('timeline runtime', () => {
     timeline.disposeRuntime = dispose;
     timeline.__timelineRuntimeToken = Symbol('stale-module');
 
-    const replaced = createTimelineRuntime(PM);
+    const replaced = createTimelineRuntime(harness.api);
 
     expect(dispose).toHaveBeenCalledOnce();
     expect(replaced).toBe(timeline);

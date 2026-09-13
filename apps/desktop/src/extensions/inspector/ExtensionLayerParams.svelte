@@ -3,10 +3,10 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc, transport } = inspectorContext();
+  const { api, doc, transport, controlProps } = inspectorContext();
   const { ColorField, Section, ToggleField } = api.ui.controls;
 
-  let { PM, layer }: { PM: Record<string, any>; layer: Record<string, any> } = $props();
+  let { layer }: { layer: any } = $props();
   const definition = $derived((doc.tick.structure, doc.proj, api.layers.get(String(layer.d?.definition || ''))));
   const meshAsset = $derived.by(() => {
     doc.tick.assets; doc.proj;
@@ -21,7 +21,7 @@
       origin: 'inspector',
       command: (value: unknown) => ({
         type: 'set_property', target: layer.id, path, value: value as any,
-        time: PM.time, preserveHandEdits: false
+        time: api.transport.time(), preserveHandEdits: false
       })
     };
   }
@@ -53,31 +53,30 @@
     {#if property}
       {@const path = `x.${parameter.k}`}
       {#if parameter.type === 'color'}
-        <AnimatedRow {PM} {layer} {path} label={parameter.label}>
+        <AnimatedRow {layer} {path} label={parameter.label}>
           <ColorField
-            {PM}
-            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
+            {...controlProps}
+            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, parameter.label)}
             label={parameter.label}
           />
         </AnimatedRow>
       {:else if parameter.type === 'toggle'}
-        <AnimatedRow {PM} {layer} {path} label={parameter.label}>
+        <AnimatedRow {layer} {path} label={parameter.label}>
           <ToggleField
-            {PM}
-            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
+            {...controlProps}
+            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, parameter.label)}
             label={parameter.label}
           />
         </AnimatedRow>
       {:else}
         <ChannelRow
-          {PM}
           {layer}
           channel={path}
           label={parameter.label}
           {property}
-          getValue={(time) => PM.evP(layer, property, time, parameter.k)}
+          getValue={(time) => api.anim.evP(layer, property, time, parameter.k)}
           step={parameter.step ?? ((parameter.max - parameter.min) / 200 || 0.01)}
           min={parameter.min}
           max={parameter.max}

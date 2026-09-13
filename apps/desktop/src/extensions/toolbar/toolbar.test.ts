@@ -1,27 +1,25 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 
-import type { PanelDefinition, PowermoveAPI } from 'powermove';
+import type { MenuContribution, PanelDefinition, PowermoveAPI, ToolService } from 'powermove';
 
 import activate from './index';
+
+type ToolbarMenuItem = Extract<MenuContribution, { label: string }>;
 
 describe('toolbar', () => {
   it('registers and builds the legacy toolbar through the extension API', () => {
     let panel: PanelDefinition | undefined;
-    let toolListener: (() => void) | undefined;
+    let toolService: ToolService | undefined;
     const run = vi.fn();
     const menu = vi.fn();
-    const PM = {
-      bus: {
-        emit: vi.fn((event: string) => event === 'tool' && toolListener?.()),
-        on: vi.fn((_event: string, listener: () => void) => {
-          toolListener = listener;
-          return vi.fn();
-        })
-      }
-    };
     const api = {
-      host: { pm: PM },
+      services: {
+        register: vi.fn((_name: string, implementation: ToolService) => {
+          toolService = implementation;
+          return { dispose() {} };
+        })
+      },
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) },
       commands: { run },
       ui: { menu, icon: (name: string) => `<svg data-icon="${name}"></svg>` }
@@ -39,35 +37,35 @@ describe('toolbar', () => {
       .toEqual(['select', 'hand', 'shape', 'text']);
 
     body.querySelector<HTMLButtonElement>('[aria-label="Selection and transform tools"]')?.click();
-    const transformItems = menu.mock.lastCall![1];
-    expect(transformItems.map((item: any) => item.label)).toEqual([
+    const transformItems = menu.mock.lastCall![1] as ToolbarMenuItem[];
+    expect(transformItems.map((item) => item.label)).toEqual([
       'Selection Tool (V)', 'Rotation Tool (W)', 'Anchor Point Tool (Y)'
     ]);
-    transformItems[1].run();
+    transformItems[1]!.run?.();
     expect(run).toHaveBeenLastCalledWith('toolRotate');
-    (PM as { setTool?: (tool: string) => void }).setTool?.('rotate');
+    toolService?.setTool('rotate');
     expect(body.querySelector('[data-tool="rotate"]')?.getAttribute('aria-pressed')).toBe('true');
 
     // Shortcut changes expose the active hidden tool and remember it after switching groups.
-    (PM as { setTool?: (tool: string) => void }).setTool?.('zoom');
+    toolService?.setTool('zoom');
     expect(body.querySelector('[data-tool="zoom"]')?.classList.contains('on')).toBe(true);
     body.querySelector<HTMLButtonElement>('[data-tool="rotate"]')?.click();
     expect(run).toHaveBeenLastCalledWith('toolRotate');
     body.querySelector('[data-tool="zoom"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
-    expect(menu.mock.lastCall![1].map((item: any) => item.label)).toEqual(['Hand Tool (H)', 'Zoom Tool (Z)']);
+    expect((menu.mock.lastCall![1] as ToolbarMenuItem[]).map((item) => item.label)).toEqual(['Hand Tool (H)', 'Zoom Tool (Z)']);
 
     body.querySelector<HTMLButtonElement>('[aria-label="Drawing tools"]')?.click();
-    menu.mock.lastCall![1][1].run();
+    (menu.mock.lastCall![1] as ToolbarMenuItem[])[1]!.run?.();
     expect(run).toHaveBeenLastCalledWith('toolPen');
-    (PM as { setTool?: (tool: string, detail?: string) => void }).setTool?.('shape', 'ellipse');
+    toolService?.setTool('shape', 'ellipse');
     body.querySelector<HTMLButtonElement>('[data-tool="shape"]')?.click();
-    expect((PM as { toolShape?: string }).toolShape).toBe('ellipse');
+    expect(toolService?.toolShape).toBe('ellipse');
 
     body.querySelector<HTMLButtonElement>('[aria-label="Add layer or media"]')?.click();
-    const createItems = menu.mock.lastCall![1];
+    const createItems = menu.mock.lastCall![1] as ToolbarMenuItem[];
     expect(createItems).toHaveLength(4);
     for (const [index, command] of ['import', 'newSolid', 'newShader', 'newNull'].entries()) {
-      createItems[index].run();
+      createItems[index]?.run?.();
       expect(run).toHaveBeenLastCalledWith(command);
     }
   });

@@ -4,21 +4,21 @@ import {
   selectionOutlineColor,
   anchorMoveValues,
   calculateResize, composeLocalLinear, compositionFramePosition, compositionIsOutOfView, editableTextAtPoint,
-  install, layerContainsPoint, layerWorldPivot,
+  createViewerRuntime, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
   previewRenderSize, previewRenderViewport, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
   shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 import type { PreviewViewport } from './viewer';
-import type { Space3DAPI } from 'powermove';
+import type { PowermoveAPI, Space3DAPI, ViewerService } from 'powermove';
 
 const originalWindow = (globalThis as any).window;
 
-function testSpace3d(PM: Record<string, any>): Space3DAPI {
+function testSpace3d(api: PowermoveAPI): Space3DAPI {
   return {
     is3DLayer: () => false,
     planeContains: (layer: any, time: number, x: number, y: number, bounds: any) => {
-      const [a, b, c, d, tx, ty] = PM.worldMatrix(layer, time);
+      const [a, b, c, d, tx, ty] = api.anim.worldMatrix(layer, time);
       const determinant = a * d - b * c;
       if (Math.abs(determinant) < 1e-10) return false;
       const localX = (d * (x - tx) - c * (y - ty)) / determinant;
@@ -33,18 +33,56 @@ afterEach(() => {
   else (globalThis as any).window = originalWindow;
 });
 
-function viewerRegistry(): Record<string, any> {
-  (globalThis as any).window = { addEventListener() {} };
-  const PM: Record<string, any> = {
-    h() {},
-    clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-    registerPanel() {},
-    bus: { on() {} },
-    GL: {},
+function viewerApi(): PowermoveAPI {
+  (globalThis as any).window = {
+    addEventListener() {}, removeEventListener() {},
+    requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+    performance: { now: () => 0 },
   };
-  PM.space3d = testSpace3d(PM);
-  install(PM, PM.space3d);
-  return PM;
+  const project: any = { w: 1920, h: 1080, fps: 30, dur: 10, layers: [], assets: {} };
+  const services = new Map<string, unknown>();
+  const api = {
+    project: { get: () => project },
+    selection: { layers: () => [], first: () => null, select() {} },
+    groups: { ancestors: () => [], transformRoots: (ids: string[]) => ids.map(id => api.model.layer(id)).filter(Boolean) },
+    anim: {
+      active: () => true, ev: () => 0, version: () => 0,
+      worldMatrix: () => [1, 0, 0, 1, 0, 0],
+      localMatrix: () => [1, 0, 0, 1, 0, 0],
+      transformParentMatrix: () => [1, 0, 0, 1, 0, 0],
+      mul: (left: number[], right: number[]) => [
+        left[0]! * right[0]! + left[2]! * right[1]!, left[1]! * right[0]! + left[3]! * right[1]!,
+        left[0]! * right[2]! + left[2]! * right[3]!, left[1]! * right[2]! + left[3]! * right[3]!,
+        left[0]! * right[4]! + left[2]! * right[5]! + left[4]!, left[1]! * right[4]! + left[3]! * right[5]! + left[5]!,
+      ],
+    },
+    model: { TYPE_META: { shape: {}, audio: { pickable: false } }, layer: (id: string) => project.layers.find((layer: any) => layer.id === id), curComp: () => project },
+    render: { gl: { bounds: () => null, pick: () => null, context: null, previewViewport: null } },
+    transport: { time: () => 0, playing: () => false, quality: 1, perf: { auto: false }, previewResolution: 1, invalidate() {} },
+    util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
+    events: { on: () => ({ dispose() {} }) },
+    services: {
+      register: (name: string, implementation: unknown) => { services.set(name, implementation); return { dispose: () => services.delete(name) }; },
+      get: (name: string) => services.get(name) ?? null,
+    },
+    ui: {}, dnd: {}, menus: {}, edit: {}, history: {},
+  } as unknown as PowermoveAPI;
+  const runtime = createViewerRuntime(api, testSpace3d(api));
+  api.services.register('viewer', runtime);
+  return api;
+}
+
+interface ViewerTestRuntime extends ViewerService {
+  boxSnapPoints(bounds: object): any[];
+  findSnapTarget(source: any[], targets: any[], threshold: number, axis: 'x' | 'y'): any;
+  passedMoveDragThreshold(dx: number, dy: number): boolean;
+  snapBox(moving: any, candidates: any, threshold: number, axes?: {x:boolean;y:boolean}): any;
+  snapCandidatesFromPoints(points: Array<{x:number;y:number}>): any;
+  snapLinesChanged(previous: any[] | null, next: any[] | null): boolean;
+}
+
+function viewer(api: PowermoveAPI): ViewerTestRuntime {
+  return api.services.get('viewer') as ViewerTestRuntime;
 }
 
 describe('viewer runtime', () => {
@@ -161,7 +199,7 @@ describe('viewer runtime', () => {
     }
   });
   it('snaps to the nearest candidate and breaks ties by the shorter guide', () => {
-    const V = viewerRegistry().Viewer;
+    const V = viewer(viewerApi());
     const source = V.snapCandidatesFromPoints([{ x: 103, y: 10 }]);
     const targets = V.snapCandidatesFromPoints([{ x: 100, y: 500 }, { x: 100, y: 40 }, { x: 200, y: 10 }]);
 
@@ -171,7 +209,7 @@ describe('viewer runtime', () => {
   });
 
   it('snaps each axis independently, respects a locked axis, and draws guides to the target', () => {
-    const V = viewerRegistry().Viewer;
+    const V = viewer(viewerApi());
     const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 193, x1: 213, y0: 42, y1: 62 }));
     const candidates = V.snapCandidatesFromPoints([{ x: 200, y: 0 }, { x: 400, y: 50 }]);
 
@@ -188,24 +226,24 @@ describe('viewer runtime', () => {
   });
 
   it('keeps sibling alignment targets for a multi-selection inside one parent', () => {
-    const PM = viewerRegistry();
+    const api = viewerApi();
     const parent = { id: 'parent', parent: null };
     const left = { id: 'left', parent: parent.id };
     const middle = { id: 'middle', parent: parent.id };
     const target = { id: 'target', parent: parent.id };
     const layers = [parent, left, middle, target];
-    PM.proj = { w: 640, h: 360, layers };
-    PM.active = () => true;
-    PM.L = (id: string) => layers.find((layer) => layer.id === id);
-    PM.GL.bounds = () => ({ x0: -10, x1: 10, y0: -10, y1: 10 });
-    PM.worldMatrix = (layer: any) => [1, 0, 0, 1, layer === target ? 290 : 50, 100];
+    Object.assign(api.project.get(), { w: 640, h: 360, layers });
+    api.anim.active = () => true;
+    api.model.layer = (id: string) => layers.find((layer) => layer.id === id) as any;
+    api.render.gl.bounds = () => ({ x0: -10, x1: 10, y0: -10, y1: 10 });
+    api.anim.worldMatrix = (layer: any) => [1, 0, 0, 1, layer === target ? 290 : 50, 100];
 
-    const candidates = PM.Viewer.snapshotSnapCandidates(0, [left, middle]);
+    const candidates = viewer(api).snapshotSnapCandidates(0, [left, middle] as any);
     expect(candidates.x.map((candidate: any) => candidate.value)).toEqual(expect.arrayContaining([280, 290, 300]));
   });
 
   it('fires the haptic on guide entry and retarget, not while a guide stays put', () => {
-    const V = viewerRegistry().Viewer;
+    const V = viewer(viewerApi());
     const a = [{ from: { x: 0, y: 0 }, to: { x: 100, y: 0 } }];
     const b = [{ from: { x: 0, y: 0 }, to: { x: 200, y: 0 } }];
 
@@ -217,7 +255,7 @@ describe('viewer runtime', () => {
   });
 
   it('keeps click jitter below the move-drag threshold', () => {
-    const V = viewerRegistry().Viewer;
+    const V = viewer(viewerApi());
 
     expect(V.passedMoveDragThreshold(0, 0)).toBe(false);
     expect(V.passedMoveDragThreshold(1, 1)).toBe(false);
@@ -226,43 +264,42 @@ describe('viewer runtime', () => {
   });
 
   it('measures rotated layer bounds in composition space', () => {
-    const PM = viewerRegistry();
-    PM.GL.bounds = () => ({ x0: -10, y0: -20, x1: 10, y1: 20 });
-    PM.worldMatrix = () => [0, 1, -1, 0, 100, 200];
+    const api = viewerApi();
+    api.render.gl.bounds = () => ({ x0: -10, y0: -20, x1: 10, y1: 20 });
+    api.anim.worldMatrix = () => [0, 1, -1, 0, 100, 200];
 
-    expect(PM.Viewer.worldBounds({}, 0)).toEqual({ x0: 80, x1: 120, y0: 190, y1: 210, cx: 100, cy: 200 });
+    expect(viewer(api).worldBounds({} as any, 0)).toEqual({ x0: 80, x1: 120, y0: 190, y1: 210, cx: 100, cy: 200 });
   });
 
   it('recognizes the selected layer box beneath a full-frame top layer', () => {
-    const PM = viewerRegistry();
+    const api = viewerApi();
     const selected = { id: 'text' };
-    PM.GL.bounds = (layer: any) => layer === selected
+    api.render.gl.bounds = (layer: any) => layer === selected
       ? { x0: -100, y0: -25, x1: 100, y1: 25 }
       : { x0: 0, y0: 0, x1: 1920, y1: 1080 };
-    PM.worldMatrix = (layer: any) => layer === selected
+    api.anim.worldMatrix = (layer: any) => layer === selected
       ? [1, 0, 0, 1, 960, 800]
       : [1, 0, 0, 1, 0, 0];
 
-    const space3d = testSpace3d(PM);
-    expect(layerContainsPoint(PM, selected, 960, 800, 0, space3d)).toBe(true);
-    expect(layerContainsPoint(PM, selected, 700, 800, 0, space3d)).toBe(false);
+    const space3d = testSpace3d(api);
+    expect(layerContainsPoint(api, selected, 960, 800, 0, space3d)).toBe(true);
+    expect(layerContainsPoint(api, selected, 700, 800, 0, space3d)).toBe(false);
   });
 
   it('edits selected text beneath a full-frame top layer before using pixel pick', () => {
     const selected = { id: 'text', type: 'text' };
     const cover = { id: 'cover', type: 'shape' };
-    const PM = {
-      selLayers: () => [selected], active: () => true,
-      GL: {
-        pick: () => cover,
-        bounds: () => ({ x0: -100, y0: -25, x1: 100, y1: 25 }),
-      },
-      worldMatrix: () => [1, 0, 0, 1, 500, 350],
-    };
+    const api = viewerApi();
+    api.selection.layers = () => [selected.id];
+    api.model.layer = (id: string) => id === selected.id ? selected as any : null;
+    api.anim.active = () => true;
+    api.render.gl.pick = () => cover as any;
+    api.render.gl.bounds = () => ({ x0: -100, y0: -25, x1: 100, y1: 25 });
+    api.anim.worldMatrix = () => [1, 0, 0, 1, 500, 350];
 
-    const space3d = testSpace3d(PM);
-    expect(editableTextAtPoint(PM, 500, 350, 0, space3d)).toBe(selected);
-    expect(editableTextAtPoint(PM, 800, 350, 0, space3d)).toBeNull();
+    const space3d = testSpace3d(api);
+    expect(editableTextAtPoint(api, 500, 350, 0, space3d)).toBe(selected);
+    expect(editableTextAtPoint(api, 800, 350, 0, space3d)).toBeNull();
   });
 
   it('resizes edge handles on one axis and preserves the opposite midpoint', () => {
@@ -336,29 +373,28 @@ describe('viewer runtime', () => {
     const inactive = { id: 'inactive', parent: null, type: 'shape', active: false };
     const audio = { id: 'audio', parent: null, type: 'audio' };
     const layers = [parent, child, sibling, locked, inactive, audio];
-    const PM = {
-      active: (layer: any) => layer.active !== false,
-      TYPE_META: { shape: {}, audio: { pickable: false } },
-      L: (id: string) => layers.find((layer) => layer.id === id),
-    };
+    const api = viewerApi();
+    api.anim.active = (layer: any) => layer.active !== false;
+    api.model.layer = (id: string) => layers.find((layer) => layer.id === id) as any;
+    api.groups.transformRoots = () => [parent, sibling] as any;
 
-    expect(selectionTransformRoots(PM, layers, 0).map((layer) => layer.id))
+    expect(selectionTransformRoots(api, layers, 0).map((layer) => layer.id))
       .toEqual(['parent', 'sibling']);
   });
 
   it('resolves multiple layers to one axis-aligned common selection box', () => {
     const left = { id: 'left', type: 'shape', parent: null };
     const right = { id: 'right', type: 'shape', parent: null };
-    const PM = {
-      active: () => true, TYPE_META: { shape: {} }, L: () => null,
-      GL: { bounds: () => ({ x0: -10, y0: -5, x1: 10, y1: 5, w: 20, h: 10 }) },
-      worldMatrix: (layer: any) => layer === left
-        ? [1, 0, 0, 1, 100, 120]
-        : [0, 1, -1, 0, 220, 180],
-      ev: () => 0,
-    };
+    const api = viewerApi();
+    api.anim.active = () => true;
+    api.render.gl.bounds = () => ({ x0: -10, y0: -5, x1: 10, y1: 5 });
+    api.model.layer = (id: string) => ({ left, right }[id as 'left' | 'right'] as any) ?? null;
+    api.anim.worldMatrix = (layer: any) => layer === left
+      ? [1, 0, 0, 1, 100, 120]
+      : [0, 1, -1, 0, 220, 180];
+    api.anim.ev = () => 0;
 
-    const selection = resolveSelectionGeometry(PM, [left, right], 0, testSpace3d(PM));
+    const selection = resolveSelectionGeometry(api, [left, right], 0, testSpace3d(api));
     expect(selection?.mode).toBe('common');
     expect(selection?.roots).toEqual([left, right]);
     expect(selection?.bounds).toEqual({ x0: 90, y0: 115, x1: 225, y1: 190, w: 135, h: 75 });
@@ -369,14 +405,13 @@ describe('viewer runtime', () => {
   it('keeps locked members in common chrome while disabling the whole transform', () => {
     const left = { id: 'left', type: 'shape', parent: null };
     const locked = { id: 'locked', type: 'shape', parent: null, lock: true };
-    const PM = {
-      active: () => true, TYPE_META: { shape: {} }, L: () => null,
-      GL: { bounds: () => ({ x0: -10, y0: -10, x1: 10, y1: 10, w: 20, h: 20 }) },
-      worldMatrix: (layer: any) => [1, 0, 0, 1, layer === left ? 50 : 150, 100],
-      ev: () => 0,
-    };
+    const api = viewerApi();
+    api.anim.active = () => true;
+    api.render.gl.bounds = () => ({ x0: -10, y0: -10, x1: 10, y1: 10 });
+    api.anim.worldMatrix = (layer: any) => [1, 0, 0, 1, layer === left ? 50 : 150, 100];
+    api.anim.ev = () => 0;
 
-    const selection = resolveSelectionGeometry(PM, [left, locked], 0, testSpace3d(PM));
+    const selection = resolveSelectionGeometry(api, [left, locked], 0, testSpace3d(api));
     expect(selection?.layers).toEqual([left, locked]);
     expect(selection?.bounds).toEqual({ x0: 40, y0: 90, x1: 160, y1: 110, w: 120, h: 20 });
     expect(selection?.transformable).toBe(false);
@@ -385,12 +420,11 @@ describe('viewer runtime', () => {
 
   it('uses the transformed anchor as the true world rotation pivot', () => {
     const layer = { id: 'anchored' };
-    const PM = {
-      worldMatrix: () => [0, 1, -1, 0, 100, 200],
-      ev: (_layer: any, path: string) => path === 'anchor.x' ? 10 : 20,
-    };
+    const api = viewerApi();
+    api.anim.worldMatrix = () => [0, 1, -1, 0, 100, 200];
+    api.anim.ev = (_layer: any, path: string) => path === 'anchor.x' ? 10 : 20;
 
-    expect(layerWorldPivot(PM, layer, 0, testSpace3d(PM))).toEqual({ x: 80, y: 210 });
+    expect(layerWorldPivot(api, layer, 0, testSpace3d(api))).toEqual({ x: 80, y: 210 });
   });
 
   it('scales and rotates relative positions around the common fixed pivot', () => {

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { PanelDefinition, PowermoveAPI, ServicesAPI } from 'powermove';
+import type { PanelDefinition, PowermoveAPI, ServicesAPI, ViewerService } from 'powermove';
 
 import activateExtension from './index';
 
@@ -28,12 +28,52 @@ function serviceHarness(): { services: ServicesAPI; disposeAll(): void } {
   };
 }
 
-function activate(api: PowermoveAPI): void {
-  if (!(api as any).services) (api as any).services = serviceHarness().services;
-  activateExtension(api);
+function apiHarness(services = serviceHarness().services) {
+  let panel: PanelDefinition | undefined;
+  let context: object | null = null;
+  const init = vi.fn(() => { context = {}; return true; });
+  const resize = vi.fn(() => true);
+  const eventDisposers: Array<ReturnType<typeof vi.fn>> = [];
+  const disposeCallbacks: Array<() => void> = [];
+  const project: any = { w: 1920, h: 1080, fps: 30, dur: 10, layers: [], assets: {} };
+  const api = {
+    panels: { register: vi.fn((definition: PanelDefinition) => { panel = definition; return { dispose() {} }; }) },
+    services,
+    onDispose: vi.fn((dispose: () => void) => { disposeCallbacks.push(dispose); }),
+    project: { get: () => project },
+    selection: { layers: () => [], first: () => null, select: vi.fn() },
+    groups: { ancestors: () => [], transformRoots: () => [] },
+    anim: {
+      active: () => true, ev: () => 0, version: () => 0,
+      worldMatrix: () => [1, 0, 0, 1, 0, 0], localMatrix: () => [1, 0, 0, 1, 0, 0],
+      transformParentMatrix: () => [1, 0, 0, 1, 0, 0],
+    },
+    model: { TYPE_META: {}, layer: () => null, curComp: () => project },
+    transport: {
+      time: () => 0, playing: () => false, quality: 1,
+      perf: { fps: 0, ms: 0, drops: 0, budget: 0, auto: false },
+      previewResolution: 1, invalidate: vi.fn(), pause: vi.fn(),
+    },
+    render: {
+      gl: { get context() { return context; }, get previewViewport() { return null; }, init, resize, bounds: () => null, pick: () => null },
+      raster: () => null,
+    },
+    util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
+    ui: { icon: () => '<svg></svg>', drag: vi.fn() },
+    dnd: { hasFxDrag: () => false, readFxDrag: () => null },
+    menus: { collect: () => [] },
+    events: { on: vi.fn(() => { const dispose = vi.fn(); eventDisposers.push(dispose); return { dispose }; }) },
+    space3d: { is3DLayer: () => false },
+    media: { assets: { get: () => undefined } },
+    edit: {}, history: {},
+  } as unknown as PowermoveAPI;
+  return {
+    api, init, eventDisposers,
+    get panel() { return panel; },
+    viewer: () => services.get<ViewerService>('viewer'),
+    dispose: () => { for (const callback of disposeCallbacks.splice(0).reverse()) callback(); },
+  };
 }
-
-const testSpace3d = { is3DLayer: () => false } as unknown as PowermoveAPI['space3d'];
 
 describe('viewer extension', () => {
   beforeEach(() => {
@@ -47,79 +87,50 @@ describe('viewer extension', () => {
   });
 
   afterEach(() => {
+    document.body.replaceChildren();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
   it('registers the live viewer service and builds the composition panel', () => {
-    let panel: PanelDefinition | undefined;
-    const harness = serviceHarness();
-    const PM: Record<string, any> = {
-      clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-      bus: { on: vi.fn(() => () => {}) },
-      GL: { gl: null, init: vi.fn(), resize: vi.fn() },
-      proj: { w: 1920, h: 1080, layers: [] },
-      quality: 1,
-      invalidate: vi.fn()
-    };
-    const api = {
-      host: { pm: PM },
-      space3d: testSpace3d,
-      services: harness.services,
-      onDispose: vi.fn(),
-      panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
-    } as unknown as PowermoveAPI;
+    const services = serviceHarness();
+    const harness = apiHarness(services.services);
+    activateExtension(harness.api);
 
-    activate(api);
-
-    expect(panel).toMatchObject({
+    expect(harness.panel).toMatchObject({
       id: 'viewer', title: 'Composition', flush: true, noscroll: true,
       headless: true, hideMoveHandle: false
     });
-    expect(PM.Viewer).toBeDefined();
-    expect(harness.services.get('viewer')).toBe(PM.Viewer);
-    expect(PM.setOrKey).toBeTypeOf('function');
+    const runtime = harness.viewer();
+    expect(runtime).not.toBeNull();
+    expect(runtime?.snapshotSnapCandidates).toBeTypeOf('function');
 
     const body = document.createElement('div');
-    panel?.build?.(body, { spec: {} });
+    harness.panel?.build?.(body, { spec: {} });
 
     expect(body.querySelector('#stage > #stage-inner > #gl')).not.toBeNull();
     expect(body.querySelector('#stage > #overlay')).not.toBeNull();
     expect(body.querySelector('#stage > #composition-recovery')?.textContent).toContain('Fit composition');
     expect(body.querySelector<HTMLButtonElement>('#composition-recovery')?.hidden).toBe(true);
     expect(body.querySelectorAll('#stage, #stage-inner, #gl, #overlay, #composition-recovery')).toHaveLength(5);
-    expect(PM.GL.init).toHaveBeenCalledWith(body.querySelector('#gl'));
-    expect(PM.Viewer.ov).toBe(body.querySelector('#overlay'));
-    harness.disposeAll();
-    expect(harness.services.get('viewer')).toBeNull();
+    expect(harness.init).toHaveBeenCalledWith(body.querySelector('#gl'));
+    expect(runtime?.ov).toBe(body.querySelector('#overlay'));
+    services.disposeAll();
+    expect(harness.viewer()).toBeNull();
   });
 
   it('keeps the original WebGL host when a panel rebuild attempts to attach a second stage', () => {
-    let panel: PanelDefinition | undefined;
-    const PM: Record<string, any> = {
-      clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-      bus: { on: vi.fn(() => () => {}) },
-      GL: { gl: null, init: vi.fn(), resize: vi.fn() },
-      proj: { w: 1920, h: 1080, layers: [] },
-      quality: 1,
-      invalidate: vi.fn()
-    };
-    activate({
-      host: { pm: PM },
-      space3d: testSpace3d,
-      onDispose: vi.fn(),
-      panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) }
-    } as unknown as PowermoveAPI);
-
+    const harness = apiHarness();
+    activateExtension(harness.api);
     const first = document.createElement('div');
     const second = document.createElement('div');
-    panel?.build?.(first, { spec: {} });
+    harness.panel?.build?.(first, { spec: {} });
     const stage = first.querySelector('#stage');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    panel?.build?.(second, { spec: {} });
+    harness.panel?.build?.(second, { spec: {} });
 
-    expect(PM.GL.init).toHaveBeenCalledOnce();
-    expect(PM.Viewer.stage).toBe(stage);
+    expect(harness.init).toHaveBeenCalledOnce();
+    expect(harness.viewer()?.stage).toBe(stage);
     expect(second.querySelector('#stage')).toBe(stage);
     expect(warn).not.toHaveBeenCalled();
   });
@@ -130,100 +141,52 @@ describe('viewer extension', () => {
       observe(): void {}
       disconnect(): void { disconnect(); }
     });
-    const busOffs: Array<ReturnType<typeof vi.fn>> = [];
-    let firstPanel: PanelDefinition | undefined;
-    let firstDispose: (() => void) | undefined;
-    const GL: Record<string, any> = { gl: null, init: vi.fn(), resize: vi.fn() };
-    GL.init.mockImplementation(() => { GL.gl = {}; });
-    const PM: Record<string, any> = {
-      clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-      bus: { on: vi.fn(() => {
-        const off = vi.fn(); busOffs.push(off); return off;
-      }) },
-      GL,
-      proj: { w: 1920, h: 1080, layers: [] },
-      quality: 1,
-      invalidate: vi.fn()
-    };
-    activate({
-      host: { pm: PM },
-      space3d: testSpace3d,
-      onDispose: vi.fn((dispose: () => void) => void (firstDispose = dispose)),
-      panels: { register: vi.fn((definition: PanelDefinition) => void (firstPanel = definition)) }
-    } as unknown as PowermoveAPI);
+    const services = serviceHarness().services;
+    const first = apiHarness(services);
+    activateExtension(first.api);
     const firstBody = document.createElement('div');
-    firstPanel?.build?.(firstBody, { spec: {} });
+    first.panel?.build?.(firstBody, { spec: {} });
     const stage = firstBody.querySelector('#stage');
     const canvas = firstBody.querySelector('#gl');
-    const firstAttach = PM.Viewer.attach;
+    const firstAttach = first.viewer()?.attach;
 
-    firstDispose?.();
+    first.dispose();
     expect(disconnect).toHaveBeenCalledOnce();
-    expect(busOffs.every((off) => off.mock.calls.length === 1)).toBe(true);
-    expect(PM.Viewer.stage).toBe(stage);
-    expect(PM.Viewer.el).toBe(canvas);
+    expect(first.eventDisposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true);
+    expect(first.viewer()?.stage).toBe(stage);
 
-    let replacementPanel: PanelDefinition | undefined;
-    let replacementDispose: (() => void) | undefined;
-    activate({
-      host: { pm: PM },
-      space3d: testSpace3d,
-      onDispose: vi.fn((dispose: () => void) => void (replacementDispose = dispose)),
-      panels: { register: vi.fn((definition: PanelDefinition) => void (replacementPanel = definition)) }
-    } as unknown as PowermoveAPI);
+    const replacement = apiHarness(services);
+    activateExtension(replacement.api);
     const replacementBody = document.createElement('div');
-    replacementPanel?.build?.(replacementBody, { spec: {} });
+    replacement.panel?.build?.(replacementBody, { spec: {} });
 
-    expect(PM.Viewer.attach).not.toBe(firstAttach);
+    expect(replacement.viewer()?.attach).not.toBe(firstAttach);
     expect(replacementBody.querySelector('#stage')).toBe(stage);
     expect(replacementBody.querySelector('#gl')).toBe(canvas);
-    expect(PM.GL.init).toHaveBeenCalledOnce();
-    replacementDispose?.();
+    expect(first.init).toHaveBeenCalledOnce();
+    replacement.dispose();
     expect(disconnect).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps the legacy-listener fence and removes only the stale overlay closure across replacements', () => {
-    const stage = document.createElement('div');
-    stage.id = 'stage';
-    const inner = document.createElement('div'); inner.id = 'stage-inner';
-    const canvas = document.createElement('canvas'); canvas.id = 'gl'; inner.append(canvas);
-    const overlay = document.createElement('canvas'); overlay.id = 'overlay';
-    stage.append(inner, overlay);
-    const addListener = vi.spyOn(stage, 'addEventListener');
-    const legacyOverlay = function drawOverlay(): void {};
-    const unrelatedOverlay = function extensionOverlay(): void {};
-    const handlers = new Map<string, Set<(...args: any[]) => void>>([
-      ['overlay', new Set([legacyOverlay, unrelatedOverlay])],
-    ]);
-    const PM: Record<string, any> = {
-      Viewer: { stage, zoom: 1, fit: true, pan: [0, 0], attach() {} },
-      clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
-      bus: {
-        m: handlers,
-        on(event: string, handler: (...args: any[]) => void) {
-          const set = handlers.get(event) || new Set(); handlers.set(event, set); set.add(handler);
-          return () => set.delete(handler);
-        },
-      },
-      GL: { gl: {}, init: vi.fn(), resize: vi.fn() },
-      proj: { w: 1920, h: 1080, layers: [] }, quality: 1, invalidate: vi.fn(),
-    };
-    let firstDispose: (() => void) | undefined;
-    activate({
-      host: { pm: PM },
-      space3d: testSpace3d,
-      onDispose: vi.fn((dispose: () => void) => void (firstDispose = dispose)),
-      panels: { register: vi.fn() },
-    } as unknown as PowermoveAPI);
-    expect(handlers.get('overlay')?.has(legacyOverlay)).toBe(false);
-    expect(handlers.get('overlay')?.has(unrelatedOverlay)).toBe(true);
-    expect(addListener.mock.calls.find(([event]) => event === 'pointerdown')?.[2]).toBe(true);
+  it('replaces typed event subscriptions without installing duplicate stage listeners', () => {
+    const services = serviceHarness().services;
+    const first = apiHarness(services);
+    activateExtension(first.api);
+    const body = document.createElement('div');
+    first.panel?.build?.(body, { spec: {} });
+    const stage = first.viewer()?.stage!;
+    const removeListener = vi.spyOn(stage, 'removeEventListener');
+    first.dispose();
 
-    firstDispose?.();
-    addListener.mockClear();
-    activate({
-      host: { pm: PM }, space3d: testSpace3d, onDispose: vi.fn(), panels: { register: vi.fn() },
-    } as unknown as PowermoveAPI);
-    expect(addListener.mock.calls.find(([event]) => event === 'pointerdown')?.[2]).toBe(true);
+    expect(first.eventDisposers).toHaveLength(5);
+    expect(first.eventDisposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true);
+    expect(removeListener.mock.calls.some(([event]) => event === 'pointerdown')).toBe(true);
+
+    const replacement = apiHarness(services);
+    activateExtension(replacement.api);
+    const replacementBody = document.createElement('div');
+    replacement.panel?.build?.(replacementBody, { spec: {} });
+    expect(replacement.viewer()?.stage).toBe(stage);
+    expect(replacement.eventDisposers).toHaveLength(5);
   });
 });

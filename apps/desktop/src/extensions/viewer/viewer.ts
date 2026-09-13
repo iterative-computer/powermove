@@ -1,10 +1,10 @@
-import type { Space3DAPI } from 'powermove';
+import type { EditCommand, InspectorService, PowermoveAPI, Space3DAPI, ToolService, ViewerService } from 'powermove';
 
 type ViewerSpace3D = Pick<Space3DAPI, 'is3DLayer' | 'planeMatrix' | 'planeContains' | 'projectPoint' | 'inversePlane'>;
-export function visualSelection(PM: any): any[] {
-  const selected = PM.selLayers?.() || [];
+export function visualSelection(api: PowermoveAPI): any[] {
+  const selected = api.selection.layers().map(id => api.model.layer(id)).filter(Boolean) || [];
   const ids = new Set(selected.map((layer: any) => layer.id));
-  return selected.filter((layer: any) => !(PM.groupAncestors?.(layer) || []).some((group: any) => ids.has(group.id)));
+  return selected.filter((layer: any) => !(api.groups.ancestors(layer) || []).some((group: any) => ids.has(group.id)));
 }
 
 export function selectionOutlineColor(project: any): string {
@@ -16,7 +16,6 @@ export function selectionOutlineColor(project: any): string {
 
 import { editCanvasText } from './canvas-text';
 import { drawEditablePaths, startPathEdit } from './path-editing';
-import { resolveContent } from 'powermove';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
   title: 'Composition', flush: true, noscroll: true, headless: true, hideMoveHandle: false,
@@ -94,6 +93,23 @@ type WorldBounds = Bounds & { cx: number; cy: number };
 type Corner = readonly [number, number];
 type AffineMatrix = readonly [number, number, number, number, number, number];
 export type LinearMatrix = readonly [number, number, number, number];
+
+function ev(api: PowermoveAPI, layer: any, key: string, time: number): number {
+  return Number(api.anim.ev(layer, key, time)) || 0;
+}
+
+function layerBounds(api: PowermoveAPI, layer: any, time: number): Bounds | null {
+  const bounds = api.render.gl.bounds(layer, time);
+  return bounds ? { ...bounds, w: bounds.x1 - bounds.x0, h: bounds.y1 - bounds.y0 } : null;
+}
+
+function layerTypeMeta(api: PowermoveAPI, layer: any): { pickable?: boolean; masks?: boolean } | undefined {
+  return (api.model.TYPE_META as unknown as Record<string, { pickable?: boolean; masks?: boolean }>)[layer.type];
+}
+
+function resolvedContent(api: PowermoveAPI, layer: any, time: number): any {
+  return api.anim.resolveContent(layer, time);
+}
 
 export interface DragBox extends Bounds {}
 
@@ -249,6 +265,18 @@ const ROTATE_CURSOR = `url('data:image/svg+xml,${encodeURIComponent(
   '</svg>',
 )}') 13 13, auto`;
 const VIEWER_RUNTIME_TOKEN = Symbol('powermove.viewer.runtime');
+type ViewerRuntime = ViewerService & {
+  dispose(): void;
+  activePath: string | null;
+  finishCanvasText?: ((cancel?: boolean) => void) | null;
+  textSelection?: { layer: string; start: number; end: number } | null;
+  requestOverlay?(): void;
+  inner: HTMLElement;
+  _runtimeToken?: symbol | null;
+  _disposeRuntime?: () => void;
+};
+let retainedRuntime: ViewerRuntime | null = null;
+let retainedServices: PowermoveAPI['services'] | null = null;
 
 function applyMatrix(m: AffineMatrix, point: Point): Point {
   return {
@@ -386,43 +414,43 @@ function handlesFromCorners(corners: Point[]): Record<ResizeHandle, Point> {
   };
 }
 
-function layerIsTransformable(PM: any, layer: any, T: number): boolean {
-  return !!layer && !layer.lock && !(PM.groupAncestors?.(layer) || []).some((group: any) => group.lock) && PM.active(layer, T) && (layer.type === 'group' || PM.TYPE_META?.[layer.type]?.pickable !== false);
+function layerIsTransformable(api: PowermoveAPI, layer: any, T: number): boolean {
+  return !!layer && !layer.lock && !(api.groups.ancestors(layer) || []).some((group: any) => group.lock) && api.anim.active(layer, T) && (layer.type === 'group' || layerTypeMeta(api, layer)?.pickable !== false);
 }
 
-function visibleSelectionLayers(PM: any, selected: any[], T: number): any[] {
-  return selected.filter((layer) => !!layer && PM.active(layer, T) && PM.GL.bounds(layer, T));
+function visibleSelectionLayers(api: PowermoveAPI, selected: any[], T: number): any[] {
+  return selected.filter((layer) => !!layer && api.anim.active(layer, T) && layerBounds(api, layer, T));
 }
 
 /** Selected parents own their descendants. Returning only roots prevents a
     parent and selected child from receiving the same transform twice. */
-export function selectionTransformRoots(PM: any, layers: any[], T: number): any[] {
-  const eligible = layers.filter((layer) => layerIsTransformable(PM, layer, T));
-  if (PM.transformRoots) return PM.transformRoots(eligible.map(layer => layer.id));
+export function selectionTransformRoots(api: PowermoveAPI, layers: any[], T: number): any[] {
+  const eligible = layers.filter((layer) => layerIsTransformable(api, layer, T));
+  if (api.groups.transformRoots) return api.groups.transformRoots(eligible.map(layer => layer.id));
   const ids = new Set(eligible.map((layer) => layer.id));
   return eligible.filter((layer) => {
-    if ((PM.groupAncestors?.(layer) || []).some((group: any) => ids.has(group.id))) return false;
+    if ((api.groups.ancestors(layer) || []).some((group: any) => ids.has(group.id))) return false;
     let parentId = layer.parent, guard = 0;
     while (parentId && guard++ < 256) {
       if (ids.has(parentId)) return false;
-      const parent = PM.L(parentId);
+      const parent = api.model.layer(parentId);
       parentId = parent?.parent;
     }
     return true;
   });
 }
 
-export function layerWorldBounds(PM: any, layer: any, T: number, space3d: ViewerSpace3D): WorldBounds | null {
+export function layerWorldBounds(api: PowermoveAPI, layer: any, T: number, space3d: ViewerSpace3D): WorldBounds | null {
   if (layer.type === 'group' && space3d.is3DLayer(layer)) {
-    const members = PM.curComp().layers.filter((child: any) => child.type !== 'group' && child.type !== 'audio' && PM.active(child,T) && (PM.groupAncestors(child) || []).some((group: any) => group.id === layer.id));
-    const boxes = members.map((child: any) => layerWorldBounds(PM,child,T,space3d)).filter(Boolean) as WorldBounds[];
+    const members = api.model.curComp().layers.filter((child: any) => child.type !== 'group' && child.type !== 'audio' && api.anim.active(child,T) && (api.groups.ancestors(child) || []).some((group: any) => group.id === layer.id));
+    const boxes = members.map((child: any) => layerWorldBounds(api,child,T,space3d)).filter(Boolean) as WorldBounds[];
     if (!boxes.length) return null;
     const x0=Math.min(...boxes.map(b=>b.x0)),y0=Math.min(...boxes.map(b=>b.y0));
     const x1=Math.max(...boxes.map(b=>b.x1)),y1=Math.max(...boxes.map(b=>b.y1));
     return {x0,y0,x1,y1,w:x1-x0,h:y1-y0,cx:(x0+x1)/2,cy:(y0+y1)/2};
   }
-  const bounds = PM.GL.bounds(layer, T); if (!bounds) return null;
-  const matrix = PM.worldMatrix(layer, T);
+  const bounds = layerBounds(api, layer, T); if (!bounds) return null;
+  const matrix = api.anim.worldMatrix(layer, T);
   const points = [
     { x: bounds.x0, y: bounds.y0 }, { x: bounds.x1, y: bounds.y0 },
     { x: bounds.x1, y: bounds.y1 }, { x: bounds.x0, y: bounds.y1 },
@@ -434,11 +462,11 @@ export function layerWorldBounds(PM: any, layer: any, T: number, space3d: Viewer
 
 /** The real world-space anchor. Matrix translation is the transformed local
     origin, so it is not the rotation pivot when Anchor X/Y are non-zero. */
-export function layerWorldPivot(PM: any, layer: any, T: number, space3d: ViewerSpace3D): Point {
-  if (space3d.is3DLayer(layer)) return space3d.projectPoint(space3d.planeMatrix(layer,T,true), {x: PM.ev(layer,'position.x',T), y: PM.ev(layer,'position.y',T)});
-  return applyMatrix(PM.worldMatrix(layer, T), {
-    x: PM.ev(layer, 'anchor.x', T),
-    y: PM.ev(layer, 'anchor.y', T),
+export function layerWorldPivot(api: PowermoveAPI, layer: any, T: number, space3d: ViewerSpace3D): Point {
+  if (space3d.is3DLayer(layer)) return space3d.projectPoint(space3d.planeMatrix(layer,T,true), {x: ev(api, layer,'position.x',T), y: ev(api, layer,'position.y',T)});
+  return applyMatrix(api.anim.worldMatrix(layer, T), {
+    x: ev(api, layer, 'anchor.x', T),
+    y: ev(api, layer, 'anchor.y', T),
   });
 }
 
@@ -454,32 +482,32 @@ export function transformPointAround(
 }
 
 /** One geometry source for overlay drawing, hit-testing, and transforms. */
-export function resolveSelectionGeometry(PM: any, selected: any[], T: number, space3d: ViewerSpace3D): SelectionGeometry | null {
-  const layers = visibleSelectionLayers(PM, selected, T);
+export function resolveSelectionGeometry(api: PowermoveAPI, selected: any[], T: number, space3d: ViewerSpace3D): SelectionGeometry | null {
+  const layers = visibleSelectionLayers(api, selected, T);
   if (!layers.length) return null;
   /* A selection is one atomic transform target. Locked or unpickable visual
      members keep their chrome, but disable interaction for the entire box. */
-  const transformable = layers.every((layer) => layerIsTransformable(PM, layer, T));
-  const roots = transformable ? selectionTransformRoots(PM, layers, T) : [];
+  const transformable = layers.every((layer) => layerIsTransformable(api, layer, T));
+  const roots = transformable ? selectionTransformRoots(api, layers, T) : [];
 
   if (layers.length === 1 && layers[0].type === 'group' && space3d.is3DLayer(layers[0])) {
-    const box=layerWorldBounds(PM,layers[0],T,space3d);if(!box)return null;
+    const box=layerWorldBounds(api,layers[0],T,space3d);if(!box)return null;
     const corners=[{x:box.x0,y:box.y0},{x:box.x1,y:box.y0},{x:box.x1,y:box.y1},{x:box.x0,y:box.y1}];
-    return {mode:'common',layers,roots,transformable,bounds:box,matrix:[1,0,0,1,0,0],corners,handles:handlesFromCorners(corners),pivotWorld:layerWorldPivot(PM,layers[0],T,space3d)};
+    return {mode:'common',layers,roots,transformable,bounds:box,matrix:[1,0,0,1,0,0],corners,handles:handlesFromCorners(corners),pivotWorld:layerWorldPivot(api,layers[0],T,space3d)};
   }
   if (layers.length === 1) {
     const layer = layers[0]!;
-    const bounds = PM.GL.bounds(layer, T); if (!bounds) return null;
-    const matrix = PM.worldMatrix(layer, T) as AffineMatrix;
+    const bounds = layerBounds(api, layer, T); if (!bounds) return null;
+    const matrix = api.anim.worldMatrix(layer, T) as AffineMatrix;
     const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const)
       .map((corner) => space3d.is3DLayer(layer) ? space3d.projectPoint(space3d.planeMatrix(layer,T),pointInBounds(bounds,corner)) : applyMatrix(matrix, pointInBounds(bounds, corner)));
     return {
       mode: 'single', layers, roots, transformable, bounds, matrix, corners,
-      handles: handlesFromCorners(corners), pivotWorld: layerWorldPivot(PM, layer, T, space3d),
+      handles: handlesFromCorners(corners), pivotWorld: layerWorldPivot(api, layer, T, space3d),
     };
   }
 
-  const measured = layers.map((layer) => layerWorldBounds(PM, layer, T, space3d)).filter(Boolean) as WorldBounds[];
+  const measured = layers.map((layer) => layerWorldBounds(api, layer, T, space3d)).filter(Boolean) as WorldBounds[];
   if (!measured.length) return null;
   const x0 = Math.min(...measured.map((bounds) => bounds.x0));
   const x1 = Math.max(...measured.map((bounds) => bounds.x1));
@@ -559,52 +587,38 @@ export function calculateResize(
   return { scaleX, scaleY, pivotLocal: options.fromCenter ? center : pivotLocal };
 }
 
-/** Compatibility entry point for registry-based tests and legacy installers. */
-export function install(PM: any, space3d: Space3DAPI = PM.space3d): void {
-  if (!space3d) throw new Error('Viewer requires the space3d API');
-  createViewerRuntime(PM, space3d);
+export function install(api: PowermoveAPI): void {
+  createViewerRuntime(api);
 }
 
 /** Geometry hit test for selection-preserving direct manipulation. The active
     selection owns a drag inside its visible transform box even when a
     full-frame layer is stacked above it. */
-export function layerContainsPoint(PM: any, L: any, x: number, y: number, T: number, space3d: ViewerSpace3D): boolean {
-  const b = PM.GL.bounds(L, T); if (!b) return false;
+export function layerContainsPoint(api: PowermoveAPI, L: any, x: number, y: number, T: number, space3d: ViewerSpace3D = api.space3d): boolean {
+  const b = layerBounds(api, L, T); if (!b) return false;
   return space3d.planeContains(L, T, x, y, b);
 }
 
 /** Text editing follows the visible selection before the topmost pixel pick.
     This keeps a selected title editable even when a full-frame adjustment or
     overlay layer sits above it in the render stack. */
-export function editableTextAtPoint(PM: any, x: number, y: number, T: number, space3d: ViewerSpace3D): any | null {
-  const selected = visualSelection(PM).filter((layer: any) =>
-    layer?.type === 'text' && !layer.lock && PM.active?.(layer, T) !== false);
+export function editableTextAtPoint(api: PowermoveAPI, x: number, y: number, T: number, space3d: ViewerSpace3D = api.space3d): any | null {
+  const selected = visualSelection(api).filter((layer: any) =>
+    layer?.type === 'text' && !layer.lock && api.anim.active(layer, T) !== false);
   for (let index = selected.length - 1; index >= 0; index -= 1) {
-    if (layerContainsPoint(PM, selected[index], x, y, T, space3d)) return selected[index];
+    if (layerContainsPoint(api, selected[index], x, y, T, space3d)) return selected[index];
   }
-  const picked = PM.GL?.pick?.(x, y, T);
+  const picked = api.render.gl?.pick?.(x, y, T);
   return picked?.type === 'text' && !picked.lock ? picked : null;
 }
 
-/** Install the legacy viewer controller against the host registry. */
-export function createViewerRuntime(PM: any, space3d: Space3DAPI): any {
-const existing = PM.Viewer;
+/** Install the viewer controller against the typed kernel API. */
+export function createViewerRuntime(api: PowermoveAPI, space3d: Space3DAPI = api.space3d): ViewerRuntime {
+const existing = api.services.get<ViewerRuntime>('viewer') ?? (retainedServices === api.services ? retainedRuntime : null);
 if (existing?._runtimeToken === VIEWER_RUNTIME_TOKEN) return existing;
 const existingStage = existing?.stage as HTMLElement | undefined;
-if (existingStage && typeof existing?._disposeRuntime !== 'function') {
-  existing._legacyListenerFence = true;
-  /* The legacy runtime did not retain bus disposers. Its overlay callback is
-     the one behavioral stale closure; remove only that named viewer handler. */
-  const overlayHandlers = PM.bus?.m?.get?.('overlay');
-  if (overlayHandlers instanceof Set) {
-    for (const handler of overlayHandlers) if (handler?.name === 'drawOverlay') overlayHandlers.delete(handler);
-  }
-}
-/* The pre-disposer runtime's listeners cannot be removed retroactively. Keep
-   the capture fence on the retained Viewer object across every later HMR. */
-const legacyFence = !!existing?._legacyListenerFence;
 existing?._disposeRuntime?.();
-const clamp = PM.clamp;
+const clamp = api.util.clamp;
 
 const V: any = existing || {
   zoom: 1, fit: true, pan: [0, 0], el: null, ov: null, octx: null, inner: null,
@@ -618,8 +632,15 @@ if (V.zoomLayoutVersion !== ZOOM_LAYOUT_VERSION) {
   V.fit = true;
   V.pan = [0, 0];
 }
-PM.Viewer = V;
+retainedRuntime = V;
+retainedServices = api.services;
 V._runtimeToken = VIEWER_RUNTIME_TOKEN;
+V.activePath ??= null;
+const toolService = () => api.services.get<ToolService>('tool');
+const refreshInspector = () => api.services.get<InspectorService>('inspector')?.refresh();
+const selectLayers = (ids: string | string[], add = false) => api.selection.select(Array.isArray(ids) ? ids : [ids], add);
+const invalidate = (what?: string) => { api.transport.invalidate(what); schedulePresentation(); };
+V.requestOverlay = schedulePresentation;
 let disposed = false;
 let unbindStage: (() => void) | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -629,13 +650,14 @@ let requestedViewport: PreviewViewport | null = null;
 let visibleRegion: { x: number; y: number; right: number; bottom: number } | null = null;
 let zoomGestureUntil = 0;
 let navigationUntil = 0;
+let presentationFrame = 0;
 V.isNavigating = () => !disposed && (!!activeDrag || window.performance.now() < navigationUntil);
 let presentation: { time: number; version: number | undefined; project: any; quality: number } | null = null;
 V.deferNavigationRender = (now: number) => {
-  if (disposed || now >= zoomGestureUntil || PM.playing || !requestedViewport || !presentedViewport
+  if (disposed || now >= zoomGestureUntil || api.transport.playing() || !requestedViewport || !presentedViewport
       || requestedViewport === presentedViewport || !visibleRegion || !presentation
-      || presentation.version === undefined || presentation.version !== PM.animVersion?.()
-      || presentation.time !== PM.time || presentation.project !== PM.proj || presentation.quality !== PM.quality) return false;
+      || presentation.version === undefined || presentation.version !== api.anim.version()
+      || presentation.time !== api.transport.time() || presentation.project !== api.project.get() || presentation.quality !== api.transport.quality) return false;
   return visibleRegion.x >= presentedViewport.x && visibleRegion.y >= presentedViewport.y
     && visibleRegion.right <= presentedViewport.x + presentedViewport.width
     && visibleRegion.bottom <= presentedViewport.y + presentedViewport.height;
@@ -645,7 +667,7 @@ const displayViewport = (viewport: PreviewViewport, zoom = viewport.cssWidth / v
   gl.style.position = 'absolute'; gl.style.left = viewport.x * zoom + 'px'; gl.style.top = viewport.y * zoom + 'px';
   gl.style.width = viewport.width * zoom + 'px'; gl.style.height = viewport.height * zoom + 'px';
 };
-const busOffs: Array<() => void> = [];
+const eventOffs: Array<() => void> = [];
 
 const disposeRuntime = () => {
   if (disposed) return;
@@ -654,8 +676,10 @@ const disposeRuntime = () => {
   unbindStage?.(); unbindStage = null;
   resizeObserver?.disconnect(); resizeObserver = null;
   V.previewOff?.(); V.previewOff=null;
-  PM.finishCanvasText?.();
-  busOffs.splice(0).forEach((off) => off());
+  V.finishCanvasText?.();
+  if (presentationFrame) window.cancelAnimationFrame(presentationFrame);
+  presentationFrame = 0;
+  eventOffs.splice(0).forEach((off) => off());
   window.removeEventListener('resize', onWindowResize);
   setStageCursor('');
   if (V._runtimeToken === VIEWER_RUNTIME_TOKEN) V._runtimeToken = null;
@@ -670,7 +694,7 @@ const beginDrag = (event: any, options: any) => {
     if (activeDrag === control) activeDrag = null;
     return options[kind]?.(...args);
   };
-  control = PM.drag(event, {
+  control = api.ui.drag(event, {
     ...options,
     up: (...args: any[]) => finish('up', args),
     cancel: (...args: any[]) => finish('cancel', args),
@@ -726,15 +750,15 @@ V.attach = (stage: HTMLElement) => {
     preview.replaceChildren();
     const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
-    quality.value=PM.perf?.auto?'auto':String(PM.quality);quality.onchange=()=>{PM.perf.auto=quality.value==='auto';PM.quality=quality.value==='auto'?1:Number(quality.value);PM.previewResolution=quality.value;PM.bus.emit('quality');};preview.append(quality);
+    quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
 
     zoomControl.onchange = () => { if (zoomControl.value === 'fit') V.returnToComposition(); else V.setZoom(Number(zoomControl.value)); };
 
-    if (!PM.GL.gl) PM.GL.init(gl);
+    if (!api.render.gl.context) api.render.gl.init(gl);
     unbindStage?.();
     resizeObserver?.disconnect();
-    unbindStage = bindStage(stage, inner, legacyFence);
+    unbindStage = bindStage(stage, inner);
     V._boundStage = stage;
     window.requestAnimationFrame(() => V.layout());
     resizeObserver = new window.ResizeObserver(() => V.layout());
@@ -747,7 +771,7 @@ V.layout = (panOnly = false) => {
   if (panOnly === true) navigationUntil = window.performance.now() + 250;
   if (!V.el || !V.stage) return;
   const gl = V.el as HTMLCanvasElement;
-  const p = PM.proj;
+  const p = api.project.get();
   const r = V.stage.getBoundingClientRect();
   if (r.width < 8 || r.height < 8) return;
   V._sw = r.width; V._sh = r.height;
@@ -783,7 +807,7 @@ V.layout = (panOnly = false) => {
     && !(layer.masks || []).length && !layer.matteSource && !layer.transitionIn && !layer.transitionOut
     && !['adjustment', 'shader', 'extension', 'precomp'].includes(layer.type));
   const viewport = viewportSafe
-    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, PM.quality, 128, PM.GL.previewViewport)
+    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128, api.render.gl.previewViewport as PreviewViewport | null)
     : null;
   requestedViewport = viewport;
   visibleRegion = viewport ? { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
@@ -793,12 +817,12 @@ V.layout = (panOnly = false) => {
     // coordinates. Commit the new CSS placement with its GL presentation.
     const retain = presentedViewport && presentedViewport.compWidth === p.w && presentedViewport.compHeight === p.h;
     displayViewport(retain ? presentedViewport! : viewport, z);
-    PM.GL.resize(viewport.renderWidth, viewport.renderHeight, viewport);
+    api.render.gl.resize(viewport.renderWidth, viewport.renderHeight, viewport);
   } else {
     presentedViewport = null;
     gl.style.position = ''; gl.style.left = ''; gl.style.top = ''; gl.style.width = '100%'; gl.style.height = '100%';
-    const renderSize = PM.previewResolution && PM.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*PM.quality)),height:Math.max(2,Math.round(p.h*PM.quality))} : previewRenderSize(p.w, p.h, z, dpr, PM.quality);
-    PM.GL.resize(renderSize.width, renderSize.height, null);
+    const renderSize = api.transport.previewResolution && api.transport.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*api.transport.quality)),height:Math.max(2,Math.round(p.h*api.transport.quality))} : previewRenderSize(p.w, p.h, z, dpr, api.transport.quality);
+    api.render.gl.resize(renderSize.width, renderSize.height, null);
   }
   const overlayWidth = Math.round(r.width * dpr);
   const overlayHeight = Math.round(r.height * dpr);
@@ -818,10 +842,11 @@ V.layout = (panOnly = false) => {
   // Do not submit the entire layer stack again. This is deliberately scoped
   // to pan input: independent draw requests (assets, fonts, edits, context
   // recovery, etc.) remain pending and are never swallowed here.
-  const reusePan = panOnly === true && !PM.playing && viewport && viewport === presentedViewport
-    && presentation && presentation.version !== undefined && presentation.version === PM.animVersion?.()
-    && presentation.time === PM.time && presentation.project === p && presentation.quality === PM.quality;
-  if (!reusePan) PM.invalidate('render');
+  const reusePan = panOnly === true && !api.transport.playing() && viewport && viewport === presentedViewport
+    && presentation && presentation.version !== undefined && presentation.version === api.anim.version()
+    && presentation.time === api.transport.time() && presentation.project === p && presentation.quality === api.transport.quality;
+  if (!reusePan) invalidate('render');
+  schedulePresentation();
 };
 V.setZoom = (zoom: number) => {
   if (!Number.isFinite(zoom)) return false;
@@ -844,14 +869,19 @@ V.updateRecovery = () => {
 };
 const onWindowResize = () => V.layout();
 window.addEventListener('resize', onWindowResize);
-for (const event of ['quality', 'project', 'layout:applied']) {
-  const off = PM.bus.on(event, () => V.layout());
-  if (typeof off === 'function') busOffs.push(off);
-}
-{
-  const off = PM.bus.on('source-preview', () => V.updateRecovery?.());
-  if (typeof off === 'function') busOffs.push(off);
-}
+const listen = <K extends Parameters<PowermoveAPI['events']['on']>[0]>(event: K, handler: (payload: any) => void) => {
+  const disposable = api.events.on(event, handler);
+  eventOffs.push(() => disposable.dispose());
+};
+listen('project:changed', () => V.layout());
+listen('layout', () => V.layout());
+listen('selection', () => { invalidate('render'); drawOverlay(); });
+let observedQuality = api.transport.quality;
+listen('time', () => {
+  if (observedQuality !== api.transport.quality) { observedQuality = api.transport.quality; V.layout(); }
+  schedulePresentation();
+});
+listen('transport', () => schedulePresentation());
 
 /* comp px <-> screen px */
 const toComp = (e: any): [number, number] => {
@@ -870,7 +900,7 @@ function setZoomAtPoint(compositionPoint: Point, pointer: Point, zoom: number): 
   V.zoom = clamp(zoom, .05, 8);
   const pan = zoomPanForPoint(
     { width: stage.width, height: stage.height }, pointer, compositionPoint,
-    { width: PM.proj.w, height: PM.proj.h }, V.zoom,
+    { width: api.project.get().w, height: api.project.get().h }, V.zoom,
   );
   V.pan = [pan.x, pan.y];
   V.layout();
@@ -889,17 +919,22 @@ function leaveFitMode(): void {
 }
 
 /* ── overlay drawing ───────────────────────────────────── */
-for (const [event, handler] of [
-  ['overlay', drawOverlay],
-  ['preview:presented', (frame: { viewport: PreviewViewport; time: number; version: number | undefined; project: any; quality: number }) => {
-    if (frame.viewport && frame.viewport === requestedViewport && V.el) {
-      presentedViewport = frame.viewport; presentation = frame; displayViewport(frame.viewport);
+function schedulePresentation(): void {
+  if (presentationFrame || disposed) return;
+  presentationFrame = window.requestAnimationFrame(() => {
+    presentationFrame = 0;
+    if (requestedViewport && api.render.gl.previewViewport === requestedViewport && V.el) {
+      presentedViewport = requestedViewport;
+      presentation = {
+        time: api.transport.time(),
+        version: api.anim.version(),
+        project: api.project.get(),
+        quality: api.transport.quality,
+      };
+      displayViewport(requestedViewport);
     }
-  }],
-  ['sel', () => PM.invalidate('render')],
-] as const) {
-  const off = PM.bus.on(event, handler);
-  if (typeof off === 'function') busOffs.push(off);
+    drawOverlay();
+  });
 }
 
 function drawOverlay() {
@@ -913,8 +948,8 @@ function drawOverlay() {
       V.layout();
     }
   }
-  const selectionInk = selectionOutlineColor(PM.proj);
-  const p = PM.proj, dpr = V.ov.width / V.stage.getBoundingClientRect().width;
+  const selectionInk = selectionOutlineColor(api.project.get());
+  const p = api.project.get(), dpr = V.ov.width / V.stage.getBoundingClientRect().width;
   c.setTransform(1, 0, 0, 1, 0, 0);
   c.clearRect(0, 0, V.ov.width, V.ov.height);
   if (V.zoomRect) {
@@ -935,7 +970,7 @@ function drawOverlay() {
   c.lineWidth = 1 / S;
 
   drawSnapLines(c, S);
-  if(V.showControls !== false && !visualSelection(PM).some((layer: any) => space3d.is3DLayer(layer)))drawEditablePaths(PM,c,S);
+  if(V.showControls !== false && !visualSelection(api).some((layer: any) => space3d.is3DLayer(layer)))drawEditablePaths(api,c,S);
 
   if (V.toolRect) {
     const box = V.toolRect.box as DragBox;
@@ -944,7 +979,7 @@ function drawOverlay() {
     c.fillStyle = V.toolRect.kind === 'shape' ? 'rgba(255,255,255,.12)' : 'rgba(255,255,255,.045)';
     c.setLineDash([5 / S, 4 / S]);
     c.lineWidth = 1 / S;
-    if (V.toolRect.kind === 'shape' && PM.toolShape === 'ellipse') {
+    if (V.toolRect.kind === 'shape' && toolService()?.toolShape === 'ellipse') {
       c.beginPath();
       c.ellipse((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, box.w / 2, box.h / 2, 0, 0, Math.PI * 2);
       c.fill(); c.stroke();
@@ -962,16 +997,16 @@ function drawOverlay() {
     return;
   }
 
-  const sels = visualSelection(PM).filter((L: any) => PM.active(L, PM.time) && L.id !== PM.canvasTextEditing);
-  const selection = resolveSelectionGeometry(PM, sels, PM.time, space3d);
+  const sels = visualSelection(api).filter((L: any) => api.anim.active(L, api.transport.time()) && L.id !== V.canvasTextEditing);
+  const selection = resolveSelectionGeometry(api, sels, api.transport.time(), space3d);
   /* Multi-selection keeps light per-layer outlines for orientation, but owns
      exactly one common transform box and one set of controls. */
   if (sels.length > 1 || !selection) for (const L of sels) {
-    const b = PM.GL.bounds(L, PM.time);
+    const b = layerBounds(api, L, api.transport.time());
     if (!b) continue;
-    const m = PM.worldMatrix(L, PM.time);
+    const m = api.anim.worldMatrix(L, api.transport.time());
     const corners = ([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map((corner) =>
-      space3d.is3DLayer(L) ? space3d.projectPoint(space3d.planeMatrix(L,PM.time),pointInBounds(b,corner)) : applyMatrix(m, pointInBounds(b, corner)));
+      space3d.is3DLayer(L) ? space3d.projectPoint(space3d.planeMatrix(L,api.transport.time()),pointInBounds(b,corner)) : applyMatrix(m, pointInBounds(b, corner)));
     c.strokeStyle = selectionInk;
     c.lineWidth = 1 / Math.max(.02, V.shown);
     c.beginPath();
@@ -985,8 +1020,8 @@ function drawOverlay() {
   c.save();
   const anchorUnit = 1 / Math.max(.02, V.shown);
   for (const layer of sels) {
-    if (!PM.GL.bounds(layer, PM.time)) continue;
-    const pivot = layerWorldPivot(PM, layer, PM.time, space3d);
+    if (!layerBounds(api, layer, api.transport.time())) continue;
+    const pivot = layerWorldPivot(api, layer, api.transport.time(), space3d);
     if (!Number.isFinite(pivot.x) || !Number.isFinite(pivot.y)) continue;
     c.beginPath();
     c.arc(pivot.x, pivot.y, 5 * anchorUnit, 0, Math.PI * 2);
@@ -1156,7 +1191,7 @@ function snapLinesChanged(previous: SnapLine[] | null, next: SnapLine[] | null):
 }
 
 function worldBounds(L: any, T: any) {
-  const bounds = layerWorldBounds(PM, L, T, space3d);
+  const bounds = layerWorldBounds(api, L, T, space3d);
   if (!bounds) return null;
   const { x0, x1, y0, y1, cx, cy } = bounds;
   return { x0, x1, y0, y1, cx, cy };
@@ -1180,15 +1215,15 @@ function unionBounds(layers: any, T: any) {
  */
 function snapshotSnapCandidates(T: any, selectionLayers: any[]): SnapCandidates {
   const selectedIds = new Set(selectionLayers.map((L: any) => L.id));
-  const points: Point[] = boxSnapPoints({ x0: 0, y0: 0, x1: PM.proj.w, y1: PM.proj.h });
+  const points: Point[] = boxSnapPoints({ x0: 0, y0: 0, x1: api.project.get().w, y1: api.project.get().h });
   const parentIds = new Set(selectionLayers.map((L: any) => L.parent || null));
   const parentId = parentIds.size === 1 ? [...parentIds][0] : null;
-  const visible = (L: any) => PM.active(L, T);
-  for (const L of PM.proj.layers) {
+  const visible = (L: any) => api.anim.active(L, T);
+  for (const L of api.project.get().layers) {
     if ((L.parent || null) !== parentId || selectedIds.has(L.id) || !visible(L)) continue;
     const b = worldBounds(L, T); if (b) points.push(...boxSnapPoints(b));
   }
-  const parent = parentId ? PM.L(parentId) : null;
+  const parent = parentId ? api.model.layer(parentId) : null;
   if (parent && visible(parent)) {
     const b = worldBounds(parent, T); if (b) points.push(...boxSnapPoints(b));
   }
@@ -1210,16 +1245,16 @@ Object.assign(V, {
   worldBounds, unionBounds, snapshotSnapCandidates, findSnapTarget, snapBox, boxSnapPoints,
   snapCandidatesFromPoints, snapLinesChanged, passedMoveDragThreshold, calculateResize, resizeCursorForHandle,
   resizeLocksAspect,
-  resolveSelectionGeometry: (layers: any = visualSelection(PM), T: any = PM.time) =>
-    resolveSelectionGeometry(PM, layers, T, space3d),
-  selectionTransformRoots: (layers: any = visualSelection(PM), T: any = PM.time) =>
-    selectionTransformRoots(PM, layers, T),
-  layerWorldPivot: (layer: any, T: any = PM.time) => layerWorldPivot(PM, layer, T, space3d),
-  layerContainsPoint: (L: any, x: any, y: any, T: any) => layerContainsPoint(PM, L, x, y, T, space3d),
+  resolveSelectionGeometry: (layers: any = visualSelection(api), T: any = api.transport.time()) =>
+    resolveSelectionGeometry(api, layers, T, space3d),
+  selectionTransformRoots: (layers: any = visualSelection(api), T: any = api.transport.time()) =>
+    selectionTransformRoots(api, layers, T),
+  layerWorldPivot: (layer: any, T: any = api.transport.time()) => layerWorldPivot(api, layer, T, space3d),
+  layerContainsPoint: (L: any, x: any, y: any, T: any) => layerContainsPoint(api, L, x, y, T, space3d),
 });
 
 /* ── direct manipulation ───────────────────────────────── */
-function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => void {
+function bindStage(stage: any, inner: any): () => void {
   const listeners: Array<[any, string, EventListener, boolean | AddEventListenerOptions | undefined]> = [];
   const listen = (target: any, type: string, handler: EventListener, options?: boolean | AddEventListenerOptions) => {
     target.addEventListener(type, handler, options);
@@ -1227,25 +1262,24 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
   };
   const guarded = (handler: (event: any) => void) => ((event: any) => {
     if ((event.target as Element)?.closest?.('#composition-zoom, #preview-controls, [contenteditable]')) return;
-    if (fenceLegacyListeners) event.stopImmediatePropagation();
     handler(event);
   }) as EventListener;
-  const capture = fenceLegacyListeners ? true : undefined;
+  const capture = undefined;
   listen(stage, 'contextmenu', guarded((event: MouseEvent) => {
     event.preventDefault();
     const point = pointerComp(event);
-    const layer = PM.GL.pick(point.x, point.y, PM.time, { includeLocked: true });
-    if (layer) PM.showLayerMenu?.(layer, event, 'viewer');
+    const layer = api.render.gl.pick(point.x, point.y, api.transport.time(), { includeLocked: true });
+    if (layer) api.ui.showLayerMenu(layer, event, 'viewer');
     else {
-      const items = PM.Kernel?.collectMenu?.('viewer:context', { layerId: null, time: PM.time }) || [];
-      if (items.length) PM.menu(document.body, items, { x: event.clientX, y: event.clientY });
+      const items = api.menus.collect('viewer:context', { layerId: null, time: api.transport.time() });
+      if (items.length) api.ui.menu({ x: event.clientX, y: event.clientY }, items);
     }
   }), capture);
   V.layerAtPoint = (clientX: number, clientY: number) => {
     const rect = stage.getBoundingClientRect();
     if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
     const point = pointerComp({ clientX, clientY });
-    return PM.GL.pick(point.x, point.y, PM.time);
+    return api.render.gl.pick(point.x, point.y, api.transport.time());
   };
   listen(stage, 'pointerdown', guarded(onDown), capture);
   listen(stage, 'pointermove', guarded(updateStageCursor), capture);
@@ -1265,7 +1299,7 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
     V.pan = [V.pan[0] - dx, V.pan[1] - dy];
     V.layout(true);
-  }), fenceLegacyListeners ? { capture: true, passive: false } : { passive: false });
+  }), { passive: false });
   if (V.recovery) listen(V.recovery, 'pointerdown', ((e: any) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1289,33 +1323,39 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     V.temporaryTool = null;
     setStageCursor('default');
   }) as EventListener, true);
-  listen(fenceLegacyListeners ? stage : inner, 'dblclick', guarded((e: any) => {
-    if(PM.tool==='pen'){const L=PM.firstSel(),path=L?.d?.paths?.find((p:any)=>p.id===PM.activePath)||L?.masks?.find((m:any)=>m.path?.id===PM.activePath)?.path;if(path&&!L.lock){PM.Edit.mutate('Close path',()=>{if(path.p.closed.kf.length)PM.setKeyOn(path.p.closed,PM.time-L.from,true);else path.p.closed.v=true;PM.activePath=null;},{origin:'canvas'});PM.invalidate();PM.Inspector?.refresh?.();}e.preventDefault();e.stopPropagation();return;}
+  listen(inner, 'dblclick', guarded((e: any) => {
+    if(toolService()?.tool==='pen'){
+      const L=api.selection.first();
+      const paths=L ? (L.d as any).paths as any[] | undefined : undefined;
+      const path=paths?.find((candidate:any)=>candidate.id===V.activePath)||L?.masks?.find(mask=>mask.path?.id===V.activePath)?.path;
+      if(path&&L&&!L.lock){api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path.p.closed.v=true;V.activePath=null;},{origin:'canvas'});invalidate();refreshInspector();}
+      e.preventDefault();e.stopPropagation();return;
+    }
     const [x, y] = toComp(e);
-    let L = editableTextAtPoint(PM, x, y, PM.time, space3d);
+    let L = editableTextAtPoint(api, x, y, api.transport.time(), space3d);
     const remembered = V.textDoubleClickCandidate;
     if (!L && remembered && Date.now() - remembered.at < 700) {
-      const candidate = PM.L?.(remembered.id);
+      const candidate = api.model.layer(remembered.id);
       if (candidate?.type === 'text' && !candidate.lock
-        && PM.active?.(candidate, PM.time) !== false
-        && layerContainsPoint(PM, candidate, x, y, PM.time, space3d)) L = candidate;
+        && api.anim.active(candidate, api.transport.time()) !== false
+        && layerContainsPoint(api, candidate, x, y, api.transport.time(), space3d)) L = candidate;
     }
     V.textDoubleClickCandidate = null;
     if (L) {
       e.preventDefault();
       e.stopPropagation();
-      editCanvasText(PM, V, L, undefined, true);
+      editCanvasText(api, V, L, undefined, true);
     }
   }), capture);
   /* FX browser drops (effects / transitions). Non-fx drags (OS files) are left
      untouched so the window-level import handler keeps working. */
   const setDropOver = (on: boolean) => stage.classList.toggle('fx-drop-over', on);
   listen(stage, 'dragenter', (e: any) => {
-    if (!PM.fxDrop?.hasFxDrag(e.dataTransfer)) return;
+    if (!api.dnd?.hasFxDrag(e.dataTransfer)) return;
     e.preventDefault(); setDropOver(true);
   });
   listen(stage, 'dragover', (e: any) => {
-    if (!PM.fxDrop?.hasFxDrag(e.dataTransfer)) return;
+    if (!api.dnd?.hasFxDrag(e.dataTransfer)) return;
     e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setDropOver(true);
   });
   listen(stage, 'dragleave', (e: any) => {
@@ -1323,14 +1363,14 @@ function bindStage(stage: any, inner: any, fenceLegacyListeners = false): () => 
     setDropOver(false);
   });
   listen(stage, 'drop', (e: any) => {
-    const payload = PM.fxDrop?.readFxDrag(e.dataTransfer);
+    const payload = api.dnd?.readFxDrag(e.dataTransfer);
     setDropOver(false);
     if (!payload) return;
     e.preventDefault(); e.stopPropagation();
     const [x, y] = toComp(e);
-    const hit = PM.GL.pick(x, y, PM.time);
-    const target = hit || PM.firstSel?.();
-    PM.fxDrop.applyFxDrop(payload, target?.id, undefined, PM);
+    const hit = api.render.gl.pick(x, y, api.transport.time());
+    const target = hit || api.selection.first();
+    api.dnd.applyFxDrop(payload, target?.id);
   });
   return () => {
     for (const [target, type, handler, options] of listeners) target.removeEventListener(type, handler, options);
@@ -1350,7 +1390,7 @@ function cursorForHit(selection: SelectionGeometry, hit: any) {
 
 function updateStageCursor(e: any) {
   if (!V.inner) return;
-  const tool = V.temporaryTool || PM.tool;
+  const tool = V.temporaryTool || toolService()?.tool;
   if (tool === 'hand') { setStageCursor('grab'); return; }
   if (tool === 'zoom') { setStageCursor(e.altKey ? 'zoom-out' : 'zoom-in'); return; }
   if (tool === 'rotate') { setStageCursor(ROTATE_CURSOR); return; }
@@ -1358,8 +1398,8 @@ function updateStageCursor(e: any) {
   if (tool === 'pen') { setStageCursor('crosshair'); return; }
   if (tool === 'shape') { setStageCursor('crosshair'); return; }
   if (tool === 'text') { setStageCursor('text'); return; }
-  const [x, y] = toComp(e), T = PM.time;
-  const selection = resolveSelectionGeometry(PM, visualSelection(PM), T, space3d);
+  const [x, y] = toComp(e), T = api.transport.time();
+  const selection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) { setStageCursor(cursorForHit(selection, hit)); return; }
@@ -1388,43 +1428,43 @@ function onDown(e: any) {
   /* The first click of a double-click may legitimately select a full-frame
      layer above the text. Remember the selected text hit briefly so the
      ensuing dblclick can still enter that text editor and select all. */
-  if ((V.temporaryTool || PM.tool || 'select') === 'select') {
+  if ((V.temporaryTool || toolService()?.tool || 'select') === 'select') {
     const remembered = V.textDoubleClickCandidate;
     if (remembered && Date.now() - remembered.at < 700
       && Math.hypot(e.clientX - remembered.clientX, e.clientY - remembered.clientY) < 6) {
-      const layer = PM.L?.(remembered.id);
-      if (layer?.type === 'text' && !layer.lock && PM.active?.(layer, PM.time) !== false) {
+      const layer = api.model.layer(remembered.id);
+      if (layer?.type === 'text' && !layer.lock && api.anim.active(layer, api.transport.time()) !== false) {
         V.textDoubleClickCandidate = null;
         e.preventDefault();
         e.stopPropagation();
-        editCanvasText(PM, V, layer, undefined, true);
+        editCanvasText(api, V, layer, undefined, true);
         return;
       }
     }
     const point = pointerComp(e);
-    const candidate = visualSelection(PM).find((layer: any) =>
+    const candidate = visualSelection(api).find((layer: any) =>
       layer?.type === 'text' && !layer.lock
-      && PM.active?.(layer, PM.time) !== false
-      && layerContainsPoint(PM, layer, point.x, point.y, PM.time, space3d));
+      && api.anim.active(layer, api.transport.time()) !== false
+      && layerContainsPoint(api, layer, point.x, point.y, api.transport.time(), space3d));
     if (candidate) V.textDoubleClickCandidate = {
       id: candidate.id, at: Date.now(), clientX: e.clientX, clientY: e.clientY,
     };
   }
 
-  const tool = V.temporaryTool || PM.tool || 'select';
+  const tool = V.temporaryTool || toolService()?.tool || 'select';
   if (tool === 'hand') return startPan(e);
   if (tool === 'zoom') return startZoom(e);
-  if (tool === 'pen' && visualSelection(PM).some((layer: any) => space3d.is3DLayer(layer))) { PM.toast('Turn off 3D temporarily to edit path vertices'); return; }
-  if (tool === 'pen') return startPathEdit(PM,e,pointerComp,beginDrag,V.shown);
+  if (tool === 'pen' && visualSelection(api).some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Turn off 3D temporarily to edit path vertices'); return; }
+  if (tool === 'pen') return startPathEdit(api,V,e,pointerComp,beginDrag,V.shown);
   if (tool === 'shape') return startShape(e);
   if (tool === 'text') return startText(e);
   if (tool === 'rotate') return startRotationTool(e);
   if (tool === 'anchor') return startAnchorTool(e);
 
   const [x, y] = toComp(e);
-  const T = PM.time;
+  const T = api.transport.time();
 
-  const selection = resolveSelectionGeometry(PM, visualSelection(PM), T, space3d);
+  const selection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
   if (selection?.transformable) {
     const hit = handleAt(selection, x, y);
     if (hit) return startTransform(e, selection, hit, T);
@@ -1436,32 +1476,32 @@ function onDown(e: any) {
     e.preventDefault();
     return;
   }
-  const L = PM.GL.pick(x, y, T);
+  const L = api.render.gl.pick(x, y, T);
   if (selection?.transformable && pointInSelection(selection, x, y)) {
     const selectedIds = new Set(selection.layers.map((layer: any) => layer.id));
     return startMove(e, selection.roots, T, {
       selectionLayers: selection.layers,
       click: () => {
         if (L && e.shiftKey && selectedIds.has(L.id)) {
-          PM.selectLayers(PM.sel.layers.filter((id: any) => id !== L.id));
-        } else if (L && !selectedIds.has(L.id)) PM.selectLayers(L.id, e.shiftKey);
-        else if (!L && !e.shiftKey) PM.selectLayers([]);
+          selectLayers(api.selection.layers().filter((id: any) => id !== L.id));
+        } else if (L && !selectedIds.has(L.id)) selectLayers(L.id, e.shiftKey);
+        else if (!L && !e.shiftKey) selectLayers([]);
       },
     });
   }
   if (!L) return startSelectionMarquee(e);
-  if (e.shiftKey && PM.sel.layers.includes(L.id)) {
-    PM.selectLayers(PM.sel.layers.filter((id: any) => id !== L.id));
+  if (e.shiftKey && api.selection.layers().includes(L.id)) {
+    selectLayers(api.selection.layers().filter((id: any) => id !== L.id));
     return;
   }
-  PM.selectLayers(L.id, e.shiftKey);
-  const nextSelection = resolveSelectionGeometry(PM, visualSelection(PM), T, space3d);
+  selectLayers(L.id, e.shiftKey);
+  const nextSelection = resolveSelectionGeometry(api, visualSelection(api), T, space3d);
   if (nextSelection) startMove(e, nextSelection.roots, T, { selectionLayers: nextSelection.layers });
 }
 
 function clearToolRect(): void {
   V.toolRect = null;
-  PM.invalidate('render');
+  invalidate('render');
 }
 
 function startZoom(e: any): void {
@@ -1475,7 +1515,7 @@ function startZoom(e: any): void {
       V.zoomRect = moved && !ev.altKey
         ? shapeBoxFromDrag(startScreen, stagePoint(ev))
         : null;
-      PM.invalidate('render');
+      invalidate('render');
     },
     up: (_dx: number, _dy: number, ev: any) => {
       const box = V.zoomRect as DragBox | null;
@@ -1496,13 +1536,13 @@ function startZoom(e: any): void {
         { x: stage.width / 2, y: stage.height / 2 }, zoom,
       );
     },
-    cancel: () => { V.zoomRect = null; PM.invalidate('render'); },
+    cancel: () => { V.zoomRect = null; invalidate('render'); },
   });
 }
 
 function startSelectionMarquee(e: any): void {
   const start = pointerComp(e);
-  const before = [...PM.sel.layers];
+  const before = [...api.selection.layers()];
   let moved = false;
   beginDrag(e, {
     cursor: 'default',
@@ -1510,25 +1550,25 @@ function startSelectionMarquee(e: any): void {
       if (!passedMoveDragThreshold(dx, dy)) return;
       moved = true;
       V.toolRect = { kind: 'selection', box: shapeBoxFromDrag(start, pointerComp(ev)) };
-      PM.invalidate('render');
+      invalidate('render');
     },
     up: () => {
       const box = V.toolRect?.box as DragBox | undefined;
       clearToolRect();
       if (!moved || !box) {
-        if (!e.shiftKey) PM.selectLayers([]);
+        if (!e.shiftKey) selectLayers([]);
         return;
       }
-      const enclosed = PM.proj.layers.filter((layer: any) => {
-        if (!PM.active(layer, PM.time) || PM.TYPE_META?.[layer.type]?.pickable === false) return false;
-        const bounds = layerWorldBounds(PM, layer, PM.time, space3d);
+      const enclosed = api.project.get().layers.filter((layer: any) => {
+        if (!api.anim.active(layer, api.transport.time()) || layerTypeMeta(api, layer)?.pickable === false) return false;
+        const bounds = layerWorldBounds(api, layer, api.transport.time(), space3d);
         return !!bounds && bounds.x0 >= box.x0 && bounds.x1 <= box.x1 && bounds.y0 >= box.y0 && bounds.y1 <= box.y1;
       }).map((layer: any) => layer.id);
-      if (!e.shiftKey) PM.selectLayers(enclosed);
+      if (!e.shiftKey) selectLayers(enclosed);
       else {
         const next = new Set(before);
         for (const id of enclosed) next.has(id) ? next.delete(id) : next.add(id);
-        PM.selectLayers([...next]);
+        selectLayers([...next]);
       }
     },
     cancel: clearToolRect,
@@ -1547,7 +1587,7 @@ function startShape(e: any): void {
         kind: 'shape',
         box: shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey, constrain: ev.shiftKey }),
       };
-      PM.invalidate('render');
+      invalidate('render');
     },
     up: (_dx: number, _dy: number, ev: any) => {
       const box = moved
@@ -1562,36 +1602,37 @@ function startShape(e: any): void {
 }
 
 function createShape(box: DragBox): void {
-  const variant = ['rect', 'rounded', 'ellipse', 'polygon', 'star'].includes(PM.toolShape)
-    ? PM.toolShape : 'rect';
-  const selected = PM.firstSel?.();
+  const requestedShape = toolService()?.toolShape;
+  const variant = requestedShape && ['rect', 'rounded', 'ellipse', 'polygon', 'star'].includes(requestedShape)
+    ? requestedShape : 'rect';
+  const selected = api.selection.first();
   const canMask = selected && !selected.lock && selected.type !== 'shape'
-    && PM.TYPE_META?.[selected.type]?.masks !== false
+    && layerTypeMeta(api, selected)?.masks !== false
     && (variant === 'rect' || variant === 'ellipse');
   if (canMask) {
-    const matrix = PM.worldMatrix(selected, PM.time) as AffineMatrix;
-    const inv = space3d.is3DLayer(selected) ? space3d.inversePlane(space3d.planeMatrix(selected,PM.time)) : null;
+    const matrix = api.anim.worldMatrix(selected, api.transport.time()) as AffineMatrix;
+    const inv = space3d.is3DLayer(selected) ? space3d.inversePlane(space3d.planeMatrix(selected,api.transport.time())) : null;
     const first = inv ? space3d.projectPoint(inv, {x:box.x0,y:box.y0}) : invertPoint(matrix, { x: box.x0, y: box.y0 });
     const second = inv ? space3d.projectPoint(inv, {x:box.x1,y:box.y1}) : invertPoint(matrix, { x: box.x1, y: box.y1 });
     if (!first || !second) return;
-    PM.Edit.mutate('Draw mask', () => {
-      const mask = PM.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect');
-      mask.p.x.v = (first.x + second.x) / 2;
-      mask.p.y.v = (first.y + second.y) / 2;
-      mask.p.w.v = Math.abs(second.x - first.x);
-      mask.p.h.v = Math.abs(second.y - first.y);
-      mask.p.feather.v = 0;
+    api.edit.mutate('Draw mask', () => {
+      const mask = api.model.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect');
+      mask.p.x!.v = (first.x + second.x) / 2;
+      mask.p.y!.v = (first.y + second.y) / 2;
+      mask.p.w!.v = Math.abs(second.x - first.x);
+      mask.p.h!.v = Math.abs(second.y - first.y);
+      mask.p.feather!.v = 0;
       selected.masks.push(mask);
       return mask;
     }, { origin: 'canvas' });
-    PM.invalidate();
-    PM.Inspector?.refresh?.();
+    invalidate();
+    refreshInspector();
     return;
   }
   const shape = variant === 'rounded' ? 'rect' : variant;
-  PM.Edit.apply({
-    type: 'add_layer', layerType: 'shape', name: `${variant[0].toUpperCase()}${variant.slice(1)}`,
-    from: PM.snapF(PM.time, PM.proj.fps), duration: Math.max(1 / PM.proj.fps, PM.proj.dur - PM.time),
+  api.edit.apply({
+    type: 'add_layer', layerType: 'shape', name: `${variant.charAt(0).toUpperCase()}${variant.slice(1)}`,
+    from: api.util.snapF(api.transport.time(), api.project.get().fps), duration: Math.max(1 / api.project.get().fps, api.project.get().dur - api.transport.time()),
     content: {
       /* The drawn dimensions live in ordinary animated Scale channels. The
          source shape is normalized to 100px, so a Scale value in percent is
@@ -1607,15 +1648,15 @@ function createShape(box: DragBox): void {
     },
     select: true,
   }, { label: `Draw ${variant}`, origin: 'canvas' });
-  PM.invalidate();
-  PM.Inspector?.refresh?.();
+  invalidate();
+  refreshInspector();
 }
 
 function startText(e: any): void {
   const [hitX, hitY] = toComp(e);
-  const hit = PM.GL.pick(hitX, hitY, PM.time);
+  const hit = api.render.gl.pick(hitX, hitY, api.transport.time());
   if (hit?.type === 'text' && !e.shiftKey) {
-    editCanvasText(PM,V,hit,e);
+    editCanvasText(api,V,hit,e);
     return;
   }
   const start = pointerComp(e);
@@ -1626,25 +1667,25 @@ function startText(e: any): void {
       if (!passedMoveDragThreshold(dx, dy)) return;
       moved = true;
       V.toolRect = { kind: 'text', box: shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey }) };
-      PM.invalidate('render');
+      invalidate('render');
     },
     up: (_dx: number, _dy: number, ev: any) => {
       const box = moved ? shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey }) : null;
       clearToolRect();
       const position = box ? { x: box.x0, y: box.y0 } : start;
-      const result = PM.Edit.apply({
+      const result = api.edit.apply({
         type: 'add_layer', layerType: 'text', name: 'Text',
-        from: PM.snapF(PM.time, PM.proj.fps), duration: Math.max(1 / PM.proj.fps, PM.proj.dur - PM.time),
+        from: api.util.snapF(api.transport.time(), api.project.get().fps), duration: Math.max(1 / api.project.get().fps, api.project.get().dur - api.transport.time()),
         content: {
           text: '', align: 'left',
-          boxWidth: PM.P(box?.w || 0), boxHeight: PM.P(box?.h || 0),
-        },
+          boxWidth: api.model.P(box?.w || 0), boxHeight: api.model.P(box?.h || 0),
+        } as unknown as Extract<EditCommand, { type: 'add_layer' }>['content'],
         properties: { 'position.x': position.x, 'position.y': position.y },
         select: true,
       }, { label: box ? 'New paragraph text' : 'New point text', origin: 'canvas' });
       const layer = result?.ok && result.data?.results?.[0]?.data?.layer;
-      if (layer) editCanvasText(PM,V,layer);
-      PM.invalidate();
+      if (layer) editCanvasText(api,V,layer);
+      invalidate();
     },
     cancel: clearToolRect,
   });
@@ -1652,37 +1693,37 @@ function startText(e: any): void {
 
 function selectionForTransformTool(e: any): SelectionGeometry | null {
   const point = pointerComp(e);
-  let selection = resolveSelectionGeometry(PM, visualSelection(PM), PM.time, space3d);
+  let selection = resolveSelectionGeometry(api, visualSelection(api), api.transport.time(), space3d);
   if (selection && pointInSelection(selection, point.x, point.y)) return selection;
-  const layer = PM.GL.pick(point.x, point.y, PM.time);
+  const layer = api.render.gl.pick(point.x, point.y, api.transport.time());
   if (!layer) return null;
-  PM.selectLayers(layer.id, e.shiftKey);
-  selection = resolveSelectionGeometry(PM, visualSelection(PM), PM.time, space3d);
+  selectLayers(layer.id, e.shiftKey);
+  selection = resolveSelectionGeometry(api, visualSelection(api), api.transport.time(), space3d);
   return selection;
 }
 
 function startRotationTool(e: any): void {
   const selection = selectionForTransformTool(e);
-  if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { PM.toast('Use X, Y and Z Rotation in Transform for 3D layers'); return; }
-  if (selection?.transformable) startTransform(e, selection, { rotate: true }, PM.time);
+  if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Use X, Y and Z Rotation in Transform for 3D layers'); return; }
+  if (selection?.transformable) startTransform(e, selection, { rotate: true }, api.transport.time());
 }
 
 function startAnchorTool(e: any): void {
   const selection = selectionForTransformTool(e);
-  if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { PM.toast('Use Anchor X, Y and Z in Transform for 3D layers'); return; }
+  if (selection?.layers.some((layer: any) => space3d.is3DLayer(layer))) { api.ui.toast('Use Anchor X, Y and Z in Transform for 3D layers'); return; }
   if (!selection?.transformable || selection.layers.length !== 1) return;
   const pointer = pointerComp(e);
   if (Math.hypot(pointer.x - selection.pivotWorld.x, pointer.y - selection.pivotWorld.y) > 12 / Math.max(.02, V.shown)) return;
   const layer = selection.layers[0];
-  const T = PM.time;
-  const local = PM.localMatrix(layer, T) as AffineMatrix;
+  const T = api.transport.time();
+  const local = api.anim.localMatrix(layer, T) as AffineMatrix;
   const linear: LinearMatrix = [local[0], local[1], local[2], local[3]];
-  const anchor = { x: PM.ev(layer, 'anchor.x', T), y: PM.ev(layer, 'anchor.y', T) };
-  const position = { x: PM.ev(layer, 'position.x', T), y: PM.ev(layer, 'position.y', T) };
+  const anchor = { x: ev(api, layer, 'anchor.x', T), y: ev(api, layer, 'anchor.y', T) };
+  const position = { x: ev(api, layer, 'position.x', T), y: ev(api, layer, 'position.y', T) };
   const parent = parentWorldMatrix(layer, T);
-  const bounds = PM.GL.bounds(layer, T);
+  const bounds = layerBounds(api, layer, T);
   let moved = false;
-  PM.Edit.begin('Move anchor point', { origin: 'canvas' });
+  api.edit.begin('Move anchor point', { origin: 'canvas' });
   beginDrag(e, {
     cursor: 'crosshair',
     move: (dx: number, dy: number, ev: any) => {
@@ -1706,16 +1747,16 @@ function startAnchorTool(e: any): void {
           };
         }
       }
-      setOrKey(layer, 'anchor.x', PM.round(next.anchor.x, 3), T);
-      setOrKey(layer, 'anchor.y', PM.round(next.anchor.y, 3), T);
+      setOrKey(layer, 'anchor.x', api.util.round(next.anchor.x, 3), T);
+      setOrKey(layer, 'anchor.y', api.util.round(next.anchor.y, 3), T);
       if (!ev.altKey) {
-        setOrKey(layer, 'position.x', PM.round(next.position.x, 3), T);
-        setOrKey(layer, 'position.y', PM.round(next.position.y, 3), T);
+        setOrKey(layer, 'position.x', api.util.round(next.position.x, 3), T);
+        setOrKey(layer, 'position.y', api.util.round(next.position.y, 3), T);
       }
-      PM.invalidate();
+      invalidate();
     },
-    up: () => { moved ? PM.Edit.commit('Move anchor point') : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
-    cancel: () => { PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    up: () => { moved ? api.edit.commit('Move anchor point') : api.edit.cancel(); refreshInspector(); },
+    cancel: () => { api.edit.cancel(); refreshInspector(); },
   });
 }
 
@@ -1724,7 +1765,7 @@ function pointInSelection(selection: SelectionGeometry, x: number, y: number): b
     const bounds = selection.bounds;
     return x >= bounds.x0 && x <= bounds.x1 && y >= bounds.y0 && y <= bounds.y1;
   }
-  return layerContainsPoint(PM, selection.layers[0], x, y, PM.time, space3d);
+  return layerContainsPoint(api, selection.layers[0], x, y, api.transport.time(), space3d);
 }
 
 function handleAt(selection: SelectionGeometry, x: any, y: any) {
@@ -1746,7 +1787,7 @@ function handleAt(selection: SelectionGeometry, x: any, y: any) {
 function startMove(e: any, layers: any, T: any, options: any = {}) {
   if (!layers.length) return;
   const start = layers.map((L: any) => {
-    const x = PM.ev(L, 'position.x', T), y = PM.ev(L, 'position.y', T);
+    const x = ev(api, L, 'position.x', T), y = ev(api, L, 'position.y', T);
     const m = space3d.is3DLayer(L) ? space3d.planeMatrix(L,T,true) : null;
     return {L,x,y,inverse:m ? space3d.inversePlane(m) : null,pivot:m ? space3d.projectPoint(m,{x,y}) : null};
   });
@@ -1758,8 +1799,8 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
   };
   const selectionLayers = options.selectionLayers || layers;
   const candidates = snapshotSnapCandidates(T, selectionLayers);
-  const clearGuides = () => { V.snapLines = null; PM.invalidate('render'); };
-  PM.Edit.begin(selectionLayers.length > 1 ? 'Move selection' : 'Move layer', { origin: 'canvas' });
+  const clearGuides = () => { V.snapLines = null; invalidate('render'); };
+  api.edit.begin(selectionLayers.length > 1 ? 'Move selection' : 'Move layer', { origin: 'canvas' });
   let moved = false;
   beginDrag(e, {
     move: (dx: any, dy: any, ev: any) => {
@@ -1799,15 +1840,15 @@ function startMove(e: any, layers: any, T: any, options: any = {}) {
         window.powermove?.haptic.alignment();
       }
       V.snapLines = nextLines;
-      PM.invalidate();
+      invalidate();
     },
     up: () => {
       clearGuides();
-      if (moved) PM.Edit.commit('Move layer');
-      else { PM.Edit.cancel(); options.click?.(); }
-      PM.Inspector?.refresh?.();
+      if (moved) api.edit.commit('Move layer');
+      else { api.edit.cancel(); options.click?.(); }
+      refreshInspector();
     },
-    cancel: () => { clearGuides(); PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    cancel: () => { clearGuides(); api.edit.cancel(); refreshInspector(); },
   });
 }
 
@@ -1817,9 +1858,9 @@ function worldPointToParentLocal(L: any, T: any, point: Point): Point | null {
 }
 
 function parentWorldMatrix(L: any, T: any): AffineMatrix | null {
-  if (PM.transformParentMatrix) return PM.transformParentMatrix(L, T);
-  const parent = L.parent && PM.L(L.parent);
-  return parent ? PM.worldMatrix(parent, T) as AffineMatrix : null;
+  if (api.anim.transformParentMatrix) return api.anim.transformParentMatrix(L, T);
+  const parent = L.parent && api.model.layer(L.parent);
+  return parent ? api.anim.worldMatrix(parent, T) as AffineMatrix : null;
 }
 
 function pointerAngleInParentSpace(L: any, T: any, pivotWorld: Point, pointerWorld: Point): number | null {
@@ -1849,15 +1890,15 @@ function startTransform(e: any, selection: SelectionGeometry, hit: any, T: any) 
 
 function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T: any) {
   const L = selection.layers[0];
-  const b = PM.GL.bounds(L, T);
+  const b = layerBounds(api, L, T);
   if (!b) return;
   const s0 = {
-    sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T),
-    x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T),
-    r: PM.ev(L, 'rotation', T),
+    sx: ev(api, L, 'scale.x', T), sy: ev(api, L, 'scale.y', T),
+    x: ev(api, L, 'position.x', T), y: ev(api, L, 'position.y', T),
+    r: ev(api, L, 'rotation', T),
   };
-  const textSize0 = L.type === 'text' ? Math.max(4, Number(resolveContent(PM, L, PM.time).size) || 4) : null;
-  const m = [...PM.worldMatrix(L, T)] as [number, number, number, number, number, number];
+  const textSize0 = L.type === 'text' ? Math.max(4, Number(resolvedContent(api, L, api.transport.time()).size) || 4) : null;
+  const m = [...api.anim.worldMatrix(L, T)] as [number, number, number, number, number, number];
   const pivotWorld = selection.pivotWorld;
   const pointerStart = pointerComp(e);
   const a0 = pointerAngleInParentSpace(L, T, pivotWorld, pointerStart);
@@ -1875,10 +1916,10 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
   };
   const applyTextSize = (value: number) => {
     if (appliedTextSize == null || Math.abs(value - appliedTextSize) < .0005) return;
-    PM.Edit.dispatch({ type: 'set_content', target: L.id, patch: { size: value } });
+    api.edit.dispatch({ type: 'set_content', target: L.id, patch: { size: value } });
     appliedTextSize = value;
   };
-  PM.Edit.begin(hit.rotate ? 'Rotate layer' : textSize0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
+  api.edit.begin(hit.rotate ? 'Rotate layer' : textSize0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
   let moved = false;
   beginDrag(e, {
     cursor: cursorForHit(selection, hit),
@@ -1891,7 +1932,7 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
         let deg = s0.r + angleDeltaDegrees(a, a0);
         if (ev.metaKey || ev.ctrlKey) deg = Math.round(deg / 45) * 45;
         else if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
-        setOrKey(L, 'rotation', PM.round(deg, 2), T);
+        setOrKey(L, 'rotation', api.util.round(deg, 2), T);
       } else {
         const pointerWorld = pointerComp(ev);
         const pointerLocal = invertPoint(m, pointerWorld);
@@ -1909,8 +1950,8 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
              resizing changes Size; Scale X/Y remain explicit transform
              overrides instead of becoming an accidental second font size. */
           const factor = next.scaleX / Math.max(.001, s0.sx);
-          applyTextSize(PM.round(Math.max(4, textSize0 * factor), 2));
-          const resizedBounds = PM.GL.bounds(L, T);
+          applyTextSize(api.util.round(Math.max(4, textSize0 * factor), 2));
+          const resizedBounds = layerBounds(api, L, T);
           if (resizedBounds) {
             const pivotRatio: Corner = [
               b.w ? (next.pivotLocal.x - b.x0) / b.w : .5,
@@ -1919,25 +1960,25 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
             renderedPivotLocal = pointInBounds(resizedBounds, pivotRatio);
           }
         } else {
-          applyValue('scale.x', PM.round(next.scaleX, 3), 'sx');
-          applyValue('scale.y', PM.round(next.scaleY, 3), 'sy');
+          applyValue('scale.x', api.util.round(next.scaleX, 3), 'sx');
+          applyValue('scale.y', api.util.round(next.scaleY, 3), 'sy');
         }
         /* Every move starts from the gesture snapshot. This prevents the
            previous correction from accumulating as the pointer changes. */
         applyValue('position.x', s0.x, 'x');
         applyValue('position.y', s0.y, 'y');
-        const resizedMatrix = PM.worldMatrix(L, T);
+        const resizedMatrix = api.anim.worldMatrix(L, T);
         const renderedPivot = applyMatrix(resizedMatrix, renderedPivotLocal);
         const [positionDx, positionDy] = worldDeltaToLocal(
           L, T, fixedWorld.x - renderedPivot.x, fixedWorld.y - renderedPivot.y,
         );
-        applyValue('position.x', PM.round(s0.x + positionDx, 3), 'x');
-        applyValue('position.y', PM.round(s0.y + positionDy, 3), 'y');
+        applyValue('position.x', api.util.round(s0.x + positionDx, 3), 'x');
+        applyValue('position.y', api.util.round(s0.y + positionDy, 3), 'y');
       }
-      PM.invalidate();
+      invalidate();
     },
-    up: () => { moved ? PM.Edit.commit() : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
-    cancel: () => { PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    up: () => { moved ? api.edit.commit() : api.edit.cancel(); refreshInspector(); },
+    cancel: () => { api.edit.cancel(); refreshInspector(); },
   });
 }
 
@@ -1954,26 +1995,26 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
   );
   const snapshots = selection.roots.map((L: any) => ({
     L,
-    x: PM.ev(L, 'position.x', T), y: PM.ev(L, 'position.y', T),
-    sx: PM.ev(L, 'scale.x', T), sy: PM.ev(L, 'scale.y', T),
-    rotation: PM.ev(L, 'rotation', T),
-    skew: PM.ev(L, 'skew', T),
-    pivotWorld: layerWorldPivot(PM, L, T, space3d),
+    x: ev(api, L, 'position.x', T), y: ev(api, L, 'position.y', T),
+    sx: ev(api, L, 'scale.x', T), sy: ev(api, L, 'scale.y', T),
+    rotation: ev(api, L, 'rotation', T),
+    skew: ev(api, L, 'skew', T),
+    pivotWorld: layerWorldPivot(api, L, T, space3d),
     parentLinear: (() => {
       const matrix = parentWorldMatrix(L, T);
       return matrix ? [matrix[0], matrix[1], matrix[2], matrix[3]] as LinearMatrix : null;
     })(),
     worldLinear: (() => {
-      const matrix = PM.worldMatrix(L, T);
+      const matrix = api.anim.worldMatrix(L, T);
       return [matrix[0], matrix[1], matrix[2], matrix[3]] as LinearMatrix;
     })(),
-    textSize: L.type === 'text' ? Math.max(4, Number(resolveContent(PM, L, PM.time).size) || 4) : null,
-    textOwnsDescendants: L.type === 'text' && PM.proj.layers.some((layer: any) => layer.parent === L.id),
+    textSize: L.type === 'text' ? Math.max(4, Number(resolvedContent(api, L, api.transport.time()).size) || 4) : null,
+    textOwnsDescendants: L.type === 'text' && api.project.get().layers.some((layer: any) => layer.parent === L.id),
   }));
   if (!snapshots.length) return;
 
   const label = hit.rotate ? 'Rotate selection' : 'Resize selection';
-  PM.Edit.begin(label, { origin: 'canvas' });
+  api.edit.begin(label, { origin: 'canvas' });
   let moved = false;
   beginDrag(e, {
     cursor: cursorForHit(selection, hit),
@@ -1991,12 +2032,12 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
           );
           const nextPosition = worldPointToParentLocal(snapshot.L, T, nextPivot);
           if (!nextPosition) continue;
-          setOrKey(snapshot.L, 'position.x', PM.round(nextPosition.x, 3), T);
-          setOrKey(snapshot.L, 'position.y', PM.round(nextPosition.y, 3), T);
+          setOrKey(snapshot.L, 'position.x', api.util.round(nextPosition.x, 3), T);
+          setOrKey(snapshot.L, 'position.y', api.util.round(nextPosition.y, 3), T);
           if (!snapshot.parentLinear) {
             /* With no parent, left-multiplying by R(delta) changes only the
                local rotation; preserve scale/skew channels and their keys. */
-            setOrKey(snapshot.L, 'rotation', PM.round(snapshot.rotation + delta, 3), T);
+            setOrKey(snapshot.L, 'rotation', api.util.round(snapshot.rotation + delta, 3), T);
             continue;
           }
           const desiredWorld = rotateLinear(snapshot.worldLinear, delta);
@@ -2010,7 +2051,7 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
             ['scale.y', local.scaleY * 100],
             ['skew', local.skew],
           ] as const;
-          for (const [path, value] of values) setOrKey(snapshot.L, path, PM.round(value, 4), T);
+          for (const [path, value] of values) setOrKey(snapshot.L, path, api.util.round(value, 4), T);
         }
       } else {
         const next = calculateResize(
@@ -2021,38 +2062,37 @@ function startCommonTransform(e: any, selection: SelectionGeometry, hit: any, T:
         const pivot = next.pivotLocal;
         for (const snapshot of snapshots) {
           if (snapshot.textSize != null && !snapshot.textOwnsDescendants) {
-            PM.Edit.dispatch({
+            api.edit.dispatch({
               type: 'set_content', target: snapshot.L.id,
-              patch: { size: PM.round(Math.max(4, snapshot.textSize * scaleX), 2) },
+              patch: { size: api.util.round(Math.max(4, snapshot.textSize * scaleX), 2) },
             });
           } else {
-            setOrKey(snapshot.L, 'scale.x', PM.round(snapshot.sx * scaleX, 3), T);
-            setOrKey(snapshot.L, 'scale.y', PM.round(snapshot.sy * scaleY, 3), T);
+            setOrKey(snapshot.L, 'scale.x', api.util.round(snapshot.sx * scaleX, 3), T);
+            setOrKey(snapshot.L, 'scale.y', api.util.round(snapshot.sy * scaleY, 3), T);
           }
           const nextPivot = transformPointAround(snapshot.pivotWorld, pivot, scaleX, scaleY);
           const nextPosition = worldPointToParentLocal(snapshot.L, T, nextPivot);
           if (!nextPosition) continue;
-          setOrKey(snapshot.L, 'position.x', PM.round(nextPosition.x, 3), T);
-          setOrKey(snapshot.L, 'position.y', PM.round(nextPosition.y, 3), T);
+          setOrKey(snapshot.L, 'position.x', api.util.round(nextPosition.x, 3), T);
+          setOrKey(snapshot.L, 'position.y', api.util.round(nextPosition.y, 3), T);
         }
       }
-      PM.invalidate();
+      invalidate();
     },
-    up: () => { moved ? PM.Edit.commit(label) : PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
-    cancel: () => { PM.Edit.cancel(); PM.Inspector?.refresh?.(); },
+    up: () => { moved ? api.edit.commit(label) : api.edit.cancel(); refreshInspector(); },
+    cancel: () => { api.edit.cancel(); refreshInspector(); },
   });
 }
 
 /** Write a value: sets a keyframe when the channel is animated, otherwise the static value. */
 function setOrKey(L: any, key: any, v: any, T: any) {
-  return PM.Edit.dispatch({
+  return api.edit.dispatch({
     type: 'set_property', target: L.id, path: key, value: v, time: T,
     mode: 'auto', preserveHandEdits: false, markIntent: 'human',
   });
 }
-PM.setOrKey = setOrKey;
 /* Replacement activation receives the same viewer object and WebGL surface.
    Rebind the new closures immediately; the panel never needs to reopen. */
 if (existingStage) V.attach(existingStage);
-return V;
+return V as ViewerRuntime;
 }

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { inspectorContext, type EditBinding } from './context';
-  import { evaluatedValue } from 'powermove';
+  import type { EditCommand } from 'powermove';
+  import { evaluatedValue } from './multi-edit';
   import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
   /* App-local clipboard survives layer/inspector remounts without replacing the user's system clipboard. */
@@ -10,10 +11,10 @@
   import { showFxMenu } from './actions';
   import { inspectorRefresh } from './refresh.svelte.js';
 
-  const { api, doc, transport } = inspectorContext();
+  const { api, doc, transport, controlProps, edit: inspectorEdit, inspector } = inspectorContext();
   const { ColorField, Section, ToggleField } = api.ui.controls;
 
-  let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
+  let { layer }: { layer: any } = $props();
 
   let openVersion = $state(0);
   let selectedIds = $state<string[]>([]);
@@ -39,19 +40,19 @@
 
   function isOpen(effect: any): boolean {
     openVersion;
-    return !!PM.UIState.getFxOpen(effect);
+    return !!api.uiState.getFxOpen(effect);
   }
 
   function toggleOpen(event: MouseEvent, effect: any): void {
     event.stopPropagation();
-    PM.UIState.setFxOpen(effect, !isOpen(effect));
+    api.uiState.setFxOpen(effect, !isOpen(effect));
     openVersion++;
   }
 
   function clearSelection(): void {
     selectedIds = [];
     selectionAnchor = null;
-    PM.Inspector?.clearEffectSelection?.();
+    inspector()?.clearEffectSelection();
   }
 
   function clearSelectionFromBackground(event: PointerEvent): void {
@@ -68,25 +69,25 @@
     return () => document.removeEventListener('pointerdown', clearFromOutside, true);
   });
 
-  const enabled = (effect: any) => (doc.tick.values, doc.proj, transport.time, evaluatedValue(PM, layer, effect.on, transport.time, `${effect.id}.$enabled`));
+  const enabled = (effect: any) => (doc.tick.values, doc.proj, transport.time, evaluatedValue(api, layer, effect.on, transport.time, `${effect.id}.$enabled`));
 
   function setEnabled(event: MouseEvent, effect: any): void {
     event.stopPropagation();
-    PM.Edit.apply(
+    inspectorEdit.apply(
       { type: 'set_effect', target: layer.id, effect: effect.id, patch: { enabled: !enabled(effect) } },
       { label: 'Toggle effect', origin: 'inspector' }
     );
-    PM.invalidate?.();
+    api.transport.invalidate?.();
   }
 
   function remove(event: MouseEvent, effect: any): void {
     event.stopPropagation();
-    const result = PM.Edit.apply(
+    const result = inspectorEdit.apply(
       { type: 'remove_effect', target: layer.id, effect: effect.id },
       { label: 'Remove effect', origin: 'inspector' }
     );
     if (result?.ok !== false) selectedIds = selectedIds.filter((id) => id !== effect.id);
-    PM.invalidate?.();
+    api.transport.invalidate?.();
   }
 
   function selected(effect: any): boolean {
@@ -106,7 +107,7 @@
         : [...selectedIds, effect.id];
     } else selectedIds = [effect.id];
     selectionAnchor = effect.id;
-    PM.Inspector?.setEffectSelection?.(layer.id, selectedIds);
+    inspector()?.setEffectSelection(layer.id, selectedIds);
     (event.currentTarget as HTMLElement).focus();
   }
 
@@ -124,20 +125,20 @@
     const copied = effects.filter((effect: any) => ids.has(effect.id));
     selectedIds = copied.map((effect: any) => effect.id);
     selectionAnchor = fallback.id;
-    PM.Inspector?.setEffectSelection?.(layer.id, selectedIds);
+    inspector()?.setEffectSelection(layer.id, selectedIds);
     const count = copyEffects(copied);
-    PM.toast?.(`Copied ${count} ${count === 1 ? 'effect' : 'effects'}`);
+    api.ui.toast?.(`Copied ${count} ${count === 1 ? 'effect' : 'effects'}`);
   }
 
   function pasteEffects(): void {
     const commands = effectPasteCommands(layer.id)
-      .filter((command) => !!PM.FX?.[command.effect]);
+      .filter((command) => !!api.effects.get(command.effect));
     if (!commands.length) {
-      PM.toast?.('Copy an effect first');
+      api.ui.toast?.('Copy an effect first');
       return;
     }
     const before = new Set(effects.map((effect: any) => effect.id));
-    const result = PM.Edit.apply(commands.length === 1 ? commands[0] : commands, {
+    const result = inspectorEdit.apply(commands.length === 1 ? commands[0]! : commands, {
       label: commands.length === 1 ? 'Paste effect' : 'Paste effects',
       origin: 'inspector'
     });
@@ -148,7 +149,7 @@
       selectionAnchor = pasted.at(-1)?.id ?? null;
       focusEffect(selectionAnchor);
     }
-    PM.invalidate?.();
+    api.transport.invalidate?.();
   }
 
   function deleteSelected(fallback: any): void {
@@ -160,10 +161,10 @@
     const first = effects.findIndex((effect: any) => ids.has(effect.id));
     const survivors = effects.filter((effect: any) => !ids.has(effect.id));
     const next = survivors[Math.min(first, Math.max(0, survivors.length - 1))] ?? null;
-    const commands = removing.map((effect: any) => ({
+    const commands: EditCommand[] = removing.map((effect: any) => ({
       type: 'remove_effect', target: layer.id, effect: effect.id
     }));
-    const result = PM.Edit.apply(commands.length === 1 ? commands[0] : commands, {
+    const result = inspectorEdit.apply(commands.length === 1 ? commands[0]! : commands, {
       label: commands.length === 1 ? 'Remove effect' : 'Remove effects',
       origin: 'inspector'
     });
@@ -171,7 +172,7 @@
     selectedIds = next ? [next.id] : [];
     selectionAnchor = next?.id ?? null;
     focusEffect(selectionAnchor);
-    PM.invalidate?.();
+    api.transport.invalidate?.();
   }
 
   function moveSelection(event: KeyboardEvent, effect: any, direction: number): void {
@@ -215,7 +216,7 @@
       class="chip wide"
       onpointerdown={(event) => {
         event.preventDefault();
-        showFxMenu(PM, event.currentTarget, layer);
+        showFxMenu(api, event.currentTarget, layer);
       }}
     ><Icon name="plus" />Add effect</button>
   {/if}
@@ -223,7 +224,7 @@
   {#if effects.length > 0}
   <div class="fx-list" role="listbox" aria-label="Effects" aria-multiselectable="true">
     {#each effects as effect (effect.id)}
-      {@const definition = PM.FX?.[effect.type]}
+      {@const definition = api.effects.get(effect.type)}
       {#if definition}
       {@const expanded = isOpen(effect)}
       {@const paramsId = `fx-params-${layer.id}-${effect.id}`}
@@ -269,30 +270,30 @@
 
       {#if expanded}
         <div class="grp fx-params" id={paramsId}>
-          <AnimatedRow {PM} {layer} path={`${effect.id}.$enabled`} label="Enabled">
-            <ToggleField {PM} get={() => enabled(effect)} edit={propertyEdit(`${effect.id}.$enabled`, 'Enable effect')} label="Enabled" />
+          <AnimatedRow {layer} path={`${effect.id}.$enabled`} label="Enabled">
+            <ToggleField {...controlProps} get={() => enabled(effect)} edit={propertyEdit(`${effect.id}.$enabled`, 'Enable effect')} label="Enabled" />
           </AnimatedRow>
           {#each definition.params ?? [] as parameter (parameter.k)}
             {@const property = effect.p?.[parameter.k]}
             {#if property}
               {#if parameter.type === 'color'}
-                <AnimatedRow {PM} {layer} path={`${effect.id}.${parameter.k}`} label={parameter.label}>
-                  <ColorField {PM}
-                    get={() => (doc.tick.values, doc.proj, PM.evP(layer, property, transport.time, parameter.k))}
+                <AnimatedRow {layer} path={`${effect.id}.${parameter.k}`} label={parameter.label}>
+                  <ColorField {...controlProps}
+                    get={() => (doc.tick.values, doc.proj, api.anim.evP(layer, property, transport.time, parameter.k))}
                     edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)} label={parameter.label} />
                 </AnimatedRow>
               {:else}
                 <ChannelRow
-                  {PM}
+
                   {layer}
                   channel={`${effect.id}.${parameter.k}`}
                   label={parameter.label}
                   {property}
-                  getValue={(time) => PM.evP(layer, property, time, parameter.k)}
-                  step={parameter.step}
-                  min={parameter.min}
-                  max={parameter.max}
-                  unit={parameter.unit}
+                  getValue={(time) => api.anim.evP(layer, property, time, parameter.k)}
+                  step={'step' in parameter ? parameter.step : undefined}
+                  min={'min' in parameter ? parameter.min : undefined}
+                  max={'max' in parameter ? parameter.max : undefined}
+                  unit={'unit' in parameter ? parameter.unit : undefined}
                 />
               {/if}
             {/if}

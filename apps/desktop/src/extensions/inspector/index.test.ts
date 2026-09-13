@@ -33,16 +33,13 @@ describe('inspector extension', () => {
     let panel: PanelDefinition | undefined;
     const harness = serviceHarness();
     const shader: Record<string, any> = {
-      id: 'shader-1', type: 'shader', d: { code: 'uniform float amount;', uniforms: {} }
+      id: 'shader-1', type: 'shader', d: { code: 'uniform float amount; // @param 0.5', uniforms: {} }
     };
-    const PM: Record<string, any> = {
-      proj: { layers: [shader], comps: {} },
-      parseUniforms: vi.fn(() => [{ name: 'amount', def: 0.5 }]),
-      UIState: { setShaderMeta: vi.fn() },
-      P: vi.fn((value: unknown) => ({ v: value, kf: [] }))
-    };
+    const setShaderMeta = vi.fn();
     const api = {
-      host: { pm: PM },
+      project: { get: () => ({ layers: [shader], comps: {} }) },
+      model: { P: vi.fn((value: unknown) => ({ v: value, kf: [] })) },
+      uiState: { setShaderMeta },
       services: harness.services,
       panels: { register: vi.fn((definition: PanelDefinition) => void (panel = definition)) },
       log: vi.fn()
@@ -51,12 +48,13 @@ describe('inspector extension', () => {
     activate(api);
 
     expect(panel).toMatchObject({ id: 'inspector', title: 'Properties' });
-    expect(harness.services.get<InspectorService>('inspector')).toBe(PM.Inspector);
+    const inspector = harness.services.get<InspectorService>('inspector');
+    expect(inspector).not.toBeNull();
     const shaderHooks = harness.services.get<ShaderHooks>('shaderHooks');
-    expect(shaderHooks?.syncShaderUniforms).toBe(PM.syncShaderUniforms);
+    expect(shaderHooks?.syncShaderUniforms).toBe((inspector as InspectorService & ShaderHooks).syncShaderUniforms);
     expect(shader.d.uniforms.amount).toEqual({ v: 0.5, kf: [] });
-    expect(PM.UIState.setShaderMeta).toHaveBeenCalledWith(shader, {
-      udefs: [{ name: 'amount', def: 0.5 }]
+    expect(setShaderMeta).toHaveBeenCalledWith(shader, {
+      udefs: [expect.objectContaining({ name: 'amount', def: 0.5 })]
     });
 
     harness.disposeAll();

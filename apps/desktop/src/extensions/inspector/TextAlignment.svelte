@@ -1,10 +1,11 @@
 <script lang="ts">
   import { inspectorContext } from './context';
+  import { inspectorMixed } from './multi-edit';
 
   let { value = 'center', layer }: { value?: string; layer: any } = $props();
-  const { PM, api, doc, sel, transport } = inspectorContext();
+  const { api, doc, sel, transport, edit: inspectorEdit } = inspectorContext();
   const binding = $derived(api.ui.controls.binding.contentBinding(layer.id, 'align', { label: 'Text alignment', origin: 'inspector' }));
-  const mixed = $derived((sel.layers, doc.tick.values, doc.proj, transport.time, PM.inspectorMixed?.(binding, value) ?? false));
+  const mixed = $derived((sel.layers, doc.tick.values, doc.proj, transport.time, inspectorMixed(api, binding, value)));
   const options = ['left', 'center', 'right'] as const;
 
   function align(next: string) {
@@ -12,8 +13,8 @@
     if (binding.mode === 'command') {
       binding.prepare?.();
       const command = typeof binding.command === 'function' ? binding.command(next) : { ...binding.command, value: next };
-      PM.Edit.apply(command, { label: binding.label, origin: binding.origin });
-      PM.invalidate?.();
+      inspectorEdit.apply(command, { label: binding.label, origin: binding.origin });
+      api.transport.invalidate?.();
     }
   }
 </script>

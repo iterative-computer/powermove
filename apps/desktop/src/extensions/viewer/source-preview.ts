@@ -4,7 +4,9 @@
 
    A quiet floating transport keeps playback controls together. */
 
-export interface SourcePreview {
+import type { PowermoveAPI, SourcePreview as KernelSourcePreview, ViewerService } from 'powermove';
+
+export interface SourcePreview extends KernelSourcePreview {
   /** Show the asset (paused). Returns false if it can't be previewed. */
   show(assetId: string): boolean;
   /** Show if hidden, then play; pause if already playing. */
@@ -14,6 +16,7 @@ export interface SourcePreview {
   readonly activeId: string | null;
   readonly playing: boolean;
 }
+interface SourcePreviewHost extends ViewerService { updateRecovery?(): boolean }
 
 const STYLES = `
   #source-preview{position:absolute;inset:0;z-index:6;display:none;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}
@@ -46,17 +49,18 @@ function clock(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
-export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview {
+export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHost, stage: HTMLElement): SourcePreview {
   const existing = stage.querySelector<HTMLElement>('#source-preview');
   /* Extension hot updates reinstall this controller in place. Dispose the old
      listeners and overlay, but keep the WebGL stage and Electron window. */
-  const previous = PM.Viewer?.preview;
+  const previous = viewer.preview;
   if (previous?.dispose) previous.dispose();
   else previous?.clear?.();
   existing?.remove();
 
   const icon = (name: string): Element =>
-    PM.icon?.(name) ?? document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    (() => { const host=document.createElement('span');host.innerHTML=api.ui.icon(name);return host.firstElementChild; })()
+      ?? document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 
   const root = document.createElement('div');
   root.id = 'source-preview';
@@ -167,14 +171,14 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     fill.style.width = '0%';
     media.replaceChildren();
     root.dataset.open = 'false';
-    PM.bus?.emit?.('source-preview', null);
+    viewer.updateRecovery?.();
   }
 
   const liveUrl = (asset: any): string => String(asset?.url || asset?.el?.currentSrc || asset?.el?.src || '');
 
   function show(assetId: string): boolean {
-    const record = PM.proj?.assets?.[assetId];
-    const live = PM.assets?.get?.(assetId);
+    const record = api.project.get().assets?.[assetId] as { kind: string; name?: string } | undefined;
+    const live = api.media.assets.get(assetId);
     if (!record) return false;
     if (activeId === assetId) return true;
     clear();
@@ -188,7 +192,7 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
       const video = document.createElement('video');
       video.src = url; video.playsInline = true; video.preload = 'auto';
       media.append(video); bindElement(video);
-    } else if (kind === 'audio' && live?.audioBlob) {
+    } else if (kind === 'audio' && live?.audioBlob instanceof Blob) {
       audioUrl = URL.createObjectURL(live.audioBlob);
       const audio = document.createElement('audio'); audio.src = audioUrl; audio.preload = 'auto';
       const card = document.createElement('div');
@@ -210,8 +214,8 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     activeId = assetId;
     root.dataset.open = 'true';
     /* A source monitor and the composition never play at once. */
-    if (PM.playing) PM.pause?.();
-    PM.bus?.emit?.('source-preview', assetId);
+    if (api.transport.playing()) api.transport.pause();
+    viewer.updateRecovery?.();
     return true;
   }
 
@@ -299,11 +303,11 @@ export function installSourcePreview(PM: any, stage: HTMLElement): SourcePreview
     root.remove();
   }
 
-  const api: SourcePreview = {
+  const controller: SourcePreview = {
     show, toggle, clear, dispose,
     get activeId() { return activeId; },
     get playing() { return !!element && !element.paused; },
   };
-  if (PM.Viewer) PM.Viewer.preview = api;
-  return api;
+  viewer.preview = controller;
+  return controller;
 }

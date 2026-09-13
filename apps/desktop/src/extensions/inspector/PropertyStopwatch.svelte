@@ -2,13 +2,13 @@
   import { toggleSelectionKey } from './selection-animation';
   import { inspectorContext } from './context';
   import { inspectorRefresh } from './refresh.svelte.js';
-  const { doc, transport } = inspectorContext();
-  let { PM, layer, path, label, fallback }: {
-    PM: Record<string, any>; layer: any; path: string; label: string; fallback?: unknown;
+  const { api, doc, transport, timeline } = inspectorContext();
+  let { layer, path, label, fallback }: {
+    layer: any; path: string; label: string; fallback?: unknown;
   } = $props();
-  const property = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, doc.tick.structure, doc.proj, PM.findProp?.(layer, path)));
+  const property = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, doc.tick.structure, doc.proj, api.anim.findProp?.(layer, path)));
   const animated = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, doc.proj, !!property?.kf?.length));
-  const current = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, transport.time, !!property && !!PM.hasKeyAt(layer, property, transport.time)));
+  const current = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.values, transport.time, !!property && !!api.anim.hasKeyAt(layer, property, transport.time)));
   function toggle(event: MouseEvent): void {
     event.stopPropagation();
     const parts = path.split('.');
@@ -16,11 +16,11 @@
       : path.endsWith('.$enabled') ? layer.fx?.find((fx: any) => fx.id === parts[0])?.on
       : path.startsWith('m.') ? layer.masks?.find((mask: any) => mask.id === parts[1])?.[parts[2]!]
       : fallback;
-    const value = property ? PM.evP(layer, property, transport.time, path) : initial;
-    const result=toggleSelectionKey(PM,layer,[path],transport.time,`${current?'Remove keyframe for':'Add keyframe for'} ${label}`,value);
-    if (result?.ok === false) { PM.toast?.(result.message); return; }
-    PM.TL?.reveal?.(layer, [path]);
-    PM.invalidate?.();
+    const value = property ? api.anim.evP(layer, property, transport.time, path) : initial;
+    const result=toggleSelectionKey(api,layer,[path],transport.time,`${current?'Remove keyframe for':'Add keyframe for'} ${label}`,value);
+    if (result?.ok === false) { api.ui.toast?.(result.message); return; }
+    timeline()?.reveal(layer, [path]);
+    api.transport.invalidate?.();
     inspectorRefresh.bump();
   }
 </script>

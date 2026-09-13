@@ -29,11 +29,9 @@ const VIEWER_STYLES = `
 `;
 
 export default function activate(api: PowermoveAPI): void {
-  const PM = api.host.pm as Record<string, any>;
-
-  // Install at activation time so legacy consumers retain the PM.Viewer and
-  // PM.setOrKey contracts even before the panel has mounted.
-  const runtime = createViewerRuntime(PM, api.space3d);
+  // Install at activation time so engine and panels can consume the viewer
+  // service even before the panel has mounted.
+  const runtime = createViewerRuntime(api);
   const disposeRuntime = runtime.dispose as () => void;
   api.onDispose(() => disposeRuntime());
   api.services.register('viewer', runtime);
@@ -45,15 +43,15 @@ export default function activate(api: PowermoveAPI): void {
     build(body) {
       // Reuse the live WebGL surface during extension/HMR updates. A new canvas
       // cannot inherit the old GL context, textures, or viewer event bindings.
-      if (PM.Viewer?.stage) {
-        const stage = PM.Viewer.stage as HTMLElement;
+      if (runtime.stage) {
+        const stage = runtime.stage;
         const styles = stage.querySelector('style');
         if (styles) styles.textContent = VIEWER_STYLES;
         const overlay = stage.querySelector('#overlay');
         if (overlay && overlay.parentElement !== stage) stage.appendChild(overlay);
         body.replaceChildren(stage);
-        PM.Viewer.layout();
-        installSourcePreview(PM, stage);
+        runtime.layout();
+        installSourcePreview(api, runtime, stage);
         return;
       }
       const stage = document.createElement('div');
@@ -73,8 +71,8 @@ export default function activate(api: PowermoveAPI): void {
       stage.append(inner, overlay, styles);
       body.replaceChildren(stage);
 
-      createViewerRuntime(PM, api.space3d).attach(stage);
-      installSourcePreview(PM, stage);
+      runtime.attach(stage);
+      installSourcePreview(api, runtime, stage);
     }
   });
 }

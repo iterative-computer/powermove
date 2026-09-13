@@ -29,11 +29,9 @@ function serviceHarness(): { services: ServicesAPI; disposeAll(): void } {
 }
 
 describe('toolbar service', () => {
-  it('keeps the registered tool provider synchronized with legacy state', () => {
+  it('owns tool state through the registered service', () => {
     const harness = serviceHarness();
-    const PM: Record<string, any> = { bus: { emit: vi.fn() } };
     activate({
-      host: { pm: PM },
       services: harness.services,
       panels: { register: vi.fn() }
     } as unknown as PowermoveAPI);
@@ -41,15 +39,15 @@ describe('toolbar service', () => {
     const toolService = harness.services.get<ToolService>('tool');
     expect(toolService?.tool).toBe('select');
     toolService!.tool = 'hand';
-    expect(PM.tool).toBe('hand');
-    PM.tool = 'zoom';
+    expect(toolService?.tool).toBe('hand');
+    toolService!.tool = 'zoom';
     expect(toolService?.tool).toBe('zoom');
     toolService!.toolShape = 'ellipse';
-    expect(PM.toolShape).toBe('ellipse');
-    PM.toolShape = 'star';
+    expect(toolService?.toolShape).toBe('ellipse');
+    toolService!.toolShape = 'star';
     expect(toolService?.toolShape).toBe('star');
     toolService?.setTool('shape', 'rect');
-    expect(PM).toMatchObject({ tool: 'shape', toolShape: 'rect' });
+    expect(toolService).toMatchObject({ tool: 'shape', toolShape: 'rect' });
 
     harness.disposeAll();
     expect(harness.services.get('tool')).toBeNull();
