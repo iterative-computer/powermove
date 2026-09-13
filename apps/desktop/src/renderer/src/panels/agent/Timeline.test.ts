@@ -67,6 +67,7 @@ describe('Timeline', () => {
     render({ activity: 'Inspecting the composition…' });
     const line = target.querySelector('.agent-trace .shimmer-text')!;
     expect(line.textContent).toBe('Inspecting the composition…');
+    expect(target.querySelectorAll('.agent-pixel-loader > i')).toHaveLength(9);
     expect(target.querySelectorAll('.agent-trace-tool')).toHaveLength(0);
     // The old per-word stagger is gone.
     expect(target.querySelector('.agent-thinking-word')).toBeNull();
@@ -87,12 +88,62 @@ describe('Timeline', () => {
     const at = (index: number): HTMLElement => rows[index]!;
     expect(rows).toHaveLength(3);
     expect(at(0).className).toContain('agent-trace-thought');
-    expect(at(0).textContent).toBe('Reading the composition');
-    expect(at(1).querySelector('.agent-trace-tool')).toBeTruthy();
+    // A settled thought collapses to its header; the prose stays one click away.
+    expect((at(0) as HTMLDetailsElement).open).toBe(false);
+    expect(at(0).querySelector('summary')?.textContent?.trim()).toBe('Thought');
+    expect(at(0).querySelector('.agent-thinking-body')?.textContent).toBe('Reading the composition');
+    expect(at(1).matches('.agent-trace-tool')).toBe(true);
     expect(at(1).textContent).toContain('Ran commands and edited files');
     expect(at(2).className).toContain('agent-trace-text');
     expect(at(2).textContent).toBe('The layout is fixed.');
     expect(target.querySelector('.shimmer-text')).toBeNull();
+  });
+
+  it('streams the newest text row with a caret and drops it once work moves on', () => {
+    render(trace([{ kind: 'text', id: 'm0', text: 'Looking at the' }]));
+    const text = target.querySelector('.agent-trace-text')!;
+    expect(text.className).toContain('is-streaming');
+    expect(text.querySelector('.agent-stream-caret')).toBeTruthy();
+    expect(text.textContent).toBe('Looking at the');
+
+    Object.assign(agentState, { trace: [
+      { kind: 'text', id: 'm0', text: 'Looking at the layout.' },
+      { kind: 'tool', id: 'x1', toolName: 'read', label: 'Read', detail: 'Timeline.svelte', status: 'running' }
+    ] });
+    flushSync();
+    expect(target.querySelector('.agent-trace-text')?.className).not.toContain('is-streaming');
+    expect(target.querySelector('.agent-stream-caret')).toBeNull();
+  });
+
+  it('titles a settled thought with how long it took', () => {
+    render(trace([{ kind: 'thought', id: 't0', label: 'Weighing options', live: false, startedAt: 10_000, endedAt: 14_200 }]));
+    expect(target.querySelector('.agent-trace-thought summary')?.textContent?.trim()).toBe('Thought for 4s');
+  });
+
+  it('shows each call as icon, label, and a mono argument chip, and expands its output', () => {
+    render(trace([
+      { kind: 'tool', id: 'x1', toolName: 'bash', label: 'Run', detail: 'npm test', output: '✓ 34 checks passed', status: 'done', startedAt: 0, endedAt: 1_200 },
+      { kind: 'tool', id: 'x2', toolName: 'edit', label: 'Edit', detail: 'Timeline.svelte', status: 'done' }
+    ]));
+    const rows = [...target.querySelectorAll('.agent-tool-details > div')];
+    expect(rows).toHaveLength(2);
+    const first = rows[0]!;
+    expect(first.querySelector('.agent-tool-glyph')?.getAttribute('data-family')).toBe('run');
+    expect(first.querySelector('span')?.textContent).toBe('Run');
+    expect(first.querySelector('.agent-tool-chip')?.textContent).toBe('npm test');
+    expect(first.querySelector('em.is-time')?.textContent).toBe('1s');
+    const toggle = first.querySelector<HTMLButtonElement>('button.agent-tool-row')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    toggle.click();
+    flushSync();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(first.querySelector('.agent-tool-output')?.className).toContain('is-open');
+    expect(first.querySelector('.agent-tool-output pre')?.textContent).toBe('✓ 34 checks passed');
+    // A call without output is not a button: nothing to disclose.
+    expect(rows[1]!.querySelector('button')).toBeNull();
+    expect(rows[1]!.querySelector('.agent-tool-glyph')?.getAttribute('data-family')).toBe('edit');
+    // Settled groups read their size and span in the header.
+    expect(target.querySelector('.agent-tool-activity summary small')?.textContent).toBe('2 calls');
   });
 
   it('exposes the collapsed step labels as a title tooltip', () => {
@@ -114,8 +165,10 @@ describe('Timeline', () => {
     const row = target.querySelector('details.agent-trace-tool')!;
     expect(row.hasAttribute('open')).toBe(true);
     expect(row.className).toContain('is-pulsing');
+    expect(row.className).toContain('is-running');
     expect(row.querySelector('summary')?.textContent).toContain('edit · Timeline.svelte');
     expect(row.querySelector('summary')?.textContent).toContain('Working');
+    expect(row.querySelector('.agent-tool-details .is-running .agent-tool-spinner')).toBeTruthy();
     expect([...row.querySelectorAll('.agent-tool-details span')].map((item) => item.textContent))
       .toEqual(['bash · npm test', 'edit · Timeline.svelte']);
   });
@@ -160,22 +213,26 @@ describe('Timeline', () => {
     const pulsing = target.querySelectorAll('.agent-trace .is-pulsing, .agent-trace .shimmer-text');
     expect(pulsing).toHaveLength(1);
     expect(pulsing[0]?.className).toContain('agent-trace-tool');
+    // The stale thought stays open (it is still flagged live) but does not shimmer.
+    expect(target.querySelector('.agent-thinking-heading')?.className).not.toContain('shimmer-text');
   });
 
-  it('shimmers a live plain thought but pulses a bold action thought', () => {
+  it('keeps a live thought open under a shimmering Thinking header', () => {
     render(trace([{ kind: 'thought', id: 't0', label: 'Thinking it through', live: true }]));
-    expect(target.querySelector('.agent-trace-thought')?.className).toContain('shimmer-text');
-    flushSync();
+    const row = target.querySelector<HTMLDetailsElement>('.agent-trace-thought')!;
+    expect(row.open).toBe(true);
+    expect(row.className).toContain('is-live');
+    expect(row.querySelector('.agent-thinking-heading')?.textContent).toBe('Thinking');
+    expect(row.querySelector('.agent-thinking-heading')?.className).toContain('shimmer-text');
+    expect(row.querySelector('.agent-thinking-body')?.textContent).toBe('Thinking it through');
 
     Object.assign(agentState, {
       trace: [{ kind: 'thought', id: 't1', label: 'Now **editing the file**', live: true }]
     });
     flushSync();
-    const row = target.querySelector('.agent-trace-thought')!;
-    expect(row.className).toContain('is-action');
-    expect(row.className).toContain('is-pulsing');
-    expect(row.className).not.toContain('shimmer-text');
-    expect(row.textContent).toBe('Now editing the file');
+    const action = target.querySelector('.agent-trace-thought')!;
+    expect(action.className).toContain('is-action');
+    expect(action.querySelector('.agent-thinking-body')?.textContent).toBe('Now editing the file');
   });
 
   it('renders inline code spans as code chips', () => {
@@ -193,6 +250,7 @@ describe('Timeline', () => {
     });
     expect(target.querySelector('.agent-step')).toBeNull();
     expect(target.querySelector('.agent-trace-thought')).toBeTruthy();
+    expect(target.querySelector('.agent-trace')?.className).toContain('is-live');
 
     Object.assign(agentState, { phase: 'preview' });
     flushSync();

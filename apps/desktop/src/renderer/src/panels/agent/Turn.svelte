@@ -5,12 +5,13 @@
   import type { AgentMessage } from './agent-state.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { activityRows } from './activity-rows';
-  import { toRichWords } from './rich-words';
   import { revealText, sendMessage } from './text-reveal';
   import { mountPromptGlow } from './prompt-glow';
   import { glowFade } from './motion';
   import ModResult from './ModResult.svelte';
   import { modResultForMessage } from './mod-result';
+  import ThoughtRow from './ThoughtRow.svelte';
+  import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
 
   let {
@@ -40,9 +41,9 @@
   <div class="agent-trace is-archived">
     {#each traceRows as row (row.renderKey)}
       {#if row.kind === 'thought'}
-        <p class="agent-trace-thought">{#each toRichWords(row.label) as word, wi (wi)}<span class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
+        <ThoughtRow label={row.label} startedAt={row.startedAt} endedAt={row.endedAt} />
       {:else if row.kind === 'text'}
-        <p class="agent-trace-text">{#each toRichWords(row.text) as word, wi (wi)}<span class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
+        <TextRow text={row.text} />
       {:else if row.kind === 'tools'}
         <ToolActivity {row} />
       {/if}

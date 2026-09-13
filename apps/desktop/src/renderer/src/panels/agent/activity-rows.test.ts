@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { activityRows, joinActions, toolAction, type ActivityRow, type TraceStep } from './activity-rows';
+import { activityRows, durationLabel, joinActions, toolAction, toolFamily, type ActivityRow, type TraceStep } from './activity-rows';
 
 /* Rows are a discriminated union and the array index is unchecked; tests reach
    in by position, so one loose accessor keeps the assertions readable. */
@@ -54,9 +54,9 @@ describe('activityRows', () => {
     ]);
 
     expect(at(rows).detail).toEqual(['npm test', 'Timeline.svelte']);
-    expect(at(rows).details).toEqual([
-      { id: '1', label: 'npm test', status: 'done' },
-      { id: '2', label: 'Timeline.svelte', status: 'done' }
+    expect(at(rows).details).toMatchObject([
+      { id: '1', label: 'npm test', status: 'done', family: 'run' },
+      { id: '2', label: 'Timeline.svelte', status: 'done', family: 'edit' }
     ]);
   });
 
@@ -67,7 +67,7 @@ describe('activityRows', () => {
     ]);
     expect(at(running).detail).toBeUndefined();
     expect(at(running).currentLabel).toBe('edit · Timeline.svelte');
-    expect(at(running).details).toEqual([
+    expect(at(running).details).toMatchObject([
       { id: '1', label: 'npm test', status: 'done' },
       { id: '2', label: 'edit · Timeline.svelte', status: 'running' }
     ]);
@@ -161,6 +161,23 @@ describe('activityRows', () => {
     expect(at(rows).pulsing).toBe(false);
   });
 
+  it('carries the running call\'s argument and the group\'s wall-clock span', () => {
+    const running = activityRows([
+      tool({ id: '1', toolName: 'bash', label: 'Run', detail: 'npm test', status: 'running', startedAt: 1_000 })
+    ]);
+    expect(at(running).currentDetail).toBe('npm test');
+    expect(at(running).startedAt).toBe(1_000);
+    expect(at(running).endedAt).toBeUndefined();
+
+    const settled = activityRows([
+      tool({ id: '1', toolName: 'read', label: 'Read', detail: 'a.ts', startedAt: 1_000, endedAt: 2_000 }),
+      tool({ id: '2', toolName: 'edit', label: 'Edit', detail: 'a.ts', output: '+3 -1', startedAt: 2_000, endedAt: 5_500 })
+    ]);
+    expect(at(settled).startedAt).toBe(1_000);
+    expect(at(settled).endedAt).toBe(5_500);
+    expect(at(settled).details[1]).toMatchObject({ detail: 'a.ts', output: '+3 -1', family: 'edit' });
+  });
+
   it('returns no rows for an empty or all-unknown trace', () => {
     expect(activityRows([])).toEqual([]);
     expect(activityRows(undefined as any)).toEqual([]);
@@ -210,6 +227,32 @@ describe('toolAction', () => {
     expect(toolAction('mcp__github__issues')).toBe('used issues');
     expect(toolAction('')).toBe('used a tool');
     expect(toolAction(undefined)).toBe('used a tool');
+  });
+});
+
+describe('toolFamily', () => {
+  it.each([
+    ['bash', 'run'], ['Bash', 'run'], ['run_command', 'run'],
+    ['edit', 'edit'], ['write_file', 'edit'], ['multiedit', 'edit'], ['file_change', 'edit'],
+    ['read', 'read'], ['view', 'read'],
+    ['grep', 'search'], ['glob', 'search'], ['web_search', 'search'], ['webfetch', 'search'],
+    ['image_generation', 'image'], ['computer_use', 'computer'],
+    ['mcp__powermove__get_panel_state', 'panel'], ['render_frames', 'panel'],
+    ['agent', 'think'], ['todowrite', 'think'],
+    ['blender', 'tool'], ['', 'tool'], [undefined, 'tool']
+  ])('maps %s to the %s glyph', (name, family) => {
+    expect(toolFamily(name as string | undefined)).toBe(family);
+  });
+});
+
+describe('durationLabel', () => {
+  it('formats spans the way the settled header reads them', () => {
+    expect(durationLabel(300)).toBe('<1s');
+    expect(durationLabel(4_200)).toBe('4s');
+    expect(durationLabel(72_000)).toBe('1m 12s');
+    expect(durationLabel(3_600_000 * 2 + 60_000 * 5)).toBe('2h 5m');
+    expect(durationLabel(-1)).toBe('');
+    expect(durationLabel(Number.NaN)).toBe('');
   });
 });
 

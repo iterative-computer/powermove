@@ -7,18 +7,16 @@
    — and thinking/text steps stay where they are so the trail keeps its
    chronology. Ported from supermove. */
 
-export type TraceStep =
-  | { kind: 'thought'; id: string; label: string; live: boolean }
-  | { kind: 'text'; id: string; text: string }
-  | {
-      kind: 'tool';
-      id: string;
-      toolName: string;
-      label: string;
-      status: 'running' | 'done' | 'error' | 'continued';
-    };
+export type { TraceStep } from './agent-state.svelte';
+import type { TraceStep } from './agent-state.svelte';
 
 export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
+
+/** One call inside a tool group — everything the expandable work log shows. */
+export type ToolDetail = Pick<ToolStep, 'id' | 'label' | 'status'> &
+  Partial<Pick<ToolStep, 'toolName' | 'detail' | 'output' | 'startedAt' | 'endedAt'>> & {
+    family: ToolFamily;
+  };
 
 export interface ToolsRow {
   kind: 'tools';
@@ -30,10 +28,52 @@ export interface ToolsRow {
   toolCount: number;
   /** The provider-emitted label for the tool doing work right now. */
   currentLabel?: string;
+  /** The mono argument of the tool doing work right now (command, path, query). */
+  currentDetail?: string;
   /** Real provider-emitted activity, retained for the expandable work log. */
-  details: Array<Pick<ToolStep, 'id' | 'label' | 'status'>>;
+  details: ToolDetail[];
   /** Individual step labels, kept for a title tooltip on settled groups. */
   detail?: string[];
+  /** Wall-clock span of the group, when the provider stamped its calls. */
+  startedAt?: number;
+  endedAt?: number;
+}
+
+/* Icon family for a tool row. Coarser than `toolAction`: the glyph only needs
+   to say "shell", "file", "search" — the label says the rest. */
+export type ToolFamily = 'run' | 'edit' | 'read' | 'search' | 'image' | 'computer' | 'panel' | 'think' | 'tool';
+
+const FAMILY_RULES: Array<[RegExp, ToolFamily]> = [
+  [/panel|workspace|project_state|render_frames|apply_commands|edit_video|rollback/, 'panel'],
+  [/^(web|search|browse|fetch|grep|glob|find|ls$|list)|url/, 'search'],
+  [/^(bash|command|shell|terminal|exec|run|process)/, 'run'],
+  [/^(edit|write|create|patch|apply|delete|move|multiedit|notebook)|file_change/, 'edit'],
+  [/^(read|view|cat)/, 'read'],
+  [/^(image|render|draw|screenshot)/, 'image'],
+  [/^computer/, 'computer'],
+  [/^(agent|task|todo|plan)/, 'think']
+];
+
+export function toolFamily(toolName?: string): ToolFamily {
+  const name = String(toolName ?? '').trim().toLowerCase();
+  if (!name) return 'tool';
+  const short = name.startsWith('mcp__') ? (name.split('__').at(-1) || name) : name;
+  for (const [pattern, family] of FAMILY_RULES) {
+    if (pattern.test(short)) return family;
+  }
+  return 'tool';
+}
+
+/* "4s", "1m 12s" — the settled-header duration, harness style. Sub-second
+   work reads as "<1s" rather than "0s", which looks like a failure. */
+export function durationLabel(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 type RowMeta = { renderKey: string; pulsing: boolean };
@@ -104,6 +144,9 @@ export function groupedToolRow(steps: ToolStep[]): ToolsRow {
       : failedCount > 0
         ? 'partial'
       : 'done';
+  const current = [...steps].reverse().find((step) => step.status === 'running' && step.label);
+  const started = steps.map((step) => step.startedAt).filter((value): value is number => typeof value === 'number');
+  const ended = steps.map((step) => step.endedAt).filter((value): value is number => typeof value === 'number');
   const row: ToolsRow = {
     kind: 'tools',
     id: `tools-${steps[0]?.id ?? steps[0]?.toolName ?? 'activity'}`,
@@ -112,11 +155,17 @@ export function groupedToolRow(steps: ToolStep[]): ToolsRow {
     failedCount,
     successCount,
     toolCount: steps.length,
-    currentLabel: [...steps].reverse().find((step) => step.status === 'running' && step.label)?.label,
+    currentLabel: current?.label,
+    currentDetail: current?.detail,
     details: steps
       .filter((step) => Boolean(step.label))
-      .map(({ id, label, status }) => ({ id, label, status }))
+      .map(({ id, label, status, toolName, detail, output, startedAt, endedAt }) => ({
+        id, label, status, toolName, detail, output, startedAt, endedAt, family: toolFamily(toolName)
+      }))
   };
+  if (started.length) row.startedAt = Math.min(...started);
+  // A settled group's end is its last completed call; a running group has none yet.
+  if (status !== 'running' && ended.length === settledCount && ended.length) row.endedAt = Math.max(...ended);
   // Powermove keeps what supermove drops: once a group settles, the individual
   // labels stay reachable as a tooltip. Detail without visual noise.
   if (status !== 'running' && steps.length > 1) {
