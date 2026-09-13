@@ -26,7 +26,7 @@
 <details class="agent-trace-thought agent-thinking" class:is-live={live} class:is-action={isAction} open={live}>
   <summary>
     <svg class="agent-thinking-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z" /></svg>
-    <span class="agent-thinking-heading" class:shimmer-text={live && animated} role="status">{heading}</span>
+    <span class="agent-thinking-heading" class:shimmer-text={live && animated}>{heading}</span>
     <svg class="agent-thinking-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
   </summary>
   <p class="agent-thinking-body">{#each words as word, wi (wi)}<span use:revealText={animated && live && Boolean(word.w.trim())} class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>

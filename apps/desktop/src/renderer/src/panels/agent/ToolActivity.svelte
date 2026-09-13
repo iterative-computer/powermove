@@ -1,6 +1,6 @@
 <script lang="ts">
   import { durationLabel, type ToolDetail, type ToolsRow } from './activity-rows';
-  import { toolGlyph } from './tool-icons';
+  import { toolGlyph, type ToolGlyph } from './tool-icons';
 
   /* A tool group, harness-style: one quiet header row ("Ran commands and
      edited files · 3 calls · 4s") that discloses compact call rows. Each call
@@ -36,6 +36,25 @@
     detail.startedAt !== undefined && detail.endedAt !== undefined ? durationLabel(detail.endedAt - detail.startedAt) : '';
 </script>
 
+{#snippet call(detail: ToolDetail, glyph: ToolGlyph, canOpen: boolean)}
+  <svg class="agent-tool-glyph" viewBox="0 0 24 24" aria-hidden="true" data-family={detail.family}>
+    <path d={glyph.d} fill={glyph.fill ? 'currentColor' : 'none'} stroke={glyph.fill ? 'none' : 'currentColor'} />
+  </svg>
+  {#if canOpen}
+    <svg class="agent-tool-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+  {/if}
+  <span>{detail.label}</span>
+  {#if detail.detail}<code class="agent-tool-chip">{detail.detail}</code>{/if}
+  {#if detail.status === 'running'}
+    <i class="agent-tool-spinner" aria-hidden="true"></i>
+    <em class="panel-sr-only">Running</em>
+  {:else if detail.status === 'error' || detail.status === 'continued'}
+    <em>{statusLabel(detail.status)}</em>
+  {:else if callSpan(detail)}
+    <em class="is-time">{callSpan(detail)}</em>
+  {/if}
+{/snippet}
+
 <details
   class="agent-trace-tool agent-tool-activity"
   class:is-error={row.status === 'error'}
@@ -67,30 +86,15 @@
         {@const open = openRows.has(key)}
         {@const canOpen = expandable(detail)}
         <div class:is-failed={detail.status === 'error'} class:is-running={detail.status === 'running'} class:is-open={open}>
-          <svelte:element
-            this={canOpen ? 'button' : 'div'}
-            class="agent-tool-row"
-            type={canOpen ? 'button' : undefined}
-            aria-expanded={canOpen ? open : undefined}
-            onclick={canOpen ? () => toggleRow(key) : undefined}
-          >
-            <svg class="agent-tool-glyph" viewBox="0 0 24 24" aria-hidden="true" data-family={detail.family}>
-              <path d={glyph.d} fill={glyph.fill ? 'currentColor' : 'none'} stroke={glyph.fill ? 'none' : 'currentColor'} />
-            </svg>
-            {#if canOpen}
-              <svg class="agent-tool-row-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
-            {/if}
-            <span>{detail.label}</span>
-            {#if detail.detail}<code class="agent-tool-chip">{detail.detail}</code>{/if}
-            {#if detail.status === 'running'}
-              <i class="agent-tool-spinner" aria-hidden="true"></i>
-              <em class="panel-sr-only">Running</em>
-            {:else if detail.status === 'error' || detail.status === 'continued'}
-              <em>{statusLabel(detail.status)}</em>
-            {:else if callSpan(detail)}
-              <em class="is-time">{callSpan(detail)}</em>
-            {/if}
-          </svelte:element>
+          {#if canOpen}
+            <button class="agent-tool-row" type="button" aria-expanded={open} onclick={() => toggleRow(key)}>
+              {@render call(detail, glyph, true)}
+            </button>
+          {:else}
+            <div class="agent-tool-row">
+              {@render call(detail, glyph, false)}
+            </div>
+          {/if}
           {#if canOpen}
             <div class="agent-tool-output" class:is-open={open}>
               <pre>{detail.output}</pre>

@@ -15,12 +15,18 @@
   const mode = $derived(composerMode(agentState.legacyPhase));
   const textareaId = $derived(`agent-composer-${panelId}`);
 
+  /* Track only the draft and the phase (placeholder copy) — not the snapshot
+     revision — so streaming ticks never re-measure the textarea. */
+  let sizedPhase = '';
   $effect(() => {
-    agentState.revision;
     const next = agentState.composerDraft;
-    if (draft !== next) draft = next;
+    const nextPhase = agentState.legacyPhase;
+    const draftChanged = draft !== next;
+    const phaseChanged = sizedPhase !== nextPhase;
+    sizedPhase = nextPhase;
+    if (draftChanged) draft = next;
     if (textarea && textarea.value !== next) textarea.value = next;
-    if (textarea) queueMicrotask(autosize);
+    if (textarea && (draftChanged || phaseChanged)) queueMicrotask(autosize);
   });
 
   $effect(() => {

@@ -815,6 +815,42 @@ it('accretes adjacent thoughts and seals them before tool and text steps', () =>
   ]);
 });
 
+it('concatenates answer fragments without changing their whitespace', () => {
+  const { PM, assistant } = spatialHarness();
+  assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'Reading ' });
+  assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'the source' });
+  PM.AgentUI.update({ flush: true });
+
+  assert.equal(PM.AgentUI.state.trace[0].text, 'Reading the source');
+});
+
+it('upserts tool starts and records detail, bounded output, and trace timestamps', () => {
+  const { PM, assistant } = spatialHarness();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Inspecting' });
+  now.mockReturnValue(1_100);
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'tool-1', toolName: 'bash', label: 'Run' });
+  now.mockReturnValue(1_200);
+  assistant.lifecycle.reduceTrace({
+    kind: 'tool-start', itemId: 'tool-1', toolName: 'bash', label: 'Run tests', detail: 'bun test'
+  });
+  now.mockReturnValue(1_300);
+  assistant.lifecycle.reduceTrace({
+    kind: 'tool-end', itemId: 'tool-1', isError: false, output: 'x'.repeat(650)
+  });
+  PM.AgentUI.update({ flush: true });
+
+  assert.equal(PM.AgentUI.state.trace.filter(step => step.kind === 'tool').length, 1);
+  assert.deepEqual(PM.AgentUI.state.trace[0], {
+    kind: 'thought', id: PM.AgentUI.state.trace[0].id, label: 'Inspecting', live: false,
+    startedAt: 1_000, endedAt: 1_100,
+  });
+  assert.deepEqual(PM.AgentUI.state.trace[1], {
+    kind: 'tool', id: 'tool-1', toolName: 'bash', label: 'Run tests', detail: 'bun test',
+    status: 'done', startedAt: 1_100, endedAt: 1_300, output: 'x'.repeat(600),
+  });
+});
+
 it('correlates tool completion by item id and records failures on the same row', () => {
   const { PM, assistant } = spatialHarness();
   assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'first', toolName: 'bash', label: 'bash · one' });
@@ -862,7 +898,7 @@ it('caps traces at 200 steps by dropping old thought and tool rows before text',
   assert.equal(PM.AgentUI.state.trace.at(-1).id, 'tool-204');
 });
 
-it('replaces the trace array in snapshots and clears it for a new request', () => {
+it('keeps the trace array across snapshots and clears it for a new request', () => {
   const { PM, assistant } = spatialHarness();
   assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Old run' });
   PM.AgentUI.update({ flush: true });
@@ -870,7 +906,7 @@ it('replaces the trace array in snapshots and clears it for a new request', () =
   assert.equal(priorSnapshot.length, 1);
 
   PM.AgentUI.update({ flush: true });
-  assert.notEqual(PM.AgentUI.state.trace, priorSnapshot);
+  assert.equal(PM.AgentUI.state.trace, priorSnapshot);
   PM.AgentUI.submit('New run');
   assert.deepEqual(PM.AgentUI.state.trace, []);
   PM.AgentUI.stop();

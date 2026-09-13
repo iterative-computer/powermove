@@ -43,7 +43,7 @@
 
 {#if fallback}
   <div class="agent-trace">
-    <p class="agent-trace-loading" role="status">
+    <p class="agent-trace-loading">
       <span class="agent-pixel-loader" aria-hidden="true">{#each Array(9) as _, cell (cell)}<i style="--cell-delay:{((cell % 3) + Math.abs(Math.floor(cell / 3) - 1)) * 90}ms"></i>{/each}</span>
       <span class="agent-trace-thought shimmer-text">{fallback}</span>
     </p>

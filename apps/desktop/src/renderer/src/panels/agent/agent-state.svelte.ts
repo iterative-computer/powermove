@@ -31,10 +31,23 @@ export interface AgentStep {
   status: 'pending' | 'active' | 'complete' | 'error';
 }
 
+/* Frozen 2026-09-13 (agent-stream-ux). Mirrors ./activity-rows TraceStep. */
 export type TraceStep =
-  | { kind: 'thought'; id: string; label: string; live: boolean }
+  | { kind: 'thought'; id: string; label: string; live: boolean; startedAt?: number; endedAt?: number }
   | { kind: 'text'; id: string; text: string }
-  | { kind: 'tool'; id: string; toolName: string; label: string; status: 'running' | 'done' | 'error' | 'continued' };
+  | {
+      kind: 'tool';
+      id: string;
+      toolName: string;
+      label: string;
+      status: 'running' | 'done' | 'error' | 'continued';
+      /** Primary argument in mono (command, path, query). */
+      detail?: string;
+      /** Bounded result excerpt, set on tool-end. */
+      output?: string;
+      startedAt?: number;
+      endedAt?: number;
+    };
 
 export interface AgentSnapshot {
   threadId?: string;
@@ -130,59 +143,166 @@ function viewPhase(snapshot: AgentSnapshot): AgentPhase {
   return 'prompt';
 }
 
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function assignChangedFields(
+  current: Record<string, any>,
+  next: Record<string, any>,
+  fields: readonly string[]
+): void {
+  for (const field of fields) {
+    if (current[field] !== next[field]) current[field] = next[field];
+  }
+}
+
+function reconcileTrace(next: TraceStep[]): void {
+  for (let index = 0; index < next.length; index += 1) {
+    const nextStep = next[index]!;
+    const currentStep = agentState.trace[index];
+    if (!currentStep || currentStep.kind !== nextStep.kind || currentStep.id !== nextStep.id) {
+      agentState.trace[index] = { ...nextStep };
+      continue;
+    }
+    if (nextStep.kind === 'thought') {
+      assignChangedFields(currentStep, nextStep, ['label', 'live', 'startedAt', 'endedAt']);
+    } else if (nextStep.kind === 'text') {
+      assignChangedFields(currentStep, nextStep, ['text']);
+    } else {
+      assignChangedFields(currentStep, nextStep, [
+        'toolName', 'label', 'status', 'detail', 'output', 'startedAt', 'endedAt'
+      ]);
+    }
+  }
+  if (agentState.trace.length !== next.length) agentState.trace.length = next.length;
+}
+
+function reconcileSteps(next: AgentStep[]): void {
+  for (let index = 0; index < next.length; index += 1) {
+    const nextStep = next[index]!;
+    const currentStep = agentState.steps[index];
+    if (!currentStep || currentStep.id !== nextStep.id) {
+      agentState.steps[index] = { ...nextStep };
+      continue;
+    }
+    assignChangedFields(currentStep, nextStep, ['title', 'status']);
+  }
+  if (agentState.steps.length !== next.length) agentState.steps.length = next.length;
+}
+
+function cloneMessage(message: AgentMessage): AgentMessage {
+  return {
+    ...message,
+    modResult: message.modResult ? { ...message.modResult } : undefined,
+    steps: message.steps?.map((step) => ({ ...step })),
+    focusLabels: message.focusLabels ? [...message.focusLabels] : undefined,
+    attachments: message.attachments?.map((attachment) =>
+      typeof attachment === 'string' ? attachment : { ...attachment }
+    )
+  };
+}
+
+function reconcileConversation(next: AgentMessage[]): void {
+  for (let index = 0; index < next.length; index += 1) {
+    const nextMessage = next[index]!;
+    const currentMessage = agentState.conversation[index];
+    if (!currentMessage || currentMessage.role !== nextMessage.role) {
+      agentState.conversation[index] = cloneMessage(nextMessage);
+      continue;
+    }
+    assignChangedFields(currentMessage, nextMessage, [
+      'text', 'steering', 'entering', 'error', 'fixExtensionId'
+    ]);
+    if (!jsonEqual(currentMessage.modResult, nextMessage.modResult)) {
+      currentMessage.modResult = nextMessage.modResult ? { ...nextMessage.modResult } : undefined;
+    }
+    if (!jsonEqual(currentMessage.steps, nextMessage.steps)) {
+      currentMessage.steps = nextMessage.steps?.map((step) => ({ ...step }));
+    }
+    if (!jsonEqual(currentMessage.attachments, nextMessage.attachments)) {
+      currentMessage.attachments = nextMessage.attachments?.map((attachment) =>
+        typeof attachment === 'string' ? attachment : { ...attachment }
+      );
+    }
+    if (!jsonEqual(currentMessage.focusLabels, nextMessage.focusLabels)) {
+      currentMessage.focusLabels = nextMessage.focusLabels ? [...nextMessage.focusLabels] : undefined;
+    }
+  }
+  if (agentState.conversation.length !== next.length) agentState.conversation.length = next.length;
+}
+
 export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOptions = {}): void {
   const phase = viewPhase(snapshot);
   const tokenChanged = snapshot.requestToken !== agentState.requestToken;
   const enteringRun = phase === 'running' && agentState.phase !== 'running';
+  const threadChanged = (snapshot.threadId || '') !== agentState.threadId;
   let progressLines = tokenChanged || enteringRun ? [] : [...agentState.progressLines];
   if (phase === 'running' && snapshot.activity && progressLines.at(-1) !== snapshot.activity) {
     progressLines = [...progressLines, snapshot.activity].slice(-20);
   }
   if ((phase === 'idle' || phase === 'prompt') && !snapshot.activity) progressLines = [];
 
-  Object.assign(agentState, snapshot, {
-    threadId: snapshot.threadId || '',
-    threads: snapshot.threads?.map(thread => ({ ...thread })) || [],
-    threadSwitchBlocked: snapshot.threadSwitchBlocked || false,
-    threadSaveError: snapshot.threadSaveError || false,
+  const {
+    conversation,
+    trace,
+    steps,
+    models,
+    providers,
+    reasoningEfforts,
+    accessModes,
+    threads = [],
+    threadId,
+    threadSwitchBlocked,
+    threadSaveError,
+    attachments,
+    uiPlacement,
+    plan,
+    run,
+    panelRun,
+    ...scalarSnapshot
+  } = snapshot;
+
+  reconcileConversation(conversation);
+  reconcileTrace(trace);
+  reconcileSteps(steps);
+  if (!jsonEqual(agentState.models, models)) agentState.models = models.map((model) => ({ ...model }));
+  if (!jsonEqual(agentState.providers, providers)) agentState.providers = providers.map((provider) => ({ ...provider }));
+  if (!jsonEqual(agentState.reasoningEfforts, reasoningEfforts)) agentState.reasoningEfforts = [...reasoningEfforts];
+  if (!jsonEqual(agentState.accessModes, accessModes)) agentState.accessModes = accessModes.map((mode) => ({ ...mode }));
+  if (!jsonEqual(agentState.threads, threads)) agentState.threads = threads.map((thread) => ({ ...thread }));
+  if (!jsonEqual(agentState.attachments, attachments)) {
+    agentState.attachments = attachments.map((attachment) => ({ ...attachment }));
+  }
+
+  Object.assign(agentState, scalarSnapshot, {
+    threadId: threadId || '',
+    threadSwitchBlocked: threadSwitchBlocked || false,
+    threadSaveError: threadSaveError || false,
     phase,
     workingStartedAt: phase === 'running'
-      ? (enteringRun || tokenChanged || (snapshot.threadId || '') !== agentState.threadId ? Date.now() : agentState.workingStartedAt)
+      ? (enteringRun || tokenChanged || threadChanged ? Date.now() : agentState.workingStartedAt)
       : null,
     workingConversationIndex: phase === 'running'
-      ? (enteringRun || tokenChanged || (snapshot.threadId || '') !== agentState.threadId
-        ? snapshot.conversation.length : agentState.workingConversationIndex)
+      ? (enteringRun || tokenChanged || threadChanged
+        ? conversation.length : agentState.workingConversationIndex)
       : null,
-    uiPlacement: phase === 'running' && snapshot.uiPlacement ? { ...snapshot.uiPlacement } : null,
-    plan: snapshot.plan ? { ...snapshot.plan } : null,
-    run: snapshot.run ? {
-      ...snapshot.run,
-      artifacts: snapshot.run.artifacts?.map((artifact: Record<string, any>) => ({ ...artifact })),
-      externalActions: snapshot.run.externalActions ? [...snapshot.run.externalActions] : snapshot.run.externalActions,
-      frames: snapshot.run.frames ? {
-        ...snapshot.run.frames,
-        images: snapshot.run.frames.images ? [...snapshot.run.frames.images] : snapshot.run.frames.images,
-        times: snapshot.run.frames.times ? [...snapshot.run.frames.times] : snapshot.run.frames.times
-      } : snapshot.run.frames
+    uiPlacement: phase === 'running' && uiPlacement ? { ...uiPlacement } : null,
+    plan: plan ? { ...plan } : null,
+    run: run ? {
+      ...run,
+      artifacts: run.artifacts?.map((artifact: Record<string, any>) => ({ ...artifact })),
+      externalActions: run.externalActions ? [...run.externalActions] : run.externalActions,
+      frames: run.frames ? {
+        ...run.frames,
+        images: run.frames.images ? [...run.frames.images] : run.frames.images,
+        times: run.frames.times ? [...run.frames.times] : run.frames.times
+      } : run.frames
     } : null,
-    panelRun: snapshot.panelRun ? {
-      ...snapshot.panelRun,
-      actions: snapshot.panelRun.actions?.map((action: Record<string, any>) => ({ ...action }))
+    panelRun: panelRun ? {
+      ...panelRun,
+      actions: panelRun.actions?.map((action: Record<string, any>) => ({ ...action }))
     } : null,
-    conversation: snapshot.conversation.map((message) => ({
-      ...message,
-      modResult: message.modResult ? { ...message.modResult } : undefined,
-      focusLabels: message.focusLabels ? [...message.focusLabels] : undefined,
-      attachments: message.attachments?.map((attachment) =>
-        typeof attachment === 'string' ? attachment : { ...attachment })
-    })),
-    attachments: snapshot.attachments.map((attachment) => ({ ...attachment })),
-    trace: snapshot.trace.map((step) => ({ ...step })),
-    steps: snapshot.steps.map((step) => ({ ...step })),
-    models: snapshot.models.map((model) => ({ ...model })),
-    providers: snapshot.providers.map((provider) => ({ ...provider })),
-    reasoningEfforts: [...snapshot.reasoningEfforts],
-    accessModes: snapshot.accessModes.map((mode) => ({ ...mode })),
     progressLines,
     focusVersion: agentState.focusVersion + (options.focusComposer ? 1 : 0),
     revision: agentState.revision + 1

@@ -1279,11 +1279,15 @@ function stopActiveRequest() {
 }
 
 const TRACE_STEP_LIMIT: any = 200;
-const TRACE_TEXT_LIMIT: any = 2_000;
+const TRACE_THOUGHT_LIMIT: any = 2_000;
+const TRACE_TEXT_LIMIT: any = 6_000;
 
 function finishTraceThought() {
   const last: any = S.trace.at(-1);
-  if (last?.kind === 'thought' && last.live) last.live = false;
+  if (last?.kind === 'thought' && last.live) {
+    last.live = false;
+    last.endedAt = Date.now();
+  }
 }
 
 function trimTrace() {
@@ -1310,10 +1314,10 @@ function reduceTrace(step: CodexTraceEvent) {
     if (!step.text) return;
     let thought: any = S.trace.at(-1);
     if (thought?.kind !== 'thought' || !thought.live) {
-      thought = { kind: 'thought', id: PM.uid('trace-thought-'), label: '', live: true };
+      thought = { kind: 'thought', id: PM.uid('trace-thought-'), label: '', live: true, startedAt: Date.now() };
       S.trace.push(thought);
     }
-    thought.label = `${thought.label}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
+    thought.label = `${thought.label}${step.text}`.slice(0, TRACE_THOUGHT_LIMIT);
   } else if (step.kind === 'answer') {
     if (!step.text) return;
     finishTraceThought();
@@ -1325,13 +1329,24 @@ function reduceTrace(step: CodexTraceEvent) {
     text.text = `${text.text}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
   } else if (step.kind === 'tool-start') {
     finishTraceThought();
-    S.trace.push({
-      kind: 'tool', id: step.itemId, toolName: step.toolName,
-      label: step.label, status: 'running',
-    });
+    const tool: any = S.trace.find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
+    if (tool) {
+      tool.label = step.label;
+      if (step.detail !== undefined) tool.detail = step.detail;
+    } else {
+      S.trace.push({
+        kind: 'tool', id: step.itemId, toolName: step.toolName,
+        label: step.label, ...(step.detail === undefined ? {} : { detail: step.detail }),
+        status: 'running', startedAt: Date.now(),
+      });
+    }
   } else if (step.kind === 'tool-end') {
     const tool: any = [...S.trace].reverse().find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
-    if (tool) tool.status = step.isError ? 'error' : 'done';
+    if (tool) {
+      tool.status = step.isError ? 'error' : 'done';
+      tool.endedAt = Date.now();
+      if (step.output !== undefined) tool.output = String(step.output).slice(0, 600);
+    }
   }
   trimTrace();
 }
