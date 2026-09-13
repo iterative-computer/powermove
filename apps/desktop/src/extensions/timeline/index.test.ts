@@ -219,7 +219,8 @@ describe('timeline extension', () => {
 
     const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (Shift+F3)"]')!;
     const slot = graph.closest('.tl-graph-slot')!;
-    expect(slot.firstElementChild).toBe(graph);
+    expect(slot.lastElementChild).toBe(graph);
+    expect(slot.firstElementChild).toBe(body.querySelector('button[title="Graph options"]'));
     expect(slot.previousElementSibling?.classList.contains('tl-transport')).toBe(true);
     expect(graph.closest('.tl-transport')).toBeNull();
     expect(graph.querySelector('[data-icon="bezier"]')).not.toBeNull();
