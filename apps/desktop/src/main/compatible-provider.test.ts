@@ -24,8 +24,8 @@ it('keeps keys out of status, does not forward saved keys to another provider, a
   const fetcher = vi.fn(async (_url: any, options: any) => {
     const body = JSON.parse(options.body); requests.push({ body, headers: options.headers });
     if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
-    if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_project_state', arguments: '{}' } }] }, 'tool_calls'));
-    return streamed(event({ content: 'Ready to edit.' }, 'stop'));
+    if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_panel_state', arguments: '{\"panelId\":\"inspector\"}' } }] }, 'tool_calls'));
+    return streamed(event({ content: 'Ready  ' }) + event({ content: 'to\nedit.\u0000' }, 'stop'));
   }) as unknown as typeof fetch;
   const provider = new CompatibleProvider(directory, fetcher);
   const connected = await provider.configure({ baseUrl: 'https://example.com/v1', model: 'model-a', apiKey: 'private-key', vision: false });
@@ -34,9 +34,16 @@ it('keeps keys out of status, does not forward saved keys to another provider, a
   await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
   expect(requests[1].headers.Authorization).toBeUndefined();
   const call = vi.fn(async () => ({ runId: 'r', callId: 'c1', ok: true, content: [{ type: 'text' as const, text: 'Project is open' }] }));
-  const result = await provider.run({ id: 'r', mode: 'autonomous', access: 'editor', prompt: 'Hello', images: [], attachments: [] } as any, () => {}, call);
-  expect(call).toHaveBeenCalledWith('get_project_state', {});
-  expect(result.ok && JSON.parse(result.text).summary).toBe('Ready to edit.');
+  const trace: any[] = [];
+  const result = await provider.run({ id: 'r', mode: 'autonomous', access: 'editor', prompt: 'Hello', images: [], attachments: [] } as any, step => trace.push(step), call);
+  expect(call).toHaveBeenCalledWith('get_panel_state', { panelId: 'inspector' });
+  expect(result.ok && JSON.parse(result.text).summary).toBe('Ready  to\nedit.\u0000');
+  expect(trace).toEqual([
+    { kind: 'tool-start', itemId: 'c1', toolName: 'get_panel_state', label: 'Get panel state', detail: 'inspector' },
+    { kind: 'tool-end', itemId: 'c1', isError: false, output: 'Project is open' },
+    { kind: 'answer', text: 'Ready  ' },
+    { kind: 'answer', text: 'to\nedit.' }
+  ]);
 });
 it('exposes only live inspection tools to compatible editor runs and forwards captured images', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-provider-editor-')); directories.push(directory);

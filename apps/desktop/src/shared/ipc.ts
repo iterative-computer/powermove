@@ -111,6 +111,8 @@ export const LIMITS = {
   codexProjectJsonBytes: PROJECT_SNAPSHOT_BYTES,
   codexProgressChars: 320,
   codexTraceChars: 2_000,
+  codexToolDetailChars: 200,
+  codexToolOutputChars: 600,
   storeValueBytes: PROJECT_SNAPSHOT_BYTES,
   logChars: 8_000
 } as const;
@@ -232,11 +234,34 @@ export interface CodexRebasePromptRequest {
   id: string;
 }
 
+/* Structured activity, streamed from main as it happens. Every `thought` and
+   `answer` event is an APPEND-ONLY fragment: the renderer concatenates
+   consecutive fragments into the current live row, so a provider that streams
+   token deltas and one that only emits whole blocks look the same to the UI.
+   Providers must emit each piece of text exactly once (never a delta AND the
+   completed block) and must preserve inner whitespace so words do not fuse.
+   `tool-start` is an UPSERT keyed by itemId: emit it the instant a call is
+   known (label only), then again once the arguments are complete (with
+   `detail`); the renderer patches the existing row instead of adding one. */
 export type CodexTraceEvent =
   | { kind: 'thought'; text: string }
   | { kind: 'answer'; text: string }
-  | { kind: 'tool-start'; itemId: string; toolName: string; label: string }
-  | { kind: 'tool-end'; itemId: string; isError: boolean };
+  | {
+      kind: 'tool-start';
+      itemId: string;
+      toolName: string;
+      /** Short human label, e.g. "Read", "Edit", "Run", "Search". */
+      label: string;
+      /** The tool's primary argument in mono: a command, a file path, a query. ≤ LIMITS.codexToolDetailChars */
+      detail?: string;
+    }
+  | {
+      kind: 'tool-end';
+      itemId: string;
+      isError: boolean;
+      /** Bounded excerpt of the tool result (first lines of output, diff stats, error text). ≤ LIMITS.codexToolOutputChars */
+      output?: string;
+    };
 
 export type CodexProgressEvent =
   | {

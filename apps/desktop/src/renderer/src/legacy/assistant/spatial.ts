@@ -1279,11 +1279,15 @@ function stopActiveRequest() {
 }
 
 const TRACE_STEP_LIMIT: any = 200;
-const TRACE_TEXT_LIMIT: any = 2_000;
+const TRACE_THOUGHT_LIMIT: any = 2_000;
+const TRACE_TEXT_LIMIT: any = 6_000;
 
 function finishTraceThought() {
   const last: any = S.trace.at(-1);
-  if (last?.kind === 'thought' && last.live) last.live = false;
+  if (last?.kind === 'thought' && last.live) {
+    last.live = false;
+    last.endedAt = Date.now();
+  }
 }
 
 function trimTrace() {
@@ -1310,10 +1314,10 @@ function reduceTrace(step: CodexTraceEvent) {
     if (!step.text) return;
     let thought: any = S.trace.at(-1);
     if (thought?.kind !== 'thought' || !thought.live) {
-      thought = { kind: 'thought', id: PM.uid('trace-thought-'), label: '', live: true };
+      thought = { kind: 'thought', id: PM.uid('trace-thought-'), label: '', live: true, startedAt: Date.now() };
       S.trace.push(thought);
     }
-    thought.label = `${thought.label}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
+    thought.label = `${thought.label}${step.text}`.slice(0, TRACE_THOUGHT_LIMIT);
   } else if (step.kind === 'answer') {
     if (!step.text) return;
     finishTraceThought();
@@ -1325,13 +1329,24 @@ function reduceTrace(step: CodexTraceEvent) {
     text.text = `${text.text}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
   } else if (step.kind === 'tool-start') {
     finishTraceThought();
-    S.trace.push({
-      kind: 'tool', id: step.itemId, toolName: step.toolName,
-      label: step.label, status: 'running',
-    });
+    const tool: any = S.trace.find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
+    if (tool) {
+      tool.label = step.label;
+      if (step.detail !== undefined) tool.detail = step.detail;
+    } else {
+      S.trace.push({
+        kind: 'tool', id: step.itemId, toolName: step.toolName,
+        label: step.label, ...(step.detail === undefined ? {} : { detail: step.detail }),
+        status: 'running', startedAt: Date.now(),
+      });
+    }
   } else if (step.kind === 'tool-end') {
     const tool: any = [...S.trace].reverse().find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
-    if (tool) tool.status = step.isError ? 'error' : 'done';
+    if (tool) {
+      tool.status = step.isError ? 'error' : 'done';
+      tool.endedAt = Date.now();
+      if (step.output !== undefined) tool.output = String(step.output).slice(0, 600);
+    }
   }
   trimTrace();
 }
@@ -1344,9 +1359,9 @@ function sealTrace() {
 }
 
 /* Move the finished run's trace into the conversation so the activity trail
-   stays visible above its summary (supermove keeps per-message steps). Final
-   traces drop text because the answer lands in its own conversation turn;
-   steering checkpoints retain text because no replacement turn exists yet. */
+   stays visible (supermove keeps per-message steps). Text is kept whenever it
+   is the reply — a run that spoke, or a steering checkpoint — and dropped only
+   when a separate assistant turn replaces it (stop, plans, errors). */
 function archiveTrace(preserveText = false) {
   sealTrace();
   const steps: any = preserveText ? [...S.trace] : S.trace.filter((step: any) => step.kind !== 'text');
@@ -1640,8 +1655,12 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
     const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
     finishSteps();
-    archiveTrace();
-    S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
+    // The prose the model streamed during the run IS the reply; the structured
+    // `summary` is a terse restatement for the result card. Keep the prose in
+    // place (chronology intact) and only add the summary when nothing was said.
+    const spoke: any = S.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
+    archiveTrace(spoke);
+    if (!spoke) S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
     S.conversation.push(...extensionTurns);
     S.run = {
       autonomous: true, summary: result.summary, checkpoint,

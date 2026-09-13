@@ -755,25 +755,27 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-thinking-copy{display:block;min-width:0;white-space:normal;color:var(--tx-2);animation:agent-live-pulse 1.6s ease-in-out .8s infinite}
 @keyframes agent-live-pulse{50%{opacity:.55}}
 @keyframes agent-spin{to{transform:rotate(360deg)}}
-/* thinking feed — the flat activity trail the agent writes while it works.
-   No cards, no borders, no timestamps: thinking is muted prose, model text is
-   primary prose, tool work is one wrench row. Exactly one row carries motion. */
-.agent-trace{display:flex;flex-direction:column;gap:12px;min-width:0;padding-left:0}
+/* thinking feed — the activity trail the agent writes while it works, in the
+   harness idiom: thinking collapses to a header, model prose streams with a
+   caret, tool work discloses compact call rows. No cards; hairlines only.
+   Exactly one row carries motion. */
+.agent-trace{display:flex;flex-direction:column;gap:8px;min-width:0;padding-left:0}
 .agent-trace p{margin:0}
-.agent-trace-thought{white-space:pre-wrap;font-size:13px;line-height:1.55;color:var(--tx-3)}
-/* A thought that contains bold reads as an ACTION the model is narrating, not
-   as musing — it holds its weight and pulses instead of shimmering, because a
-   gradient sweep over mixed weights smears. */
-.agent-trace-thought.is-action{font-weight:var(--fw-medium)}
-.agent-trace-text{white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--tx)}
-.agent-trace-tool{display:flex;align-items:center;gap:10px;min-width:0;font-size:13px;font-weight:var(--fw-medium);line-height:1.4;color:var(--tx-3)}
-.agent-trace-tool>svg{width:16px;height:16px;flex:none;fill:currentColor;color:var(--tx-4)}
-.agent-trace-tool>span{min-width:0;flex:1}
-.agent-trace-tool>em{flex:none;font-size:11px;font-style:normal;opacity:.8}
-.agent-trace-tool.is-error{color:var(--danger)}
-.agent-trace-tool.is-error>svg{color:var(--danger)}
-.agent-trace .is-pulsing{animation:agent-live-pulse 1.6s ease-in-out infinite}
-.agent-trace-code{border-radius:var(--r-xs);padding:0 4px;background:var(--bg-field);font-family:var(--f-mono);font-size:12px}
+.agent-trace.is-live>*{animation:agent-fade-up 300ms cubic-bezier(.23,1,.32,1) both}
+@keyframes agent-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes agent-pop-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
+.agent-trace-prose,.agent-reply{display:flex;flex-direction:column;gap:8px;min-width:0;font-size:var(--fs-md);line-height:1.6;color:var(--tx)}
+.agent-trace-prose{padding:2px 0}
+/* Streaming caret: solid while text lands, gone once it settles. */
+p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-streaming p::after{content:"";display:inline-block;width:2px;height:.9em;margin-left:2px;border-radius:1px;background:var(--tx);vertical-align:-0.12em;animation:agent-caret-in 150ms ease-out both}
+@keyframes agent-caret-in{from{opacity:0}}
+/* Pre-trace shimmer line with the pixel-grid loader (harness LoadingState). */
+.agent-trace-loading{display:flex;align-items:center;gap:9px;min-width:0;padding:2px 0}
+.agent-trace-loading .agent-trace-thought{min-width:0;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-2)}
+.agent-pixel-loader{display:grid;grid-template-columns:repeat(3,4px);gap:1.5px;flex:none}
+.agent-pixel-loader>i{display:block;width:4px;height:4px;border-radius:1px;background:var(--tx);opacity:.15;animation:agent-pixel-on 650ms ease-in-out var(--cell-delay,0ms) infinite}
+@keyframes agent-pixel-on{0%,100%{opacity:.15}40%{opacity:.9}}
+.agent-trace-code{border-radius:var(--r-xs);padding:0 4px;background:var(--ink-1);box-shadow:inset 0 0 0 var(--hairline) var(--line-2);font-family:var(--f-mono);font-size:.92em}
 /* Inside a shimmering line the parent clips its gradient to the text and sets
    color:transparent; a code chip's own background breaks that clip and leaves
    invisible text on a pill — restore a solid color for chips only. */
@@ -786,7 +788,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 @media (prefers-reduced-motion:reduce){.panel-library-glider,.pglider{transition:none}}
 @media (prefers-reduced-motion:reduce){
   .shimmer-text{animation:none;background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--tx-2)}
-  .agent-trace .is-pulsing{animation:none}
+  .agent-trace.is-live>*{animation:none}
+  .agent-pixel-loader>i{animation:none}
+  p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-streaming p::after{animation:none}
   .agent-word,.agent-thinking-word{animation:none;opacity:1;filter:none;transform:none}
 }
 /* welcome */

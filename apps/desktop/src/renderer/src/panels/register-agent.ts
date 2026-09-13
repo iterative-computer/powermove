@@ -40,7 +40,7 @@ export interface AgentLegacyBridge {
 type LegacyPM = Record<string, any>;
 
 export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): void {
-  const updateInterval = 32;
+  const updateInterval = 16;
   let updateTimer: ReturnType<typeof setTimeout> | null = null;
   let lastUpdateAt: number | null = null;
   let queuedOptions: AgentUpdateOptions = {};

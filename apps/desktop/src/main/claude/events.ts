@@ -1,19 +1,38 @@
 import { LIMITS, type CodexTraceEvent } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
+import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-tools/trace-format';
 
 const MAX_LINE_BYTES = 1024 * 1024;
+const MAX_TOOL_BLOCKS = 64;
+const MAX_TOOL_INPUT_BYTES = 64 * 1024;
 
 export interface ClaudeEventCallbacks {
   onProgress?: (text: string) => void;
   onTrace?: (step: CodexTraceEvent) => void;
   onSessionId?: (sessionId: string) => void;
   onWarning?: (message: string) => void;
+  projectCwd?: string;
+}
+
+interface StreamedToolBlock {
+  id: string;
+  name: string;
+  partialJson: string;
+  detailUnavailable: boolean;
+}
+
+interface StreamedAssistantMessage {
+  tools: Map<number, StreamedToolBlock>;
 }
 
 function normalizedText(value: unknown, limit: number): string {
   return typeof value === 'string'
     ? value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, limit)
     : '';
+}
+
+function blockIndex(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 export class ClaudeEventParser {
@@ -24,6 +43,12 @@ export class ClaudeEventParser {
   private structuredOutput: unknown = undefined;
   private resultText = '';
   private resultError: string | null = null;
+  private streamedMessage: StreamedAssistantMessage | null = null;
+  /* Once the CLI streams one message it streams them all: every later
+     `assistant` event repeats blocks already delivered as deltas. Claude Code
+     may also split one message into several `assistant` events (one per
+     block, same message id), so dedupe on the mode, not per message. */
+  private streamingMode = false;
 
   constructor(private readonly callbacks: ClaudeEventCallbacks = {}) {}
 
@@ -70,8 +95,15 @@ export class ClaudeEventParser {
     if (!isRecord(event)) return;
     this.captureSession(event.session_id);
 
+    if (event.type === 'stream_event' && isRecord(event.event)) {
+      this.streamEvent(event.event);
+      return;
+    }
     if (event.type === 'assistant' && isRecord(event.message) && Array.isArray(event.message.content)) {
-      for (const block of event.message.content) this.assistantBlock(block);
+      for (const block of event.message.content) {
+        if (this.streamingMode) this.streamedAssistantProgress(block);
+        else this.assistantBlock(block);
+      }
       return;
     }
     if (event.type === 'user' && isRecord(event.message) && Array.isArray(event.message.content)) {
@@ -93,32 +125,139 @@ export class ClaudeEventParser {
     this.callbacks.onSessionId?.(this.sessionId);
   }
 
+  private streamEvent(event: Record<string, unknown>): void {
+    if (event.type === 'message_start') {
+      this.streamingMode = true;
+      this.streamedMessage = { tools: new Map() };
+      return;
+    }
+
+    const current = this.streamedMessage;
+    if (!current) return;
+
+    if (event.type === 'content_block_start') {
+      const index = blockIndex(event.index);
+      const block = event.content_block;
+      if (index === null || !isRecord(block) || block.type !== 'tool_use') return;
+      if (!isString(block.id, 120) || !isString(block.name, 80)) return;
+      if (!current.tools.has(index) && current.tools.size >= MAX_TOOL_BLOCKS) return;
+      const name = normalizedText(block.name, 80) || 'tool';
+      current.tools.set(index, { id: block.id, name, partialJson: '', detailUnavailable: false });
+      this.callbacks.onTrace?.({
+        kind: 'tool-start',
+        itemId: block.id,
+        toolName: name.toLowerCase(),
+        label: humanLabel(name)
+      });
+      return;
+    }
+
+    if (event.type === 'content_block_delta' && isRecord(event.delta)) {
+      if (event.delta.type === 'text_delta') {
+        this.emitFragment('answer', event.delta.text);
+        return;
+      }
+      if (event.delta.type === 'thinking_delta') {
+        this.emitFragment('thought', event.delta.thinking);
+        return;
+      }
+      if (event.delta.type !== 'input_json_delta') return;
+      const index = blockIndex(event.index);
+      const tool = index === null ? undefined : current.tools.get(index);
+      if (!tool || tool.detailUnavailable || !isString(event.delta.partial_json)) return;
+      if (Buffer.byteLength(tool.partialJson, 'utf8') + Buffer.byteLength(event.delta.partial_json, 'utf8') > MAX_TOOL_INPUT_BYTES) {
+        tool.detailUnavailable = true;
+        tool.partialJson = '';
+        return;
+      }
+      tool.partialJson += event.delta.partial_json;
+      return;
+    }
+
+    if (event.type === 'content_block_stop') {
+      const index = blockIndex(event.index);
+      const tool = index === null ? undefined : current.tools.get(index);
+      if (!tool) return;
+      current.tools.delete(index!);
+      let input: unknown;
+      if (!tool.detailUnavailable) {
+        try { input = JSON.parse(tool.partialJson); } catch { input = undefined; }
+      }
+      const detail = input === undefined ? '' : toolDetail(tool.name, input, this.callbacks.projectCwd);
+      this.callbacks.onTrace?.({
+        kind: 'tool-start',
+        itemId: tool.id,
+        toolName: tool.name.toLowerCase(),
+        label: humanLabel(tool.name),
+        ...(detail ? { detail } : {})
+      });
+      this.callbacks.onProgress?.(`Using ${humanLabel(tool.name)}…`);
+      return;
+    }
+
+    if (event.type === 'message_stop') this.finishStreamedMessage();
+  }
+
+  private emitFragment(kind: 'answer' | 'thought', value: unknown): void {
+    const text = fragmentText(value).slice(0, LIMITS.codexTraceChars);
+    if (text) this.callbacks.onTrace?.({ kind, text });
+  }
+
+  private finishStreamedMessage(): void {
+    this.streamedMessage?.tools.clear();
+    this.streamedMessage = null;
+  }
+
+  private streamedAssistantProgress(value: unknown): void {
+    if (!isRecord(value) || value.type !== 'text') return;
+    const text = normalizedText(value.text, LIMITS.codexTraceChars);
+    if (text) this.callbacks.onProgress?.(text.slice(0, LIMITS.codexProgressChars));
+  }
+
   private assistantBlock(value: unknown): void {
     if (!isRecord(value)) return;
     if (value.type === 'text') {
-      const text = normalizedText(value.text, LIMITS.codexTraceChars);
+      const text = fragmentText(value.text).slice(0, LIMITS.codexTraceChars);
       if (!text) return;
       this.callbacks.onTrace?.({ kind: 'answer', text });
-      this.callbacks.onProgress?.(text.slice(0, LIMITS.codexProgressChars));
+      const progress = normalizedText(value.text, LIMITS.codexProgressChars);
+      if (progress) this.callbacks.onProgress?.(progress);
       return;
     }
     if (value.type === 'thinking') {
-      const text = normalizedText(value.thinking, LIMITS.codexTraceChars);
+      const text = fragmentText(value.thinking).slice(0, LIMITS.codexTraceChars);
       if (text) this.callbacks.onTrace?.({ kind: 'thought', text });
       return;
     }
     if (value.type !== 'tool_use' || !isString(value.id, 120) || !isString(value.name, 80)) return;
     const name = normalizedText(value.name, 80) || 'tool';
+    const detail = toolDetail(name, value.input, this.callbacks.projectCwd);
     this.callbacks.onTrace?.({
-      kind: 'tool-start', itemId: value.id, toolName: name.toLowerCase(), label: name
+      kind: 'tool-start',
+      itemId: value.id,
+      toolName: name.toLowerCase(),
+      label: humanLabel(name),
+      ...(detail ? { detail } : {})
     });
-    this.callbacks.onProgress?.(`Using ${name}…`);
+    this.callbacks.onProgress?.(`Using ${humanLabel(name)}…`);
   }
 
   private toolResult(value: unknown): void {
     if (!isRecord(value) || value.type !== 'tool_result' || !isString(value.tool_use_id, 120)) return;
+    let content = '';
+    if (isString(value.content)) content = value.content;
+    else if (Array.isArray(value.content)) {
+      content = value.content
+        .filter((block): block is Record<string, unknown> => isRecord(block) && block.type === 'text' && isString(block.text))
+        .map((block) => block.text as string)
+        .join('\n');
+    }
+    const output = outputExcerpt(content || value);
     this.callbacks.onTrace?.({
-      kind: 'tool-end', itemId: value.tool_use_id, isError: value.is_error === true
+      kind: 'tool-end',
+      itemId: value.tool_use_id,
+      isError: value.is_error === true,
+      ...(output ? { output } : {})
     });
   }
 }

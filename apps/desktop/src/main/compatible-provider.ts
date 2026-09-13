@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DEFAULT_COMPATIBLE_PROVIDER, providerUrl, type CompatibleProviderConfig, type CompatibleProviderInput } from '../shared/compatible-provider';
 import type { CodexRunRequest, CodexRunResult, CodexTraceEvent, AgentToolResponseEvent } from '../shared/ipc';
 import { POWERMOVE_AGENT_TOOLS, POWERMOVE_LIVE_INSPECTION_TOOLS } from './agent-tools/spec';
+import { fragmentText, humanLabel, outputExcerpt, toolDetail } from './agent-tools/trace-format';
 
 type Saved = CompatibleProviderConfig & { secret?: string };
 const MAX_RESPONSE = 2_000_000;
@@ -80,7 +81,10 @@ export class CompatibleProvider {
             ...(callTool ? { tools: availableTools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}) }),
         });
         if (!response.ok) { await response.body?.cancel(); throw this.httpError(response.status); }
-        const message = await readCompletion(response, signal, text => { if (autonomous) onTrace({ kind: 'answer', text }); });
+        const message = await readCompletion(response, signal, text => {
+          const fragment = fragmentText(text);
+          if (autonomous && fragment) onTrace({ kind: 'answer', text: fragment });
+        });
         messages.push({ role: 'assistant', ...message });
         if (!message.tool_calls?.length) {
           if (!message.content.trim()) throw new Error('The model returned an empty response. Try again or choose another model.');
@@ -89,17 +93,34 @@ export class CompatibleProvider {
         for (const tool of message.tool_calls) {
           signal.throwIfAborted();
           if (!callTool || !availableTools.some(spec => spec.name === tool.function.name)) throw new Error('The model requested an unavailable tool. Choose a model that supports function calling.');
-          onTrace({ kind: 'tool-start', itemId: tool.id, toolName: tool.function.name, label: tool.function.name.replaceAll('_', ' ') });
-          let result: AgentToolResponseEvent;
+          let args: Record<string, unknown> = {};
+          let argumentError: Error | null = null;
           try {
-            const args = JSON.parse(tool.function.arguments || '{}');
-            if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object');
-            result = await callTool(tool.function.name, args);
+            const parsed: unknown = JSON.parse(tool.function.arguments || '{}');
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Tool arguments must be an object');
+            args = parsed as Record<string, unknown>;
           } catch (error) {
-            result = { runId: req.id, callId: tool.id, ok: false, content: [], error: error instanceof Error ? error.message : 'Tool failed' };
+            argumentError = error instanceof Error ? error : new Error('Invalid tool arguments');
+          }
+          const detail = toolDetail(tool.function.name, args);
+          onTrace({
+            kind: 'tool-start', itemId: tool.id, toolName: tool.function.name.toLowerCase(),
+            label: humanLabel(tool.function.name), ...(detail ? { detail } : {})
+          });
+          let result: AgentToolResponseEvent;
+          if (argumentError) {
+            result = { runId: req.id, callId: tool.id, ok: false, content: [], error: argumentError.message };
+          } else {
+            try {
+              result = await callTool(tool.function.name, args);
+            } catch (error) {
+              result = { runId: req.id, callId: tool.id, ok: false, content: [], error: error instanceof Error ? error.message : 'Tool failed' };
+            }
           }
           signal.throwIfAborted();
-          onTrace({ kind: 'tool-end', itemId: tool.id, isError: !result.ok });
+          const textOutput = result.content.filter((item) => item.type === 'text').map((item) => item.text);
+          const output = outputExcerpt(!result.ok && result.error ? [result.error, ...textOutput] : textOutput);
+          onTrace({ kind: 'tool-end', itemId: tool.id, isError: !result.ok, ...(output ? { output } : {}) });
           messages.push({ role: 'tool', tool_call_id: tool.id, content: JSON.stringify({ ...result, content: result.content.filter(item => item.type === 'text') }).slice(0, 120_000) });
           if (config.vision) {
             const images = result.content.filter(item => item.type === 'image').map((item: any) => ({ type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${Buffer.from(item.data).toString('base64')}` } }));

@@ -508,7 +508,7 @@ describe('AgentPanel', () => {
 });
 
 describe('agent bridge', () => {
-  it('coalesces active-run updates on a 32 ms trailing timer and flushes final state', () => {
+  it('coalesces active-run updates on a 16 ms trailing timer and flushes final state', () => {
     vi.useFakeTimers();
     try {
       const legacyState = snapshot({ legacyPhase: 'working', activity: 'Starting' });
@@ -544,7 +544,7 @@ describe('agent bridge', () => {
       registry.AgentUI.update();
       expect(agentState.revision).toBe(initialRevision);
 
-      vi.advanceTimersByTime(32);
+      vi.advanceTimersByTime(16);
       expect(agentState.revision).toBe(initialRevision + 1);
       expect(agentState.activity).toBe('Editing');
 
@@ -556,7 +556,7 @@ describe('agent bridge', () => {
       expect(agentState.phase).toBe('prompt');
       expect(agentState.activity).toBe('');
       const finalRevision = agentState.revision;
-      vi.advanceTimersByTime(32);
+      vi.advanceTimersByTime(16);
       expect(agentState.revision).toBe(finalRevision);
     } finally {
       vi.useRealTimers();

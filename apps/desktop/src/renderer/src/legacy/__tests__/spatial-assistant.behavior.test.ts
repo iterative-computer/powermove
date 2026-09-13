@@ -381,6 +381,53 @@ it('reloads typed extension changes during the autonomous request flow', async (
   assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Added mod New Mod'));
 });
 
+it('keeps the prose the model streamed as the reply instead of replacing it with the structured summary', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn((command) => command),
+  };
+  const spoken = '## What I did\n\nManifest and **TypeScript checks passed**. See [Commons](https://example.com).';
+  PM.CodexBridge.request = vi.fn(async (_prompt, _s, _i, options) => {
+    options.onTrace({ kind: 'tool-start', itemId: 'edit-1', toolName: 'edit', label: 'Edit', detail: 'panel.tsx' });
+    options.onTrace({ kind: 'tool-end', itemId: 'edit-1', isError: false });
+    options.onTrace({ kind: 'answer', text: spoken });
+    return { text: JSON.stringify({ summary: 'Updated the panel.', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] };
+  });
+
+  PM.AgentUI.submit('Add the portrait');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+
+  const conversation = PM.AgentUI.state.conversation;
+  const trace = conversation.find(turn => turn.role === 'trace');
+  assert.ok(trace, 'the run archives its trail');
+  assert.deepEqual(trace.steps.map((step) => step.kind), ['tool', 'text']);
+  assert.equal(trace.steps[1].text, spoken);
+  assert.ok(!conversation.some(turn => turn.role === 'assistant' && turn.text === 'Updated the panel.'), 'no duplicate summary turn');
+  assert.equal(PM.AgentUI.state.run.summary, 'Updated the panel.');
+});
+
+it('falls back to the structured summary when the run streamed no prose', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
+  PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn((command) => command),
+  };
+  PM.CodexBridge.request = vi.fn(async (_prompt, _s, _i, options) => {
+    options.onTrace({ kind: 'tool-start', itemId: 'edit-1', toolName: 'edit', label: 'Edit' });
+    options.onTrace({ kind: 'tool-end', itemId: 'edit-1', isError: false });
+    return { text: JSON.stringify({ summary: 'Updated the panel.', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] };
+  });
+
+  PM.AgentUI.submit('Add the portrait');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.ok(PM.AgentUI.state.conversation.some(turn => turn.role === 'assistant' && turn.text === 'Updated the panel.'));
+});
+
 it('recognizes native live edits without applying final commands a second time', async () => {
   const { PM } = spatialHarness();
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
@@ -815,6 +862,42 @@ it('accretes adjacent thoughts and seals them before tool and text steps', () =>
   ]);
 });
 
+it('concatenates answer fragments without changing their whitespace', () => {
+  const { PM, assistant } = spatialHarness();
+  assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'Reading ' });
+  assistant.lifecycle.reduceTrace({ kind: 'answer', text: 'the source' });
+  PM.AgentUI.update({ flush: true });
+
+  assert.equal(PM.AgentUI.state.trace[0].text, 'Reading the source');
+});
+
+it('upserts tool starts and records detail, bounded output, and trace timestamps', () => {
+  const { PM, assistant } = spatialHarness();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+  assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Inspecting' });
+  now.mockReturnValue(1_100);
+  assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'tool-1', toolName: 'bash', label: 'Run' });
+  now.mockReturnValue(1_200);
+  assistant.lifecycle.reduceTrace({
+    kind: 'tool-start', itemId: 'tool-1', toolName: 'bash', label: 'Run tests', detail: 'bun test'
+  });
+  now.mockReturnValue(1_300);
+  assistant.lifecycle.reduceTrace({
+    kind: 'tool-end', itemId: 'tool-1', isError: false, output: 'x'.repeat(650)
+  });
+  PM.AgentUI.update({ flush: true });
+
+  assert.equal(PM.AgentUI.state.trace.filter(step => step.kind === 'tool').length, 1);
+  assert.deepEqual(PM.AgentUI.state.trace[0], {
+    kind: 'thought', id: PM.AgentUI.state.trace[0].id, label: 'Inspecting', live: false,
+    startedAt: 1_000, endedAt: 1_100,
+  });
+  assert.deepEqual(PM.AgentUI.state.trace[1], {
+    kind: 'tool', id: 'tool-1', toolName: 'bash', label: 'Run tests', detail: 'bun test',
+    status: 'done', startedAt: 1_100, endedAt: 1_300, output: 'x'.repeat(600),
+  });
+});
+
 it('correlates tool completion by item id and records failures on the same row', () => {
   const { PM, assistant } = spatialHarness();
   assistant.lifecycle.reduceTrace({ kind: 'tool-start', itemId: 'first', toolName: 'bash', label: 'bash · one' });
@@ -862,7 +945,7 @@ it('caps traces at 200 steps by dropping old thought and tool rows before text',
   assert.equal(PM.AgentUI.state.trace.at(-1).id, 'tool-204');
 });
 
-it('replaces the trace array in snapshots and clears it for a new request', () => {
+it('keeps the trace array across snapshots and clears it for a new request', () => {
   const { PM, assistant } = spatialHarness();
   assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Old run' });
   PM.AgentUI.update({ flush: true });
@@ -870,7 +953,7 @@ it('replaces the trace array in snapshots and clears it for a new request', () =
   assert.equal(priorSnapshot.length, 1);
 
   PM.AgentUI.update({ flush: true });
-  assert.notEqual(PM.AgentUI.state.trace, priorSnapshot);
+  assert.equal(PM.AgentUI.state.trace, priorSnapshot);
   PM.AgentUI.submit('New run');
   assert.deepEqual(PM.AgentUI.state.trace, []);
   PM.AgentUI.stop();

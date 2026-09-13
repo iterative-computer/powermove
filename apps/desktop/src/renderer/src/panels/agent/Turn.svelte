@@ -5,12 +5,13 @@
   import type { AgentMessage } from './agent-state.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { activityRows } from './activity-rows';
-  import { toRichWords } from './rich-words';
-  import { revealText, sendMessage } from './text-reveal';
+  import { sendMessage } from './text-reveal';
+  import Markdown from './Markdown.svelte';
   import { mountPromptGlow } from './prompt-glow';
   import { glowFade } from './motion';
   import ModResult from './ModResult.svelte';
   import { modResultForMessage } from './mod-result';
+  import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
 
   let {
@@ -39,10 +40,8 @@
 {#if message.role === 'trace'}
   <div class="agent-trace is-archived">
     {#each traceRows as row (row.renderKey)}
-      {#if row.kind === 'thought'}
-        <p class="agent-trace-thought">{#each toRichWords(row.label) as word, wi (wi)}<span class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
-      {:else if row.kind === 'text'}
-        <p class="agent-trace-text">{#each toRichWords(row.text) as word, wi (wi)}<span class={word.c ? 'agent-trace-code' : ''}>{word.w}</span>{/each}</p>
+      {#if row.kind === 'text'}
+        <TextRow text={row.text} />
       {:else if row.kind === 'tools'}
         <ToolActivity {row} />
       {/if}
@@ -67,7 +66,7 @@
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}
-      <p>{#each (message.text || '').split(/(\s+)/) as word, index (index)}<span use:revealText={Boolean(message.entering) && Boolean(word.trim())}>{word}</span>{/each}</p>
+      <div class="agent-reply"><Markdown text={message.text || ''} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
     {/if}
     {#if message.fixExtensionId}
       <div class="agent-card-actions">

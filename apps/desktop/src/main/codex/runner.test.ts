@@ -227,7 +227,7 @@ describe('CodexRunner lifecycle', () => {
 
     expect(result.ok).toBe(true);
     expect(trace).toEqual([
-      { kind: 'tool-start', itemId: '0', toolName: 'bash', label: 'bash · pwd' },
+      { kind: 'tool-start', itemId: '0', toolName: 'bash', label: 'Run', detail: 'pwd' },
       { kind: 'tool-end', itemId: '0', isError: false },
       { kind: 'thought', text: 'Reviewing the café timeline' },
       { kind: 'answer', text: 'Preparing the final animation' }

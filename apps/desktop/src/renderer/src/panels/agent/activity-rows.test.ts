@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { activityRows, joinActions, toolAction, type ActivityRow, type TraceStep } from './activity-rows';
+import { activityRows, durationLabel, joinActions, thoughtLead, toolAction, toolFamily, type ActivityRow, type TraceStep } from './activity-rows';
 
 /* Rows are a discriminated union and the array index is unchecked; tests reach
    in by position, so one loose accessor keeps the assertions readable. */
@@ -27,7 +27,8 @@ describe('activityRows', () => {
     expect(rows[0]).toMatchObject({
       kind: 'tools',
       id: 'tools-1',
-      label: 'Ran commands, edited files, and searched the web',
+      label: '3 tool calls',
+      summary: 'Ran commands, edited files, and searched the web',
       status: 'done',
       failedCount: 0,
       successCount: 3,
@@ -44,7 +45,7 @@ describe('activityRows', () => {
       tool({ id: '3', toolName: 'write_file' })
     ]);
 
-    expect(at(rows).label).toBe('Ran commands and edited files');
+    expect(at(rows).summary).toBe('Ran commands and edited files');
   });
 
   it('keeps individual labels as detail once a multi-step group settles', () => {
@@ -53,10 +54,10 @@ describe('activityRows', () => {
       tool({ id: '2', toolName: 'edit', label: 'Timeline.svelte' })
     ]);
 
-    expect(at(rows).detail).toEqual(['npm test', 'Timeline.svelte']);
-    expect(at(rows).details).toEqual([
-      { id: '1', label: 'npm test', status: 'done' },
-      { id: '2', label: 'Timeline.svelte', status: 'done' }
+    expect(at(rows).detail).toEqual(['Ran commands and edited files', 'npm test', 'Timeline.svelte']);
+    expect(at(rows).details).toMatchObject([
+      { id: '1', label: 'npm test', status: 'done', family: 'run' },
+      { id: '2', label: 'Timeline.svelte', status: 'done', family: 'edit' }
     ]);
   });
 
@@ -67,7 +68,7 @@ describe('activityRows', () => {
     ]);
     expect(at(running).detail).toBeUndefined();
     expect(at(running).currentLabel).toBe('edit · Timeline.svelte');
-    expect(at(running).details).toEqual([
+    expect(at(running).details).toMatchObject([
       { id: '1', label: 'npm test', status: 'done' },
       { id: '2', label: 'edit · Timeline.svelte', status: 'running' }
     ]);
@@ -85,35 +86,53 @@ describe('activityRows', () => {
     ]);
 
     expect(new Set(rows.map((row) => row.renderKey)).size).toBe(rows.length);
+    // The thought folds into the group; only text splits it.
     expect(rows.map((row) => row.renderKey)).toEqual([
       'tools-replayed-call-0',
-      'separator-1',
-      'tools-replayed-call-2',
-      'separator-3'
+      'separator-1'
     ]);
+    expect(at(rows).details.map((detail: any) => detail.kind)).toEqual(['tool', 'thought', 'tool']);
   });
 
   it('only the newest active row can pulse when stale live flags remain', () => {
     const rows = activityRows([
       { kind: 'thought', id: 'old-thought', label: 'Planning the first approach', live: true },
       tool({ id: 'old-tool', toolName: 'bash', status: 'running' }),
+      { kind: 'text', id: 'said', text: 'Halfway.' },
       { kind: 'thought', id: 'current-thought', label: 'Refining the result', live: true }
     ]);
 
     expect(rows.map((row) => row.pulsing)).toEqual([false, false, true]);
   });
 
-  it('thinking separates tool groups and remains fully visible', () => {
-    const thought: TraceStep = { kind: 'thought', id: 'thought', label: 'Checking the transition', live: true };
+  it('folds thinking into the work group as its own row', () => {
     const rows = activityRows([
       tool({ id: '1', toolName: 'read' }),
-      thought,
+      { kind: 'thought', id: 'thought', label: 'Checking the transition. Then the easing.', live: true, startedAt: 5 },
       tool({ id: '2', toolName: 'bash', status: 'running' })
     ]);
 
-    expect(at(rows).label).toBe('Read files');
-    expect(rows[1]).toEqual({ ...thought, renderKey: 'thought-1', pulsing: false });
-    expect(rows[2]).toMatchObject({ label: 'Ran commands', status: 'running', pulsing: true });
+    expect(rows).toHaveLength(1);
+    expect(at(rows)).toMatchObject({ label: '2 tool calls', summary: 'Read files and ran commands', status: 'running', pulsing: true, thoughtCount: 1 });
+    expect(at(rows).details[1]).toMatchObject({
+      kind: 'thought', label: 'Thinking', status: 'running', family: 'think',
+      detail: 'Checking the transition.', output: 'Checking the transition. Then the easing.'
+    });
+  });
+
+  it('titles reasoning alone by its duration and lists edited files', () => {
+    const alone = activityRows([{ kind: 'thought', id: 't', label: 'Weighing', live: false, startedAt: 0, endedAt: 4_000 }]);
+    expect(at(alone)).toMatchObject({ label: 'Thought for 4s', toolCount: 0, status: 'done' });
+    expect(at(alone).details[0]).toMatchObject({ label: 'Thought for 4s' });
+
+    const edits = activityRows([
+      tool({ id: 'a', toolName: 'edit', label: 'Edit', detail: 'src/a.ts' }),
+      tool({ id: 'b', toolName: 'write', label: 'Write', detail: 'src/deep/b.css, c.ts' }),
+      tool({ id: 'c', toolName: 'edit', label: 'Edit', detail: 'src/a.ts' }),
+      tool({ id: 'd', toolName: 'edit', label: 'Edit', detail: 'broken.ts', status: 'error' }),
+      tool({ id: 'e', toolName: 'read', label: 'Read', detail: 'notes.md' })
+    ]);
+    expect(at(edits).files).toEqual(['a.ts', 'b.css', 'c.ts']);
   });
 
   it('keeps model text in chronological order with thinking and tool calls', () => {
@@ -126,14 +145,13 @@ describe('activityRows', () => {
       { kind: 'text', id: 'text-5', text: 'The change is complete.' }
     ]);
 
-    expect(rows.map((row) => `${row.kind}:${(row as any).text ?? (row as any).label}`)).toEqual([
-      'thought:Inspecting the project',
+    expect(rows.map((row) => `${row.kind}:${(row as any).text ?? (row as any).summary}`)).toEqual([
       'tools:Read files',
       'text:I found the relevant file.',
-      'thought:Applying the change',
       'tools:Edited files',
       'text:The change is complete.'
     ]);
+    expect(at(rows, 0).details.map((detail: any) => detail.label)).toEqual(['Thought', 'Ran a command']);
   });
 
   it('distinguishes a partly failed batch from a wholly failed batch', () => {
@@ -149,7 +167,7 @@ describe('activityRows', () => {
     ).toBe('error');
     expect(
       at(activityRows([tool({ id: 'a', status: 'done' }), tool({ id: 'b', status: 'error' })])).detail
-    ).toEqual(['Succeeded · Ran a command', 'Failed · Ran a command']);
+    ).toEqual(['Ran commands', 'Succeeded · Ran a command', 'Failed · Ran a command']);
     expect(
       at(activityRows([tool({ id: 'a', status: 'done' }), tool({ id: 'b', status: 'error' })])).successCount
     ).toBe(1);
@@ -159,6 +177,23 @@ describe('activityRows', () => {
     const rows = activityRows([tool({ toolName: 'bash', status: 'continued' })]);
     expect(at(rows).status).toBe('done');
     expect(at(rows).pulsing).toBe(false);
+  });
+
+  it('carries the running call\'s argument and the group\'s wall-clock span', () => {
+    const running = activityRows([
+      tool({ id: '1', toolName: 'bash', label: 'Run', detail: 'npm test', status: 'running', startedAt: 1_000 })
+    ]);
+    expect(at(running).currentDetail).toBe('npm test');
+    expect(at(running).startedAt).toBe(1_000);
+    expect(at(running).endedAt).toBeUndefined();
+
+    const settled = activityRows([
+      tool({ id: '1', toolName: 'read', label: 'Read', detail: 'a.ts', startedAt: 1_000, endedAt: 2_000 }),
+      tool({ id: '2', toolName: 'edit', label: 'Edit', detail: 'a.ts', output: '+3 -1', startedAt: 2_000, endedAt: 5_500 })
+    ]);
+    expect(at(settled).startedAt).toBe(1_000);
+    expect(at(settled).endedAt).toBe(5_500);
+    expect(at(settled).details[1]).toMatchObject({ detail: 'a.ts', output: '+3 -1', family: 'edit' });
   });
 
   it('returns no rows for an empty or all-unknown trace', () => {
@@ -171,7 +206,7 @@ describe('toolAction', () => {
   it('describes the screenshot tool group in plain English', () => {
     const rows = activityRows(['bash', 'get_panel_layout', 'get_project_state', 'get_panel_state']
       .map((toolName, index) => tool({ id: String(index), toolName })));
-    expect(at(rows).label).toBe('Ran commands, checked the panel layout, inspected the project, and checked panel controls');
+    expect(at(rows).summary).toBe('Ran commands, checked the panel layout, inspected the project, and checked panel controls');
   });
 
   it.each([
@@ -210,6 +245,41 @@ describe('toolAction', () => {
     expect(toolAction('mcp__github__issues')).toBe('used issues');
     expect(toolAction('')).toBe('used a tool');
     expect(toolAction(undefined)).toBe('used a tool');
+  });
+});
+
+describe('toolFamily', () => {
+  it.each([
+    ['bash', 'run'], ['Bash', 'run'], ['run_command', 'run'],
+    ['edit', 'edit'], ['write_file', 'edit'], ['multiedit', 'edit'], ['file_change', 'edit'],
+    ['read', 'read'], ['view', 'read'],
+    ['grep', 'search'], ['glob', 'search'], ['web_search', 'search'], ['webfetch', 'search'],
+    ['image_generation', 'image'], ['computer_use', 'computer'],
+    ['mcp__powermove__get_panel_state', 'panel'], ['render_frames', 'panel'],
+    ['agent', 'think'], ['todowrite', 'think'],
+    ['blender', 'tool'], ['', 'tool'], [undefined, 'tool']
+  ])('maps %s to the %s glyph', (name, family) => {
+    expect(toolFamily(name as string | undefined)).toBe(family);
+  });
+});
+
+describe('thoughtLead', () => {
+  it('takes the opening sentence, flattens markdown, and bounds the length', () => {
+    expect(thoughtLead('The plan is **simple**. Then details follow.')).toBe('The plan is simple.');
+    expect(thoughtLead('No terminal punctuation here')).toBe('No terminal punctuation here');
+    expect(thoughtLead('Ok. Short first sentence should not stop early.')).toBe('Ok. Short first sentence should not stop early.');
+    expect(thoughtLead('x'.repeat(200)).length).toBe(96);
+  });
+});
+
+describe('durationLabel', () => {
+  it('formats spans the way the settled header reads them', () => {
+    expect(durationLabel(300)).toBe('<1s');
+    expect(durationLabel(4_200)).toBe('4s');
+    expect(durationLabel(72_000)).toBe('1m 12s');
+    expect(durationLabel(3_600_000 * 2 + 60_000 * 5)).toBe('2h 5m');
+    expect(durationLabel(-1)).toBe('');
+    expect(durationLabel(Number.NaN)).toBe('');
   });
 });
 
