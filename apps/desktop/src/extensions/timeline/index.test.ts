@@ -181,7 +181,7 @@ describe('timeline extension', () => {
     PM.TL.graph = true;
     emit('project');
     expect(body.querySelector('#tl-time')?.textContent).toBe('0:24');
-    expect(body.querySelector('.tl-graph-slot button')?.classList.contains('on')).toBe(true);
+    expect(body.querySelector('button[title="Graph editor (Shift+F3)"]')?.classList.contains('on')).toBe(true);
   });
 
   it('scrubs time from the initial position instead of accumulating pointer offsets', () => {
