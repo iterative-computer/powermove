@@ -146,6 +146,10 @@
   .toast[data-toast-error]{align-items:flex-start;padding:0 6px 0 0;width:min(440px,calc(100vw - 32px));gap:0}
   .toast[data-toast-error] :global(.error-notice){border:0;background:transparent}
   .toast[data-toast-error]>button{margin-top:8px}
-  :global(.toastwrap){max-height:45vh;max-width:calc(100vw - 24px);overflow-y:auto;overscroll-behavior:contain;padding:8px;pointer-events:none}
+  /* The wrapper scrolls once the stack outgrows 45vh, and a scroll container
+     clips at its padding edge. Pad it past the reach of --shadow-float
+     (~60px below, ~40px beside) and pull the anchor down by the same amount
+     so the toast itself sits where it always did. */
+  :global(.toastwrap){box-sizing:border-box;bottom:-28px;max-height:calc(45vh + 96px);max-width:100vw;overflow-y:auto;overscroll-behavior:contain;padding:32px 48px 64px;pointer-events:none}
   .toast{pointer-events:auto;flex-shrink:0}
 </style>
