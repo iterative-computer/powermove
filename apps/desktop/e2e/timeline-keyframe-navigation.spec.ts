@@ -2,8 +2,9 @@ import { expect } from '@playwright/test';
 import { test } from './helpers/app';
 
 test('timeline shortcuts navigate real keyframes with a compact transport', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
   const before = await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Keyframe navigation', dur: 8 }));
@@ -30,9 +31,11 @@ test('timeline shortcuts navigate real keyframes with a compact transport', asyn
   await page.keyboard.press('Shift+K'); await expect.poll(time).toBe(4);
   await page.keyboard.press('Shift+J'); await expect.poll(time).toBe(3);
   const point = await page.evaluate(() => {
-    const T = (window as any).PM.TL, box = T.cv.getBoundingClientRect();
-    const i = T.rows.findIndex((r: any) => r.key === 'position.y');
-    return { x: box.x + 28, y: box.y + T.ruler + i * T.row - T.scrollY + T.row / 2 };
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    const box = timeline.cv.getBoundingClientRect();
+    const i = timeline.rows.findIndex((r: any) => r.key === 'position.y');
+    return { x: box.x + 28, y: box.y + timeline.ruler + i * timeline.row - timeline.scrollY + timeline.row / 2 };
   });
   await page.mouse.click(point.x, point.y);
   await expect.poll(time).toBe(2);
@@ -52,8 +55,9 @@ test('timeline shortcuts navigate real keyframes with a compact transport', asyn
 });
 
 test('clicking away clears row selection and deleting final keys preserves value with Undo', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Keyframe deselection', dur: 8 }));
@@ -67,9 +71,11 @@ test('clicking away clears row selection and deleting final keys preserves value
     PM.setTime(2);
   });
   const coords = await page.evaluate(() => {
-    const T = (window as any).PM.TL, box = T.cv.getBoundingClientRect();
-    const i = T.rows.findIndex((r: any) => r.key === 'position.y');
-    return { x: box.x, y: box.y + T.ruler + i * T.row - T.scrollY + T.row / 2, emptyY: box.y + T.hgt - 8, gut: T.gut };
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    const box = timeline.cv.getBoundingClientRect();
+    const i = timeline.rows.findIndex((r: any) => r.key === 'position.y');
+    return { x: box.x, y: box.y + timeline.ruler + i * timeline.row - timeline.scrollY + timeline.row / 2, emptyY: box.y + timeline.hgt - 8, gut: timeline.gut };
   });
   await page.mouse.click(coords.x + 115, coords.y);
   await expect.poll(() => page.evaluate(() => (window as any).PM.sel.chan)).toBe('position.y');
@@ -106,8 +112,9 @@ test('clicking away clears row selection and deleting final keys preserves value
 
 
 test('removing the last current key disables its diamond and Undo restores it', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Last key', dur: 5 }));
@@ -131,8 +138,9 @@ test('removing the last current key disables its diamond and Undo restores it', 
 });
 
 for (const type of ['text', 'shape']) test(`${type} color diamonds animate visible color and reveal its timeline row`, async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   await page.evaluate(type => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Color animation', dur: 5 }));
@@ -147,8 +155,10 @@ for (const type of ['text', 'shape']) test(`${type} color diamonds animate visib
   await page.getByRole('button', { name: 'Close color picker', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers[0].d.color.kf.length)).toBe(2);
   expect(await page.evaluate(() => {
-    const PM = (window as any).PM, L = PM.proj.layers[0];
-    return { midpoint: PM.resolveContent(L, 1).color, visible: PM.TL.rows.some((r: any) => r.key === 'c.color') };
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    const L = PM.proj.layers[0];
+    return { midpoint: PM.resolveContent(L, 1).color, visible: timeline.rows.some((r: any) => r.key === 'c.color') };
   })).toEqual({ midpoint: '#800080', visible: true });
   await page.evaluate(() => (window as any).PM.hist.undo());
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers[0].d.color.kf.length)).toBe(1);
@@ -156,20 +166,22 @@ for (const type of ['text', 'shape']) test(`${type} color diamonds animate visib
 });
 
 test('composition zoom dropdown follows presets, shortcuts, pan and Fit without changing the project', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  const dropdown = page.getByRole('combobox', { name: 'Composition zoom', exact: true });
-  await expect(dropdown).toBeVisible();
+  const trigger = page.getByRole('combobox', { name: 'Composition zoom', exact: true });
+  const dropdown = page.locator('#composition-zoom');
+  await expect(trigger).toBeVisible();
   const before = await page.evaluate(() => JSON.stringify((window as any).PM.proj));
   await dropdown.selectOption('0.5');
-  expect(await page.evaluate(() => (window as any).PM.Viewer.shown)).toBe(.5);
+  expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; })).toBe(.5);
   await page.evaluate(() => (window as any).PM.cmd('zoomIn'));
   await expect(dropdown).toHaveValue('custom');
   await expect(dropdown.locator('option:checked')).toHaveText('62.5%');
-  await page.evaluate(() => {const V=(window as any).PM.Viewer;V.pan=[90,50];V.layout();});
+  await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); viewer.pan=[90,50];viewer.layout();});
   await dropdown.selectOption('1');
-  expect(await page.evaluate(() => (window as any).PM.Viewer.pan)).toEqual([90, 50]);
+  expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.pan; })).toEqual([90, 50]);
   await dropdown.selectOption('fit');
-  expect(await page.evaluate(() => ({fit:(window as any).PM.Viewer.fit,pan:(window as any).PM.Viewer.pan}))).toEqual({fit:true,pan:[0,0]});
+  expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return ({fit:viewer.fit,pan:viewer.pan}); })).toEqual({fit:true,pan:[0,0]});
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(before);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

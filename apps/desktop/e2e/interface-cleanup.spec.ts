@@ -2,9 +2,11 @@ import { test, expect } from './helpers/app';
 import { cp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('panel reload keeps the project and canvas while simplifying editor controls', async ({ session }) => {
   const { page } = session;
-  await page.waitForFunction(() => (window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl);
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return viewer?.ov && PM?.GL?.gl; });
   await page.evaluate(() => (window as any).PM.Kernel.loader.builtinsReady);
   await page.evaluate(() => {
     const PM = (window as any).PM;

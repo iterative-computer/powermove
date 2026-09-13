@@ -3,6 +3,7 @@ import path from 'node:path';
 import { test, expect } from './helpers/app';
 
 test('prompt halo sits outside the message bubble and stays within the panel', async ({ session }, testInfo) => {
+  await session.openEditor();
   const { page } = session;
   const output = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
   await mkdir(output, { recursive: true });

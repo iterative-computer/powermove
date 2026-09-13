@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('agent content wraps without horizontal scroll at narrow and normal widths', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   const token = 'long_command_or_path_'.repeat(60);
   await page.evaluate((token) => {

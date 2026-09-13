@@ -2,8 +2,13 @@ import { expect, test } from './helpers/app';
 
 test.describe('@viewer continuous rasterization', () => {
   test('renders editable text and shapes from source at their displayed density', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => {
+      const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      return Boolean(viewer?.ov && PM.GL?.gl);
+    });
 
     const proof = await page.evaluate(async () => {
       const PM = (window as any).PM;
@@ -21,8 +26,9 @@ test.describe('@viewer continuous rasterization', () => {
       project.layers = [shape, text];
       PM.replaceProject(project);
       PM.setTime(1, { raw: true, force: true });
-      PM.Viewer.fit = true;
-      PM.Viewer.layout();
+      const viewer = PM.Kernel.services.get('viewer');
+      viewer.fit = true;
+      viewer.layout();
 
       const samples: Array<{ id: string; scale: number; backingWidth: number; logicalWidth: number }> = [];
       const raster = PM.raster;
@@ -45,8 +51,8 @@ test.describe('@viewer continuous rasterization', () => {
       const largest = Math.sqrt(Math.max(0, (aa + cc + Math.sqrt(Math.max(0, (aa - cc) ** 2 + 4 * bb ** 2))) / 2));
       const expectedScale = Math.ceil(Math.max(.25, Math.min(32, largest)) * 4 - 1e-9) / 4;
       const sampleFor = (id: string) => samples.filter((sample) => sample.id === id).sort((a, b) => b.scale - a.scale)[0];
-      PM.Viewer.setZoom(8);
-      PM.Viewer.layout();
+      viewer.setZoom(8);
+      viewer.layout();
       PM.invalidate('render');
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       const highZoomShape = sampleFor(shape.id);

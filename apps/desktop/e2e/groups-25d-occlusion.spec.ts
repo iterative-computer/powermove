@@ -1,5 +1,6 @@
 import {test,expect} from './helpers/app';
 import {readFileSync} from 'node:fs';
+test.beforeEach(async ({session})=>{await session.openEditor();});
 test('orientation keeps coplanar group text and details above the card background',async({session})=>{
  const {page}=session;await page.waitForFunction(()=>Boolean((window as any).PM?.GL?.gl));
  const specimen=process.env.POWERMOVE_25D_SPECIMEN ? JSON.parse(readFileSync(process.env.POWERMOVE_25D_SPECIMEN,'utf8')).proj : null;

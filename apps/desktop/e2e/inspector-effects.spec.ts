@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('a copied effect pastes onto the layer selected after copying', async ({ session }) => {
   const { page } = session;
   const ids = await page.evaluate(() => {
@@ -115,6 +117,7 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   await expect(page.getByRole('slider', { name: 'Timeline zoom', exact: true })).toHaveCount(0);
   const geometry = await page.evaluate(() => {
     const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
     const head = document.querySelector('#tl-head')!.getBoundingClientRect();
     const canvas = document.querySelector('#tl-canvas')!.getBoundingClientRect();
     const controls = [...document.querySelectorAll('#tl-head button, #tl-head input')]
@@ -122,8 +125,8 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
     return {
       head: { x: head.x, y: head.y, width: head.width, height: head.height },
       canvas: { x: canvas.x, y: canvas.y },
-      gutter: PM.TL.gut,
-      ruler: PM.TL.ruler,
+      gutter: timeline.gut,
+      ruler: timeline.ruler,
       controlsInside: controls.every((rect) => rect.left >= head.left && rect.right <= head.right
         && rect.top >= head.top && rect.bottom <= head.bottom)
     };

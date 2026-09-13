@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('agent opens and uses an extension panel through its real controls', async ({ session }) => {
+  await session.openEditor();
   await session.page.waitForSelector('#panel-agent textarea', { state: 'attached' });
   const result = await session.page.evaluate(async () => {
     const PM = (window as any).PM;

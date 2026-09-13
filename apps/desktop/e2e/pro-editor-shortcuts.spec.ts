@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test.beforeEach(async ({ session }) => {
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
@@ -110,7 +111,7 @@ test('professional shortcuts split, cut, paste, nudge, and respect focused field
     contents.sendInputEvent({ type: 'keyDown', keyCode: 'h', modifiers: [primary, 'shift', 'isautorepeat'] });
     contents.sendInputEvent({ type: 'keyUp', keyCode: 'h', modifiers: [primary, 'shift'] });
   });
-  await expect.poll(() => page.evaluate(() => (window as any).PM.Viewer.showControls)).toBe(false);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return viewer.showControls; })).toBe(false);
   expect(await page.evaluate(() => (window as any).PM.firstSel()?.on)).toBe(true);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
@@ -153,7 +154,7 @@ test('repeat safety and native menus use the same context-aware editor commands'
   });
   expect(menuWired).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(4);
-  await expect.poll(() => page.evaluate(() => (window as any).PM.Viewer.fit)).toBe(true);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return viewer.fit; })).toBe(true);
 
   await page.evaluate(() => {
     const input = document.createElement('input');

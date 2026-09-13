@@ -8,6 +8,7 @@ for (const camera of [
   {name:'media and shadow', zoom:3.1223372814366486, pan:[2142.9624206302624,1263.2672596867947]},
 ]) test(`pan the reported ${camera.name} region at fractional Retina zoom`, async ({ session }, testInfo) => {
   test.setTimeout(120000);
+  await session.openEditor();
   const { page } = session;
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1448, height: 949, deviceScaleFactor: 2, mobile: false });
@@ -16,16 +17,17 @@ for (const camera of [
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: data.proj || data }));
     PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   }, JSON.parse(readFileSync(process.env.PM_PERF_PROJECT!, 'utf8')));
-  await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean((window as any).PM?.GL?.gl && viewer?.stage); });
   await cdp.send('Profiler.enable'); await cdp.send('Profiler.start');
   const result = await page.evaluate(async camera => {
-    const PM = (window as any).PM, V = PM.Viewer;
+    const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
     // Match the actual user's panel and camera, independent of fixture docking.
-    V.stage.style.width = '681px'; V.stage.style.height = '502px';
-    V.fit = false; V.zoom = camera.zoom; V.pan = [...camera.pan];
-    V.layout(); PM.GL.render(0, { mblur: true, mbSamples: 12, shutter: .5 });
+    viewer.stage.style.width = '681px'; viewer.stage.style.height = '502px';
+    viewer.fit = false; viewer.zoom = camera.zoom; viewer.pan = [...camera.pan];
+    viewer.layout(); PM.GL.render(0, { mblur: true, mbSamples: 12, shutter: .5 });
     const resizes: any[] = []; const resize = PM.GL.resize;
-    PM.GL.resize = (w: number,h: number,...args: any[]) => { const old = [V.el.width,V.el.height],start=performance.now(); const value=resize(w,h,...args); if(value)resizes.push({old,next:[w,h],ms:performance.now()-start}); return value; };
+    PM.GL.resize = (w: number,h: number,...args: any[]) => { const old = [viewer.el.width,viewer.el.height],start=performance.now(); const value=resize(w,h,...args); if(value)resizes.push({old,next:[w,h],ms:performance.now()-start}); return value; };
     const original = PM.GL.render; const costs: number[] = [], frames: number[] = [];
     let previous = performance.now();
     PM.GL.render = (...args: any[]) => { const start = performance.now(); const value = original(...args); costs.push(performance.now() - start); return value; };
@@ -34,13 +36,13 @@ for (const camera of [
       for (let i = 0; i < 180; i++) {
         await new Promise(requestAnimationFrame);
         const now = performance.now(); frames.push(now - previous); previous = now;
-        const rect = V.stage.getBoundingClientRect();
+        const rect = viewer.stage.getBoundingClientRect();
         const direction = (Math.floor(i / 45) % 2 ? -1 : 1) * (camera.outward ? -1 : 1);
-        V.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7.3 * direction, deltaY: 2.7 * direction, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 }));
+        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7.3 * direction, deltaY: 2.7 * direction, clientX: rect.left + rect.width/2, clientY: rect.top + rect.height/2 }));
 
       }
       await new Promise(resolve => setTimeout(resolve, 150));
-      return { frames, costs, resizes, stage: [V.stage.clientWidth,V.stage.clientHeight], pan: V.pan, zoom: V.zoom, draws: PM.GL.stats.draws };
+      return { frames, costs, resizes, stage: [viewer.stage.clientWidth,viewer.stage.clientHeight], pan: viewer.pan, zoom: viewer.zoom, draws: PM.GL.stats.draws };
     } finally { PM.GL.render = original; PM.GL.resize = resize; PM.agentFrameCapture = true; }
   }, {...camera, freeze:process.env.PM_PERF_FREEZE === '1'});
   const profile = await cdp.send('Profiler.stop');

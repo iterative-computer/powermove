@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@menu-save save command routing', () => {
   test('routes both the renderer accelerator and native menu item to PM.cmd', async ({ session }) => {
     const { app, page } = session;

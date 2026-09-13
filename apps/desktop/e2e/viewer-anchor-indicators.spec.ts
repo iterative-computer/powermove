@@ -1,10 +1,13 @@
 import { expect, test } from './helpers/app';
 
 test('selected layers show their transformed anchors at a constant screen size', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.octx));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.octx); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
+    const tool = PM.Kernel.services.get('tool');
     PM.replaceProject(PM.mkProject({ name: 'Selected anchors', w: 640, h: 360, fps: 30, dur: 4, bg: '#222222' }));
     const parent = PM.mkLayer('null', { name: 'Parent', dur: 4, p: {
       'position.x': 250, 'position.y': 150, rotation: 20, 'scale.x': 120, 'scale.y': 80,
@@ -20,21 +23,22 @@ test('selected layers show their transformed anchors at a constant screen size',
     child.parent = parent.id;
     PM.proj.layers = [child, other, parent];
     PM.ProjectIndex.invalidate(); PM.invalidate();
-    PM.setTime(1, { raw: true, force: true }); PM.setTool('select');
-    PM.selectLayers([child.id, other.id]); PM.Viewer.showControls = true;
+    PM.setTime(1, { raw: true, force: true }); tool.setTool('select');
+    PM.selectLayers([child.id, other.id]); viewer.showControls = true;
   });
   for (const zoom of [.5, 1.5]) {
     const result = await page.evaluate((zoom) => {
-      const PM = (window as any).PM, V = PM.Viewer;
-      V.fit = false; V.zoom = zoom; V.pan = [17, -11]; V.layout();
+      const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      viewer.fit = false; viewer.zoom = zoom; viewer.pan = [17, -11]; viewer.layout();
       const expected = PM.selLayers().map((layer: any) => {
         const m = PM.worldMatrix(layer, PM.time), x = PM.ev(layer, 'anchor.x', PM.time), y = PM.ev(layer, 'anchor.y', PM.time);
         return { x: m[0] * x + m[2] * y + m[4], y: m[1] * x + m[3] * y + m[5] };
       });
       const arcs: { x: number; y: number; radius: number }[] = [];
-      const ctx = V.octx, original = ctx.arc;
+      const ctx = viewer.octx, original = ctx.arc;
       ctx.arc = function(x: number, y: number, radius: number, ...rest: any[]) {
-        arcs.push({ x, y, radius: radius * V.shown });
+        arcs.push({ x, y, radius: radius * viewer.shown });
         return original.call(this, x, y, radius, ...rest);
       };
       try { PM.bus.emit('overlay'); } finally { ctx.arc = original; }
@@ -48,7 +52,9 @@ test('selected layers show their transformed anchors at a constant screen size',
   }
   await page.locator('#stage').screenshot({ path: '/private/tmp/powermove-selected-anchors.png' });
   const deselectedArcs = await page.evaluate(() => {
-    const PM = (window as any).PM, ctx = PM.Viewer.octx, original = ctx.arc;
+    const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
+    const ctx = viewer.octx, original = ctx.arc;
     const ids = PM.selLayers().map((layer: any) => layer.id);
     PM.selectLayers([]);
     let count = 0;
@@ -58,10 +64,12 @@ test('selected layers show their transformed anchors at a constant screen size',
   });
   expect(deselectedArcs).toBe(0);
   const hiddenArcs = await page.evaluate(() => {
-    const PM = (window as any).PM, ctx = PM.Viewer.octx, original = ctx.arc;
+    const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
+    const ctx = viewer.octx, original = ctx.arc;
     let count = 0;
     ctx.arc = function(...args: any[]) { count++; return original.apply(this, args); };
-    try { PM.Viewer.showControls = false; PM.bus.emit('overlay'); } finally { ctx.arc = original; }
+    try { viewer.showControls = false; PM.bus.emit('overlay'); } finally { ctx.arc = original; }
     return count;
   });
   expect(hiddenArcs).toBe(0);
@@ -69,25 +77,29 @@ test('selected layers show their transformed anchors at a constant screen size',
 });
 
 test('clicking away commits canvas text and returns to Selection while explicit tool choices win', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.octx));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.octx); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
+    const tool = PM.Kernel.services.get('tool');
     PM.replaceProject(PM.mkProject({ name: 'Text click away', w: 640, h: 360, fps: 30, dur: 4 }));
     PM.setTime(1, { raw: true, force: true });
-    PM.Viewer.fit = true; PM.Viewer.layout(); PM.setTool('text');
+    viewer.fit = true; viewer.layout(); tool.setTool('text');
   });
   const frame = await page.locator('#stage-inner').boundingBox();
   if (!frame) throw new Error('Composition unavailable');
   await page.mouse.click(frame.x + frame.width * .3, frame.y + frame.height * .4);
   const editor = page.getByRole('textbox', { name: 'Edit text on canvas' });
   await editor.fill('Keep this text');
-  expect(await page.evaluate(() => (window as any).PM.tool)).toBe('text');
+  expect(await page.evaluate(() => { const PM = (window as any).PM; const tool = PM.Kernel.services.get('tool'); return tool.tool; })).toBe('text');
   await page.mouse.click(frame.x + frame.width * .1, frame.y + frame.height * .1);
   await expect(editor).toHaveCount(0);
   const result = await page.evaluate(() => {
     const PM = (window as any).PM;
-    return { tool: PM.tool, count: PM.proj.layers.length, text: (PM.proj.layers[0].d.text?.v ?? PM.proj.layers[0].d.text) };
+    const tool = PM.Kernel.services.get('tool');
+    return { tool: tool.tool, count: PM.proj.layers.length, text: (PM.proj.layers[0].d.text?.v ?? PM.proj.layers[0].d.text) };
   });
   expect(result).toEqual({ tool: 'select', count: 1, text: 'Keep this text' });
   const undone = await page.evaluate(() => {
@@ -99,11 +111,11 @@ test('clicking away commits canvas text and returns to Selection while explicit 
   });
   expect(undone.count).toBe(1);
   expect(undone.text).not.toBe('Keep this text');
-  await page.evaluate(() => { const PM = (window as any).PM; PM.hist.redo(); PM.setTool('text'); });
+  await page.evaluate(() => { const PM = (window as any).PM; const tool = PM.Kernel.services.get('tool'); PM.hist.redo(); tool.setTool('text'); });
   await page.mouse.click(frame.x + frame.width * .3, frame.y + frame.height * .4);
   await expect(editor).toBeVisible();
   await page.getByRole('button', { name: 'Hand Tool (H)', exact: true }).click();
   await expect(editor).toHaveCount(0);
-  expect(await page.evaluate(() => (window as any).PM.tool)).toBe('hand');
+  expect(await page.evaluate(() => { const PM = (window as any).PM; const tool = PM.Kernel.services.get('tool'); return tool.tool; })).toBe('hand');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

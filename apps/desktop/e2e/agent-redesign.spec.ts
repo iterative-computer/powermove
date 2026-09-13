@@ -3,6 +3,7 @@ import path from 'node:path';
 import { test, expect } from './helpers/app';
 
 test('studio agent keeps suggestions, steering, activity and narrow layouts usable', async ({ session }, testInfo) => {
+  await session.openEditor();
   const { page } = session;
   const artifacts = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
   await mkdir(artifacts, { recursive: true });

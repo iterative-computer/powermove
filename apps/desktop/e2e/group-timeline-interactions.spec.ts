@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@groups timeline selection and strip editing', () => {
   test('selecting grouped layers reveals ancestors without hiding siblings', async ({ session }) => {
     const { page } = session;
@@ -18,26 +20,37 @@ test.describe('@groups timeline selection and strip editing', () => {
 
     await page.waitForFunction(({ group, first, second }) => {
       const PM = (window as any).PM;
+      const timeline = PM.Kernel.services.get('timeline');
       return PM.UIState.getLayerCollapsed(PM.L(group)) === false
-        && PM.TL.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id).join(',') === `${group},${first},${second}`;
+        && timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id).join(',') === `${group},${first},${second}`;
     }, ids);
 
     for (const selected of [ids.second, ids.group, ids.first]) {
       await page.evaluate(id => (window as any).PM.selectLayers(id), selected);
-      await expect.poll(() => page.evaluate(() => (window as any).PM.TL.rows
-        .filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id))).toEqual([ids.group, ids.first, ids.second]);
+      await expect.poll(() => page.evaluate(() => {
+        const PM = (window as any).PM;
+        const timeline = PM.Kernel.services.get('timeline');
+        return timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
+      })).toEqual([ids.group, ids.first, ids.second]);
     }
 
     const twirl = await page.evaluate(() => {
-      const T = (window as any).PM.TL, rect = T.cv.getBoundingClientRect();
-      return { x: rect.left + 64, y: rect.top + T.ruler + T.row / 2 - T.scrollY };
+      const PM = (window as any).PM;
+      const timeline = PM.Kernel.services.get('timeline');
+      const rect = timeline.cv.getBoundingClientRect();
+      return { x: rect.left + 64, y: rect.top + timeline.ruler + timeline.row / 2 - timeline.scrollY };
     });
     await page.mouse.click(twirl.x, twirl.y);
-    await expect.poll(() => page.evaluate(() => (window as any).PM.TL.rows
-      .filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id))).toEqual([ids.group]);
+    await expect.poll(() => page.evaluate(() => {
+      const PM = (window as any).PM;
+      const timeline = PM.Kernel.services.get('timeline');
+      return timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
+    })).toEqual([ids.group]);
     await page.mouse.click(twirl.x, twirl.y);
     await page.waitForFunction(({ group, first, second }) => {
-      const rows = (window as any).PM.TL.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
+      const PM = (window as any).PM;
+      const timeline = PM.Kernel.services.get('timeline');
+      const rows = timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
       return rows.join(',') === `${group},${first},${second}`;
     }, ids);
     expect(session.diagnostics.pageErrors).toEqual([]);
@@ -45,7 +58,7 @@ test.describe('@groups timeline selection and strip editing', () => {
 
   test('both edges of a selected group strip freely trim its members', async ({ session }) => {
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+    await page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
     await page.evaluate(() => {
       const PM = (window as any).PM;
       const project = PM.mkProject({ w: 640, h: 360, fps: 30, dur: 8 });
@@ -55,13 +68,14 @@ test.describe('@groups timeline selection and strip editing', () => {
       PM.replaceProject(project);
       const group = PM.groupLayers([first.id, second.id], 'Titles');
       PM.selectLayers(group.id);
-      PM.TL.scrollT = 0;
+      const timeline = PM.Kernel.services.get('timeline');
+      timeline.scrollT = 0;
       PM.invalidate('timeline');
     });
 
     const strip = await page.evaluate(() => {
-      const PM = (window as any).PM, T = PM.TL, rect = T.cv.getBoundingClientRect(), group = PM.firstSel(), span = PM.groupSpan(group);
-      return { left: rect.left + T.gut + (span.from - T.scrollT) * T.pps, right: rect.left + T.gut + (span.from + span.dur - T.scrollT) * T.pps, y: rect.top + T.ruler + T.row / 2 - T.scrollY, pps: T.pps };
+      const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), rect = timeline.cv.getBoundingClientRect(), group = PM.firstSel(), span = PM.groupSpan(group);
+      return { left: rect.left + timeline.gut + (span.from - timeline.scrollT) * timeline.pps, right: rect.left + timeline.gut + (span.from + span.dur - timeline.scrollT) * timeline.pps, y: rect.top + timeline.ruler + timeline.row / 2 - timeline.scrollY, pps: timeline.pps };
     });
     await page.mouse.move(strip.right, strip.y);
     await page.mouse.down();

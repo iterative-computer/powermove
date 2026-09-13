@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { test, expect } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.skip(!process.env.PM_PERF_PROJECT, 'Set PM_PERF_PROJECT to a copied project');
 test('measure sustained playback and paused FPS at high zoom', async ({ session }, testInfo) => {
   test.setTimeout(120000);
@@ -13,10 +15,10 @@ test('measure sustained playback and paused FPS at high zoom', async ({ session 
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: data.proj || data }));
     PM.ProjectsScreen.hide();
   }, data);
-  await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
   await cdp.send('Profiler.enable'); await cdp.send('Profiler.start');
   const results = await page.evaluate(async () => {
-    const PM = (window as any).PM, V = PM.Viewer, original = PM.GL.render, results = [];
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), original = PM.GL.render, results = [];
     let frames: any[] = [], last = 0;
     PM.GL.render = function (...args: any[]) {
       const now = performance.now(); const value = original(...args);
@@ -25,7 +27,7 @@ test('measure sustained playback and paused FPS at high zoom', async ({ session 
     try {
       for (const view of [{ zoom: 1, center: [960, 540] }, { zoom: 8, center: [960, 540] }, { zoom: 8, center: [200, 120] }]) {
         PM.pause(); PM.setTime(0); PM.perf.auto = false; PM.quality = 1;
-        V.fit = false; V.zoom = view.zoom; V.pan = [(PM.proj.w / 2 - view.center[0]!) * view.zoom, (PM.proj.h / 2 - view.center[1]!) * view.zoom]; V.layout();
+        viewer.fit = false; viewer.zoom = view.zoom; viewer.pan = [(PM.proj.w / 2 - view.center[0]!) * view.zoom, (PM.proj.h / 2 - view.center[1]!) * view.zoom]; viewer.layout();
         await new Promise(resolve => setTimeout(resolve, 1200));
         const pausedFps = PM.perf.fps;
         frames = []; last = 0;

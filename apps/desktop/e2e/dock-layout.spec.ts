@@ -118,6 +118,7 @@ test.describe('@dock-layout Svelte DockLayout', () => {
   });
 
   test('keeps panel and viewer hosts alive across layout and workspace moves', async ({ session }) => {
+    await session.openEditor();
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     await expect(page.locator('#body > .dock .panel[data-panel]')).not.toHaveCount(0);

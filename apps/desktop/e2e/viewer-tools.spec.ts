@@ -3,14 +3,16 @@ import { expect, test } from './helpers/app';
 async function cleanProject(page: any, name: string) {
   return page.evaluate(async (projectName: string) => {
     const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
+    const tool = PM.Kernel.services.get('tool');
     const project = PM.mkProject({ name: projectName, w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
     PM.replaceProject(project);
     PM.setTime(1, { raw: true, force: true });
     PM.selectLayers([]);
-    PM.setTool('select');
-    PM.Viewer.fit = true;
-    PM.Viewer.pan = [0, 0];
-    PM.Viewer.layout();
+    tool.setTool('select');
+    viewer.fit = true;
+    viewer.pan = [0, 0];
+    viewer.layout();
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
   }, name);
 }
@@ -18,14 +20,15 @@ async function cleanProject(page: any, name: string) {
 async function compositionPoint(page: any, x: number, y: number) {
   const box = await page.locator('#stage-inner').boundingBox();
   if (!box) throw new Error('viewer frame is unavailable');
-  const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+  const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
   return { x: box.x + x * shown, y: box.y + y * shown, shown };
 }
 
 test.describe('@viewer After Effects tool behavior', () => {
   test('keeps tools distinct from creation commands and draws an undoable shape', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.setTool));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return Boolean(viewer?.ov && tool?.setTool); });
     await cleanProject(page, 'Shape tool');
 
     const tools = await page.locator('#toolbar button[data-tool]').evaluateAll((buttons: HTMLElement[]) =>
@@ -37,7 +40,7 @@ test.describe('@viewer After Effects tool behavior', () => {
     await page.screenshot({ path: '/private/tmp/powermove-toolbar-menu.png' });
     await page.keyboard.press('Escape');
     await page.locator('#toolbar button[data-tool="shape"]').click();
-    expect(await page.evaluate(() => [(window as any).PM.tool, (window as any).PM.toolShape])).toEqual(['shape', 'rect']);
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const tool = PM.Kernel.services.get('tool'); return [tool.tool, tool.toolShape]; })).toEqual(['shape', 'rect']);
 
     const start = await compositionPoint(page, 100, 100);
     const end = await compositionPoint(page, 300, 220);
@@ -70,11 +73,13 @@ test.describe('@viewer After Effects tool behavior', () => {
   });
 
   test('marquee-selects enclosed layers and Shift toggles the enclosed set', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.setTool));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return Boolean(viewer?.ov && tool?.setTool); });
     await cleanProject(page, 'Selection marquee');
     const ids = await page.evaluate(() => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
       const left = PM.mkLayer('shape', {
         name: 'Left', dur: 4,
         d: { shape: 'rect', color: '#FFFFFF', w: 100, h: 80, radius: 0, stroke: 0, strokeColor: '#000000', points: 5 },
@@ -86,7 +91,7 @@ test.describe('@viewer After Effects tool behavior', () => {
         p: { 'position.x': 480, 'position.y': 180 },
       }, PM.proj);
       PM.proj.layers = [right, left];
-      PM.ProjectIndex.invalidate(); PM.invalidate(); PM.Viewer.layout();
+      PM.ProjectIndex.invalidate(); PM.invalidate(); viewer.layout();
       return { left: left.id, right: right.id };
     });
 
@@ -105,8 +110,9 @@ test.describe('@viewer After Effects tool behavior', () => {
   });
 
   test('Rotation, Pan Behind, Type, Zoom, and temporary Hand use professional gesture semantics', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.setTool));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return Boolean(viewer?.ov && tool?.setTool); });
     await cleanProject(page, 'Transform tools');
     const setup = await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -151,8 +157,10 @@ test.describe('@viewer After Effects tool behavior', () => {
     const typeAt = await compositionPoint(page, 120, 80);
     await page.mouse.click(typeAt.x, typeAt.y);
     const text = await page.evaluate(() => {
-      const PM = (window as any).PM; const layer = PM.proj.layers[0];
-      return { tool: PM.tool, type: layer.type, text: layer.d.text, position: [layer.p['position.x'].v, layer.p['position.y'].v] };
+      const PM = (window as any).PM;
+      const tool = PM.Kernel.services.get('tool');
+      const layer = PM.proj.layers[0];
+      return { tool: tool.tool, type: layer.type, text: layer.d.text, position: [layer.p['position.x'].v, layer.p['position.y'].v] };
     });
     expect(text).toEqual({ tool: 'text', type: 'text', text: '', position: [120, 80] });
 
@@ -182,7 +190,7 @@ test.describe('@viewer After Effects tool behavior', () => {
     await page.getByRole('menuitem', { name: 'Zoom Tool (Z)', exact: true }).click();
     const zoomAt = await compositionPoint(page, 160, 90);
     await page.mouse.click(zoomAt.x, zoomAt.y);
-    const zoomed = await page.evaluate(() => ({ tool: (window as any).PM.tool, fit: (window as any).PM.Viewer.fit, zoom: (window as any).PM.Viewer.zoom }));
+    const zoomed = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return ({ tool: tool.tool, fit: viewer.fit, zoom: viewer.zoom }); });
     expect(zoomed.tool).toBe('zoom'); expect(zoomed.fit).toBe(false); expect(zoomed.zoom).toBeGreaterThan(0);
 
     await page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click();
@@ -192,7 +200,7 @@ test.describe('@viewer After Effects tool behavior', () => {
     await expect(page.locator('#stage-inner')).toHaveCSS('cursor', 'grab');
     await page.mouse.down(); await page.mouse.move(zoomAt.x + 35, zoomAt.y + 15, { steps: 5 }); await page.mouse.up();
     await page.keyboard.up('Space');
-    expect(await page.evaluate(() => [(window as any).PM.tool, (window as any).PM.Viewer.temporaryTool])).toEqual(['select', null]);
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return [tool.tool, viewer.temporaryTool]; })).toEqual(['select', null]);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 });

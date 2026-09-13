@@ -2,12 +2,15 @@ import { expect, test } from './helpers/app';
 import { chromium } from '@playwright/test';
 import { createServer } from 'node:http';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('@viewer imports SVG as durable editable Shape paths and preserves its source', async ({ session }) => {
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && PM?.GL?.gl); });
 
   const proof = await page.evaluate(async () => {
     const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
     const project = PM.mkProject({ name: 'SVG source', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
     PM.replaceProject(project);
     const source = '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32"><rect width="64" height="32" rx="8" fill="#ff5a1f"/><circle cx="48" cy="16" r="8" fill="#ffffff"/></svg>';
@@ -27,8 +30,8 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
     PM.hist.undo();
     const restoredVertexX = PM.L(layer.id).d.paths[0].vertices[0].p.x.v;
     PM.setTime(1, { raw: true, force: true });
-    PM.Viewer.fit = true;
-    PM.Viewer.layout();
+    viewer.fit = true;
+    viewer.layout();
     PM.invalidate('render');
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
@@ -36,7 +39,7 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
     PM.quality = 1;
     PM.previewResolution = '1';
     layer.p['scale.x'].v = 3471.293; layer.p['scale.y'].v = 3471.293;
-    PM.Viewer.setZoom(8);
+    viewer.setZoom(8);
     PM.invalidate('render');
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     const highZoom = {
@@ -46,8 +49,8 @@ test('@viewer imports SVG as durable editable Shape paths and preserves its sour
       viewportTextureBytes: PM.GL.texes.get('viewport-path:' + layer.id)?.bytes || 0,
     };
     layer.p['scale.x'].v = 200; layer.p['scale.y'].v = 200;
-    PM.Viewer.fit = true;
-    PM.Viewer.layout();
+    viewer.fit = true;
+    viewer.layout();
 
     const web = await PM.Export.buildWeb();
     const exportedLayer = web.scene.project.layers.find((candidate: any) => candidate.id === layer.id);

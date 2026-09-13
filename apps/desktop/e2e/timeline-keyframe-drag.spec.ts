@@ -2,8 +2,9 @@ import { expect } from '@playwright/test';
 import { test } from './helpers/app';
 
 for (const path of ['c.color', 'position.y']) test(`drag ${path} keyframes without changing values, then Undo`, async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   const before = await page.evaluate(path => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Keyframe drag', dur: 6 }));
@@ -15,11 +16,13 @@ for (const path of ['c.color', 'position.y']) test(`drag ${path} keyframes witho
     PM.UIState.setLayerCollapsed(L, false); PM.bus.emit('layers'); PM.setTime(0);
     return JSON.stringify(PM.findProp(L, path).kf);
   }, path);
-  await expect.poll(() => page.evaluate(path => (window as any).PM.TL.rows.some((r: any) => r.key === path), path)).toBe(true);
+  await expect.poll(() => page.evaluate(path => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r: any) => r.key === path); }, path)).toBe(true);
   const point = await page.evaluate(path => {
-    const PM = (window as any).PM, T = PM.TL, rect = T.cv.getBoundingClientRect();
-    const i = T.rows.findIndex((r: any) => r.key === path);
-    return { x: rect.x + T.gut + (1 - T.scrollT) * T.pps, y: rect.y + T.ruler + i * T.row - T.scrollY + T.row / 2, dx: T.pps };
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    const rect = timeline.cv.getBoundingClientRect();
+    const i = timeline.rows.findIndex((r: any) => r.key === path);
+    return { x: rect.x + timeline.gut + (1 - timeline.scrollT) * timeline.pps, y: rect.y + timeline.ruler + i * timeline.row - timeline.scrollY + timeline.row / 2, dx: timeline.pps };
   }, path);
   await page.mouse.move(point.x, point.y); await page.mouse.down();
   await page.mouse.move(point.x + point.dx, point.y, { steps: 8 }); await page.mouse.up();

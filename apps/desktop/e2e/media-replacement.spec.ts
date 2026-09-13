@@ -3,6 +3,8 @@ import path from 'node:path';
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 async function imageFile(page: any, directory: string, name: string, color: string) {
   const encoded = await page.evaluate((fill: string) => {
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;

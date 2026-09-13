@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('Astra selection reaches the request and Claude selections preserve capabilities', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -11,8 +12,8 @@ test('Astra selection reaches the request and Claude selections preserve capabil
       return { text: JSON.stringify({ summary: 'Model routing verified', commands: [], artifacts: [], externalActions: [], notes: [] }) };
     };
   });
-  await page.getByRole('combobox', { name: 'Model', exact: true }).selectOption('gpt-6-astra');
-  await page.getByRole('combobox', { name: 'Reasoning effort', exact: true }).selectOption('max');
+  await page.locator('select[aria-label="Model"]').selectOption('gpt-6-astra');
+  await page.locator('select[aria-label="Reasoning effort"]').selectOption('max');
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Check routing');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).__selectedModel)).toEqual({ model: 'gpt-6-astra', effort: 'max' });

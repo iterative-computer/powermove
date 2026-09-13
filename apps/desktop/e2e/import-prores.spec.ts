@@ -1,6 +1,8 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@import-prores automatic playback proxy', () => {
   test('converts ProRes once, presents video frames, and restores the durable proxy', async ({ session }) => {
     await session.page.evaluate(() => (window as any).PM.newProject());

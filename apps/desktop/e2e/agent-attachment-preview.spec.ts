@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('agent image attachments open a fitted preview and Escape returns focus', async ({ session }, testInfo) => {
+  await session.openEditor();
   const { page } = session;
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   await page.evaluate(() => {

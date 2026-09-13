@@ -23,6 +23,8 @@ const savedName = async (file: string) => {
 };
 
 test('Command+S writes real files, reuses the destination, saves from a field, and Save As changes it', async ({ session }) => {
+  await session.openEditor();
+  await rename(session, 'Velocity Study');
   const a = path.join(session.userData, 'First.pmv'), b = path.join(session.userData, 'Copy.pmv');
   await saveTo(session, a);
   await session.page.keyboard.press('Meta+S');
@@ -44,6 +46,7 @@ test('Command+S writes real files, reuses the destination, saves from a field, a
   await expect.poll(() => savedName(b)).toBe('Second version');
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.saving)).toBe(false);
   await session.relaunch();
+  await session.openEditor();
   await expect.poll(() => session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(false);
   await rename(session, 'After relaunch');
   await session.page.keyboard.press('Meta+S');
@@ -54,6 +57,13 @@ test('Command+S writes real files, reuses the destination, saves from a field, a
 });
 
 test('native Open preserves editable source and subsequent saves update the opened file', async ({ session }) => {
+  await session.openEditor();
+  await session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.proj.layers.push(PM.mkLayer('shape', { name: 'Editable layer' }));
+    PM.ProjectIndex.invalidate();
+    PM.touch();
+  });
   const destination = path.join(session.userData, 'Editable.pmv');
   await saveTo(session, destination);
   const oldId = await session.page.evaluate(() => (window as any).PM.proj.id);
@@ -91,6 +101,10 @@ test('Projects screen exposes file state and saves active, duplicated, and opene
     await page.getByRole('menuitem', { name: action, exact: true }).click();
   };
 
+  await page.getByRole('button', { name: 'New project', exact: true }).click();
+  await page.getByRole('dialog', { name: 'New composition', exact: true })
+    .getByRole('button', { name: 'Create', exact: true }).click();
+  await rename(session, 'Velocity Study');
   await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
   await expect(card('Velocity Study')).toContainText('Not saved to a file');
 
@@ -125,6 +139,7 @@ test('Projects screen exposes file state and saves active, duplicated, and opene
 });
 
 test('cancel, disk-write failures, and external modifications never clear unsaved changes', async ({ session }) => {
+  await session.openEditor();
   const destination = path.join(session.userData, 'Safe.pmv');
   await rename(session, 'Unsaved work');
   await saveTo(session, null);
@@ -143,6 +158,7 @@ test('cancel, disk-write failures, and external modifications never clear unsave
 });
 
 test('closing a tab and the native window honors Cancel and cancelled Save', async ({ session }) => {
+  await session.openEditor();
   await rename(session, 'Keep this open');
   await session.app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async () => {
@@ -166,6 +182,7 @@ test('closing a tab and the native window honors Cancel and cancelled Save', asy
 });
 
 test('Save on native window close writes the document before closing', async ({ session }) => {
+  await session.openEditor();
   const destination = path.join(session.userData, 'On close.pmv');
   await rename(session, 'Saved on close');
   await saveTo(session, destination);
@@ -178,6 +195,7 @@ test('Save on native window close writes the document before closing', async ({ 
 });
 
 test('native Quit honors Cancel without closing the editing session', async ({ session }) => {
+  await session.openEditor();
   await rename(session, 'Cancel quitting');
   await session.app.evaluate(({ dialog, app }) => {
     dialog.showMessageBox = async () => {

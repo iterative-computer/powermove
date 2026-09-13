@@ -4,6 +4,7 @@ import { inspectWebM } from './helpers/webm';
 
 test.describe('@export-webm frame-exact WebM export', () => {
   test('exports VP8/VP9 video with Opus audio and frame blocks', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;

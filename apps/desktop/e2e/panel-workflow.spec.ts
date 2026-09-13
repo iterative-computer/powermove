@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test.beforeEach(async ({ session }) => {
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
 });
 
@@ -10,20 +11,22 @@ test('library shows a panel grid, adds panels to the workspace, and edits panels
   await expect(page.getByRole('button', { name: 'Ask Powermove agent', exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => (window as any).PM.PanelRefiner)).toBeUndefined();
   const timelineStyle = await page.evaluate(() => {
-    const timeline = document.getElementById('panel-timeline')!;
-    const previous = timeline.getAttribute('style');
-    timeline.style.setProperty('position', 'fixed', 'important');
-    timeline.style.setProperty('width', '137px', 'important');
-    timeline.style.setProperty('height', '691px', 'important');
-    const rect = timeline.getBoundingClientRect();
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    const timelinePanel = document.getElementById('panel-timeline')!;
+    const previous = timelinePanel.getAttribute('style');
+    timelinePanel.style.setProperty('position', 'fixed', 'important');
+    timelinePanel.style.setProperty('width', '137px', 'important');
+    timelinePanel.style.setProperty('height', '691px', 'important');
+    const rect = timelinePanel.getBoundingClientRect();
     return {
       previous,
       width: rect.width,
       height: rect.height,
       runtime: {
-        pps: (window as any).PM.TL.pps,
-        scrollT: (window as any).PM.TL.scrollT,
-        scrollY: (window as any).PM.TL.scrollY
+        pps: timeline.pps,
+        scrollT: timeline.scrollT,
+        scrollY: timeline.scrollY
       }
     };
   });
@@ -115,11 +118,11 @@ test('library shows a panel grid, adds panels to the workspace, and edits panels
   expect(timelineFit?.previewRight).toBeLessThanOrEqual(timelineFit?.cssWidth ?? 0);
   expect((timelineFit?.cssWidth ?? 0) - (timelineFit?.previewRight ?? 0)).toBeLessThanOrEqual(17);
   expect(timelineFit?.inset).toBeLessThan(1);
-  expect(await page.evaluate(() => ({
-    pps: (window as any).PM.TL.pps,
-    scrollT: (window as any).PM.TL.scrollT,
-    scrollY: (window as any).PM.TL.scrollY
-  }))).toEqual(timelineStyle.runtime);
+  expect(await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    return { pps: timeline.pps, scrollT: timeline.scrollT, scrollY: timeline.scrollY };
+  })).toEqual(timelineStyle.runtime);
   await page.evaluate((previous) => {
     const timeline = document.getElementById('panel-timeline')!;
     if (previous === null) timeline.removeAttribute('style');

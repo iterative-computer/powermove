@@ -2,9 +2,14 @@ import { expect } from '@playwright/test';
 import { test } from './helpers/app';
 
 test('color picker stays above adjacent panels and inside the viewport', async ({ session }, testInfo) => {
+  await session.openEditor();
   const { app, page } = session;
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1000, 600));
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => {
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    return Boolean(timeline?.cv);
+  });
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Color picker overlay', dur: 5 }));

@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { test, expect } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.skip(!process.env.PM_PERF_PROJECT, 'Set PM_PERF_PROJECT to a copied project');
 test('profile sustained 800% pan at Retina density', async ({ session }, testInfo) => {
   test.setTimeout(120000);
@@ -13,10 +15,10 @@ test('profile sustained 800% pan at Retina density', async ({ session }, testInf
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: data.proj || data }));
     PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   }, data);
-  await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
   await cdp.send('Profiler.enable'); await cdp.send('Profiler.start');
   const result = await page.evaluate(async () => {
-    const PM = (window as any).PM, V = PM.Viewer, GL = PM.GL;
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), GL = PM.GL;
     const results = [];
     let typeCosts: any = {}, raster = PM.raster;
     PM.raster = function (layer: any, ...args: any[]) {
@@ -32,9 +34,9 @@ test('profile sustained 800% pan at Retina density', async ({ session }, testInf
         for (let i = 0; i < 60; i++) {
           await new Promise(requestAnimationFrame);
           const start = performance.now();
-          V.fit = false; V.zoom = 8;
-          V.pan = [(PM.proj.w / 2 - center[0]!) * 8 + i * 7, (PM.proj.h / 2 - center[1]!) * 8 - i * 3];
-          V.layout();
+          viewer.fit = false; viewer.zoom = 8;
+          viewer.pan = [(PM.proj.w / 2 - center[0]!) * 8 + i * 7, (PM.proj.h / 2 - center[1]!) * 8 - i * 3];
+          viewer.layout();
           const layout = performance.now();
           GL.render(0, { mblur: false });
           const submitted = performance.now();
@@ -51,8 +53,8 @@ test('profile sustained 800% pan at Retina density', async ({ session }, testInf
   // Exercise the actual wheel handler and normal scheduled renderer as well
   // as the controlled submissions above. No direct GL.render calls here.
   const wheel = await page.evaluate(async () => {
-    const PM = (window as any).PM, V = PM.Viewer, original = PM.GL.render;
-    V.zoom = 8; V.pan = [0, 0]; V.layout();
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), original = PM.GL.render;
+    viewer.zoom = 8; viewer.pan = [0, 0]; viewer.layout();
     PM.agentFrameCapture = false;
     const frames: number[] = [], costs: number[] = []; let previous = performance.now();
     PM.GL.render = function (...args: any[]) {
@@ -62,19 +64,19 @@ test('profile sustained 800% pan at Retina density', async ({ session }, testInf
       for (let i = 0; i < 60; i++) {
         await new Promise(requestAnimationFrame);
         const now = performance.now(); frames.push(now - previous); previous = now;
-        const rect = V.stage.getBoundingClientRect();
-        V.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7, deltaY: 3, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+        const rect = viewer.stage.getBoundingClientRect();
+        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 7, deltaY: 3, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
       }
       await new Promise(requestAnimationFrame);
-      return { frames, costs, pan: [...V.pan], zoom: V.zoom };
+      return { frames, costs, pan: [...viewer.pan], zoom: viewer.zoom };
     } finally { PM.GL.render = original; PM.agentFrameCapture = true; }
   });
   writeFileSync(testInfo.outputPath('wheel.json'), JSON.stringify(wheel));
   console.log('WHEEL', JSON.stringify(wheel));
   expect(wheel.zoom).toBe(8); expect(Math.abs(wheel.pan[0])).toBeGreaterThan(100); expect(wheel.costs.length).toBeGreaterThan(0); expect(wheel.costs.length).toBeLessThan(15);
   const pinch = await page.evaluate(async () => {
-    const PM = (window as any).PM, V = PM.Viewer;
-    V.zoom = 8; V.pan = [(PM.proj.w / 2 - 230) * 8, (PM.proj.h / 2 - 100) * 8]; V.layout();
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+    viewer.zoom = 8; viewer.pan = [(PM.proj.w / 2 - 230) * 8, (PM.proj.h / 2 - 100) * 8]; viewer.layout();
     PM.agentFrameCapture = false;
     const intervals: number[] = [], resizeEvents: any[] = []; let previous = performance.now();
     const originalResize = PM.GL.resize;
@@ -87,12 +89,12 @@ test('profile sustained 800% pan at Retina density', async ({ session }, testInf
       for (let i = 0; i < 72; i++) {
         await new Promise(requestAnimationFrame);
         const now = performance.now(); intervals.push(now - previous); previous = now;
-        const rect = V.stage.getBoundingClientRect();
-        V.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: Math.floor(i / 24) % 2 ? -5 : 5, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+        const rect = viewer.stage.getBoundingClientRect();
+        viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: Math.floor(i / 24) % 2 ? -5 : 5, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
       }
       await new Promise(requestAnimationFrame);
       await new Promise(resolve => setTimeout(resolve, 120));
-      return { intervals, zoom: V.zoom, resizeEvents };
+      return { intervals, zoom: viewer.zoom, resizeEvents };
     } finally { PM.GL.resize = originalResize; PM.agentFrameCapture = true; }
   });
   writeFileSync(testInfo.outputPath('pinch.json'), JSON.stringify(pinch));

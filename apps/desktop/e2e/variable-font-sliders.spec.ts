@@ -3,8 +3,9 @@ import { test } from './helpers/app';
 
 test('variable font numeric fields scrub, animate, undo, and persist', async ({ session }) => {
   test.setTimeout(60000);
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   const hasFont = await page.evaluate(async () => (await (window as any).queryLocalFonts()).some((font: any) => font.family === 'Geist Width'));
   test.skip(!hasFont, 'Requires installed Geist Width');
   const id = await page.evaluate(() => {
@@ -49,11 +50,12 @@ test('variable font numeric fields scrub, animate, undo, and persist', async ({ 
 
 test('installed variable font exposes its axes before editing and changes real glyph pixels', async ({ session }) => {
   test.setTimeout(60000);
+  await session.openEditor();
   const { page } = session;
   const hasFont = await page.evaluate(async () => typeof (window as any).queryLocalFonts === 'function'
     && (await (window as any).queryLocalFonts()).some((font: any) => font.family === 'Geist Width'));
   test.skip(!hasFont, 'Glyph rendering proof requires the installed Geist Width variable font.');
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   const id = await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Detected variable axes', dur: 5 }));
@@ -84,8 +86,9 @@ test('installed variable font exposes its axes before editing and changes real g
 
 test('first-pass keyframe playback renders every width sample without delayed font swaps', async ({ session }) => {
   test.setTimeout(60000);
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   const hasFont = await page.evaluate(async () => (await (window as any).queryLocalFonts()).some((font: any) => font.family === 'Geist Width'));
   test.skip(!hasFont, 'Requires installed Geist Width');
   const id = await page.evaluate(() => {
@@ -124,6 +127,7 @@ test('first-pass keyframe playback renders every width sample without delayed fo
 
 test('SF Pro weight scrubbing reuses decoded faces without crashing the renderer', async ({ session }) => {
   test.setTimeout(60000);
+  await session.openEditor();
   const { page } = session;
   const hasFont = await page.evaluate(async () => (await (window as any).queryLocalFonts()).some((font: any) => font.family === 'SF Pro'));
   test.skip(!hasFont, 'Requires installed SF Pro');

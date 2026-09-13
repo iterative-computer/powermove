@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { test, expect } from './helpers/app';
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
 test.skip(!process.env.PM_PERF_PROJECT, 'Set PM_PERF_PROJECT to a local project JSON copy');
 test('profile copied large project', async ({ session }, testInfo) => {
   test.setTimeout(120000);

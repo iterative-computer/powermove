@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { expect, test, repoRoot } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('imports ProRes 4444 with transparency and restores playable media', async ({ session }) => {
   test.setTimeout(180_000);
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-alpha-import-'));

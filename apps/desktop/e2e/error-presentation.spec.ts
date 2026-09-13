@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test.beforeEach(async ({ session }) => {
+  await session.openEditor();
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Error checks', w: 640, h: 360, dur: 5, fps: 30 }) }));

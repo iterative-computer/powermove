@@ -2,6 +2,8 @@ import { expect, test } from './helpers/app';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@persistence native project persistence', () => {
   test('keeps an imported project and its edits when closed immediately',async({session})=>{
     const source=await session.page.evaluate(()=>{

@@ -7,6 +7,19 @@ import { promisify } from 'node:util';
 import { expect, test as base, type TestInfo } from '@playwright/test';
 import { _electron, type ElectronApplication, type Page } from 'playwright';
 
+/**
+ * Page-side service convention for e2e specs: inside each `page.evaluate` or
+ * `page.waitForFunction` callback, read extension-owned providers from
+ * `PM.Kernel.services` into descriptive locals named `viewer`, `timeline`,
+ * `inspector`, `tool`, or `shaderHooks`. For example:
+ *
+ *   const PM = (window as any).PM;
+ *   const viewer = PM.Kernel.services.get('viewer');
+ *
+ * Playwright callbacks run in the renderer and cannot close over module-side
+ * helper functions, so keeping this lookup page-side is intentional.
+ */
+
 const execFileAsync = promisify(execFile);
 export const repoRoot = path.resolve(__dirname, '../..');
 const mainEntry = path.join(repoRoot, 'out/main/index.js');

@@ -9,6 +9,7 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     }
   });
   try {
+    await session.openEditor();
     const { page } = session;
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
@@ -47,6 +48,7 @@ test('Connect opens the trusted ChatGPT browser flow and enters waiting state', 
     }
   });
   try {
+    await session.openEditor();
     await session.app.evaluate(({ shell }) => {
       (globalThis as any).__powermoveOpenedAuthUrl = null;
       shell.openExternal = async (url: string) => {
@@ -112,6 +114,7 @@ test('Claude subscription status and structured runs cross the real hidden app b
     }
   });
   try {
+    await session.openEditor();
     const { page } = session;
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });

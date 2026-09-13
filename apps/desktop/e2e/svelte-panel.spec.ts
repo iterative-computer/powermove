@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@svelte-panel Svelte panel hosted in the legacy layout', () => {
   test('the perf panel mounts once, renders, and reacts to typed edits', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     const before = await page.evaluate(() => {
       const PM = (window as any).PM;

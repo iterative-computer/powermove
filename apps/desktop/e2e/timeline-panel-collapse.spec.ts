@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('keeps the timeline usable after double-clicks and a saved collapsed state', async ({ session }) => {
+  await session.openEditor();
   const { page, diagnostics } = session;
   const panel = page.locator('#panel-timeline');
   const canvas = page.locator('#tl-canvas');

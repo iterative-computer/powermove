@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('Command+A selects the full agent composer draft', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
@@ -15,6 +16,7 @@ test('Command+A selects the full agent composer draft', async ({ session }) => {
 });
 
 test('selected agent text copies and pastes normally without copying layers', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   const reply = 'Selection-ready agent reply';
   await session.app.evaluate(({ clipboard }) => clipboard.writeText(''));
@@ -53,6 +55,7 @@ test('selected agent text copies and pastes normally without copying layers', as
 });
 
 test('steering stays in the active run and preserves the transcript before it', async ({ session }, testInfo) => {
+  await session.openEditor();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -111,6 +114,7 @@ test('steering stays in the active run and preserves the transcript before it', 
 });
 
 test('hidden renderer switches threads, keeps drafts, and restores history after relaunch', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const picker = page.getByRole('button', { name: 'Switch thread', exact: true });
@@ -138,6 +142,7 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
     return PM.store.get(`agentThreads.${PM.proj.id}`)?.activeId;
   })).toBe(second);
   await session.relaunch();
+  await session.openEditor();
   await expect.poll(() => session.page.evaluate(() => {
     const state = (window as any).PM.AgentUI.state;
     return { activeId: state.threadId, threadIds: state.threads.map((thread: any) => thread.id) };
@@ -150,6 +155,7 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
 });
 
 test('background app is never visible or focused, but can draw and accept input', async ({ session }, testInfo) => {
+  await session.openEditor();
   const state = () => session.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map(w => ({
     visible: w.isVisible(), focused: w.isFocused(), devtools: w.webContents.isDevToolsOpened(),
   })));
@@ -163,6 +169,7 @@ test('background app is never visible or focused, but can draw and accept input'
 });
 
 test('thread transcripts and titles survive a hidden relaunch without leaking into another thread', async ({ session }) => {
+  await session.openEditor();
   let page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -184,6 +191,7 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
   // flush the draft before its debounce timer fires.
   await page.getByRole('textbox', {name:'Message Powermove agent',exact:true}).fill('Last keystroke');
   await session.relaunch(); page = session.page;
+  await session.openEditor();
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await expect(page.getByRole('log')).toContainText('First conversation request');
   await expect(page.getByRole('log')).toContainText('A saved test reply');

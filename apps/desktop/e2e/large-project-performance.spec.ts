@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test.beforeEach(async ({ session }) => {
+  await session.openEditor();
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     window.dispatchEvent(new CustomEvent('pm-open-project', {
@@ -9,7 +10,7 @@ test.beforeEach(async ({ session }) => {
     PM.ProjectsScreen.hide();
     PM.agentFrameCapture = true;
   });
-  await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.TL?.cv));
+  await session.page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(PM?.GL?.gl && timeline?.cv); });
 });
 
 test.afterEach(async ({ session }) => {

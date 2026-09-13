@@ -1,9 +1,11 @@
 import { expect } from '@playwright/test';
 import { test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('properties and timeline expose editable content animation, scrubbing, and one-step Undo', async ({ session }) => {
   const { page } = session;
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   const id = await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Property animation', dur: 5 }));
@@ -25,15 +27,15 @@ test('properties and timeline expose editable content animation, scrubbing, and 
   await width.focus(); await width.press('ArrowUp'); await width.press('Enter');
   await expect.poll(() => page.evaluate(id => (window as any).PM.L(id).d.w.kf.length, id)).toBe(2);
   const position = await page.evaluate(id => {
-    const PM = (window as any).PM, layer = PM.L(id), T = PM.TL;
-    PM.UIState.setLayerCollapsed(layer, false); T.reveal(layer, ['c.w']); PM.bus.emit('layers'); PM.invalidate();
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), layer = PM.L(id);
+    PM.UIState.setLayerCollapsed(layer, false); timeline.reveal(layer, ['c.w']); PM.bus.emit('layers'); PM.invalidate();
     return id;
   }, id);
-  await expect.poll(() => page.evaluate(id => (window as any).PM.TL.rows.some((row: any) => row.L.id === id && row.key === 'c.w'), position)).toBe(true);
+  await expect.poll(() => page.evaluate(id => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((row: any) => row.L.id === id && row.key === 'c.w'); }, position)).toBe(true);
   const coords = await page.evaluate(id => {
-    const T = (window as any).PM.TL, rect = T.cv.getBoundingClientRect();
-    const index = T.rows.findIndex((row: any) => row.L.id === id && row.key === 'c.w');
-    return { x: rect.x + T.propertyValueX + 12, y: rect.y + T.ruler + index * T.row - T.scrollY + T.row / 2 };
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), rect = timeline.cv.getBoundingClientRect();
+    const index = timeline.rows.findIndex((row: any) => row.L.id === id && row.key === 'c.w');
+    return { x: rect.x + timeline.propertyValueX + 12, y: rect.y + timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
   }, id);
   const before = await page.evaluate(id => (window as any).PM.evP((window as any).PM.L(id), (window as any).PM.L(id).d.w, 1, 'c.w'), id);
   await page.mouse.move(coords.x, coords.y); await page.mouse.down();
@@ -65,7 +67,7 @@ test('properties and timeline expose editable content animation, scrubbing, and 
 
 test('text, shader, extension, blend, and mask stopwatches animate their real values', async ({ session }) => {
   const { page } = session;
-  await page.waitForFunction(() => !!(window as any).PM?.TL?.cv);
+  await page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return !!timeline?.cv; });
   for (const type of ['text', 'shader', 'extension', 'shape']) {
     const paths = await page.evaluate(type => {
       const PM = (window as any).PM;
@@ -80,7 +82,8 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
       }
       if (type === 'shader') {
         layer.d.code = 'uniform vec3 uTint; // @param #FF0000\nuniform bool uEnabled; // @param true\nuniform float uAmount; // @param 1 0 10\nvoid mainImage(out vec4 c,in vec2 p){c=vec4(uTint*uAmount,1.); }';
-        PM.syncShaderUniforms(layer);
+        const shaderHooks = PM.Kernel.services.get('shaderHooks');
+        shaderHooks.syncShaderUniforms(layer);
       }
       if (type === 'shape') { layer.masks.push(PM.mkMask('rect', PM.proj)); layer.fx.push(PM.mkEffect('blur')); PM.UIState.setFxOpen(layer.fx[0], true); }
       PM.selectLayers(layer.id); PM.bus.emit('layers'); PM.invalidate();

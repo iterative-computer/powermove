@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('moves the Preview canvas through the shared panel drag affordance', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
 

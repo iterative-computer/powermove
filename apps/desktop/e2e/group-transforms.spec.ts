@@ -1,7 +1,8 @@
 import { expect, test } from './helpers/app';
 
 test.beforeEach(async ({session}) => {
-  await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.TL?.cv));
+  await session.openEditor();
+  await session.page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(PM?.GL?.gl && timeline?.cv); });
   await session.page.evaluate(() => {
     const PM=(window as any).PM;
     const project=PM.mkProject({name:'Group transforms',w:640,h:360,dur:5,fps:30,bg:'#FFFFFF'});
@@ -9,7 +10,8 @@ test.beforeEach(async ({session}) => {
     const b=PM.mkLayer('shape',{name:'Blue card',d:{w:100,h:100,color:'#4274EC'},p:{'position.x':390,'position.y':180}},project);
     project.layers=[a,b];PM.replaceProject(project);PM.setTime(0,{force:true});
     PM.Edit.apply({type:'group_layers',targets:[a.id,b.id],name:'Cards'},{origin:'agent'});
-    PM.Viewer.fit=false;PM.Viewer.zoom=.7;PM.Viewer.pan=[0,0];PM.Viewer.layout();PM.invalidate();
+    const viewer=PM.Kernel.services.get('viewer');
+    viewer.fit=false;viewer.zoom=.7;viewer.pan=[0,0];viewer.layout();PM.invalidate();
     (window as any).groupOriginal=JSON.stringify([a.p,b.p]);
   });
 });
@@ -37,9 +39,9 @@ test('group Properties transform the rendered members and animate with one Undo'
   await page.evaluate(()=>(window as any).PM.setTime(2));
   await set('Position X','480');
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.firstSel().p['position.x'].kf.map((k:any)=>[k.t,k.v]);})).toEqual([[0,400],[2,480]]);
-  await page.waitForFunction(()=>{const PM=(window as any).PM;return PM.TL.rows.some((row:any)=>row.kind==='prop'&&row.L.id===PM.firstSel().id&&row.key==='position.x');});
+  await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.kind==='prop'&&row.L.id===PM.firstSel().id&&row.key==='position.x');});
   await page.screenshot({path:'/tmp/powermove-group-transforms-review.png'});
-  const strip=await page.evaluate(()=>{const PM=(window as any).PM,T=PM.TL,r=T.cv.getBoundingClientRect();return {x:r.left+T.gut+T.pps*.5,y:r.top+T.ruler+T.row/2,dx:T.pps*.5};});
+  const strip=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return {x:r.left+timeline.gut+timeline.pps*.5,y:r.top+timeline.ruler+timeline.row/2,dx:timeline.pps*.5};});
   await page.mouse.move(strip.x,strip.y);await page.mouse.down();await page.mouse.move(strip.x+strip.dx,strip.y,{steps:8});await page.mouse.up();
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return {starts:PM.proj.layers.map((l:any)=>l.from),value:PM.ev(PM.firstSel(),'position.x',2.5)};})).toEqual({starts:[.5,.5,.5],value:480});
   await page.evaluate(()=>(window as any).PM.hist.undo());
@@ -57,8 +59,8 @@ test('group Properties transform the rendered members and animate with one Undo'
 test('canvas drag and keyboard nudge edit only group channels',async({session})=>{
   const {page}=session;
   const drag=await page.evaluate(()=>{
-    const PM=(window as any).PM,V=PM.Viewer,r=V.stage.getBoundingClientRect();
-    return {x:r.left+r.width/2-60*V.shown,y:r.top+r.height/2,dx:40*V.shown};
+    const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),r=viewer.stage.getBoundingClientRect();
+    return {x:r.left+r.width/2-60*viewer.shown,y:r.top+r.height/2,dx:40*viewer.shown};
   });
   await page.keyboard.down('Meta');
   await page.mouse.move(drag.x,drag.y);await page.mouse.down();await page.mouse.move(drag.x+drag.dx,drag.y,{steps:8});await page.mouse.up();

@@ -1,4 +1,5 @@
 import {test,expect} from './helpers/app';
+test.beforeEach(async ({session})=>{await session.openEditor();});
 test('3D groups transform flat children together, including nested groups, with editable animation and Undo',async({session})=>{
  const {page}=session;
  await page.waitForFunction(()=>Boolean((window as any).PM?.GL?.gl));
@@ -17,15 +18,15 @@ test('3D groups transform flat children together, including nested groups, with 
   const before=pixels(0);
   const edit=PM.Edit.apply([{type:'set_property',target:g.id,path:'rotation.y',value:40},{type:'set_property',target:g.id,path:'position.z',value:100},{type:'set_property',target:g.id,path:'rotation.x',value:0,time:0,mode:'keyframe'},{type:'set_property',target:g.id,path:'rotation.x',value:25,time:2,mode:'keyframe'}],{label:'Tilt group'});
   const after=pixels(0),later=pixels(2);PM.setTime(0,{force:true});
-  const children=PM.proj.layers.filter((l:any)=>l.type==='shape'),V=PM.Viewer,box=V.resolveSelectionGeometry();
-  const picked=children.every((l:any)=>{const p=V.layerWorldPivot(l,0);return PM.GL.pick(p.x,p.y,0)?.id===l.id;});
+  const viewer=PM.Kernel.services.get('viewer'),children=PM.proj.layers.filter((l:any)=>l.type==='shape'),box=viewer.resolveSelectionGeometry();
+  const picked=children.every((l:any)=>{const p=viewer.layerWorldPivot(l,0);return PM.GL.pick(p.x,p.y,0)?.id===l.id;});
   const undo=PM.hist.undo(),undone=pixels(0);PM.hist.redo();PM.selectLayers(g.id);PM.invalidate();
   return {edit,changed:JSON.stringify(before)!==JSON.stringify(after),animated:JSON.stringify(after)!==JSON.stringify(later),undo,restored:JSON.stringify(before)===JSON.stringify(undone),switches:children.map((l:any)=>!!l.threeD),picked,box:box.corners.every((p:any)=>Number.isFinite(p.x)&&Number.isFinite(p.y)),errors:[...PM.GL.errors.entries()]};
  });
  expect(result.edit.ok).toBe(true);expect(result.changed).toBe(true);expect(result.animated).toBe(true);expect(result.undo).toBe(true);expect(result.restored).toBe(true);expect(result.switches).toEqual([false,false]);expect(result.picked).toBe(true);expect(result.box).toBe(true);expect(result.errors).toEqual([]);
- const drag=await page.evaluate(()=>{const PM=(window as any).PM,V=PM.Viewer,p=V.layerWorldPivot(PM.firstSel(),0),r=V.inner.getBoundingClientRect();return {x:r.left+p.x*V.shown,y:r.top+p.y*V.shown};});
+ const drag=await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),p=viewer.layerWorldPivot(PM.firstSel(),0),r=viewer.inner.getBoundingClientRect();return {x:r.left+p.x*viewer.shown,y:r.top+p.y*viewer.shown};});
  await page.mouse.move(drag.x,drag.y);await page.mouse.down();await page.mouse.move(drag.x+40,drag.y-20,{steps:8});await page.mouse.up();
- const moved=await page.evaluate(()=>{const PM=(window as any).PM,V=PM.Viewer,p=V.layerWorldPivot(PM.firstSel(),0),r=V.inner.getBoundingClientRect();return {type:PM.firstSel().type,x:r.left+p.x*V.shown,y:r.top+p.y*V.shown};});
+ const moved=await page.evaluate(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),p=viewer.layerWorldPivot(PM.firstSel(),0),r=viewer.inner.getBoundingClientRect();return {type:PM.firstSel().type,x:r.left+p.x*viewer.shown,y:r.top+p.y*viewer.shown};});
  expect(moved.type).toBe('group');expect(moved.x-drag.x).toBeCloseTo(40,0);expect(moved.y-drag.y).toBeCloseTo(-20,0);
  await page.screenshot({path:'/tmp/powermove-25d-groups-review.png'});
  const mask=await page.evaluate(()=>{

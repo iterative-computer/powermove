@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('agent frame capture preserves the displayed canvas before the next animation frame', async ({ session }) => {
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM.GL.canvas));
   const result = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
@@ -38,6 +39,7 @@ test('agent frame capture preserves the displayed canvas before the next animati
 });
 
 test('offscreen captures match opaque presentation without resizing or replacing a zoomed preview', async ({session}) => {
+  await session.openEditor();
   const {page} = session;
   await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -49,19 +51,19 @@ test('offscreen captures match opaque presentation without resizing or replacing
     ];
     window.dispatchEvent(new CustomEvent('pm-open-project',{detail:project})); PM.ProjectsScreen.hide(); PM.agentFrameCapture=true;
   });
-  await page.waitForFunction(()=>Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return Boolean(PM.GL?.gl&&viewer?.stage);});
   const result = await page.evaluate(() => {
-    const PM=(window as any).PM,V=PM.Viewer,GL=PM.GL;
+    const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),GL=PM.GL;
     const results=[];
     for(const transparent of [false,true]) {
       PM.proj.backgroundFill = {type:transparent?'none':'solid',stops:[{color:'#142839',position:0}],angle:0};
-      V.fit=false;V.zoom=4.371588852276498;V.pan=[17.25,-11.5];V.layout();GL.render(0,{mblur:false});
-      const before=V.el.toDataURL(),viewport=GL.previewViewport,dimensions=[V.el.width,V.el.height];
+      viewer.fit=false;viewer.zoom=4.371588852276498;viewer.pan=[17.25,-11.5];viewer.layout();GL.render(0,{mblur:false});
+      const before=viewer.el.toDataURL(),viewport=GL.previewViewport,dimensions=[viewer.el.width,viewer.el.height];
       const resize=GL.resize;let resizes=0;
       GL.resize=(...args:any[])=>{resizes++;return resize(...args);};
       let captured:HTMLCanvasElement;
       try { captured=PM.renderFrameTo(0,320,180,{mblur:false}); } finally {GL.resize=resize;}
-      const preserved=before===V.el.toDataURL()&&viewport===GL.previewViewport&&dimensions[0]===V.el.width&&dimensions[1]===V.el.height;
+      const preserved=before===viewer.el.toDataURL()&&viewport===GL.previewViewport&&dimensions[0]===viewer.el.width&&dimensions[1]===viewer.el.height;
       const actual=captured!.getContext('2d')!.getImageData(0,0,320,180).data;
       // The old capture's pixel reference: normal opaque presentation at the
       // target dimensions, copied to Canvas2D. Only the test resizes the viewer.
@@ -81,6 +83,7 @@ test('offscreen captures match opaque presentation without resizing or replacing
 });
 
 test('autosave persists during panning and captures its thumbnail after navigation settles', async ({session}) => {
+  await session.openEditor();
   const {page}=session;
   await page.evaluate(()=>{
     const PM=(window as any).PM;
@@ -88,10 +91,10 @@ test('autosave persists during panning and captures its thumbnail after navigati
     window.dispatchEvent(new CustomEvent('pm-open-project',{detail:PM.mkProject({name:'Thumbnail navigation',w:640,h:360,fps:30,dur:2})}));
     PM.ProjectsScreen.hide();
   });
-  await page.waitForFunction(()=>Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return Boolean(PM.GL?.gl&&viewer?.stage);});
   const result=await page.evaluate(async()=>{
-    const PM=(window as any).PM,V=PM.Viewer;
-    V.fit=false;V.zoom=4.37;V.pan=[0,0];V.layout();
+    const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');
+    viewer.fit=false;viewer.zoom=4.37;viewer.pan=[0,0];viewer.layout();
     const original=PM.Export.snapshot;let captures=0;
     PM.Export.snapshot=(...args:any[])=>{captures++;return original(...args);};
     PM.agentFrameCapture=false;
@@ -99,7 +102,7 @@ test('autosave persists during panning and captures its thumbnail after navigati
       PM.autosave();
       const end=performance.now()+1100;
       while(performance.now()<end){
-        V.pan[0]+=.25;V.layout(true);
+        viewer.pan[0]+=.25;viewer.layout(true);
         await new Promise(resolve=>setTimeout(resolve,16));
       }
       const during=captures;
