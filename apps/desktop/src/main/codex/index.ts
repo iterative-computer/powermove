@@ -159,10 +159,21 @@ function builtinExtensionsDirectory(ctx: CodexIpcContext): string {
     : path.resolve(app.getAppPath(), 'src/extensions');
 }
 
-async function createStagingDirectoryResolver(
+function createStagingDirectoryResolver(
   req: CodexRunRequest,
   userData: string
-): Promise<(forkId: string) => Promise<string>> {
+): (forkId: string) => Promise<string> {
+  const prepared = prepareStagingSnapshot(req, userData);
+  return async (forkId: string): Promise<string> => {
+    const { resolve } = await prepared;
+    return resolve(forkId);
+  };
+}
+
+async function prepareStagingSnapshot(
+  req: CodexRunRequest,
+  userData: string
+): Promise<{ resolve: (forkId: string) => Promise<string> }> {
   const root = agentWorkspaceRoot(userData, req.projectId);
   const stagingRoot = path.join(root, '.powermove', 'extension-runs');
   const authority = req.access === 'computer' ? 'computer' : 'project';
@@ -188,7 +199,7 @@ async function createStagingDirectoryResolver(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
-  return async (forkId: string): Promise<string> => {
+  const resolve = async (forkId: string): Promise<string> => {
     if (checkpointStage) {
       const metadata = await stat(path.join(checkpointStage, forkId));
       if (!metadata.isDirectory()) throw new Error('The resumed run does not contain the requested fork.');
@@ -211,6 +222,7 @@ async function createStagingDirectoryResolver(
     }
     return candidates[0]!;
   };
+  return { resolve };
 }
 
 function requireConsentRequest(value: unknown): ConsentRequest {
@@ -363,12 +375,16 @@ export function registerCodexIpc(
         ? claudeRunner
         : (req.mode === 'editor' ? appServerRunner : runner);
       if (toolBridge) {
-        const resolveStagingDirectory = await createStagingDirectoryResolver(req, ctx.userData);
         toolSession = await toolBridge.openSession({
           runId: req.id,
           owner,
           baseRevision: projectRevision(req.projectJSON),
-          resolveStagingDirectory
+          // Fork rebases stage into the run's extension staging dir, which only
+          // autonomous runs own. The resolver snapshots the staging root now and
+          // finishes its lookup lazily, so opening the session is not delayed.
+          ...(req.mode === 'autonomous'
+            ? { resolveStagingDirectory: createStagingDirectoryResolver(req, ctx.userData) }
+            : {})
         });
       }
       let result = req.provider === 'compatible'
