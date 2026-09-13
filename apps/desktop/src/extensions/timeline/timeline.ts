@@ -560,7 +560,7 @@ function buildHead(head: any) {
     graphOptions.hidden = !shown;
     graphOptions.style.display = shown ? '' : 'none';
   };
-  const graphSlot = h('div.tl-group.tl-graph-slot', graph, graphOptions);
+  const graphSlot = h('div.tl-group.tl-graph-slot', graphOptions, graph);
   const transport = h('div.tl-group.tl-transport',
     playBtn,
     time,
