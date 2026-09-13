@@ -32,8 +32,14 @@ type Mat4 = [
 export const CHANNELS_3D = { perspective: 50, 'position.z': 0, 'anchor.z': 0, 'scale.z': 100, 'rotation.x': 0, 'rotation.y': 0, 'orientation.x': 0, 'orientation.y': 0, 'orientation.z': 0 };
 const identity = (): Mat4 => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 function multiply(a: Mat4, b: Mat4): Mat4 {
-    return Array.from({ length: 16 }, (_, i) => { const r = i % 4, c = Math.floor(i / 4); let v = 0; for (let k = 0; k < 4; k++)
-        v += a[k * 4 + r]! * b[c * 4 + k]!; return v; }) as Mat4;
+    const result = new Array<number>(16) as Mat4;
+    for (let c = 0; c < 16; c += 4) {
+        for (let r = 0; r < 4; r++) {
+            result[c + r] = a[r]! * b[c]! + a[4 + r]! * b[c + 1]!
+                + a[8 + r]! * b[c + 2]! + a[12 + r]! * b[c + 3]!;
+        }
+    }
+    return result;
 }
 function translation(x: number, y: number, z: number) { const m = identity(); m[12] = x; m[13] = y; m[14] = z; return m; }
 function rotation(axis: number, degrees: number) { const m = identity(), a = (axis + 1) % 3, b = (axis + 2) % 3, c = Math.cos(degrees * Math.PI / 180), s = Math.sin(degrees * Math.PI / 180); m[a * 4 + a] = c; m[b * 4 + b] = c; m[a * 4 + b] = s; m[b * 4 + a] = -s; return m; }
@@ -46,8 +52,10 @@ export function local3D(PM: any, L: any, T: number): Mat4 {
         return [m[0], m[1], 0, 0, m[2], m[3], 0, 0, 0, 0, 1, 0, m[4], m[5], 0, 1];
     }
     let m = translation(ev('position.x'), ev('position.y'), ev('position.z'));
-    for (const [axis, key] of [[2, 'rotation'], [1, 'rotation.y'], [0, 'rotation.x'], [2, 'orientation.z'], [1, 'orientation.y'], [0, 'orientation.x']] as const)
-        m = multiply(m, rotation(axis, ev(key)));
+    for (const [axis, key] of [[2, 'rotation'], [1, 'rotation.y'], [0, 'rotation.x'], [2, 'orientation.z'], [1, 'orientation.y'], [0, 'orientation.x']] as const) {
+        const degrees = ev(key);
+        if (degrees !== 0) m = multiply(m, rotation(axis, degrees));
+    }
     const scale = identity();
     scale[0] = ev('scale.x', 100) / 100;
     scale[5] = ev('scale.y', 100) / 100;
@@ -104,6 +112,12 @@ export function planeMatrix(PM: any, L: any, T: number, positioning = false): Ma
     }
     const m = world3D(PM, L, T, positioning), comp = PM.curComp?.() || PM.proj, cx = comp.w / 2, cy = comp.h / 2, f = Math.max(1, comp.w) * perspectiveAmount(PM, L, T) / 36;
     return [m[0] + cx * m[2] / f, m[1] + cy * m[2] / f, m[2] / f, m[4] + cx * m[6] / f, m[5] + cy * m[6] / f, m[6] / f, m[12] + cx * m[14] / f, m[13] + cy * m[14] / f, 1 + m[14] / f];
+}
+/** A front-facing plane with constant perspective divide is exactly affine.
+ * Tilted or behind-camera planes retain the full perspective source path. */
+export function affinePlane(m: Readonly<Mat3>): [number, number, number, number, number, number] | null {
+    if (m[2] !== 0 || m[5] !== 0 || m[8] <= 0.0001 || !m.every(Number.isFinite)) return null;
+    return [m[0] / m[8], m[1] / m[8], m[3] / m[8], m[4] / m[8], m[6] / m[8], m[7] / m[8]];
 }
 export function projectPoint(m: Readonly<Mat3>, p: {
     x: number;

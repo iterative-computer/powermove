@@ -1,6 +1,6 @@
 import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
-import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane } from '../core/space-3d';
+import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane, affinePlane } from '../core/space-3d';
 import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { createPreviewWarmup } from './preview-warmup';
 import { sourceTime } from '../core/retiming';
@@ -745,20 +745,26 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     // outside that target are discarded before the effect, so its ordinary
     // children can still use clipped sources without changing the effect.
     if (canClipPreviewSources(W, H) && !L.d.paths?.length
-        && !is3DLayer(PM, L) && !hasRenderableEffects(L.fx, PM, L, T)
+        && !hasRenderableEffects(L.fx, PM, L, T)
         && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut) {
-      const visibleWorld = scaledWorld(L, T, W, H);
-      if (clip) { visibleWorld[4] -= clip.x; visibleWorld[5] -= clip.y; }
-      if (L.type === 'shape') {
-        const plan = previewShapeRaster(d, ss, visibleWorld, clip?.width ?? W, clip?.height ?? H);
-        if (plan.kind === 'outside') return null;
-        if (plan.kind === 'solid') return { solid: PM.hex2rgb(d.color), w: W, h: H, ax: 0, ay: 0, screenSpace: true };
-        if (plan.kind === 'crop') crop = plan.window;
-      } else if (!L.d.animators?.length && !L.d.styles?.length && !L.d.fontAnchorBounds
-          && !rasterIntersectsViewport(PM.textRasterGeometry(L, ss, T), visibleWorld, clip?.width ?? W, clip?.height ?? H)) {
-        // Keep visible text on the original full-bitmap path: cropping a glyph
-        // can change Canvas antialiasing even with an integer pixel offset.
-        return null;
+      const plane = is3DLayer(PM, L) ? affinePlane(planeMatrix(PM, L, T)) : null;
+      const [sx, sy] = outputScale(W, H);
+      const visibleWorld: [number, number, number, number, number, number] | null = plane
+        ? [plane[0] * sx, plane[1] * sy, plane[2] * sx, plane[3] * sy, plane[4] * sx, plane[5] * sy]
+        : !is3DLayer(PM, L) ? scaledWorld(L, T, W, H) : null;
+      if (visibleWorld) {
+        if (clip) { visibleWorld[4] -= clip.x; visibleWorld[5] -= clip.y; }
+        if (L.type === 'shape') {
+          const plan = previewShapeRaster(d, ss, visibleWorld, clip?.width ?? W, clip?.height ?? H);
+          if (plan.kind === 'outside') return null;
+          if (plan.kind === 'solid') return { solid: PM.hex2rgb(d.color), w: W, h: H, ax: 0, ay: 0, screenSpace: true };
+          if (plan.kind === 'crop') crop = plan.window;
+        } else if (!L.d.animators?.length && !L.d.styles?.length && !L.d.fontAnchorBounds
+            && !rasterIntersectsViewport(PM.textRasterGeometry(L, ss, T), visibleWorld, clip?.width ?? W, clip?.height ?? H)) {
+          // Keep visible text on the original full-bitmap path: cropping a glyph
+          // can change Canvas antialiasing even with an integer pixel offset.
+          return null;
+        }
       }
     }
     // CPU bitmaps and uploaded textures have independent memory budgets. A
@@ -940,7 +946,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
   const world = scaledWorld(L, T, W, H);
   const M = c.screenSpace ? [W, 0, 0, H, 0, 0] : PM.mul(world, [c.w, 0, 0, c.h, -c.ax, -c.ay]);
   let projected = m3(M);
-  if (is3DLayer(PM,L)) {
+  if (!c.screenSpace && is3DLayer(PM,L)) {
     const h = planeMatrix(PM, L, T), [sx, sy] = outputScale(W, H);
     projected = new Float32Array([
       h[0]*c.w*sx,h[1]*c.w*sy,h[2]*c.w,
@@ -1437,7 +1443,7 @@ const requestSourceWarmup = createPreviewWarmup(
   (layer, time) => {
     // Speculation must fit the existing cache and leave room for the next
     // visible frame. A large source keeps the normal demand-driven path.
-    if (layer.d.paths?.length || is3DLayer(PM, layer)) return;
+    if (layer.d.paths?.length) return;
     const W = GL.canvas.width, H = GL.canvas.height;
     PM.scope.push(PM.proj); PM.beginEval(time);
     previewViewportActive = !!GL.previewViewport; previewSourceClipping = true; preparingSource = true;

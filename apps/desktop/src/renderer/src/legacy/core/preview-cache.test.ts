@@ -6,12 +6,13 @@ vi.mock('./frame-preparation', () => ({ prepareFrame: vi.fn(async () => {}) }));
 function fixture() {
   const listeners = new Map<string, Array<() => void>>();
   const bitmap = { close: vi.fn() };
-  const canvas = { style: {}, getContext: () => ({ drawImage: vi.fn() }), remove: vi.fn() };
+  const drawImage = vi.fn();
+  const canvas = { style: {}, getContext: () => ({ drawImage }), remove: vi.fn() };
   vi.stubGlobal('document', { createElement: () => canvas });
   vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
   vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
-  const audio = { running: true, start: vi.fn(() => { audio.running = true; }), pause: vi.fn(() => { audio.running = false; }) };
+  const audio = { running: true, seek: vi.fn(), start: vi.fn(() => { audio.running = true; }), pause: vi.fn(() => { audio.running = false; }) };
   const PM: any = {
     proj: { id: 'project', fps: 30, dur: 1 / 30, work: [0, 1 / 30] },
     time: 0, playing: true, Audio: audio,
@@ -66,4 +67,18 @@ describe('cached preview audio ownership', () => {
     expect(audio.running).toBe(true);
     expect(audio.pause).not.toHaveBeenCalled();
   });
+});
+
+it('starts at frame zero when the first RAF timestamp predates playback setup', async () => {
+  vi.useFakeTimers();
+  const { PM, bitmap, canvas, audio } = fixture();
+  PM.proj.work = [0, 2 / 30];
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync();
+  await prepared;
+  const tick = vi.mocked(requestAnimationFrame).mock.calls[0]![0];
+  tick(performance.now() - 1);
+  expect(canvas.getContext().drawImage).toHaveBeenCalledWith(bitmap, 0, 0);
+  expect(PM.time).toBe(0);
+  expect(audio.seek).not.toHaveBeenCalled();
 });
