@@ -194,6 +194,7 @@
       aria-atomic="false"
       bind:this={scroller}
       onscroll={onScroll}
+      data-overflow-bottom={showJump ? '1' : '0'}
     >
       {#key agentState.threadId}<Conversation {PM} />{/key}
     </div>

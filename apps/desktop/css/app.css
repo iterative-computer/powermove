@@ -168,9 +168,32 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
    own material without adding another outline around the clipped contents. */
 .dock:is(#dock-left,#dock-right){overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:none;border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing)}
 .dock:is(#dock-left,#dock-right)::-webkit-scrollbar{display:none}
-/* Fluid panels must shrink as their neighbour grows during a splitter drag.
-   Their explicit minimum height protects the chrome; fixed panels retain
-   flex-shrink:0 from the layout, and the column scrolls if minimums overflow. */
+/* Scroll affordance: the column's hidden edge fades out, so a scrollable dock
+   never looks the same as a full one. Animating the length needs @property —
+   a bare custom property would jump between the two states. */
+@property --dock-fade-top{syntax:'<length>';inherits:false;initial-value:0px}
+@property --dock-fade-bottom{syntax:'<length>';inherits:false;initial-value:0px}
+.dock:is(#dock-left,#dock-right){
+  --dock-fade:28px;
+  /* The mask is painted against the border box, so it stays at the column's
+     edges instead of scrolling away with the panels. */
+  mask-image:linear-gradient(to bottom,
+    transparent 0,
+    #000 var(--dock-fade-top),
+    #000 calc(100% - var(--dock-fade-bottom)),
+    transparent 100%);
+  transition:--dock-fade-top var(--dur-2) var(--ease),--dock-fade-bottom var(--dur-2) var(--ease);
+}
+.dock:is(#dock-left,#dock-right)[data-overflow-top="1"]{--dock-fade-top:var(--dock-fade)}
+.dock:is(#dock-left,#dock-right)[data-overflow-bottom="1"]{--dock-fade-bottom:var(--dock-fade)}
+@media (prefers-reduced-motion:reduce){
+  .dock:is(#dock-left,#dock-right){transition:none}
+}
+/* Side columns scroll as one surface when their panels no longer fit. Fluid
+   panels must stay shrinkable so a neighbour can grow during a splitter drag,
+   so the overflow comes from their min-height floor (panelMinHeight), not from
+   pinning them: fixed panels already hold their size via inline flex:0 0 Npx,
+   and once the floors no longer fit, this column scrolls. */
 /* The agent's ghost holds the slot of the panel being built, so it keeps a real
    panel's sizing here too: full height in a scrolling column. */
 .dock:is(#dock-left,#dock-right)>.ui-placement-ghost{flex-shrink:0}
@@ -692,6 +715,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-connect-mark svg{width:22px;height:22px}.agent-connect-gate>b{color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}.agent-connect-gate>span{max-width:260px;margin-top:6px;font-size:var(--fs-sm);line-height:1.5}.agent-connect-button{min-width:142px;margin-top:18px}.agent-connect-gate>small{max-width:240px;margin-top:10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.45}
 .agent-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:12px var(--panel-edge-inset) 14px;scrollbar-width:none}
 .agent-scroll::-webkit-scrollbar{display:none}
+/* The jump pill and the footer card float over the transcript, so the tail the
+   reader has not reached yet has to dissolve under them rather than run into
+   them mid-word. Keyed off the same "content below" state that raises the pill,
+   so the last line stays fully lit once the thread is at its end. Animating the
+   length needs @property — a bare custom property would jump between states. */
+@property --agent-fade-bottom{syntax:'<length>';inherits:false;initial-value:0px}
+.agent-scroll{mask-image:linear-gradient(to bottom,#000 calc(100% - var(--agent-fade-bottom)),transparent 100%);transition:--agent-fade-bottom var(--dur-2) var(--ease)}
+.agent-scroll[data-overflow-bottom="1"]{--agent-fade-bottom:44px}
+@media (prefers-reduced-motion:reduce){.agent-scroll{transition:none}}
 .agent-scroll,.agent-scroll *{user-select:text;-webkit-user-select:text}
 /* Long commands, URLs and streamed word spans must contribute a shrinkable
    minimum width. Hiding the scrollbar alone leaves a horizontal scroll range. */

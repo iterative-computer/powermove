@@ -170,6 +170,16 @@ export function movePanelBy(ws: Workspace, id: string, delta: number): boolean {
   return true;
 }
 
+/**
+ * Floor a panel may shrink to in a dock column. Side columns scroll only when
+ * their panels stop crushing, so this floor is what makes the overflow real —
+ * and it must match `clampPanelHeight`'s, or a splitter drag would fight the
+ * DOM minimum it is dragging against.
+ */
+export function panelMinHeight(spec: PanelSpec, def: Record<string, any> = {}): number {
+  return Math.max(72, Number(spec.min ?? def.min) || 88);
+}
+
 export function applyPanelSize(el: HTMLElement, spec: PanelSpec, def: Record<string, any>): void {
   if (keepPanelAtSetHeight(spec)) {
     el.style.setProperty('--set-panel-height', `${spec.size}px`);
