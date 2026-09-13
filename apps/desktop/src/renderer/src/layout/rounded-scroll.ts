@@ -31,8 +31,18 @@ export function roundedScroll(node: HTMLElement) {
     panel.style.borderRadius = original.borderRadius;
     originals.delete(panel);
   };
+  /* Tell the column whether content is hidden above or below, so CSS can fade
+     that edge. Without it a full column looks identical to a scrollable one. */
+  const markScrollEdges = () => {
+    const remaining = node.scrollHeight - node.clientHeight;
+    // Sub-pixel dock heights leave a fractional remainder at either end.
+    const scrollable = remaining > 1;
+    node.dataset.overflowTop = scrollable && node.scrollTop > 1 ? '1' : '0';
+    node.dataset.overflowBottom = scrollable && node.scrollTop < remaining - 1 ? '1' : '0';
+  };
   const update = () => {
     frame = 0;
+    markScrollEdges();
     const bounds = node.getBoundingClientRect();
     const chrome = getComputedStyle(node);
     const radius = parseFloat(chrome.borderTopLeftRadius);
@@ -74,5 +84,7 @@ export function roundedScroll(node: HTMLElement) {
     resize.disconnect();
     mutations.disconnect();
     for (const panel of originals.keys()) restore(panel);
+    delete node.dataset.overflowTop;
+    delete node.dataset.overflowBottom;
   } };
 }

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import type { PMRegistry } from '../legacy/registry';
   import { clampPanelHeight, resolvePairResize, transferPanelHeights } from './geometry';
-  import { applyPanelSize, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
+  import { applyPanelSize, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
 
   let {
     PM,
@@ -117,7 +117,7 @@
     minimum = 200;
     maximum = 760;
   };
-  const panelMin = (spec: PanelSpec): number => Math.max(72, Number(spec.min || PM.PANELS[spec.id]?.min) || 88);
+  const panelMin = (spec: PanelSpec): number => panelMinHeight(spec, PM.PANELS[spec.id] || {});
   const horizontalGeometry = () => {
     const { resize, spec, other, sign } = horizontalPair();
     const element = panelElement(spec);

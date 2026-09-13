@@ -5,7 +5,7 @@ import { flushSync } from 'svelte';
 import type { PMRegistry } from '../legacy/registry';
 import { install as installLegacyLayout } from '../legacy/ui/layout';
 import { installSvelteLayout, unmountSvelteLayout } from './install';
-import type { Workspace } from './model';
+import { panelMinHeight, type Workspace } from './model';
 import contractText from '../../../../tests-vitest/fixtures/dom-contract.json?raw';
 
 const domContract = JSON.parse(contractText) as {
@@ -513,5 +513,26 @@ describe('Svelte DockLayout panel pool', () => {
     expect(body.style.display).toBe('none');
     expect(PM.Layout.setCollapsed('beta', false)).toBe(true);
     expect(panel.style.flex).toBe('0 0 140px');
+  });
+
+  /* A side column can only scroll if its panels stop crushing. Regression for
+     the floor being dropped to 56px while the splitter still clamped at 88,
+     which let fluid panels shrink past the point where the column overflowed. */
+  it('floors panels at the same minimum the splitter clamps to, so side docks overflow', () => {
+    register(PM, 'alpha', { min: 140 });
+    register(PM, 'viewer', { headless: true, hideMoveHandle: true });
+    register(PM, 'beta', { size: 140 });
+    installSvelteLayout(PM);
+    PM.Layout.apply(PM.WS.current);
+
+    // Fluid panel in the left dock: shrinkable, but not below the shared floor.
+    const alpha = document.getElementById('panel-alpha')!;
+    expect(alpha.style.flex).toBe('1 1 auto');
+    expect(alpha.style.minHeight).toBe(`${panelMinHeight({ id: 'alpha' }, PM.PANELS.alpha)}px`);
+    expect(alpha.style.minHeight).toBe('140px');
+
+    // A panel declaring no minimum still floors at the default, never at 56px.
+    const beta = document.getElementById('panel-beta')!;
+    expect(beta.style.minHeight).toBe('88px');
   });
 });

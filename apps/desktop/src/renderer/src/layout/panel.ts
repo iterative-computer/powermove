@@ -2,7 +2,7 @@ import type { PMRegistry } from '../legacy/registry';
 import { beginPanelDrag } from './drag';
 import { openPanelMenu } from './menu';
 import { dismissedMenu } from '../overlays/dismissal';
-import { applyPanelSize, findPanel, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { applyPanelSize, findPanel, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec, type Workspace } from './model';
 import { movePreservingFocus, parkPanel, stagePanelMove } from './portal';
 
 function makeElement<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
@@ -71,7 +71,7 @@ export function syncPanelManifest(PM: PMRegistry, id: string, spec: PanelSpec, d
   inst.dock = dock;
   inst.def = PM.PANELS[id] ?? inst.def;
   applyPanelSize(inst.el, spec, inst.def);
-  inst.el.style.minHeight = `${spec.min || 56}px`;
+  inst.el.style.minHeight = `${panelMinHeight(spec, inst.def)}px`;
   inst.el.querySelector('.ptitle')?.replaceChildren(spec.title || inst.def.title);
   setPanelCollapsed(PM, id, !!findPanel(PM.Layout.ws as Workspace, id)?.spec.collapsed, false);
   return inst.el;
@@ -116,7 +116,7 @@ export function ensurePanel(PM: PMRegistry, spec: PanelSpec, dock: DockSpec): HT
 
   Object.assign(inst, { el: element, body, header, def, spec, dock, moveHandle: null, cache: body });
   applyPanelSize(element, spec, def);
-  element.style.minHeight = `${spec.min || 56}px`;
+  element.style.minHeight = `${panelMinHeight(spec, def)}px`;
 
   body.textContent = '';
   try {

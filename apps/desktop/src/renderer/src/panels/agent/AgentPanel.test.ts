@@ -396,6 +396,26 @@ describe('AgentPanel', () => {
     expect(log.querySelector('.agent-thinking-word')).toBeNull();
   });
 
+  /* The jump pill floats over the transcript, so the same "content below"
+     state has to advertise itself to CSS — otherwise the pill lands on crisp
+     prose and hides the words underneath it. */
+  it('fades the transcript tail only while the reader is away from the end', () => {
+    renderPanel(snapshot({ legacyPhase: 'working', requestToken: 4, activity: 'Working…' }));
+    const log = target.querySelector<HTMLElement>('.agent-scroll')!;
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, value: 900 });
+    Object.defineProperty(log, 'clientHeight', { configurable: true, value: 400 });
+
+    log.scrollTop = 100;
+    flushSync(() => log.dispatchEvent(new Event('scroll')));
+    expect(log.dataset.overflowBottom).toBe('1');
+    expect(target.querySelector('[aria-label="Scroll to latest"]')).not.toBeNull();
+
+    log.scrollTop = 500; // scrollHeight - clientHeight
+    flushSync(() => log.dispatchEvent(new Event('scroll')));
+    expect(log.dataset.overflowBottom).toBe('0');
+    expect(target.querySelector('[aria-label="Scroll to latest"]')).toBeNull();
+  });
+
   it('self-heals a stale panel scope to the workspace', async () => {
     renderPanel(snapshot({ scope: 'panel:missing' }));
     await Promise.resolve();
