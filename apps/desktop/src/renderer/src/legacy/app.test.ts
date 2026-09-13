@@ -8,6 +8,7 @@ import { unpackProjectFile } from './core/project-file';
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
   else delete (globalThis as any).window;
 });
@@ -421,6 +422,53 @@ describe('legacy app install', () => {
 
     expect(PM.theme.current).toBe('dark');
     expect(memory.get('theme')).toBe('dark');
+  });
+
+  it('retries a deferred thumbnail without repeatedly saving the document during playback', async () => {
+    const { PM, timers } = appRegistry();
+    const put = vi.spyOn(PM.Projects, 'put');
+    PM.playing = true; PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(put).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 3; i++) {
+      const id = Math.max(...timers.keys()), callback = timers.get(id);
+      timers.delete(id); callback();
+    }
+    expect(put).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['readback', 'resize'])('defers a thumbnail when playback starts during %s', async stage => {
+    const { PM, timers } = appRegistry();
+    const captures: Function[] = [];
+    let finishResize!: (bitmap: any) => void;
+    const bitmap = { width: 320, height: 180, close: vi.fn() };
+    const resize = vi.fn(() => new Promise(resolve => { finishResize = resolve; }));
+    vi.stubGlobal('createImageBitmap', resize);
+    PM.GL.canvas = { width: 640, height: 360, toBlob: vi.fn((callback: Function) => captures.push(callback)) };
+    const encode = vi.fn(() => 'data:image/jpeg;base64,preview');
+    const create = window.document.createElement;
+    window.document.createElement = ((tag: string) => tag === 'canvas'
+      ? { getContext: () => ({ drawImage() {} }), toDataURL: encode }
+      : create(tag)) as any;
+    PM.Projects.upsertMeta = vi.fn();
+    PM.autosave(); await timers.get(PM.app.saveTimer)();
+    const capture = captures.shift()!;
+    if (stage === 'readback') PM.playing = true;
+    capture(new Blob(['frame']));
+    if (stage === 'resize') { PM.playing = true; finishResize(bitmap); }
+    await Promise.resolve(); await Promise.resolve();
+    expect(encode).not.toHaveBeenCalled();
+    expect(PM.Projects.upsertMeta).not.toHaveBeenCalled();
+    if (stage === 'resize') expect(bitmap.close).toHaveBeenCalledOnce();
+    else expect(resize).not.toHaveBeenCalled();
+    PM.playing = false;
+    const id = Math.max(...timers.keys()), retry = timers.get(id);
+    timers.delete(id); retry();
+    captures.shift()!(new Blob(['new frame']));
+    finishResize(bitmap);
+    await Promise.resolve(); await Promise.resolve();
+    expect(encode).toHaveBeenCalledOnce();
+    expect(PM.Projects.upsertMeta).toHaveBeenCalledWith(expect.objectContaining({ id: PM.proj.id, thumb: 'data:image/jpeg;base64,preview' }));
   });
 
   it('includes library mutations in autosave', () => {

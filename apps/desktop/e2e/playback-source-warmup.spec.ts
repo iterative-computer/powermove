@@ -1,9 +1,10 @@
 import { expect, test } from './helpers/app';
 
-test('prepares a dense group entrance before playback reaches its first frame', async ({ session }) => {
+for (const paused of [false, true]) {
+test(`prepares a dense group entrance while ${paused ? 'paused just before it' : 'playing'}`, async ({ session }) => {
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM.GL.gl));
-  await page.evaluate(() => {
+  await page.evaluate(paused => {
     const PM = (window as any).PM;
     const p = PM.mkProject({ name: 'Dense entrance', w: 640, h: 360, dur: 10, fps: 30 });
     p.layers = Array.from({ length: 200 }, (_, i) => PM.mkLayer('shape', {
@@ -16,8 +17,9 @@ test('prepares a dense group entrance before playback reaches its first frame', 
     (window as any).warmCalls = 0;
     const raster = PM.raster;
     PM.raster = (...args: any[]) => { if (args[2] === 4 && PM.time < 4) (window as any).warmCalls++; return raster(...args); };
-    PM.setTime(2.1); PM.play();
-  });
+    PM.setTime(paused ? 119 / 30 : 2.1);
+    if (!paused) PM.play();
+  }, paused);
   await expect.poll(() => page.evaluate(() => (window as any).warmCalls), { timeout: 1800 }).toBeGreaterThanOrEqual(200);
   const result = await page.evaluate(() => {
     const PM = (window as any).PM;
@@ -42,6 +44,8 @@ test('prepares a dense group entrance before playback reaches its first frame', 
   expect(result.draws).toBeGreaterThanOrEqual(200);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+}
 
 test('fitted previews skip offscreen oversized sources and keep the rendered pixels', async ({ session }) => {
   await session.page.waitForFunction(() => Boolean((window as any).PM.GL.gl));

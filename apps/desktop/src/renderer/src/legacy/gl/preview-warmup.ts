@@ -40,7 +40,10 @@ export function createPreviewWarmup(
       pending = false;
       const current = state();
       if (current.blocked || current.time < lastTime || requestedProject !== current.project || requestedKey !== current.key) {
-        queue = []; return;
+        queue = [];
+        // A paused redraw may already have requested the new key while this
+        // slice was pending. Requeue it now; there may be no subsequent frame.
+        request(); return;
       }
       const start = now();
       while (queue.length && now() - start < 2 && deadline.timeRemaining() > 1) {

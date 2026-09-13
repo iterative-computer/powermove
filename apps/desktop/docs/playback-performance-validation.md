@@ -24,3 +24,10 @@ PM_PERF_PROJECT=/absolute/path/to/copied-project.json bun run test:e2e -- compos
 The profile reports all frame timings, texture uploads, cache bytes and sampled scrubs across the full composition. It does not establish audio playback performance when referenced media files are absent from the copy.
 
 Final validation: 1,870 unit tests passed (one intentionally skipped); 29 hidden Electron checks passed; typechecking and all 10 extension boundaries passed. After the final import-only boundary corrections, the affected keymap and property-reveal tests passed again.
+
+
+Follow-up for the opening seconds and frame 00:03:29: idle source preparation now also runs while paused near an entrance, and a cancelled queue reschedules itself after a font or preview-size change. The audio device is prepared while an audible project is idle; the transport clock starts after synchronous audio setup, preserving the opening frames even on a cold device.
+
+Profiling also found a 53 ms synchronous thumbnail readback after playback had started. Thumbnail completion now rechecks playback/navigation/export ownership after both asynchronous stages. Its deferred retry captures only the thumbnail instead of serializing the entire project every 500 ms.
+
+The final isolated profile included the composition's actual MP3. Playback from zero and from 00:03:29 reached the window entrance with zero texture uploads; CPU render time was 3.4 ms and 4.0 ms respectively. Entrance intervals stayed around 33 ms and neither run reported a main-thread long task. The earlier nearby-start run required 143 uploads, 15.4 ms of CPU rendering, and 32.6 ms of GPU work on the entrance frame. Timings remain dependent on background machine load. Deterministic regression tests cover the delayed thumbnail callbacks, repeated thumbnail retries, cancelled idle queues, cold audio clock initialization, and paused source preparation with pixel parity.

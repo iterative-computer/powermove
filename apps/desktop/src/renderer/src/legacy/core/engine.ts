@@ -119,6 +119,9 @@ PM.play = () => {
   PM.preparedVideoFrames=null;
   PM.playing = true;
   lastRenderTime = NaN;
+  // AudioContext construction can block the first Play on some devices. Do
+  // that setup before starting the transport clock so it cannot skip frames.
+  PM.Audio.start(PM.time);
   clock.last = window.performance.now();
   // Paused redraws are demand-driven. Start a new measurement window here so
   // idle time and the previous playback session cannot depress the FPS readout.
@@ -126,7 +129,6 @@ PM.play = () => {
   PM.invalidate('status');
   clock.base = PM.time;
   clock.origin=clock.last;clock.cycle=0;
-  PM.Audio.start(PM.time);
   PM.bus.emit('transport');
   PM.invalidate('ui');
 };
