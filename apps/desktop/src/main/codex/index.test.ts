@@ -147,6 +147,8 @@ describe('registerCodexIpc', () => {
   beforeEach(() => {
     handlers.clear();
     vi.clearAllMocks();
+    mocks.toolSession.changed = true;
+    mocks.toolFinish.mockResolvedValue({ changed: true, revision: 2, historyId: 'native-history-1' });
     registerCodexIpc(ipcMain as never, {
       getWindow: () => null,
       userData: '/tmp/powermove-index-test',
@@ -231,6 +233,38 @@ describe('registerCodexIpc', () => {
 
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+  });
+
+  it('gives editor App Server runs a live inspection tool session', async () => {
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null,
+      userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles,
+      isTrustedSender: () => true,
+      codexBinaryPref: () => null,
+      openExternal: async () => undefined,
+      agentToolServerPath: '/test/mcp-server.mjs',
+      agentToolCommand: '/test/electron'
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    mocks.toolSession.changed = false;
+    mocks.toolFinish.mockResolvedValueOnce({ changed: false, revision: 2, historyId: 'native-history-1' });
+    const owner = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+
+    expect(mocks.toolOpenSession).toHaveBeenCalledWith({
+      runId: 'ipc-run-1234', owner, baseRevision: 0
+    });
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'editor' }),
+      expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
+    ));
+    mocks.resolve({ ok: true, text: '{"kind":"panels"}', access: 'editor' });
+
+    await expect(pending).resolves.toEqual({
+      ok: true, text: '{"kind":"panels"}', access: 'editor'
+    });
+    expect(mocks.toolFinish).toHaveBeenCalledExactlyOnceWith(true);
   });
 
   it('gives autonomous native providers live tools and does not apply duplicate final commands', async () => {

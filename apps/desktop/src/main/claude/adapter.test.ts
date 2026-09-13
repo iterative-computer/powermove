@@ -71,4 +71,27 @@ describe('Claude CLI adapter', () => {
     expect(allowed).toContain('mcp__powermove__get_project_state');
     expect(allowed).toContain('mcp__powermove__apply_commands');
   });
+
+  it('limits editor runs to live Powermove inspection and capture tools', () => {
+    const nativeTools = {
+      command: '/Applications/Powermove.app/Contents/MacOS/Powermove',
+      args: ['/Applications/Powermove.app/Contents/Resources/agent-tools/mcp-server.mjs'],
+      env: { ELECTRON_RUN_AS_NODE: '1', POWERMOVE_AGENT_TOOL_TOKEN: 'secret' }
+    };
+    const argv = buildClaudeArgv({
+      schema,
+      prompt: 'Inspect the built-in inspector',
+      imagePaths: [],
+      model: 'sonnet',
+      reasoningEffort: 'high',
+      sessionId: null,
+      access: 'editor',
+      nativeTools
+    });
+    const allowed = argv[argv.indexOf('--allowedTools') + 1]!;
+    expect(allowed).toContain('mcp__powermove__capture_panel');
+    expect(allowed).toContain('mcp__powermove__render_frames');
+    expect(allowed).not.toContain('mcp__powermove__apply_commands');
+    expect(allowed).not.toContain('mcp__powermove__computer_use_panel');
+  });
 });

@@ -1,7 +1,11 @@
 import type { CodexAccess, ReasoningEffort } from '../../shared/ipc';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
 import { modelEffort } from '../../shared/agent-models';
-import { POWERMOVE_MCP_TOOL_NAMES, type NativeMcpServerConfig } from '../agent-tools/spec';
+import {
+  POWERMOVE_LIVE_INSPECTION_MCP_TOOL_NAMES,
+  POWERMOVE_MCP_TOOL_NAMES,
+  type NativeMcpServerConfig
+} from '../agent-tools/spec';
 
 const PROJECT_TOOLS = 'Read,Glob,Grep,Write,Edit,Bash,WebSearch,WebFetch';
 const EDITOR_TOOLS = 'Read,Glob,Grep';
@@ -42,6 +46,9 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
   const projectTools = options.nativeTools
     ? `${PROJECT_TOOLS},${POWERMOVE_MCP_TOOL_NAMES.join(',')}`
     : PROJECT_TOOLS;
+  const editorTools = options.nativeTools
+    ? `${EDITOR_TOOLS},${POWERMOVE_LIVE_INSPECTION_MCP_TOOL_NAMES.join(',')}`
+    : EDITOR_TOOLS;
   const argv = [
     '--print',
     '--output-format', 'stream-json',
@@ -67,8 +74,8 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
     argv.push(
       '--permission-mode', options.access === 'editor' ? 'dontAsk' : 'acceptEdits',
       '--settings', STRICT_SANDBOX,
-      '--tools', options.access === 'editor' ? EDITOR_TOOLS : projectTools,
-      '--allowedTools', options.access === 'editor' ? EDITOR_TOOLS : projectTools
+      '--tools', options.access === 'editor' ? editorTools : projectTools,
+      '--allowedTools', options.access === 'editor' ? editorTools : projectTools
     );
   }
 

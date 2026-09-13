@@ -115,5 +115,26 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   }
 ] as const;
 
+/** Read-only project inspection plus the minimum layout action required to
+ * make a hidden panel observable. Editor/planning runs must never receive the
+ * project- or control-mutating tools from the complete agent tool set. */
+export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
+  'get_project_state',
+  'get_panel_layout',
+  'open_panel',
+  'get_panel_state',
+  'capture_panel',
+  'get_workspace_state',
+  'render_frames'
+] as const;
+
+const liveInspectionToolNames = new Set<string>(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES);
+
+export const POWERMOVE_LIVE_INSPECTION_TOOLS = POWERMOVE_AGENT_TOOLS.filter((tool) =>
+  liveInspectionToolNames.has(tool.name));
+
 export const POWERMOVE_MCP_TOOL_NAMES = POWERMOVE_AGENT_TOOLS.map((tool) =>
   `mcp__powermove__${tool.name}`);
+
+export const POWERMOVE_LIVE_INSPECTION_MCP_TOOL_NAMES = POWERMOVE_LIVE_INSPECTION_TOOL_NAMES.map((tool) =>
+  `mcp__powermove__${tool}`);
