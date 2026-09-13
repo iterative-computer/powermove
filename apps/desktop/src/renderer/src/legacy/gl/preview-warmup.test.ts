@@ -31,6 +31,18 @@ describe('preview source warmup', () => {
     f.run(); expect(f.prepare).not.toHaveBeenCalled();
   });
 
+  it('reschedules a replaced queue even when the paused redraw happened while a slice was pending', () => {
+    const f = fixture();
+    f.request();
+    f.state.key = 'new-font-or-preview-size';
+    f.request();
+    f.run();
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.callbacks).toHaveLength(1);
+    while (f.callbacks.length) f.run();
+    expect(f.prepare).toHaveBeenCalledTimes(20);
+  });
+
   it('does not force work into an exhausted idle deadline', () => {
     const f = fixture(); f.request();
     f.callbacks.shift()!({ timeRemaining: () => 0 });

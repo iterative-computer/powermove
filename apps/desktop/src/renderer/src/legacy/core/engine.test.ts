@@ -26,13 +26,13 @@ function delayedVideo(): any {
   return { el, finishPlay: () => finishPlay() };
 }
 
-function engine({ layer = null, media = null, work = [0, 10] }: any = {}): any {
+function engine({ layer = null, media = null, work = [0, 10], audioStartupDelay = 0 }: any = {}): any {
   const listeners = new Map<string, any[]>();
   const frames: any[] = [];
   let nowValue = 0;
   const audioCalls: any[] = [];
   const Audio = {
-    start(time: any) { audioCalls.push(['start', time]); },
+    start(time: any) { audioCalls.push(['start', time]); nowValue += audioStartupDelay; },
     pause() { audioCalls.push(['pause']); },
     seek(time: any) { audioCalls.push(['seek', time]); },
     tick(time: any) { audioCalls.push(['tick', time]); },
@@ -91,6 +91,16 @@ afterEach(() => {
 });
 
 describe('legacy engine install', () => {
+  it('starts the playback clock after synchronous audio device setup', () => {
+    const { PM, runFrame, audioCalls } = engine({ audioStartupDelay: 250 });
+    PM.time = 119 / 30;
+    PM.play();
+    runFrame(266);
+    expect(PM.time).toBeCloseTo(119 / 30 + .016);
+    expect(audioCalls).toContainEqual(['start', 119 / 30]);
+    expect(audioCalls.filter((call: any[]) => call[0] === 'seek')).toEqual([]);
+  });
+
   it('does not render the same project frame twice on a high refresh display', () => {
     const { PM, runFrame } = engine();
     PM.GL.gl = {}; PM.GL.render = vi.fn(); PM.animVersion = () => 1;

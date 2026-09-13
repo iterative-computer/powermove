@@ -546,17 +546,29 @@ PM.SettingsUI = { open: openSettings };
    to settle. A five-second rate limit alone still allowed mid-gesture stalls. */
 let lastThumbAt = 0;
 let thumbRetry = 0;
+const thumbnailBlocked = () => PM.interactionActive?.() || PM.Viewer?.isNavigating?.() || PM.playing
+  || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active;
+function retryThumbnail(project: any) {
+  window.clearTimeout(thumbRetry);
+  thumbRetry = window.setTimeout(() => {
+    thumbRetry = 0;
+    // Retry only the preview. The document was already saved; rewriting it
+    // every half second would keep serialization work running during playback.
+    if (PM.proj === project) projectThumb();
+  }, 500);
+}
+function canFinishThumbnail(project: any) {
+  if (PM.proj !== project) return false;
+  if (!thumbnailBlocked()) return true;
+  lastThumbAt = 0;
+  retryThumbnail(project);
+  return false;
+}
 function projectThumb() {
   const now = Date.now();
   if (now - lastThumbAt < 5000) return undefined;
-  if (PM.interactionActive?.() || PM.Viewer?.isNavigating?.() || PM.playing || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active) {
-    window.clearTimeout(thumbRetry);
-    const project = PM.proj;
-    thumbRetry = window.setTimeout(() => {
-      thumbRetry = 0;
-      // Never write a thumbnail for a project that was closed or replaced.
-      if (PM.proj === project) persistCurrent(true);
-    }, 500);
+  if (thumbnailBlocked()) {
+    retryThumbnail(PM.proj);
     return undefined;
   }
   window.clearTimeout(thumbRetry); thumbRetry = 0;
@@ -566,10 +578,11 @@ function projectThumb() {
   const canvas = PM.GL?.canvas, project = PM.proj;
   if (canvas?.toBlob && typeof createImageBitmap === 'function') {
     canvas.toBlob((blob: Blob | null) => {
-      if (!blob || PM.proj !== project) return;
+      if (!blob || !canFinishThumbnail(project)) return;
       void createImageBitmap(blob, { resizeWidth: 320, resizeHeight: Math.max(1, Math.round(320 * canvas.height / canvas.width)) }).then(bitmap => {
         try {
-          if (PM.proj !== project) return;
+          // Playback may have started while readback or bitmap resizing ran.
+          if (!canFinishThumbnail(project)) return;
           const thumbnail = document.createElement('canvas'); thumbnail.width = bitmap.width; thumbnail.height = bitmap.height;
           thumbnail.getContext('2d')!.drawImage(bitmap, 0, 0);
           PM.Projects.upsertMeta({ id: project.id, name: project.name, at: Date.now(), thumb: thumbnail.toDataURL('image/jpeg', .7) });

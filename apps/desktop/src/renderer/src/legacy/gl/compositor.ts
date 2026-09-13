@@ -1430,7 +1430,7 @@ const requestSourceWarmup = createPreviewWarmup(
   () => ({
     project: PM.proj, time: PM.time,
     key: JSON.stringify([sourceGeneration, PM.animVersion?.(), GL.canvas?.width, GL.canvas?.height, GL.previewViewport, PM.quality]),
-    blocked: !GL.gl || !PM.playing || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active || PM.agentFrameCapture,
+    blocked: !GL.gl || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active || PM.agentFrameCapture,
   }),
   (layer, time) => {
     // Speculation must fit the existing cache and leave room for the next
