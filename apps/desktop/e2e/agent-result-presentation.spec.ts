@@ -39,12 +39,14 @@ test('agent results keep activity, files and composer readable at narrow widths'
     await panel.evaluate((el, width) => { (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`; }, width);
     await page.locator('.agent-scroll').evaluate(el => { el.scrollTop = 0; });
     await panel.screenshot({ path: path.join(output, `result-layout-${width}.png`) });
+    // The header reads "18 tool calls · 1 failed · …" inline; the status must
+    // stay one line tall and inside the header box at every width.
     const layout = await page.locator('.agent-tool-activity summary').evaluate(el => {
-      const title = el.querySelector(':scope > span')!.getBoundingClientRect();
-      const status = el.querySelector(':scope > em')!.getBoundingClientRect();
-      return { titleBottom: title.bottom, statusTop: status.top, statusLines: status.height / parseFloat(getComputedStyle(el.querySelector('em')!).lineHeight) };
+      const box = el.getBoundingClientRect();
+      const status = el.querySelector('em')!.getBoundingClientRect();
+      return { inside: status.left >= box.left && status.right <= box.right + 1, statusLines: status.height / parseFloat(getComputedStyle(el.querySelector('em')!).lineHeight) };
     });
-    expect.soft(layout.statusTop).toBeGreaterThanOrEqual(layout.titleBottom);
+    expect.soft(layout.inside).toBe(true);
     expect.soft(layout.statusLines).toBeLessThan(1.5);
     const composer = await page.locator('.agent-composer').evaluate(el => {
       const attach = el.querySelector('.agent-attach')!.getBoundingClientRect();

@@ -39,7 +39,8 @@ describe('assistant word reveal', () => {
     });
     const row = target.querySelector<HTMLDetailsElement>('details.agent-trace-tool')!;
     expect(row.open).toBe(false);
-    expect(row.querySelector('summary')?.textContent).toContain('1 completed · 1 failed');
+    expect(row.querySelector('summary')?.textContent).toContain('1 failed');
+    expect(row.className).toContain('is-partial');
     expect(row.querySelectorAll('.agent-tool-details > div')).toHaveLength(3);
     expect(row.querySelector('.agent-tool-details')?.textContent).toContain('Continued');
   });

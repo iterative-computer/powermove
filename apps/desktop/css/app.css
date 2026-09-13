@@ -759,22 +759,22 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
    harness idiom: thinking collapses to a header, model prose streams with a
    caret, tool work discloses compact call rows. No cards; hairlines only.
    Exactly one row carries motion. */
-.agent-trace{display:flex;flex-direction:column;gap:6px;min-width:0;padding-left:0}
+.agent-trace{display:flex;flex-direction:column;gap:8px;min-width:0;padding-left:0}
 .agent-trace p{margin:0}
 .agent-trace.is-live>*{animation:agent-fade-up 300ms cubic-bezier(.23,1,.32,1) both}
 @keyframes agent-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-.agent-trace-thought{font-size:12.5px;line-height:1.55;color:var(--tx-3)}
-.agent-trace-text{white-space:pre-wrap;font-size:13px;line-height:1.6;color:var(--tx);padding:2px 0}
+@keyframes agent-pop-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
+.agent-trace-text{white-space:pre-wrap;font-size:var(--fs-md);line-height:1.6;color:var(--tx);padding:2px 0}
 /* Streaming caret: solid while text lands, gone once it settles. */
 .agent-trace-text.is-streaming::after{content:"";display:inline-block;width:2px;height:.9em;margin-left:2px;border-radius:1px;background:var(--tx);vertical-align:-0.12em;animation:agent-caret-in 150ms ease-out both}
 @keyframes agent-caret-in{from{opacity:0}}
 /* Pre-trace shimmer line with the pixel-grid loader (harness LoadingState). */
 .agent-trace-loading{display:flex;align-items:center;gap:9px;min-width:0;padding:2px 0}
-.agent-trace-loading .agent-trace-thought{min-width:0;font-weight:var(--fw-medium);color:var(--tx-2)}
+.agent-trace-loading .agent-trace-thought{min-width:0;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-2)}
 .agent-pixel-loader{display:grid;grid-template-columns:repeat(3,4px);gap:1.5px;flex:none}
 .agent-pixel-loader>i{display:block;width:4px;height:4px;border-radius:1px;background:var(--tx);opacity:.15;animation:agent-pixel-on 650ms ease-in-out var(--cell-delay,0ms) infinite}
 @keyframes agent-pixel-on{0%,100%{opacity:.15}40%{opacity:.9}}
-.agent-trace-code{border-radius:var(--r-xs);padding:0 4px;background:var(--bg-field);font-family:var(--f-mono);font-size:12px}
+.agent-trace-code{border-radius:var(--r-xs);padding:0 4px;background:var(--ink-1);box-shadow:inset 0 0 0 var(--hairline) var(--line-2);font-family:var(--f-mono);font-size:.92em}
 /* Inside a shimmering line the parent clips its gradient to the text and sets
    color:transparent; a code chip's own background breaks that clip and leaves
    invisible text on a pill — restore a solid color for chips only. */

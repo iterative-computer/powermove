@@ -4,24 +4,31 @@
    produces a stuttering list of near-identical lines ("Read file", "Read file",
    "Read file"). Instead, consecutive tool steps collapse into ONE row with a
    natural-language label — "Ran commands, edited files, and searched the web"
-   — and thinking/text steps stay where they are so the trail keeps its
-   chronology. Ported from supermove. */
+   — reasoning folds into the same group as rows of their own, and text stays
+   where it is so the trail keeps its chronology. Ported from supermove, laid
+   out after the beautiful-ui harness. */
 
 export type { TraceStep } from './agent-state.svelte';
 import type { TraceStep } from './agent-state.svelte';
 
 export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
 
-/** One call inside a tool group — everything the expandable work log shows. */
+/** One row inside a work group: a tool call, or a stretch of reasoning.
+    Thoughts ride in the same list as calls (harness ToolChips idiom): label
+    "Thinking", the first sentence as the chip, the full text as the output. */
 export type ToolDetail = Pick<ToolStep, 'id' | 'label' | 'status'> &
   Partial<Pick<ToolStep, 'toolName' | 'detail' | 'output' | 'startedAt' | 'endedAt'>> & {
+    kind: 'tool' | 'thought';
     family: ToolFamily;
   };
 
 export interface ToolsRow {
   kind: 'tools';
   id: string;
+  /** Header text: "4 tool calls", or "Thinking" / "Thought for 4s" for reasoning alone. */
   label: string;
+  /** What was done, in words: "Ran commands and edited files". */
+  summary: string;
   status: ToolsRowStatus;
   failedCount: number;
   successCount: number;
@@ -37,6 +44,10 @@ export interface ToolsRow {
   /** Wall-clock span of the group, when the provider stamped its calls. */
   startedAt?: number;
   endedAt?: number;
+  /** Files touched by edit-family calls, for the trailing file chips. */
+  files: string[];
+  /** Number of reasoning stretches folded into this group. */
+  thoughtCount: number;
 }
 
 /* Icon family for a tool row. Coarser than `toolAction`: the glyph only needs
@@ -79,7 +90,6 @@ export function durationLabel(ms: number): string {
 type RowMeta = { renderKey: string; pulsing: boolean };
 
 export type ActivityRow =
-  | (Extract<TraceStep, { kind: 'thought' }> & RowMeta)
   | (Extract<TraceStep, { kind: 'text' }> & RowMeta)
   | (ToolsRow & RowMeta);
 
@@ -126,76 +136,124 @@ export function joinActions(actions: string[]): string {
 }
 
 type ToolStep = Extract<TraceStep, { kind: 'tool' }>;
+type ThoughtStep = Extract<TraceStep, { kind: 'thought' }>;
+type WorkStep = ToolStep | ThoughtStep;
 
-export function groupedToolRow(steps: ToolStep[]): ToolsRow {
+/* The chip for a thought is its opening: first sentence, one line. */
+export function thoughtLead(text: string): string {
+  const flat = String(text ?? '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+  const sentence = flat.match(/^.{12,}?[.!?](\s|$)/)?.[0]?.trim();
+  const lead = sentence && sentence.length < flat.length ? sentence : flat;
+  return lead.length > 96 ? `${lead.slice(0, 95).trimEnd()}…` : lead;
+}
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+}
+
+function thoughtDetail(step: ThoughtStep): ToolDetail {
+  const span = step.startedAt !== undefined && step.endedAt !== undefined ? durationLabel(step.endedAt - step.startedAt) : '';
+  return {
+    kind: 'thought',
+    id: step.id,
+    label: step.live ? 'Thinking' : span ? `Thought for ${span}` : 'Thought',
+    status: step.live ? 'running' : 'done',
+    detail: thoughtLead(step.label),
+    output: step.label,
+    startedAt: step.startedAt,
+    endedAt: step.endedAt,
+    family: 'think'
+  };
+}
+
+export function groupedToolRow(work: WorkStep[]): ToolsRow {
+  const steps = work.filter((step): step is ToolStep => step.kind === 'tool');
+  const thoughts = work.filter((step): step is ThoughtStep => step.kind === 'thought');
   const actions = [...new Set(steps.map((step) => toolAction(step.toolName)))];
-  const label = joinActions(actions);
   const failedCount = steps.filter((step) => step.status === 'error').length;
   const successCount = steps.filter((step) => step.status === 'done').length;
   const settledCount = steps.filter((step) => step.status !== 'running').length;
+  const thinking = thoughts.some((step) => step.live);
   // `continued` is a bookkeeping state (the call was resumed), not a failure —
   // it stops pulsing like `done`, but is not counted as confirmed success.
   // A failed exploratory check must not paint successful
   // commands and edits in the same batch as wholly failed.
-  const status: ToolsRowStatus = steps.some((step) => step.status === 'running')
+  const status: ToolsRowStatus = steps.some((step) => step.status === 'running') || thinking
     ? 'running'
     : failedCount === settledCount && failedCount > 0
       ? 'error'
       : failedCount > 0
         ? 'partial'
       : 'done';
+  const started = work.map((step) => step.startedAt).filter((value): value is number => typeof value === 'number');
+  const ended = work.map((step) => step.endedAt).filter((value): value is number => typeof value === 'number');
+  const span = started.length && ended.length && status !== 'running' ? durationLabel(Math.max(...ended) - Math.min(...started)) : '';
+  // The header counts calls (harness "4 tool calls"); the natural-language
+  // summary of what was done stays reachable as the tooltip. A reasoning-only
+  // stretch reads like the harness ThinkingState header.
+  const label = steps.length
+    ? `${steps.length} tool ${steps.length === 1 ? 'call' : 'calls'}`
+    : thinking ? 'Thinking' : span ? `Thought for ${span}` : 'Thought';
   const current = [...steps].reverse().find((step) => step.status === 'running' && step.label);
-  const started = steps.map((step) => step.startedAt).filter((value): value is number => typeof value === 'number');
-  const ended = steps.map((step) => step.endedAt).filter((value): value is number => typeof value === 'number');
   const row: ToolsRow = {
     kind: 'tools',
-    id: `tools-${steps[0]?.id ?? steps[0]?.toolName ?? 'activity'}`,
-    label: label.charAt(0).toUpperCase() + label.slice(1),
+    id: `tools-${work[0]?.id ?? 'activity'}`,
+    label,
+    summary: steps.length ? joinActions(actions).replace(/^./, (c) => c.toUpperCase()) : label,
     status,
     failedCount,
     successCount,
     toolCount: steps.length,
+    thoughtCount: thoughts.length,
     currentLabel: current?.label,
     currentDetail: current?.detail,
-    details: steps
-      .filter((step) => Boolean(step.label))
-      .map(({ id, label, status, toolName, detail, output, startedAt, endedAt }) => ({
-        id, label, status, toolName, detail, output, startedAt, endedAt, family: toolFamily(toolName)
-      }))
+    details: work.map((step) => step.kind === 'thought'
+      ? thoughtDetail(step)
+      : {
+          kind: 'tool' as const,
+          id: step.id, label: step.label, status: step.status, toolName: step.toolName,
+          detail: step.detail, output: step.output, startedAt: step.startedAt, endedAt: step.endedAt,
+          family: toolFamily(step.toolName)
+        }).filter((detail) => Boolean(detail.label)),
+    files: [...new Set(steps
+      .filter((step) => toolFamily(step.toolName) === 'edit' && step.detail && step.status !== 'error')
+      .flatMap((step) => String(step.detail).split(/,\s*/).map((part) => basename(part.trim())).filter(Boolean)))]
   };
   if (started.length) row.startedAt = Math.min(...started);
-  // A settled group's end is its last completed call; a running group has none yet.
-  if (status !== 'running' && ended.length === settledCount && ended.length) row.endedAt = Math.max(...ended);
+  // A settled group's end is its last completed step; a running group has none yet.
+  if (status !== 'running' && ended.length) row.endedAt = Math.max(...ended);
   // Powermove keeps what supermove drops: once a group settles, the individual
   // labels stay reachable as a tooltip. Detail without visual noise.
   if (status !== 'running' && steps.length > 1) {
-    row.detail = steps
+    row.detail = [row.summary, ...steps
       .filter((step) => Boolean(step.label))
       .map((step) => failedCount > 0
         ? `${step.status === 'error' ? 'Failed' : step.status === 'continued' ? 'Continued' : 'Succeeded'} · ${step.label}`
-        : step.label);
+        : step.label)];
   }
   return row;
 }
 
 export function activityRows(steps: TraceStep[] = []): ActivityRow[] {
   const rows: Array<TraceStep | ToolsRow> = [];
-  let tools: ToolStep[] = [];
-  const flushTools = (): void => {
-    if (!tools.length) return;
-    rows.push(groupedToolRow(tools));
-    tools = [];
+  let work: WorkStep[] = [];
+  const flushWork = (): void => {
+    if (!work.length) return;
+    rows.push(groupedToolRow(work));
+    work = [];
   };
 
+  // Reasoning and calls share one group; only model prose breaks it, so the
+  // trail reads text → work → text in stream order.
   for (const step of steps) {
-    if (step?.kind === 'tool') {
-      tools.push(step);
+    if (step?.kind === 'tool' || step?.kind === 'thought') {
+      work.push(step);
     } else {
-      flushTools();
-      if (step?.kind === 'thought' || step?.kind === 'text') rows.push(step);
+      flushWork();
+      if (step?.kind === 'text') rows.push(step);
     }
   }
-  flushTools();
+  flushWork();
 
   // Replayed or interleaved provider events can leave more than one historical
   // row marked live/running. Preserve those states for diagnostics, but give
@@ -204,7 +262,7 @@ export function activityRows(steps: TraceStep[] = []): ActivityRow[] {
   let pulsingIndex = -1;
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index] as any;
-    if ((row.kind === 'thought' && row.live) || (row.kind === 'tools' && row.status === 'running')) {
+    if (row.kind === 'tools' && row.status === 'running') {
       pulsingIndex = index;
     }
   }

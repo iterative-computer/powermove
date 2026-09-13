@@ -10,7 +10,6 @@
   import { glowFade } from './motion';
   import ModResult from './ModResult.svelte';
   import { modResultForMessage } from './mod-result';
-  import ThoughtRow from './ThoughtRow.svelte';
   import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
 
@@ -40,9 +39,7 @@
 {#if message.role === 'trace'}
   <div class="agent-trace is-archived">
     {#each traceRows as row (row.renderKey)}
-      {#if row.kind === 'thought'}
-        <ThoughtRow label={row.label} startedAt={row.startedAt} endedAt={row.endedAt} />
-      {:else if row.kind === 'text'}
+      {#if row.kind === 'text'}
         <TextRow text={row.text} />
       {:else if row.kind === 'tools'}
         <ToolActivity {row} />

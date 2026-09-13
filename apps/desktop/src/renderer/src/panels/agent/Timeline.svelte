@@ -1,15 +1,14 @@
 <script lang="ts">
   import { agentState } from './agent-state.svelte';
   import { activityRows, type TraceStep } from './activity-rows';
-  import ThoughtRow from './ThoughtRow.svelte';
   import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
 
   let { PM: _PM }: { PM: Record<string, any> } = $props();
 
-  /* The live activity trail. Rows keep their stream order: thinking collapses
-     to a header, prose streams with a caret, tool groups disclose their calls.
-     Exactly one row carries motion at a time. */
+  /* The live activity trail. Rows keep their stream order: prose streams with
+     a caret; reasoning and tool calls share flat work groups that disclose
+     their rows. Exactly one row carries motion at a time. */
 
   /* Frozen contract from agent-state; the fallback survives an older snapshot. */
   const trace = $derived((agentState.trace ?? []) as TraceStep[]);
@@ -51,9 +50,7 @@
 {:else if rows.length}
   <div class="agent-trace is-live">
     {#each rows as row, index (row.renderKey)}
-      {#if row.kind === 'thought'}
-        <ThoughtRow label={row.label} live={row.live && running} startedAt={row.startedAt} endedAt={row.endedAt} animated={row.pulsing} />
-      {:else if row.kind === 'text'}
+      {#if row.kind === 'text'}
         <TextRow text={row.text} streaming={index === streamingIndex} animated />
       {:else}
         <ToolActivity {row} animated />
