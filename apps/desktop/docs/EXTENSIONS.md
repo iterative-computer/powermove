@@ -111,11 +111,41 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **uiState.getShaderMeta** — `getShaderMeta(layer): ShaderMeta | null` reads the compositor metadata cached for a layer.
 - **render.gl.compileError** — `compileError(key): string | null` reads the latest shader compilation diagnostic for a program key.
 - **events.fonts** — `on('fonts', families => …)` receives the complete ordered font-family list whenever the catalogue changes.
-- **host.pm** — **Deprecated**, unstable escape hatch to the legacy `PM` object; use the typed namespaces above.
-- **host.state** — **Deprecated**, unstable escape hatch to the renderer's `doc`, `sel`,
-  `transport`, and `perf` rune stores for built-in UI migrations.
+
+### Deprecated
+
+`api.host.pm` and `api.host.state` exist for compatibility with older user
+extensions only. They are unstable, untyped escape hatches; new code must use the
+typed namespaces above. Both forms, plus the standalone `PM` identifier, fail the
+built-in extension boundary lint.
 
 ## Patterns
+
+### Panels that import media and drop onto the timeline
+
+See the complete, commented [Media Browser sample](samples/media-browser/README.md).
+It fetches each source URL as a `Blob`, wraps it in a named `File`, and calls
+`api.assets.import(file)`. That is the durable asset API; `api.media.importFiles`
+is the higher-level choice when files should be imported and placed immediately.
+
+Asset drags carry `{ id, name, kind, dur? }` under `api.dnd.ASSET_MIME`. FX drags
+carry `{ kind: 'effect' | 'transition', id, label }` under `api.dnd.FX_MIME`.
+Call `api.dnd.startAssetDrag(event.dataTransfer, payload)` instead of spelling
+the MIME string yourself. Set `api.dnd.mediaDrag = payload` for the duration of
+an in-app asset drag so the timeline can render its preview during `dragover`,
+then clear it on `dragend`.
+
+Place a panel at a stable dock position with:
+
+```ts
+api.panels.open('media-browser', { dock: 'left', index: 0 });
+```
+
+Asset import and project history are deliberately separate. The imported asset
+stays in the media library; dropping it on the timeline creates the undoable
+layer edit. `api.project.undo()` is the simple project façade. `api.history.undo()`
+targets the same history stack and returns whether an entry was undone; use the
+rest of `api.history` only when bracketing lower-level mutations yourself.
 
 **Add an effect**
 ```ts

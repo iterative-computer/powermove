@@ -476,7 +476,11 @@ if (!hasSingleInstanceLock) {
       ['api.ts', 'src/renderer/src/kernel/api.ts'],
       ['extensions.ts', 'src/shared/extensions.ts'],
       ['project.ts', 'src/renderer/src/core/types/project.ts'],
-      ['commands.ts', 'src/renderer/src/core/types/commands.ts']
+      ['commands.ts', 'src/renderer/src/core/types/commands.ts'],
+      ['samples/media-browser/manifest.json', 'docs/samples/media-browser/manifest.json'],
+      ['samples/media-browser/index.ts', 'docs/samples/media-browser/index.ts'],
+      ['samples/media-browser/MediaBrowserPanel.svelte', 'docs/samples/media-browser/MediaBrowserPanel.svelte'],
+      ['samples/media-browser/README.md', 'docs/samples/media-browser/README.md']
     ];
     const apiPackFiles = async (): Promise<Array<{ name: string; text: string }>> => {
       const files: Array<{ name: string; text: string }> = [];

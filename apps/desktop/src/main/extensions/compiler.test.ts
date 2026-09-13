@@ -28,11 +28,21 @@ afterEach(async () => {
 });
 
 describe('compileExtension', () => {
-  it('compiles every source-heavy built-in through the same forkable extension pipeline', async () => {
+  it('compiles every built-in and the teaching sample through the same forkable extension pipeline', async () => {
     const outDir = await temporaryDirectory();
-    for (const id of ['viewer', 'timeline', 'inspector']) {
-      const dir = path.resolve('src/extensions', id);
-      const result = await compileExtension({ dir, entry: 'index.ts', outDir });
+    const builtInRoot = path.resolve('src/extensions');
+    const builtIns = (await readdir(builtInRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => ({ id: entry.name, dir: path.join(builtInRoot, entry.name) }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const extensions = [
+      ...builtIns,
+      { id: 'media-browser', dir: path.resolve('docs/samples/media-browser') }
+    ];
+
+    for (const { id, dir } of extensions) {
+      const manifest = JSON.parse(await readFile(path.join(dir, 'manifest.json'), 'utf8')) as { entry?: string };
+      const result = await compileExtension({ dir, entry: manifest.entry ?? 'index.ts', outDir });
       if (!result.ok) throw new Error(`${id}: ${result.error}`);
       expect(result.bundlePath).toBe(path.join(outDir, id, 'bundle.js'));
     }

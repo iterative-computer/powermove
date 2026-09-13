@@ -10,23 +10,34 @@
  * is a violation: it would make the extension un-forkable and let built-ins
  * couple to each other outside the public API.
  *
+ * Non-test extension sources also may not mention `host.pm`, `host.state`, or
+ * the standalone `PM` identifier. Compatibility escape hatches remain public
+ * for old user extensions, but code shipped in src/extensions must teach only
+ * the typed API.
+ *
  * Exit 1 on any violation. Run: node scripts/check-boundaries.mjs
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const root = path.resolve(new URL('..', import.meta.url).pathname);
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const extRoot = path.join(root, 'src', 'extensions');
 
 const ALLOWED_BARE = [/^powermove$/, /^svelte$/, /^svelte\/.+/];
 const IMPORT_RE = /(?:^|\n)\s*(?:import|export)\s[^'"]*?from\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)|(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g;
+const LEGACY_API_RE = /host\.pm|host\.state|\bPM\b/g;
+
+function isTestFile(file) {
+  return /(?:^|[\\/])__tests__(?:[\\/]|$)|\.(?:test|spec)\.(?:ts|js|mjs|svelte)$/.test(file);
+}
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
     const p = path.join(dir, name);
     const st = statSync(p);
     if (st.isDirectory()) walk(p, out);
-    else if (/\.(ts|js|mjs|svelte)$/.test(name) && !/\.test\.ts$/.test(name)) out.push(p);
+    else if (/\.(ts|js|mjs|svelte)$/.test(name) && !isTestFile(p)) out.push(p);
   }
   return out;
 }
@@ -61,6 +72,11 @@ for (const id of extDirs) {
         console.error(`${rel}: disallowed import "${spec}" (only powermove, svelte, and in-folder relative imports)`);
         violations++;
       }
+    }
+    for (const match of text.matchAll(LEGACY_API_RE)) {
+      const line = text.slice(0, match.index).split('\n').length;
+      console.error(`${path.relative(root, file)}:${line}: forbidden legacy API reference "${match[0]}"`);
+      violations++;
     }
   }
 }

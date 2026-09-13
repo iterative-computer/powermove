@@ -1,0 +1,10 @@
+{
+  "id": "media-browser",
+  "name": "Media Browser",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "Imports images from a replaceable media source and drops them onto the timeline.",
+  "entry": "index.ts",
+  "contributes": ["panels", "commands"],
+  "author": "powermove"
+}

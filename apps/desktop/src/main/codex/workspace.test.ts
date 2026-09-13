@@ -204,6 +204,21 @@ describe('prepareAgentWorkspace', () => {
     await expect(readFile(path.join(escaped.apiPackDirectory, 'ok.ts'), 'utf8')).resolves.toBe('ok');
     await expect(readFile(path.join(escaped.apiPackDirectory, '..', 'outside.ts'), 'utf8')).rejects.toThrow();
 
+    const nested = await prepareAgentWorkspace(
+      request(),
+      userData,
+      'project',
+      agentResultSchema(),
+      workspaceOptions({ apiPackFiles: [
+        { name: 'samples/media-browser/index.ts', text: 'sample' },
+        { name: 'samples/../escape.ts', text: 'nope' },
+        { name: '/abs.ts', text: 'nope' }
+      ] })
+    );
+    await expect(readFile(path.join(nested.apiPackDirectory, 'samples/media-browser/index.ts'), 'utf8')).resolves.toBe('sample');
+    await expect(readFile(path.join(nested.apiPackDirectory, 'escape.ts'), 'utf8')).rejects.toThrow();
+    await expect(readFile(path.join(nested.apiPackDirectory, 'abs.ts'), 'utf8')).rejects.toThrow();
+
     const collided = await prepareAgentWorkspace(
       request(),
       userData,

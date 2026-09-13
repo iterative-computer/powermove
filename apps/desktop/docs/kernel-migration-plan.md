@@ -166,3 +166,13 @@ rg "PM\.(TL|Viewer|Inspector|syncShaderUniforms|setTool|toolShape)\b" src/render
 
 Plus one non-runner gate per phase: a real `bun run build` and a hidden-renderer
 boot through the e2e helper that opens timeline, viewer, and inspector.
+
+## 8. Results
+
+Phase 4 removed the remaining legacy-registry references from the built-ins:
+
+| Extension | Before | After |
+|---|---:|---:|
+| timeline | 467 | 0 |
+| viewer | 286 | 0 |
+| inspector | 221 | 0 |

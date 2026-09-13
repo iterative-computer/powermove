@@ -52,6 +52,10 @@ extraResources:
     to: api-pack/project.ts
   - from: src/renderer/src/core/types/commands.ts
     to: api-pack/commands.ts
+  - from: docs/samples/media-browser
+    to: api-pack/samples/media-browser
+    filter:
+      - "**/*"
   - from: src/main/agent-tools/mcp-server.mjs
     to: agent-tools/mcp-server.mjs
 extraMetadata:
