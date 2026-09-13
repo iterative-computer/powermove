@@ -137,6 +137,21 @@ function context() {
   return state.context;
 }
 
+// Open the audio device while a paused project is idle, before Play starts
+// its clock. Do not resume a suspended context until the playback gesture.
+let contextWarmup: number | undefined;
+let contextWarmupGeneration = 0;
+function requestContextWarmup() {
+  if (state.context || contextWarmup !== undefined || PM.playing || PM.audioDisabled
+    || typeof window.requestIdleCallback !== 'function' || !hasAudibleLayers()) return;
+  const generation = contextWarmupGeneration;
+  contextWarmup = window.requestIdleCallback(() => {
+    contextWarmup = undefined;
+    if (generation !== contextWarmupGeneration || state.context || PM.playing || PM.audioDisabled || !hasAudibleLayers()) return;
+    try { context(); } catch { /* Playback owns any user-facing device error. */ }
+  });
+}
+
 function decodeArrayBuffer(ctx: any, bytes: any) {
   return new Promise((resolve: any, reject: any) => {
     let settled: any = false;
@@ -555,7 +570,7 @@ function tick(time: any) { sync(time, false); }
 
 function reconcile() {
   state.project = PM.proj || null;
-  if (PM.audioDisabled || !PM.playing) { pause(); return; }
+  if (PM.audioDisabled || !PM.playing) { pause(); requestContextWarmup(); return; }
   state.generation++;
   sync(PM.time, true);
 }
@@ -805,6 +820,9 @@ function hasAudibleLayers(project: any = PM.proj) {
 
 const Audio: any = PM.Audio = {
   destroy() {
+    contextWarmupGeneration++;
+    if (contextWarmup !== undefined) window.cancelIdleCallback?.(contextWarmup);
+    contextWarmup = undefined;
     pause();
     state.generation++;
     if (state.context) void state.context.close();
@@ -854,6 +872,7 @@ PM.Memory?.register?.('audio', {
 
 PM.bus.on('layers', () => { invalidateAudioIndex(); reconcile(); });
 PM.bus.on('assets', reconcile);
-PM.bus.on('project', () => { invalidateAudioIndex(); reconcileProject(); });
+PM.bus.on('project', () => { invalidateAudioIndex(); reconcileProject(); requestContextWarmup(); });
+requestContextWarmup();
 publishState();
 }

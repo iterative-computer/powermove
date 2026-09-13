@@ -30,6 +30,19 @@ afterEach(async () => {
 });
 
 describe('file store', () => {
+  it('preserves legacy undo history when a renderer updates metadata only', async () => {
+    const directory = await temporaryDirectory(), store = createStore(directory);
+    await store.load();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
+    store.set('projectState.demo', { history, time: 1 });
+    store.set('projectState.demo', { time: 2 });
+    expect(store.snapshot()['projectState.demo']).toEqual({ history, time: 2 });
+    store.setSerialized!('projectState.demo', JSON.stringify({ time: 3 }));
+    await store.flushAll();
+    const reopened = createStore(directory); await reopened.load();
+    expect(reopened.snapshot()['projectState.demo']).toEqual({ history, time: 3 });
+  });
+
   it('round-trips set, snapshot, delete, and load without sharing references', async () => {
     const directory = await temporaryDirectory();
     const store = createStore(directory);
@@ -248,6 +261,27 @@ describe('file store', () => {
     expect((reopened.snapshot().takes as typeof takes)[0]!.json.length).toBe(LIMITS.storeValueBytes);
   });
 
+  it('round-trips the 33792768-byte project session reported by the editor', async () => {
+    const directory = await temporaryDirectory();
+    const store = createStore(directory);
+    await store.load();
+    const state = {
+      history: { version: 1, index: 0, entries: [{ label: 'Edit source',
+        forward: [{ path: ['source'], exists: true, value: '' }],
+        backward: [{ path: ['source'], exists: false }],
+      }] },
+      workspace: { name: 'Editing' }, time: 12,
+    };
+    state.history.entries[0]!.forward[0]!.value = 'x'.repeat(33792768 - Buffer.byteLength(JSON.stringify(state)));
+
+    store.set('projectState.Pyckwzri', state);
+    await store.flushAll();
+    expect((await fs.stat(path.join(directory, 'projectState.Pyckwzri.json'))).size).toBe(33792768);
+    const reopened = createStore(directory);
+    await reopened.load();
+    expect(reopened.snapshot()['projectState.Pyckwzri']).toEqual(state);
+  }, 30_000);
+
   it('round-trips the 168720601-byte take history reported by the editor', async () => {
     const directory = await temporaryDirectory();
     const store = createStore(directory);
@@ -336,13 +370,23 @@ describe('store IPC and quit integration', () => {
     const set = vi.fn((key: string) => {
       if (key === '../theme') throw new IpcValidationError(IPC.storeSet, `unknown store key: ${key}`);
     });
-    const store = storeStub({ set });
+    const recovery = { 'projectHistory.demo': { undo: [{ layers: [{ id: 'one' }] }], redo: [] }, takes: [{ name: 'Saved', json: '{"layers":[]}' }] };
+    const store = storeStub({ set, snapshot: () => recovery });
     registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, {
       isTrustedSender: (event) => Boolean((event as unknown as { trusted?: boolean }).trusted)
     });
     const send = vi.fn();
     const trustedEvent = { trusted: true, sender: { send }, returnValue: undefined };
     const untrustedEvent = { trusted: false, sender: { send }, returnValue: undefined };
+
+    listeners.get(IPC.storeSnapshotSerializedSync)?.(trustedEvent);
+    expect(Object.values(trustedEvent.returnValue as unknown as Record<string, string>).every(value => typeof value === 'string')).toBe(true);
+    expect(Object.fromEntries(Object.entries(trustedEvent.returnValue as unknown as Record<string, string>)
+      .map(([key, value]) => [key, JSON.parse(value)]))).toEqual({ ...recovery, __powermoveAsyncStore: true });
+    listeners.get(IPC.storeSnapshotSerializedSync)?.(untrustedEvent);
+    expect(untrustedEvent.returnValue).toEqual({});
+    listeners.get(IPC.storeSnapshotSync)?.(trustedEvent);
+    expect(trustedEvent.returnValue).toEqual({ ...recovery, __powermoveAsyncStore: true });
 
     listeners.get(IPC.storeSet)?.(untrustedEvent, { key: 'theme', value: 'dark' });
     listeners.get(IPC.storeSet)?.(trustedEvent, { key: '../theme', value: 'dark' });

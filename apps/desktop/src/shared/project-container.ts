@@ -39,6 +39,51 @@ export function encodeProjectContainer(document: any, media: ProjectContainerMed
   return result;
 }
 
+/** UTF-8 encoding also yields: a single TextEncoder call can stall on large histories. */
+export async function encodeTextChunks(text: string): Promise<Uint8Array[]> {
+  const chunks: Uint8Array[] = [], encoder = new TextEncoder();
+  let deadline = performance.now() + 4;
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(text.length, start + 256 * 1024);
+    const last = text.charCodeAt(end - 1);
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end--;
+    chunks.push(encoder.encode(text.slice(start, end))); start = end;
+    if (performance.now() >= deadline) {
+      await new Promise<void>(resolve => setTimeout(resolve, 0)); deadline = performance.now() + 4;
+    }
+  }
+  return chunks;
+}
+
+/** Reuse serialized document bytes and copy large media in bounded slices. */
+export async function encodeProjectContainerAsync(documentJSON: string | Uint8Array[], media: ProjectContainerMedia[]): Promise<Uint8Array> {
+  let offset = 0;
+  const descriptors = media.map(item => {
+    const descriptor = { id: item.id, type: item.type, offset, length: item.data.byteLength };
+    offset += item.data.byteLength;
+    return descriptor;
+  });
+  const encoder = new TextEncoder();
+  const header = [encoder.encode('{"document":'),
+    ...(typeof documentJSON === 'string' ? await encodeTextChunks(documentJSON) : documentJSON),
+    encoder.encode(',"media":' + JSON.stringify(descriptors) + '}')];
+  const headerLength = header.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(MAGIC.length + 4 + headerLength + offset);
+  result.set(MAGIC);
+  new DataView(result.buffer).setUint32(MAGIC.length, headerLength, true);
+  let cursor = MAGIC.length + 4, deadline = performance.now() + 4;
+  for (const source of [...header, ...media.map(item => item.data)]) {
+    for (let start = 0; start < source.length; start += 1024 * 1024) {
+      const chunk = source.subarray(start, start + 1024 * 1024);
+      result.set(chunk, cursor); cursor += chunk.length;
+      if (performance.now() >= deadline) {
+        await new Promise<void>(resolve => setTimeout(resolve, 0)); deadline = performance.now() + 4;
+      }
+    }
+  }
+  return result;
+}
+
 export function decodeProjectContainer(input: string | Uint8Array | ArrayBuffer): DecodedProjectContainer {
   if (typeof input === 'string') return { document: JSON.parse(input), media: [], binary: false };
   const data = bytes(input);

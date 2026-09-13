@@ -37,6 +37,12 @@ import { backgroundTesting, backgroundWindowOptions } from './background-testing
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
 
 const APP_ORIGIN = 'app://powermove';
+
+// Electron derives the default userData directory from the application name.
+// Set it before the first getPath('userData') call so development launches use
+// the same Powermove profile as packaged builds (including generated effects).
+app.setName('Powermove');
+
 // Served with X-Content-Type-Options: nosniff, so anything not listed here is
 // rejected by <video>/<audio>/WebAssembly rather than sniffed.
 const MIME_TYPES: Readonly<Record<string, string>> = {
@@ -359,8 +365,6 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.setName('Powermove');
-
   app.on('second-instance', () => {
     if (isBackgroundTest) return;
     // The listener is installed before async startup finishes. Do not let an

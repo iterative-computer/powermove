@@ -157,7 +157,8 @@ export class ClaudeRunner {
           model: req.model,
           reasoningEffort: req.reasoningEffort,
           sessionId: null,
-          access: 'editor'
+          access: 'editor',
+          nativeTools: options.nativeTools
         }), null, options);
         if (this.cancelled.has(req.id)) return failure('The Claude run was cancelled.', true);
         if (attempt.code !== 0 || attempt.resultError) return failure(humanizeFailure(attempt, 'Claude generation failed.'));

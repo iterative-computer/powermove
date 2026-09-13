@@ -1,14 +1,9 @@
 import type { PowermoveAPI } from 'powermove';
+import { propertyShortcuts } from 'powermove';
 import { selectedLayers } from './api-helpers';
 
 /** Timeline presentation only: these shortcuts never mutate animation data. */
-export const propertyShortcuts = [
-  ['p', 'revealPos', 'Position'], ['s', 'revealScale', 'Scale'],
-  ['r', 'revealRot', 'Rotation'], ['t', 'revealOpacity', 'Opacity'],
-  ['a', 'revealAnchor', 'Anchor point'], ['u', 'revealKeys', 'Animated properties'],
-  ['m', 'revealMasks', 'Mask controls'], ['f', 'revealFeather', 'Mask feather'],
-  ['e', 'revealEffects', 'Effects'], ['l', 'revealAudio', 'Audio levels'],
-] as const;
+export { propertyShortcuts };
 
 export function revealedProperties(api: Pick<PowermoveAPI, 'uiState'>, layer: any, props: any[]): any[] {
   const reveal = api.uiState.getReveal(layer);
@@ -81,7 +76,7 @@ export function createPropertyReveal(api: Pick<PowermoveAPI, 'anim' | 'effects' 
         }
         api.uiState.setReveal(L, keys);
         api.uiState.setLayerCollapsed(L, close || (shift && !keys.length));
-        for (const group of api.groups.ancestors(L) || []) api.uiState.setLayerCollapsed(group, false);
+        for (const group of api.groups.ancestors(L) || []) api.uiState.setGroupCollapsed(group, false);
       });
       last = double ? undefined : { key, shift, time: now, layers: [...layers], before };
     }

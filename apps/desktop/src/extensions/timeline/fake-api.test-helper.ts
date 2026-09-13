@@ -116,7 +116,7 @@ export function fakePowermoveAPI(vi: { fn: (...args: any[]) => any }): FakeAPIHa
       resolveSelectedKeys: vi.fn(() => []),
       keySelectionActive: false,
     },
-    groups: { ancestors: vi.fn(() => []), transformRoots: vi.fn((ids: string[]) => ids), span: vi.fn((layer: any) => layer), expand: vi.fn((ids: string[]) => ids), normalizeStack: vi.fn(), moveToGroup: vi.fn((ids: string[], group: string | null) => ({ ids, group })) },
+    groups: { ancestors: vi.fn(() => []), transformRoots: vi.fn((ids: string[]) => ids), bounds: vi.fn(() => null), span: vi.fn((layer: any) => layer), expand: vi.fn((ids: string[]) => ids), normalizeStack: vi.fn(), moveToGroup: vi.fn((ids: string[], group: string | null) => ({ ids, group })) },
     transport: {
       time: () => state.time,
       setTime: vi.fn((time: number) => { state.time = time; emit('time', time); }),
@@ -127,7 +127,7 @@ export function fakePowermoveAPI(vi: { fn: (...args: any[]) => any }): FakeAPIHa
     edit: { apply: vi.fn(() => ({ ok: true })), begin: vi.fn(), commit: vi.fn(() => ({ ok: true })), cancel: vi.fn(() => true), dispatch: vi.fn(() => ({ ok: true })), mutate: vi.fn((_label: string, run: () => unknown) => run()) },
     media: { timing: { isTimed: vi.fn(() => false), rate: vi.fn(() => 1), earliestStart: vi.fn((layer: any) => layer.from) }, importFiles: vi.fn(), commandForAsset: vi.fn(), audio: { drawWaveform: vi.fn(() => false) }, assets: { get: vi.fn(), add: vi.fn(), kind: vi.fn() }, fonts: { bundled: [], system: [], families: [], setSystemFamilies: vi.fn(), options: vi.fn(() => []), ensure: vi.fn() } },
     render: { gl: { bounds: vi.fn(), pick: vi.fn(), init: vi.fn(), resize: vi.fn(), previewViewport: null, context: null }, raster: vi.fn(), renderFrameTo: vi.fn(), snapshot: vi.fn() },
-    uiState: { getLayerCollapsed: vi.fn((layer: any) => !!layer.collapsed), setLayerCollapsed: vi.fn((layer: any, value: boolean) => (layer.collapsed = value)), getKeyHandles: vi.fn(), setKeyHandles: vi.fn(), getFxOpen: vi.fn(), setFxOpen: vi.fn(), getReveal: vi.fn((layer: any) => layer.reveal ?? null), setReveal: vi.fn((layer: any, value: string[]) => (layer.reveal = value)), setShaderMeta: vi.fn() },
+    uiState: { getLayerCollapsed: vi.fn((layer: any) => !!layer.collapsed), setLayerCollapsed: vi.fn((layer: any, value: boolean) => (layer.collapsed = value)), getGroupCollapsed: vi.fn((layer: any) => !!layer.groupCollapsed), setGroupCollapsed: vi.fn((layer: any, value: boolean) => (layer.groupCollapsed = value)), getKeyHandles: vi.fn(), setKeyHandles: vi.fn(), getFxOpen: vi.fn(), setFxOpen: vi.fn(), getReveal: vi.fn((layer: any) => layer.reveal ?? null), setReveal: vi.fn((layer: any, value: string[]) => (layer.reveal = value)), setShaderMeta: vi.fn() },
     ui: { controls: {}, toast: vi.fn(), confirm: vi.fn(), menu: vi.fn(), modal: vi.fn(), icon: vi.fn((name: string) => `<svg data-icon="${name}"></svg>`), drag: vi.fn(() => ({ cancel: vi.fn() })), closeMenus: vi.fn(), showLayerMenu: vi.fn(), showParentMenu: vi.fn(), beginParentPick: vi.fn(), openShaderEditor: vi.fn(), gesture: class {} },
     dnd: { ASSET_MIME: '', FX_MIME: '', startAssetDrag: vi.fn(), mediaDrag: null, hasAssetDrag: vi.fn(), hasFileDrag: vi.fn(), hasMediaDrag: vi.fn(), readAssetDrag: vi.fn(), hasFxDrag: vi.fn(), readFxDrag: vi.fn(), applyFxDrop: vi.fn() },
     workspace: { current: vi.fn(() => null), mutate: vi.fn(), hasPanel: vi.fn(), addPanel: vi.fn(), movePanel: vi.fn(), removePanel: vi.fn(), hidePanel: vi.fn(), restorePanel: vi.fn(), refresh: vi.fn() },

@@ -16,11 +16,11 @@
     layerFieldBinding(layer.id, field as any, { label, origin: 'inspector' });
   const selectedLayers = () => api.selection.layers().map((id) => api.model.layer(id)).filter((candidate) => candidate !== null);
   const parentingLayers = () => (api.selection.layers().includes(layer.id) ? selectedLayers() : [layer])
-    .filter((item: any) => item.type !== 'group' && (api.model.TYPE_META as Record<string, { transform?: boolean }>)[item.type]?.transform !== false);
+    .filter((item: any) => (api.model.TYPE_META as Record<string, { transform?: boolean }>)[item.type]?.transform !== false);
   const parentEdit: EditBinding = { mode:'command', label:'Parent layers', origin:'inspector', command: (parent) => parentingLayers().map((item: any) => ({ type:'set_layer', target:item.id, patch:{parent: parent == null ? null : String(parent)} })) };
   const parentOptions = $derived<SelectOption[]>((doc.tick.structure, doc.proj, sel.layers, [
     { v: null, label: 'None' },
-    ...api.project.get().layers.filter((candidate: any) => candidate.type !== 'group' && (api.model.TYPE_META as Record<string, { transform?: boolean }>)[candidate.type]?.transform !== false && parentingLayers().every((item: any) => item.id !== candidate.id && !api.anim.wouldCycle(item, candidate.id)))
+    ...api.project.get().layers.filter((candidate: any) => (api.model.TYPE_META as Record<string, { transform?: boolean }>)[candidate.type]?.transform !== false && parentingLayers().every((item: any) => item.id !== candidate.id && !api.anim.wouldCycle(item, candidate.id)))
       .map((candidate: any) => ({v:candidate.id,label:String(candidate.name)}))
   ]));
 </script>
@@ -31,7 +31,7 @@
 
 <Row {api} label="Visible"><ToggleField {api} {mixed} get={() => value('on')} edit={edit('visible', 'Visibility')} label="Visibility" /></Row>
 
-{#if layer.type === 'audio' || layer.type === 'group'}
+{#if layer.type === 'audio'}
   <Row {api} label="Color"><ColorField {api} {mixed} get={() => layer.color} edit={edit('color', 'Label color')} label="Label color" /></Row>
 {:else}
   <AnimatedRow {layer} path="l.blend" label="Blend mode"><SelectField {api} {mixed} get={() => value('blend')} edit={animatedEdit('blend', 'Blend')} options={api.model.BLENDS ?? []} label="Blend" /></AnimatedRow>

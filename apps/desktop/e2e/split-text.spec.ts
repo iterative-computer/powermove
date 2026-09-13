@@ -32,21 +32,27 @@ for (const [label, expected] of [
   await page.getByText(label, { exact: true }).click();
   const result = await page.evaluate(() => {
     const PM = (window as any).PM;
-    return { texts: PM.selLayers().map((l: any) => l.d.text),
-      positioned: PM.selLayers().every((l: any, i: number) => {
-        const source = PM.proj.layers.at(-1), mode = PM.selLayers().length === 4 ? 'words' : PM.selLayers().length === 2 ? 'lines' : 'characters';
+    const group = PM.firstSel(), members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
+    const source = members.at(-1), split = members.filter((layer: any) => layer !== source);
+    return { texts: split.map((l: any) => l.d.text),
+      positioned: split.every((l: any, i: number) => {
+        const mode = split.length === 4 ? 'words' : split.length === 2 ? 'lines' : 'characters';
         const piece = PM.textLayout(source)[mode][i];
         return Math.abs(l.p['anchor.x'].v + piece.x) < 0.001 && Math.abs(l.p['anchor.y'].v + piece.y) < 0.001;
       }),
-      editable: PM.selLayers().every((l: any) => l.type === 'text' && l.p.rotation.v === 12),
-      sourceHidden: PM.proj.layers.at(-1).on.v === false };
+      editable: split.every((l: any) => l.type === 'text' && l.p.rotation.v === 12),
+      grouped: group.type === 'group' && group.name === source.name && members.length === split.length + 1,
+      sourceHidden: source.on.v === false };
   });
-  expect(result.texts).toEqual(expected); expect(result.editable).toBe(true); expect(result.positioned).toBe(true); expect(result.sourceHidden).toBe(true);
+  expect(result.texts).toEqual(expected); expect(result.editable).toBe(true); expect(result.positioned).toBe(true); expect(result.grouped).toBe(true); expect(result.sourceHidden).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('split-text.png') });
   await page.evaluate(() => (window as any).PM.hist.undo());
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj.layers))).toBe(original);
   await page.evaluate(() => (window as any).PM.hist.redo());
-  expect(await page.evaluate(() => (window as any).PM.proj.layers.slice(0, -1).map((l: any) => l.d.text))).toEqual(expected);
+  expect(await page.evaluate(() => {
+    const PM = (window as any).PM, group = PM.proj.layers.find((layer: any) => layer.type === 'group');
+    return PM.proj.layers.filter((layer: any) => layer.group === group.id && layer.on.v !== false).map((layer: any) => layer.d.text);
+  })).toEqual(expected);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

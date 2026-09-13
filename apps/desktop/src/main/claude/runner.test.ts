@@ -73,12 +73,18 @@ describe('Claude runner', () => {
   it('runs the official CLI in structured stream mode and returns schema output', async () => {
     const spawnProcess = vi.fn(() => successfulChild() as never);
     const runner = new ClaudeRunner();
+    const nativeTools = {
+      command: '/test/electron',
+      args: ['/test/mcp-server.mjs'],
+      env: { POWERMOVE_AGENT_TOOL_TOKEN: 'secret' }
+    };
     const result = await runner.run(request(), {
       userData: '/tmp/powermove-claude-runner',
       extensionsDir: '/tmp/powermove-extensions',
       apiPackFiles: async () => [],
       binary: '/bin/claude',
-      spawnProcess
+      spawnProcess,
+      nativeTools
     });
 
     expect(result).toEqual({ ok: true, text: '{"message":"hello"}', access: 'editor' });
@@ -87,6 +93,11 @@ describe('Claude runner', () => {
       expect.arrayContaining(['--print', '--output-format', 'stream-json', '--safe-mode']),
       expect.objectContaining({ detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     );
+    const argv = (spawnProcess.mock.calls[0] as unknown as [string, string[]])[1];
+    expect(JSON.parse(argv[argv.indexOf('--mcp-config') + 1]!)).toEqual({
+      mcpServers: { powermove: { type: 'stdio', ...nativeTools } }
+    });
+    expect(argv[argv.indexOf('--allowedTools') + 1]).toContain('mcp__powermove__capture_panel');
     const options = (spawnProcess.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2];
     expect(options.env.CLAUDE_CONFIG_DIR).toBe('/tmp/powermove-claude-runner/claude-runtime');
   });

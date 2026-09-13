@@ -247,6 +247,7 @@ function makeGroups(PM: LegacyPM): GroupsAPI {
   return {
     ancestors: (...args) => PM?.groupAncestors?.(...args) ?? [],
     transformRoots: (ids) => PM?.transformRoots?.(ids) ?? [],
+    bounds: (group, time) => PM?.groupBounds?.(group, time) ?? null,
     span: (group) => PM?.groupSpan?.(group) ?? { from: 0, dur: 0 },
     expand: (ids) => PM?.expandGroups?.(ids) ?? [...ids],
     normalizeStack: () => PM?.normalizeStack?.(),
@@ -346,6 +347,8 @@ function makeUIState(PM: LegacyPM): UIStateAPI {
   return {
     getLayerCollapsed: (layer) => !!PM?.UIState?.getLayerCollapsed?.(layer),
     setLayerCollapsed: (layer, collapsed) => !!PM?.UIState?.setLayerCollapsed?.(layer, collapsed),
+    getGroupCollapsed: (layer) => !!PM?.UIState?.getGroupCollapsed?.(layer),
+    setGroupCollapsed: (layer, collapsed) => !!PM?.UIState?.setGroupCollapsed?.(layer, collapsed),
     getKeyHandles: (key) => PM?.UIState?.getKeyHandles?.(key) ?? null,
     setKeyHandles: (key, patch) => PM?.UIState?.setKeyHandles?.(key, patch) ?? null,
     getFxOpen: (effect) => !!PM?.UIState?.getFxOpen?.(effect),

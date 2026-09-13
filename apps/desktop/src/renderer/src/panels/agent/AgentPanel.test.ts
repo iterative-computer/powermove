@@ -187,7 +187,7 @@ describe('AgentPanel', () => {
       flushSync();
       expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent).toBe('Connect ChatGPT');
     });
-    expect(target.querySelector('[aria-label="Message composer"]')).toBeNull();
+    expect(target.querySelector('[aria-label="Message composer"]')).toBeTruthy();
 
     target.querySelector<HTMLButtonElement>('.agent-connect-button')!.click();
     await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
@@ -344,6 +344,18 @@ describe('AgentPanel', () => {
     expect(userTurns[0]?.classList.contains('is-steering')).toBe(false);
     expect(userTurns[1]?.classList.contains('is-steering')).toBe(true);
     expect(userTurns[1]?.querySelector('.agent-bubble')?.textContent).toBe('continue');
+  });
+
+  it('separates error recovery from the diagnostic card', () => {
+    renderPanel(snapshot({
+      conversation: [{ role: 'assistant', text: 'codex:run: invalid request', error: true }]
+    }));
+
+    const notice = target.querySelector('.error-notice');
+    const retry = target.querySelector<HTMLButtonElement>('.agent-error-retry');
+    expect(notice).toBeTruthy();
+    expect(retry?.textContent).toBe('Try again');
+    expect(retry?.previousElementSibling).toBe(notice);
   });
 
   it('separates the model and effort triggers and keeps no scope or authority pickers', () => {

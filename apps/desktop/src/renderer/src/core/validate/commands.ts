@@ -699,7 +699,7 @@ function isLayerContent(type: LayerType, value: unknown): boolean {
       && numberFields('w', 'h')
       && isRecord(value.params) && Object.values(value.params).every(isChannel)
       && isRecord(value.data);
-    case 'null': return true;
+    case 'null': return typeof value.color === 'string' && numberFields('w', 'h', 'radius');
     case 'group': return true;
     case 'precomp': return (value.comp === null || typeof value.comp === 'string') && numberFields('w', 'h');
   }

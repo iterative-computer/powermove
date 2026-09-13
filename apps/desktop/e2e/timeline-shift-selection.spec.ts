@@ -8,7 +8,7 @@ for (const surface of ['list', 'clip']) {
     await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.replaceProject(PM.mkProject({ name: 'Range selection', dur: 10 }));
+      window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Range selection', dur: 10 }) })); PM.ProjectsScreen.hide();
       PM.proj.layers = Array.from({ length: 5 }, (_, i) => PM.mkLayer('solid', { name: `Layer ${i}`, from: 0, dur: 10 }));
       PM.selectLayers([]);
       PM.invalidate();

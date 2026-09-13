@@ -330,6 +330,7 @@ it('a failed multi-command edit rolls the entire source back', () => {
   const layer = addText(PM);
   PM.hist.clear();
   const before = JSON.stringify(PM.proj);
+  const historyBefore = PM.hist.list();
   const result = PM.Edit.apply([
     { type: 'set_property', target: layer.id, path: 'opacity', value: 40, mode: 'static', preserveHandEdits: false },
     { type: 'set_property', target: layer.id, path: 'not-a-property', value: 2 },
@@ -337,5 +338,5 @@ it('a failed multi-command edit rolls the entire source back', () => {
   assert.equal(result.ok, false);
   assert.match(result.message, /not-a-property/);
   assert.equal(JSON.stringify(PM.proj), before);
-  assert.equal(PM.hist.canUndo(), false);
+  assert.deepEqual(PM.hist.list(), historyBefore);
 });

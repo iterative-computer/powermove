@@ -462,6 +462,8 @@ export interface SelectionAPI {
 export interface GroupsAPI {
   ancestors(layer: Layer, layers?: Layer[]): Layer[];
   transformRoots(ids: string[]): Layer[];
+  /** Bounds of a group's active visual descendants in the group's local space. */
+  bounds(group: Layer, time: number): (Bounds & { w: number; h: number; ax: number; ay: number }) | null;
   span(group: Layer): { from: number; dur: number };
   expand(ids: string[]): string[];
   normalizeStack(): void;
@@ -576,6 +578,8 @@ export interface ShaderMeta { [key: string]: unknown }
 export interface UIStateAPI {
   getLayerCollapsed(layer: Layer): boolean;
   setLayerCollapsed(layer: Layer, collapsed: boolean): boolean;
+  getGroupCollapsed(layer: Layer): boolean;
+  setGroupCollapsed(layer: Layer, collapsed: boolean): boolean;
   getKeyHandles(key: Keyframe): KeyHandleState | null;
   setKeyHandles(key: Keyframe, patch: KeyHandleState): KeyHandleState | null;
   getFxOpen(effect: Effect): boolean;

@@ -78,6 +78,12 @@ function expectStructuralReplay(before: any, PM: any, label: string) {
 }
 
 describe('legacy shortcut install', () => {
+  it('does not register the removed shader-layer creation command', () => {
+    const PM = shortcutsRegistry();
+
+    expect(PM.Kernel.commands.get('newShader')).toBeUndefined();
+  });
+
   it('deletes only selected keys and never falls through to layers on repeated Delete', () => {
     const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'ui/shortcuts');
     PM.proj = PM.mkProject();
@@ -222,6 +228,7 @@ describe('pro editor shortcut behavior', () => {
     video.transitionOut = { type: 'fade', dur: 1, p: {} };
     expect(PM.ev(video, 'position.x', PM.time)).toBe(40);
     PM.selectLayers([video.id, locked.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     const beforeSplit = JSON.parse(JSON.stringify(PM.proj));
     PM.cmd('split');
 
@@ -241,32 +248,85 @@ describe('pro editor shortcut behavior', () => {
     expect(locked.dur).toBe(8);
     expect(outside.dur).toBe(4);
     expect(PM.sel.layers).toEqual([tail.id]);
-    expect(PM.hist.list()).toEqual(['Selection', 'Split']);
+    expect(PM.hist.list()).toEqual(['Split']);
     expect(PM.proj.revision).toBe(1);
     expectStructuralReplay(beforeSplit, PM, 'Split');
     expect(PM.hist.undo()).toBe(true);
     expect(ids(PM)).toEqual(['parent', 'video', 'locked', 'outside']);
   });
 
-  it('splits a selected group through its members without cloning the group strip', () => {
+  it('splits a selected group into adjacent group strips with remapped members', () => {
     const PM = editorRuntime();
     const first = layer(PM, 'first', { from: 1, dur: 8 });
     const second = layer(PM, 'second', { from: 2, dur: 6 });
     const group = PM.groupLayers([first.id, second.id], 'Titles');
+    second.parent = first.id;
+    PM.hist.clear();
     PM.time = 5;
 
     PM.cmd('split');
 
-    expect(PM.proj.layers.filter((item: any) => item.type === 'group')).toEqual([group]);
-    const members = PM.proj.layers.filter((item: any) => item.group === group.id);
-    expect(members).toHaveLength(4);
-    expect(members.map((item: any) => [item.from, item.dur])).toEqual([
-      [5, 4], [1, 4], [5, 3], [2, 3],
-    ]);
-    expect(PM.sel.layers).toEqual([members[0].id, members[2].id]);
+    const groups = PM.proj.layers.filter((item: any) => item.type === 'group');
+    expect(groups).toHaveLength(2);
+    const tailGroup = groups[0];
+    expect(groups[1]).toBe(group);
+    const tailMembers = PM.proj.layers.filter((item: any) => item.group === tailGroup.id);
+    const headMembers = PM.proj.layers.filter((item: any) => item.group === group.id);
+    expect(tailMembers.map((item: any) => [item.from, item.dur])).toEqual([[5, 4], [5, 3]]);
+    expect(headMembers.map((item: any) => [item.from, item.dur])).toEqual([[1, 4], [2, 3]]);
+    expect(tailMembers[1].parent).toBe(tailMembers[0].id);
+    expect(headMembers[1].parent).toBe(headMembers[0].id);
+    expect(PM.sel.layers).toEqual([tailGroup.id]);
     expect(PM.hist.list().at(-1)).toBe('Split');
     expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.layers.filter((item: any) => item.type === 'group').map((item: any) => item.id)).toEqual([group.id]);
+    expect(PM.L(group.id)).toMatchObject({ from: 0, dur: 10 });
     expect(PM.proj.layers.filter((item: any) => item.group === group.id).map((item: any) => item.id)).toEqual(['first', 'second']);
+  });
+
+  it('partitions staggered group members across the split instead of duplicating them', () => {
+    const PM = editorRuntime();
+    const before = layer(PM, 'before', { from: 1, dur: 3 });
+    const crossing = layer(PM, 'crossing', { from: 2, dur: 6 });
+    const after = layer(PM, 'after', { from: 6, dur: 2 });
+    const group = PM.groupLayers([before.id, crossing.id, after.id], 'Staggered');
+    PM.hist.clear();
+    PM.time = 5;
+
+    PM.cmd('split');
+
+    const tailGroup = PM.firstSel();
+    expect(tailGroup.type).toBe('group');
+    expect(PM.proj.layers.filter((item: any) => item.group === group.id).map((item: any) => item.id))
+      .toEqual([before.id, crossing.id]);
+    const tailMembers = PM.proj.layers.filter((item: any) => item.group === tailGroup.id);
+    expect(tailMembers).toHaveLength(2);
+    expect(tailMembers.map((item: any) => [item.from, item.dur])).toEqual([[5, 3], [6, 2]]);
+    expect(tailMembers[0].id).not.toBe(crossing.id);
+    expect(tailMembers.find((item: any) => item.name === 'after')).toBe(after);
+    expect(PM.hist.list()).toEqual(['Split']);
+  });
+
+  it('remaps nested group membership into the new tail hierarchy', () => {
+    const PM = editorRuntime();
+    const first = layer(PM, 'nested-first');
+    const second = layer(PM, 'nested-second');
+    const sibling = layer(PM, 'outer-sibling');
+    const inner = PM.groupLayers([first.id, second.id], 'Inner');
+    const outer = PM.groupLayers([inner.id, sibling.id], 'Outer');
+    PM.hist.clear();
+    PM.time = 5;
+
+    PM.cmd('split');
+
+    const tailOuter = PM.firstSel();
+    const tailInner = PM.proj.layers.find((item: any) => item.type === 'group' && item.group === tailOuter.id);
+    expect(tailOuter).toMatchObject({ type: 'group', from: 5, dur: 5 });
+    expect(tailInner).toMatchObject({ type: 'group', group: tailOuter.id, from: 5, dur: 5 });
+    expect(PM.proj.layers.filter((item: any) => item.group === tailInner.id)).toHaveLength(2);
+    expect(PM.proj.layers.filter((item: any) => item.group === tailOuter.id && item.type !== 'group')).toHaveLength(1);
+    expect(PM.proj.layers.filter((item: any) => item.type === 'group')).toHaveLength(4);
+    expect(PM.hist.list()).toEqual(['Split']);
   });
 
   it('keeps split audio source time without replaying internal edge fades', () => {
@@ -295,6 +355,7 @@ describe('pro editor shortcut behavior', () => {
       d: { asset: 'video-asset', trim: 2, speed: 1, embeddedAudio: true },
     });
     PM.selectLayers(video.id);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
 
     PM.cmd('separateAudio', video.id);
 
@@ -305,7 +366,7 @@ describe('pro editor shortcut behavior', () => {
       name: 'Interview Audio', type: 'audio', from: 1, dur: 8,
       d: { asset: 'video-asset', trim: 2, gain: 1, fadeIn: 0, fadeOut: 0 },
     });
-    expect(PM.hist.list()).toEqual(['Selection', 'Separate audio']);
+    expect(PM.hist.list()).toEqual(['Separate audio']);
     expect(PM.autosave).toHaveBeenCalledOnce();
     expect(PM.hist.undo()).toBe(true);
     expect(ids(PM)).toEqual([video.id]);
@@ -324,16 +385,16 @@ describe('pro editor shortcut behavior', () => {
     PM.cmd('split');
     expect(ids(PM)).toEqual([expect.any(String), 'visible', 'hidden', 'locked', expect.any(String), 'parent', 'child']);
 
-    PM.hist.clear();
     PM.selectLayers([visible.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     PM.time = visible.from;
     PM.cmd('split');
     expect(ids(PM)).toHaveLength(7);
-    expect(PM.hist.list()).toEqual(['Selection']);
+    expect(PM.hist.list()).toEqual([]);
     PM.time = visible.from + visible.dur;
     PM.cmd('split');
     expect(ids(PM)).toHaveLength(7);
-    expect(PM.hist.list()).toEqual(['Selection']);
+    expect(PM.hist.list()).toEqual([]);
   });
 
   it('cuts only editable selected layers and pastes in stack order beside the topmost selection', () => {
@@ -345,6 +406,7 @@ describe('pro editor shortcut behavior', () => {
     PM.selectLayers([child.id, parent.id, locked.id]);
     PM.cmd('copyLayers');
     PM.selectLayers([target.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     const beforePaste = JSON.parse(JSON.stringify(PM.proj));
     PM.cmd('pasteLayers');
 
@@ -354,17 +416,17 @@ describe('pro editor shortcut behavior', () => {
     expect(pasted[0].parent).toBeNull();
     expect(pasted[1].parent).toBe(pasted[0].id);
     expect(PM.sel.layers).toEqual(pasted.map((value: any) => value.id));
-    expect(PM.hist.list()).toEqual(['Selection', 'Selection', 'Paste layers']);
+    expect(PM.hist.list()).toEqual(['Paste layers']);
     expectStructuralReplay(beforePaste, PM, 'Paste layers');
 
-    PM.hist.clear();
     PM.selectLayers([parent.id, child.id, locked.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     const beforeCut = JSON.parse(JSON.stringify(PM.proj));
     PM.cmd('cutLayers');
     expect(ids(PM)).toEqual(['locked', pasted[0].id, pasted[1].id, pasted[2].id, target.id]);
     expect(PM.L(locked.id)).toBeTruthy();
     expect(PM.sel.layers).toEqual([locked.id]);
-    expect(PM.hist.list()).toEqual(['Selection', 'Cut layers']);
+    expect(PM.hist.list()).toEqual(['Cut layers']);
     expectStructuralReplay(beforeCut, PM, 'Cut layers');
     PM.cmd('pasteLayers');
     const cutPaste = PM.proj.layers.filter((value: any) =>
@@ -402,11 +464,12 @@ describe('pro editor shortcut behavior', () => {
     const hidden = layer(PM, 'hidden', { on: false });
     const locked = layer(PM, 'locked', { on: true, lock: true });
     PM.selectLayers([shown.id, hidden.id, locked.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     PM.cmd('toggleVisibility');
     expect([PM.L(shown.id).on, PM.L(hidden.id).on, PM.L(locked.id).on]).toEqual([false, false, true]);
     PM.cmd('toggleVisibility');
     expect([PM.L(shown.id).on, PM.L(hidden.id).on, PM.L(locked.id).on]).toEqual([true, true, true]);
-    expect(PM.hist.list()).toEqual(['Selection', 'Hide layers', 'Show layers']);
+    expect(PM.hist.list()).toEqual(['Hide layers', 'Show layers']);
     PM.hist.undo();
     expect([PM.L(shown.id).on, PM.L(hidden.id).on, PM.L(locked.id).on]).toEqual([false, false, true]);
   });
@@ -440,6 +503,7 @@ describe('pro editor shortcut behavior', () => {
     const locked = layer(PM, 'locked', { lock: true });
     PM.setKeyOn(movable.p['position.x'], 5, 100, 'linear', PM.proj.fps);
     PM.selectLayers([movable.id, locked.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     const apply = vi.spyOn(PM.Edit, 'apply');
     const result = PM.cmd('nudgeSelection', 5, -2);
     expect(result.ok).toBe(true);
@@ -450,7 +514,7 @@ describe('pro editor shortcut behavior', () => {
     expect(movable.p['position.x'].kf.at(-1).v).toBe(105);
     expect(PM.evP(movable, movable.p['position.y'], PM.time, 'position.y')).toBe(-2);
     expect(locked.p['position.x'].v).toBe(0);
-    expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection']);
+    expect(PM.hist.list()).toEqual(['Nudge selection']);
     expect(PM.cmd('nudgeSelection', 0, 0)).toBeUndefined();
     expect(PM.cmd('nudgeSelection', Infinity, 1)).toBeUndefined();
     apply.mockRestore();
@@ -462,6 +526,7 @@ describe('pro editor shortcut behavior', () => {
     const child = layer(PM, 'child', { parent: parent.id });
     parent.p.rotation.v = 90;
     PM.selectLayers([child.id]);
+    PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
     const before = PM.worldMatrix(child, PM.time);
 
     PM.cmd('nudgeSelection', 10, 0);
@@ -469,7 +534,7 @@ describe('pro editor shortcut behavior', () => {
     const after = PM.worldMatrix(child, PM.time);
     expect(after[4] - before[4]).toBeCloseTo(10, 6);
     expect(after[5] - before[5]).toBeCloseTo(0, 6);
-    expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection']);
+    expect(PM.hist.list()).toEqual(['Nudge selection']);
   });
 
   it('treats nudging as a human edit after canvas intent has been recorded', () => {
@@ -493,14 +558,15 @@ describe('pro editor shortcut behavior', () => {
       const PM = editorRuntime();
       const movable = layer(PM, 'movable');
       PM.selectLayers([movable.id]);
+      PM.hist.clear(); // Selection above is fixture setup; measure the command undo steps.
 
       PM.cmd('nudgeSelection', 1, 0);
       PM.cmd('nudgeSelection', 1, 0);
       PM.cmd('nudgeSelection', 1, 0);
-      expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection', 'Nudge selection', 'Nudge selection']);
+      expect(PM.hist.list()).toEqual(['Nudge selection', 'Nudge selection', 'Nudge selection']);
       vi.advanceTimersByTime(180);
 
-      expect(PM.hist.list()).toEqual(['Selection', 'Nudge selection']);
+      expect(PM.hist.list()).toEqual(['Nudge selection']);
       expect(PM.ev(movable, 'position.x', PM.time)).toBe(3);
       expect(PM.hist.undo()).toBe(true);
       expect(PM.ev(PM.L(movable.id), 'position.x', PM.time)).toBe(0);

@@ -173,7 +173,7 @@ describe('ShaderPanel', () => {
 
     expect(target.querySelector('textarea')).toBeNull();
     expect(target.textContent).toContain('No shader layers');
-    expect(target.textContent).toContain('Create a shader layer');
+    expect(target.textContent).toContain('This project does not contain any editable shader layers.');
   });
 
   it('inserts two spaces with Tab and lets Escape then Tab leave the field', async () => {

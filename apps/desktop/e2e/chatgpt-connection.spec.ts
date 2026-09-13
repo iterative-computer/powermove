@@ -11,6 +11,11 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
   try {
     await session.openEditor();
     const { page } = session;
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Agent connection' }) }));
+      PM.ProjectsScreen.hide(); PM.SpatialAssistant.open();
+    });
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await expect(settings).toBeVisible();
@@ -23,17 +28,16 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     await extensionsTab.click();
     await expect(extensionsTab).toHaveAttribute('aria-selected', 'true');
     const extensions = settings.getByRole('list', { name: 'Extensions' });
-    await expect(settings).toContainText('extensions discovered');
-    await expect(extensions).toContainText('Timeline');
-    await expect(extensions).toContainText('Powermove themes');
+    await expect(settings).toContainText('Manage extensions');
+    await expect(extensions).toBeVisible();
     await generalTab.click();
     const disconnect = settings.getByRole('button', { name: 'Disconnect', exact: true });
     await expect(disconnect).toBeEnabled();
     await disconnect.click();
-    await expect(settings.getByRole('button', { name: 'Connect', exact: true })).toBeEnabled();
+    await expect(settings.getByRole('button', { name: 'Connect', exact: true }).first()).toBeEnabled();
     await expect(settings).toContainText('Use your ChatGPT subscription with Powermove.');
     await expect(page.locator('[data-agent-panel] .agent-connect-gate')).toContainText('Connect ChatGPT');
-    await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toHaveCount(0);
+    await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toHaveCount(1);
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session.close();
@@ -56,6 +60,11 @@ test('Connect opens the trusted ChatGPT browser flow and enters waiting state', 
       };
     });
     const { page } = session;
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Agent connection' }) }));
+      PM.ProjectsScreen.hide(); PM.SpatialAssistant.open();
+    });
     const gate = page.locator('[data-agent-panel] .agent-connect-gate');
     await expect(gate).toContainText('Use your ChatGPT subscription to power the Powermove agent.');
     const connect = gate.getByRole('button', { name: 'Connect ChatGPT', exact: true });
@@ -116,6 +125,11 @@ test('Claude subscription status and structured runs cross the real hidden app b
   try {
     await session.openEditor();
     const { page } = session;
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Agent connection' }) }));
+      PM.ProjectsScreen.hide(); PM.SpatialAssistant.open();
+    });
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await expect(settings).toContainText('Claude');

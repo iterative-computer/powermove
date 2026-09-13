@@ -147,7 +147,11 @@ describe('installKernel', () => {
     expect(Object.keys(api.edit)).toEqual(expect.arrayContaining(['apply', 'begin', 'commit', 'cancel', 'dispatch', 'mutate']));
     expect(Object.keys(api.media)).toEqual(expect.arrayContaining(['timing', 'importFiles', 'commandForAsset', 'audio', 'assets', 'fonts']));
     expect(Object.keys(api.render)).toEqual(expect.arrayContaining(['gl', 'raster', 'renderFrameTo', 'snapshot']));
-    expect(Object.keys(api.uiState)).toHaveLength(10);
+    expect(Object.keys(api.uiState)).toEqual(expect.arrayContaining([
+      'getLayerCollapsed', 'setLayerCollapsed', 'getGroupCollapsed', 'setGroupCollapsed',
+      'getKeyHandles', 'setKeyHandles', 'getFxOpen', 'setFxOpen', 'getReveal', 'setReveal',
+      'getShaderMeta', 'setShaderMeta',
+    ]));
     expect(Object.keys(api.ui)).toEqual(expect.arrayContaining(['drag', 'closeMenus', 'showLayerMenu', 'showParentMenu', 'beginParentPick', 'openShaderEditor', 'gesture']));
     expect(Object.keys(api.dnd)).toEqual(expect.arrayContaining([
       'ASSET_MIME', 'FX_MIME', 'startAssetDrag', 'mediaDrag', 'hasAssetDrag', 'hasFileDrag',

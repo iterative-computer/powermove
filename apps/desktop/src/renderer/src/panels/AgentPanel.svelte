@@ -27,7 +27,7 @@
     state: 'checking', email: null, planType: null, detail: null
   });
   let accountBusy = $state(false);
-  const providerName = $derived(agentState.provider === 'claude' ? 'Claude' : 'ChatGPT');
+  const providerName = $derived(agentState.provider === 'compatible' ? 'API or local model' : agentState.provider === 'claude' ? 'Claude' : 'ChatGPT');
 
   const showPreview = $derived(agentState.phase === 'preview');
   const showResult = $derived(agentState.phase === 'result' && (agentState.panelRun || !agentState.run?.autonomous));
@@ -55,32 +55,38 @@
   }
 
   async function connectProvider(): Promise<void> {
+    if (agentState.provider === 'compatible') { PM.SettingsUI?.open('general'); return; }
     const api = providerApi();
     if (!api || accountBusy) return;
+    const provider = agentState.provider;
     accountBusy = true;
     accountStatus = {
       state: 'connecting', email: null, planType: null, detail: `Opening ${providerName} sign-in…`
     };
     try {
-      accountStatus = await api.connect();
+      const status = await api.connect();
+      if (provider === agentState.provider) accountStatus = status;
     } catch (error) {
-      accountStatus = unavailable(error);
+      if (provider === agentState.provider) accountStatus = unavailable(error);
     } finally {
-      accountBusy = false;
+      if (provider === agentState.provider) accountBusy = false;
     }
   }
 
   async function retryProvider(): Promise<void> {
+    if (agentState.provider === 'compatible') { PM.SettingsUI?.open('general'); return; }
     const api = providerApi();
     if (!api || accountBusy) return;
+    const provider = agentState.provider;
     accountBusy = true;
     accountStatus = { state: 'checking', email: null, planType: null, detail: null };
     try {
-      accountStatus = await api.status();
+      const status = await api.status();
+      if (provider === agentState.provider) accountStatus = status;
     } catch (error) {
-      accountStatus = unavailable(error);
+      if (provider === agentState.provider) accountStatus = unavailable(error);
     } finally {
-      accountBusy = false;
+      if (provider === agentState.provider) accountBusy = false;
     }
   }
 
@@ -125,18 +131,29 @@
 
   $effect(() => {
     const provider = agentState.provider;
-    const api = provider === 'claude' ? window.powermove?.claude : window.powermove?.chatgpt;
+    let alive = true;
+    accountBusy = false;
     accountStatus = { state: 'checking', email: null, planType: null, detail: null };
+    if (provider === 'compatible') {
+      const update = () => window.powermove?.compatible?.status().then(config => {
+        if (alive) accountStatus = { state: config.model ? 'connected' : 'disconnected', email: null, planType: null,
+          detail: config.model ? null : 'Connect an API, Ollama, or LM Studio in settings.' };
+      }, error => { if (alive) accountStatus = unavailable(error); });
+      void update();
+      window.addEventListener('pm-provider-connected', update);
+      return () => { alive = false; window.removeEventListener('pm-provider-connected', update); };
+    }
+    const api = provider === 'claude' ? window.powermove?.claude : window.powermove?.chatgpt;
     if (!api) {
       accountStatus = unavailable(new Error(`Restart Powermove to finish installing ${provider === 'claude' ? 'Claude' : 'ChatGPT'} connection.`));
       return;
     }
-    const stop = api.onChanged((status) => { accountStatus = status; });
+    const stop = api.onChanged((status) => { if (alive) accountStatus = status; });
     void api.status().then(
-      (status) => { accountStatus = status; },
-      (error) => { accountStatus = unavailable(error); }
+      (status) => { if (alive) accountStatus = status; },
+      (error) => { if (alive) accountStatus = unavailable(error); }
     );
-    return stop;
+    return () => { alive = false; stop(); };
   });
 </script>
 
@@ -162,9 +179,9 @@
         disabled={accountBusy || accountStatus.state === 'connecting'}
         onclick={accountStatus.state === 'unavailable' ? retryProvider : connectProvider}
       >{accountStatus.state === 'connecting' ? 'Waiting…' : accountStatus.state === 'unavailable' ? 'Try again' : `Connect ${providerName}`}</button>
-      <small>Sign-in is handled by the official {providerName === 'Claude' ? 'Claude Code' : 'Codex'} runtime. Powermove never sees your password.</small>
+      <button type="button" class="btn" onclick={() => PM.SettingsUI?.open('general')}>All connection options</button>
     </div>
-  {:else}
+  {/if}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
     <div
       class="agent-scroll"
@@ -190,10 +207,12 @@
       {#if showResult}<ResultActions {PM} />{/if}
       <Composer {PM} {panelId} />
     </div>
-  {/if}
 </div>
 
 <style>
+  .agent-connect-gate { flex: 0 1 auto; padding: 8px 12px; }
+  .agent-connect-mark { display: none; }
+  .agent-connect-button { margin-top: 8px; }
   /* The set-height variable is updated by explicit splitter resizing. The
      important basis also pins older live sessions whose inline style is fluid. */
   :global(#panel-agent:not([data-collapsed="1"])) {

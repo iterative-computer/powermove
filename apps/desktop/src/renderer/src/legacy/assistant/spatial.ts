@@ -2,7 +2,7 @@ import { createAgentCheckpoint } from './checkpoint';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
-import type { CodexTraceEvent, ReasoningEffort } from '../../../../shared/ipc';
+import { LIMITS, type CodexTraceEvent, type ReasoningEffort } from '../../../../shared/ipc';
 import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
@@ -15,6 +15,70 @@ import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
+
+const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
+const AGENT_LAYER_INDEX_CHARS = 18_000;
+const AGENT_PROMPT_HEADROOM_CHARS = 1_024;
+const AGENT_REQUEST_CHARS = 50_000;
+
+function boundedEditableSource(catalog: any, request: string, selectedLayerIds: string[] = [], maxChars = AGENT_EDITABLE_CATALOG_CHARS) {
+  if (!catalog || typeof catalog !== 'object') return {};
+  const allLayers: any[] = Array.isArray(catalog.layers) ? catalog.layers : [];
+  const selected = new Set(selectedLayerIds.map(String));
+  const requestText = String(request || '').toLocaleLowerCase();
+  const mentioned = (layer: any) => {
+    const name = String(layer?.name || '').trim().toLocaleLowerCase();
+    return name.length >= 3 && requestText.includes(name);
+  };
+  const prioritized = allLayers
+    .map((layer, index) => ({ layer, index }))
+    .sort((a, b) => Number(selected.has(String(b.layer?.id))) - Number(selected.has(String(a.layer?.id)))
+      || Number(mentioned(b.layer)) - Number(mentioned(a.layer))
+      || a.index - b.index);
+  const result: any = {
+    target: catalog.target,
+    composition: catalog.composition,
+    operations: catalog.operations,
+    truncated: false,
+    totalLayers: allLayers.length,
+    layerIndex: [],
+    layers: [],
+  };
+  for (const layer of allLayers) {
+    const entry = {
+      id: String(layer?.id || ''),
+      name: String(layer?.name || '').slice(0, 160),
+      type: String(layer?.type || ''),
+      group: layer?.group ?? null,
+      parent: layer?.parent ?? null,
+    };
+    const next = [...result.layerIndex, entry];
+    if (JSON.stringify(next).length > AGENT_LAYER_INDEX_CHARS) break;
+    result.layerIndex = next;
+  }
+  for (const { layer } of prioritized) {
+    const next = { ...result, layers: [...result.layers, layer] };
+    if (JSON.stringify(next).length > maxChars - 512) break;
+    result.layers.push(layer);
+  }
+  result.truncated = result.layers.length < allLayers.length || result.layerIndex.length < allLayers.length;
+  result.includedLayers = result.layers.length;
+  result.indexedLayers = result.layerIndex.length;
+  if (result.truncated) {
+    result.note = 'Large-project catalog: selected layers and layers named in the request are prioritized. layerIndex lists additional targets; inspect the live source before editing an omitted layer.';
+  }
+  while (result.layers.length && JSON.stringify(result).length > maxChars) result.layers.pop();
+  result.includedLayers = result.layers.length;
+  return result;
+}
+
+function boundedAgentPrompt(prompt: string, request: string, maxChars = LIMITS.codexPromptChars - AGENT_PROMPT_HEADROOM_CHARS) {
+  if (prompt.length <= maxChars) return prompt;
+  const suffix = `\n\nUSER REQUEST\n${String(request || '').slice(0, AGENT_REQUEST_CHARS)}`;
+  const notice = '\n\n[Earlier project context was clipped to fit the agent request limit. Use the editable catalog and rendered frames above, then preserve unrelated source.]';
+  const prefixChars = Math.max(0, maxChars - notice.length - suffix.length);
+  return `${prompt.slice(0, prefixChars).trimEnd()}${notice}${suffix}`.slice(0, maxChars);
+}
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -53,7 +117,7 @@ PM.CodexBridge = {
       activeCodexRequestId = id;
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
-      bridge.postMessage({
+      try { bridge.postMessage({
         id, prompt, schema, images: images.slice(0, 6),
         provider: options.provider || 'chatgpt',
         threadId: options.threadId || '',
@@ -61,7 +125,7 @@ PM.CodexBridge = {
         mode: options.mode || 'editor', access: options.access || 'editor',
         projectId: options.projectId || '', projectName: options.projectName || '',
         projectJSON: options.projectJSON || '', attachments: (options.attachments || []).slice(0, 6),
-      });
+      }); } catch (error) { settle(error); }
     });
   },
   async steer(prompt: any, images: any = []) {
@@ -107,7 +171,7 @@ PM.CodexBridge = {
   },
   trace(id: any, step: any) {
     const job: any = pending.get(id); if (!job || typeof job.onTrace !== 'function') return;
-    job.onTrace(step);
+    try { job.onTrace(step); } catch (error) { window.console.warn('Agent activity could not be displayed', error); }
   },
 };
 
@@ -175,7 +239,7 @@ PM.WindowCapture = {
    without a picker. Computer access still requires its per-run confirmation. */
 const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'project');
 const storedProvider: any = PM.store?.get?.('agentProvider', 'chatgpt');
-const initialProvider: any = ['chatgpt', 'claude'].includes(storedProvider) ? storedProvider : 'chatgpt';
+const initialProvider: any = ['chatgpt', 'claude', 'compatible'].includes(storedProvider) ? storedProvider : 'chatgpt';
 const S: any = {
   initialized: false, active: false, pressed: false, phase: 'idle',
   samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
@@ -192,7 +256,7 @@ const S: any = {
   panelRun: null, scope: PM.store?.get?.('agentScope', 'workspace') || 'workspace',
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
   provider: initialProvider,
-  model: PM.store?.get?.(`agentModel.${initialProvider}`, initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol'),
+  model: PM.store?.get?.(`agentModel.${initialProvider}`, initialProvider === 'compatible' ? 'configured' : initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (initialProvider === 'compatible' ? 'configured' : initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol'),
   reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
   accessMode: ['editor', 'project'].includes(storedAccessMode) ? storedAccessMode : 'project',
 };
@@ -200,8 +264,18 @@ const S: any = {
 const AGENT_PROVIDERS: any = [
   { id: 'chatgpt', label: 'ChatGPT' },
   { id: 'claude', label: 'Claude' },
+  { id: 'compatible', label: 'API / local model' },
 ];
 S.reasoningEffort = modelEffort(S.provider, S.model, S.reasoningEffort) || S.reasoningEffort;
+if (S.provider === 'compatible') S.accessMode = 'editor';
+globalThis.window?.addEventListener('pm-provider-connected', (event: Event) => {
+  const config = (event as CustomEvent).detail;
+  if (config?.model) AGENT_MODELS.compatible[0]!.label = config.model;
+  PM.AgentUI?.setProvider('compatible');
+});
+void globalThis.window?.powermove?.compatible?.status().then(config => {
+  if (config.model) { AGENT_MODELS.compatible[0]!.label = config.model; PM.AgentUI?.update(); }
+}).catch(() => undefined);
 const AGENT_ACCESS_MODES: any = [
   { id: 'editor', label: 'Edit project', detail: 'Edit the current composition' },
   { id: 'project', label: 'Change Powermove (project)', detail: 'Create or edit mods with files, shell, web, and integrations' },
@@ -344,7 +418,7 @@ const Spatial: any = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult },
+  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
   lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
 };
 PM.SpatialAssistant = Spatial;
@@ -388,7 +462,7 @@ function agentUISnapshot(): AgentSnapshot {
     models: AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS],
     providers: AGENT_PROVIDERS,
     reasoningEfforts: modelEfforts(S.provider, S.model),
-    accessModes: AGENT_ACCESS_MODES,
+    accessModes: S.provider === 'compatible' ? AGENT_ACCESS_MODES.filter((item: any) => item.id === 'editor') : AGENT_ACCESS_MODES,
   };
   S.conversation.forEach((message: any) => { message.entering = false; });
   S.pendingEntering = false;
@@ -403,11 +477,11 @@ registerAgentPanel(PM, {
   snapshot: agentUISnapshot,
   submit: (value: string) => { void sendRequest({ value }); },
   stop: stopActiveRequest,
-  setDraft: (value: string) => {
+  setDraft: (value: string, focusComposer = false) => {
     const projectChanged = ensureThreadProject();
     S.composerDraft = value; captureThread();
     clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300);
-    if (projectChanged) PM.AgentUI?.update({ flush: true });
+    if (projectChanged || focusComposer) PM.AgentUI?.update({ flush: true, focusComposer });
   },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
@@ -419,10 +493,19 @@ registerAgentPanel(PM, {
   setProvider: (provider: string) => {
     if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || S.activeRequest) return;
     S.provider = provider;
-    S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
+    if (provider === 'compatible') S.accessMode = 'editor';
+    S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
     S.reasoningEffort = modelEffort(provider, S.model, S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
+  },
+  retry: (messageIndex?: number) => {
+    if (S.activeRequest) return;
+    const end = Number.isInteger(messageIndex) ? messageIndex : S.conversation.length;
+    const message = S.conversation.slice(0, end).reverse().find((item: any) => item.role === 'user');
+    if (!message) return;
+    S.attachments = (message.attachments || []).map((item: any) => ({ ...item }));
+    void sendRequest({ value: message.text || '' });
   },
   setAccess: setAgentAccessMode,
   confirmComputerAccess: () => {
@@ -1267,7 +1350,7 @@ function normalizeAutonomousResult(raw: any, rawExtensions: any) {
     ...(item.summary === undefined ? {} : { summary: item.summary }),
   }));
   return {
-    summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 800),
+    summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 30_000),
     commands: (Array.isArray(raw?.commands) ? raw.commands : [])
       .slice(0, 80).map(PM.AgentHarness.cleanCommand).filter(Boolean),
     artifacts: (Array.isArray(raw?.artifacts) ? raw.artifacts : []).slice(0, 80).map((item: any) => ({
@@ -1283,6 +1366,36 @@ function normalizeAutonomousResult(raw: any, rawExtensions: any) {
     notes: (Array.isArray(raw?.notes) ? raw.notes : []).slice(0, 80).map(text).filter(Boolean),
     extensions,
   };
+}
+
+const MAX_PROJECT_RECONCILIATIONS: any = 2;
+
+function projectChangePaths(entry: any) {
+  const paths: any = [];
+  for (const patch of Array.isArray(entry?.patches) ? entry.patches : []) {
+    const label: any = Array.isArray(patch?.path) && patch.path.length
+      ? patch.path.map((part: any) => String(part)).join('.')
+      : 'project';
+    if (!paths.includes(label)) paths.push(label);
+    if (paths.length >= 12) break;
+  }
+  return paths;
+}
+
+function agentAuthoredProjectChange(entry: any) {
+  if (entry?.origin) return entry.origin === 'agent';
+  const edit: any = Array.isArray(PM.proj?.edits) ? PM.proj.edits.at(-1) : null;
+  return edit?.origin === 'agent'
+    && Number(edit.revision) === Number(entry?.revision);
+}
+
+function projectChangeNotice(entry: any, baseRevision: any) {
+  const revision: any = Number(PM.proj?.revision) || Number(entry?.revision) || 0;
+  const paths: any = projectChangePaths(entry);
+  return `POWERMOVE PROJECT UPDATE
+The user changed the open project while you were working (your proposal revision: ${baseRevision}; current revision: ${revision}).
+${paths.length ? `Changed source paths: ${paths.join(', ')}.` : 'The editable project source changed.'}
+Re-read get_project_state before your next project edit. Reconcile your work with the current source, preserve the user's changes, and do not apply commands prepared for the older revision.`;
 }
 
 async function applyExtensionChanges(extensions: any) {
@@ -1329,9 +1442,8 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   const baseRevision: any = Number(PM.proj.revision) || 0;
   const checkpointLabel: any = `Before autonomous agent · ${request.slice(0, 42)}`;
   const checkpoint = createAgentCheckpoint(PM, checkpointLabel);
-  const historyMark: any = PM.hist.mark();
   const observationPromise: any = PM.AgentHarness ? PM.AgentHarness.observe() : Promise.resolve({ state: {}, times: [], images: [] });
-  const [observation]: any = await Promise.all([
+  let [observation]: any = await Promise.all([
     observationPromise,
     new Promise((resolve: any) => window.setTimeout(resolve, SEND_TRANSITION_MS)),
   ]);
@@ -1343,83 +1455,190 @@ async function runAutonomousRequest({ request, token, controller, access, focus,
   S.activity = '';
   PM.AgentUI?.update();
   const userImages: any = S.requestAttachments.filter((item: any) => item.dataUrl).map((item: any) => item.dataUrl);
-  const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
-  const raw: any = await PM.CodexBridge.request(`${request}\n\n${AGENT_TESTING_INSTRUCTIONS}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(S.conversation.filter((m: any) => m.role !== 'trace').slice(0, -1).slice(-12).map((m: any) => ({ role: m.role, text: m.text })))}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
-    mode: 'autonomous', access,
-    threadId,
-    projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
-    projectJSON: JSON.stringify(PM.proj),
-    attachments: requestFileAttachments(S.requestAttachments),
-    provider: S.provider,
-    model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
-    timeoutMs: 3_600_000,
-    onProgress: (summary: any) => {
-      if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;
-      S.activity = summary; PM.AgentUI?.update();
-    },
-    onTrace: (step: CodexTraceEvent) => {
-      if (token !== S.requestToken) return;
-      reduceTrace(step); PM.AgentUI?.update();
-    },
-  });
-  if (token !== S.requestToken) return;
-  const responseText: any = typeof raw === 'string' ? raw : raw?.text;
-  let decoded: any;
-  try { decoded = JSON.parse(responseText); }
-  catch { throw new Error('The autonomous agent returned an invalid result'); }
-  const result: any = normalizeAutonomousResult(decoded, typeof raw === 'object' ? raw?.extensions : []);
-  S.steps[1].status = 'complete'; S.steps[2].status = 'active';
-  S.activity = 'Bringing the result back into Powermove…'; PM.AgentUI?.update();
-  const liveEditsApplied: any = typeof raw === 'object' && raw?.liveEditsApplied === true;
-  let changed: any = liveEditsApplied;
-  let reviewError: any = '';
-  if (liveEditsApplied) {
-    // The native provider already edited through PM.Edit.apply via the guarded
-    // live tool transaction. Its final commands array is deliberately empty.
-  } else if ((Number(PM.proj.revision) || 0) !== baseRevision) {
-    reviewError = 'Project changed while the autonomous agent was working, so its proposed source edits and automatic imports were left unapplied.';
-  } else {
-    const commands: any = result.commands;
-    if (commands.length) {
-      const applied: any = PM.Edit.apply(commands, {
-        label: 'Autonomous agent', origin: 'agent', baseRevision,
-      });
-      if (!applied.ok) throw new Error(applied.message);
-      changed = true;
-    }
-    for (const artifact of result.artifacts.filter((item: any) => item.importToTimeline)) {
+  let projectChangeSerial: any = 0;
+  let notifiedSerial: any = 0;
+  let notificationActive: any = false;
+  let proposalRevision: any = baseRevision;
+  let watchingProject: any = true;
+  const notifyAgentOfProjectChanges: any = () => {
+    if (notificationActive) return;
+    notificationActive = true;
+    void Promise.resolve().then(async () => {
       try {
-        const file: any = await PM.AgentArtifacts.load(artifact);
-        if (!PM.assetKind(file)) throw new Error(`${artifact.name} is not supported project media`);
-        await PM.importFiles([file]);
-        artifact.imported = true; changed = true;
-      } catch (error: any) {
-        reviewError += `${reviewError ? ' ' : ''}${String(error.message || error)}`;
+        while (watchingProject && notifiedSerial < projectChangeSerial && token === S.requestToken) {
+          const serial: any = projectChangeSerial;
+          notifiedSerial = serial;
+          const entry: any = latestProjectChange;
+          let accepted: any = false;
+          try { accepted = await PM.CodexBridge.steer(projectChangeNotice(entry, proposalRevision)); }
+          catch { /* A non-steerable provider is reconciled after its run completes. */ }
+          if (accepted && watchingProject && token === S.requestToken) {
+            S.activity = 'Agent updated with the latest project…'; PM.AgentUI?.update();
+          }
+        }
+      } finally {
+        notificationActive = false;
+        if (watchingProject && notifiedSerial < projectChangeSerial) notifyAgentOfProjectChanges();
+      }
+    });
+  };
+  let latestProjectChange: any = null;
+  const offProjectChanges: any = PM.bus?.on?.('history:project-patch', (entry: any) => {
+    if (!watchingProject || token !== S.requestToken || entry?.projectId !== PM.proj?.id || agentAuthoredProjectChange(entry)) return;
+    latestProjectChange = entry;
+    projectChangeSerial += 1;
+    S.activity = 'Project changed — updating the agent…'; PM.AgentUI?.update();
+    notifyAgentOfProjectChanges();
+  });
+  const stopWatchingProject: any = () => {
+    if (!watchingProject) return;
+    watchingProject = false;
+    if (typeof offProjectChanges === 'function') offProjectChanges();
+  };
+
+  try {
+    const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
+    const raw: any = await PM.CodexBridge.request(`${request}\n\n${AGENT_TESTING_INSTRUCTIONS}\n\nCONVERSATION IN THIS THREAD\n${JSON.stringify(S.conversation.filter((m: any) => m.role !== 'trace').slice(0, -1).slice(-12).map((m: any) => ({ role: m.role, text: m.text })))}\n\n${panelFocusPrompt(focus)}\n\nSELECTED REGION REFERENCE\n${JSON.stringify(context)}\n\n${NATIVE_PANEL_DESIGN}\n\n${uiPlacementInstructions(PM.WS?.current)}`, null, attachedImages, {
+      mode: 'autonomous', access,
+      threadId,
+      projectId: PM.proj.id, projectName: PM.proj.name || 'Untitled',
+      projectJSON: JSON.stringify(PM.proj),
+      attachments: requestFileAttachments(S.requestAttachments),
+      provider: S.provider,
+      model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
+      timeoutMs: 3_600_000,
+      onProgress: (summary: any) => {
+        if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;
+        S.activity = summary; PM.AgentUI?.update();
+      },
+      onTrace: (step: CodexTraceEvent) => {
+        if (token !== S.requestToken) return;
+        reduceTrace(step); PM.AgentUI?.update();
+      },
+    });
+    if (token !== S.requestToken) return;
+    const responseText: any = typeof raw === 'string' ? raw : raw?.text;
+    let decoded: any;
+    try { decoded = JSON.parse(responseText); }
+    catch { throw new Error('The autonomous agent returned an invalid result'); }
+    const result: any = normalizeAutonomousResult(decoded, typeof raw === 'object' ? raw?.extensions : []);
+    const liveEditsApplied: any = typeof raw === 'object' && raw?.liveEditsApplied === true;
+    const needsProjectReconciliation: any = result.commands.length > 0;
+    let reconciliationCount: any = 0;
+    let proposalChangeSerial: any = 0;
+
+    while (!liveEditsApplied && needsProjectReconciliation
+      && ((Number(PM.proj.revision) || 0) !== proposalRevision || projectChangeSerial !== proposalChangeSerial)
+      && reconciliationCount < MAX_PROJECT_RECONCILIATIONS) {
+      reconciliationCount += 1;
+      proposalRevision = Number(PM.proj.revision) || 0;
+      proposalChangeSerial = projectChangeSerial;
+      S.activity = 'Project changed — reconciling with the latest version…'; PM.AgentUI?.update();
+      observation = PM.AgentHarness ? await PM.AgentHarness.observe() : { state: {}, times: [], images: [] };
+      const reconcileRequest: any = `Reconcile the autonomous agent's proposed Powermove source edits with the project as it exists now.
+
+ORIGINAL USER REQUEST
+${request}
+
+PRIOR AGENT SUMMARY
+${result.summary}
+
+PRIOR PROPOSED COMMANDS
+${JSON.stringify(result.commands)}
+
+The user edited the project during the autonomous run. Return kind=scene and a complete replacement sceneEdit for the current source. Preserve the user's newer work and unrelated edits. Do not create panels, workspaces, extensions, files, or external actions in this reconciliation pass.`;
+      const reconcileImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
+      const reconciledRaw: any = await PM.CodexBridge.request(
+        agentPrompt(reconcileRequest, observation, false, focus, context), responseSchema(), reconcileImages,
+        {
+          threadId,
+          attachments: requestFileAttachments(S.requestAttachments),
+          provider: S.provider,
+          model: S.model, reasoningEffort: S.reasoningEffort, signal: controller.signal,
+          onProgress: (summary: any) => {
+            if (token !== S.requestToken || !summary || isUIPlacementMessage(summary)) return;
+            S.activity = summary; PM.AgentUI?.update();
+          },
+          onTrace: (step: CodexTraceEvent) => {
+            if (token !== S.requestToken) return;
+            reduceTrace(step); PM.AgentUI?.update();
+          },
+        },
+      );
+      if (token !== S.requestToken) return;
+      let reconciledDecoded: any;
+      try { reconciledDecoded = JSON.parse(reconciledRaw); }
+      catch { throw new Error('The coding agent returned an invalid project reconciliation'); }
+      const plan: any = sanitizePlan(
+        reconciledDecoded,
+        { ...context, targetPanelId: focus.panels[0]?.id || context?.targetPanelId || '' },
+        request,
+      );
+      if (plan.kind !== 'scene' || plan.operation === 'noop') {
+        throw new Error(plan.message || 'The coding agent could not reconcile its edits with the current project');
+      }
+      result.commands = plan.sceneEdit?.commands || [];
+      if (plan.sceneEdit?.summary) result.notes.push(plan.sceneEdit.summary);
+    }
+
+    stopWatchingProject();
+    S.steps[1].status = 'complete'; S.steps[2].status = 'active';
+    S.activity = 'Bringing the result back into Powermove…'; PM.AgentUI?.update();
+    let changed: any = liveEditsApplied;
+    let reviewError: any = '';
+    const stillStale: any = !liveEditsApplied && needsProjectReconciliation
+      && ((Number(PM.proj.revision) || 0) !== proposalRevision || projectChangeSerial !== proposalChangeSerial);
+    const historyMark: any = PM.hist.mark();
+    if (liveEditsApplied) {
+      // The native provider already edited through PM.Edit.apply via the guarded
+      // live tool transaction. Its final commands array is deliberately empty.
+    } else if (stillStale) {
+      reviewError = 'The project kept changing while the agent reconciled its edits, so Powermove preserved the newer work and left the stale source edits unapplied.';
+    } else {
+      const commands: any = result.commands;
+      if (commands.length) {
+        const applied: any = PM.Edit.apply(commands, {
+          label: 'Autonomous agent', origin: 'agent', baseRevision: proposalRevision,
+        });
+        if (!applied.ok) throw new Error(applied.message);
+        changed = true;
+      }
+      for (const artifact of result.artifacts.filter((item: any) => item.importToTimeline)) {
+        try {
+          const file: any = await PM.AgentArtifacts.load(artifact);
+          if (!PM.assetKind(file)) throw new Error(`${artifact.name} is not supported project media`);
+          await PM.importFiles([file]);
+          artifact.imported = true; changed = true;
+        } catch (error: any) {
+          reviewError += `${reviewError ? ' ' : ''}${String(error.message || error)}`;
+        }
       }
     }
+    const extensionTurns: any = await applyExtensionChanges(result.extensions);
+    if (token !== S.requestToken) return;
+    checkpoint.historyId = liveEditsApplied
+      ? (typeof raw === 'object' ? raw?.liveEditHistoryId || null : null)
+      : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
+    const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
+    finishSteps();
+    archiveTrace();
+    S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
+    S.conversation.push(...extensionTurns);
+    S.run = {
+      autonomous: true, summary: result.summary, checkpoint,
+      extensionChangeSetId: typeof raw === 'object' ? raw?.extensionChangeSetId : undefined,
+      projectId: PM.proj.id,
+      applied: result.commands, changed, artifacts: result.artifacts,
+      externalActions: result.externalActions, extensions: result.extensions,
+      review: { message: result.notes.join(' ') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
+      frames: finalFrames, reviewError,
+    };
+    /* Deliberate Svelte deviation from HEAD: result transitions restore the
+       persistent composer's focus instead of relying on a DOM rebuild. */
+    S.activity = ''; S.phase = 'result'; PM.AgentUI?.update({ focusComposer: true });
+  } finally {
+    stopWatchingProject();
   }
-  const extensionTurns: any = await applyExtensionChanges(result.extensions);
-  if (token !== S.requestToken) return;
-  checkpoint.historyId = liveEditsApplied
-    ? (typeof raw === 'object' ? raw?.liveEditHistoryId || null : null)
-    : (changed ? PM.hist.squash(historyMark, 'Autonomous agent') : null);
-  const finalFrames: any = changed && PM.AgentHarness ? await PM.AgentHarness.observe() : observation;
-  finishSteps();
-  archiveTrace();
-  S.conversation.push({ entering: true, role: 'assistant', text: result.summary });
-  S.conversation.push(...extensionTurns);
-  S.run = {
-    autonomous: true, summary: result.summary, checkpoint,
-    extensionChangeSetId: typeof raw === 'object' ? raw?.extensionChangeSetId : undefined,
-    projectId: PM.proj.id,
-    applied: result.commands, changed, artifacts: result.artifacts,
-    externalActions: result.externalActions, extensions: result.extensions,
-    review: { message: result.notes.join(' ') || (changed ? 'The editable Powermove result is ready to review.' : 'The agent run completed without changing Powermove source.') },
-    frames: finalFrames, reviewError,
-  };
-  /* Deliberate Svelte deviation from HEAD: result transitions restore the
-     persistent composer's focus instead of relying on a DOM rebuild. */
-  S.activity = ''; S.phase = 'result'; PM.AgentUI?.update({ focusComposer: true });
 }
 
 async function sendRequest(input: any) {
@@ -1458,11 +1677,12 @@ async function sendRequest(input: any) {
     }));
     const steeringImages: any = steeringAttachments
       .filter(isAgentImageAttachment).map((item: any) => item.dataUrl).slice(0, 6);
+    const steeringToken = S.requestToken;
     const accepted: any = await PM.CodexBridge.steer(
       `${request}\n\nThis is new direction for the active run. Incorporate it into the same final editable result.\n\nATTACHED FILES\n${JSON.stringify(attachmentContext)}`,
       steeringImages,
     );
-    if (accepted) return;
+    if (accepted || steeringToken !== S.requestToken || S.phase !== 'working') return;
 
     /* Providers without a live steering transport keep the established
        replace-and-resume behavior. Remove the optimistic turn first so the
@@ -1489,11 +1709,11 @@ async function sendRequest(input: any) {
   });
   threads.active.updatedAt = Date.now();
   persistThreads();
-  if (firstUserRequest && typedRequest) {
+  if (firstUserRequest && typedRequest && S.provider !== 'compatible') {
     generateThreadTitle(threads.projectId, threadIdAtStart, typedRequest, S.provider);
   }
   const accessAtStart: any = S.accessMode;
-  const autonomous: any = accessAtStart !== 'editor';
+  const autonomous: any = accessAtStart !== 'editor' || S.provider === 'compatible';
   updateSteps(autonomous ? [
     'Understand the request and project',
     'Research and operate the required tools',
@@ -1537,7 +1757,7 @@ async function sendRequest(input: any) {
     const userImages: any = S.requestAttachments.filter(isAgentImageAttachment).map((item: any) => item.dataUrl);
     const attachedImages: any = [...userImages, ...(S.regionImage ? [S.regionImage] : []), ...observation.images].slice(0, 6);
     const raw: any = await PM.CodexBridge.request(
-      agentPrompt(request, observation, steering, focus, context), responseSchema(), attachedImages,
+      agentPrompt(request, observation, steering, focus, context) + '\nFor questions, explanations, greetings, or requests needing clarification, use operation=noop and put your natural-language answer in message. No edit is required for an ordinary conversation.', responseSchema(), attachedImages,
       {
         threadId: threadIdAtStart,
         attachments: requestFileAttachments(S.requestAttachments),
@@ -1557,7 +1777,13 @@ async function sendRequest(input: any) {
     let decoded: any;
     try { decoded = JSON.parse(raw); } catch { throw new Error('The coding agent returned an invalid section'); }
     const plan: any = sanitizePlan(decoded, { ...context, targetPanelId: focus.panels[0]?.id || context?.targetPanelId || '' }, request);
-    if (plan.operation === 'noop') throw new Error(plan.message || 'I could not turn that into an editable change yet');
+    if (plan.operation === 'noop') {
+      finishSteps(); archiveTrace();
+      S.conversation.push({ entering: true, role: 'assistant', text: plan.message || 'What would you like to work on?' });
+      S.activity = ''; S.plan = null; S.phase = 'conversation';
+      PM.AgentUI?.update({ focusComposer: true });
+      return;
+    }
     if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'I could not prepare the composition edit');
     if (plan.kind === 'section' && !plan.section.controls.length) throw new Error('The generated section had no controls connected to editable source');
     if (plan.kind === 'workspace' && !plan.workspaceEdit) throw new Error('The generated workspace was not safe or complete enough to preview');
@@ -1641,13 +1867,17 @@ function agentPrompt(request: any, observation: any, steering: any = false, focu
     name: item.name, type: item.type, content: item.content ? item.content.slice(0, 30_000) : undefined,
     image: !!item.dataUrl,
   }));
-  const editableSource: any = PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {};
+  const editableSource: any = boundedEditableSource(
+    PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {},
+    request,
+    Array.isArray(PM.sel?.layers) ? PM.sel.layers : [],
+  );
   const capabilities: any = PM.Capabilities?.catalog?.() || {};
   const conversation: any = S.conversation.slice(0, -1).slice(-12).map((message: any) => ({
     role: message.role, text: message.text,
     attachments: (message.attachments || []).map((item: any) => typeof item === 'string' ? item : item.name),
   }));
-  return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Your final response must be only the requested JSON object.
+  const prompt = `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Your final response must be only the requested JSON object.
 
 ${AGENT_TESTING_INSTRUCTIONS}
 
@@ -1674,7 +1904,7 @@ RULES
 - operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
 - A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, button, readout, and visual curve controls.
 - Every non-button control that edits project data must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths. A visual tool control may instead use stateKey only when a validated source-action button consumes that state.
-- The EDITABLE SOURCE CATALOG below is authoritative and complete for the current project. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
+- The EDITABLE SOURCE CATALOG below is authoritative for every included layer. Large projects also include a compact layerIndex; selected layers and layers named in the request are prioritized. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
 - Do not create decorative or disconnected scene parameters. If a requested control has no source yet, prefer a scene or workspace action that creates useful editable source rather than refusing the whole request.
 - Buttons may use only one of the listed command ids. Never invent commands.
 - Advanced generated tools may use local settings with stateKey plus buttons whose action is a JSON-encoded safe transform action. A transform action is {"type":"transform","mode":"preview|apply","transform":{"label":"...","selector":{"scope":"selection|all|visible","types":[]},"order":"stack|reverseStack|selection|reverseSelection|start|reverseStart|name|random","edits":[{"path":"layer.from|layer.duration|layer.*|properties.*|content.*","value":EXPRESSION}]}}. Expressions are constants or objects using state, ref, aggregate, and bounded math ops from GENERATED TOOL CAPABILITIES. Prefer this declarative form when it can express the tool.
@@ -1725,6 +1955,7 @@ ${PM.AgentHarness.promptContext(observation)}
 
 USER REQUEST
 ${request}`;
+  return boundedAgentPrompt(prompt, request);
 }
 
 function workspaceSemanticContext(workspace: any) {
@@ -1997,7 +2228,7 @@ function sanitizePlan(raw: any, context: any, request: any = '') {
     targetPanelId: cleanText(raw?.targetPanelId, context?.targetPanelId || '', 100),
     dockId: cleanText(raw?.dockId, '', 100),
     placement: ['before', 'after', 'replace'].includes(raw?.placement) ? raw.placement : (operation === 'modify' ? 'replace' : 'after'),
-    message: cleanText(raw?.message, operation === 'modify' ? 'The redesigned section is ready.' : 'The new section is ready.', 220),
+    message: cleanText(raw?.message, operation === 'modify' ? 'The redesigned section is ready.' : 'The new section is ready.', operation === 'noop' ? 30_000 : 220),
     steps: steps.length ? steps : ['Prepare the editable change', 'Review the visible result'],
     chromeEdit: kind === 'chrome' ? { target: chromeTarget, value: chromeValue } : null,
     interfaceEdit: kind === 'interface' ? interfaceEdit : null,

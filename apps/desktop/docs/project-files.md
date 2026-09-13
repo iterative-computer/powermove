@@ -13,3 +13,11 @@ Project files embed imported media and currently have a **256 MB total size limi
 Local recovery remains in the app’s own storage and is separate from deliberate saves. Playing, seeking, selecting layers, and moving panels do not constitute project-file edits. Unsaved edits are retained locally for recovery, but a `.pmv` file changes only when you explicitly save it.
 
 Native save/open/close handlers are installed at app launch. An already-running development session must be restarted with the user’s approval to activate changes to those handlers. Tests run only in the hidden Electron harness with a fresh temporary profile; native dialog decisions are substituted there while the actual file reads/writes and renderer commands run unchanged.
+
+### Undo and redo persistence
+
+Saved `.pmv` files and local project sessions retain the bounded project-edit
+history and its current undo/redo position. Grouped agent edits remain a single
+step, and the file includes media referenced only by history (for example, a
+deleted image). Opening an older file without history starts a fresh timeline.
+Session-only selection and interface callbacks are not included in the file.

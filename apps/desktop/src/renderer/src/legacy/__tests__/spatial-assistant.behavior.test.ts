@@ -411,6 +411,147 @@ it('recognizes native live edits without applying final commands a second time',
   assert.equal(PM.Edit.apply.mock.calls.length, 0);
 });
 
+it('notifies the active autonomous agent when the user changes the project', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [], edits: [] };
+  PM.hist = { mark: vi.fn(() => ({ index: -1, topId: null })), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn(command => command),
+  };
+  PM.CodexBridge.steer = vi.fn(async () => true);
+  let finish;
+  PM.CodexBridge.request = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+
+  PM.AgentUI.submit('Add a title');
+  await vi.waitFor(() => assert.equal(PM.CodexBridge.request.mock.calls.length, 1));
+  PM.proj.revision = 1;
+  PM.proj.edits.push({ revision: 1, origin: 'interface' });
+  PM.bus.emit('history:project-patch', {
+    projectId: 'project-1', revision: 1, origin: 'interface',
+    patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'User title' }],
+  });
+
+  await vi.waitFor(() => assert.equal(PM.CodexBridge.steer.mock.calls.length, 1));
+  assert.match(PM.CodexBridge.steer.mock.calls[0][0], /current revision: 1/);
+  assert.match(PM.CodexBridge.steer.mock.calls[0][0], /layers\.0\.name/);
+  finish({ text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+});
+
+it('does not notify the autonomous agent about its own live project edits', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [], edits: [] };
+  PM.hist = { mark: vi.fn(() => ({ index: -1, topId: null })), squash: vi.fn() };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn(command => command),
+  };
+  PM.CodexBridge.steer = vi.fn(async () => true);
+  let finish;
+  PM.CodexBridge.request = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+
+  PM.AgentUI.submit('Add a title');
+  await vi.waitFor(() => assert.equal(PM.CodexBridge.request.mock.calls.length, 1));
+  PM.proj.revision = 1;
+  PM.proj.edits.push({ revision: 1, origin: 'agent' });
+  PM.bus.emit('history:project-patch', {
+    projectId: 'project-1', revision: 1, origin: 'agent',
+    patches: [{ path: ['layers'], exists: true, value: [] }],
+  });
+  await Promise.resolve();
+
+  assert.equal(PM.CodexBridge.steer.mock.calls.length, 0);
+  finish({
+    text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }),
+    liveEditsApplied: true,
+  });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+});
+
+it('imports autonomous artifacts even when the project changed during the run', async () => {
+  const { PM } = spatialHarness();
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [], edits: [] };
+  PM.hist = {
+    mark: vi.fn(() => ({ index: 0, topId: 'user-history' })),
+    squash: vi.fn(() => 'agent-history'),
+  };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn(command => command),
+  };
+  const media = new File(['clip'], 'clip.mp4', { type: 'video/mp4' });
+  PM.AgentArtifacts = { load: vi.fn(async () => media) };
+  PM.assetKind = vi.fn(() => 'video');
+  PM.importFiles = vi.fn(async () => {});
+  PM.CodexBridge.request = vi.fn(async () => {
+    PM.proj.revision = 1;
+    return {
+      text: JSON.stringify({
+        summary: 'Created a clip', commands: [], externalActions: [], notes: [],
+        artifacts: [{ path: 'clip.mp4', name: 'clip.mp4', mime: 'video/mp4', importToTimeline: true }],
+      }),
+      extensions: [],
+    };
+  });
+
+  PM.AgentUI.submit('Create and import a clip');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+
+  assert.equal(PM.CodexBridge.request.mock.calls.length, 1, 'an import does not need command reconciliation');
+  assert.equal(PM.importFiles.mock.calls.length, 1);
+  assert.equal(PM.AgentUI.state.run.artifacts[0].imported, true);
+  assert.equal(PM.AgentUI.state.run.reviewError, '');
+});
+
+it('reconciles stale autonomous commands against the latest project before applying them', async () => {
+  const { PM } = spatialHarness();
+  const command = { type: 'set_composition', patch: { bg: '#123456' } };
+  PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [], edits: [] };
+  PM.hist = {
+    mark: vi.fn(() => ({ index: 0, topId: 'user-history' })),
+    squash: vi.fn(() => 'agent-history'),
+  };
+  PM.Edit = { apply: vi.fn(() => ({ ok: true })) };
+  PM.AgentHarness = {
+    observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
+    cleanCommand: vi.fn(value => value),
+    sanitizeProposal: vi.fn(value => value),
+    sceneSchema: vi.fn(() => ({ type: 'object' })),
+    promptContext: vi.fn(() => ''),
+  };
+  PM.CodexBridge.steer = vi.fn(async () => false);
+  PM.CodexBridge.request = vi.fn(async (...args) => {
+    if (PM.CodexBridge.request.mock.calls.length === 1) {
+      PM.proj.revision = 1;
+      PM.proj.edits.push({ revision: 1, origin: 'interface' });
+      PM.bus.emit('history:project-patch', {
+        projectId: 'project-1', revision: 1, origin: 'interface',
+        patches: [{ path: ['bg'], exists: true, value: '#654321' }],
+      });
+      return {
+        text: JSON.stringify({ summary: 'Updated the composition', commands: [command], artifacts: [], externalActions: [], notes: [] }),
+        extensions: [],
+      };
+    }
+    return JSON.stringify({
+      kind: 'scene', operation: 'modify', targetPanelId: '', dockId: '', placement: 'replace',
+      message: 'Reconciled the edit', steps: ['Reconcile the source'],
+      sceneEdit: { label: 'Reconciled edit', summary: 'Preserved the newer background.', commands: [command], reviewTimes: [] },
+    });
+  });
+
+  PM.AgentUI.submit('Update the composition');
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result', JSON.stringify(PM.AgentUI.state.conversation)));
+
+  assert.equal(PM.CodexBridge.request.mock.calls.length, 2, 'uses a read-only reconciliation pass');
+  assert.equal(PM.CodexBridge.request.mock.calls[1][3].mode, undefined);
+  assert.deepEqual(PM.Edit.apply.mock.calls[0][0], [command]);
+  assert.equal(PM.Edit.apply.mock.calls[0][1].baseRevision, 1);
+  assert.equal(PM.AgentUI.state.run.reviewError, '');
+  assert.equal(PM.AgentUI.state.run.checkpoint.historyId, 'agent-history');
+});
+
 function placementHarness() {
   const { PM } = spatialHarness();
   window.requestAnimationFrame = () => 0;

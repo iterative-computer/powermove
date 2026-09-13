@@ -22,6 +22,9 @@ async function fakeCodex(directory: string, name: string, version: string): Prom
     'utf8'
   );
   await chmod(binary, 0o755);
+  const toolHost = path.join(directory, 'codex-code-mode-host');
+  await writeFile(toolHost, '#!/bin/sh\nexit 0\n', 'utf8');
+  await chmod(toolHost, 0o755);
   return binary;
 }
 
@@ -76,6 +79,18 @@ describe('Codex binary discovery', () => {
       '/Powermove.app/Contents/Resources/codex/bin/codex',
       '/Powermove/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex'
     ]);
+  });
+
+  it('skips a Codex launcher whose tool-host companion is empty', async () => {
+    const bundledDirectory = await mkdtemp(path.join(tmpdir(), 'powermove-env-empty-host-'));
+    const shellDirectory = await mkdtemp(path.join(tmpdir(), 'powermove-env-good-host-'));
+    const bundledBinary = await fakeCodex(bundledDirectory, 'codex-bundled', 'bundled 1.0');
+    const shellBinary = await fakeCodex(shellDirectory, 'codex', 'shell 1.0');
+    await writeFile(path.join(bundledDirectory, 'codex-code-mode-host'), '', 'utf8');
+    await writeFile(path.join(shellDirectory, '.zprofile'), `export PATH='${shellDirectory}':$PATH\n`, 'utf8');
+    process.env.ZDOTDIR = shellDirectory;
+
+    await expect(discoverCodex(null, { bundledCandidates: [bundledBinary] })).resolves.toBe(shellBinary);
   });
 
   it('records codex --version once for the process-wide description', async () => {

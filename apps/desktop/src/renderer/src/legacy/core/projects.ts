@@ -141,13 +141,36 @@ R.get = (id: any) => {
   return project;
 };
 
-R.getState = (id: any) => id ? PM.store.get(R.STATE + id, null) : null;
-R.putState = (id: any, state: any) => { if (id && state && typeof state === 'object') PM.store.set(R.STATE + id, state); };
+R.getState = (id: any, options: { history?: boolean } = {}) => {
+  if (!id) return null;
+  const history = options.history === false ? undefined : PM.store.get(`projectHistory.${id}`, undefined);
+  const metadata = PM.store.get(`projectMeta.${id}`, null);
+  const legacy = !metadata || options.history !== false && history === undefined
+    ? PM.store.get(R.STATE + id, null, { omitHistory: options.history === false || history !== undefined }) : null;
+  const state = metadata ? { ...legacy, ...metadata } : legacy;
+  return history === undefined ? state : { ...state, history };
+};
+R.putState = (id: any, state: any) => {
+  if (!id || !state || typeof state !== 'object') return;
+  if (PM.store.separateHistory !== true) {
+    const previous = state.history === undefined ? PM.store.get(R.STATE + id, null) : null;
+    PM.store.set(R.STATE + id, { ...previous, ...state });
+    return;
+  }
+  const { history, ...metadata } = state;
+  if (history !== undefined) {
+    if (PM.store.setAsync) void PM.store.setAsync(`projectHistory.${id}`, history);
+    else PM.store.set(`projectHistory.${id}`, history);
+  }
+  // Keep the legacy envelope as a recovery fallback until the separate history
+  // has reached disk. Small metadata updates never clone or overwrite it.
+  PM.store.set(`projectMeta.${id}`, metadata);
+};
 
 /** Pure boot choice: content first (open tabs, then registry), then a named
     empty project. Anonymous empty projects never win over the welcome demo. */
 R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, getState = R.getState, legacy = null }: any = {}) => {
-  const active = tabs.map((id: string) => ({ id, at: Number(getState(id)?.lastActiveAt) || 0 }))
+  const active = tabs.map((id: string) => ({ id, at: Number(getState(id, { history: false })?.lastActiveAt) || 0 }))
     .filter((item: any) => item.at > 0).sort((a: any, b: any) => b.at - a.at);
   for (const item of active) {
     const project = R.unwrap(get(item.id));
@@ -200,6 +223,9 @@ R.destroy = (id: any) => {
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
   try { PM.store.del(R.STATE + id); } catch (e) { }
+  for (const prefix of ['projectMeta.', 'projectHistory.', 'projectWorkspace.']) {
+    try { PM.store.del(prefix + id); } catch (e) { }
+  }
   try { PM.store.del(R.JOURNAL + id); } catch (e) { }
 };
 
@@ -236,6 +262,13 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
 // development without propagating a name-workflow edit into a window reload.
 if (import.meta.hot) {
   import.meta.hot.accept(next => {
-    if (next && window.PM) next.install(window.PM);
+    if (next && window.PM) {
+      const PM = window.PM;
+      next.install(PM);
+      if (PM.proj?.id && PM.hist?.export) {
+        PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }),
+          history: PM.hist.export({ copy: false }), workspace: PM.WS?.snapshot(), time: PM.time });
+      }
+    }
   });
 }

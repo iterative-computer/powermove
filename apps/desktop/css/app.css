@@ -168,10 +168,9 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
    own material without adding another outline around the clipped contents. */
 .dock:is(#dock-left,#dock-right){overflow-y:auto;overscroll-behavior-y:contain;scrollbar-width:none;border-radius:var(--r-lg);corner-shape:var(--ui-corner-smoothing)}
 .dock:is(#dock-left,#dock-right)::-webkit-scrollbar{display:none}
-/* Side columns scroll as one surface when their panels no longer fit. Keep a
-   fluid panel at its usable content height instead of crushing it against the
-   titlebar while fixed panels spill below the status bar. */
-.dock:is(#dock-left,#dock-right)>.panel-slot>.panel{flex-shrink:0!important}
+/* Fluid panels must shrink as their neighbour grows during a splitter drag.
+   Their explicit minimum height protects the chrome; fixed panels retain
+   flex-shrink:0 from the layout, and the column scrolls if minimums overflow. */
 /* The agent's ghost holds the slot of the panel being built, so it keeps a real
    panel's sizing here too: full height in a scrolling column. */
 .dock:is(#dock-left,#dock-right)>.ui-placement-ghost{flex-shrink:0}
@@ -343,13 +342,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
   flex:1 1 0;min-width:0;width:100%;line-height:28px;padding:0 8px}
 .num.editing{background:rgb(var(--ink-rgb) / .06);box-shadow:inset 0 0 0 1px var(--accent);cursor:text}
 .num.link{color:var(--accent-tx)}
-/* A well with an optional 24px prefix gutter (X / Y / W / H) on the left and
-   a 24px keyframe slot on the right. */
+/* A well with an optional 24px prefix gutter (X / Y / W / H) on the left. */
 .well{position:relative;display:flex;flex:1 1 0;min-width:0;align-items:center}
 .well[data-prefix]::before{content:attr(data-prefix);position:absolute;left:0;top:0;bottom:0;width:24px;display:grid;place-items:center;
   font-family:var(--f-mono);font-size:10px;color:var(--tx-3);pointer-events:none}
 .well[data-prefix] .num{padding-left:24px}
-.well.has-kf .num{padding-right:24px}
 .kf{position:absolute;right:0;top:0;width:24px;height:28px;display:grid;place-items:center;color:var(--tx-4);flex:none}
 .kf i{width:6px;height:6px;transform:rotate(45deg);border:1px solid rgb(var(--ink-rgb) / .35);background:transparent;transition:border-color var(--dur-1),background var(--dur-1)}
 .kf:hover i{border-color:var(--tx)}
@@ -1109,6 +1106,8 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .fxb-cat:hover{color:var(--tx)}
 .fxb-cat.on{background:var(--bg-float);color:var(--tx);box-shadow:var(--ctl-edge)}
 .fxb-cat:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+/* Short panels scroll their contents instead of compressing every label. */
+.fxb-cat,.fxb-row,.fxb-sec,.fxb-empty{flex-shrink:0}
 .fxb-list{min-height:0;flex:1;overflow:auto;padding:6px 6px 10px 6px;display:flex;flex-direction:column;scrollbar-width:thin}
 .fxb-sec{height:auto;margin:0;padding:10px 8px 3px;border-top:0;color:var(--tx-4);font-size:var(--fs-xs);font-weight:var(--fw-medium);letter-spacing:0}
 .fxb-sec:first-child{padding-top:2px}
@@ -1126,7 +1125,7 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .fxb{container-type:inline-size}
 @container (max-width:230px){
   .fxb-body{flex-direction:column}
-  .fxb-rail{width:auto;flex-direction:row;flex-wrap:wrap;gap:2px;padding:6px 8px 2px;border-right:0;border-bottom:1px solid var(--line)}
+  .fxb-rail{width:auto;flex-direction:row;flex-wrap:nowrap;gap:2px;padding:6px 8px 2px;border-right:0;border-bottom:1px solid var(--line)}
   .fxb-cat{width:auto;height:22px;padding:0 8px;font-size:var(--fs-xs)}
 }
 

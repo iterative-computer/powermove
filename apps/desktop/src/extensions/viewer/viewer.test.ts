@@ -7,7 +7,7 @@ import {
   createViewerRuntime, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
   previewRenderSize, previewRenderViewport, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
-  shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
+  selectionBoundsCenter, shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 import type { PreviewViewport } from './viewer';
 import type { PowermoveAPI, Space3DAPI, ViewerService } from 'powermove';
@@ -73,7 +73,7 @@ function viewerApi(): PowermoveAPI {
 }
 
 interface ViewerTestRuntime extends ViewerService {
-  boxSnapPoints(bounds: object): any[];
+  boxSnapPoints(bounds: object, scope?: 'layer' | 'composition'): any[];
   findSnapTarget(source: any[], targets: any[], threshold: number, axis: 'x' | 'y'): any;
   passedMoveDragThreshold(dx: number, dy: number): boolean;
   snapBox(moving: any, candidates: any, threshold: number, axes?: {x:boolean;y:boolean}): any;
@@ -217,12 +217,30 @@ describe('viewer runtime', () => {
     expect(both.dx).toBe(-3);
     expect(both.dy).toBe(-2);
     expect(both.lines).toEqual([
-      { from: { x: 200, y: 50 }, to: { x: 200, y: 0 } },
-      { from: { x: 200, y: 50 }, to: { x: 400, y: 50 } },
+      expect.objectContaining({ axis: 'x', from: { x: 200, y: 50 }, to: { x: 200, y: 0 } }),
+      expect.objectContaining({ axis: 'y', from: { x: 200, y: 50 }, to: { x: 400, y: 50 } }),
     ]);
 
     const locked = V.snapBox(moving, candidates, 6, { x: true, y: false });
-    expect(locked).toEqual({ dx: -3, dy: 0, lines: [{ from: { x: 200, y: 52 }, to: { x: 200, y: 0 } }] });
+    expect(locked.dx).toBe(-3);
+    expect(locked.dy).toBe(0);
+    expect(locked.lines).toEqual([
+      expect.objectContaining({ axis: 'x', from: { x: 200, y: 52 }, to: { x: 200, y: 0 } }),
+    ]);
+  });
+
+  it('preserves enough snap-point context to render an unmistakable composition center', () => {
+    const V = viewer(viewerApi());
+    const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 270, x1: 370, y0: 140, y1: 220 }));
+    const composition = V.snapCandidatesFromPoints(V.boxSnapPoints(
+      { x0: 0, x1: 640, y0: 0, y1: 360 }, 'composition',
+    ));
+
+    const snap = V.snapBox(moving, composition, 1);
+    expect(snap.lines).toEqual([
+      expect.objectContaining({ axis: 'x', sourceRole: 'center', targetRole: 'center', targetScope: 'composition' }),
+      expect.objectContaining({ axis: 'y', sourceRole: 'center', targetRole: 'center', targetScope: 'composition' }),
+    ]);
   });
 
   it('keeps sibling alignment targets for a multi-selection inside one parent', () => {
@@ -252,6 +270,10 @@ describe('viewer runtime', () => {
     expect(V.snapLinesChanged(a, b)).toBe(true);
     expect(V.snapLinesChanged(a, [...a, ...b])).toBe(true);
     expect(V.snapLinesChanged(a, null)).toBe(false);
+    expect(V.snapLinesChanged(
+      [{ ...a[0], axis: 'x', targetRole: 'corner', targetScope: 'layer' }],
+      [{ ...a[0], axis: 'x', targetRole: 'center', targetScope: 'composition' }],
+    )).toBe(true);
   });
 
   it('keeps click jitter below the move-drag threshold', () => {
@@ -400,6 +422,19 @@ describe('viewer runtime', () => {
     expect(selection?.bounds).toEqual({ x0: 90, y0: 115, x1: 225, y1: 190, w: 135, h: 75 });
     expect(selection?.handles.nw).toEqual({ x: 90, y: 115 });
     expect(selection?.handles.se).toEqual({ x: 225, y: 190 });
+  });
+
+  it('keeps a group bounds center explicit when its transform anchor is offset', () => {
+    const group = { id: 'group', type: 'group', parent: null };
+    const api = viewerApi();
+    api.anim.active = () => true;
+    api.render.gl.bounds = () => ({ x0: -70, y0: -40, x1: 70, y1: 40, w: 140, h: 80 });
+    api.anim.worldMatrix = () => [1, 0, 0, 1, 320, 180];
+    api.anim.ev = (_layer: any, path: string) => path === 'anchor.x' ? 10 : path === 'anchor.y' ? -20 : 0;
+
+    const selection = resolveSelectionGeometry(api, [group], 0, testSpace3d(api))!;
+    expect(selectionBoundsCenter(selection)).toEqual({ x: 320, y: 180 });
+    expect(selection.pivotWorld).toEqual({ x: 330, y: 160 });
   });
 
   it('keeps locked members in common chrome while disabling the whole transform', () => {

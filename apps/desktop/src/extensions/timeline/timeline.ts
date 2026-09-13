@@ -2,11 +2,12 @@ import { revealedProperties } from './property-reveal';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
 import { temporalKeys, type KernelEvents, type PowermoveAPI, type Space3DAPI } from 'powermove';
+import { createGraphSampleCache } from './graph-sample-cache';
 import { adjacentKeyframe } from './keyframe-navigation';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
 import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './api-helpers';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
-import { expandScaleKeyIds, graphHandleChannels, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
+import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
   bezierHandleAtPoint,
   keysForBezierHandleDrag,
@@ -34,6 +35,8 @@ export interface KeyframeMoveSnapshotItem<Property = unknown> {
   maxTime?: number;
   selected: boolean;
   order?: number;
+  offsetIndex?: number;
+  offsetCount?: number;
 }
 
 export interface KeyframeMovePlan<Property = unknown> {
@@ -75,6 +78,109 @@ export const timelineWorkArea = {
     return { workArea: [nextStart, nextStart + span] as [number, number] };
   },
 };
+export interface QuickOffsetTimingItem {
+  time: number;
+  offsetIndex: number;
+  offsetCount: number;
+  minTime?: number;
+  maxTime?: number;
+}
+
+export interface QuickOffsetTimingPlan {
+  total: number;
+  perGroup: number;
+  times: number[];
+}
+
+export interface PropertyValueColumn {
+  left: number;
+  right: number;
+  width: number;
+}
+
+/** Keep property values aligned and visibly separated from one another and
+    from trailing row actions such as the Scale link control. */
+export function propertyValueColumns(
+  valueX: number, gutter: number, count: number, actionWidth = 0, gap = 8,
+): PropertyValueColumn[] {
+  const columns = Math.max(1, Math.floor(count) || 1);
+  const rightEdge = Math.max(valueX, gutter - 8 - Math.max(0, actionWidth));
+  const available = Math.max(0, rightEdge - valueX - gap * (columns - 1));
+  const width = available / columns;
+  return Array.from({ length: columns }, (_, index) => {
+    const left = valueX + index * (width + gap);
+    return { left, right: left + width, width };
+  });
+}
+
+export function toggleTimelineDisclosure(api: PowermoveAPI, layer: any): boolean {
+  if (layer.type === 'group') {
+    const collapsed = !api.uiState.getGroupCollapsed(layer);
+    api.uiState.setGroupCollapsed(layer, collapsed);
+    return collapsed;
+  }
+  const collapsed = !api.uiState.getLayerCollapsed(layer);
+  layer.collapsed = collapsed;
+  api.uiState.setLayerCollapsed(layer, collapsed);
+  return collapsed;
+}
+
+export function toggleTimelineScaleLink(api: PowermoveAPI, layer: any): void {
+  api.edit.apply(
+    { type: 'set_layer', target: layer.id, patch: { scaleLinked: !layer.scaleLinked } },
+    { label: 'Link scale axes', origin: 'timeline' },
+  );
+}
+
+/** Distribute one pointer delta across an ordered set of groups. The first
+    selected group is the anchor, the last follows the pointer, and everything
+    between receives an equal share. Items may repeat an index when one layer
+    group owns several clips or selected keyframes. */
+export function planQuickOffsetTiming(
+  items: QuickOffsetTimingItem[], requestedTotal: number,
+): QuickOffsetTimingPlan {
+  const totalGroups = Math.max(0, ...items.map(item => Number(item.offsetCount) || 0));
+  if (totalGroups < 2 || !items.length) {
+    return { total: 0, perGroup: 0, times: items.map(item => item.time) };
+  }
+  let total = Number.isFinite(requestedTotal) ? requestedTotal : 0;
+  for (const item of items) {
+    const factor = item.offsetIndex / (totalGroups - 1);
+    if (!(factor > 0) || !Number.isFinite(item.time)) continue;
+    const minTime = Number.isFinite(item.minTime) ? item.minTime! : 0;
+    total = Math.max(total, (minTime - item.time) / factor);
+    if (Number.isFinite(item.maxTime)) total = Math.min(total, (item.maxTime! - item.time) / factor);
+  }
+  if (Object.is(total, -0)) total = 0;
+  return {
+    total,
+    perGroup: total / (totalGroups - 1),
+    times: items.map(item => item.time + item.offsetIndex / (totalGroups - 1) * total),
+  };
+}
+
+/** Quick Offset keeps each layer's selected keys rigid while staggering the
+    layers themselves. Unlike an ordinary key drag, its advertised precision
+    includes subframes, so the total is intentionally not frame-rounded. */
+export function planQuickOffsetKeyframes<Property>(
+  items: Array<KeyframeMoveSnapshotItem<Property>>, requestedTotal: number, _fps: number,
+): KeyframeMovePlan<Property> {
+  const selected = items.filter(item => item.selected && item.offsetIndex != null && item.offsetCount != null);
+  const timing = planQuickOffsetTiming(selected.map(item => ({
+    time: item.time,
+    offsetIndex: item.offsetIndex!,
+    offsetCount: item.offsetCount!,
+    minTime: item.minTime,
+    maxTime: item.maxTime,
+  })), requestedTotal);
+  const moves = selected.map((item, index) => ({ item, time: timing.times[index]! }));
+  const removed: Array<KeyframeMoveSnapshotItem<Property>> = [];
+  for (const fixed of items) {
+    if (fixed.selected) continue;
+    if (moves.some(move => move.item.property === fixed.property && Math.abs(move.time - fixed.time) < 1e-9)) removed.push(fixed);
+  }
+  return { delta: timing.total, moves, removed };
+}
 
 /** Resolve a temporary Shift-snap without letting two nearby targets make the
     playhead flicker. A previously acquired target gets a slightly wider
@@ -250,6 +356,7 @@ const T: any = previous || {
   graph: false, rows: [], cv: null, ctx: null, w: 0, hgt: 0, dpr: 1,
   hover: null, marquee: null, dropRow: null as number | null,
   reorder: null as ReturnType<typeof layerDrop>,
+  quickOffset: null as null | { total: number; perGroup: number; x: number; y: number },
   drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
@@ -280,6 +387,7 @@ T.__timelineRuntimeDisposed = false;
 const runtimeCleanups: Array<() => void> = [];
 let headCleanups: Array<() => void> = [];
 let canvasCleanups: Array<() => void> = [];
+let syncGraphControls = () => {};
 const frameIds = new Set<number>();
 const timerIds = new Set<number>();
 const activeDrags = new Set<any>();
@@ -437,8 +545,31 @@ function buildHead(head: any) {
   const playBtn = btn('play', () => api.transport.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
   const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (Shift+F3)' }, iconNode(api, 'bezier'));
-  listen(graph, 'click', () => { T.graph = !T.graph; graph.classList.toggle('on', T.graph); invalidate('timeline'); }, undefined, headCleanups);
-  const graphSlot = h('div.tl-group.tl-graph-slot', graph);
+  listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
+  const graphOptions = btn('more', () => api.ui.menu(graphOptions, [
+    { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
+    { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
+    { label: 'Fit selected curves', disabled: !T._graph, run: () => {
+      const points = T._graph?.points || [];
+      if (!points.length) return;
+      const times = points.map((point: any) => point.axis.L.from + point.key.t);
+      const first = Math.min(...times), last = Math.max(...times);
+      T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
+      T.scrollT = Math.max(-.4, first - 24 / T.pps);
+      T.graphViewBounds = null; invalidate('timeline');
+    } },
+  ]), 'Graph options');
+  let graphShown: boolean | undefined;
+  syncGraphControls = () => {
+    const shown = Boolean(T.graph);
+    if (graphShown === shown) return;
+    graphShown = shown;
+    graph.classList.toggle('on', shown);
+    graph.setAttribute('aria-pressed', String(shown));
+    graphOptions.hidden = !shown;
+    graphOptions.style.display = shown ? '' : 'none';
+  };
+  const graphSlot = h('div.tl-group.tl-graph-slot', graphOptions, graph);
   const transport = h('div.tl-group.tl-transport',
     playBtn,
     time,
@@ -471,7 +602,8 @@ function buildHead(head: any) {
     }));
   }, undefined, headCleanups);
   const syncTime = () => {
-    time.textContent = api.util.tc(api.transport.time(), api.project.get().fps);
+    const text = api.util.tc(api.transport.time(), api.project.get().fps);
+    if (time.textContent !== text) time.textContent = text;
   };
   const syncTransport = () => {
     /* Keep the icon node stable while playback frames update the timecode.
@@ -485,9 +617,9 @@ function buildHead(head: any) {
   onEvent('project:changed', () => {
     syncTime();
     syncTransport();
-    graph.classList.toggle('on', T.graph);
+    syncGraphControls();
   }, headCleanups);
-  syncTime(); syncTransport();
+  syncTime(); syncTransport(); syncGraphControls(); syncHeadGeometry(head);
   listen(time, 'pointerdown', (e: any) => {
     const startTime = api.transport.time();
     beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => api.transport.setTime(startTime + dx / 12 / api.project.get().fps) });
@@ -495,14 +627,17 @@ function buildHead(head: any) {
 }
 
 function refreshTimelineManifest() {
+  syncGraphControls();
   const raw = api.workspace.current()?.chrome?.timeline;
   const config = normalizeTimelineChrome(api, raw);
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
   T.style = config;
   const head = document.querySelector<HTMLElement>('#tl-head');
   if (head) {
-    head.dataset.density = config.toolbarDensity;
-    syncHeadGeometry(head);
+    if (head.dataset.density !== config.toolbarDensity) head.dataset.density = config.toolbarDensity;
+    // The draw resolves the minimum width of property columns before syncing
+    // the header. Publishing the narrower configured gutter here and widening
+    // it again below forced layout twice on every playback/scrub frame.
   }
   return config;
 }
@@ -554,7 +689,7 @@ let propertyLabelWidth: number | null = null;
 function revealSelectedAncestors() {
   for (const layer of selectedLayers(api) || []) {
     for (const group of api.groups.ancestors(layer) || []) {
-      api.uiState.setLayerCollapsed(group, false);
+      api.uiState.setGroupCollapsed(group, false);
     }
   }
   rowsDirty = true;
@@ -578,7 +713,7 @@ function buildRows() {
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
     const ancestors = api.groups.ancestors(L) || [];
-    if (!T.search && ancestors.some((group: any) => api.uiState.getLayerCollapsed(group))) continue;
+    if (!T.search && ancestors.some((group: any) => api.uiState.getGroupCollapsed(group))) continue;
     if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
     const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
@@ -613,8 +748,8 @@ onEvent('time', () => invalidate('timeline'));
 onEvent('selection', () => {
   revealSelectedAncestors();
   buildRows();
-  const selectedRow = T.rows.findIndex((row: any) => row.kind === 'layer' && api.selection.layers().includes(row.L.id));
-  if (selectedRow >= 0) keepRowsVisible(selectedRow, 0);
+  /* Selection can originate in the composition canvas, marquee, inspector,
+     or another panel. Never move the user's timeline viewport to chase it. */
   invalidate('timeline');
 });
 revealSelectedAncestors();
@@ -743,6 +878,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
   }
   drawRuler(c, W, H);
   drawPlayhead(c, W, H);
+  drawQuickOffset(c, W, H);
   drawScrollThumb(c, W, H, maxScroll);
   if ((window as any).__tlDebug) {
     const px = t2x(api.transport.time());
@@ -773,6 +909,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph,
     style: T.style, rows: T.rows, propertyValueX: T.propertyValueX,
     hover: T.hover, marquee: T.marquee, dropRow: T.dropRow, drop: T.drop, reorder: T.reorder,
+    quickOffset: T.quickOffset,
   };
   try {
     T.gut = 224;
@@ -784,6 +921,7 @@ T.renderPreview = (canvas: HTMLCanvasElement, width: number, height: number) => 
     T.dropRow = null;
     T.drop = null;
     T.reorder = null;
+    T.quickOffset = null;
     T.style = {
       clipRadius: 5, keyframeSize: 8, showLayerNumbers: true,
       showTypeBadges: true, toolbarDensity: 'compact'
@@ -1184,7 +1322,9 @@ function drawGutter(c: any, W: any, H: any) {
          state (hidden or locked). Idle rows show number, tag, name. */
       const active = sel || T.hoverRow === i;
       const indent = Math.min(48, (r.depth || 0) * 12);
-      const collapsed = api.uiState.getLayerCollapsed(L);
+      const collapsed = L.type === 'group'
+        ? api.uiState.getGroupCollapsed(L)
+        : api.uiState.getLayerCollapsed(L);
       c.font = '400 10px ' + fmono();
       c.fillStyle = INK.lo; c.textBaseline = 'middle';
       if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
@@ -1210,7 +1350,7 @@ function drawGutter(c: any, W: any, H: any) {
       c.textAlign = 'left';
       c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      const hasParentControl = L.type !== 'group' && layerSupportsTransform(L.type);
+      const hasParentControl = layerSupportsTransform(L.type);
       const showParentControl = hasParentControl && (active || !!L.parent);
       const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur') ? 12 : 0);
       const nameRight = T.gut - (hasParentControl ? 50 : 12) - statusWidth;
@@ -1247,35 +1387,65 @@ function drawGutter(c: any, W: any, H: any) {
       clipText(c, r.label, labelX, y + T.row / 2, valueX - labelX - 12);
       /* value at playhead */
       const values = trackChannels(r).map(axis => api.anim.evP(L, axis.prop, api.transport.time(), axis.key));
-      const v = r.channels ? values.map(value => api.util.round(Number(value), 1)).join(', ') + '%' : values[0];
       c.font = '400 10px ' + fmono();
       c.fillStyle = theme.accent;
-      c.textAlign = 'left';
-      if (r.channels) {
-        const width = (T.gut - valueX - 8) / values.length;
-        values.forEach((value, index) => c.fillText(`${api.util.round(Number(value), 1)}%`, valueX + index * width, y + T.row / 2, width - 4));
-      } else c.fillText(typeof v === 'number' ? api.util.round(v, 1) : String(v).slice(0, 20), valueX, y + T.row / 2,
-        Math.max(24, T.gut - valueX - 8));
+      c.textAlign = 'right';
+      const actionWidth = isScaleTrack(r) ? 24 : 0;
+      const columns = propertyValueColumns(valueX, T.gut, values.length, actionWidth);
+      values.forEach((value, index) => {
+        const column = columns[index]!;
+        const text = fittedPropertyValue(c, value, r.channels ? '%' : '', column.width);
+        c.fillText(text, column.right, y + T.row / 2);
+      });
+      if (isScaleTrack(r)) icoScaleLink(c, T.gut - 12, y + T.row / 2, !!L.scaleLinked);
       c.textAlign = 'left';
       if (r.prop.expr) { c.fillStyle = theme.accent; c.fillText('ƒ', 70, y + T.row / 2); }
     }
   }
   c.restore();
 }
+const clippedLabels = new Map<string, string>();
+listen(document.fonts, 'loadingdone', () => { clippedLabels.clear(); invalidate('timeline'); });
 function clipText(c: any, s: any, x: any, y: any, max: any) {
   if (max <= 0) return;
+  const key = JSON.stringify([c.font, c.letterSpacing, String(s), max]);
+  const cached = clippedLabels.get(key);
+  if (cached !== undefined) { c.fillText(cached, x, y); return; }
   let t = String(s);
   if (c.measureText(t).width > max) {
     if (c.measureText('…').width > max) return;
     while (t.length && c.measureText(t + '…').width > max) t = t.slice(0, -1);
     t += '…';
   }
+  if (clippedLabels.size >= 1024) clippedLabels.clear();
+  clippedLabels.set(key, t);
   c.fillText(t, x, y);
+}
+function fittedPropertyValue(c: any, value: any, unit: string, maxWidth: number) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const candidates = [
+      `${api.util.round(value, 1)}${unit}`,
+      `${api.util.round(value, 0)}${unit}`,
+      ...(Math.abs(value) >= 1000 ? [`${api.util.round(value / 1000, 1)}k${unit}`] : []),
+    ];
+    return candidates.find(candidate => c.measureText(candidate).width <= maxWidth) ?? candidates.at(-1)!;
+  }
+  let text = String(value).slice(0, 20);
+  if (c.measureText(text).width <= maxWidth) return text;
+  while (text.length && c.measureText(text + '…').width > maxWidth) text = text.slice(0, -1);
+  return text ? text + '…' : '…';
 }
 function icoAnimationDiamond(c: any, x: number, y: number, animated: boolean, current: boolean) {
   c.save(); c.strokeStyle = animated ? theme.accent : theme.tx3; c.fillStyle = theme.accent; c.lineWidth = 1.2;
   c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 4, y); c.lineTo(x, y + 5); c.lineTo(x - 4, y); c.closePath();
   if (current) c.fill(); else c.stroke(); c.restore();
+}
+function icoScaleLink(c: any, x: number, y: number, linked: boolean) {
+  c.save(); c.translate(x, y); c.rotate(-Math.PI / 4);
+  c.strokeStyle = linked ? theme.accent : theme.tx3; c.lineWidth = 1.3;
+  roundRect(c, -7, -4, 9, 5, 2.5); c.stroke();
+  roundRect(c, -2, -1, 9, 5, 2.5); c.stroke();
+  c.restore();
 }
 function drawKeyArrow(c: any, x: number, y: number, direction: number, enabled: boolean) {
   c.save(); c.strokeStyle = enabled ? theme.tx2 : theme.tx3; c.globalAlpha = enabled ? 1 : .3; c.lineWidth = 1.4;
@@ -1371,8 +1541,36 @@ function drawPlayhead(c: any, W: any, H: any) {
   c.restore();
 }
 
+function formatOffsetTime(seconds: number): string {
+  const sign = seconds < 0 ? '−' : '+';
+  return sign + api.util.tc(Math.abs(seconds), api.project.get().fps);
+}
+
+function drawQuickOffset(c: any, W: number, H: number) {
+  const offset = T.quickOffset;
+  if (!offset) return;
+  const width = 214, height = 45;
+  const left = clamp(offset.x + 14, T.gut + 8, Math.max(T.gut + 8, W - width - 8));
+  const top = clamp(offset.y + 14, T.ruler + 8, Math.max(T.ruler + 8, H - height - 8));
+  c.save();
+  c.fillStyle = theme.float;
+  c.strokeStyle = theme.line;
+  c.lineWidth = 1;
+  roundRect(c, left, top, width, height, 7); c.fill(); c.stroke();
+  c.textBaseline = 'middle';
+  c.font = '400 10px ' + fui(); c.fillStyle = theme.tx3;
+  c.fillText('TOTAL OFFSET', left + 10, top + 14);
+  c.fillText('PER LAYER', left + 112, top + 14);
+  c.font = '500 11px ' + fmono(); c.fillStyle = theme.tx;
+  c.fillText(formatOffsetTime(offset.total), left + 10, top + 31);
+  c.fillText(formatOffsetTime(offset.perGroup), left + 112, top + 31);
+  c.restore();
+}
+
 /* ── graph editor ──────────────────────────────────────── */
+const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(api, axis, time, speed));
 function drawGraph(c: any, W: any, H: any) {
+  graphSamples.begin(api.project.get(), [api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
   T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
@@ -1389,7 +1587,7 @@ function drawGraph(c: any, W: any, H: any) {
   }
   const selectedKeyIds = new Set(T.graphMarqueeIds ?? api.selection.keys());
   const series = rows
-    .flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L})))
+    .flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L,trackKey:r.key})))
     .filter((axis:any)=>typeof axis.prop.v==='number' && axis.prop.kf.some((key:any)=>selectedKeyIds.has(key.i)));
   if (!series.length) {
     c.fillStyle = theme.tx3; c.font = '400 11.5px ' + fui(); c.textAlign = 'center';
@@ -1405,7 +1603,7 @@ function drawGraph(c: any, W: any, H: any) {
     const keys=axis.prop.kf;
     for(let i=0;i<keys.length;i++) for(let sample=0;sample<=48;sample++) {
       const t=axis.L.from+keys[i].t+((keys[i+1]?.t ?? keys[i].t)-keys[i].t)*sample/48;
-      const v=graphSample(api,axis,t,speedMode); if(Number.isFinite(v)){vmin=Math.min(vmin,v);vmax=Math.max(vmax,v);}
+      const v=graphSamples.sample(axis,t,speedMode); if(Number.isFinite(v)){vmin=Math.min(vmin,v);vmax=Math.max(vmax,v);}
     }
   });
   if (!isFinite(vmin)) { vmin = 0; vmax = 1; }
@@ -1436,7 +1634,7 @@ function drawGraph(c: any, W: any, H: any) {
   const x1 = Math.min(W, t2x(L.from + Math.max(L.dur, ...kf.map((key: any) => key.t))));
   for (let x = x0; x <= x1; x += 1.5) {
     const tl = x2t(x) - L.from;
-    const v = graphSample(api,axis,tl+L.from,speedMode);
+    const v = graphSamples.sample(axis,tl+L.from,speedMode);
     const y = v2y(v == null ? 0 : v);
     x === x0 ? c.moveTo(x, y) : c.lineTo(x, y);
   }
@@ -1445,7 +1643,7 @@ function drawGraph(c: any, W: any, H: any) {
   kf.forEach((k: any, i: any) => {
     api.uiState.setKeyHandles(k, { ho: null, hi: null, pt: null });
     if (!selectedKeyIds.has(k.i)) return;
-    const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSample(api,axis,L.from+k.t,true) : k.v);
+    const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSamples.sample(axis,L.from+k.t,true) : k.v);
     const nx = kf[i + 1], pv = kf[i - 1];
     c.strokeStyle = INK.sub; c.lineWidth = 1;
     if (nx && !k.hold && !speedMode) {
@@ -1655,14 +1853,17 @@ function onMove(e: any) {
   }
   if (x < T.gut && y >= T.ruler) {
     const row = hitRow(y)?.row;
-    if (row?.kind === 'layer' && row.L.type !== 'group' && layerSupportsTransform(row.L.type) && x >= T.gut - 40) {
+    if (row?.kind === 'layer' && layerSupportsTransform(row.L.type) && x >= T.gut - 40) {
       cur = x < T.gut - 20 ? 'crosshair' : 'pointer';
       const parent = row.L.parent ? api.model.layer(row.L.parent)?.name || 'Missing layer' : 'None';
       title = x < T.gut - 20 ? `Parent: ${parent} · Drag to a layer` : `Parent: ${parent} · Choose parent`;
     } else if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
       cur = adjacentKeyframe(api, x < 40 ? -1 : 1, row, space3d) != null ? 'pointer' : 'default';
     } else if (row?.kind === 'prop' && !row.L.lock) {
-      if (x >= 76 && x < 96) cur = 'pointer';
+      if (isScaleTrack(row) && x >= T.gut - 24) {
+        cur = 'pointer';
+        title = row.L.scaleLinked ? 'Adjust Scale X and Y separately' : 'Link Scale X and Y';
+      } else if (x >= 76 && x < 96) cur = 'pointer';
       else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key) === 'number') ? 'ew-resize' : 'pointer';
     }
   }
@@ -1711,6 +1912,10 @@ function onDown(e: any) {
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
   const onClip = x >= x0 - 5 && x <= x1 + 5;
   if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey });
+  if (quickOffsetModifiers(e) && api.selection.layers().includes(L.id) && quickOffsetLayerGroups().length > 1) {
+    if (L.lock) return;
+    return quickOffsetLayers(e);
+  }
   if (!selectLayerForPointer(L, e) || L.lock) return;
   if (Math.abs(x - x0) < 5) return trim(e, 'in');
   if (Math.abs(x - x1) < 5) return trim(e, 'out');
@@ -1730,6 +1935,52 @@ function panViewport(e: PointerEvent) {
 }
 
 let layerSelectionAnchor: string | null = null;
+function quickOffsetModifiers(event: any) {
+  return !!event?.altKey && !!(event?.metaKey || event?.ctrlKey);
+}
+
+function quickOffsetLayerGroups() {
+  const selected = new Set(api.selection.layers());
+  return api.selection.layers().map((id: string) => api.model.layer(id)).filter((layer: any) => layer
+    && !api.groups.ancestors(layer).some((group: any) => selected.has(group.id)));
+}
+
+function quickOffsetLayers(e: any) {
+  const roots = quickOffsetLayerGroups();
+  if (roots.length < 2) return;
+  const groups = roots.map((root: any) => {
+    const ids = root.type === 'group' ? api.groups.expand([root.id]) : [root.id];
+    return ids.map((id: string) => api.model.layer(id)).filter(Boolean);
+  });
+  if (groups.some((members: any[]) => members.some((layer: any) => layer.lock
+      || api.groups.ancestors(layer).some((group: any) => group.lock)))) return;
+  const timing = groups.flatMap((members: any[], offsetIndex: number) => members.map((L: any) => ({
+    L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: 0,
+  })));
+  api.edit.begin('Quick offset layers', { origin: 'timeline' });
+  let moved = false;
+  const clear = () => { T.quickOffset = null; invalidate('timeline'); };
+  beginDrag(e, {
+    cursor: 'ew-resize',
+    move: (dx: number, _dy: number, event: PointerEvent) => {
+      if (!moved && Math.abs(dx) < 3) return;
+      moved = true;
+      const plan = planQuickOffsetTiming(timing, dx / T.pps);
+      timing.forEach((item: any, index: number) => api.edit.dispatch({
+        type: 'set_layer', target: item.L.id, patch: { from: api.util.round(plan.times[index] ?? item.time, 6) },
+      }));
+      const rect = T.cv.getBoundingClientRect();
+      T.quickOffset = {
+        total: plan.total, perGroup: plan.perGroup,
+        x: event.clientX - rect.left, y: event.clientY - rect.top,
+      };
+      invalidate('timeline');
+    },
+    up: () => { clear(); moved ? api.edit.commit('Quick offset layers') : api.edit.cancel(); },
+    cancel: () => { clear(); api.edit.cancel(); },
+  });
+}
+
 function selectLayerForPointer(L: any, event: PointerEvent) {
   T.keySelectionActive = false;
   api.selection.set({ keys: [] });
@@ -1793,18 +2044,23 @@ function workAreaMove(e: any) {
 }
 
 function scrub(e: any) {
-  const targets: number[] = [];
-  for (const L of api.project.get().layers) {
-    targets.push(L.from, L.from + L.dur);
-    for (const item of api.anim.allProps?.(L) || []) {
-      for (const key of item.prop?.kf || []) targets.push(L.from + key.t);
-    }
-  }
+  // Most drags do not snap. Enumerate the project's property/keyframe graph
+  // only if Shift is actually pressed, including midway through a drag.
+  let targets: number[] | undefined;
   let rawTime = 0;
   let lockedTarget: number | null = null;
   const apply = () => {
     const time = clamp(rawTime, 0, api.project.get().dur);
     if (!shiftSnapping()) { lockedTarget = null; api.transport.setTime(time); return; }
+    if (!targets) {
+      targets = [];
+      for (const L of api.project.get().layers) {
+        targets.push(L.from, L.from + L.dur);
+        for (const item of api.anim.allProps(L) || []) {
+          for (const key of item.prop?.kf || []) targets.push(L.from + key.t);
+        }
+      }
+  }
     const tolerance = 10 / Math.max(1, T.pps);
     const resolved = resolveTimelineSnap(time, targets, tolerance, lockedTarget, 15 / Math.max(1, T.pps));
     lockedTarget = resolved.target;
@@ -1842,6 +2098,10 @@ function togglePropertyAnimation(row: any) {
   });
   T.reveal(row.L, axes.map(axis => axis.key));
   rowsDirty = true; invalidate();
+}
+
+function isScaleTrack(row: any) {
+  return row?.key === 'scale' && trackChannels(row).length === 2;
 }
 
 function dragPropertyValue(event: any, row: any, rowIndex: number) {
@@ -1929,6 +2189,7 @@ function gutterDown(e: any, x: any, y: any) {
     api.selection.select(r.L.id); T.keySelectionActive = true; invalidate('timeline');
     if (r.prop.kf.length && x >= 16 && x < 64) { navigateKeyframe(x < 40 ? -1 : 1, r); return; }
     if (r.L.lock) return;
+    if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(api, r.L); return; }
     if (x >= 76 && x < 96) { togglePropertyAnimation(r); return; }
     if (x >= T.propertyValueX - 4) dragPropertyValue(e, r, hr.i);
     return;
@@ -1936,7 +2197,7 @@ function gutterDown(e: any, x: any, y: any) {
   T.keySelectionActive = false;
   api.selection.set({ keys: [] });
   const L = r.L;
-  if (L.type !== 'group' && layerSupportsTransform(L.type) && x >= T.gut - 40) {
+  if (layerSupportsTransform(L.type) && x >= T.gut - 40) {
     const ids = api.selection.layers().includes(L.id) ? api.selection.layers() : [L.id];
     if (x < T.gut - 20) api.ui.beginParentPick(e, ids);
     else api.ui.showParentMenu(ids, e);
@@ -1946,12 +2207,19 @@ function gutterDown(e: any, x: any, y: any) {
   else if (x < 40) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(L, L.on, api.transport.time(), 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
   else if (x < 58) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
   else if (x >= 58 + Math.min(48, (r.depth || 0) * 12) && x < 74 + Math.min(48, (r.depth || 0) * 12)) {
-    const collapsed = !api.uiState.getLayerCollapsed(L);
-    L.collapsed = collapsed;
-    api.uiState.setLayerCollapsed(L, collapsed);
+    const collapsed = toggleTimelineDisclosure(api, L);
     rowsDirty = true;
     if (!collapsed) {
-      const kids = visibleProps(L).length;
+      buildRows();
+      let kids = visibleProps(L).length;
+      if (L.type === 'group') {
+        kids = 0;
+        for (let index = hr.i + 1; index < T.rows.length; index++) {
+          const child = T.rows[index];
+          if (child.kind === 'layer' && (child.depth || 0) <= (r.depth || 0)) break;
+          kids++;
+        }
+      }
       keepRowsVisible(hr.i, kids);
     }
     invalidate('timeline');
@@ -2066,6 +2334,12 @@ function trim(e: any, side: any) {
 
 function captureKeyframeGesture(entries: any[]) {
   const selected = new Set(entries.map((entry: any) => entry.key));
+  const entryLayerIds = new Set(entries.map((entry: any) => entry.L.id));
+  const layerOrder = [
+    ...api.selection.layers().filter((id: string) => entryLayerIds.has(id)),
+    ...api.project.get().layers.map((layer: any) => layer.id).filter((id: string) => entryLayerIds.has(id)),
+  ].filter((id: string, index: number, ids: string[]) => ids.indexOf(id) === index);
+  const offsetIndex = new Map(layerOrder.map((id: string, index: number) => [id, index]));
   const layerByProperty = new Map(entries.map((entry: any) => [entry.prop, entry.L]));
   const props = [...new Set(entries.map((entry: any) => entry.prop))];
   const properties = props.map((prop: any) => ({
@@ -2090,6 +2364,8 @@ function captureKeyframeGesture(entries: any[]) {
     ),
     selected: selected.has(entry.key),
     order: entry.order,
+    offsetIndex: offsetIndex.get(layerByProperty.get(prop)?.id) ?? 0,
+    offsetCount: layerOrder.length,
     key: entry.key,
     value: entry.value,
   })));
@@ -2156,11 +2432,12 @@ function applyKeyframeGesture(
 }
 
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
-  const additive = e.shiftKey || e.metaKey;
   const hit = pickKeyframeHit(
     r.prop.kf, api.selection.keys(),
     (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
   );
+  const quickModifier = quickOffsetModifiers(e);
+  const additive = !quickModifier && (e.shiftKey || e.metaKey);
   if (!hit) return marquee(e, { additive });
   api.selection.set({ chan: r.key });
   T.focusGraph(r.L, r.key);
@@ -2172,25 +2449,38 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, additive, true));
   const entries = selectedKeyEntries();
   const snapshot = captureKeyframeGesture(entries);
+  const quickOffset = quickModifier && new Set(snapshot.items
+    .filter((item: any) => item.selected).map((item: any) => item.offsetIndex)).size > 1;
   let snapLock: KeyframeGroupSnapLock | null = null;
   let moved = false;
+  const clearQuickOffset = () => { T.quickOffset = null; };
   beginDrag(e, {
     move: (dx: any, dy: any, event: PointerEvent) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { moved = true; api.history.begin('Move keyframe'); }
+      if (!moved) { moved = true; api.history.begin(quickOffset ? 'Quick offset keyframes' : 'Move keyframe'); }
       let delta = dx / T.pps;
-      if (shiftSnapping(event)) {
+      if (!quickOffset && shiftSnapping(event)) {
         const snap = snapKeyframeGesture(snapshot, delta, snapLock);
         delta = snap.delta; snapLock = snap.lock;
       } else snapLock = null;
-      applyKeyframeGesture(snapshot, delta);
+      const plan = applyKeyframeGesture(snapshot, delta, null, quickOffset ? planQuickOffsetKeyframes : planKeyframeMove);
+      if (quickOffset) {
+        const count = Math.max(0, ...snapshot.items.map((item: any) => item.offsetCount || 0));
+        const rect = T.cv.getBoundingClientRect();
+        T.quickOffset = {
+          total: plan.delta, perGroup: count > 1 ? plan.delta / (count - 1) : 0,
+          x: event.clientX - rect.left, y: event.clientY - rect.top,
+        };
+      }
     },
     up: () => {
-      if (moved) api.history.commit('Move keyframe');
+      clearQuickOffset();
+      if (moved) api.history.commit(quickOffset ? 'Quick offset keyframes' : 'Move keyframe');
       else if (additive && wasSelected) setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, true, false));
       invalidate('timeline');
     },
     cancel: () => {
+      clearQuickOffset();
       if (moved) { restoreKeyframeGesture(snapshot); api.history.cancel(); api.anim.touch(); }
       invalidate('timeline');
     },
@@ -2217,7 +2507,7 @@ function graphDown(e: any, x: any, y: any) {
     })).sort((a, b) => a.distance - b.distance);
     const nearest = handles[0]?.distance ?? Infinity;
     const handle = handles.find(item => item.distance <= nearest + 1 && api.selection.keys().includes(item.key.i)) ?? handles[0];
-    if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L);
+    if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L, handle.axis);
   }
   if ((!pointHit || pointHit.distance >= 8) && pointInGraphSelection(g.selectionBounds, x, y)) {
     return dragGraphSelection(e, g, L);
@@ -2281,13 +2571,20 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
     },
   });
 }
-function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any) {
+function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any, clickedAxis: any) {
   if (L.lock) return;
-  const axes = graphHandleChannels(timelineProperties(api, L, space3d), kf);
+  const trackKey = clickedAxis?.trackKey ?? clickedAxis?.key;
+  const axes = g.series.filter((axis: any) => (axis.trackKey ?? axis.key) === trackKey && !axis.L.lock);
   const candidates = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
-  const targetKeys = new Set(keysForBezierHandleDrag(candidates.map((item: any) => item.key), k, api.selection.keys()));
-  const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));
   const clickedIndex = kf.indexOf(k);
+  const explicitlySelected = new Set(api.selection.keys());
+  const owningKeys = candidates.filter((item: any) => item.axis.L === L).map((item: any) => item.key);
+  const targetKeys = new Set([
+    ...keysForBezierHandleDrag(owningKeys, k, api.selection.keys()),
+    ...axes.filter((axis: any) => axis.L !== L).map((axis: any) => axis.prop.kf[clickedIndex])
+      .filter((key: any) => key && keyMembers(key).some(member => explicitlySelected.has(member.key.i))),
+  ]);
+  const memberAxes = candidates.filter((item: any) => targetKeys.has(item.key));
   const clickedPrevious = which === 'eo' ? k : kf[clickedIndex - 1];
   const clickedNext = which === 'eo' ? kf[clickedIndex + 1] : k;
   if (!clickedPrevious || !clickedNext) return;
@@ -2304,25 +2601,25 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
     const previous = which === 'eo' ? key : keys[index - 1];
     const next = which === 'eo' ? keys[index + 1] : key;
     if (!previous || !next) return null;
-    const segmentStart: [number, number] = [t2x(L.from + previous.t), g.v2y(previous.v)];
-    const segmentEnd: [number, number] = [t2x(L.from + next.t), g.v2y(next.v)];
+    const segmentStart: [number, number] = [t2x(axis.L.from + previous.t), g.v2y(previous.v)];
+    const segmentEnd: [number, number] = [t2x(axis.L.from + next.t), g.v2y(next.v)];
     const oppositeWhich: 'eo' | 'ei' = which === 'eo' ? 'ei' : 'eo';
     const oppositeNeighbor = which === 'eo' ? keys[index - 1] : keys[index + 1];
     let opposite: any = null;
     if (oppositeNeighbor && key.bezierMode !== 'split' && !split) {
       const oppositeStart = which === 'eo'
-        ? [t2x(L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number]
-        : [t2x(L.from + key.t), g.v2y(key.v)] as [number, number];
+        ? [t2x(axis.L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number]
+        : [t2x(axis.L.from + key.t), g.v2y(key.v)] as [number, number];
       const oppositeEnd = which === 'eo'
-        ? [t2x(L.from + key.t), g.v2y(key.v)] as [number, number]
-        : [t2x(L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number];
+        ? [t2x(axis.L.from + key.t), g.v2y(key.v)] as [number, number]
+        : [t2x(axis.L.from + oppositeNeighbor.t), g.v2y(oppositeNeighbor.v)] as [number, number];
       const oppositeHandle = visibleBezierHandle(key, oppositeNeighbor, oppositeWhich);
       opposite = { which: oppositeWhich, segmentStart: oppositeStart, segmentEnd: oppositeEnd,
         previous: which === 'eo' ? oppositeNeighbor : key,
         next: which === 'eo' ? key : oppositeNeighbor,
         point: pointForBezierHandle(oppositeHandle, oppositeStart, oppositeEnd), fallback: oppositeHandle };
     }
-    return { key, previous, next, segmentStart, segmentEnd, opposite };
+    return { axis, key, previous, next, segmentStart, segmentEnd, opposite };
   }).filter(Boolean);
   api.history.begin('Adjust easing');
   T.graphDragBounds = [g.vmin, g.vmax];
@@ -2345,7 +2642,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any)
       drags.forEach((drag: any) => {
         drag.key[which] = handle.map((value: number) => api.util.round(value, 4));
         if (!drag.opposite) return;
-        const keyPoint: [number, number] = [t2x(L.from + drag.key.t), g.v2y(drag.key.v)];
+        const keyPoint: [number, number] = [t2x(drag.axis.L.from + drag.key.t), g.v2y(drag.key.v)];
         const draggedPoint = pointForBezierHandle(handle, drag.segmentStart, drag.segmentEnd);
         const mirroredPoint = mirroredBezierHandlePoint(keyPoint, draggedPoint, drag.opposite.point);
         const oppositeHandle = bezierHandleAtPoint(
@@ -2614,7 +2911,13 @@ T.nextEdge = nextEdge; T.prevEdge = prevEdge;
 T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, api.project.get().dur), 4, 4000); invalidate('timeline'); };
 T.reveal = (L: any, keys: any) => {
   api.uiState.setLayerCollapsed(L, false);
-  api.uiState.setReveal(L, keys);
+  const current = api.uiState.getReveal(L);
+  const alreadyVisible = current == null
+    ? timelineProperties(api, L, space3d).flatMap((row: any) => trackChannels(row)
+      .filter((axis: any) => axis.prop.kf.length || axis.prop.expr)
+      .map((axis: any) => axis.key))
+    : current;
+  api.uiState.setReveal(L, alreadyVisible.includes('*') ? alreadyVisible : [...new Set([...alreadyVisible, ...keys])]);
   rowsDirty = true;
   buildRows();
   const idx = T.rows.findIndex((r: any) => r.kind === 'layer' && r.L === L);

@@ -8,7 +8,7 @@ test.beforeEach(async ({session}) => {
     const project=PM.mkProject({name:'Group transforms',w:640,h:360,dur:5,fps:30,bg:'#FFFFFF'});
     const a=PM.mkLayer('shape',{name:'Orange card',d:{w:100,h:100,color:'#EF683B'},p:{'position.x':250,'position.y':180}},project);
     const b=PM.mkLayer('shape',{name:'Blue card',d:{w:100,h:100,color:'#4274EC'},p:{'position.x':390,'position.y':180}},project);
-    project.layers=[a,b];PM.replaceProject(project);PM.setTime(0,{force:true});
+    project.layers=[a,b];window.dispatchEvent(new CustomEvent('pm-open-project',{detail:project}));PM.ProjectsScreen.hide();PM.setTime(0,{force:true});
     PM.Edit.apply({type:'group_layers',targets:[a.id,b.id],name:'Cards'},{origin:'agent'});
     const viewer=PM.Kernel.services.get('viewer');
     viewer.fit=false;viewer.zoom=.7;viewer.pan=[0,0];viewer.layout();PM.invalidate();
@@ -35,10 +35,11 @@ test('group Properties transform the rendered members and animate with one Undo'
   expect(proof.pixel[0]).toBeGreaterThan(proof.pixel[2]!);expect(proof.pixel[2]).toBeLessThan(220);
   await page.evaluate(()=>(window as any).PM.hist.undo());
   await expect(page.getByRole('spinbutton',{name:'Opacity',exact:true})).toHaveValue('100%');
-  await page.getByRole('button',{name:'Animate Position X',exact:true}).click();
+  await page.getByRole('button',{name:'Add keyframe for Position X',exact:true}).click();
   await page.evaluate(()=>(window as any).PM.setTime(2));
   await set('Position X','480');
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.firstSel().p['position.x'].kf.map((k:any)=>[k.t,k.v]);})).toEqual([[0,400],[2,480]]);
+  await page.keyboard.press('p');
   await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.kind==='prop'&&row.L.id===PM.firstSel().id&&row.key==='position.x');});
   await page.screenshot({path:'/tmp/powermove-group-transforms-review.png'});
   const strip=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return {x:r.left+timeline.gut+timeline.pps*.5,y:r.top+timeline.ruler+timeline.row/2,dx:timeline.pps*.5};});

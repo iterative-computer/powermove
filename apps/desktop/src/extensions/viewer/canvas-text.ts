@@ -1,5 +1,4 @@
 import type { PowermoveAPI, ViewerService } from 'powermove';
-import './canvas-text.css';
 
 export interface CanvasTextState extends ViewerService {
   inner: HTMLElement;
@@ -50,7 +49,12 @@ export function editCanvasText(api: PowermoveAPI,V:CanvasTextState,layer:any,eve
     const tools=api.services.get<{tool:string;setTool(tool:string):void}>('tool');
     if(tools?.tool==='text'&&!toolButton)tools.setTool('select');
   };
-  V.finishCanvasText=finish;el.addEventListener('input',update);el.addEventListener('keydown',e=>{e.stopPropagation();if(e.key==='Escape'){e.preventDefault();finish(true);}else if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();finish();}});el.addEventListener('pointerdown',e=>e.stopPropagation());
+  V.finishCanvasText=finish;el.addEventListener('input',update);el.addEventListener('keydown',e=>{
+    // Let keydowns bubble to the field-aware global keymap. It suppresses
+    // editor commands for contenteditable targets and routes native editing
+    // shortcuts (notably Electron paste) through the focused WebContents.
+    if(e.key==='Escape'){e.preventDefault();finish(true);}else if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();finish();}
+  });el.addEventListener('pointerdown',e=>e.stopPropagation());
   document.addEventListener('selectionchange',capture);document.addEventListener('pointerdown',outside,true);el.focus();
   const range=document.createRange();range.selectNodeContents(el);if(!selectAll)range.collapse(false);const selection=window.getSelection();selection?.removeAllRanges();selection?.addRange(range);
   if(event){const caret=(document as any).caretRangeFromPoint?.(event.clientX,event.clientY);if(caret&&el.contains(caret.startContainer)){selection?.removeAllRanges();selection?.addRange(caret);}}

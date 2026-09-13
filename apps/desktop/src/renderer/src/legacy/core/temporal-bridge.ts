@@ -1,6 +1,7 @@
 import { adoptTemporalEase, easeFromUnitHandle, unitHandleFromEase, valueAtTime, refreshAutoBezier, segmentControlPoints, solveCurveParam } from '../../core/anim/temporal-ease';
 const owners = new WeakMap<object,any[]>();
-const prepared = new WeakMap<any[], {version:number; length:number; first:any; last:any; curves:any[]; times?:Float64Array; values?:Float64Array}>();
+type PreparedTrack = {version:number; length:number; first:any; last:any; curves:any[]; times?:Float64Array; values?:Float64Array; evaluatedTime?:number; evaluatedValue?:number; evaluatedSpring?:(time:number,config:any)=>number};
+const prepared = new WeakMap<any[], PreparedTrack>();
 /** Legacy controls are views of native speed/influence, never persisted copies. */
 export function temporalKeys(keys: any[], version?:number): any[] {
   const cached=prepared.get(keys);
@@ -37,8 +38,7 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   }
   return keys;
 }
-export function temporalValue(keys: any[], left: number, time: number): number {
-  const state=prepared.get(keys);
+export function temporalValue(keys: any[], left: number, time: number, state = prepared.get(keys)): number {
   if(!state) return valueAtTime(keys[left],keys[left+1],time);
   let c=state.curves[left];
   if(!c){
@@ -66,9 +66,13 @@ export function temporalEvaluate(keys:any[],time:number,version:number,spring:(t
     adoptTemporalEase(keys);
     state={version,length:keys.length,first:keys[0],last:keys[keys.length-1],curves:[]};prepared.set(keys,state);
   }
+  if (state.evaluatedTime === time && state.evaluatedSpring === spring) return state.evaluatedValue!;
   state.times ||= Float64Array.from(keys,k=>k.t);state.values ||= Float64Array.from(keys,k=>k.v);
   const times=state.times,values=state.values,n=times.length;
   if(time<=times[0]!)return values[0]!;if(time>=times[n-1]!)return values[n-1]!;
   let lo=0,hi=n-1;while(hi-lo>1){const m=(lo+hi)>>1;times[m]!<=time?lo=m:hi=m;}
-  activeSpring=spring;return temporalValue(keys,lo,time);
+  activeSpring=spring;
+  const value = temporalValue(keys,lo,time,state);
+  state.evaluatedTime = time; state.evaluatedValue = value; state.evaluatedSpring = spring;
+  return value;
 }

@@ -20,8 +20,8 @@ export const TYPE_META = {
   adjustment: { icon: 'wand', color: '#A78BFA', label: 'Adjustment', pickable: false },
   shader: { icon: 'wand', color: '#FF6B1A', label: 'Shader' },
   extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
-  null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: false },
-  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, effects: false, masks: false, pickable: false },
+  null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: true },
+  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, pickable: false },
   precomp: { icon: 'layers', color: '#3FCF8E', label: 'Precomp' }
 } as const;
 
@@ -219,6 +219,14 @@ export interface ExtensionLayerContent {
 
 export interface NullContent {
   [key: string]: unknown;
+  color: string;
+  w: number;
+  h: number;
+  radius: number;
+}
+
+export interface GroupContent {
+  [key: string]: unknown;
 }
 
 export interface PrecompContent {
@@ -290,7 +298,7 @@ export type Layer =
   | ShaderLayer
   | ExtensionLayer
   | NullLayer
-  | LayerBase<'group', NullContent>
+  | LayerBase<'group', GroupContent>
   | PrecompLayer;
 
 export interface FillStop {

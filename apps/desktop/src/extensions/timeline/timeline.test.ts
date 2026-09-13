@@ -6,9 +6,14 @@ import {
   createTimelineRuntime,
   pickKeyframeHit,
   planKeyframeMove,
+  planQuickOffsetKeyframes,
+  planQuickOffsetTiming,
+  propertyValueColumns,
   resolveTimelineSnap,
   shouldDrawClipLabel,
   timelineWorkArea,
+  toggleTimelineDisclosure,
+  toggleTimelineScaleLink,
   type KeyframeMoveSnapshotItem,
 } from './timeline';
 import { expandScaleKeyIds, timelineProperties } from './property-tracks';
@@ -38,6 +43,78 @@ function timelineHarness() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('timeline runtime', () => {
+  it('opens a group hierarchy without opening its property strip', () => {
+    const harness = timelineHarness();
+    const group = { id: 'group', type: 'group', collapsed: true };
+    const state = { groupCollapsed: true, layerCollapsed: true };
+    vi.mocked(harness.api.uiState.getGroupCollapsed).mockImplementation(() => state.groupCollapsed);
+    vi.mocked(harness.api.uiState.setGroupCollapsed).mockImplementation((_layer, value) => (state.groupCollapsed = value));
+    vi.mocked(harness.api.uiState.getLayerCollapsed).mockImplementation(() => state.layerCollapsed);
+    vi.mocked(harness.api.uiState.setLayerCollapsed).mockImplementation((_layer, value) => (state.layerCollapsed = value));
+
+    expect(toggleTimelineDisclosure(harness.api, group)).toBe(false);
+    expect(state).toEqual({ groupCollapsed: false, layerCollapsed: true });
+    expect(group.collapsed).toBe(true);
+  });
+
+  it('never scrolls the timeline viewport to chase an external selection', () => {
+    const harness = timelineHarness();
+    const layers = Array.from({ length: 20 }, (_, index) => ({
+      id: `layer-${index}`, type: 'text', name: `Layer ${index}`,
+      group: null, shy: false, collapsed: true, p: {},
+    }));
+    harness.state.project.layers = layers;
+    harness.state.selection.layers = [layers[0]!.id];
+    (harness.state.timeline as any).hgt = 160;
+    harness.state.timeline!.scrollY = 300;
+
+    harness.emit('selection', harness.state.selection);
+
+    expect(harness.state.timeline!.scrollY).toBe(300);
+  });
+
+  it('keeps existing property rows revealed when keyframing another property', () => {
+    const harness = timelineHarness();
+    const layer = { id: 'layer', type: 'solid', name: 'Layer', group: null, shy: false, collapsed: false, p: {} };
+    const properties = [
+      { key: 'position.y', label: 'Position Y', prop: { v: 540, kf: [{ i: 'position-key', t: 0, v: 540 }], expr: null } },
+      { key: 'scale.x', label: 'Scale X', prop: { v: 95, kf: [{ i: 'scale-x-key', t: 0, v: 95 }], expr: null } },
+      { key: 'scale.y', label: 'Scale Y', prop: { v: 95, kf: [{ i: 'scale-y-key', t: 0, v: 95 }], expr: null } },
+    ];
+    let reveal = properties.map(property => property.key);
+    harness.state.project.layers = [layer];
+    harness.state.selection.layers = [layer.id];
+    vi.mocked(harness.api.anim.allProps).mockReturnValue(properties as any);
+    vi.mocked(harness.api.uiState.getReveal).mockImplementation(() => reveal);
+    vi.mocked(harness.api.uiState.setReveal).mockImplementation((_layer, keys) => (reveal = keys));
+
+    harness.state.timeline!.reveal(layer as any, ['scale.x', 'scale.y']);
+
+    expect(reveal).toEqual(['position.y', 'scale.x', 'scale.y']);
+  });
+
+  it('toggles linked Scale axes from the timeline with the standard layer command', () => {
+    const harness = timelineHarness();
+    const layer = { id: 'layer', scaleLinked: false };
+
+    toggleTimelineScaleLink(harness.api, layer);
+
+    expect(harness.api.edit.apply).toHaveBeenCalledExactlyOnceWith(
+      { type: 'set_layer', target: 'layer', patch: { scaleLinked: true } },
+      { label: 'Link scale axes', origin: 'timeline' },
+    );
+  });
+
+  it('gives every property value a right-aligned column with a readable gap', () => {
+    expect(propertyValueColumns(160, 280, 1)).toEqual([
+      { left: 160, right: 272, width: 112 },
+    ]);
+    expect(propertyValueColumns(160, 280, 2, 24)).toEqual([
+      { left: 160, right: 200, width: 40 },
+      { left: 208, right: 248, width: 40 },
+    ]);
+  });
+
   it('groups Scale without altering unequal legacy key times or values', () => {
     const harness = fakePowermoveAPI(vi);
     const key = (i: string, t: number, v: number) => ({ i, t, v, eo: [0, 0], ei: [1, 1], hold: false });
@@ -336,6 +413,31 @@ describe('keyframe move planning', () => {
     expect(plan.removed).toEqual([]);
     expect(applyKeyframeMovePlan([selected, overlap], plan).map((item) => item.id))
       .toEqual(['selected', 'overlap']);
+  });
+
+  it('quick-offsets ordered layer groups from a fixed first item to the full dragged last item', () => {
+    const plan = planQuickOffsetTiming([
+      { time: 1, offsetIndex: 0, offsetCount: 4, minTime: 0 },
+      { time: 1, offsetIndex: 1, offsetCount: 4, minTime: 0 },
+      { time: 1, offsetIndex: 2, offsetCount: 4, minTime: 0 },
+      { time: 1, offsetIndex: 3, offsetCount: 4, minTime: 0 },
+    ], 3);
+
+    expect(plan).toEqual({ total: 3, perGroup: 1, times: [1, 2, 3, 4] });
+  });
+
+  it('clamps a negative quick offset at zero without disturbing spacing inside a keyframe group', () => {
+    const items = [
+      { ...key('a', 'x', 1, true), offsetIndex: 0, offsetCount: 3 },
+      { ...key('b', 'x', 2, true), offsetIndex: 1, offsetCount: 3 },
+      { ...key('c', 'x', 4, true), offsetIndex: 1, offsetCount: 3 },
+      { ...key('d', 'x', 1, true), offsetIndex: 2, offsetCount: 3 },
+    ];
+    const plan = planQuickOffsetKeyframes(items, -4, 30);
+
+    expect(plan.delta).toBe(-1);
+    expect(plan.moves.map(move => move.time)).toEqual([1, 1.5, 3.5, 0]);
+    expect(plan.moves[2]!.time - plan.moves[1]!.time).toBe(2);
   });
 
   it('moves a graph selection together without deleting an occupied key', () => {

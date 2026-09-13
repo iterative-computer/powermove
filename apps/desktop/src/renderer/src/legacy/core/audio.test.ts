@@ -3,14 +3,18 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PMRegistry } from '../registry';
 import { install } from './audio';
 
-function audioRegistry(): PMRegistry {
-  vi.stubGlobal('window', {});
+function audioRegistry({ host = {}, layers = [] }: any = {}): PMRegistry {
+  vi.stubGlobal('window', host);
+  const listeners = new Map<string, Function[]>();
   const PM: PMRegistry = {
-    proj: { dur: 12, fps: 30, work: [0, 12], layers: [], assets: {} },
+    proj: { dur: 12, fps: 30, work: [0, 12], layers, assets: {} },
     assets: { map: new Map(), get() { return null; } },
     time: 0,
     playing: false,
-    bus: { on() {}, emit() {} },
+    bus: {
+      on(event: string, handler: Function) { listeners.set(event, [...(listeners.get(event) || []), handler]); },
+      emit(event: string) { for (const handler of listeners.get(event) || []) handler(); },
+    },
     invalidate() {},
     toast() {},
   };
@@ -26,6 +30,49 @@ function audioLayer(): any {
 }
 
 describe('legacy audio install', () => {
+  function idleAudio() {
+    const callbacks: Function[] = [];
+    const resume = vi.fn();
+    const createContext = vi.fn(function () {
+      return { state: 'suspended', createGain: () => ({ gain: { value: 0 }, connect() {} }), destination: {}, close: vi.fn(), resume };
+    });
+    const host = {
+      AudioContext: createContext,
+      requestIdleCallback: vi.fn((callback: Function) => { callbacks.push(callback); return callbacks.length; }),
+      cancelIdleCallback: vi.fn(),
+    };
+    return { callbacks, resume, createContext, host };
+  }
+
+  it('prepares an audible project during idle without starting or resuming playback', () => {
+    const f = idleAudio();
+    const PM = audioRegistry({ host: f.host, layers: [audioLayer()] });
+    PM.bus.emit('assets'); PM.bus.emit('layers');
+    expect(f.host.requestIdleCallback).toHaveBeenCalledTimes(1);
+    expect(f.createContext).not.toHaveBeenCalled();
+    f.callbacks.shift()!();
+    expect(f.createContext).toHaveBeenCalledTimes(1);
+    expect(f.resume).not.toHaveBeenCalled();
+    expect(PM.Audio.inspect().running).toBe(false);
+    PM.bus.emit('assets');
+    expect(f.host.requestIdleCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prepare audio for a silent project or after audio ownership changes', () => {
+    const f = idleAudio();
+    const PM = audioRegistry({ host: f.host });
+    expect(f.host.requestIdleCallback).not.toHaveBeenCalled();
+    PM.proj.layers.push(audioLayer()); PM.bus.emit('layers');
+    PM.proj.layers = []; PM.bus.emit('layers');
+    f.callbacks.shift()!();
+    expect(f.createContext).not.toHaveBeenCalled();
+    PM.proj.layers.push(audioLayer()); PM.bus.emit('layers');
+    PM.Audio.destroy();
+    expect(f.host.cancelIdleCallback).toHaveBeenCalled();
+    f.callbacks.shift()!();
+    expect(f.createContext).not.toHaveBeenCalled();
+  });
+
   it('uses MIME first and a deliberate extension fallback', () => {
     const PM = audioRegistry();
 

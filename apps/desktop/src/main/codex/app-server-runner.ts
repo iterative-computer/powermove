@@ -13,6 +13,10 @@ import type {
 import { isRecord, isString } from '../../shared/guards';
 import { discoverCodexBinary } from './env';
 import { isolatedCodexEnvironment, prepareIsolatedCodexHome } from './isolation';
+import {
+  POWERMOVE_LIVE_INSPECTION_TOOL_NAMES,
+  type NativeMcpServerConfig
+} from '../agent-tools/spec';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const TURN_TIMEOUT_MS = 3_600_000;
@@ -20,6 +24,12 @@ const TURN_TIMEOUT_MS = 3_600_000;
 interface RunCallbacks {
   onProgress?: (text: string) => void;
   onTrace?: (step: CodexTraceEvent) => void;
+}
+
+interface AppServerRunOptions extends RunCallbacks {
+  userData: string;
+  codexBinaryPref?: string | null;
+  nativeTools?: NativeMcpServerConfig;
 }
 
 interface ActiveTurn extends RunCallbacks {
@@ -59,6 +69,23 @@ function appServerError(value: unknown, fallback: string): string {
   return fallback;
 }
 
+function liveInspectionConfig(nativeTools: NativeMcpServerConfig): Record<string, unknown> {
+  return {
+    mcp_servers: {
+      powermove: {
+        command: nativeTools.command,
+        args: nativeTools.args,
+        env: nativeTools.env,
+        startup_timeout_sec: 10,
+        tool_timeout_sec: 120,
+        required: true,
+        enabled_tools: [...POWERMOVE_LIVE_INSPECTION_TOOL_NAMES],
+        default_tools_approval_mode: 'approve'
+      }
+    }
+  };
+}
+
 /**
  * Rich Codex transport used by the editor agent. Unlike `codex exec`, App
  * Server exposes the active thread and turn ids required by `turn/steer`.
@@ -86,12 +113,7 @@ export class CodexAppServerRunner {
 
   async run(
     req: CodexRunRequest,
-    options: {
-      userData: string;
-      codexBinaryPref?: string | null;
-      onProgress?: (text: string) => void;
-      onTrace?: (step: CodexTraceEvent) => void;
-    }
+    options: AppServerRunOptions
   ): Promise<CodexRunResult> {
     if (req.mode !== 'editor') return { ok: false, error: 'App Server editor transport received a non-editor run.', cancelled: false };
     if (this.active.has(req.id) || this.preparing.has(req.id)) return { ok: false, error: `A Codex run with id ${req.id} is already active.`, cancelled: false };
@@ -122,6 +144,7 @@ export class CodexAppServerRunner {
         approvalPolicy: 'never',
         sandbox: 'readOnly',
         ephemeral: true,
+        ...(options.nativeTools ? { config: liveInspectionConfig(options.nativeTools) } : {}),
         ...(req.model ? { model: req.model } : {}),
         serviceName: 'powermove'
       });

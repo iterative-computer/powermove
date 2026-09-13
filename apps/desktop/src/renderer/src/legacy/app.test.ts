@@ -3,10 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServicesRegistry } from '../kernel/services';
 import type { PMRegistry } from './registry';
 import { install } from './app';
+import { install as installHistory } from './core/history';
+import { unpackProjectFile } from './core/project-file';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
   else delete (globalThis as any).window;
 });
@@ -420,6 +423,53 @@ describe('legacy app install', () => {
     expect(memory.get('theme')).toBe('dark');
   });
 
+  it('retries a deferred thumbnail without repeatedly saving the document during playback', async () => {
+    const { PM, timers } = appRegistry();
+    const put = vi.spyOn(PM.Projects, 'put');
+    PM.playing = true; PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(put).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 3; i++) {
+      const id = Math.max(...timers.keys()), callback = timers.get(id);
+      timers.delete(id); callback();
+    }
+    expect(put).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['readback', 'resize'])('defers a thumbnail when playback starts during %s', async stage => {
+    const { PM, timers } = appRegistry();
+    const captures: Function[] = [];
+    let finishResize!: (bitmap: any) => void;
+    const bitmap = { width: 320, height: 180, close: vi.fn() };
+    const resize = vi.fn(() => new Promise(resolve => { finishResize = resolve; }));
+    vi.stubGlobal('createImageBitmap', resize);
+    PM.GL.canvas = { width: 640, height: 360, toBlob: vi.fn((callback: Function) => captures.push(callback)) };
+    const encode = vi.fn(() => 'data:image/jpeg;base64,preview');
+    const create = window.document.createElement;
+    window.document.createElement = ((tag: string) => tag === 'canvas'
+      ? { getContext: () => ({ drawImage() {} }), toDataURL: encode }
+      : create(tag)) as any;
+    PM.Projects.upsertMeta = vi.fn();
+    PM.autosave(); await timers.get(PM.app.saveTimer)();
+    const capture = captures.shift()!;
+    if (stage === 'readback') PM.playing = true;
+    capture(new Blob(['frame']));
+    if (stage === 'resize') { PM.playing = true; finishResize(bitmap); }
+    await Promise.resolve(); await Promise.resolve();
+    expect(encode).not.toHaveBeenCalled();
+    expect(PM.Projects.upsertMeta).not.toHaveBeenCalled();
+    if (stage === 'resize') expect(bitmap.close).toHaveBeenCalledOnce();
+    else expect(resize).not.toHaveBeenCalled();
+    PM.playing = false;
+    const id = Math.max(...timers.keys()), retry = timers.get(id);
+    timers.delete(id); retry();
+    captures.shift()!(new Blob(['new frame']));
+    finishResize(bitmap);
+    await Promise.resolve(); await Promise.resolve();
+    expect(encode).toHaveBeenCalledOnce();
+    expect(PM.Projects.upsertMeta).toHaveBeenCalledWith(expect.objectContaining({ id: PM.proj.id, thumb: 'data:image/jpeg;base64,preview' }));
+  });
+
   it('includes library mutations in autosave', () => {
     const { PM } = appRegistry();
     const libraryHandlers = PM.__busHandlers.get('library');
@@ -481,4 +531,34 @@ describe('legacy app install', () => {
     expect(shader.d.uniforms.strength.kf[0]).toMatchObject({ t: 0, v: 3 });
     expect(PM.__normalizationCalls.length).toBeGreaterThanOrEqual(5);
   });
+});
+
+it('saves real undo and redo history in the native file and local session', async () => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn();
+  PM.rasterClear = vi.fn();
+  PM.WS.activate = vi.fn();
+  PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  PM.hist.do('Rename one', () => { PM.proj.name = 'One'; });
+  PM.hist.do('Rename two', () => { PM.proj.name = 'Two'; });
+  PM.hist.undo();
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
+  (window as any).powermove = { saveFile };
+  expect(await PM.saveProject()).toBe(true);
+  const saved = unpackProjectFile(saveFile.mock.calls[0]![0].data);
+  expect(saved.history.index).toBe(0);
+  expect(saved.history.entries.map((entry: any) => entry.label)).toEqual(['Rename one', 'Rename two']);
+  expect(PM.Projects.getState('P1').history).toEqual(saved.history);
+  (window as any).powermove.openProjectFile = async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data: saveFile.mock.calls[0]![0].data });
+  await PM.openProject();
+  expect(toasts).not.toEqual(expect.arrayContaining([expect.stringContaining('Could not open')]));
+  expect(PM.proj.id).toBe('reopened');
+  expect(PM.hist.canUndo()).toBe(true);
+  expect(PM.hist.canRedo()).toBe(true);
+  PM.hist.redo();
+  expect(PM.proj.name).toBe('Two');
+  PM.hist.undo();
+  expect(PM.proj.name).toBe('One');
 });

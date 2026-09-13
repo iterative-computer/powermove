@@ -27,13 +27,13 @@ function delayedVideo(): any {
   return { el, finishPlay: () => finishPlay() };
 }
 
-function engine({ layer = null, media = null, work = [0, 10] }: any = {}): any {
+function engine({ layer = null, media = null, work = [0, 10], audioStartupDelay = 0 }: any = {}): any {
   const listeners = new Map<string, any[]>();
   const frames: any[] = [];
   let nowValue = 0;
   const audioCalls: any[] = [];
   const Audio = {
-    start(time: any) { audioCalls.push(['start', time]); },
+    start(time: any) { audioCalls.push(['start', time]); nowValue += audioStartupDelay; },
     pause() { audioCalls.push(['pause']); },
     seek(time: any) { audioCalls.push(['seek', time]); },
     tick(time: any) { audioCalls.push(['tick', time]); },
@@ -93,6 +93,27 @@ afterEach(() => {
 });
 
 describe('legacy engine install', () => {
+  it('starts the playback clock after synchronous audio device setup', () => {
+    const { PM, runFrame, audioCalls } = engine({ audioStartupDelay: 250 });
+    PM.time = 119 / 30;
+    PM.play();
+    runFrame(266);
+    expect(PM.time).toBeCloseTo(119 / 30 + .016);
+    expect(audioCalls).toContainEqual(['start', 119 / 30]);
+    expect(audioCalls.filter((call: any[]) => call[0] === 'seek')).toEqual([]);
+  });
+
+  it('does not render the same project frame twice on a high refresh display', () => {
+    const { PM, runFrame } = engine();
+    PM.GL.gl = {}; PM.GL.render = vi.fn(); PM.animVersion = () => 1;
+    PM.play(); runFrame(1); runFrame(8); runFrame(16); runFrame(24);
+    expect(PM.GL.render).toHaveBeenCalledTimes(1);
+    runFrame(40);
+    expect(PM.GL.render).toHaveBeenCalledTimes(2);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    PM.bus.emit('quality'); runFrame(48);
+    expect(PM.GL.render).toHaveBeenCalledTimes(3);
+  });
   it('keeps a navigation redraw pending until refinement and never defers playback', () => {
     const { PM, runFrame } = engine();
     PM.GL.gl = {}; PM.GL.render = vi.fn();
@@ -124,12 +145,14 @@ describe('legacy engine install', () => {
     runFrame(10000);
     PM.play();
     for (let frame = 1; frame <= 32; frame++) runFrame(10000 + frame * 16);
-    expect(PM.perf.fps).toBeGreaterThanOrEqual(60);
+    expect(PM.perf.fps).toBeGreaterThanOrEqual(28);
+    expect(PM.perf.fps).toBeLessThanOrEqual(32);
     PM.pause();
     expect(PM.perf.fps).toBe(0);
     runFrame(30000); PM.play();
     for (let frame = 1; frame <= 32; frame++) runFrame(30000 + frame * 16);
-    expect(PM.perf.fps).toBeGreaterThanOrEqual(60);
+    expect(PM.perf.fps).toBeGreaterThanOrEqual(28);
+    expect(PM.perf.fps).toBeLessThanOrEqual(32);
   });
 
   it('delegates transport start, timeline tick, seek, and pause to PM.Audio', () => {

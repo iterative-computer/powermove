@@ -85,7 +85,6 @@ export function splitSelectedLayersAtPlayhead(api: PowermoveAPI): string[] {
 }
 
 type LayerWithTrim = { d: { trim?: number } };
-
 export default function activate(api: PowermoveAPI): void {
   activeApi = api;
   const timeline = createTimelineRuntime(api);
@@ -116,15 +115,8 @@ export default function activate(api: PowermoveAPI): void {
     });
   }
   api.commands?.register({
-    id: 'split',
-    label: 'Split at playhead',
-    category: 'Edit',
-    kb: '⌘⇧D',
-    run: () => splitSelectedLayersAtPlayhead(api)
-  });
-  api.commands?.register({
     id: 'toggleLayerStrips',
-    label: 'Open / collapse layer strips',
+    label: 'Reveal mask properties',
     category: 'Timeline',
     kb: 'M',
     run: () => revealProperty('m')

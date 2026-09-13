@@ -50,6 +50,7 @@ interface InspectorTestBackend {
   firstSel?: any;
   sel?: any;
   groupAncestors?: any;
+  groupBounds?: any;
   expandGroups?: any;
   invalidate?: any;
   hist?: any;
@@ -155,7 +156,11 @@ function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI
       select: (ids: string[]) => { runtime.sel.layers = [...ids]; setSelection({ ...runtime.sel }); },
       resolveSelectedKeys: () => []
     },
-    groups: { ancestors: runtime.groupAncestors ?? (() => []), expand: runtime.expandGroups ?? ((ids: string[]) => ids) },
+    groups: {
+      ancestors: runtime.groupAncestors ?? (() => []),
+      bounds: (...args: any[]) => runtime.groupBounds?.(...args) ?? null,
+      expand: runtime.expandGroups ?? ((ids: string[]) => ids)
+    },
     transport: { time: () => transport.time, invalidate: runtime.invalidate ?? vi.fn() },
     history: runtime.hist ?? { do: (_label: string, operation: () => unknown) => operation(), begin: vi.fn(), commit: vi.fn(), cancel: vi.fn() },
     edit: runtime.Edit ?? { apply: vi.fn(), begin: vi.fn(), dispatch: vi.fn(), commit: vi.fn(), cancel: vi.fn(), mutate: (_label: string, operation: () => unknown) => operation() },
@@ -270,7 +275,7 @@ function setup(
     }])),
     BLENDS: ['normal', 'screen'],
     MASK_SHAPES: ['rect', 'ellipse'],
-    TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' }, shape: { label: 'Shape' } },
+    TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' }, shape: { label: 'Shape' }, null: { label: 'Null' }, group: { label: 'Group', transform: true } },
     FX: {
       blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', step: 1, min: 0, max: 100 }] },
       duotone: { label: 'Duotone', group: 'Color', params: [{ k: 'shadow', label: 'Shadow', type: 'color' }] }
@@ -389,6 +394,65 @@ afterEach(async () => {
 });
 
 describe('InspectorPanel', () => {
+  it('exposes the compact footprint of a transparent null object', () => {
+    const candidate = layer('N'); candidate.type = 'null'; candidate.name = 'Null';
+    candidate.d = { color: '#6A6A70', w: 100, h: 100, radius: 0 };
+    candidate.p.opacity!.v = 0;
+    setup([candidate], ['N']);
+
+    expect(labelledSpinbutton('Width').value).toBe('100px');
+    expect(labelledSpinbutton('Height').value).toBe('100px');
+    expect(labelledSpinbutton('Opacity').value).toBe('0%');
+  });
+
+  it('offers parent selection when a group layer is selected', () => {
+    const group = layer('G'); group.type = 'group'; group.name = 'Group'; group.d = {};
+    const rig = layer('R'); rig.type = 'solid'; rig.name = 'Rig';
+    setup([group, rig], ['G']);
+
+    expect([...labelledSelect('Parent').options].map(option => option.textContent)).toEqual(['None', 'Rig']);
+    expect(target.querySelector('[aria-label="Pick parent layer"]')).not.toBeNull();
+  });
+
+  it('exposes effects, masks, blend, motion blur and track mattes for groups', () => {
+    const group = layer('G'); group.type = 'group'; group.name = 'Group'; group.d = {};
+    const matte = layer('M'); matte.name = 'Matte';
+    const { runtime } = setup([group, matte], ['G']);
+    runtime.groupBounds = vi.fn(() => ({ x0: 20, y0: 30, x1: 220, y1: 130, w: 200, h: 100, ax: 0, ay: 0 }));
+
+    const headings = [...target.querySelectorAll('.sec')].map((item) => item.textContent?.trim());
+    expect(headings).toContain('Effects');
+    expect(headings).toContain('Masks');
+    expect(target.querySelector('[aria-label="Add effect"]')).not.toBeNull();
+    expect(labelledSelect('Blend mode')).not.toBeNull();
+    expect([...target.querySelectorAll('button[aria-labelledby]')].some((button) =>
+      document.getElementById(button.getAttribute('aria-labelledby')!)?.textContent?.trim() === 'Motion blur'
+    )).toBe(true);
+    expect(labelledSelect('Track matte')).not.toBeNull();
+
+    target.querySelector<HTMLButtonElement>('[aria-label="Add mask"]')!.click();
+    expect(runtime.mkMask).toHaveBeenCalledWith('rect', runtime.proj);
+    expect(group.masks).toHaveLength(1);
+    expect(group.masks[0].p).toMatchObject({
+      x: { v: 120 }, y: { v: 80 }, w: { v: 200 }, h: { v: 100 },
+    });
+  });
+
+  it('offers a group as a transform parent without changing membership', () => {
+    const child = layer('C'); child.name = 'Child';
+    const group = layer('G'); group.type = 'group'; group.name = 'Rig Group'; group.d = {};
+    const { apply } = setup([child, group], ['C']);
+
+    expect([...labelledSelect('Parent').options].map(option => option.textContent)).toEqual(['None', 'Rig Group']);
+    labelledSelect('Parent').value = '1';
+    labelledSelect('Parent').dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(apply).toHaveBeenCalledWith(
+      [{ type: 'set_layer', target: child.id, patch: { parent: group.id } }],
+      { label: 'Parent layers', origin: 'inspector' },
+    );
+  });
+
   it('activates by registering the inspector panel contribution', () => {
     const register = vi.fn(() => ({ dispose: vi.fn() }));
 
@@ -560,29 +624,29 @@ describe('InspectorPanel', () => {
   it.each([true, false])('animates both axes and handles partial keys when scaleLinked=%s', (linked) => {
     const candidate = layer('A');
     candidate.scaleLinked = linked;
-    const { runtime, menu,apply } = setup([candidate]);
+    const { runtime, menu, apply } = setup([candidate]);
     apply.mockImplementation((commands?: any)=>{for(const c of [].concat(commands) as any[]){const p=candidate.p[c.path];if(!p)continue;if(c.type==='replace_keyframes')p.kf=[];else if(c.type==='set_property'&&c.mode==='keyframe')p.kf.push({t:c.time,v:c.value});}return {ok:true};});
     const row = channelRow('A', 'scale.x');
-    const stopwatch = row.querySelector<HTMLButtonElement>('.property-stopwatch')!;
-    expect(stopwatch.getAttribute('aria-pressed')).toBe('false');
-    stopwatch.click();
+    const diamond = row.querySelector<HTMLButtonElement>('.property-stopwatch')!;
+    expect(row.querySelector('.well .kf')).toBeNull();
+    expect(diamond.getAttribute('aria-pressed')).toBe('false');
+    diamond.click();
     bump('values'); flushSync();
-    let diamond = row.querySelector<HTMLButtonElement>('.kf[data-key="scale.x"]')!;
-    expect(apply).toHaveBeenLastCalledWith(expect.any(Array),{label:'Animate Scale',origin:'inspector'});
+    expect(apply).toHaveBeenLastCalledWith(expect.any(Array), { label: 'Add keyframe for Scale', origin: 'inspector' });
+    expect(runtime.TL.reveal).not.toHaveBeenCalled();
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
     // An existing project may have a key on just one of the linked axes.
     candidate.p['scale.y']!.kf = [];
     bump('values');
     flushSync();
-    expect(diamond.classList.contains('track')).toBe(true);
-    expect(diamond.classList.contains('on')).toBe(false);
+    expect(diamond.classList.contains('at-key')).toBe(false);
     diamond.click();
     bump('values');
     flushSync();
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
-    expect(diamond.classList.contains('on')).toBe(true);
+    expect(diamond.classList.contains('at-key')).toBe(true);
     diamond.click();
     bump('values');
     flushSync();
@@ -592,8 +656,7 @@ describe('InspectorPanel', () => {
     candidate.p['scale.y']!.kf = [{ t: 0, v: 100 }];
     bump('values');
     flushSync();
-    diamond = row.querySelector<HTMLButtonElement>('.kf[data-key="scale.x"]')!;
-    expect(diamond.getAttribute('aria-pressed')).toBe('true');
+    expect(diamond.getAttribute('aria-pressed')).toBe('false');
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
     const items = menu.mock.calls.at(-1)![1] as Array<{ label?: string; run?: (e?: any) => void }>;
     items.find((item) => item.label === 'Remove animation')!.run!(new MouseEvent('click'));
@@ -601,13 +664,13 @@ describe('InspectorPanel', () => {
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
   });
 
-  it.each(['.property-stopwatch', '.kf[data-key="scale.x"]'])('toggles only playhead keys with %s', (selector) => {
+  it('toggles only playhead keys with the property diamond', () => {
     const candidate = layer('A');
     candidate.p['scale.x']!.kf = [{ t: 0, v: 50 }, { t: 2, v: 100 }];
     candidate.p['scale.y']!.kf = [{ t: 0, v: 50 }, { t: 2, v: 100 }];
     setup([candidate]);
     transport.time = 1; bump('values'); flushSync();
-    const button = channelRow('A', 'scale.x').querySelector<HTMLButtonElement>(selector)!;
+    const button = channelRow('A', 'scale.x').querySelector<HTMLButtonElement>('.property-stopwatch')!;
     button.click(); bump('values'); flushSync();
     expect(candidate.p['scale.x']!.kf.map((k: any) => k.t).sort()).toEqual([0, 1, 2]);
     button.click(); bump('values'); flushSync();
@@ -655,25 +718,27 @@ describe('InspectorPanel', () => {
     candidate.p.opacity!.kf = [{ t: 0, v: 75 }];
     setup([candidate], ['A']);
     const row = channelRow('A', 'opacity');
-    const diamond = row.querySelector<HTMLButtonElement>('button.kf')!;
+    const diamond = row.querySelector<HTMLButtonElement>('.property-stopwatch')!;
 
     /* animated + key under the playhead: filled */
-    expect(diamond.classList.contains('track')).toBe(true);
     expect(diamond.classList.contains('on')).toBe(true);
+    expect(diamond.classList.contains('at-key')).toBe(true);
     expect(diamond.getAttribute('aria-pressed')).toBe('true');
 
     /* animated, playhead between keys: outlined */
     transport.time = 1;
     flushSync();
-    expect(diamond.classList.contains('track')).toBe(true);
-    expect(diamond.classList.contains('on')).toBe(false);
+    expect(diamond.classList.contains('on')).toBe(true);
+    expect(diamond.classList.contains('at-key')).toBe(false);
+    expect(diamond.getAttribute('aria-pressed')).toBe('false');
 
-    /* static: muted, still rendered so it can start an animation */
+    /* Static: muted, still rendered so it can add the first keyframe. */
     candidate.p.opacity!.kf = [];
     bump('values');
     flushSync();
-    expect(row.querySelector('button.kf')).toBeNull();
-    expect(row.querySelector('.property-stopwatch')?.getAttribute('aria-pressed')).toBe('false');
+    expect(diamond.classList.contains('on')).toBe(false);
+    expect(diamond.getAttribute('aria-pressed')).toBe('false');
+    expect(row.querySelector('.well .kf')).toBeNull();
   });
 
   it('sends the exact legacy add-effect and remove-effect commands', () => {

@@ -15,7 +15,7 @@ export function splitTextLayers(PM: PMRegistry, ids: string[], mode: TextSplitMo
   });
   if (!plans.some(({ pieces }: any) => pieces.length)) return false;
   return PM.Edit.mutate(`Split text by ${mode}`, () => {
-    const created: any[] = [];
+    const created: any[] = [], groups: any[] = [];
     for (const { source, pieces, layout } of plans) {
       if (!pieces.length) continue;
       const content = resolveContent(PM, source, PM.time);
@@ -62,9 +62,13 @@ export function splitTextLayers(PM: PMRegistry, ids: string[], mode: TextSplitMo
       source.on = PM.P(false);
       source.solo = false;
       created.push(...children);
+      // Keep every derivative beside its hidden, recoverable source. Grouping
+      // directly inside this mutation preserves one-step undo/redo while the
+      // identity group transform leaves each split layer's world pose intact.
+      groups.push(PM.groupLayers([...children.map((layer: any) => layer.id), source.id], source.name));
     }
     PM.ProjectIndex?.invalidate();
-    PM.selectLayers(created.map(layer => layer.id));
+    PM.selectLayers(groups.map(group => group.id));
     return created;
   }, { origin: 'command' });
 }

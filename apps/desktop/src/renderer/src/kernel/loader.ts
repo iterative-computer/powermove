@@ -149,6 +149,7 @@ export function createLoader(options: LoaderOptions): Loader {
 
   const active = new Map<string, ActiveEntry>();
   const failures = new Map<string, number[]>();
+  const activationFailures = new Set<string>();
   const reloadTokens = new Map<string, number>();
   let queue: Promise<void> = Promise.resolve();
   let unsubscribe: (() => void) | null = null;
@@ -234,6 +235,7 @@ export function createLoader(options: LoaderOptions): Loader {
     }
 
     active.set(id, { record, module, handle });
+    activationFailures.delete(id);
     syncActive();
     reportHealth(id, { state: 'ok' });
     kernel.events.emit('extension:loaded', { id });
@@ -242,6 +244,7 @@ export function createLoader(options: LoaderOptions): Loader {
 
   function failActivation(record: ExtensionRecord, error: unknown): void {
     const id = record.id;
+    activationFailures.add(id);
     console.error(`[kernel] extension "${id}" failed to activate`, error);
     kernel.disposeOwner(id);
     reportHealth(id, { state: 'activation-error', error: errorText(error) });
@@ -271,7 +274,12 @@ export function createLoader(options: LoaderOptions): Loader {
       registry changes batched so a replacement swap never presents the layout
       with a momentary "panel missing" state. */
   async function reconcile(list: ExtensionRecord[], changedIds: string[] = []): Promise<void> {
-    const plan = planLoad(list, Object.keys(builtins));
+    for (const id of changedIds) activationFailures.delete(id);
+    // Health notifications echo our own activation result. Retrying from that
+    // notification floods IPC, logs and toasts indefinitely. A failed module
+    // stays out of the plan until its source changes or the user retries it;
+    // excluding it also lets a replaced built-in become available again.
+    const plan = planLoad(list.filter(record => !activationFailures.has(record.id)), Object.keys(builtins));
     const desired = new Set(plan.order);
     const changed = new Set(changedIds);
     const panelChanges = kernel.panels.batchChanges();
@@ -294,6 +302,7 @@ export function createLoader(options: LoaderOptions): Loader {
     const panelChanges = kernel.panels.batchChanges();
     try {
       await deactivate(id);
+      activationFailures.delete(id);
       reloadTokens.set(id, (reloadTokens.get(id) ?? 0) + 1);
       await refreshRecords();
       const record = recordFor(id);

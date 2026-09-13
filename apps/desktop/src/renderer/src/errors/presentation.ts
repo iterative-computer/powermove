@@ -39,7 +39,7 @@ export function presentError(value: unknown): ErrorPresentation {
     return result('The agent couldn’t finish the result', 'Review any changes already made, then send your request again.');
   }
   const readable = details.replace(/^(?:The agent failed:\s*|Error:\s*|Error invoking remote method '[^']+':\s*)+/i, '');
-  const technical = /(?:\b(?:TypeError|ReferenceError|SyntaxError)\b|\bat \S+ \(|thread\/|code -\d+|\b[A-Z_]{4,}:)/.test(readable);
+  const technical = /(?:\b(?:TypeError|ReferenceError|SyntaxError|IpcValidationError)\b|\bremote method\b|\bat \S+ \(|thread\/|code -\d+|\b[A-Z_]{4,}:)/.test(readable);
   return result('Something needs attention', !technical && readable.length <= 400 && readable
     ? readable : 'This operation couldn’t finish. Try again; if it continues, copy the details to help diagnose the problem.');
 }

@@ -1,9 +1,8 @@
 <script lang="ts">
   import { inspectorContext } from './context';
-  import { axisContentKey, axisPath, type FontAxis } from 'powermove';
+  import { axisContentKey, axisPath, type ControlEditBinding, type FontAxis } from 'powermove';
   const { api, doc, transport, mixed, edit: inspectorEdit, timeline } = inspectorContext();
   const { NumField, Row } = api.ui.controls;
-  type EditBinding = ConstructorParameters<typeof api.ui.gesture>[0];
   let { layer, axis }: { layer: any; axis: Pick<FontAxis, 'tag' | 'label' | 'default'> & Partial<FontAxis> } = $props();
   const key = $derived(axisContentKey(axis.tag)), path = $derived(axisPath(axis.tag));
   const property = $derived((doc.tick.values, doc.tick.history, doc.proj, layer.d[key]));
@@ -18,7 +17,7 @@
     ...(!layer.d[key] ? [{ type: 'set_content', target: layer.id, patch: { [key]: api.model.P(initial) } }] : []),
     { type: 'set_property', target: layer.id, path, value: Number(next), time: transport.time, mode, preserveHandEdits: false }
   ];
-  const edit = $derived<EditBinding>({ mode: 'command', label: `${axis.label} axis`, origin: 'inspector', command: next => commands(next) });
+  const edit = $derived<ControlEditBinding>({ mode: 'command', label: `${axis.label} axis`, origin: 'inspector', command: next => commands(next) });
   function toggle() {
     if (property?.kf) {
       api.history.do(current ? 'Remove keyframe' : 'Add keyframe', () => {

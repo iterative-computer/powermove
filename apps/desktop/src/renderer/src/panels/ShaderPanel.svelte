@@ -83,7 +83,7 @@
   {:else}
     <div class="empty shader-empty">
       <b>No shader layers</b>
-      <span>Create a shader layer (⌘⇧G) to edit its source.</span>
+      <span>This project does not contain any editable shader layers.</span>
     </div>
   {/if}
 </div>

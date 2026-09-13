@@ -3,7 +3,7 @@
 </script>
 
 <script lang="ts">
-  import { animateSelection, selectionChannels } from './selection-animation';
+  import { animateSelection, toggleSelectionKey } from './selection-animation';
   import Icon from './Icon.svelte';
   import { expressionDiagnostic, EXPRESSION_NAMES } from 'powermove';
   import type { ChannelDefinition, EditCommand, MenuContribution } from 'powermove';
@@ -24,7 +24,6 @@
     max,
     unit,
     precision,
-    showDiamond = true,
     allowContextMenu = true,
     compact = false,
     prefix
@@ -39,7 +38,6 @@
     max?: number;
     unit?: string;
     precision?: number;
-    showDiamond?: boolean;
     allowContextMenu?: boolean;
     /** Render only the well (no Row); the parent composes X / Y pairs. */
     compact?: boolean;
@@ -117,16 +115,18 @@
   function toggleKey(event: MouseEvent): void {
     event.stopPropagation();
     const time = transport.time;
-    const targets=selectionChannels(api,layer,channels);api.history.do('Keyframe',()=>{for(const target of targets){const p=target.prop;if(!p)continue;const at=api.anim.hasKeyAt(target.layer,p,time);if(keyAtPlayhead&&at)api.anim.removeKey(p,at);else if(!at)api.anim.setKeyOn(p,time-target.layer.from,api.anim.evP(target.layer,p,time,target.path)!,'linear',api.project.get().fps);}});
+    toggleSelectionKey(
+      api,
+      layer,
+      channels,
+      time,
+      `${keyAtPlayhead ? 'Remove keyframe for' : 'Add keyframe for'} ${label}`
+    );
     refreshValues();
   }
 
-  /* One diamond, editor-style: static → start animating (track + key);
-     animated → toggle the key under the playhead. Removing the animation
-     lives in the context menu. */
   function diamondClick(event: MouseEvent): void {
-    if (!animated) toggleStopwatch(event);
-    else toggleKey(event);
+    toggleKey(event);
   }
 
   function addKeyframe(): void {
@@ -261,8 +261,8 @@
   }
 </script>
 
-{#snippet well(key: string, fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
-  <div class="well" class:has-kf={showDiamond && animated} data-prefix={gutter}>
+{#snippet well(fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
+  <div class="well" data-prefix={gutter}>
     <NumField
       {api}
       {mixed}
@@ -278,19 +278,6 @@
       {precision}
       link={linked}
     />
-    {#if showDiamond && animated}
-      <button
-        type="button"
-        class="kf"
-        class:track={animated}
-        class:on={animated && keyAtPlayhead}
-        title={!animated ? `Animate ${fieldLabel}` : keyAtPlayhead ? 'Remove keyframe' : 'Add keyframe'}
-        aria-label={!animated ? `Animate ${fieldLabel}` : keyAtPlayhead ? `Remove keyframe for ${fieldLabel}` : `Add keyframe for ${fieldLabel}`}
-        aria-pressed={animated}
-        data-key={key}
-        onclick={diamondClick}
-      ><i aria-hidden="true"></i></button>
-    {/if}
   </div>
 {/snippet}
 
@@ -305,7 +292,7 @@
     oncontextmenu={allowContextMenu ? contextMenu : undefined}
     onpointerdown={selectChannel}
   >
-    {@render well(channel, label, edit, () => value, !!prop?.expr, prefix)}
+    {@render well(label, edit, () => value, !!prop?.expr, prefix)}
   </div>
 {:else}
   <div
@@ -326,9 +313,9 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg>
         </button>
       {/snippet}
-      {@render well(channel, isScale ? 'Scale X' : label, edit, () => value, !!prop?.expr, isScale ? 'X' : prefix)}
+      {@render well(isScale ? 'Scale X' : label, edit, () => value, !!prop?.expr, isScale ? 'X' : prefix)}
       {#if isScale}
-        {@render well('scale.y', 'Scale Y', scaleYEdit, () => api.anim.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
+        {@render well('Scale Y', scaleYEdit, () => api.anim.ev(layer, 'scale.y', transport.time), !!layer.p?.['scale.y']?.expr, 'Y')}
       {/if}
       {#snippet action()}
         {#if isScale}

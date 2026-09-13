@@ -1,5 +1,6 @@
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { stringifyAsync } from '../core/serialize-async';
 
 export function install(PM: PMRegistry): void {
   'use strict';
@@ -86,7 +87,7 @@ export function install(PM: PMRegistry): void {
 
     return {
       id: String(body.id || ''),
-      provider: body.provider === 'claude' ? 'claude' : 'chatgpt',
+      provider: body.provider === 'compatible' ? 'compatible' : body.provider === 'claude' ? 'claude' : 'chatgpt',
       ...(typeof body.threadId === 'string' && body.threadId ? { threadId: body.threadId } : {}),
       mode,
       prompt: String(body.prompt || ''),
@@ -291,7 +292,9 @@ export function install(PM: PMRegistry): void {
 
   let snapshot = {};
   try {
-    snapshot = bridge.store.snapshotSync() || {};
+    snapshot = bridge.store.snapshotSerializedSync
+      ? Object.fromEntries(Object.entries(bridge.store.snapshotSerializedSync() as Record<string, string>).map(([key, value]) => [key, JSON.parse(value)]))
+      : bridge.store.snapshotSync() || {};
   } catch (error) {
     bridge.log('error', `store snapshot failed: ${errorText(error, 'unknown error')}`);
   }
@@ -299,15 +302,47 @@ export function install(PM: PMRegistry): void {
   const serviceKey = (key: any) => String(key).startsWith('pm.') ? String(key).slice(3) : String(key);
   const legacyKey = (key: any) => `pm.${serviceKey(key)}`;
   const saveErrors = new Map<string, string>();
+  const asyncWrites = new Map<string, Promise<void>>();
+  const writeVersions = new Map<string, number>();
 
   PM.store = {
-    get(key: any, fallback: any) {
+    // A development renderer may reload before its native process. Keep using
+    // the legacy envelope until the native process advertises the new write API.
+    separateHistory: (snapshot as any).__powermoveAsyncStore === true && typeof bridge.store.setSerialized === 'function',
+    get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
       if (!cached.has(stored)) return fallback;
-      try { return cloneValue(cached.get(stored)); } catch { return fallback; }
+      try {
+        const value: any = cached.get(stored);
+        if (options.omitHistory && value && typeof value === 'object') {
+          const { history, ...metadata } = value;
+          return cloneValue(metadata);
+        }
+        return cloneValue(value);
+      } catch { return fallback; }
+    },
+    /** Internal immutable snapshots (history patches), serialized without blocking input. */
+    setAsync(key: string, value: any) {
+      if (!bridge.store.setSerialized) return Promise.resolve(PM.store.set(key, value));
+      const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
+      writeVersions.set(service, version);
+      cached.set(legacyKey(service), value);
+      const write = stringifyAsync(value, async () => {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        if (writeVersions.get(service) !== version) throw new Error('Snapshot superseded');
+      }).then(async serialized => {
+        if (writeVersions.get(service) !== version) return;
+        await bridge.store.setSerialized(service, serialized);
+        saveErrors.delete(service);
+      }).catch(error => {
+        if (writeVersions.get(service) === version) saveErrors.set(service, errorText(error, 'Save failed'));
+      }).finally(() => { if (asyncWrites.get(service) === write) asyncWrites.delete(service); });
+      asyncWrites.set(service, write);
+      return write;
     },
     set(key: any, value: any) {
       const service = serviceKey(key);
+      writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       try {
         const copy = cloneValue(value);
         saveErrors.delete(service);
@@ -322,10 +357,12 @@ export function install(PM: PMRegistry): void {
     },
     del(key: any) {
       const service = serviceKey(key);
+      writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));
       bridge.store.delete(service);
     },
     async flush() {
+      while (asyncWrites.size) await Promise.all([...asyncWrites.values()]);
       await bridge.store.flush();
       if (saveErrors.size) throw new Error([...saveErrors.values()][0]);
     }

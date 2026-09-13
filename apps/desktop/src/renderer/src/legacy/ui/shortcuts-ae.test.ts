@@ -55,6 +55,7 @@ describe('After Effects shortcut fundamentals', () => {
     const first = add(PM, 'first', 2, 4);
     const second = add(PM, 'second', 3, 5);
     PM.selectLayers([first.id, second.id]);
+    PM.hist.clear(); // Start the command history after selecting its targets.
 
     expect(goToSelectedLayerBoundary(PM, 'in')).toBe(2);
     expect(goToSelectedLayerBoundary(PM, 'out')).toBe(8);
@@ -62,7 +63,7 @@ describe('After Effects shortcut fundamentals', () => {
     PM.time = 5;
     expect(editSelectedLayerTiming(PM, 'moveIn')).toMatchObject({ ok: true });
     expect(PM.proj.layers.map((layer: any) => [layer.from, layer.dur])).toEqual([[5, 4], [5, 5]]);
-    expect(PM.hist.list()).toEqual(['Selection', 'Move layer In point']);
+    expect(PM.hist.list()).toEqual(['Move layer In point']);
     expect(PM.hist.undo()).toBe(true);
 
     PM.time = 4;
@@ -111,12 +112,13 @@ describe('After Effects shortcut fundamentals', () => {
     expect(selectAdjacentLayer(PM, 1, true)).toBe(second);
     expect(PM.sel.layers).toEqual([first.id, second.id]);
 
+    PM.hist.clear(); // The navigation above already verified its selection changes.
     expect(setLayerLocks(PM, true)).toMatchObject({ ok: true });
     expect([first.lock, second.lock, third.lock]).toEqual([true, true, false]);
-    expect(PM.hist.list()).toEqual(['Selection', 'Selection', 'Selection', 'Lock layers']);
+    expect(PM.hist.list()).toEqual(['Lock layers']);
 
     expect(setLayerLocks(PM, false, true)).toMatchObject({ ok: true });
     expect([first.lock, second.lock, third.lock]).toEqual([false, false, false]);
-    expect(PM.hist.list()).toEqual(['Selection', 'Selection', 'Selection', 'Lock layers', 'Unlock layers']);
+    expect(PM.hist.list()).toEqual(['Lock layers', 'Unlock layers']);
   });
 });

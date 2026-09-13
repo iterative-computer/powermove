@@ -7,6 +7,7 @@ test.beforeEach(async ({ session }) => {
     const PM = (window as any).PM;
     const project = PM.mkProject({ name: 'Pro shortcut proof', w: 640, h: 360, dur: 8, fps: 30 });
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
+    PM.ProjectsScreen.hide();
     for (const [index, name] of ['Back', 'Middle', 'Front'].entries()) {
       const result = PM.Edit.apply({
         type: 'add_layer', layerType: 'solid', name, from: 0, duration: 8, index,
@@ -14,10 +15,40 @@ test.beforeEach(async ({ session }) => {
       }, { label: `Add ${name}`, origin: 'test' });
       if (!result.ok) throw new Error(result.message);
     }
-    PM.hist.clear();
     PM.setTime(4);
     PM.selectLayers([PM.proj.layers[1].id]);
+    PM.hist.clear();
   });
+});
+
+test('Command+Shift+D splits a group into two group strips', async ({ session }) => {
+  const { app, page } = session;
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const group = PM.groupLayers(PM.proj.layers.slice(0, 2).map((layer: any) => layer.id), 'Pair');
+    PM.hist.clear();
+    PM.selectLayers(group.id);
+  });
+
+  await app.evaluate(({ BrowserWindow }) => {
+    const contents = BrowserWindow.getAllWindows()[0]?.webContents;
+    if (!contents) throw new Error('Missing editor window');
+    const primary: 'command' | 'control' = process.platform === 'darwin' ? 'command' : 'control';
+    contents.sendInputEvent({ type: 'keyDown', keyCode: 'd', modifiers: [primary, 'shift'] });
+    contents.sendInputEvent({ type: 'keyUp', keyCode: 'd', modifiers: [primary, 'shift'] });
+  });
+
+  await expect.poll(() => page.evaluate(() => {
+    const PM = (window as any).PM;
+    const groups = PM.proj.layers.filter((layer: any) => layer.type === 'group');
+    return {
+      groups: groups.length,
+      selectedType: PM.firstSel()?.type,
+      memberCounts: groups.map((group: any) => PM.proj.layers.filter((layer: any) => layer.group === group.id).length),
+      history: PM.hist.list(),
+    };
+  })).toEqual({ groups: 2, selectedType: 'group', memberCounts: [2, 2], history: ['Split'] });
+  expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
 test('professional shortcuts split, cut, paste, nudge, and respect focused fields', async ({ session }) => {

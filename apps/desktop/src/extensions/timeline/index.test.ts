@@ -142,6 +142,7 @@ describe('timeline extension', () => {
     expect(commands.has('timeline.revealAll')).toBe(true);
     expect(commands.has('timeline.adjacentKeyframe:prev')).toBe(true);
     expect(commands.has('timeline.adjacentKeyframe:next')).toBe(true);
+    expect(commands.has('split')).toBe(false);
 
     commands.get('timeline.revealProperty:p')?.run();
     expect(layer.reveal).toEqual(['position.x']);
@@ -176,7 +177,7 @@ describe('timeline extension', () => {
     value.state.timeline.graph = true;
     value.emit('project:changed', { kind: 'project' });
     expect(body.querySelector('#tl-time')?.textContent).toBe('0:24');
-    expect(body.querySelector('.tl-graph-slot button')?.classList.contains('on')).toBe(true);
+    expect(body.querySelector('button[title="Graph editor (Shift+F3)"]')?.classList.contains('on')).toBe(true);
   });
 
   it('scrubs time from the initial position instead of accumulating pointer offsets', () => {
@@ -201,7 +202,8 @@ describe('timeline extension', () => {
     const body = build(value);
     const graph = body.querySelector<HTMLButtonElement>('button[title="Graph editor (Shift+F3)"]')!;
     const slot = graph.closest('.tl-graph-slot')!;
-    expect(slot.firstElementChild).toBe(graph);
+    expect(slot.lastElementChild).toBe(graph);
+    expect(slot.firstElementChild).toBe(body.querySelector('button[title="Graph options"]'));
     expect(slot.previousElementSibling?.classList.contains('tl-transport')).toBe(true);
     expect(graph.closest('.tl-transport')).toBeNull();
     expect(graph.querySelector('[data-icon="bezier"]')).not.toBeNull();

@@ -3,11 +3,11 @@ import { splitTextLayers, type TextSplitMode } from '../core/split-text';
 import { evaluatedValue } from '../core/content-properties';
 
 export function parentMenuItems(PM: PMRegistry, ids: string[], origin = 'timeline'): any[] {
-  const selected = ids.map(id => PM.L(id)).filter((layer: any) => layer && layer.type !== 'group' && PM.TYPE_META[layer.type]?.transform !== false);
+  const selected = ids.map(id => PM.L(id)).filter((layer: any) => layer && PM.TYPE_META[layer.type]?.transform !== false);
   const apply = (parent: string | null) => PM.Edit.apply(selected.map((layer: any) => ({ type: 'set_layer', target: layer.id, patch: { parent } })), { label: parent ? 'Parent layers' : 'Remove parent', origin });
   return [
     { label: 'None', on: selected.every((layer: any) => !layer.parent), run: () => apply(null) },
-    ...PM.proj.layers.filter((candidate: any) => candidate.type !== 'group' && PM.TYPE_META[candidate.type]?.transform !== false && selected.every((layer: any) => layer.id !== candidate.id && !PM.wouldCycle(layer, candidate.id)))
+    ...PM.proj.layers.filter((candidate: any) => PM.TYPE_META[candidate.type]?.transform !== false && selected.every((layer: any) => layer.id !== candidate.id && !PM.wouldCycle(layer, candidate.id)))
       .map((candidate: any) => ({ label: candidate.name, on: selected.every((layer: any) => layer.parent === candidate.id), run: () => apply(candidate.id) })),
   ];
 }
@@ -38,7 +38,7 @@ export function installLayerMenu(PM: PMRegistry): void {
       { label: 'Outside groups', run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: null }, 'Move out of group') },
       ...groups.map((group: any) => ({ label: group.name, run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: group.id }, 'Move to group') }))
     ]) });
-    if (selected.every((item: any) => item.type !== 'group' && PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Parent…', disabled: !editable, run: () => more('Parent', parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin)) });
+    if (selected.every((item: any) => PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Parent…', disabled: !editable, run: () => more('Parent', parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin)) });
     if (selected.every((item: any) => item.type !== 'group')) {
       const inside = selected.every((item: any) => PM.time > item.from && PM.time < item.from + item.dur);
       items.push({ label: 'Timing…', disabled: !editable, run: () => more('Timing', [

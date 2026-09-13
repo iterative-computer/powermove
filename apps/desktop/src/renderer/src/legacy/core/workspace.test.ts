@@ -28,6 +28,26 @@ function workspaceModel(saved: Record<string, any> = {}): PMRegistry {
 }
 
 describe('legacy workspace install', () => {
+  it('persists accessible headless panels and preserves ordinary collapsed panels before mounting', () => {
+    const saved: Record<string, any> = {};
+    const PM = workspaceModel(saved);
+    PM.PANELS = { timeline: { headless: true }, fxbrowser: {} };
+    PM.store.separateHistory = true;
+    PM.WS.init();
+    PM.WS.mutate((workspace: any) => {
+      for (const dock of workspace.layout.docks) {
+        for (const panel of dock.panels) {
+          if (['viewer', 'timeline', 'fxbrowser'].includes(panel.id)) panel.collapsed = true;
+        }
+      }
+    });
+    const panels = saved['projectWorkspace.project'].layout.docks.flatMap((dock: any) => dock.panels);
+    expect(panels.find((panel: any) => panel.id === 'viewer').collapsed).toBeUndefined();
+    expect(panels.find((panel: any) => panel.id === 'timeline').collapsed).toBeUndefined();
+    expect(panels.find((panel: any) => panel.id === 'fxbrowser').collapsed).toBe(true);
+    expect(saved['projectWorkspace.project']).toEqual(PM.WS.snapshot());
+  });
+
   it('keeps the agent panel at a set height instead of making it fill the dock', () => {
     const PM = workspaceModel();
     const workspace = PM.WS.normalize({

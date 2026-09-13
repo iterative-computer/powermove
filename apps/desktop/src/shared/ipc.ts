@@ -17,6 +17,9 @@ export const IPC = {
   onboardingBegin: 'onboarding:begin',
 
   fileSave: 'file:save',
+  fileSaveUpload: 'file:save-upload',
+  fileSaveChunk: 'file:save-chunk',
+  fileSaveAbort: 'file:save-abort',
   projectOpen: 'project:open',
   projectConfirmClose: 'project:confirm-close',
 
@@ -46,6 +49,8 @@ export const IPC = {
   claudeConnect: 'claude:connect',
   claudeDisconnect: 'claude:disconnect',
   claudeChanged: 'claude:changed', // main → renderer
+  compatibleStatus: 'compatible:status',
+  compatibleConfigure: 'compatible:configure',
   consentComputer: 'consent:computer',
 
   artifactRead: 'agent:artifact:read',
@@ -54,8 +59,10 @@ export const IPC = {
   captureWindow: 'capture:window',
 
   storeSnapshot: 'store:snapshot',
+  storeSnapshotSerializedSync: 'store:snapshot-serialized-sync',
   storeSnapshotSync: 'store:snapshot-sync', // ipcRenderer.sendSync from preload, boot barrier only
   storeSet: 'store:set',
+  storeSetSerialized: 'store:set-serialized',
   storeDelete: 'store:delete',
   storeFlush: 'store:flush',
   storeError: 'store:error', // main → renderer
@@ -137,7 +144,7 @@ export interface MediaProxyReadRequest {
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export type AgentProviderId = 'chatgpt' | 'claude';
+export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
 
 export interface CodexAttachment {
   name: string;
@@ -359,10 +366,20 @@ export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'sel
 import type { ExtensionsBridge } from './extensions';
 
 export interface PowermoveBridge {
+  compatible?: {
+    status(): Promise<import('./compatible-provider').CompatibleProviderConfig>;
+    configure(input: import('./compatible-provider').CompatibleProviderInput): Promise<import('./compatible-provider').CompatibleProviderConfig>;
+  };
   agentNotification(options: { sound: string; preview?: boolean }): Promise<void>;
   ping(): Promise<string>;
   versions: { electron: string; chrome: string; node: string };
 
+  fileUpload?: {
+    begin(size: number): Promise<string>;
+    chunk(uploadId: string, data: Uint8Array): Promise<void>;
+    finish(uploadId: string, metadata: Omit<FileSaveRequest, 'data'>): Promise<FileSaveResult>;
+    abort(uploadId: string): Promise<void>;
+  };
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
   confirmProjectClose(name: string): Promise<CloseDecision>;
@@ -427,8 +444,11 @@ export interface PowermoveBridge {
   store: {
     /** Synchronous boot barrier: legacy classic scripts read PM.store during load. */
     snapshotSync(): StoreSnapshot;
+    /** Keep large recovery trees out of contextBridge's recursive object copying. */
+    snapshotSerializedSync?(): Record<string, string>;
     snapshot(): Promise<StoreSnapshot>;
     set(key: string, value: unknown): void;
+    setSerialized?(key: string, serialized: string): Promise<void>;
     delete(key: string): void;
     flush(): Promise<void>;
     onError(cb: (e: StoreErrorEvent) => void): () => void;
