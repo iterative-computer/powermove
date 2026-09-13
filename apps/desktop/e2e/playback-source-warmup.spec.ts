@@ -77,3 +77,44 @@ test('fitted previews skip offscreen oversized sources and keep the rendered pix
   expect(result.clippedBytes).toBeLessThan(result.referenceBytes / 4);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('group effects preserve pixels while clipping oversized child sources', async ({ session }) => {
+  await session.page.waitForFunction(() => Boolean((window as any).PM.GL.gl));
+  const result = await session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    const p = PM.mkProject({ name: 'Large blurred group', w: 320, h: 180, dur: 5 });
+    const group = PM.mkLayer('group', {}, p);
+    p.layers = [
+      group,
+      PM.mkLayer('shape', { d: { w: 5000, h: 140, color: '#5274FF', radius: 20 }, p: { 'position.x': 80, 'position.y': 100 } }, p),
+      PM.mkLayer('shape', { d: { w: 1200, h: 1000, color: '#FF4455', radius: 100 }, p: { 'position.x': -900, 'position.y': -900 } }, p),
+      PM.mkLayer('text', { d: { text: 'Outside the group target', size: 120 }, p: { 'position.x': 3000, 'position.y': 100 } }, p),
+    ];
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p }));
+    for (const child of PM.proj.layers.filter((l: any) => l.id !== group.id)) child.group = group.id;
+    PM.touch();
+    const add = PM.Edit.apply({ type: 'add_effect', target: group.id, effect: 'blur', parameters: { amount: 24 } }, { origin: 'agent' });
+    if (!add.ok) throw new Error('Expected a renderable group blur');
+    PM.pause(); PM.agentFrameCapture = true; PM.quality = 1;
+    PM.GL.previewViewport = null; PM.GL.resize(320, 180);
+    const gl = PM.GL.gl;
+    const render = (sourceClipping: boolean) => {
+      PM.rasterClear();
+      PM.GL.render(0, { mblur: false, sourceClipping, exporting: true });
+      // Compile the effect synchronously first; compare the regular preview paths.
+      PM.rasterClear();
+      PM.GL.render(0, { mblur: false, sourceClipping });
+      const data = new Uint8Array(320 * 180 * 4);
+      gl.readPixels(0, 0, 320, 180, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      return { data, bytes: PM.GL.memoryStats().textures.bytes, passes: PM.GL.stats.passes };
+    };
+    const clipped = render(true), reference = render(false);
+    let maxDifference = 0;
+    for (let i = 0; i < clipped.data.length; i++) maxDifference = Math.max(maxDifference, Math.abs(clipped.data[i]! - reference.data[i]!));
+    return { maxDifference, clippedBytes: clipped.bytes, referenceBytes: reference.bytes, passes: clipped.passes };
+  });
+  expect(result.maxDifference).toBeLessThanOrEqual(1);
+  expect(result.passes).toBeGreaterThan(0);
+  expect(result.clippedBytes).toBeLessThan(result.referenceBytes / 4);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
