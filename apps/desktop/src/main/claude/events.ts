@@ -35,6 +35,21 @@ function blockIndex(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+/* Prose keeps its shape. Answers and reasoning are rendered as paragraphs and
+   lists, so line structure is content — only control characters and trailing
+   padding are stripped. Labels and progress lines still use `normalizedText`,
+   which flattens everything to a single line. */
+function normalizedProse(value: unknown, limit: number): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/\r\n?/gu, '\n')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/gu, ' ')
+    .replace(/ *\n/gu, '\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim()
+    .slice(0, limit);
+}
+
 export class ClaudeEventParser {
   private readonly decoder = new TextDecoder('utf-8');
   private pending = '';
@@ -217,7 +232,7 @@ export class ClaudeEventParser {
   private assistantBlock(value: unknown): void {
     if (!isRecord(value)) return;
     if (value.type === 'text') {
-      const text = fragmentText(value.text).slice(0, LIMITS.codexTraceChars);
+      const text = normalizedProse(value.text, LIMITS.codexTraceChars);
       if (!text) return;
       this.callbacks.onTrace?.({ kind: 'answer', text });
       const progress = normalizedText(value.text, LIMITS.codexProgressChars);
@@ -225,7 +240,7 @@ export class ClaudeEventParser {
       return;
     }
     if (value.type === 'thinking') {
-      const text = fragmentText(value.thinking).slice(0, LIMITS.codexTraceChars);
+      const text = normalizedProse(value.thinking, LIMITS.codexTraceChars);
       if (text) this.callbacks.onTrace?.({ kind: 'thought', text });
       return;
     }
