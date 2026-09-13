@@ -563,6 +563,27 @@ describe('installKernel', () => {
     expect(installed.effects.list()).toEqual([]);
   });
 
+  it('forwards extension forks through the native bridge', async () => {
+    const PM = fakePM();
+    const fork = vi.fn(async ({ id }: { id: string }) => ({ id: `${id}-fork` }));
+    PM.extensionsBridge = {
+      list: vi.fn(async () => []),
+      setEnabled: vi.fn(async () => []),
+      remove: vi.fn(async () => []),
+      reload: vi.fn(async () => []),
+      create: vi.fn(async () => []),
+      fork,
+      reveal: vi.fn(async () => undefined),
+      readSource: vi.fn(async () => []),
+      reportHealth: vi.fn(),
+      onChanged: vi.fn(() => () => {})
+    };
+    installed = installKernel(PM);
+
+    await expect(installed.api('mods').extensions.fork('timeline')).resolves.toEqual({ id: 'timeline-fork' });
+    expect(fork).toHaveBeenCalledExactlyOnceWith({ id: 'timeline' });
+  });
+
   it('emits layout after built-ins without waiting for a hanging user extension', async () => {
     vi.useFakeTimers();
     const PM = fakePM();

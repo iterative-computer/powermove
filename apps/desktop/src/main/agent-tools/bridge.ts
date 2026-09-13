@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import net, { type Server, type Socket } from 'node:net';
+import path from 'node:path';
 
 import type { IpcMain, IpcMainEvent, WebContents } from 'electron';
 
@@ -11,6 +13,8 @@ import {
   type AgentToolResponseEvent
 } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
+import { EXTENSION_ID } from '../../shared/extensions';
+import { forkBuiltinExtension } from '../extensions/fork';
 import { POWERMOVE_AGENT_TOOLS, type NativeMcpServerConfig } from './spec';
 
 const TOOL_TIMEOUT_MS = 120_000;
@@ -25,6 +29,7 @@ interface ToolSocketRequest {
   id: string | number | null;
   tool: string;
   arguments: Record<string, unknown>;
+  workspace: string;
 }
 
 interface PendingToolCall {
@@ -47,6 +52,8 @@ export class PowermoveAgentToolSession {
   changed = false;
   private closed = false;
   private finishing: Promise<AgentToolFinishResult> | null = null;
+  readonly openedAt = Date.now();
+  stagingDirectory: string | null = null;
 
   constructor(
     readonly runId: string,
@@ -95,6 +102,8 @@ export class PowermoveAgentToolSession {
 
 export interface PowermoveAgentToolBridgeOptions {
   mcpServerPath: string;
+  /** Test/embedding seam. Production infers this from mcpServerPath. */
+  resourcesDir?: string;
   command?: string;
   timeoutMs?: number;
 }
@@ -332,6 +341,14 @@ export class PowermoveAgentToolBridge {
     if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
+    if (request.tool === 'fork_builtin_extension') {
+      const result = await this.forkBuiltinExtension(session, request);
+      return {
+        id: request.id,
+        ok: true,
+        content: [{ type: 'text', text: JSON.stringify(result) }]
+      };
+    }
     const response = request.tool === 'capture_panel'
       ? await this.capturePanel(session, request.arguments)
       : request.tool === 'computer_use_panel'
@@ -359,15 +376,67 @@ export class PowermoveAgentToolBridge {
       !isString(value.runId, 80) ||
       !(typeof value.id === 'string' || typeof value.id === 'number' || value.id === null) ||
       !isString(value.tool, 80) ||
-      !isRecord(value.arguments)
+      !isRecord(value.arguments) ||
+      !isString(value.workspace, 4_096) ||
+      !path.isAbsolute(value.workspace)
     ) throw new Error('Invalid Powermove tool request.');
     return {
       token: value.token,
       runId: value.runId,
       id: value.id,
       tool: value.tool,
-      arguments: value.arguments
+      arguments: value.arguments,
+      workspace: value.workspace
     };
+  }
+
+  private async forkBuiltinExtension(
+    session: PowermoveAgentToolSession,
+    request: ToolSocketRequest
+  ): Promise<Record<string, unknown>> {
+    const keys = Object.keys(request.arguments);
+    const id = request.arguments.id;
+    const forkId = request.arguments.forkId;
+    if (
+      keys.some((key) => key !== 'id' && key !== 'forkId') ||
+      typeof id !== 'string' || !EXTENSION_ID.test(id) ||
+      (forkId !== undefined && (typeof forkId !== 'string' || !EXTENSION_ID.test(forkId)))
+    ) {
+      throw new Error('fork_builtin_extension expects { id, forkId? }.');
+    }
+    const stagingDirectory = session.stagingDirectory ??
+      await resolveCurrentStagingDirectory(request.workspace, session.openedAt);
+    session.stagingDirectory = stagingDirectory;
+    const result = await forkBuiltinExtension({
+      resourcesDir: await this.resourcesDirectory(),
+      id,
+      targetDir: stagingDirectory,
+      ...(typeof forkId === 'string' ? { forkId } : {})
+    });
+    return {
+      dir: result.dir,
+      forkId: result.forkId,
+      files: result.files,
+      forkedFrom: result.forkedFrom,
+      reminder: `List ${result.forkId} in the result's extensions array with action created.`
+    };
+  }
+
+  private async resourcesDirectory(): Promise<string> {
+    if (this.options.resourcesDir) return this.options.resourcesDir;
+    const serverDirectory = path.dirname(path.resolve(this.options.mcpServerPath));
+    const candidates = [
+      path.join(path.dirname(serverDirectory), 'builtin-extensions'),
+      path.resolve(serverDirectory, '..', '..', 'extensions')
+    ];
+    for (const candidate of candidates) {
+      try {
+        if ((await fs.stat(candidate)).isDirectory()) return candidate;
+      } catch {
+        // Try the development or packaged layout next.
+      }
+    }
+    throw new Error('Powermove built-in extensions are unavailable.');
   }
 
   private onRendererResponse(event: IpcMainEvent, value: unknown): void {
@@ -432,4 +501,32 @@ export class PowermoveAgentToolBridge {
     if (socket.destroyed || !socket.writable) return;
     socket.end(`${JSON.stringify(value)}\n`);
   }
+}
+
+async function resolveCurrentStagingDirectory(workspace: string, openedAt: number): Promise<string> {
+  const workspaceRoot = await fs.realpath(workspace);
+  const runsRoot = await fs.realpath(path.join(workspaceRoot, '.powermove', 'extension-runs'));
+  const relativeRoot = path.relative(workspaceRoot, runsRoot);
+  if (relativeRoot.startsWith('..') || path.isAbsolute(relativeRoot)) {
+    throw new Error('Powermove extension staging root escapes the current workspace.');
+  }
+
+  // The MCP session is opened before prepareAgentWorkspace creates its stage,
+  // while the MCP subprocess itself starts afterward with that workspace as
+  // cwd. Prefer the one stage born during this session; a resumed run safely
+  // falls back only when it is the sole retained stage.
+  const candidates: Array<{ dir: string; birthtimeMs: number }> = [];
+  for (const entry of await fs.readdir(runsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(runsRoot, entry.name);
+    const metadata = await fs.lstat(dir);
+    if (metadata.isSymbolicLink()) continue;
+    candidates.push({ dir: await fs.realpath(dir), birthtimeMs: metadata.birthtimeMs });
+  }
+  const fresh = candidates.filter((candidate) => candidate.birthtimeMs >= openedAt - 1_000);
+  const selected = fresh.length === 1 ? fresh[0] : fresh.length === 0 && candidates.length === 1 ? candidates[0] : undefined;
+  if (!selected) {
+    throw new Error('Could not identify this run\'s extension staging directory safely. Retry after other Powermove agent runs finish.');
+  }
+  return selected.dir;
 }

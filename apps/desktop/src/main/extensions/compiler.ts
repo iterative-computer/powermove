@@ -55,6 +55,11 @@ function hasNodeModulesComponent(file: string): boolean {
   return file.split(path.sep).includes('node_modules');
 }
 
+function hasHiddenComponent(file: string): boolean {
+  return file.split(path.sep).some((component) =>
+    component !== '.' && component !== '..' && component.startsWith('.'));
+}
+
 function isRuntimeImport(specifier: string): boolean {
   return specifier === 'powermove' || specifier === 'svelte' || specifier.startsWith('svelte/');
 }
@@ -122,7 +127,11 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
       }
 
       const unresolved = path.resolve(resolveDir, specifier);
-      if (!isContained(extensionRoot, unresolved) || hasNodeModulesComponent(path.relative(extensionRoot, unresolved))) {
+      const unresolvedRelative = path.relative(extensionRoot, unresolved);
+      if (hasHiddenComponent(unresolvedRelative)) {
+        throw new Error(`Imports from hidden extension paths are not allowed: ${specifier}`);
+      }
+      if (!isContained(extensionRoot, unresolved) || hasNodeModulesComponent(unresolvedRelative)) {
         throw new Error(`Import escapes extension directory: ${specifier}`);
       }
 
@@ -134,7 +143,11 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
         try {
           if (!(await stat(candidate)).isFile()) continue;
           const canonical = await realpath(candidate);
-          if (!isContained(extensionRoot, canonical) || hasNodeModulesComponent(path.relative(extensionRoot, canonical))) {
+          const canonicalRelative = path.relative(extensionRoot, canonical);
+          if (hasHiddenComponent(canonicalRelative)) {
+            throw new Error(`Imports from hidden extension paths are not allowed: ${specifier}`);
+          }
+          if (!isContained(extensionRoot, canonical) || hasNodeModulesComponent(canonicalRelative)) {
             throw new Error(`Import escapes extension directory: ${specifier}`);
           }
           return canonical;

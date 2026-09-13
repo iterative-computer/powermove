@@ -6,6 +6,7 @@ import type { IpcMain } from 'electron';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EXT_IPC, type ExtensionRecord } from '../../shared/extensions';
+import { IPC } from '../../shared/ipc';
 import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './index';
 import type { ExtensionRegistry } from './registry';
 
@@ -28,6 +29,7 @@ function registryStub(buildDir: string): ExtensionRegistry {
   const records: ExtensionRecord[] = [];
   return {
     buildDir,
+    userDir: path.join(path.dirname(buildDir), 'user'),
     list: vi.fn(() => records),
     setEnabled: vi.fn(async () => records),
     remove: vi.fn(async () => records),
@@ -67,7 +69,7 @@ describe('extensions IPC', () => {
     const buildDir = await temporaryDirectory();
     const registry = registryStub(buildDir);
     const { ipcMain, handlers, listeners } = fakeIpcMain();
-    registerExtensionsIpc(ipcMain, { registry, isTrusted: () => false });
+    registerExtensionsIpc(ipcMain, { registry, resourcesDir: path.join(buildDir, 'builtins'), isTrusted: () => false });
 
     expect([...handlers.keys()].sort()).toEqual(
       [
@@ -76,6 +78,7 @@ describe('extensions IPC', () => {
         EXT_IPC.remove,
         EXT_IPC.reload,
         EXT_IPC.create,
+        IPC.extensionFork,
         EXT_IPC.reveal,
         EXT_IPC.readSource
       ].sort()
@@ -85,21 +88,22 @@ describe('extensions IPC', () => {
     expect(registry.reportHealth).not.toHaveBeenCalled();
   });
 
-  it.each([EXT_IPC.remove, EXT_IPC.reload, EXT_IPC.reveal, EXT_IPC.readSource])(
+  it.each([EXT_IPC.remove, EXT_IPC.reload, IPC.extensionFork, EXT_IPC.reveal, EXT_IPC.readSource])(
     'rejects traversal-shaped ids on %s',
     async (channel) => {
       const registry = registryStub(await temporaryDirectory());
       const { ipcMain, handlers } = fakeIpcMain();
-      registerExtensionsIpc(ipcMain, { registry, isTrusted: () => true });
+      registerExtensionsIpc(ipcMain, { registry, resourcesDir: path.join(registry.buildDir, 'builtins'), isTrusted: () => true });
 
-      expect(() => handlers.get(channel)?.({}, { id: '../escape' })).toThrow(`expected { id }`);
+      await expect(Promise.resolve().then(() => handlers.get(channel)?.({}, { id: '../escape' })))
+        .rejects.toThrow('expected { id }');
     }
   );
 
   it('validates health reports before forwarding them', async () => {
     const registry = registryStub(await temporaryDirectory());
     const { ipcMain, listeners } = fakeIpcMain();
-    registerExtensionsIpc(ipcMain, { registry, isTrusted: () => true });
+    registerExtensionsIpc(ipcMain, { registry, resourcesDir: path.join(registry.buildDir, 'builtins'), isTrusted: () => true });
     const listener = listeners.get(EXT_IPC.reportHealth);
 
     listener?.({}, { id: 'valid-id', health: { state: 'build-error', error: 'no' } });
@@ -111,6 +115,27 @@ describe('extensions IPC', () => {
       id: 'valid-id',
       health: { state: 'runtime-error', error: 'boom' }
     });
+  });
+
+  it('forks a built-in into the live user directory and refreshes both records', async () => {
+    const root = await temporaryDirectory();
+    const buildDir = path.join(root, 'build');
+    const resourcesDir = path.join(root, 'builtins');
+    const registry = registryStub(buildDir);
+    await fs.mkdir(path.join(resourcesDir, 'timeline'), { recursive: true });
+    await fs.mkdir(registry.userDir, { recursive: true });
+    await fs.writeFile(path.join(resourcesDir, 'timeline', 'manifest.json'), JSON.stringify({
+      id: 'timeline', name: 'Timeline', version: '1.0.0', apiVersion: 1
+    }));
+    await fs.writeFile(path.join(resourcesDir, 'timeline', 'index.ts'), 'export default () => undefined');
+    const { ipcMain, handlers } = fakeIpcMain();
+    registerExtensionsIpc(ipcMain, { registry, resourcesDir, isTrusted: () => true });
+
+    await expect(handlers.get(IPC.extensionFork)?.({}, { id: 'timeline' })).resolves.toEqual({ id: 'timeline-fork' });
+    expect(registry.refresh).toHaveBeenCalledWith(['timeline', 'timeline-fork']);
+    expect(registry.emitChanged).toHaveBeenCalledWith({ ids: ['timeline', 'timeline-fork'], reason: 'create' });
+    await expect(fs.readFile(path.join(registry.userDir, 'timeline-fork', 'manifest.json'), 'utf8'))
+      .resolves.toContain('"forkedFrom": "timeline@1.0.0"');
   });
 });
 
@@ -128,7 +153,7 @@ describe('extension asset server', () => {
     await fs.mkdir(path.join(buildDir, 'valid-id'));
     await fs.writeFile(path.join(buildDir, 'valid-id', 'bundle.js'), 'export const answer = 42;');
     const { ipcMain } = fakeIpcMain();
-    registerExtensionsIpc(ipcMain, { registry: registryStub(buildDir), isTrusted: () => true });
+    registerExtensionsIpc(ipcMain, { registry: registryStub(buildDir), resourcesDir: path.join(buildDir, 'builtins'), isTrusted: () => true });
 
     const response = await serveExtensionAsset('/ext/valid-id/bundle.js');
 
@@ -146,7 +171,7 @@ describe('extension asset server', () => {
     await fs.writeFile(path.join(outside, 'bundle.js'), 'malicious');
     await fs.symlink(path.join(outside, 'bundle.js'), path.join(buildDir, 'valid-id', 'bundle.js'));
     const { ipcMain } = fakeIpcMain();
-    registerExtensionsIpc(ipcMain, { registry: registryStub(buildDir), isTrusted: () => true });
+    registerExtensionsIpc(ipcMain, { registry: registryStub(buildDir), resourcesDir: path.join(buildDir, 'builtins'), isTrusted: () => true });
 
     await expect(serveExtensionAsset('ext/valid-id/bundle.js')).resolves.toBeNull();
   });

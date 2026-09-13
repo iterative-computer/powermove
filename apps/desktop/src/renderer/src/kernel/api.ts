@@ -843,6 +843,7 @@ export interface EventsAPI {
 
 export interface ExtensionsAPI {
   list(): ExtensionRecord[];
+  fork(id: string): Promise<{ id: string }>;
   setEnabled(id: string, enabled: boolean): Promise<void>;
   remove(id: string): Promise<void>;
   reload(id: string): Promise<void>;

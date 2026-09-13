@@ -106,6 +106,7 @@ async function enforceSourceFileLimit(root: string): Promise<void> {
 
     const names = await readdir(directory);
     for (const name of names) {
+      if (name.startsWith('.')) continue;
       const itemPath = path.join(directory, name);
       const stats = await lstat(itemPath);
       if (stats.isSymbolicLink()) continue;

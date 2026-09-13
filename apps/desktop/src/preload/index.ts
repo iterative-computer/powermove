@@ -10,6 +10,7 @@ import {
   type CodexProgressEvent,
   type CodexRunResult,
   type ConsentResult,
+  type ExtensionForkResult,
   type FileSaveResult,
   type MenuCommand,
   type MediaProxyResult,
@@ -197,6 +198,7 @@ const bridge: PowermoveBridge = {
     remove: (req) => ipcRenderer.invoke(EXT_IPC.remove, req) as Promise<ExtensionRecord[]>,
     reload: (req) => ipcRenderer.invoke(EXT_IPC.reload, req) as Promise<ExtensionRecord[]>,
     create: (req) => ipcRenderer.invoke(EXT_IPC.create, req) as Promise<ExtensionRecord[]>,
+    fork: (req) => ipcRenderer.invoke(IPC.extensionFork, req) as Promise<ExtensionForkResult>,
     reveal: (req) => ipcRenderer.invoke(EXT_IPC.reveal, req) as Promise<void>,
     readSource: (req) =>
       ipcRenderer.invoke(EXT_IPC.readSource, req) as Promise<ExtensionSourceFile[]>,

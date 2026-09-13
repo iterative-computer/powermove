@@ -23,7 +23,7 @@ function bridgeCall(tool, args, id) {
     });
     let output = '';
     socket.once('connect', () => {
-      socket.write(`${JSON.stringify({ token, runId, id, tool, arguments: args || {} })}\n`);
+      socket.write(`${JSON.stringify({ token, runId, id, tool, arguments: args || {}, workspace: process.cwd() })}\n`);
     });
     socket.on('data', (chunk) => {
       output += chunk;

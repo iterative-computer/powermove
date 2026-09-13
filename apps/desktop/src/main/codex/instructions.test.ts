@@ -57,7 +57,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('EXTENDING POWERMOVE');
     expect(instructions).toContain('/absolute/user/extensions');
     expect(instructions).toContain('powermove-api/EXTENSIONS.md');
-    expect(instructions).toMatch(/contribute.+override.+fork.+replaces/s);
+    expect(instructions).toMatch(/contribute.+override.+fork_builtin_extension/s);
     expect(instructions).toContain('folder name must equal the extension manifest id');
     expect(instructions).toContain('Never edit the app bundle');
     expect(instructions).toContain("result's extensions array");

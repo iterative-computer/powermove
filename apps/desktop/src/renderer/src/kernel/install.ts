@@ -44,6 +44,7 @@ import type {
   WorkspaceAPI
 } from './api';
 import type { ExtensionsBridge } from '../../../shared/extensions';
+import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
@@ -100,6 +101,7 @@ import {
 } from '../layout/model';
 
 type LegacyPM = Record<string, any>;
+type ExtensionsHostBridge = ExtensionsBridge & Partial<Pick<PowermoveExtensionsBridge, 'fork'>>;
 
 export interface InstalledKernel extends Kernel {
   /** Set by `bootExtensions`; null until then. */
@@ -631,9 +633,13 @@ function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
   };
 }
 
-function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsBridge | null, getLoader: () => Loader | null): ExtensionsAPI {
+function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsHostBridge | null, getLoader: () => Loader | null): ExtensionsAPI {
   return {
     list: (): ExtensionRecord[] => storeRecords(),
+    fork: async (id) => {
+      if (!bridge?.fork) throw new Error('Forking built-in extensions is unavailable.');
+      return bridge.fork({ id });
+    },
     setEnabled: async (id, enabled) => void (await bridge?.setEnabled({ id, enabled })),
     remove: async (id) => void (await bridge?.remove({ id })),
     reload: async (id) => {
@@ -648,9 +654,9 @@ function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsBridge | null, getLoa
   };
 }
 
-function resolveBridge(PM: LegacyPM): ExtensionsBridge | null {
+function resolveBridge(PM: LegacyPM): ExtensionsHostBridge | null {
   const candidate = (globalThis as Record<string, any>)?.powermove?.extensions ?? PM?.extensionsBridge ?? null;
-  if (candidate && typeof candidate.list === 'function' && typeof candidate.onChanged === 'function') return candidate as ExtensionsBridge;
+  if (candidate && typeof candidate.list === 'function' && typeof candidate.onChanged === 'function') return candidate as ExtensionsHostBridge;
   return null;
 }
 

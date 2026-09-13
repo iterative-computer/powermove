@@ -47,6 +47,7 @@ export interface ExtensionRegistryOptions {
 
 export interface ExtensionRegistry {
   readonly buildDir: string;
+  readonly userDir: string;
   list(): ExtensionRecord[];
   refresh(ids?: string[]): Promise<void>;
   setEnabled(request: ExtensionSetEnabledRequest): Promise<ExtensionRecord[]>;
@@ -209,6 +210,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
 
   const registry: ExtensionRegistry = {
     buildDir: options.buildDir,
+    userDir: options.userDir,
 
     list() {
       const builtinOrder = new Map(options.builtinIds.map((id, index) => [id, index]));
@@ -455,6 +457,7 @@ async function directorySignature(root: string): Promise<string> {
     const entries = await fs.readdir(directory, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const fullPath = path.join(directory, entry.name);
       const metadata = await fs.lstat(fullPath);
@@ -594,6 +597,7 @@ async function collectTextSource(root: string): Promise<ExtensionSourceFile[]> {
     const entries = await fs.readdir(directory, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
       if (visitedFiles >= MANIFEST_LIMITS.sourceFiles) return;
       const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
       const fullPath = path.join(directory, entry.name);

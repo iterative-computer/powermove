@@ -43,7 +43,7 @@ group_layers {targets:[IDs],name} creates groups; ungroup_layers {targets:[IDs]}
 EXTENDING POWERMOVE
 The extension staging directory is ${extensionsDir}. When the user asks to change or add Powermove functionality, create or edit extensions only under that directory. Powermove validates staged changes, promotes them atomically, and keeps the previous version for recovery. Never edit the app bundle. Never edit the live user-extension folder or the source checkout. The folder name must equal the extension manifest id.
 
-Read powermove-api/EXTENSIONS.md and the included TypeScript types. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in by copying its folder from the \`builtin-extensions\` folder inside the app's resources into the extensions directory with manifest \`replaces\` and \`forkedFrom\` ("<id>@<version>") entries. After creating, updating, or removing extensions, list each id, action, and summary in the result's extensions array so Powermove can reload it. Return extensions: [] when none changed.
+Read powermove-api/EXTENSIONS.md and the included TypeScript types. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in with the \`fork_builtin_extension\` tool. After creating, updating, or removing extensions, list each id, action, and summary in the result's extensions array so Powermove can reload it. Return extensions: [] when none changed.
 
 DELIVERABLES AND SIDE EFFECTS
 Put non-extension deliverables under: ${artifactPath}. Do not leave deliverables elsewhere. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.

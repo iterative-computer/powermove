@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
 
 import { IpcValidationError, isRecord } from '../../shared/guards';
+import { IPC, type ExtensionForkResult } from '../../shared/ipc';
 import {
   EXTENSION_ID,
   EXT_IPC,
@@ -13,6 +14,7 @@ import {
   type ExtensionSetEnabledRequest
 } from '../../shared/extensions';
 import type { ExtensionRegistry } from './registry';
+import { forkBuiltinExtension } from './fork';
 
 type ExtensionsIpcEvent = IpcMainEvent | IpcMainInvokeEvent;
 
@@ -22,6 +24,7 @@ export function registerExtensionsIpc(
   ipcMain: Pick<IpcMain, 'handle' | 'on'>,
   options: {
     registry: ExtensionRegistry;
+    resourcesDir: string;
     isTrusted(event: ExtensionsIpcEvent): boolean;
   }
 ): void {
@@ -68,6 +71,19 @@ export function registerExtensionsIpc(
       throw new IpcValidationError(EXT_IPC.create, 'expected { manifest, files }');
     }
     return registry.create(payload as unknown as ExtensionCreateRequest);
+  });
+
+  ipcMain.handle(IPC.extensionFork, async (event, payload: unknown): Promise<ExtensionForkResult> => {
+    requireTrusted(event, IPC.extensionFork);
+    const { id } = extensionIdRequest(payload, IPC.extensionFork);
+    const result = await forkBuiltinExtension({
+      resourcesDir: options.resourcesDir,
+      id,
+      targetDir: registry.userDir
+    });
+    await registry.refresh([id, result.forkId]);
+    registry.emitChanged({ ids: [id, result.forkId], reason: 'create' });
+    return { id: result.forkId };
   });
 
   ipcMain.handle(EXT_IPC.reveal, (event, payload: unknown) => {

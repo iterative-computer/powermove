@@ -139,6 +139,29 @@ describe('extension discovery', () => {
     expect(result[0]?.error).toContain(`more than ${MANIFEST_LIMITS.sourceFiles}`);
   });
 
+  it('ignores the hidden fork merge base when enforcing the loader source limit', async () => {
+    const root = await temporaryDirectory();
+    const extension = await writeExtension(root, 'forked-extension', {
+      forkedFrom: 'timeline@1.0.0',
+      replaces: ['timeline']
+    });
+    const pristine = path.join(extension, '.forked-from');
+    await fs.mkdir(pristine);
+    await Promise.all(
+      Array.from({ length: MANIFEST_LIMITS.sourceFiles + 1 }, (_, index) =>
+        fs.writeFile(path.join(pristine, `${index}.ts`), '')
+      )
+    );
+
+    const result = await scanExtensionDirs([{ dir: root, scope: 'user' }]);
+
+    expect(result[0]).toMatchObject({
+      id: 'forked-extension',
+      manifest: { forkedFrom: 'timeline@1.0.0', replaces: ['timeline'] }
+    });
+    expect(result[0]?.error).toBeUndefined();
+  });
+
   it('tolerates missing scan roots', async () => {
     const root = await temporaryDirectory();
 

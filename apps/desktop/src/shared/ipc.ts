@@ -33,6 +33,8 @@ export const IPC = {
   mediaRevealSource: 'media:reveal-source',
   attachmentReveal: 'attachment:reveal',
 
+  extensionFork: 'ext:fork',
+
   codexRun: 'codex:run',
   codexSteer: 'codex:steer',
   codexCancel: 'codex:cancel',
@@ -365,6 +367,18 @@ export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'sel
 /* ── the preload surface ─────────────────────────────────── */
 import type { ExtensionsBridge } from './extensions';
 
+export interface ExtensionForkRequest {
+  id: string;
+}
+
+export interface ExtensionForkResult {
+  id: string;
+}
+
+export interface PowermoveExtensionsBridge extends ExtensionsBridge {
+  fork(req: ExtensionForkRequest): Promise<ExtensionForkResult>;
+}
+
 export interface PowermoveBridge {
   compatible?: {
     status(): Promise<import('./compatible-provider').CompatibleProviderConfig>;
@@ -463,5 +477,5 @@ export interface PowermoveBridge {
   nativeEdit(action: NativeEditAction): void;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;
 
-  extensions: ExtensionsBridge;
+  extensions: PowermoveExtensionsBridge;
 }

@@ -113,7 +113,7 @@ export interface HostDeps {
   space3d?: Space3DAPI;
   assets: AssetsAPI;
   storage(id: string): StorageAPI;
-  extensions: ExtensionsAPI;
+  extensions: Omit<ExtensionsAPI, 'fork'> & Partial<Pick<ExtensionsAPI, 'fork'>>;
   panelsBackend: PanelsBackend;
   paletteOpen(query?: string): void;
   /** Called for every guarded callback that throws — the loader's error policy hook. */
@@ -179,6 +179,13 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     };
     disposers.push(release);
     return { dispose: release };
+  };
+
+  const extensions: ExtensionsAPI = {
+    ...deps.extensions,
+    fork: deps.extensions.fork ?? (async () => {
+      throw new Error('Forking built-in extensions is unavailable in this host.');
+    })
   };
 
   /* ── panels ────────────────────────────────────────────── */
@@ -400,7 +407,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     services,
     storage: deps.storage(id),
     events,
-    extensions: deps.extensions,
+    extensions,
     host: {
       pm: deps.pm,
       state: deps.state,

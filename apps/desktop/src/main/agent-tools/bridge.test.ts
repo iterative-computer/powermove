@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -53,10 +55,13 @@ function rpc(child: ChildProcessWithoutNullStreams, message: Record<string, unkn
 describe('native Powermove agent tool bridge', () => {
   const bridges: PowermoveAgentToolBridge[] = [];
   const children: ChildProcessWithoutNullStreams[] = [];
+  const temporaryDirectories: string[] = [];
 
   afterEach(async () => {
     for (const child of children.splice(0)) child.kill();
     for (const bridge of bridges.splice(0)) await bridge.shutdown();
+    await Promise.all(temporaryDirectories.splice(0).map((directory) =>
+      fs.rm(directory, { recursive: true, force: true })));
   });
 
   it('serves the shared tools through the standalone MCP shim and finalizes one history entry', async () => {
@@ -82,7 +87,7 @@ describe('native Powermove agent tool bridge', () => {
 
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
-      'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
+      'fork_builtin_extension', 'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
     ]);
 
     const state = await rpc(child, {
@@ -102,6 +107,55 @@ describe('native Powermove agent tool bridge', () => {
     const finish = await session.finish(true);
     expect(finish).toEqual({ changed: true, revision: 1, historyId: 'agent-history-1' });
     expect(owner.requests.at(-1)?.tool).toBe('__finish_run');
+  });
+
+  it('forks a built-in into the current run staging directory without calling the renderer', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-fork-'));
+    temporaryDirectories.push(root);
+    const workspace = path.join(root, 'workspace');
+    const stagingRoot = path.join(workspace, '.powermove', 'extension-runs');
+    const resourcesDir = path.join(root, 'builtin-extensions');
+    await fs.mkdir(path.join(resourcesDir, 'timeline'), { recursive: true });
+    await fs.writeFile(path.join(resourcesDir, 'timeline', 'manifest.json'), JSON.stringify({
+      id: 'timeline', name: 'Timeline', version: '1.0.0', apiVersion: 1, author: 'powermove'
+    }));
+    await fs.writeFile(path.join(resourcesDir, 'timeline', 'index.ts'), 'export default () => undefined');
+
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      command: process.execPath,
+      mcpServerPath: path.join(__dirname, 'mcp-server.mjs'),
+      resourcesDir,
+      timeoutMs: 2_000
+    });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-fork', owner: owner as never, baseRevision: 0 });
+    const stagingDirectory = path.join(stagingRoot, 'stage-1');
+    await fs.mkdir(stagingDirectory, { recursive: true });
+    const child = spawn(session.mcpConfig.command, session.mcpConfig.args, {
+      cwd: workspace,
+      env: { ...process.env, ...session.mcpConfig.env },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    children.push(child);
+
+    const response = await rpc(child, {
+      jsonrpc: '2.0', id: 7, method: 'tools/call',
+      params: { name: 'fork_builtin_extension', arguments: { id: 'timeline', forkId: 'custom-timeline' } }
+    });
+    expect(response).toMatchObject({ id: 7, result: { isError: false } });
+    const result = JSON.parse(response.result.content[0].text);
+    expect(result).toMatchObject({
+      dir: path.join(await fs.realpath(stagingDirectory), 'custom-timeline'),
+      forkId: 'custom-timeline',
+      files: ['index.ts', 'manifest.json'],
+      forkedFrom: 'timeline@1.0.0'
+    });
+    expect(result.reminder).toContain('extensions array with action created');
+    expect(owner.requests).toEqual([]);
+    await expect(fs.readFile(path.join(result.dir, '.forked-from', 'manifest.json'), 'utf8'))
+      .resolves.toContain('"id":"timeline"');
   });
 
   it('survives a tool client that resets the connection mid-request', async () => {
