@@ -346,6 +346,18 @@ describe('AgentPanel', () => {
     expect(userTurns[1]?.querySelector('.agent-bubble')?.textContent).toBe('continue');
   });
 
+  it('separates error recovery from the diagnostic card', () => {
+    renderPanel(snapshot({
+      conversation: [{ role: 'assistant', text: 'codex:run: invalid request', error: true }]
+    }));
+
+    const notice = target.querySelector('.error-notice');
+    const retry = target.querySelector<HTMLButtonElement>('.agent-error-retry');
+    expect(notice).toBeTruthy();
+    expect(retry?.textContent).toBe('Try again');
+    expect(retry?.previousElementSibling).toBe(notice);
+  });
+
   it('separates the model and effort triggers and keeps no scope or authority pickers', () => {
     renderPanel();
     expect(target.querySelector('select[aria-label="Agent authority"]')).toBeNull();

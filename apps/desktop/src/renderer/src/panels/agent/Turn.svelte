@@ -63,7 +63,7 @@
   <div class="agent-msg assistant" class:is-error={message.error}>
     {#if message.error}
       <ErrorNotice error={message.text} live={Boolean(message.entering)} />
-      <button type="button" class="btn" onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
+      <button type="button" class="btn agent-error-retry" onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}
@@ -88,4 +88,5 @@
   .agent-message-focus { color: var(--tx-3); font: var(--fs-xs)/1.4 var(--f-ui); text-wrap: pretty; }
   /* Steering reads as a continuation of the request above it, not a new turn. */
   .agent-msg.user.is-steering { margin-top: -12px; }
+  .agent-error-retry { margin-top: 8px; }
 </style>
