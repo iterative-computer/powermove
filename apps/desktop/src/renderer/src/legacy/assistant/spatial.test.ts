@@ -66,4 +66,49 @@ describe('legacy spatial assistant install', () => {
     expect(math.overlayPointerAction('composing', 0, true)).toBe('ignore');
     expect(math.overlayPointerAction('composing', 2, false)).toBe('ignore');
   });
+
+  it('bounds large editable catalogs while prioritizing selected and named layers', () => {
+    const math = spatialRegistry().SpatialAssistant.math;
+    const controls = Array.from({ length: 80 }, (_, index) => ({
+      path: `properties.control-${index}`,
+      label: `Control ${index}`,
+      control: 'slider',
+      value: index,
+      min: 0,
+      max: 100,
+    }));
+    const layers = Array.from({ length: 700 }, (_, index) => ({
+      id: `layer-${index}`,
+      name: index === 699 ? 'Hero headline' : `Layer ${index}`,
+      type: 'text',
+      group: null,
+      parent: null,
+      controls,
+    }));
+
+    const result = math.boundedEditableSource(
+      { target: '$composition', composition: [], operations: ['set_property'], layers },
+      'Polish the Hero headline',
+      ['layer-698'],
+      72_000,
+    );
+
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(72_000);
+    expect(result.truncated).toBe(true);
+    expect(result.totalLayers).toBe(700);
+    expect(result.layers.slice(0, 2).map((layer: any) => layer.id)).toEqual(['layer-698', 'layer-699']);
+    expect(result.layerIndex[0]).toMatchObject({ id: 'layer-0', name: 'Layer 0', type: 'text' });
+  });
+
+  it('keeps oversized assembled prompts inside the IPC limit without dropping the user request', () => {
+    const math = spatialRegistry().SpatialAssistant.math;
+    const request = 'Explain what we can do after showing the Powermove window';
+    const prompt = `AGENT INSTRUCTIONS\n${'source-property '.repeat(260_000)}\n\nUSER REQUEST\n${request}`;
+
+    const result = math.boundedAgentPrompt(prompt, request, 200_000);
+
+    expect(result.length).toBeLessThanOrEqual(200_000);
+    expect(result).toContain('Earlier project context was clipped');
+    expect(result.endsWith(`USER REQUEST\n${request}`)).toBe(true);
+  });
 });

@@ -2,7 +2,7 @@ import { createAgentCheckpoint } from './checkpoint';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
-import type { CodexTraceEvent, ReasoningEffort } from '../../../../shared/ipc';
+import { LIMITS, type CodexTraceEvent, type ReasoningEffort } from '../../../../shared/ipc';
 import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
@@ -15,6 +15,70 @@ import { AgentThreads, normalizeGeneratedThreadTitle, threadTitle } from '../../
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
+
+const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
+const AGENT_LAYER_INDEX_CHARS = 18_000;
+const AGENT_PROMPT_HEADROOM_CHARS = 1_024;
+const AGENT_REQUEST_CHARS = 50_000;
+
+function boundedEditableSource(catalog: any, request: string, selectedLayerIds: string[] = [], maxChars = AGENT_EDITABLE_CATALOG_CHARS) {
+  if (!catalog || typeof catalog !== 'object') return {};
+  const allLayers: any[] = Array.isArray(catalog.layers) ? catalog.layers : [];
+  const selected = new Set(selectedLayerIds.map(String));
+  const requestText = String(request || '').toLocaleLowerCase();
+  const mentioned = (layer: any) => {
+    const name = String(layer?.name || '').trim().toLocaleLowerCase();
+    return name.length >= 3 && requestText.includes(name);
+  };
+  const prioritized = allLayers
+    .map((layer, index) => ({ layer, index }))
+    .sort((a, b) => Number(selected.has(String(b.layer?.id))) - Number(selected.has(String(a.layer?.id)))
+      || Number(mentioned(b.layer)) - Number(mentioned(a.layer))
+      || a.index - b.index);
+  const result: any = {
+    target: catalog.target,
+    composition: catalog.composition,
+    operations: catalog.operations,
+    truncated: false,
+    totalLayers: allLayers.length,
+    layerIndex: [],
+    layers: [],
+  };
+  for (const layer of allLayers) {
+    const entry = {
+      id: String(layer?.id || ''),
+      name: String(layer?.name || '').slice(0, 160),
+      type: String(layer?.type || ''),
+      group: layer?.group ?? null,
+      parent: layer?.parent ?? null,
+    };
+    const next = [...result.layerIndex, entry];
+    if (JSON.stringify(next).length > AGENT_LAYER_INDEX_CHARS) break;
+    result.layerIndex = next;
+  }
+  for (const { layer } of prioritized) {
+    const next = { ...result, layers: [...result.layers, layer] };
+    if (JSON.stringify(next).length > maxChars - 512) break;
+    result.layers.push(layer);
+  }
+  result.truncated = result.layers.length < allLayers.length || result.layerIndex.length < allLayers.length;
+  result.includedLayers = result.layers.length;
+  result.indexedLayers = result.layerIndex.length;
+  if (result.truncated) {
+    result.note = 'Large-project catalog: selected layers and layers named in the request are prioritized. layerIndex lists additional targets; inspect the live source before editing an omitted layer.';
+  }
+  while (result.layers.length && JSON.stringify(result).length > maxChars) result.layers.pop();
+  result.includedLayers = result.layers.length;
+  return result;
+}
+
+function boundedAgentPrompt(prompt: string, request: string, maxChars = LIMITS.codexPromptChars - AGENT_PROMPT_HEADROOM_CHARS) {
+  if (prompt.length <= maxChars) return prompt;
+  const suffix = `\n\nUSER REQUEST\n${String(request || '').slice(0, AGENT_REQUEST_CHARS)}`;
+  const notice = '\n\n[Earlier project context was clipped to fit the agent request limit. Use the editable catalog and rendered frames above, then preserve unrelated source.]';
+  const prefixChars = Math.max(0, maxChars - notice.length - suffix.length);
+  return `${prompt.slice(0, prefixChars).trimEnd()}${notice}${suffix}`.slice(0, maxChars);
+}
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -354,7 +418,7 @@ const Spatial: any = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult },
+  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
   lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
 };
 PM.SpatialAssistant = Spatial;
@@ -1803,13 +1867,17 @@ function agentPrompt(request: any, observation: any, steering: any = false, focu
     name: item.name, type: item.type, content: item.content ? item.content.slice(0, 30_000) : undefined,
     image: !!item.dataUrl,
   }));
-  const editableSource: any = PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {};
+  const editableSource: any = boundedEditableSource(
+    PM.Edit?.sourceCatalog?.() || observation?.state?.editableSource || {},
+    request,
+    Array.isArray(PM.sel?.layers) ? PM.sel.layers : [],
+  );
   const capabilities: any = PM.Capabilities?.catalog?.() || {};
   const conversation: any = S.conversation.slice(0, -1).slice(-12).map((message: any) => ({
     role: message.role, text: message.text,
     attachments: (message.attachments || []).map((item: any) => typeof item === 'string' ? item : item.name),
   }));
-  return `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Your final response must be only the requested JSON object.
+  const prompt = `You are the action-oriented visual editing agent inside Powermove. Turn the user's request into the strongest editable change supported by the available source operations. Your final response must be only the requested JSON object.
 
 ${AGENT_TESTING_INSTRUCTIONS}
 
@@ -1836,7 +1904,7 @@ RULES
 - operation=create when adding a section; operation=modify when replacing or changing an existing source surface.
 - A section is a compact native Powermove panel made from slider, text, color, fill, toggle, select, button, readout, and visual curve controls.
 - Every non-button control that edits project data must bind to real editable source. Use target="$selection" for the selected layer, an exact layer id from EDITABLE SOURCE CATALOG, or target="$composition" for composition paths. A visual tool control may instead use stateKey only when a validated source-action button consumes that state.
-- The EDITABLE SOURCE CATALOG below is authoritative and complete for the current project. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
+- The EDITABLE SOURCE CATALOG below is authoritative for every included layer. Large projects also include a compact layerIndex; selected layers and layers named in the request are prioritized. If a requested field is listed, create the working control; never claim it is unavailable. Choose each control type and range from its catalog entry.
 - Do not create decorative or disconnected scene parameters. If a requested control has no source yet, prefer a scene or workspace action that creates useful editable source rather than refusing the whole request.
 - Buttons may use only one of the listed command ids. Never invent commands.
 - Advanced generated tools may use local settings with stateKey plus buttons whose action is a JSON-encoded safe transform action. A transform action is {"type":"transform","mode":"preview|apply","transform":{"label":"...","selector":{"scope":"selection|all|visible","types":[]},"order":"stack|reverseStack|selection|reverseSelection|start|reverseStart|name|random","edits":[{"path":"layer.from|layer.duration|layer.*|properties.*|content.*","value":EXPRESSION}]}}. Expressions are constants or objects using state, ref, aggregate, and bounded math ops from GENERATED TOOL CAPABILITIES. Prefer this declarative form when it can express the tool.
@@ -1887,6 +1955,7 @@ ${PM.AgentHarness.promptContext(observation)}
 
 USER REQUEST
 ${request}`;
+  return boundedAgentPrompt(prompt, request);
 }
 
 function workspaceSemanticContext(workspace: any) {
