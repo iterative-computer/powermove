@@ -9,9 +9,11 @@ it.each([
   ['Codex CLI is not signed in', 'Sign-in needs attention'],
   ['429 rate limit exceeded', 'Agent is temporarily unavailable'],
   ['The autonomous agent returned an invalid result', 'The agent couldn’t finish the result'],
+  ['Error invoking remote method \'codex:run\': IpcValidationError: codex:run: invalid request', 'Something needs attention'],
 ])('explains %s while retaining its diagnostic', (raw, title) => {
   expect(presentError(raw)).toMatchObject({ title, details: raw });
   expect(presentError(raw).message).not.toContain('Error:');
+  expect(presentError(raw).message).not.toContain('codex:run');
 });
 
 it('retains useful application context and keeps raw exception text in details', () => {
