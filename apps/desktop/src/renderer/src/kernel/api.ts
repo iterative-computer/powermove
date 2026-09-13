@@ -817,7 +817,17 @@ export interface KernelEvents {
   'extension:unloaded': { id: string };
   /** Any extension record changed (health, enablement, rebuild) — re-read `extensions.list()`. */
   'extensions:changed': { ids: string[]; reason: string };
-  'frame:rendered': { time: number };
+  /** The compositor presented a frame. `viewport` is the exact preview viewport
+   * object it drew into (identity-comparable with `render.gl.previewViewport`),
+   * so a viewer can tell a fresh presentation from a reused one. */
+  'frame:rendered': { time: number; viewport: PreviewViewport | null; version: number | undefined; quality: number };
+  /** The engine finished a frame and overlays (selection, guides) should redraw. */
+  overlay: undefined;
+  /** Coalesced repaint request from the host: 'render' fires immediately for
+   * the compositor; 'timeline', 'ui', and 'status' fire once per animation
+   * frame after any host-side invalidation (reveal, collapse, history restore,
+   * selection restore). Extensions that cache derived rows or panels rebuild on it. */
+  invalidate: 'render' | 'timeline' | 'ui' | 'status';
 }
 
 export interface EventsAPI {

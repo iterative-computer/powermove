@@ -178,7 +178,7 @@ describe('viewer extension', () => {
     const removeListener = vi.spyOn(stage, 'removeEventListener');
     first.dispose();
 
-    expect(first.eventDisposers).toHaveLength(5);
+    expect(first.eventDisposers).toHaveLength(7);
     expect(first.eventDisposers.every(dispose => dispose.mock.calls.length === 1)).toBe(true);
     expect(removeListener.mock.calls.some(([event]) => event === 'pointerdown')).toBe(true);
 
@@ -187,6 +187,6 @@ describe('viewer extension', () => {
     const replacementBody = document.createElement('div');
     replacement.panel?.build?.(replacementBody, { spec: {} });
     expect(replacement.viewer()?.stage).toBe(stage);
-    expect(replacement.eventDisposers).toHaveLength(5);
+    expect(replacement.eventDisposers).toHaveLength(7);
   });
 });

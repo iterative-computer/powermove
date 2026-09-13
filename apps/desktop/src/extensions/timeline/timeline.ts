@@ -605,9 +605,10 @@ const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
 
 /* ── draw ──────────────────────────────────────────────── */
 onEvent('project:changed', () => { rowsDirty = true; invalidate('timeline'); });
-// The public event surface intentionally does not expose the legacy
-// draw:timeline topic. Time is the high-frequency signal that keeps the
-// playhead and animated values live during scrubbing and playback.
+// Host-side invalidations (reveal, collapse, history and selection restore)
+// arrive as a coalesced 'timeline' repaint request; rows depend on UI state,
+// so they are rebuilt, not just repainted.
+onEvent('invalidate', (what) => { if (what === 'timeline') { rowsDirty = true; draw(); } });
 onEvent('time', () => invalidate('timeline'));
 onEvent('selection', () => {
   revealSelectedAncestors();

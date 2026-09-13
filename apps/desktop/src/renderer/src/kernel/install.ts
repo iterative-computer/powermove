@@ -10,6 +10,7 @@
  * install) rather than throwing and taking the app down with it.
  */
 import type {
+  PreviewViewport,
   AnimAPI,
   AssetRecord,
   AssetsAPI,
@@ -773,6 +774,13 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   on('transport', () => kernel.events.emit('transport', { playing: !!PM?.playing }));
   on('fonts', (families: string[]) => kernel.events.emit('fonts', families));
   on('layout', () => kernel.events.emit('layout', undefined));
+  on('draw', () => kernel.events.emit('invalidate', 'render'));
+  on('draw:timeline', () => kernel.events.emit('invalidate', 'timeline'));
+  on('draw:ui', () => kernel.events.emit('invalidate', 'ui'));
+  on('draw:status', () => kernel.events.emit('invalidate', 'status'));
+  on('preview:presented', (frame: { viewport: PreviewViewport | null; time: number; version: number | undefined; quality: number }) =>
+    kernel.events.emit('frame:rendered', { time: Number(frame?.time ?? 0), viewport: frame?.viewport ?? null, version: frame?.version, quality: Number(frame?.quality ?? 1) }));
+  on('overlay', () => kernel.events.emit('overlay', undefined));
 
   const syntheticRecord = (id: string): ExtensionRecord => ({
     id,

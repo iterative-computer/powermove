@@ -923,19 +923,21 @@ function schedulePresentation(): void {
   if (presentationFrame || disposed) return;
   presentationFrame = window.requestAnimationFrame(() => {
     presentationFrame = 0;
-    if (requestedViewport && api.render.gl.previewViewport === requestedViewport && V.el) {
-      presentedViewport = requestedViewport;
-      presentation = {
-        time: api.transport.time(),
-        version: api.anim.version(),
-        project: api.project.get(),
-        quality: api.transport.quality,
-      };
-      displayViewport(requestedViewport);
-    }
     drawOverlay();
   });
 }
+
+/* The compositor tells us which viewport it actually presented. Only a frame
+   drawn into the viewport we requested counts as presented; a reused frame
+   during navigation must not, or deferral and pan-refresh math break. */
+listen('frame:rendered', (frame: { viewport: PreviewViewport | null; time: number; version: number | undefined; quality: number }) => {
+  if (frame.viewport && frame.viewport === requestedViewport && V.el) {
+    presentedViewport = frame.viewport;
+    presentation = { time: frame.time, version: frame.version, project: api.project.get(), quality: frame.quality };
+    displayViewport(frame.viewport);
+  }
+});
+listen('overlay', () => drawOverlay());
 
 function drawOverlay() {
   const c = V.octx; if (!c) return;

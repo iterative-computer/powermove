@@ -101,7 +101,9 @@ function createReactiveState(api: PowermoveAPI): Pick<InspectorContext, 'doc' | 
     }),
     api.events.on('selection', () => signal.bump()),
     api.events.on('time', () => signal.bump()),
-    api.events.on('transport', () => signal.bump())
+    api.events.on('transport', () => signal.bump()),
+    // Host UI invalidation (stopwatch toggles, reveal, restores) repaints panels.
+    api.events.on('invalidate', (what) => { if (what === 'ui') signal.bump(); })
   ];
   onDestroy(() => {
     for (const subscription of subscriptions) subscription.dispose();
