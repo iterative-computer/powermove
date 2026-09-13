@@ -175,6 +175,27 @@ describe('Claude stream parser', () => {
     });
   });
 
+  /* Answers and reasoning are rendered as prose, so paragraph breaks are
+     content; only the one-line progress label stays flattened. */
+  it('keeps paragraph breaks in answers and reasoning', () => {
+    const onProgress = vi.fn();
+    const onTrace = vi.fn();
+    const parser = new ClaudeEventParser({ onProgress, onTrace });
+    parser.push(new TextEncoder().encode(`${JSON.stringify({
+      type: 'assistant', message: { content: [
+        { type: 'thinking', thinking: 'First thought.\r\n\r\nSecond thought.' },
+        { type: 'text', text: '**Done**: the cursor now blinks.\n\n\n- one\n- two  \n' }
+      ] }
+    })}\n`));
+    parser.finish();
+
+    expect(onTrace).toHaveBeenCalledWith({ kind: 'thought', text: 'First thought.\n\nSecond thought.' });
+    expect(onTrace).toHaveBeenCalledWith({
+      kind: 'answer', text: '**Done**: the cursor now blinks.\n\n- one\n- two'
+    });
+    expect(onProgress).toHaveBeenCalledWith('**Done**: the cursor now blinks. - one - two');
+  });
+
   it('keeps CLI failures out of successful structured output', () => {
     const parser = new ClaudeEventParser();
     feed(parser, [{ type: 'result', subtype: 'error', is_error: true, result: 'Authentication required' }]);
