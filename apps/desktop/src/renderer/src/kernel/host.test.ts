@@ -69,7 +69,7 @@ function harness(kernel: Kernel = createKernel()) {
       readText: async () => ''
     },
     storage,
-    extensions: { list: () => [], setEnabled: async () => {}, remove: async () => {}, reload: async () => {}, reveal: async () => {}, requestFix: vi.fn() },
+    extensions: { list: () => [], setEnabled: async () => {}, remove: async () => {}, reload: async () => {}, reveal: async () => {}, requestFix: vi.fn(), rebase: vi.fn() },
     panelsBackend: {
       open: (id) => void opened.push(id),
       close: vi.fn(),

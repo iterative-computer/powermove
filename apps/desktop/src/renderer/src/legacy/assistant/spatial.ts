@@ -415,6 +415,7 @@ const Spatial: any = {
   activate,
   open: openAgentPanel,
   requestFix,
+  requestRebase: requestExtensionRebase,
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
@@ -423,6 +424,7 @@ const Spatial: any = {
 };
 PM.SpatialAssistant = Spatial;
 PM.requestExtensionFix = requestFix;
+PM.requestExtensionRebase = requestExtensionRebase;
 
 function agentUISnapshot(): AgentSnapshot {
   ensureThreadProject();
@@ -607,6 +609,23 @@ async function requestFix(id: any) {
     PM.AgentUI?.submit?.(String(prompt));
   } catch (error: any) {
     window.console.warn(`[agent] Could not prepare Fix it for extension "${String(id)}"`, error);
+  }
+}
+
+async function requestExtensionRebase(id: any) {
+  const native: any = (window as any).powermove;
+  if (typeof native?.codex?.rebasePrompt !== 'function') {
+    window.console.warn(`[agent] Fork rebase is unavailable for extension "${String(id)}"`);
+    return;
+  }
+  try {
+    const prompt: any = await native.codex.rebasePrompt({ id });
+    openAgentPanel();
+    setAgentAccessMode('project');
+    PM.AgentUI?.setDraft?.(String(prompt), true);
+    PM.AgentUI?.submit?.(String(prompt));
+  } catch (error: any) {
+    window.console.warn(`[agent] Could not prepare fork rebase for extension "${String(id)}"`, error);
   }
 }
 

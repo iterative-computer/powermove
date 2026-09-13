@@ -47,6 +47,10 @@ const mocks = vi.hoisted(() => {
   };
   const toolOpenSession = vi.fn(async () => toolSession);
   const toolShutdown = vi.fn(async () => undefined);
+  const readForkRebaseInfo = vi.fn(async ({ forkId }: { forkId: string }) => ({
+    forkId, forkedFrom: 'timeline', base: '1.0.0', current: '2.0.0'
+  }));
+  const stageForkRebase = vi.fn();
   return {
     appOnce: vi.fn(),
     cancel,
@@ -74,6 +78,8 @@ const mocks = vi.hoisted(() => {
     toolSession,
     toolOpenSession,
     toolShutdown,
+    readForkRebaseInfo,
+    stageForkRebase,
     appRunner: {
       run,
       cancel: appCancel,
@@ -103,6 +109,10 @@ vi.mock('../agent-tools/bridge', () => ({
     openSession = mocks.toolOpenSession;
     shutdown = mocks.toolShutdown;
   }
+}));
+vi.mock('../extensions/rebase', () => ({
+  readForkRebaseInfo: mocks.readForkRebaseInfo,
+  stageForkRebase: mocks.stageForkRebase
 }));
 
 import { registerCodexIpc } from './index';
@@ -153,6 +163,7 @@ describe('registerCodexIpc', () => {
       getWindow: () => null,
       userData: '/tmp/powermove-index-test',
       extensionsDir: '/tmp/powermove-user-extensions',
+      builtinExtensionsDir: '/tmp/powermove-builtin-extensions',
       apiPackFiles,
       isTrustedSender: () => true,
       codexBinaryPref: () => null,
@@ -174,6 +185,7 @@ describe('registerCodexIpc', () => {
       IPC.codexSteer,
       IPC.codexCancel,
       IPC.codexFixPrompt,
+      IPC.codexRebasePrompt,
       IPC.codexRestoreChangeSet,
       IPC.consentComputer,
       IPC.artifactRead,
@@ -288,9 +300,10 @@ describe('registerCodexIpc', () => {
     };
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, request);
 
-    expect(mocks.toolOpenSession).toHaveBeenCalledWith({
-      runId: 'ipc-run-1234', owner, baseRevision: 1
-    });
+    await vi.waitFor(() => expect(mocks.toolOpenSession).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'ipc-run-1234', owner, baseRevision: 1,
+      resolveStagingDirectory: expect.any(Function)
+    })));
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ nativeTools: mocks.toolSession.mcpConfig })
@@ -346,6 +359,45 @@ describe('registerCodexIpc', () => {
       error: 'index.ts:1: failed',
       files: [{ path: 'index.ts', text: 'throw new Error();' }]
     })).resolves.toContain('The extension `broken-extension` fails: index.ts:1: failed. Files:');
+  });
+
+  it('builds a rebase prompt from the validated live fork and shipped built-in', async () => {
+    const prompt = await handlers.get(IPC.codexRebasePrompt)!({ sender: new Sender() }, { id: 'my-fork' });
+    expect(prompt).toContain('`timeline@1.0.0`');
+    expect(prompt).toContain('`timeline@2.0.0`');
+    expect(mocks.readForkRebaseInfo).toHaveBeenCalledWith({
+      forkId: 'my-fork',
+      userExtensionsDir: '/tmp/powermove-user-extensions',
+      builtinExtensionsDir: '/tmp/powermove-builtin-extensions'
+    });
+  });
+
+  it('rejects an invalid rebase-prompt extension id', async () => {
+    await expect(handlers.get(IPC.codexRebasePrompt)!({ sender: new Sender() }, { id: '../escape' }))
+      .rejects.toThrow(IPC.codexRebasePrompt);
+  });
+
+  it('refreshes promoted extension records before returning the run result', async () => {
+    const refreshExtensions = vi.fn(async () => undefined);
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null,
+      userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions',
+      builtinExtensionsDir: '/tmp/powermove-builtin-extensions',
+      apiPackFiles,
+      isTrustedSender: () => true,
+      codexBinaryPref: () => null,
+      refreshExtensions,
+      openExternal: async () => undefined
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    const pending = handlers.get(IPC.codexRun)!({ sender: new Sender() }, runRequest());
+    mocks.resolve({
+      ok: true, text: '{}', access: 'editor',
+      extensions: [{ id: 'my-fork', action: 'updated' }]
+    });
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(refreshExtensions).toHaveBeenCalledExactlyOnceWith(['my-fork']);
   });
 
   it.each([

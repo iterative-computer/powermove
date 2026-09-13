@@ -61,7 +61,8 @@ export class PowermoveAgentToolSession {
     readonly baseRevision: number,
     readonly token: string,
     private readonly bridge: PowermoveAgentToolBridge,
-    mcpConfig: NativeMcpServerConfig
+    mcpConfig: NativeMcpServerConfig,
+    private readonly resolveStagingDirectory?: (forkId: string) => Promise<string>
   ) {
     this.mcpConfig = mcpConfig;
   }
@@ -98,6 +99,11 @@ export class PowermoveAgentToolSession {
   }
 
   isClosed(): boolean { return this.closed; }
+
+  stagingDirectory(forkId: string): Promise<string> {
+    if (!this.resolveStagingDirectory) throw new Error('Fork rebase staging is unavailable for this run.');
+    return this.resolveStagingDirectory(forkId);
+  }
 }
 
 export interface PowermoveAgentToolBridgeOptions {
@@ -106,6 +112,7 @@ export interface PowermoveAgentToolBridgeOptions {
   resourcesDir?: string;
   command?: string;
   timeoutMs?: number;
+  stageForkRebase?(options: { forkId: string; stagingDirectory: string }): Promise<unknown>;
 }
 
 export class PowermoveAgentToolBridge {
@@ -130,6 +137,7 @@ export class PowermoveAgentToolBridge {
     runId: string;
     owner: WebContents;
     baseRevision: number;
+    resolveStagingDirectory?: (forkId: string) => Promise<string>;
   }): Promise<PowermoveAgentToolSession> {
     if (!REQUEST_ID.test(options.runId)) throw new Error('Invalid agent tool run id.');
     if (this.sessionsByRun.has(options.runId)) throw new Error('Agent tool session already exists.');
@@ -152,7 +160,8 @@ export class PowermoveAgentToolBridge {
       Math.max(0, Math.trunc(options.baseRevision)),
       token,
       this,
-      mcpConfig
+      mcpConfig,
+      options.resolveStagingDirectory
     );
     this.sessionsByToken.set(token, session);
     this.sessionsByRun.set(options.runId, session);
@@ -349,7 +358,9 @@ export class PowermoveAgentToolBridge {
         content: [{ type: 'text', text: JSON.stringify(result) }]
       };
     }
-    const response = request.tool === 'capture_panel'
+    const response = request.tool === 'stage_fork_rebase'
+      ? await this.callStageForkRebase(session, request.arguments)
+      : request.tool === 'capture_panel'
       ? await this.capturePanel(session, request.arguments)
       : request.tool === 'computer_use_panel'
         ? await this.computerUsePanel(session, request.arguments)
@@ -366,6 +377,26 @@ export class PowermoveAgentToolBridge {
             data: Buffer.from(item.data).toString('base64'),
             mimeType: item.mimeType
           })
+    };
+  }
+
+  private async callStageForkRebase(
+    session: PowermoveAgentToolSession,
+    args: Record<string, unknown>
+  ): Promise<AgentToolResponseEvent> {
+    if (Object.keys(args).length !== 1 || typeof args.id !== 'string' || !EXTENSION_ID.test(args.id)) {
+      throw new Error('stage_fork_rebase expects { id } with a valid extension id.');
+    }
+    if (!this.options.stageForkRebase) throw new Error('Fork rebase staging is unavailable.');
+    const result = await this.options.stageForkRebase({
+      forkId: args.id,
+      stagingDirectory: await session.stagingDirectory(args.id)
+    });
+    return {
+      runId: session.runId,
+      callId: `main-${randomUUID()}`,
+      ok: true,
+      content: [{ type: 'text', text: JSON.stringify(result) }]
     };
   }
 

@@ -111,6 +111,12 @@ describe('preload bridge', () => {
     expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexSteer, steering);
   });
 
+  it('requests a fork rebase prompt over its dedicated IPC channel', async () => {
+    electronMocks.invoke.mockResolvedValue('rebase prompt');
+    await expect(bridge().codex.rebasePrompt({ id: 'my-fork' })).resolves.toBe('rebase prompt');
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexRebasePrompt, { id: 'my-fork' });
+  });
+
   it('brokers native agent tool requests without exposing Electron event objects', () => {
     const onRequest = vi.fn();
     const stop = bridge().agentTools.onRequest(onRequest);

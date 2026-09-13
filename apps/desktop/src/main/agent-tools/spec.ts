@@ -122,6 +122,11 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
     name: 'rollback_changes',
     description: 'Roll back every live composition edit made by this agent run, without touching earlier project work. The run may make a fresh guarded edit after rolling back.',
     inputSchema: closedObject({})
+  },
+  {
+    name: 'stage_fork_rebase',
+    description: 'Stage a stale user fork for a three-way rebase onto the built-in version shipped by this Powermove app. Returns only run-private working/base/ours paths plus sorted user, upstream, and conflict file lists. Call this before editing the fork.',
+    inputSchema: closedObject({ id: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{1,63}$' } }, ['id'])
   }
 ] as const;
 

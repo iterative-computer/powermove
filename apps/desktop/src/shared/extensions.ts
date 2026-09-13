@@ -134,6 +134,7 @@ export interface ExtensionRecord {
   id: string;
   scope: ExtensionScope;
   manifest: ExtensionManifest | null; // null when manifest failed to parse
+  update?: { forkedFrom: string; base: string; current: string };
   dir: string; // absolute path on disk (built-ins: resource path)
   enabled: boolean; // user intent (persisted)
   /** Module URL to import, or null when there is nothing loadable (build/manifest error, builtin handled in-bundle). */

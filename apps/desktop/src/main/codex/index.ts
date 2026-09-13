@@ -14,6 +14,7 @@ import {
   type WebContents
 } from 'electron';
 import path from 'node:path';
+import { readFile, readdir, stat } from 'node:fs/promises';
 
 import {
   IPC,
@@ -25,6 +26,7 @@ import {
   type CodexCancelRequest,
   type AgentChangeSetRestoreRequest,
   type CodexFixPromptRequest,
+  type CodexRebasePromptRequest,
   type CodexRunRequest,
   type CodexSteerRequest,
   type ConsentRequest
@@ -37,10 +39,11 @@ import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
 import { CodexAppServerRunner } from './app-server-runner';
 import { ClaudeAccountClient, ClaudeRunner } from '../claude';
-import { buildFixPrompt } from './instructions';
+import { buildFixPrompt, buildRebasePrompt } from './instructions';
 import { restoreExtensionChangeSet } from './change-history';
-import { agentWorkspaceRoot, safeAgentComponent, type AgentApiPackFile } from './workspace';
+import { agentWorkspaceRoot, safeAgentComponent, sessionPathFor, type AgentApiPackFile } from './workspace';
 import { PowermoveAgentToolBridge, type PowermoveAgentToolSession } from '../agent-tools/bridge';
+import { readForkRebaseInfo, stageForkRebase } from '../extensions/rebase';
 
 const FIX_PROMPT_ERROR_CHARS = 4_000;
 const FIX_PROMPT_FILES = 40;
@@ -60,6 +63,8 @@ export interface CodexIpcContext {
   agentToolServerPath?: string;
   /** Defaults to process.execPath (Electron with ELECTRON_RUN_AS_NODE=1). */
   agentToolCommand?: string;
+  /** Test seam; production resolves the same built-in resource root as main boot. */
+  builtinExtensionsDir?: string;
 }
 
 export interface ChatGPTAccountController {
@@ -140,6 +145,74 @@ function requireFixPromptRequest(value: unknown): CodexFixPromptRequest {
   return { id: value.id, error: value.error, files };
 }
 
+function requireRebasePromptRequest(value: unknown): CodexRebasePromptRequest {
+  if (!isRecord(value) || !isString(value.id) || !EXTENSION_ID.test(value.id)) {
+    throw new IpcValidationError(IPC.codexRebasePrompt, 'invalid request');
+  }
+  return { id: value.id };
+}
+
+function builtinExtensionsDirectory(ctx: CodexIpcContext): string {
+  if (ctx.builtinExtensionsDir) return ctx.builtinExtensionsDir;
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'builtin-extensions')
+    : path.resolve(app.getAppPath(), 'src/extensions');
+}
+
+async function createStagingDirectoryResolver(
+  req: CodexRunRequest,
+  userData: string
+): Promise<(forkId: string) => Promise<string>> {
+  const root = agentWorkspaceRoot(userData, req.projectId);
+  const stagingRoot = path.join(root, '.powermove', 'extension-runs');
+  const authority = req.access === 'computer' ? 'computer' : 'project';
+  const checkpointPath = `${sessionPathFor(root, authority, req.threadId, req.provider ?? 'chatgpt')}.checkpoint.json`;
+  let checkpointStage: string | null = null;
+  try {
+    const saved: unknown = JSON.parse(await readFile(checkpointPath, 'utf8'));
+    if (isRecord(saved) && typeof saved.stagingDirectory === 'string') {
+      const relative = path.relative(stagingRoot, saved.stagingDirectory);
+      if (relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+        checkpointStage = saved.stagingDirectory;
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const before = new Set<string>();
+  try {
+    for (const entry of await readdir(stagingRoot, { withFileTypes: true })) {
+      if (entry.isDirectory()) before.add(entry.name);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  return async (forkId: string): Promise<string> => {
+    if (checkpointStage) {
+      const metadata = await stat(path.join(checkpointStage, forkId));
+      if (!metadata.isDirectory()) throw new Error('The resumed run does not contain the requested fork.');
+      return checkpointStage;
+    }
+    const candidates: string[] = [];
+    for (const entry of await readdir(stagingRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || before.has(entry.name)) continue;
+      const directory = path.join(stagingRoot, entry.name);
+      try {
+        if ((await stat(path.join(directory, forkId))).isDirectory()) candidates.push(directory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    if (candidates.length !== 1) {
+      throw new Error(candidates.length === 0
+        ? 'The current run extension stage is not ready.'
+        : 'More than one extension stage was created concurrently; retry the rebase after the other run finishes.');
+    }
+    return candidates[0]!;
+  };
+}
+
 function requireConsentRequest(value: unknown): ConsentRequest {
   if (!isRecord(value) || !isString(value.projectName) || !isString(value.summary)) {
     throw new IpcValidationError(IPC.consentComputer, 'invalid request');
@@ -214,7 +287,13 @@ export function registerCodexIpc(
   const toolBridge = ctx.agentToolServerPath
     ? new PowermoveAgentToolBridge(ipcMain, {
         mcpServerPath: ctx.agentToolServerPath,
-        ...(ctx.agentToolCommand ? { command: ctx.agentToolCommand } : {})
+        ...(ctx.agentToolCommand ? { command: ctx.agentToolCommand } : {}),
+        stageForkRebase: ({ forkId, stagingDirectory }) => stageForkRebase({
+          forkId,
+          stagingDirectory,
+          userExtensionsDir: ctx.extensionsDir,
+          builtinExtensionsDir: builtinExtensionsDirectory(ctx)
+        })
       })
     : null;
 
@@ -284,10 +363,12 @@ export function registerCodexIpc(
         ? claudeRunner
         : (req.mode === 'editor' ? appServerRunner : runner);
       if (toolBridge) {
+        const resolveStagingDirectory = await createStagingDirectoryResolver(req, ctx.userData);
         toolSession = await toolBridge.openSession({
           runId: req.id,
           owner,
-          baseRevision: projectRevision(req.projectJSON)
+          baseRevision: projectRevision(req.projectJSON),
+          resolveStagingDirectory
         });
       }
       let result = req.provider === 'compatible'
@@ -330,6 +411,9 @@ export function registerCodexIpc(
         }
         if (finish.warning) console.warn(`[agent-tools] ${finish.warning}`);
       }
+      if (result.ok && result.extensions?.length) {
+        await ctx.refreshExtensions?.(result.extensions.map((change) => change.id));
+      }
       return result;
     } finally {
       if (toolSession) await toolSession.finish(false).catch(() => undefined);
@@ -357,6 +441,16 @@ export function registerCodexIpc(
   ipcMain.handle(IPC.codexFixPrompt, async (event, rawRequest: unknown) => {
     requireTrusted(event, ctx);
     return buildFixPrompt(requireFixPromptRequest(rawRequest));
+  });
+
+  ipcMain.handle(IPC.codexRebasePrompt, async (event, rawRequest: unknown) => {
+    requireTrusted(event, ctx);
+    const request = requireRebasePromptRequest(rawRequest);
+    return buildRebasePrompt(await readForkRebaseInfo({
+      forkId: request.id,
+      userExtensionsDir: ctx.extensionsDir,
+      builtinExtensionsDir: builtinExtensionsDirectory(ctx)
+    }));
   });
 
   ipcMain.handle(IPC.codexRestoreChangeSet, async (event, rawRequest: unknown) => {
