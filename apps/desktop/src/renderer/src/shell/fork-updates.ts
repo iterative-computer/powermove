@@ -17,7 +17,9 @@ const TOAST_KEY = 'fork-updates';
 const DISMISSED = 'dismissed';
 
 let api: PowermoveAPI | null = null;
+let registry: PMRegistry | null = null;
 let pending: ForkUpdate[] = [];
+let toastShown = false;
 const listeners = new Set<Listener>();
 
 const signature = (update: ForkUpdate): string => `${update.id}@${update.current}`;
@@ -51,23 +53,38 @@ function message(count: number): string {
     : `${count} extensions need updating`;
 }
 
+/* The Projects home screen carries the notice in its sidebar, so the corner
+   toast only shows over the editor; a toast there would cover New Project. */
+function homeOpen(): boolean {
+  return !!(registry?.ProjectsScreen as { isOpen?: boolean } | undefined)?.isOpen;
+}
+
+function syncToast(): void {
+  if (!api) return;
+  const wanted = pending.length > 0 && !homeOpen();
+  if (wanted) {
+    api.ui.toast(message(pending.length), {
+      sticky: true,
+      dismissible: true,
+      icon: 'sparkle',
+      key: TOAST_KEY,
+      corner: 'top-right',
+      action: { label: 'Update', run: updateAll },
+      onDismiss: dismissAll
+    });
+    toastShown = true;
+  } else if (toastShown) {
+    (registry?.dismissToast as ((key: string) => void) | undefined)?.(TOAST_KEY);
+    toastShown = false;
+  }
+}
+
 function refresh(): void {
   const next = collect();
   const changed = next.length !== pending.length || next.some((update, i) => signature(update) !== signature(pending[i]!));
   pending = next;
-  if (!changed) return;
-  notify();
-  if (!api) return;
-  if (pending.length === 0) return;
-  api.ui.toast(message(pending.length), {
-    sticky: true,
-    dismissible: true,
-    icon: 'sparkle',
-    key: TOAST_KEY,
-    corner: 'top-right',
-    action: { label: 'Update', run: updateAll },
-    onDismiss: dismissAll
-  });
+  if (changed) notify();
+  syncToast();
 }
 
 /** Hand every pending fork to the agent, one prompt per fork. */
@@ -99,13 +116,17 @@ export function installForkUpdates(PM: PMRegistry): () => void {
   const kernel = PM.Kernel as { api?: (id: string) => PowermoveAPI } | undefined;
   if (typeof kernel?.api !== 'function') return () => {};
   api = kernel.api('fork-updates');
+  registry = PM;
   const subscriptions = [
     api.events.on('extensions:changed', refresh),
     api.events.on('extension:loaded', refresh)
   ];
+  const offScreen = (PM.bus as { on?: (event: string, fn: () => void) => (() => void) | undefined } | undefined)?.on?.('projects:screen', syncToast);
   refresh();
   return () => {
     for (const subscription of subscriptions) subscription.dispose();
+    offScreen?.();
+    registry = null;
     api = null;
     pending = [];
     listeners.clear();
