@@ -17,6 +17,7 @@ import {
   POWERMOVE_LIVE_INSPECTION_TOOL_NAMES,
   type NativeMcpServerConfig
 } from '../agent-tools/spec';
+import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-tools/trace-format';
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const TURN_TIMEOUT_MS = 3_600_000;
@@ -40,6 +41,8 @@ interface ActiveTurn extends RunCallbacks {
   directory: string;
   queuedSteering: CodexSteerRequest[];
   cancelRequested: boolean;
+  agentMessageDeltaItemIds: Set<string>;
+  sawUnscopedAgentMessageDelta: boolean;
   resolve(result: CodexRunResult): void;
   timer: NodeJS.Timeout;
 }
@@ -84,6 +87,93 @@ function liveInspectionConfig(nativeTools: NativeMcpServerConfig): Record<string
       }
     }
   };
+}
+
+const TRACE_ITEM_ID_CHARS = 120;
+
+function normalizedItemType(value: unknown): string {
+  return typeof value === 'string' ? value.replaceAll('_', '').toLowerCase() : '';
+}
+
+function basename(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').split(/[\\/]/).filter(Boolean).at(-1) ?? '';
+}
+
+function changedFileNames(item: Record<string, unknown>): string[] {
+  if (!Array.isArray(item.changes)) return [];
+  return item.changes
+    .map((change) => typeof change === 'string' ? basename(change) : isRecord(change) ? basename(change.path) : '')
+    .filter(Boolean);
+}
+
+function traceItemId(item: Record<string, unknown>): string | null {
+  return isString(item.id, TRACE_ITEM_ID_CHARS * 2) ? item.id.slice(0, TRACE_ITEM_ID_CHARS) : null;
+}
+
+function appServerToolStart(item: Record<string, unknown>): CodexTraceEvent | null {
+  const itemId = traceItemId(item);
+  if (!itemId) return null;
+  const type = normalizedItemType(item.type);
+  if (type === 'commandexecution') {
+    const detail = toolDetail('Bash', { command: item.command });
+    return { kind: 'tool-start', itemId, toolName: 'bash', label: 'Run', ...(detail ? { detail } : {}) };
+  }
+  if (type === 'filechange') {
+    const detail = toolDetail('Edit', { file_path: changedFileNames(item).join(', ') });
+    return { kind: 'tool-start', itemId, toolName: 'edit', label: 'Edit', ...(detail ? { detail } : {}) };
+  }
+  if (type === 'websearch') {
+    const detail = toolDetail('WebSearch', { query: item.query });
+    return { kind: 'tool-start', itemId, toolName: 'search', label: 'Search', ...(detail ? { detail } : {}) };
+  }
+  if (type === 'imagegeneration') {
+    return { kind: 'tool-start', itemId, toolName: 'image', label: 'Image' };
+  }
+  if (type === 'computeruse') {
+    return { kind: 'tool-start', itemId, toolName: 'computer', label: 'Computer' };
+  }
+  if (type === 'mcptoolcall') {
+    const rawTool = typeof item.tool === 'string' && item.tool ? item.tool : 'mcp';
+    const detail = toolDetail(rawTool, { tool: rawTool });
+    return {
+      kind: 'tool-start', itemId, toolName: rawTool.slice(0, TRACE_ITEM_ID_CHARS), label: humanLabel(rawTool),
+      ...(detail ? { detail } : {})
+    };
+  }
+  return null;
+}
+
+function appServerErrorText(item: Record<string, unknown>): string {
+  if (typeof item.error === 'string') return item.error;
+  if (isRecord(item.error) && typeof item.error.message === 'string') return item.error.message;
+  return typeof item.status === 'string' ? item.status : '';
+}
+
+function appServerToolEnd(item: Record<string, unknown>): CodexTraceEvent | null {
+  const itemId = traceItemId(item);
+  if (!itemId) return null;
+  const type = normalizedItemType(item.type);
+  if (!['commandexecution', 'filechange', 'mcptoolcall', 'websearch', 'imagegeneration', 'computeruse'].includes(type)) {
+    return null;
+  }
+  const status = typeof item.status === 'string' ? item.status.toLowerCase() : '';
+  const isError = status === 'failed' || status === 'error' || status === 'declined';
+  let rawOutput: unknown;
+  if (isError) rawOutput = appServerErrorText(item);
+  else if (type === 'commandexecution') rawOutput = item.aggregatedOutput ?? item.aggregated_output ?? item.output;
+  else if (type === 'filechange') {
+    const files = changedFileNames(item);
+    rawOutput = files.length > 3 ? `${files.length} files changed` : files.join(', ');
+  } else if (type === 'websearch') rawOutput = item.query;
+  else if (type === 'mcptoolcall') rawOutput = item.result ?? item.output;
+  else rawOutput = item.output;
+  const output = outputExcerpt(rawOutput);
+  return { kind: 'tool-end', itemId, isError, ...(output ? { output } : {}) };
+}
+
+function methodIs(method: string, suffix: string): boolean {
+  return method === suffix || method.endsWith(`/${suffix}`);
 }
 
 /**
@@ -172,6 +262,8 @@ export class CodexAppServerRunner {
           directory: turnDirectory,
           queuedSteering: [],
           cancelRequested: false,
+          agentMessageDeltaItemIds: new Set(),
+          sawUnscopedAgentMessageDelta: false,
           resolve,
           timer,
           onProgress: options.onProgress,
@@ -360,28 +452,63 @@ export class CodexAppServerRunner {
       return;
     }
     if (!isString(message.method, 200) || !isRecord(message.params)) return;
+    const method = message.method;
     const params = message.params;
     const threadId = isString(params.threadId, 200) ? params.threadId : null;
-    const turnId = isString(params.turnId, 200)
-      ? params.turnId
-      : (isRecord(params.turn) && isString(params.turn.id, 200) ? params.turn.id : null);
+    const topLevelTurnId = isString(params.turnId, 200) ? params.turnId : null;
+    const turnId = topLevelTurnId ?? (methodIs(method, 'turn/completed') && isRecord(params.turn) && isString(params.turn.id, 200)
+      ? params.turn.id
+      : null);
+    if (threadId === null || turnId === null) return;
     const turn = [...this.active.values()].find((candidate) =>
-      candidate.threadId === threadId && (candidate.turnId === null || turnId === null || candidate.turnId === turnId));
+      candidate.threadId === threadId && (candidate.turnId === null || candidate.turnId === turnId));
     if (!turn) return;
 
-    if (message.method === 'item/completed' && isRecord(params.item)) {
-      const item = params.item;
-      if (item.type === 'agentMessage' && isString(item.text)) {
-        turn.finalText = item.text;
-        turn.onTrace?.({ kind: 'answer', text: item.text });
+    if (methodIs(method, 'item/commandExecution/outputDelta')) return;
+
+    if (methodIs(method, 'item/started') && isRecord(params.item)) {
+      const trace = appServerToolStart(params.item);
+      if (trace) turn.onTrace?.(trace);
+      return;
+    }
+    if (methodIs(method, 'item/agentMessage/delta') && isString(params.delta)) {
+      const text = fragmentText(params.delta);
+      if (text) turn.onTrace?.({ kind: 'answer', text });
+      if (isString(params.itemId, TRACE_ITEM_ID_CHARS * 2)) {
+        turn.agentMessageDeltaItemIds.add(params.itemId.slice(0, TRACE_ITEM_ID_CHARS));
+      } else {
+        turn.sawUnscopedAgentMessageDelta = true;
       }
       return;
     }
-    if (message.method === 'item/reasoning/summaryTextDelta' && isString(params.delta)) {
-      turn.onProgress?.(params.delta.replace(/\s+/g, ' ').trim().slice(0, 320));
+    if ((methodIs(method, 'item/reasoning/textDelta') || methodIs(method, 'item/reasoning/summaryTextDelta')) && isString(params.delta)) {
+      const text = fragmentText(params.delta);
+      if (text) turn.onTrace?.({ kind: 'thought', text });
+      if (methodIs(method, 'item/reasoning/summaryTextDelta')) {
+        const progress = params.delta.replace(/\s+/g, ' ').trim().slice(0, 320);
+        if (progress) turn.onProgress?.(progress);
+      }
       return;
     }
-    if (message.method !== 'turn/completed' || !isRecord(params.turn)) return;
+    if (methodIs(method, 'item/completed') && isRecord(params.item)) {
+      const item = params.item;
+      const toolTrace = appServerToolEnd(item);
+      if (toolTrace) {
+        turn.onTrace?.(toolTrace);
+        return;
+      }
+      if (normalizedItemType(item.type) === 'agentmessage' && isString(item.text)) {
+        turn.finalText = item.text;
+        const itemId = traceItemId(item);
+        const alreadyStreamed = turn.sawUnscopedAgentMessageDelta || (itemId !== null && turn.agentMessageDeltaItemIds.has(itemId));
+        if (!alreadyStreamed) {
+          const text = fragmentText(item.text);
+          if (text) turn.onTrace?.({ kind: 'answer', text });
+        }
+      }
+      return;
+    }
+    if (!methodIs(method, 'turn/completed') || !isRecord(params.turn)) return;
     const status = params.turn.status;
     if (status === 'completed') {
       this.finish(turn, turn.finalText

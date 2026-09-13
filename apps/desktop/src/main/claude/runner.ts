@@ -300,6 +300,7 @@ export class ClaudeRunner {
       onProgress: options.onProgress,
       onTrace: options.onTrace,
       onWarning: options.onWarning,
+      projectCwd: cwd,
       onSessionId: (sessionId) => {
         if (!layout) return;
         state.sessionWrite = state.sessionWrite

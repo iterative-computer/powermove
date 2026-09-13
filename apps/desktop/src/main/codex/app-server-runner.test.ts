@@ -153,6 +153,137 @@ describe('CodexAppServerRunner steering', () => {
     await runner.shutdown();
   });
 
+  it('streams matched tool and text notifications, preserving fragments and suppressing completed duplicates', async () => {
+    const child = new FakeAppServer();
+    const trace: unknown[] = [];
+    const progress: string[] = [];
+    const runner = new CodexAppServerRunner({
+      discoverBinary: async () => '/fake/codex',
+      prepareHome: async () => '/tmp/powermove-app-server-test',
+      spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams,
+      requestTimeoutMs: 500,
+      turnTimeoutMs: 5_000
+    });
+    const run = runner.run(request(), {
+      userData: '/tmp/powermove-app-server-test',
+      onTrace: (event) => trace.push(event),
+      onProgress: (text) => progress.push(text)
+    });
+    await vi.waitFor(() => expect(child.messages.some((message) => message.method === 'turn/start')).toBe(true));
+
+    child.notify('item/started', {
+      threadId: 'other-thread', turnId: 'turn_456',
+      item: { id: 'ignored-thread', type: 'commandExecution', command: 'nope' }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'other-turn',
+      item: { id: 'ignored-turn', type: 'commandExecution', command: 'nope' }
+    });
+    child.notify('codex/event/item/started', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'cmd-1', type: 'commandExecution', command: 'bun run typecheck' }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'files-1', type: 'file_change', changes: [{ path: '/tmp/a.ts' }, { path: 'src/b.ts' }] }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'mcp-1', type: 'mcpToolCall', server: 'powermove', tool: 'get_panel_state' }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'mcp-2', type: 'mcp_tool_call', server: 'github', tool: 'create_issue' }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'web-1', type: 'webSearch', query: 'Codex protocol' }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'turn_456', item: { id: 'image-1', type: 'image_generation' }
+    });
+    child.notify('item/started', {
+      threadId: 'thr_123', turnId: 'turn_456', item: { id: 'computer-1', type: 'computerUse' }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'cmd-1', type: 'command_execution', status: 'completed', aggregatedOutput: 'ok\n2 tests passed' }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'mcp-1', type: 'mcp_tool_call', status: 'failed', error: { message: 'Panel unavailable' } }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'mcp-2', type: 'mcpToolCall', status: 'completed', result: { content: [{ type: 'text', text: 'Issue #42' }] } }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'files-1', type: 'fileChange', status: 'completed', changes: [{ path: '/tmp/a.ts' }, { path: 'src/b.ts' }] }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'web-1', type: 'web_search', status: 'completed', query: 'Codex protocol' }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456', item: { id: 'image-1', type: 'imageGeneration', status: 'completed' }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456', item: { id: 'computer-1', type: 'computer_use', status: 'declined', error: 'Approval declined' }
+    });
+    child.notify('item/commandExecution/outputDelta', {
+      threadId: 'thr_123', turnId: 'turn_456', itemId: 'cmd-1', delta: 'do not flood'
+    });
+    child.notify('item/reasoning/textDelta', {
+      threadId: 'thr_123', turnId: 'turn_456', itemId: 'reason-1', delta: '  thinking\n'
+    });
+    child.notify('item/reasoning/summaryTextDelta', {
+      threadId: 'thr_123', turnId: 'turn_456', itemId: 'reason-1', delta: ' summary  update '
+    });
+    child.notify('item/agentMessage/delta', {
+      threadId: 'thr_123', turnId: 'turn_456', itemId: 'msg-streamed', delta: 'Hello'
+    });
+    child.notify('rpc/item/agentMessage/delta', {
+      threadId: 'thr_123', turnId: 'turn_456', itemId: 'msg-streamed', delta: ' world'
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'msg-other', type: 'agentMessage', text: 'Separate message' }
+    });
+    child.notify('item/completed', {
+      threadId: 'thr_123', turnId: 'turn_456',
+      item: { id: 'msg-streamed', type: 'agentMessage', text: 'Hello world' }
+    });
+    child.notify('turn/completed', {
+      threadId: 'thr_123', turn: { id: 'turn_456', status: 'completed' }
+    });
+
+    await expect(run).resolves.toEqual({ ok: true, text: 'Hello world', access: 'editor' });
+    expect(trace).toEqual([
+      { kind: 'tool-start', itemId: 'cmd-1', toolName: 'bash', label: 'Run', detail: 'bun run typecheck' },
+      { kind: 'tool-start', itemId: 'files-1', toolName: 'edit', label: 'Edit', detail: 'a.ts, b.ts' },
+      { kind: 'tool-start', itemId: 'mcp-1', toolName: 'get_panel_state', label: 'Get panel state', detail: 'get_panel_state' },
+      { kind: 'tool-start', itemId: 'mcp-2', toolName: 'create_issue', label: 'Create issue', detail: 'create_issue' },
+      { kind: 'tool-start', itemId: 'web-1', toolName: 'search', label: 'Search', detail: 'Codex protocol' },
+      { kind: 'tool-start', itemId: 'image-1', toolName: 'image', label: 'Image' },
+      { kind: 'tool-start', itemId: 'computer-1', toolName: 'computer', label: 'Computer' },
+      { kind: 'tool-end', itemId: 'cmd-1', isError: false, output: 'ok\n2 tests passed' },
+      { kind: 'tool-end', itemId: 'mcp-1', isError: true, output: 'Panel unavailable' },
+      { kind: 'tool-end', itemId: 'mcp-2', isError: false, output: 'Issue #42' },
+      { kind: 'tool-end', itemId: 'files-1', isError: false, output: 'a.ts, b.ts' },
+      { kind: 'tool-end', itemId: 'web-1', isError: false, output: 'Codex protocol' },
+      { kind: 'tool-end', itemId: 'image-1', isError: false },
+      { kind: 'tool-end', itemId: 'computer-1', isError: true, output: 'Approval declined' },
+      { kind: 'thought', text: '  thinking\n' },
+      { kind: 'thought', text: ' summary  update ' },
+      { kind: 'answer', text: 'Hello' },
+      { kind: 'answer', text: ' world' },
+      { kind: 'answer', text: 'Separate message' }
+    ]);
+    expect(progress).toEqual(['summary update']);
+    await runner.shutdown();
+  });
+
   it('rejects steering when no matching turn is active', async () => {
     const runner = new CodexAppServerRunner();
     await expect(runner.steer({ id: 'missing-run', prompt: 'continue', images: [] })).resolves.toBe(false);

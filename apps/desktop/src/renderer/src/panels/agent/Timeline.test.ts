@@ -103,7 +103,8 @@ describe('Timeline', () => {
     render(trace([{ kind: 'text', id: 'm0', text: 'Looking at the' }]));
     const text = target.querySelector('.agent-trace-text')!;
     expect(text.className).toContain('is-streaming');
-    expect(text.querySelector('.agent-stream-caret')).toBeTruthy();
+    // The caret is a pseudo-element: every real child stays an inline word span.
+    expect([...text.children].every((child) => child.tagName === 'SPAN' && !child.className)).toBe(true);
     expect(text.textContent).toBe('Looking at the');
 
     Object.assign(agentState, { trace: [
@@ -112,7 +113,6 @@ describe('Timeline', () => {
     ] });
     flushSync();
     expect(target.querySelector('.agent-trace-text')?.className).not.toContain('is-streaming');
-    expect(target.querySelector('.agent-stream-caret')).toBeNull();
   });
 
   it('titles a settled thought with how long it took', () => {

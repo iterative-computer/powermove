@@ -50,7 +50,7 @@ describe('CodexEventParser', () => {
       'Preparing the final animation'
     ]);
     expect(trace).toEqual([
-      { kind: 'tool-start', itemId: '0', toolName: 'bash', label: 'bash · pwd' },
+      { kind: 'tool-start', itemId: '0', toolName: 'bash', label: 'Run', detail: 'pwd' },
       { kind: 'tool-end', itemId: '0', isError: false },
       { kind: 'thought', text: 'Reviewing the café timeline' },
       { kind: 'answer', text: 'Preparing the final animation' }
@@ -131,27 +131,27 @@ describe('Codex trace mapping', () => {
   it.each([
     [
       { id: 'cmd-1', type: 'command_execution', command: 'npm run build' },
-      { kind: 'tool-start', itemId: 'cmd-1', toolName: 'bash', label: 'bash · npm run build' }
+      { kind: 'tool-start', itemId: 'cmd-1', toolName: 'bash', label: 'Run', detail: 'npm run build' }
     ],
     [
       { id: 'edit-1', type: 'file_change', changes: [{ path: '/tmp/src/main.ts' }, { path: 'styles/app.css' }, { path: 'README.md' }, { path: 'ignored.ts' }] },
-      { kind: 'tool-start', itemId: 'edit-1', toolName: 'edit', label: 'edit · main.ts, app.css, README.md' }
+      { kind: 'tool-start', itemId: 'edit-1', toolName: 'edit', label: 'Edit', detail: 'main.ts, app.css, README.md, ignored.ts' }
     ],
     [
       { id: 'search-1', type: 'web_search', query: 'Codex structured event schema' },
-      { kind: 'tool-start', itemId: 'search-1', toolName: 'search', label: 'search · Codex structured event schema' }
+      { kind: 'tool-start', itemId: 'search-1', toolName: 'search', label: 'Search', detail: 'Codex structured event schema' }
     ],
     [
       { id: 'image-1', type: 'image_generation' },
-      { kind: 'tool-start', itemId: 'image-1', toolName: 'image', label: 'image' }
+      { kind: 'tool-start', itemId: 'image-1', toolName: 'image', label: 'Image' }
     ],
     [
       { id: 'computer-1', type: 'computer_use' },
-      { kind: 'tool-start', itemId: 'computer-1', toolName: 'computer', label: 'computer' }
+      { kind: 'tool-start', itemId: 'computer-1', toolName: 'computer', label: 'Computer' }
     ],
     [
       { id: 'mcp-1', type: 'mcp_tool_call', tool: 'github', name: 'create_issue' },
-      { kind: 'tool-start', itemId: 'mcp-1', toolName: 'github', label: 'github · create_issue' }
+      { kind: 'tool-start', itemId: 'mcp-1', toolName: 'github', label: 'Create issue', detail: 'create_issue' }
     ]
   ])('maps a %# tool start with its useful payload', (item, expected) => {
     expect(traceForCodexEvent({ type: 'item.started', item })).toEqual(expected);
@@ -161,18 +161,46 @@ describe('Codex trace mapping', () => {
     ['completed', false],
     ['failed', true],
     ['error', true],
+    ['declined', true],
     [undefined, false]
   ])('correlates a %s tool completion', (status, isError) => {
     expect(traceForCodexEvent({
       type: 'item.completed',
       item: { id: 'cmd-2', type: 'command_execution', status }
-    })).toEqual({ kind: 'tool-end', itemId: 'cmd-2', isError });
+    })).toEqual({
+      kind: 'tool-end', itemId: 'cmd-2', isError,
+      ...(isError ? { output: status } : {})
+    });
+  });
+
+  it('includes bounded command, file, web, and error output on completion', () => {
+    expect(traceForCodexEvent({
+      type: 'item.completed',
+      item: { id: 'cmd', type: 'command_execution', status: 'completed', aggregated_output: 'one\ntwo' }
+    })).toEqual({ kind: 'tool-end', itemId: 'cmd', isError: false, output: 'one\ntwo' });
+    expect(traceForCodexEvent({
+      type: 'item.completed',
+      item: { id: 'files', type: 'file_change', status: 'completed', changes: [
+        { path: '/a/one.ts' }, { path: '/b/two.ts' }, { path: '/c/three.ts' }, { path: '/d/four.ts' }
+      ] }
+    })).toEqual({ kind: 'tool-end', itemId: 'files', isError: false, output: '4 files changed' });
+    expect(traceForCodexEvent({
+      type: 'item.completed', item: { id: 'web', type: 'web_search', query: 'stream protocol' }
+    })).toEqual({ kind: 'tool-end', itemId: 'web', isError: false, output: 'stream protocol' });
+    expect(traceForCodexEvent({
+      type: 'item.completed', item: {
+        id: 'mcp', type: 'mcp_tool_call', status: 'completed', result: { content: [{ type: 'text', text: 'Issue #42' }] }
+      }
+    })).toEqual({ kind: 'tool-end', itemId: 'mcp', isError: false, output: 'Issue #42' });
+    expect(traceForCodexEvent({
+      type: 'item.completed', item: { id: 'bad', type: 'command_execution', status: 'failed', error: { message: 'permission denied' } }
+    })).toEqual({ kind: 'tool-end', itemId: 'bad', isError: true, output: 'permission denied' });
   });
 
   it('preserves prose newlines and maps reasoning and agent messages separately', () => {
     expect(traceForCodexEvent({
       type: 'item.completed', item: { type: 'reasoning', text: '  First line\nSecond line  ' }
-    })).toEqual({ kind: 'thought', text: 'First line\nSecond line' });
+    })).toEqual({ kind: 'thought', text: '  First line\nSecond line  ' });
     expect(traceForCodexEvent({
       type: 'item.completed', item: { type: 'agent_message', text: 'Done.' }
     })).toEqual({ kind: 'answer', text: 'Done.' });
@@ -201,37 +229,39 @@ describe('Codex trace mapping', () => {
     }
   });
 
-  it('caps per-kind label details and strips label controls and newlines', () => {
+  it('caps item ids and details and strips detail controls and newlines', () => {
     const command = traceForCodexEvent({
       type: 'item.started',
       item: { id: 'c'.repeat(240), type: 'command_execution', command: `${'x'.repeat(65)}\n\u0000tail` }
     });
-    expect(command).toMatchObject({ kind: 'tool-start', toolName: 'bash' });
+    expect(command).toMatchObject({ kind: 'tool-start', toolName: 'bash', label: 'Run' });
     if (command?.kind === 'tool-start') {
       expect(command.itemId).toHaveLength(120);
-      expect(command.label).toHaveLength('bash · '.length + 68);
-      expect(command.label).not.toMatch(/[\n\r\u0000]/);
+      expect(command.detail?.length).toBeLessThanOrEqual(LIMITS.codexToolDetailChars);
+      expect(command.detail).not.toMatch(/[\n\r\u0000]/);
     }
 
     const search = traceForCodexEvent({
       type: 'item.started', item: { id: 'search', type: 'web_search', query: 'q'.repeat(100) }
     });
     expect(search).toEqual({
-      kind: 'tool-start', itemId: 'search', toolName: 'search', label: `search · ${'q'.repeat(60)}`
+      kind: 'tool-start', itemId: 'search', toolName: 'search', label: 'Search', detail: 'q'.repeat(100)
     });
 
     const mcp = traceForCodexEvent({
       type: 'item.started', item: { id: 'mcp', type: 'mcp_tool_call', tool: 't'.repeat(60), name: 'n'.repeat(60) }
     });
     expect(mcp).toEqual({
-      kind: 'tool-start', itemId: 'mcp', toolName: 't'.repeat(40),
-      label: `${'t'.repeat(40)} · ${'n'.repeat(40)}`
+      kind: 'tool-start', itemId: 'mcp', toolName: 't'.repeat(60),
+      label: `N${'n'.repeat(39)}`, detail: 'n'.repeat(60)
     });
   });
 
-  it('ignores unknown, malformed, and non-item trace events', () => {
+  it('ignores unknown, malformed, and non-item trace events while preserving whitespace fragments', () => {
     expect(traceForCodexEvent({ type: 'item.started', item: { id: 'x', type: 'unknown', command: 'secret' } })).toBeNull();
-    expect(traceForCodexEvent({ type: 'item.completed', item: { type: 'reasoning', text: '   ' } })).toBeNull();
+    expect(traceForCodexEvent({ type: 'item.completed', item: { type: 'reasoning', text: '   ' } })).toEqual({
+      kind: 'thought', text: '   '
+    });
     expect(traceForCodexEvent({ type: 'thread.started', thread_id: 'thread-1' })).toBeNull();
   });
 });

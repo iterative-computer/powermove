@@ -52,6 +52,7 @@ export function buildClaudeArgv(options: ClaudeArgvOptions): string[] {
   const argv = [
     '--print',
     '--output-format', 'stream-json',
+    '--include-partial-messages',
     '--verbose',
     '--safe-mode',
     '--setting-sources', '',

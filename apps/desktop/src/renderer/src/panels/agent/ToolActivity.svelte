@@ -135,7 +135,6 @@
     align-items: start;
     gap: 2px 6px;
     min-width: 0;
-    margin: 0 -6px;
     padding: 5px 6px;
     border-radius: var(--r-sm);
     cursor: pointer;
@@ -176,8 +175,8 @@
     display: flex;
     flex-direction: column;
     gap: 1px;
-    margin: 2px 0 2px 5px;
-    padding: 2px 0 2px 10px;
+    margin: 2px 0 2px 12px;
+    padding: 2px 0 2px 8px;
     border-left: 1px solid var(--line-2);
     font-size: 12px;
     color: var(--tx-2);
@@ -206,7 +205,7 @@
   button.agent-tool-row { cursor: pointer; }
   button.agent-tool-row:hover, .is-open > .agent-tool-row { background: var(--ink-1); }
   button.agent-tool-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .agent-tool-row > span { min-width: 0; flex: none; max-width: 100%; overflow-wrap: anywhere; font-weight: var(--fw-medium); color: var(--tx); }
+  .agent-tool-row > span { min-width: 0; flex: 0 1 auto; overflow-wrap: anywhere; font-weight: var(--fw-medium); color: var(--tx); }
   .agent-tool-row > em { flex: none; margin-left: auto; font-size: 11px; font-style: normal; color: var(--tx-3); font-variant-numeric: tabular-nums; }
   .agent-tool-glyph { width: 13px; height: 13px; flex: none; color: var(--tx-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: opacity var(--dur-2); }
   .agent-tool-row-chevron {

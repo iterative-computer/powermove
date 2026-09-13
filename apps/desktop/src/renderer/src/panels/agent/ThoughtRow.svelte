@@ -53,7 +53,6 @@
     gap: 6px;
     width: fit-content;
     max-width: 100%;
-    margin: 0 -6px;
     padding: 4px 6px;
     border-radius: var(--r-sm);
     list-style: none;
@@ -76,7 +75,7 @@
   }
   details[open] > summary .agent-thinking-chevron { transform: rotate(180deg); }
   .agent-thinking-body {
-    margin: 2px 0 4px 6px;
+    margin: 2px 0 4px 12px;
     padding: 2px 0 2px 13px;
     border-left: 1px solid var(--line-2);
     color: var(--tx-3);

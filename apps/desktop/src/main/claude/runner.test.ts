@@ -104,13 +104,24 @@ describe('Claude runner', () => {
 
   it('completes against the executable CLI fixture through real child-process pipes', async () => {
     const runner = new ClaudeRunner();
+    const activity: Array<{ type: 'trace' | 'progress'; value: unknown }> = [];
     const result = await runner.run(request({ id: 'claude-real-pipes' }), {
       userData: '/tmp/powermove-claude-real-pipes',
       extensionsDir: '/tmp/powermove-extensions',
       apiPackFiles: async () => [],
       binary: path.join(__dirname, '__fixtures__', 'fake-claude.sh'),
-      timeoutMs: 5_000
+      timeoutMs: 5_000,
+      onTrace: (step) => activity.push({ type: 'trace', value: step }),
+      onProgress: (text) => activity.push({ type: 'progress', value: text })
     });
     expect(result).toEqual({ ok: true, text: '{"message":"claude editor done"}', access: 'editor' });
+    const traces = activity.filter((event) => event.type === 'trace').map((event) => event.value);
+    expect(traces).toContainEqual({ kind: 'tool-start', itemId: 'tool-read', toolName: 'read', label: 'Read' });
+    expect(activity.findIndex((event) => event.type === 'trace' && (event.value as { kind?: string }).kind === 'tool-start'))
+      .toBeLessThan(activity.findIndex((event) => event.type === 'progress' && event.value === 'Preparing the Claude result'));
+    expect(traces.filter((event) => (event as { kind?: string }).kind === 'answer')).toEqual([
+      { kind: 'answer', text: 'Preparing ' },
+      { kind: 'answer', text: 'the Claude result' }
+    ]);
   });
 });

@@ -1,4 +1,5 @@
 import { LIMITS, type CodexTraceEvent } from '../../shared/ipc';
+import { fragmentText, humanLabel, outputExcerpt, toolDetail } from '../agent-tools/trace-format';
 
 export const MAX_CODEX_EVENT_LINE_BYTES = 1024 * 1024;
 
@@ -27,7 +28,6 @@ const TOOL_ITEM_TYPES = new Set([
   'mcp_tool_call'
 ]);
 const TRACE_ITEM_ID_CHARS = 120;
-const TRACE_LABEL_CHARS = 120;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -53,21 +53,9 @@ function completedDisplayText(item: Record<string, unknown>, minimumStructuredLe
   return displayText;
 }
 
-function labelPart(value: unknown, limit: number): string {
-  if (typeof value !== 'string') return '';
-  return value
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, limit);
-}
-
-function label(value: string): string {
-  return labelPart(value, TRACE_LABEL_CHARS);
-}
-
 function basename(value: unknown): string {
-  const path = labelPart(value, TRACE_LABEL_CHARS);
+  if (typeof value !== 'string') return '';
+  const path = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? '';
 }
 
@@ -81,7 +69,7 @@ function changedFileNames(item: Record<string, unknown>): string[] {
   }
   if (values.length === 0 && Array.isArray(item.files)) values.push(...item.files);
   if (values.length === 0) values.push(item.path);
-  return values.map(basename).filter(Boolean).slice(0, 3);
+  return values.map(basename).filter(Boolean);
 }
 
 function toolStart(item: Record<string, unknown>): CodexTraceEvent | null {
@@ -90,28 +78,57 @@ function toolStart(item: Record<string, unknown>): CodexTraceEvent | null {
 
   switch (item.type) {
     case 'command_execution': {
-      const detail = labelPart(item.command, 68);
-      return { kind: 'tool-start', itemId, toolName: 'bash', label: label(detail ? `bash · ${detail}` : 'bash') };
+      const detail = toolDetail('Bash', { command: item.command });
+      return { kind: 'tool-start', itemId, toolName: 'bash', label: 'Run', ...(detail ? { detail } : {}) };
     }
     case 'file_change': {
-      const detail = changedFileNames(item).join(', ');
-      return { kind: 'tool-start', itemId, toolName: 'edit', label: label(detail ? `edit · ${detail}` : 'edit') };
+      const detail = toolDetail('Edit', { file_path: changedFileNames(item).join(', ') });
+      return { kind: 'tool-start', itemId, toolName: 'edit', label: 'Edit', ...(detail ? { detail } : {}) };
     }
     case 'web_search': {
-      const detail = labelPart(item.query, 60);
-      return { kind: 'tool-start', itemId, toolName: 'search', label: label(detail ? `search · ${detail}` : 'search') };
+      const detail = toolDetail('WebSearch', { query: item.query });
+      return { kind: 'tool-start', itemId, toolName: 'search', label: 'Search', ...(detail ? { detail } : {}) };
     }
     case 'image_generation':
-      return { kind: 'tool-start', itemId, toolName: 'image', label: 'image' };
+      return { kind: 'tool-start', itemId, toolName: 'image', label: 'Image' };
     case 'computer_use':
-      return { kind: 'tool-start', itemId, toolName: 'computer', label: 'computer' };
+      return { kind: 'tool-start', itemId, toolName: 'computer', label: 'Computer' };
     case 'mcp_tool_call': {
-      const tool = labelPart(item.tool, 40) || 'mcp';
-      const name = labelPart(item.name, 40) || 'tool';
-      return { kind: 'tool-start', itemId, toolName: tool, label: label(`${tool} · ${name}`) };
+      const toolName = typeof item.tool === 'string' && item.tool ? item.tool : 'mcp';
+      const name = typeof item.name === 'string' && item.name ? item.name : toolName;
+      const detail = toolDetail(name, { tool: name });
+      return {
+        kind: 'tool-start', itemId, toolName: toolName.slice(0, 120), label: humanLabel(name),
+        ...(detail ? { detail } : {})
+      };
     }
     default:
       return null;
+  }
+}
+
+function errorText(item: Record<string, unknown>): string {
+  if (typeof item.error === 'string') return item.error;
+  if (isRecord(item.error) && typeof item.error.message === 'string') return item.error.message;
+  return typeof item.status === 'string' ? item.status : '';
+}
+
+function toolOutput(item: Record<string, unknown>, isError: boolean): string {
+  if (isError) return outputExcerpt(errorText(item));
+  switch (item.type) {
+    case 'command_execution':
+      return outputExcerpt(item.aggregated_output ?? item.output);
+    case 'file_change': {
+      const files = changedFileNames(item);
+      const count = Array.isArray(item.changes) ? item.changes.length : files.length;
+      return outputExcerpt(count > 3 ? `${count} files changed` : files.join(', '));
+    }
+    case 'web_search':
+      return outputExcerpt(item.query);
+    case 'mcp_tool_call':
+      return outputExcerpt(item.result ?? item.output);
+    default:
+      return outputExcerpt(item.output);
   }
 }
 
@@ -164,17 +181,20 @@ export function traceForCodexEvent(event: unknown): CodexTraceEvent | null {
   if (item.type === 'reasoning' || item.type === 'agent_message') {
     const rawText = completedDisplayText(item);
     if (rawText === null) return null;
-    const text = rawText.trim().slice(0, LIMITS.codexTraceChars);
+    const text = fragmentText(rawText);
     if (!text) return null;
     return { kind: item.type === 'reasoning' ? 'thought' : 'answer', text };
   }
 
   if (!TOOL_ITEM_TYPES.has(item.type) || typeof item.id !== 'string' || item.id.length === 0) return null;
   const status = typeof item.status === 'string' ? item.status.toLowerCase() : '';
+  const isError = status === 'failed' || status === 'error' || status === 'declined';
+  const output = toolOutput(item, isError);
   return {
     kind: 'tool-end',
     itemId: item.id.slice(0, TRACE_ITEM_ID_CHARS),
-    isError: status === 'failed' || status === 'error'
+    isError,
+    ...(output ? { output } : {})
   };
 }
 
