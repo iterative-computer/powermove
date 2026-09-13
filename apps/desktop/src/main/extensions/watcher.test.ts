@@ -82,6 +82,7 @@ describe('extension watcher', () => {
     setup.listener()('change', '.hidden/index.ts');
     setup.listener()('change', 'Uppercase/index.ts');
     setup.listener()('change', 'a/index.ts');
+    setup.listener()('change', 'valid-ext/.forked-from/index.ts');
     setup.listener()('change', '../outside/index.ts');
     await vi.advanceTimersByTimeAsync(500);
 

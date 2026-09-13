@@ -443,7 +443,11 @@ if (!hasSingleInstanceLock) {
         builtinIds,
         resourcesDir: builtinResourcesDir
       });
-      registerExtensionsIpc(ipcMain, { registry: extensionRegistry, isTrusted: isTrustedSender });
+      registerExtensionsIpc(ipcMain, {
+        registry: extensionRegistry,
+        resourcesDir: builtinResourcesDir,
+        isTrusted: isTrustedSender
+      });
       refreshRestoredExtensions = async (ids) => {
         await extensionRegistry.refresh(ids);
         extensionRegistry.emitChanged({ ids, reason: 'reload' });

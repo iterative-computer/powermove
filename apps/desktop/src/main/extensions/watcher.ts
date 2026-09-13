@@ -75,8 +75,10 @@ export function startExtensionWatcher({
     if (!changedPath || isWithin(buildRoot, changedPath)) return;
 
     const relative = path.relative(sourceRoot, changedPath);
-    const id = relative.split(/[\\/]/, 1)[0];
+    const components = relative.split(/[\\/]/);
+    const id = components[0];
     if (!id || !EXTENSION_ID.test(id)) return;
+    if (components.slice(1).some((component) => component.startsWith('.'))) return;
 
     pendingIds.add(id);
     if (timer) clearTimeout(timer);

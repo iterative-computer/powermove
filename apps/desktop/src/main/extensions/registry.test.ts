@@ -132,6 +132,11 @@ describe('extension registry', () => {
     await setup.registry.refresh();
     expect(setup.compile).toHaveBeenCalledTimes(1);
 
+    await fs.mkdir(path.join(directory, '.forked-from'));
+    await fs.writeFile(path.join(directory, '.forked-from', 'index.ts'), 'pristine base changed');
+    await setup.registry.refresh(['cached-ext']);
+    expect(setup.compile).toHaveBeenCalledTimes(1);
+
     await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => "changed and longer"');
     await setup.registry.refresh(['cached-ext']);
     expect(setup.compile).toHaveBeenCalledTimes(2);
@@ -239,11 +244,30 @@ describe('extension registry', () => {
     await fs.writeFile(path.join(directory, 'large.txt'), 'x'.repeat(64 * 1024 + 1));
     await fs.symlink(path.join(setup.root, 'outside.txt'), path.join(directory, 'link.txt'));
     await fs.writeFile(path.join(setup.root, 'outside.txt'), 'secret');
+    await fs.mkdir(path.join(directory, '.forked-from'));
+    await fs.writeFile(path.join(directory, '.forked-from', 'manifest.json'), 'pristine');
     await setup.registry.refresh();
 
     const files = await setup.registry.readSource({ id: 'source-ext' });
     expect(files.map((file) => file.path).sort()).toEqual(['index.ts', 'manifest.json', 'notes.txt']);
     expect(files.find((file) => file.path === 'notes.txt')?.text).toBe('hello');
+  });
+
+  it('keeps fork provenance in listed records', async () => {
+    const setup = await harness();
+    const directory = await writeExtension(setup.userDir, 'timeline-fork');
+    await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest('timeline-fork', {
+      name: 'Timeline (fork)',
+      forkedFrom: 'timeline@1.0.0',
+      replaces: ['timeline']
+    })));
+
+    await setup.registry.refresh();
+
+    expect(setup.registry.list()[0]?.manifest).toMatchObject({
+      forkedFrom: 'timeline@1.0.0',
+      replaces: ['timeline']
+    });
   });
 
   it('validates health reports and reveals only a verified record directory', async () => {

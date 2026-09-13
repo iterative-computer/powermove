@@ -58,6 +58,14 @@ beforeEach(() => {
 });
 
 describe('preload bridge', () => {
+  it('forwards built-in extension forks through the dedicated IPC channel', async () => {
+    electronMocks.invoke.mockResolvedValue({ id: 'timeline-fork' });
+
+    await expect(bridge().extensions.fork({ id: 'timeline' })).resolves.toEqual({ id: 'timeline-fork' });
+
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.extensionFork, { id: 'timeline' });
+  });
+
   it('isolates progress and trace by request and removes its one listener after resolve', async () => {
     const result = { ok: true as const, text: 'done', access: 'editor' as const };
     electronMocks.invoke.mockResolvedValue(result);

@@ -127,6 +127,18 @@ describe('compileExtension', () => {
     if (!symlinkResult.ok) expect(symlinkResult.error).toMatch(/escapes/i);
   });
 
+  it('does not allow fork merge-base files into the compiled import graph', async () => {
+    const { dir, outDir } = await fixture('forked-extension');
+    await mkdir(path.join(dir, '.forked-from'));
+    await writeFile(path.join(dir, '.forked-from', 'original.ts'), 'export const original = true;');
+    await writeFile(path.join(dir, 'index.ts'), "import './.forked-from/original.ts';");
+
+    const result = await compileExtension({ dir, entry: 'index.ts', outDir });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/\.forked-from|escapes/i);
+  });
+
   it('enforces the total source byte limit', async () => {
     const { dir, outDir } = await fixture('large-extension');
     await writeFile(path.join(dir, 'index.ts'), `/*${'x'.repeat(MANIFEST_LIMITS.sourceBytes)}*/`);

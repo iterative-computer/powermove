@@ -1,3 +1,5 @@
+import { EXTENSION_ID } from '../../shared/extensions';
+
 export interface NativeMcpServerConfig {
   command: string;
   args: string[];
@@ -18,6 +20,14 @@ const closedObject = (properties: Record<string, unknown>, required: string[] = 
 });
 
 export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
+  {
+    name: 'fork_builtin_extension',
+    description: 'Copy a shipped built-in extension into this run\'s isolated extension staging directory, rewrite it as a user fork, and retain a pristine merge base. Edit the returned directory, then report the fork id in the final extensions array with action created.',
+    inputSchema: closedObject({
+      id: { type: 'string', pattern: EXTENSION_ID.source },
+      forkId: { type: 'string', pattern: EXTENSION_ID.source }
+    }, ['id'])
+  },
   {
     name: 'get_project_state',
     description: 'Read the live Powermove composition, selection, layers, editable properties, keyframes, effects, markers, and current revision. Call this again after edits instead of assuming cached state. Results are paged: use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit; counts indicate omitted data.',
