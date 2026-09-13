@@ -3,7 +3,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import { expect, it, vi } from 'vitest';
 import Turn from './Turn.svelte';
 
-it('renders edited panel rows and opens the selected panel, while preserving creation labels', () => {
+it('renders edited panels in the creation card and opens the selected panel', () => {
   const target = document.createElement('div');
   document.body.appendChild(target);
   const reveal = vi.fn();
@@ -17,14 +17,16 @@ it('renders edited panel rows and opens the selected panel, while preserving cre
     } } });
     flushSync();
     if (action === 'updated') {
-      expect(target.textContent).toContain('Edited 2 panels');
+      // Same card as creation, different label — one design for both.
+      expect(target.textContent).toContain('2 panels edited');
       expect(target.textContent).not.toContain('Panel created');
-      expect(target.querySelectorAll('.edited-panel')).toHaveLength(2);
-      target.querySelector<HTMLButtonElement>('[aria-label="Open Saved clips"]')!.click();
+      const buttons = [...target.querySelectorAll<HTMLButtonElement>('.mod-panels button')];
+      expect(buttons.map((button) => button.textContent)).toEqual(['Open Search', 'Open Saved clips']);
+      buttons[1]!.click();
       expect(reveal).toHaveBeenCalledWith('saved');
     } else {
       expect(target.textContent).toContain('Panel created');
-      expect(target.querySelector('.edited-result')).toBeNull();
+      expect(target.textContent).not.toContain('edited');
     }
     unmount(instance);
     flushSync();

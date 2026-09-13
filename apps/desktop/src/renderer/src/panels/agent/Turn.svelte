@@ -5,7 +5,8 @@
   import type { AgentMessage } from './agent-state.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { activityRows } from './activity-rows';
-  import { revealText, sendMessage } from './text-reveal';
+  import { sendMessage } from './text-reveal';
+  import Markdown from './Markdown.svelte';
   import { mountPromptGlow } from './prompt-glow';
   import { glowFade } from './motion';
   import ModResult from './ModResult.svelte';
@@ -65,7 +66,7 @@
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}
-      <p>{#each (message.text || '').split(/(\s+)/) as word, index (index)}<span use:revealText={Boolean(message.entering) && Boolean(word.trim())}>{word}</span>{/each}</p>
+      <div class="agent-reply"><Markdown text={message.text || ''} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
     {/if}
     {#if message.fixExtensionId}
       <div class="agent-card-actions">

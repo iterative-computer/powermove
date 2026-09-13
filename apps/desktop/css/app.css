@@ -764,9 +764,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-trace.is-live>*{animation:agent-fade-up 300ms cubic-bezier(.23,1,.32,1) both}
 @keyframes agent-fade-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 @keyframes agent-pop-in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
-.agent-trace-text{white-space:pre-wrap;font-size:var(--fs-md);line-height:1.6;color:var(--tx);padding:2px 0}
+.agent-trace-prose,.agent-reply{display:flex;flex-direction:column;gap:8px;min-width:0;font-size:var(--fs-md);line-height:1.6;color:var(--tx)}
+.agent-trace-prose{padding:2px 0}
 /* Streaming caret: solid while text lands, gone once it settles. */
-.agent-trace-text.is-streaming::after{content:"";display:inline-block;width:2px;height:.9em;margin-left:2px;border-radius:1px;background:var(--tx);vertical-align:-0.12em;animation:agent-caret-in 150ms ease-out both}
+p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-streaming p::after{content:"";display:inline-block;width:2px;height:.9em;margin-left:2px;border-radius:1px;background:var(--tx);vertical-align:-0.12em;animation:agent-caret-in 150ms ease-out both}
 @keyframes agent-caret-in{from{opacity:0}}
 /* Pre-trace shimmer line with the pixel-grid loader (harness LoadingState). */
 .agent-trace-loading{display:flex;align-items:center;gap:9px;min-width:0;padding:2px 0}
@@ -789,7 +790,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
   .shimmer-text{animation:none;background:none;-webkit-background-clip:border-box;background-clip:border-box;color:var(--tx-2)}
   .agent-trace.is-live>*{animation:none}
   .agent-pixel-loader>i{animation:none}
-  .agent-trace-text.is-streaming::after{animation:none}
+  p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-streaming p::after{animation:none}
   .agent-word,.agent-thinking-word{animation:none;opacity:1;filter:none;transform:none}
 }
 /* welcome */

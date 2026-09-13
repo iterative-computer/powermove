@@ -97,8 +97,8 @@ describe('Timeline', () => {
     expect(work[0]!.className).toContain('is-thought');
     expect(work[0]!.querySelector('span')?.textContent).toBe('Thought');
     expect(work[0]!.querySelector('.agent-tool-chip')?.textContent).toBe('Reading the composition');
-    expect(at(1).className).toContain('agent-trace-text');
-    expect(at(1).textContent).toBe('The layout is fixed.');
+    expect(at(1).className).toContain('agent-trace-prose');
+    expect(at(1).querySelector('.agent-trace-text')?.textContent).toBe('The layout is fixed.');
     expect(target.querySelector('.shimmer-text')).toBeNull();
   });
 
@@ -107,7 +107,7 @@ describe('Timeline', () => {
     const text = target.querySelector('.agent-trace-text')!;
     expect(text.className).toContain('is-streaming');
     // The caret is a pseudo-element: every real child stays an inline word span.
-    expect([...text.children].every((child) => child.tagName === 'SPAN' && !child.className)).toBe(true);
+    expect([...text.children].every((child) => child.tagName === 'SPAN' && !/agent-/.test(child.className))).toBe(true);
     expect(text.textContent).toBe('Looking at the');
 
     Object.assign(agentState, { trace: [
