@@ -741,10 +741,12 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
        a different output resolution. */
     const ss = continuousRasterScale(scaledWorld(L, T, W, H));
     let crop: RasterWindow | undefined;
+    // Group effects sample the already-composited W×H group target. Pixels
+    // outside that target are discarded before the effect, so its ordinary
+    // children can still use clipped sources without changing the effect.
     if (canClipPreviewSources(W, H) && !L.d.paths?.length
         && !is3DLayer(PM, L) && !hasRenderableEffects(L.fx, PM, L, T)
-        && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut
-        && !(PM.groupAncestors?.(L) || []).some((group: any) => hasRenderableEffects(group.fx, PM, group, T))) {
+        && !L.masks?.length && !L.matteSource && !L.transitionIn && !L.transitionOut) {
       const visibleWorld = scaledWorld(L, T, W, H);
       if (clip) { visibleWorld[4] -= clip.x; visibleWorld[5] -= clip.y; }
       if (L.type === 'shape') {
