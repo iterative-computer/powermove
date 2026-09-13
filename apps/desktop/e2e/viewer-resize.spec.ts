@@ -2,10 +2,13 @@ import { expect, test } from './helpers/app';
 
 test.describe('@viewer direct resize', () => {
   test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Direct resize', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const parent = PM.mkLayer('null', {
         name: 'Transform parent', dur: 4,
@@ -23,11 +26,11 @@ test.describe('@viewer direct resize', () => {
       }, project);
       project.layers = [cover, text, parent];
       PM.replaceProject(project);
-      PM.tool = 'select';
+      tool.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.setKey(text, 'scale.y', 0, 100, 'linear');
       PM.selectLayers(text.id);
-      PM.Viewer.layout();
+      viewer.layout();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
       const bounds = PM.GL.bounds(text, 1);
@@ -41,7 +44,7 @@ test.describe('@viewer direct resize', () => {
         textId: text.id, coverId: cover.id, parentId: parent.id,
         east: point(1, .5), west: point(0, .5),
         axis: { x: matrix[0] / axisLength, y: matrix[1] / axisLength },
-        eastCursor: PM.Viewer.resizeCursorForHandle(matrix, 'e'),
+        eastCursor: viewer.resizeCursorForHandle(matrix, 'e'),
         scaleX: text.p['scale.x'].v, scaleY: text.p['scale.y'].v,
         scaleYKeys: text.p['scale.y'].kf.length,
         coverScaleX: cover.p['scale.x'].v,
@@ -52,7 +55,7 @@ test.describe('@viewer direct resize', () => {
     const frame = page.locator('#stage-inner');
     const box = await frame.boundingBox();
     if (!box) throw new Error('viewer frame is unavailable');
-    const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     const east = { x: box.x + setup.east.x * shown, y: box.y + setup.east.y * shown };
     await page.mouse.move(east.x, east.y);
     await expect(page.locator('#stage-inner')).toHaveCSS('cursor', setup.eastCursor);
@@ -86,7 +89,9 @@ test.describe('@viewer direct resize', () => {
     expect(resized.parentScaleX).toBe(setup.parentScaleX);
 
     const rotatedNorth = await page.evaluate((textId) => {
-      const PM = (window as any).PM, text = PM.L(textId);
+      const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const text = PM.L(textId);
       text.p.rotation.v = 90;
       PM.touch(); PM.invalidate();
       const bounds = PM.GL.bounds(text, 1), matrix = PM.worldMatrix(text, 1);
@@ -94,7 +99,7 @@ test.describe('@viewer direct resize', () => {
       return {
         x: matrix[0] * x + matrix[2] * y + matrix[4],
         y: matrix[1] * x + matrix[3] * y + matrix[5],
-        cursor: PM.Viewer.resizeCursorForHandle(matrix, 'n'),
+        cursor: viewer.resizeCursorForHandle(matrix, 'n'),
       };
     }, setup.textId);
     await page.mouse.move(box.x + rotatedNorth.x * shown, box.y + rotatedNorth.y * shown);
@@ -103,10 +108,13 @@ test.describe('@viewer direct resize', () => {
   });
 
   test('maps text handle resizing to typography Size without touching Scale X/Y', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Proportional text resize', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const text = PM.mkLayer('text', {
         name: 'Selected text', dur: 4,
@@ -115,12 +123,12 @@ test.describe('@viewer direct resize', () => {
       }, project);
       project.layers = [text];
       PM.replaceProject(project);
-      PM.tool = 'select';
+      tool.tool = 'select';
       PM.setKey(text, 'scale.x', 0, 100, 'linear');
       PM.setKey(text, 'scale.y', 0, 100, 'linear');
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers(text.id);
-      PM.Viewer.layout();
+      viewer.layout();
       await document.fonts.ready;
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
@@ -138,12 +146,14 @@ test.describe('@viewer direct resize', () => {
     });
 
     const bottom = await page.evaluate((textId) => {
-      const PM = (window as any).PM, text = PM.L(textId);
+      const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const text = PM.L(textId);
       const bounds = PM.GL.bounds(text, 1), matrix = PM.worldMatrix(text, 1);
       const x = bounds.x0 + bounds.w * .5, y = bounds.y1;
       const point = { x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] };
-      const rect = PM.Viewer.inner.getBoundingClientRect();
-      return { x: rect.left + point.x * PM.Viewer.shown, y: rect.top + point.y * PM.Viewer.shown };
+      const rect = viewer.inner.getBoundingClientRect();
+      return { x: rect.left + point.x * viewer.shown, y: rect.top + point.y * viewer.shown };
     }, setup.textId);
     await page.mouse.move(bottom.x, bottom.y);
     await expect(page.locator('#stage-inner')).toHaveCSS('cursor', 'ns-resize');
@@ -182,10 +192,13 @@ test.describe('@viewer direct resize', () => {
   });
 
   test('resizes and rotates a multi-selection around the common pivot with one-step undo', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Common transform', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const parent = PM.mkLayer('null', {
         name: 'Skewed parent', dur: 4,
@@ -210,17 +223,17 @@ test.describe('@viewer direct resize', () => {
       textChild.parent = text.id;
       project.layers = [textChild, text, shape, parent];
       PM.replaceProject(project);
-      PM.tool = 'select';
+      tool.tool = 'select';
       PM.setKey(shape, 'scale.x', 0, 100, 'linear');
       PM.setKey(shape, 'scale.y', 0, 100, 'linear');
       PM.setKey(text, 'scale.x', 0, 100, 'linear');
       PM.setKey(text, 'scale.y', 0, 100, 'linear');
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers([shape.id, text.id, textChild.id]);
-      PM.Viewer.layout();
+      viewer.layout();
       await document.fonts.ready;
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const selection = PM.Viewer.resolveSelectionGeometry();
+      const selection = viewer.resolveSelectionGeometry();
       const axis = (layer: any) => {
         const matrix = PM.worldMatrix(layer, 1);
         return {
@@ -259,7 +272,7 @@ test.describe('@viewer direct resize', () => {
     const frame = page.locator('#stage-inner');
     const box = await frame.boundingBox();
     if (!box) throw new Error('viewer frame is unavailable');
-    const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     const southeast = {
       x: box.x + setup.southeast.x * shown,
       y: box.y + setup.southeast.y * shown,
@@ -272,8 +285,9 @@ test.describe('@viewer direct resize', () => {
 
     const resized = await page.evaluate(({ shapeId, textId, textChildId }) => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
       const shape = PM.L(shapeId), text = PM.L(textId), textChild = PM.L(textChildId);
-      const selection = PM.Viewer.resolveSelectionGeometry();
+      const selection = viewer.resolveSelectionGeometry();
       return {
         bounds: selection.bounds,
         shapeScale: [PM.ev(shape, 'scale.x', 1), PM.ev(shape, 'scale.y', 1)],
@@ -319,7 +333,8 @@ test.describe('@viewer direct resize', () => {
 
     const rotation = await page.evaluate(() => {
       const PM = (window as any).PM;
-      const selection = PM.Viewer.resolveSelectionGeometry();
+      const viewer = PM.Kernel.services.get('viewer');
+      const selection = viewer.resolveSelectionGeometry();
       return {
         center: selection.pivotWorld,
         north: selection.handles.n,

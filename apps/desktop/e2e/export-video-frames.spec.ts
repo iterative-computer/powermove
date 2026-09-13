@@ -5,6 +5,7 @@ import os from 'node:os';
 import { expect, test, repoRoot } from './helpers/app';
 
 test('exports each decoded video frame even when the preview is at another time', async ({ session }) => {
+  await session.openEditor();
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-frames-'));
   const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
   try {

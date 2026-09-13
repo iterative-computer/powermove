@@ -117,8 +117,10 @@ for (const [chord, command] of TRANSPORT_CHORDS) {
 bind('shift+pageup', 'stepFrames', false, [-10]);
 bind('shift+pagedown', 'stepFrames', false, [10]);
 for (const modifier of ['cmd', 'ctrl']) {
-  bind(`${modifier}+left`, modifier === 'ctrl' ? 'prevKeyframe' : 'prevFrame');
-  bind(`${modifier}+right`, modifier === 'ctrl' ? 'nextKeyframe' : 'nextFrame');
+  const previous = modifier === 'ctrl' ? 'timeline.adjacentKeyframe:prev' : 'prevFrame';
+  const next = modifier === 'ctrl' ? 'timeline.adjacentKeyframe:next' : 'nextFrame';
+  bind(`${modifier}+left`, previous);
+  bind(`${modifier}+right`, next);
   bind(`${modifier}+shift+left`, 'stepFrames', false, [-10]);
   bind(`${modifier}+shift+right`, 'stepFrames', false, [10]);
 }
@@ -126,8 +128,8 @@ for (const modifier of ['cmd', 'ctrl']) {
 /* Timeline navigation and layer timing use AE's native muscle memory. */
 bind('j', 'prevVisibleEvent');
 bind('k', 'nextVisibleEvent');
-bind('shift+j', 'prevKeyframe');
-bind('shift+k', 'nextKeyframe');
+bind('shift+j', 'timeline.adjacentKeyframe:prev');
+bind('shift+k', 'timeline.adjacentKeyframe:next');
 bind('i', 'gotoLayerIn');
 bind('o', 'gotoLayerOut');
 bind('[', 'moveLayerIn');
@@ -160,12 +162,14 @@ for (const [chord, command] of BARE_KEYS) {
   bind(chord, command);
   bind(`shift+${chord}`, command);
 }
-for (const [key, command] of propertyShortcuts) {
+const PROPERTY_SHORTCUTS = ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l'] as const;
+for (const key of PROPERTY_SHORTCUTS) {
+  const command = `timeline.revealProperty:${key}`;
   bind(key, command);
   bind(`shift+${key}`, command, false, [true]);
 }
-bind('cmd+`', 'revealAll');
-bind('ctrl+`', 'revealAll');
+bind('cmd+`', 'timeline.revealAll');
+bind('ctrl+`', 'timeline.revealAll');
 
 /* Escape inside a text field blurs it without triggering the editor-level
    deselect binding. The command itself remains in legacy shortcuts because it

@@ -28,7 +28,7 @@ function editor() {
   });
   PM.proj = PM.mkProject({ name: 'Transitions', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   const layer = PM.mkLayer('text', { name: 'Title', from: 0, dur: 5 });
   layer.id = 'title';
   PM.addLayer(layer, 0);
@@ -219,14 +219,16 @@ it('hydrate preserves unknown transitions as disabled missing placeholders', () 
       put: noop, remove: noop, getState: () => null, putState: noop, markOpen: noop, markClosed: noop, tabs: () => [raw.id], rename: noop,
     },
     WS: { init: noop, restoreSnapshot: noop, snapshot: () => ({}), editing: false },
-    TL: { pps: 90, scrollT: 0, scrollY: 0, graph: false, frameView: noop },
     setTime(value) { PM.time = value; },
     Audio: { normalizeLayer: noop },
     rasterClear: noop,
     assets: { restoreProject: async () => ({ stale: true, missing: [] }), clear: noop },
-    Inspector: { refresh: noop }, Viewer: { layout: noop }, Export: { snapshot: () => '' },
+    Export: { snapshot: () => '' },
     h: () => element(), $: () => element(), icon: element, PANELS: {}, perf: {},
   });
+  PM.Kernel.services.register('timeline', { pps: 90, scrollT: 0, scrollY: 0, graph: false, frameView: noop });
+  PM.Kernel.services.register('viewer', { layout: noop });
+  PM.Kernel.services.register('inspector', { refresh: noop });
   installApp(PM);
   assert.equal(PM.proj.layers[0].transitionIn.type, 'removed-extension-transition');
   assert.equal(PM.proj.layers[0].transitionIn.missing, true);

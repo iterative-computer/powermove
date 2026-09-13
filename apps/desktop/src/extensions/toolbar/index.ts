@@ -1,14 +1,4 @@
-import type { PowermoveAPI } from 'powermove';
-
-interface LegacyPM {
-  tool?: string;
-  toolShape?: string;
-  setTool?: (tool: string, detail?: string) => void;
-  bus?: {
-    emit?: (event: string) => void;
-    on?: (event: string, listener: () => void) => void | (() => void);
-  };
-}
+import type { PowermoveAPI, ToolService } from 'powermove';
 
 interface ToolbarButton {
   tool?: string;
@@ -38,14 +28,21 @@ const CREATE: ToolbarButton[] = [
 const IMPORT: ToolbarButton = { icon: 'image', title: 'Import media (Command+I)', command: 'import' };
 
 export default function activate(api: PowermoveAPI): void {
-  const PM = api.host.pm as LegacyPM;
-  PM.tool ||= 'select';
-  PM.toolShape ||= 'rect';
-  PM.setTool = (tool: string, detail?: string): void => {
-    PM.tool = tool;
-    if (tool === 'shape' && detail) PM.toolShape = detail;
-    PM.bus?.emit?.('tool');
+  let tool = 'select';
+  let toolShape = 'rect';
+  const toolListeners = new Set<() => void>();
+  const toolService: ToolService = {
+    get tool() { return tool; },
+    set tool(value: string) { tool = value; },
+    get toolShape() { return toolShape; },
+    set toolShape(value: string) { toolShape = value; },
+    setTool(nextTool: string, detail?: string): void {
+      tool = nextTool;
+      if (nextTool === 'shape' && detail) toolShape = detail;
+      for (const listener of toolListeners) listener();
+    }
   };
+  api.services.register<ToolService>('tool', toolService);
 
   api.panels.register({
     id: 'toolbar',
@@ -61,13 +58,13 @@ export default function activate(api: PowermoveAPI): void {
       const groups: { button: HTMLButtonElement; definitions: ToolbarButton[]; current: ToolbarButton }[] = [];
       const choose = (definition: ToolbarButton): void => {
         // Clicking Shape preserves the current variant; Q still cycles variants.
-        if (definition.tool === 'shape') PM.setTool?.('shape', PM.toolShape);
+        if (definition.tool === 'shape') toolService.setTool('shape', toolService.toolShape);
         else api.commands.run(definition.command);
         syncTools();
       };
       const syncTools = (): void => {
         for (const group of groups) {
-          const active = group.definitions.find((definition) => definition.tool === PM.tool);
+          const active = group.definitions.find((definition) => definition.tool === toolService.tool);
           if (active) group.current = active;
           const { button, current } = group;
           button.dataset.tool = current.tool;
@@ -97,7 +94,7 @@ export default function activate(api: PowermoveAPI): void {
           const open = (): void => api.ui.menu(wrapper, definitions.map((definition) => ({
             icon: definition.icon,
             label: definition.title.split(' · ')[0] ?? definition.title,
-            on: PM.tool === definition.tool,
+            on: toolService.tool === definition.tool,
             run: () => { group.current = definition; choose(definition); }
           })));
           const more = document.createElement('button');
@@ -137,9 +134,9 @@ export default function activate(api: PowermoveAPI): void {
       }))));
       body.appendChild(add);
 
-      const off = PM.bus?.on?.('tool', syncTools);
+      toolListeners.add(syncTools);
       syncTools();
-      return () => off?.();
+      return () => void toolListeners.delete(syncTools);
     }
   });
 }

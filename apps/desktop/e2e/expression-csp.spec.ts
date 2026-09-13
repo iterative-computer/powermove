@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('evaluates project expressions without unsafe-eval in the editor document', async ({ session }) => {
+  await session.openEditor();
   const result = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.proj = PM.mkProject({ name: 'Expressions', w: 64, h: 64, fps: 30, dur: 2 });

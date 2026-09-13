@@ -6,6 +6,7 @@ import {readFile} from 'node:fs/promises';
 test.describe('@export-mp4 H.264 delivery', () => {
   test('exports a playable MP4 with H.264 video and AAC audio', async ({ session }) => {
     test.setTimeout(45_000);
+    await session.openEditor();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;

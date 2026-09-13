@@ -1,6 +1,8 @@
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('panel picker, independent hover states, media icons, and titlebar spacing', async ({ session }, info) => {
   const { page } = session;
   await importFixture(page, 'tone.wav');
@@ -10,8 +12,8 @@ test('panel picker, independent hover states, media icons, and titlebar spacing'
     const PM = (window as any).PM;
     PM.SpatialAssistant.open();
   });
-  const model = page.locator('#panel-agent .agent-modelbar select').first();
-  const effort = page.locator('#panel-agent .agent-modelbar select').last();
+  const model = page.locator('#panel-agent .agent-modelbar').getByRole('combobox', { name: 'Model', exact: true });
+  const effort = page.locator('#panel-agent .agent-modelbar').getByRole('combobox', { name: 'Reasoning effort', exact: true });
   for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
     await model.hover();

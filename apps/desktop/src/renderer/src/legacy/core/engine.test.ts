@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createServicesRegistry } from '../../kernel/services';
 import type { PMRegistry } from '../registry';
 import { install } from './engine';
 
@@ -40,6 +41,7 @@ function engine({ layer = null, media = null, work = [0, 10], audioStartupDelay 
   const assets = new Map<string, any>();
   if (media) assets.set('asset-1', { el: media.el, dur: 10 });
   const PM: PMRegistry = {
+    Kernel: { services: createServicesRegistry() },
     proj: { dur: 10, fps: 30, work, shutter: 0.5, layers: layer ? [layer] : [] },
     assets: { get: (id: string) => assets.get(id) },
     Audio,
@@ -115,15 +117,16 @@ describe('legacy engine install', () => {
   it('keeps a navigation redraw pending until refinement and never defers playback', () => {
     const { PM, runFrame } = engine();
     PM.GL.gl = {}; PM.GL.render = vi.fn();
-    PM.Viewer = { deferNavigationRender: vi.fn(() => true) };
+    const viewer = { deferNavigationRender: vi.fn(() => true) };
+    PM.Kernel.services.register('viewer', viewer);
     runFrame(16); runFrame(32);
     expect(PM.GL.render).not.toHaveBeenCalled();
-    PM.Viewer.deferNavigationRender.mockReturnValue(false);
+    viewer.deferNavigationRender.mockReturnValue(false);
     runFrame(48);
     expect(PM.GL.render).toHaveBeenCalledTimes(1);
     runFrame(64);
     expect(PM.GL.render).toHaveBeenCalledTimes(1);
-    PM.Viewer.deferNavigationRender.mockReturnValue(true);
+    viewer.deferNavigationRender.mockReturnValue(true);
     PM.play(); runFrame(80);
     expect(PM.GL.render).toHaveBeenCalledTimes(2);
   });

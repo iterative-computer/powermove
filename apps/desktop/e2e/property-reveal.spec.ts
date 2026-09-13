@@ -1,9 +1,11 @@
 import { expect } from '@playwright/test';
 import { test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('AE property toggles and global M disclosure use actual timeline rows', async ({ session }) => {
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Property shortcuts' }));
@@ -14,7 +16,7 @@ test('AE property toggles and global M disclosure use actual timeline rows', asy
     PM.bus.emit('layers');
     (document.activeElement as HTMLElement)?.blur();
   });
-  const rows = () => page.evaluate(() => (window as any).PM.TL.rows.filter((r: any) => r.kind === 'prop').map((r: any) => r.key));
+  const rows = () => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline.rows.filter((r: any) => r.kind === 'prop').map((r: any) => r.key); });
   await page.keyboard.press('p');
   await expect.poll(rows).toEqual(['position.x', 'position.y']);
   await page.keyboard.press('Shift+t');
@@ -48,19 +50,20 @@ test('AE property toggles and global M disclosure use actual timeline rows', asy
 
 test('timeline diamond toggles playhead keys without clearing other times', async ({ session }) => {
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Key toggle' }));
     const L = PM.mkLayer('solid'); PM.proj.layers.push(L); PM.selectLayers([L.id]);
     PM.setKey(L, 'opacity', 0, 20); PM.setKey(L, 'opacity', 2, 80);
-    PM.time = 1; PM.TL.reveal(L, ['opacity']); PM.bus.emit('layers'); PM.invalidate();
+    const timeline = PM.Kernel.services.get('timeline');
+    PM.time = 1; timeline.reveal(L, ['opacity']); PM.bus.emit('layers'); PM.invalidate();
   });
   const keys = () => page.evaluate(() => (window as any).PM.proj.layers[0].p.opacity.kf.map((k: any) => k.t));
-  await expect.poll(async () => page.evaluate(() => (window as any).PM.TL.rows.some((r: any) => r.key === 'opacity'))).toBe(true);
+  await expect.poll(async () => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r: any) => r.key === 'opacity'); })).toBe(true);
   const point = await page.evaluate(() => {
-    const T = (window as any).PM.TL; const box = T.cv.getBoundingClientRect();
-    return { x: box.x + 85, y: box.y + T.ruler + T.rows.findIndex((r: any) => r.key === 'opacity') * T.row - T.scrollY + T.row / 2 };
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); const box = timeline.cv.getBoundingClientRect();
+    return { x: box.x + 85, y: box.y + timeline.ruler + timeline.rows.findIndex((r: any) => r.key === 'opacity') * timeline.row - timeline.scrollY + timeline.row / 2 };
   });
   await page.mouse.click(point.x, point.y);
   await expect.poll(keys).toEqual([0, 1, 2]);

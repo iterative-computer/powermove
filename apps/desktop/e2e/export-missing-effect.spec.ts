@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('web export preserves inactive missing effects and their animation', async ({ session }) => {
+  await session.openEditor();
   const result = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.pause();

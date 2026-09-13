@@ -2,10 +2,13 @@ import { expect, test } from './helpers/app';
 
 test.describe('@viewer selection-preserving direct manipulation', () => {
   test('drags the timeline-selected layer beneath a full-frame top layer', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Selection ownership', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const text = PM.mkLayer('text', {
         name: 'Selected text', dur: 4,
@@ -18,17 +21,17 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
       }, project);
       project.layers = [cover, text];
       PM.replaceProject(project);
-      PM.tool = 'select';
+      tool.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers(text.id);
-      PM.Viewer.layout();
-      const textBounds = PM.Viewer.worldBounds(text, 1);
+      viewer.layout();
+      const textBounds = viewer.worldBounds(text, 1);
       const point = { x: textBounds.cx, y: textBounds.cy };
       return {
         textId: text.id, coverId: cover.id,
         pickedId: PM.GL.pick(point.x, point.y, 1)?.id,
         textX: text.p['position.x'].v, coverX: cover.p['position.x'].v,
-        point, containsCenter: PM.Viewer.layerContainsPoint(text, point.x, point.y, 1),
+        point, containsCenter: viewer.layerContainsPoint(text, point.x, point.y, 1),
       };
     });
     expect(setup.pickedId).toBe(setup.coverId);
@@ -37,7 +40,7 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
     const frame = page.locator('#stage-inner');
     const box = await frame.boundingBox();
     if (!box) throw new Error('viewer frame is unavailable');
-    const shownAtStart = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shownAtStart = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     const start = { x: box.x + setup.point.x * shownAtStart, y: box.y + setup.point.y * shownAtStart };
     await page.mouse.move(start.x, start.y);
     await page.mouse.down();
@@ -57,17 +60,20 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
     expect(moved.coverX).toBe(setup.coverX);
 
     // A click without drag still explicitly chooses the visually top layer.
-    const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     await page.mouse.click(start.x + (moved.textX - setup.textX) * shown, start.y);
     expect(await page.evaluate(() => [...(window as any).PM.sel.layers])).toEqual([setup.coverId]);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
   test('moves a multi-selection from the empty gap inside its common box as one undoable gesture', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Common-box move', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const left = PM.mkLayer('shape', {
         name: 'Left', dur: 4,
@@ -81,12 +87,12 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
       }, project);
       project.layers = [right, left];
       PM.replaceProject(project);
-      PM.tool = 'select';
+      tool.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers([left.id, right.id]);
-      PM.Viewer.layout();
+      viewer.layout();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const selection = PM.Viewer.resolveSelectionGeometry();
+      const selection = viewer.resolveSelectionGeometry();
       return {
         leftId: left.id, rightId: right.id,
         leftX: left.p['position.x'].v, rightX: right.p['position.x'].v,
@@ -101,7 +107,7 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
     const frame = page.locator('#stage-inner');
     const box = await frame.boundingBox();
     if (!box) throw new Error('viewer frame is unavailable');
-    const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     const start = { x: box.x + setup.point.x * shown, y: box.y + setup.point.y * shown };
     await page.mouse.move(start.x, start.y);
     await expect(frame).toHaveCSS('cursor', 'move');
@@ -135,10 +141,13 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
   });
 
   test('keeps locked members in common chrome without transforming the unlocked subset', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Atomic locked selection', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const left = PM.mkLayer('shape', {
         name: 'Unlocked', dur: 4,
@@ -153,16 +162,16 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
       right.lock = true;
       project.layers = [right, left];
       PM.replaceProject(project);
-      PM.tool = 'select';
+      tool.tool = 'select';
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers([left.id, right.id]);
-      PM.Viewer.layout();
+      viewer.layout();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const selection = PM.Viewer.resolveSelectionGeometry();
+      const selection = viewer.resolveSelectionGeometry();
       return {
         leftId: left.id, rightId: right.id,
         positions: [left.p['position.x'].v, right.p['position.x'].v],
-        point: { x: PM.Viewer.worldBounds(left, 1).cx, y: PM.Viewer.worldBounds(left, 1).cy },
+        point: { x: viewer.worldBounds(left, 1).cx, y: viewer.worldBounds(left, 1).cy },
         layerIds: selection.layers.map((layer: any) => layer.id),
         transformable: selection.transformable,
         roots: selection.roots.length,
@@ -178,7 +187,7 @@ test.describe('@viewer selection-preserving direct manipulation', () => {
     const frame = page.locator('#stage-inner');
     const box = await frame.boundingBox();
     if (!box) throw new Error('viewer frame is unavailable');
-    const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     const start = { x: box.x + setup.point.x * shown, y: box.y + setup.point.y * shown };
     await page.mouse.move(start.x, start.y);
     await expect(frame).toHaveCSS('cursor', 'default');

@@ -13,7 +13,7 @@ export default defineConfig({
     // The animation suite measures real frame-evaluation time. Concurrent test
     // workers otherwise turn its calibrated budget into a CPU-contention test.
     fileParallelism: false,
-    include: ['src/**/*.{test,spec}.ts'],
+    include: ['src/**/*.{test,spec}.ts', 'scripts/**/*.{test,spec}.ts'],
     exclude: ['**/node_modules/**', 'out/**', 'tests/**'],
     passWithNoTests: true
     // Renderer tests that need a DOM declare `// @vitest-environment happy-dom`.

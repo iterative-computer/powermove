@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { decodeProjectContainer } from '../src/shared/project-container';
 import path from 'node:path';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('saved project files restore imported video without the original session media', async ({ session }) => {
   await importFixture(session.page, 'h264-aac.mp4');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'h264-aac.mp4'));
@@ -116,7 +118,7 @@ test('closing a local project tab and reopening it keeps imported audio', async 
   });
 
   await page.locator(`[data-tab-id="${project.id}"] .project-doc-close`).click();
-  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.id)).not.toBe(project.id);
+  await expect.poll(() => page.evaluate(() => (window as any).PM.ProjectsScreen.isOpen)).toBe(true);
   await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
   await page.locator('.ps-card').filter({ has: page.locator('.ps-name', { hasText: project.name }) }).click();
 

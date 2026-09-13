@@ -1,6 +1,7 @@
 /* Ported from js/core/workspace.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { ensureDockFill, keepPanelAtSetHeight } from '../../layout/model';
+import { timelineService } from './services';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -477,7 +478,8 @@ WS.restoreSnapshot = (snapshot: any) => {
 function applyFeatures(w: any) {
   const f: any = w.features || {};
   if (f.adaptiveQuality !== undefined) PM.perf.auto = !!f.adaptiveQuality;
-  if (f.graphOnOpen !== undefined && PM.TL) PM.TL.graph = !!f.graphOnOpen;
+  const timeline = timelineService(PM);
+  if (f.graphOnOpen !== undefined && timeline) timeline.graph = !!f.graphOnOpen;
   window.document.documentElement.dataset.previewCorners = w.chrome?.previewCornerRadius === 'rounded' ? 'rounded' : 'square';
   window.document.documentElement.dataset.timelineSurfaces = w.chrome?.timelineSurfaceOrder === 'reversed' ? 'reversed' : 'normal';
   PM.invalidate();

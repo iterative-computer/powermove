@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 
 test('web export plays independently and matches editor frames', async ({ session }, testInfo) => {
   test.setTimeout(90_000);
+  await session.openEditor();
   const videoBytes = [...await readFile(fixturePath('h264-aac.mp4'))];
   const audioBytes = [...await readFile(fixturePath('tone.wav'))];
   const exported = await session.page.evaluate(async ({ videoBytes, audioBytes }) => {

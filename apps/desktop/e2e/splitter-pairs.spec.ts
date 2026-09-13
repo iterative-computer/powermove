@@ -1,5 +1,6 @@
 import { test, expect } from './helpers/app';
 test('timeline/shader splitter transfers height and revives a collapsed shader', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   await page.waitForTimeout(1000);

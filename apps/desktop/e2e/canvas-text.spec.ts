@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('edits existing canvas text with native selection, multiline input, cancel and one-step undo', async ({ session }, testInfo) => {
+  await session.openEditor();
   const { page } = session;
   const id = await page.evaluate(async () => {
     const PM = (window as any).PM;
@@ -10,15 +11,17 @@ test('edits existing canvas text with native selection, multiline input, cancel 
       p: { 'position.x': 400, 'position.y': 180 },
     }, project);
     project.layers = [layer]; PM.replaceProject(project); PM.selectLayers(layer.id);
-    PM.setTool('select'); PM.Viewer.fit = true; PM.Viewer.layout(); PM.hist.clear(); PM.invalidate();
+    const tool = PM.Kernel.services.get('tool');
+    const viewer = PM.Kernel.services.get('viewer');
+    tool.setTool('select'); viewer.fit = true; viewer.layout(); PM.hist.clear(); PM.invalidate();
     await document.fonts.ready;
     return layer.id;
   });
   const open = async () => {
     const point = await page.evaluate(id => {
-      const PM = (window as any).PM, b = PM.Viewer.worldBounds(PM.L(id), PM.time);
+      const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), b = viewer.worldBounds(PM.L(id), PM.time);
       const r = document.querySelector('#stage-inner')!.getBoundingClientRect();
-      return { x: r.x + b.cx * PM.Viewer.shown, y: r.y + b.cy * PM.Viewer.shown };
+      return { x: r.x + b.cx * viewer.shown, y: r.y + b.cy * viewer.shown };
     }, id);
     await page.mouse.dblclick(point.x, point.y);
   };
@@ -37,7 +40,7 @@ test('edits existing canvas text with native selection, multiline input, cancel 
   await page.keyboard.press('Enter');
   await page.keyboard.type('Second line');
   expect(await source()).toBe('ffag works\nSecond line');
-  expect(await page.evaluate(() => (window as any).PM.Viewer.temporaryTool)).not.toBe('hand');
+  expect(await page.evaluate(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return viewer.temporaryTool; })).not.toBe('hand');
   await page.keyboard.press('Meta+Enter'); await expect(editor).toHaveCount(0);
   await page.evaluate(() => (window as any).PM.hist.undo()); expect(await source()).toBe('ffagarrag');
   await page.evaluate(() => (window as any).PM.hist.redo()); expect(await source()).toBe('ffag works\nSecond line');

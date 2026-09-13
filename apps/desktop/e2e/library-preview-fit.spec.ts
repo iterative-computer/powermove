@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('library previews contain tall panel content without changing the live panel', async ({ session }) => {
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));

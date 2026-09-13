@@ -17,6 +17,7 @@ async function capturePixel(page: any, x: number, y: number): Promise<number[]> 
 }
 
 test('spatial Ripple renders through Motion GPU and cleans up', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.evaluate(() => {
@@ -46,6 +47,7 @@ test('spatial Ripple renders through Motion GPU and cleans up', async ({ session
 });
 
 test('change mode preserves captured colors beneath the intentional dim wash', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.evaluate(() => {

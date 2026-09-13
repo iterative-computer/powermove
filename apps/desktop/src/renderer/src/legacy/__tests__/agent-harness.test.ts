@@ -13,7 +13,7 @@ function harnessEditor(): PMRegistry {
   );
   PM.proj = PM.mkProject({ name: 'Harness test', w: 1920, h: 1080, fps: 30, dur: 6 });
   PM.time = 1;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   PM.mkEffect = () => null;
   PM.Export = { snapshot: (time: number) => `data:image/jpeg;base64,frame-${time}` };
   return PM;
@@ -87,7 +87,7 @@ describe('agent harness oracle', () => {
     );
     PM.proj = PM.mkProject({ name: 'Native tools', w: 1920, h: 1080, fps: 30, dur: 6 });
     PM.time = 0;
-    PM.syncShaderUniforms = () => {};
+    PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
     PM.mkEffect = () => null;
     PM.Export = { snapshot: (time: number) => `data:image/png;base64,${Buffer.from(`frame-${time}`).toString('base64')}` };
     expect(handleRequest).toBeTypeOf('function');
@@ -151,7 +151,7 @@ describe('agent harness oracle', () => {
       'core/history', 'core/editing', 'assistant/harness',
     );
     PM.proj = PM.mkProject({ name: 'Native rollback', w: 1920, h: 1080, fps: 30, dur: 6 });
-    PM.syncShaderUniforms = () => {};
+    PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
     PM.mkEffect = () => null;
 
     handleRequest!({

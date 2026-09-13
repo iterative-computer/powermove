@@ -8,14 +8,15 @@ async function waitForViewer(page: any): Promise<void> {
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Viewer recovery', w: 1920, h: 1080, fps: 30, dur: 4 }) }));
     PM.ProjectsScreen.hide();
   });
-  await page.waitForFunction(() => Boolean(
-    (window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl
+  await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(
+    viewer?.ov && (window as any).PM?.GL?.gl
       && document.querySelector('#composition-recovery'),
-  ));
+  ); });
 }
 
 test.describe('@viewer composition recovery', () => {
   test('offers a one-click return only after explicit panning fully loses the composition', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
     const recovery = page.locator('#composition-recovery');
@@ -23,24 +24,26 @@ test.describe('@viewer composition recovery', () => {
 
     await page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.Viewer.fit = false;
-      PM.Viewer.zoom = PM.Viewer.shown || 1;
-      PM.Viewer.pan = [PM.Viewer.stage.getBoundingClientRect().width * 2, 0];
-      PM.Viewer.layout();
+      const viewer = PM.Kernel.services.get('viewer');
+      viewer.fit = false;
+      viewer.zoom = viewer.shown || 1;
+      viewer.pan = [viewer.stage.getBoundingClientRect().width * 2, 0];
+      viewer.layout();
     });
 
     await expect(recovery).toBeVisible();
     await expect(recovery).toContainText('Composition is out of view');
     await recovery.click();
     await expect(recovery).toBeHidden();
-    expect(await page.evaluate(() => ({
-      fit: (window as any).PM.Viewer.fit,
-      pan: [...(window as any).PM.Viewer.pan],
-    }))).toEqual({ fit: true, pan: [0, 0] });
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return ({
+      fit: viewer.fit,
+      pan: [...viewer.pan],
+    }); })).toEqual({ fit: true, pan: [0, 0] });
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
   test('keeps the same composition point under the cursor through small-to-oversized zoom', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
     const initialFrame = await page.locator('#stage-inner').boundingBox();
@@ -53,12 +56,13 @@ test.describe('@viewer composition recovery', () => {
     };
     const compositionAtPointer = () => page.evaluate(({ x, y }) => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
       return {
-        x: (x - PM.Viewer.inner.getBoundingClientRect().left) / PM.Viewer.shown,
-        y: (y - PM.Viewer.inner.getBoundingClientRect().top) / PM.Viewer.shown,
-        shown: PM.Viewer.shown,
-        frameWidth: PM.Viewer.inner.getBoundingClientRect().width,
-        stageWidth: PM.Viewer.stage.getBoundingClientRect().width,
+        x: (x - viewer.inner.getBoundingClientRect().left) / viewer.shown,
+        y: (y - viewer.inner.getBoundingClientRect().top) / viewer.shown,
+        shown: viewer.shown,
+        frameWidth: viewer.inner.getBoundingClientRect().width,
+        stageWidth: viewer.stage.getBoundingClientRect().width,
       };
     }, pointer);
     const initial = await compositionAtPointer();
@@ -92,15 +96,17 @@ test.describe('@viewer composition recovery', () => {
   });
 
   test('keeps the last composition frame visible while zoom resizes its drawing buffer', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
     const pixels = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
       const project = PM.mkProject({
         name: 'Zoom presentation', w: 640, h: 360, fps: 30, dur: 4, bg: '#D92D20',
       });
       PM.replaceProject(project);
-      PM.Viewer.returnToComposition();
+      viewer.returnToComposition();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       const sample = () => {
         const gl = PM.GL.gl as WebGL2RenderingContext;
@@ -116,11 +122,11 @@ test.describe('@viewer composition recovery', () => {
       /* Stress more than one input event per animation frame and cross the
          full-frame/cropped-viewport boundary in both directions. */
       for (let index = 0; index < 8; index++) {
-        PM.Viewer.setZoom(PM.Viewer.shown * 1.35);
+        viewer.setZoom(viewer.shown * 1.35);
         duringResize.push(sample());
       }
       for (let index = 0; index < 8; index++) {
-        PM.Viewer.setZoom(PM.Viewer.shown / 1.35);
+        viewer.setZoom(viewer.shown / 1.35);
         duringResize.push(sample());
       }
       return { before, duringResize };
@@ -134,20 +140,21 @@ test.describe('@viewer composition recovery', () => {
   });
 
   test('zooms with a mouse wheel, pans with trackpad scroll, pinches to zoom, and middle-drags', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
-    await page.evaluate(() => (window as any).PM.Viewer.returnToComposition());
+    await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.returnToComposition(); });
     const stage = await page.locator('#stage').boundingBox();
     const frame = await page.locator('#stage-inner').boundingBox();
     if (!stage || !frame) throw new Error('viewer geometry is unavailable');
     const pointer = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
-    const fittedZoom = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const fittedZoom = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
 
     await page.mouse.move(pointer.x, pointer.y);
     await page.mouse.wheel(0, -120);
-    expect(await page.evaluate(() => (window as any).PM.Viewer.shown)).toBeGreaterThan(fittedZoom);
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; })).toBeGreaterThan(fittedZoom);
 
-    await page.evaluate(() => (window as any).PM.Viewer.returnToComposition());
+    await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.returnToComposition(); });
     await page.evaluate(({ x, y }) => {
       const stageElement = document.querySelector('#stage')!;
       stageElement.dispatchEvent(new WheelEvent('wheel', {
@@ -155,38 +162,41 @@ test.describe('@viewer composition recovery', () => {
         deltaMode: WheelEvent.DOM_DELTA_PIXEL, deltaX: 6.5, deltaY: 10.25,
       }));
     }, pointer);
-    expect(await page.evaluate(() => ({
-      fit: (window as any).PM.Viewer.fit,
-      zoom: (window as any).PM.Viewer.shown,
-      pan: [...(window as any).PM.Viewer.pan],
-    }))).toEqual({ fit: false, zoom: fittedZoom, pan: [-6.5, -10.25] });
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return ({
+      fit: viewer.fit,
+      zoom: viewer.shown,
+      pan: [...viewer.pan],
+    }); })).toEqual({ fit: false, zoom: fittedZoom, pan: [-6.5, -10.25] });
 
-    const beforePinch = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const beforePinch = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
     await page.evaluate(({ x, y }) => {
       document.querySelector('#stage')!.dispatchEvent(new WheelEvent('wheel', {
         bubbles: true, cancelable: true, clientX: x, clientY: y,
         ctrlKey: true, deltaMode: WheelEvent.DOM_DELTA_PIXEL, deltaY: -24.5,
       }));
     }, pointer);
-    expect(await page.evaluate(() => (window as any).PM.Viewer.shown)).toBeGreaterThan(beforePinch);
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; })).toBeGreaterThan(beforePinch);
 
-    await page.evaluate(() => (window as any).PM.Viewer.returnToComposition());
+    await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.returnToComposition(); });
     await page.mouse.move(stage.x + stage.width / 2, stage.y + stage.height / 2);
     await page.mouse.down({ button: 'middle' });
     await page.mouse.move(stage.x + stage.width / 2 + 40, stage.y + stage.height / 2 + 20, { steps: 5 });
     await page.mouse.up({ button: 'middle' });
-    expect(await page.evaluate(() => ({
-      zoom: (window as any).PM.Viewer.shown,
-      pan: [...(window as any).PM.Viewer.pan],
-    }))).toEqual({ zoom: fittedZoom, pan: [40, 20] });
+    expect(await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return ({
+      zoom: viewer.shown,
+      pan: [...viewer.pan],
+    }); })).toEqual({ zoom: fittedZoom, pan: [40, 20] });
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
   test('double-clicks selected text through a full-frame top layer and selects all its source', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await waitForViewer(page);
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Text edit ownership', w: 640, h: 360, fps: 30, dur: 4, bg: '#202020' });
       const text = PM.mkLayer('text', {
         name: 'Selected text', dur: 4,
@@ -200,18 +210,18 @@ test.describe('@viewer composition recovery', () => {
       project.layers = [cover, text];
       PM.replaceProject(project);
       PM.setTime(1, { raw: true, force: true });
-      PM.setTool('select');
+      tool.setTool('select');
       PM.selectLayers(text.id);
-      PM.Viewer.fit = true;
-      PM.Viewer.pan = [0, 0];
-      PM.Viewer.layout();
+      viewer.fit = true;
+      viewer.pan = [0, 0];
+      viewer.layout();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-      const bounds = PM.Viewer.worldBounds(text, 1);
+      const bounds = viewer.worldBounds(text, 1);
       return { textId: text.id, text: text.d.text, point: { x: bounds.cx, y: bounds.cy } };
     });
     const frame = await page.locator('#stage-inner').boundingBox();
     if (!frame) throw new Error('composition frame is unavailable');
-    const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+    const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
 
     await page.mouse.dblclick(frame.x + setup.point.x * shown, frame.y + setup.point.y * shown);
     const editor = page.getByRole('textbox', { name: 'Edit text on canvas' });
@@ -224,6 +234,7 @@ test.describe('@viewer composition recovery', () => {
 });
 
 test('keeps saved built-in workspace geometry across a hidden app relaunch', async ({ session }) => {
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.WS?.current));
   const before = await session.page.evaluate(() => {
     const PM = (window as any).PM;
@@ -238,6 +249,7 @@ test('keeps saved built-in workspace geometry across a hidden app relaunch', asy
   expect(before).toEqual({ id: 'design', size: 444 });
 
   await session.relaunch(); // Restarts only the isolated hidden test app and keeps its temporary profile.
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.WS?.current));
   expect(await session.page.evaluate(() => {
     const PM = (window as any).PM;

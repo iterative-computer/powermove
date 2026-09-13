@@ -1,11 +1,11 @@
 import { revealedProperties } from './property-reveal';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
+import { temporalKeys, type KernelEvents, type PowermoveAPI, type Space3DAPI } from 'powermove';
 import { createGraphSampleCache } from './graph-sample-cache';
-import { temporalKeys } from 'powermove';
 import { adjacentKeyframe } from './keyframe-navigation';
-import { evaluatedValue } from 'powermove';
 import { draggedPropertyValue, propertyMetadata } from './property-values';
+import { element, iconNode, normalizeTimelineChrome, selectedLayers } from './api-helpers';
 /* Ported from js/ui/timeline.js — behavior-preserving. */
 import { expandScaleKeyIds, keyMembers, timelineProperties, trackChannels, trackSelected } from './property-tracks';
 import {
@@ -60,6 +60,24 @@ export interface KeyframeGroupSnapResolution {
   lock: KeyframeGroupSnapLock | null;
 }
 
+export const timelineWorkArea = {
+  resize(work: unknown, idx: number, time: number, duration: number, frame: number) {
+    const span = Array.isArray(work) ? work : [0, duration];
+    const start = Math.max(0, Number(span[0]) || 0);
+    const end = Math.max(start + frame, Number(span[1]) || duration);
+    const nextTime = Math.max(0, Number(time) || 0);
+    if (idx === 0) return { duration, workArea: [Math.max(0, Math.min(end - frame, nextTime)), end] as [number, number] };
+    const nextEnd = Math.max(start + frame, nextTime);
+    return { duration: Math.max(duration, nextEnd), workArea: [start, nextEnd] as [number, number] };
+  },
+  move(work: number[], delta: number, duration: number, frame: number) {
+    const start = Math.max(0, Number(work[0]) || 0);
+    const end = Math.max(start + frame, Number(work[1]) || duration);
+    const span = Math.min(duration, end - start);
+    const nextStart = Math.max(0, Math.min(Math.max(0, duration - span), start + delta));
+    return { workArea: [nextStart, nextStart + span] as [number, number] };
+  },
+};
 export interface QuickOffsetTimingItem {
   time: number;
   offsetIndex: number;
@@ -95,20 +113,20 @@ export function propertyValueColumns(
   });
 }
 
-export function toggleTimelineDisclosure(PM: any, layer: any): boolean {
+export function toggleTimelineDisclosure(api: PowermoveAPI, layer: any): boolean {
   if (layer.type === 'group') {
-    const collapsed = !PM.UIState.getGroupCollapsed(layer);
-    PM.UIState.setGroupCollapsed(layer, collapsed);
+    const collapsed = !api.uiState.getGroupCollapsed(layer);
+    api.uiState.setGroupCollapsed(layer, collapsed);
     return collapsed;
   }
-  const collapsed = !PM.UIState.getLayerCollapsed(layer);
+  const collapsed = !api.uiState.getLayerCollapsed(layer);
   layer.collapsed = collapsed;
-  PM.UIState.setLayerCollapsed(layer, collapsed);
+  api.uiState.setLayerCollapsed(layer, collapsed);
   return collapsed;
 }
 
-export function toggleTimelineScaleLink(PM: any, layer: any): void {
-  PM.Edit.apply(
+export function toggleTimelineScaleLink(api: PowermoveAPI, layer: any): void {
+  api.edit.apply(
     { type: 'set_layer', target: layer.id, patch: { scaleLinked: !layer.scaleLinked } },
     { label: 'Link scale axes', origin: 'timeline' },
   );
@@ -293,13 +311,10 @@ export function applyKeyframeMovePlan<Property>(
   }));
 }
 
-export function install(pm: any): void {
-createTimelineRuntime(pm);
-}
-
 /** A new ESM instance gets a new token. It can recognize and dispose a
     runtime left behind by the previous hot-reloaded module instance. */
 const TIMELINE_RUNTIME_TOKEN = Symbol('powermove.timeline.runtime');
+const runtimes = new WeakMap<PowermoveAPI, any>();
 
 /** Resolve overlapping keyframe hit targets without stealing an established
     selection. With no selected hit, array order remains the visual/top order. */
@@ -323,28 +338,18 @@ return layerType !== 'audio';
 }
 
 /** Compatibility name for tests and downstream forks of the legacy runtime. */
-export function createTimeline(pm: any): any {
-return createTimelineRuntime(pm);
+export function createTimeline(api: PowermoveAPI): any {
+return createTimelineRuntime(api, api.space3d);
 }
 
-export function createTimelineRuntime(pm: any): any {
-const PM = pm;
-const previous = PM.TL;
+export function createTimelineRuntime(api: PowermoveAPI, space3d: Space3DAPI = api.space3d): any {
+const previous = runtimes.get(api);
 if (previous?.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN && !previous.__timelineRuntimeDisposed) return previous;
 const previousHead = previous?.__timelineHead || null;
 const previousWrap = previous?.__timelineWrap || null;
 if (previous?.disposeRuntime) previous.disposeRuntime();
 else if (previous?.dispose) previous.dispose();
-else if (previous?.attachCanvas) {
-  // One-time upgrade from the runtime that had no teardown. Disable its canvas
-  // and its named draw listener; never clear unrelated bus subscribers.
-  for (const listener of PM.bus.m?.get('draw:timeline') ?? []) {
-    if (listener.name === 'draw') PM.bus.off('draw:timeline', listener);
-  }
-  previous.cv = null;
-  previous.ctx = null;
-}
-const h = PM.h, clamp = PM.clamp;
+const h = element, clamp = api.util.clamp;
 
 const T: any = previous || {
   gut: 224, row: 40, ruler: 28, pps: 90, scrollT: 0, scrollY: 0,
@@ -358,23 +363,23 @@ const T: any = previous || {
 /* Built-in extensions activate after project hydration. Restore the current
    project session here, matching the former app bootstrap path that ran after
    the legacy timeline installer. */
-const sessionTimeline = previous ?? PM.Projects?.getState?.(PM.proj?.id)?.timeline;
+const sessionTimeline = previous ?? api.storage.get<{ pps?: number; scrollT?: number; scrollY?: number; graph?: boolean }>(`session:${api.project.get().id}`);
 if (sessionTimeline) {
   T.pps = Number.isFinite(sessionTimeline.pps) ? sessionTimeline.pps : T.pps;
   T.scrollT = Number.isFinite(sessionTimeline.scrollT) ? sessionTimeline.scrollT : T.scrollT;
   T.scrollY = Number.isFinite(sessionTimeline.scrollY) ? sessionTimeline.scrollY : T.scrollY;
   T.graph = !!sessionTimeline.graph;
 }
-PM.TL = T;
-T.keySelectionActive = !!(T.keySelectionActive || PM.sel?.keys?.length);
+runtimes.set(api, T);
+T.keySelectionActive = !!(T.keySelectionActive || api.selection.keys().length);
 T.graphFocus = T.graphFocus && typeof T.graphFocus.layerId === 'string' && typeof T.graphFocus.trackKey === 'string'
   ? T.graphFocus : null;
 T.focusGraph = (L: any, channel: string) => {
-  const target = typeof PM.allProps === 'function'
-    ? timelineProperties(PM, L).find((row: any) => trackSelected(row, channel))
+  const target = typeof api.anim.allProps === 'function'
+    ? timelineProperties(api, L, space3d).find((row: any) => trackSelected(row, channel))
     : null;
   T.graphFocus = { layerId: L.id, trackKey: target?.key || channel };
-  PM.invalidate('timeline');
+  invalidate('timeline');
 };
 T.__timelineRuntimeToken = TIMELINE_RUNTIME_TOKEN;
 T.__timelineRuntimeDisposed = false;
@@ -397,9 +402,9 @@ function listen(target: any, event: string, handler: any, options?: any, bucket 
   bucket.push(cleanup);
   return cleanup;
 }
-function onBus(event: string, handler: any, bucket = runtimeCleanups) {
-  const release = PM.bus.on(event, handler);
-  bucket.push(typeof release === 'function' ? release : () => PM.bus.off?.(event, handler));
+function onEvent<K extends keyof KernelEvents>(event: K, handler: (payload: KernelEvents[K]) => void, bucket = runtimeCleanups) {
+  const subscription = api.events.on(event, handler);
+  bucket.push(() => subscription.dispose());
 }
 function scheduleFrame(fn: () => void) {
   let id = 0;
@@ -412,6 +417,26 @@ function scheduleTimer(fn: () => void, delay: number) {
   id = window.setTimeout(() => { timerIds.delete(id); if (!disposed) fn(); }, delay);
   timerIds.add(id);
   return id;
+}
+let drawPending = false;
+function invalidate(what?: string) {
+  api.transport.invalidate(what);
+  if ((what == null || what === 'timeline') && T.cv && !drawPending) {
+    drawPending = true;
+    scheduleFrame(() => { drawPending = false; draw(); });
+  }
+}
+function evaluatedValue(layer: any, value: any, time: number, path: string): any {
+  return value && typeof value === 'object' && Array.isArray(value.kf) && 'v' in value
+    ? api.anim.evP(layer, value, time, path)
+    : value;
+}
+function keyHandles(key: any): any {
+  return api.uiState.getKeyHandles(key);
+}
+function layerSupportsTransform(type: unknown): boolean {
+  const metadata = api.model.TYPE_META as Record<string, { transform?: boolean }>;
+  return metadata[String(type)]?.transform !== false;
 }
 function runCleanups(bucket: Array<() => void>) {
   for (const cleanup of bucket.splice(0).reverse()) {
@@ -439,7 +464,7 @@ function beginDrag(event: any, options: any) {
     activeDrags.delete(control);
     return options[kind]?.(...args);
   };
-  control = PM.drag(event, { ...options, up: finish('up'), cancel: finish('cancel') });
+  control = api.ui.drag(event, { ...options, up: finish('up'), cancel: finish('cancel') });
   activeDrags.add(control);
   return control;
 }
@@ -453,6 +478,7 @@ function disposeRuntime() {
   resizeObserver?.disconnect(); resizeObserver = null;
   frameIds.forEach((id) => window.cancelAnimationFrame?.(id)); frameIds.clear();
   timerIds.forEach((id) => window.clearTimeout?.(id)); timerIds.clear();
+  api.storage.set(`session:${api.project.get().id}`, { pps: T.pps, scrollT: T.scrollT, scrollY: T.scrollY, graph: T.graph });
   if (T.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN) {
     T.__timelineRuntimeDisposed = true;
     T.__timelineRuntimeToken = null;
@@ -468,24 +494,7 @@ T.dispose = disposeRuntime;
 /* The work bar owns only a thin strip at the very top of the ruler; the rest
    of the ruler is a scrub surface (click anywhere to move the playhead). */
 const WORK_BAR = { top: 0, height: 5, hit: 7 };
-const WorkArea = PM.TimelineWorkArea = {
-  resize(work: any, idx: any, time: any, duration: any, frame: any) {
-    const span = Array.isArray(work) ? work : [0, duration];
-    const start = Math.max(0, Number(span[0]) || 0);
-    const end = Math.max(start + frame, Number(span[1]) || duration);
-    const t = Math.max(0, Number(time) || 0);
-    if (idx === 0) return { duration, workArea: [clamp(t, 0, end - frame), end] };
-    const nextEnd = Math.max(start + frame, t);
-    return { duration: Math.max(duration, nextEnd), workArea: [start, nextEnd] };
-  },
-  move(work: any, delta: any, duration: any, frame: any) {
-    const start = Math.max(0, Number(work[0]) || 0);
-    const end = Math.max(start + frame, Number(work[1]) || duration);
-    const span = Math.min(duration, end - start);
-    const nextStart = clamp(start + delta, 0, Math.max(0, duration - span));
-    return { workArea: [nextStart, nextStart + span] };
-  },
-};
+const WorkArea = timelineWorkArea;
 
 let attachedHead: HTMLElement | null = null;
 let attachedWrap: HTMLElement | null = null;
@@ -529,25 +538,25 @@ function buildHead(head: any) {
   const moveHandles = [...head.children].filter((node: any) => node.classList?.contains('panel-move-handle'));
   head.replaceChildren(...moveHandles);
   const btn = (icon: any, fn: any, title: any) => {
-    const button = h('button.iconbtn', { type: 'button', title }, PM.icon(icon));
+    const button = h('button.iconbtn', { type: 'button', title }, iconNode(api, icon));
     listen(button, 'click', fn, undefined, headCleanups);
     return button;
   };
-  const playBtn = btn('play', () => PM.toggle(), 'Play / Pause (Space)');
+  const playBtn = btn('play', () => api.transport.toggle(), 'Play / Pause (Space)');
   const time = h('div#tl-time');
-  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (Shift+F3)' }, PM.icon('bezier'));
-  listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); PM.invalidate('timeline'); }, undefined, headCleanups);
-  const graphOptions = btn('more', () => PM.menu(graphOptions, [
-    { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; PM.invalidate('timeline'); } },
-    { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; PM.invalidate('timeline'); } },
+  const graph = h('button.iconbtn' + (T.graph ? '.on' : ''), { title: 'Graph editor (Shift+F3)' }, iconNode(api, 'bezier'));
+  listen(graph, 'click', () => { T.graph = !T.graph; syncGraphControls(); invalidate('timeline'); }, undefined, headCleanups);
+  const graphOptions = btn('more', () => api.ui.menu(graphOptions, [
+    { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
+    { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
     { label: 'Fit selected curves', disabled: !T._graph, run: () => {
       const points = T._graph?.points || [];
       if (!points.length) return;
       const times = points.map((point: any) => point.axis.L.from + point.key.t);
       const first = Math.min(...times), last = Math.max(...times);
-      T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / PM.proj.fps, last - first), 4, 4000);
+      T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
       T.scrollT = Math.max(-.4, first - 24 / T.pps);
-      T.graphViewBounds = null; PM.invalidate('timeline');
+      T.graphViewBounds = null; invalidate('timeline');
     } },
   ]), 'Graph options');
   let graphShown: boolean | undefined;
@@ -579,7 +588,7 @@ function buildHead(head: any) {
     event.stopPropagation();
     /* Reuse the layout's existing, live drag listener without importing its
        private module into the hot-reloadable extension bundle. Subsequent real
-       pointer moves are still captured by PM.drag on window. */
+       pointer moves are still captured by api.ui.drag on window. */
     panelHeader.dispatchEvent(new PointerEvent('pointerdown', {
       bubbles: true,
       cancelable: true,
@@ -593,40 +602,37 @@ function buildHead(head: any) {
     }));
   }, undefined, headCleanups);
   const syncTime = () => {
-    const text = PM.tc(PM.time, PM.proj.fps);
+    const text = api.util.tc(api.transport.time(), api.project.get().fps);
     if (time.textContent !== text) time.textContent = text;
   };
   const syncTransport = () => {
     /* Keep the icon node stable while playback frames update the timecode.
        Replacing it between pointerdown and pointerup cancels a human-speed
        click in Chromium, which made the visible Pause control unresponsive. */
-    const icon = PM.playing ? 'pause' : 'play';
+    const icon = api.transport.playing() ? 'pause' : 'play';
     if (playBtn.querySelector(`[data-icon="${icon}"]`)) return;
-    playBtn.replaceChildren(PM.icon(icon));
+    playBtn.replaceChildren(iconNode(api, icon));
   };
-  onBus('time', syncTime, headCleanups); onBus('transport', syncTransport, headCleanups);
-  onBus('project', () => {
+  onEvent('time', syncTime, headCleanups); onEvent('transport', syncTransport, headCleanups);
+  onEvent('project:changed', () => {
     syncTime();
     syncTransport();
     syncGraphControls();
   }, headCleanups);
   syncTime(); syncTransport(); syncGraphControls(); syncHeadGeometry(head);
   listen(time, 'pointerdown', (e: any) => {
-    const startTime = PM.time;
-    beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => PM.setTime(startTime + dx / 12 / PM.proj.fps) });
+    const startTime = api.transport.time();
+    beginDrag(e, { cursor: 'ew-resize', move: (dx: any) => api.transport.setTime(startTime + dx / 12 / api.project.get().fps) });
   }, undefined, headCleanups);
 }
 
 function refreshTimelineManifest() {
   syncGraphControls();
-  const raw = PM.WS?.current?.chrome?.timeline || {};
-  const config = PM.WS?.normalizeTimelineChrome?.(raw) || {
-    rowHeight: 30, gutterWidth: 224, rulerHeight: 28, clipRadius: 5,
-    keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact',
-  };
+  const raw = api.workspace.current()?.chrome?.timeline;
+  const config = normalizeTimelineChrome(api, raw);
   T.row = config.rowHeight; T.gut = config.gutterWidth; T.ruler = config.rulerHeight;
   T.style = config;
-  const head = PM.$('#tl-head');
+  const head = document.querySelector<HTMLElement>('#tl-head');
   if (head) {
     if (head.dataset.density !== config.toolbarDensity) head.dataset.density = config.toolbarDensity;
     // The draw resolves the minimum width of property columns before syncing
@@ -636,7 +642,7 @@ function refreshTimelineManifest() {
   return config;
 }
 
-function syncHeadGeometry(head = PM.$('#tl-head')) {
+function syncHeadGeometry(head = document.querySelector<HTMLElement>('#tl-head')) {
   if (!head) return;
   const gutter = `${Math.round(T.gut)}px`;
   const ruler = `${Math.round(T.ruler)}px`;
@@ -660,10 +666,11 @@ function resize(wrap?: any) {
      after an already-requested animation frame, so relying only on the shared
      invalidation queue can expose the canvas's cleared backing store. */
   if (changed) draw();
-  PM.invalidate('timeline');
+  invalidate('timeline');
 }
 listen(window, 'resize', () => resize());
-onBus('layout:applied', () => {
+onEvent('layout', () => {
+  refreshTimelineManifest();
   resize();
   /* Second pass after flex settles: the first layout:applied can fire while the
      dock is still animating to its final size (workspace switch, boot with a
@@ -680,18 +687,18 @@ let propertyLabelWidth: number | null = null;
 // Selection reveals its ancestor groups without filtering out sibling rows.
 // Only the disclosure control should hide children in an expanded group.
 function revealSelectedAncestors() {
-  for (const layer of PM.selLayers?.() || []) {
-    for (const group of PM.groupAncestors?.(layer) || []) {
-      PM.UIState.setGroupCollapsed(group, false);
+  for (const layer of selectedLayers(api) || []) {
+    for (const group of api.groups.ancestors(layer) || []) {
+      api.uiState.setGroupCollapsed(group, false);
     }
   }
   rowsDirty = true;
 }
 function buildRows() {
-  const animationVersion = PM.animVersion?.();
+  const animationVersion = api.anim.version();
   if (!rowsDirty && rowsAnimationVersion === animationVersion && Array.isArray(T.rows)) return T.rows;
   const rows = [];
-  const source = PM.proj.layers;
+  const source = api.project.get().layers;
   const layers: any[] = [];
   const seen = new Set<string>();
   const visit = (parent: string | null) => {
@@ -705,14 +712,14 @@ function buildRows() {
   for (const layer of source) if (!seen.has(layer.id)) layers.push(layer);
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
-    const ancestors = PM.groupAncestors?.(L) || [];
-    if (!T.search && ancestors.some((group: any) => PM.UIState.getGroupCollapsed(group))) continue;
+    const ancestors = api.groups.ancestors(L) || [];
+    if (!T.search && ancestors.some((group: any) => api.uiState.getGroupCollapsed(group))) continue;
     if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
     const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
     if (query && !L.name.toLowerCase().includes(query) && !matching.length) continue;
     rows.push({ kind: 'layer', L, i: source.indexOf(L), depth: ancestors.length });
-    if (!PM.UIState.getLayerCollapsed(L) || query) {
+    if (!api.uiState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
       props.forEach((p: any) => rows.push({ kind: 'prop', L, ...p }));
     }
@@ -724,7 +731,7 @@ function buildRows() {
   return rows;
 }
 function visibleProps(L: any) {
-  return revealedProperties(PM, L, timelineProperties(PM, L));
+  return revealedProperties(api, L, timelineProperties(api, L, space3d));
 }
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
@@ -732,16 +739,19 @@ const t2x = (t: any) => T.gut + (t - T.scrollT) * T.pps;
 const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
 
 /* ── draw ──────────────────────────────────────────────── */
-onBus('draw:timeline', draw);
-onBus('layers', () => { rowsDirty = true; PM.invalidate('timeline'); });
-onBus('sel', () => {
+onEvent('project:changed', () => { rowsDirty = true; invalidate('timeline'); });
+// Host-side invalidations (reveal, collapse, history and selection restore)
+// arrive as a coalesced 'timeline' repaint request; rows depend on UI state,
+// so they are rebuilt, not just repainted.
+onEvent('invalidate', (what) => { if (what === 'timeline') { rowsDirty = true; draw(); } });
+onEvent('time', () => invalidate('timeline'));
+onEvent('selection', () => {
   revealSelectedAncestors();
   buildRows();
   /* Selection can originate in the composition canvas, marquee, inspector,
      or another panel. Never move the user's timeline viewport to chase it. */
-  PM.invalidate('timeline');
+  invalidate('timeline');
 });
-onBus('history', () => { rowsDirty = true; PM.invalidate('timeline'); });
 revealSelectedAncestors();
 
 function css(v: any) { return window.getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
@@ -762,7 +772,7 @@ const refreshTheme = () => {
     line: css('--line') || 'rgba(15,15,20,.09)',
   };
 };
-onBus('layout', () => { refreshTimelineManifest(); refreshTheme(); refreshInk(); PM.invalidate('timeline'); });
+onEvent('theme:changed', () => { refreshTheme(); refreshInk(); invalidate('timeline'); });
 
 /* Ink-on-paper colors for canvas chrome. Light theme uses black alpha;
    dark theme uses white alpha — resolved on every theme refresh. */
@@ -797,12 +807,12 @@ function drawInner(preview?: TimelinePreviewTarget) {
     T.cv.height = Math.max(2, Math.round(preview.height * T.dpr));
     T.ctx = T.cv.getContext('2d');
   } else {
-    const liveCv = PM.$('#tl-canvas');
+    const liveCv = document.querySelector<HTMLCanvasElement>('#tl-canvas');
     if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d'); }
     /* Unconditional size sync: measure the wrap every draw so the bitmap always
        matches the laid-out size, regardless of missed observer/RAF frames. */
     const host = T.cv && T.cv.parentElement;
-    if (host && (!PM.playing || !T.w || !T.hgt)) {
+    if (host && (!api.transport.playing() || !T.w || !T.hgt)) {
       const r = host.getBoundingClientRect();
       if (r.width >= 8 && r.height >= 8) {
         const bw = Math.max(2, Math.round(r.width * T.dpr));
@@ -815,7 +825,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
   }
   const c = T.ctx; if (!c) return null;
   if (!theme) refreshTheme();
-  const p = PM.proj;
+  const p = api.project.get();
   const W = T.w, H = T.hgt;
   c.setTransform(T.dpr, 0, 0, T.dpr, 0, 0);
   c.fillStyle = theme.panel; c.fillRect(0, 0, W, H);
@@ -831,17 +841,17 @@ function drawInner(preview?: TimelinePreviewTarget) {
   if (preview) {
     T.scrollT = 0;
     T.scrollY = 0;
-    T.pps = Math.max(.01, (W - T.gut - 16) / Math.max(.5, Number(PM.proj.dur) || .5));
+    T.pps = Math.max(.01, (W - T.gut - 16) / Math.max(.5, Number(api.project.get().dur) || .5));
   } else syncHeadGeometry();
 
   const maxScroll = Math.max(0, T.rows.length * T.row - (H - T.ruler));
   T.scrollY = clamp(T.scrollY, 0, maxScroll);
 
   /* keep playhead in view while playing (AE follow) */
-  if (PM.playing) {
-    const px = t2x(PM.time);
-    if (px > W - 50) T.scrollT = PM.time - (W - T.gut - 50) / T.pps;
-    else if (px < T.gut) T.scrollT = PM.time - 60 / T.pps;
+  if (api.transport.playing()) {
+    const px = t2x(api.transport.time());
+    if (px > W - 50) T.scrollT = api.transport.time() - (W - T.gut - 50) / T.pps;
+    else if (px < T.gut) T.scrollT = api.transport.time() - 60 / T.pps;
     T.scrollT = Math.max(-.4, T.scrollT);
   }
 
@@ -871,8 +881,8 @@ function drawInner(preview?: TimelinePreviewTarget) {
   drawQuickOffset(c, W, H);
   drawScrollThumb(c, W, H, maxScroll);
   if ((window as any).__tlDebug) {
-    const px = t2x(PM.time);
-    const msg = '[tl] t=' + PM.time.toFixed(3) + ' px=' + (isFinite(px) ? px.toFixed(1) : String(px)) + ' gut=' + T.gut + ' W=' + W + ' sT=' + T.scrollT.toFixed(3) + ' pps=' + T.pps + ' rows=' + T.rows.length + ' graph=' + T.graph;
+    const px = t2x(api.transport.time());
+    const msg = '[tl] t=' + api.transport.time().toFixed(3) + ' px=' + (isFinite(px) ? px.toFixed(1) : String(px)) + ' gut=' + T.gut + ' W=' + W + ' sT=' + T.scrollT.toFixed(3) + ' pps=' + T.pps + ' rows=' + T.rows.length + ' graph=' + T.graph;
     try { (window as any).webkit.messageHandlers.pmLog.postMessage(msg); } catch (e) { }
     console.log(msg);
   }
@@ -885,8 +895,8 @@ function drawInner(preview?: TimelinePreviewTarget) {
   if (preview) {
     preview.canvas.dataset.timelinePreviewMode = 'full-duration';
     preview.canvas.dataset.timelinePreviewStart = '0';
-    preview.canvas.dataset.timelinePreviewEnd = String(PM.proj.dur);
-    preview.canvas.dataset.timelinePreviewRight = String(T.gut + Math.max(0, Number(PM.proj.dur) || 0) * T.pps);
+    preview.canvas.dataset.timelinePreviewEnd = String(api.project.get().dur);
+    preview.canvas.dataset.timelinePreviewRight = String(T.gut + Math.max(0, Number(api.project.get().dur) || 0) * T.pps);
     return { gutter: T.gut, ruler: T.ruler, pps: T.pps };
   }
   return null;
@@ -949,7 +959,7 @@ function drawTracksBg(c: any, W: any, H: any) {
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
   c.fillStyle = theme.sunken; c.fillRect(T.gut, T.ruler, W - T.gut, H - T.ruler);
   /* Keep the active work area clear and shade only the range outside it. */
-  const p = PM.proj;
+  const p = api.project.get();
   const wa = p.work || [0, p.dur];
   const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
   c.fillStyle = INK.over;
@@ -972,7 +982,7 @@ function drawTracksBg(c: any, W: any, H: any) {
     const r = T.rows[i];
     /* Row states are alpha washes: selected > hovered. No hairlines between
        rows; the clip bodies give the rows their structure. */
-    if (r.kind === 'layer' && PM.sel.layers.includes(r.L.id)) {
+    if (r.kind === 'layer' && api.selection.layers().includes(r.L.id)) {
       c.fillStyle = INK.over; c.fillRect(T.gut, y, W - T.gut, T.row);
     } else if (T.hoverRow === i) {
       c.fillStyle = INK.over; c.globalAlpha = .7; c.fillRect(T.gut, y, W - T.gut, T.row); c.globalAlpha = 1;
@@ -993,7 +1003,7 @@ function niceStep(pps: any) {
 }
 
 function drawRuler(c: any, W: any, H: any) {
-  const p = PM.proj;
+  const p = api.project.get();
   c.fillStyle = theme.panel; c.fillRect(0, 0, W, T.ruler);
   c.strokeStyle = theme.line; c.beginPath(); c.moveTo(0, T.ruler - .5); c.lineTo(W, T.ruler - .5); c.stroke();
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, T.ruler); c.clip();
@@ -1038,7 +1048,7 @@ function drawWorkBracket(c: any, x: any, idx: any) {
   c.closePath(); c.fill();
 }
 function fmtRuler(t: any, step: any, fps: any) {
-  if (step < 1) return PM.tc(t, fps).slice(-5);
+  if (step < 1) return api.util.tc(t, fps).slice(-5);
   const m = Math.floor(t / 60), s = Math.round(t % 60);
   return (m ? m + ':' : '0:') + String(s).padStart(2, '0');
 }
@@ -1051,7 +1061,7 @@ function drawClips(c: any, W: any, H: any) {
     const y = rowY(i);
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
-    if (r.kind === 'layer') drawClip(c, r.L.type === 'group' ? { ...r.L, ...PM.groupSpan(r.L) } : r.L, y);
+    if (r.kind === 'layer') drawClip(c, r.L.type === 'group' ? { ...r.L, ...api.groups.span(r.L) } : r.L, y);
     else drawPropKeys(c, r, y);
   }
   c.restore();
@@ -1063,7 +1073,7 @@ function drawClips(c: any, W: any, H: any) {
    insertion slot so "append at bottom" is still visible. */
 function drawDropGhost(c: any, W: any, H: any) {
   const d = T.drop; if (!d || T.graph) return;
-  const p = PM.proj;
+  const p = api.project.get();
   const type = d.kind === 'audio' ? 'audio' : d.kind === 'video' ? 'video' : d.kind === 'image' ? 'image' : null;
   const pal = clipPalette({ type });
   const dur = d.dur || Math.max(1 / p.fps, Math.min(4, p.dur - d.at) || 4);
@@ -1104,7 +1114,7 @@ function drawDropGhost(c: any, W: any, H: any) {
   c.beginPath(); c.moveTo(hx, T.ruler); c.lineTo(hx, yy); c.stroke();
   c.setLineDash([]);
   c.restore();
-  const tag = PM.tc(d.at, p.fps);
+  const tag = api.util.tc(d.at, p.fps);
   c.save();
   c.font = '500 10px ' + fui(); c.textBaseline = 'middle';
   const tw = c.measureText(tag).width + 10;
@@ -1116,7 +1126,7 @@ function drawDropGhost(c: any, W: any, H: any) {
   c.restore();
 }
 
-function rgba(hex: any, a: any) { const [r, g, b] = PM.hex2rgb(hex); return `rgba(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0},${a})`; }
+function rgba(hex: any, a: any) { const [r = 0, g = 0, b = 0] = api.util.hex2rgb(hex); return `rgba(${r * 255 | 0},${g * 255 | 0},${b * 255 | 0},${a})`; }
 
 const BADGE: any = { text: 'T', shape: 'S', solid: 'S', shader: 'fx', extension: 'ext', null: 'N', image: 'img', video: 'vid', audio: 'aud' };
 
@@ -1126,16 +1136,15 @@ function drawAudioClipWaveform(c: any, L: any, { x, y, width, height, color }: a
   /* Waveform in the clip's bright tint. With no name label to stay clear of,
      the bars stand on the clip floor and use the full body height. */
   const top = 2;
-  if (PM.Audio && typeof PM.Audio.drawWaveform === 'function') {
-    try {
-      PM.Audio.drawWaveform(c, L, {
-        x, y: y + top, width, height: height - top - 2, clipLeft, color, placeholderColor: color,
-        step: 1, anchor: 1,
-      });
+  try {
+    if (api.media.audio.drawWaveform(c, L, {
+      x, y: y + top, width, height: height - top - 2, clipLeft, color, placeholderColor: color,
+      step: 1, anchor: 1,
+    })) {
       c.restore();
       return;
-    } catch (error) { /* Keep the timeline usable while waveform data is unavailable. */ }
-  }
+    }
+  } catch (error) { /* Keep the timeline usable while waveform data is unavailable. */ }
   const right = Math.min(x + width, T.w);
   if (right > clipLeft) {
     c.strokeStyle = color;
@@ -1168,7 +1177,7 @@ const CLIP_TYPES: Record<string, { body: string; primary: string; foreground: st
 const CLIP_FALLBACK = { body: '#34505A', primary: '#8DB8C6', foreground: '#E6F1F4' };
 function mixHex(color: string, toward: [number, number, number], amount: number) {
   const m1 = color.match(/^rgb\((\d+),(\d+),(\d+)\)$/);
-  const [r, g, b] = m1 ? [+m1[1]! / 255, +m1[2]! / 255, +m1[3]! / 255] : PM.hex2rgb(color);
+  const [r = 0, g = 0, b = 0] = m1 ? [+m1[1]! / 255, +m1[2]! / 255, +m1[3]! / 255] : api.util.hex2rgb(color);
   const m = (v: number, t: number) => Math.round((v * 255) * (1 - amount) + t * amount);
   return `rgb(${m(r, toward[0])},${m(g, toward[1])},${m(b, toward[2])})`;
 }
@@ -1191,11 +1200,11 @@ function drawClip(c: any, L: any, y: any) {
   /* Clips fill their row with a 1px breath between neighbours. */
   const hh = T.row - 2;
   const yy = y + 1;
-  const sel = PM.sel.layers.includes(L.id);
+  const sel = api.selection.layers().includes(L.id);
   const r = Math.min(4, T.style.clipRadius);
   const w = Math.max(4, x1 - x0);
   const pal = clipPalette(L);
-  const off = !evaluatedValue(PM, L, L.on, PM.time, 'l.on');
+  const off = !evaluatedValue(L, L.on, api.transport.time(), 'l.on');
   const dark = document.documentElement.dataset.theme === 'dark';
   c.save();
   if (off) c.globalAlpha = .5;
@@ -1306,7 +1315,7 @@ function drawGutter(c: any, W: any, H: any) {
     if (y + T.row < T.ruler || y > H) continue;
     const r = T.rows[i];
     if (r.kind === 'layer') {
-      const L = r.L, sel = PM.sel.layers.includes(L.id);
+      const L = r.L, sel = api.selection.layers().includes(L.id);
       if (sel) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
       else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
       /* Quiet card: controls surface on hover/selection or when they carry
@@ -1314,13 +1323,13 @@ function drawGutter(c: any, W: any, H: any) {
       const active = sel || T.hoverRow === i;
       const indent = Math.min(48, (r.depth || 0) * 12);
       const collapsed = L.type === 'group'
-        ? PM.UIState.getGroupCollapsed(L)
-        : PM.UIState.getLayerCollapsed(L);
+        ? api.uiState.getGroupCollapsed(L)
+        : api.uiState.getLayerCollapsed(L);
       c.font = '400 10px ' + fmono();
       c.fillStyle = INK.lo; c.textBaseline = 'middle';
       if (T.style.showLayerNumbers) c.fillText(String(r.i + 1).padStart(2, '0'), 8, y + T.row / 2);
       /* eye / lock */
-      if (active || !evaluatedValue(PM, L, L.on, PM.time, 'l.on')) icoEye(c, 30, y + T.row / 2, evaluatedValue(PM, L, L.on, PM.time, 'l.on'));
+      if (active || !evaluatedValue(L, L.on, api.transport.time(), 'l.on')) icoEye(c, 30, y + T.row / 2, evaluatedValue(L, L.on, api.transport.time(), 'l.on'));
       if (active || L.lock) icoLock(c, 48, y + T.row / 2, L.lock);
       /* twirl */
       if (active || !collapsed || L.type === 'group') {
@@ -1341,9 +1350,9 @@ function drawGutter(c: any, W: any, H: any) {
       c.textAlign = 'left';
       c.font = (sel ? '500 ' : '400 ') + '12px ' + fui();
       c.fillStyle = sel ? theme.tx : theme.tx2;
-      const hasParentControl = PM.TYPE_META[L.type]?.transform !== false;
+      const hasParentControl = layerSupportsTransform(L.type);
       const showParentControl = hasParentControl && (active || !!L.parent);
-      const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur') ? 12 : 0);
+      const statusWidth = (L.solo ? 12 : 0) + (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur') ? 12 : 0);
       const nameRight = T.gut - (hasParentControl ? 50 : 12) - statusWidth;
       clipText(c, L.name, 96 + indent, iy, Math.max(0, nameRight - 96 - indent));
       if (showParentControl) {
@@ -1359,26 +1368,25 @@ function drawGutter(c: any, W: any, H: any) {
       }
       let statusX = nameRight + 8;
       if (L.solo) { c.fillStyle = theme.accent; c.fillText('●', statusX, iy); statusX += 12; }
-      if (evaluatedValue(PM, L, L.mblur, PM.time, 'l.mblur')) {
+      if (evaluatedValue(L, L.mblur, api.transport.time(), 'l.mblur')) {
         c.fillStyle = theme.accent; c.beginPath(); c.arc(statusX, iy, 2, 0, 7); c.fill();
       }
     } else {
       const L = r.L;
-      const selected = PM.sel.layers.includes(L.id) && trackSelected(r, PM.sel.chan);
+      const selected = api.selection.layers().includes(L.id) && trackSelected(r, api.selection.chan() ?? '');
       if (selected) { c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row); }
       else if (T.hoverRow === i) { c.fillStyle = INK.over; c.fillRect(0, y, T.gut, T.row); }
       c.font = '400 11px ' + fui();
       c.fillStyle = selected ? theme.accent : theme.tx3;
       const labelX = 100, valueX = T.propertyValueX;
       if (r.prop.kf.length) {
-        drawKeyArrow(c, 28, y + T.row / 2, -1, adjacentKeyframe(PM, -1, r) != null);
-        drawKeyArrow(c, 52, y + T.row / 2, 1, adjacentKeyframe(PM, 1, r) != null);
+        drawKeyArrow(c, 28, y + T.row / 2, -1, adjacentKeyframe(api, -1, r, space3d) != null);
+        drawKeyArrow(c, 52, y + T.row / 2, 1, adjacentKeyframe(api, 1, r, space3d) != null);
       }
-      icoAnimationDiamond(c, 85, y + T.row / 2, trackChannels(r).some(axis => axis.prop.kf.length > 0), trackChannels(r).some(axis => !!PM.hasKeyAt(r.L, axis.prop, PM.time)));
+      icoAnimationDiamond(c, 85, y + T.row / 2, trackChannels(r).some(axis => axis.prop.kf.length > 0), trackChannels(r).some(axis => !!api.anim.hasKeyAt(r.L, axis.prop, api.transport.time())));
       clipText(c, r.label, labelX, y + T.row / 2, valueX - labelX - 12);
       /* value at playhead */
-      const values = trackChannels(r).map(axis => PM.evP(L, axis.prop, PM.time, axis.key));
-      const v = values[0];
+      const values = trackChannels(r).map(axis => api.anim.evP(L, axis.prop, api.transport.time(), axis.key));
       c.font = '400 10px ' + fmono();
       c.fillStyle = theme.accent;
       c.textAlign = 'right';
@@ -1397,7 +1405,7 @@ function drawGutter(c: any, W: any, H: any) {
   c.restore();
 }
 const clippedLabels = new Map<string, string>();
-listen(document.fonts, 'loadingdone', () => { clippedLabels.clear(); PM.invalidate('timeline'); });
+listen(document.fonts, 'loadingdone', () => { clippedLabels.clear(); invalidate('timeline'); });
 function clipText(c: any, s: any, x: any, y: any, max: any) {
   if (max <= 0) return;
   const key = JSON.stringify([c.font, c.letterSpacing, String(s), max]);
@@ -1416,9 +1424,9 @@ function clipText(c: any, s: any, x: any, y: any, max: any) {
 function fittedPropertyValue(c: any, value: any, unit: string, maxWidth: number) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     const candidates = [
-      `${PM.round(value, 1)}${unit}`,
-      `${PM.round(value, 0)}${unit}`,
-      ...(Math.abs(value) >= 1000 ? [`${PM.round(value / 1000, 1)}k${unit}`] : []),
+      `${api.util.round(value, 1)}${unit}`,
+      `${api.util.round(value, 0)}${unit}`,
+      ...(Math.abs(value) >= 1000 ? [`${api.util.round(value / 1000, 1)}k${unit}`] : []),
     ];
     return candidates.find(candidate => c.measureText(candidate).width <= maxWidth) ?? candidates.at(-1)!;
   }
@@ -1444,16 +1452,13 @@ function drawKeyArrow(c: any, x: number, y: number, direction: number, enabled: 
   c.beginPath(); c.moveTo(x - direction * 2, y - 4); c.lineTo(x + direction * 2, y); c.lineTo(x - direction * 2, y + 4); c.stroke(); c.restore();
 }
 function navigateKeyframe(direction: -1 | 1, row?: any) {
-  const time = adjacentKeyframe(PM, direction, row);
-  if (time != null) PM.setTime(time);
+  const time = adjacentKeyframe(api, direction, row, space3d);
+  if (time != null) api.transport.setTime(time);
 }
 function clearTimelineSelection() {
-  PM.sel.chan = null;
-  PM.sel.keys = [];
   T.keySelectionActive = false;
-  PM.selectLayers([]);
-  PM.bus.emit('sel');
-  PM.invalidate('timeline');
+  api.selection.set({ chan: null, keys: [], layers: [] });
+  invalidate('timeline');
 }
 function icoEye(c: any, x: any, y: any, on: any) {
   c.strokeStyle = on ? INK.hi : INK.lo;
@@ -1484,8 +1489,8 @@ const trail = { time: NaN, stamp: 0, width: 0, velocity: 0 };
 function stepTrail(): number {
   const now = performance.now() / 1000;
   const dt = trail.stamp ? Math.min(now - trail.stamp, .25) : 0;
-  const moved = Number.isFinite(trail.time) ? (PM.time - trail.time) * T.pps : 0;
-  trail.time = PM.time; trail.stamp = now;
+  const moved = Number.isFinite(trail.time) ? (api.transport.time() - trail.time) * T.pps : 0;
+  trail.time = api.transport.time(); trail.stamp = now;
   const target = dt > 0 ? clamp(TRAIL.pxPerVelocity * moved / dt, -TRAIL.maxWidth, TRAIL.maxWidth) : 0;
   if (dt > 0) {
     const omega = 2 / TRAIL.response, decay = Math.exp(-omega * dt);
@@ -1498,10 +1503,10 @@ function stepTrail(): number {
 }
 
 function drawPlayhead(c: any, W: any, H: any) {
-  const x = Math.round(t2x(PM.time)) + .5;
+  const x = Math.round(t2x(api.transport.time())) + .5;
   const width = stepTrail();
   /* Keep animating until the trail has fully settled. */
-  if (width !== 0) scheduleFrame(() => PM.invalidate('timeline'));
+  if (width !== 0) scheduleFrame(() => invalidate('timeline'));
   if (x < T.gut) return;
   c.save(); c.beginPath(); c.rect(T.gut, 0, W - T.gut, H); c.clip();
   /* glow trail behind the direction of travel */
@@ -1538,7 +1543,7 @@ function drawPlayhead(c: any, W: any, H: any) {
 
 function formatOffsetTime(seconds: number): string {
   const sign = seconds < 0 ? '−' : '+';
-  return sign + PM.tc(Math.abs(seconds), PM.proj.fps);
+  return sign + api.util.tc(Math.abs(seconds), api.project.get().fps);
 }
 
 function drawQuickOffset(c: any, W: number, H: number) {
@@ -1563,16 +1568,16 @@ function drawQuickOffset(c: any, W: number, H: number) {
 }
 
 /* ── graph editor ──────────────────────────────────────── */
-const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(PM, axis, time, speed));
+const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(api, axis, time, speed));
 function drawGraph(c: any, W: any, H: any) {
-  graphSamples.begin(PM.proj, [PM.animVersion?.(), PM.proj.fps, T.pps, T.scrollT, W, T.graphType].join(':'));
+  graphSamples.begin(api.project.get(), [api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
   T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
-  const rows = PM.proj.layers.flatMap((L: any) => timelineProperties(PM, L)
+  const rows = api.project.get().layers.flatMap((L: any) => timelineProperties(api, L, space3d)
     .map((row: any) => ({ kind: 'prop', L, ...row })))
-    .filter((r: any) => trackSelected(r, PM.sel.chan) || r.prop.kf.length);
-  const target = resolveGraphTarget(rows, T.graphFocus, PM.sel.layers, (r: any) => trackSelected(r, PM.sel.chan));
+    .filter((r: any) => trackSelected(r, api.selection.chan() ?? '') || r.prop.kf.length);
+  const target = resolveGraphTarget(rows, T.graphFocus, api.selection.layers(), (r: any) => trackSelected(r, api.selection.chan() ?? ''));
   if (target) T.graphFocus = { layerId: target.L.id, trackKey: target.key };
   c.save(); c.beginPath(); c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
   if (!target) {
@@ -1580,7 +1585,7 @@ function drawGraph(c: any, W: any, H: any) {
     c.fillText('Select an animated property to edit its curve', (W + T.gut) / 2, (H + T.ruler) / 2);
     c.textAlign = 'left'; c.restore(); return;
   }
-  const selectedKeyIds = new Set(T.graphMarqueeIds ?? PM.sel.keys);
+  const selectedKeyIds = new Set(T.graphMarqueeIds ?? api.selection.keys());
   const series = rows
     .flatMap((r:any)=>trackChannels(r).map((axis:any)=>({...axis,L:r.L,trackKey:r.key})))
     .filter((axis:any)=>typeof axis.prop.v==='number' && axis.prop.kf.some((key:any)=>selectedKeyIds.has(key.i)));
@@ -1590,7 +1595,7 @@ function drawGraph(c: any, W: any, H: any) {
     c.textAlign = 'left'; c.restore(); return;
   }
   const L = target.L, speedMode=T.graphType==='speed';
-  const viewKey = PM.proj.id + ':' + T.graphType + ':' + series.map((axis: any) => axis.L.id + ':' + axis.key).join('|');
+  const viewKey = api.project.get().id + ':' + T.graphType + ':' + series.map((axis: any) => axis.L.id + ':' + axis.key).join('|');
   if (T.graphViewKey !== viewKey) { T.graphViewKey = viewKey; T.graphViewBounds = null; }
   series.forEach((axis:any)=>temporalKeys(axis.prop.kf));
   let vmin = Infinity, vmax = -Infinity;
@@ -1616,7 +1621,7 @@ function drawGraph(c: any, W: any, H: any) {
   for (let i = 0; i <= 4; i++) {
     const v = vmin + (vmax - vmin) * i / 4, y = Math.round(v2y(v)) + .5;
     c.beginPath(); c.moveTo(T.gut, y); c.lineTo(W, y); c.stroke();
-    c.fillText(PM.round(v, 1), T.gut + 5, y - 4);
+    c.fillText(api.util.round(v, 1), T.gut + 5, y - 4);
   }
   /* curve */
   series.forEach((axis: any, axisIndex: number) => {
@@ -1636,7 +1641,7 @@ function drawGraph(c: any, W: any, H: any) {
   c.stroke();
   /* handles + keys */
   kf.forEach((k: any, i: any) => {
-    PM.UIState.setKeyHandles(k, { ho: null, hi: null, pt: null });
+    api.uiState.setKeyHandles(k, { ho: null, hi: null, pt: null });
     if (!selectedKeyIds.has(k.i)) return;
     const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSamples.sample(axis,L.from+k.t,true) : k.v);
     const nx = kf[i + 1], pv = kf[i - 1];
@@ -1646,7 +1651,7 @@ function drawGraph(c: any, W: any, H: any) {
       const [hx, hy] = pointForBezierHandle(handle, [x, y], [t2x(L.from + nx.t), v2y(nx.v)]);
       c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
       c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
-      PM.UIState.setKeyHandles(k, { ho: [hx, hy] });
+      api.uiState.setKeyHandles(k, { ho: [hx, hy] });
     }
     if (pv && !pv.hold && !speedMode) {
       const handle = visibleBezierHandle(k, pv, 'ei');
@@ -1654,19 +1659,19 @@ function drawGraph(c: any, W: any, H: any) {
       const [hx, hy] = pointForBezierHandle(handle, [px, py], [x, y]);
       c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
       c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
-      PM.UIState.setKeyHandles(k, { hi: [hx, hy] });
+      api.uiState.setKeyHandles(k, { hi: [hx, hy] });
     }
-    const sel = PM.sel.keys.includes(k.i);
+    const sel = api.selection.keys().includes(k.i);
     c.fillStyle = sel ? curveColor : INK.inv;
     c.beginPath(); c.arc(x, y, 4.2, 0, 7); c.fill();
-    PM.UIState.setKeyHandles(k, { pt: [x, y] });
+    api.uiState.setKeyHandles(k, { pt: [x, y] });
   });
   });
   const graphPoints: any[] = series.flatMap((axis: any) => axis.prop.kf.map((key: any) => {
-    const point = PM.UIState.getKeyHandles(key)?.pt;
+    const point = keyHandles(key)?.pt;
     return point ? { id: key.i, key, axis, x: point[0], y: point[1] } : null;
   })).filter(Boolean);
-  const selectedIds = new Set(PM.sel.keys);
+  const selectedIds = new Set(api.selection.keys());
   T._graph.points = graphPoints;
   T._graph.selectionBounds = graphSelectionBounds(graphPoints.filter(point => selectedIds.has(point.id)));
   if (T._graph.selectionBounds) {
@@ -1682,7 +1687,7 @@ function drawGraph(c: any, W: any, H: any) {
   let legendX = T.gut + 12;
   for (const [index, axis] of series.entries()) {
     const label = axis.label === 'fontAxis.wght' ? 'Weight' : axis.label;
-    const unit = PM.CH[axis.key]?.unit;
+    const unit = api.model.CH[axis.key]?.unit;
     const text = label + (unit ? ` (${unit}${speedMode ? '/s' : ''})` : speedMode ? ' /s' : '');
     const width = c.measureText(text).width + 25;
     if (legendX + width > W - 8) { c.fillStyle = theme.tx3; c.fillText('…', legendX, T.ruler + 17); break; }
@@ -1712,7 +1717,7 @@ function bind(cv: any, wrap: any) {
   const setDropRow = (index: number | null) => {
     if (T.dropRow === index) return;
     T.dropRow = index;
-    PM.invalidate('timeline');
+    invalidate('timeline');
   };
   const dropLayerAt = (y: number) => {
     const hr = hitRow(y);
@@ -1722,8 +1727,8 @@ function bind(cv: any, wrap: any) {
      frame-snapped time and row; dropping places the layer exactly there.
      Rows below the last layer append to the bottom of the stack. */
   const mediaDropAt = (e: any) => {
-    const p = PM.proj;
-    const at = Math.max(0, PM.snapF(x2t(Math.max(e.offsetX, T.gut)), p.fps));
+    const p = api.project.get();
+    const at = Math.max(0, api.util.snapF(x2t(Math.max(e.offsetX, T.gut)), p.fps));
     const hr = hitRow(e.offsetY);
     const rowIdx = hr ? hr.i : T.rows.length;
     const index = hr?.row?.L ? p.layers.indexOf(hr.row.L) : p.layers.length;
@@ -1734,54 +1739,53 @@ function bind(cv: any, wrap: any) {
     if (!next && !prev) return;
     if (next && prev && next.at === prev.at && next.rowIdx === prev.rowIdx && next.name === prev.name) return;
     T.drop = next;
-    PM.invalidate('timeline');
+    invalidate('timeline');
   };
   listen(cv, 'dragover', (e: any) => {
     const dt = e.dataTransfer;
-    if (PM.fxDrop?.hasFxDrag(dt)) {
+    if (api.dnd.hasFxDrag(dt)) {
       e.preventDefault(); dt.dropEffect = 'copy';
       const hit = e.offsetX > T.gut ? dropLayerAt(e.offsetY) : null;
       setDropRow(hit ? hit.index : null);
       return;
     }
-    if (!PM.mediaDrop?.hasMediaDrag(dt)) return;
+    if (!api.dnd.hasMediaDrag(dt)) return;
     e.preventDefault(); e.stopPropagation(); dt.dropEffect = 'copy';
     /* Payload data is unreadable during dragover; the drag source parks a
-       description on PM so the ghost can carry its name, kind and length. */
-    const src = PM.mediaDrag || { name: 'Media', kind: 'file' };
+       description on api so the ghost can carry its name, kind and length. */
+    const src = api.dnd.mediaDrag || { name: 'Media', kind: 'file', dur: undefined };
     setMediaDrop({ ...mediaDropAt(e), name: src.name, kind: src.kind, dur: src.dur });
   }, undefined, canvasCleanups);
   listen(cv, 'dragleave', () => { setDropRow(null); setMediaDrop(null); }, undefined, canvasCleanups);
   listen(cv, 'drop', (e: any) => {
     const dt = e.dataTransfer;
-    const fx = PM.fxDrop?.readFxDrag(dt);
+    const fx = api.dnd.readFxDrag(dt);
     setDropRow(null); setMediaDrop(null);
     if (fx) {
       e.preventDefault(); e.stopPropagation();
       const hit = dropLayerAt(e.offsetY);
-      const L = hit?.layer || PM.firstSel?.();
+      const L = hit?.layer || api.selection.first();
       let edge: 'in' | 'out' | undefined;
       if (L && fx.kind === 'transition') {
         const mid = t2x(L.from + L.dur / 2);
         edge = e.offsetX < mid ? 'in' : 'out';
       }
-      PM.fxDrop.applyFxDrop(fx, L?.id, edge, PM);
+      api.dnd.applyFxDrop(fx, L?.id, edge);
       return;
     }
-    const asset = PM.mediaDrop?.readAssetDrag(dt);
-    const files = PM.mediaDrop?.hasFileDrag(dt) ? Array.from(dt.files || []) : [];
+    const asset = api.dnd.readAssetDrag(dt);
+    const files = api.dnd.hasFileDrag(dt) ? Array.from(dt.files || []) as File[] : [];
     if (!asset && !files.length) return;
     e.preventDefault(); e.stopPropagation();
     const { at, index } = mediaDropAt(e);
     if (asset) {
-      const command = PM.commandForAsset(asset.id, at);
-      if (!command) return;
+      const command = api.media.commandForAsset(asset.id, at);
+      if (!command || command.type !== 'add_layer') return;
       command.index = index;
-      const result = PM.Edit.apply(command, { label: 'Add ' + asset.name, origin: 'command' });
-      if (result?.ok === false) PM.toast(result.message || 'Could not add ' + asset.name);
-      PM.autosave?.();
+      const result = api.edit.apply(command, { label: 'Add ' + asset.name, origin: 'command' });
+      if (result?.ok === false) api.ui.toast(result.message || 'Could not add ' + asset.name);
     } else {
-      PM.importFiles(files, { placement: { at, index } });
+      api.media.importFiles(files, { placement: { at, index } });
     }
   }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
@@ -1802,14 +1806,14 @@ function bind(cv: any, wrap: any) {
       T.scrollT += e.deltaX / T.pps;
     }
     T.scrollT = Math.max(-.4, T.scrollT);
-    PM.invalidate('timeline');
+    invalidate('timeline');
   }, { passive: false }, canvasCleanups);
 }
 
 function setHoverRow(index: number | null) {
   if (T.hoverRow === index) return;
   T.hoverRow = index;
-  PM.invalidate('timeline');
+  invalidate('timeline');
 }
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
@@ -1818,11 +1822,11 @@ function onMove(e: any) {
     const graph = T._graph;
     const keys = graph?.series?.flatMap((axis: any) => axis.prop.kf) ?? [];
     const nearHandle = keys.some((key: any) => {
-      const handles = PM.UIState.getKeyHandles(key);
+      const handles = keyHandles(key);
       return [handles?.ho, handles?.hi].some((point: any) => point && Math.hypot(x - point[0], y - point[1]) < 7);
     });
     const nearPoint = keys.some((key: any) => {
-      const point = PM.UIState.getKeyHandles(key)?.pt;
+      const point = keyHandles(key)?.pt;
       return point && Math.hypot(x - point[0], y - point[1]) < 8;
     });
     T.cv.style.cursor = nearHandle ? 'crosshair'
@@ -1849,18 +1853,18 @@ function onMove(e: any) {
   }
   if (x < T.gut && y >= T.ruler) {
     const row = hitRow(y)?.row;
-    if (row?.kind === 'layer' && PM.TYPE_META[row.L.type]?.transform !== false && x >= T.gut - 40) {
+    if (row?.kind === 'layer' && layerSupportsTransform(row.L.type) && x >= T.gut - 40) {
       cur = x < T.gut - 20 ? 'crosshair' : 'pointer';
-      const parent = row.L.parent ? PM.L(row.L.parent)?.name || 'Missing layer' : 'None';
+      const parent = row.L.parent ? api.model.layer(row.L.parent)?.name || 'Missing layer' : 'None';
       title = x < T.gut - 20 ? `Parent: ${parent} · Drag to a layer` : `Parent: ${parent} · Choose parent`;
     } else if (row?.kind === 'prop' && row.prop.kf.length && x >= 16 && x < 64) {
-      cur = adjacentKeyframe(PM, x < 40 ? -1 : 1, row) != null ? 'pointer' : 'default';
+      cur = adjacentKeyframe(api, x < 40 ? -1 : 1, row, space3d) != null ? 'pointer' : 'default';
     } else if (row?.kind === 'prop' && !row.L.lock) {
       if (isScaleTrack(row) && x >= T.gut - 24) {
         cur = 'pointer';
         title = row.L.scaleLinked ? 'Adjust Scale X and Y separately' : 'Link Scale X and Y';
       } else if (x >= 76 && x < 96) cur = 'pointer';
-      else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof PM.evP(row.L, axis.prop, PM.time, axis.key) === 'number') ? 'ew-resize' : 'pointer';
+      else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key) === 'number') ? 'ew-resize' : 'pointer';
     }
   }
   T.cv.title = title;
@@ -1868,7 +1872,7 @@ function onMove(e: any) {
 }
 
 function workAreaHit(x: any, y: any) {
-  const wa = PM.proj.work || [0, PM.proj.dur];
+  const wa = api.project.get().work || [0, api.project.get().dur];
   const x0 = t2x(wa[0]), x1 = t2x(wa[1]);
   const d0 = Math.abs(x - x0), d1 = Math.abs(x - x1);
   /* Handles get a little vertical grace; the bar itself only owns its thin
@@ -1890,7 +1894,7 @@ function onDown(e: any) {
   if (e.button === 1) { releaseExternalFieldFocus(); return panViewport(e); }
   if (e.button === 0) releaseExternalFieldFocus();
   const x = e.offsetX, y = e.offsetY;
-  PM.closeMenus();
+  api.ui.closeMenus();
   if (y < T.ruler && x > T.gut) {
     const hit = workAreaHit(x, y);
     if (hit?.kind === 'handle') return workAreaDrag(e, hit.idx);
@@ -1904,11 +1908,11 @@ function onDown(e: any) {
   const r = hr.row;
   if (r.kind === 'prop') return keyDown(e, r, x, y, hr.i);
   const L = r.L;
-  const span = L.type === 'group' ? PM.groupSpan(L) : L;
+  const span = L.type === 'group' ? api.groups.span(L) : L;
   const x0 = t2x(span.from), x1 = t2x(span.from + span.dur);
   const onClip = x >= x0 - 5 && x <= x1 + 5;
   if (!onClip) return marquee(e, { additive: e.shiftKey || e.metaKey });
-  if (quickOffsetModifiers(e) && PM.sel.layers.includes(L.id) && quickOffsetLayerGroups().length > 1) {
+  if (quickOffsetModifiers(e) && api.selection.layers().includes(L.id) && quickOffsetLayerGroups().length > 1) {
     if (L.lock) return;
     return quickOffsetLayers(e);
   }
@@ -1925,7 +1929,7 @@ function panViewport(e: PointerEvent) {
     cursor: 'grabbing',
     move: (dx: number) => {
       T.scrollT = Math.max(-.4, start - dx / T.pps);
-      PM.invalidate('timeline');
+      invalidate('timeline');
     },
   });
 }
@@ -1936,106 +1940,106 @@ function quickOffsetModifiers(event: any) {
 }
 
 function quickOffsetLayerGroups() {
-  const selected = new Set(PM.sel.layers);
-  return PM.sel.layers.map((id: string) => PM.L(id)).filter((layer: any) => layer
-    && !PM.groupAncestors?.(layer).some((group: any) => selected.has(group.id)));
+  const selected = new Set(api.selection.layers());
+  return api.selection.layers().map((id: string) => api.model.layer(id)).filter((layer: any) => layer
+    && !api.groups.ancestors(layer).some((group: any) => selected.has(group.id)));
 }
 
 function quickOffsetLayers(e: any) {
   const roots = quickOffsetLayerGroups();
   if (roots.length < 2) return;
   const groups = roots.map((root: any) => {
-    const ids = root.type === 'group' ? PM.expandGroups([root.id]) : [root.id];
-    return ids.map((id: string) => PM.L(id)).filter(Boolean);
+    const ids = root.type === 'group' ? api.groups.expand([root.id]) : [root.id];
+    return ids.map((id: string) => api.model.layer(id)).filter(Boolean);
   });
   if (groups.some((members: any[]) => members.some((layer: any) => layer.lock
-      || PM.groupAncestors?.(layer).some((group: any) => group.lock)))) return;
+      || api.groups.ancestors(layer).some((group: any) => group.lock)))) return;
   const timing = groups.flatMap((members: any[], offsetIndex: number) => members.map((L: any) => ({
     L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: 0,
   })));
-  PM.Edit.begin('Quick offset layers', { origin: 'timeline' });
+  api.edit.begin('Quick offset layers', { origin: 'timeline' });
   let moved = false;
-  const clear = () => { T.quickOffset = null; PM.invalidate('timeline'); };
+  const clear = () => { T.quickOffset = null; invalidate('timeline'); };
   beginDrag(e, {
     cursor: 'ew-resize',
     move: (dx: number, _dy: number, event: PointerEvent) => {
       if (!moved && Math.abs(dx) < 3) return;
       moved = true;
       const plan = planQuickOffsetTiming(timing, dx / T.pps);
-      timing.forEach((item: any, index: number) => PM.Edit.dispatch({
-        type: 'set_layer', target: item.L.id, patch: { from: PM.round(plan.times[index], 6) },
+      timing.forEach((item: any, index: number) => api.edit.dispatch({
+        type: 'set_layer', target: item.L.id, patch: { from: api.util.round(plan.times[index] ?? item.time, 6) },
       }));
       const rect = T.cv.getBoundingClientRect();
       T.quickOffset = {
         total: plan.total, perGroup: plan.perGroup,
         x: event.clientX - rect.left, y: event.clientY - rect.top,
       };
-      PM.invalidate('timeline');
+      invalidate('timeline');
     },
-    up: () => { clear(); moved ? PM.Edit.commit('Quick offset layers') : PM.Edit.cancel(); },
-    cancel: () => { clear(); PM.Edit.cancel(); },
+    up: () => { clear(); moved ? api.edit.commit('Quick offset layers') : api.edit.cancel(); },
+    cancel: () => { clear(); api.edit.cancel(); },
   });
 }
 
 function selectLayerForPointer(L: any, event: PointerEvent) {
   T.keySelectionActive = false;
-  PM.sel.keys = [];
-  const selected = PM.sel.layers.includes(L.id);
+  api.selection.set({ keys: [] });
+  const selected = api.selection.layers().includes(L.id);
   const toggle = event.metaKey || event.ctrlKey;
   if (event.shiftKey) {
     const ids = buildRows().filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
     // Keep the original anchor while the user extends or shrinks the range.
-    if (!layerSelectionAnchor || !ids.includes(layerSelectionAnchor) || !PM.sel.layers.includes(layerSelectionAnchor)) {
-      layerSelectionAnchor = PM.sel.layers.find((id: string) => ids.includes(id)) ?? L.id;
+    if (!layerSelectionAnchor || !ids.includes(layerSelectionAnchor) || !api.selection.layers().includes(layerSelectionAnchor)) {
+      layerSelectionAnchor = api.selection.layers().find((id: string) => ids.includes(id)) ?? L.id;
     }
     const from = ids.indexOf(layerSelectionAnchor), to = ids.indexOf(L.id);
     const range = ids.slice(Math.min(from, to), Math.max(from, to) + 1);
-    PM.selectLayers(toggle ? [...new Set([...PM.sel.layers, ...range])] : range);
+    api.selection.select(toggle ? [...new Set([...api.selection.layers(), ...range])] : range);
     return true;
   }
   layerSelectionAnchor = L.id;
   if (!toggle) {
-    if (!selected) PM.selectLayers(L.id);
+    if (!selected) api.selection.select(L.id);
     return true;
   }
-  PM.selectLayers(selected ? PM.sel.layers.filter((id: any) => id !== L.id) : [...PM.sel.layers, L.id]);
+  api.selection.select(selected ? api.selection.layers().filter((id: any) => id !== L.id) : [...api.selection.layers(), L.id]);
   return !selected;
 }
 
 function workAreaDrag(e: any, idx: any) {
-  const startWork = [...(PM.proj.work || [0, PM.proj.dur])];
-  const startDuration = PM.proj.dur;
-  const frame = 1 / Math.max(1, PM.proj.fps);
-  PM.Edit.begin('Work area', { origin: 'timeline' });
+  const startWork = [...(api.project.get().work || [0, api.project.get().dur])];
+  const startDuration = api.project.get().dur;
+  const frame = 1 / Math.max(1, api.project.get().fps);
+  api.edit.begin('Work area', { origin: 'timeline' });
   beginDrag(e, {
     cursor: 'ew-resize',
     move: (dx: any, dy: any, ev: any) => {
       const r = T.cv.getBoundingClientRect();
-      const t = Math.max(0, PM.snapF(x2t(ev.clientX - r.left), PM.proj.fps));
-      const patch = WorkArea.resize(startWork, idx, t, Math.max(startDuration, PM.proj.dur), frame);
-      PM.Edit.dispatch({ type: 'set_composition', patch });
+      const t = Math.max(0, api.util.snapF(x2t(ev.clientX - r.left), api.project.get().fps));
+      const patch = WorkArea.resize(startWork, idx, t, Math.max(startDuration, api.project.get().dur), frame);
+      api.edit.dispatch({ type: 'set_composition', patch });
     },
-    up: () => PM.Edit.commit('Work area'),
-    cancel: () => PM.Edit.cancel(),
+    up: () => api.edit.commit('Work area'),
+    cancel: () => api.edit.cancel(),
   });
 }
 
 function workAreaMove(e: any) {
-  const startWork = [...(PM.proj.work || [0, PM.proj.dur])];
-  const duration = PM.proj.dur;
-  const frame = 1 / Math.max(1, PM.proj.fps);
-  PM.Edit.begin('Move work area', { origin: 'timeline' });
+  const startWork = [...(api.project.get().work || [0, api.project.get().dur])];
+  const duration = api.project.get().dur;
+  const frame = 1 / Math.max(1, api.project.get().fps);
+  api.edit.begin('Move work area', { origin: 'timeline' });
   let moved = false;
   beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: any) => {
       if (!moved && Math.abs(dx) < 2) return;
       moved = true;
-      const delta = PM.snapF(dx / T.pps, PM.proj.fps);
-      PM.Edit.dispatch({ type: 'set_composition', patch: WorkArea.move(startWork, delta, duration, frame) });
+      const delta = api.util.snapF(dx / T.pps, api.project.get().fps);
+      api.edit.dispatch({ type: 'set_composition', patch: WorkArea.move(startWork, delta, duration, frame) });
     },
-    up: () => moved ? PM.Edit.commit('Move work area') : PM.Edit.cancel(),
-    cancel: () => PM.Edit.cancel(),
+    up: () => moved ? api.edit.commit('Move work area') : api.edit.cancel(),
+    cancel: () => api.edit.cancel(),
   });
 }
 
@@ -2046,21 +2050,21 @@ function scrub(e: any) {
   let rawTime = 0;
   let lockedTarget: number | null = null;
   const apply = () => {
-    const time = clamp(rawTime, 0, PM.proj.dur);
-    if (!shiftSnapping()) { lockedTarget = null; PM.setTime(time); return; }
+    const time = clamp(rawTime, 0, api.project.get().dur);
+    if (!shiftSnapping()) { lockedTarget = null; api.transport.setTime(time); return; }
     if (!targets) {
       targets = [];
-      for (const L of PM.proj.layers) {
+      for (const L of api.project.get().layers) {
         targets.push(L.from, L.from + L.dur);
-        for (const item of PM.allProps?.(L) || []) {
+        for (const item of api.anim.allProps(L) || []) {
           for (const key of item.prop?.kf || []) targets.push(L.from + key.t);
         }
       }
-    }
+  }
     const tolerance = 10 / Math.max(1, T.pps);
     const resolved = resolveTimelineSnap(time, targets, tolerance, lockedTarget, 15 / Math.max(1, T.pps));
     lockedTarget = resolved.target;
-    PM.setTime(resolved.time);
+    api.transport.setTime(resolved.time);
   };
   const set = (ev: any) => {
     const r = T.cv.getBoundingClientRect();
@@ -2081,16 +2085,19 @@ function scrub(e: any) {
 
 function togglePropertyAnimation(row: any) {
   const axes = trackChannels(row);
-  const remove = axes.every(axis => PM.hasKeyAt(row.L, axis.prop, PM.time));
-  PM.hist.do(remove ? 'Remove keyframe' : 'Add keyframe', () => {
+  const remove = axes.every(axis => api.anim.hasKeyAt(row.L, axis.prop, api.transport.time()));
+  api.history.do(remove ? 'Remove keyframe' : 'Add keyframe', () => {
     for (const axis of axes) {
-      const at = PM.hasKeyAt(row.L, axis.prop, PM.time);
-      if (remove) PM.removeKey(axis.prop, at);
-      else if (!at) PM.setKeyOn(axis.prop, PM.time - row.L.from, PM.evP(row.L, axis.prop, PM.time, axis.key), 'linear', PM.proj.fps);
+      const at = api.anim.hasKeyAt(row.L, axis.prop, api.transport.time());
+      if (remove && at) api.anim.removeKey(axis.prop, at);
+      else if (!at) {
+        const value = api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key);
+        if (value != null) api.anim.setKeyOn(axis.prop, api.transport.time() - row.L.from, value, 'linear', api.project.get().fps);
+      }
     }
   });
   T.reveal(row.L, axes.map(axis => axis.key));
-  rowsDirty = true; PM.invalidate();
+  rowsDirty = true; invalidate();
 }
 
 function isScaleTrack(row: any) {
@@ -2098,7 +2105,7 @@ function isScaleTrack(row: any) {
 }
 
 function dragPropertyValue(event: any, row: any, rowIndex: number) {
-  let axes = trackChannels(row).map(axis => ({ ...axis, value: PM.evP(row.L, axis.prop, PM.time, axis.key), meta: propertyMetadata(PM, row.L, axis.key) }));
+  let axes = trackChannels(row).map(axis => ({ ...axis, value: api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key), meta: propertyMetadata(api, row.L, axis.key) }));
   if (!axes.every(axis => typeof axis.value === 'number')) {
     editPropertyValue(row, rowIndex); return;
   }
@@ -2106,7 +2113,7 @@ function dragPropertyValue(event: any, row: any, rowIndex: number) {
     const index = Math.min(axes.length - 1, Math.max(0, Math.floor((event.offsetX - T.propertyValueX) / ((T.gut - T.propertyValueX - 8) / axes.length))));
     axes = [axes[index]];
   }
-  const time = PM.time;
+  const time = api.transport.time();
   let editing = false;
   let control: any;
   const cancelOnEscape = (event: KeyboardEvent) => {
@@ -2120,28 +2127,28 @@ function dragPropertyValue(event: any, row: any, rowIndex: number) {
     cursor: 'ew-resize',
     move: (dx: number, _dy: number, ev: any) => {
       if (!editing && Math.abs(dx) < 3) return;
-      if (!editing) { PM.Edit.begin(`Adjust ${row.label}`, { origin: 'timeline' }); editing = true; }
+      if (!editing) { api.edit.begin(`Adjust ${row.label}`, { origin: 'timeline' }); editing = true; }
       axes.forEach((axis, index) => {
         const delta = draggedPropertyValue(axes[0].value, dx, axes[0].meta, !!ev.altKey, !!ev.shiftKey) - axes[0].value;
         const value = row.channels && row.L.scaleLinked && index > 0
           ? axis.value + delta * (axes[0].value ? axis.value / axes[0].value : 1)
           : draggedPropertyValue(axis.value, dx, axis.meta, !!ev.altKey, !!ev.shiftKey);
-        PM.Edit.dispatch({ type: 'set_property', target: row.L.id, path: axis.key, value, time, mode: 'auto', preserveHandEdits: false });
+        api.edit.dispatch({ type: 'set_property', target: row.L.id, path: axis.key, value, time, mode: 'auto', preserveHandEdits: false });
       });
-      PM.invalidate();
+      invalidate();
     },
-    up: () => { cleanup(); if (editing) PM.Edit.commit(`Adjust ${row.label}`); else editPropertyValue(row, rowIndex); },
-    cancel: () => { cleanup(); if (editing) PM.Edit.cancel(); }
+    up: () => { cleanup(); if (editing) api.edit.commit(`Adjust ${row.label}`); else editPropertyValue(row, rowIndex); },
+    cancel: () => { cleanup(); if (editing) api.edit.cancel(); }
   });
 }
 
 function editPropertyValue(row: any, rowIndex: number) {
   if (row.L.lock) return;
   const axes = trackChannels(row);
-  const values = axes.map(axis => PM.evP(row.L, axis.prop, PM.time, axis.key));
-  const time = PM.time;
-  const choices: Record<string, string[]> = {
-    'l.blend': PM.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
+  const values = axes.map(axis => api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key));
+  const time = api.transport.time();
+  const choices: Record<string, readonly string[]> = {
+    'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
     'c.fit': ['cover', 'contain', 'stretch']
   };
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
@@ -2152,7 +2159,7 @@ function editPropertyValue(row: any, rowIndex: number) {
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: '0 4px', zIndex: 9 } });
   if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
   else if (typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0])) input.type = 'color';
-  PM.$('#tl-canvas-wrap').appendChild(input); input.focus(); input.select?.();
+  document.querySelector<HTMLElement>('#tl-canvas-wrap')?.appendChild(input); input.focus(); input.select?.();
   let closed = false;
   const finish = (save: boolean) => {
     if (closed) return;
@@ -2160,11 +2167,11 @@ function editPropertyValue(row: any, rowIndex: number) {
     if (save) {
       const parts = axes.length > 1 ? input.value.split(',').map((value: string) => value.trim()) : [input.value];
       const next = values.map((value, index) => typeof value === 'number' ? Number(parts[index] ?? parts[0]) : typeof value === 'boolean' ? parts[index] === 'true' : parts[index]);
-      if (next.every(value => typeof value !== 'number' || Number.isFinite(value))) PM.Edit.apply(axes.map((axis, index) => ({
+      if (next.every(value => typeof value !== 'number' || Number.isFinite(value))) api.edit.apply(axes.map((axis, index) => ({
         type: 'set_property', target: row.L.id, path: axis.key, value: next[index], time, mode: 'auto', preserveHandEdits: false
       })), { label: `Edit ${row.label}`, origin: 'timeline' });
     }
-    input.remove(); PM.invalidate();
+    input.remove(); invalidate();
   };
   if (options) input.onchange = () => finish(true);
   input.onblur = () => finish(true);
@@ -2177,30 +2184,30 @@ function gutterDown(e: any, x: any, y: any) {
   if (!hr) { if (!e.shiftKey && !e.metaKey) clearTimelineSelection(); return; }
   const r = hr.row;
   if (r.kind !== 'layer') {
-    PM.sel.chan = r.key;
+    api.selection.set({ chan: r.key });
     T.focusGraph(r.L, r.key);
-    PM.selectLayers(r.L.id); T.keySelectionActive = true; PM.invalidate('timeline');
+    api.selection.select(r.L.id); T.keySelectionActive = true; invalidate('timeline');
     if (r.prop.kf.length && x >= 16 && x < 64) { navigateKeyframe(x < 40 ? -1 : 1, r); return; }
     if (r.L.lock) return;
-    if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(PM, r.L); return; }
+    if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(api, r.L); return; }
     if (x >= 76 && x < 96) { togglePropertyAnimation(r); return; }
     if (x >= T.propertyValueX - 4) dragPropertyValue(e, r, hr.i);
     return;
   }
   T.keySelectionActive = false;
-  PM.sel.keys = [];
+  api.selection.set({ keys: [] });
   const L = r.L;
-  if (PM.TYPE_META[L.type]?.transform !== false && x >= T.gut - 40) {
-    const ids = PM.sel.layers.includes(L.id) ? PM.sel.layers : [L.id];
-    if (x < T.gut - 20) PM.beginParentPick?.(e, ids);
-    else PM.showParentMenu?.(ids, e);
+  if (layerSupportsTransform(L.type) && x >= T.gut - 40) {
+    const ids = api.selection.layers().includes(L.id) ? api.selection.layers() : [L.id];
+    if (x < T.gut - 20) api.ui.beginParentPick(e, ids);
+    else api.ui.showParentMenu(ids, e);
     return;
   }
   if (x < 22) { }
-  else if (x < 40) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(PM, L, L.on, PM.time, 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
-  else if (x < 58) { PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
+  else if (x < 40) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { visible: !evaluatedValue(L, L.on, api.transport.time(), 'l.on') } }, { label: 'Toggle visibility', origin: 'timeline' }); return; }
+  else if (x < 58) { api.edit.apply({ type: 'set_layer', target: L.id, patch: { locked: !L.lock } }, { label: 'Toggle lock', origin: 'timeline' }); return; }
   else if (x >= 58 + Math.min(48, (r.depth || 0) * 12) && x < 74 + Math.min(48, (r.depth || 0) * 12)) {
-    const collapsed = toggleTimelineDisclosure(PM, L);
+    const collapsed = toggleTimelineDisclosure(api, L);
     rowsDirty = true;
     if (!collapsed) {
       buildRows();
@@ -2215,15 +2222,18 @@ function gutterDown(e: any, x: any, y: any) {
       }
       keepRowsVisible(hr.i, kids);
     }
-    PM.invalidate('timeline');
+    invalidate('timeline');
     return;
   }
   if (!selectLayerForPointer(L, e)) return;
-  const selected = PM.sel.layers.slice();
-  const moving = PM.expandGroups?.(selected) || selected;
-  if (moving.some((id: string) => PM.L(id)?.lock || PM.groupAncestors(PM.L(id)).some((g: any) => g.lock))) return;
+  const selected = api.selection.layers().slice();
+  const moving = api.groups.expand(selected) || selected;
+  if (moving.some((id: string) => {
+    const layer = api.model.layer(id);
+    return !layer || layer.lock || api.groups.ancestors(layer).some((group) => group.lock);
+  })) return;
   let active = false;
-  const clear = () => { T.reorder = null; PM.invalidate('timeline'); };
+  const clear = () => { T.reorder = null; invalidate('timeline'); };
   beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: number, dy: number, ev: PointerEvent) => {
@@ -2231,42 +2241,42 @@ function gutterDown(e: any, x: any, y: any) {
       active = true;
       const rect = T.cv.getBoundingClientRect(), py = ev.clientY - rect.top;
       const drop = layerDrop(T.rows, (py - T.ruler + T.scrollY) / T.row, ev.clientX - rect.left);
-      const target = drop && PM.L(drop.target);
-      T.reorder = drop && !moving.includes(drop.target) && !target.lock && !PM.groupAncestors(target).some((g: any) => g.lock) ? drop : null;
-      PM.invalidate('timeline');
+      const target = drop && api.model.layer(drop.target);
+      T.reorder = drop && target && !moving.includes(drop.target) && !target.lock && !api.groups.ancestors(target).some((g: any) => g.lock) ? drop : null;
+      invalidate('timeline');
     },
     up: () => {
       const drop = T.reorder; clear();
       if (!drop) return;
-      const roots = PM.proj.layers.filter((layer: any) => selected.includes(layer.id) && !PM.groupAncestors(layer).some((g: any) => selected.includes(g.id)));
-      PM.Edit.mutate('Move layers', () => {
+      const roots = api.project.get().layers.filter((layer: any) => selected.includes(layer.id) && !api.groups.ancestors(layer).some((g: any) => selected.includes(g.id)));
+      api.edit.mutate('Move layers', () => {
         const changing = roots.filter((layer: any) => (layer.group || null) !== drop.group);
-        if (changing.length) PM.moveToGroup(changing.map((layer: any) => layer.id), drop.group);
-        const block = PM.proj.layers.filter((layer: any) => moving.includes(layer.id));
-        const remaining = PM.proj.layers.filter((layer: any) => !moving.includes(layer.id));
+        if (changing.length) api.groups.moveToGroup(changing.map((layer: any) => layer.id), drop.group);
+        const block = api.project.get().layers.filter((layer: any) => moving.includes(layer.id));
+        const remaining = api.project.get().layers.filter((layer: any) => !moving.includes(layer.id));
         let index = remaining.findIndex((layer: any) => layer.id === drop.target);
         if (drop.mode !== 'before') {
           index++;
-          if (drop.mode === 'after') while (index < remaining.length && PM.groupAncestors(remaining[index]).some((g: any) => g.id === drop.target)) index++;
+          if (drop.mode === 'after') while (index < remaining.length && remaining[index] && api.groups.ancestors(remaining[index]!).some((g: any) => g.id === drop.target)) index++;
         }
-        remaining.splice(index, 0, ...block); PM.proj.layers = remaining;
-        PM.normalizeGroupStack(); PM.touch(); PM.ProjectIndex?.invalidate(); PM.bus.emit('layers');
+        remaining.splice(index, 0, ...block); api.project.get().layers = remaining;
+        api.groups.normalizeStack(); api.anim.touch();
       }, { origin: 'timeline' });
-      PM.invalidate();
+      invalidate();
     },
     cancel: clear,
   });
 }
 
 function slide(e: any) {
-  const selectedIds = PM.expandGroups?.(PM.sel.layers) || PM.sel.layers;
-  if (PM.selLayers().some((layer: any) => layer.type === 'group') && PM.proj.layers.some((layer: any) => selectedIds.includes(layer.id) && layer.lock)) return;
-  const layers = PM.proj.layers.filter((l: any) => (PM.expandGroups?.(PM.sel.layers) || PM.sel.layers).includes(l.id) && l.type !== 'group' && !l.lock && !(PM.groupAncestors?.(l) || []).some((g: any) => g.lock));
-  const groupIds = PM.expandGroups?.(PM.sel.layers) || PM.sel.layers;
-  const groups = PM.proj.layers.filter((L: any) => groupIds.includes(L.id) && L.type === 'group' && !L.lock && !(PM.groupAncestors?.(L) || []).some((g: any) => g.lock));
+  const selectedIds = api.groups.expand(api.selection.layers()) || api.selection.layers();
+  if (selectedLayers(api).some((layer: any) => layer.type === 'group') && api.project.get().layers.some((layer: any) => selectedIds.includes(layer.id) && layer.lock)) return;
+  const layers = api.project.get().layers.filter((l: any) => (api.groups.expand(api.selection.layers()) || api.selection.layers()).includes(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
+  const groupIds = api.groups.expand(api.selection.layers()) || api.selection.layers();
+  const groups = api.project.get().layers.filter((L: any) => groupIds.includes(L.id) && L.type === 'group' && !L.lock && !(api.groups.ancestors(L) || []).some((g: any) => g.lock));
   const groupStart = groups.map((L: any) => ({L, from:L.from}));
   const start = layers.map((L: any) => ({ L, from: L.from }));
-  PM.Edit.begin('Move clip', { origin: 'timeline' });
+  api.edit.begin('Move clip', { origin: 'timeline' });
   let moved = false;
   beginDrag(e, {
     cursor: 'grabbing',
@@ -2275,16 +2285,16 @@ function slide(e: any) {
       let dt = dx / T.pps;
       if (shiftSnapping(ev)) dt = snapDelta(start, dt);
       dt = Math.max(dt, -Math.min(...start.map((item: any) => item.from)));
-      groupStart.forEach((s: any) => PM.Edit.dispatch({type:'set_layer',target:s.L.id,patch:{from:PM.snapF(s.from+dt,PM.proj.fps)}}));
-      start.forEach((s: any) => PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: Math.max(0, PM.snapF(s.from + dt, PM.proj.fps)) } }));
+      groupStart.forEach((s: any) => api.edit.dispatch({type:'set_layer',target:s.L.id,patch:{from:api.util.snapF(s.from+dt,api.project.get().fps)}}));
+      start.forEach((s: any) => api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: Math.max(0, api.util.snapF(s.from + dt, api.project.get().fps)) } }));
     },
-    up: () => { moved ? PM.Edit.commit('Move clip') : PM.Edit.cancel(); },
-    cancel: () => PM.Edit.cancel(),
+    up: () => { moved ? api.edit.commit('Move clip') : api.edit.cancel(); },
+    cancel: () => api.edit.cancel(),
   });
 }
 function snapDelta(start: any, dt: any, side?: 'in' | 'out') {
-  const pts = [PM.time, 0, PM.proj.dur, ...(PM.proj.work || []), ...PM.proj.markers.map((m: any) => m.t)];
-  PM.proj.layers.forEach((L: any) => { if (!start.some((s: any) => s.L === L)) { pts.push(L.from, L.from + L.dur); } });
+  const pts = [api.transport.time(), 0, api.project.get().dur, ...(api.project.get().work || []), ...api.project.get().markers.map((m: any) => m.t)];
+  api.project.get().layers.forEach((L: any) => { if (!start.some((s: any) => s.L === L)) { pts.push(L.from, L.from + L.dur); } });
   const tol = 8 / T.pps;
   let best = dt, bd = tol;
   for (const s of start) for (const edge of (side === 'in' ? [s.from + dt] : side === 'out' ? [s.from + s.dur + dt] : [s.from + dt, s.from + s.L.dur + dt])) {
@@ -2294,9 +2304,9 @@ function snapDelta(start: any, dt: any, side?: 'in' | 'out') {
 }
 
 function trim(e: any, side: any) {
-  const layers = PM.proj.layers.filter((l: any) => (PM.expandGroups?.(PM.sel.layers) || PM.sel.layers).includes(l.id) && l.type !== 'group' && !l.lock && !(PM.groupAncestors?.(l) || []).some((g: any) => g.lock));
+  const layers = api.project.get().layers.filter((l: any) => (api.groups.expand(api.selection.layers()) || api.selection.layers()).includes(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
   const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
-  PM.Edit.begin('Trim clip', { origin: 'timeline' });
+  api.edit.begin('Trim clip', { origin: 'timeline' });
   let moved = false;
   beginDrag(e, {
     cursor: 'ew-resize',
@@ -2304,21 +2314,21 @@ function trim(e: any, side: any) {
       moved = true;
       let dt = dx / T.pps;
       if (shiftSnapping(ev)) dt = snapDelta(start, dt, side);
-      dt = PM.snapF(dt, PM.proj.fps);
+      dt = api.util.snapF(dt, api.project.get().fps);
       start.forEach((s: any) => {
         if (side === 'in') {
-          let nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / PM.proj.fps);
-          if (PM.MediaTiming.isTimed(s.L)) nf = Math.max(nf, PM.MediaTiming.earliestStart({ ...s.L, from: s.from, d: { ...s.L.d, trim: s.trim } }));
-          PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: nf, duration: s.dur + (s.from - nf) } });
-          if (PM.MediaTiming.isTimed(s.L)) {
-            const rate = PM.MediaTiming.rate(s.L);
-            PM.Edit.dispatch({ type: 'set_content', target: s.L.id, patch: { trim: Math.max(0, s.trim + (nf - s.from) * rate) } });
+          let nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / api.project.get().fps);
+          if (api.media.timing.isTimed(s.L)) nf = Math.max(nf, api.media.timing.earliestStart({ ...s.L, from: s.from, d: { ...s.L.d, trim: s.trim } }));
+          api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: nf, duration: s.dur + (s.from - nf) } });
+          if (api.media.timing.isTimed(s.L)) {
+            const rate = api.media.timing.rate(s.L);
+            api.edit.dispatch({ type: 'set_content', target: s.L.id, patch: { trim: Math.max(0, s.trim + (nf - s.from) * rate) } });
           }
-        } else PM.Edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { duration: Math.max(1 / PM.proj.fps, s.dur + dt) } });
+        } else api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { duration: Math.max(1 / api.project.get().fps, s.dur + dt) } });
       });
     },
-    up: () => { moved ? PM.Edit.commit('Trim clip') : PM.Edit.cancel(); },
-    cancel: () => PM.Edit.cancel(),
+    up: () => { moved ? api.edit.commit('Trim clip') : api.edit.cancel(); },
+    cancel: () => api.edit.cancel(),
   });
 }
 
@@ -2326,8 +2336,8 @@ function captureKeyframeGesture(entries: any[]) {
   const selected = new Set(entries.map((entry: any) => entry.key));
   const entryLayerIds = new Set(entries.map((entry: any) => entry.L.id));
   const layerOrder = [
-    ...PM.sel.layers.filter((id: string) => entryLayerIds.has(id)),
-    ...PM.proj.layers.map((layer: any) => layer.id).filter((id: string) => entryLayerIds.has(id)),
+    ...api.selection.layers().filter((id: string) => entryLayerIds.has(id)),
+    ...api.project.get().layers.map((layer: any) => layer.id).filter((id: string) => entryLayerIds.has(id)),
   ].filter((id: string, index: number, ids: string[]) => ids.indexOf(id) === index);
   const offsetIndex = new Map(layerOrder.map((id: string, index: number) => [id, index]));
   const layerByProperty = new Map(entries.map((entry: any) => [entry.prop, entry.L]));
@@ -2350,7 +2360,7 @@ function captureKeyframeGesture(entries: any[]) {
        merely because a drag began or allow the group to move farther right. */
     maxTime: Math.max(
       entry.time,
-      Math.max(0, PM.proj.dur - (Number(layerByProperty.get(prop)?.from) || 0)),
+      Math.max(0, api.project.get().dur - (Number(layerByProperty.get(prop)?.from) || 0)),
     ),
     selected: selected.has(entry.key),
     order: entry.order,
@@ -2364,15 +2374,15 @@ function captureKeyframeGesture(entries: any[]) {
 
 function keyframeSnapTargets(snapshot: any) {
   const selected = new Set(snapshot.items.filter((item: any) => item.selected).map((item: any) => item.key));
-  const targets: number[] = [PM.time, 0, PM.proj.dur, ...(PM.proj.work || [])];
-  targets.push(...(PM.proj.markers || []).map((marker: any) => marker.t));
-  PM.proj.layers.forEach((L: any) => {
+  const targets: number[] = [api.transport.time(), 0, api.project.get().dur, ...(api.project.get().work || [])];
+  targets.push(...(api.project.get().markers || []).map((marker: any) => marker.t));
+  api.project.get().layers.forEach((L: any) => {
     targets.push(L.from, L.from + L.dur);
-    PM.allProps(L).forEach(({ prop }: any) => prop.kf.forEach((key: any) => {
+    api.anim.allProps(L).forEach(({ prop }: any) => prop.kf.forEach((key: any) => {
       if (!selected.has(key)) targets.push(L.from + key.t);
     }));
   });
-  return [...new Set(targets.filter(Number.isFinite).map((time: number) => PM.round(time, 6)))];
+  return [...new Set(targets.filter(Number.isFinite).map((time: number) => api.util.round(time, 6)))];
 }
 
 function snapKeyframeGesture(snapshot: any, requestedDelta: number, lock: KeyframeGroupSnapLock | null) {
@@ -2401,14 +2411,14 @@ function applyKeyframeGesture(
   planner: (items: any[], delta: number, fps: number) => any = planKeyframeMove,
 ) {
   restoreKeyframeGesture(snapshot);
-  const plan = planner(snapshot.items, requestedDelta, PM.proj.fps);
+  const plan = planner(snapshot.items, requestedDelta, api.project.get().fps);
   const removed = new Set(plan.removed.map((item: any) => item.key));
   plan.moves.forEach(({ item, time }: any) => { item.key.t = time; });
   if (valueForItem) {
     snapshot.items.forEach((item: any) => {
       if (!item.selected || typeof item.value !== 'number') return;
       const value = valueForItem(item);
-      if (Number.isFinite(value)) item.key.v = PM.round(value, 3);
+      if (value != null && Number.isFinite(value)) item.key.v = api.util.round(value, 3);
     });
   }
   snapshot.properties.forEach(({ prop, keys }: any) => {
@@ -2417,24 +2427,24 @@ function applyKeyframeGesture(
       .filter((key: any) => !removed.has(key))
       .sort((a: any, b: any) => a.t - b.t || (order.get(a) as number) - (order.get(b) as number));
   });
-  PM.touch(); PM.invalidate();
+  api.anim.touch(); invalidate();
   return plan;
 }
 
 function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   const hit = pickKeyframeHit(
-    r.prop.kf, PM.sel.keys,
+    r.prop.kf, api.selection.keys(),
     (k: any) => Math.abs(t2x(r.L.from + k.t) - x), 6,
   );
   const quickModifier = quickOffsetModifiers(e);
   const additive = !quickModifier && (e.shiftKey || e.metaKey);
   if (!hit) return marquee(e, { additive });
-  PM.sel.chan = r.key;
+  api.selection.set({ chan: r.key });
   T.focusGraph(r.L, r.key);
   const wasSelected = keySelected(hit);
-  if (additive) PM.selectLayers(r.L.id, true);
-  else if (!PM.sel.layers.includes(r.L.id)) PM.selectLayers(r.L.id);
-  const baseSelection = [...PM.sel.keys];
+  if (additive) api.selection.select(r.L.id, true);
+  else if (!api.selection.layers().includes(r.L.id)) api.selection.select(r.L.id);
+  const baseSelection = [...api.selection.keys()];
   const hitIds = uniqueKeyIds([hit]);
   setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, additive, true));
   const entries = selectedKeyEntries();
@@ -2447,7 +2457,7 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
   beginDrag(e, {
     move: (dx: any, dy: any, event: PointerEvent) => {
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { moved = true; PM.hist.begin(quickOffset ? 'Quick offset keyframes' : 'Move keyframe'); }
+      if (!moved) { moved = true; api.history.begin(quickOffset ? 'Quick offset keyframes' : 'Move keyframe'); }
       let delta = dx / T.pps;
       if (!quickOffset && shiftSnapping(event)) {
         const snap = snapKeyframeGesture(snapshot, delta, snapLock);
@@ -2465,14 +2475,14 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
     },
     up: () => {
       clearQuickOffset();
-      if (moved) PM.hist.commit(quickOffset ? 'Quick offset keyframes' : 'Move keyframe');
+      if (moved) api.history.commit(quickOffset ? 'Quick offset keyframes' : 'Move keyframe');
       else if (additive && wasSelected) setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, true, false));
-      PM.invalidate('timeline');
+      invalidate('timeline');
     },
     cancel: () => {
       clearQuickOffset();
-      if (moved) { restoreKeyframeGesture(snapshot); PM.hist.cancel(); PM.touch(); }
-      PM.invalidate('timeline');
+      if (moved) { restoreKeyframeGesture(snapshot); api.history.cancel(); api.anim.touch(); }
+      invalidate('timeline');
     },
   });
 }
@@ -2485,18 +2495,18 @@ function graphDown(e: any, x: any, y: any) {
   // Pick the closest visible point/handle, not whichever axis was iterated first.
   const points = series.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
   const pointHits = points.map(item => {
-    const pt = PM.UIState.getKeyHandles(item.key)?.pt;
+    const pt = keyHandles(item.key)?.pt;
     return { ...item, i: item.key.i, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
   }).sort((a, b) => a.distance - b.distance);
   const closestDistance = pointHits[0]?.distance ?? Infinity;
-  const pointHit = pickKeyframeHit(pointHits.filter(item => item.distance <= closestDistance + 1), PM.sel.keys, item => item.distance, 8) ?? pointHits[0];
+  const pointHit = pickKeyframeHit(pointHits.filter(item => item.distance <= closestDistance + 1), api.selection.keys(), item => item.distance, 8) ?? pointHits[0];
   if (!pointHit || pointHit.distance >= 6) {
     const handles = points.flatMap(item => (['eo', 'ei'] as const).map(which => {
-      const pt = PM.UIState.getKeyHandles(item.key)?.[which === 'eo' ? 'ho' : 'hi'];
+      const pt = keyHandles(item.key)?.[which === 'eo' ? 'ho' : 'hi'];
       return { ...item, which, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
     })).sort((a, b) => a.distance - b.distance);
     const nearest = handles[0]?.distance ?? Infinity;
-    const handle = handles.find(item => item.distance <= nearest + 1 && PM.sel.keys.includes(item.key.i)) ?? handles[0];
+    const handle = handles.find(item => item.distance <= nearest + 1 && api.selection.keys().includes(item.key.i)) ?? handles[0];
     if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L, handle.axis);
   }
   if ((!pointHit || pointHit.distance >= 8) && pointInGraphSelection(g.selectionBounds, x, y)) {
@@ -2507,9 +2517,9 @@ function graphDown(e: any, x: any, y: any) {
   const hit = pointHit.key;
   const additive = e.shiftKey || e.metaKey;
   const wasSelected = keySelected(hit);
-  if (additive) PM.selectLayers(L.id, true);
-  else if (!PM.sel.layers.includes(L.id)) PM.selectLayers(L.id);
-  const baseSelection = [...PM.sel.keys];
+  if (additive) api.selection.select(L.id, true);
+  else if (!api.selection.layers().includes(L.id)) api.selection.select(L.id);
+  const baseSelection = [...api.selection.keys()];
   const hitIds = uniqueKeyIds([hit]);
   setSelectedKeys(selectionAfterKeyGesture(baseSelection, hitIds, additive, true));
   return dragGraphSelection(e, g, L, () => {
@@ -2538,7 +2548,7 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
         else dx = 0;
       }
       if (!moved && Math.hypot(dx, dy) < 3) return;
-      if (!moved) { moved = true; PM.hist.begin(entries.length > 1 ? 'Edit keyframes' : 'Edit curve'); }
+      if (!moved) { moved = true; api.history.begin(entries.length > 1 ? 'Edit keyframes' : 'Edit curve'); }
       const dv = g.y2v(anchorY + dy) - g.y2v(anchorY);
       let delta = dx / timeScale;
       if (shiftSnapping(event) && dx !== 0) {
@@ -2546,18 +2556,18 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
         delta = snap.delta; snapLock = snap.lock;
       } else snapLock = null;
       applyKeyframeGesture(snapshot, delta, (item: any) => item.value + (T.graphType==='speed'?0:dv), planGraphKeyframeMove);
-      if(T.graphType==='speed'){ for(const item of speeds){ item.key.inInterp=item.key.outInterp='bezier'; item.key.inEase.speed=item.inSpeed+dv; item.key.outEase.speed=item.outSpeed+dv; } PM.touch(); PM.invalidate(); }
+      if(T.graphType==='speed'){ for(const item of speeds){ item.key.inInterp=item.key.outInterp='bezier'; item.key.inEase.speed=item.inSpeed+dv; item.key.outEase.speed=item.outSpeed+dv; } api.anim.touch(); invalidate(); }
     },
     up: () => {
       T.graphDragBounds = null;
-      if (moved) PM.hist.commit('Edit curve');
+      if (moved) api.history.commit('Edit curve');
       else click?.();
-      PM.invalidate();
+      invalidate();
     },
     cancel: () => {
-      if (moved) { restoreKeyframeGesture(snapshot); PM.hist.cancel(); PM.touch(); }
+      if (moved) { restoreKeyframeGesture(snapshot); api.history.cancel(); api.anim.touch(); }
       T.graphDragBounds = null;
-      PM.invalidate();
+      invalidate();
     },
   });
 }
@@ -2567,10 +2577,10 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any,
   const axes = g.series.filter((axis: any) => (axis.trackKey ?? axis.key) === trackKey && !axis.L.lock);
   const candidates = axes.flatMap((axis: any) => axis.prop.kf.map((key: any) => ({ axis, key })));
   const clickedIndex = kf.indexOf(k);
-  const explicitlySelected = new Set(PM.sel.keys);
+  const explicitlySelected = new Set(api.selection.keys());
   const owningKeys = candidates.filter((item: any) => item.axis.L === L).map((item: any) => item.key);
   const targetKeys = new Set([
-    ...keysForBezierHandleDrag(owningKeys, k, PM.sel.keys),
+    ...keysForBezierHandleDrag(owningKeys, k, api.selection.keys()),
     ...axes.filter((axis: any) => axis.L !== L).map((axis: any) => axis.prop.kf[clickedIndex])
       .filter((key: any) => key && keyMembers(key).some(member => explicitlySelected.has(member.key.i))),
   ]);
@@ -2611,7 +2621,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any,
     }
     return { axis, key, previous, next, segmentStart, segmentEnd, opposite };
   }).filter(Boolean);
-  PM.hist.begin('Adjust easing');
+  api.history.begin('Adjust easing');
   T.graphDragBounds = [g.vmin, g.vmax];
   let moved = false, prepared = false;
   beginDrag(e, {
@@ -2630,7 +2640,7 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any,
       }
       const handle = moveBezierHandle(start, [dx, dy], clickedStart, clickedEnd, shiftSnapping(event) ? which : undefined);
       drags.forEach((drag: any) => {
-        drag.key[which] = handle.map((value: number) => PM.round(value, 4));
+        drag.key[which] = handle.map((value: number) => api.util.round(value, 4));
         if (!drag.opposite) return;
         const keyPoint: [number, number] = [t2x(drag.axis.L.from + drag.key.t), g.v2y(drag.key.v)];
         const draggedPoint = pointForBezierHandle(handle, drag.segmentStart, drag.segmentEnd);
@@ -2639,36 +2649,36 @@ function dragHandle(e: any, k: any, which: 'eo' | 'ei', g: any, kf: any, L: any,
           mirroredPoint, drag.opposite.segmentStart, drag.opposite.segmentEnd, drag.opposite.fallback,
         );
         oppositeHandle[0] = Math.max(0, Math.min(1, oppositeHandle[0]));
-        drag.key[drag.opposite.which] = oppositeHandle.map((value: number) => PM.round(value, 4));
+        drag.key[drag.opposite.which] = oppositeHandle.map((value: number) => api.util.round(value, 4));
       });
-      PM.touch(); PM.invalidate();
+      api.anim.touch(); invalidate();
     },
-    up: () => { T.graphDragBounds = null; moved ? PM.hist.commit('Adjust easing') : PM.hist.cancel(); PM.invalidate(); },
+    up: () => { T.graphDragBounds = null; moved ? api.history.commit('Adjust easing') : api.history.cancel(); invalidate(); },
     cancel: () => {
       originals.forEach(({ key, state }: any) => {
         for (const field of Object.keys(key)) if (!(field in state)) delete key[field];
         Object.assign(key, state);
       });
-      T.graphDragBounds = null; PM.hist.cancel(); PM.touch(); PM.invalidate();
+      T.graphDragBounds = null; api.history.cancel(); api.anim.touch(); invalidate();
     },
   });
 }
 
-function keySelected(key: any) { return keyMembers(key).some(member => PM.sel.keys.includes(member.key.i)); }
+function keySelected(key: any) { return keyMembers(key).some(member => api.selection.keys().includes(member.key.i)); }
 function uniqueKeyIds(keys: any) {
-  return expandScaleKeyIds(PM, keys);
+  return expandScaleKeyIds(api, keys);
 }
 function setSelectedKeys(keys: any, layerIds?: any) {
-  PM.sel.keys = uniqueKeyIds(keys);
+  const selection: { keys: string[]; layers?: string[] } = { keys: uniqueKeyIds(keys) };
   T.keySelectionActive = true;
-  if (layerIds) PM.sel.layers = [...new Set(layerIds)];
-  PM.bus.emit('sel');
-  PM.invalidate();
+  if (layerIds) selection.layers = [...new Set(layerIds)] as string[];
+  api.selection.set(selection);
+  invalidate();
 }
 function selectedKeyEntries() {
-  const selected = new Set(PM.resolveSelectedKeys());
+  const selected = new Set(api.selection.resolveSelectedKeys());
   const entries: any[] = [];
-  PM.proj.layers.forEach((L: any) => PM.allProps(L).forEach(({ prop }: any) => prop.kf.forEach((key: any) => {
+  api.project.get().layers.forEach((L: any) => api.anim.allProps(L).forEach(({ prop }: any) => prop.kf.forEach((key: any) => {
     if (selected.has(key)) {temporalKeys(prop.kf);entries.push({ key, prop, L });}
   })));
   return entries;
@@ -2678,7 +2688,7 @@ function keysInMarquee(m: any, graph: any = false) {
   if (graph) {
     const target = T._graph && T._graph.target;
     (T._graph?.series?.flatMap((axis:any) => axis.prop.kf) ?? []).forEach((key: any) => {
-      const pt = PM.UIState.getKeyHandles(key)?.pt;
+      const pt = keyHandles(key)?.pt;
       if (pt && pt[0] >= m.x0 && pt[0] <= m.x1 && pt[1] >= m.y0 && pt[1] <= m.y1) picked.push(key);
     });
     return picked;
@@ -2696,8 +2706,8 @@ function keysInMarquee(m: any, graph: any = false) {
 }
 function layersForKeys(keys: any) {
   const ids = new Set(uniqueKeyIds(keys)), layers: any[] = [];
-  PM.proj.layers.forEach((L: any) => {
-    if (PM.allProps(L).some(({ prop }: any) => prop.kf.some((key: any) => ids.has(key.i)))) layers.push(L.id);
+  api.project.get().layers.forEach((L: any) => {
+    if (api.anim.allProps(L).some(({ prop }: any) => prop.kf.some((key: any) => ids.has(key.i)))) layers.push(L.id);
   });
   return layers;
 }
@@ -2706,9 +2716,9 @@ function marquee(e: any, opt: any = {}) {
   const r = T.cv.getBoundingClientRect();
   const x0 = e.clientX - r.left, y0 = e.clientY - r.top;
   const additive = !!opt.additive;
-  const baseKeys = additive ? [...PM.sel.keys] : [];
-  const baseLayers = additive ? [...PM.sel.layers] : [];
-  const originalKeys = [...PM.sel.keys], originalLayers = [...PM.sel.layers];
+  const baseKeys = additive ? [...api.selection.keys()] : [];
+  const baseLayers = additive ? [...api.selection.layers()] : [];
+  const originalKeys = [...api.selection.keys()], originalLayers = [...api.selection.layers()];
   const graphPoints = opt.graph ? [...(T._graph?.points ?? [])] : null;
   if (graphPoints) T.graphMarqueeIds = originalKeys;
   let graphPickedIds: string[] = [];
@@ -2728,7 +2738,7 @@ function marquee(e: any, opt: any = {}) {
         ? [...new Set([...originalKeys, ...pickedIds])]
         : selectionAfterMarquee(baseKeys, pickedIds, additive);
       setSelectedKeys(nextKeys, [...baseLayers, ...layersForKeys(nextKeys)]);
-      PM.invalidate('timeline');
+      invalidate('timeline');
     },
     up: () => {
       if (!dragged) {
@@ -2737,7 +2747,7 @@ function marquee(e: any, opt: any = {}) {
       } else if (graphPoints && !additive) {
         const nextKeys = graphPickedIds.length ? graphPickedIds : originalKeys;
         setSelectedKeys(nextKeys, layersForKeys(nextKeys));
-      } else if (T.marquee && !PM.sel.keys.length) {
+      } else if (T.marquee && !api.selection.keys().length) {
         const m = T.marquee;
         const picked: any[] = [];
         T.rows.forEach((row: any, i: any) => {
@@ -2748,13 +2758,13 @@ function marquee(e: any, opt: any = {}) {
             if (b > m.x0 && a < m.x1) picked.push(row.L.id);
           }
         });
-        PM.selectLayers([...baseLayers, ...picked]);
+        api.selection.select([...baseLayers, ...picked]);
       }
-      T.graphMarqueeIds = null; T.marquee = null; PM.invalidate('timeline');
+      T.graphMarqueeIds = null; T.marquee = null; invalidate('timeline');
     },
     cancel: () => {
       if (graphPoints) { T.graphMarqueeIds = null; setSelectedKeys(originalKeys, originalLayers); }
-      T.marquee = null; PM.invalidate('timeline');
+      T.marquee = null; invalidate('timeline');
     },
   });
 }
@@ -2763,7 +2773,7 @@ function onDbl(e: any) {
   const x = e.offsetX, y = e.offsetY;
   const workHit: any = x > T.gut && workAreaHit(x, y);
   if (workHit?.kind === 'bar') {
-    PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Reset work area', origin: 'timeline' });
+    api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Reset work area', origin: 'timeline' });
     return;
   }
   if (x < T.gut && y > T.ruler) {
@@ -2773,7 +2783,7 @@ function onDbl(e: any) {
   }
 }
 function renameLayer(L: any, rowIdx: any) {
-  const wrap = PM.$('#tl-canvas-wrap');
+  const wrap = document.querySelector<HTMLElement>('#tl-canvas-wrap');
   const inp = h('input', {
     value: L.name,
     style: {
@@ -2782,50 +2792,51 @@ function renameLayer(L: any, rowIdx: any) {
       color: 'var(--tx)', fontSize: '11.5px', padding: '0 5px', zIndex: 9,
     },
   });
+  if (!wrap) return;
   wrap.appendChild(inp); inp.focus(); inp.select();
   const disposeInput = () => { inp.onblur = null; inp.onkeydown = null; inp.remove(); };
   canvasCleanups.push(disposeInput);
   const done = (ok: any) => {
-    if (ok && inp.value.trim()) PM.Edit.apply({ type: 'set_layer', target: L.id, patch: { name: inp.value.trim() } }, { label: 'Rename layer', origin: 'timeline' });
-    disposeInput(); PM.invalidate();
+    if (ok && inp.value.trim()) api.edit.apply({ type: 'set_layer', target: L.id, patch: { name: inp.value.trim() } }, { label: 'Rename layer', origin: 'timeline' });
+    disposeInput(); invalidate();
   };
   inp.onblur = () => done(true);
   inp.onkeydown = (ev: any) => { ev.stopPropagation(); if (ev.key === 'Enter') done(true); if (ev.key === 'Escape') done(false); };
 }
 
 function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
-  const entries = keyframeContextEntries(clickedEntries, PM.sel.keys, selectedKeyEntries());
+  const entries = keyframeContextEntries(clickedEntries, api.selection.keys(), selectedKeyEntries());
   entries.forEach((entry:any)=>temporalKeys(entry.prop.kf));
   const keys = entries.map((entry: any) => entry.key);
   const multiple = keys.length > 1;
   items.push({ header: multiple ? `${keys.length} keyframes` : 'Keyframe' });
-  items.push({label:'Keyframe Velocity…',run:()=>velocityDialog(PM,entries)}, {label:'Scale keyframes…',run:()=>scaleGraphDialog(PM,selectedKeyEntries())});
+  items.push({label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale keyframes…',run:()=>scaleGraphDialog(api,selectedKeyEntries())});
   const labels: Record<string, string> = {
     linear: 'Linear', power: 'Power', easeOut: 'Ease out', easeInOut: 'Ease in / out',
     expoOut: 'Exponential out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide',
   };
   ['linear', 'power', 'easeOut', 'easeInOut', 'expoOut', 'backOut', 'snap', 'glide'].forEach((name: any) =>
     items.push({
-      label: labels[name], curve: PM.Ease.PRESETS[name],
-      on: keys.every((target: any) => !target.hold && PM.Ease.nameOf(target.eo, target.ei) === name),
-      run: () => PM.hist.do(multiple ? 'Ease keyframes' : 'Ease', () => PM.applyEaseTo(keys, name)),
+      label: labels[name], curve: api.ease.PRESETS[name],
+      on: keys.every((target: any) => !target.hold && api.ease.nameOf(target.eo, target.ei) === name),
+      run: () => api.history.do(multiple ? 'Ease keyframes' : 'Ease', () => api.anim.applyEaseTo(keys, name)),
     }));
   const allHold = keys.every((target: any) => target.hold);
   items.push({
     label: allHold ? 'Remove hold' : multiple ? 'Hold keyframes' : 'Toggle hold',
-    run: () => PM.hist.do(multiple ? 'Hold keyframes' : 'Hold', () => {
+    run: () => api.history.do(multiple ? 'Hold keyframes' : 'Hold', () => {
       keys.forEach((target: any) => { target.hold = !allHold; });
-      PM.touch();
+      api.anim.touch();
     }),
   });
   items.push('-', {
     label: multiple ? `Delete ${keys.length} keyframes` : 'Delete keyframe',
-    run: () => PM.hist.do(multiple ? 'Delete keyframes' : 'Delete keyframe', () => {
+    run: () => api.history.do(multiple ? 'Delete keyframes' : 'Delete keyframe', () => {
       const values = new Map<any, any>();
-      for (const layer of PM.proj.layers) for (const { key, prop } of PM.allProps(layer)) {
-        if (entries.some((entry: any) => entry.prop === prop)) values.set(prop, PM.evP(layer, prop, PM.time, key));
+      for (const layer of api.project.get().layers) for (const { key, prop } of api.anim.allProps(layer)) {
+        if (entries.some((entry: any) => entry.prop === prop)) values.set(prop, api.anim.evP(layer, prop, api.transport.time(), key));
       }
-      entries.forEach((entry: any) => PM.removeKey(entry.prop, entry.key));
+      entries.forEach((entry: any) => api.anim.removeKey(entry.prop, entry.key));
       for (const [prop, value] of values) if (!prop.kf.length) prop.v = value;
     }),
   });
@@ -2856,19 +2867,19 @@ function onCtx(e: any) {
       const members = key.members ?? [{ key, prop: r.prop }];
       pushKeyframeMenu(items, members);
     } else {
-      items.push({ label: 'Add keyframe here', run: () => PM.hist.do('Add keyframe', () => {
-        const values = trackChannels(r).map(axis => ({ ...axis, value: PM.evP(r.L, axis.prop, x2t(x), axis.key) }));
-        values.forEach(axis => PM.setKeyOn(axis.prop, x2t(x) - r.L.from, axis.value, 'linear', PM.proj.fps));
+      items.push({ label: 'Add keyframe here', run: () => api.history.do('Add keyframe', () => {
+        const values = trackChannels(r).map(axis => ({ ...axis, value: api.anim.evP(r.L, axis.prop, x2t(x), axis.key) }));
+        values.forEach(axis => api.anim.setKeyOn(axis.prop, x2t(x) - r.L.from, axis.value, 'linear', api.project.get().fps));
       }) });
-      items.push({ label: 'Clear all keyframes', disabled: !r.prop.kf.length, run: () => PM.hist.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = PM.evP(r.L, axis.prop, PM.time, axis.key); axis.prop.kf = []; }); PM.touch(); }) });
+      items.push({ label: 'Clear all keyframes', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
     }
   } else if (!T.graph && hr && hr.row.kind === 'layer') {
-    PM.showLayerMenu(hr.row.L, e, 'timeline');
+    api.ui.showLayerMenu(hr.row.L, e, 'timeline');
     return;
   } else if (!T.graph || y < T.ruler) {
-    items.push({ label: 'Set work area start', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(PM.time, PM.proj.work[1] - 1 / PM.proj.fps), PM.proj.work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Set work area end', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [PM.proj.work[0], Math.max(PM.time, PM.proj.work[0] + 1 / PM.proj.fps)] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Reset work area', run: () => PM.Edit.apply({ type: 'set_composition', patch: { workArea: [0, PM.proj.dur] } }, { label: 'Work area', origin: 'timeline' }) });
+    items.push({ label: 'Set work area start', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Set work area end', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Reset work area', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) });
   }
   /* Extension contributions land at the end, so the positions a user has
      learned for the built-in rows never move. `layer:context` only fires over a
@@ -2878,35 +2889,35 @@ function onCtx(e: any) {
     ? T._graph?.target?.L?.id ?? null
     : hr && hr.row.kind === 'layer' ? hr.row.L.id : null;
   const contributed = [
-    ...(layerId ? PM.Kernel?.collectMenu?.('layer:context', { layerId }) ?? [] : []),
-    ...(PM.Kernel?.collectMenu?.('timeline:context', { kind: rowKind, layerId, time: x2t(x) }) ?? []),
+    ...(layerId ? api.menus.collect('layer:context', { layerId }) : []),
+    ...api.menus.collect('timeline:context', { kind: rowKind, layerId, time: x2t(x) }),
   ];
   if (contributed.length) items.push('-' as any, ...contributed);
-  if (items.length) PM.menu(document.body, items, { x: e.clientX, y: e.clientY });
+  if (items.length) api.ui.menu({ x: e.clientX, y: e.clientY }, items);
 }
 
 /* ── edge navigation ───────────────────────────────────── */
 function edges() {
-  const e = new Set([0, PM.proj.dur]);
-  PM.proj.layers.forEach((L: any) => {
-    e.add(PM.round(L.from, 4)); e.add(PM.round(L.from + L.dur, 4));
-    PM.allProps(L).forEach((p: any) => p.prop.kf.forEach((k: any) => e.add(PM.round(L.from + k.t, 4))));
+  const e = new Set([0, api.project.get().dur]);
+  api.project.get().layers.forEach((L: any) => {
+    e.add(api.util.round(L.from, 4)); e.add(api.util.round(L.from + L.dur, 4));
+    api.anim.allProps(L).forEach((p: any) => p.prop.kf.forEach((k: any) => e.add(api.util.round(L.from + k.t, 4))));
   });
   return [...e].sort((a: any, b: any) => a - b);
 }
-function nextEdge() { const e = edges(); return e.find((t: any) => t > PM.time + 1e-4) ?? PM.proj.dur; }
-function prevEdge() { const e = edges(); return [...e].reverse().find((t: any) => t < PM.time - 1e-4) ?? 0; }
+function nextEdge() { const e = edges(); return e.find((t: any) => t > api.transport.time() + 1e-4) ?? api.project.get().dur; }
+function prevEdge() { const e = edges(); return [...e].reverse().find((t: any) => t < api.transport.time() - 1e-4) ?? 0; }
 T.nextEdge = nextEdge; T.prevEdge = prevEdge;
-T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, PM.proj.dur), 4, 4000); PM.invalidate('timeline'); };
+T.frameView = () => { T.scrollT = 0; T.pps = clamp((T.w - T.gut - 40) / Math.max(.5, api.project.get().dur), 4, 4000); invalidate('timeline'); };
 T.reveal = (L: any, keys: any) => {
-  PM.UIState.setLayerCollapsed(L, false);
-  const current = PM.UIState.getReveal(L);
+  api.uiState.setLayerCollapsed(L, false);
+  const current = api.uiState.getReveal(L);
   const alreadyVisible = current == null
-    ? timelineProperties(PM, L).flatMap((row: any) => trackChannels(row)
+    ? timelineProperties(api, L, space3d).flatMap((row: any) => trackChannels(row)
       .filter((axis: any) => axis.prop.kf.length || axis.prop.expr)
       .map((axis: any) => axis.key))
     : current;
-  PM.UIState.setReveal(L, alreadyVisible.includes('*') ? alreadyVisible : [...new Set([...alreadyVisible, ...keys])]);
+  api.uiState.setReveal(L, alreadyVisible.includes('*') ? alreadyVisible : [...new Set([...alreadyVisible, ...keys])]);
   rowsDirty = true;
   buildRows();
   const idx = T.rows.findIndex((r: any) => r.kind === 'layer' && r.L === L);
@@ -2914,13 +2925,13 @@ T.reveal = (L: any, keys: any) => {
     const kids = visibleProps(L).length;
     keepRowsVisible(idx, kids);
   }
-  PM.invalidate('timeline');
+  invalidate('timeline');
 };
 /* Direct module HMR can replace this runtime without rebuilding the panel.
    Rebind the already-mounted hosts immediately; kernel reloads rebuild the
    panel afterward and call these same idempotent attach methods. */
-const liveHead = previousHead && previousHead.isConnected !== false ? previousHead : PM.$?.('#tl-head');
-const liveWrap = previousWrap && previousWrap.isConnected !== false ? previousWrap : PM.$?.('#tl-canvas-wrap');
+const liveHead = previousHead && previousHead.isConnected !== false ? previousHead : document.querySelector('#tl-head');
+const liveWrap = previousWrap && previousWrap.isConnected !== false ? previousWrap : document.querySelector('#tl-canvas-wrap');
 if (liveHead) T.attachHead(liveHead);
 if (liveWrap) T.attachCanvas(liveWrap);
 return T;

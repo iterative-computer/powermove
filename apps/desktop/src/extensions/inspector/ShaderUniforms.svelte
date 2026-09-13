@@ -3,13 +3,10 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc, transport } = inspectorContext();
+  const { api, doc, transport, mixed, inspector } = inspectorContext();
   const { ColorField, Section, ToggleField } = api.ui.controls;
 
-  let { PM, layer }: {
-    PM: Record<string, any>;
-    layer: Record<string, any>;
-  } = $props();
+  let { layer }: { layer: any } = $props();
 
   let definitions = $state<any[]>([]);
 
@@ -17,8 +14,9 @@
     doc.tick.structure;
     doc.proj;
     layer.d?.code;
-    PM.syncShaderUniforms?.(layer);
-    definitions = PM.UIState?.getShaderMeta?.(layer)?.udefs ?? [];
+    const service = inspector();
+    service?.syncShaderUniforms(layer as any);
+    definitions = service?.shaderDefinitions(layer as any) ?? [];
   });
 
   function fieldBinding(path: string, label: string): EditBinding {
@@ -31,7 +29,7 @@
         target: layer.id,
         path,
         value: value as any,
-        time: PM.time,
+        time: api.transport.time(),
         preserveHandEdits: false
       })
     };
@@ -39,37 +37,41 @@
 </script>
 
 {#if definitions.length}
-  <Section title="Shader" />
+  <Section {api} title="Shader" />
   {#each definitions as definition (definition.name)}
     {@const property = layer.d?.uniforms?.[definition.name]}
     {#if property}
       {@const path = `u.${definition.name}`}
       {#if definition.control === 'color'}
-        <AnimatedRow {PM} {layer} {path} label={definition.label}>
+        <AnimatedRow {layer} {path} label={definition.label}>
           <ColorField
-            {PM}
-            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
+            {api}
+            {mixed}
+
+            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, definition.label)}
             label={definition.label}
           />
         </AnimatedRow>
       {:else if definition.control === 'toggle'}
-        <AnimatedRow {PM} {layer} {path} label={definition.label}>
+        <AnimatedRow {layer} {path} label={definition.label}>
           <ToggleField
-            {PM}
-            get={() => (doc.tick.values, doc.proj, transport.time, PM.evP(layer, property, transport.time, path))}
+            {api}
+            {mixed}
+
+            get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, definition.label)}
             label={definition.label}
           />
         </AnimatedRow>
       {:else}
         <ChannelRow
-          {PM}
+
           {layer}
           channel={path}
           label={definition.label}
           {property}
-          getValue={(time) => PM.evP(layer, property, time, definition.name)}
+          getValue={(time) => api.anim.evP(layer, property, time, definition.name)}
           step={(definition.max - definition.min) / 200 || .01}
           min={definition.min}
           max={definition.max}

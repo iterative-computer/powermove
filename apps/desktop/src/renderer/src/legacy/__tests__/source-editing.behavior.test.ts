@@ -18,7 +18,7 @@ function editor() {
   for (const definition of EFFECTS) PM.Kernel.registerEffect('effects-basic', definition);
   PM.proj = PM.mkProject({ name: 'Test', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 1;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   return { PM, events: [] };
 }
 
@@ -328,6 +328,7 @@ it('section creation and updates cross the same undoable source transaction boun
 it('a failed multi-command edit rolls the entire source back', () => {
   const { PM } = editor();
   const layer = addText(PM);
+  PM.hist.clear();
   const before = JSON.stringify(PM.proj);
   const historyBefore = PM.hist.list();
   const result = PM.Edit.apply([

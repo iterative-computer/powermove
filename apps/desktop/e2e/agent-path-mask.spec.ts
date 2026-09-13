@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 
 test('path masks preserve video RGB inside the matte across frames', async ({ session }) => {
+  await session.openEditor();
   await importFixture(session.page, 'h264-aac.mp4');
   await session.page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'));
   const pixels = await session.page.evaluate(async () => {

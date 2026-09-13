@@ -7,6 +7,19 @@ import { promisify } from 'node:util';
 import { expect, test as base, type TestInfo } from '@playwright/test';
 import { _electron, type ElectronApplication, type Page } from 'playwright';
 
+/**
+ * Page-side service convention for e2e specs: inside each `page.evaluate` or
+ * `page.waitForFunction` callback, read extension-owned providers from
+ * `PM.Kernel.services` into descriptive locals named `viewer`, `timeline`,
+ * `inspector`, `tool`, or `shaderHooks`. For example:
+ *
+ *   const PM = (window as any).PM;
+ *   const viewer = PM.Kernel.services.get('viewer');
+ *
+ * Playwright callbacks run in the renderer and cannot close over module-side
+ * helper functions, so keeping this lookup page-side is intentional.
+ */
+
 const execFileAsync = promisify(execFile);
 export const repoRoot = path.resolve(__dirname, '../..');
 const mainEntry = path.join(repoRoot, 'out/main/index.js');
@@ -34,6 +47,9 @@ export type LaunchedApp = {
   readonly userData: string;
   readonly diagnostics: RendererDiagnostics;
   relaunch(): Promise<void>;
+  /** A fresh profile boots to the Projects home screen. Specs that exercise
+   * editor panels open an empty composition first, the way a user would. */
+  openEditor(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -137,6 +153,18 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       active = await startElectron(userData, env, diagnostics);
       session.app = active.app;
       session.page = active.page;
+    },
+    async openEditor() {
+      const { page } = session;
+      await page.waitForFunction(() => Boolean((window as any).PM?.ProjectsScreen && (window as any).PM?.mkProject));
+      await page.evaluate(() => {
+        const PM = (window as any).PM;
+        if (!PM.ProjectsScreen.isOpen) return;
+        window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'E2E composition' }) }));
+        PM.ProjectsScreen.hide();
+      });
+      await page.waitForFunction(() => !(window as any).PM.ProjectsScreen.isOpen);
+      await page.waitForSelector('#body .dock', { state: 'visible' });
     },
     async close() {
       if (closed) return;

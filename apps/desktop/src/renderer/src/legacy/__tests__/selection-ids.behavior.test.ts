@@ -24,7 +24,7 @@ function runtime() {
   PM.time = 1;
   PM.rasterClears = 0;
   PM.rasterClear = () => { PM.rasterClears++; };
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   return { PM, events };
 }
 
@@ -79,4 +79,3 @@ it('expression cache survives touches, caps at 256, and evaluates after 300 dist
   assert.equal(PM.exprCache.has('value + 299'), true);
   assert.equal(PM.ev(layer, 'opacity', 0), 299);
 });
-

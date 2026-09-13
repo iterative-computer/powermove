@@ -2,6 +2,7 @@ import { prepareFrame } from './frame-preparation';
 import { installPreviewCache } from './preview-cache';
 import { sourceTime } from './retiming';
 import { resolveContent } from './content-properties';
+import { viewerService } from './services';
 /* Ported from js/core/engine.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
@@ -191,7 +192,7 @@ function frame(now: any) {
   // During a paused zoom gesture the viewer can transform valid presented
   // pixels immediately. Keep the redraw pending until refinement is needed;
   // playback and content/time changes always bypass this navigation-only path.
-  if (!PM.playing && PM.Viewer?.deferNavigationRender?.(now)) return;
+  if (!PM.playing && viewerService(PM)?.deferNavigationRender(now)) return;
   const renderTime=PM.playing ? Math.floor(PM.time*(PM.previewFps||p.fps))/(PM.previewFps||p.fps) : PM.time;
   if (PM.playing && renderTime === lastRenderTime && p === lastProject && renderedGeneration === contentGeneration) {
     PM.bus.emit('overlay');
@@ -218,7 +219,7 @@ function frame(now: any) {
   }
 }
 window.requestAnimationFrame(frame);
-const resumeView=()=>{if(window.document?.visibilityState==='hidden')return;videoSeekGeneration++;PM.Viewer?.layout?.();needsDraw=true;PM.invalidate();};
+const resumeView=()=>{if(window.document?.visibilityState==='hidden')return;videoSeekGeneration++;viewerService(PM)?.layout();needsDraw=true;PM.invalidate();};
 window.addEventListener?.('focus',resumeView);
 window.document?.addEventListener?.('visibilitychange',resumeView);
 

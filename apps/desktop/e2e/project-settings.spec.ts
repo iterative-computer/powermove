@@ -3,6 +3,7 @@ import { expect, launchApp, test } from './helpers/app';
 test('Settings › Project edits the live composition and its export settings', async () => {
   const session = await launchApp();
   try {
+    await session.openEditor();
     const { page } = session;
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
@@ -16,7 +17,7 @@ test('Settings › Project edits the live composition and its export settings', 
     await expect(panel).toContainText('Composition');
     await expect(panel).toContainText('Export');
 
-    await panel.getByLabel('Resolution preset').selectOption('1080x1920');
+    await panel.locator('select[aria-label="Resolution preset"]').selectOption('1080x1920');
     await expect(panel.getByLabel('Width in pixels', { exact: true })).toHaveValue('1080');
     expect(await page.evaluate(() => [(window as any).PM.proj.w, (window as any).PM.proj.h])).toEqual([1080, 1920]);
 
@@ -28,11 +29,11 @@ test('Settings › Project edits the live composition and its export settings', 
     await panel.getByLabel('Frame rate', { exact: true }).blur();
     expect(await page.evaluate(() => (window as any).PM.proj.fps)).toBe(48);
 
-    await panel.getByLabel('Export quality').selectOption('max');
+    await panel.locator('select[aria-label="Export quality"]').selectOption('max');
     // Transparent background only applies to image formats, so it unlocks
     // once the default format is switched away from video.
     await expect(panel.getByLabel('Transparent background')).toBeDisabled();
-    await panel.getByLabel('Export format').selectOption('png');
+    await panel.locator('select[aria-label="Export format"]').selectOption('png');
     await panel.getByLabel('Transparent background').check();
     expect(await page.evaluate(() => (window as any).PM.proj.exportDefaults))
       .toMatchObject({ format: 'png', quality: 'max', alpha: true });
@@ -58,7 +59,7 @@ test('New composition asks for the settings that matter before creating', async 
     await expect(dialog).toBeVisible();
 
     await dialog.getByLabel('Project name').fill('Square spot');
-    await dialog.getByLabel('Resolution preset').selectOption('1080x1080');
+    await dialog.locator('select[aria-label="Resolution preset"]').selectOption('1080x1080');
     await dialog.getByLabel('Frame rate', { exact: true }).fill('48');
     await dialog.getByLabel('Duration in seconds').fill('6');
 

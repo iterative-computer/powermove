@@ -10,22 +10,38 @@
  * install) rather than throwing and taking the app down with it.
  */
 import type {
+  PreviewViewport,
+  AnimAPI,
   AssetRecord,
   AssetsAPI,
   ControlsAPI,
+  DndAPI,
   Disposable,
+  EaseAPI,
   EditCommand,
+  EditAPI,
   EditMeta,
   EditResult,
   ExtensionRecord,
   ExtensionsAPI,
+  GroupsAPI,
+  HistoryAPI,
+  MediaAPI,
   MenuContribution,
+  ModelAPI,
   PowermoveAPI,
   Project,
   ProjectAPI,
+  RenderAPI,
   Selection,
+  SelectionAPI,
+  Space3DAPI,
   StorageAPI,
-  UIAPI
+  TransportAPI,
+  UIAPI,
+  UIStateAPI,
+  UtilAPI,
+  WorkspaceAPI
 } from './api';
 import type { ExtensionsBridge } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
@@ -44,10 +60,44 @@ import TextField from '../controls/TextField.svelte';
 import ToggleField from '../controls/ToggleField.svelte';
 import Row from '../controls/Row.svelte';
 import Section from '../controls/Section.svelte';
-import { channelBinding, compositionBinding, contentBinding, layerFieldBinding } from '../controls/binding';
+import { channelBinding, compositionBinding, contentBinding, layerFieldBinding, type ControlBindingAPI } from '../controls/binding';
 import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
 import { perf, transport } from '../state/transport.svelte';
+import { EditGesture, type EditBinding } from '../controls/gesture';
+import {
+  CHANNELS_3D,
+  inversePlane,
+  is3DLayer,
+  local3D,
+  parent3D,
+  perspectiveAmount,
+  planeContains,
+  planeMatrix,
+  projectPoint,
+  world3D
+} from '../legacy/core/space-3d';
+import {
+  ASSET_DRAG_MIME,
+  FX_DRAG_MIME,
+  applyFxDrop,
+  hasAssetDrag,
+  hasFileDrag,
+  hasFxDrag,
+  hasMediaDrag,
+  readAssetDrag,
+  readFxDrag,
+  writeAssetDrag
+} from '../fx/drop';
+import {
+  findPanel,
+  hasPanel,
+  hidePanel,
+  insertPanel,
+  removePanel,
+  restorePanel,
+  type Workspace as LayoutWorkspace
+} from '../layout/model';
 
 type LegacyPM = Record<string, any>;
 
@@ -78,13 +128,21 @@ const controls: ControlsAPI = {
   ToggleField: ToggleField as unknown as ControlsAPI['ToggleField'],
   Row: Row as unknown as ControlsAPI['Row'],
   Section: Section as unknown as ControlsAPI['Section'],
-  binding: {
-    channelBinding,
-    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
-    contentBinding,
-    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options)
-  }
+  binding: null as unknown as ControlsAPI['binding']
 };
+
+/** Binding helpers close over typed kernel capabilities. */
+function boundControls(api: ControlBindingAPI): ControlsAPI {
+  return {
+    ...controls,
+    binding: {
+      channelBinding: (layerId, channel, options) => channelBinding(api, layerId, channel, options),
+      layerFieldBinding: (layerId, field, options) => layerFieldBinding(api, layerId, field as any, options),
+      contentBinding: (layerId, field, options) => contentBinding(api, layerId, field, options),
+      compositionBinding: (field, options) => compositionBinding(api, field as any, options)
+    }
+  };
+}
 
 /* ── PM-backed capability adapters ───────────────────────── */
 
@@ -112,9 +170,313 @@ function makeProject(PM: LegacyPM): ProjectAPI {
   };
 }
 
-function makeUI(PM: LegacyPM): UIAPI {
+const EMPTY_AFFINE = [1, 0, 0, 1, 0, 0] as const;
+const EMPTY_MAT3 = [1, 0, 0, 0, 1, 0, 0, 0, 1] as const;
+const EMPTY_MAT4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
+
+function makeAnim(PM: LegacyPM): AnimAPI {
+  const emptyErrors = new WeakMap<object, string>();
   return {
-    controls,
+    ev: (layer, key, time) => PM?.ev?.(layer, key, time) ?? null,
+    evP: (layer, prop, time, key) => PM?.evP?.(layer, prop, time, key) ?? null,
+    active: (layer, time) => !!PM?.active?.(layer, time),
+    findProp: (layer, key) => PM?.findProp?.(layer, key) ?? null,
+    allProps: (layer) => PM?.allProps?.(layer) ?? [],
+    hasKeyAt: (layer, prop, time) => PM?.hasKeyAt?.(layer, prop, time) ?? null,
+    setKey: (...args) => PM?.setKey?.(...args) ?? null,
+    setKeyOn: (...args) => PM?.setKeyOn?.(...args) ?? null,
+    removeKey: (prop, key) => PM?.removeKey?.(prop, key),
+    applyEaseTo: (keys, name) => PM?.applyEaseTo?.(keys, name),
+    wouldCycle: (layer, parentId) => !!PM?.wouldCycle?.(layer, parentId),
+    resolveContent: (...args) => PM?.resolveContent?.(...args) ?? args[0].d,
+    get expressionErrors() { return PM?.expressionErrors ?? emptyErrors; },
+    version: () => Number(PM?.animVersion?.() ?? 0),
+    touch: () => PM?.touch?.(),
+    worldMatrix: (layer, time) => PM?.worldMatrix?.(layer, time) ?? [...EMPTY_AFFINE],
+    localMatrix: (layer, time) => PM?.localMatrix?.(layer, time) ?? [...EMPTY_AFFINE],
+    transformParentMatrix: (...args) => PM?.transformParentMatrix?.(...args) ?? [...EMPTY_AFFINE],
+    mul: (left, right) => PM?.mul?.(left, right) ?? [...EMPTY_AFFINE]
+  } as AnimAPI;
+}
+
+function makeModel(PM: LegacyPM): ModelAPI {
+  return {
+    P: ((...args: [unknown, object?]) => PM?.P?.(...args) ?? { v: args[0], kf: [], expr: null, ...(args[1] ?? {}) }) as ModelAPI['P'],
+    get CH() { return PM?.CH ?? {}; },
+    KF: ((...args: [number, unknown, string?]) => PM?.KF?.(...args)) as ModelAPI['KF'],
+    get BLENDS() { return PM?.BLENDS ?? []; },
+    get TYPE_META() { return PM?.TYPE_META ?? {}; },
+    get MASK_SHAPES() { return PM?.MASK_SHAPES ?? []; },
+    mkLayer: (...args) => PM?.mkLayer?.(...args),
+    mkMask: (...args) => PM?.mkMask?.(...args),
+    mkProject: (...args) => PM?.mkProject?.(...args),
+    cloneLayer: (layer) => PM?.cloneLayer?.(layer),
+    normalizeFill: (value, fallback) => PM?.normalizeFill?.(value, fallback),
+    layerDefinition: (id) => PM?.layerDefinition?.(id),
+    curComp: () => PM?.curComp?.() ?? PM?.proj,
+    layer: (id) => PM?.L?.(id) ?? null,
+    byName: (name) => PM?.byName?.(name) ?? null
+  } as ModelAPI;
+}
+
+function makeSelection(PM: LegacyPM): SelectionAPI {
+  const empty: Selection = { layers: [], keys: [], chan: null };
+  const current = (): Selection => PM?.sel ?? empty;
+  return {
+    get: current,
+    layers: () => current().layers,
+    first: () => PM?.firstSel?.() ?? null,
+    keys: () => current().keys,
+    chan: () => current().chan,
+    set: (partial) => {
+      if (!PM?.sel) return;
+      const before = { ...PM.sel, layers: [...(PM.sel.layers ?? [])], keys: [...(PM.sel.keys ?? [])] };
+      Object.assign(PM.sel, partial);
+      PM?.hist?.selection?.(before, PM.sel);
+      PM?.bus?.emit?.('sel');
+      PM?.invalidate?.();
+    },
+    select: (ids, add) => PM?.selectLayers?.(ids, add),
+    resolveSelectedKeys: () => PM?.resolveSelectedKeys?.() ?? [],
+    get keySelectionActive() { return !!PM?.TL?.keySelectionActive; },
+    set keySelectionActive(value: boolean) { if (PM?.TL) PM.TL.keySelectionActive = value; }
+  };
+}
+
+function makeGroups(PM: LegacyPM): GroupsAPI {
+  return {
+    ancestors: (...args) => PM?.groupAncestors?.(...args) ?? [],
+    transformRoots: (ids) => PM?.transformRoots?.(ids) ?? [],
+    bounds: (group, time) => PM?.groupBounds?.(group, time) ?? null,
+    span: (group) => PM?.groupSpan?.(group) ?? { from: 0, dur: 0 },
+    expand: (ids) => PM?.expandGroups?.(ids) ?? [...ids],
+    normalizeStack: () => PM?.normalizeStack?.(),
+    moveToGroup: (ids, target) => PM?.moveToGroup?.(ids, target) ?? { ids: [...ids], group: target }
+  };
+}
+
+function makeTransport(PM: LegacyPM): TransportAPI {
+  const emptyPerf = { fps: 0, ms: 0, drops: 0, budget: 0, auto: false };
+  return {
+    time: () => Number(PM?.time ?? 0),
+    setTime: (...args) => PM?.setTime?.(...args),
+    play: () => PM?.play?.(),
+    pause: () => PM?.pause?.(),
+    toggle: () => PM?.toggle?.(),
+    playing: () => !!PM?.playing,
+    step: (frames) => PM?.step?.(frames),
+    get quality() { return Number(PM?.quality ?? 0); },
+    set quality(value: number) { PM.quality = value; },
+    get perf() { return PM?.perf ?? emptyPerf; },
+    invalidate: (...args) => PM?.invalidate?.(...args),
+    get previewResolution() { return PM?.previewResolution ?? null; },
+    set previewResolution(value: string | number | null) { PM.previewResolution = value; }
+  };
+}
+
+function makeHistory(PM: LegacyPM): HistoryAPI {
+  return {
+    do: ((label: string, fn: () => unknown) => PM?.hist?.do?.(label, fn)) as HistoryAPI['do'],
+    begin: (...args) => PM?.hist?.begin?.(...args),
+    commit: (...args) => !!PM?.hist?.commit?.(...args),
+    cancel: () => PM?.hist?.cancel?.(),
+    undo: () => !!PM?.hist?.undo?.(),
+    redo: () => !!PM?.hist?.redo?.(),
+    external: (...args) => PM?.hist?.external?.(...args) ?? null,
+    selection: (before, after) => PM?.hist?.selection?.(before, after) ?? null
+  };
+}
+
+function makeEdit(PM: LegacyPM): EditAPI {
+  const unavailable = (): EditResult => ({ ok: false, message: 'editing engine unavailable' });
+  return {
+    apply: (...args) => PM?.Edit?.apply?.(...args) ?? unavailable(),
+    begin: (...args) => PM?.Edit?.begin?.(...args),
+    commit: (...args) => PM?.Edit?.commit?.(...args),
+    cancel: () => !!PM?.Edit?.cancel?.(),
+    dispatch: (command) => PM?.Edit?.dispatch?.(command) ?? unavailable(),
+    mutate: ((...args: [string, () => unknown, EditMeta?]) => PM?.Edit?.mutate?.(...args) ?? unavailable()) as EditAPI['mutate']
+  };
+}
+
+function makeMedia(PM: LegacyPM): MediaAPI {
+  const emptyFonts = {
+    bundled: [], system: [], families: [],
+    setSystemFamilies: (_values: string[]) => {},
+    options: (current: string) => current ? [current] : [],
+    ensure: async (_family: string, _weight?: number) => {}
+  };
+  return {
+    timing: {
+      isTimed: (layer) => !!PM?.MediaTiming?.isTimed?.(layer),
+      rate: (layer) => Number(PM?.MediaTiming?.rate?.(layer) ?? 1),
+      earliestStart: (layer) => Number(PM?.MediaTiming?.earliestStart?.(layer) ?? layer.from ?? 0)
+    },
+    importFiles: (...args) => PM?.importFiles?.(...args) ?? Promise.resolve(undefined),
+    commandForAsset: (...args) => PM?.commandForAsset?.(...args),
+    audio: {
+      drawWaveform: (...args) => !!PM?.Audio?.drawWaveform?.(...args)
+    },
+    assets: {
+      get: (id) => PM?.assets?.get?.(id),
+      add: (...args) => PM?.assets?.add?.(...args) ?? Promise.resolve(undefined),
+      kind: (file) => PM?.assetKind?.(file) ?? null
+    },
+    get fonts() { return PM?.Fonts ?? emptyFonts; }
+  } as MediaAPI;
+}
+
+function makeRender(PM: LegacyPM): RenderAPI {
+  return {
+    gl: {
+      bounds: (layer, time) => PM?.GL?.bounds?.(layer, time) ?? null,
+      pick: (x, y, time, options) => PM?.GL?.pick?.(x, y, time, options) ?? null,
+      init: (...args) => !!PM?.GL?.init?.(...args),
+      resize: (...args) => !!PM?.GL?.resize?.(...args),
+      compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
+      get previewViewport() { return PM?.GL?.previewViewport ?? null; },
+      get context() { return PM?.GL?.gl ?? null; }
+    },
+    raster: (...args) => PM?.raster?.(...args) ?? null,
+    renderFrameTo: (...args) => PM?.renderFrameTo?.(...args),
+    snapshot: (...args) => PM?.Export?.snapshot?.(...args) ?? ''
+  } as RenderAPI;
+}
+
+function makeUIState(PM: LegacyPM): UIStateAPI {
+  return {
+    getLayerCollapsed: (layer) => !!PM?.UIState?.getLayerCollapsed?.(layer),
+    setLayerCollapsed: (layer, collapsed) => !!PM?.UIState?.setLayerCollapsed?.(layer, collapsed),
+    getGroupCollapsed: (layer) => !!PM?.UIState?.getGroupCollapsed?.(layer),
+    setGroupCollapsed: (layer, collapsed) => !!PM?.UIState?.setGroupCollapsed?.(layer, collapsed),
+    getKeyHandles: (key) => PM?.UIState?.getKeyHandles?.(key) ?? null,
+    setKeyHandles: (key, patch) => PM?.UIState?.setKeyHandles?.(key, patch) ?? null,
+    getFxOpen: (effect) => !!PM?.UIState?.getFxOpen?.(effect),
+    setFxOpen: (effect, open) => !!PM?.UIState?.setFxOpen?.(effect, open),
+    getReveal: (layer) => PM?.UIState?.getReveal?.(layer) ?? null,
+    setReveal: (layer, keys) => PM?.UIState?.setReveal?.(layer, keys) ?? null,
+    getShaderMeta: (layer) => PM?.UIState?.getShaderMeta?.(layer) ?? null,
+    setShaderMeta: (layer, patch) => PM?.UIState?.setShaderMeta?.(layer, patch) ?? null
+  };
+}
+
+function makeDnd(PM: LegacyPM): DndAPI {
+  return {
+    ASSET_MIME: ASSET_DRAG_MIME,
+    FX_MIME: FX_DRAG_MIME,
+    startAssetDrag: writeAssetDrag,
+    get mediaDrag() { return PM?.mediaDrag ?? null; },
+    set mediaDrag(value) { PM.mediaDrag = value; },
+    hasAssetDrag,
+    hasFileDrag,
+    hasMediaDrag,
+    readAssetDrag,
+    hasFxDrag,
+    readFxDrag,
+    applyFxDrop: (payload, layerId, edge) => applyFxDrop(payload, layerId, edge, PM)
+  };
+}
+
+function makeWorkspace(PM: LegacyPM): WorkspaceAPI {
+  const current = () => PM?.WS?.current ?? null;
+  const mutate = (...args: [(workspace: LayoutWorkspace) => void, { inPlace?: boolean }?]): unknown =>
+    PM?.WS?.mutate?.(...args);
+  return {
+    current,
+    mutate: ((...args: Parameters<WorkspaceAPI['mutate']>) => mutate(
+      args[0] as unknown as (workspace: LayoutWorkspace) => void,
+      ...args.slice(1) as [{ inPlace?: boolean }?]
+    ) as ReturnType<WorkspaceAPI['current']>) as WorkspaceAPI['mutate'],
+    hasPanel: (id) => {
+      const workspace = current();
+      return !!workspace && hasPanel(workspace as unknown as LayoutWorkspace, id);
+    },
+    addPanel: (id, dock = 'right', index) => {
+      mutate((workspace) => {
+        removePanel(workspace, id);
+        workspace.hiddenPanels = (workspace.hiddenPanels ?? []).filter((item) => item.id !== id);
+        insertPanel(workspace, { id }, dock, index);
+      });
+    },
+    movePanel: (id, dock, index) => {
+      let moved = false;
+      mutate((workspace) => {
+        const found = findPanel(workspace, id);
+        if (!found) return;
+        const from = found.dock.panels.indexOf(found.spec);
+        if (found.dock.id === dock && from === index) return;
+        const spec = { ...found.spec };
+        removePanel(workspace, id);
+        insertPanel(workspace, spec, dock, index);
+        workspace.hiddenPanels = (workspace.hiddenPanels ?? []).filter((item) => item.id !== id);
+        moved = true;
+      });
+      return moved;
+    },
+    removePanel: (id) => void mutate((workspace) => removePanel(workspace, id)),
+    hidePanel: (id) => {
+      let hidden = false;
+      mutate((workspace) => { hidden = hidePanel(workspace, id); });
+      return hidden;
+    },
+    restorePanel: (id) => {
+      let restored = false;
+      mutate((workspace) => { restored = restorePanel(workspace, id); });
+      return restored;
+    },
+    refresh: (id) => PM?.Layout?.refresh?.(id)
+  } as WorkspaceAPI;
+}
+
+function makeUtil(PM: LegacyPM): UtilAPI {
+  return {
+    round: (...args) => Number(PM?.round?.(...args) ?? Number(args[0].toFixed(args[1] ?? 2))),
+    clamp: (value, min, max) => Number(PM?.clamp?.(value, min, max) ?? Math.max(min, Math.min(max, value))),
+    lerp: (from, to, amount) => Number(PM?.lerp?.(from, to, amount) ?? from + (to - from) * amount),
+    snapF: (time, fps) => Number(PM?.snapF?.(time, fps) ?? Math.round(time * fps) / fps),
+    tc: (...args) => String(PM?.tc?.(...args) ?? args[0]),
+    parseTc: (...args) => PM?.parseTc?.(...args) ?? null,
+    uid: (...args) => String(PM?.uid?.(...args) ?? `${args[0] ?? 'l'}-${Math.random().toString(36).slice(2)}`),
+    hex2rgb: (hex) => PM?.hex2rgb?.(hex) ?? [],
+    rgb2hex: (red, green, blue) => String(PM?.rgb2hex?.(red, green, blue) ?? '')
+  };
+}
+
+function makeEase(PM: LegacyPM): EaseAPI {
+  return {
+    nameOf: (easeOut, easeIn) => String(PM?.Ease?.nameOf?.(easeOut, easeIn) ?? 'custom'),
+    get PRESETS() { return PM?.Ease?.PRESETS ?? {}; }
+  };
+}
+
+function makeSpace3D(PM: LegacyPM): Space3DAPI {
+  const attempt = <T,>(fn: () => T, fallback: T): T => {
+    try { return fn(); } catch { return fallback; }
+  };
+  return {
+    CHANNELS_3D,
+    local3D: (layer, time) => attempt(() => local3D(PM, layer, time), [...EMPTY_MAT4]),
+    parent3D: (...args) => attempt(() => parent3D(PM, ...args), [...EMPTY_MAT4]),
+    world3D: (...args) => attempt(() => world3D(PM, ...args), [...EMPTY_MAT4]),
+    is3DLayer: (layer) => attempt(() => is3DLayer(PM, layer), false),
+    perspectiveAmount: (layer, time) => attempt(() => perspectiveAmount(PM, layer, time), 0.001),
+    planeMatrix: (...args) => attempt(() => planeMatrix(PM, ...args), [...EMPTY_MAT3]),
+    projectPoint,
+    inversePlane,
+    planeContains: (layer, time, x, y, bounds) => attempt(() => planeContains(PM, layer, time, x, y, bounds), false)
+  } as Space3DAPI;
+}
+
+function makeUI(
+  PM: LegacyPM,
+  controlAPI: ControlBindingAPI,
+  gestureAPI: Pick<PowermoveAPI, 'edit' | 'history'>
+): UIAPI {
+  class BoundEditGesture extends EditGesture {
+    constructor(binding: EditBinding) { super(gestureAPI, binding); }
+  }
+  return {
+    controls: boundControls(controlAPI),
     toast: (text, opts) => PM?.toast?.(text, opts?.sticky ? 8000 : 2200, opts ?? {}),
     confirm: (title, body) =>
       new Promise<boolean>((resolve) => {
@@ -146,7 +508,14 @@ function makeUI(PM: LegacyPM): UIAPI {
     icon: (name) => {
       const icon = PM?.icon?.(name);
       return typeof icon === 'string' ? icon : String(icon?.outerHTML ?? icon ?? '');
-    }
+    },
+    drag: (event, options) => PM?.drag?.(event, options) ?? { cancel: () => {} },
+    closeMenus: () => PM?.closeMenus?.(),
+    showLayerMenu: (...args) => PM?.showLayerMenu?.(...args),
+    showParentMenu: (ids, event) => PM?.showParentMenu?.(ids, event),
+    beginParentPick: (event, ids) => PM?.beginParentPick?.(event, ids),
+    openShaderEditor: (...args) => PM?.openShaderEditor?.(...args),
+    gesture: BoundEditGesture
   };
 }
 
@@ -222,13 +591,31 @@ function makeAssets(PM: LegacyPM): AssetsAPI {
 function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
   const current = (): unknown => PM?.WS?.current;
   return {
-    open: (id, dock) => {
+    open: (id, placement) => {
+      const explicitOptions = typeof placement === 'object' && placement !== null;
+      const options = typeof placement === 'string' ? { dock: placement } : (placement ?? {});
+      const dock = options.dock;
       if (!PM?.Layout?.hasPanel?.(current(), id)) {
         PM?.WS?.mutate?.((workspace: any) => {
           /* A hidden panel remembers its dock, index and size — restore beats
              a fresh add, which would drop all three. */
-          if (PM?.Layout?.restorePanel?.(workspace, id)) return;
-          PM?.Layout?.addPanel?.(workspace, id, dock ?? 'center');
+          if (PM?.Layout?.restorePanel?.(workspace, id)) {
+            if (explicitOptions && workspace?.layout?.docks && (dock != null || options.index != null)) {
+              const found = findPanel(workspace as LayoutWorkspace, id);
+              if (found) {
+                const spec = { ...found.spec };
+                const targetDock = dock ?? found.dock.id;
+                const targetIndex = options.index ?? found.dock.panels.indexOf(found.spec);
+                removePanel(workspace as LayoutWorkspace, id);
+                insertPanel(workspace as LayoutWorkspace, spec, targetDock, targetIndex);
+              }
+            }
+            return;
+          }
+          if (explicitOptions && workspace?.layout?.docks) {
+            workspace.hiddenPanels = (workspace.hiddenPanels ?? []).filter((item: { id?: string }) => item.id !== id);
+            insertPanel(workspace as LayoutWorkspace, { id }, dock ?? 'center', options.index);
+          } else PM?.Layout?.addPanel?.(workspace, id, dock ?? 'center');
         });
       }
       PM?.Layout?.refresh?.(id);
@@ -278,11 +665,35 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
      later without recapturing a stale binding. */
   const box: { loader: Loader | null } = { loader: null };
 
+  const project = makeProject(PM);
+  const anim = makeAnim(PM);
+  const model = makeModel(PM);
+  const transportAPI = makeTransport(PM);
+  const history = makeHistory(PM);
+  const edit = makeEdit(PM);
+  const util = makeUtil(PM);
+  const controlAPI: ControlBindingAPI = { project, anim, model, transport: transportAPI, util };
+
   const deps: Omit<HostDeps, 'reportRuntimeError'> = {
     pm: PM,
     state: { doc, sel, transport, perf },
-    ui: makeUI(PM),
-    project: makeProject(PM),
+    ui: makeUI(PM, controlAPI, { edit, history }),
+    project,
+    anim,
+    model,
+    selection: makeSelection(PM),
+    groups: makeGroups(PM),
+    transport: transportAPI,
+    history,
+    edit,
+    media: makeMedia(PM),
+    render: makeRender(PM),
+    uiState: makeUIState(PM),
+    dnd: makeDnd(PM),
+    workspace: makeWorkspace(PM),
+    util,
+    ease: makeEase(PM),
+    space3d: makeSpace3D(PM),
     assets: makeAssets(PM),
     storage: makeStorage(PM),
     extensions: makeExtensionsAPI(PM, bridge, () => box.loader),
@@ -364,7 +775,15 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   on('sel', () => kernel.events.emit('selection', deps.project.selection()));
   on('time', (t: number) => kernel.events.emit('time', Number(t ?? PM?.time ?? 0)));
   on('transport', () => kernel.events.emit('transport', { playing: !!PM?.playing }));
+  on('fonts', (families: string[]) => kernel.events.emit('fonts', families));
   on('layout', () => kernel.events.emit('layout', undefined));
+  on('draw', () => kernel.events.emit('invalidate', 'render'));
+  on('draw:timeline', () => kernel.events.emit('invalidate', 'timeline'));
+  on('draw:ui', () => kernel.events.emit('invalidate', 'ui'));
+  on('draw:status', () => kernel.events.emit('invalidate', 'status'));
+  on('preview:presented', (frame: { viewport: PreviewViewport | null; time: number; version: number | undefined; quality: number }) =>
+    kernel.events.emit('frame:rendered', { time: Number(frame?.time ?? 0), viewport: frame?.viewport ?? null, version: frame?.version, quality: Number(frame?.quality ?? 1) }));
+  on('overlay', () => kernel.events.emit('overlay', undefined));
 
   const syntheticRecord = (id: string): ExtensionRecord => ({
     id,

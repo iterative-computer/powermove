@@ -1,5 +1,6 @@
 /* Compact, byte-budgeted project history. */
 import type { PMRegistry } from '../registry';
+import { timelineService } from './services';
 
 type PathPart = string | number;
 type Patch = { path: PathPart[]; exists: boolean; value?: any };
@@ -310,7 +311,8 @@ export function install(PM: PMRegistry): void {
         if (PM.proj.id !== projectId) return;
         const ids = new Set((PM.curComp?.() || PM.proj).layers.map((layer: any) => layer.id));
         Object.assign(PM.sel, clone(selection), { layers: selection.layers.filter((id: string) => ids.has(id)) });
-        if (PM.TL) PM.TL.keySelectionActive = !!PM.sel.keys.length;
+        const timeline = timelineService(PM);
+        if (timeline) timeline.keySelectionActive = !!PM.sel.keys.length;
         PM.bus.emit('sel'); PM.invalidate();
       };
       return push({ label: 'Selection', bytes: encodedBytes(previous) + encodedBytes(next),

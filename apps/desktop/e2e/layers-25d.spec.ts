@@ -1,4 +1,5 @@
 import { test, expect } from './helpers/app';
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
 test('editable 2.5D layers render perspective, depth, keyframes and survive Undo and save', async ({ session }) => {
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
@@ -50,12 +51,12 @@ test('editable 2.5D layers render perspective, depth, keyframes and survive Undo
     await page.getByRole('button', { name: '3D layer', exact: true }).click();
     await expect(page.getByRole('spinbutton', { name: 'Position Z', exact: true })).toBeVisible();
     await page.screenshot({ path: '/tmp/powermove-25d-review.png' });
-    const drag = await page.evaluate(() => { const PM = (window as any).PM, V = PM.Viewer, l = PM.firstSel(), p = V.layerWorldPivot(l, 0), r = V.inner.getBoundingClientRect(); return { x: r.left + p.x * V.shown, y: r.top + p.y * V.shown, position: PM.ev(l, 'position.x', 0), zoom: V.shown }; });
+    const drag = await page.evaluate(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), l = PM.firstSel(), p = viewer.layerWorldPivot(l, 0), r = viewer.inner.getBoundingClientRect(); return { x: r.left + p.x * viewer.shown, y: r.top + p.y * viewer.shown, position: PM.ev(l, 'position.x', 0), zoom: viewer.shown }; });
     await page.mouse.move(drag.x, drag.y);
     await page.mouse.down();
     await page.mouse.move(drag.x + 60, drag.y + 20, { steps: 8 });
     await page.mouse.up();
-    const moved = await page.evaluate(() => { const PM = (window as any).PM, l = PM.firstSel(), V = PM.Viewer, p = V.layerWorldPivot(l, 0), r = V.inner.getBoundingClientRect(); return { x: r.left + p.x * V.shown, y: r.top + p.y * V.shown }; });
+    const moved = await page.evaluate(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), l = PM.firstSel(), p = viewer.layerWorldPivot(l, 0), r = viewer.inner.getBoundingClientRect(); return { x: r.left + p.x * viewer.shown, y: r.top + p.y * viewer.shown }; });
     expect(moved.x - drag.x).toBeCloseTo(60, 0);
     expect(moved.y - drag.y).toBeCloseTo(20, 0);
     await page.evaluate(() => { const PM = (window as any).PM; PM.hist.undo(); PM.replaceProject(PM.deserialize(PM.serialize())); });

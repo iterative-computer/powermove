@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { editCanvasText } from './canvas-text';
 import { createKernel } from '../../renderer/src/kernel/registries';
+import type { PowermoveAPI } from 'powermove';
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -19,23 +20,22 @@ describe('canvas text keyboard handling', () => {
         leading: 1.15, tracking: 0, color: '#ffffff', align: 'left'
       }
     };
-    const PM: any = {
-      time: 0,
-      raster: () => null,
-      worldMatrix: () => [1, 0, 0, 1, 0, 0],
-      selectLayers: vi.fn(),
-      pause: vi.fn(),
-      invalidate: vi.fn(),
-      Edit: { begin: vi.fn(), dispatch: vi.fn(), commit: vi.fn(), cancel: vi.fn() }
-    };
-    const V = { shown: 1, inner: document.body };
+    const api = {
+      selection: { select: vi.fn() },
+      transport: { time: () => 0, pause: vi.fn(), invalidate: vi.fn() },
+      anim: { resolveContent: () => layer.d, worldMatrix: () => [1, 0, 0, 1, 0, 0] },
+      render: { raster: () => null },
+      edit: { begin: vi.fn(), dispatch: vi.fn(), commit: vi.fn(), cancel: vi.fn() },
+      services: { get: () => null },
+    } as unknown as PowermoveAPI;
+    const V: any = { shown: 1, inner: document.body };
     const kernel = createKernel();
     const commands = vi.fn();
     const listener = kernel.installKeyListener((command) => void commands(command));
     kernel.bind('built-in', { key: 'cmd+v', command: 'contextPaste', inFields: true });
     kernel.bind('built-in', { key: 'v', command: 'toolSelect' });
 
-    editCanvasText(PM, V, layer);
+    editCanvasText(api, V, layer);
     const editor = document.querySelector<HTMLElement>('.canvas-text-editor')!;
     const paste = new KeyboardEvent('keydown', {
       key: 'v', metaKey: true, bubbles: true, cancelable: true
@@ -48,6 +48,6 @@ describe('canvas text keyboard handling', () => {
     expect(commands).toHaveBeenCalledExactlyOnceWith('contextPaste');
     expect(paste.defaultPrevented).toBe(true);
     listener.dispose();
-    PM.finishCanvasText?.();
+    V.finishCanvasText?.();
   });
 });

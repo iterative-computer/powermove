@@ -18,6 +18,7 @@ import {
 import type { PMRegistry } from '../registry';
 import { packProjectFile } from './project-file';
 import { buildWebExport, inspectWebExport } from '../../player/export-web';
+import { viewerService } from './services';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -409,7 +410,7 @@ async function run(opts: any) {
       await PM.download(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`);
       PM.toast('Frame exported');return {cancelled:false};
     }catch(error){const message=(error as Error).message;PM.toast(message,6000);return {error:message};}
-    finally{X.busy=false;PM.preparedVideoFrames=null;PM.setTime(at,{force:true});PM.Viewer?.layout?.();if(wasPlaying)PM.play();}
+    finally{X.busy=false;PM.preparedVideoFrames=null;PM.setTime(at,{force:true});viewerService(PM)?.layout();if(wasPlaying)PM.play();}
   }
 
   X.busy = true; X.cancel = false;
@@ -450,7 +451,7 @@ async function run(opts: any) {
     PM.preparedVideoFrames=null;
     PM.quality = oldQ;
     PM.setTime(oldT, { force: true });
-    PM.Viewer?.layout?.();
+    viewerService(PM)?.layout();
     if (wasPlaying) PM.play();
   }
 }

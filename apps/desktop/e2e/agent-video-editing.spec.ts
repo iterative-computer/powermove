@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 
 test('agent cuts imported footage, reviews decoded frames, and undoes the run', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
   await importFixture(page, 'h264-aac.mp4');
   await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.type === 'video'));

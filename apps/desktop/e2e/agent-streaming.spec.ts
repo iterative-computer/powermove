@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 test('streamed text stays inline and keeps existing nodes as chunks arrive', async ({ session }) => {
+  await session.openEditor();
   const page = session.page;
   await page.evaluate(() => {
     const PM = (window as any).PM;

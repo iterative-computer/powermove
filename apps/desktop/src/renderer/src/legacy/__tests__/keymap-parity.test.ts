@@ -37,6 +37,13 @@ function makeEditor() {
   } as any);
   ran = [];
   ranArgs = [];
+  for (const id of [
+    'timeline.adjacentKeyframe:prev',
+    'timeline.adjacentKeyframe:next',
+    ...['p', 's', 'r', 't', 'a', 'u', 'f'].map(key => `timeline.revealProperty:${key}`),
+  ]) {
+    PM.Kernel.commands.register('timeline-test', { id, label: id, run() {} });
+  }
   /* Shadow every command with a recorder. Registering over an id is exactly
      what an extension override does, so this also exercises that path. */
   for (const id of PM.Kernel.commands.ids()) {
@@ -108,9 +115,9 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+shift+Left steps ten frames', { key: 'ArrowLeft', metaKey: true, shiftKey: true }, 'stepFrames'],
   ['cmd+Right steps one frame', { key: 'ArrowRight', metaKey: true }, 'nextFrame'],
   ['cmd+shift+Right steps ten frames', { key: 'ArrowRight', metaKey: true, shiftKey: true }, 'stepFrames'],
-  ['ctrl+Left jumps to the previous keyframe', { key: 'ArrowLeft', ctrlKey: true }, 'prevKeyframe'],
+  ['ctrl+Left jumps to the previous keyframe', { key: 'ArrowLeft', ctrlKey: true }, 'timeline.adjacentKeyframe:prev'],
   ['ctrl+shift+Left steps ten frames', { key: 'ArrowLeft', ctrlKey: true, shiftKey: true }, 'stepFrames'],
-  ['ctrl+Right jumps to the next keyframe', { key: 'ArrowRight', ctrlKey: true }, 'nextKeyframe'],
+  ['ctrl+Right jumps to the next keyframe', { key: 'ArrowRight', ctrlKey: true }, 'timeline.adjacentKeyframe:next'],
   ['ctrl+shift+Right steps ten frames', { key: 'ArrowRight', ctrlKey: true, shiftKey: true }, 'stepFrames'],
   ['ArrowRight nudges right', { key: 'ArrowRight' }, 'nudgeSelection'],
   ['shift+ArrowRight nudges right ten pixels', { key: 'ArrowRight', shiftKey: true }, 'nudgeSelection'],
@@ -125,19 +132,19 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['w picks the rotation tool', { key: 'w' }, 'toolRotate'],
   ['y picks the pan behind tool', { key: 'y' }, 'toolAnchor'],
   ['q picks and cycles the shape tools', { key: 'q' }, 'toolShape'],
-  ['p reveals position', { key: 'p' }, 'revealPos'],
-  ['s reveals scale', { key: 's' }, 'revealScale'],
-  ['r reveals rotation', { key: 'r' }, 'revealRot'],
-  ['t reveals opacity', { key: 't' }, 'revealOpacity'],
-  ['a reveals the anchor point', { key: 'a' }, 'revealAnchor'],
-  ['u reveals animated properties', { key: 'u' }, 'revealKeys'],
+  ['p reveals position', { key: 'p' }, 'timeline.revealProperty:p'],
+  ['s reveals scale', { key: 's' }, 'timeline.revealProperty:s'],
+  ['r reveals rotation', { key: 'r' }, 'timeline.revealProperty:r'],
+  ['t reveals opacity', { key: 't' }, 'timeline.revealProperty:t'],
+  ['a reveals the anchor point', { key: 'a' }, 'timeline.revealProperty:a'],
+  ['u reveals animated properties', { key: 'u' }, 'timeline.revealProperty:u'],
   ['b sets the work area in', { key: 'b' }, 'workIn'],
   ['n sets the work area out', { key: 'n' }, 'workOut'],
-  ['shift+f reveals feather', { key: 'f', shiftKey: true }, 'revealFeather'],
+  ['shift+f reveals feather', { key: 'f', shiftKey: true }, 'timeline.revealProperty:f'],
   ['j jumps to the previous visible event', { key: 'j' }, 'prevVisibleEvent'],
   ['k jumps to the next visible event', { key: 'k' }, 'nextVisibleEvent'],
-  ['shift+j jumps to the previous keyframe', { key: 'j', shiftKey: true }, 'prevKeyframe'],
-  ['shift+k jumps to the next keyframe', { key: 'k', shiftKey: true }, 'nextKeyframe'],
+  ['shift+j jumps to the previous keyframe', { key: 'j', shiftKey: true }, 'timeline.adjacentKeyframe:prev'],
+  ['shift+k jumps to the next keyframe', { key: 'k', shiftKey: true }, 'timeline.adjacentKeyframe:next'],
   ['i goes to the selected layer In point', { key: 'i' }, 'gotoLayerIn'],
   ['o goes to the selected layer Out point', { key: 'o' }, 'gotoLayerOut'],
   ['left bracket moves the layer In point', { key: '[', code: 'BracketLeft' }, 'moveLayerIn'],
@@ -225,7 +232,7 @@ describe('AE-style keymap dispatch', () => {
 
   it('reveals mask feather with F', () => {
     const event = press({ key: 'f' });
-    expect(ran).toEqual(['revealFeather']);
+    expect(ran).toEqual(['timeline.revealProperty:f']);
     expect(event.defaultPrevented).toBe(true);
   });
 

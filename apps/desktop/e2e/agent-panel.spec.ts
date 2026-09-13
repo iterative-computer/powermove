@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', () => {
   test('keeps a set height when the editor window grows', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await page.setViewportSize({ width: 1280, height: 760 });
     const panel = page.locator('#panel-agent');
@@ -21,6 +22,7 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
   test('composer submit → progress → result phase, all through the Svelte UI', async ({ session }) => {
     test.skip(!process.env.POWERMOVE_E2E_LIVE, 'live codex run — set POWERMOVE_E2E_LIVE=1 (excluded from the 2-minute CI suite)');
     test.setTimeout(240_000);
+    await session.openEditor();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;

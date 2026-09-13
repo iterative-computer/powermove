@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@generated-panel agent-authored workspace sections', () => {
   test('the gradient workspace mounts a Svelte GeneratedPanel whose controls edit the document', async ({ session }) => {
     const { page } = session;

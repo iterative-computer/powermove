@@ -142,7 +142,7 @@ describe('keymap-default', () => {
       ['shift+pageup', 'stepFrames'], ['shift+pagedown', 'stepFrames'],
       ['shift+home', 'gotoWorkIn'], ['shift+end', 'gotoWorkOut'],
       ['j', 'prevVisibleEvent'], ['k', 'nextVisibleEvent'],
-      ['shift+j', 'prevKeyframe'], ['shift+k', 'nextKeyframe'],
+      ['shift+j', 'timeline.adjacentKeyframe:prev'], ['shift+k', 'timeline.adjacentKeyframe:next'],
       ['i', 'gotoLayerIn'], ['o', 'gotoLayerOut'],
       ['[', 'moveLayerIn'], [']', 'moveLayerOut'],
       ['alt+[', 'trimIn'], ['alt+]', 'trimOut'],
@@ -158,6 +158,38 @@ describe('keymap-default', () => {
     expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'i', command: 'trimIn' }));
     expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'k', command: 'transportPause' }));
     expect(KEYMAP_DEFAULT).not.toContainEqual(expect.objectContaining({ key: 'g', command: 'graph' }));
+    expect(KEYMAP_DEFAULT).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'ctrl+left', command: 'timeline.adjacentKeyframe:prev' }),
+      expect.objectContaining({ key: 'ctrl+right', command: 'timeline.adjacentKeyframe:next' })
+    ]));
+  });
+
+  it('binds property disclosure only through timeline command ids', () => {
+    for (const key of ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l']) {
+      expect(KEYMAP_DEFAULT).toContainEqual(expect.objectContaining({
+        key,
+        command: `timeline.revealProperty:${key}`
+      }));
+      expect(KEYMAP_DEFAULT).toContainEqual(expect.objectContaining({
+        key: `shift+${key}`,
+        command: `timeline.revealProperty:${key}`,
+        args: [true]
+      }));
+    }
+    expect(KEYMAP_DEFAULT).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'cmd+`', command: 'timeline.revealAll' }),
+      expect.objectContaining({ key: 'ctrl+`', command: 'timeline.revealAll' })
+    ]));
+    for (const key of ['p', 's', 'r', 't', 'a', 'u', 'm', 'f', 'e', 'l']) {
+      expect(KEYMAP_DEFAULT.filter(({ key: chord, command }) =>
+        chord === key && command.startsWith('timeline.revealProperty:')
+      )).toEqual([expect.objectContaining({ command: `timeline.revealProperty:${key}`, priority: 100 })]);
+    }
+    expect(KEYMAP_DEFAULT.filter(({ command }) => [
+      'prevKeyframe', 'nextKeyframe', 'revealPos', 'revealScale', 'revealRot',
+      'revealOpacity', 'revealAnchor', 'revealKeys', 'revealMasks',
+      'revealFeather', 'revealEffects', 'revealAudio', 'revealAll'
+    ].includes(command))).toEqual([]);
   });
 
   it('uses the browser plus key chord and does not alias Cmd+Shift+N to newProject', () => {

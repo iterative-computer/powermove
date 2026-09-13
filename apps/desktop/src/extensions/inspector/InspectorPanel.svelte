@@ -17,28 +17,26 @@
   import { inspectorRefresh } from './refresh.svelte.js';
 
   let { panelId, api }: PanelProps & { api: PowermoveAPI } = $props();
-  const { PM, doc, sel } = provideInspectorContext(untrack(() => api));
+  const { doc, sel } = provideInspectorContext(untrack(() => api));
   let fontsVersion = $state(0);
 
   const selectedLayers = $derived<any[]>(
     (inspectorRefresh.version, doc.tick.structure, doc.proj,
-      inspectorSelection(PM, sel.layers.map((id) => doc.proj?.layers?.find((layer: any) => layer.id === id)).filter(Boolean)))
+      inspectorSelection(api, sel.layers.map((id) => api.model.layer(id)).filter((layer): layer is NonNullable<typeof layer> => layer !== null)))
   );
   const firstLayer = $derived(selectedLayers[0]);
 
-  /* Phase 5 removal: fonts have no document tick yet, so this is the sole bus
-     subscription in the Svelte inspector. */
   $effect(() => {
-    const off = PM.bus?.on?.('fonts', () => { fontsVersion++; });
-    return () => { if (typeof off === 'function') off(); };
+    const subscription = api.events.on('fonts', () => { fontsVersion++; });
+    return () => subscription.dispose();
   });
 </script>
 
 <div class="insp" data-svelte-panel={panelId} data-inspector-refresh={inspectorRefresh.version}>
-  {#if firstLayer}<InspectorHeader {PM} layer={firstLayer} />{/if}
+  {#if firstLayer}<InspectorHeader layer={firstLayer} />{/if}
 
   {#if selectedLayers.length === 0}
-    <CompositionSection {PM} />
+    <CompositionSection />
   {:else}
     {#if selectedLayers.length > 1}
       <div class="inspector-selection-note" role="status">
@@ -48,22 +46,22 @@
     <div class="inspector-layer" data-inspector-layer={firstLayer.id}>
       {#if firstLayer.type === 'group'}
         <div class="group-actions">
-          <button class="chip" onclick={() => PM.selectLayers(PM.expandGroups([firstLayer.id]).filter((id: string) => id !== firstLayer.id))}>Select contents</button>
-          <button class="chip" onclick={() => PM.cmd('ungroupLayers')}>Ungroup</button>
+          <button class="chip" onclick={() => api.selection.select(api.groups.expand([firstLayer.id]).filter((id) => id !== firstLayer.id))}>Select contents</button>
+          <button class="chip" onclick={() => api.commands.run('ungroupLayers')}>Ungroup</button>
         </div>
       {:else}
-        <ContentSection {PM} layer={firstLayer} {fontsVersion} />
+        <ContentSection layer={firstLayer} {fontsVersion} />
       {/if}
-      {#if firstLayer.type !== 'audio'}<TransformSection {PM} layer={firstLayer} />{/if}
-      <StructuredSection {PM} layer={firstLayer} />
+      {#if firstLayer.type !== 'audio'}<TransformSection layer={firstLayer} />{/if}
+      <StructuredSection layer={firstLayer} />
       {#if firstLayer.type !== 'audio'}
-        {#if firstLayer.type === 'shader'}<ShaderUniforms {PM} layer={firstLayer} />{/if}
-        {#if firstLayer.type === 'extension'}<ExtensionLayerParams {PM} layer={firstLayer} />{/if}
-        <EffectsSection {PM} layer={firstLayer} />
-        <MasksSection {PM} layer={firstLayer} />
+        {#if firstLayer.type === 'shader'}<ShaderUniforms layer={firstLayer} />{/if}
+        {#if firstLayer.type === 'extension'}<ExtensionLayerParams layer={firstLayer} />{/if}
+        <EffectsSection layer={firstLayer} />
+        <MasksSection layer={firstLayer} />
       {/if}
-      {#if firstLayer.type === 'video' || firstLayer.type === 'precomp'}<RetimingSection {PM} layer={firstLayer} />{/if}
-      <LayerOptions {PM} layer={firstLayer} />
+      {#if firstLayer.type === 'video' || firstLayer.type === 'precomp'}<RetimingSection layer={firstLayer} />{/if}
+      <LayerOptions layer={firstLayer} />
     </div>
   {/if}
 </div>

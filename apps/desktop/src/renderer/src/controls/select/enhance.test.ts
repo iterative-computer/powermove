@@ -6,7 +6,8 @@ function build(): HTMLSelectElement {
   const select = document.createElement('select');
   select.setAttribute('aria-label', 'Format');
   select.className = 'sel export-select';
-  for (const [v, l] of [['mp4', 'MP4'], ['webm', 'WebM'], ['prores', 'ProRes']] as const) {
+  const options: Array<[string, string]> = [['mp4', 'MP4'], ['webm', 'WebM'], ['prores', 'ProRes']];
+  for (const [v, l] of options) {
     const o = document.createElement('option'); o.value = v; o.textContent = l; select.append(o);
   }
   document.body.append(select);

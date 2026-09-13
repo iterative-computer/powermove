@@ -1,6 +1,8 @@
 import { expect } from '@playwright/test';
 import { test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('font changes and animation preserve a centered text anchor', async ({ session }) => {
   const result = await session.page.evaluate(() => {
     const PM = (window as any).PM;

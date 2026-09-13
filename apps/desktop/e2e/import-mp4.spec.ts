@@ -6,6 +6,7 @@ import {fixturePath} from './helpers/media';
 
 test.describe('@import-mp4 H.264 import smoke', () => {
   test.beforeEach(async ({session}) => {
+    await session.openEditor();
     await session.page.evaluate(() => {
       const PM = (window as any).PM;
       window.dispatchEvent(new CustomEvent('pm-open-project', {detail: PM.mkProject({name:'Regression fixture'})}));
@@ -131,9 +132,10 @@ test.describe('@import-mp4 H.264 import smoke', () => {
 
     const rowPosition = await page.evaluate(() => {
       const PM = (window as any).PM;
+      const timeline = PM.Kernel.services.get('timeline');
       const layer = PM.proj.layers.find((item: any) => item.type === 'video' && item.name === 'h264-aac.mp4');
-      const index = PM.TL.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === layer.id);
-      return { x: Math.min(100, PM.TL.gut / 2), y: PM.TL.ruler + index * PM.TL.row - PM.TL.scrollY + PM.TL.row / 2 };
+      const index = timeline.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === layer.id);
+      return { x: Math.min(100, timeline.gut / 2), y: timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
     });
     await page.locator('#tl-canvas').click({ button: 'right', position: rowPosition });
     const separate = page.getByRole('menuitem', { name: 'Separate audio' });

@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@viewer adjustment layers', () => {
   test('processes only lower layers across the full frame with timing, masks, and opacity', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
 

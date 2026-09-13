@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@extensions structured programmable layers', () => {
   test('the bundled 3D layer renders, edits through source, and undoes atomically', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => {
       const PM = (window as any).PM;
@@ -57,6 +58,7 @@ test.describe('@extensions structured programmable layers', () => {
   });
 
   test('imports a durable OBJ asset and renders its structured mesh layer', async ({ session }) => {
+    await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.layerDefinition?.('powermove.3d.obj-model')));
 

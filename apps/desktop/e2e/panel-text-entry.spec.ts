@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('Command+V pastes text into a panel search field without pasting layers', async ({ session }) => {
   const { page } = session;
   await page.evaluate(() => {

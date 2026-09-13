@@ -5,6 +5,8 @@ import os from 'node:os';
 import { decodeProjectContainer } from '../src/shared/project-container';
 import { expect, test, repoRoot } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 // Optional real-project acceptance run, using a copy and an isolated profile.
 test('reopens a media project, preserves source, and exports advancing frames', async ({ session }) => {
   test.skip(!process.env.POWERMOVE_EXPORT_FIXTURE, 'Set POWERMOVE_EXPORT_FIXTURE to a project file');

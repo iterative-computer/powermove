@@ -5,28 +5,31 @@
   import { EditGesture, type EditBinding } from './gesture';
   import { rowLabelId } from './context';
   import './controls.css';
+  import type { PowermoveAPI } from '../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit,
-    label
+    label,
+    mixed
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
+    mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
 
   const labelledBy = rowLabelId();
   const value = $derived((doc.tick.values, doc.proj, transport.time, !!get()));
-  const mixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,PM.inspectorMixed?.(edit,value)??false));
-  const gesture = $derived(new EditGesture(PM, edit));
+  const isMixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,mixed?.(edit,value)??false));
+  const gesture = $derived(new EditGesture(api, edit));
 
   function toggle(event: MouseEvent): void {
     event.stopPropagation();
-    gesture.once(mixed?true:!value);
-    PM.invalidate?.();
+    gesture.once(isMixed?true:!value);
+    api.transport.invalidate();
   }
 </script>
 
@@ -34,8 +37,8 @@
   type="button"
   class:on={value}
   class="toggle"
-  class:mixed
-  aria-pressed={mixed?'mixed':value}
+  class:mixed={isMixed}
+  aria-pressed={isMixed?'mixed':value}
   aria-labelledby={labelledBy}
   aria-label={labelledBy ? undefined : (label ?? edit.label)}
   onpointerdown={(event) => event.stopPropagation()}

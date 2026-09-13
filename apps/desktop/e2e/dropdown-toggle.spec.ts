@@ -1,6 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test('dropdown triggers close on the second click and reopen on the third', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   await page.evaluate(() => (window as any).PM.Kernel.loader.builtinsReady);
@@ -62,10 +63,10 @@ test('dropdown triggers close on the second click and reopen on the third', asyn
     expect(await control.evaluate(el => getComputedStyle(el).backgroundImage)).toContain('data:image/svg+xml');
     expect(await control.evaluate(el => ({ appearance: getComputedStyle(el).appearance, right: getComputedStyle(el).paddingRight, arrow: getComputedStyle(el).backgroundPosition }))).toEqual({ appearance: 'none', right: '26px', arrow: 'calc(100% - 10px) 50%' });
   }
-  await page.getByRole('combobox', { name: 'Preview resolution', exact: true }).selectOption('0.25');
-  await expect(page.getByRole('combobox', { name: 'Preview resolution', exact: true })).toHaveValue('0.25');
-  await page.getByRole('combobox', { name: 'Composition zoom', exact: true }).selectOption('1');
-  await expect(page.getByRole('combobox', { name: 'Composition zoom', exact: true })).toHaveValue('1');
+  await page.locator('#preview-controls select').selectOption('0.25');
+  await expect(page.locator('#preview-controls select')).toHaveValue('0.25');
+  await page.locator('#composition-zoom').selectOption('1');
+  await expect(page.locator('#composition-zoom')).toHaveValue('1');
   await page.locator('#preview-controls').screenshot({ path: '/private/tmp/pm-dropdown-padding-after.png' });
   await page.locator('#composition-zoom').screenshot({ path: '/private/tmp/pm-dropdown-zoom-after.png' });
   expect(session.diagnostics.pageErrors).toEqual([]);

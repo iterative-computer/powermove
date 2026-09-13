@@ -1,6 +1,8 @@
 import path from 'node:path';
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 // Normalization omits false collapsed flags; both representations are expanded.
 const canonical = (value: unknown) => JSON.parse(JSON.stringify(value,
   (key, value) => key === 'collapsed' && value === false ? undefined : value));
@@ -42,6 +44,7 @@ test('restores each project layout after quit and when reopening its saved file'
     return { id: PM.proj.id, workspace: PM.WS.snapshot() };
   });
   await session.relaunch();
+  await session.openEditor();
   expect(canonical(await session.page.evaluate(() => ({
     id: (window as any).PM.proj.id, workspace: (window as any).PM.WS.snapshot(),
   })))).toEqual(canonical(second));

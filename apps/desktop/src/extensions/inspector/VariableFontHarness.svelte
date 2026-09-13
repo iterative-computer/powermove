@@ -5,7 +5,7 @@
   import { provideInspectorContext } from './context';
 
   let { api, layer }: { api: PowermoveAPI; layer: any } = $props();
-  const { PM } = provideInspectorContext(untrack(() => api));
+  provideInspectorContext(untrack(() => api));
 </script>
 
-<ContentSection {PM} {layer} />
+<ContentSection {layer} />

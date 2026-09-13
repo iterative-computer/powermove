@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@prompt-glow run halo around the prompt being answered', () => {
   test('wraps the live prompt, stays out of the way, and settles out when the run lands', async ({ session }) => {
     const { page } = session;

@@ -11,6 +11,7 @@
   let { panelId }: PanelProps = $props();
 
   const PM = window.PM as Record<string, any>;
+  const api = PM.Kernel.api('shader-panel');
   const selectedShader = $derived.by(() => {
     doc.tick.structure;
     doc.tick.values;
@@ -39,7 +40,7 @@
     const preset = presets.find(([name]) => name === select.value);
     select.value = '';
     if (!preset) return;
-    new EditGesture(PM, binding(selectedShader, 'Shader preset')).once(preset[1]);
+    new EditGesture(api, binding(selectedShader, 'Shader preset')).once(preset[1]);
     PM.invalidate?.();
     refreshToken++;
   }
@@ -57,7 +58,7 @@
 <div class="shader-panel" data-svelte-panel={panelId}>
   {#if selectedShader}
     {#key selectedShader.id}
-      <ShaderEditor PM={PM} layer={selectedShader} {panelId} onWrite={() => refreshToken++} onCompile={compile} />
+      <ShaderEditor PM={PM} {api} layer={selectedShader} {panelId} onWrite={() => refreshToken++} onCompile={compile} />
       <div class="codebar">
         <CompileStatus PM={PM} layer={selectedShader} {refreshToken} />
         <span class="codebar-spacer"></span>

@@ -1,4 +1,5 @@
 import type { PMRegistry } from '../registry';
+import { timelineService, viewerService } from '../core/services';
 
 /** One cancellable pickwhip, shared by the inspector and timeline. */
 export function installParentPickwhip(PM: PMRegistry): void {
@@ -16,7 +17,8 @@ export function installParentPickwhip(PM: PMRegistry): void {
     overlay.append(line, label); document.body.append(overlay);
     let target: any = null;
     const move = (pointer: PointerEvent) => {
-      const candidate = PM.TL?.layerAtPoint?.(pointer.clientX, pointer.clientY) || PM.Viewer?.layerAtPoint?.(pointer.clientX, pointer.clientY);
+      const candidate = timelineService(PM)?.layerAtPoint(pointer.clientX, pointer.clientY)
+        || viewerService(PM)?.layerAtPoint?.(pointer.clientX, pointer.clientY);
       target = candidate && PM.TYPE_META[candidate.type]?.transform !== false && layers.every((layer: any) => layer.id !== candidate.id && !PM.wouldCycle(layer, candidate.id)) ? candidate : null;
       line.setAttribute('d', `M ${event.clientX} ${event.clientY} C ${event.clientX + 60} ${event.clientY}, ${pointer.clientX - 60} ${pointer.clientY}, ${pointer.clientX} ${pointer.clientY}`);
       label.setAttribute('x', String(Math.min(window.innerWidth - 200, pointer.clientX + 12))); label.setAttribute('y', String(pointer.clientY - 12));

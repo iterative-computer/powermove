@@ -1,4 +1,6 @@
-export type LegacyPM = Record<string, any>;
+import type { PowermoveAPI } from '../kernel/api';
+
+type ControlUtilAPI = Pick<PowermoveAPI, 'model' | 'util'>;
 
 export interface FillStop {
   id: string;
@@ -14,8 +16,8 @@ export interface FillValue {
 
 export const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
-export const round = (PM: LegacyPM, value: number, precision: number): number =>
-  PM.round ? PM.round(value, precision) : Number(value.toFixed(precision));
+export const round = (api: Pick<PowermoveAPI, 'util'>, value: number, precision: number): number =>
+  api.util.round(value, precision);
 
 export const normalizeHex = (value: unknown): string | null => {
   const raw = String(value ?? '').trim().replace(/^#/, '');
@@ -58,20 +60,6 @@ export const fillCss = (fill: FillValue): string => {
   return fill.type === 'radial' ? `radial-gradient(circle,${stops})` : `linear-gradient(${fill.angle}deg,${stops})`;
 };
 
-export function normalizeFill(PM: LegacyPM, value: unknown, fallback = '#000000'): FillValue {
-  if (typeof PM.normalizeFill === 'function') return PM.normalizeFill(value, fallback) as FillValue;
-  const raw = value && typeof value === 'object' ? value as Partial<FillValue> & { color?: string } : {};
-  const fillColor = (candidate: unknown): string => typeof candidate === 'string' && /^#[0-9a-f]{6}$/i.test(candidate)
-    ? candidate.toUpperCase()
-    : fallback;
-  const type = ['solid', 'linear', 'radial', 'none'].includes(String(raw.type)) ? raw.type as FillValue['type'] : 'solid';
-  let stops = Array.isArray(raw.stops) ? raw.stops.slice(0, 8).map((stop, index) => ({
-    id: typeof stop?.id === 'string' && stop.id ? stop.id : `stop-${index + 1}`,
-    color: fillColor(stop?.color),
-    position: clamp(Number(stop?.position) || 0, 0, 100)
-  })).sort((a, b) => a.position - b.position) : [];
-  if (!stops.length) stops = [{ id: 'stop-1', color: fillColor(raw.color ?? fallback), position: 0 }];
-  if (type !== 'solid' && type !== 'none' && stops.length < 2) stops.push({ id: 'stop-2', color: stops[0]!.color, position: 100 });
-  if (type === 'solid' || type === 'none') stops = [{ ...stops[0]!, position: 0 }];
-  return { type, angle: clamp(Number(raw.angle) || 0, -180, 180), stops };
+export function normalizeFill(api: ControlUtilAPI, value: unknown, fallback = '#000000'): FillValue {
+  return api.model.normalizeFill(value, fallback) as FillValue;
 }

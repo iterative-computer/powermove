@@ -8,24 +8,27 @@
   import { clamp, hexToRgb, hsvToRgb, normalizeHex, rgbToHex, rgbToHsv } from './control-utils';
   import { anchorPicker, mountOverlayOnBody } from './overlay';
   import './controls.css';
+  import type { PowermoveAPI } from '../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit,
-    label = 'Color'
+    label = 'Color',
+    mixed
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
+    mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
 
   const labelledBy = rowLabelId();
   const raw = $derived((doc.tick.values, doc.proj, transport.time, get()));
   const value = $derived(typeof raw === 'string' && /^#[0-9a-f]{3,8}$/i.test(raw) ? raw : '#808080');
-  const mixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,PM.inspectorMixed?.(edit,value)??false));
-  const gesture = $derived(new EditGesture(PM, edit));
+  const isMixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,mixed?.(edit,value)??false));
+  const gesture = $derived(new EditGesture(api, edit));
   const presets = ['#09090A', '#FFFFFF', '#FF6B1A', '#FFB000', '#34C759', '#0A84FF', '#6E5AE6', '#FF375F'];
   const hsvChannels = [['h', 'H', '°', 359], ['s', 'S', '%', 100], ['v', 'B', '%', 100]] as const;
   const rgbChannels = [['r', 'R'], ['g', 'G'], ['b', 'B']] as const;
@@ -61,7 +64,7 @@
       previewing = true;
     }
     gesture.write(chosen);
-    PM.invalidate?.('render');
+    api.transport.invalidate('render');
   }
 
   function setHex(next: unknown, preview = true): boolean {
@@ -78,7 +81,7 @@
   async function sampleScreenColor(): Promise<void> {
     const EyeDropper = (window as Window & { EyeDropper?: EyeDropperConstructor }).EyeDropper;
     if (!EyeDropper) {
-      PM.toast?.('Eyedropper is not available on this system');
+      api.ui.toast('Eyedropper is not available on this system');
       return;
     }
     if (sampling) return;
@@ -87,7 +90,7 @@
       const result = await new EyeDropper().open();
       setHex(result.sRGBHex);
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === 'AbortError')) PM.toast?.('Could not sample that color');
+      if (!(error instanceof DOMException && error.name === 'AbortError')) api.ui.toast('Could not sample that color');
     } finally {
       sampling = false;
     }
@@ -127,7 +130,7 @@
     event.preventDefault();
     const element = event.currentTarget as HTMLElement;
     picker(event, element);
-    PM.drag?.(event, { move: (_dx: number, _dy: number, next: PointerEvent) => picker(next, element), up: () => {} });
+    api.ui.drag(event, { move: (_dx: number, _dy: number, next: PointerEvent) => picker(next, element), up: () => {} });
   }
 
   function nudgeSv(event: KeyboardEvent): void {
@@ -169,18 +172,18 @@
       if (edit.mode === 'local') gesture.write(before);
       gesture.cancel();
       previewing = false;
-      PM.invalidate?.('render');
+      api.transport.invalidate('render');
     }
     finishClose();
   }
 
   function apply(): void {
-    if (!commitHex(draft)) { PM.toast?.('Enter a six-digit hex color'); return; }
+    if (!commitHex(draft)) { api.ui.toast('Enter a six-digit hex color'); return; }
     if (previewing) {
       gesture.write(chosen);
       gesture.commit();
       previewing = false;
-      PM.invalidate?.('render');
+      api.transport.invalidate('render');
     } else gesture.once(chosen);
     finishClose();
   }
@@ -190,7 +193,7 @@
       gesture.write(chosen);
       gesture.commit();
       previewing = false;
-      PM.invalidate?.('render');
+      api.transport.invalidate('render');
     }
     finishClose();
   }
@@ -219,7 +222,7 @@
   onpointerdown={(event) => event.stopPropagation()}
   onclick={show}
 >
-  <span style="font-family:var(--f-mono);font-size:var(--fs-md);color:var(--tx)">{mixed?'Mixed':value.toUpperCase()}</span>
+  <span style="font-family:var(--f-mono);font-size:var(--fs-md);color:var(--tx)">{isMixed?'Mixed':value.toUpperCase()}</span>
   <span class="sw" aria-hidden="true" style={`--sw-color:${value}`}></span>
 </button>
 

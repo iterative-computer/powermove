@@ -8,11 +8,44 @@
  */
 
 import type { Component } from 'svelte';
-import type { Project } from '../core/types/project';
+import type {
+  BlendMode,
+  Channel,
+  ChannelValue,
+  Comp,
+  Effect,
+  Fill,
+  Keyframe,
+  Layer,
+  LayerType,
+  Mask,
+  Project
+} from '../core/types/project';
 import type { EditCommand, EditMeta, EditResult, JsonObject } from '../core/types/commands';
+import type { WorkspaceManifest } from '../core/types/workspace';
 import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionScope } from '../../../shared/extensions';
 
-export type { Project, EditCommand, EditMeta, EditResult, ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionScope };
+export type {
+  BlendMode,
+  Channel,
+  ChannelValue,
+  Comp,
+  EditCommand,
+  EditMeta,
+  EditResult,
+  Effect,
+  Fill,
+  ExtensionHealth,
+  ExtensionManifest,
+  ExtensionRecord,
+  ExtensionScope,
+  Keyframe,
+  Layer,
+  LayerType,
+  Mask,
+  Project,
+  WorkspaceManifest
+};
 
 export interface Disposable {
   dispose(): void;
@@ -69,12 +102,16 @@ export interface PanelsAPI {
   /** Ids of all registered panels (built-in and extension). */
   list(): string[];
   /** Show the panel in a dock (adds it to the active workspace if absent). */
-  open(id: string, dock?: 'left' | 'center' | 'right'): void;
+  open(id: string, dock?: PanelDock): void;
+  open(id: string, options?: PanelOpenOptions): void;
   close(id: string): void;
   isOpen(id: string): boolean;
   /** Re-run the panel's `build` (imperative panels only). */
   refresh(id: string): void;
 }
+
+export type PanelDock = 'left' | 'center' | 'right';
+export interface PanelOpenOptions { dock?: PanelDock; index?: number }
 
 /* ── commands & keybindings ──────────────────────────────── */
 
@@ -339,6 +376,303 @@ export interface ProjectAPI {
   snapshot(t?: number, maxWidth?: number): Promise<string>;
 }
 
+/* ── editor kernel façades ──────────────────────────────── */
+
+export type AffineMatrix = [number, number, number, number, number, number];
+export type Mat3 = [number, number, number, number, number, number, number, number, number];
+export type Mat4 = [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
+export interface Point { x: number; y: number }
+export interface Bounds { x0: number; x1: number; y0: number; y1: number; cx?: number; cy?: number }
+export interface PropertyEntry { key: string; prop: Channel; label: string; group: string }
+
+/**
+ * Animation evaluates channels and hierarchy transforms without changing the project, except for the key/easing helpers and `touch`, which mutate channel data and invalidate animation-derived caches. Expression evaluation records failures in `expressionErrors` but does not emit project events.
+ */
+export interface AnimAPI {
+  ev(layer: Layer, key: string, time: number): ChannelValue | null;
+  evP(layer: Layer, prop: Channel, time: number, key: string): ChannelValue | null;
+  active(layer: Layer, time: number): boolean;
+  findProp(layer: Layer, key: string): Channel | null;
+  allProps(layer: Layer): PropertyEntry[];
+  hasKeyAt(layer: Layer, prop: Channel, time: number): Keyframe | null;
+  setKey(layer: Layer, key: string, time: number, value: ChannelValue, ease?: string): Keyframe | null;
+  setKeyOn(prop: Channel, localTime: number, value: ChannelValue, ease?: string, fps?: number): Keyframe | null;
+  removeKey(prop: Channel, key: Keyframe): void;
+  applyEaseTo(keys: Keyframe[], name: string): void;
+  wouldCycle(layer: Layer, parentId: string | null): boolean;
+  resolveContent(layer: Layer, time?: number): Layer['d'];
+  readonly expressionErrors: WeakMap<object, string>;
+  version(): number;
+  touch(): void;
+  worldMatrix(layer: Layer, time: number): AffineMatrix;
+  localMatrix(layer: Layer, time: number): AffineMatrix;
+  transformParentMatrix(layer: Layer, time: number, parent?: Layer | null): AffineMatrix;
+  mul(left: Readonly<AffineMatrix>, right: Readonly<AffineMatrix>): AffineMatrix;
+}
+
+export interface ChannelDefinition { label: string; group: string; unit?: string; step?: number; min?: number; max?: number }
+export interface LayerFactoryOptions {
+  name?: string;
+  from?: number;
+  dur?: number;
+  color?: string;
+  p?: Partial<Record<string, ChannelValue>>;
+  d?: Partial<Layer['d']>;
+}
+
+/**
+ * Model exposes the canonical factories, schema tables, and current-composition lookups. Factories allocate detached project objects; lookups are read-only, and callers must use edit/history APIs to make durable project mutations.
+ */
+export interface ModelAPI {
+  P<T extends ChannelValue>(value: T, options?: Partial<Channel<T>>): Channel<T>;
+  readonly CH: Readonly<Record<string, ChannelDefinition>>;
+  KF<T extends ChannelValue>(time: number, value: T, ease?: string): Keyframe<T>;
+  readonly BLENDS: readonly BlendMode[];
+  readonly TYPE_META: typeof import('../core/types/project').TYPE_META;
+  readonly MASK_SHAPES: readonly Mask['shape'][];
+  mkLayer(type: LayerType, options?: LayerFactoryOptions, comp?: Comp): Layer;
+  mkMask(shape?: Mask['shape'], comp?: Comp): Mask;
+  mkProject(options?: Partial<Project>): Project;
+  cloneLayer(layer: Layer): Layer;
+  normalizeFill(value: unknown, fallback?: string): Fill;
+  layerDefinition(id: string): ExtensionLayerDefinition | undefined;
+  curComp(): Comp;
+  layer(id: string): Layer | null;
+  byName(name: string): Layer | null;
+}
+
+/**
+ * Selection reads and updates the single mutable legacy selection object so existing references stay live. `set` and `select` emit the legacy `sel` event and invalidate dependent UI; selection history remains suppressed while a project transaction is pending by the backing history service.
+ */
+export interface SelectionAPI {
+  get(): Selection;
+  layers(): string[];
+  first(): Layer | null;
+  keys(): string[];
+  chan(): string | null;
+  set(partial: Partial<Selection>): void;
+  select(ids: string[], add?: boolean): void;
+  resolveSelectedKeys(): Keyframe[];
+  keySelectionActive: boolean;
+}
+
+/**
+ * Groups query hierarchy and timing, expand selections, and perform structural reparenting. `normalizeStack` and `moveToGroup` mutate the project; the latter also touches animation state and emits the legacy layer/selection changes.
+ */
+export interface GroupsAPI {
+  ancestors(layer: Layer, layers?: Layer[]): Layer[];
+  transformRoots(ids: string[]): Layer[];
+  /** Bounds of a group's active visual descendants in the group's local space. */
+  bounds(group: Layer, time: number): (Bounds & { w: number; h: number; ax: number; ay: number }) | null;
+  span(group: Layer): { from: number; dur: number };
+  expand(ids: string[]): string[];
+  normalizeStack(): void;
+  moveToGroup(ids: string[], target: string | null): { ids: string[]; group: string | null };
+}
+
+export interface TransportPerformance { fps: number; ms: number; drops: number; budget: number; auto: boolean }
+export interface SetTimeOptions { raw?: boolean; force?: boolean }
+
+/**
+ * Transport owns mutable playhead, playback and preview-quality state. Changing time or playback emits the backing transport events and invalidates rendering/UI; `invalidate` preserves the legacy immediate-render and coalesced UI invalidation behavior.
+ */
+export interface TransportAPI {
+  time(): number;
+  setTime(time: number, options?: SetTimeOptions): void;
+  play(): void;
+  pause(): void;
+  toggle(): void;
+  playing(): boolean;
+  step(frames: number): void;
+  quality: number;
+  readonly perf: TransportPerformance;
+  invalidate(what?: string): void;
+  previewResolution: string | number | null;
+}
+
+export interface HistoryExternalOptions { bytes?: number; cleanup?: () => void; group?: string | null }
+
+/**
+ * History brackets raw mutations, commits undo/redo patches, and publishes the same project invalidations as the legacy stack. Selection entries are ignored while another transaction is pending, preserving atomic edit behavior.
+ */
+export interface HistoryAPI {
+  do<T>(label: string, fn: () => T): T;
+  begin(label: string, group?: string | null): unknown;
+  commit(label?: string): boolean;
+  cancel(): void;
+  undo(): boolean;
+  redo(): boolean;
+  external(label: string, undo: () => void, redo: () => void, options?: HistoryExternalOptions): string | null;
+  selection(before: Selection, after: Selection): string | null;
+}
+
+/**
+ * Edit is the validated, provenance-aware project mutation surface. One-shot `apply` calls and live begin/dispatch/commit gestures create undoable edits, while `cancel` rolls changed gestures back and `mutate` wraps structural project changes in one atomic history transaction.
+ */
+export interface EditAPI {
+  apply(input: EditCommand | EditCommand[], meta?: EditMeta): EditResult;
+  begin(label: string, meta?: EditMeta): void;
+  commit(label?: string): EditResult;
+  cancel(): boolean;
+  dispatch(command: EditCommand): EditResult;
+  mutate<T>(label: string, action: () => T, meta?: EditMeta): T | EditResult;
+}
+
+export interface ImportPlacement { at: number; index?: number }
+export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null }
+export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
+export interface WaveformOptions { [key: string]: unknown }
+export interface FontCatalog {
+  bundled: string[];
+  system: string[];
+  families: string[];
+  setSystemFamilies(values: string[]): void;
+  options(current: string): string[];
+  ensure(family: string, weight?: number): Promise<void>;
+}
+
+/**
+ * Media exposes timing queries, file import, layer-command creation, waveform drawing, runtime raster assets and fonts. Imports/assets/fonts may perform asynchronous I/O and invalidate caches; command creation and timing helpers do not mutate the project by themselves.
+ */
+export interface MediaAPI {
+  readonly timing: { isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number };
+  importFiles(files: FileList | File[], options?: ImportFilesOptions): Promise<unknown>;
+  commandForAsset(id?: string, at?: number): EditCommand | undefined;
+  readonly audio: { drawWaveform(ctx: CanvasRenderingContext2D, layer: Layer, options?: WaveformOptions): boolean };
+  readonly assets: {
+    get(id: string): RuntimeAsset | undefined;
+    add(file: File, options?: Record<string, unknown>): Promise<RuntimeAsset>;
+    kind(file: File): 'image' | 'video' | 'audio' | 'model' | null;
+  };
+  readonly fonts: FontCatalog;
+}
+
+export interface PreviewViewport { x: number; y: number; width: number; height: number; [key: string]: unknown }
+export interface RasterWindow { x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
+export interface RasterSurface { canvas?: HTMLCanvasElement; bitmap?: ImageBitmap; x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
+
+/**
+ * Render provides WebGL setup, picking/bounds, raster cache access and frame capture. Rendering may allocate or invalidate GPU/CPU caches and temporarily change preview quality, but it does not make durable project edits.
+ */
+export interface RenderAPI {
+  readonly gl: {
+    bounds(layer: Layer, time: number): Bounds | null;
+    pick(x: number, y: number, time: number, options?: { includeLocked?: boolean }): Layer | null;
+    init(canvas: HTMLCanvasElement, options?: { alpha?: boolean; quiet?: boolean }): boolean;
+    resize(width: number, height: number, previewViewport?: PreviewViewport | null): boolean;
+    compileError(key: string): string | null;
+    readonly previewViewport: PreviewViewport | null;
+    readonly context: WebGL2RenderingContext | null;
+  };
+  raster(layer: Layer, scale?: number, time?: number, uploaded?: (key: string) => unknown, crop?: RasterWindow): RasterSurface | null;
+  renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement;
+  snapshot(time: number, maxWidth?: number): string;
+}
+
+export interface KeyHandleState { [key: string]: unknown }
+export interface ShaderMeta { [key: string]: unknown }
+
+/**
+ * UI state stores non-project disclosure, graph-handle, reveal and shader metadata. Setters mutate only the backing UI-state caches and compatibility fields; they do not create project history entries or render output directly.
+ */
+export interface UIStateAPI {
+  getLayerCollapsed(layer: Layer): boolean;
+  setLayerCollapsed(layer: Layer, collapsed: boolean): boolean;
+  getGroupCollapsed(layer: Layer): boolean;
+  setGroupCollapsed(layer: Layer, collapsed: boolean): boolean;
+  getKeyHandles(key: Keyframe): KeyHandleState | null;
+  setKeyHandles(key: Keyframe, patch: KeyHandleState): KeyHandleState | null;
+  getFxOpen(effect: Effect): boolean;
+  setFxOpen(effect: Effect, open: boolean): boolean;
+  getReveal(layer: Layer): string[] | null;
+  setReveal(layer: Layer, keys: string[]): string[] | null;
+  getShaderMeta(layer: Layer): ShaderMeta | null;
+  setShaderMeta(layer: Layer, patch: ShaderMeta): ShaderMeta | null;
+}
+
+export interface DragOptions {
+  move(dx: number, dy: number, event: PointerEvent): void;
+  up?(event?: PointerEvent): void;
+  cancel?(): void;
+  cursor?: string;
+  infinite?: boolean;
+}
+export interface EditGestureAPI { begin(): void; write(value: unknown): void; commit(): void; cancel(): void; once(value: unknown): unknown }
+export interface EditGestureConstructor { new(binding: ControlEditBinding): EditGestureAPI }
+
+export interface AssetDragPayload { id: string; name: string; kind: string; dur?: number }
+export interface FxDragPayload { kind: 'effect' | 'transition'; id: string; label: string }
+
+/**
+ * Drag-and-drop serializes asset/FX payloads to the canonical MIME keys and proxies the live in-process media drag. Reads are side-effect free; `startAssetDrag` writes the DataTransfer, while `applyFxDrop` performs the backing undoable edit and invalidates the viewer.
+ */
+export interface DndAPI {
+  readonly ASSET_MIME: string;
+  readonly FX_MIME: string;
+  startAssetDrag(dataTransfer: DataTransfer | null | undefined, payload: AssetDragPayload): void;
+  mediaDrag: AssetDragPayload | null;
+  hasAssetDrag(dataTransfer: DataTransfer | null | undefined): boolean;
+  hasFileDrag(dataTransfer: DataTransfer | null | undefined): boolean;
+  hasMediaDrag(dataTransfer: DataTransfer | null | undefined): boolean;
+  readAssetDrag(dataTransfer: DataTransfer | null | undefined): AssetDragPayload | null;
+  hasFxDrag(dataTransfer: DataTransfer | null | undefined): boolean;
+  readFxDrag(dataTransfer: DataTransfer | null | undefined): FxDragPayload | null;
+  applyFxDrop(payload: FxDragPayload, layerId: string | null | undefined, edge?: 'in' | 'out'): boolean;
+}
+
+export interface WorkspaceMutateOptions { inPlace?: boolean }
+
+/**
+ * Workspace exposes the active layout and persists mutations through the legacy workspace manager, including built-in-to-user cloning unless `inPlace` is requested. Panel operations mutate layout state, normalize dock fill, apply the layout and emit workspace/layout events; they do not touch project history.
+ */
+export interface WorkspaceAPI {
+  current(): WorkspaceManifest | null;
+  mutate(fn: (workspace: WorkspaceManifest) => void, options?: WorkspaceMutateOptions): WorkspaceManifest | null;
+  hasPanel(id: string): boolean;
+  addPanel(id: string, dock?: PanelDock, index?: number): void;
+  movePanel(id: string, dock: PanelDock, index: number): boolean;
+  removePanel(id: string): void;
+  hidePanel(id: string): boolean;
+  restorePanel(id: string): boolean;
+  refresh(id: string): void;
+}
+
+/**
+ * Utility contains deterministic numeric, timecode, colour and identifier helpers. Calls are otherwise side-effect free; only `uid` consumes runtime randomness to allocate a new identifier.
+ */
+export interface UtilAPI {
+  round(value: number, places?: number): number;
+  clamp(value: number, min: number, max: number): number;
+  lerp(from: number, to: number, amount: number): number;
+  snapF(time: number, fps: number): number;
+  tc(seconds: number, fps?: number, showFrames?: boolean): string;
+  parseTc(value: string, fps?: number): number | null;
+  uid(prefix?: string): string;
+  hex2rgb(hex: string): number[];
+  rgb2hex(red: number, green: number, blue: number): string;
+}
+
+/**
+ * Ease exposes the immutable preset table and identifies matching temporal handles. Both operations are read-only and do not mutate channels, history, or render state.
+ */
+export interface EaseAPI { nameOf(easeOut: number[], easeIn: number[]): string; readonly PRESETS: Readonly<Record<string, number[]>> }
+
+/**
+ * Space3D computes bound-PM layer, parent and perspective transforms plus plane projection/containment. These helpers are read-only; the adapter supplies the legacy PM argument so extensions never receive or pass the registry.
+ */
+export interface Space3DAPI {
+  readonly CHANNELS_3D: Readonly<Record<string, number>>;
+  local3D(layer: Layer, time: number): Mat4;
+  parent3D(layer: Layer, time: number, parent?: Layer | null): Mat4;
+  world3D(layer: Layer, time: number, positioning?: boolean): Mat4;
+  is3DLayer(layer: Layer): boolean;
+  perspectiveAmount(layer: Layer, time: number): number;
+  planeMatrix(layer: Layer, time: number, positioning?: boolean): Mat3;
+  projectPoint(matrix: Readonly<Mat3>, point: Point): Point;
+  inversePlane(matrix: Readonly<Mat3>): Mat3 | null;
+  planeContains(layer: Layer, time: number, x: number, y: number, bounds: Bounds): boolean;
+}
+
 /* ── ui helpers ──────────────────────────────────────────── */
 
 export type ControlComponent = Component<Record<string, unknown>>;
@@ -370,17 +704,19 @@ export interface ControlsAPI {
    */
   readonly binding: {
     channelBinding(
-      pm: Record<string, any>,
       layerId: string,
       channel: string,
       options?: ControlBindingOptions & { time?: number | (() => number) }
     ): ControlEditBinding;
-    layerFieldBinding(pm: Record<string, any>, layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
-    contentBinding(pm: Record<string, any>, layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
-    compositionBinding(pm: Record<string, any>, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    layerFieldBinding(layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    contentBinding(layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
+    compositionBinding(field: string, options?: ControlBindingOptions): ControlEditBinding;
   };
 }
 
+/**
+ * UI exposes kernel controls, overlays, menus and pointer helpers. Most members only mutate transient interface state; parent picking can apply an edit, shader opening mutates workspace state, and gesture coordinates the backing edit/history transaction.
+ */
 export interface UIAPI {
   readonly controls: ControlsAPI;
   toast(text: string, opts?: { sticky?: boolean; dismissible?: boolean; icon?: string }): void;
@@ -389,6 +725,77 @@ export interface UIAPI {
   modal(opts: { title?: string; body?: HTMLElement | string; width?: number; actions?: Array<{ label: string; pri?: boolean; run?: () => unknown }> }): { close(): void; body: HTMLElement };
   /** Icon SVG markup by name from the kernel set. */
   icon(name: string): string;
+  drag(event: PointerEvent, options: DragOptions): { cancel(): void };
+  closeMenus(): void;
+  showLayerMenu(layer: Layer, event: { clientX: number; clientY: number }, origin?: string): void;
+  showParentMenu(ids: string[], event: { clientX: number; clientY: number }): HTMLElement | undefined;
+  beginParentPick(event: PointerEvent, ids: string[]): void;
+  openShaderEditor(layer?: Layer): void;
+  readonly gesture: EditGestureConstructor;
+}
+
+export interface SourcePreview {
+  show(assetId: string): boolean;
+  toggle(assetId: string): void;
+  clear(): void;
+  dispose(): void;
+  readonly activeId: string | null;
+  readonly playing: boolean;
+}
+export interface SnapAxisCandidate { value: number; point: Point; [key: string]: unknown }
+export interface SnapCandidates { x: SnapAxisCandidate[]; y: SnapAxisCandidate[] }
+
+export interface TimelineService {
+  graph: boolean;
+  cv: HTMLCanvasElement | null;
+  pps: number;
+  scrollY: number;
+  scrollT: number;
+  keySelectionActive: boolean;
+  nextEdge(): number;
+  prevEdge(): number;
+  layerAtPoint(clientX: number, clientY: number): Layer | null;
+  frameView(): void;
+  reveal(layer: Layer, keys: string[]): void;
+}
+export interface ViewerService {
+  pan: number[];
+  zoom: number;
+  fit: boolean;
+  shown: number;
+  showControls?: boolean;
+  preview?: SourcePreview;
+  layout(panOnly?: boolean): void;
+  stage: HTMLElement | null;
+  ov: HTMLCanvasElement | null;
+  attach(stage: HTMLElement): ViewerService | void;
+  worldBounds(layer: Layer, time: number): Bounds | null;
+  snapshotSnapCandidates(time: number, selectionLayers: Layer[]): SnapCandidates;
+  isNavigating(): boolean;
+  deferNavigationRender(now: number): boolean;
+  setZoom(zoom: number): number | false;
+  layerAtPoint?(clientX: number, clientY: number): Layer | null;
+  /** Layer id whose source text is being edited on the canvas; the compositor skips drawing it. */
+  canvasTextEditing?: string | null;
+}
+export interface InspectorService {
+  refresh(): void;
+  syncs: unknown[];
+  focusText(layer: Layer): void;
+  copySelectedEffects(): boolean;
+  clearEffectClipboard(): void;
+  pasteCopiedEffects(): boolean;
+  body: HTMLElement | null;
+}
+export interface ToolService { tool: string; toolShape: string; setTool(tool: string, detail?: string): void }
+export interface ShaderHooks { syncShaderUniforms(layer: Layer): void }
+
+/**
+ * Services is a typed LIFO compatibility registry for extension-owned runtime capabilities. Registering the same name shadows the prior implementation; disposing restores it. Registration itself has no project side effects.
+ */
+export interface ServicesAPI {
+  register<T>(name: string, implementation: T): Disposable;
+  get<T>(name: string): T | null;
 }
 
 /* ── storage ─────────────────────────────────────────────── */
@@ -406,13 +813,25 @@ export interface KernelEvents {
   selection: Selection;
   time: number;
   transport: { playing: boolean };
+  /** Font family catalogue changed; payload is the complete ordered families list. */
+  fonts: string[];
   layout: undefined;
   'theme:changed': { id: string; scheme: 'light' | 'dark' };
   'extension:loaded': { id: string };
   'extension:unloaded': { id: string };
   /** Any extension record changed (health, enablement, rebuild) — re-read `extensions.list()`. */
   'extensions:changed': { ids: string[]; reason: string };
-  'frame:rendered': { time: number };
+  /** The compositor presented a frame. `viewport` is the exact preview viewport
+   * object it drew into (identity-comparable with `render.gl.previewViewport`),
+   * so a viewer can tell a fresh presentation from a reused one. */
+  'frame:rendered': { time: number; viewport: PreviewViewport | null; version: number | undefined; quality: number };
+  /** The engine finished a frame and overlays (selection, guides) should redraw. */
+  overlay: undefined;
+  /** Coalesced repaint request from the host: 'render' fires immediately for
+   * the compositor; 'timeline', 'ui', and 'status' fire once per animation
+   * frame after any host-side invalidation (reveal, collapse, history restore,
+   * selection restore). Extensions that cache derived rows or panels rebuild on it. */
+  invalidate: 'render' | 'timeline' | 'ui' | 'status';
 }
 
 export interface EventsAPI {
@@ -436,12 +855,16 @@ export interface ExtensionsAPI {
 
 export interface HostAPI {
   /**
+   * @deprecated Use the typed top-level API namespaces instead.
+   *
    * UNSTABLE. The legacy `PM` registry. Built-ins use it mid-migration; user
    * extensions should prefer the typed surface. Shape may change between app
    * versions without an apiVersion bump.
    */
   readonly pm: unknown;
   /**
+   * @deprecated Use the typed top-level API namespaces instead.
+   *
    * UNSTABLE. Escape hatch to the renderer's rune stores. Built-ins use it
    * mid-migration; shapes may change between app versions without an
    * apiVersion bump.
@@ -473,7 +896,23 @@ export interface PowermoveAPI {
   readonly menus: MenusAPI;
   readonly status: StatusAPI;
   readonly project: ProjectAPI;
+  readonly anim: AnimAPI;
+  readonly model: ModelAPI;
+  readonly selection: SelectionAPI;
+  readonly groups: GroupsAPI;
+  readonly transport: TransportAPI;
+  readonly history: HistoryAPI;
+  readonly edit: EditAPI;
+  readonly media: MediaAPI;
+  readonly render: RenderAPI;
+  readonly uiState: UIStateAPI;
   readonly ui: UIAPI;
+  readonly dnd: DndAPI;
+  readonly workspace: WorkspaceAPI;
+  readonly util: UtilAPI;
+  readonly ease: EaseAPI;
+  readonly space3d: Space3DAPI;
+  readonly services: ServicesAPI;
   readonly storage: StorageAPI;
   readonly events: EventsAPI;
   readonly extensions: ExtensionsAPI;

@@ -6,4 +6,3 @@ export const propertyShortcuts = [
   ['m', 'revealMasks', 'Mask controls'], ['f', 'revealFeather', 'Mask feather'],
   ['e', 'revealEffects', 'Effects'], ['l', 'revealAudio', 'Audio levels'],
 ] as const;
-

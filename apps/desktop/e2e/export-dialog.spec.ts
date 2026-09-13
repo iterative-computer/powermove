@@ -3,6 +3,7 @@ import { expect, launchApp, test } from './helpers/app';
 test('Export dialog gates fields by format and accepts a custom size', async () => {
   const session = await launchApp();
   try {
+    await session.openEditor();
     const { page } = session;
     await page.evaluate(() => (window as any).PM.Export.dialog());
     const dialog = page.getByRole('dialog', { name: 'Export', exact: true });
@@ -15,15 +16,15 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
     await expect(dialog).toContainText('frames ·');
 
     await expect(dialog.getByRole('button', { name: 'Queue', exact: true })).toHaveCount(0);
-    await dialog.getByRole('combobox', { name: 'Frame rate', exact: true }).selectOption('60');
-    await expect(dialog.getByRole('combobox', { name: 'Frame rate', exact: true })).toHaveValue('60');
+    await dialog.locator('select[aria-label="Frame rate"]').selectOption('60');
+    await expect(dialog.locator('select[aria-label="Frame rate"]')).toHaveValue('60');
     const blur = dialog.getByRole('switch', { name: 'Motion blur', exact: true });
     await blur.focus();
     await page.keyboard.press('Space');
     await expect(blur).toHaveAttribute('aria-checked', 'false');
 
     // Custom resolution reveals pixel inputs and updates the summary.
-    await dialog.getByRole('combobox', { name: 'Resolution', exact: true }).selectOption('__custom__');
+    await dialog.locator('select[aria-label="Resolution"]').selectOption('__custom__');
     const width = dialog.getByLabel('Export width in pixels');
     await expect(width).toBeVisible();
     await width.fill('1000');
@@ -39,7 +40,7 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
     await expect(dialog.getByText('Transparent background')).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Export frame', exact: true })).toBeVisible();
 
-    await dialog.getByRole('combobox', { name: 'Format', exact: true }).selectOption('png');
+    await dialog.locator('select[aria-label="Format"]').selectOption('png');
     await expect(dialog.getByRole('combobox', { name: 'Frame rate', exact: true })).toBeVisible();
     await dialog.getByRole('button', { name: 'Project', exact: true }).click();
     await expect(dialog).toContainText('Keep every layer editable');
@@ -69,6 +70,7 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
 test('export button shows rendered frames, finishes, and can export again', async () => {
   const session = await launchApp();
   try {
+    await session.openEditor();
     const { page } = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;
@@ -98,6 +100,7 @@ test('export button shows rendered frames, finishes, and can export again', asyn
 test('progress displays actual pixels and cancelling releases the export', async () => {
   const session = await launchApp();
   try {
+    await session.openEditor();
     const {page} = session;
     await page.evaluate(() => {
       const PM = (window as any).PM;

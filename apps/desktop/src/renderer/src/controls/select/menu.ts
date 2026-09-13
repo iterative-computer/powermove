@@ -74,7 +74,8 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     let i = active;
     for (let n = 0; n < items.length; n++) {
       i = (i + delta + items.length) % items.length;
-      if (req.options[i] && !req.options[i]!.disabled) { setActive(i); return; }
+      const option = req.options[i];
+      if (option && !option.disabled) { setActive(i); return; }
     }
   }
 

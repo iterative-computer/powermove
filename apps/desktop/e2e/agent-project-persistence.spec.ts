@@ -2,6 +2,7 @@ import path from 'node:path';
 import { expect, test } from './helpers/app';
 
 test('agent history follows a saved project across file opens, project switches, and relaunch', async ({ session }) => {
+  await session.openEditor();
   const filePath = path.join(session.userData, 'Agent history.pmv');
   await session.app.evaluate(({ dialog }, filePath) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath });
@@ -38,6 +39,7 @@ test('agent history follows a saved project across file opens, project switches,
   }, reopenedId);
   await expect.poll(snapshot).toEqual({ ids: original, draft: 'Updated after reopening' });
   await session.relaunch();
+  await session.openEditor();
   await expect.poll(snapshot).toEqual({ ids: original, draft: 'Updated after reopening' });
   await session.app.evaluate(({ dialog }, filePath) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });

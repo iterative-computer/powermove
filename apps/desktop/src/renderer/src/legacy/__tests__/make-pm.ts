@@ -1,4 +1,5 @@
 import type { PMRegistry } from '../registry';
+import { createServicesRegistry } from '../../kernel/services';
 
 import { install as installDiag } from '../core/diag';
 import { install as installUtil } from '../core/util';
@@ -22,8 +23,6 @@ import { install as installCompositor } from '../gl/compositor';
 import { install as installEngine } from '../core/engine';
 import { install as installControls } from '../ui/controls';
 import { install as installLayout } from '../ui/layout';
-import { install as installViewer } from '../../../../extensions/viewer/viewer';
-import { install as installTimeline } from '../../../../extensions/timeline/timeline';
 import { install as installLibraryUi } from '../ui/library';
 import { install as installShortcuts } from '../ui/shortcuts';
 import { install as installWorkspace } from '../core/workspace';
@@ -57,8 +56,6 @@ const INSTALLS = [
   ['core/engine', installEngine],
   ['ui/controls', installControls],
   ['ui/layout', installLayout],
-  ['ui/viewer', installViewer],
-  ['ui/timeline', installTimeline],
   ['ui/library', installLibraryUi],
   ['ui/shortcuts', installShortcuts],
   ['core/workspace', installWorkspace],
@@ -121,6 +118,10 @@ export function makePM(...installNames: LegacyInstallName[]): PMRegistry {
 
   for (const [name, install] of INSTALLS) {
     if (selected.has(name)) install(PM);
+  }
+
+  if (!PM.Kernel?.services) {
+    PM.Kernel = { ...(PM.Kernel || {}), services: createServicesRegistry() };
   }
 
   return PM;

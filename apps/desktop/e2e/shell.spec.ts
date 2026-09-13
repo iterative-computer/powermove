@@ -31,6 +31,9 @@ test.describe('@shell Svelte shell', () => {
   test('closes the final project tab and can reopen it from Projects', async ({ session }) => {
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
+    await page.getByRole('button', { name: 'New project', exact: true }).click();
+    await page.getByRole('dialog', { name: 'New composition', exact: true })
+      .getByRole('button', { name: 'Create', exact: true }).click();
     const activeId = await page.evaluate(() => {
       const PM = (window as any).PM;
       const id = PM.proj.id as string;

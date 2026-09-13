@@ -6,8 +6,15 @@ const CONSOLE_ERROR_ALLOWLIST = [/^Request Autofill\.enable failed/];
 
 test.describe('@boot Electron boot smoke', () => {
   test('opens the legacy renderer with WebGL and the demo project', async ({ session }) => {
+    await session.openEditor();
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.proj.layers.push(PM.mkLayer('shape', { name: 'Boot smoke layer' }));
+      PM.ProjectIndex.invalidate();
+      PM.invalidate();
+    });
     await page.waitForTimeout(1_300); // include deferred native boot diagnostics/errors
 
     const state = await page.evaluate(() => {

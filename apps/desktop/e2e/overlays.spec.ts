@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test.describe('@overlays Svelte overlays', () => {
   test('runs a palette command and manages modal focus and toast lifetime', async ({ session }) => {
     test.setTimeout(20_000);

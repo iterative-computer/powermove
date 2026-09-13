@@ -2,6 +2,7 @@ import { expect, test } from './helpers/app';
 
 test.describe('@dock-layout Svelte DockLayout', () => {
   test('keeps overfilled side panels usable between the titlebar and status bar', async ({ session }) => {
+    await session.openEditor();
     const { page, diagnostics } = session;
     const ids = ['overflow-flex', 'overflow-fixed-a', 'overflow-fixed-b', 'overflow-fixed-c'];
 
@@ -117,6 +118,7 @@ test.describe('@dock-layout Svelte DockLayout', () => {
   });
 
   test('keeps panel and viewer hosts alive across layout and workspace moves', async ({ session }) => {
+    await session.openEditor();
     const { page, diagnostics } = session;
     await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
     await expect(page.locator('#body > .dock .panel[data-panel]')).not.toHaveCount(0);

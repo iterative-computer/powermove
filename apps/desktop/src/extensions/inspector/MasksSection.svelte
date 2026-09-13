@@ -3,14 +3,15 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
   import PropertyStopwatch from './PropertyStopwatch.svelte';
-  import { evaluatedValue, isProperty } from 'powermove';
+  import { isProperty } from 'powermove';
+  import { evaluatedValue } from './multi-edit';
   import Icon from './Icon.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
-  const { api, doc, transport } = inspectorContext();
+  const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
   const { Row, Section, SelectField, ToggleField } = api.ui.controls;
 
-  let { PM, layer }: { PM: Record<string, any>; layer: any } = $props();
+  let { layer }: { layer: any } = $props();
 
   const fields = [
     ['x', 'X', 1, 'px'], ['y', 'Y', 1, 'px'],
@@ -20,21 +21,21 @@
   const masks = $derived((inspectorRefresh.version, doc.tick.structure, doc.tick.values, doc.proj, [...(layer.masks ?? [])]));
 
   function mutate(label: string, operation: () => void): void {
-    PM.hist.do(label, () => {
+    api.history.do(label, () => {
       operation();
-      PM.touch();
+      api.anim.touch();
     });
-    PM.invalidate?.();
+    api.transport.invalidate?.();
     inspectorRefresh.bump();
   }
 
-  const enabled = (mask: any) => (doc.tick.values, doc.proj, transport.time, evaluatedValue(PM, layer, mask.on, transport.time, `m.${mask.id}.on`) !== false);
+  const enabled = (mask: any) => (doc.tick.values, doc.proj, transport.time, evaluatedValue(api, layer, mask.on, transport.time, `m.${mask.id}.on`) !== false);
 
   function addMask(): void {
     mutate('Add mask', () => {
-      const mask = PM.mkMask('rect', PM.curComp());
+      const mask = api.model.mkMask('rect', api.model.curComp());
       if (layer.type === 'group') {
-        const bounds = PM.groupBounds?.(layer, transport.time);
+        const bounds = api.groups.bounds(layer, transport.time);
         if (bounds) {
           mask.p.x.v = (bounds.x0 + bounds.x1) / 2;
           mask.p.y.v = (bounds.y0 + bounds.y1) / 2;
@@ -65,7 +66,7 @@
 
 </script>
 
-<Section title="Masks" />
+<Section {api} title="Masks" />
 {#if masks.length === 0}
   <button type="button" class="chip wide" aria-label="Add mask"  onclick={addMask}>
     <Icon name="plus" />Add mask
@@ -82,7 +83,7 @@
         class="stopwatch"
         aria-label={`${enabled(mask) ? 'Disable' : 'Enable'} mask ${index + 1}`}
         aria-pressed={enabled(mask)}
-        onclick={() => PM.Edit.apply({ type: 'set_property', target: layer.id, path: `m.${maskId}.on`, value: !enabled(mask), time: transport.time, mode: 'auto', preserveHandEdits: false }, { label: 'Toggle mask', origin: 'inspector' })}
+        onclick={() => inspectorEdit.apply({ type: 'set_property', target: layer.id, path: `m.${maskId}.on`, value: !enabled(mask), time: transport.time, mode: 'auto', preserveHandEdits: false }, { label: 'Toggle mask', origin: 'inspector' })}
       ><Icon name="eye" /></button>
       <button
         type="button"
@@ -93,24 +94,26 @@
       ><Icon name="x" /></button>
     </div>
     <div class="grp mask-params">
-      <AnimatedRow {PM} {layer} path={`m.${maskId}.on`} label="Enabled">
-        <ToggleField {PM} get={() => enabled(mask)} edit={propertyBinding(maskId, 'on', 'Enable mask')} label="Enabled" />
+      <AnimatedRow {layer} path={`m.${maskId}.on`} label="Enabled">
+        <ToggleField {api} {mixed} get={() => enabled(mask)} edit={propertyBinding(maskId, 'on', 'Enable mask')} label="Enabled" />
       </AnimatedRow>
-      <Row label="Shape">
-        {#snippet left()}<PropertyStopwatch {PM} {layer} path={`m.${maskId}.shape`} label="Mask shape" fallback={mask.shape} />{/snippet}
+      <Row {api} label="Shape">
+        {#snippet left()}<PropertyStopwatch {layer} path={`m.${maskId}.shape`} label="Mask shape" fallback={mask.shape} />{/snippet}
         <SelectField
-          {PM}
-          get={() => (doc.tick.values, doc.proj, transport.time, isProperty(mask.shape) ? PM.evP(layer, mask.shape, transport.time, `m.${maskId}.shape`) : mask.shape)}
+          {api}
+          {mixed}
+          get={() => (doc.tick.values, doc.proj, transport.time, isProperty(mask.shape) ? api.anim.evP(layer, mask.shape, transport.time, `m.${maskId}.shape`) : mask.shape)}
           edit={propertyBinding(maskId, 'shape', 'Mask shape')}
-          options={PM.MASK_SHAPES}
+          options={api.model.MASK_SHAPES}
           label="Shape"
         />
       </Row>
-      <Row label="Mode">
-        {#snippet left()}<PropertyStopwatch {PM} {layer} path={`m.${maskId}.mode`} label="Mask mode" fallback={mask.mode} />{/snippet}
+      <Row {api} label="Mode">
+        {#snippet left()}<PropertyStopwatch {layer} path={`m.${maskId}.mode`} label="Mask mode" fallback={mask.mode} />{/snippet}
         <SelectField
-          {PM}
-          get={() => (doc.tick.values, doc.proj, transport.time, isProperty(mask.mode) ? PM.evP(layer, mask.mode, transport.time, `m.${maskId}.mode`) : mask.mode)}
+          {api}
+          {mixed}
+          get={() => (doc.tick.values, doc.proj, transport.time, isProperty(mask.mode) ? api.anim.evP(layer, mask.mode, transport.time, `m.${maskId}.mode`) : mask.mode)}
           edit={propertyBinding(maskId, 'mode', 'Mask mode')}
           options={['add', 'subtract']}
           label="Mode"
@@ -118,8 +121,8 @@
       </Row>
       {#each fields as [key, label, step] (key)}
         {@const property = mask.p[key]}
-        <ChannelRow {PM} {layer} channel={`m.${maskId}.${key}`} {label} {property} {step}
-          getValue={(time) => PM.evP(layer, property, time, key)} />
+        <ChannelRow {layer} channel={`m.${maskId}.${key}`} {label} {property} {step}
+          getValue={(time) => api.anim.evP(layer, property, time, key)} />
       {/each}
     </div>
   {/each}

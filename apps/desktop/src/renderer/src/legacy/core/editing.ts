@@ -4,6 +4,7 @@ import { validMatteSource } from './matte';
 import { canAnimateContent, evaluatedValue, isProperty } from './content-properties';
 import { preserveParentPose } from './parenting';
 import { expressionDiagnostic } from './expression';
+import { inspectorService, shaderHooks } from './services';
 import { compactEditLog } from '../../core/edit-log';
 /* Ported from js/core/editing.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -297,7 +298,7 @@ function setContent(command: any) {
   else if (layer.type === 'extension') setExtensionContent(layer, patch);
   else Object.assign(layer.d, patch);
   if (layer.type === 'shader' && Object.hasOwn(patch, 'code')) {
-    PM.syncShaderUniforms && PM.syncShaderUniforms(layer);
+    shaderHooks(PM)?.syncShaderUniforms(layer);
     if (layer._shaderKey && PM.GL) PM.GL.dropProgram(layer._shaderKey);
   }
   PM.touch();
@@ -517,7 +518,7 @@ function addLayer(command: any) {
   if (command.visible != null) layer.on = !!command.visible;
   if (command.shy != null) layer.shy = !!command.shy;
   if (command.collapsed != null) layer.collapsed = !!command.collapsed;
-  if (type === 'shader' && PM.syncShaderUniforms) PM.syncShaderUniforms(layer);
+  if (type === 'shader') shaderHooks(PM)?.syncShaderUniforms(layer);
   if (command.select !== false) PM.selectLayers(layer.id);
   return { id: layer.id, name: layer.name, layer };
 }
@@ -874,7 +875,7 @@ function changed(notify: any = true) {
     PM.bus.emit('project');
   }
   PM.invalidate();
-  if (notify && PM.Inspector && PM.Inspector.refresh) PM.Inspector.refresh();
+  if (notify) inspectorService(PM)?.refresh();
 }
 
 const colorValue: any = (value: any) => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);

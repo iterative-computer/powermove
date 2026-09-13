@@ -14,24 +14,40 @@ import TextField from '../../renderer/src/controls/TextField.svelte';
 import ToggleField from '../../renderer/src/controls/ToggleField.svelte';
 import { channelBinding, compositionBinding, contentBinding, layerFieldBinding } from '../../renderer/src/controls/binding';
 import { doc } from '../../renderer/src/state/document.svelte';
-import { sel } from '../../renderer/src/state/selection.svelte';
-import { perf, transport } from '../../renderer/src/state/transport.svelte';
+import { transport } from '../../renderer/src/state/transport.svelte';
 import * as fontCatalog from '../../renderer/src/typography/font-catalog';
 import VariableFontHarness from './VariableFontHarness.svelte';
 
-const controls: ControlsAPI = {
+interface VariableFontTestBackend {
+  proj: any;
+  selLayers: any;
+  firstSel: any;
+  L: any;
+  findProp: any;
+  hasKeyAt: any;
+  P: any;
+  Fonts: any;
+  Edit: any;
+  evP: any;
+  round: any;
+  drag: any;
+  invalidate: any;
+  Inspector: any;
+}
+
+const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
   NumField: NumField as ControlsAPI['NumField'], ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'], FontField: FontField as ControlsAPI['FontField'],
   SelectField: SelectField as ControlsAPI['SelectField'], TextField: TextField as ControlsAPI['TextField'],
   ToggleField: ToggleField as ControlsAPI['ToggleField'], Row: Row as ControlsAPI['Row'],
   Section: Section as ControlsAPI['Section'],
   binding: {
-    channelBinding,
-    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options),
-    contentBinding,
-    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
+    channelBinding: (layerId, channel, options) => channelBinding(getAPI(), layerId, channel, options),
+    compositionBinding: (field, options) => compositionBinding(getAPI(), field as any, options),
+    contentBinding: (layerId, field, options) => contentBinding(getAPI(), layerId, field, options),
+    layerFieldBinding: (layerId, field, options) => layerFieldBinding(getAPI(), layerId, field as any, options),
   },
-};
+});
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
@@ -47,8 +63,8 @@ function setup(content: Record<string, any>) {
   };
   const project = { id: 'p', w: 1920, h: 1080, fps: 30, dur: 5, assets: {}, layers: [layer] };
   const apply = vi.fn(() => ({ ok: true }));
-  const PM: Record<string, any> = {
-    proj: project, sel: { layers: [layer.id], keys: [], chan: null },
+  const runtime: VariableFontTestBackend = {
+    proj: project,
     selLayers: () => [layer], firstSel: () => layer, L: () => layer,
     findProp: (_layer: any, path: string) => (layer.d as any)[path.slice(2)],
     hasKeyAt: () => null,
@@ -62,15 +78,41 @@ function setup(content: Record<string, any>) {
   };
   doc.replace(project as any);
   transport.time = 2;
-  const api = {
+  let api: PowermoveAPI;
+  api = {
     id: 'inspector', apiVersion: 1,
     manifest: { id: 'inspector', name: 'Inspector', version: '1', apiVersion: 1 },
-    ui: { controls, icon: () => '<svg></svg>' },
-    host: { pm: PM, state: { doc, sel, transport, perf }, mount: vi.fn() },
+    project: { get: () => project },
+    model: {
+      layer: () => layer,
+      P: runtime.P,
+      normalizeFill: (value: any, fallback = '#000000') => typeof value === 'string'
+        ? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: value, position: 0 }] }
+        : value ?? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: fallback, position: 0 }] }
+    },
+    selection: { layers: () => ['text-1'], keys: () => [], chan: () => null },
+    groups: { ancestors: () => [] },
+    transport: { time: () => transport.time, invalidate: runtime.invalidate },
+    anim: {
+      findProp: runtime.findProp, hasKeyAt: runtime.hasKeyAt, evP: runtime.evP,
+      resolveContent: () => layer.d, expressionErrors: new WeakMap(), touch: vi.fn()
+    },
+    edit: runtime.Edit,
+    history: { do: (_label: string, operation: () => unknown) => operation(), begin: vi.fn(), commit: vi.fn(), cancel: vi.fn() },
+    media: { fonts: runtime.Fonts },
+    render: { gl: { compileError: () => null } },
+    uiState: { getShaderMeta: () => null },
+    util: { round: runtime.round, clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)), uid: () => 'test-id' },
+    ui: {
+      controls: controlsFor(() => api), icon: () => '<svg></svg>', drag: runtime.drag,
+      closeMenus: vi.fn(), toast: vi.fn()
+    },
+    services: { get: () => null },
+    events: { on: () => ({ dispose() {} }) }
   } as unknown as PowermoveAPI;
   instance = mount(VariableFontHarness, { target, props: { api, layer } });
   flushSync();
-  return { PM, apply };
+  return { api, apply };
 }
 
 beforeEach(() => {
@@ -91,7 +133,7 @@ describe('type settings', () => {
       { tag: 'wght', label: 'Weight', min: 100, max: 900, default: 400 },
       { tag: 'wdth', label: 'Width', min: 75, max: 125, default: 100 }
     ] });
-    const { PM, apply } = setup({});
+    const { apply } = setup({});
     await vi.waitFor(() => { flushSync(); expect(target.querySelector('[data-font-axis="wdth"] [role="spinbutton"]')).not.toBeNull(); });
     expect(apply).not.toHaveBeenCalled();
     const field = target.querySelector<HTMLInputElement>('[data-font-axis="wdth"] [role="spinbutton"]')!;

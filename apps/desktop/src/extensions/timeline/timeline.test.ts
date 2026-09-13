@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -10,6 +11,7 @@ import {
   propertyValueColumns,
   resolveTimelineSnap,
   shouldDrawClipLabel,
+  timelineWorkArea,
   toggleTimelineDisclosure,
   toggleTimelineScaleLink,
   type KeyframeMoveSnapshotItem,
@@ -29,74 +31,50 @@ import {
   resolveGraphTarget,
   selectionAfterMarquee,
 } from './graph-selection';
-import { makePM } from '../../renderer/src/legacy/__tests__/make-pm';
+import { fakePowermoveAPI } from './fake-api.test-helper';
 
-function timelineRegistry(): Record<string, any> {
-  vi.stubGlobal('window', {
-    addEventListener() {},
-    getComputedStyle() { return { getPropertyValue() { return ''; } }; }
-  });
-  vi.stubGlobal('document', { documentElement: { dataset: { theme: 'light' } } });
-
-  const listeners = new Map<string, (...args: any[]) => void>();
-  const PM: Record<string, any> = {
-    h() {},
-    clamp(value: number, min: number, max: number) { return Math.max(min, Math.min(max, value)); },
-    registerPanel() {},
-    bus: { on(name: string, listener: (...args: any[]) => void) { listeners.set(name, listener); } },
-    __timelineListeners: listeners,
-    invalidate() {}
-  };
-  createTimelineRuntime(PM);
-  return PM;
+function timelineHarness() {
+  const harness = fakePowermoveAPI(vi);
+  harness.state.project = { id: 'project-1', w: 1920, h: 1080, fps: 30, dur: 10, work: [0, 10], layers: [], markers: [] };
+  harness.state.timeline = createTimelineRuntime(harness.api);
+  return harness;
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('timeline runtime', () => {
   it('opens a group hierarchy without opening its property strip', () => {
+    const harness = timelineHarness();
     const group = { id: 'group', type: 'group', collapsed: true };
     const state = { groupCollapsed: true, layerCollapsed: true };
-    const PM = { UIState: {
-      getGroupCollapsed: () => state.groupCollapsed,
-      setGroupCollapsed: (_layer: any, value: boolean) => { state.groupCollapsed = value; },
-      getLayerCollapsed: () => state.layerCollapsed,
-      setLayerCollapsed: (_layer: any, value: boolean) => { state.layerCollapsed = value; },
-    } };
+    vi.mocked(harness.api.uiState.getGroupCollapsed).mockImplementation(() => state.groupCollapsed);
+    vi.mocked(harness.api.uiState.setGroupCollapsed).mockImplementation((_layer, value) => (state.groupCollapsed = value));
+    vi.mocked(harness.api.uiState.getLayerCollapsed).mockImplementation(() => state.layerCollapsed);
+    vi.mocked(harness.api.uiState.setLayerCollapsed).mockImplementation((_layer, value) => (state.layerCollapsed = value));
 
-    expect(toggleTimelineDisclosure(PM, group)).toBe(false);
+    expect(toggleTimelineDisclosure(harness.api, group)).toBe(false);
     expect(state).toEqual({ groupCollapsed: false, layerCollapsed: true });
     expect(group.collapsed).toBe(true);
   });
 
   it('never scrolls the timeline viewport to chase an external selection', () => {
-    const PM = timelineRegistry();
+    const harness = timelineHarness();
     const layers = Array.from({ length: 20 }, (_, index) => ({
       id: `layer-${index}`, type: 'text', name: `Layer ${index}`,
       group: null, shy: false, collapsed: true, p: {},
     }));
-    PM.proj = { layers };
-    PM.sel = { layers: [layers[0]!.id], keys: [], chan: '' };
-    PM.selLayers = () => [layers[0]!];
-    PM.groupAncestors = () => [];
-    PM.UIState = {
-      getLayerCollapsed: () => true,
-      getGroupCollapsed: () => true,
-      setGroupCollapsed() {},
-      getReveal: () => null,
-    };
-    PM.animVersion = () => 0;
-    PM.allProps = () => [];
-    PM.TL.hgt = 160;
-    PM.TL.scrollY = 300;
+    harness.state.project.layers = layers;
+    harness.state.selection.layers = [layers[0]!.id];
+    (harness.state.timeline as any).hgt = 160;
+    harness.state.timeline!.scrollY = 300;
 
-    PM.__timelineListeners.get('sel')?.();
+    harness.emit('selection', harness.state.selection);
 
-    expect(PM.TL.scrollY).toBe(300);
+    expect(harness.state.timeline!.scrollY).toBe(300);
   });
 
   it('keeps existing property rows revealed when keyframing another property', () => {
-    const PM = timelineRegistry();
+    const harness = timelineHarness();
     const layer = { id: 'layer', type: 'solid', name: 'Layer', group: null, shy: false, collapsed: false, p: {} };
     const properties = [
       { key: 'position.y', label: 'Position Y', prop: { v: 540, kf: [{ i: 'position-key', t: 0, v: 540 }], expr: null } },
@@ -104,30 +82,24 @@ describe('timeline runtime', () => {
       { key: 'scale.y', label: 'Scale Y', prop: { v: 95, kf: [{ i: 'scale-y-key', t: 0, v: 95 }], expr: null } },
     ];
     let reveal = properties.map(property => property.key);
-    PM.proj = { layers: [layer] };
-    PM.sel = { layers: [layer.id], keys: [], chan: '' };
-    PM.groupAncestors = () => [];
-    PM.animVersion = () => 0;
-    PM.allProps = () => properties;
-    PM.UIState = {
-      getLayerCollapsed: () => false,
-      setLayerCollapsed() {},
-      getReveal: () => reveal,
-      setReveal: (_layer: any, keys: string[]) => { reveal = keys; },
-    };
+    harness.state.project.layers = [layer];
+    harness.state.selection.layers = [layer.id];
+    vi.mocked(harness.api.anim.allProps).mockReturnValue(properties as any);
+    vi.mocked(harness.api.uiState.getReveal).mockImplementation(() => reveal);
+    vi.mocked(harness.api.uiState.setReveal).mockImplementation((_layer, keys) => (reveal = keys));
 
-    PM.TL.reveal(layer, ['scale.x', 'scale.y']);
+    harness.state.timeline!.reveal(layer as any, ['scale.x', 'scale.y']);
 
     expect(reveal).toEqual(['position.y', 'scale.x', 'scale.y']);
   });
 
   it('toggles linked Scale axes from the timeline with the standard layer command', () => {
-    const apply = vi.fn();
+    const harness = timelineHarness();
     const layer = { id: 'layer', scaleLinked: false };
 
-    toggleTimelineScaleLink({ Edit: { apply } }, layer);
+    toggleTimelineScaleLink(harness.api, layer);
 
-    expect(apply).toHaveBeenCalledExactlyOnceWith(
+    expect(harness.api.edit.apply).toHaveBeenCalledExactlyOnceWith(
       { type: 'set_layer', target: 'layer', patch: { scaleLinked: true } },
       { label: 'Link scale axes', origin: 'timeline' },
     );
@@ -144,25 +116,24 @@ describe('timeline runtime', () => {
   });
 
   it('groups Scale without altering unequal legacy key times or values', () => {
-    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim');
-    PM.proj = PM.mkProject();
-    const layer = PM.mkLayer('solid');
-    PM.proj.layers = [layer];
-    PM.setKey(layer, 'scale.x', 0, 100, 'power');
-    PM.setKey(layer, 'scale.x', 2, 200, 'linear');
-    PM.setKey(layer, 'scale.y', 0, 50, 'linear');
-    PM.setKey(layer, 'scale.y', 1, 80, 'backOut');
+    const harness = fakePowermoveAPI(vi);
+    const key = (i: string, t: number, v: number) => ({ i, t, v, eo: [0, 0], ei: [1, 1], hold: false });
+    const layer: any = { id: 'solid', threeD: false, p: {
+      'scale.x': { v: 100, expr: null, kf: [key('x0', 0, 100), key('x2', 2, 200)] },
+      'scale.y': { v: 50, expr: null, kf: [key('y0', 0, 50), key('y1', 1, 80)] },
+    } };
+    harness.state.project.layers = [layer];
     const before = JSON.stringify(layer.p);
-    const rows = timelineProperties(PM, layer);
+    const rows = timelineProperties(harness.api, layer);
     const scale = rows.find(row => row.key === 'scale');
     expect(rows.filter(row => row.key.startsWith('scale'))).toHaveLength(1);
     expect(scale.label).toBe('Scale');
     expect(scale.prop.kf.map((key: any) => key.t)).toEqual([0, 1, 2]);
     expect(scale.prop.kf[0].members.map((member: any) => member.key.v)).toEqual([100, 50]);
-    expect(expandScaleKeyIds(PM, [layer.p['scale.y'].kf[0].i])).toEqual([
+    expect(expandScaleKeyIds(harness.api, [layer.p['scale.y'].kf[0].i])).toEqual([
       layer.p['scale.y'].kf[0].i, layer.p['scale.x'].kf[0].i
     ]);
-    expect(expandScaleKeyIds(PM, [scale.prop.kf[1]])).toEqual([layer.p['scale.y'].kf[1].i]);
+    expect(expandScaleKeyIds(harness.api, [scale.prop.kf[1]])).toEqual([layer.p['scale.y'].kf[1].i]);
     expect(JSON.stringify(layer.p)).toBe(before);
   });
 
@@ -265,55 +236,47 @@ describe('timeline runtime', () => {
   });
 
   it('extends the composition when the out marker passes its end', () => {
-    const math = timelineRegistry().TimelineWorkArea;
-    const patch = math.resize([0, 10], 1, 14.5, 10, 1 / 30);
+    const patch = timelineWorkArea.resize([0, 10], 1, 14.5, 10, 1 / 30);
 
     expect(patch.duration).toBe(14.5);
     expect(patch.workArea).toEqual([0, 14.5]);
   });
 
   it('keeps work-area markers at least one frame apart', () => {
-    const math = timelineRegistry().TimelineWorkArea;
-    const left = math.resize([2, 8], 0, 20, 10, 1 / 30);
-    const right = math.resize([2, 8], 1, 0, 10, 1 / 30);
+    const left = timelineWorkArea.resize([2, 8], 0, 20, 10, 1 / 30);
+    const right = timelineWorkArea.resize([2, 8], 1, 0, 10, 1 / 30);
 
     expect(left.workArea[0]).toBeCloseTo(8 - 1 / 30, 10);
     expect(right.workArea[1]).toBeCloseTo(2 + 1 / 30, 10);
   });
 
   it('preserves the span and stops a moved work area at composition edges', () => {
-    const math = timelineRegistry().TimelineWorkArea;
-
-    expect(math.move([2, 6], 3, 10, 1 / 30).workArea).toEqual([5, 9]);
-    expect(math.move([2, 6], 20, 10, 1 / 30).workArea).toEqual([6, 10]);
-    expect(math.move([2, 6], -20, 10, 1 / 30).workArea).toEqual([0, 4]);
+    expect(timelineWorkArea.move([2, 6], 3, 10, 1 / 30).workArea).toEqual([5, 9]);
+    expect(timelineWorkArea.move([2, 6], 20, 10, 1 / 30).workArea).toEqual([6, 10]);
+    expect(timelineWorkArea.move([2, 6], -20, 10, 1 / 30).workArea).toEqual([0, 4]);
   });
 
   it('restores the current project timeline session when activated after hydration', () => {
-    const PM = timelineRegistry();
-    delete PM.TL;
-    PM.proj = { id: 'project-1' };
-    PM.Projects = {
-      getState: () => ({ timeline: { pps: 144, scrollT: 2.5, scrollY: 64, graph: true } })
-    };
-
-    const timeline = createTimelineRuntime(PM);
+    const harness = fakePowermoveAPI(vi);
+    harness.state.project.id = 'project-1';
+    harness.api.storage.set('session:project-1', { pps: 144, scrollT: 2.5, scrollY: 64, graph: true });
+    const timeline = createTimelineRuntime(harness.api);
 
     expect(timeline).toMatchObject({ pps: 144, scrollT: 2.5, scrollY: 64, graph: true });
   });
 
   it('is idempotent within one module instance', () => {
-    const PM = timelineRegistry();
-    const first = PM.TL;
+    const harness = timelineHarness();
+    const first: any = harness.state.timeline!;
     const attachHead = first.attachHead;
 
-    expect(createTimelineRuntime(PM)).toBe(first);
+    expect(createTimelineRuntime(harness.api)).toBe(first);
     expect(first.attachHead).toBe(attachHead);
   });
 
   it('disposes stale module closures while retaining the timeline state object', () => {
-    const PM = timelineRegistry();
-    const timeline = PM.TL;
+    const harness = timelineHarness();
+    const timeline: any = harness.state.timeline!;
     timeline.pps = 237;
     timeline.scrollT = 4.5;
     const staleAttach = timeline.attachHead;
@@ -322,7 +285,7 @@ describe('timeline runtime', () => {
     timeline.disposeRuntime = dispose;
     timeline.__timelineRuntimeToken = Symbol('stale-module');
 
-    const replaced = createTimelineRuntime(PM);
+    const replaced = createTimelineRuntime(harness.api);
 
     expect(dispose).toHaveBeenCalledOnce();
     expect(replaced).toBe(timeline);

@@ -4,6 +4,7 @@ import { expect, test } from './helpers/app';
 import { decodeProjectContainer } from '../src/shared/project-container';
 
 test.beforeEach(async ({ session }) => {
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
@@ -43,8 +44,9 @@ test('inspector keyframes animate, linked scale edits undo together, and handles
   await expect(page.getByRole('spinbutton', { name: 'Scale Y', exact: true })).toHaveValue('100%');
   await page.evaluate(() => {
     const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
     PM.Edit.apply({ type: 'set_property', target: PM.firstSel().id, path: 'position.x', value: -25, mode: 'keyframe', time: 0, preserveHandEdits: false });
-    PM.Viewer.fit = false; PM.Viewer.zoom = .6; PM.Viewer.pan = [0, 0]; PM.Viewer.layout();
+    viewer.fit = false; viewer.zoom = .6; viewer.pan = [0, 0]; viewer.layout();
   });
   await expect.poll(() => page.evaluate(() => {
     const stage = document.getElementById('stage')!.getBoundingClientRect();
@@ -90,6 +92,7 @@ test('cancelled Save never reports a saved file; successful Save writes a reopen
   await page.screenshot({ path: info.outputPath('saved-project.png') });
   await page.evaluate(async () => { await new Promise(resolve => setTimeout(resolve, 800)); await (window as any).powermove.store.flush(); });
   await session.relaunch(); // Only the isolated temporary test app, never the working app.
+  await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   expect(await session.page.evaluate(() => (window as any).PM.proj.layers[0].scaleLinked)).toBe(true);
   expect(session.diagnostics.pageErrors).toEqual([]);

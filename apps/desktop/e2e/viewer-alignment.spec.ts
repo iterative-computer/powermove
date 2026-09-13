@@ -3,16 +3,17 @@ import { expect, test } from './helpers/app';
 async function compositionPoint(page: any, x: number, y: number) {
   const box = await page.locator('#stage-inner').boundingBox();
   if (!box) throw new Error('viewer frame is unavailable');
-  const shown = await page.evaluate(() => (window as any).PM.Viewer.shown);
+  const shown = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return viewer.shown; });
   return { x: box.x + x * shown, y: box.y + y * shown };
 }
 
 test.describe('@viewer alignment snapping', () => {
   test('renders the composition center as full-axis guides with a fixed bullseye', async ({ session }) => {
+  await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.octx));
+    await page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.services?.get('viewer')?.octx));
     const rendering = await page.evaluate(() => {
-      const PM = (window as any).PM, V = PM.Viewer;
+      const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
       PM.replaceProject(PM.mkProject({ name: 'Center guide', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' }));
       V.fit = true; V.layout();
       const moving = V.snapCandidatesFromPoints(V.boxSnapPoints({ x0: 270, x1: 370, y0: 140, y1: 220 }));
@@ -50,10 +51,14 @@ test.describe('@viewer alignment snapping', () => {
   });
 
   test('aligns both axes during an ordinary layer drag and allows Command to bypass snapping', async ({ session }) => {
+  await session.openEditor();
+    await session.openEditor();
     const { page } = session;
-    await page.waitForFunction(() => Boolean((window as any).PM?.Viewer?.ov && (window as any).PM?.GL?.gl));
+    await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
     const setup = await page.evaluate(async () => {
       const PM = (window as any).PM;
+      const viewer = PM.Kernel.services.get('viewer');
+      const tool = PM.Kernel.services.get('tool');
       const project = PM.mkProject({ name: 'Reliable alignment', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const moving = PM.mkLayer('shape', {
         name: 'Moving', dur: 4,
@@ -67,11 +72,11 @@ test.describe('@viewer alignment snapping', () => {
       }, project);
       project.layers = [target, moving];
       PM.replaceProject(project);
-      PM.setTool('select');
+      tool.setTool('select');
       PM.setTime(1, { raw: true, force: true });
       PM.selectLayers(moving.id);
-      PM.Viewer.fit = true;
-      PM.Viewer.layout();
+      viewer.fit = true;
+      viewer.layout();
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       return { id: moving.id };
     });

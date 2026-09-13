@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('closing an unchanged local project skips the save prompt, while edits still prompt', async ({ session }) => {
   await session.app.evaluate(({ dialog }) => {
     (globalThis as any).__closePrompts = 0;

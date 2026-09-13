@@ -1,47 +1,49 @@
-type LegacyPM = Record<string, any>;
+import type { Layer, MenuContribution, PowermoveAPI } from 'powermove';
 
-export function showNewLayerMenu(PM: LegacyPM, anchor: HTMLElement): void {
-  PM.menu(anchor, [
+export function showNewLayerMenu(api: PowermoveAPI, anchor: HTMLElement): void {
+  api.ui.menu(anchor, [
     { header: 'New layer' },
-    { label: 'Text', kb: '⌘T', run: () => PM.cmd('newText') },
-    { label: 'Shape', kb: '⌘⇧Y', run: () => PM.cmd('newShape') },
-    { label: 'Solid', kb: '⌘Y', run: () => PM.cmd('newSolid') },
-    { label: 'Null', run: () => PM.cmd('newNull') },
+    { label: 'Text', kb: '⌘T', run: () => api.commands.run('newText') },
+    { label: 'Shape', kb: '⌘⇧Y', run: () => api.commands.run('newShape') },
+    { label: 'Solid', kb: '⌘Y', run: () => api.commands.run('newSolid') },
+    { label: 'Null', run: () => api.commands.run('newNull') },
     '-',
-    { label: 'Import media…', kb: '⌘I', run: () => PM.cmd('import') }
-  ], { right: true });
+    { label: 'Import media…', kb: '⌘I', run: () => api.commands.run('import') }
+  ]);
 }
 
-export function showFxMenu(PM: LegacyPM, anchor: HTMLElement, selected?: any): void {
-  const layer = selected ?? PM.firstSel?.();
-  if (!layer || PM.TYPE_META?.[layer.type]?.effects === false) {
-    PM.toast?.('Select a layer first');
+export function showFxMenu(api: PowermoveAPI, anchor: HTMLElement, selected?: Layer | null): void {
+  const layer = selected ?? api.selection.first();
+  const metadata = layer ? api.model.TYPE_META[layer.type] : null;
+  if (!layer || (metadata && 'effects' in metadata && metadata.effects === false)) {
+    api.ui.toast('Select a layer first');
     return;
   }
 
-  const groups = new Map<string, Array<[string, any]>>();
-  for (const [key, definition] of Object.entries(PM.FX ?? {}) as Array<[string, any]>) {
+  const groups = new Map<string, Array<[string, ReturnType<PowermoveAPI['effects']['get']>]>>();
+  for (const definition of api.effects.list()) {
     const group = definition.group ?? 'Effects';
     const entries = groups.get(group) ?? [];
-    entries.push([key, definition]);
+    entries.push([definition.id, definition]);
     groups.set(group, entries);
   }
 
-  const items: any[] = [];
+  const items: MenuContribution[] = [];
   for (const [group, entries] of groups) {
     items.push({ header: group });
     for (const [key, definition] of entries) {
+      if (!definition) continue;
       items.push({
         label: definition.label,
         run: () => {
-          PM.Edit.apply(
+          api.edit.apply(
             { type: 'add_effect', target: layer.id, effect: key },
             { label: `Add ${definition.label}`, origin: 'inspector' }
           );
-          PM.invalidate?.();
+          api.transport.invalidate();
         }
       });
     }
   }
-  PM.menu(anchor, items, { right: true });
+  api.ui.menu(anchor, items);
 }

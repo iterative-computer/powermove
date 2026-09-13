@@ -1,6 +1,7 @@
 import { test, expect } from './helpers/app';
 
 for (const surface of ['floating', 'panel'] as const) test(`${surface} prompt pastes native text and clipboard attachments without changing layers`, async ({ session }) => {
+  await session.openEditor();
   const { page, app } = session;
   await page.evaluate((surface) => {
     const PM = (window as any).PM;

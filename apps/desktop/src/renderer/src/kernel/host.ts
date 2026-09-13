@@ -15,20 +15,28 @@
  */
 import type {
   AssetsAPI,
+  AnimAPI,
   CommandDefinition,
   CommandsAPI,
   Disposable,
+  DndAPI,
+  EaseAPI,
+  EditAPI,
   EffectsAPI,
   ExtensionLayersAPI,
   EventsAPI,
   ExtensionManifest,
   ExtensionRecord,
   ExtensionsAPI,
+  GroupsAPI,
+  HistoryAPI,
   KeybindingDefinition,
   KeybindingsAPI,
   MenuContribution,
   MenuLocation,
   MenusAPI,
+  MediaAPI,
+  ModelAPI,
   PaletteAPI,
   PaletteEntry,
   PaletteProvider,
@@ -36,13 +44,23 @@ import type {
   PanelsAPI,
   PowermoveAPI,
   ProjectAPI,
+  RenderAPI,
+  SelectionAPI,
+  ServicesAPI,
+  Space3DAPI,
   StatusAPI,
   StatusItem,
   StorageAPI,
   ThemeAPI,
   ThemeDefinition,
+  TransportAPI,
   TransitionsAPI,
-  UIAPI
+  UIAPI,
+  UIStateAPI,
+  UtilAPI,
+  WorkspaceAPI,
+  PanelDock,
+  PanelOpenOptions
 } from './api';
 import type { EffectDefinition, EditCommand, EditMeta, EditResult, TransitionDefinition } from './api';
 import type { ExtensionLayerDefinition } from './api';
@@ -53,7 +71,7 @@ import { mountComponent } from './runtime-globals';
 import { performanceMonitor } from '../runtime/performance-monitor';
 
 export interface PanelsBackend {
-  open(id: string, dock?: 'left' | 'center' | 'right'): void;
+  open(id: string, dock?: PanelDock | PanelOpenOptions): void;
   close(id: string): void;
   isOpen(id: string): boolean;
   refresh(id: string): void;
@@ -78,6 +96,21 @@ export interface HostDeps {
     icon: UIAPI['icon'];
   };
   project: ProjectAPI;
+  anim?: AnimAPI;
+  model?: ModelAPI;
+  selection?: SelectionAPI;
+  groups?: GroupsAPI;
+  transport?: TransportAPI;
+  history?: HistoryAPI;
+  edit?: EditAPI;
+  media?: MediaAPI;
+  render?: RenderAPI;
+  uiState?: UIStateAPI;
+  dnd?: DndAPI;
+  workspace?: WorkspaceAPI;
+  util?: UtilAPI;
+  ease?: EaseAPI;
+  space3d?: Space3DAPI;
   assets: AssetsAPI;
   storage(id: string): StorageAPI;
   extensions: ExtensionsAPI;
@@ -327,6 +360,11 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     emit: (event, payload) => kernel.events.emit(event, payload)
   };
 
+  const services: ServicesAPI = {
+    register: <T,>(name: string, implementation: T) => collect(kernel.services.register(name, implementation)),
+    get: <T,>(name: string) => kernel.services.get<T>(name)
+  };
+
   const api: PowermoveAPI = {
     id,
     apiVersion: 1,
@@ -343,7 +381,23 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     menus,
     status,
     project,
-    ui: deps.ui,
+    anim: deps.anim as AnimAPI,
+    model: deps.model as ModelAPI,
+    selection: deps.selection as SelectionAPI,
+    groups: deps.groups as GroupsAPI,
+    transport: deps.transport as TransportAPI,
+    history: deps.history as HistoryAPI,
+    edit: deps.edit as EditAPI,
+    media: deps.media as MediaAPI,
+    render: deps.render as RenderAPI,
+    uiState: deps.uiState as UIStateAPI,
+    ui: deps.ui as UIAPI,
+    dnd: deps.dnd as DndAPI,
+    workspace: deps.workspace as WorkspaceAPI,
+    util: deps.util as UtilAPI,
+    ease: deps.ease as EaseAPI,
+    space3d: deps.space3d as Space3DAPI,
+    services,
     storage: deps.storage(id),
     events,
     extensions: deps.extensions,

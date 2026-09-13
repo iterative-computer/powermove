@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ControlsAPI, PowermoveAPI } from 'powermove';
+import type { ControlsAPI, InspectorService, PowermoveAPI, ShaderHooks } from 'powermove';
+import type { InspectorRuntimeService } from './context';
 
 import ColorField from '../../renderer/src/controls/ColorField.svelte';
 import FillField from '../../renderer/src/controls/FillField.svelte';
@@ -23,6 +24,55 @@ import activate from './index';
 type Channel = { v: number; kf: Array<{ t: number; v: number }>; expr: string | null };
 type TestLayer = Record<string, any> & { p: Record<string, Channel> };
 
+interface InspectorTestBackend {
+  proj?: any;
+  TL?: any;
+  setTool?: any;
+  FX?: any;
+  cmd?: any;
+  ev?: any;
+  evP?: any;
+  findProp?: any;
+  hasKeyAt?: any;
+  setKeyOn?: any;
+  removeKey?: any;
+  applyEaseTo?: any;
+  touch?: any;
+  wouldCycle?: any;
+  CH?: any;
+  BLENDS?: any;
+  MASK_SHAPES?: any;
+  TYPE_META?: any;
+  P?: any;
+  L?: any;
+  curComp?: any;
+  mkMask?: any;
+  firstSel?: any;
+  sel?: any;
+  groupAncestors?: any;
+  groupBounds?: any;
+  expandGroups?: any;
+  invalidate?: any;
+  hist?: any;
+  Edit?: any;
+  UIState?: any;
+  menu?: any;
+  modal?: any;
+  toast?: any;
+  drag?: any;
+  beginParentPick?: any;
+  openShaderEditor?: any;
+  closeMenus?: any;
+  Fonts?: any;
+  round?: any;
+  clamp?: any;
+  uid?: any;
+  toggleStopwatch?: any;
+  selLayers?: any;
+  time?: number;
+  ICONS?: any;
+}
+
 const CHANNELS = [
   'anchor.x', 'anchor.y', 'position.x', 'position.y', 'scale.x',
   'scale.y', 'rotation', 'opacity', 'skew'
@@ -30,8 +80,14 @@ const CHANNELS = [
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
+let activeApi: PowermoveAPI | undefined;
 
-const controls: ControlsAPI = {
+function bump(kind: 'values' | 'structure') {
+  doc.bump(kind);
+  activeApi?.events.emit('project:changed', { kind });
+}
+
+const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
   NumField: NumField as ControlsAPI['NumField'],
   ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'],
@@ -42,29 +98,98 @@ const controls: ControlsAPI = {
   Row: Row as ControlsAPI['Row'],
   Section: Section as ControlsAPI['Section'],
   binding: {
-    channelBinding,
-    compositionBinding: (PM, field, options) => compositionBinding(PM, field as any, options),
-    contentBinding,
-    layerFieldBinding: (PM, layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options)
+    channelBinding: (layerId, channel, options) => channelBinding(getAPI(), layerId, channel, options),
+    compositionBinding: (field, options) => compositionBinding(getAPI(), field as any, options),
+    contentBinding: (layerId, field, options) => contentBinding(getAPI(), layerId, field, options),
+    layerFieldBinding: (layerId, field, options) => layerFieldBinding(getAPI(), layerId, field as any, options)
   }
-};
+});
 
-function apiFor(PM: Record<string, any>, register = vi.fn()): PowermoveAPI {
-  return {
+function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI {
+  const implementations = new Map<string, unknown>();
+  const listeners = new Map<string, Set<(payload: unknown) => void>>();
+  const events: PowermoveAPI['events'] = {
+    on(event, listener) {
+      const key = String(event);
+      const eventListeners = listeners.get(key) ?? new Set<(payload: unknown) => void>();
+      eventListeners.add(listener as (payload: unknown) => void);
+      listeners.set(key, eventListeners);
+      return { dispose: () => eventListeners.delete(listener as (payload: unknown) => void) };
+    },
+    emit(event, payload) {
+      for (const listener of listeners.get(String(event)) ?? []) listener(payload);
+    }
+  };
+  if (runtime.TL) implementations.set('timeline', runtime.TL);
+  if (runtime.setTool) implementations.set('tool', { tool: 'select', toolShape: 'rect', setTool: runtime.setTool });
+  const definitions = Object.entries(runtime.FX ?? {}).map(([id, definition]) => ({ id, ...(definition as object) }));
+  let api: PowermoveAPI;
+  api = {
     id: 'inspector',
     apiVersion: 1,
     manifest: { id: 'inspector', name: 'Inspector', version: '1.0.0', apiVersion: 1 },
     panels: { register },
-    ui: {
-      controls,
-      icon: (name: string) => `<svg data-icon="${name}" aria-hidden="true"><path/></svg>`
+    commands: { run: runtime.cmd ?? vi.fn() },
+    project: { get: () => runtime.proj ?? project([]) },
+    anim: {
+      ev: runtime.ev ?? (() => null), evP: runtime.evP ?? ((_layer: any, property: any) => property?.v),
+      findProp: (layer: any, path: string) => runtime.findProp?.(layer, path) ?? layer.p?.[path],
+      hasKeyAt: runtime.hasKeyAt ?? (() => null), setKeyOn: runtime.setKeyOn ?? vi.fn(),
+      removeKey: runtime.removeKey ?? vi.fn(), applyEaseTo: runtime.applyEaseTo ?? vi.fn(),
+      touch: runtime.touch ?? vi.fn(), wouldCycle: runtime.wouldCycle ?? (() => false),
+      resolveContent: (layer: any) => layer.d, expressionErrors: new WeakMap(), version: () => 0
     },
-    host: {
-      pm: PM,
-      state: { doc, sel, transport, perf },
-      mount: vi.fn()
-    }
+    model: {
+      CH: runtime.CH ?? {}, BLENDS: runtime.BLENDS ?? [], MASK_SHAPES: runtime.MASK_SHAPES ?? [],
+      TYPE_META: runtime.TYPE_META ?? {}, P: runtime.P ?? ((value: unknown) => ({ v: value, kf: [], expr: null })),
+      layer: runtime.L ?? (() => null), curComp: runtime.curComp ?? (() => runtime.proj),
+      mkMask: runtime.mkMask ?? vi.fn(), layerDefinition: vi.fn(),
+      normalizeFill: (value: any, fallback = '#000000') => typeof value === 'string'
+        ? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: value, position: 0 }] }
+        : value ?? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: fallback, position: 0 }] }
+    },
+    selection: {
+      get: () => runtime.sel ?? { layers: [], keys: [], chan: null },
+      layers: () => runtime.sel?.layers ?? [], keys: () => runtime.sel?.keys ?? [], chan: () => runtime.sel?.chan ?? null,
+      first: runtime.firstSel ?? (() => null),
+      set: (partial: object) => Object.assign(runtime.sel, partial),
+      select: (ids: string[]) => { runtime.sel.layers = [...ids]; setSelection({ ...runtime.sel }); },
+      resolveSelectedKeys: () => []
+    },
+    groups: {
+      ancestors: runtime.groupAncestors ?? (() => []),
+      bounds: (...args: any[]) => runtime.groupBounds?.(...args) ?? null,
+      expand: runtime.expandGroups ?? ((ids: string[]) => ids)
+    },
+    transport: { time: () => transport.time, invalidate: runtime.invalidate ?? vi.fn() },
+    history: runtime.hist ?? { do: (_label: string, operation: () => unknown) => operation(), begin: vi.fn(), commit: vi.fn(), cancel: vi.fn() },
+    edit: runtime.Edit ?? { apply: vi.fn(), begin: vi.fn(), dispatch: vi.fn(), commit: vi.fn(), cancel: vi.fn(), mutate: (_label: string, operation: () => unknown) => operation() },
+    effects: { list: () => definitions, get: (id: string) => definitions.find((definition) => definition.id === id) },
+    layers: { get: () => undefined },
+    assets: { get: () => undefined },
+    render: { gl: { compileError: () => null } },
+    uiState: {
+      ...(runtime.UIState ?? {}),
+      getShaderMeta: runtime.UIState?.getShaderMeta ?? (() => null),
+      setShaderMeta: runtime.UIState?.setShaderMeta ?? vi.fn()
+    },
+    ui: {
+      controls: controlsFor(() => api),
+      icon: (name: string) => `<svg data-icon="${name}" aria-hidden="true"><path/></svg>`,
+      menu: runtime.menu ?? vi.fn(), modal: runtime.modal ?? vi.fn(), toast: runtime.toast ?? vi.fn(),
+      drag: runtime.drag ?? vi.fn(), beginParentPick: runtime.beginParentPick ?? vi.fn(),
+      openShaderEditor: runtime.openShaderEditor ?? vi.fn(), closeMenus: runtime.closeMenus ?? vi.fn()
+    },
+    media: { fonts: runtime.Fonts ?? { options: (value: string) => [value], ensure: vi.fn() } },
+    util: { round: runtime.round ?? ((value: number) => value), clamp: runtime.clamp ?? ((value: number, min: number, max: number) => Math.max(min, Math.min(max, value))), uid: runtime.uid ?? (() => 'test-id') },
+    services: {
+      register: (name: string, implementation: unknown) => { implementations.set(name, implementation); return { dispose: () => implementations.delete(name) }; },
+      get: <T,>(name: string) => (implementations.get(name) as T | undefined) ?? null
+    },
+    events,
+    log: vi.fn()
   } as unknown as PowermoveAPI;
+  return api;
 }
 
 function layer(id: string, opacity = 100): TestLayer {
@@ -139,11 +264,10 @@ function setup(
   options: { fxOpen?: boolean } = {}
 ) {
   let dragOptions: { up(): void; move?(dx: number, dy: number, event: PointerEvent): void; cancel?(): void } | undefined;
-  const offFonts = vi.fn();
   const currentProject = project(testLayers);
-  const apply = vi.fn();
+  const apply = vi.fn((_input?: unknown) => ({ ok: true }));
   const menu = vi.fn();
-  const PM: Record<string, any> = {
+  const runtime: InspectorTestBackend = {
     proj: currentProject,
     CH: Object.fromEntries(CHANNELS.map((channel) => [channel, {
       step: 1,
@@ -177,7 +301,6 @@ function setup(
       getFxOpen: vi.fn(() => !!options.fxOpen),
       setFxOpen: vi.fn()
     },
-    bus: { on: vi.fn((_event: string, _listener: () => void) => offFonts) },
     menu,
     modal: vi.fn(),
     cmd: vi.fn(),
@@ -211,19 +334,20 @@ function setup(
       property.kf = property.kf.length ? [] : [{ t: time - candidate.from, v: property.v }];
     },
     firstSel: () => currentProject.layers.find(({ id }) => id === selected[0]) ?? null,
-    selLayers: () => currentProject.layers.filter(({ id }) => PM.sel.layers.includes(id)),
+    selLayers: () => currentProject.layers.filter(({ id }) => runtime.sel.layers.includes(id)),
     time: 0
   };
 
   doc.replace(currentProject as any);
   setSelection({ layers: selected, keys: [], chan: null });
   transport.time = 0;
-  const api = apiFor(PM);
+  const api = apiFor(runtime);
+  activeApi = api;
   activate(api);
   instance = mount(InspectorPanel, { target, props: { panelId: 'inspector', spec: {}, api } });
   flushSync();
 
-  return { PM, apply, menu, offFonts, drag: () => dragOptions! };
+  return { runtime, api, apply, menu, drag: () => dragOptions! };
 }
 
 function channelRow(layerId: string, channel: string): HTMLElement {
@@ -262,10 +386,10 @@ beforeEach(() => {
 afterEach(async () => {
   if (instance) await unmount(instance);
   instance = undefined;
+  activeApi = undefined;
   target.remove();
   setSelection({ layers: [], keys: [], chan: null });
   transport.time = 0;
-  delete (window as any).PM;
   vi.restoreAllMocks();
 });
 
@@ -293,8 +417,8 @@ describe('InspectorPanel', () => {
   it('exposes effects, masks, blend, motion blur and track mattes for groups', () => {
     const group = layer('G'); group.type = 'group'; group.name = 'Group'; group.d = {};
     const matte = layer('M'); matte.name = 'Matte';
-    const { PM } = setup([group, matte], ['G']);
-    PM.groupBounds = vi.fn(() => ({ x0: 20, y0: 30, x1: 220, y1: 130, w: 200, h: 100 }));
+    const { runtime } = setup([group, matte], ['G']);
+    runtime.groupBounds = vi.fn(() => ({ x0: 20, y0: 30, x1: 220, y1: 130, w: 200, h: 100, ax: 0, ay: 0 }));
 
     const headings = [...target.querySelectorAll('.sec')].map((item) => item.textContent?.trim());
     expect(headings).toContain('Effects');
@@ -307,7 +431,7 @@ describe('InspectorPanel', () => {
     expect(labelledSelect('Track matte')).not.toBeNull();
 
     target.querySelector<HTMLButtonElement>('[aria-label="Add mask"]')!.click();
-    expect(PM.mkMask).toHaveBeenCalledWith('rect', PM.proj);
+    expect(runtime.mkMask).toHaveBeenCalledWith('rect', runtime.proj);
     expect(group.masks).toHaveLength(1);
     expect(group.masks[0].p).toMatchObject({
       x: { v: 120 }, y: { v: 80 }, w: { v: 200 }, h: { v: 100 },
@@ -341,39 +465,35 @@ describe('InspectorPanel', () => {
     }));
   });
 
-  it('registers the persistent Properties panel and installs the inert legacy shim', () => {
+  it('registers the persistent Properties panel and typed inspector services', () => {
     let definition: Record<string, any> | undefined;
-    const PM: Record<string, any> = {
-      parseUniforms: vi.fn(() => [{ name: 'amount', def: 1 }]),
+    const runtime: InspectorTestBackend = {
       P: vi.fn((value: unknown) => ({ v: value, kf: [], expr: null })),
       UIState: { setShaderMeta: vi.fn() },
-      registerPanel: vi.fn((id: string, next: Record<string, any>) => {
-        expect(id).toBe('inspector');
-        definition = next;
-      })
     };
 
     const register = vi.fn((next: Record<string, any>) => {
       definition = next;
       return { dispose: vi.fn() };
     });
-    activate(apiFor(PM, register));
+    const api = apiFor(runtime, register);
+    activate(api);
 
     expect(register).toHaveBeenCalledOnce();
     expect(definition).toMatchObject({ id: 'inspector', title: 'Properties' });
     expect(definition?.component).toBe(InspectorPanel);
     expect(definition?.header).toBeTypeOf('function');
-    expect(PM.Inspector.body).toBeNull();
-    expect(PM.Inspector.syncs).toEqual([]);
-    expect(PM.Inspector.refresh).toBeTypeOf('function');
-    expect(PM.Inspector.focusText).toBeTypeOf('function');
-    expect(() => PM.Inspector.refresh()).not.toThrow();
-    expect(PM.fxMenu).toBeTypeOf('function');
+    const service = api.services.get<InspectorRuntimeService>('inspector');
+    expect(service?.body).toBeNull();
+    expect(service?.syncs).toEqual([]);
+    expect(service?.refresh).toBeTypeOf('function');
+    expect(service?.focusText).toBeTypeOf('function');
+    expect(() => service?.refresh()).not.toThrow();
 
-    const shader = { d: { code: 'uniform float amount;', uniforms: { stale: { v: 2 } } } };
-    PM.syncShaderUniforms(shader);
-    expect(PM.UIState.setShaderMeta).toHaveBeenCalledWith(shader, {
-      udefs: [{ name: 'amount', def: 1 }]
+    const shader = { id: 'shader', type: 'shader', d: { code: 'uniform float amount; // @param 1', uniforms: { stale: { v: 2 } } } };
+    api.services.get<ShaderHooks>('shaderHooks')?.syncShaderUniforms(shader as any);
+    expect(runtime.UIState.setShaderMeta).toHaveBeenCalledWith(shader, {
+      udefs: [expect.objectContaining({ name: 'amount', def: 1 })]
     });
     expect(shader.d.uniforms).toEqual({ amount: { v: 1, kf: [], expr: null } });
   });
@@ -397,7 +517,7 @@ describe('InspectorPanel', () => {
 
   it('presents imported SVG paths as Motioner-style property sections', () => {
     const candidate = shapeLayer('SVG');
-    const { apply, PM } = setup([candidate]);
+    const { apply, runtime } = setup([candidate]);
     const headings = [...target.querySelectorAll('.sec')].map((section) => section.textContent?.trim());
 
     expect(headings.slice(0, 5)).toEqual(['Transform', 'Path', 'Fill', 'Stroke', 'Effects']);
@@ -410,7 +530,7 @@ describe('InspectorPanel', () => {
       expect.objectContaining({ type: 'set_property', target: 'SVG', path: 'g.path-1.strokeWidth', value: 1 }),
       { label: 'Add stroke', origin: 'inspector' }
     );
-    expect(PM.setTool).not.toHaveBeenCalled();
+    expect(runtime.setTool).not.toHaveBeenCalled();
   });
 
   it('updates a channel value on the values tick without remounting its row', () => {
@@ -422,7 +542,7 @@ describe('InspectorPanel', () => {
     expect(input.value).toBe('40%');
 
     candidate.p.opacity!.v = 55;
-    doc.bump('values');
+    bump('values');
     flushSync();
 
     const updated = channelRow('A', 'opacity');
@@ -453,7 +573,7 @@ describe('InspectorPanel', () => {
       { label: 'Link scale axes', origin: 'inspector' }
     );
     candidate.scaleLinked = false;
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(channelRow('A', 'scale.x')).toBe(row);
     expect(labelledSpinbutton('Scale X')).toBe(x);
@@ -464,7 +584,7 @@ describe('InspectorPanel', () => {
     expect(labelledSpinbutton('Scale Y').value).toBe('90%');
     expect(link.getAttribute('aria-pressed')).toBe('false');
     candidate.scaleLinked = true;
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(labelledSpinbutton('Scale X')).toBe(x);
     expect(labelledSpinbutton('Scale Y')).toBe(y);
@@ -491,7 +611,7 @@ describe('InspectorPanel', () => {
       expect.objectContaining({ type: 'set_property', path: 'scale.x', value: 102 })
     ], { label: 'Scale', origin: 'inspector' });
     candidate.scaleLinked = false;
-    doc.bump('values');
+    bump('values');
     flushSync();
     apply.mockClear();
     increment('Scale Y');
@@ -504,37 +624,37 @@ describe('InspectorPanel', () => {
   it.each([true, false])('animates both axes and handles partial keys when scaleLinked=%s', (linked) => {
     const candidate = layer('A');
     candidate.scaleLinked = linked;
-    const { PM, menu, apply } = setup([candidate]);
-    apply.mockImplementation((commands:any)=>{for(const c of [].concat(commands) as any[]){const p=candidate.p[c.path];if(!p)continue;if(c.type==='replace_keyframes')p.kf=[];else if(c.type==='set_property'&&c.mode==='keyframe')p.kf.push({t:c.time,v:c.value});}});
+    const { runtime, menu, apply } = setup([candidate]);
+    apply.mockImplementation((commands?: any)=>{for(const c of [].concat(commands) as any[]){const p=candidate.p[c.path];if(!p)continue;if(c.type==='replace_keyframes')p.kf=[];else if(c.type==='set_property'&&c.mode==='keyframe')p.kf.push({t:c.time,v:c.value});}return {ok:true};});
     const row = channelRow('A', 'scale.x');
     const diamond = row.querySelector<HTMLButtonElement>('.property-stopwatch')!;
     expect(row.querySelector('.well .kf')).toBeNull();
     expect(diamond.getAttribute('aria-pressed')).toBe('false');
     diamond.click();
-    doc.bump('values'); flushSync();
+    bump('values'); flushSync();
     expect(apply).toHaveBeenLastCalledWith(expect.any(Array), { label: 'Add keyframe for Scale', origin: 'inspector' });
-    expect(PM.TL.reveal).not.toHaveBeenCalled();
+    expect(runtime.TL.reveal).not.toHaveBeenCalled();
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
     // An existing project may have a key on just one of the linked axes.
     candidate.p['scale.y']!.kf = [];
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(diamond.classList.contains('at-key')).toBe(false);
     diamond.click();
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
     expect(diamond.classList.contains('at-key')).toBe(true);
     diamond.click();
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(candidate.p['scale.x']!.kf).toHaveLength(0);
     expect(candidate.p['scale.y']!.kf).toHaveLength(0);
     /* Removing the animation lives in the context menu. */
     candidate.p['scale.y']!.kf = [{ t: 0, v: 100 }];
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(diamond.getAttribute('aria-pressed')).toBe('false');
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
@@ -549,22 +669,22 @@ describe('InspectorPanel', () => {
     candidate.p['scale.x']!.kf = [{ t: 0, v: 50 }, { t: 2, v: 100 }];
     candidate.p['scale.y']!.kf = [{ t: 0, v: 50 }, { t: 2, v: 100 }];
     setup([candidate]);
-    transport.time = 1; doc.bump('values'); flushSync();
+    transport.time = 1; bump('values'); flushSync();
     const button = channelRow('A', 'scale.x').querySelector<HTMLButtonElement>('.property-stopwatch')!;
-    button.click(); doc.bump('values'); flushSync();
+    button.click(); bump('values'); flushSync();
     expect(candidate.p['scale.x']!.kf.map((k: any) => k.t).sort()).toEqual([0, 1, 2]);
-    button.click(); doc.bump('values'); flushSync();
+    button.click(); bump('values'); flushSync();
     expect(candidate.p['scale.x']!.kf.map((k: any) => k.t)).toEqual([0, 2]);
     expect(candidate.p['scale.y']!.kf.map((k: any) => k.t)).toEqual([0, 2]);
   });
 
   it('selects a property without opening its timeline rows', () => {
     const candidate = layer('A');
-    const { PM } = setup([candidate]);
+    const { runtime } = setup([candidate]);
     for (const channel of ['scale.x', 'opacity']) {
       channelRow('A', channel).dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-      expect(PM.sel.chan).toBe(channel);
-      expect(PM.TL.reveal).not.toHaveBeenCalled();
+      expect(runtime.sel.chan).toBe(channel);
+      expect(runtime.TL.reveal).not.toHaveBeenCalled();
     }
   });
 
@@ -572,7 +692,7 @@ describe('InspectorPanel', () => {
     const candidate = layer('A');
     candidate.scaleLinked = true;
     candidate.p['scale.y']!.expr = 'value * 2';
-    const { PM, apply, menu } = setup([candidate]);
+    const { runtime, apply, menu } = setup([candidate]);
     channelRow('A', 'scale.x').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
     const items = menu.mock.calls[0]![1] as Array<{ label?: string; run?: () => void }>;
     expect(labelledSpinbutton('Scale Y').classList.contains('link')).toBe(true);
@@ -585,7 +705,7 @@ describe('InspectorPanel', () => {
     expect(candidate.p['scale.x']!.kf).toHaveLength(1);
     expect(candidate.p['scale.y']!.kf).toHaveLength(1);
     items.find((item) => item.label === 'Show in graph editor')!.run!();
-    expect(PM.TL.reveal).toHaveBeenLastCalledWith(candidate, ['scale.x', 'scale.y']);
+    expect(runtime.TL.reveal).toHaveBeenLastCalledWith(candidate, ['scale.x', 'scale.y']);
     items.find((item) => item.label === 'Reset')!.run!();
     expect(apply).toHaveBeenCalledWith([
       expect.objectContaining({ type: 'replace_keyframes', path: 'scale.x', keyframes: [] }),
@@ -614,7 +734,7 @@ describe('InspectorPanel', () => {
 
     /* Static: muted, still rendered so it can add the first keyframe. */
     candidate.p.opacity!.kf = [];
-    doc.bump('values');
+    bump('values');
     flushSync();
     expect(diamond.classList.contains('on')).toBe(false);
     expect(diamond.getAttribute('aria-pressed')).toBe('false');
@@ -636,7 +756,7 @@ describe('InspectorPanel', () => {
 
     apply.mockClear();
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: {} });
-    doc.bump('structure');
+    bump('structure');
     flushSync();
     target.querySelector<HTMLButtonElement>('button[aria-label="Remove Gaussian Blur"]')!.click();
     expect(apply).toHaveBeenCalledExactlyOnceWith(
@@ -703,15 +823,15 @@ describe('InspectorPanel', () => {
       id: 'fx-1', type: 'blur', on: true, open: true,
       p: { amount: { v: 18, expr: null, kf: [] } }
     });
-    const { PM, apply } = setup([source, destination], ['A']);
+    const { runtime, api, apply } = setup([source, destination], ['A']);
     const effect = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     effect.click();
-    expect(PM.Inspector.copySelectedEffects()).toBe(true);
+    expect(api.services.get<InspectorService>('inspector')?.copySelectedEffects()).toBe(true);
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
-    PM.sel.layers = ['B'];
+    runtime.sel.layers = ['B'];
     apply.mockClear();
 
-    expect(PM.Inspector.pasteCopiedEffects()).toBe(true);
+    expect(api.services.get<InspectorService>('inspector')?.pasteCopiedEffects()).toBe(true);
     expect(apply).toHaveBeenCalledExactlyOnceWith({
       type: 'add_effect', target: 'B', effect: 'blur', parameters: source.fx[0].p,
       open: true, enabled: true
@@ -738,7 +858,7 @@ describe('InspectorPanel', () => {
   it('routes transform, effect, layer, and content fields through exact typed commands', () => {
     const candidate = layer('A', 40);
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    const { PM, apply } = setup([candidate], ['A'], { fxOpen: true });
+    const { runtime, apply } = setup([candidate], ['A'], { fxOpen: true });
     transport.time = 2;
     flushSync();
 
@@ -753,7 +873,7 @@ describe('InspectorPanel', () => {
     );
 
     apply.mockClear();
-    expect(PM.evP).toHaveBeenCalledWith(candidate, candidate.fx[0].p.amount, 2, 'amount');
+    expect(runtime.evP).toHaveBeenCalledWith(candidate, candidate.fx[0].p.amount, 2, 'amount');
     labelledSpinbutton('Amount').dispatchEvent(
       new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })
     );
@@ -789,9 +909,9 @@ describe('InspectorPanel', () => {
       { id: 'fx-blur', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } },
       { id: 'fx-duotone', type: 'duotone', on: true, p: { shadow: { v: '#1B2A4A', kf: [], expr: null } } }
     );
-    const { apply, PM } = setup([candidate], ['A'], { fxOpen: true });
-    PM.findProp = (_layer: any, path: string) => { const [id, key] = path.split('.'); return candidate.fx.find((fx: any) => fx.id === id)?.p[key!]; };
-    doc.bump('values');
+    const { apply, runtime } = setup([candidate], ['A'], { fxOpen: true });
+    runtime.findProp = (_layer: any, path: string) => { const [id, key] = path.split('.'); return candidate.fx.find((fx: any) => fx.id === id)?.p[key!]; };
+    bump('values');
     transport.time = 2;
     flushSync();
 
@@ -809,7 +929,7 @@ describe('InspectorPanel', () => {
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {
     const candidate = layer('A');
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    const { PM, apply } = setup([candidate], ['A'], { fxOpen: true });
+    const { runtime, apply } = setup([candidate], ['A'], { fxOpen: true });
     const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const expanders = head.querySelectorAll<HTMLButtonElement>('button[aria-expanded]');
     expect(expanders).toHaveLength(1);
@@ -824,13 +944,13 @@ describe('InspectorPanel', () => {
     );
 
     expanders[0]!.click();
-    expect(PM.UIState.setFxOpen).toHaveBeenCalledWith(candidate.fx[0], false);
+    expect(runtime.UIState.setFxOpen).toHaveBeenCalledWith(candidate.fx[0], false);
   });
 
   it('selects effect rows without changing disclosure and reserves disclosure for the chevron', () => {
     const candidate = layer('A');
     candidate.fx.push({ id: 'fx-1', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } });
-    const { PM } = setup([candidate], ['A']);
+    const { runtime } = setup([candidate], ['A']);
     const head = target.querySelector<HTMLElement>('[data-effect-id="fx-1"]')!;
     const label = head.querySelector<HTMLElement>('.k')!;
     const chevron = head.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
@@ -838,13 +958,13 @@ describe('InspectorPanel', () => {
     head.click();
     flushSync();
     expect(head.dataset.selected).toBe('true');
-    expect(PM.UIState.setFxOpen).not.toHaveBeenCalled();
+    expect(runtime.UIState.setFxOpen).not.toHaveBeenCalled();
 
     label.click();
-    expect(PM.UIState.setFxOpen).not.toHaveBeenCalled();
+    expect(runtime.UIState.setFxOpen).not.toHaveBeenCalled();
 
     chevron.click();
-    expect(PM.UIState.setFxOpen).toHaveBeenCalledExactlyOnceWith(candidate.fx[0], true);
+    expect(runtime.UIState.setFxOpen).toHaveBeenCalledExactlyOnceWith(candidate.fx[0], true);
   });
 
   it('clears effect selection when clicking anywhere outside it but not from nested controls', () => {
@@ -868,12 +988,12 @@ describe('InspectorPanel', () => {
 
   it('uses a typed mask property path while add mask stays history-backed', () => {
     const candidate = layer('A');
-    const { PM, apply } = setup([candidate], ['A']);
+    const { runtime, apply } = setup([candidate], ['A']);
     target.querySelector<HTMLButtonElement>('[aria-label="Add mask"]')!.click();
-    expect(PM.hist.do).toHaveBeenCalledWith('Add mask', expect.any(Function));
-    expect(PM.mkMask).toHaveBeenCalledWith('rect', PM.proj);
+    expect(runtime.hist.do).toHaveBeenCalledWith('Add mask', expect.any(Function));
+    expect(runtime.mkMask).toHaveBeenCalledWith('rect', runtime.proj);
     expect(candidate.masks).toHaveLength(1);
-    doc.bump('structure');
+    bump('structure');
     flushSync();
 
     transport.time = 3;
@@ -894,7 +1014,7 @@ describe('InspectorPanel', () => {
     const candidate = layer('A');
     candidate.type = 'text';
     candidate.d = { text: 'Hello', font: 'SF Pro Display', weight: 400, size: 64, tracking: 0, leading: 1.2, align: 'center', color: '#FFFFFF' };
-    const { PM } = setup([candidate], ['A']);
+    const { runtime } = setup([candidate], ['A']);
     const textarea = target.querySelector<HTMLTextAreaElement>('[data-inspector-text-layer="A"]')!;
 
     textarea.dispatchEvent(new FocusEvent('focus'));
@@ -902,20 +1022,18 @@ describe('InspectorPanel', () => {
     textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
     textarea.dispatchEvent(new FocusEvent('blur'));
 
-    expect(PM.Edit.begin).toHaveBeenCalledWith('Edit text', { origin: 'inspector' });
-    expect(PM.Edit.dispatch).toHaveBeenCalledWith({
+    expect(runtime.Edit.begin).toHaveBeenCalledWith('Edit text', { origin: 'inspector' });
+    expect(runtime.Edit.dispatch).toHaveBeenCalledWith({
       type: 'set_content', target: 'A', patch: { text: 'Hello world' }
     });
-    expect(PM.Edit.commit).toHaveBeenCalledWith('Edit text');
+    expect(runtime.Edit.commit).toHaveBeenCalledWith('Edit text');
   });
 
-  it('subscribes only to fonts and removes that subscription on unmount', async () => {
-    const { PM, offFonts } = setup([layer('A')], ['A']);
-    expect(PM.bus.on).toHaveBeenCalledExactlyOnceWith('fonts', expect.any(Function));
-
+  it('unmounts cleanly without a host-state subscription', async () => {
+    setup([layer('A')], ['A']);
     await unmount(instance!);
     instance = undefined;
-    expect(offFonts).toHaveBeenCalledOnce();
+    expect(target.querySelector('[data-svelte-panel="inspector"]')).toBeNull();
   });
 
   it('labels every numeric spinbutton and gives every button an accessible name', () => {

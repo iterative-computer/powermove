@@ -9,6 +9,7 @@ import { shapeRasterGeometry, type RasterWindow } from './shape-raster-window';
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { parseSvg } from '../core/svg-import';
+import { inspectorService, viewerService } from '../core/services';
 
 const VIDEO_READ_FAILURE = 'Could not read this video file';
 
@@ -831,7 +832,7 @@ PM.assets = {
 
       const applyVersion = (meta: any, runtime: any) => {
         if (!PM.proj || PM.proj.id !== targetProjectId || !PM.proj.assets?.[id]) return;
-        PM.Viewer?.preview?.clear?.();
+        viewerService(PM)?.preview?.clear();
         if (kind === 'audio' || kind === 'video') PM.Audio?.pause?.();
         PM.proj.assets[id] = JSON.parse(JSON.stringify(meta));
         if (runtime) PM.assets.map.set(id, runtime);
@@ -844,7 +845,7 @@ PM.assets = {
         PM.bus.emit('assets');
         PM.bus.emit('layers');
         PM.bus.emit('project');
-        PM.Inspector?.refresh?.();
+        inspectorService(PM)?.refresh();
         PM.invalidate('all');
         PM.autosave?.();
       };

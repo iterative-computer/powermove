@@ -1,5 +1,7 @@
 import { test, expect } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('high-zoom pans move the presented picture before another render is available', async ({ session }) => {
   const { page } = session;
   await page.evaluate(() => {
@@ -8,34 +10,34 @@ test('high-zoom pans move the presented picture before another render is availab
     p.layers = [PM.mkLayer('shape', { d: { shape: 'rect', w: 20, h: 20, color: '#dd5522' }, p: { 'position.x': 960, 'position.y': 540 } })];
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p })); PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   });
-  await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
   const result = await page.evaluate(() => {
-    const PM = (window as any).PM, V = PM.Viewer;
-    V.fit = false; V.zoom = 8; V.pan = [0, 0]; V.layout(); PM.GL.render(0, { mblur: false });
-    const rect = V.el.getBoundingClientRect(), viewport = PM.GL.previewViewport;
-    const image = V.el.toDataURL();
-    V.pan = [32, -24]; V.layout();
-    const moved = V.el.getBoundingClientRect();
-    const small = { dx: moved.left - rect.left, dy: moved.top - rect.top, sameViewport: PM.GL.previewViewport === viewport, samePixels: V.el.toDataURL() === image };
-    V.pan = [160, -24]; V.layout();
-    const pending = V.el.getBoundingClientRect();
-    const refresh = { dx: pending.left - rect.left, dy: pending.top - rect.top, newViewport: PM.GL.previewViewport !== viewport, samePixels: V.el.toDataURL() === image };
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+    viewer.fit = false; viewer.zoom = 8; viewer.pan = [0, 0]; viewer.layout(); PM.GL.render(0, { mblur: false });
+    const rect = viewer.el.getBoundingClientRect(), viewport = PM.GL.previewViewport;
+    const image = viewer.el.toDataURL();
+    viewer.pan = [32, -24]; viewer.layout();
+    const moved = viewer.el.getBoundingClientRect();
+    const small = { dx: moved.left - rect.left, dy: moved.top - rect.top, sameViewport: PM.GL.previewViewport === viewport, samePixels: viewer.el.toDataURL() === image };
+    viewer.pan = [160, -24]; viewer.layout();
+    const pending = viewer.el.getBoundingClientRect();
+    const refresh = { dx: pending.left - rect.left, dy: pending.top - rect.top, newViewport: PM.GL.previewViewport !== viewport, samePixels: viewer.el.toDataURL() === image };
     const orangeCenter = () => {
-      const gl = PM.GL.gl, w = V.el.width, h = V.el.height, pixels = new Uint8Array(w * h * 4);
+      const gl = PM.GL.gl, w = viewer.el.width, h = viewer.el.height, pixels = new Uint8Array(w * h * 4);
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
       let sumX = 0, sumY = 0, count = 0;
       for (let i = 0; i < pixels.length; i += 4) if (pixels[i]! > 200 && pixels[i+1]! > 60 && pixels[i+1]! < 110 && pixels[i+2]! < 60) {
         sumX += (i / 4) % w + .5; sumY += h - Math.floor(i / 4 / w) - .5; count++;
       }
-      const box = V.el.getBoundingClientRect();
+      const box = viewer.el.getBoundingClientRect();
       return { x: box.left + sumX / count * box.width / w, y: box.top + sumY / count * box.height / h, count };
     };
     const beforeRefresh = orangeCenter();
     PM.GL.render(0, { mblur: false });
     const afterRefresh = orangeCenter();
-    const oldWidth = V.el.getBoundingClientRect().width;
-    V.zoom = 6; V.layout();
-    const zoomWidth = V.el.getBoundingClientRect().width, pendingZoom = orangeCenter();
+    const oldWidth = viewer.el.getBoundingClientRect().width;
+    viewer.zoom = 6; viewer.layout();
+    const zoomWidth = viewer.el.getBoundingClientRect().width, pendingZoom = orangeCenter();
     PM.GL.render(0, { mblur: false });
     const settledZoom = orangeCenter();
     return { small, refresh, drift: { x: afterRefresh.x - beforeRefresh.x, y: afterRefresh.y - beforeRefresh.y }, visible: afterRefresh.count > 0,
@@ -63,33 +65,33 @@ test('paused zoom refines after settling and content or time changes bypass defe
     p.layers = [PM.mkLayer('shape', { d: { shape: 'rect', w: 20, h: 20, color: '#dd5522' }, p: { 'position.x': 960, 'position.y': 540 } })];
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p })); PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   });
-  await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
   const result = await page.evaluate(async () => {
-    const PM = (window as any).PM, V = PM.Viewer;
-    V.fit = false; V.zoom = 8; V.pan = [0, 0]; V.layout(); PM.GL.render(0, { mblur: false });
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+    viewer.fit = false; viewer.zoom = 8; viewer.pan = [0, 0]; viewer.layout(); PM.GL.render(0, { mblur: false });
     const original = PM.GL.render; let renders = 0;
     PM.GL.render = (...args: any[]) => { renders++; return original(...args); };
     const pinch = () => {
-      const r = V.stage.getBoundingClientRect();
-      V.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: 5, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+      const r = viewer.stage.getBoundingClientRect();
+      viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: 5, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
     };
     PM.agentFrameCapture = false;
     try {
       pinch();
-      const deferred = V.deferNavigationRender(performance.now());
+      const deferred = viewer.deferNavigationRender(performance.now());
       await new Promise(requestAnimationFrame);
       const duringGesture = renders;
       await new Promise(resolve => setTimeout(resolve, 140));
-      const refined = renders > 0 && !V.deferNavigationRender(performance.now());
-      const image = V.el.toDataURL();
+      const refined = renders > 0 && !viewer.deferNavigationRender(performance.now());
+      const image = viewer.el.toDataURL();
       PM.rasterClear(); PM.GL.render(0, { mblur: false });
-      const exact = image === V.el.toDataURL();
+      const exact = image === viewer.el.toDataURL();
       pinch();
       const edit = PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'c.color', value: '#2255dd', mode: 'static', preserveHandEdits: false });
-      const editImmediate = edit.ok && !V.deferNavigationRender(performance.now());
+      const editImmediate = edit.ok && !viewer.deferNavigationRender(performance.now());
       PM.GL.render(PM.time, { mblur: false });
       pinch(); PM.setTime(.5);
-      const scrubImmediate = !V.deferNavigationRender(performance.now());
+      const scrubImmediate = !viewer.deferNavigationRender(performance.now());
       return { deferred, duringGesture, refined, exact, editImmediate, scrubImmediate, quality: PM.quality };
     } finally { PM.GL.render = original; PM.agentFrameCapture = true; }
   });
@@ -107,33 +109,33 @@ test('fractional pans reuse covered pixels while crop changes and independent re
     p.layers = [PM.mkLayer('shape', { d: { shape: 'rect', w: 20, h: 20, color: '#dd5522' }, p: { 'position.x': 960, 'position.y': 540 } })];
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: p })); PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   });
-  await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'); return Boolean(PM?.GL?.gl && viewer?.stage); });
   const result = await page.evaluate(async () => {
-    const PM = (window as any).PM, V = PM.Viewer;
-    V.fit = false; V.zoom = 4.371588852276498; V.pan = [0, 0]; V.layout();
+    const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer');
+    viewer.fit = false; viewer.zoom = 4.371588852276498; viewer.pan = [0, 0]; viewer.layout();
     PM.agentFrameCapture = false;
     await new Promise(resolve => setTimeout(resolve, 100));
     const original = PM.GL.render; let renders = 0;
     PM.GL.render = (...args: any[]) => { renders++; return original(...args); };
     const pan = (deltaX: number) => {
-      const r = V.stage.getBoundingClientRect();
-      V.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX, clientX: r.left+r.width/2, clientY:r.top+r.height/2 }));
+      const r = viewer.stage.getBoundingClientRect();
+      viewer.stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX, clientX: r.left+r.width/2, clientY:r.top+r.height/2 }));
     };
     const frame = async () => { await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); };
     try {
-      const pixels = V.el.toDataURL(), left = V.el.getBoundingClientRect().left;
+      const pixels = viewer.el.toDataURL(), left = viewer.el.getBoundingClientRect().left;
       for (let i = 0; i < 12; i++) { pan(3.25); await frame(); }
-      const reused = renders === 0 && pixels === V.el.toDataURL();
-      const moved = V.el.getBoundingClientRect().left - left;
+      const reused = renders === 0 && pixels === viewer.el.toDataURL();
+      const moved = viewer.el.getBoundingClientRect().left - left;
       // A redraw that is already pending must survive a subsequent covered pan.
       PM.invalidate('render'); pan(1); await frame();
       const externalRedraw = renders > 0;
       const previous = renders;
       pan(180); await frame();
       const newRegion = renders > previous;
-      const image = V.el.toDataURL();
+      const image = viewer.el.toDataURL();
       PM.rasterClear(); PM.GL.render(0, { mblur: false });
-      const exact = image === V.el.toDataURL();
+      const exact = image === viewer.el.toDataURL();
       const beforeEdit = renders;
       PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'c.color', value: '#2255dd', mode: 'static', preserveHandEdits: false });
       pan(1); await frame();
@@ -157,19 +159,19 @@ test('native outward pans keep GPU allocation stable at every composition edge',
     project.layers=[PM.mkLayer('shape',{d:{shape:'rect',w:1900,h:1060,radius:20,color:'#dd5522'},p:{'position.x':960,'position.y':540}})];
     window.dispatchEvent(new CustomEvent('pm-open-project',{detail:project}));PM.ProjectsScreen.hide();PM.agentFrameCapture=true;
   });
-  await page.waitForFunction(()=>Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await page.waitForFunction(()=>{const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');return Boolean(PM?.GL?.gl&&viewer?.stage);});
   for(const edge of ['left','right','top','bottom']) {
     const gesture=await page.evaluate(edge=>{
-      const PM=(window as any).PM,V=PM.Viewer,r=V.stage.getBoundingClientRect(),z=2.51184505912942;
+      const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),r=viewer.stage.getBoundingClientRect(),z=2.51184505912942;
       let x=(r.width-PM.proj.w*z)/2,y=(r.height-PM.proj.h*z)/2,dx=0,dy=0;
       if(edge==='left'){x=-150;dx=180;}if(edge==='right'){x=r.width-PM.proj.w*z+150;dx=-180;}
       if(edge==='top'){y=-150;dy=180;}if(edge==='bottom'){y=r.height-PM.proj.h*z+150;dy=-180;}
-      V.fit=false;V.zoom=z;V.pan=[x-(r.width-PM.proj.w*z)/2,y-(r.height-PM.proj.h*z)/2];V.layout();PM.GL.render(0,{mblur:false});
+      viewer.fit=false;viewer.zoom=z;viewer.pan=[x-(r.width-PM.proj.w*z)/2,y-(r.height-PM.proj.h*z)/2];viewer.layout();PM.GL.render(0,{mblur:false});
       const resize=PM.GL.resize; (window as any).__edgeResizes=[];
       (window as any).__restoreEdge=()=>{PM.GL.resize=resize;};
       PM.GL.resize=(...args:any[])=>{const resized=resize(...args);if(resized)(window as any).__edgeResizes.push(args.slice(0,2));return resized;};
       PM.agentFrameCapture=false;
-      return {x:r.left+r.width/2,y:r.top+r.height/2,dx,dy,pan:[...V.pan]};
+      return {x:r.left+r.width/2,y:r.top+r.height/2,dx,dy,pan:[...viewer.pan]};
     },edge);
     await page.mouse.move(gesture.x,gesture.y);
     await page.mouse.down({button:'middle'});
@@ -177,8 +179,9 @@ test('native outward pans keep GPU allocation stable at every composition edge',
     await page.mouse.up({button:'middle'});
     const result=await page.evaluate(()=>{
       const PM=(window as any).PM;
+      const viewer=PM.Kernel.services.get('viewer');
       (window as any).__restoreEdge();
-      return {resizes:(window as any).__edgeResizes,pan:[...PM.Viewer.pan],quality:PM.quality};
+      return {resizes:(window as any).__edgeResizes,pan:[...viewer.pan],quality:PM.quality};
     });
     expect(result.resizes).toEqual([]);
     expect(result.pan[0]-gesture.pan[0]).toBeCloseTo(gesture.dx,0);

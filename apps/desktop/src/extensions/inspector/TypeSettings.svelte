@@ -4,7 +4,7 @@
   import { inspectorContext } from './context';
   import { inspectFont, isAxisTag, type FontInspection } from 'powermove';
   const { doc } = inspectorContext();
-  let { PM, layer, family, onVariableWeight }: { PM: Record<string, any>; layer: any; family: string; onVariableWeight?: (value: boolean) => void } = $props();
+  let { layer, family, onVariableWeight }: { layer: any; family: string; onVariableWeight?: (value: boolean) => void } = $props();
   let info = $state<FontInspection | null>(null), attempt = $state(0);
   $effect(() => {
     const selected = family, retry = attempt;
@@ -22,7 +22,7 @@
 <details class="type-settings" data-font-variations open>
   <summary><span>Type settings</span><span class="font-status">{!info ? 'Loading…' : info.status === 'variable' ? 'Variable' : info.status === 'static' ? 'Static' : 'Unavailable'}</span></summary>
   {#if info?.axes.length}
-    {#each info.axes as axis (axis.tag)}<TypeAxis {PM} {layer} {axis} />{/each}
+    {#each info.axes as axis (axis.tag)}<TypeAxis {layer} {axis} />{/each}
   {:else if info}
     <p class="font-note">{info.status === 'static' ? `${family} is a static font. Choose a variable font to adjust its axes.` : info.status === 'missing' ? `${family} could not be found among installed fonts.` : 'Font details could not be read. Try refreshing the installed fonts.'}</p>
     <button type="button" class="chip refresh-fonts" onclick={() => { attempt++; }}>Refresh fonts</button>
@@ -30,7 +30,7 @@
   {#if saved.length}
     <details class="saved-axes"><summary>Saved axis values</summary>
       <p class="font-note">These values remain editable. The selected font has not reported matching axes.</p>
-      {#each saved as axis (axis.tag)}<TypeAxis {PM} {layer} {axis} />{/each}
+      {#each saved as axis (axis.tag)}<TypeAxis {layer} {axis} />{/each}
     </details>
   {/if}
 </details>

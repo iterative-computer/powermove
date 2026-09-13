@@ -105,13 +105,20 @@ export async function prepareAgentWorkspace(
     throw new Error('The user extensions directory must be an absolute path.');
   }
 
+  /* Pack names are relative POSIX paths (`api.ts`, `samples/x/index.ts`).
+     Anything absolute, escaping, or with empty segments is skipped. */
+  const isSafePackPath = (name: string): boolean => {
+    if (path.isAbsolute(name) || name.includes('\\')) return false;
+    const segments = name.split('/');
+    return segments.every((segment) => segment.length > 0 && segment !== '.' && segment !== '..');
+  };
   const apiPackNames = new Set<string>();
   for (const file of options.apiPackFiles) {
     if (
       file.name.length === 0 ||
       file.name === '.' ||
       file.name === '..' ||
-      path.basename(file.name) !== file.name ||
+      !isSafePackPath(file.name) ||
       file.name.includes('\0') ||
       apiPackNames.has(file.name)
     ) {
@@ -177,7 +184,9 @@ export async function prepareAgentWorkspace(
   await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, 'utf8');
 
   for (const file of apiPackFiles) {
-    await writeFile(path.join(apiPackDirectory, file.name), file.text, 'utf8');
+    const target = path.join(apiPackDirectory, file.name);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, file.text, 'utf8');
   }
   // Remove stale pack files individually (never rm -rf: a concurrent run on the
   // same project may be reading the directory).

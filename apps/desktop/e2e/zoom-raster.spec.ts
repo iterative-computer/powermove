@@ -1,12 +1,13 @@
 import { test, expect } from './helpers/app';
 
 test.beforeEach(async ({ session }) => {
+  await session.openEditor();
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Zoom raster checks', w: 800, h: 500, fps: 30, dur: 3 }) }));
     PM.ProjectsScreen.hide(); PM.agentFrameCapture = true;
   });
-  await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl && (window as any).PM?.Viewer?.stage));
+  await session.page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean((window as any).PM?.GL?.gl && viewer?.stage); });
 });
 test.afterEach(async ({ session }) => {
   await session.page.evaluate(async () => await (window as any).PM.flushProject());

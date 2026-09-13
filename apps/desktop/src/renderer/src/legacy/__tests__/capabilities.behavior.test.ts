@@ -17,7 +17,7 @@ function runtime() {
   );
   PM.proj = PM.mkProject({ name: 'Transforms', w: 1920, h: 1080, fps: 30, dur: 10 });
   PM.time = 2;
-  PM.syncShaderUniforms = () => {};
+  PM.Kernel.services.register('shaderHooks', { syncShaderUniforms() {} });
   return PM;
 }
 
@@ -163,4 +163,3 @@ it('Decompose Text is a reusable sandboxed tool rather than a panel of generic s
   assert.equal(sanitized.type, 'script');
   assert.equal(PM.Capabilities.sanitizeControlAction({ type: 'script', mode: 'apply', code: '' }), null);
 });
-

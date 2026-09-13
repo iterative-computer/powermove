@@ -4,16 +4,17 @@
   import { EditGesture, type EditBinding } from './gesture';
   import { rowLabelId } from './context';
   import './controls.css';
+  import type { PowermoveAPI } from '../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit,
     label,
     align = 'right',
     mono = true
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
@@ -23,7 +24,7 @@
 
   const labelledBy = rowLabelId();
   const value = $derived((doc.tick.values, doc.proj, transport.time, get()));
-  const gesture = $derived(new EditGesture(PM, edit));
+  const gesture = $derived(new EditGesture(api, edit));
   let input: HTMLInputElement;
   let live = false;
   let draft = $state('');
@@ -41,7 +42,7 @@
   function inputValue(): void {
     draft = input.value;
     gesture.write(draft);
-    PM.invalidate?.('render');
+    api.transport.invalidate('render');
   }
 
   function blur(): void {
@@ -79,4 +80,3 @@
   onblur={blur}
   onkeydown={keydown}
 />
-

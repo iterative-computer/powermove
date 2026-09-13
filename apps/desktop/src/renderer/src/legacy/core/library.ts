@@ -1,5 +1,6 @@
 /* Ported from js/core/library.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { shaderHooks } from './services';
 
 export function install(PM: PMRegistry): void {
 const MAX_PER_KIND: any = 24;
@@ -277,7 +278,7 @@ function applyLook(id: any, options: any = {}) {
     const L: any = PM.mkLayer('shader', { name: k.name });
     L.d.code = k.code;
     PM.addLayer(L, 0);
-    PM.syncShaderUniforms?.(L);
+    shaderHooks(PM)?.syncShaderUniforms(L);
     for (const un in (k.uniforms || {})) {
       if (L.d.uniforms[un]) {
         L.d.uniforms[un].v = k.uniforms[un].v;

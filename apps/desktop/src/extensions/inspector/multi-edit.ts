@@ -1,108 +1,259 @@
-import { canAnimateContent, evaluatedValue, isProperty } from 'powermove';
+import { canAnimateContent, isProperty } from 'powermove';
+import type { Channel, ChannelValue, ControlEditBinding, EditCommand, Layer, PowermoveAPI } from 'powermove';
+
+export type InspectorAPI = {
+  model: Pick<PowermoveAPI['model'], 'layer'>;
+  selection: Pick<PowermoveAPI['selection'], 'layers' | 'keys'>;
+  groups: Pick<PowermoveAPI['groups'], 'ancestors'>;
+  transport: Pick<PowermoveAPI['transport'], 'time'>;
+  anim: Pick<PowermoveAPI['anim'], 'findProp' | 'evP'>;
+  edit: PowermoveAPI['edit'];
+};
+
+type InspectorLayer = Layer & {
+  p: Record<string, Channel>;
+  d: Record<string, any>;
+  [key: string]: any;
+};
+const inspectable = (layer: Layer): InspectorLayer => layer as InspectorLayer;
 
 /** A selected group owns its selected members for shared inspector edits. */
-export function inspectorSelection(PM: any, layers: any[]): any[] {
-  const ids = new Set(layers.map(layer => layer.id));
-  return layers.filter(layer => !(PM.groupAncestors?.(layer) || []).some((group: any) => ids.has(group.id)));
+export function inspectorSelection(api: InspectorAPI, layers: Layer[]): Layer[] {
+  const ids = new Set(layers.map((layer) => layer.id));
+  return layers.filter((layer) => !api.groups.ancestors(layer).some((group) => ids.has(group.id)));
 }
 
-export function translatePath(primary: any, target: any, path: string): string | null {
+export function translatePath(primary: Layer, target: Layer, path: string): string | null {
   if (path.startsWith('c.')) return canAnimateContent(target, path.slice(2)) ? path : null;
   if (path.startsWith('l.')) return target.type === 'audio' && path !== 'l.on' ? null : path;
-  if (target.p?.[path]) return path;
-  if (path.startsWith('u.') || path.startsWith('x.')) return primary.type === target.type && (primary.type !== 'extension' || primary.d.definition === target.d.definition) ? path : null;
-  if (/^(g|mp|ta|ts)\./.test(path)) return primary.id===target.id?path:null;
+  if (inspectable(target).p?.[path]) return path;
+  if (path.startsWith('u.') || path.startsWith('x.')) return primary.type === target.type && (primary.type !== 'extension' || inspectable(primary).d.definition === inspectable(target).d.definition) ? path : null;
+  if (/^(g|mp|ta|ts)\./.test(path)) return primary.id === target.id ? path : null;
   if (path.startsWith('m.')) {
-    const [,id,...rest] = path.split('.'), i = primary.masks.findIndex((m: any) => m.id === id);
-    return target.masks?.[i] ? `m.${target.masks[i].id}.${rest.join('.')}` : null;
+    const [, id, ...rest] = path.split('.');
+    const index = primary.masks.findIndex((mask) => mask.id === id);
+    return target.masks?.[index] ? `m.${target.masks[index]!.id}.${rest.join('.')}` : null;
   }
-  const [id,...rest] = path.split('.'), i = primary.fx.findIndex((f: any) => f.id === id);
-  return i >= 0 && target.fx?.[i]?.type === primary.fx[i].type ? `${target.fx[i].id}.${rest.join('.')}` : null;
+  const [id, ...rest] = path.split('.');
+  const index = primary.fx.findIndex((effect) => effect.id === id);
+  return index >= 0 && target.fx?.[index]?.type === primary.fx[index]!.type
+    ? `${target.fx[index]!.id}.${rest.join('.')}`
+    : null;
 }
 
-function currentValue(PM: any, layer: any, command: any) {
-  if(command.type==='set_content'){const field=Object.keys(command.patch||{})[0];return field?evaluatedValue(PM,layer,layer.d[field],PM.time,'c.'+field):undefined;}
-  if(command.type==='set_layer'){const field=Object.keys(command.patch||{})[0];const key=({visible:'on',motionBlur:'mblur'} as any)[field!]||field;return key?evaluatedValue(PM,layer,layer[key],PM.time,'l.'+key):undefined;}
-  const path = command.path;
+function selectedLayers(api: InspectorAPI): Layer[] {
+  return api.selection.layers().map((id) => api.model.layer(id)).filter((layer): layer is Layer => layer !== null);
+}
+
+export function evaluatedValue(api: InspectorAPI, layer: Layer, value: unknown, time: number, path: string): unknown {
+  return isProperty(value) ? api.anim.evP(layer, value as Channel, time, path) : value;
+}
+
+function currentValue(api: InspectorAPI, layer: Layer | null, command: EditCommand): unknown {
+  if (!layer) return undefined;
+  if (command.type === 'set_content') {
+    const field = Object.keys(command.patch ?? {})[0];
+    return field ? evaluatedValue(api, layer, inspectable(layer).d[field], api.transport.time(), `c.${field}`) : undefined;
+  }
+  if (command.type === 'set_layer') {
+    const field = Object.keys(command.patch ?? {})[0];
+    const key = ({ visible: 'on', motionBlur: 'mblur' } as Record<string, string>)[field!] ?? field;
+    return key ? evaluatedValue(api, layer, layer[key as keyof Layer], api.transport.time(), `l.${key}`) : undefined;
+  }
   if (command.type === 'set_property') {
-    const prop = PM.findProp?.(layer,path) || layer?.p?.[path];
-    if (prop) return PM.evP(layer,prop,command.time ?? PM.time,path);
-    if (path.startsWith('c.')) return evaluatedValue(PM,layer,layer.d[path.slice(2)],PM.time,path);
-    if (path.startsWith('l.')) return evaluatedValue(PM,layer,layer[path.slice(2)],PM.time,path);
+    const prop = api.anim.findProp(layer, command.path) ?? inspectable(layer).p?.[command.path];
+    if (prop) return api.anim.evP(layer, prop, command.time ?? api.transport.time(), command.path);
+    if (command.path.startsWith('c.')) return evaluatedValue(api, layer, inspectable(layer).d[command.path.slice(2)], api.transport.time(), command.path);
+    if (command.path.startsWith('l.')) return evaluatedValue(api, layer, layer[command.path.slice(2) as keyof Layer], api.transport.time(), command.path);
   }
   return undefined;
 }
 
-/** The inspector owns selection expansion; agent and canvas commands stay explicit. */
-export function inspectorPM(PM: any): any {
-  let snapshot: Map<string,unknown> | null = null;
+export function inspectorTargets(api: InspectorAPI, layer: Layer, path: string) {
+  const selected = inspectorSelection(api, selectedLayers(api));
+  return (selected.some((candidate) => candidate.id === layer.id) ? selected : [layer])
+    .filter((candidate) => !candidate.lock)
+    .flatMap((candidate) => {
+      const translated = translatePath(layer, candidate, path);
+      return translated ? [{ layer: candidate, path: translated, prop: api.anim.findProp(candidate, translated) ?? inspectable(candidate).p?.[translated] }] : [];
+    });
+}
+
+export function createInspectorEdit(api: InspectorAPI) {
+  let snapshot: Map<string, unknown> | null = null;
   let editing = false;
-  let keySnapshot = new Map<string, { base: number; keys: any[] }>();
-  const expandKeys = (commands: any[]) => commands.flatMap(command => {
+  let keySnapshot = new Map<string, { base: number; keys: Array<{ t: number; v: number; [key: string]: unknown }> }>();
+
+  const expandKeys = (commands: EditCommand[]): EditCommand[] => commands.flatMap((command) => {
     if (command.type !== 'set_property' || typeof command.value !== 'number' || command.mode === 'static') return [command];
-    const layer = PM.L(command.target);
+    const layer = api.model.layer(String(command.target));
     if (!layer || layer.lock) return [command];
-    const prop = PM.findProp?.(layer, command.path) || layer.p?.[command.path];
-    const selected = new Set(PM.sel.keys || []);
-    const keys = prop?.kf?.filter((key: any) => selected.has(key.i) && typeof key.v === 'number') || [];
+    const prop = api.anim.findProp(layer, command.path) ?? inspectable(layer).p?.[command.path];
+    const selected = new Set(api.selection.keys());
+    const keys = prop?.kf?.filter((key) => selected.has(key.i) && typeof key.v === 'number') ?? [];
     if (keys.length < 2) return [command];
     const id = `${layer.id}:${command.path}`;
     if (!keySnapshot.has(id)) keySnapshot.set(id, {
-      base: currentValue(PM, layer, command),
-      keys: keys.map((key: any) => ({ ...key }))
+      base: Number(currentValue(api, layer, command)),
+      keys: keys.map((key) => ({ ...key, v: Number(key.v) }))
     });
     const initial = keySnapshot.get(id)!;
-    return initial.keys.map(key => ({ ...command, mode: 'keyframe',
-      time: layer.from + key.t, value: key.v + command.value - initial.base }));
+    const delta = command.value;
+    return initial.keys.map((key) => ({
+      ...command,
+      mode: 'keyframe',
+      time: layer.from + key.t,
+      value: key.v + delta - initial.base
+    }));
   });
-  const expand = (input: any, relative = false) => {
-    const selected = inspectorSelection(PM, PM.selLayers()).filter((l: any) => !l.lock);
-    const first = inspectorSelection(PM, PM.selLayers())[0];
-    return ([] as any[]).concat(input).flatMap(command => {
-      if (!first || command.target !== first.id || PM.selLayers().length < 2) return [command];
-      if (!['set_property','set_expression','replace_keyframes','set_content','set_layer'].includes(command.type)) return [command];
-      return selected.flatMap((target: any) => {
-        const path = command.path ? translatePath(first,target,command.path) : null;
-        if (command.path && !path) return [];
+
+  const expand = (input: EditCommand | EditCommand[], relative = false): EditCommand[] => {
+    const allSelected = selectedLayers(api);
+    const selected = inspectorSelection(api, allSelected).filter((layer) => !layer.lock);
+    const first = inspectorSelection(api, allSelected)[0];
+    return ([] as EditCommand[]).concat(input).flatMap((command) => {
+      if (!first || !('target' in command) || command.target !== first.id || allSelected.length < 2) return [command];
+      if (!['set_property', 'set_expression', 'replace_keyframes', 'set_content', 'set_layer'].includes(command.type)) return [command];
+      return selected.flatMap((target) => {
+        const sourcePath = 'path' in command ? command.path : null;
+        const path = sourcePath ? translatePath(first, target, sourcePath) : null;
+        if (sourcePath && !path) return [];
         if (command.type === 'set_content' && target.type !== first.type) return [];
-        const next = { ...command, target: target.id, ...(path ? {path} : {}) };
-        if (relative && typeof command.value === 'number' && path) {
-          const key = `${target.id}:${path}`, firstKey = `${first.id}:${command.path}`;
-          if (!snapshot!.has(key)) snapshot!.set(key,currentValue(PM,target,next));
-          if (!snapshot!.has(firstKey)) snapshot!.set(firstKey,currentValue(PM,first,command));
-          const own = snapshot!.get(key), base = snapshot!.get(firstKey);
-          if (typeof own === 'number' && typeof base === 'number') next.value = own + command.value-base;
+        const next = { ...command, target: target.id, ...(path ? { path } : {}) } as EditCommand;
+        if (relative && command.type === 'set_property' && typeof command.value === 'number' && path && next.type === 'set_property') {
+          const key = `${target.id}:${path}`;
+          const firstKey = `${first.id}:${sourcePath}`;
+          if (!snapshot!.has(key)) snapshot!.set(key, currentValue(api, target, next));
+          if (!snapshot!.has(firstKey)) snapshot!.set(firstKey, currentValue(api, first, command));
+          const own = snapshot!.get(key);
+          const base = snapshot!.get(firstKey);
+          if (typeof own === 'number' && typeof base === 'number') next.value = own + command.value - base;
         }
-        if(relative&&command.type==='set_content'){
-          next.patch={...command.patch};
-          for(const [field,value] of Object.entries(command.patch))if(typeof value==='number'){
-            const key=`${target.id}:c.${field}`,firstKey=`${first.id}:c.${field}`,read=(l:any)=>currentValue(PM,l,{type:'set_content',patch:{[field]:value}});
-            if(!snapshot!.has(key))snapshot!.set(key,read(target));if(!snapshot!.has(firstKey))snapshot!.set(firstKey,read(first));
-            const own=snapshot!.get(key),base=snapshot!.get(firstKey);if(typeof own==='number'&&typeof base==='number')next.patch[field]=own+value-base;
+        if (relative && command.type === 'set_content' && next.type === 'set_content') {
+          next.patch = { ...command.patch };
+          for (const [field, value] of Object.entries(command.patch)) if (typeof value === 'number') {
+            const key = `${target.id}:c.${field}`;
+            const firstKey = `${first.id}:c.${field}`;
+            const read = (candidate: Layer) => currentValue(api, candidate, { type: 'set_content', target: candidate.id, patch: { [field]: value } });
+            if (!snapshot!.has(key)) snapshot!.set(key, read(target));
+            if (!snapshot!.has(firstKey)) snapshot!.set(firstKey, read(first));
+            const own = snapshot!.get(key);
+            const base = snapshot!.get(firstKey);
+            if (typeof own === 'number' && typeof base === 'number') next.patch[field] = own + value - base;
           }
         }
         return [next];
       });
     });
   };
-  const edit = new Proxy(PM.Edit, { get(target,key) {
-    if (key === 'begin') return (...args: any[]) => { editing = true; snapshot = new Map(); keySnapshot = new Map(); return target.begin(...args); };
-    if (key === 'dispatch') return (commands: any) => {const next=expandKeys(expand(commands,editing));return target.dispatch(Array.isArray(commands)||next.length!==1?next:next[0]);};
-    if (key === 'apply') return (commands: any,...args: any[]) => {keySnapshot = new Map(); const next=expandKeys(expand(commands));return target.apply(Array.isArray(commands)||next.length!==1?next:next[0],...args);};
-    if (key === 'commit' || key === 'cancel') return (...args: any[]) => { editing = false; snapshot = null; keySnapshot = new Map(); return target[key](...args); };
-    return target[key];
-  }});
-  return new Proxy(PM, { get(target,key) {
-    if (key === 'Edit') return edit;
-    if(key==='inspectorApply')return PM.Edit.apply;
-    if(key==='inspectorTargets')return (layer:any,path:string)=>{const selected=inspectorSelection(PM,PM.selLayers());return (selected.some((l:any)=>l.id===layer.id)?selected:[layer]).filter((l:any)=>!l.lock).flatMap((l:any)=>{const translated=translatePath(layer,l,path);return translated?[{layer:l,path:translated,prop:PM.findProp?.(l,translated)||l.p?.[translated]}]:[];});};
-    if (key === 'inspectorMixed') return (binding: any,value: any) => {
-      if (!binding || binding.mode !== 'command' || typeof binding.command !== 'function') return false;
-      if(PM.selLayers().filter((l:any)=>!l.lock).length<2)return false;
-      const commands = expand(binding.command(value));
-      const values = commands.filter(c => ['set_property','set_content','set_layer'].includes(c.type)).map(c => currentValue(PM,PM.L(c.target),c));
-      return values.length>1 && values.some(v => !Object.is(v,values[0]));
-    };
-    return target[key];
-  }});
+
+  return {
+    begin(label: string, meta?: Parameters<PowermoveAPI['edit']['begin']>[1]) {
+      editing = true;
+      snapshot = new Map();
+      keySnapshot = new Map();
+      return api.edit.begin(label, meta);
+    },
+    dispatch(commands: EditCommand | EditCommand[]) {
+      const next = expandKeys(expand(commands, editing));
+      let result = { ok: true } as ReturnType<PowermoveAPI['edit']['dispatch']>;
+      for (const command of next) result = api.edit.dispatch(command);
+      return result;
+    },
+    apply(commands: EditCommand | EditCommand[], meta?: Parameters<PowermoveAPI['edit']['apply']>[1]) {
+      keySnapshot = new Map();
+      const next = expandKeys(expand(commands));
+      const input = Array.isArray(commands) || next.length !== 1 ? next : next[0]!;
+      return meta === undefined ? api.edit.apply(input) : api.edit.apply(input, meta);
+    },
+    commit(label?: string) {
+      editing = false;
+      snapshot = null;
+      keySnapshot = new Map();
+      return api.edit.commit(label);
+    },
+    cancel() {
+      editing = false;
+      snapshot = null;
+      keySnapshot = new Map();
+      return api.edit.cancel();
+    },
+    mutate: api.edit.mutate
+  };
+}
+
+export function inspectorMixed(api: InspectorAPI, binding: ControlEditBinding, value: unknown): boolean {
+  if (binding.mode !== 'command' || typeof binding.command !== 'function') return false;
+  const selected = inspectorSelection(api, selectedLayers(api)).filter((layer) => !layer.lock);
+  if (selected.length < 2) return false;
+  const primary = selected[0]!;
+  const commands = ([] as EditCommand[]).concat(binding.command(value));
+  const values = commands.flatMap((command) => selected.flatMap((target) => {
+    if (!('target' in command) || command.target !== primary.id) return [];
+    const sourcePath = 'path' in command ? command.path : null;
+    const path = sourcePath ? translatePath(primary, target, sourcePath) : null;
+    if (sourcePath && !path) return [];
+    if (command.type === 'set_content' && target.type !== primary.type) return [];
+    const next = { ...command, target: target.id, ...(path ? { path } : {}) } as EditCommand;
+    return ['set_property', 'set_content', 'set_layer'].includes(next.type) ? [currentValue(api, target, next)] : [];
+  }));
+  return values.length > 1 && values.some((candidate) => !Object.is(candidate, values[0]));
+}
+
+interface LegacyInspectorSource {
+  time: number;
+  sel: { layers: string[]; keys: string[]; chan?: string | null };
+  Edit: PowermoveAPI['edit'];
+  L(id: string): Layer | null;
+  selLayers(): Layer[];
+  groupAncestors?(layer: Layer): Layer[];
+  findProp?(layer: Layer, path: string): Channel | null;
+  evP(layer: Layer, property: Channel, time: number, path: string): ChannelValue | null;
+}
+
+function isLegacyInspectorSource(value: unknown): value is LegacyInspectorSource {
+  if (!value || typeof value !== 'object') return false;
+  const source = value as Partial<LegacyInspectorSource>;
+  return typeof source.time === 'number'
+    && !!source.sel
+    && !!source.Edit
+    && typeof source.L === 'function'
+    && typeof source.selLayers === 'function'
+    && typeof source.evP === 'function';
+}
+
+/** @deprecated Compatibility for one renderer behavior suite pending its Phase 4 test-fixture move. */
+export function inspectorPM(value: unknown) {
+  if (!isLegacyInspectorSource(value)) throw new TypeError('Invalid legacy inspector test source');
+  const source = value;
+  const base: InspectorAPI = {
+    model: { layer: (id: string) => source.L(id) },
+    selection: {
+      layers: () => source.selLayers().map((layer) => layer.id),
+      keys: () => source.sel.keys
+    },
+    groups: { ancestors: (layer: Layer) => source.groupAncestors?.(layer) ?? [] },
+    transport: { time: () => source.time },
+    anim: {
+      findProp: (layer, path) => source.findProp?.(layer, path) ?? null,
+      evP: source.evP.bind(source)
+    },
+    edit: source.Edit
+  };
+  const edit = createInspectorEdit(base);
+  return {
+    ...base,
+    Edit: edit,
+    inspectorMixed: (binding: unknown, nextValue: unknown) => {
+      if (!binding || typeof binding !== 'object') return false;
+      const candidate = binding as { mode?: unknown; command?: unknown };
+      if (candidate.mode !== 'command' || typeof candidate.command !== 'function') return false;
+      const normalized: ControlEditBinding = {
+        mode: 'command',
+        label: 'Inspector edit',
+        command: candidate.command as (input: unknown) => EditCommand | EditCommand[]
+      };
+      return inspectorMixed(base, normalized, nextValue);
+    }
+  };
 }

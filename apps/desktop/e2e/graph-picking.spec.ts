@@ -1,10 +1,13 @@
 import { expect, type Page } from '@playwright/test';
 import { test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 async function graphFixture(page: Page) {
-  await page.waitForFunction(() => Boolean((window as any).PM?.TL?.cv));
+  await page.waitForFunction(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
   await page.evaluate(() => {
     const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
     PM.replaceProject(PM.mkProject({ name: 'Graph picking QA', dur: 6 }));
     const L = PM.mkLayer('text', { name: 'Introducing', dur: 6, d: { 'fontAxis.wght': PM.P(180) } });
     PM.proj.layers.push(L);
@@ -13,13 +16,17 @@ async function graphFixture(page: Page) {
       PM.setKeyOn(prop, 1, values[0]); PM.setKeyOn(prop, 3, values[1]);
     }
     PM.selectLayers(L.id); PM.sel.chan = 'scale';
-    PM.TL.graphFocus = { layerId: L.id, trackKey: 'scale' };
-    PM.TL.pps = 90; PM.TL.scrollT = 0;
+    timeline.graphFocus = { layerId: L.id, trackKey: 'scale' };
+    timeline.pps = 90; timeline.scrollT = 0;
     PM.sel.keys = PM.findProp(L, 'c.fontAxis.wght').kf.map((k: any) => k.i);
     PM.bus.emit('layers'); PM.invalidate();
   });
   await page.getByRole('button', { name: 'Graph editor (Shift+F3)', exact: true }).click();
-  await page.waitForFunction(() => (window as any).PM.TL._graph?.series?.length >= 1);
+  await page.waitForFunction(() => {
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    return timeline._graph?.series?.length >= 1;
+  });
 }
 
 test('a Weight handle edits Weight while Scale is focused, and Undo restores it', async ({ session }) => {
@@ -30,10 +37,15 @@ test('a Weight handle edits Weight while Scale is focused, and Undo restores it'
     PM.sel.keys = PM.allProps(PM.proj.layers[0]).flatMap((axis: any) => axis.prop.kf.map((key: any) => key.i));
     PM.bus.emit('sel'); PM.invalidate();
   });
-  await page.waitForFunction(() => (window as any).PM.TL._graph?.series?.length === 3);
+  await page.waitForFunction(() => {
+    const PM = (window as any).PM;
+    const timeline = PM.Kernel.services.get('timeline');
+    return timeline._graph?.series?.length === 3;
+  });
   const before = await page.evaluate(() => {
     const PM = (window as any).PM, L = PM.proj.layers[0], key = PM.findProp(L, 'c.fontAxis.wght').kf[0];
-    const box = PM.TL.cv.getBoundingClientRect(), p = PM.UIState.getKeyHandles(key).ho;
+    const timeline = PM.Kernel.services.get('timeline');
+    const box = timeline.cv.getBoundingClientRect(), p = PM.UIState.getKeyHandles(key).ho;
     PM.hist.clear();
     return { scale: JSON.stringify([L.p['scale.x'], L.p['scale.y']]), weight: JSON.stringify(PM.findProp(L, 'c.fontAxis.wght')), x: box.x + p[0], y: box.y + p[1] };
   });
@@ -55,7 +67,8 @@ for (const side of ['ho', 'hi'] as const) test(`Shift snaps the ${side} handle f
   await graphFixture(page);
   const before = await page.evaluate(side => {
     const PM = (window as any).PM, prop = PM.findProp(PM.proj.layers[0], 'c.fontAxis.wght');
-    const box = PM.TL.cv.getBoundingClientRect(), p = PM.UIState.getKeyHandles(prop.kf[side === 'ho' ? 0 : 1])[side];
+    const timeline = PM.Kernel.services.get('timeline');
+    const box = timeline.cv.getBoundingClientRect(), p = PM.UIState.getKeyHandles(prop.kf[side === 'ho' ? 0 : 1])[side];
     return { x: box.x + p[0], y: box.y + p[1], source: JSON.stringify(prop) };
   }, side);
   await page.mouse.move(before.x, before.y); await page.mouse.down();
@@ -80,14 +93,14 @@ test('vertical scrolling pans the graph without scrolling rows or editing animat
   const { page } = session;
   await graphFixture(page);
   const before = await page.evaluate(() => {
-    const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
-    return { value: T._graph.vmin, rows: T.scrollY, source: JSON.stringify(PM.proj.layers), x: box.x + T.gut + 120, y: box.y + T.ruler + 80 };
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), box = timeline.cv.getBoundingClientRect();
+    return { value: timeline._graph.vmin, rows: timeline.scrollY, source: JSON.stringify(PM.proj.layers), x: box.x + timeline.gut + 120, y: box.y + timeline.ruler + 80 };
   });
   await page.mouse.move(before.x, before.y); await page.mouse.wheel(0, 60);
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph.vmin)).toBeLessThan(before.value);
-  expect(await page.evaluate(() => (window as any).PM.TL.scrollY)).toBe(before.rows);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph.vmin; })).toBeLessThan(before.value);
+  expect(await page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline.scrollY; })).toBe(before.rows);
   await page.mouse.wheel(0, -60);
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph.vmin)).toBeCloseTo(before.value);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph.vmin; })).toBeCloseTo(before.value);
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj.layers))).toBe(before.source);
   await page.locator('#panel-timeline').screenshot({ path: info.outputPath('graph-cleanup.png') });
   expect(session.diagnostics.pageErrors).toEqual([]);
@@ -101,17 +114,17 @@ test('only selected keys and their curves appear, and clearing selection clears 
     PM.sel.keys = [PM.findProp(PM.proj.layers[0], 'c.fontAxis.wght').kf[0].i];
     PM.bus.emit('sel'); PM.invalidate();
   });
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph?.points.length)).toBe(1);
-  expect(await page.evaluate(() => (window as any).PM.TL._graph.series.map((axis: any) => axis.key))).toEqual(['c.fontAxis.wght']);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph?.points.length; })).toBe(1);
+  expect(await page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph.series.map((axis: any) => axis.key); })).toEqual(['c.fontAxis.wght']);
   await page.evaluate(() => {
     const PM = (window as any).PM, L = PM.proj.layers[0];
     PM.sel.keys = [...L.p['scale.x'].kf, ...L.p['scale.y'].kf].map((key: any) => key.i);
     PM.theme.apply('dark'); PM.bus.emit('sel'); PM.invalidate();
   });
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph?.series.map((axis: any) => axis.key))).toEqual(['scale.x', 'scale.y']);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph?.series.map((axis: any) => axis.key); })).toEqual(['scale.x', 'scale.y']);
   await page.locator('#panel-timeline').screenshot({ path: info.outputPath('selected-scale-dark.png') });
   await page.evaluate(() => { const PM = (window as any).PM; PM.sel.keys = []; PM.bus.emit('sel'); PM.invalidate(); });
-  await expect.poll(() => page.evaluate(() => (window as any).PM.TL._graph)).toBeNull();
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph; })).toBeNull();
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -119,7 +132,7 @@ test('marquee keeps its original graph targets and selected points still drag to
   const { page } = session;
   await graphFixture(page);
   const box = await page.evaluate(() => {
-    const PM = (window as any).PM, T = PM.TL, bounds = T.cv.getBoundingClientRect(), p = T._graph.points;
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), bounds = timeline.cv.getBoundingClientRect(), p = timeline._graph.points;
     return { x0: bounds.x + Math.min(...p.map((p: any) => p.x)) - 12, x1: bounds.x + Math.max(...p.map((p: any) => p.x)) + 12,
       y0: bounds.y + Math.min(...p.map((p: any) => p.y)) - 12, y1: bounds.y + Math.max(...p.map((p: any) => p.y)) + 12 };
   });
@@ -127,13 +140,13 @@ test('marquee keeps its original graph targets and selected points still drag to
   await page.mouse.move(box.x1, box.y1, { steps: 12 }); await page.mouse.up();
   expect(await page.evaluate(() => (window as any).PM.sel.keys.length)).toBe(2);
   const before = await page.evaluate(() => {
-    const PM = (window as any).PM, T = PM.TL, bounds = T.cv.getBoundingClientRect(), p = T._graph.points[0];
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), bounds = timeline.cv.getBoundingClientRect(), p = timeline._graph.points[0];
     PM.hist.clear();
-    return { x: bounds.x + p.x, y: bounds.y + p.y, values: T._graph.points.map((p: any) => [p.key.t, p.key.v]) };
+    return { x: bounds.x + p.x, y: bounds.y + p.y, values: timeline._graph.points.map((p: any) => [p.key.t, p.key.v]) };
   });
   await page.mouse.move(before.x, before.y); await page.mouse.down();
   await page.mouse.move(before.x + 15, before.y - 10, { steps: 6 }); await page.mouse.up();
-  const values = () => page.evaluate(() => (window as any).PM.TL._graph.points.map((p: any) => [p.key.t, p.key.v]));
+  const values = () => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph.points.map((p: any) => [p.key.t, p.key.v]); });
   expect((await values()).every((p: number[], i: number) => p[0]! > before.values[i][0] && p[1]! > before.values[i][1])).toBe(true);
   await page.evaluate(() => (window as any).PM.hist.undo());
   await expect.poll(values).toEqual(before.values);
@@ -144,12 +157,12 @@ test('drawing an empty graph marquee preserves selected keyframes', async ({ ses
   const { page } = session;
   await graphFixture(page);
   const before = await page.evaluate(() => {
-    const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
-    return { ids: [...PM.sel.keys], x: box.x + T.gut + 15, y: box.y + T.ruler + 45 };
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), box = timeline.cv.getBoundingClientRect();
+    return { ids: [...PM.sel.keys], x: box.x + timeline.gut + 15, y: box.y + timeline.ruler + 45 };
   });
   await page.mouse.move(before.x, before.y); await page.mouse.down();
   await page.mouse.move(before.x + 25, before.y + 25, { steps: 4 });
-  expect(await page.evaluate(() => Boolean((window as any).PM.TL.marquee))).toBe(true);
+  expect(await page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline.marquee); })).toBe(true);
   expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual(before.ids);
   await page.mouse.up();
   expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual(before.ids);
@@ -160,8 +173,8 @@ test('a graph marquee selects a subset and moves only enclosed points', async ({
   const { page } = session;
   await graphFixture(page);
   const target = await page.evaluate(() => {
-    const PM = (window as any).PM, T = PM.TL, box = T.cv.getBoundingClientRect();
-    const p = T._graph.points.reduce((a: any, b: any) => a.y > b.y ? a : b);
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), box = timeline.cv.getBoundingClientRect();
+    const p = timeline._graph.points.reduce((a: any, b: any) => a.y > b.y ? a : b);
     return { id: p.key.i, x: box.x + p.x, y: box.y + p.y,
       keys: PM.findProp(PM.proj.layers[0], 'c.fontAxis.wght').kf.map((k: any) => ({ id: k.i, t: k.t, v: k.v })) };
   });
@@ -169,7 +182,7 @@ test('a graph marquee selects a subset and moves only enclosed points', async ({
   await page.mouse.move(target.x + 14, target.y + 14, { steps: 6 }); await page.mouse.up();
   expect(await page.evaluate(() => (window as any).PM.sel.keys)).toEqual([target.id]);
   const point = await page.evaluate(() => {
-    const T = (window as any).PM.TL, box = T.cv.getBoundingClientRect(), p = T._graph.points[0];
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'), box = timeline.cv.getBoundingClientRect(), p = timeline._graph.points[0];
     return { x: box.x + p.x, y: box.y + p.y };
   });
   await page.mouse.move(point.x, point.y); await page.mouse.down();

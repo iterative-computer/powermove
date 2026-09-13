@@ -5,23 +5,27 @@ for (const [label, expected] of [
   ['By character', ['H','e','l','l','o','w','o','r','l','d','H','e','l','l','o','👨‍👩‍👧‍👦','!']],
   ['By line', ['Hello world', 'Hello 👨‍👩‍👧‍👦!']],
 ] as const) test(`split text ${label} through the layer menu, with undo and redo`, async ({ session }, testInfo) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.Viewer));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer); });
   const original = await page.evaluate(() => {
     const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
     const project = PM.mkProject({ name: 'Split text', w: 1000, h: 600, dur: 5 });
     const layer = PM.mkLayer('text', { d: { text: 'Hello world\nHello 👨‍👩‍👧‍👦!', size: 50, align: 'center' },
       p: { 'position.x': 450, 'position.y': 200, rotation: 12, 'scale.x': 120 } }, project);
     project.layers = [layer]; PM.replaceProject(project); PM.selectLayers(layer.id);
-    PM.hist.clear(); PM.Viewer.fit = true; PM.Viewer.layout();
+    PM.hist.clear(); viewer.fit = true; viewer.layout();
 
     return JSON.stringify(PM.proj.layers);
   });
   const point = await page.evaluate(() => {
-    const PM = (window as any).PM, layer = PM.proj.layers[0];
+    const PM = (window as any).PM;
+    const viewer = PM.Kernel.services.get('viewer');
+    const layer = PM.proj.layers[0];
     const glyph = PM.textLayout(layer).characters[0], m = PM.worldMatrix(layer, PM.time);
     const x = glyph.x + 15, y = glyph.y + 20, rect = document.querySelector('#stage-inner')!.getBoundingClientRect();
-    return { x: rect.x + (m[0]*x + m[2]*y + m[4])*PM.Viewer.shown, y: rect.y + (m[1]*x + m[3]*y + m[5])*PM.Viewer.shown };
+    return { x: rect.x + (m[0]*x + m[2]*y + m[4])*viewer.shown, y: rect.y + (m[1]*x + m[3]*y + m[5])*viewer.shown };
   });
   await page.mouse.click(point.x, point.y, { button: 'right' });
   await page.getByText('Split text into layers…', { exact: true }).click();
@@ -53,8 +57,9 @@ for (const [label, expected] of [
 });
 
 test('wrapped lines, locked layers and blank text', async ({ session }) => {
+  await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => Boolean((window as any).PM?.Viewer));
+  await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer); });
   await page.evaluate(() => {
     const PM = (window as any).PM, project = PM.mkProject({ w: 800, h: 600, dur: 5 });
     const layer = PM.mkLayer('text', { d: { text: 'One two three four five', size: 40, paragraph: true, boxWidth: 130, boxHeight: 400 } }, project);

@@ -14,6 +14,7 @@ import {
   type CompositionPatch
 } from './ui/project-settings';
 import { createSettingsTabs } from './ui/settings-tabs';
+import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -296,7 +297,7 @@ function hydrate(p: any) {
       if (PM.TYPE_META[L.type] && PM.TYPE_META[L.type].masks === false) L.masks = [];
       if (L.type === 'shader') {
         L.d.uniforms = sanitizeLooseParams(L.d.uniforms, -L.from);
-        PM.syncShaderUniforms?.(L);
+        shaderHooks(PM)?.syncShaderUniforms(L);
       }
       if (L.type === 'extension') {
         L.d.definition = typeof L.d.definition === 'string' ? L.d.definition : '';
@@ -356,7 +357,7 @@ async function restoreProjectAssets(project: any, warn: any = true) {
   const result = await PM.assets.restoreProject(project);
   if (result.stale || PM.proj !== project) return result;
   PM.bus.emit('assets');
-  PM.Inspector?.refresh?.();
+  inspectorService(PM)?.refresh();
   PM.invalidate('all');
   if (warn && result.missing.length) {
     const count = result.missing.length;
@@ -424,7 +425,7 @@ function revalidateContributionPlaceholders() {
     }
   }
   if (changed) {
-    PM.Inspector?.refresh?.();
+    inspectorService(PM)?.refresh();
     PM.invalidate();
   }
 }
@@ -441,11 +442,12 @@ PM.selectLayers((bootSession?.selection?.layers || []).filter((id: any) => PM.L(
 PM.sel.keys = [...new Set((bootSession?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
 PM.sel.keys = PM.resolveSelectedKeys().map((key: any) => key.i);
 PM.setTime(Number.isFinite(bootSession?.time) ? bootSession.time : .9, { raw: true, force: true });
-if (bootSession?.timeline && PM.TL) {
-  PM.TL.pps = Number.isFinite(bootSession.timeline.pps) ? bootSession.timeline.pps : PM.TL.pps;
-  PM.TL.scrollT = Number.isFinite(bootSession.timeline.scrollT) ? bootSession.timeline.scrollT : PM.TL.scrollT;
-  PM.TL.scrollY = Number.isFinite(bootSession.timeline.scrollY) ? bootSession.timeline.scrollY : PM.TL.scrollY;
-  PM.TL.graph = !!bootSession.timeline.graph;
+const bootTimeline = timelineService(PM);
+if (bootSession?.timeline && bootTimeline) {
+  bootTimeline.pps = Number.isFinite(bootSession.timeline.pps) ? bootSession.timeline.pps : bootTimeline.pps;
+  bootTimeline.scrollT = Number.isFinite(bootSession.timeline.scrollT) ? bootSession.timeline.scrollT : bootTimeline.scrollT;
+  bootTimeline.scrollY = Number.isFinite(bootSession.timeline.scrollY) ? bootSession.timeline.scrollY : bootTimeline.scrollY;
+  bootTimeline.graph = !!bootSession.timeline.graph;
 }
 PM.hist.import?.(bootSession?.history);
 restoreProjectAssets(PM.proj);
@@ -479,7 +481,7 @@ function projectSettingsBridge() {
       }
       if (PM.time > PM.proj.dur) PM.setTime(PM.proj.dur);
       PM.rasterClear?.();
-      PM.Viewer?.layout?.();
+      viewerService(PM)?.layout();
       PM.invalidate('all');
     },
     exportDefaults: readExportDefaults,
@@ -546,7 +548,7 @@ PM.SettingsUI = { open: openSettings };
    to settle. A five-second rate limit alone still allowed mid-gesture stalls. */
 let lastThumbAt = 0;
 let thumbRetry = 0;
-const thumbnailBlocked = () => PM.interactionActive?.() || PM.Viewer?.isNavigating?.() || PM.playing
+const thumbnailBlocked = () => PM.interactionActive?.() || viewerService(PM)?.isNavigating?.() || PM.playing
   || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active;
 function retryThumbnail(project: any) {
   window.clearTimeout(thumbRetry);
@@ -606,14 +608,15 @@ function captureProjectSession() {
   if (!PM.proj?.id || PM.proj.id === homeProjectId) return true;
   PM.bus.emit('project:flush-edits');
   const saved = persistCurrent(false);
+  const timeline = timelineService(PM);
   PM.Projects.putState(PM.proj.id, {
     ...PM.Projects.getState(PM.proj.id, { history: false }),
     lastActiveAt: Date.now(),
     history: PM.hist.export?.({ copy: false }),
     workspace: PM.WS.snapshot(), time: PM.time,
     selection: { layers: [...PM.sel.layers], keys: PM.sel.keys.filter((key: any) => typeof key === 'string'), chan: PM.sel.chan },
-    timeline: PM.TL
-      ? { pps: PM.TL.pps, scrollT: PM.TL.scrollT, scrollY: PM.TL.scrollY, graph: PM.TL.graph }
+    timeline: timeline
+      ? { pps: timeline.pps, scrollT: timeline.scrollT, scrollY: timeline.scrollY, graph: timeline.graph }
       : undefined,
   });
   return saved;
@@ -846,11 +849,12 @@ function switchProject(p: any, history?: any) {
   PM.sel.keys = [...new Set((session?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
   PM.sel.keys = PM.resolveSelectedKeys().map((key: any) => key.i);
   PM.sel.chan = session?.selection?.chan || null;
-  if (PM.TL) {
-    PM.TL.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
-    PM.TL.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
-    PM.TL.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
-    PM.TL.graph = !!session?.timeline?.graph;
+  const timeline = timelineService(PM);
+  if (timeline) {
+    timeline.pps = Number.isFinite(session?.timeline?.pps) ? session.timeline.pps : 90;
+    timeline.scrollT = Number.isFinite(session?.timeline?.scrollT) ? session.timeline.scrollT : 0;
+    timeline.scrollY = Number.isFinite(session?.timeline?.scrollY) ? session.timeline.scrollY : 0;
+    timeline.graph = !!session?.timeline?.graph;
   }
   PM.rasterClear();
   PM.assets.clear();
@@ -860,8 +864,8 @@ function switchProject(p: any, history?: any) {
   PM.bus.emit('layers');
   PM.bus.emit('sel');
   PM.bus.emit('assets');
-  PM.Inspector?.refresh?.();
-  PM.Viewer?.layout?.();
+  inspectorService(PM)?.refresh();
+  viewerService(PM)?.layout();
   PM.invalidate('all');
   PM.invalidate('status');
   restoreProjectAssets(PM.proj);
@@ -1011,11 +1015,11 @@ PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
 
 /* first full frame after persistent panels have measured */
 window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-  PM.Viewer?.layout?.();
-  PM.TL?.frameView?.();
+  viewerService(PM)?.layout();
+  timelineService(PM)?.frameView();
   PM.bus.emit('layers');
   PM.bus.emit('sel');
-  PM.Inspector?.refresh?.();
+  inspectorService(PM)?.refresh();
   PM.invalidate('all');
   PM.invalidate('status');
   if (PM.SpatialAssistant) PM.SpatialAssistant.init();

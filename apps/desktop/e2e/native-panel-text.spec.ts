@@ -1,5 +1,7 @@
 import { test, expect } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('native pointer selection in the agent copies into its composer', async ({ session }) => {
   const page = session.page;
   await page.evaluate(() => {

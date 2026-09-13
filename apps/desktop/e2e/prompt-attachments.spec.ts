@@ -1,5 +1,7 @@
 import { expect, test } from './helpers/app';
 
+test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
 test('floating prompt attaches images and binary files, removes them, and sends their contents', async ({ session }) => {
   const { page } = session;
   await page.evaluate(() => {

@@ -70,7 +70,7 @@ inside the extension folder. No npm packages, no `..` escapes.
 
 Full types: `powermove.d.ts` (next to this file). Summary:
 
-- **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)`, `close`, `isOpen`, `refresh`, `list`.
+- **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)` or `open(id, { dock, index })`, `close`, `isOpen`, `refresh`, `list`.
   `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.
 - **commands** — `register({ id, label, category, run, when? })`, `run(id, …args)`, `has`, `list`. Commands appear in the palette (⌘K).
 - **keybindings** — `bind({ key, command, args?, inFields?, looseModifiers?, repeat?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through. Repeated browser keydowns are ignored by default; set `repeat: true` only for continuous, repeat-safe actions such as frame stepping or nudging. Suppressed repeats do not prevent the browser's default behavior.
@@ -86,16 +86,66 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
 - **project** — `get()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`.
   `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
-- **ui** — `toast`, `confirm`, `menu`, `modal`, `icon`; `ui.controls` exposes
-  the kernel's versioned field/row/section components and built-in binding helpers.
+- **anim** — channel evaluation, property/keyframe edits, easing, expression errors, animation versioning, and 2D transform matrices.
+- **model** — property/keyframe/layer/project factories, model schema tables, current composition, layer lookups, `cloneLayer(layer)`, and `normalizeFill(value, fallback?)`.
+- **selection** — live selection reads, mutation with legacy events/invalidation, selected-key resolution, and key-selection mode.
+- **groups** — hierarchy queries, selection expansion, stack normalization, and pose-preserving reparenting.
+- **transport** — time, playback, stepping, quality/performance, preview resolution, and render/UI invalidation.
+- **history** — raw transaction begin/commit/cancel, undo/redo, external entries, and transaction-aware selection history.
+- **edit** — validated one-shot edits, gesture transactions, dispatch, cancel/rollback, and structural mutation.
+- **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading.
+- **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots.
+- **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
+- **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, and edit/history-backed `gesture` construction.
+- **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
+- **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations.
+- **util** — numeric interpolation/snapping, timecode, ids, and colour conversion.
+- **ease** — easing preset lookup and handle-name matching.
+- **space3d** — PM-bound 3D transforms, perspective planes, projection, inversion, and containment.
+- **services** — LIFO typed runtime service registration; disposing an override restores the previous implementation.
 - **storage** — per-extension `get/set/delete` (persisted).
-- **events / on** — `project:changed`, `selection`, `time`, `transport`, `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
+- **events / on** — `project:changed`, `selection`, `time`, `transport`, `fonts` (complete family list), `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
 - **extensions** — introspection: `list`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
-- **host.pm** — UNSTABLE escape hatch to the legacy `PM` object. Use when the typed surface genuinely lacks something; prefer typed APIs.
-- **host.state** — UNSTABLE escape hatch to the renderer's `doc`, `sel`,
-  `transport`, and `perf` rune stores for built-in UI migrations.
+- **model.cloneLayer** — `cloneLayer(layer): Layer` deep-clones a layer and refreshes its layer/keyframe ids and numbered name.
+- **model.normalizeFill** — `normalizeFill(value, fallback?): Fill` canonicalizes solid, gradient, radial, and empty fills.
+- **uiState.getShaderMeta** — `getShaderMeta(layer): ShaderMeta | null` reads the compositor metadata cached for a layer.
+- **render.gl.compileError** — `compileError(key): string | null` reads the latest shader compilation diagnostic for a program key.
+- **events.fonts** — `on('fonts', families => …)` receives the complete ordered font-family list whenever the catalogue changes.
+
+### Deprecated
+
+`api.host.pm` and `api.host.state` exist for compatibility with older user
+extensions only. They are unstable, untyped escape hatches; new code must use the
+typed namespaces above. Both forms, plus the standalone `PM` identifier, fail the
+built-in extension boundary lint.
 
 ## Patterns
+
+### Panels that import media and drop onto the timeline
+
+See the complete, commented [Media Browser sample](samples/media-browser/README.md).
+It fetches each source URL as a `Blob`, wraps it in a named `File`, and calls
+`api.assets.import(file)`. That is the durable asset API; `api.media.importFiles`
+is the higher-level choice when files should be imported and placed immediately.
+
+Asset drags carry `{ id, name, kind, dur? }` under `api.dnd.ASSET_MIME`. FX drags
+carry `{ kind: 'effect' | 'transition', id, label }` under `api.dnd.FX_MIME`.
+Call `api.dnd.startAssetDrag(event.dataTransfer, payload)` instead of spelling
+the MIME string yourself. Set `api.dnd.mediaDrag = payload` for the duration of
+an in-app asset drag so the timeline can render its preview during `dragover`,
+then clear it on `dragend`.
+
+Place a panel at a stable dock position with:
+
+```ts
+api.panels.open('media-browser', { dock: 'left', index: 0 });
+```
+
+Asset import and project history are deliberately separate. The imported asset
+stays in the media library; dropping it on the timeline creates the undoable
+layer edit. `api.project.undo()` is the simple project façade. `api.history.undo()`
+targets the same history stack and returns whether an entry was undone; use the
+rest of `api.history` only when bracketing lower-level mutations yourself.
 
 **Add an effect**
 ```ts

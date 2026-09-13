@@ -37,6 +37,7 @@
   };
   const { PM, section, initialPanelId } = initial();
   if (!section) throw new Error(`Generated panel manifest not found: ${initialPanelId}`);
+  const api = PM.Kernel.api('generated-controls');
 
   let toolState = $state<Record<string, unknown>>({ ...(section.state || {}) });
   const defaults: Record<string, unknown> = $state.snapshot(toolState);
@@ -113,6 +114,7 @@
   {#each controls as prepared (prepared.key)}
     <GeneratedControlView
       {PM}
+      {api}
       control={prepared.control}
       get={prepared.get}
       edit={prepared.edit}
