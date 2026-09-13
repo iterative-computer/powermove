@@ -1,5 +1,6 @@
 /* Ported from js/ui/projects.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { subscribeForkUpdates, updateAll, type ForkUpdate } from '../../shell/fork-updates';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -35,7 +36,21 @@ function ensure() {
   S.search = h('input', { type: 'search', placeholder: 'Search projects', 'aria-label': 'Search projects' });
   S.search.addEventListener('input', paint);
   S.nav = h('div.ps-nav');
-  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav,
+  /* Forked built-ins that fell behind the shipped version. The agent does the
+     merge; this block only says how many and offers the one action. */
+  S.updates = h('div.ps-updates', { hidden: true });
+  const paintUpdates = (pending: readonly ForkUpdate[]) => {
+    S.updates.textContent = '';
+    S.updates.hidden = pending.length === 0;
+    if (!pending.length) return;
+    const names = pending.map((update) => update.name).join(', ');
+    S.updates.append(
+      h('b', pending.length === 1 ? '1 extension needs updating' : `${pending.length} extensions need updating`),
+      h('span', `${names} ${pending.length === 1 ? 'was' : 'were'} forked from an older built-in. Your agent can merge the new version while keeping your changes.`),
+      h('button.btn', { onclick: () => { updateAll(); PM.ProjectsScreen.hide(); } }, 'Update with agent'));
+  };
+  S.offUpdates = subscribeForkUpdates(paintUpdates);
+  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.updates,
     h('div.ps-sidefoot', 'Local recovery is automatic. Use Save to update a .pmv file you can move, copy, or back up.'));
 
   S.title = h('b'); S.count = h('span');
@@ -244,6 +259,7 @@ function ago(t: any) {
 
 const offTabs = PM.bus.on('projects:tabs', () => { if (PM.ProjectsScreen.isOpen) paint(); });
 PM.__disposeProjectsScreen = () => {
+  S.offUpdates?.(); S.offUpdates = null;
   offTabs?.();
   S.el?.remove?.();
   S.el = null;

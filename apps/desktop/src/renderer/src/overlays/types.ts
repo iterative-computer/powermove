@@ -7,6 +7,14 @@ export type ToastOptions = {
   dismissible?: boolean;
   /** Prefer a Powermove icon name. When omitted, the toast message selects one. */
   icon?: string;
+  /** A stable key replaces an earlier toast with the same key instead of stacking. */
+  key?: string;
+  /** Persistent notices (updates, attention) sit in the top-right corner; status stays bottom-center. */
+  corner?: 'top-right';
+  /** One primary action rendered as a quiet button inside the toast. */
+  action?: { label: string; run: () => void };
+  /** Called when the user dismisses the toast explicitly (not on replace or timeout). */
+  onDismiss?: () => void;
 };
 
 export type MenuAction = {

@@ -13,6 +13,10 @@
     sticky: boolean;
     dismissible: boolean;
     timeout: number;
+    key?: string;
+    corner?: 'top-right';
+    action?: { label: string; run: () => void };
+    onDismiss?: () => void;
   };
 
   let queue = $state<ToastItem[]>([]);
@@ -22,11 +26,16 @@
     if (message == null) return;
     const inferredError = isErrorToast(message);
     const text = String(message);
-    const existing = queue.find(item => item.message === text && item.error === inferredError);
-    if (existing) return;
-    // Routine status updates replace each other. Errors remain available to read.
+    if (options.key) {
+      const keyed = queue.find(item => item.key === options.key);
+      if (keyed) { window.clearTimeout(keyed.timeout); queue = queue.filter(item => item !== keyed); }
+    } else {
+      const existing = queue.find(item => item.message === text && item.error === inferredError);
+      if (existing) return;
+    }
+    // Routine status updates replace each other. Errors and corner notices remain available to read.
     for (const item of [...queue]) {
-      if (!item.error && !item.sticky) dismiss(item.id);
+      if (!item.error && !item.sticky && !item.corner) dismiss(item.id);
     }
     const item: ToastItem = {
       id: nextId++,
@@ -35,18 +44,26 @@
       error: inferredError,
       sticky: options.sticky ?? inferredError,
       dismissible: options.dismissible ?? inferredError,
-      timeout: 0
+      timeout: 0,
+      key: options.key,
+      corner: options.corner,
+      action: options.action,
+      onDismiss: options.onDismiss
     };
     queue = [...queue, item];
     if (!item.sticky) item.timeout = window.setTimeout(() => dismiss(item.id), milliseconds);
   }
 
-  export function dismiss(id: number): void {
+  export function dismiss(id: number, byUser = false): void {
     const item = queue.find((candidate) => candidate.id === id);
     if (!item) return;
     window.clearTimeout(item.timeout);
     queue = queue.filter((candidate) => candidate.id !== id);
+    if (byUser) item.onDismiss?.();
   }
+
+  const bottom = $derived(queue.filter(item => !item.corner));
+  const corner = $derived(queue.filter(item => item.corner === 'top-right'));
 
   export function clear(): void {
     for (const item of queue) {
@@ -82,7 +99,7 @@
   }
 </script>
 
-{#each queue as item (item.id)}
+{#snippet toast(item: ToastItem)}
   <div
     class="toast"
     role={item.error ? undefined : 'status'}
@@ -96,10 +113,20 @@
       <span>{item.message}</span>
     {/if}
     {#if item.dismissible}
-      <button type="button" aria-label="Dismiss notification" onclick={() => dismiss(item.id)}>×</button>
+      {#if item.action}
+        <button type="button" class="toast-action" onclick={() => { item.action?.run(); dismiss(item.id); }}>{item.action.label}</button>
+      {/if}
+      <button type="button" aria-label="Dismiss notification" onclick={() => dismiss(item.id, true)}>×</button>
     {/if}
   </div>
-{/each}
+{/snippet}
+
+{#each bottom as item (item.id)}{@render toast(item)}{/each}
+{#if corner.length}
+  <div class="toast-corner" role="status" aria-live="polite">
+    {#each corner as item (item.id)}{@render toast(item)}{/each}
+  </div>
+{/if}
 
 <style>
   .toast[data-toast-error]{align-items:flex-start;padding:0 6px 0 0;width:min(440px,calc(100vw - 32px));gap:0}

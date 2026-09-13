@@ -105,8 +105,7 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **services** — LIFO typed runtime service registration; disposing an override restores the previous implementation.
 - **storage** — per-extension `get/set/delete` (persisted).
 - **events / on** — `project:changed`, `selection`, `time`, `transport`, `fonts` (complete family list), `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
-- **extensions** — introspection: `list`, `fork`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
-- **extensions** — introspection: `list`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`, `rebase`.
+- **extensions** — introspection: `list`, `fork`, `rebase`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
 - **model.cloneLayer** — `cloneLayer(layer): Layer` deep-clones a layer and refreshes its layer/keyframe ids and numbered name.
 - **model.normalizeFill** — `normalizeFill(value, fallback?): Fill` canonicalizes solid, gradient, radial, and empty fills.
 - **uiState.getShaderMeta** — `getShaderMeta(layer): ShaderMeta | null` reads the compositor metadata cached for a layer.
