@@ -1,6 +1,6 @@
 # Kernel migration: built-ins off the legacy `PM` registry
 
-Status: in progress. Owner: orchestrator (Fable). Implementers: Sol (codex).
+Status: phases 0-4 complete (2026-09-12). Owner: orchestrator (Fable). Implementers: Sol (codex).
 Every phase leaves the branch green on the full gate battery (section 7).
 
 ## 1. Why
