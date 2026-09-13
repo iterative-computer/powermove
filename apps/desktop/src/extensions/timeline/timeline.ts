@@ -315,6 +315,25 @@ export function applyKeyframeMovePlan<Property>(
     runtime left behind by the previous hot-reloaded module instance. */
 const TIMELINE_RUNTIME_TOKEN = Symbol('powermove.timeline.runtime');
 const runtimes = new WeakMap<PowermoveAPI, any>();
+/** The WeakMap misses whenever the kernel hands out a fresh API facade for the
+    same window. Without a second handle on the mounted runtime that miss builds
+    a *duplicate* timeline: the original keeps its listeners and keeps painting
+    #tl-canvas, while the newcomer restores pps/scrollT from the session written
+    at the last dispose. The two then fight over one canvas, so the track area
+    flashes an older zoom/scroll for a frame or two before the live runtime
+    repaints — the gutter stays put because it is derived, not restored. */
+let mountedRuntime: any = null;
+const liveRuntime = (candidate: any) =>
+  candidate?.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN && !candidate.__timelineRuntimeDisposed
+    ? candidate : null;
+/* Only reclaim the leftover when it still owns the canvas this activation is
+   about to attach to. An unrelated API (another harness, another window) must
+   still get a runtime of its own. */
+const runtimeOwningLiveCanvas = () => {
+  const wrap = mountedRuntime?.__timelineWrap;
+  return wrap && wrap.isConnected !== false && wrap === document.querySelector('#tl-canvas-wrap')
+    ? mountedRuntime : null;
+};
 
 /** Resolve overlapping keyframe hit targets without stealing an established
     selection. With no selected hit, array order remains the visual/top order. */
@@ -343,8 +362,9 @@ return createTimelineRuntime(api, api.space3d);
 }
 
 export function createTimelineRuntime(api: PowermoveAPI, space3d: Space3DAPI = api.space3d): any {
-const previous = runtimes.get(api);
-if (previous?.__timelineRuntimeToken === TIMELINE_RUNTIME_TOKEN && !previous.__timelineRuntimeDisposed) return previous;
+const leftover = runtimeOwningLiveCanvas();
+const previous = liveRuntime(runtimes.get(api)) ?? liveRuntime(leftover) ?? runtimes.get(api) ?? leftover;
+if (liveRuntime(previous)) { runtimes.set(api, previous); return previous; }
 const previousHead = previous?.__timelineHead || null;
 const previousWrap = previous?.__timelineWrap || null;
 if (previous?.disposeRuntime) previous.disposeRuntime();
@@ -371,6 +391,7 @@ if (sessionTimeline) {
   T.graph = !!sessionTimeline.graph;
 }
 runtimes.set(api, T);
+mountedRuntime = T;
 T.keySelectionActive = !!(T.keySelectionActive || api.selection.keys().length);
 T.graphFocus = T.graphFocus && typeof T.graphFocus.layerId === 'string' && typeof T.graphFocus.trackKey === 'string'
   ? T.graphFocus : null;
@@ -483,6 +504,7 @@ function disposeRuntime() {
     T.__timelineRuntimeDisposed = true;
     T.__timelineRuntimeToken = null;
   }
+  if (mountedRuntime === T) mountedRuntime = null;
 }
 T.disposeRuntime = disposeRuntime;
 T.dispose = disposeRuntime;

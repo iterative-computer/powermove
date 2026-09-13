@@ -265,6 +265,34 @@ describe('timeline runtime', () => {
     expect(timeline).toMatchObject({ pps: 144, scrollT: 2.5, scrollY: 64, graph: true });
   });
 
+  it('reuses the mounted runtime when the kernel activates with a fresh API facade', () => {
+    /* A second runtime over the same canvas kept its own pps/scrollT and both
+       painted #tl-canvas, so the track area flashed an older zoom/scroll for a
+       frame before the live runtime repainted. */
+    const wrap = document.createElement('div');
+    wrap.id = 'tl-canvas-wrap';
+    const canvas = document.createElement('canvas');
+    canvas.id = 'tl-canvas';
+    wrap.appendChild(canvas);
+    document.body.appendChild(wrap);
+    try {
+      const mounted = timelineHarness();
+      const runtime: any = mounted.state.timeline!;
+      runtime.attachCanvas(wrap);
+      runtime.pps = 144;
+      runtime.scrollT = 5.25;
+
+      const reactivated = fakePowermoveAPI(vi);
+      reactivated.state.project.id = 'project-1';
+      reactivated.api.storage.set('session:project-1', { pps: 90, scrollT: 3.2, scrollY: 0, graph: false });
+
+      expect(createTimelineRuntime(reactivated.api)).toBe(runtime);
+      expect(runtime).toMatchObject({ pps: 144, scrollT: 5.25 });
+    } finally {
+      wrap.remove();
+    }
+  });
+
   it('is idempotent within one module instance', () => {
     const harness = timelineHarness();
     const first: any = harness.state.timeline!;
