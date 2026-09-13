@@ -10,7 +10,10 @@
   let { row, animated = false }: { row: ToolsRow & { pulsing?: boolean }; animated?: boolean } = $props();
 
   const isRunning = $derived(row.status === 'running');
-  const summary = $derived(isRunning ? (row.currentLabel || row.label) : row.label);
+  /* While running the rows below are open and name the active call, so the
+     header says only that work is underway (harness "Running tools"); once
+     settled it becomes the natural-language summary of what was done. */
+  const summary = $derived(isRunning ? (row.toolCount > 1 ? 'Running tools' : 'Running a tool') : row.label);
   const span = $derived(row.startedAt !== undefined && row.endedAt !== undefined ? durationLabel(row.endedAt - row.startedAt) : '');
   const meta = $derived(isRunning ? '' : [
     row.toolCount > 1 ? `${row.toolCount} calls` : '',
@@ -64,12 +67,10 @@
   open={isRunning}
   title={row.detail?.length ? row.detail.join('\n') : undefined}
 >
-  <summary class:has-status={isRunning || row.status === 'error' || row.status === 'partial'}>
+  <summary class:has-status={row.status === 'error' || row.status === 'partial'}>
     <svg class="agent-tool-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
-    <span>{summary}{#if isRunning && row.currentDetail}<code class="agent-tool-chip">{row.currentDetail}</code>{/if}</span>
-    {#if isRunning}
-      <em>Working</em>
-    {:else if row.status === 'error'}
+    <span>{summary}</span>
+    {#if row.status === 'error'}
       <em>Failed</em>
     {:else if row.status === 'partial'}
       <em>{row.successCount} completed · {row.failedCount} failed</em>
@@ -152,7 +153,6 @@
   summary > span { grid-column: 2; grid-row: 1; min-width: 0; overflow-wrap: anywhere; }
   summary > em, summary > small { grid-column: 2; grid-row: 2; text-align: left; line-height: 1.4; font-size: 11px; font-style: normal; color: var(--tx-3); }
   summary > small { font-variant-numeric: tabular-nums; }
-  summary > span > .agent-tool-chip { margin-left: 6px; }
   .agent-tool-chevron {
     grid-column: 1; grid-row: 1; align-self: center; width: 12px; height: 12px; margin-top: 1px;
     fill: none; stroke: var(--tx-4); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
@@ -166,7 +166,6 @@
     -webkit-background-clip: text; background-clip: text; color: transparent;
     animation: shimmer-sweep 1.6s linear infinite;
   }
-  .is-running > summary > span > .agent-tool-chip { -webkit-background-clip: border-box; background-clip: border-box; color: var(--tx-2); }
   .is-error > summary > span { color: var(--danger); }
   .is-error > summary > em { color: var(--danger); }
 
@@ -205,7 +204,10 @@
   button.agent-tool-row { cursor: pointer; }
   button.agent-tool-row:hover, .is-open > .agent-tool-row { background: var(--ink-1); }
   button.agent-tool-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  /* The label keeps its natural width and the chip takes the rest, truncating
+     with an ellipsis; only a label with no room left wraps. */
   .agent-tool-row > span { min-width: 0; flex: 0 1 auto; overflow-wrap: anywhere; font-weight: var(--fw-medium); color: var(--tx); }
+  .agent-tool-row > span:has(+ .agent-tool-chip) { flex-shrink: 0; overflow-wrap: normal; }
   .agent-tool-row > em { flex: none; margin-left: auto; font-size: 11px; font-style: normal; color: var(--tx-3); font-variant-numeric: tabular-nums; }
   .agent-tool-glyph { width: 13px; height: 13px; flex: none; color: var(--tx-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: opacity var(--dur-2); }
   .agent-tool-row-chevron {
@@ -221,7 +223,7 @@
     display: inline-block;
     min-width: 0;
     max-width: 100%;
-    flex: 0 1 auto;
+    flex: 1 1 0%;
     padding: 0 5px;
     border-radius: var(--r-xs);
     background: var(--bg-field);

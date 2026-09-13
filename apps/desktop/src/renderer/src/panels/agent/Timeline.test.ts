@@ -166,8 +166,9 @@ describe('Timeline', () => {
     expect(row.hasAttribute('open')).toBe(true);
     expect(row.className).toContain('is-pulsing');
     expect(row.className).toContain('is-running');
-    expect(row.querySelector('summary')?.textContent).toContain('edit · Timeline.svelte');
-    expect(row.querySelector('summary')?.textContent).toContain('Working');
+    // The open rows name the active call; the header only says work is underway.
+    expect(row.querySelector('summary')?.textContent?.trim()).toBe('Running tools');
+    expect(row.querySelector('.agent-tool-details .is-running span')?.textContent).toBe('edit · Timeline.svelte');
     expect(row.querySelector('.agent-tool-details .is-running .agent-tool-spinner')).toBeTruthy();
     expect([...row.querySelectorAll('.agent-tool-details span')].map((item) => item.textContent))
       .toEqual(['bash · npm test', 'edit · Timeline.svelte']);
