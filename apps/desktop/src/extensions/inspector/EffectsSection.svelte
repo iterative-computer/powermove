@@ -11,7 +11,7 @@
   import { showFxMenu } from './actions';
   import { inspectorRefresh } from './refresh.svelte.js';
 
-  const { api, doc, transport, controlProps, edit: inspectorEdit, inspector } = inspectorContext();
+  const { api, doc, transport, mixed, edit: inspectorEdit, inspector } = inspectorContext();
   const { ColorField, Section, ToggleField } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
@@ -209,7 +209,7 @@
   role="group"
   aria-label="Effects section"
 >
-  <Section title="Effects" />
+  <Section {api} title="Effects" />
   {#if effects.length === 0}
     <button
       type="button"
@@ -271,14 +271,14 @@
       {#if expanded}
         <div class="grp fx-params" id={paramsId}>
           <AnimatedRow {layer} path={`${effect.id}.$enabled`} label="Enabled">
-            <ToggleField {...controlProps} get={() => enabled(effect)} edit={propertyEdit(`${effect.id}.$enabled`, 'Enable effect')} label="Enabled" />
+            <ToggleField {api} {mixed} get={() => enabled(effect)} edit={propertyEdit(`${effect.id}.$enabled`, 'Enable effect')} label="Enabled" />
           </AnimatedRow>
           {#each definition.params ?? [] as parameter (parameter.k)}
             {@const property = effect.p?.[parameter.k]}
             {#if property}
               {#if parameter.type === 'color'}
                 <AnimatedRow {layer} path={`${effect.id}.${parameter.k}`} label={parameter.label}>
-                  <ColorField {...controlProps}
+                  <ColorField {api} {mixed}
                     get={() => (doc.tick.values, doc.proj, api.anim.evP(layer, property, transport.time, parameter.k))}
                     edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)} label={parameter.label} />
                 </AnimatedRow>

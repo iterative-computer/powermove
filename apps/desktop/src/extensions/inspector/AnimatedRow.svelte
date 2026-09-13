@@ -8,7 +8,7 @@
     layer: any; path?: string; label: string; children: Snippet;
   } = $props();
 </script>
-<Row {label}>
+<Row {api} {label}>
   {#snippet left()}
     {#if path}<PropertyStopwatch {layer} {path} {label} fallback={path.startsWith('c.') ? layer.d?.[path.slice(2)] : undefined} />{/if}
   {/snippet}

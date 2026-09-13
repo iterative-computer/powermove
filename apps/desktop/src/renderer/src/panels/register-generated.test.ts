@@ -98,6 +98,18 @@ function fakePM() {
     },
     Script: { canRun: vi.fn(() => true) }
   };
+  const api = {
+    edit: PM.Edit,
+    history: PM.hist,
+    project: { get: () => PM.proj },
+    transport: { time: () => PM.time, invalidate: PM.invalidate },
+    model: { layer: PM.L, normalizeFill: PM.normalizeFill },
+    anim: { ev: (layer: any, key: string) => layer.p?.[key]?.v ?? null },
+    util: { round: PM.round, clamp: PM.clamp, uid: PM.uid },
+    ui: { drag: PM.drag, closeMenus: vi.fn(), toast: PM.toast },
+    media: { fonts: { options: (value: string) => [value], ensure: vi.fn() } }
+  };
+  PM.Kernel = { api: () => api };
   PMs.push(PM);
   return { PM, layers, panels, drag: () => dragOptions };
 }

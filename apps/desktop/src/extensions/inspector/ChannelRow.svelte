@@ -9,7 +9,7 @@
   import type { ChannelDefinition, EditCommand, MenuContribution } from 'powermove';
   import { inspectorContext, type EditBinding } from './context';
 
-  const { api, doc, transport, controlProps, edit: inspectorEdit, inspector, timeline } = inspectorContext();
+  const { api, doc, transport, mixed, edit: inspectorEdit, inspector, timeline } = inspectorContext();
   const { NumField, Row } = api.ui.controls;
   const { channelBinding } = api.ui.controls.binding;
 
@@ -264,7 +264,8 @@
 {#snippet well(key: string, fieldLabel: string, fieldEdit: EditBinding, getter: () => unknown, linked: boolean, gutter?: string)}
   <div class="well" class:has-kf={showDiamond && animated} data-prefix={gutter}>
     <NumField
-      {...controlProps}
+      {api}
+      {mixed}
 
       get={getter}
       edit={fieldEdit}
@@ -316,7 +317,7 @@
     oncontextmenu={allowContextMenu ? contextMenu : undefined}
     onpointerdown={selectChannel}
   >
-    <Row {label} pair={isScale}>
+    <Row {api} {label} pair={isScale}>
       {#snippet left()}
         <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={keyAtPlayhead}
           aria-label={`${keyAtPlayhead ? 'Remove keyframe for' : 'Add keyframe for'} ${label}`}

@@ -76,7 +76,7 @@ export interface InspectorContext {
   sel: InspectorSelectionState;
   transport: InspectorTransportState;
   edit: InspectorEditAPI;
-  controlProps: Record<string, unknown>;
+  mixed(binding: EditBinding, value: unknown): boolean;
   inspector(): InspectorRuntimeService | null;
   timeline(): InspectorTimelineService | null;
   tools(): ToolService | null;
@@ -133,26 +133,11 @@ function createReactiveState(api: PowermoveAPI): Pick<InspectorContext, 'doc' | 
 export function provideInspectorContext(api: PowermoveAPI): InspectorContext {
   const state = createReactiveState(api);
   const edit = createInspectorEdit(api);
-  const controlHost = {
-    Edit: edit,
-    hist: api.history,
-    inspectorMixed: (binding: EditBinding, value: unknown) => inspectorMixed(api, binding, value),
-    round: api.util.round,
-    clamp: api.util.clamp,
-    uid: api.util.uid,
-    drag: api.ui.drag,
-    invalidate: api.transport.invalidate,
-    toast: api.ui.toast,
-    closeMenus: api.ui.closeMenus,
-    Fonts: api.media.fonts
-  };
   const context: InspectorContext = {
     api,
     ...state,
     edit,
-    /* PHASE3-GAP: ControlsAPI components still require their legacy-named host prop.
-       This value is a capability-limited, API-backed adapter, never the host registry. */
-    controlProps: { ['P' + 'M']: controlHost },
+    mixed: (binding, value) => inspectorMixed(api, binding, value),
     inspector: () => api.services.get<InspectorRuntimeService>('inspector'),
     timeline: () => api.services.get<InspectorTimelineService>('timeline'),
     tools: () => api.services.get<ToolService>('tool'),

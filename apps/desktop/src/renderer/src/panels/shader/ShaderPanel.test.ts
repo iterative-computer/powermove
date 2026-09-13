@@ -56,6 +56,12 @@ function setup(selectedLayer: Record<string, any>, layers = [selectedLayer]) {
     invalidate: vi.fn(),
     Inspector: { refresh: vi.fn() }
   } as Record<string, any>;
+  PM.Kernel = {
+    api: () => ({
+      edit: PM.Edit,
+      history: { begin: vi.fn(), commit: vi.fn(), cancel: vi.fn(), do: vi.fn((_label: string, operation: () => unknown) => operation()) }
+    })
+  };
 
   window.PM = PM as any;
   doc.replace(project);

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { inspectorContext, type EditBinding, type SelectOption } from './context';
 
-  const { api, doc, controlProps } = inspectorContext();
+  const { api, doc, mixed } = inspectorContext();
   const { ColorField, FillField, NumField, Row, Section, SelectField, ToggleField } = api.ui.controls;
   const { compositionBinding } = api.ui.controls.binding;
 
@@ -68,26 +68,27 @@
       .filter((param): param is SceneParamView => param !== null)));
 </script>
 
-<Section title="Composition" />
-<Row label="Width"><NumField {...controlProps} get={() => api.project.get().w} edit={compEdit('width', 'Width')} label="Width" step={2} min={16} /></Row>
-<Row label="Height"><NumField {...controlProps} get={() => api.project.get().h} edit={compEdit('height', 'Height')} label="Height" step={2} min={16} /></Row>
-<Row label="Duration"><NumField {...controlProps} get={() => api.project.get().dur} edit={compEdit('duration', 'Duration')} label="Duration" step={0.5} precision={2} unit="s" /></Row>
-<Row label="Frame rate"><NumField {...controlProps} get={() => api.project.get().fps} edit={compEdit('fps', 'Frame rate')} label="Frame rate" step={1} /></Row>
-<Row label="Background"><FillField {...controlProps} get={() => api.project.get().backgroundFill} edit={compEdit('backgroundFill', 'Background fill')} label="Background fill" fallback={api.project.get().bg} /></Row>
+<Section {api} title="Composition" />
+<Row {api} label="Width"><NumField {api} {mixed} get={() => api.project.get().w} edit={compEdit('width', 'Width')} label="Width" step={2} min={16} /></Row>
+<Row {api} label="Height"><NumField {api} {mixed} get={() => api.project.get().h} edit={compEdit('height', 'Height')} label="Height" step={2} min={16} /></Row>
+<Row {api} label="Duration"><NumField {api} {mixed} get={() => api.project.get().dur} edit={compEdit('duration', 'Duration')} label="Duration" step={0.5} precision={2} unit="s" /></Row>
+<Row {api} label="Frame rate"><NumField {api} {mixed} get={() => api.project.get().fps} edit={compEdit('fps', 'Frame rate')} label="Frame rate" step={1} /></Row>
+<Row {api} label="Background"><FillField {api} get={() => api.project.get().backgroundFill} edit={compEdit('backgroundFill', 'Background fill')} label="Background fill" fallback={api.project.get().bg} /></Row>
 
 {#if params.length}
-  <Section title="Scene parameters" />
+  <Section {api} title="Scene parameters" />
   {#each params as param (param.name)}
-    <Row label={param.label}>
+    <Row {api} label={param.label}>
       {#if param.control === 'color'}
-        <ColorField {...controlProps} get={() => param.value} edit={paramEdit(param)} label={param.label} />
+        <ColorField {api} {mixed} get={() => param.value} edit={paramEdit(param)} label={param.label} />
       {:else if param.control === 'toggle'}
-        <ToggleField {...controlProps} get={() => param.value} edit={paramEdit(param)} label={param.label} />
+        <ToggleField {api} {mixed} get={() => param.value} edit={paramEdit(param)} label={param.label} />
       {:else if param.control === 'select'}
-        <SelectField {...controlProps} get={() => param.value} edit={paramEdit(param)} options={param.options} label={param.label} />
+        <SelectField {api} {mixed} get={() => param.value} edit={paramEdit(param)} options={param.options} label={param.label} />
       {:else}
         <NumField
-          {...controlProps}
+          {api}
+          {mixed}
           get={() => param.value}
           edit={paramEdit(param)}
           label={param.label}

@@ -5,10 +5,11 @@ import type {
   LayerTarget
 } from '../core/types/commands';
 import type { EditBinding } from './gesture';
+import type { PowermoveAPI } from '../kernel/api';
 
 export type { EditBinding } from './gesture';
 
-type LegacyPM = Record<string, any>;
+export type ControlBindingAPI = Pick<PowermoveAPI, 'anim' | 'model' | 'project' | 'transport' | 'util'>;
 type TimeSource = number | (() => number);
 
 interface BindingOptions {
@@ -28,7 +29,7 @@ const commandBinding = (
 
 /** Inspector/generated-panel channel edit with the exact legacy intent flags. */
 export function channelBinding(
-  PM: LegacyPM,
+  api: ControlBindingAPI,
   layerId: LayerTarget,
   channel: string,
   options: ChannelBindingOptions = {}
@@ -36,16 +37,17 @@ export function channelBinding(
   const path = channel.replace(/^properties\./, '').replace(/^transform\./, '');
   const time = (): number => {
     const source = options.time;
-    return typeof source === 'function' ? source() : source ?? PM.time;
+    return typeof source === 'function' ? source() : source ?? api.transport.time();
   };
   let scale: { linked: boolean; animated: boolean; other: number; ratio: number } | null = null;
   const prepare = () => {
     if (path !== 'scale.x' && path !== 'scale.y') return;
-    const layer = PM.L?.(layerId);
-    const primary = Number(layer && PM.ev(layer, path, time()));
-    const other = Number(layer && PM.ev(layer, path === 'scale.x' ? 'scale.y' : 'scale.x', time()));
+    const layer = typeof layerId === 'string' ? api.model.layer(layerId) : null;
+    const primary = Number(layer && api.anim.ev(layer, path, time()));
+    const other = Number(layer && api.anim.ev(layer, path === 'scale.x' ? 'scale.y' : 'scale.x', time()));
     scale = { linked: !!layer?.scaleLinked,
-      animated: !!(layer?.p?.['scale.x']?.kf.length || layer?.p?.['scale.y']?.kf.length),
+      animated: !!((layer?.p as Record<string, { kf?: unknown[] }> | undefined)?.['scale.x']?.kf?.length
+        || (layer?.p as Record<string, { kf?: unknown[] }> | undefined)?.['scale.y']?.kf?.length),
       other, ratio: Math.abs(primary) > 1e-8 ? other / primary : 1 };
   };
   const binding = commandBinding(options.label ?? path, options.origin, (value) => {
@@ -69,7 +71,7 @@ export function channelBinding(
 
 /** Mirrors sourceBinding's `layer.*` → set_layer path. */
 export function layerFieldBinding(
-  _PM: LegacyPM,
+  _api: ControlBindingAPI,
   layerId: LayerTarget,
   field: keyof LayerPatch | `layer.${string}`,
   options: BindingOptions = {}
@@ -82,7 +84,7 @@ export function layerFieldBinding(
 
 /** Mirrors sourceBinding's `content.*` → set_content path. */
 export function contentBinding(
-  _PM: LegacyPM,
+  _api: ControlBindingAPI,
   layerId: LayerTarget,
   field: string,
   options: BindingOptions = {}
@@ -95,7 +97,7 @@ export function contentBinding(
 
 /** Mirrors sourceBinding's direct composition fields and work-area endpoints. */
 export function compositionBinding(
-  PM: LegacyPM,
+  api: ControlBindingAPI,
   field: keyof CompositionPatch | 'workArea.start' | 'workArea.end' | `composition.${string}`,
   options: BindingOptions = {}
 ): EditBinding {
@@ -103,11 +105,12 @@ export function compositionBinding(
   return commandBinding(options.label ?? key, options.origin, (value) => {
     if (key === 'workArea.start' || key === 'workArea.end') {
       const index = key.endsWith('start') ? 0 : 1;
-      const duration = Number(PM.proj?.dur ?? PM.proj?.duration ?? 0);
-      const source = PM.proj?.work ?? [0, duration];
+      const project = api.project.get();
+      const duration = Number(project?.dur ?? 0);
+      const source = project?.work ?? [0, duration];
       const workArea: [number, number] = [Number(source[0]) || 0, Number(source[1]) || duration];
-      const frame = 1 / Math.max(1, Number(PM.proj?.fps) || 30);
-      const clamp = PM.clamp ?? ((n: number, min: number, max: number) => Math.max(min, Math.min(max, n)));
+      const frame = 1 / Math.max(1, Number(project?.fps) || 30);
+      const clamp = api.util.clamp;
       workArea[index] = index === 0
         ? clamp(Number(value), 0, Math.max(0, workArea[1] - frame))
         : clamp(Number(value), Math.min(duration, workArea[0] + frame), duration);

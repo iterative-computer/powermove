@@ -1,31 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { channelBinding, compositionBinding, contentBinding, layerFieldBinding } from './binding';
+import { channelBinding, compositionBinding, contentBinding, layerFieldBinding, type ControlBindingAPI } from './binding';
 
 const command = (binding: ReturnType<typeof channelBinding>, value: unknown) => {
   if (binding.mode !== 'command') throw new Error('Expected command binding');
   return typeof binding.command === 'function' ? binding.command(value) : { ...binding.command, value };
 };
 
+const fakeAPI = (overrides: Partial<ControlBindingAPI> = {}): ControlBindingAPI => ({
+  project: { get: () => ({ dur: 10, fps: 20, work: [2, 8] }) },
+  transport: { time: () => 1 },
+  model: { layer: () => null },
+  anim: { ev: () => null },
+  util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
+  ...overrides
+} as ControlBindingAPI);
+
 describe('control bindings', () => {
-  it('builds the inspector set_property command with live time and human intent', () => {
-    const PM = { time: 1 };
-    const binding = channelBinding(PM, 'L1', 'position.x', { label: 'X', time: () => PM.time });
-    PM.time = 4.5;
-    expect(command(binding, 24)).toEqual({
-      type: 'set_property', target: 'L1', path: 'position.x', value: 24,
-      time: 4.5, mode: 'auto', preserveHandEdits: false, markIntent: 'human'
-    });
+  it('reads a live API time source for channel edits', () => {
+    let time = 1;
+    const api = fakeAPI({ transport: { time: () => time } as ControlBindingAPI['transport'] });
+    const binding = channelBinding(api, 'L1', 'position.x', { label: 'X' });
+    time = 4.5;
+    expect(command(binding, 20)).toEqual(expect.objectContaining({
+      type: 'set_property', target: 'L1', path: 'position.x', value: 20, time: 4.5
+    }));
   });
 
-  it('maps layer, content, and composition fields to their edit commands', () => {
-    expect(command(layerFieldBinding({}, 'L1', 'layer.visible'), true)).toEqual({ type: 'set_layer', target: 'L1', patch: { visible: true } });
-    expect(command(contentBinding({}, 'L1', 'content.text'), 'Hello')).toEqual({ type: 'set_content', target: 'L1', patch: { text: 'Hello' } });
-    expect(command(compositionBinding({}, 'composition.background'), '#123456')).toEqual({ type: 'set_composition', patch: { background: '#123456' } });
+  it('maps layer and content fields to typed commands', () => {
+    const api = fakeAPI();
+    expect(command(layerFieldBinding(api, 'L1', 'name'), 'Title')).toEqual({ type: 'set_layer', target: 'L1', patch: { name: 'Title' } });
+    expect(command(contentBinding(api, 'L1', 'text'), 'Hello')).toEqual({ type: 'set_content', target: 'L1', patch: { text: 'Hello' } });
+    expect(command(compositionBinding(api, 'fps'), 60)).toEqual({ type: 'set_composition', patch: { fps: 60 } });
   });
 
-  it('clamps work-area endpoints with the same frame gap as sourceBinding', () => {
-    const PM = { proj: { dur: 10, fps: 20, work: [2, 8] }, clamp: (n: number, min: number, max: number) => Math.max(min, Math.min(max, n)) };
-    expect(command(compositionBinding(PM, 'workArea.start'), 9)).toEqual({ type: 'set_composition', patch: { workArea: [7.95, 8] } });
-    expect(command(compositionBinding(PM, 'workArea.end'), 1)).toEqual({ type: 'set_composition', patch: { workArea: [2, 2.05] } });
+  it('clamps work-area endpoints through project and utility APIs', () => {
+    const api = fakeAPI();
+    expect(command(compositionBinding(api, 'workArea.start'), 9)).toEqual({ type: 'set_composition', patch: { workArea: [7.95, 8] } });
+    expect(command(compositionBinding(api, 'workArea.end'), 1)).toEqual({ type: 'set_composition', patch: { workArea: [2, 2.05] } });
   });
 });

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { inspectorContext } from './context';
   import { axisContentKey, axisPath, type FontAxis } from 'powermove';
-  const { api, doc, transport, controlProps, edit: inspectorEdit, timeline } = inspectorContext();
+  const { api, doc, transport, mixed, edit: inspectorEdit, timeline } = inspectorContext();
   const { NumField, Row } = api.ui.controls;
   type EditBinding = ConstructorParameters<typeof api.ui.gesture>[0];
   let { layer, axis }: { layer: any; axis: Pick<FontAxis, 'tag' | 'label' | 'default'> & Partial<FontAxis> } = $props();
@@ -32,13 +32,13 @@
 </script>
 
 <div class="type-axis" data-font-axis={axis.tag} data-channel={path} title={`${axis.label} (${axis.tag})`}>
-  <Row label={axis.label}>
+  <Row {api} label={axis.label}>
     {#snippet left()}
       <button type="button" class="stopwatch property-stopwatch" class:on={animated} class:at-key={current}
         aria-label={`${current ? 'Remove keyframe for' : 'Add keyframe for'} ${axis.label} · ${axis.tag}`}
         aria-pressed={current} onclick={toggle}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 20 12 12 21 4 12Z"/></svg></button>
     {/snippet}
-    <NumField {...controlProps} get={() => value} {edit} label={`${axis.label} axis`} min={axis.min} max={axis.max} {step} speed={axis.min != null && axis.max != null ? Math.max(.01, (axis.max - axis.min) / 300) / step : 50} precision={2} />
+    <NumField {api} {mixed} get={() => value} {edit} label={`${axis.label} axis`} min={axis.min} max={axis.max} {step} speed={axis.min != null && axis.max != null ? Math.max(.01, (axis.max - axis.min) / 300) / step : 50} precision={2} />
   </Row>
 
 </div>

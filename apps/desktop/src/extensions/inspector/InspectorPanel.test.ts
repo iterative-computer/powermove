@@ -86,7 +86,7 @@ function bump(kind: 'values' | 'structure') {
   activeApi?.events.emit('project:changed', { kind });
 }
 
-const controlsFor = (runtime: InspectorTestBackend): ControlsAPI => ({
+const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
   NumField: NumField as ControlsAPI['NumField'],
   ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'],
@@ -97,10 +97,10 @@ const controlsFor = (runtime: InspectorTestBackend): ControlsAPI => ({
   Row: Row as ControlsAPI['Row'],
   Section: Section as ControlsAPI['Section'],
   binding: {
-    channelBinding: (layerId, channel, options) => channelBinding(runtime, layerId, channel, options),
-    compositionBinding: (field, options) => compositionBinding(runtime, field as any, options),
-    contentBinding: (layerId, field, options) => contentBinding(runtime, layerId, field, options),
-    layerFieldBinding: (layerId, field, options) => layerFieldBinding(runtime, layerId, field as any, options)
+    channelBinding: (layerId, channel, options) => channelBinding(getAPI(), layerId, channel, options),
+    compositionBinding: (field, options) => compositionBinding(getAPI(), field as any, options),
+    contentBinding: (layerId, field, options) => contentBinding(getAPI(), layerId, field, options),
+    layerFieldBinding: (layerId, field, options) => layerFieldBinding(getAPI(), layerId, field as any, options)
   }
 });
 
@@ -122,7 +122,8 @@ function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI
   if (runtime.TL) implementations.set('timeline', runtime.TL);
   if (runtime.setTool) implementations.set('tool', { tool: 'select', toolShape: 'rect', setTool: runtime.setTool });
   const definitions = Object.entries(runtime.FX ?? {}).map(([id, definition]) => ({ id, ...(definition as object) }));
-  return {
+  let api: PowermoveAPI;
+  api = {
     id: 'inspector',
     apiVersion: 1,
     manifest: { id: 'inspector', name: 'Inspector', version: '1.0.0', apiVersion: 1 },
@@ -141,7 +142,10 @@ function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI
       CH: runtime.CH ?? {}, BLENDS: runtime.BLENDS ?? [], MASK_SHAPES: runtime.MASK_SHAPES ?? [],
       TYPE_META: runtime.TYPE_META ?? {}, P: runtime.P ?? ((value: unknown) => ({ v: value, kf: [], expr: null })),
       layer: runtime.L ?? (() => null), curComp: runtime.curComp ?? (() => runtime.proj),
-      mkMask: runtime.mkMask ?? vi.fn(), layerDefinition: vi.fn()
+      mkMask: runtime.mkMask ?? vi.fn(), layerDefinition: vi.fn(),
+      normalizeFill: (value: any, fallback = '#000000') => typeof value === 'string'
+        ? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: value, position: 0 }] }
+        : value ?? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: fallback, position: 0 }] }
     },
     selection: {
       get: () => runtime.sel ?? { layers: [], keys: [], chan: null },
@@ -158,9 +162,14 @@ function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI
     effects: { list: () => definitions, get: (id: string) => definitions.find((definition) => definition.id === id) },
     layers: { get: () => undefined },
     assets: { get: () => undefined },
-    uiState: { ...(runtime.UIState ?? {}), setShaderMeta: runtime.UIState?.setShaderMeta ?? vi.fn() },
+    render: { gl: { compileError: () => null } },
+    uiState: {
+      ...(runtime.UIState ?? {}),
+      getShaderMeta: runtime.UIState?.getShaderMeta ?? (() => null),
+      setShaderMeta: runtime.UIState?.setShaderMeta ?? vi.fn()
+    },
     ui: {
-      controls: controlsFor(runtime),
+      controls: controlsFor(() => api),
       icon: (name: string) => `<svg data-icon="${name}" aria-hidden="true"><path/></svg>`,
       menu: runtime.menu ?? vi.fn(), modal: runtime.modal ?? vi.fn(), toast: runtime.toast ?? vi.fn(),
       drag: runtime.drag ?? vi.fn(), beginParentPick: runtime.beginParentPick ?? vi.fn(),
@@ -175,6 +184,7 @@ function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI
     events,
     log: vi.fn()
   } as unknown as PowermoveAPI;
+  return api;
 }
 
 function layer(id: string, opacity = 100): TestLayer {

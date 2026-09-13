@@ -3,14 +3,17 @@
   import type { EasingCurve, GeneratedCurveControl } from '../../core/types/workspace';
   import { doc } from '../../state/document.svelte';
   import { transport } from '../../state/transport.svelte';
+  import type { PowermoveAPI } from '../../kernel/api';
 
   let {
     PM,
+    api,
     control,
     get,
     edit
   }: {
     PM: Record<string, any>;
+    api: PowermoveAPI;
     control: GeneratedCurveControl;
     get: () => unknown;
     edit: EditBinding;
@@ -20,7 +23,7 @@
   const maxY = $derived(Number.isFinite(control.maxY) ? control.maxY : 2);
   const pad = { x: 34, y: 24 };
   const defaultCurve: EasingCurve = [.62, .05, 0, 1];
-  const gesture = $derived(new EditGesture(PM, edit));
+  const gesture = $derived(new EditGesture(api, edit));
   let canvas = $state<HTMLCanvasElement>();
   let curve = $state<EasingCurve>([...defaultCurve]);
   let active = $state(0);

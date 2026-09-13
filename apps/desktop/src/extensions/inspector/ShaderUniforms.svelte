@@ -3,7 +3,7 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc, transport, controlProps, inspector } = inspectorContext();
+  const { api, doc, transport, mixed, inspector } = inspectorContext();
   const { ColorField, Section, ToggleField } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
@@ -37,7 +37,7 @@
 </script>
 
 {#if definitions.length}
-  <Section title="Shader" />
+  <Section {api} title="Shader" />
   {#each definitions as definition (definition.name)}
     {@const property = layer.d?.uniforms?.[definition.name]}
     {#if property}
@@ -45,7 +45,8 @@
       {#if definition.control === 'color'}
         <AnimatedRow {layer} {path} label={definition.label}>
           <ColorField
-            {...controlProps}
+            {api}
+            {mixed}
 
             get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, definition.label)}
@@ -55,7 +56,8 @@
       {:else if definition.control === 'toggle'}
         <AnimatedRow {layer} {path} label={definition.label}>
           <ToggleField
-            {...controlProps}
+            {api}
+            {mixed}
 
             get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, definition.label)}

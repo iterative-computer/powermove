@@ -95,8 +95,23 @@ describe('timeline extension', () => {
     ]);
     expect(value.state.project.layers[0].p.x.kf.map((key: any) => key.t)).toEqual([-3, 3]);
     expect(left.p.x.kf.map((key: any) => key.t)).toEqual([0, 6]);
+    expect(value.api.model.cloneLayer).toHaveBeenCalledWith(left);
     expect(value.api.anim.touch).toHaveBeenCalledOnce();
     expect(value.state.selection.layers).toEqual(['right']);
+  });
+
+  it('preserves source time when splitting timed media', () => {
+    const value = harness();
+    const left = { id: 'video', type: 'video', name: 'Video', from: 2, dur: 6, d: { trim: 1 }, p: {} } as any;
+    value.state.project.layers = [left];
+    value.state.selection.layers = [left.id];
+    value.state.time = 5;
+    vi.mocked(value.api.media.timing.isTimed).mockReturnValue(true);
+    vi.mocked(value.api.media.timing.rate).mockReturnValue(2);
+
+    splitSelectedLayersAtPlayhead(value.api);
+
+    expect(value.state.project.layers[0].d.trim).toBe(7);
   });
 
   it('registers the M timeline keybinding outside text fields', () => {

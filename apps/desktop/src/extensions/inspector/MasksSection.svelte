@@ -8,7 +8,7 @@
   import Icon from './Icon.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
-  const { api, doc, transport, controlProps, edit: inspectorEdit } = inspectorContext();
+  const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
   const { Row, Section, SelectField, ToggleField } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
@@ -54,7 +54,7 @@
 
 </script>
 
-<Section title="Masks" />
+<Section {api} title="Masks" />
 {#if masks.length === 0}
   <button type="button" class="chip wide" aria-label="Add mask"  onclick={addMask}>
     <Icon name="plus" />Add mask
@@ -83,22 +83,24 @@
     </div>
     <div class="grp mask-params">
       <AnimatedRow {layer} path={`m.${maskId}.on`} label="Enabled">
-        <ToggleField {...controlProps} get={() => enabled(mask)} edit={propertyBinding(maskId, 'on', 'Enable mask')} label="Enabled" />
+        <ToggleField {api} {mixed} get={() => enabled(mask)} edit={propertyBinding(maskId, 'on', 'Enable mask')} label="Enabled" />
       </AnimatedRow>
-      <Row label="Shape">
+      <Row {api} label="Shape">
         {#snippet left()}<PropertyStopwatch {layer} path={`m.${maskId}.shape`} label="Mask shape" fallback={mask.shape} />{/snippet}
         <SelectField
-          {...controlProps}
+          {api}
+          {mixed}
           get={() => (doc.tick.values, doc.proj, transport.time, isProperty(mask.shape) ? api.anim.evP(layer, mask.shape, transport.time, `m.${maskId}.shape`) : mask.shape)}
           edit={propertyBinding(maskId, 'shape', 'Mask shape')}
           options={api.model.MASK_SHAPES}
           label="Shape"
         />
       </Row>
-      <Row label="Mode">
+      <Row {api} label="Mode">
         {#snippet left()}<PropertyStopwatch {layer} path={`m.${maskId}.mode`} label="Mask mode" fallback={mask.mode} />{/snippet}
         <SelectField
-          {...controlProps}
+          {api}
+          {mixed}
           get={() => (doc.tick.values, doc.proj, transport.time, isProperty(mask.mode) ? api.anim.evP(layer, mask.mode, transport.time, `m.${maskId}.mode`) : mask.mode)}
           edit={propertyBinding(maskId, 'mode', 'Mask mode')}
           options={['add', 'subtract']}

@@ -14,6 +14,7 @@ import type {
   ChannelValue,
   Comp,
   Effect,
+  Fill,
   Keyframe,
   Layer,
   LayerType,
@@ -33,6 +34,7 @@ export type {
   EditMeta,
   EditResult,
   Effect,
+  Fill,
   ExtensionHealth,
   ExtensionManifest,
   ExtensionRecord,
@@ -431,6 +433,8 @@ export interface ModelAPI {
   mkLayer(type: LayerType, options?: LayerFactoryOptions, comp?: Comp): Layer;
   mkMask(shape?: Mask['shape'], comp?: Comp): Mask;
   mkProject(options?: Partial<Project>): Project;
+  cloneLayer(layer: Layer): Layer;
+  normalizeFill(value: unknown, fallback?: string): Fill;
   layerDefinition(id: string): ExtensionLayerDefinition | undefined;
   curComp(): Comp;
   layer(id: string): Layer | null;
@@ -554,6 +558,7 @@ export interface RenderAPI {
     pick(x: number, y: number, time: number, options?: { includeLocked?: boolean }): Layer | null;
     init(canvas: HTMLCanvasElement, options?: { alpha?: boolean; quiet?: boolean }): boolean;
     resize(width: number, height: number, previewViewport?: PreviewViewport | null): boolean;
+    compileError(key: string): string | null;
     readonly previewViewport: PreviewViewport | null;
     readonly context: WebGL2RenderingContext | null;
   };
@@ -577,6 +582,7 @@ export interface UIStateAPI {
   setFxOpen(effect: Effect, open: boolean): boolean;
   getReveal(layer: Layer): string[] | null;
   setReveal(layer: Layer, keys: string[]): string[] | null;
+  getShaderMeta(layer: Layer): ShaderMeta | null;
   setShaderMeta(layer: Layer, patch: ShaderMeta): ShaderMeta | null;
 }
 
@@ -803,6 +809,8 @@ export interface KernelEvents {
   selection: Selection;
   time: number;
   transport: { playing: boolean };
+  /** Font family catalogue changed; payload is the complete ordered families list. */
+  fonts: string[];
   layout: undefined;
   'theme:changed': { id: string; scheme: 'light' | 'dark' };
   'extension:loaded': { id: string };

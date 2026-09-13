@@ -6,7 +6,7 @@
   import { pathTargets, structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
 
-  const {api,doc,transport,controlProps,edit:inspectorEdit,tools,viewer}=inspectorContext();
+  const {api,doc,transport,mixed,edit:inspectorEdit,tools,viewer}=inspectorContext();
   const {Section,Row,SelectField,ColorField}=api.ui.controls;
   let {layer}:{layer:any}=$props();
 
@@ -45,7 +45,7 @@
 </script>
 
 {#if layer.type==='shape' && activeTarget}
-  <div class="section-head"><Section title={shapeTargets.length===1?'Path':'Paths'} /><button class="section-action" onclick={addPath} aria-label="Add path" title="Add path"><Icon name="plus" /></button></div>
+  <div class="section-head"><Section {api} title={shapeTargets.length===1?'Path':'Paths'} /><button class="section-action" onclick={addPath} aria-label="Add path" title="Add path"><Icon name="plus" /></button></div>
   <div class="path-list" class:multiple={shapeTargets.length>1}>
     {#each shapeTargets as target (target.path.id)}
       <div class="path-item" class:active={target.path.id===activeTarget.path.id}>
@@ -60,7 +60,7 @@
   <details class="advanced">
     <summary>Advanced path options</summary>
     {#if shapeTargets.length>1}
-      <Row label="Group"><SelectField {...controlProps} label="Path parent group" get={()=>activeTarget.path.parent} options={[{v:null,label:'None'},...shapeTargets.filter((target:any)=>target!==activeTarget&&!target.path.parent).map((target:any)=>({v:target.path.id,label:target.path.name}))]} edit={{mode:'set',label:'Group path',set:(value:any)=>{activeTarget.path.parent=value;api.transport.invalidate();inspectorRefresh.bump();}}} /></Row>
+      <Row {api} label="Group"><SelectField {api} {mixed} label="Path parent group" get={()=>activeTarget.path.parent} options={[{v:null,label:'None'},...shapeTargets.filter((target:any)=>target!==activeTarget&&!target.path.parent).map((target:any)=>({v:target.path.id,label:target.path.name}))]} edit={{mode:'set',label:'Group path',set:(value:any)=>{activeTarget.path.parent=value;api.transport.invalidate();inspectorRefresh.bump();}}} /></Row>
     {/if}
     <div class="advanced-label">Path transform</div>
     {#each ['x','y','rotation','scaleX','scaleY'] as key (key)}
@@ -82,36 +82,36 @@
     {/if}
   </details>
 
-  <div class="section-head"><Section title="Fill" /><button class="section-action" onclick={()=>applyPathValue('fillEnabled',!activeValues.fillEnabled,activeValues.fillEnabled?'Remove fill':'Add fill')} aria-label={activeValues.fillEnabled?'Remove fill':'Add fill'} title={activeValues.fillEnabled?'Remove fill':'Add fill'}><span aria-hidden="true">{activeValues.fillEnabled?'−':'+'}</span></button></div>
+  <div class="section-head"><Section {api} title="Fill" /><button class="section-action" onclick={()=>applyPathValue('fillEnabled',!activeValues.fillEnabled,activeValues.fillEnabled?'Remove fill':'Add fill')} aria-label={activeValues.fillEnabled?'Remove fill':'Add fill'} title={activeValues.fillEnabled?'Remove fill':'Add fill'}><span aria-hidden="true">{activeValues.fillEnabled?'−':'+'}</span></button></div>
   {#if activeValues.fillEnabled}
-    <AnimatedRow {layer} path={channel('fill')} label="Color"><ColorField {...controlProps} label="Fill color" get={()=>activeValues.fill} edit={bind(channel('fill'))} /></AnimatedRow>
+    <AnimatedRow {layer} path={channel('fill')} label="Color"><ColorField {api} {mixed} label="Fill color" get={()=>activeValues.fill} edit={bind(channel('fill'))} /></AnimatedRow>
     <ChannelRow {layer} channel={channel('fillOpacity')} property={property('fillOpacity')} label="Opacity" step={1} min={0} max={100} unit="%" />
   {/if}
 
-  <div class="section-head"><Section title="Stroke" /><button class="section-action" onclick={()=>applyPathValue('strokeWidth',Number(activeValues.strokeWidth)>0?0:1,Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke')} aria-label={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'} title={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'}><span aria-hidden="true">{Number(activeValues.strokeWidth)>0?'−':'+'}</span></button></div>
+  <div class="section-head"><Section {api} title="Stroke" /><button class="section-action" onclick={()=>applyPathValue('strokeWidth',Number(activeValues.strokeWidth)>0?0:1,Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke')} aria-label={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'} title={Number(activeValues.strokeWidth)>0?'Remove stroke':'Add stroke'}><span aria-hidden="true">{Number(activeValues.strokeWidth)>0?'−':'+'}</span></button></div>
   {#if Number(activeValues.strokeWidth)>0}
-    <AnimatedRow {layer} path={channel('stroke')} label="Color"><ColorField {...controlProps} label="Stroke color" get={()=>activeValues.stroke} edit={bind(channel('stroke'))} /></AnimatedRow>
+    <AnimatedRow {layer} path={channel('stroke')} label="Color"><ColorField {api} {mixed} label="Stroke color" get={()=>activeValues.stroke} edit={bind(channel('stroke'))} /></AnimatedRow>
     <ChannelRow {layer} channel={channel('strokeWidth')} property={property('strokeWidth')} label="Weight" step={0.5} min={0} unit="px" />
     <ChannelRow {layer} channel={channel('strokeOpacity')} property={property('strokeOpacity')} label="Opacity" step={1} min={0} max={100} unit="%" />
   {/if}
 {/if}
 
 {#if maskTargets.length}
-  <Section title="Mask paths" />
+  <Section {api} title="Mask paths" />
   {#each maskTargets as target (target.path.id)}
     <details><summary>{target.path.name}</summary>
       <div class="buttons"><button class="chip" onclick={()=>selectPath(target,true)}>Edit vertices</button><button class="chip" onclick={()=>mutate('Remove path',()=>{const mask=layer.masks.find((candidate:any)=>candidate.path===target.path);if(mask)layer.masks=layer.masks.filter((candidate:any)=>candidate!==mask);})}>Remove</button></div>
       {#each records.filter((record:any)=>record.key.startsWith(target.prefix+'.')&&!record.key.includes('.v.')) as record (record.key)}
         {@const value=api.anim.evP(layer,record.prop,transport.time,record.key)}
         {#if typeof value==='number'}<ChannelRow {layer} channel={record.key} property={record.prop} label={label(record.label)} step={1} />
-        {:else}<AnimatedRow {layer} path={record.key} label={label(record.label)}>{#if typeof value==='boolean'}<button class="compact-toggle" class:on={!!value} onclick={()=>inspectorEdit.apply({type:'set_property',target:layer.id,path:record.key,value:!value,time:transport.time,preserveHandEdits:false},{label:'Edit '+record.key,origin:'inspector'})}>{value?'On':'Off'}</button>{:else}<ColorField {...controlProps} label={label(record.label)} get={()=>value} edit={bind(record.key)} />{/if}</AnimatedRow>{/if}
+        {:else}<AnimatedRow {layer} path={record.key} label={label(record.label)}>{#if typeof value==='boolean'}<button class="compact-toggle" class:on={!!value} onclick={()=>inspectorEdit.apply({type:'set_property',target:layer.id,path:record.key,value:!value,time:transport.time,preserveHandEdits:false},{label:'Edit '+record.key,origin:'inspector'})}>{value?'On':'Off'}</button>{:else}<ColorField {api} {mixed} label={label(record.label)} get={()=>value} edit={bind(record.key)} />{/if}</AnimatedRow>{/if}
       {/each}
     </details>
   {/each}
 {/if}
 
 {#if layer.type==='text'}
-  <Section title="Text animation & ranges" />
+  <Section {api} title="Text animation & ranges" />
   <div class="buttons"><button class="chip" onclick={addAnimator}>Add animator</button><button class="chip" onclick={range}>Style selection</button></div>
   {#each textItems as item (item.id)}
     {@const prefix=(item.start===undefined?'ta.':'ts.')+item.id}
@@ -120,7 +120,7 @@
       {#each records.filter((record:any)=>record.key.startsWith(prefix+'.')) as record (record.key)}
         {@const value=api.anim.evP(layer,record.prop,transport.time,record.key)}
         {#if typeof value==='number'}<ChannelRow {layer} channel={record.key} property={record.prop} label={label(record.label)} step={1} />
-        {:else}<AnimatedRow {layer} path={record.key} label={label(record.label)}>{#if record.label==='unit'}<SelectField {...controlProps} label="Based on" get={()=>value} edit={bind(record.key)} options={['characters','words','lines']} />{:else}<ColorField {...controlProps} label="Range color" get={()=>value} edit={bind(record.key)} />{/if}</AnimatedRow>{/if}
+        {:else}<AnimatedRow {layer} path={record.key} label={label(record.label)}>{#if record.label==='unit'}<SelectField {api} {mixed} label="Based on" get={()=>value} edit={bind(record.key)} options={['characters','words','lines']} />{:else}<ColorField {api} {mixed} label="Range color" get={()=>value} edit={bind(record.key)} />{/if}</AnimatedRow>{/if}
       {/each}
     </details>
   {/each}

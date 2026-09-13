@@ -83,6 +83,47 @@ describe('installKernel', () => {
     expect(installed.loader).toBeNull();
   });
 
+  it('forwards model.cloneLayer to the canonical model helper', () => {
+    const PM = fakePM();
+    const layer = { id: 'source', name: 'Source', p: {}, d: {} } as any;
+    const clone = { ...layer, id: 'clone' };
+    PM.cloneLayer = vi.fn(() => clone);
+    installed = installKernel(PM);
+
+    expect(installed.api('contracts').model.cloneLayer(layer)).toBe(clone);
+    expect(PM.cloneLayer).toHaveBeenCalledWith(layer);
+  });
+
+  it('forwards model.normalizeFill with its optional fallback', () => {
+    const PM = fakePM();
+    const fill = { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: '#123456', position: 0 }] };
+    PM.normalizeFill = vi.fn(() => fill);
+    installed = installKernel(PM);
+
+    expect(installed.api('contracts').model.normalizeFill({ color: 'bad' }, '#123456')).toBe(fill);
+    expect(PM.normalizeFill).toHaveBeenCalledWith({ color: 'bad' }, '#123456');
+  });
+
+  it('forwards uiState.getShaderMeta to the UI-state cache', () => {
+    const PM = fakePM();
+    const layer = { id: 'shader', name: 'Shader', p: {}, d: {} } as any;
+    const meta = { shaderKey: 'shader:key', udefs: [] };
+    PM.UIState = { getShaderMeta: vi.fn(() => meta) };
+    installed = installKernel(PM);
+
+    expect(installed.api('contracts').uiState.getShaderMeta(layer)).toBe(meta);
+    expect(PM.UIState.getShaderMeta).toHaveBeenCalledWith(layer);
+  });
+
+  it('forwards render.gl.compileError to the compositor diagnostics', () => {
+    const PM = fakePM();
+    PM.GL = { compileError: vi.fn(() => 'line 1: syntax error') };
+    installed = installKernel(PM);
+
+    expect(installed.api('contracts').render.gl.compileError('shader:key')).toBe('line 1: syntax error');
+    expect(PM.GL.compileError).toHaveBeenCalledWith('shader:key');
+  });
+
   it('publishes every Phase 1 adapter member', () => {
     const PM = fakePM();
     installed = installKernel(PM);
@@ -95,7 +136,7 @@ describe('installKernel', () => {
     ]));
     expect(Object.keys(api.model)).toEqual(expect.arrayContaining([
       'P', 'CH', 'KF', 'BLENDS', 'TYPE_META', 'MASK_SHAPES', 'mkLayer', 'mkMask', 'mkProject',
-      'layerDefinition', 'curComp', 'layer', 'byName'
+      'cloneLayer', 'normalizeFill', 'layerDefinition', 'curComp', 'layer', 'byName'
     ]));
     expect(Object.keys(api.selection)).toEqual(expect.arrayContaining([
       'get', 'layers', 'first', 'keys', 'chan', 'set', 'select', 'resolveSelectedKeys', 'keySelectionActive'
@@ -106,7 +147,7 @@ describe('installKernel', () => {
     expect(Object.keys(api.edit)).toEqual(expect.arrayContaining(['apply', 'begin', 'commit', 'cancel', 'dispatch', 'mutate']));
     expect(Object.keys(api.media)).toEqual(expect.arrayContaining(['timing', 'importFiles', 'commandForAsset', 'audio', 'assets', 'fonts']));
     expect(Object.keys(api.render)).toEqual(expect.arrayContaining(['gl', 'raster', 'renderFrameTo', 'snapshot']));
-    expect(Object.keys(api.uiState)).toHaveLength(9);
+    expect(Object.keys(api.uiState)).toHaveLength(10);
     expect(Object.keys(api.ui)).toEqual(expect.arrayContaining(['drag', 'closeMenus', 'showLayerMenu', 'showParentMenu', 'beginParentPick', 'openShaderEditor', 'gesture']));
     expect(Object.keys(api.dnd)).toEqual(expect.arrayContaining([
       'ASSET_MIME', 'FX_MIME', 'startAssetDrag', 'mediaDrag', 'hasAssetDrag', 'hasFileDrag',
@@ -124,7 +165,7 @@ describe('installKernel', () => {
     const call = (...args: unknown[]) => args;
     for (const name of ['ev', 'evP', 'active', 'findProp', 'allProps', 'hasKeyAt', 'setKey', 'setKeyOn', 'removeKey',
       'applyEaseTo', 'wouldCycle', 'resolveContent', 'animVersion', 'touch', 'worldMatrix', 'localMatrix',
-      'transformParentMatrix', 'mul', 'P', 'KF', 'mkLayer', 'mkMask', 'mkProject', 'curComp', 'L', 'byName',
+      'transformParentMatrix', 'mul', 'P', 'KF', 'mkLayer', 'mkMask', 'mkProject', 'cloneLayer', 'normalizeFill', 'curComp', 'L', 'byName',
       'firstSel', 'selectLayers', 'resolveSelectedKeys', 'groupAncestors', 'transformRoots', 'groupSpan',
       'expandGroups', 'normalizeStack', 'moveToGroup', 'toggle', 'step', 'invalidate', 'importFiles',
       'commandForAsset', 'assetKind', 'raster', 'renderFrameTo', 'round', 'clamp', 'lerp', 'snapF', 'tc',
@@ -156,10 +197,11 @@ describe('installKernel', () => {
     PM.Fonts = { bundled: [], system: [], families: [], setSystemFamilies: vi.fn(), options: vi.fn(() => []), ensure: vi.fn(async () => {}) };
     PM.GL = {
       bounds: vi.fn(call), pick: vi.fn(call), init: vi.fn(() => true), resize: vi.fn(() => true),
+      compileError: vi.fn(() => 'compile failed'),
       previewViewport: { x: 1 }, gl: { drawingBufferWidth: 1 }
     };
     PM.Export.snapshot = vi.fn(() => 'snapshot');
-    PM.UIState = Object.fromEntries(['getLayerCollapsed', 'setLayerCollapsed', 'getKeyHandles', 'setKeyHandles', 'getFxOpen', 'setFxOpen', 'getReveal', 'setReveal', 'setShaderMeta'].map((name) => [name, vi.fn(call)]));
+    PM.UIState = Object.fromEntries(['getLayerCollapsed', 'setLayerCollapsed', 'getKeyHandles', 'setKeyHandles', 'getFxOpen', 'setFxOpen', 'getReveal', 'setReveal', 'getShaderMeta', 'setShaderMeta'].map((name) => [name, vi.fn(call)]));
     PM.Ease = { nameOf: vi.fn(() => 'linear'), PRESETS: { linear: [0, 0, 1, 1] } };
     PM.Edit = Object.fromEntries(['apply', 'begin', 'commit', 'cancel', 'dispatch', 'mutate'].map((name) => [name, vi.fn(call)]));
     PM.hist = Object.fromEntries(['do', 'begin', 'commit', 'cancel', 'undo', 'redo', 'external', 'selection'].map((name) => [name, vi.fn(call)]));
@@ -191,7 +233,7 @@ describe('installKernel', () => {
     expect(api.anim.expressionErrors).toBe(PM.expressionErrors);
 
     api.model.P(1, { expr: 'x' }); api.model.KF(1, 2, 'linear'); api.model.mkLayer('solid', {}, PM.proj);
-    api.model.mkMask('rect', PM.proj); api.model.mkProject({ name: 'P' } as any); api.model.curComp(); api.model.layer('L1'); api.model.byName('Layer');
+    api.model.mkMask('rect', PM.proj); api.model.mkProject({ name: 'P' } as any); api.model.cloneLayer(layer); api.model.normalizeFill({}, '#123456'); api.model.curComp(); api.model.layer('L1'); api.model.byName('Layer');
     expect(PM.P).toHaveBeenLastCalledWith(1, { expr: 'x' });
     expect(api.model.CH).toBe(PM.CH); expect(api.model.BLENDS).toBe(PM.BLENDS); expect(api.model.TYPE_META).toBe(PM.TYPE_META); expect(api.model.MASK_SHAPES).toBe(PM.MASK_SHAPES);
 
@@ -219,7 +261,7 @@ describe('installKernel', () => {
     const canvas = document.createElement('canvas'); api.media.audio.drawWaveform(canvas.getContext('2d')!, layer, { color: 'red' }); api.media.assets.get('a'); await api.media.assets.add(new File(['x'], 'x.png'), { persist: true }); api.media.assets.kind(new File(['x'], 'x.png'));
     expect(PM.importFiles).toHaveBeenLastCalledWith([], { placement: null }); expect(PM.Audio.drawWaveform).toHaveBeenCalled(); expect(api.media.fonts).toBe(PM.Fonts);
 
-    api.render.gl.bounds(layer, 1); api.render.gl.pick(1, 2, 3, { includeLocked: true }); api.render.gl.init(canvas, { alpha: true }); api.render.gl.resize(100, 50, null);
+    api.render.gl.bounds(layer, 1); api.render.gl.pick(1, 2, 3, { includeLocked: true }); api.render.gl.init(canvas, { alpha: true }); api.render.gl.resize(100, 50, null); api.render.gl.compileError('shader:key');
     api.render.raster(layer, 2, 3, fn, { x: 1 }); api.render.renderFrameTo(1, 100, 50, { alpha: true }); api.render.snapshot(1, 480);
     expect(PM.GL.pick).toHaveBeenLastCalledWith(1, 2, 3, { includeLocked: true }); expect(api.render.gl.previewViewport).toBe(PM.GL.previewViewport); expect(api.render.gl.context).toBe(PM.GL.gl);
 
@@ -372,6 +414,18 @@ describe('installKernel', () => {
     expect(seen).toHaveLength(6);
   });
 
+  it('bridges the complete font families payload from the legacy bus', () => {
+    const PM = fakePM();
+    installed = installKernel(PM);
+    const seen: string[][] = [];
+    installed.events.on('fonts', (families) => seen.push(families));
+
+    const families = ['SF Pro Text', 'Avenir Next', 'Helvetica'];
+    PM.bus.emit('fonts', families);
+
+    expect(seen).toEqual([families]);
+  });
+
   it('routes key chords through the PM.cmd seam when present', () => {
     const PM = fakePM();
     installed = installKernel(PM);
@@ -435,7 +489,7 @@ describe('installKernel', () => {
       void api.anim.expressionErrors; api.anim.version(); api.anim.touch(); api.anim.worldMatrix(layer, 0);
       api.anim.localMatrix(layer, 0); api.anim.transformParentMatrix(layer, 0); api.anim.mul([1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 0, 0]);
       api.model.P(0); api.model.KF(0, 0); void api.model.CH; void api.model.BLENDS; void api.model.TYPE_META;
-      void api.model.MASK_SHAPES; api.model.mkLayer('solid'); api.model.mkMask(); api.model.mkProject();
+      void api.model.MASK_SHAPES; api.model.mkLayer('solid'); api.model.mkMask(); api.model.mkProject(); api.model.cloneLayer(layer); api.model.normalizeFill(null);
       api.model.layerDefinition('x'); api.model.curComp(); api.model.layer('x'); api.model.byName('x');
       api.selection.get(); api.selection.layers(); api.selection.first(); api.selection.keys(); api.selection.chan();
       api.selection.set({ layers: [] }); api.selection.select([]); api.selection.resolveSelectedKeys();
@@ -453,11 +507,11 @@ describe('installKernel', () => {
       api.media.commandForAsset(); api.media.audio.drawWaveform(document.createElement('canvas').getContext('2d')!, layer);
       api.media.assets.get('x'); api.media.assets.kind(new File([], 'x')); void api.media.fonts;
       api.render.gl.bounds(layer, 0); api.render.gl.pick(0, 0, 0); api.render.gl.init(document.createElement('canvas'));
-      api.render.gl.resize(1, 1); void api.render.gl.previewViewport; void api.render.gl.context;
+      api.render.gl.resize(1, 1); api.render.gl.compileError('x'); void api.render.gl.previewViewport; void api.render.gl.context;
       api.render.raster(layer); api.render.renderFrameTo(0, 1, 1); api.render.snapshot(0);
       api.uiState.getLayerCollapsed(layer); api.uiState.setLayerCollapsed(layer, false); api.uiState.getKeyHandles(key);
       api.uiState.setKeyHandles(key, {}); api.uiState.getFxOpen({} as any); api.uiState.setFxOpen({} as any, false);
-      api.uiState.getReveal(layer); api.uiState.setReveal(layer, []); api.uiState.setShaderMeta(layer, {});
+      api.uiState.getReveal(layer); api.uiState.setReveal(layer, []); api.uiState.getShaderMeta(layer); api.uiState.setShaderMeta(layer, {});
       api.ui.drag(new PointerEvent('pointerdown'), { move: () => {} }); api.ui.closeMenus();
       api.ui.showLayerMenu(layer, { clientX: 0, clientY: 0 }); api.ui.showParentMenu([], { clientX: 0, clientY: 0 });
       api.ui.beginParentPick(new PointerEvent('pointerdown'), []); api.ui.openShaderEditor();

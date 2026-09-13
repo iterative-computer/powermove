@@ -35,17 +35,17 @@ interface VariableFontTestBackend {
   Inspector: any;
 }
 
-const controlsFor = (runtime: VariableFontTestBackend): ControlsAPI => ({
+const controlsFor = (getAPI: () => PowermoveAPI): ControlsAPI => ({
   NumField: NumField as ControlsAPI['NumField'], ColorField: ColorField as ControlsAPI['ColorField'],
   FillField: FillField as ControlsAPI['FillField'], FontField: FontField as ControlsAPI['FontField'],
   SelectField: SelectField as ControlsAPI['SelectField'], TextField: TextField as ControlsAPI['TextField'],
   ToggleField: ToggleField as ControlsAPI['ToggleField'], Row: Row as ControlsAPI['Row'],
   Section: Section as ControlsAPI['Section'],
   binding: {
-    channelBinding: (layerId, channel, options) => channelBinding(runtime, layerId, channel, options),
-    compositionBinding: (field, options) => compositionBinding(runtime, field as any, options),
-    contentBinding: (layerId, field, options) => contentBinding(runtime, layerId, field, options),
-    layerFieldBinding: (layerId, field, options) => layerFieldBinding(runtime, layerId, field as any, options),
+    channelBinding: (layerId, channel, options) => channelBinding(getAPI(), layerId, channel, options),
+    compositionBinding: (field, options) => compositionBinding(getAPI(), field as any, options),
+    contentBinding: (layerId, field, options) => contentBinding(getAPI(), layerId, field, options),
+    layerFieldBinding: (layerId, field, options) => layerFieldBinding(getAPI(), layerId, field as any, options),
   },
 });
 
@@ -78,11 +78,18 @@ function setup(content: Record<string, any>) {
   };
   doc.replace(project as any);
   transport.time = 2;
-  const api = {
+  let api: PowermoveAPI;
+  api = {
     id: 'inspector', apiVersion: 1,
     manifest: { id: 'inspector', name: 'Inspector', version: '1', apiVersion: 1 },
     project: { get: () => project },
-    model: { layer: () => layer, P: runtime.P },
+    model: {
+      layer: () => layer,
+      P: runtime.P,
+      normalizeFill: (value: any, fallback = '#000000') => typeof value === 'string'
+        ? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: value, position: 0 }] }
+        : value ?? { type: 'solid', angle: 0, stops: [{ id: 'stop-1', color: fallback, position: 0 }] }
+    },
     selection: { layers: () => ['text-1'], keys: () => [], chan: () => null },
     groups: { ancestors: () => [] },
     transport: { time: () => transport.time, invalidate: runtime.invalidate },
@@ -93,9 +100,11 @@ function setup(content: Record<string, any>) {
     edit: runtime.Edit,
     history: { do: (_label: string, operation: () => unknown) => operation(), begin: vi.fn(), commit: vi.fn(), cancel: vi.fn() },
     media: { fonts: runtime.Fonts },
+    render: { gl: { compileError: () => null } },
+    uiState: { getShaderMeta: () => null },
     util: { round: runtime.round, clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)), uid: () => 'test-id' },
     ui: {
-      controls: controlsFor(runtime), icon: () => '<svg></svg>', drag: runtime.drag,
+      controls: controlsFor(() => api), icon: () => '<svg></svg>', drag: runtime.drag,
       closeMenus: vi.fn(), toast: vi.fn()
     },
     services: { get: () => null },

@@ -34,6 +34,19 @@ export function fakePowermoveAPI(vi: { fn: (...args: any[]) => any }): FakeAPIHa
     playing: false,
     disposers: [],
   };
+  const uid = vi.fn((prefix = 'l') => `${prefix}-${Math.random()}`);
+  const cloneLayer = vi.fn((layer: Layer) => {
+    const clone = JSON.parse(JSON.stringify(layer)) as Layer;
+    clone.id = uid('L');
+    const baseName = layer.name.replace(/ (\d+)$/, '');
+    clone.name = `${baseName} ${state.project.layers.filter((item: Layer) => item.name.startsWith(baseName)).length + 1}`;
+    const renew = (property: unknown): void => {
+      const channel = property as { kf?: Array<{ i: string }> } | null;
+      for (const keyframe of channel?.kf ?? []) keyframe.i = uid('k');
+    };
+    Object.values(clone.p ?? {}).forEach(renew);
+    return clone;
+  });
   const emit = (event: string, payload?: unknown): void => {
     for (const handler of listeners.get(event) ?? []) handler(payload);
   };
@@ -83,7 +96,7 @@ export function fakePowermoveAPI(vi: { fn: (...args: any[]) => any }): FakeAPIHa
     },
     model: {
       P: vi.fn((value: unknown) => ({ v: value, kf: [], expr: null })), CH: {}, KF: vi.fn(), BLENDS: [], TYPE_META: {}, MASK_SHAPES: [],
-      mkLayer: vi.fn(), mkMask: vi.fn(), mkProject: vi.fn(), layerDefinition: vi.fn(), curComp: () => state.project,
+      mkLayer: vi.fn(), mkMask: vi.fn(), mkProject: vi.fn(), cloneLayer, normalizeFill: vi.fn(), layerDefinition: vi.fn(), curComp: () => state.project,
       layer: (id: string) => state.project.layers.find((layer: Layer) => layer.id === id) ?? null,
       byName: vi.fn(() => null),
     },
@@ -118,7 +131,7 @@ export function fakePowermoveAPI(vi: { fn: (...args: any[]) => any }): FakeAPIHa
     ui: { controls: {}, toast: vi.fn(), confirm: vi.fn(), menu: vi.fn(), modal: vi.fn(), icon: vi.fn((name: string) => `<svg data-icon="${name}"></svg>`), drag: vi.fn(() => ({ cancel: vi.fn() })), closeMenus: vi.fn(), showLayerMenu: vi.fn(), showParentMenu: vi.fn(), beginParentPick: vi.fn(), openShaderEditor: vi.fn(), gesture: class {} },
     dnd: { ASSET_MIME: '', FX_MIME: '', startAssetDrag: vi.fn(), mediaDrag: null, hasAssetDrag: vi.fn(), hasFileDrag: vi.fn(), hasMediaDrag: vi.fn(), readAssetDrag: vi.fn(), hasFxDrag: vi.fn(), readFxDrag: vi.fn(), applyFxDrop: vi.fn() },
     workspace: { current: vi.fn(() => null), mutate: vi.fn(), hasPanel: vi.fn(), addPanel: vi.fn(), movePanel: vi.fn(), removePanel: vi.fn(), hidePanel: vi.fn(), restorePanel: vi.fn(), refresh: vi.fn() },
-    util: { round: vi.fn((value: number, places = 2) => Number(value.toFixed(places))), clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)), lerp: vi.fn(), snapF: vi.fn((time: number, fps: number) => Math.round(time * fps) / fps), tc: vi.fn(() => '00:00:00:00'), parseTc: vi.fn(), uid: vi.fn((prefix = 'l') => `${prefix}-${Math.random()}`), hex2rgb: vi.fn(() => [0, 0, 0]), rgb2hex: vi.fn() },
+    util: { round: vi.fn((value: number, places = 2) => Number(value.toFixed(places))), clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)), lerp: vi.fn(), snapF: vi.fn((time: number, fps: number) => Math.round(time * fps) / fps), tc: vi.fn(() => '00:00:00:00'), parseTc: vi.fn(), uid, hex2rgb: vi.fn(() => [0, 0, 0]), rgb2hex: vi.fn() },
     ease: { nameOf: vi.fn(() => 'linear'), PRESETS: {} },
     space3d: { CHANNELS_3D: {}, local3D: vi.fn(), parent3D: vi.fn(), world3D: vi.fn(), is3DLayer: vi.fn(), perspectiveAmount: vi.fn(), planeMatrix: vi.fn(), projectPoint: vi.fn(), inversePlane: vi.fn(), planeContains: vi.fn() },
     services: {

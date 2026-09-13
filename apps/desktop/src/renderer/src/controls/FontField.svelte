@@ -6,27 +6,30 @@
   import { EditGesture, type EditBinding } from './gesture';
   import { rowLabelId } from './context';
   import './controls.css';
+  import type { PowermoveAPI } from '../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit,
     label,
     weight,
-    onChange
+    onChange,
+    mixed
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
     weight?: () => number;
     onChange?: (value: string) => void;
+    mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
 
   const labelledBy = rowLabelId();
   const value = $derived((doc.tick.values, doc.proj, transport.time, String(get() ?? '')));
-  const mixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,PM.inspectorMixed?.(edit,value)??false));
-  const gesture = $derived(new EditGesture(PM, edit));
+  const isMixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,mixed?.(edit,value)??false));
+  const gesture = $derived(new EditGesture(api, edit));
   let trigger = $state<HTMLButtonElement>();
   let menu = $state<HTMLDivElement>();
   let search = $state<HTMLInputElement>();
@@ -35,23 +38,22 @@
   let menuLeft = $state(6);
   let menuTop = $state(6);
   let menuWidth = $state(230);
-  const allFonts = $derived((PM.Fonts?.options?.(value) ?? [value]) as string[]);
+  const allFonts = $derived(api.media.fonts.options(value));
   const matches = $derived(allFonts.filter((name) => !query.trim() || name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
 
   const familyStyle = (name: string): string => `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
   function show(): void {
     if (open) { close(); return; }
-    PM.closeMenus?.();
+    api.ui.closeMenus();
     open = true;
     query = '';
     void tick().then(() => {
       const rect = trigger?.getBoundingClientRect();
       if (rect) {
         menuWidth = Math.max(230, Math.min(310, rect.width + 120));
-        const clamp = PM.clamp ?? ((value: number, min: number, max: number) => Math.max(min, Math.min(max, value)));
-        menuLeft = clamp(rect.right - menuWidth, 6, window.innerWidth - menuWidth - 6);
-        menuTop = clamp(rect.bottom + 5, 6, window.innerHeight - (menu?.offsetHeight ?? 0) - 6);
+        menuLeft = api.util.clamp(rect.right - menuWidth, 6, window.innerWidth - menuWidth - 6);
+        menuTop = api.util.clamp(rect.bottom + 5, 6, window.innerHeight - (menu?.offsetHeight ?? 0) - 6);
       }
       search?.focus();
     });
@@ -64,10 +66,10 @@
 
   function choose(name: string): void {
     gesture.once(name);
-    PM.invalidate?.();
-    PM.Fonts?.ensure?.(name, weight?.() ?? 400);
+    api.transport.invalidate();
+    void api.media.fonts.ensure(name, weight?.() ?? 400);
     onChange?.(name);
-    PM.closeMenus?.();
+    api.ui.closeMenus();
     close();
   }
 
@@ -105,7 +107,7 @@
   style:font-family={familyStyle(value)}
   onpointerdown={(event) => event.stopPropagation()}
   onclick={show}
->{mixed?'Mixed':value}</button>
+>{isMixed?'Mixed':value}</button>
 
 {#if open}
   <div bind:this={menu} class="drop font-drop pm-control-font-drop" role="dialog" aria-label={label ?? 'Choose font'} tabindex="-1" style:left={`${menuLeft}px`} style:top={`${menuTop}px`} style:width={`${menuWidth}px`} onkeydown={menuKeydown}>

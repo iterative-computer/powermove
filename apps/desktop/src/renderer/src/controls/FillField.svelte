@@ -17,15 +17,16 @@
     type FillValue
   } from './control-utils';
   import './controls.css';
+  import type { PowermoveAPI } from '../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit,
     label = 'Fill',
     fallback = '#000000'
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     label?: string;
@@ -34,8 +35,8 @@
 
   const labelledBy = rowLabelId();
   const raw = $derived((doc.tick.values, doc.proj, transport.time, get()));
-  const value = $derived(normalizeFill(PM, raw, fallback));
-  const gesture = $derived(new EditGesture(PM, edit));
+  const value = $derived(normalizeFill(api, raw, fallback));
+  const gesture = $derived(new EditGesture(api, edit));
   const modes: Array<[FillValue['type'], string]> = [['solid', 'Solid'], ['linear', 'Linear'], ['radial', 'Radial'], ['none', 'None']];
   const colors = ['#FF3B30','#FF9500','#FFCC00','#34C759','#00C7BE','#0A84FF','#5E5CE6','#BF5AF2','#FF2D55','#FFFFFF','#8E8E93','#09090A'];
   const hsvChannels = [['h','H',359], ['s','S',100], ['v','B',100]] as const;
@@ -60,8 +61,8 @@
 
   function show(): void {
     previewing = false;
-    before = normalizeFill(PM, value, fallback);
-    draft = normalizeFill(PM, before, fallback);
+    before = normalizeFill(api, value, fallback);
+    draft = normalizeFill(api, before, fallback);
     selected = draft.stops[0]!.id;
     channelsOpen = false;
     syncHsv();
@@ -79,8 +80,8 @@
       gesture.begin();
       previewing = true;
     }
-    gesture.write(normalizeFill(PM, draft, fallback));
-    PM.invalidate?.('render');
+    gesture.write(normalizeFill(api, draft, fallback));
+    api.transport.invalidate('render');
   }
 
   function cancelPreview(): void {
@@ -88,23 +89,23 @@
       if (edit.mode === 'local') gesture.write(before);
       gesture.cancel();
       previewing = false;
-      PM.invalidate?.('render');
+      api.transport.invalidate('render');
     }
     finishClose();
   }
 
   function apply(): void {
     if (previewing) {
-      gesture.write(normalizeFill(PM, draft, fallback));
+      gesture.write(normalizeFill(api, draft, fallback));
       gesture.commit();
       previewing = false;
-      PM.invalidate?.('render');
-    } else gesture.once(normalizeFill(PM, draft, fallback));
+      api.transport.invalidate('render');
+    } else gesture.once(normalizeFill(api, draft, fallback));
     finishClose();
   }
 
   function setType(type: FillValue['type']): void {
-    draft = normalizeFill(PM, { ...draft, type }, fallback);
+    draft = normalizeFill(api, { ...draft, type }, fallback);
     selected = draft.stops[0]!.id;
     syncHsv();
     previewDraft();
@@ -142,13 +143,13 @@
     event.preventDefault();
     const element = event.currentTarget as HTMLElement;
     picker(event, element);
-    PM.drag(event, { move: (_dx: number, _dy: number, next: PointerEvent) => picker(next, element), up: () => {} });
+    api.ui.drag(event, { move: (_dx: number, _dy: number, next: PointerEvent) => picker(next, element), up: () => {} });
   }
 
   function addStop(): void {
     if (draft.stops.length >= 8) return;
     const prior = selectedStop();
-    const id = PM.uid?.('stop') ?? `stop-${Date.now()}-${draft.stops.length}`;
+    const id = api.util.uid('stop');
     draft.stops.push({ id, color: prior.color, position: Math.min(100, prior.position + 10) });
     selected = id;
     syncHsv();
@@ -241,7 +242,7 @@
 
           <div class="fill-color-values">
             <div class="fill-current" aria-label="Current color" style={`--sw-color:${selectedHex}`}></div>
-            <label class="fill-hex-field"><span>Hex</span><input class="fill-hex pm-control-input" value={selectedHex} aria-label="Hex color" spellcheck="false" onchange={(event) => { if (!setSelectedColor(event.currentTarget.value)) { PM.toast?.('Enter a three- or six-digit hex color'); event.currentTarget.value = selectedHex; } }} /></label>
+            <label class="fill-hex-field"><span>Hex</span><input class="fill-hex pm-control-input" value={selectedHex} aria-label="Hex color" spellcheck="false" onchange={(event) => { if (!setSelectedColor(event.currentTarget.value)) { api.ui.toast('Enter a three- or six-digit hex color'); event.currentTarget.value = selectedHex; } }} /></label>
             <button type="button" class="fill-channels-toggle" class:on={channelsOpen} aria-expanded={channelsOpen} onclick={() => channelsOpen = !channelsOpen}>Channels</button>
           </div>
 

@@ -2,18 +2,19 @@
   import NumField from '../NumField.svelte';
   import Row from '../Row.svelte';
   import type { EditBinding } from '../gesture';
+  import type { PowermoveAPI } from '../../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
   } = $props();
 </script>
 
-<Row label="Opacity">
-  <NumField {PM} {get} {edit} />
+<Row {api} label="Opacity">
+  <NumField {api} {get} {edit} />
 </Row>

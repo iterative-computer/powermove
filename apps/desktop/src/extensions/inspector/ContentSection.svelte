@@ -6,7 +6,7 @@
   import TextAlignment from './TextAlignment.svelte';
   import { axisContentKey } from 'powermove';
 
-  const { api, doc, transport, controlProps, edit: inspectorEdit } = inspectorContext();
+  const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
   const { ColorField, FontField, NumField, Section, SelectField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
 
@@ -15,8 +15,9 @@
   const content = $derived((doc.tick.values, doc.proj, transport.time, api.anim.resolveContent(layer, transport.time) as Record<string, any>));
   const shape = $derived((doc.tick.values, doc.proj, content.shape));
   const assets = $derived((doc.tick.assets, doc.tick.structure, doc.proj, Object.values(api.project.get()?.assets ?? {}) as any[]));
-  // PHASE3-GAP: the frozen render API does not expose shader compile diagnostics.
-  const shaderError = $derived((doc.tick.values, doc.proj, ''));
+  const shaderMeta = $derived((doc.tick.values, doc.proj, api.uiState.getShaderMeta(layer)));
+  const shaderError = $derived((doc.tick.values, doc.proj,
+    typeof shaderMeta?.shaderKey === 'string' ? api.render.gl.compileError(shaderMeta.shaderKey) ?? '' : ''));
   let editingText = false;
   let hasVariableWeight = $state(false);
 
@@ -58,7 +59,7 @@
 
 </script>
 
-{#if !(layer.type === 'shape' && layer.d.paths?.length)}<Section title="Content" />{/if}
+{#if !(layer.type === 'shape' && layer.d.paths?.length)}<Section {api} title="Content" />{/if}
 
 {#if layer.type === 'text'}
   <AnimatedRow {layer} label="Text" path="c.text">
@@ -76,7 +77,8 @@
   <AnimatedRow {layer} label="Font" path="c.font">
     {#key fontsVersion}
       <FontField
-        {...controlProps}
+        {api}
+        {mixed}
 
         get={get('font', '')}
         edit={edit('font', 'Font')}
@@ -89,7 +91,8 @@
     {@const weights = [...new Set([Number(content.weight) || 400, 100, 200, 300, 400, 500, 600, 700, 800, 900])].sort((a, b) => a - b)}
     <AnimatedRow {layer} label="Weight" path="c.weight">
       <SelectField
-        {...controlProps}
+        {api}
+        {mixed}
 
         get={get('weight', 400)}
         edit={edit('weight', 'Weight')}
@@ -99,41 +102,41 @@
       />
     </AnimatedRow>
   {/if}
-  <AnimatedRow {layer} label="Size" path="c.size"><NumField {...controlProps} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {...controlProps} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {...controlProps} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
+  <AnimatedRow {layer} label="Size" path="c.size"><NumField {api} {mixed} get={get('size', 0)} edit={edit('size', 'Size')} label="Size" step={1} min={4} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Tracking" path="c.tracking"><NumField {api} {mixed} get={get('tracking', 0)} edit={edit('tracking', 'Tracking')} label="Tracking" step={0.5} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Leading" path="c.leading"><NumField {api} {mixed} get={get('leading', 0)} edit={edit('leading', 'Leading')} label="Leading" step={0.02} precision={2} /></AnimatedRow>
   <AnimatedRow {layer} label="Align" path="c.align"><TextAlignment {layer} value={String(content.align ?? 'center')} /></AnimatedRow>
-  <AnimatedRow {layer} label="Color" path="c.color"><ColorField {...controlProps} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
+  <AnimatedRow {layer} label="Color" path="c.color"><ColorField {api} {mixed} get={get('color', '#F2F2F2')} edit={edit('color', 'Text color')} label="Text color" /></AnimatedRow>
   <TypeSettings {layer} family={String(content.font ?? '')} onVariableWeight={(value) => { hasVariableWeight = value; }} />
 {:else if (layer.type === 'solid' || layer.type === 'shape') && !layer.d.paths?.length}
-  <AnimatedRow {layer} label="Fill" path="c.color"><ColorField {...controlProps} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
+  <AnimatedRow {layer} label="Fill" path="c.color"><ColorField {api} {mixed} get={get('color', '#808080')} edit={edit('color', 'Fill')} label="Fill" /></AnimatedRow>
   {#if layer.type === 'shape'}
-    <AnimatedRow {layer} label="Shape" path="c.shape"><SelectField {...controlProps} get={get('shape', 'rect')} edit={edit('shape', 'Shape')} options={['rect', 'ellipse', 'polygon', 'star', 'line']} label="Shape" /></AnimatedRow>
+    <AnimatedRow {layer} label="Shape" path="c.shape"><SelectField {api} {mixed} get={get('shape', 'rect')} edit={edit('shape', 'Shape')} options={['rect', 'ellipse', 'polygon', 'star', 'line']} label="Shape" /></AnimatedRow>
   {/if}
-  <AnimatedRow {layer} label="Width" path="c.w"><NumField {...controlProps} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Height" path="c.h"><NumField {...controlProps} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Corner radius" path="c.radius"><NumField {...controlProps} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Corner radius" path="c.radius"><NumField {api} {mixed} get={get('radius', 0)} edit={edit('radius', 'Corner radius')} label="Corner radius" step={1} min={0} unit="px" /></AnimatedRow>
   {#if layer.type === 'shape'}
-    <AnimatedRow {layer} label="Stroke" path="c.stroke"><NumField {...controlProps} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
-    <AnimatedRow {layer} label="Stroke color" path="c.strokeColor"><ColorField {...controlProps} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></AnimatedRow>
+    <AnimatedRow {layer} label="Stroke" path="c.stroke"><NumField {api} {mixed} get={get('stroke', 0)} edit={edit('stroke', 'Stroke')} label="Stroke" step={0.5} min={0} unit="px" /></AnimatedRow>
+    <AnimatedRow {layer} label="Stroke color" path="c.strokeColor"><ColorField {api} {mixed} get={get('strokeColor', '#FFFFFF')} edit={edit('strokeColor', 'Stroke')} label="Stroke" /></AnimatedRow>
     {#if shape === 'polygon' || shape === 'star'}
-      <AnimatedRow {layer} label="Points" path="c.points"><NumField {...controlProps} get={get('points', 5)} edit={edit('points', 'Points')} label="Points" step={1} min={3} max={24} /></AnimatedRow>
+      <AnimatedRow {layer} label="Points" path="c.points"><NumField {api} {mixed} get={get('points', 5)} edit={edit('points', 'Points')} label="Points" step={1} min={3} max={24} /></AnimatedRow>
     {/if}
   {/if}
 {:else if layer.type === 'image' || layer.type === 'video'}
-  <AnimatedRow {layer} label="Source"><SelectField {...controlProps} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" /></AnimatedRow>
-  <AnimatedRow {layer} label="Fit" path="c.fit"><SelectField {...controlProps} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></AnimatedRow>
-  <AnimatedRow {layer} label="Width" path="c.w"><NumField {...controlProps} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Height" path="c.h"><NumField {...controlProps} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Source"><SelectField {api} {mixed} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" /></AnimatedRow>
+  <AnimatedRow {layer} label="Fit" path="c.fit"><SelectField {api} {mixed} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></AnimatedRow>
+  <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
   {#if layer.type === 'video'}
-    <AnimatedRow {layer} label="Trim start" path="c.trim"><NumField {...controlProps} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} unit="s" /></AnimatedRow>
-    <AnimatedRow {layer} label="Speed" path="c.speed"><NumField {...controlProps} get={get('speed', 1)} edit={edit('speed', 'Speed')} label="Speed" step={0.05} precision={2} min={0.05} /></AnimatedRow>
+    <AnimatedRow {layer} label="Trim start" path="c.trim"><NumField {api} {mixed} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} unit="s" /></AnimatedRow>
+    <AnimatedRow {layer} label="Speed" path="c.speed"><NumField {api} {mixed} get={get('speed', 1)} edit={edit('speed', 'Speed')} label="Speed" step={0.05} precision={2} min={0.05} /></AnimatedRow>
   {/if}
 {:else if layer.type === 'audio'}
-  <AnimatedRow {layer} label="Trim start" path="c.trim"><NumField {...controlProps} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} min={0} unit="s" /></AnimatedRow>
-  <AnimatedRow {layer} label="Gain" path="c.gain"><NumField {...controlProps} get={get('gain', 1)} edit={edit('gain', 'Gain')} label="Gain" step={0.05} precision={2} min={0} max={4} /></AnimatedRow>
-  <AnimatedRow {layer} label="Fade in" path="c.fadeIn"><NumField {...controlProps} get={get('fadeIn', 0)} edit={edit('fadeIn', 'Fade in')} label="Fade in" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></AnimatedRow>
-  <AnimatedRow {layer} label="Fade out" path="c.fadeOut"><NumField {...controlProps} get={get('fadeOut', 0)} edit={edit('fadeOut', 'Fade out')} label="Fade out" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></AnimatedRow>
+  <AnimatedRow {layer} label="Trim start" path="c.trim"><NumField {api} {mixed} get={get('trim', 0)} edit={edit('trim', 'Trim start')} label="Trim start" step={0.05} precision={2} min={0} unit="s" /></AnimatedRow>
+  <AnimatedRow {layer} label="Gain" path="c.gain"><NumField {api} {mixed} get={get('gain', 1)} edit={edit('gain', 'Gain')} label="Gain" step={0.05} precision={2} min={0} max={4} /></AnimatedRow>
+  <AnimatedRow {layer} label="Fade in" path="c.fadeIn"><NumField {api} {mixed} get={get('fadeIn', 0)} edit={edit('fadeIn', 'Fade in')} label="Fade in" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></AnimatedRow>
+  <AnimatedRow {layer} label="Fade out" path="c.fadeOut"><NumField {api} {mixed} get={get('fadeOut', 0)} edit={edit('fadeOut', 'Fade out')} label="Fade out" step={0.05} precision={2} min={0} max={layer.dur} unit="s" /></AnimatedRow>
 {:else if layer.type === 'shader'}
   <button
     type="button"
@@ -144,9 +147,9 @@
   {#if shaderError}
     <div role="status" style="font-size:var(--fs-xs);color:var(--red);padding:6px 4px;white-space:pre-wrap;max-height:90px;overflow:auto">{shaderError}</div>
   {/if}
-  <AnimatedRow {layer} label="Width" path="c.w"><NumField {...controlProps} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Height" path="c.h"><NumField {...controlProps} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
 {:else if layer.type === 'extension'}
-  <AnimatedRow {layer} label="Width" path="c.w"><NumField {...controlProps} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
-  <AnimatedRow {layer} label="Height" path="c.h"><NumField {...controlProps} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
+  <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>
 {/if}

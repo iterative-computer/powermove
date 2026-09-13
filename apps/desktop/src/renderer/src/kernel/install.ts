@@ -59,7 +59,7 @@ import TextField from '../controls/TextField.svelte';
 import ToggleField from '../controls/ToggleField.svelte';
 import Row from '../controls/Row.svelte';
 import Section from '../controls/Section.svelte';
-import { channelBinding, compositionBinding, contentBinding, layerFieldBinding } from '../controls/binding';
+import { channelBinding, compositionBinding, contentBinding, layerFieldBinding, type ControlBindingAPI } from '../controls/binding';
 import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
 import { perf, transport } from '../state/transport.svelte';
@@ -130,15 +130,15 @@ const controls: ControlsAPI = {
   binding: null as unknown as ControlsAPI['binding']
 };
 
-/** Binding helpers close over the host registry so extensions never hold PM. */
-function boundControls(PM: LegacyPM): ControlsAPI {
+/** Binding helpers close over typed kernel capabilities. */
+function boundControls(api: ControlBindingAPI): ControlsAPI {
   return {
     ...controls,
     binding: {
-      channelBinding: (layerId, channel, options) => channelBinding(PM, layerId, channel, options),
-      layerFieldBinding: (layerId, field, options) => layerFieldBinding(PM, layerId, field as any, options),
-      contentBinding: (layerId, field, options) => contentBinding(PM, layerId, field, options),
-      compositionBinding: (field, options) => compositionBinding(PM, field as any, options)
+      channelBinding: (layerId, channel, options) => channelBinding(api, layerId, channel, options),
+      layerFieldBinding: (layerId, field, options) => layerFieldBinding(api, layerId, field as any, options),
+      contentBinding: (layerId, field, options) => contentBinding(api, layerId, field, options),
+      compositionBinding: (field, options) => compositionBinding(api, field as any, options)
     }
   };
 }
@@ -209,6 +209,8 @@ function makeModel(PM: LegacyPM): ModelAPI {
     mkLayer: (...args) => PM?.mkLayer?.(...args),
     mkMask: (...args) => PM?.mkMask?.(...args),
     mkProject: (...args) => PM?.mkProject?.(...args),
+    cloneLayer: (layer) => PM?.cloneLayer?.(layer),
+    normalizeFill: (value, fallback) => PM?.normalizeFill?.(value, fallback),
     layerDefinition: (id) => PM?.layerDefinition?.(id),
     curComp: () => PM?.curComp?.() ?? PM?.proj,
     layer: (id) => PM?.L?.(id) ?? null,
@@ -329,6 +331,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
       pick: (x, y, time, options) => PM?.GL?.pick?.(x, y, time, options) ?? null,
       init: (...args) => !!PM?.GL?.init?.(...args),
       resize: (...args) => !!PM?.GL?.resize?.(...args),
+      compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
       get context() { return PM?.GL?.gl ?? null; }
     },
@@ -348,6 +351,7 @@ function makeUIState(PM: LegacyPM): UIStateAPI {
     setFxOpen: (effect, open) => !!PM?.UIState?.setFxOpen?.(effect, open),
     getReveal: (layer) => PM?.UIState?.getReveal?.(layer) ?? null,
     setReveal: (layer, keys) => PM?.UIState?.setReveal?.(layer, keys) ?? null,
+    getShaderMeta: (layer) => PM?.UIState?.getShaderMeta?.(layer) ?? null,
     setShaderMeta: (layer, patch) => PM?.UIState?.setShaderMeta?.(layer, patch) ?? null
   };
 }
@@ -459,19 +463,16 @@ function makeSpace3D(PM: LegacyPM): Space3DAPI {
   } as Space3DAPI;
 }
 
-function makeUI(PM: LegacyPM): UIAPI {
-  const gesturePM = new Proxy(PM, {
-    get(target, property, receiver) {
-      if (property === 'Edit' && !target.Edit) return { begin() {}, dispatch() {}, commit() {}, cancel() {}, apply() {} };
-      if (property === 'hist' && !target.hist) return { begin() {}, commit() {}, cancel() {}, do: (_label: string, fn: () => unknown) => fn() };
-      return Reflect.get(target, property, receiver);
-    }
-  });
+function makeUI(
+  PM: LegacyPM,
+  controlAPI: ControlBindingAPI,
+  gestureAPI: Pick<PowermoveAPI, 'edit' | 'history'>
+): UIAPI {
   class BoundEditGesture extends EditGesture {
-    constructor(binding: EditBinding) { super(gesturePM, binding); }
+    constructor(binding: EditBinding) { super(gestureAPI, binding); }
   }
   return {
-    controls: boundControls(PM),
+    controls: boundControls(controlAPI),
     toast: (text, opts) => PM?.toast?.(text, opts?.sticky ? 8000 : 2200, opts ?? {}),
     confirm: (title, body) =>
       new Promise<boolean>((resolve) => {
@@ -660,24 +661,33 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
      later without recapturing a stale binding. */
   const box: { loader: Loader | null } = { loader: null };
 
+  const project = makeProject(PM);
+  const anim = makeAnim(PM);
+  const model = makeModel(PM);
+  const transportAPI = makeTransport(PM);
+  const history = makeHistory(PM);
+  const edit = makeEdit(PM);
+  const util = makeUtil(PM);
+  const controlAPI: ControlBindingAPI = { project, anim, model, transport: transportAPI, util };
+
   const deps: Omit<HostDeps, 'reportRuntimeError'> = {
     pm: PM,
     state: { doc, sel, transport, perf },
-    ui: makeUI(PM),
-    project: makeProject(PM),
-    anim: makeAnim(PM),
-    model: makeModel(PM),
+    ui: makeUI(PM, controlAPI, { edit, history }),
+    project,
+    anim,
+    model,
     selection: makeSelection(PM),
     groups: makeGroups(PM),
-    transport: makeTransport(PM),
-    history: makeHistory(PM),
-    edit: makeEdit(PM),
+    transport: transportAPI,
+    history,
+    edit,
     media: makeMedia(PM),
     render: makeRender(PM),
     uiState: makeUIState(PM),
     dnd: makeDnd(PM),
     workspace: makeWorkspace(PM),
-    util: makeUtil(PM),
+    util,
     ease: makeEase(PM),
     space3d: makeSpace3D(PM),
     assets: makeAssets(PM),
@@ -761,6 +771,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   on('sel', () => kernel.events.emit('selection', deps.project.selection()));
   on('time', (t: number) => kernel.events.emit('time', Number(t ?? PM?.time ?? 0)));
   on('transport', () => kernel.events.emit('transport', { playing: !!PM?.playing }));
+  on('fonts', (families: string[]) => kernel.events.emit('fonts', families));
   on('layout', () => kernel.events.emit('layout', undefined));
 
   const syntheticRecord = (id: string): ExtensionRecord => ({

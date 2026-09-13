@@ -3,7 +3,7 @@
   import AnimatedRow from './AnimatedRow.svelte';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc, transport, controlProps } = inspectorContext();
+  const { api, doc, transport, mixed } = inspectorContext();
   const { ColorField, Section, ToggleField } = api.ui.controls;
 
   let { layer }: { layer: any } = $props();
@@ -28,14 +28,14 @@
 </script>
 
 {#if !definition}
-  <Section title="Extension" />
+  <Section {api} title="Extension" />
   <div class="extension-layer-missing" role="status">
     <span>Renderer unavailable</span>
     <code>{String(layer.d?.definition || 'Unknown definition')}</code>
     <small>The structured layer data is preserved.</small>
   </div>
 {:else}
-  <Section title={definition.label} />
+  <Section {api} title={definition.label} />
   {#if Number(layer.d?.version) !== definition.version}
     <div class="extension-layer-warning" role="status">
       Saved with definition v{Number(layer.d?.version) || 1}; installed definition is v{definition.version}.
@@ -55,7 +55,8 @@
       {#if parameter.type === 'color'}
         <AnimatedRow {layer} {path} label={parameter.label}>
           <ColorField
-            {...controlProps}
+            {api}
+            {mixed}
             get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, parameter.label)}
             label={parameter.label}
@@ -64,7 +65,8 @@
       {:else if parameter.type === 'toggle'}
         <AnimatedRow {layer} {path} label={parameter.label}>
           <ToggleField
-            {...controlProps}
+            {api}
+            {mixed}
             get={() => (doc.tick.values, doc.proj, transport.time, api.anim.evP(layer, property, transport.time, path))}
             edit={fieldBinding(path, parameter.label)}
             label={parameter.label}

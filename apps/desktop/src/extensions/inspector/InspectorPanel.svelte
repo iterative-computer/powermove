@@ -26,12 +26,9 @@
   );
   const firstLayer = $derived(selectedLayers[0]);
 
-  // PHASE3-GAP: EventsAPI has no font-catalog event; FontFaceSet covers completed browser font loads.
   $effect(() => {
-    const fonts = window.document.fonts;
-    const update = () => { fontsVersion++; };
-    fonts?.addEventListener?.('loadingdone', update);
-    return () => fonts?.removeEventListener?.('loadingdone', update);
+    const subscription = api.events.on('fonts', () => { fontsVersion++; });
+    return () => subscription.dispose();
   });
 </script>
 

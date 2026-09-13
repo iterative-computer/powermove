@@ -3,7 +3,7 @@ import type { PowermoveAPI } from 'powermove';
 import { createTimelineRuntime, timelinePanelOptions } from './timeline';
 import { adjacentKeyframe } from './keyframe-navigation';
 import { createPropertyReveal, propertyShortcuts } from './property-reveal';
-import { cloneLayer, selectedLayers, trimAtStart } from './api-helpers';
+import { selectedLayers, trimAtStart } from './api-helpers';
 
 let activeApi: PowermoveAPI | null = null;
 
@@ -60,7 +60,7 @@ export function splitSelectedLayersAtPlayhead(api: PowermoveAPI): string[] {
   api.history.do('Split', () => {
     for (const layer of selectedLayers(api)) {
       if (api.transport.time() <= layer.from || api.transport.time() >= layer.from + layer.dur) continue;
-      const right = cloneLayer(api, layer);
+      const right = api.model.cloneLayer(layer);
       // Keyframe times are layer-local. Preserve their composition times
       // when the tail gets a new in point, including keys before the cut.
       const offset = api.transport.time() - layer.from;

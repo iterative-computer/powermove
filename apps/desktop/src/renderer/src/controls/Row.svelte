@@ -4,6 +4,7 @@
 
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import type { PowermoveAPI } from '../kernel/api';
   import { provideRowLabel } from './context';
 
   let {
@@ -12,7 +13,8 @@
     left,
     onLabel,
     pair = false,
-    action
+    action,
+    api
   }: {
     label: string;
     children: Snippet;
@@ -22,7 +24,9 @@
     pair?: boolean;
     /** A 24px slot after a pair (link, lock, …). */
     action?: Snippet;
+    api: PowermoveAPI;
   } = $props();
+
 
   const labelId = `pm-control-label-${++sequence}`;
   provideRowLabel(labelId);

@@ -4,15 +4,18 @@
   import { EditGesture, type EditBinding } from '../../controls/gesture';
   import { doc } from '../../state/document.svelte';
   import '../../controls/controls.css';
+  import type { PowermoveAPI } from '../../kernel/api';
 
   let {
     PM,
+    api,
     layer,
     panelId,
     onWrite,
     onCompile
   }: {
     PM: Record<string, any>;
+    api: PowermoveAPI;
     layer: ShaderLayer;
     panelId: string;
     onWrite?: () => void;
@@ -27,7 +30,7 @@
     origin: 'shader-panel',
     command: (value) => ({ type: 'set_content', target: layer.id, patch: { code: String(value ?? '') } })
   };
-  const gesture = new EditGesture(untrack(() => PM), edit);
+  const gesture = new EditGesture(untrack(() => api), edit);
   const keyboardHelpId = `${untrack(() => panelId)}-shader-editor-keyboard-help`;
 
   let textareaElement: HTMLTextAreaElement;

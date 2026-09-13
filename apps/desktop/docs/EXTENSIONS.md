@@ -87,16 +87,16 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **project** — `get()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`.
   `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
 - **anim** — channel evaluation, property/keyframe edits, easing, expression errors, animation versioning, and 2D transform matrices.
-- **model** — property/keyframe/layer/project factories, model schema tables, current composition, and layer lookups.
+- **model** — property/keyframe/layer/project factories, model schema tables, current composition, layer lookups, `cloneLayer(layer)`, and `normalizeFill(value, fallback?)`.
 - **selection** — live selection reads, mutation with legacy events/invalidation, selected-key resolution, and key-selection mode.
 - **groups** — hierarchy queries, selection expansion, stack normalization, and pose-preserving reparenting.
 - **transport** — time, playback, stepping, quality/performance, preview resolution, and render/UI invalidation.
 - **history** — raw transaction begin/commit/cancel, undo/redo, external entries, and transaction-aware selection history.
 - **edit** — validated one-shot edits, gesture transactions, dispatch, cancel/rollback, and structural mutation.
 - **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading.
-- **render** — WebGL bounds/picking/setup, raster access, offscreen frame rendering, and snapshots.
-- **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata.
-- **ui** — controls, overlays, menus, pointer drag, parent picking, shader editor opening, and PM-bound `gesture` construction.
+- **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots.
+- **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
+- **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, and edit/history-backed `gesture` construction.
 - **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
 - **workspace** — active workspace mutation plus indexed panel add/move/hide/restore/refresh operations.
 - **util** — numeric interpolation/snapping, timecode, ids, and colour conversion.
@@ -104,8 +104,13 @@ Full types: `powermove.d.ts` (next to this file). Summary:
 - **space3d** — PM-bound 3D transforms, perspective planes, projection, inversion, and containment.
 - **services** — LIFO typed runtime service registration; disposing an override restores the previous implementation.
 - **storage** — per-extension `get/set/delete` (persisted).
-- **events / on** — `project:changed`, `selection`, `time`, `transport`, `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
+- **events / on** — `project:changed`, `selection`, `time`, `transport`, `fonts` (complete family list), `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
 - **extensions** — introspection: `list`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
+- **model.cloneLayer** — `cloneLayer(layer): Layer` deep-clones a layer and refreshes its layer/keyframe ids and numbered name.
+- **model.normalizeFill** — `normalizeFill(value, fallback?): Fill` canonicalizes solid, gradient, radial, and empty fills.
+- **uiState.getShaderMeta** — `getShaderMeta(layer): ShaderMeta | null` reads the compositor metadata cached for a layer.
+- **render.gl.compileError** — `compileError(key): string | null` reads the latest shader compilation diagnostic for a program key.
+- **events.fonts** — `on('fonts', families => …)` receives the complete ordered font-family list whenever the catalogue changes.
 - **host.pm** — **Deprecated**, unstable escape hatch to the legacy `PM` object; use the typed namespaces above.
 - **host.state** — **Deprecated**, unstable escape hatch to the renderer's `doc`, `sel`,
   `transport`, and `perf` rune stores for built-in UI migrations.

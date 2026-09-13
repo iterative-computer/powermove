@@ -15,44 +15,10 @@ export function selectedLayers(api: Pick<PowermoveAPI, 'model' | 'selection'>): 
   return api.selection.layers().map((id) => api.model.layer(id)).filter((layer): layer is Layer => layer != null);
 }
 
-export function cloneLayer(api: Pick<PowermoveAPI, 'anim' | 'project' | 'util'>, layer: Layer): Layer {
-  const clone = JSON.parse(JSON.stringify(layer)) as Layer;
-  clone.id = api.util.uid('L');
-  const baseName = layer.name.replace(/ (\d+)$/, '');
-  clone.name = `${baseName} ${api.project.get().layers.filter((item) => item.name.startsWith(baseName)).length + 1}`;
-  const renew = (property: unknown): void => {
-    const channel = property as { kf?: Array<{ i: string }> } | null;
-    for (const keyframe of channel?.kf ?? []) keyframe.i = api.util.uid('k');
-  };
-  Object.values(clone.p ?? {}).forEach(renew);
-  for (const effect of clone.fx ?? []) {
-    renew(effect.on);
-    Object.values(effect.p ?? {}).forEach(renew);
-  }
-  for (const mask of clone.masks ?? []) {
-    Object.values(mask.p ?? {}).forEach(renew);
-    renew(mask.shape);
-    renew(mask.mode);
-    renew(mask.on);
-  }
-  Object.values(clone.d ?? {}).forEach(renew);
-  renew(clone.blend);
-  renew(clone.mblur);
-  renew(clone.on);
-  const dynamic = clone as Layer & {
-    d: Layer['d'] & { uniforms?: Record<string, unknown>; params?: Record<string, unknown> };
-    transitionIn?: { p?: Record<string, unknown> } | null;
-    transitionOut?: { p?: Record<string, unknown> } | null;
-  };
-  Object.values(dynamic.d?.uniforms ?? {}).forEach(renew);
-  Object.values(dynamic.d?.params ?? {}).forEach(renew);
-  for (const transition of [dynamic.transitionIn, dynamic.transitionOut]) Object.values(transition?.p ?? {}).forEach(renew);
-  return clone;
-}
-
-export function trimAtStart(api: Pick<PowermoveAPI, 'anim' | 'media' | 'transport'>, layer: Layer, nextFrom: number): number {
-  const content = api.anim.resolveContent(layer, api.transport.time()) as Layer['d'] & { trim?: number };
-  const trim = Math.max(0, Number(content?.trim) || 0);
+export function trimAtStart(api: Pick<PowermoveAPI, 'media'>, layer: Layer, nextFrom: number): number {
+  // Pre-migration timeline.ts:2028,2043-2045 captured raw d.trim at drag start,
+  // then advanced it by the layer's media rate as the in-point moved.
+  const trim = Math.max(0, Number((layer.d as Layer['d'] & { trim?: number })?.trim) || 0);
   return Math.max(0, trim + (nextFrom - Number(layer.from || 0)) * api.media.timing.rate(layer));
 }
 

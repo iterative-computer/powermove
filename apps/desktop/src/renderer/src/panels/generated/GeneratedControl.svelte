@@ -12,9 +12,11 @@
   import CurveControl from './CurveControl.svelte';
   import GeneratedButton from './GeneratedButton.svelte';
   import Readout from './Readout.svelte';
+  import type { PowermoveAPI } from '../../kernel/api';
 
   let {
     PM,
+    api,
     control,
     get,
     edit,
@@ -23,6 +25,7 @@
     onReset
   }: {
     PM: Record<string, any>;
+    api: PowermoveAPI;
     control: GeneratedControl;
     get?: () => unknown;
     edit?: EditBinding;
@@ -33,25 +36,25 @@
 </script>
 
 {#if control.type === 'readout'}
-  <Row label={control.label}><Readout {PM} source={control.source} /></Row>
+  <Row {api} label={control.label}><Readout {PM} source={control.source} /></Row>
 {:else if control.type === 'button'}
   <GeneratedButton {PM} {control} {toolState} {onPreview} {onReset} />
 {:else if get && edit && control.type === 'curve'}
-  <CurveControl {PM} {control} {get} {edit} />
+  <CurveControl {PM} {api} {control} {get} {edit} />
 {:else if get && edit && control.type === 'text'}
-  <Row label={control.label}><TextField {PM} {get} {edit} label={control.label} mono={false} /></Row>
+  <Row {api} label={control.label}><TextField {api} {get} {edit} label={control.label} mono={false} /></Row>
 {:else if get && edit && control.type === 'color'}
-  <Row label={control.label}><ColorField {PM} {get} {edit} label={control.label} /></Row>
+  <Row {api} label={control.label}><ColorField {api} {get} {edit} label={control.label} /></Row>
 {:else if get && edit && control.type === 'fill'}
-  <Row label={control.label}><FillField {PM} {get} {edit} label={control.label} fallback={PM.proj.bg} /></Row>
+  <Row {api} label={control.label}><FillField {api} {get} {edit} label={control.label} fallback={api.project.get().bg} /></Row>
 {:else if get && edit && control.type === 'toggle'}
-  <Row label={control.label}><ToggleField {PM} {get} {edit} label={control.label} /></Row>
+  <Row {api} label={control.label}><ToggleField {api} {get} {edit} label={control.label} /></Row>
 {:else if get && edit && control.type === 'select'}
-  <Row label={control.label}><SelectField {PM} {get} {edit} label={control.label} options={control.options} /></Row>
+  <Row {api} label={control.label}><SelectField {api} {get} {edit} label={control.label} options={control.options} /></Row>
 {:else if get && edit && control.type === 'slider'}
-  <Row label={control.label}>
+  <Row {api} label={control.label}>
     <NumField
-      {PM}
+      {api}
       {get}
       {edit}
       label={control.label}

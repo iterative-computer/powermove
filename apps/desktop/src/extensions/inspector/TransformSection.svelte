@@ -2,7 +2,7 @@
   import { inspectorContext } from './context';
   import ChannelRow from './ChannelRow.svelte';
 
-  const { api, doc, controlProps } = inspectorContext();
+  const { api, doc, mixed } = inspectorContext();
   const { Section, Row, ToggleField } = api.ui.controls;
 
   let { layer }: {
@@ -12,8 +12,8 @@
   const edit3D = { mode: 'command' as const, label: '3D layer', origin: 'inspector' as const, command: (value: unknown) => ({type: 'set_layer' as const, target: layer.id, patch: {threeD: !!value}}) };
 </script>
 
-<Section title="Transform" />
-{#if layer.type !== 'adjustment'}<Row label="3D layer"><ToggleField {...controlProps} get={() => threeD} edit={edit3D} label="3D layer" /></Row>{/if}
+<Section {api} title="Transform" />
+{#if layer.type !== 'adjustment'}<Row {api} label="3D layer"><ToggleField {api} {mixed} get={() => threeD} edit={edit3D} label="3D layer" /></Row>{/if}
 <ChannelRow {layer} channel="position.x" label="Position X" prefix="X" />
 <ChannelRow {layer} channel="position.y" label="Position Y" prefix="Y" />
 {#if threeD}<ChannelRow {layer} channel="position.z" label="Position Z" prefix="Z" />{/if}

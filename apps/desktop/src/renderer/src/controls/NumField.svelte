@@ -9,9 +9,10 @@
   import { round } from './control-utils';
   import './controls.css';
   import { horizontalScrub } from './horizontal-scrub';
+  import type { PowermoveAPI } from '../kernel/api';
 
   let {
-    PM,
+    api,
     get,
     edit,
     min,
@@ -24,9 +25,10 @@
     ariaLabel,
     link = false,
     onInput,
-    onCommit
+    onCommit,
+    mixed
   }: {
-    PM: Record<string, any>;
+    api: PowermoveAPI;
     get: () => unknown;
     edit: EditBinding;
     min?: number;
@@ -40,12 +42,13 @@
     link?: boolean;
     onInput?: (value: number) => void;
     onCommit?: (value: number) => void;
+    mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
 
   const labelledBy = rowLabelId();
   const value = $derived((doc.tick.values, doc.proj, transport.time, get()));
   const numeric = $derived(typeof value === 'number' ? value : Number(value));
-  const gesture = $derived(new EditGesture(PM, edit));
+  const gesture = $derived(new EditGesture(api, edit));
   let input: HTMLInputElement;
   let editing = $state(false);
   let draft = $state('');
@@ -60,11 +63,11 @@
     return result + unit;
   };
 
-  const mixed = $derived((sel.layers,doc.tick.values, doc.tick.structure, doc.proj, transport.time, PM.inspectorMixed?.(edit,value) ?? false));
-  const shown = $derived(editing ? draft : mixed ? 'Mixed' : format(value));
+  const isMixed = $derived((sel.layers,doc.tick.values, doc.tick.structure, doc.proj, transport.time, mixed?.(edit,value) ?? false));
+  const shown = $derived(editing ? draft : isMixed ? 'Mixed' : format(value));
 
   function openEditor(): void {
-    draft = String(round(PM, Number(get()), 3));
+    draft = String(round(api, Number(get()), 3));
     editing = true;
     void tick().then(() => { input.focus(); input.select(); });
   }
@@ -77,7 +80,7 @@
   function clampValue(next: number): number {
     if (min != null) next = Math.max(min, next);
     if (max != null) next = Math.min(max, next);
-    return round(PM, next, 4);
+    return round(api, next, 4);
   }
 
   function finish(commit: boolean): void {
@@ -85,7 +88,7 @@
     if (commit) {
       const next = parseDraft();
       if (Number.isFinite(next)) {
-        const rounded = round(PM, next, 4);
+        const rounded = round(api, next, 4);
         gesture.once(rounded);
         onCommit?.(rounded);
       }
@@ -133,7 +136,7 @@
     cancelScrub = () => { handle?.cancel(); cancel(); };
     window.addEventListener('keydown', escape, true);
     scrub.begin();
-    const handle = PM.drag(event, {
+    const handle = api.ui.drag(event, {
       cursor: 'ew-resize',
       infinite: true,
       move: (dx: number, _dy: number, nextEvent: PointerEvent) => {
@@ -143,7 +146,7 @@
         let next = start + dx * effectiveStep * multiplier * effectiveSpeed;
         if (min != null) next = Math.max(min, next);
         if (max != null) next = Math.min(max, next);
-        next = round(PM, next, 3);
+        next = round(api, next, 3);
         scrub.write(next);
         onInput?.(next);
       },
@@ -184,7 +187,7 @@
       const direction = event.key === 'ArrowUp' ? 1 : -1;
       const parsed = Number.parseFloat(draft || '0');
       const next = (Number.isFinite(parsed) ? parsed : 0) + direction * effectiveStep * (event.shiftKey ? 10 : 1);
-      draft = String(round(PM, next, 4));
+      draft = String(round(api, next, 4));
     }
   }
 </script>
