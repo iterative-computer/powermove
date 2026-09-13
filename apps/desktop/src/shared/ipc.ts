@@ -39,6 +39,7 @@ export const IPC = {
   codexSteer: 'codex:steer',
   codexCancel: 'codex:cancel',
   codexFixPrompt: 'codex:fix-prompt',
+  codexRebasePrompt: 'codex:rebase-prompt',
   codexRestoreChangeSet: 'codex:restore-change-set',
   codexEvent: 'codex:event', // main → renderer
   agentToolRequest: 'agent-tool:request', // main → renderer
@@ -225,6 +226,10 @@ export interface CodexFixPromptRequest {
   id: string;
   error: string;
   files: CodexFixPromptFile[];
+}
+
+export interface CodexRebasePromptRequest {
+  id: string;
 }
 
 export type CodexTraceEvent =
@@ -425,6 +430,7 @@ export interface PowermoveBridge {
     steer(req: CodexSteerRequest): Promise<CodexSteerResult>;
     cancel(id: string): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
+    rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
     requestComputerConsent(req: ConsentRequest): Promise<ConsentResult>;
   };

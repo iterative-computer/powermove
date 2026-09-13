@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AGENT_COMMAND_TYPES, EDIT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
-import { agentInstructions, agentResultSchema, buildFixPrompt } from './instructions';
+import { agentInstructions, agentResultSchema, buildFixPrompt, buildRebasePrompt } from './instructions';
 
 function normalizeText(value: string): string {
   return value
@@ -136,5 +136,28 @@ describe('buildFixPrompt', () => {
   it('states when no source files were supplied', () => {
     expect(buildFixPrompt({ id: 'broken-extension', error: 'boom', files: [] }))
       .toBe('The extension `broken-extension` fails: boom. Files:\n\n(none)');
+  });
+});
+
+describe('buildRebasePrompt', () => {
+  it('matches the committed rebase prompt contract', () => {
+    expect(buildRebasePrompt({
+      forkId: 'my-timeline',
+      forkedFrom: 'timeline',
+      base: '1.2.0',
+      current: '1.4.0'
+    })).toBe(`Update the user fork \`my-timeline\`. It was forked from \`timeline@1.2.0\`, and Powermove now ships \`timeline@1.4.0\`.
+
+Call \`stage_fork_rebase\` with {"id":"my-timeline"}. Work only inside the returned staging paths. Merge every file in \`changedUpstream\` into \`workingDir\` using a three-way comparison: \`baseDir\` is the old base, the working copy is the user's version (theirs), and \`oursDir\` is the shipped version (ours). Preserve the user's changes, behavior, and intent. Treat every path in \`conflicts\` with care, and explain each conflict resolution in your final response. When finished, return the fork in the result's \`extensions\` array as {"id":"my-timeline","action":"updated","summary":"..."}.`);
+  });
+
+  it('stays below the 1.5 KB prompt budget', () => {
+    const prompt = buildRebasePrompt({
+      forkId: 'x'.repeat(64),
+      forkedFrom: 'y'.repeat(64),
+      base: '999999.999999.999999',
+      current: '999999.999999.999999'
+    });
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(1_500);
   });
 });

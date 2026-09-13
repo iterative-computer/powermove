@@ -143,6 +143,59 @@ describe('extension registry', () => {
     expect(setup.registry.list()[0]?.bundleUrl).toContain('?v=hash2');
   });
 
+  it('marks a stale user fork and clears the update after its fork base catches up', async () => {
+    const setup = await harness({ builtinIds: ['builtin-tools'] });
+    const builtinDirectory = await writeExtension(setup.resourcesDir, 'builtin-tools');
+    await fs.writeFile(
+      path.join(builtinDirectory, 'manifest.json'),
+      JSON.stringify(manifest('builtin-tools', { version: '2.0.0' }))
+    );
+    const userDirectory = await writeExtension(setup.userDir, 'custom-tools');
+    await fs.writeFile(
+      path.join(userDirectory, 'manifest.json'),
+      JSON.stringify(manifest('custom-tools', { forkedFrom: 'builtin-tools@1.0.0', replaces: ['builtin-tools'] }))
+    );
+
+    await setup.registry.refresh();
+    expect(setup.registry.list().find((record) => record.id === 'custom-tools')?.update).toEqual({
+      forkedFrom: 'builtin-tools',
+      base: '1.0.0',
+      current: '2.0.0'
+    });
+
+    await fs.writeFile(
+      path.join(userDirectory, 'manifest.json'),
+      JSON.stringify(manifest('custom-tools', { forkedFrom: 'builtin-tools@2.0.0', replaces: ['builtin-tools'] }))
+    );
+    await setup.registry.refresh();
+    expect(setup.registry.list().find((record) => record.id === 'custom-tools')?.update).toBeUndefined();
+  });
+
+  it('carries stale-fork updates on user build errors but never marks project forks', async () => {
+    const projectDir = await temporaryDirectory();
+    const compile = vi.fn(async () => ({ ok: false as const, error: 'broken build' }));
+    const setup = await harness({ builtinIds: ['builtin-tools'], projectDirs: [projectDir], compile });
+    const builtinDirectory = await writeExtension(setup.resourcesDir, 'builtin-tools');
+    await fs.writeFile(
+      path.join(builtinDirectory, 'manifest.json'),
+      JSON.stringify(manifest('builtin-tools', { version: '2.0.0' }))
+    );
+    for (const [root, id] of [[setup.userDir, 'user-tools'], [projectDir, 'project-tools']] as const) {
+      const directory = await writeExtension(root, id);
+      await fs.writeFile(
+        path.join(directory, 'manifest.json'),
+        JSON.stringify(manifest(id, { forkedFrom: 'builtin-tools@1.0.0', replaces: ['builtin-tools'] }))
+      );
+    }
+
+    await setup.registry.refresh();
+    expect(setup.registry.list().find((record) => record.id === 'user-tools')).toMatchObject({
+      health: { state: 'build-error' },
+      update: { forkedFrom: 'builtin-tools', base: '1.0.0', current: '2.0.0' }
+    });
+    expect(setup.registry.list().find((record) => record.id === 'project-tools')?.update).toBeUndefined();
+  });
+
   it('creates a validated extension atomically, refreshes it, and announces creation', async () => {
     const setup = await harness();
 

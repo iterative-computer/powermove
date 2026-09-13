@@ -6,6 +6,7 @@ import { BrowserWindow, shell } from 'electron';
 
 import {
   EXTENSION_ID,
+  EXTENSION_VERSION,
   EXTENSIONS_STORE_KEY,
   EXT_IPC,
   MANIFEST_LIMITS,
@@ -106,6 +107,9 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
     await fs.mkdir(options.buildDir, { recursive: true });
 
     const builtins = await readBuiltins(options.resourcesDir, options.builtinIds);
+    const shippedBuiltins = new Map(
+      builtins.flatMap((builtin) => builtin.manifest === null ? [] : [[builtin.id, builtin.manifest] as const])
+    );
     const scanDirs: Array<{ dir: string; scope: 'user' | 'project' }> = [
       { dir: options.userDir, scope: 'user' },
       ...(options.projectDirs ?? []).map((dir) => ({ dir, scope: 'project' as const }))
@@ -164,11 +168,13 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
         continue;
       }
 
+      const update = staleForkUpdate(candidate, shippedBuiltins);
+
       let signature: string;
       try {
         signature = await directorySignature(candidate.dir);
       } catch (error) {
-        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, errorText(error), updatedAt));
+        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, errorText(error), updatedAt, update));
         continue;
       }
 
@@ -190,7 +196,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       }
 
       if (!result.ok) {
-        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, result.error, updatedAt));
+        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, result.error, updatedAt, update));
         continue;
       }
 
@@ -198,6 +204,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
         id,
         scope: candidate.scope,
         manifest: candidate.manifest,
+        ...(update === undefined ? {} : { update }),
         dir: candidate.dir,
         enabled,
         bundleUrl: `app://powermove/ext/${id}/bundle.js?v=${result.hash}`,
@@ -407,12 +414,14 @@ function buildErrorRecord(
   manifest: ExtensionManifest,
   enabled: boolean,
   error: string,
-  updatedAt: number
+  updatedAt: number,
+  update?: ExtensionRecord['update']
 ): ExtensionRecord {
   return {
     id: candidate.id,
     scope: candidate.scope,
     manifest,
+    ...(update === undefined ? {} : { update }),
     dir: candidate.dir,
     enabled,
     bundleUrl: null,
@@ -420,6 +429,25 @@ function buildErrorRecord(
     health: enabled ? { state: 'build-error', error: truncateError(error) } : { state: 'disabled' },
     updatedAt
   };
+}
+
+function staleForkUpdate(
+  candidate: DiscoveredExtension,
+  shippedBuiltins: ReadonlyMap<string, ExtensionManifest>
+): ExtensionRecord['update'] {
+  if (candidate.scope !== 'user' || candidate.manifest === null) return undefined;
+  const forkedFrom = candidate.manifest.forkedFrom;
+  if (!forkedFrom) return undefined;
+
+  const separator = forkedFrom.indexOf('@');
+  if (separator <= 0 || separator !== forkedFrom.lastIndexOf('@')) return undefined;
+  const builtinId = forkedFrom.slice(0, separator);
+  const base = forkedFrom.slice(separator + 1);
+  if (!EXTENSION_ID.test(builtinId) || !EXTENSION_VERSION.test(base)) return undefined;
+
+  const shipped = shippedBuiltins.get(builtinId);
+  if (!shipped || !candidate.manifest.replaces?.includes(builtinId) || shipped.version === base) return undefined;
+  return { forkedFrom: builtinId, base, current: shipped.version };
 }
 
 async function readBuiltins(resourcesDir: string, ids: readonly string[]): Promise<ParsedBuiltin[]> {

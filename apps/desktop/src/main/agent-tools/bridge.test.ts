@@ -5,7 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { IPC, type AgentToolRequestEvent } from '../../shared/ipc';
 import { PowermoveAgentToolBridge } from './bridge';
@@ -87,7 +87,7 @@ describe('native Powermove agent tool bridge', () => {
 
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
-      'fork_builtin_extension', 'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes'
+      'fork_builtin_extension', 'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'stage_fork_rebase'
     ]);
 
     const state = await rpc(child, {
@@ -156,6 +156,44 @@ describe('native Powermove agent tool bridge', () => {
     expect(owner.requests).toEqual([]);
     await expect(fs.readFile(path.join(result.dir, '.forked-from', 'manifest.json'), 'utf8'))
       .resolves.toContain('"id":"timeline"');
+  });
+
+  it('runs fork rebase staging in main for the owning run directory', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const stageForkRebase = vi.fn(async ({ forkId, stagingDirectory }) => ({
+      forkId,
+      workingDir: `${stagingDirectory}/${forkId}`,
+      baseDir: `${stagingDirectory}/.rebase/${forkId}/base`,
+      oursDir: `${stagingDirectory}/.rebase/${forkId}/ours`,
+      changedByUser: ['index.ts'], changedUpstream: ['index.ts'], conflicts: ['index.ts']
+    }));
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      command: process.execPath,
+      mcpServerPath: path.join(__dirname, 'mcp-server.mjs'),
+      timeoutMs: 2_000,
+      stageForkRebase
+    });
+    bridges.push(bridge);
+    const session = await bridge.openSession({
+      runId: 'native-run-rebase', owner: owner as never, baseRevision: 0,
+      resolveStagingDirectory: async () => '/private/stage/current-run'
+    });
+    const child = spawn(session.mcpConfig.command, session.mcpConfig.args, {
+      env: { ...process.env, ...session.mcpConfig.env },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    children.push(child);
+
+    const response = await rpc(child, {
+      jsonrpc: '2.0', id: 9, method: 'tools/call',
+      params: { name: 'stage_fork_rebase', arguments: { id: 'my-fork' } }
+    });
+    expect(response).toMatchObject({ id: 9, result: { isError: false } });
+    expect(stageForkRebase).toHaveBeenCalledExactlyOnceWith({
+      forkId: 'my-fork', stagingDirectory: '/private/stage/current-run'
+    });
+    expect(owner.requests).toHaveLength(0);
   });
 
   it('survives a tool client that resets the connection mid-request', async () => {

@@ -719,7 +719,22 @@ export interface ControlsAPI {
  */
 export interface UIAPI {
   readonly controls: ControlsAPI;
-  toast(text: string, opts?: { sticky?: boolean; dismissible?: boolean; icon?: string }): void;
+  toast(
+    text: string,
+    opts?: {
+      sticky?: boolean;
+      dismissible?: boolean;
+      icon?: string;
+      /** Replace an earlier toast with the same key instead of stacking. */
+      key?: string;
+      /** Persistent notices sit top-right; status toasts stay bottom-center. */
+      corner?: 'top-right';
+      /** One primary action rendered inside the toast. */
+      action?: { label: string; run: () => void };
+      /** Called only on explicit user dismissal. */
+      onDismiss?: () => void;
+    }
+  ): void;
   confirm(title: string, body?: string): Promise<boolean>;
   menu(anchor: HTMLElement | { x: number; y: number }, items: MenuContribution[]): void;
   modal(opts: { title?: string; body?: HTMLElement | string; width?: number; actions?: Array<{ label: string; pri?: boolean; run?: () => unknown }> }): { close(): void; body: HTMLElement };
@@ -850,6 +865,8 @@ export interface ExtensionsAPI {
   reveal(id: string): Promise<void>;
   /** Ask the agent to repair a failing extension (opens the agent panel with a prefilled prompt). */
   requestFix(id: string): void;
+  /** Ask the agent to rebase a stale user fork onto its newly shipped built-in. */
+  rebase(id: string): void;
 }
 
 /* ── the API object ──────────────────────────────────────── */

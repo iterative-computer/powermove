@@ -88,6 +88,19 @@ export function buildFixPrompt({ id, error, files }: BuildFixPromptOptions): str
   return prompt.length > budget ? `${prompt.slice(0, budget)}\n/* …truncated… */` : prompt;
 }
 
+export interface BuildRebasePromptOptions {
+  forkId: string;
+  forkedFrom: string;
+  base: string;
+  current: string;
+}
+
+export function buildRebasePrompt({ forkId, forkedFrom, base, current }: BuildRebasePromptOptions): string {
+  return `Update the user fork \`${forkId}\`. It was forked from \`${forkedFrom}@${base}\`, and Powermove now ships \`${forkedFrom}@${current}\`.
+
+Call \`stage_fork_rebase\` with {"id":${JSON.stringify(forkId)}}. Work only inside the returned staging paths. Merge every file in \`changedUpstream\` into \`workingDir\` using a three-way comparison: \`baseDir\` is the old base, the working copy is the user's version (theirs), and \`oursDir\` is the shipped version (ours). Preserve the user's changes, behavior, and intent. Treat every path in \`conflicts\` with care, and explain each conflict resolution in your final response. When finished, return the fork in the result's \`extensions\` array as {"id":${JSON.stringify(forkId)},"action":"updated","summary":"..."}.`;
+}
+
 export function agentResultSchema(): Record<string, unknown> {
   return {
     type: 'object',

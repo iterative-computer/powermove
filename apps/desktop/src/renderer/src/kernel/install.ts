@@ -650,6 +650,10 @@ function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsHostBridge | null, ge
     requestFix: (id) => {
       if (typeof PM?.requestExtensionFix === 'function') PM.requestExtensionFix(id);
       else PM?.cmd?.('agent');
+    },
+    rebase: (id) => {
+      if (typeof PM?.requestExtensionRebase === 'function') PM.requestExtensionRebase(id);
+      else PM?.cmd?.('agent');
     }
   };
 }

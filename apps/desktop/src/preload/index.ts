@@ -108,6 +108,7 @@ const bridge: PowermoveBridge = {
     steer: (req) => ipcRenderer.invoke(IPC.codexSteer, req),
     cancel: (id) => ipcRenderer.invoke(IPC.codexCancel, { id }) as Promise<void>,
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
+    rebasePrompt: (req) => ipcRenderer.invoke(IPC.codexRebasePrompt, req) as Promise<string>,
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),
     requestComputerConsent: (req) =>
       ipcRenderer.invoke(IPC.consentComputer, req) as Promise<ConsentResult>

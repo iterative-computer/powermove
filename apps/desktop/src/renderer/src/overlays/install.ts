@@ -81,6 +81,8 @@ export function installSvelteOverlays(PM: PMRegistry): void {
   };
   installed = { PM, target, toasts, menu, modal, palette, previous, members, attributes };
   PM.toast = members.toast;
+  /* Keyed notices (fork updates) need to retract without counting as a user dismissal. */
+  PM.dismissToast = (key: string): void => toasts.dismissKey(key);
   PM.menu = members.menu;
   PM.closeMenus = members.closeMenus;
   PM.modal = members.modal;
