@@ -758,7 +758,12 @@ function visibleProps(L: any) {
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
 const t2x = (t: any) => T.gut + (t - T.scrollT) * T.pps;
-const rowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
+/* Unshifted row geometry. While a media drag is over the canvas, rows at or
+   below the insertion slot move down one row so the ghost lands in a real
+   gap: a new layer strip, never on top of an existing one. */
+const rawRowY = (idx: any) => Math.round(T.ruler + idx * T.row - T.scrollY);
+const rowShift = (idx: any) => T.drop && !T.graph && idx >= T.drop.rowIdx ? 1 : 0;
+const rowY = (idx: any) => rawRowY(idx + rowShift(idx));
 
 /* ── draw ──────────────────────────────────────────────── */
 onEvent('project:changed', () => { rowsDirty = true; invalidate('timeline'); });
@@ -1100,7 +1105,8 @@ function drawDropGhost(c: any, W: any, H: any) {
   const pal = clipPalette({ type });
   const dur = d.dur || Math.max(1 / p.fps, Math.min(4, p.dur - d.at) || 4);
   const x0 = t2x(d.at), w = Math.max(6, dur * T.pps);
-  const y = rowY(d.rowIdx);
+  /* the slot is the gap opened by rowShift, so it uses unshifted geometry */
+  const y = rawRowY(d.rowIdx);
   const yy = y + 1, hh = T.row - 2;
   const r = Math.min(4, T.style.clipRadius);
   c.save();
@@ -1424,6 +1430,27 @@ function drawGutter(c: any, W: any, H: any) {
       if (r.prop.expr) { c.fillStyle = theme.accent; c.fillText('ƒ', 70, y + T.row / 2); }
     }
   }
+  /* The media-drop slot reads as an incoming layer card: wash, type swatch
+     and the asset name, in the gap the rows below have opened up. */
+  const d = T.drop;
+  if (d && !T.graph) {
+    const y = rawRowY(d.rowIdx);
+    if (y + T.row >= T.ruler && y <= H) {
+      const type = d.kind === 'audio' ? 'audio' : d.kind === 'video' ? 'video' : d.kind === 'image' ? 'image' : null;
+      const pal = clipPalette({ type });
+      const iy = y + T.row / 2;
+      c.fillStyle = INK.over2; c.fillRect(0, y, T.gut, T.row);
+      c.globalAlpha = .7;
+      c.fillStyle = pal.body; roundRect(c, 74, iy - 8, 16, 16, 3); c.fill();
+      c.setLineDash([3, 2]); c.strokeStyle = pal.primary; c.lineWidth = 1; c.stroke(); c.setLineDash([]);
+      c.font = '600 8px ' + fui(); c.fillStyle = pal.primary; c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText((type ? BADGE[type] : 'new').toUpperCase().slice(0, 1), 82, iy + .5);
+      c.textAlign = 'left';
+      c.font = '400 12px ' + fui(); c.fillStyle = theme.tx2;
+      clipText(c, d.name, 96, iy, Math.max(0, T.gut - 12 - 96));
+      c.globalAlpha = 1;
+    }
+  }
   c.restore();
 }
 const clippedLabels = new Map<string, string>();
@@ -1745,15 +1772,39 @@ function bind(cv: any, wrap: any) {
     const hr = hitRow(y);
     return hr?.row?.L ? { layer: hr.row.L, index: hr.i } : null;
   };
-  /* Media drops (asset cards, OS files): the ghost clip follows the pointer's
-     frame-snapped time and row; dropping places the layer exactly there.
-     Rows below the last layer append to the bottom of the stack. */
+  /* Media drops (asset cards, OS files): a new layer is always its own strip,
+     so the pointer resolves to a boundary between layer rows, never onto one.
+     The upper half of a layer row inserts above it, the lower half (and any
+     of its property rows) inserts below its block. Rows below the last layer
+     append to the bottom of the stack. `rowIdx` is the slot in T.rows where
+     the gap opens; `index` is the matching position in project.layers. */
   const mediaDropAt = (e: any) => {
     const p = api.project.get();
     const at = Math.max(0, api.util.snapF(x2t(Math.max(e.offsetX, T.gut)), p.fps));
-    const hr = hitRow(e.offsetY);
-    const rowIdx = hr ? hr.i : T.rows.length;
-    const index = hr?.row?.L ? p.layers.indexOf(hr.row.L) : p.layers.length;
+    const rows = T.rows;
+    const raw = (Math.max(e.offsetY, T.ruler) - T.ruler + T.scrollY) / T.row;
+    let slot = Math.floor(raw);
+    const open = T.drop ? T.drop.rowIdx : null;
+    /* the gap already open shifts rows below it; keep the slot while the
+       pointer stays inside it, otherwise map back to the unshifted row */
+    if (open != null && slot === open) return { at, rowIdx: open, index: T.drop.index };
+    if (open != null && slot > open) slot--;
+    let rowIdx = rows.length;
+    if (slot < rows.length) {
+      const fraction = raw - Math.floor(raw);
+      let i = slot;
+      while (i > 0 && rows[i].kind !== 'layer') i--;
+      const before = rows[slot].kind === 'layer' && fraction < .5;
+      if (before) rowIdx = i;
+      else {
+        /* below the whole block: property rows and, for groups, children */
+        const depth = rows[i].depth || 0;
+        rowIdx = i + 1;
+        while (rowIdx < rows.length && (rows[rowIdx].kind !== 'layer' || (rows[rowIdx].depth || 0) > depth)) rowIdx++;
+      }
+    }
+    const next = rows[rowIdx]?.L;
+    const index = next ? p.layers.indexOf(next) : p.layers.length;
     return { at, rowIdx, index };
   };
   const setMediaDrop = (next: any) => {
@@ -1782,6 +1833,8 @@ function bind(cv: any, wrap: any) {
   listen(cv, 'drop', (e: any) => {
     const dt = e.dataTransfer;
     const fx = api.dnd.readFxDrag(dt);
+    /* resolve while the slot is still open so the drop lands where the ghost showed */
+    const placement = mediaDropAt(e);
     setDropRow(null); setMediaDrop(null);
     if (fx) {
       e.preventDefault(); e.stopPropagation();
@@ -1799,7 +1852,7 @@ function bind(cv: any, wrap: any) {
     const files = api.dnd.hasFileDrag(dt) ? Array.from(dt.files || []) as File[] : [];
     if (!asset && !files.length) return;
     e.preventDefault(); e.stopPropagation();
-    const { at, index } = mediaDropAt(e);
+    const { at, index } = placement;
     if (asset) {
       const command = api.media.commandForAsset(asset.id, at);
       if (!command || command.type !== 'add_layer') return;
