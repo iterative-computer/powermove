@@ -20,6 +20,10 @@
     refreshToken;
     return !!PM.ProjectsScreen?.isOpen;
   });
+  const settingsOpen = $derived.by(() => {
+    refreshToken;
+    return !!PM.SettingsUI?.isOpen;
+  });
   const activeProjectId = $derived.by(() => {
     refreshToken;
     return PM.proj?.id as string | undefined;
@@ -191,7 +195,7 @@
   }
 
   $effect(() => {
-    const events = ['projects:tabs', 'projects:screen', 'workspaces', 'project', 'history'];
+    const events = ['projects:tabs', 'projects:screen', 'settings:screen', 'workspaces', 'project', 'history'];
     const offs = events.map((event) => PM.bus?.on?.(event, () => {
       if (!renamingId) {
         if (!document.getElementById('tabs')?.contains(document.activeElement)) rovingId = '';
@@ -333,7 +337,15 @@
       <Icon {PM} name="grid" />
     </button>
   {/if}
-  <button class="iconbtn" type="button" title="Settings" aria-label="Open settings" onclick={() => PM.SettingsUI?.open?.()}>
+  <button
+    class="iconbtn"
+    class:on={settingsOpen}
+    type="button"
+    title="Settings (⌘,)"
+    aria-label="Open settings"
+    aria-pressed={settingsOpen}
+    onclick={() => (settingsOpen ? PM.SettingsUI?.close?.() : PM.SettingsUI?.open?.())}
+  >
     <Icon {PM} name="gear" />
   </button>
 </div>

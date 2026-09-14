@@ -11,6 +11,7 @@
       "dependencies": {
         "@anthropic-ai/claude-code": "2.1.261",
         "@anthropic-ai/claude-code-darwin-arm64": "2.1.261",
+        "@lisse/core": "0.7.2",
         "@motion-core/motion-gpu": "0.15.1",
         "@openai/codex": "0.153.4",
         "@openai/codex-darwin-arm64": "npm:@openai/codex@0.153.4-darwin-arm64",
@@ -217,6 +218,8 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.6.0", "", {}, "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
+
+    "@lisse/core": ["@lisse/core@0.7.2", "", {}, "sha512-YjGQ1JprtAry68U3jM532roxFcug8GCisQGQhcAVyC2r3WloILFECTi24eZtM2RRq8i7yQ+aDF2Cx6q+ffIGxg=="],
 
     "@lucide/svelte": ["@lucide/svelte@1.45.0", "", { "peerDependencies": { "svelte": "^5" } }, "sha512-SBqLvcYGEDz82Lwz7meR4qM+SGeDKRU/RBo8BhAhARNUzIXTrykbFLabW9X1Fokp01Yw2kOFx/AsLUUIxj0NLA=="],
 

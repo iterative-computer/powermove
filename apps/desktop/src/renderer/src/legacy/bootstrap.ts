@@ -44,6 +44,7 @@ import { install as installScripting } from './core/scripting';
 import { install as installSpatial } from './assistant/spatial';
 import { install as installProjectsUi } from './ui/projects';
 import { install as installApp } from './app';
+import { install as installSettingsUi } from '../settings/install';
 
 declare global {
   interface Window {
@@ -102,6 +103,8 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['runtime/bridge', installLegacyRuntime],
   ['panels/svelte', installSveltePanels],
   ['app', installApp],
+  /* Settings reads PM.theme and PM.exportDefaults, which the app install owns. */
+  ['ui/settings', installSettingsUi],
   /* Extensions load last: every kernel registry is populated and the whole
      legacy UI is mounted, so an extension can override any of it. */
   ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).catch((error) => console.error('[kernel] boot failed', error))]

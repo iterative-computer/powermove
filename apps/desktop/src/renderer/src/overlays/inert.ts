@@ -3,6 +3,7 @@ const OVERLAY_HOST_IDS = [
   'projects-screen',
   'library-overlay',
   'library-screen',
+  'settings-screen',
   'workspace-editbar'
 ] as const;
 

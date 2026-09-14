@@ -1,0 +1,133 @@
+/* ── Settings ──────────────────────────────────────────────
+   A full-screen surface under the titlebar, laid out like the Projects home:
+   the sidebar sits on the window colour, the page is one inset sheet.
+
+   Row anatomy after the habitat settings lab (2026-09-08): one 608px column,
+   cards bleeding 14px, rows padded 10 with the text block inset 4 so title and
+   hint share one edge 15px in from the card, controls one height, section
+   labels 8px above their card, 32px between sections. Corners are Lisse
+   squircles (settings/squircle.ts); the CSS border is the source of truth
+   and is redrawn as SVG, so hover and focus borders come from --sg-edge-*. */
+
+#settings-screen{
+  --ctl-h:30px;
+  --sg-edge:var(--line-2);
+  --sg-edge-hot:var(--line-strong);
+  --sg-edge-focus:color-mix(in srgb,var(--accent) 60%,transparent);
+  --sg-row:var(--bg-panel);
+  position:fixed;inset:44px 0 0;z-index:36;display:none;min-height:0;padding:0 10px 10px 0;background:var(--bg-window);
+}
+#settings-screen.on{display:flex}
+#settings-screen:focus-visible{outline:0}
+/* The editor panels under the screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
+body:has(#settings-screen.on) #body{visibility:hidden}
+
+/* ── sidebar ── */
+.sg-sidebar{width:236px;flex:none;display:flex;flex-direction:column;gap:14px;padding:6px 12px 18px}
+.sg-search{height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);color:var(--tx-3)}
+.sg-search svg{width:14px;height:14px;flex:none}
+.sg-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
+.sg-search input::placeholder{color:var(--tx-3)}
+.sg-nav{min-height:0;flex:1;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+.sg-nav-group{display:flex;flex-direction:column;gap:2px}
+.sg-nav-title{padding:0 10px 4px;color:var(--tx-3);font-size:var(--fs-sm);line-height:18px}
+.sg-nav-empty{padding:4px 10px;color:var(--tx-3);font-size:var(--fs-sm)}
+/* A transparent border so the squircle has an edge to light on focus. */
+.sg-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border:1px solid transparent;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
+.sg-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}
+.sg-navbtn span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sg-navbtn:hover{background:var(--bg-row);color:var(--tx)}
+.sg-navbtn.on{background:var(--ink-2);color:var(--tx)}
+.sg-navbtn.on svg{color:var(--tx)}
+.sg-navbtn:focus-visible{outline:0}
+
+/* ── the inset sheet ── */
+.sg-main{position:relative;min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window));box-shadow:0 0 0 var(--hairline) var(--line)}
+.sg-top{position:absolute;top:14px;right:16px;z-index:1;display:flex;align-items:center;gap:8px}
+.sg-top .btn{height:32px;padding:0 14px}
+.sg-scroll{min-height:0;flex:1;overflow:auto;padding:56px 40px 96px;container-type:inline-size}
+.sg-column{width:608px;max-width:100%;margin:0 auto}
+
+/* ── page ── */
+.sg-page{display:flex;flex-direction:column;gap:32px}
+.sg-page[hidden]{display:none}
+.sg-page:focus-visible{outline:0}
+.sg-heading{margin:0 0 -8px}
+.sg-heading h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
+.sg-heading p{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
+.sg-sections,.sg-column .settings-sections{display:flex;flex-direction:column;gap:32px}
+.sg-column .settings-sections.is-scroll{flex:none;overflow:visible}
+.sg-section,.sg-column .settings-section{display:flex;flex-direction:column}
+.sg-section-title,.sg-column .settings-section-heading{display:flex;align-items:center;gap:6px;height:20px;padding:0 0 8px;box-sizing:content-box;font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
+.sg-column .settings-section-heading>b{font-weight:inherit}
+.sg-column .settings-section-heading>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx-4);font-weight:var(--fw-regular)}
+.sg-column .settings-section-heading>span:empty{display:none}
+.settings-note{margin-top:8px;padding:0 1px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);text-wrap:pretty}
+
+/* ── card + rows ── */
+.sg-group{margin:0 -14px;display:flex;flex-direction:column;border:1px solid var(--sg-edge);border-radius:var(--r-lg);background:var(--sg-row);overflow:hidden}
+.sg-group>*+*{border-top:1px solid var(--line)}
+.sg-group>.settings-row,.sg-group>.settings-extension-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px}
+.sg-group>.settings-row>:last-child{flex:none}
+.settings-copy,.settings-extension-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;padding:0 4px}
+.settings-copy>b,.settings-extension-name>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
+.settings-copy>span,.settings-extension-copy>span{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.settings-provider-title{display:flex;align-items:center;gap:6px}
+.settings-provider>.btn{min-width:112px}
+.settings-dot{width:6px;height:6px;border-radius:50%;background:var(--tx-4);transition:background var(--dur-1)}
+.settings-dot[data-state="connected"]{background:var(--success)}
+.settings-dot[data-state="connecting"]{background:var(--warning)}
+.settings-dot[data-state="unavailable"]{background:var(--danger)}
+
+/* ── controls: one 30px height, hairline edge, squircle corners ── */
+.sg-column .settings-select,.sg-column .settings-input,.sg-column .pm-select.settings-select,.sg-column .pm-select.settings-appearance{height:30px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}
+.sg-column .pm-select{padding-right:28px}
+.sg-column .settings-input{font-weight:var(--fw-regular)}
+.sg-column .settings-input.is-wide{width:220px}
+.sg-column .settings-input:focus-visible,.sg-column .pm-select:focus-visible{box-shadow:none}
+.sg-column .settings-field-pair{gap:6px}
+.sg-column .toggle{flex:none}
+
+/* API or local model: one stacked row, fields as label/value pairs. */
+.sg-group>.settings-provider.settings-sections{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:12px 14px 14px}
+.sg-group>.settings-provider.settings-sections>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
+.sg-group>.settings-provider.settings-sections>b+span{margin:-7px 0 4px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.sg-group>.settings-provider.settings-sections>.pm-select{align-self:flex-start;min-width:220px}
+.sg-group>.settings-provider.settings-sections>.field{height:30px;gap:12px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;font-size:var(--fs-sm);color:var(--tx-2);white-space:nowrap}
+.sg-group>.settings-provider.settings-sections>.field:focus-within{background:var(--bg-float);box-shadow:none}
+.sg-group>.settings-provider.settings-sections>.field input{min-width:0;flex:1;text-align:right;font-size:var(--fs-md);color:var(--tx)}
+.sg-group>.settings-provider.settings-sections>label:not(.field){display:flex;align-items:center;gap:7px;padding:2px 0;font-size:var(--fs-sm);color:var(--tx-2)}
+.sg-group>.settings-provider.settings-sections>label:not(.field) input{width:14px;height:14px;accent-color:var(--accent)}
+.sg-group>.settings-provider.settings-sections>.btn{align-self:flex-start;margin-top:2px}
+.sg-group>.settings-provider.settings-sections>[role="status"]{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.sg-group>.settings-provider.settings-sections>[role="status"]:empty{display:none}
+
+/* ── extensions ── */
+.sg-group>.settings-extension-row{align-items:flex-start}
+.settings-extension-name{display:flex;min-width:0;align-items:center;gap:6px}
+.settings-extension-name>b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-extension-tag{flex:none;padding:1px 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:1.3}
+.settings-extension-copy>.settings-extension-error{color:var(--danger)}
+.settings-extension-controls{flex:none;min-height:32px;display:flex;align-items:center;gap:10px}
+.settings-extension-status{font-size:var(--fs-sm);color:var(--tx-3);white-space:nowrap}
+.settings-extension-status.is-ok{color:var(--success)}
+.settings-extension-status.is-warning{color:var(--danger)}
+.settings-extension-impact{color:var(--tx-3);font-size:var(--fs-sm);line-height:16px;overflow-wrap:anywhere}
+.settings-extension-impact strong{color:var(--tx-2);font-weight:var(--fw-medium)}
+.settings-extension-impact.is-replacement{color:var(--accent-tx)}
+.settings-extension-details{margin-top:4px;color:var(--tx-3);font-size:var(--fs-sm);line-height:16px;overflow-wrap:anywhere}
+.settings-extension-details summary{width:fit-content;cursor:pointer;color:var(--tx-2)}
+.settings-extension-details>div{padding-top:4px}
+.settings-extension-details .btn{margin-top:6px}
+.settings-extension-confirm{margin-top:8px}
+.settings-extension-empty{padding:16px 14px;color:var(--tx-3);font-size:var(--fs-md)}
+
+/* ── narrow ── */
+@container (max-width:28rem){
+  .sg-group>.settings-row{flex-wrap:wrap}
+  .sg-group>.settings-row>:last-child{margin-left:auto}
+}
+@media (max-width:760px){
+  .sg-sidebar{width:180px}
+  .sg-scroll{padding:56px 20px 64px}
+}

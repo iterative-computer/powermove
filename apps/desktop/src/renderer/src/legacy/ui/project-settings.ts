@@ -7,7 +7,7 @@ import {
   exportFieldSupport,
   type ExportDefaults
 } from '../../core/export-defaults';
-import { createSettingsSection } from './settings-tabs';
+import { createSettingsSection } from './settings-section';
 
 /** Composition fields the Project tab and the New project dialog both edit. */
 export interface CompositionValues {

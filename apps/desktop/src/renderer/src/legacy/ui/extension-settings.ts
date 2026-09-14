@@ -1,5 +1,5 @@
 import type { ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../../shared/extensions';
-import { createSettingsSection } from './settings-tabs';
+import { createSettingsSection } from './settings-section';
 
 export interface ExtensionSettingsControl {
   element: HTMLElement;
@@ -48,12 +48,6 @@ export function createExtensionSettingsControl(
   let pendingDelete: string | null = null;
   const busy = new Set<string>();
   const expanded = new Set<string>();
-  const intro = document.createElement('p');
-  intro.className = 'settings-note';
-  intro.textContent = 'Manage extensions and turn them on or off.';
-  section.element.insertBefore(intro, list);
-
-
   const render = (records: ExtensionRecord[]): void => {
     if (!alive) return;
     const sorted = records.filter(record => record.scope !== 'builtin').sort(compareRecords);

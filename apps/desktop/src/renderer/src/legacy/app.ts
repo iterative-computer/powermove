@@ -6,14 +6,7 @@ import type { PMRegistry } from './registry';
 import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
-import { createExtensionSettingsControl } from './ui/extension-settings';
-import { createGeneralSettingsControl } from './ui/general-settings';
-import {
-  createNewProjectForm,
-  createProjectSettingsControl,
-  type CompositionPatch
-} from './ui/project-settings';
-import { createSettingsTabs } from './ui/settings-tabs';
+import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 
 export function install(PM: PMRegistry): void {
@@ -464,84 +457,6 @@ function writeExportDefaults(patch: Partial<ExportDefaults>) {
 }
 PM.exportDefaults = { read: readExportDefaults, write: writeExportDefaults };
 
-function projectSettingsBridge() {
-  return {
-    composition: () => ({
-      name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur
-    }),
-    applyComposition: (patch: CompositionPatch) => {
-      /* Renaming goes through the project registry so the tab strip and the
-         stored project slot stay in step, exactly like an inline tab rename. */
-      if (patch.name != null) { PM.Projects.rename(PM.proj.id, patch.name); return; }
-      try {
-        PM.Edit.apply({ type: 'set_composition', patch }, { label: 'Project settings', origin: 'interface' });
-      } catch (error: any) {
-        PM.toast('Could not change the project: ' + (error?.message || 'invalid value'), 4500);
-        return;
-      }
-      if (PM.time > PM.proj.dur) PM.setTime(PM.proj.dur);
-      PM.rasterClear?.();
-      viewerService(PM)?.layout();
-      PM.invalidate('all');
-    },
-    exportDefaults: readExportDefaults,
-    applyExportDefaults: writeExportDefaults,
-    backgroundField: () => PM.fillField(
-      () => PM.normalizeFill(PM.proj.backgroundFill, PM.proj.bg),
-      (value: any) => {
-        PM.proj.backgroundFill = PM.normalizeFill(value, PM.proj.bg);
-        PM.proj.bg = PM.proj.backgroundFill.stops[0].color;
-      },
-      { label: 'Background', command: (value: any) => ({ type: 'set_composition', patch: { backgroundFill: value } }) }
-    )
-  };
-}
-
-/* Settings is a singleton: the menu item, the ⌘, shortcut, and the titlebar
-   button all lead to the one dialog. A second request re-uses the open one and
-   switches it to the asked-for tab instead of stacking another copy. */
-let settingsSession: { dialog: any; show(tab: 'general' | 'project' | 'extensions'): void } | null = null;
-
-function openSettings(initialTab: 'general' | 'project' | 'extensions' = 'general') {
-  if (settingsSession) {
-    settingsSession.show(initialTab);
-    return settingsSession.dialog;
-  }
-  const general = createGeneralSettingsControl(PM.theme);
-  const extensions = createExtensionSettingsControl();
-  /* The Project tab only makes sense with a project open; without one it is
-     left out entirely rather than shown empty. */
-  const project = PM.proj ? createProjectSettingsControl(projectSettingsBridge()) : null;
-  const offProject = project ? PM.bus.on('project', () => project.refresh()) : null;
-  const tabs = createSettingsTabs([
-    { id: 'general', label: 'General', panel: h('section', general.element) },
-    ...(project ? [{ id: 'project', label: 'Project', panel: h('section', project.element) }] : []),
-    { id: 'extensions', label: 'Extensions', panel: h('section', extensions.element) }
-  ], project || initialTab !== 'project' ? initialTab : 'general');
-  const dialog = PM.modal({
-    title: 'Settings',
-    body: h('div.settings-view', tabs.element),
-    width: 620,
-    fill: true,
-    actions: [{ label: 'Done', pri: true }],
-    onClose: () => {
-      settingsSession = null;
-      offProject?.(); general.destroy(); project?.destroy(); extensions.destroy();
-    }
-  });
-  const show = (tab: 'general' | 'project' | 'extensions') => {
-    const target = tab === 'project' && !project ? 'general' : tab;
-    tabs.select(target);
-    window.setTimeout(() => {
-      if (target === 'general') general.focus();
-      else if (target === 'project') project?.focus();
-    }, 30);
-  };
-  settingsSession = { dialog, show };
-  show(initialTab);
-  return dialog;
-}
-PM.SettingsUI = { open: openSettings };
 
 /* ── persistence ───────────────────────────────────────── */
 /* Save the document immediately; thumbnail GPU readback waits for navigation
