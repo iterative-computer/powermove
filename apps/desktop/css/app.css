@@ -8,6 +8,94 @@ html,body{height:100%;overflow:hidden}
 :where(.panel,.drop,.modal,#library-screen,.sg-main,.library-card,.ps-grid:not(.list) .ps-thumb,.spatial-compose,.spatial-outline,.panel-ghost-card,.panel-drop-preview.dock-edge,.pop-mirror,.fill-picker,#workspace-editbar){
   corner-shape:var(--ui-corner-smoothing);
 }
+/* ── material ──────────────────────────────────────────── */
+/* The window body is a native under-window material (see createWindow in
+   src/main/index.ts). The canvas the renderer paints is a tint over that
+   material, so the stone palette holds on any desktop while the blur still
+   reads through. Solid surfaces (panels, floats, fields) are unchanged: only
+   the canvas between them is vibrant, as in Finder and Xcode. Anything that
+   must stay opaque mixes from --bg-window-solid instead. */
+:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .3)}
+:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .32)}
+/* Content areas of the full-screen views (projects, settings) are nearly
+   solid, with a little of the material left showing through. */
+:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 70%,transparent)}
+html{background:transparent}
+
+/* ── glass chrome ──────────────────────────────────────── */
+/* Floating chrome (tab strip, tool cluster, Export, sidebar selection) reads
+   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas, a
+   uniform hairline, and a one-pixel glint where light enters at the upper-left
+   and leaves at the lower-right. Everything is inset shadows on one element;
+   no gradients, no bloom, no hover states. The backdrop is blurred and
+   saturated so content passing beneath reads through the material. */
+:root{
+  --glass-fill:rgb(var(--paper-rgb) / .45);
+  --glass-edge:none;
+  --glass-rim:conic-gradient(from 315deg,
+    rgb(var(--paper-rgb) / .95) 0,rgb(var(--ink-rgb) / .07) 16%,
+    rgb(var(--ink-rgb) / .07) 36%,rgb(var(--paper-rgb) / .7) 50%,
+    rgb(var(--ink-rgb) / .07) 64%,rgb(var(--ink-rgb) / .07) 84%,
+    rgb(var(--paper-rgb) / .95) 100%);
+  --glass-fill-hi:rgb(var(--paper-rgb) / .9);
+  --glass-edge-hi:none;
+  --glass-rim-hi:conic-gradient(from 315deg,
+    rgb(var(--paper-rgb) / 1) 0,rgb(var(--ink-rgb) / .1) 16%,
+    rgb(var(--ink-rgb) / .1) 36%,rgb(var(--paper-rgb) / .9) 50%,
+    rgb(var(--ink-rgb) / .1) 64%,rgb(var(--ink-rgb) / .1) 84%,
+    rgb(var(--paper-rgb) / 1) 100%);
+  --glass-backdrop:blur(20px) saturate(1.5);
+}
+/* Measured from a Tahoe toolbar button over a dark canvas: the glass body
+   sits ~20% toward black (glass darkens what's behind it), the rim is a 6%
+   white hairline, and the top edge alone rises to ~10%. */
+/* Measured from a Tahoe toolbar button over a dark canvas: the glass body
+   sits ~20% toward black (glass darkens what's behind it); the rim is a 6%
+   white hairline that lifts to ~12% where light enters at the upper-left and
+   ~10% where it leaves at the lower-right. */
+:root[data-theme="dark"]{
+  --glass-fill:rgb(0 0 0 / .19);
+  --glass-edge:none;
+  --glass-rim:conic-gradient(from 315deg,
+    rgb(var(--paper-rgb) / .13) 0,rgb(var(--paper-rgb) / .06) 16%,
+    rgb(var(--paper-rgb) / .06) 36%,rgb(var(--paper-rgb) / .1) 50%,
+    rgb(var(--paper-rgb) / .06) 64%,rgb(var(--paper-rgb) / .06) 84%,
+    rgb(var(--paper-rgb) / .13) 100%);
+  --glass-fill-hi:rgb(var(--paper-rgb) / .07);
+  --glass-edge-hi:none;
+  --glass-rim-hi:conic-gradient(from 315deg,
+    rgb(var(--paper-rgb) / .2) 0,rgb(var(--paper-rgb) / .09) 16%,
+    rgb(var(--paper-rgb) / .09) 36%,rgb(var(--paper-rgb) / .15) 50%,
+    rgb(var(--paper-rgb) / .09) 64%,rgb(var(--paper-rgb) / .09) 84%,
+    rgb(var(--paper-rgb) / .2) 100%);
+}
+:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
+  position:relative;isolation:isolate;
+  background:var(--glass-fill);
+  box-shadow:var(--glass-edge);
+  -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
+}
+/* The rim is a 1px ring whose brightness turns softly around the shape. */
+:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
+  content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
+  padding:1px;background:var(--glass-rim);opacity:1;transition:none;
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+}
+/* Glass does not react to hover: Export drops the button wash. */
+.tb-export:hover::after{opacity:1}
+:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){position:relative;isolation:isolate;background:var(--glass-fill-hi)!important;box-shadow:var(--glass-edge-hi)!important}
+:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{
+  content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
+  padding:1px;background:var(--glass-rim-hi);opacity:1;transition:none;
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+}
+@media (prefers-reduced-transparency: reduce){
+  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
+  :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
+}
 body{
   background:var(--bg-window);color:var(--tx);
   font-family:var(--f-ui);font-size:var(--fs-md);
@@ -42,7 +130,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .panel::-webkit-scrollbar,.panel *::-webkit-scrollbar,.library-content::-webkit-scrollbar,.spatial-preview::-webkit-scrollbar,.pop-mirror::-webkit-scrollbar,.pop-mirror *::-webkit-scrollbar,.fill-picker-body::-webkit-scrollbar{display:none}
 
 /* ── shell ─────────────────────────────────────────────── */
-#app{display:flex;flex-direction:column;height:100vh;background:var(--bg-window)}
+#app{display:flex;flex-direction:column;height:100vh;background:transparent}
 
 #titlebar{
   --titlebar-h:44px;--traffic-inset:96px;
@@ -52,7 +140,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 }
 #tabs{
   height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:40%;min-width:0;
-  padding:2px;border:0;border-radius:var(--r-md);background:var(--ink-2);
+  padding:2px;border:0;border-radius:var(--r-md);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
 #tabs::-webkit-scrollbar{display:none}
@@ -132,7 +220,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 /* ── tool toolbar, inline with the native titlebar ─────── */
 #toolbar-strip{
   flex:0 1 auto;min-width:0;height:30px;display:flex;align-items:center;
-  margin:0;padding:2px;background:var(--ink-2);border:0;border-radius:var(--r-md);
+  margin:0;padding:2px;border:0;border-radius:var(--r-md);
   position:relative;z-index:30;-webkit-app-region:no-drag;
 }
 #toolbar-strip[hidden]{display:none}
@@ -951,10 +1039,12 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 
 /* ── production project library ──────────────────────── */
 /* The titlebar and sidebar share the window colour as one piece of chrome; the library itself is an inset panel. */
-#projects-screen{position:fixed;inset:44px 0 0;z-index:35;background:var(--bg-window);display:none;min-height:0;padding:0 10px 10px 0}
+#projects-screen{position:fixed;inset:44px 0 0;z-index:35;background:transparent;display:none;min-height:0;padding:0 10px 10px 0}
 #projects-screen.on{display:flex}
 /* The editor panels under the home screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
-body:has(#projects-screen.on) #body{visibility:hidden}
+/* The screen's canvas is the window material, so it can't cover what sits
+   beneath it. Hide the editor and its status line instead of painting over them. */
+body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibility:hidden}
 .ps-sidebar{width:236px;flex:none;padding:6px 12px 18px;display:flex;flex-direction:column;gap:14px}
 .ps-search{height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-3);transition:box-shadow var(--dur-1)}
 .ps-search:focus-within{outline:0;box-shadow:var(--focus-ring)}
@@ -969,7 +1059,7 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-updates .btn{align-self:flex-start;height:28px;padding:0 12px}
 .ps-updates+.ps-sidefoot{margin-top:0}
 .ps-sidefoot{margin-top:auto;padding:0 10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.5}
-.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window));box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
+.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
 /* Everything on the top row is 32px tall. */
 .ps-top .btn{height:32px;padding:0 14px}
 .ps-title{min-width:0;flex:1;display:flex;align-items:baseline;gap:9px}.ps-title b{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}.ps-title span{font-size:var(--fs-xs);color:var(--tx-4)}
