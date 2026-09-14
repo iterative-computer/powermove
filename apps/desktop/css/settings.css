@@ -145,14 +145,19 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .settings-extension-empty{padding:16px 14px;color:var(--tx-3);font-size:var(--fs-md)}
 
 /* detail */
+/* An open extension takes over the page: the page heading steps aside and
+   the extension's name becomes the title, with the way back above it. */
+.sg-page:has(.settings-extension-detail:not([hidden]))>.sg-heading{display:none}
 .settings-extension-detail{display:flex;flex-direction:column;gap:32px}
-.settings-extension-back{align-self:flex-start;display:inline-flex;align-items:center;gap:3px;height:24px;margin:-8px 0 -20px -6px;padding:0 8px 0 4px;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
+.settings-extension-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-4px 0 -26px -6px;padding:0 8px 0 3px;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
 .settings-extension-back svg{width:12px;height:12px;transform:rotate(180deg)}
 .settings-extension-back:hover{color:var(--tx);background:var(--ink-1)}
-.settings-extension-head{display:flex;flex-direction:column;gap:4px;margin-bottom:-8px}
-.settings-extension-title{display:flex;align-items:center;gap:8px}
-.settings-extension-title h3{font-size:17px;line-height:22px;font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}
-.settings-extension-head p{font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
+.settings-extension-head{display:flex;flex-direction:column;margin-bottom:-8px}
+.settings-extension-title{display:flex;align-items:center;gap:9px}
+.settings-extension-title .settings-extension-dot{width:7px;height:7px}
+.settings-extension-title h3{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
+.settings-extension-title .settings-extension-tag{margin-top:2px}
+.settings-extension-head p{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
 .settings-extension-detail .settings-copy>span{white-space:normal;overflow-wrap:anywhere}
 .settings-extension-detail .settings-row>.btn.settings-extension-delete{color:var(--danger)}
 .settings-extension-confirm{padding:12px 14px 14px;font-size:var(--fs-sm);line-height:16px}

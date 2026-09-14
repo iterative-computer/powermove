@@ -159,11 +159,15 @@
     const id = current.id;
     groups;
     void tick().then(() => {
-      const row = navEl?.querySelector<HTMLElement>(`[data-settings-tab="${id}"]`);
-      if (!row || !glider) { gliderOn = false; return; }
+      const nav = navEl;
+      const row = nav?.querySelector<HTMLElement>(`[data-settings-tab="${id}"]`);
+      if (!nav || !row || !glider) { gliderOn = false; return; }
+      /* Measure against the nav's own box: the squircle overlay makes each
+         group its own offset parent, so offsetTop would restart per group. */
+      const top = row.getBoundingClientRect().top - nav.getBoundingClientRect().top + nav.scrollTop;
       const first = !untrack(() => gliderOn);
       if (first) glider.style.transition = 'none';
-      glider.style.transform = `translateY(${row.offsetTop}px)`;
+      glider.style.transform = `translateY(${Math.round(top)}px)`;
       glider.style.height = `${row.offsetHeight}px`;
       if (first) { void glider.offsetHeight; glider.style.transition = ''; }
       gliderOn = true;
