@@ -152,6 +152,7 @@ export function createLoader(options: LoaderOptions): Loader {
   const activationFailures = new Set<string>();
   const reloadTokens = new Map<string, number>();
   let queue: Promise<void> = Promise.resolve();
+  let booting: Promise<void> | null = null;
   let unsubscribe: (() => void) | null = null;
   let disposed = false;
   let resolveBuiltinsReady!: () => void;
@@ -298,7 +299,7 @@ export function createLoader(options: LoaderOptions): Loader {
     }
   }
 
-  async function reload(id: string): Promise<void> {
+  async function reloadInternal(id: string): Promise<void> {
     const panelChanges = kernel.panels.batchChanges();
     try {
       await deactivate(id);
@@ -327,11 +328,25 @@ export function createLoader(options: LoaderOptions): Loader {
     });
   }
 
-  function enqueue(task: () => Promise<void>): void {
-    queue = queue.then(task).catch((error) => void console.error('[kernel] loader task failed', error));
+  function enqueue(task: () => Promise<void>): Promise<void> {
+    const pending = queue.then(task);
+    queue = pending.catch((error) => void console.error('[kernel] loader task failed', error));
+    return pending;
   }
 
-  async function boot(): Promise<void> {
+  // Health reports can echo back while an extension import is still pending.
+  // Startup and explicit reloads must share the bridge-change queue; otherwise
+  // two activations can both pass active.has(), leaving an untracked runtime
+  // (and its canvas painters, timers and input handlers) alive indefinitely.
+  function boot(): Promise<void> {
+    return booting ??= enqueue(bootInternal);
+  }
+
+  function reload(id: string): Promise<void> {
+    return enqueue(() => reloadInternal(id));
+  }
+
+  async function bootInternal(): Promise<void> {
     const builtinOrder = Object.keys(builtins);
     const builtinIds = new Set(builtinOrder);
     const bundled = synthesizeRecords();

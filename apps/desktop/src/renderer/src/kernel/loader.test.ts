@@ -187,6 +187,43 @@ describe('planLoad', () => {
 /* ── boot / activate ─────────────────────────────────────── */
 
 describe('loader boot', () => {
+  it('does not activate a second timeline when health notifications arrive during boot', async () => {
+    const bridge = fakeBridge([builtinRec('theme'), builtinRec('timeline')]);
+    const { deps } = fakeDeps();
+    const paints: number[] = [];
+    const timelines: Array<{ pps: number }> = [];
+    let releaseImport!: (module: ExtensionModule) => void;
+    const imported = new Promise<ExtensionModule>(resolve => { releaseImport = resolve; });
+    bridge.bridge.reportHealth = report => {
+      bridge.emit({ ids: [report.id], reason: 'health' });
+    };
+    const loader = createLoader({
+      kernel, bridge: bridge.bridge, deps,
+      builtins: {
+        theme: mod([], 'theme'),
+        timeline: () => imported,
+      },
+    });
+    const booting = loader.boot();
+    // Let the theme's health echo re-enter the loader while timeline imports.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    releaseImport({ default(api) {
+      const timeline = { pps: 90 };
+      timelines.push(timeline);
+      api.services.register('timeline', timeline as any);
+      api.events.on('invalidate', () => { paints.push(timeline.pps); });
+    } });
+    await booting;
+    await loader.whenIdle();
+    const timeline = kernel.services.get<any>('timeline')!;
+    timeline.pps = 6;
+    kernel.events.emit('invalidate', 'timeline');
+    await loader.dispose();
+
+    expect(paints).toEqual([6]);
+    expect(timelines).toHaveLength(1);
+  });
+
   it('signals built-in readiness before a slow bridge list resolves', async () => {
     let releaseList!: (records: ExtensionRecord[]) => void;
     const bridge = fakeBridge([]);
@@ -330,6 +367,43 @@ describe('loader boot', () => {
 /* ── reload & bridge changes ─────────────────────────────── */
 
 describe('loader reload', () => {
+  it('serializes a requested reload with bridge changes so the old painter is fully retired', async () => {
+    const bridge = fakeBridge([builtinRec('timeline')]);
+    const { deps } = fakeDeps();
+    const paints: number[] = [];
+    const retired: number[] = [];
+    let activations = 0;
+    let releaseImport!: () => void;
+    const importGate = new Promise<void>(resolve => { releaseImport = resolve; });
+    let beginImport!: () => void;
+    const importing = new Promise<void>(resolve => { beginImport = resolve; });
+    const loader = createLoader({
+      kernel, bridge: bridge.bridge, deps,
+      builtins: { timeline: async () => {
+        if (activations) { beginImport(); await importGate; }
+        return { default(api) {
+          const instance = ++activations;
+          api.events.on('invalidate', () => { paints.push(instance); });
+          api.onDispose(() => { retired.push(instance); });
+        } };
+      } },
+    });
+    await loader.boot();
+    const reloading = loader.reload('timeline');
+    await importing;
+    bridge.emit({ ids: ['timeline'], reason: 'health' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    releaseImport();
+    await reloading;
+    await loader.whenIdle();
+    kernel.events.emit('invalidate', 'timeline');
+    await loader.dispose();
+
+    expect(activations).toBe(2);
+    expect(paints).toEqual([2]);
+    expect(retired).toEqual([1, 2]);
+  });
+
   it('does not retry a failed activation on health echoes, but retries changed source', async () => {
     const { deps, toasts } = fakeDeps();
     const bridge = fakeBridge([builtinRec('bad')]);
