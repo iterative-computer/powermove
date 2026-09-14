@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { tick } from 'svelte';
   import Icon from '../panels/Icon.svelte';
   import { createChatGPTSettingsControl, createClaudeSettingsControl } from '../legacy/ui/chatgpt-settings';
   import { createCompatibleSettingsControl } from '../legacy/ui/compatible-settings';
@@ -58,26 +58,6 @@
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
-  let navEl = $state<HTMLElement | null>(null);
-  let glider = $state<HTMLElement | null>(null);
-  let gliderOn = $state(false);
-  let hoverGlider = $state<HTMLElement | null>(null);
-  let hoverOn = $state(false);
-
-  /* The hover highlight is a second layer that follows the pointer between
-     rows and leaves with it, like the select listbox. */
-  function navHover(event: PointerEvent): void {
-    const nav = navEl;
-    const row = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-settings-tab]');
-    /* Between rows the layer stays where it was; only leaving the nav hides it. */
-    if (!nav || !hoverGlider || !row) return;
-    const top = row.getBoundingClientRect().top - nav.getBoundingClientRect().top + nav.scrollTop;
-    if (!hoverOn) hoverGlider.style.transition = 'none';
-    hoverGlider.style.transform = `translateY(${Math.round(top)}px)`;
-    hoverGlider.style.height = `${row.offsetHeight}px`;
-    if (!hoverOn) { void hoverGlider.offsetHeight; hoverGlider.style.transition = ''; }
-    hoverOn = true;
-  }
   let lastFocus: HTMLElement | null = null;
 
   const hasProject = $derived(!!controls?.project);
@@ -167,29 +147,6 @@
   function show(id: SettingsPage): void {
     page = id;
   }
-
-  /* The selected highlight is one layer that glides between nav rows, the
-     way the command palette's does. It lands in place the first time and
-     whenever the list re-flows under a search. */
-  $effect(() => {
-    if (!shown) { gliderOn = false; return; }
-    const id = current.id;
-    groups;
-    void tick().then(() => {
-      const nav = navEl;
-      const row = nav?.querySelector<HTMLElement>(`[data-settings-tab="${id}"]`);
-      if (!nav || !row || !glider) { gliderOn = false; return; }
-      /* Measure against the nav's own box: the squircle overlay makes each
-         group its own offset parent, so offsetTop would restart per group. */
-      const top = row.getBoundingClientRect().top - nav.getBoundingClientRect().top + nav.scrollTop;
-      const first = !untrack(() => gliderOn);
-      if (first) glider.style.transition = 'none';
-      glider.style.transform = `translateY(${Math.round(top)}px)`;
-      glider.style.height = `${row.offsetHeight}px`;
-      if (first) { void glider.offsetHeight; glider.style.transition = ''; }
-      gliderOn = true;
-    });
-  });
 
   /* A new page starts at its top; the scroll position belongs to the page. */
   $effect(() => {
@@ -289,19 +246,7 @@
         bind:value={searchText}
       />
     </label>
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="sg-nav"
-      role="tablist"
-      aria-label="Settings sections"
-      aria-orientation="vertical"
-      tabindex="-1"
-      bind:this={navEl}
-      onpointermove={navHover}
-      onpointerleave={() => (hoverOn = false)}
-    >
-      <div class="sg-nav-glider is-hover" class:on={hoverOn} bind:this={hoverGlider} aria-hidden="true"></div>
-      <div class="sg-nav-glider" class:on={gliderOn} bind:this={glider} aria-hidden="true"></div>
+    <div class="sg-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
       {#each groups as group (group.title)}
         <div class="sg-nav-group">
           <span class="sg-nav-title">{group.title}</span>

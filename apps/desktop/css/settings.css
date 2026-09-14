@@ -28,11 +28,7 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-search svg{width:14px;height:14px;flex:none}
 .sg-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
 .sg-search input::placeholder{color:var(--tx-3)}
-.sg-nav{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
-.sg-nav-glider{position:absolute;left:0;right:0;top:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:transform 220ms cubic-bezier(.23,1,.32,1),height 220ms cubic-bezier(.23,1,.32,1),opacity 150ms ease}
-.sg-nav-glider.on{opacity:1}
-.sg-nav-glider.is-hover{background:var(--bg-row)}
-.sg-nav-group{position:static}
+.sg-nav{min-height:0;flex:1;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
 .sg-nav-group{display:flex;flex-direction:column;gap:2px}
 .sg-nav-title{padding:0 10px 4px;color:var(--tx-3);font-size:var(--fs-sm);line-height:18px}
 .sg-nav-empty{padding:4px 10px;color:var(--tx-3);font-size:var(--fs-sm)}
@@ -40,9 +36,8 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border:1px solid transparent;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
 .sg-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}
 .sg-navbtn span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sg-navbtn:hover{color:var(--tx)}
-.sg-navbtn{position:relative;z-index:1}
-.sg-navbtn.on{color:var(--tx)}
+.sg-navbtn:hover{background:var(--bg-row);color:var(--tx)}
+.sg-navbtn.on{background:var(--ink-2);color:var(--tx)}
 .sg-navbtn.on svg{color:var(--tx)}
 .sg-navbtn:focus-visible{outline:0}
 
@@ -184,4 +179,4 @@ body:has(#settings-screen.on) #body{visibility:hidden}
   .sg-scroll{padding:56px 20px 64px}
 }
 
-@media (prefers-reduced-motion:reduce){.sg-nav-glider{transition:none}}
+@media (prefers-reduced-motion:reduce){}

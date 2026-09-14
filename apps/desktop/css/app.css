@@ -961,6 +961,7 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-nav{display:flex;flex-direction:column;gap:3px}.ps-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 10px;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);text-align:left}
 .ps-navbtn:hover{background:var(--bg-row);color:var(--tx)}.ps-navbtn.on{background:var(--ink-2);color:var(--tx)}
 .ps-navbtn svg{width:14px;height:14px}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
+.ps-updates[hidden]{display:none}
 .ps-updates{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:var(--r-md);background:var(--bg-row);color:var(--tx-2);font-size:var(--fs-sm);line-height:1.45}
 .ps-updates b{display:block;color:var(--tx);font-weight:var(--fw-medium)}
 .ps-updates .btn{align-self:flex-start;height:28px;padding:0 12px}
