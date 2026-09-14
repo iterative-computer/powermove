@@ -20,7 +20,7 @@
 #settings-screen.on{display:flex}
 #settings-screen:focus-visible{outline:0}
 /* The editor panels under the screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
-body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status{visibility:hidden}
+body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:has(#settings-screen.on) #projects-screen{visibility:hidden}
 
 /* ── sidebar ── */
 .sg-sidebar{width:236px;flex:none;display:flex;flex-direction:column;gap:14px;padding:6px 12px 8px}
