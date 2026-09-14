@@ -69,7 +69,8 @@
   function navHover(event: PointerEvent): void {
     const nav = navEl;
     const row = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-settings-tab]');
-    if (!nav || !hoverGlider || !row) { hoverOn = false; return; }
+    /* Between rows the layer stays where it was; only leaving the nav hides it. */
+    if (!nav || !hoverGlider || !row) return;
     const top = row.getBoundingClientRect().top - nav.getBoundingClientRect().top + nav.scrollTop;
     if (!hoverOn) hoverGlider.style.transition = 'none';
     hoverGlider.style.transform = `translateY(${Math.round(top)}px)`;
@@ -299,8 +300,8 @@
       onpointermove={navHover}
       onpointerleave={() => (hoverOn = false)}
     >
-      <div class="sg-nav-glider" class:on={gliderOn} bind:this={glider} aria-hidden="true"></div>
       <div class="sg-nav-glider is-hover" class:on={hoverOn} bind:this={hoverGlider} aria-hidden="true"></div>
+      <div class="sg-nav-glider" class:on={gliderOn} bind:this={glider} aria-hidden="true"></div>
       {#each groups as group (group.title)}
         <div class="sg-nav-group">
           <span class="sg-nav-title">{group.title}</span>
