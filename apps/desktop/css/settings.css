@@ -86,6 +86,14 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-column .settings-input.is-wide{width:220px}
 .sg-column .settings-input:focus-visible,.sg-column .pm-select:focus-visible{box-shadow:none}
 .sg-column .settings-field-pair{gap:6px}
+/* Checkboxes: the shadcn primitive — a 16px box with a hairline edge that fills with ink and shows a check. */
+.sg-column input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:16px;height:16px;margin:0;flex:none;border:1px solid var(--line-strong);border-radius:var(--r-xs);background:var(--bg-float);display:grid;place-items:center;cursor:pointer;transition:background var(--dur-1),border-color var(--dur-1),box-shadow var(--dur-1)}
+.sg-column input[type="checkbox"]::before{content:"";width:10px;height:10px;background:currentColor;color:var(--bg-float);opacity:0;transform:scale(.6);transition:opacity var(--dur-1),transform var(--dur-1) var(--ease);mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat;-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat}
+.sg-column input[type="checkbox"]:hover{border-color:var(--tx-3)}
+.sg-column input[type="checkbox"]:checked{background:var(--tx);border-color:var(--tx)}
+.sg-column input[type="checkbox"]:checked::before{opacity:1;transform:none}
+.sg-column input[type="checkbox"]:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+.sg-column input[type="checkbox"]:disabled{opacity:var(--disabled);cursor:default}
 .sg-column .toggle{flex:none}
 /* The composition background is the app's fill field; here it wears the same edge as the fields beside it. */
 .sg-column .settings-row>.color-field{width:170px;height:30px;padding:0 10px 0 6px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none}
@@ -99,7 +107,6 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-group>.settings-provider.settings-sections>.field:focus-within{background:var(--bg-float);box-shadow:none}
 .sg-group>.settings-provider.settings-sections>.field input{min-width:0;flex:1;text-align:right;font-size:var(--fs-md);color:var(--tx)}
 .sg-group>.settings-provider.settings-sections>label:not(.field){display:flex;align-items:center;gap:7px;padding:2px 0;font-size:var(--fs-sm);color:var(--tx-2)}
-.sg-group>.settings-provider.settings-sections>label:not(.field) input{width:14px;height:14px;accent-color:var(--accent)}
 .sg-group>.settings-provider.settings-sections>.btn{align-self:flex-start;margin-top:2px}
 .sg-group>.settings-provider.settings-sections>[role="status"]{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
 .sg-group>.settings-provider.settings-sections>[role="status"]:empty{display:none}
