@@ -22,65 +22,46 @@ html,body{height:100%;overflow:hidden}
 :root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 70%,transparent)}
 html{background:transparent}
 
-/* ── liquid glass ──────────────────────────────────────── */
-/* Floating chrome (tab strip, tool cluster, Export, sidebar selection) is
-   drawn as glass the way Tahoe toolbars read: a clear body that brightens
-   toward the top where light enters, a rim that catches two specular lobes
-   (upper-left where light hits, lower-right where it exits), a soft inner
-   bloom along the lit edge and a shade along the far edge, and a low contact
-   shadow. The backdrop is blurred, saturated, and lifted so content passing
-   underneath reads as seen through a lens. All CSS, so hover, press, and
-   selection stay in the app's motion grammar; pre-Tahoe and reduce-transparency
-   fall back to flat ink. */
-/* Values are tuned against Tahoe's own toolbar buttons: the body is nearly
-   the background, and the whole effect lives in a hairline rim that catches
-   light at the upper-left and lower-right. Nothing blooms, nothing glows. */
+/* ── glass chrome ──────────────────────────────────────── */
+/* Floating chrome (tab strip, tool cluster, Export, sidebar selection) reads
+   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas, a
+   uniform hairline, and a one-pixel glint where light enters at the upper-left
+   and leaves at the lower-right. Everything is inset shadows on one element;
+   no gradients, no bloom, no hover states. The backdrop is blurred and
+   saturated so content passing beneath reads through the material. */
 :root{
-  --glass-body:linear-gradient(180deg,rgb(var(--paper-rgb) / .55),rgb(var(--paper-rgb) / .42));
-  --glass-bloom:none;
-  --glass-rim:conic-gradient(from 225deg,rgb(var(--paper-rgb) / 1) 0,rgb(var(--ink-rgb) / .1) 20%,rgb(var(--ink-rgb) / .12) 40%,rgb(var(--paper-rgb) / .85) 52%,rgb(var(--ink-rgb) / .1) 68%,rgb(var(--ink-rgb) / .08) 88%,rgb(var(--paper-rgb) / 1) 100%);
-  --glass-lens:inset 0 1px 0 rgb(var(--paper-rgb) / .6);
-  --glass-shadow:0 1px 2px rgb(var(--ink-rgb) / .08),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .06);
-  --glass-body-hi:linear-gradient(180deg,rgb(var(--paper-rgb) / 1),rgb(var(--paper-rgb) / .9));
-  --glass-shadow-hi:inset 0 1px 0 rgb(var(--paper-rgb) / 1),0 1px 2px rgb(var(--ink-rgb) / .1);
+  --glass-fill:rgb(var(--paper-rgb) / .55);
+  --glass-edge:
+    inset 0 0 0 1px rgb(var(--ink-rgb) / .08),
+    inset 1px 1px 0 rgb(var(--paper-rgb) / .9),
+    inset -1px -1px 0 rgb(var(--paper-rgb) / .55),
+    0 1px 2px rgb(var(--ink-rgb) / .06);
+  --glass-fill-hi:rgb(var(--paper-rgb) / .95);
+  --glass-edge-hi:
+    inset 1px 1px 0 rgb(var(--paper-rgb) / 1),
+    0 1px 2px rgb(var(--ink-rgb) / .1);
   --glass-backdrop:blur(20px) saturate(1.5);
 }
 :root[data-theme="dark"]{
-  --glass-body:linear-gradient(180deg,rgb(var(--paper-rgb) / .055),rgb(var(--paper-rgb) / .035));
-  --glass-bloom:none;
-  --glass-rim:conic-gradient(from 225deg,rgb(var(--paper-rgb) / .34) 0,rgb(var(--paper-rgb) / .05) 20%,rgb(var(--paper-rgb) / .04) 40%,rgb(var(--paper-rgb) / .24) 52%,rgb(var(--paper-rgb) / .05) 68%,rgb(var(--paper-rgb) / .04) 88%,rgb(var(--paper-rgb) / .34) 100%);
-  --glass-lens:inset 0 1px 0 rgb(var(--paper-rgb) / .06);
-  --glass-shadow:0 1px 2px rgb(0 0 0 / .3);
-  --glass-body-hi:linear-gradient(180deg,rgb(var(--paper-rgb) / .16),rgb(var(--paper-rgb) / .1));
-  --glass-shadow-hi:inset 0 1px 0 rgb(var(--paper-rgb) / .18),0 1px 2px rgb(0 0 0 / .35);
-  --glass-backdrop:blur(20px) saturate(1.5);
+  --glass-fill:rgb(var(--paper-rgb) / .07);
+  --glass-edge:
+    inset 0 0 0 1px rgb(var(--paper-rgb) / .06),
+    inset 1px 1px 0 rgb(var(--paper-rgb) / .1),
+    inset -1px -1px 0 rgb(var(--paper-rgb) / .07),
+    0 1px 2px rgb(0 0 0 / .25);
+  --glass-fill-hi:rgb(var(--paper-rgb) / .14);
+  --glass-edge-hi:
+    inset 1px 1px 0 rgb(var(--paper-rgb) / .14),
+    0 1px 2px rgb(0 0 0 / .3);
 }
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
-  position:relative;isolation:isolate;
-  background:var(--glass-body);
-  box-shadow:var(--glass-shadow);
+  background:var(--glass-fill);
+  box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
-  transition:filter var(--dur-2),transform var(--dur-1) var(--ease);
 }
-:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::before,:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:-1}
-/* Lens: light entering along the top edge, shade leaving along the bottom. */
-:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::before{box-shadow:var(--glass-lens)}
-/* Rim: a 1px ring whose brightness turns around the shape, two specular lobes. */
-:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
-  padding:1px;background:var(--glass-rim);
-  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
-  -webkit-mask-composite:xor;mask-composite:exclude;
-}
-/* Whole-cluster glass responds as one piece of material. */
-:is(.tb-export,.ps-navbtn.on,.sg-navbtn.on):hover{filter:brightness(1.12)}
-:is(.tb-export,.ps-navbtn.on,.sg-navbtn.on):active{filter:brightness(.96);transform:scale(.985)}
-/* The selected control inside a glass cluster is a brighter lozenge of the
-   same glass: lit top edge, no rim of its own. */
-:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--glass-body-hi)!important;box-shadow:var(--glass-shadow-hi)!important}
-/* Native fallback when the user asks macOS to reduce transparency. */
+:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--glass-fill-hi)!important;box-shadow:var(--glass-edge-hi)!important}
 @media (prefers-reduced-transparency: reduce){
   :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
-  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::before,:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{display:none}
   :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
 }
 body{
