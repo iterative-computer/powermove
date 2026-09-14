@@ -61,6 +61,22 @@
   let navEl = $state<HTMLElement | null>(null);
   let glider = $state<HTMLElement | null>(null);
   let gliderOn = $state(false);
+  let hoverGlider = $state<HTMLElement | null>(null);
+  let hoverOn = $state(false);
+
+  /* The hover highlight is a second layer that follows the pointer between
+     rows and leaves with it, like the select listbox. */
+  function navHover(event: PointerEvent): void {
+    const nav = navEl;
+    const row = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-settings-tab]');
+    if (!nav || !hoverGlider || !row) { hoverOn = false; return; }
+    const top = row.getBoundingClientRect().top - nav.getBoundingClientRect().top + nav.scrollTop;
+    if (!hoverOn) hoverGlider.style.transition = 'none';
+    hoverGlider.style.transform = `translateY(${Math.round(top)}px)`;
+    hoverGlider.style.height = `${row.offsetHeight}px`;
+    if (!hoverOn) { void hoverGlider.offsetHeight; hoverGlider.style.transition = ''; }
+    hoverOn = true;
+  }
   let lastFocus: HTMLElement | null = null;
 
   const hasProject = $derived(!!controls?.project);
@@ -272,8 +288,19 @@
         bind:value={searchText}
       />
     </label>
-    <div class="sg-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical" bind:this={navEl}>
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="sg-nav"
+      role="tablist"
+      aria-label="Settings sections"
+      aria-orientation="vertical"
+      tabindex="-1"
+      bind:this={navEl}
+      onpointermove={navHover}
+      onpointerleave={() => (hoverOn = false)}
+    >
       <div class="sg-nav-glider" class:on={gliderOn} bind:this={glider} aria-hidden="true"></div>
+      <div class="sg-nav-glider is-hover" class:on={hoverOn} bind:this={hoverGlider} aria-hidden="true"></div>
       {#each groups as group (group.title)}
         <div class="sg-nav-group">
           <span class="sg-nav-title">{group.title}</span>
