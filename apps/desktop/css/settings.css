@@ -23,7 +23,7 @@
 body:has(#settings-screen.on) #body{visibility:hidden}
 
 /* ── sidebar ── */
-.sg-sidebar{width:236px;flex:none;display:flex;flex-direction:column;gap:14px;padding:6px 12px 18px}
+.sg-sidebar{width:236px;flex:none;display:flex;flex-direction:column;gap:14px;padding:6px 12px 8px}
 .sg-search{height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);color:var(--tx-3)}
 .sg-search svg{width:14px;height:14px;flex:none}
 .sg-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
