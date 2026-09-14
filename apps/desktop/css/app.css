@@ -19,7 +19,7 @@ html,body{height:100%;overflow:hidden}
 :root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .32)}
 /* Content areas of the full-screen views (projects, settings) are nearly
    solid, with a little of the material left showing through. */
-:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 86%,transparent)}
+:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 70%,transparent)}
 html{background:transparent}
 body{
   background:var(--bg-window);color:var(--tx);
