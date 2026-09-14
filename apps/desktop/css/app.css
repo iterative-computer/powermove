@@ -1172,11 +1172,6 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
   background-size:8px 8px!important;
 }
 
-.settings-extension-delete{color:var(--danger);font-size:var(--fs-xs);padding:3px 0;background:transparent;cursor:pointer}
-.settings-extension-delete:disabled{opacity:.5;cursor:default}
-.settings-extension-confirm{padding:10px;border-radius:var(--r-sm);background:var(--bg-float);font-size:var(--fs-xs);line-height:1.5}
-.settings-extension-confirm p{margin:0 0 8px;color:var(--tx-2)}
-.settings-extension-confirm .btn{margin-right:8px;padding:5px 8px}
 
 /* Export uses the same quiet fields, type and orange accent as the inspector. */
 .export-modal{top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}

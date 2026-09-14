@@ -173,11 +173,13 @@ export default function activate(api: PowermoveAPI) {
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await settings.getByRole('tab', { name: 'Extensions', exact: true }).click();
-    const row = settings.locator('[data-extension-id="settings-override"]');
-    await expect(row).toContainText('Replaces Timeline');
+    await settings.screenshot({ path: '/private/tmp/powermove-extension-list.png' });
+    await settings.getByRole('button', { name: 'Open Interface cleanup', exact: true }).click();
+    const row = settings.locator('.settings-extension-detail[data-extension-id="settings-override"]');
+    await expect(row).toContainText('Replaces');
+    await expect(row).toContainText('Timeline');
     await expect(row).toContainText('Keyboard shortcuts');
-    await row.locator('summary').click();
-    await expect(row).toContainText('Panels: Custom timeline');
+    await expect(row).toContainText('Custom timeline');
     await settings.screenshot({ path: '/private/tmp/powermove-extension-settings.png' });
     await row.getByRole('button', { name: 'Delete Interface cleanup', exact: true }).click();
     await expect(row).toContainText('permanently removed');
@@ -186,6 +188,7 @@ export default function activate(api: PowermoveAPI) {
     await row.getByRole('button', { name: 'Delete Interface cleanup', exact: true }).click();
     await row.getByRole('button', { name: 'Delete extension', exact: true }).click();
     await expect(row).toHaveCount(0);
+    await expect(settings.locator('[data-extension-id="settings-override"]')).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.loader.activeIds())).toContain('timeline');
     await expect(page.locator('#panel-timeline #tl-canvas')).toHaveCount(1);
     expect(session.diagnostics.pageErrors).toEqual([]);
