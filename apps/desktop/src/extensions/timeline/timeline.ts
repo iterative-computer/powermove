@@ -2942,19 +2942,19 @@ function onCtx(e: any) {
       const members = key.members ?? [{ key, prop: r.prop }];
       pushKeyframeMenu(items, members);
     } else {
-      items.push({ label: 'Add keyframe here', run: () => api.history.do('Add keyframe', () => {
+      items.push({ label: 'Add keyframe here', icon: 'diamond', run: () => api.history.do('Add keyframe', () => {
         const values = trackChannels(r).map(axis => ({ ...axis, value: api.anim.evP(r.L, axis.prop, x2t(x), axis.key) }));
         values.forEach(axis => api.anim.setKeyOn(axis.prop, x2t(x) - r.L.from, axis.value, 'linear', api.project.get().fps));
       }) });
-      items.push({ label: 'Clear all keyframes', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
+      items.push({ label: 'Clear all keyframes', icon: 'x', disabled: !r.prop.kf.length, run: () => api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), axis.key); axis.prop.kf = []; }); api.anim.touch(); }) });
     }
   } else if (!T.graph && hr && hr.row.kind === 'layer') {
     api.ui.showLayerMenu(hr.row.L, e, 'timeline');
     return;
   } else if (!T.graph || y < T.ruler) {
-    items.push({ label: 'Set work area start', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Set work area end', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
-      { label: 'Reset work area', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) });
+    items.push({ label: 'Set work area start', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [Math.min(api.transport.time(), api.project.get().work[1] - 1 / api.project.get().fps), api.project.get().work[1]] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Set work area end', icon: 'frame', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [api.project.get().work[0], Math.max(api.transport.time(), api.project.get().work[0] + 1 / api.project.get().fps)] } }, { label: 'Work area', origin: 'timeline' }) },
+      { label: 'Reset work area', icon: 'undo', run: () => api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Work area', origin: 'timeline' }) });
   }
   /* Extension contributions land at the end, so the positions a user has
      learned for the built-in rows never move. `layer:context` only fires over a

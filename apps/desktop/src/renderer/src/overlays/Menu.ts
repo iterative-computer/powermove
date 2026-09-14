@@ -3,7 +3,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
 import { consumeMenuTriggerPress, markMenuDismissal } from './dismissal';
-import { canRenderNatively, planNativeMenu } from './native-menu';
+import { canRenderNatively, iconRasterizer, planNativeMenu } from './native-menu';
 
 type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement };
 
@@ -41,10 +41,12 @@ export class MenuController {
        DOM menu stays for anchored dropdowns and curve pickers. */
     const native = cursorOrigin ? nativeMenuBridge() : null;
     if (native && canRenderNatively(items)) {
-      const plan = planNativeMenu(items);
-      void native.popup({ items: plan.items, x: options.x, y: options.y }).then((id) => {
-        if (id != null) plan.actions.get(id)?.run?.();
-      }).catch(() => undefined);
+      /* Icons rasterize once per name and are cached, so the await is a
+         microtask after the first menu. */
+      void planNativeMenu(items, iconRasterizer(this.PM.ICONS as Record<string, string> | undefined))
+        .then((plan) => native.popup({ items: plan.items, x: options.x, y: options.y })
+          .then((id) => { if (id != null) plan.actions.get(id)?.run?.(); }))
+        .catch(() => undefined);
       return document.createElement('div');
     }
     const x = options.x ?? (options.right ? rect.right : rect.left);

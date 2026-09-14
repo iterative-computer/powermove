@@ -137,6 +137,13 @@ PM.ICONS = {
   diamond: '<path d="M235.33,116.72,139.28,20.66a16,16,0,0,0-22.56,0l-96,96.06a16,16,0,0,0,0,22.56l96.05,96.06h0a16,16,0,0,0,22.56,0l96.05-96.06a16,16,0,0,0,0-22.56ZM128,224h0L32,128,128,32,224,128Z"/>',
   enter: '<path d="M184,104v32a8,8,0,0,1-8,8H99.31l10.35,10.34a8,8,0,0,1-11.32,11.32l-24-24a8,8,0,0,1,0-11.32l24-24a8,8,0,0,1,11.32,11.32L99.31,128H168V104a8,8,0,0,1,16,0Zm48-48V200a16,16,0,0,1-16,16H40a16,16,0,0,1-16-16V56A16,16,0,0,1,40,40H216A16,16,0,0,1,232,56ZM216,200V56H40V200H216Z"/>',
   return: '<path d="M216,48a8,8,0,0,0-8,8v56a24,24,0,0,1-24,24H67.31l34.35-34.34a8,8,0,0,0-11.32-11.32l-48,48a8,8,0,0,0,0,11.32l48,48a8,8,0,0,0,11.32-11.32L67.31,152H184a40,40,0,0,0,40-40V56A8,8,0,0,0,216,48Z"/>',
+  /* Menu glyphs, stroked in the same weight as music/film. */
+  copy: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="88" y="88" width="136" height="136" rx="12"/><path d="M168 88V44a12 12 0 0 0-12-12H44a12 12 0 0 0-12 12v112a12 12 0 0 0 12 12h44"/></g>',
+  cube: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M128 24 40 72v112l88 48 88-48V72z"/><path d="M40 72l88 48 88-48M128 120v112"/></g>',
+  stack: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M128 40 32 88l96 48 96-48z"/><path d="M32 136l96 48 96-48M32 184l96 48 96-48"/></g>',
+  scissors: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><circle cx="64" cy="72" r="32"/><circle cx="64" cy="184" r="32"/><path d="M92 90l132 78M92 166l132-78"/></g>',
+  speaker: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M80 96H40a8 8 0 0 0-8 8v48a8 8 0 0 0 8 8h40l64 48V48zM184 104a34 34 0 0 1 0 48M208 80a68 68 0 0 1 0 96"/></g>',
+  headphones: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M40 176v-40a88 88 0 0 1 176 0v40"/><rect x="40" y="144" width="48" height="72" rx="12"/><rect x="168" y="144" width="48" height="72" rx="12"/></g>',
 };
 
 /* ── math ──────────────────────────────────────────────── */

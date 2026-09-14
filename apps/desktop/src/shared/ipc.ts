@@ -421,6 +421,8 @@ export type NativeMenuItem =
       checked?: boolean;
       /** Electron accelerator string, shown as the key equivalent. */
       accelerator?: string;
+      /** PNG data URL, 32×32 (2× of the 16pt slot), black on transparent; shown as a template image. */
+      icon?: string;
     };
 
 export type NativeMenuRequest = {
