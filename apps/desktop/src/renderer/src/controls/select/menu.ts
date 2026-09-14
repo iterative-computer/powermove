@@ -57,6 +57,8 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     check.innerHTML = '<path d="M3.5 8.5l3 3 6-6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
     item.append(label, check);
     item.addEventListener('pointermove', () => setActive(i));
+    // Like Radix: the highlight follows the pointer and leaves with it; keyboard keeps its index.
+    item.addEventListener('pointerleave', () => item.removeAttribute('data-active'));
     item.addEventListener('click', (event) => { event.stopPropagation(); if (!option.disabled) pick(i); });
     items.push(item);
     el.append(item);
