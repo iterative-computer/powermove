@@ -32,10 +32,10 @@ html{background:transparent}
 :root{
   --glass-fill:rgb(var(--paper-rgb) / .55);
   --glass-edge:
-    inset 0 0 0 1px rgb(var(--ink-rgb) / .08),
-    inset 1px 1px 0 rgb(var(--paper-rgb) / .9),
-    inset -1px -1px 0 rgb(var(--paper-rgb) / .55),
-    0 1px 2px rgb(var(--ink-rgb) / .06);
+    inset 0 0 0 1px rgb(var(--ink-rgb) / .06),
+    inset 1px 1px 0 rgb(var(--paper-rgb) / .7),
+    inset -1px -1px 0 rgb(var(--paper-rgb) / .4),
+    0 1px 2px rgb(var(--ink-rgb) / .05);
   --glass-fill-hi:rgb(var(--paper-rgb) / .95);
   --glass-edge-hi:
     inset 1px 1px 0 rgb(var(--paper-rgb) / 1),
@@ -43,16 +43,16 @@ html{background:transparent}
   --glass-backdrop:blur(20px) saturate(1.5);
 }
 :root[data-theme="dark"]{
-  --glass-fill:rgb(var(--paper-rgb) / .07);
+  --glass-fill:rgb(var(--paper-rgb) / .065);
   --glass-edge:
-    inset 0 0 0 1px rgb(var(--paper-rgb) / .06),
-    inset 1px 1px 0 rgb(var(--paper-rgb) / .1),
-    inset -1px -1px 0 rgb(var(--paper-rgb) / .07),
-    0 1px 2px rgb(0 0 0 / .25);
-  --glass-fill-hi:rgb(var(--paper-rgb) / .14);
+    inset 0 0 0 1px rgb(var(--paper-rgb) / .04),
+    inset 1px 1px 0 rgb(var(--paper-rgb) / .06),
+    inset -1px -1px 0 rgb(var(--paper-rgb) / .045),
+    0 1px 2px rgb(0 0 0 / .2);
+  --glass-fill-hi:rgb(var(--paper-rgb) / .13);
   --glass-edge-hi:
-    inset 1px 1px 0 rgb(var(--paper-rgb) / .14),
-    0 1px 2px rgb(0 0 0 / .3);
+    inset 1px 1px 0 rgb(var(--paper-rgb) / .09),
+    0 1px 2px rgb(0 0 0 / .25);
 }
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
   background:var(--glass-fill);
