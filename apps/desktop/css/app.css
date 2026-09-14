@@ -21,6 +21,56 @@ html,body{height:100%;overflow:hidden}
    solid, with a little of the material left showing through. */
 :root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 70%,transparent)}
 html{background:transparent}
+
+/* ── liquid glass ──────────────────────────────────────── */
+/* Floating chrome (tab strip, tool cluster, Export, sidebar selection) is
+   glass the way Tahoe toolbars are: a thin translucent fill, a bright rim
+   that catches light from above and fades down the sides, a soft specular
+   bloom near the top edge, and a short contact shadow. The backdrop is
+   blurred and saturated so panel content sliding underneath reads as being
+   seen through the lens rather than covered by it. Everything is drawn in
+   CSS so hover, press, and selection stay in the same motion grammar. */
+:root{
+  --glass-fill:linear-gradient(180deg,rgb(var(--paper-rgb) / .62),rgb(var(--paper-rgb) / .38));
+  --glass-fill-hi:linear-gradient(180deg,rgb(var(--paper-rgb) / .92),rgb(var(--paper-rgb) / .74));
+  --glass-rim:linear-gradient(180deg,rgb(var(--paper-rgb) / .95),rgb(var(--paper-rgb) / .35) 38%,rgb(var(--paper-rgb) / .18) 62%,rgb(var(--paper-rgb) / .6));
+  --glass-spec:radial-gradient(120% 90% at 50% -30%,rgb(var(--paper-rgb) / .55),transparent 62%);
+  --glass-shadow:0 1px 2px rgb(var(--ink-rgb) / .08),0 4px 10px -4px rgb(var(--ink-rgb) / .1),0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
+  --glass-shadow-hi:0 1px 2px rgb(var(--ink-rgb) / .1),0 3px 8px -3px rgb(var(--ink-rgb) / .14),inset 0 1px 0 rgb(var(--paper-rgb) / .9);
+  --glass-blur:blur(18px) saturate(1.5);
+}
+:root[data-theme="dark"]{
+  --glass-fill:linear-gradient(180deg,rgb(var(--paper-rgb) / .11),rgb(var(--paper-rgb) / .055));
+  --glass-fill-hi:linear-gradient(180deg,rgb(var(--paper-rgb) / .2),rgb(var(--paper-rgb) / .12));
+  --glass-rim:linear-gradient(180deg,rgb(var(--paper-rgb) / .38),rgb(var(--paper-rgb) / .1) 38%,rgb(var(--paper-rgb) / .05) 62%,rgb(var(--paper-rgb) / .16));
+  --glass-spec:radial-gradient(120% 90% at 50% -30%,rgb(var(--paper-rgb) / .16),transparent 62%);
+  --glass-shadow:0 1px 2px rgb(0 0 0 / .32),0 6px 14px -6px rgb(0 0 0 / .45),0 0 0 var(--hairline) rgb(0 0 0 / .35);
+  --glass-shadow-hi:0 1px 2px rgb(0 0 0 / .4),0 3px 8px -3px rgb(0 0 0 / .5),inset 0 1px 0 rgb(var(--paper-rgb) / .28);
+}
+:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
+  position:relative;isolation:isolate;
+  background:var(--glass-fill);
+  box-shadow:var(--glass-shadow);
+  -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+}
+/* Rim: a 1px gradient ring, brightest at the top edge like a lit bevel.
+   Specular: a soft bloom hugging the top, clipped to the ring. */
+:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::before,:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none}
+:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::before{background:var(--glass-spec);z-index:-1}
+:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
+  padding:1px;background:var(--glass-rim);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+}
+/* The selected control inside a glass cluster is a brighter lozenge of the
+   same glass: lit top edge, no rim of its own. */
+:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--glass-fill-hi)!important;box-shadow:var(--glass-shadow-hi)!important}
+/* Native fallback when the user asks macOS to reduce transparency. */
+@media (prefers-reduced-transparency: reduce){
+  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::before,:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{display:none}
+  :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
+}
 body{
   background:var(--bg-window);color:var(--tx);
   font-family:var(--f-ui);font-size:var(--fs-md);
@@ -65,7 +115,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 }
 #tabs{
   height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:40%;min-width:0;
-  padding:2px;border:0;border-radius:var(--r-md);background:var(--ink-2);
+  padding:2px;border:0;border-radius:var(--r-md);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
 #tabs::-webkit-scrollbar{display:none}
@@ -97,7 +147,8 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .tb-right{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag}
 /* Export is the app's terminal action, so it is the one labelled control in the
    titlebar; the icon-only buttons beside it stay secondary. */
-.tb-export{padding:0 10px;margin-right:6px}
+.tb-export{padding:0 10px;margin-right:6px;transition:filter var(--dur-1),transform var(--dur-1) var(--ease)}
+.tb-export:hover{filter:brightness(1.06)}
 
 /* The export dialog reuses the inspector row, whose 64px label column is sized
    for short property names; its option names need the room. */
@@ -145,7 +196,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 /* ── tool toolbar, inline with the native titlebar ─────── */
 #toolbar-strip{
   flex:0 1 auto;min-width:0;height:30px;display:flex;align-items:center;
-  margin:0;padding:2px;background:var(--ink-2);border:0;border-radius:var(--r-md);
+  margin:0;padding:2px;border:0;border-radius:var(--r-md);
   position:relative;z-index:30;-webkit-app-region:no-drag;
 }
 #toolbar-strip[hidden]{display:none}
