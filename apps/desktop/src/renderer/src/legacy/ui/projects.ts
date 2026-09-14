@@ -123,9 +123,10 @@ function card(m: any, trashed: any) {
   const raw = PM.Projects.get(m.id);
   const inner = h('div.ps-thumb-inner');
   if (m.thumb) inner.appendChild(h('img', { src: m.thumb, alt: '' }));
+  /* The meta line already says when a project is unsaved; the thumbnail only
+     carries where it is: Active or Open. */
   const badges = h('div.ps-card-badges',
-    active || open ? h('span.ps-card-badge', active ? 'Active' : 'Open') : null,
-    file?.dirty ? h('span.ps-card-badge.unsaved', 'Unsaved') : null);
+    active || open ? h('span.ps-card-badge', active ? 'Active' : 'Open') : null);
   const thumb = h('div.ps-thumb', inner, badges);
   const more = h('button.ps-more', { title: 'Project actions', 'aria-label': 'Project actions' }, PM.icon('more'));
   const sub = projectSub(m, raw, trashed, file);
