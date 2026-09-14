@@ -15,8 +15,11 @@ html,body{height:100%;overflow:hidden}
    reads through. Solid surfaces (panels, floats, fields) are unchanged: only
    the canvas between them is vibrant, as in Finder and Xcode. Anything that
    must stay opaque mixes from --bg-window-solid instead. */
-:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .2)}
-:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .22)}
+:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .3)}
+:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .32)}
+/* Content areas of the full-screen views (projects, settings) are nearly
+   solid, with a little of the material left showing through. */
+:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 86%,transparent)}
 html{background:transparent}
 body{
   background:var(--bg-window);color:var(--tx);
@@ -981,7 +984,7 @@ body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibi
 .ps-updates .btn{align-self:flex-start;height:28px;padding:0 12px}
 .ps-updates+.ps-sidefoot{margin-top:0}
 .ps-sidefoot{margin-top:auto;padding:0 10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.5}
-.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid));box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
+.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
 /* Everything on the top row is 32px tall. */
 .ps-top .btn{height:32px;padding:0 14px}
 .ps-title{min-width:0;flex:1;display:flex;align-items:baseline;gap:9px}.ps-title b{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}.ps-title span{font-size:var(--fs-xs);color:var(--tx-4)}
