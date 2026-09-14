@@ -286,7 +286,7 @@ function textGeometry(d: any) {
     selection.x0 = pad - anchorX - interactionPad;
     selection.x1 = pad + paragraphWidth - anchorX + interactionPad;
     selection.y0 = pad - anchorY - interactionPad;
-    selection.y1 = pad + Math.max(paragraphHeight, lh) - anchorY + interactionPad;
+    selection.y1 = pad + (Number(d.boxHeight) > 0 ? Math.max(paragraphHeight, lh) : lh * lines.length) - anchorY + interactionPad;
   }
   selection.w = selection.x1 - selection.x0;
   selection.h = selection.y1 - selection.y0;

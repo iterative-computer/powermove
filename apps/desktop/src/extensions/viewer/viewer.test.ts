@@ -367,8 +367,9 @@ describe('viewer runtime', () => {
     expect(next).toEqual({ scaleX: 150, scaleY: 100, pivotLocal: { x: 100, y: 50 } });
   });
 
-  it('never permits canvas handles to stretch text or intrinsic media', () => {
-    expect(resizeLocksAspect('text')).toBe(true);
+  it('allows text layout to resize freely and preserves intrinsic media proportions', () => {
+    expect(resizeLocksAspect('text')).toBe(false);
+    expect(resizeLocksAspect('text', true)).toBe(true);
     expect(resizeLocksAspect('image')).toBe(true);
     expect(resizeLocksAspect('video')).toBe(true);
     expect(resizeLocksAspect('shape')).toBe(false);

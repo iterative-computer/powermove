@@ -56,6 +56,10 @@ extraResources:
     to: api-pack/samples/media-browser
     filter:
       - "**/*"
+  - from: docs/samples/gradient-tint
+    to: api-pack/samples/gradient-tint
+    filter:
+      - "**/*"
   - from: src/main/agent-tools/mcp-server.mjs
     to: agent-tools/mcp-server.mjs
 extraMetadata:

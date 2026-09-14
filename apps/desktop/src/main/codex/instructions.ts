@@ -3,6 +3,7 @@ import type { AgentExtensionChange, CodexAccess } from '../../shared/ipc';
 import { AGENT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
+import { EFFECT_AUTHORING_INSTRUCTIONS } from '../../shared/effect-authoring';
 
 export interface AgentInstructionsOptions {
   projectName: string;
@@ -41,6 +42,9 @@ GROUPS AND PARENTING
 group_layers {targets:[IDs],name} creates groups; ungroup_layers {targets:[IDs]} dissolves them; move_to_group {targets:[IDs],group:ID|null} changes membership. Animate group transforms with set_property on its ID. Use set_layer {target,patch:{parent:ID|null}} for parenting (preserves pose; rejects cycles). Never group with precomps.
 
 EXTENDING POWERMOVE
+${EFFECT_AUTHORING_INSTRUCTIONS}
+Read powermove-api/samples/gradient-tint/README.md for new effects. Call validate_effect with the complete definition (32 params maximum). Verify registration and rendering after loading.
+
 The extension staging directory is ${extensionsDir}. When the user asks to change or add Powermove functionality, create or edit extensions only under that directory. Powermove validates staged changes, promotes them atomically, and keeps the previous version for recovery. Never edit the app bundle. Never edit the live user-extension folder or the source checkout. The folder name must equal the extension manifest id.
 
 Read powermove-api/EXTENSIONS.md and the included TypeScript types. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in with the \`fork_builtin_extension\` tool. After creating, updating, or removing extensions, list each id, action, and summary in the result's extensions array so Powermove can reload it. Return extensions: [] when none changed.

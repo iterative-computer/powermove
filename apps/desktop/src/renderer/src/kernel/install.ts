@@ -719,6 +719,33 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   const handles = new Map<string, ExtensionHandle>();
   const subscriptions: Array<() => void> = [];
 
+  // Capture the native rasterizer once (it normally installs after the kernel).
+  // Then leave PM.raster as an ordinary writable function so legacy wrappers
+  // can capture/delegate to it without changing the base beneath themselves.
+  const rasterDescriptor = Object.getOwnPropertyDescriptor(PM, 'raster');
+  let nativeRaster = PM.raster;
+  const rasterBase: RenderAPI['raster'] = (...args) => nativeRaster?.(...args) ?? null;
+  const rasterRegistration = kernel.services.register('raster', rasterBase);
+  const rasterDispatch: RenderAPI['raster'] = (...args) =>
+    (kernel.services.get<RenderAPI['raster']>('raster') ?? rasterBase)(...args);
+  const attachRaster = (value: any) => {
+    nativeRaster = value;
+    Object.defineProperty(PM, 'raster', {
+      configurable: true, enumerable: true, writable: true, value: rasterDispatch
+    });
+  };
+  if (typeof nativeRaster === 'function') attachRaster(nativeRaster);
+  else Object.defineProperty(PM, 'raster', {
+    configurable: true, enumerable: true, get: () => rasterDispatch, set: attachRaster
+  });
+  subscriptions.push(() => {
+    rasterRegistration.dispose();
+    if (rasterDescriptor?.get || rasterDescriptor?.set) Object.defineProperty(PM, 'raster', rasterDescriptor);
+    else Object.defineProperty(PM, 'raster', {
+      configurable: true, enumerable: true, writable: true, value: nativeRaster
+    });
+  });
+
   /* Route through PM.cmd when present: it is the app's public command seam
      (native menu IPC and tests interpose on it). Falls back to the kernel. */
   const keyListener = kernel.installKeyListener((command, args) =>

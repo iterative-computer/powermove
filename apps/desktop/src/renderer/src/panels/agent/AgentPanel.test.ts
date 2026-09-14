@@ -185,9 +185,10 @@ describe('AgentPanel', () => {
     renderPanel();
     await vi.waitFor(() => {
       flushSync();
-      expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent).toBe('Connect ChatGPT');
+      expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent?.trim()).toBe('Connect ChatGPT');
     });
-    expect(target.querySelector('[aria-label="Message composer"]')).toBeTruthy();
+    expect(target.querySelector('[aria-label="Message composer"]')).toBeNull();
+    expect(target.querySelector('.agent-welcome')).toBeNull();
 
     target.querySelector<HTMLButtonElement>('.agent-connect-button')!.click();
     await vi.waitFor(() => expect(connect).toHaveBeenCalledOnce());
@@ -195,7 +196,7 @@ describe('AgentPanel', () => {
       flushSync();
       expect(target.textContent).toContain('Finish signing in in your browser.');
     });
-    expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent).toBe('Waiting…');
+    expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.textContent?.trim()).toBe('Waiting for sign-in…');
 
     flushSync(() => changed?.({ state: 'connected', email: null, planType: 'plus', detail: null }));
     expect(target.querySelector('[aria-label="Message composer"]')).toBeTruthy();
@@ -214,13 +215,42 @@ describe('AgentPanel', () => {
     });
     renderPanel(snapshot({
       threadId: 'saved-thread',
-      threads: [{ id: 'saved-thread', title: 'Saved conversation' }]
+      threads: [{ id: 'saved-thread', title: 'Saved conversation' }],
+      conversation: [{ role: 'assistant', text: 'Your title animation is ready.' }],
+      composerDraft: 'Make it slower'
     }));
 
     await vi.waitFor(() => expect(target.querySelector('.agent-connect-gate')).toBeTruthy());
     const picker = target.querySelector<HTMLButtonElement>('[aria-label="Switch thread"]');
     expect(picker).toBeTruthy();
     expect(picker?.textContent).toContain('Saved conversation');
+    expect(target.querySelector('.agent-scroll')?.textContent).toContain('Your title animation is ready.');
+    expect(target.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Make it slower');
+  });
+
+  it('keeps setup visible while checking another provider and restores the saved draft', async () => {
+    const chatgpt = window.powermove!.chatgpt;
+    vi.mocked(chatgpt.status).mockResolvedValue({ state: 'disconnected', email: null, planType: null, detail: null });
+    let resolveStatus!: (status: any) => void;
+    Object.assign(window.powermove!, { claude: {
+      status: vi.fn(() => new Promise(resolve => { resolveStatus = resolve; })),
+      onChanged: vi.fn(() => () => undefined)
+    } });
+    renderPanel(snapshot({ composerDraft: 'Animate my title' }));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelector('.agent-connect-gate')).toBeTruthy();
+    });
+    flushSync(() => setAgentSnapshot(snapshot({ provider: 'claude', composerDraft: 'Animate my title' })));
+    expect(target.querySelector('.agent-connect-gate')?.textContent).toContain('Checking connection…');
+    expect(target.querySelector('[aria-label="Message composer"]')).toBeNull();
+    expect(target.querySelector<HTMLButtonElement>('.agent-connect-button')?.disabled).toBe(true);
+    resolveStatus({ state: 'connected', email: null, planType: null, detail: null });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelector('.agent-connect-gate')).toBeNull();
+      expect(target.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Animate my title');
+    });
   });
 
   it('offers accessible new-thread and switching controls and disables them during a run', () => {
@@ -442,7 +472,7 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.keepPanelRun).toHaveBeenCalledOnce();
   });
 
-  it('renders an extension recovery action inside the failing result turn', () => {
+  it('shows saved extension errors without asking the user to press Fix it', () => {
     renderPanel(snapshot({
       legacyPhase: 'conversation',
       conversation: [{
@@ -454,8 +484,9 @@ describe('AgentPanel', () => {
 
     const button = [...target.querySelectorAll<HTMLButtonElement>('button')]
       .find((candidate) => candidate.textContent === 'Fix it')!;
-    button.click();
-    expect(PM.SpatialAssistant.requestFix).toHaveBeenCalledExactlyOnceWith('broken-mod');
+    expect(button).toBeUndefined();
+    expect(target.textContent).toContain("Broken Mod didn't load: Unexpected token");
+    expect(PM.SpatialAssistant.requestFix).not.toHaveBeenCalled();
   });
 
   it('shows autonomous results once in the conversation without a completion card', () => {

@@ -361,6 +361,7 @@ it('reloads typed extension changes during the autonomous request flow', async (
   PM.proj = { id: 'project-1', name: 'Test Project', revision: 0, layers: [] };
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.AgentHarness = {
+    ...PM.AgentHarness,
     observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn((command) => command),
   };
@@ -368,10 +369,10 @@ it('reloads typed extension changes during the autonomous request flow', async (
     reload,
     records: () => [{ id: 'new-mod', manifest: { name: 'New Mod' }, health: { state: 'ok' } }],
   } };
-  PM.CodexBridge.request = vi.fn(async () => ({
+  PM.CodexBridge.request = vi.fn().mockResolvedValueOnce({
     text: JSON.stringify({ summary: 'Built the mod', commands: [], artifacts: [], externalActions: [], notes: [] }),
     extensions: [{ id: 'new-mod', action: 'created' }],
-  }));
+  }).mockResolvedValue({ text: JSON.stringify({ summary: 'Verified the mod', commands: [], artifacts: [], externalActions: [], notes: [] }), extensions: [] });
 
   PM.AgentUI.submit('Build a mod');
   await vi.waitFor(() => assert.notEqual(PM.AgentUI.state.phase, 'running'), { timeout: 1_500 });
@@ -379,6 +380,88 @@ it('reloads typed extension changes during the autonomous request flow', async (
 
   assert.deepEqual(reload.mock.calls, [['new-mod']]);
   assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Added mod New Mod'));
+});
+
+it('loads a newly authored effect before applying commands that use it', async () => {
+  const { PM, jobs } = placementHarness();
+  let registered = false;
+  PM.Kernel.loader = {
+    reload: vi.fn(async () => { registered = true; }),
+    records: () => [{ id: 'gradient-tint', manifest: { name: 'Gradient Tint' }, health: { state: 'ok' } }]
+  };
+  PM.Edit = { apply: vi.fn(() => ({ ok: registered, message: 'Unknown effect: gradient-tint' })) };
+  PM.AgentUI.submit('Create a gradient tint effect and apply it');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  const command = { type: 'add_effect', target: 'layer-1', effect: 'gradient-tint' };
+  jobs[0].resolve({
+    text: JSON.stringify({ summary: 'Created effect', commands: [command], artifacts: [], notes: [], externalActions: [] }),
+    extensions: [{ id: 'gradient-tint', action: 'created' }]
+  });
+  await vi.waitFor(() => assert.equal(jobs.length, 2, JSON.stringify(PM.AgentUI.state.conversation)));
+  assert.deepEqual(PM.Edit.apply.mock.calls[0][0], [command]);
+  jobs[1].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+});
+
+it('retains effect application commands through an activation repair and applies them once', async () => {
+  const { PM, jobs } = placementHarness();
+  let loads = 0;
+  PM.Kernel.loader = {
+    reload: vi.fn(async () => { loads++; }),
+    records: () => [{ id: 'gradient-tint', manifest: { name: 'Gradient Tint' },
+      health: loads < 2 ? { state: 'error', message: 'too many params (36 > 32)' } : { state: 'ok' } }]
+  };
+  PM.Edit = { apply: vi.fn(() => ({ ok: loads >= 2, message: 'Unknown effect: gradient-tint' })) };
+  PM.AgentUI.submit('Create a gradient tint effect and apply it');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  const command = { type: 'add_effect', target: 'layer-1', effect: 'gradient-tint' };
+  jobs[0].resolve({
+    text: JSON.stringify({ summary: 'Created effect', commands: [command], artifacts: [], notes: [], externalActions: [] }),
+    extensions: [{ id: 'gradient-tint', action: 'created' }]
+  });
+  await vi.waitFor(() => assert.equal(jobs.length, 2, JSON.stringify(PM.AgentUI.state.conversation)));
+  assert.equal(PM.Edit.apply.mock.calls.length, 0);
+  assert.ok(jobs[1].prompt.includes('DEFERRED PROJECT COMMANDS'));
+  jobs[1].resolve({ ...emptyAgentResult, extensions: [{ id: 'gradient-tint', action: 'updated' }] });
+  await vi.waitFor(() => assert.equal(jobs.length, 3));
+  assert.equal(PM.Edit.apply.mock.calls.length, 1);
+  assert.deepEqual(PM.Edit.apply.mock.calls[0][0], [command]);
+  jobs[2].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(PM.AgentUI.state.run.reviewError, '');
+  assert.deepEqual(PM.AgentUI.state.run.applied, [command]);
+});
+
+it('reconciles a deferred effect edit if the user changes the project during repair', async () => {
+  const { PM, jobs } = placementHarness();
+  let loads = 0;
+  PM.Kernel.loader = {
+    reload: vi.fn(async () => { loads++; }),
+    records: () => [{ id: 'gradient-tint', manifest: { name: 'Gradient Tint' },
+      health: loads < 2 ? { state: 'error', error: 'too many params' } : { state: 'ok' } }]
+  };
+  PM.Edit = { apply: vi.fn(() => ({ ok: true })) };
+  PM.AgentUI.submit('Create a gradient tint effect and apply it');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].resolve({
+    text: JSON.stringify({ summary: 'Created effect', commands: [{ type: 'add_effect', target: 'old-layer', effect: 'gradient-tint' }], artifacts: [], notes: [], externalActions: [] }),
+    extensions: [{ id: 'gradient-tint', action: 'created' }]
+  });
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  PM.proj.revision = 1;
+  jobs[1].resolve({ ...emptyAgentResult, extensions: [{ id: 'gradient-tint', action: 'updated' }] });
+  await vi.waitFor(() => assert.equal(jobs.length, 3));
+  assert.equal(jobs[2].options.mode, undefined, 'uses the existing read-only reconciliation path');
+  assert.equal(PM.Edit.apply.mock.calls.length, 0);
+  const command = { type: 'add_effect', target: 'current-layer', effect: 'gradient-tint' };
+  jobs[2].resolve(JSON.stringify({ kind: 'scene', operation: 'modify', sceneEdit: {
+    label: 'Apply effect to current layer', commands: [command], reviewTimes: []
+  } }));
+  await vi.waitFor(() => assert.equal(jobs.length, 4));
+  assert.deepEqual(PM.Edit.apply.mock.calls[0][0], [command]);
+  assert.equal(PM.Edit.apply.mock.calls[0][1].baseRevision, 1);
+  jobs[3].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
 });
 
 it('keeps the prose the model streamed as the reply instead of replacing it with the structured summary', async () => {
@@ -607,6 +690,7 @@ function placementHarness() {
   PM.WS.current = { layout: { docks: [{ id: 'center', panels: [{ id: 'timeline' }, { id: 'viewer' }] }] } };
   PM.hist = { mark: vi.fn(() => 1), squash: vi.fn() };
   PM.AgentHarness = {
+    ...PM.AgentHarness,
     observe: vi.fn(async () => ({ state: {}, times: [], images: [] })),
     cleanCommand: vi.fn(command => command),
   };
@@ -619,6 +703,35 @@ function placementHarness() {
 
 const placementMessage = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
 const emptyAgentResult = { text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) };
+
+it('preserves an effect-authoring request in Editor mode until Project access is chosen', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.setAccess('editor');
+  const request = 'make a typewriter effect that lets me control the gradient color of the typing cursor';
+  PM.AgentUI.submit(request);
+  await vi.waitFor(() => assert.equal(jobs.length, 1, JSON.stringify(PM.AgentUI.state.conversation)));
+  const schema = PM.CodexBridge.request.mock.calls[0][1];
+  assert.ok(schema.properties.operation.enum.includes('requires_project'));
+  assert.ok(jobs[0].prompt.includes('api.effects.register'));
+  jobs[0].resolve(JSON.stringify({
+    operation: 'requires_project', kind: 'section', message: 'I need to create an effect definition.',
+    section: { title: 'Unwanted panel', controls: [{ type: 'button', command: 'fitView' }] }
+  }));
+  await vi.waitFor(() => assert.ok(PM.AgentUI.state.conversation.some(m => m.requiresProject)));
+  assert.equal(PM.AgentUI.state.accessMode, 'editor');
+  assert.equal(PM.AgentUI.state.plan, null);
+  assert.equal(PM.proj.layers.length, 0);
+  assert.equal(jobs.length, 1);
+  const index = PM.AgentUI.state.conversation.findIndex(m => m.requiresProject);
+  PM.AgentUI.continueWithProject(index);
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  assert.equal(jobs[1].options.mode, 'autonomous');
+  assert.equal(jobs[1].options.access, 'project');
+  assert.ok(jobs[1].prompt.startsWith(request));
+  jobs[1].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+});
+
 
 it('keeps thread history, drafts and Codex sessions separate; ignores late stopped replies', async () => {
   const { PM, jobs } = placementHarness();
@@ -682,6 +795,19 @@ it('uses Claude to title the first request when Claude is the selected provider'
   PM.AgentUI.submit('Arrange this timeline like Premiere Pro');
   await vi.waitFor(() => assert.equal(PM.AgentThreadTitles.generate.mock.calls.length, 1));
   assert.equal(PM.AgentThreadTitles.generate.mock.calls[0][1], 'claude');
+});
+
+it('restores the chosen access mode after leaving an API provider instead of stranding extension authoring in Editor', () => {
+  const { PM } = placementHarness();
+  PM.AgentUI.setAccess('project');
+  PM.AgentUI.setProvider('compatible');
+  assert.equal(PM.AgentUI.state.accessMode, 'editor');
+  PM.AgentUI.setProvider('claude');
+  assert.equal(PM.AgentUI.state.accessMode, 'project');
+  PM.AgentUI.setAccess('editor');
+  PM.AgentUI.setProvider('compatible');
+  PM.AgentUI.setProvider('chatgpt');
+  assert.equal(PM.AgentUI.state.accessMode, 'editor', 'preserve explicitly restricted access');
 });
 
 it('binds the first typed draft to the boot project before it can target an older thread', () => {
@@ -791,7 +917,7 @@ it('clears placement on agent failure without disturbing the project or workspac
   assert.equal(JSON.stringify([PM.proj, PM.WS.current]), before);
 });
 
-it('offers Fix it when a reloaded mod is unhealthy', async () => {
+it('reports an unhealthy mod without a manual Fix it action', async () => {
   const { PM, assistant } = spatialHarness();
   PM.Kernel = { loader: {
     reload: vi.fn(async () => {}),
@@ -804,8 +930,71 @@ it('offers Fix it when a reloaded mod is unhealthy', async () => {
   const turns = await assistant.lifecycle.applyExtensionChanges([{ id: 'broken-mod', action: 'updated' }]);
   assert.deepEqual(turns, [
     { role: 'assistant', text: 'Updated mod Broken Mod', modResult: { id: 'broken-mod', name: 'Broken Mod', action: 'updated', status: 'error' } },
-    { role: 'assistant', text: "Broken Mod didn't load: Unexpected token", fixExtensionId: 'broken-mod' },
+    { role: 'assistant', text: "Broken Mod didn't load: Unexpected token" },
   ]);
+});
+
+it('continues the same agent to repair and verify loaded extensions before finishing', async () => {
+  const { PM, jobs } = placementHarness();
+  let health = { state: 'activation-error', error: 'Missing raster service' };
+  PM.Kernel = { loader: {
+    reload: vi.fn(async () => {}),
+    records: () => [{ id: 'typing-mod', manifest: { name: 'Typing' }, health }],
+  } };
+  PM.AgentUI.submit('Make a typing effect');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].resolve({ ...emptyAgentResult, extensions: [{ id: 'typing-mod', action: 'created' }], extensionChangeSetId: 'created' });
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  assert.equal(PM.AgentUI.state.phase, 'running');
+  assert.match(jobs[1].prompt, /Missing raster service/);
+  assert.match(jobs[1].prompt, /render_frames/);
+  assert.equal(jobs[1].options.threadId, jobs[0].options.threadId);
+  health = { state: 'ok' };
+  jobs[1].resolve({ ...emptyAgentResult, extensions: [{ id: 'typing-mod', action: 'updated' }], extensionChangeSetId: 'repaired' });
+  await vi.waitFor(() => assert.equal(jobs.length, 3));
+  jobs[2].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(PM.AgentUI.state.run.reviewError, '');
+  assert.equal(PM.AgentUI.state.conversation.filter(m => m.role === 'user').length, 1);
+  assert.ok(!PM.AgentUI.state.conversation.some(m => m.fixExtensionId));
+  const restoreChangeSet = vi.fn(async () => {});
+  (window as any).powermove = { codex: { restoreChangeSet } };
+  await PM.AgentUI.undoSceneRun();
+  assert.deepEqual(restoreChangeSet.mock.calls.map(([arg]) => arg.changeSetId), ['repaired', 'created']);
+});
+
+it('bounds automatic extension repairs and reports a persistent load failure', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.Kernel = { loader: {
+    reload: vi.fn(async () => {}),
+    records: () => [{ id: 'broken-mod', health: { state: 'activation-error', error: 'Still broken' } }],
+  } };
+  PM.AgentUI.submit('Repair the effect');
+  for (let pass = 0; pass < 4; pass++) {
+    await vi.waitFor(() => assert.equal(jobs.length, pass + 1));
+    jobs[pass].resolve({ ...emptyAgentResult, extensions: pass ? [] : [{ id: 'broken-mod', action: 'updated' }] });
+  }
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(jobs.length, 4);
+  assert.match(PM.AgentUI.state.run.reviewError, /Still broken/);
+  assert.ok(!PM.AgentUI.state.conversation.some(m => m.modResult?.status === 'ready'));
+});
+
+it('stops an automatic verification and ignores its late result', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.Kernel = { loader: {
+    reload: vi.fn(async () => {}), records: () => [{ id: 'new-mod', health: { state: 'ok' } }],
+  } };
+  PM.AgentUI.submit('Build an effect');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].resolve({ ...emptyAgentResult, extensions: [{ id: 'new-mod', action: 'created' }] });
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  PM.AgentUI.stop();
+  assert.equal(jobs[1].options.signal.aborted, true);
+  jobs[1].resolve(emptyAgentResult);
+  await Promise.resolve();
+  assert.notEqual(PM.AgentUI.state.phase, 'result');
+  assert.equal(jobs.length, 2);
 });
 
 it('builds and automatically submits an extension Fix-it prompt in project mode', async () => {

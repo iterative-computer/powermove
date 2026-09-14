@@ -99,3 +99,55 @@ it('allows local HTTP and rejects credentials, insecure remote hosts and URL fra
   expect(providerUrl('http://localhost:11434/v1/')).toBe('http://localhost:11434/v1');
   for (const url of ['http://example.com/v1', 'https://key@example.com', 'https://example.com/#key', 'file:///tmp/model']) expect(() => providerUrl(url)).toThrow();
 });
+
+it('accepts Sub2API server URLs and keys through the existing backend connection', async () => {
+  const { createServer } = await import('node:http');
+  const requests: { url?: string; authorization?: string; body: any }[] = [];
+  const server = createServer(async (req, res) => {
+    if (req.method === 'GET') { res.writeHead(404).end(); return; }
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const payload = JSON.parse(body);
+    requests.push({ url: req.url, authorization: req.headers.authorization, body: payload });
+    if (req.url !== '/v1/chat/completions' || req.headers.authorization !== 'Bearer sk-sub2api-test') {
+      res.writeHead(401).end(); return;
+    }
+    if (!payload.stream) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })); return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end(event({ content: 'Connected through the gateway.' }, 'stop') + 'data: [DONE]\n\n');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address() as import('node:net').AddressInfo;
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-sub2api-')); directories.push(directory);
+    const provider = new CompatibleProvider(directory);
+    const config = await provider.configure({ baseUrl, apiKey: 'sk-sub2api-test', model: 'claude-group-alias', vision: false });
+    expect(config).toMatchObject({ baseUrl: baseUrl + '/v1', hasKey: true });
+    const reopened = new CompatibleProvider(directory);
+    // Re-entering the equivalent full endpoint must retain the encrypted key.
+    await reopened.configure({ baseUrl: baseUrl + '/v1/chat/completions', model: 'claude-group-alias', vision: false });
+    const result = await reopened.run({ id: 'sub2api-run', mode: 'autonomous', access: 'editor', prompt: 'Hello', images: [], attachments: [] } as any, () => {});
+    expect(result.ok && JSON.parse(result.text).summary).toBe('Connected through the gateway.');
+    expect(requests).toHaveLength(3);
+    expect(requests.every(request => request.authorization === 'Bearer sk-sub2api-test' && request.url === '/v1/chat/completions')).toBe(true);
+    expect(requests[2]!.body.model).toBe('claude-group-alias');
+    expect(JSON.stringify(await reopened.status())).not.toContain('sk-sub2api-test');
+    expect(await readFile(path.join(directory, 'agent-provider.json'), 'utf8')).not.toContain('sk-sub2api-test');
+    await expect(reopened.configure({ baseUrl, apiKey: 'invalid-key', model: 'claude-group-alias', vision: false })).rejects.toThrow('rejected the API key');
+    expect(await reopened.status()).toEqual(config);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+it('normalizes gateway origins and complete endpoints without dropping deployment prefixes', () => {
+  expect(providerUrl('https://gateway.example')).toBe('https://gateway.example/v1');
+  expect(providerUrl('https://gateway.example/v1/')).toBe('https://gateway.example/v1');
+  expect(providerUrl('https://gateway.example/team/v1/chat/completions')).toBe('https://gateway.example/team/v1');
+  expect(providerUrl('https://gateway.example/team/v1')).toBe('https://gateway.example/team/v1');
+});

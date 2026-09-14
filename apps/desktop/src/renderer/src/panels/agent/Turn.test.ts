@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Turn from './Turn.svelte';
 import { WORD_REVEAL_SETTLE_MS } from './motion';
 import type { AgentMessage } from './agent-state.svelte';
+import { resetAgentState } from './agent-state.svelte';
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
@@ -15,6 +16,7 @@ function render(message: AgentMessage) {
 }
 
 beforeEach(() => {
+  resetAgentState();
   vi.useFakeTimers();
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -28,6 +30,20 @@ afterEach(() => {
 });
 
 describe('assistant word reveal', () => {
+  it('continues the original capability request only when the user chooses Project access', () => {
+    const continueWithProject = vi.fn();
+    instance = mount(Turn, { target, props: {
+      PM: { AgentUI: { continueWithProject } }, messageIndex: 3,
+      message: { role: 'assistant', text: 'This effect needs Project access.', requiresProject: true }
+    } });
+    flushSync();
+    expect(continueWithProject).not.toHaveBeenCalled();
+    const button = target.querySelector<HTMLButtonElement>('button')!;
+    expect(button.textContent).toBe('Continue with Project access');
+    button.click();
+    expect(continueWithProject).toHaveBeenCalledWith(3);
+  });
+
   it('keeps replayed tool details readable and partial failures visible while collapsed', () => {
     render({
       role: 'trace',

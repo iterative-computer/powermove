@@ -1,0 +1,9 @@
+{
+  "id": "gradient-tint",
+  "name": "Gradient Tint",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "A keyframeable gradient tint in Effects & Presets.",
+  "contributes": ["effects"],
+  "author": "agent"
+}

@@ -5,13 +5,11 @@
     record,
     quiet = false,
     onToggle,
-    onFix,
     onMenu
   }: {
     record: ExtensionRecord;
     quiet?: boolean;
     onToggle: (record: ExtensionRecord, next: boolean) => void;
-    onFix: (record: ExtensionRecord) => void;
     onMenu: (record: ExtensionRecord, anchor: HTMLElement) => void;
   } = $props();
 
@@ -105,7 +103,6 @@
     {#if shortError}
       <div class="error" title={fullError}>{shortError}</div>
       <div class="repair">
-        <button type="button" class="link" onclick={() => onFix(record)}>Fix it</button>
         <button type="button" class="link" onclick={() => onToggle(record, false)}>Turn off</button>
       </div>
     {/if}

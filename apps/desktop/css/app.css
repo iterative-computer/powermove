@@ -783,10 +783,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 #panel-agent>.body{display:flex;min-height:0;overflow:hidden}
 .agent-panel-body{container-type:inline-size}
 .agent-shell{position:relative;display:flex;flex:1;min-width:0;min-height:0;flex-direction:column;background:var(--bg-panel)}
-.agent-connect-gate{position:relative;display:flex;flex:1;min-height:0;align-items:center;justify-content:flex-start;flex-direction:column;padding:12px 16px;overflow-y:auto;text-align:center;color:var(--tx-3)}
-.agent-connect-provider{position:relative;align-self:flex-start;max-width:100%;margin-bottom:12px;appearance:none;border:0;border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);padding:5px 24px 5px 9px}
-.agent-connect-mark{display:grid;place-items:center;width:32px;height:32px;flex:none;margin-bottom:8px;border:0;border-radius:14px;color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--bg-float));box-shadow:0 10px 30px color-mix(in srgb,var(--accent) 8%,transparent)}
-.agent-connect-mark svg{width:22px;height:22px}.agent-connect-gate>b{color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}.agent-connect-gate>span{max-width:260px;margin-top:6px;font-size:var(--fs-sm);line-height:1.5}.agent-connect-button{min-width:142px;margin-top:18px}.agent-connect-gate>small{max-width:240px;margin-top:10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.45}
 .agent-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:12px var(--panel-edge-inset) 14px;scrollbar-width:none}
 .agent-scroll::-webkit-scrollbar{display:none}
 /* The jump pill and the footer card float over the transcript, so the tail the
@@ -991,7 +987,7 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 .agent-attachment-open>img{width:24px;height:24px;flex:none;object-fit:cover;border-radius:var(--r-xs);background:var(--bg-sunken)}
 .agent-attachment-type{width:24px;height:24px;flex:none;display:grid;place-items:center;border-radius:var(--r-xs);background:var(--ink-2);color:var(--tx-3);font-size:9px;letter-spacing:.02em}
 .agent-attachment-name{min-width:0;max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.agent-attachment-remove{width:20px;height:20px;flex:none;border-radius:var(--r-xs);color:var(--tx-3);opacity:.6}
+.agent-attachment-remove{width:20px;height:20px;flex:none;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-3);opacity:.6}
 .agent-attachment-open:hover .agent-attachment-name{color:var(--tx);text-decoration:underline;text-underline-offset:2px}
 .agent-attachment-remove:hover{opacity:1;background:var(--ink-2);color:var(--tx)}
 .agent-attachment-remove svg{width:9px;height:9px}

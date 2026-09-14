@@ -22,6 +22,28 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('preflights effect definitions with the registration validator without changing the project', async () => {
+    const PM = harnessEditor();
+    const before = JSON.stringify(PM.proj);
+    const definition = {
+      id: 'typewriter', label: 'Typewriter', group: 'Text',
+      params: Array.from({ length: 36 }, (_, i) => ({ k: `p${i}`, label: `P${i}`, def: 0, min: 0, max: 1 })),
+      frag: 'o = texture(u_tex, v_st);'
+    };
+    const call = () => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'validate-effect', callId: 'validate', tool: 'validate_effect',
+      arguments: { definition }, baseRevision: 0
+    });
+    await expect(call()).rejects.toThrow('too many params (36 > 32)');
+    definition.params = definition.params.slice(0, 32);
+    const result = await call();
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ valid: true, id: 'typewriter', parameterCount: 32 });
+    expect(result.changed).not.toBe(true);
+    expect(JSON.stringify(PM.proj)).toBe(before);
+    definition.params[1]!.k = definition.params[0]!.k;
+    await expect(call()).rejects.toThrow('duplicate param key');
+  });
+
   it('pages large animated properties without silently losing their counts', () => {
     const PM = harnessEditor(), layer = PM.mkLayer('shape');
     PM.proj.layers = [layer];

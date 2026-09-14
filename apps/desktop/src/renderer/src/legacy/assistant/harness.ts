@@ -2,6 +2,7 @@ import { createAgentCheckpoint } from './checkpoint';
 import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } from './panel-tools';
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
+import { validateEffect } from '../../kernel/glsl';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import type {
@@ -411,6 +412,13 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 }
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
+  if (request.tool === 'validate_effect') {
+    const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
+    return { ok: true, content: [toolText({
+      valid: true, id: definition.id, parameterCount: definition.params.length,
+      note: 'Definition validation only. This does not register the effect or compile/render its shader.'
+    })], revision: currentRevision() };
+  }
   if (request.tool === 'get_project_state') {
     const transaction = liveToolTransactions.get(request.runId);
     if (transaction?.panelActions) transaction.revision = currentRevision();
@@ -429,6 +437,10 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
       })),
       extensions: extensionRecords().map(record => ({
         id: record.id, version: record.manifest?.version, enabled: record.enabled, health: record.health,
+      })),
+      registeredEffects: (PM.Kernel?.effects?.list?.() || []).map((effect: any) => ({
+        id: effect.id, label: effect.label, group: effect.group,
+        parameters: effect.params.map((param: any) => param.k)
       })),
       projectsScreenOpen: PM.ProjectsScreen?.isOpen || false,
       selection: clone(PM.sel), layout: panelLayoutDigest(),

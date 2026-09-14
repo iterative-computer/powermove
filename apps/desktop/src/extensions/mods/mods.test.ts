@@ -193,7 +193,7 @@ describe('ModsPanel', () => {
     expect(harness.calls.setEnabled).toHaveBeenCalledWith('mine', false);
   });
 
-  it('shows a one-line error with a way out, and asks for a fix', () => {
+  it('shows a one-line error and Turn off without a manual Fix it button', () => {
     const long = `${'x'.repeat(200)}\nsecond line`;
     const harness = fakeApi([
       record('broken', {
@@ -209,9 +209,8 @@ describe('ModsPanel', () => {
     expect(error?.textContent).not.toContain('second line');
     expect(error?.getAttribute('title')).toBe(long);
 
-    buttonWithText(row, 'Fix it').click();
-    flushSync();
-    expect(harness.calls.requestFix).toHaveBeenCalledWith('broken');
+    expect(row.textContent).not.toContain('Fix it');
+    expect(harness.calls.requestFix).not.toHaveBeenCalled();
 
     buttonWithText(row, 'Turn off').click();
     flushSync();

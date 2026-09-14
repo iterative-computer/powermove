@@ -65,15 +65,6 @@
     );
   }
 
-  function fix(record: ExtensionRecord): void {
-    try {
-      api.extensions.requestFix(record.id);
-    } catch (error) {
-      api.log('error', 'could not ask for a fix', error);
-    }
-    refresh();
-  }
-
   function openMenu(record: ExtensionRecord, anchor: HTMLElement): void {
     const items: MenuContribution[] = [
       { label: 'Reload', run: () => void run(() => api.extensions.reload(record.id), `Could not reload ${nameOf(record)}.`) }
@@ -107,7 +98,7 @@
     {:else}
       <div class="list" role="list">
         {#each mine as record (record.id)}
-          <ModRow {record} onToggle={toggle} onFix={fix} onMenu={openMenu} />
+          <ModRow {record} onToggle={toggle} onMenu={openMenu} />
         {/each}
       </div>
     {/if}
@@ -118,7 +109,7 @@
       <h2 class="group">Built in</h2>
       <div class="list" role="list">
         {#each builtin as record (record.id)}
-          <ModRow {record} quiet onToggle={toggle} onFix={fix} onMenu={openMenu} />
+          <ModRow {record} quiet onToggle={toggle} onMenu={openMenu} />
         {/each}
       </div>
     </section>

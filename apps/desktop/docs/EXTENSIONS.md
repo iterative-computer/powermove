@@ -4,6 +4,23 @@ Powermove is a kernel plus extensions. The built-in editor (timeline, effects,
 theme, keymap, panels) is itself a set of extensions. You extend or replace any
 of them by writing a new extension — never by editing the app bundle.
 
+## Choose the requested contribution
+
+A request for an effect means a registered effect in **Effects & Presets**, with
+keyframeable parameters in the Inspector. Use `api.effects.register`; adding a
+panel, a script button, or a layer rig does not fulfill an effect request.
+Applying an existing effect is a separate `add_effect` project command. Panels
+are appropriate when requested or needed for a separate workflow; the panel
+examples and style rules below do not imply that every extension needs one.
+
+Start effect authoring with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
+Call the agent tool `validate_effect` with the complete definition before
+returning staged changes. It uses the real registration validator, including
+the **32-parameter maximum**, unique keys matching `/^[a-z][a-zA-Z0-9]*$/`,
+1–8 passes, and a non-empty fragment limited to 65,536 characters. It does not
+register or render the effect. After loading, check `get_workspace_state` for
+extension health and `registeredEffects`, then verify the requested rendering.
+
 ## Where extensions live
 
 | Location | Scope |
@@ -68,7 +85,7 @@ inside the extension folder. No npm packages, no `..` escapes.
 
 ## The API (apiVersion 1)
 
-Full types: `powermove.d.ts` (next to this file). Summary:
+Full types: `api.ts` (next to this file in the agent API pack). Summary:
 
 - **panels** — `register({ id, title, component?, build?, size, min, flush, noscroll, headless })`, `open(id, dock?)` or `open(id, { dock, index })`, `close`, `isOpen`, `refresh`, `list`.
   `component` is a Svelte 5 component receiving `{ panelId, spec }`. `build(body)` is the imperative alternative.
@@ -241,3 +258,9 @@ extensions directory (your working directory). Prefer the smallest shape —
 contribute → override by id → `fork_builtin_extension`. Return the ids you created or
 changed in `extensions` so the app reloads them. If the app reports a build or
 activation error, fix the extension; do not work around by touching the app bundle.
+
+### Raster overrides and verification
+
+The host registers a `raster` service with the `RenderAPI['raster']` signature. Capture it with `api.services.get` before registering a wrapper under the same name. Delegate unaffected layers to the captured implementation; calling `api.render.raster` from inside the wrapper recurses. Native raster surfaces store their canvas in `cv`, with `w`, `h`, `anchorX`, `anchorY`, `selection` and a texture cache `key`. Preserve those fields when replacing pixels. The override affects preview and export and is removed automatically when the extension disposes.
+
+Agent-authored extensions are staged until the agent returns them. After loading, the app continues the same agent task to inspect actual panels, rendered frames and runtime errors and repair failures. Each updated extension gets another verification pass, up to three follow-ups. Failed or incomplete verification is reported explicitly; no Fix it button is required. Undo restores the original change and its repair passes in reverse order.
