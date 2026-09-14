@@ -996,23 +996,25 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .pm-select.sel{height:28px;padding:0 24px 0 8px}
 .pm-select.sel .pm-select-chevron{right:6px;width:11px;height:11px;margin-top:-5.5px}
 .pm-select.ps-sort,.pm-select.settings-select,.pm-select.settings-appearance,.pm-select.export-select{border:0;box-shadow:inset 0 0 0 1px var(--line)}
-.pm-menu{position:fixed;z-index:600;overflow:auto;padding:4px;border-radius:var(--r-md);background:var(--bg-float);box-shadow:var(--shadow-float),0 0 0 var(--hairline) var(--line-strong);outline:0;font-size:var(--fs-sm);color:var(--tx);scrollbar-width:thin}
-.pm-menu[data-side=bottom]{transform-origin:top center}
-.pm-menu[data-side=top]{transform-origin:bottom center}
-/* shadcn's popper motion: fade-in-0 zoom-in-95 slide-in-from-top-2 over 150ms ease-out; out is the reverse at 100ms. */
-.pm-menu[data-state=open]{animation:pm-menu-in .15s cubic-bezier(0,0,.2,1) both}
-.pm-menu[data-state=closed]{animation:pm-menu-out .1s cubic-bezier(.4,0,1,1) both;pointer-events:none}
-@keyframes pm-menu-in{from{opacity:0;transform:scale(.95) translateY(var(--pm-menu-slide,-8px))}to{opacity:1;transform:none}}
-@keyframes pm-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.95)}}
-.pm-menu[data-side=top]{--pm-menu-slide:8px}
+/* Listbox after beautiful-ui's menus: a raised sheet, 4px inset, 30px rows on a 6px corner, and one hover layer that glides between rows. */
+.pm-menu{position:fixed;z-index:600;overflow:auto;padding:4px;border-radius:10px;background:var(--bg-float);box-shadow:0 0 0 var(--hairline) var(--line-strong),0 8px 24px -8px rgb(var(--ink-rgb) / .22),0 2px 6px rgb(var(--ink-rgb) / .06);outline:0;font-size:12.5px;font-weight:var(--fw-medium);color:var(--tx);scrollbar-width:thin}
+:root[data-theme="dark"] .pm-menu{box-shadow:0 0 0 var(--hairline) rgb(255 255 255 / .1),0 12px 32px -8px rgb(0 0 0 / .6),0 2px 6px rgb(0 0 0 / .3)}
 .pm-menu,.pm-menu *{cursor:default;user-select:none;-webkit-user-select:none}
-.pm-menu-item{position:relative;display:flex;align-items:center;gap:8px;min-height:28px;padding:0 28px 0 8px;border-radius:var(--r-xs);color:var(--tx);white-space:nowrap}
-.pm-menu-item[data-active]{background:var(--ink-2)}
+.pm-menu[data-side=bottom]{transform-origin:top left}
+.pm-menu[data-side=top]{transform-origin:bottom left}
+.pm-menu[data-state=open]{animation:pm-menu-in .18s cubic-bezier(.23,1,.32,1) both}
+.pm-menu[data-state=closed]{animation:pm-menu-out .12s cubic-bezier(.4,0,1,1) both;pointer-events:none}
+@keyframes pm-menu-in{from{opacity:0;transform:scale(.96) translateY(var(--pm-menu-slide,-4px))}to{opacity:1;transform:none}}
+@keyframes pm-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.97)}}
+.pm-menu[data-side=top]{--pm-menu-slide:4px}
+.pm-menu-glider{position:absolute;left:4px;right:4px;top:0;height:0;opacity:0;pointer-events:none;border-radius:6px;background:var(--ink-2);transition:transform 220ms cubic-bezier(.23,1,.32,1),height 220ms cubic-bezier(.23,1,.32,1),opacity 150ms ease}
+.pm-menu-glider.on{opacity:1}
+.pm-menu-item{position:relative;z-index:1;display:flex;align-items:center;gap:8px;height:30px;padding:0 28px 0 8px;border-radius:6px;color:var(--tx);white-space:nowrap}
 .pm-menu-item[aria-disabled=true]{color:var(--tx-4);pointer-events:none}
 .pm-menu-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
 .pm-menu-check{position:absolute;right:8px;width:13px;height:13px;color:var(--tx);opacity:0}
 .pm-menu-item[aria-selected=true] .pm-menu-check{opacity:1}
-@media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}}
+@media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}.pm-menu-glider{transition:none}}
 
 /* ── titlebar tabs ─────────────────────────────────────── */
 
