@@ -32,7 +32,7 @@ html{background:transparent}
 :root{
   --glass-fill:rgb(var(--paper-rgb) / .45);
   --glass-edge:none;
-  --glass-rim:conic-gradient(from 225deg,
+  --glass-rim:conic-gradient(from 315deg,
     rgb(var(--paper-rgb) / .95) 0,rgb(var(--ink-rgb) / .07) 16%,
     rgb(var(--ink-rgb) / .07) 36%,rgb(var(--paper-rgb) / .7) 50%,
     rgb(var(--ink-rgb) / .07) 64%,rgb(var(--ink-rgb) / .07) 84%,
@@ -53,7 +53,7 @@ html{background:transparent}
 :root[data-theme="dark"]{
   --glass-fill:rgb(0 0 0 / .19);
   --glass-edge:none;
-  --glass-rim:conic-gradient(from 225deg,
+  --glass-rim:conic-gradient(from 315deg,
     rgb(var(--paper-rgb) / .13) 0,rgb(var(--paper-rgb) / .06) 16%,
     rgb(var(--paper-rgb) / .06) 36%,rgb(var(--paper-rgb) / .1) 50%,
     rgb(var(--paper-rgb) / .06) 64%,rgb(var(--paper-rgb) / .06) 84%,
