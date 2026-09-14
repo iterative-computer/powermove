@@ -5,7 +5,7 @@ html,body{height:100%;overflow:hidden}
    intentionally outside this selector, so project geometry and exports cannot change. */
 /* Smoothing only where the radius is large enough to read (≥12px). Small
    controls stay circular so nested radii stay concentric: outer = inner + padding. */
-:where(.panel,.drop,.modal,#library-screen,.library-card,.spatial-compose,.spatial-outline,.panel-ghost-card,.panel-drop-preview.dock-edge,.pop-mirror,.fill-picker,#workspace-editbar){
+:where(.panel,.drop,.modal,#library-screen,.sg-main,.library-card,.spatial-compose,.spatial-outline,.panel-ghost-card,.panel-drop-preview.dock-edge,.pop-mirror,.fill-picker,#workspace-editbar){
   corner-shape:var(--ui-corner-smoothing);
 }
 body{
@@ -17,7 +17,7 @@ body{
 /* WKWebView still honors the prefixed selection property for descendants.
    App chrome is inert, while real editing surfaces keep normal caret/selection. */
 body *{-webkit-user-select:none;user-select:none}
-input:not([type=range]):not([type=color]):not([type=file]),textarea,
+input:not([type=range]):not([type=color]):not([type=file]):not([type=checkbox]):not([type=radio]),textarea,
 [contenteditable]:not([contenteditable="false"]),[contenteditable]:not([contenteditable="false"]) *,
 .editable-text,.selectable-text{-webkit-user-select:text;user-select:text;cursor:text}
 ::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
@@ -490,7 +490,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .modal h3{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;padding:16px 18px 0}
 .modal .mb{padding:12px 18px 18px;display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:8px;overflow:auto}
 .modal .mf{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line)}
-.modal:has(.settings-view) .mf{padding-top:0;border-top:0}
 .modal .mf .btn{white-space:nowrap}
 /* Actions use flat tonal fills; focus and selection provide their own cues. */
 .btn{position:relative;isolation:isolate;height:var(--ctl-h);padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);color:var(--tx);font-size:var(--fs-sm);font-weight:var(--fw-medium);box-shadow:var(--ctl-edge);display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;transition:color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease)}
@@ -506,18 +505,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
   display:flex;align-items:center;font-size:var(--fs-md);width:100%;transition:box-shadow var(--dur-1),background var(--dur-1)}
 .field:focus-within{background:var(--bg-float);box-shadow:var(--ctl-edge-inset),0 0 0 1px color-mix(in srgb,var(--accent) 60%,transparent)}
 .field input{flex:1}
-.settings-view,.settings-tabs-layout,.settings-pages,.settings-page{display:flex;flex:1 1 auto;min-height:0;flex-direction:column}.settings-view,.settings-tabs-layout{gap:12px}.settings-tabs{display:flex;align-self:flex-start;gap:2px;padding:3px;border-radius:var(--r-md);background:var(--bg-field);box-shadow:var(--ctl-edge-inset)}.settings-tab{height:28px;padding:0 12px;border-radius:calc(var(--r-md) - 2px);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1)}.settings-tab:hover{color:var(--tx)}.settings-tab[aria-selected="true"]{background:var(--bg-float);color:var(--tx);box-shadow:var(--ctl-edge)}.settings-page{gap:16px}.settings-sections{display:flex;min-height:0;flex-direction:column;gap:16px}.settings-section{display:flex;min-height:0;flex-direction:column;gap:6px}.settings-section.is-fill{flex:1 1 auto}.settings-section.is-fill>.settings-section-body{flex:1 1 auto;min-height:0;overflow:auto}.settings-section-body{display:flex;flex-direction:column;gap:4px;overflow:hidden;border:0;border-radius:0;background:transparent}.settings-page[hidden]{display:none}.settings-row{display:flex;align-items:center;gap:18px;min-height:54px;padding:8px 10px}.settings-row+.settings-row{border-top:0}.settings-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.settings-copy>b{font-size:var(--fs-sm);font-weight:var(--fw-medium)}.settings-copy>span{font-size:var(--fs-xs);line-height:1.35;color:var(--tx-3)}.settings-note{margin-top:-2px;padding:0 2px;font-size:var(--fs-xs);line-height:1.45;color:var(--tx-4)}.settings-row>.btn{min-width:88px}.settings-provider>.btn{min-width:112px}.settings-provider-title{display:flex;align-items:center;gap:6px}.settings-dot{width:6px;height:6px;border-radius:50%;background:var(--tx-4);transition:background var(--dur-1)}.settings-dot[data-state="connected"]{background:var(--success)}.settings-dot[data-state="connecting"]{background:var(--warning)}.settings-dot[data-state="unavailable"]{background:var(--danger)}.settings-appearance{height:32px;min-width:136px;padding:0 28px 0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx);font:inherit}.settings-section-heading{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:0 2px}.settings-section-heading>b{color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-semibold);letter-spacing:.01em}.settings-section-heading>span{overflow:hidden;color:var(--tx-4);font-size:var(--fs-xs);text-overflow:ellipsis;white-space:nowrap}.settings-extension-row{display:flex;align-items:center;gap:12px;min-height:44px;padding:7px 10px}.settings-extension-row+.settings-extension-row{border-top:0}.settings-extension-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}.settings-extension-name{display:flex;min-width:0;align-items:center;gap:6px}.settings-extension-name>b{overflow:hidden;font-size:var(--fs-sm);font-weight:var(--fw-medium);text-overflow:ellipsis;white-space:nowrap}.settings-extension-tag{flex:none;padding:1px 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:1.3}.settings-extension-copy>span{overflow:hidden;color:var(--tx-3);font-size:var(--fs-xs);line-height:1.3;text-overflow:ellipsis;white-space:nowrap}.settings-extension-copy>.settings-extension-error{color:var(--danger)}.settings-extension-controls{display:flex;align-items:center;gap:9px}.settings-extension-status{padding:2px 6px;border-radius:999px;background:var(--bg-float);color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap}.settings-extension-status.is-ok{color:var(--success);background:color-mix(in srgb,var(--success) 12%,var(--bg-float))}.settings-extension-status.is-warning{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,var(--bg-float))}.settings-extension-empty{padding:14px;color:var(--tx-3);font-size:var(--fs-sm);text-align:center}
-.settings-view,.settings-tabs-layout,.settings-pages,.settings-page{display:flex;min-height:0;flex-direction:column}.settings-view,.settings-tabs-layout{gap:12px}.settings-tabs{display:flex;align-self:flex-start;gap:2px;padding:3px;border-radius:var(--r-md);background:var(--bg-field);box-shadow:var(--ctl-edge-inset)}.settings-tab{height:28px;padding:0 12px;border-radius:calc(var(--r-md) - 2px);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1)}.settings-tab:hover{color:var(--tx)}.settings-tab[aria-selected="true"]{background:var(--bg-float);color:var(--tx);box-shadow:var(--ctl-edge)}.settings-page{gap:16px}.settings-sections{display:flex;min-height:0;flex-direction:column;gap:16px}.settings-section{display:flex;min-height:0;flex-direction:column;gap:8px}.settings-section-body{display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field)}.settings-page[hidden]{display:none}.settings-row{display:flex;align-items:center;gap:18px;min-height:54px;padding:8px 12px}.settings-row+.settings-row{border-top:1px solid var(--line)}.settings-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}.settings-copy b{font-size:var(--fs-sm);font-weight:var(--fw-medium)}.settings-copy span{font-size:var(--fs-xs);line-height:1.35;color:var(--tx-3)}.settings-note{font-size:var(--fs-xs);line-height:1.45;color:var(--tx-3)}.settings-row>.btn{min-width:88px}.settings-chatgpt>.btn{min-width:112px}.settings-row>.btn.is-connected{color:var(--success);background:color-mix(in srgb,var(--success) 12%,var(--bg-float))}.settings-appearance{height:32px;min-width:136px;padding:0 28px 0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx);font:inherit}.settings-section-heading{display:flex;align-items:baseline;justify-content:space-between;gap:16px}.settings-section-heading>b{font-size:var(--fs-md)}.settings-section-heading>span{overflow:hidden;color:var(--tx-3);font-size:var(--fs-xs);text-overflow:ellipsis;white-space:nowrap}.settings-extension-list{max-height:min(390px,52vh);overflow:auto}.settings-extension-row{display:flex;align-items:center;gap:12px;min-height:54px;padding:8px 12px}.settings-extension-row+.settings-extension-row{border-top:1px solid var(--line)}.settings-extension-copy{display:flex;min-width:0;flex:1;flex-direction:column;gap:2px}.settings-extension-copy>b{overflow:hidden;font-size:var(--fs-sm);font-weight:var(--fw-medium);text-overflow:ellipsis;white-space:nowrap}.settings-extension-copy>span{overflow:hidden;color:var(--tx-3);font-size:var(--fs-xs);line-height:1.3;text-overflow:ellipsis;white-space:nowrap}.settings-extension-copy>.settings-extension-error{color:var(--danger)}.settings-extension-controls{display:flex;align-items:center;gap:9px}.settings-extension-status{padding:2px 6px;border-radius:999px;background:var(--bg-float);color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap}.settings-extension-status.is-ok{color:var(--success);background:color-mix(in srgb,var(--success) 12%,var(--bg-float))}.settings-extension-status.is-warning{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,var(--bg-float))}.settings-extension-toggle{width:28px;height:16px;accent-color:var(--accent)}.settings-extension-empty{padding:14px;color:var(--tx-3);font-size:var(--fs-sm);text-align:center}
-/* The local Settings polish is the final presentation layer after merging the
-   earlier bordered-section implementation from main. */
-.settings-view,.settings-tabs-layout,.settings-pages,.settings-page{flex:1 1 auto}
-.settings-section{gap:6px}.settings-section.is-fill{flex:1 1 auto}.settings-section.is-fill>.settings-section-body{flex:1 1 auto;min-height:0;overflow:auto}
-.settings-section-body{gap:4px;border:0;border-radius:0;background:transparent}.settings-row{padding:8px 10px}.settings-row+.settings-row{border-top:0}
-.settings-copy>b{font-size:var(--fs-sm);font-weight:var(--fw-medium)}.settings-copy>span{font-size:var(--fs-xs);line-height:1.35;color:var(--tx-3)}
-.settings-note{margin-top:-2px;padding:0 2px;color:var(--tx-4)}.settings-provider>.btn{min-width:112px}.settings-provider-title{display:flex;align-items:center;gap:6px}
-.settings-dot{width:6px;height:6px;border-radius:50%;background:var(--tx-4);transition:background var(--dur-1)}.settings-dot[data-state="connected"]{background:var(--success)}.settings-dot[data-state="connecting"]{background:var(--warning)}.settings-dot[data-state="unavailable"]{background:var(--danger)}
-.settings-section-heading{padding:0 2px}.settings-section-heading>b{color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-semibold);letter-spacing:.01em}.settings-section-heading>span{color:var(--tx-4)}
-.settings-extension-row{min-height:44px;padding:7px 10px}.settings-extension-row+.settings-extension-row{border-top:0}.settings-extension-name{display:flex;min-width:0;align-items:center;gap:6px}.settings-extension-name>b{overflow:hidden;font-size:var(--fs-sm);font-weight:var(--fw-medium);text-overflow:ellipsis;white-space:nowrap}.settings-extension-tag{flex:none;padding:1px 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:1.3}
 
 /* Settings form controls (Project tab) and the New composition dialog share
    one field vocabulary so both read as the same surface. */
@@ -532,9 +519,6 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .settings-row>.color-field{width:170px;flex:none}
 .settings-row.is-dim{opacity:.45;transition:opacity var(--dur-1)}
 .settings-row[hidden]{display:none}
-.settings-sections.is-scroll{flex:1 1 auto;min-height:0;overflow:auto}
-.settings-sections.is-scroll .settings-section,.settings-sections.is-scroll .settings-row{flex:none}
-.settings-sections.is-scroll .settings-section-body{overflow:visible}
 .new-project-form{display:flex;flex-direction:column;gap:2px}
 .new-project-field{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:38px}
 .new-project-field>span{color:var(--tx-2);font-size:var(--fs-sm)}
@@ -979,6 +963,7 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-nav{display:flex;flex-direction:column;gap:3px}.ps-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 10px;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);text-align:left}
 .ps-navbtn:hover{background:var(--bg-row);color:var(--tx)}.ps-navbtn.on{background:var(--ink-2);color:var(--tx)}
 .ps-navbtn svg{width:14px;height:14px}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
+.ps-updates[hidden]{display:none}
 .ps-updates{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:var(--r-md);background:var(--bg-row);color:var(--tx-2);font-size:var(--fs-sm);line-height:1.45}
 .ps-updates b{display:block;color:var(--tx);font-weight:var(--fw-medium)}
 .ps-updates .btn{align-self:flex-start;height:28px;padding:0 12px}
@@ -991,11 +976,12 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-view{display:flex;align-items:center;gap:3px}.ps-view button{width:32px;height:32px;display:grid;place-items:center;border-radius:var(--r-md);color:var(--tx-3)}.ps-view button:hover{background:var(--bg-row);color:var(--tx)}.ps-view button.on{background:var(--ink-2);color:var(--tx)}.ps-view svg{width:15px;height:15px}
 .ps-sort{height:32px;min-width:132px;padding:0 28px 0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);outline:0}.ps-sort:focus-visible{box-shadow:var(--focus-ring)}
 .ps-content{min-height:0;flex:1;overflow:auto;padding:8px clamp(20px,3vw,28px) 40px}.ps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:16px;align-content:start;min-height:100%}.ps-grid.list{display:flex;flex-direction:column;gap:3px}.ps-grid.empty{display:grid;grid-template-columns:1fr;place-items:center}
-.ps-card{position:relative;min-width:0;border:1px solid transparent;border-radius:var(--r-xl);padding:6px;cursor:pointer;transition:background var(--dur-2),border-color var(--dur-2),transform var(--dur-2)}.ps-card:hover{background:var(--bg-row);border-color:var(--line);transform:translateY(-1px)}.ps-card.active{background:var(--accent-dim);border-color:color-mix(in srgb,var(--accent) 42%,transparent)}
+/* Project cards: quiet at rest, a raised neutral surface when hovered or active. Accent never touches them. */
+.ps-card{position:relative;min-width:0;border:1px solid transparent;border-radius:var(--r-xl);padding:6px;cursor:pointer;transition:background var(--dur-2),border-color var(--dur-2),transform var(--dur-2)}.ps-card:hover{background:var(--bg-row);border-color:var(--line);transform:translateY(-1px)}.ps-card.active{background:var(--bg-row);border-color:var(--line-2)}.ps-card.active:hover{background:var(--bg-row-hi)}
 .ps-card:active{transform:translateY(0) scale(.99)}
-.ps-thumb{position:relative;aspect-ratio:16/9;padding:1px;border-radius:var(--r-lg);overflow:hidden;background:var(--line-2)}.ps-thumb-inner{height:100%;overflow:hidden;border-radius:calc(var(--r-lg) - 1px);background:var(--bg-sunken)}.ps-thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.ps-card-badge,.library-card-badge{height:20px;padding:0 7px;display:flex;align-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .62);backdrop-filter:blur(8px);color:#fff;font-size:var(--fs-xs);font-weight:var(--fw-medium)}
-.ps-card-badges{position:absolute;left:9px;top:9px;display:flex;align-items:center;gap:5px}.ps-card-badge.unsaved{background:color-mix(in srgb,#b86d32 78%,transparent)}
+.ps-thumb{position:relative;aspect-ratio:16/9;border-radius:var(--r-lg);overflow:hidden;background:var(--bg-sunken);box-shadow:inset 0 0 0 var(--hairline) var(--line-2)}.ps-thumb-inner{height:100%;overflow:hidden;border-radius:inherit;background:var(--bg-sunken)}.ps-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.ps-card-badge,.library-card-badge{height:20px;padding:0 7px;display:flex;align-items:center;border-radius:var(--r-sm);background:rgb(10 10 12 / .55);backdrop-filter:blur(8px);color:rgb(255 255 255 / .92);font-size:var(--fs-xs);font-weight:var(--fw-medium);box-shadow:inset 0 0 0 var(--hairline) rgb(255 255 255 / .12)}
+.ps-card-badges{position:absolute;left:9px;top:9px;display:flex;align-items:center;gap:5px}
 .ps-meta{display:flex;align-items:center;gap:8px;padding:8px 5px 2px}.ps-meta-copy{min-width:0;flex:1}.ps-name{font-weight:var(--fw-medium);font-size:var(--fs-md);line-height:1.3;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ps-sub{font-size:var(--fs-sm);line-height:1.3;color:var(--tx-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ps-more{position:relative;z-index:2;width:28px;height:28px;border-radius:var(--r-md);display:grid;place-items:center;color:var(--tx-3);opacity:0}.ps-card:hover .ps-more,.ps-more:focus-visible{opacity:1}.ps-more:hover{background:var(--bg-row-hi);color:var(--tx)}.ps-more svg{width:13px;height:13px}
 .ps-grid.list .ps-card{height:62px;display:flex;align-items:center;padding:5px 8px;border-radius:var(--r-lg)}.ps-grid.list .ps-thumb{width:82px;flex:none}.ps-grid.list .ps-meta{flex:1;padding:0 10px}.ps-grid.list .ps-more{opacity:1}
@@ -1020,21 +1006,25 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .agent-modelbar .pm-select-chevron{right:4px;width:10px;height:10px;margin-top:-5px}
 .agent-modelbar .pm-select:hover,.agent-modelbar .pm-select:focus-visible{background:var(--ink-1);color:var(--tx)}
 .pm-select.ps-sort,.pm-select.settings-select,.pm-select.settings-appearance,.pm-select.export-select{border:0;box-shadow:none}
-.pm-menu{position:fixed;z-index:600;max-width:calc(100vw - 16px);overflow-x:hidden;overflow-y:auto;padding:4px;border-radius:var(--r-md);background:var(--bg-float);box-shadow:var(--shadow-float),0 0 0 var(--hairline) var(--line-strong);outline:0;font-size:var(--fs-sm);color:var(--tx);scrollbar-width:thin}
-.pm-menu[data-side=bottom]{transform-origin:top center}
-.pm-menu[data-side=top]{transform-origin:bottom center}
-.pm-menu[data-state=open]{animation:pm-menu-in .15s cubic-bezier(.16,1,.3,1) both}
-.pm-menu[data-state=closed]{animation:pm-menu-out .1s ease-in both;pointer-events:none}
-@keyframes pm-menu-in{from{opacity:0;transform:scale(.95) translateY(var(--pm-menu-slide,-6px))}to{opacity:1;transform:none}}
+/* Listbox after beautiful-ui's menus: a raised sheet, 4px inset, 30px rows on a 6px corner, and one hover layer that glides between rows. */
+.pm-menu{position:fixed;z-index:600;max-width:calc(100vw - 16px);overflow-x:hidden;overflow-y:auto;padding:4px;border-radius:10px;background:var(--bg-float);box-shadow:0 0 0 var(--hairline) var(--line-strong),0 8px 24px -8px rgb(var(--ink-rgb) / .22),0 2px 6px rgb(var(--ink-rgb) / .06);outline:0;font-size:12.5px;font-weight:var(--fw-medium);color:var(--tx);scrollbar-width:thin}
+:root[data-theme="dark"] .pm-menu{box-shadow:0 0 0 var(--hairline) rgb(255 255 255 / .1),0 12px 32px -8px rgb(0 0 0 / .6),0 2px 6px rgb(0 0 0 / .3)}
+.pm-menu,.pm-menu *{cursor:default;user-select:none;-webkit-user-select:none}
+.pm-menu[data-side=bottom]{transform-origin:top left}
+.pm-menu[data-side=top]{transform-origin:bottom left}
+.pm-menu[data-state=open]{animation:pm-menu-in .18s cubic-bezier(.23,1,.32,1) both}
+.pm-menu[data-state=closed]{animation:pm-menu-out .12s cubic-bezier(.4,0,1,1) both;pointer-events:none}
+@keyframes pm-menu-in{from{opacity:0;transform:scale(.96) translateY(var(--pm-menu-slide,-4px))}to{opacity:1;transform:none}}
 @keyframes pm-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.97)}}
-.pm-menu[data-side=top]{--pm-menu-slide:6px}
-.pm-menu-item{position:relative;display:flex;align-items:center;gap:8px;min-height:28px;padding:0 28px 0 8px;border-radius:var(--r-xs);color:var(--tx);white-space:nowrap;cursor:default;user-select:none}
-.pm-menu-item[data-active]{background:var(--bg-row-hi)}
+.pm-menu[data-side=top]{--pm-menu-slide:4px}
+.pm-menu-glider{position:absolute;left:4px;right:4px;top:0;height:0;opacity:0;pointer-events:none;border-radius:6px;background:var(--ink-2);transition:transform 220ms cubic-bezier(.23,1,.32,1),height 220ms cubic-bezier(.23,1,.32,1),opacity 150ms ease}
+.pm-menu-glider.on{opacity:1}
+.pm-menu-item{position:relative;z-index:1;display:flex;align-items:center;gap:8px;height:30px;padding:0 28px 0 8px;border-radius:6px;color:var(--tx);white-space:nowrap}
 .pm-menu-item[aria-disabled=true]{color:var(--tx-4);pointer-events:none}
 .pm-menu-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
 .pm-menu-check{position:absolute;right:8px;width:13px;height:13px;color:var(--tx);opacity:0}
 .pm-menu-item[aria-selected=true] .pm-menu-check{opacity:1}
-@media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}}
+@media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}.pm-menu-glider{transition:none}}
 
 /* ── titlebar tabs ─────────────────────────────────────── */
 
@@ -1056,8 +1046,8 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .library-navbtn svg{width:15px;height:15px}
 .library-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;background:transparent}.library-top{min-height:54px;flex:none;display:flex;align-items:center;gap:10px;padding:8px var(--library-gutter);background:transparent}
 /* Overlay view switchers are the Settings tab bar: a recessed track with one
-   raised neutral segment. `.settings-tabs` owns the material; the library
-   borrows it so a dialog's view switcher reads the same wherever it opens. */
+   raised neutral segment: a recessed track with one raised neutral segment,
+   the same material so a dialog's view switcher reads the same wherever it opens. */
 #library-screen .segmented{gap:2px;padding:3px;background:var(--bg-field);border-radius:var(--r-md);box-shadow:var(--ctl-edge-inset)}
 #library-screen .segmented button{height:28px;padding:0 12px;border-radius:calc(var(--r-md) - 2px);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1)}
 #library-screen .segmented button.on{background:var(--bg-float);color:var(--tx);box-shadow:var(--ctl-edge)}
@@ -1192,25 +1182,6 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
   background-size:8px 8px!important;
 }
 
-/* Extension settings: expose workspace impact before technical details. */
-.settings-extension-group{margin:12px 0 2px;padding:0 10px;color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-semibold)}
-.settings-extension-group:first-child{margin-top:2px}
-.settings-extension-row{flex-shrink:0;align-items:flex-start;padding:12px 10px;border-radius:var(--r-md);background:var(--bg-field)}
-.settings-extension-row+.settings-extension-row{margin-top:4px}
-.settings-extension-copy{gap:6px}
-.settings-extension-copy>span{white-space:normal;overflow-wrap:anywhere;line-height:1.5}
-.settings-extension-controls{flex-wrap:wrap;justify-content:flex-end;max-width:110px;gap:10px;padding-top:1px}
-.settings-extension-impact{color:var(--tx-3);font-size:var(--fs-xs);line-height:1.5;overflow-wrap:anywhere}
-.settings-extension-impact strong{color:var(--tx-2);font-weight:var(--fw-medium)}
-.settings-extension-impact.is-replacement{color:var(--accent-tx)}
-.settings-extension-details{color:var(--tx-3);font-size:var(--fs-xs);line-height:1.5;overflow-wrap:anywhere}
-.settings-extension-details summary{width:fit-content;cursor:pointer;color:var(--tx-2)}
-.settings-extension-details>div{padding-top:5px}
-.settings-extension-delete{color:var(--danger);font-size:var(--fs-xs);padding:3px 0;background:transparent;cursor:pointer}
-.settings-extension-delete:disabled{opacity:.5;cursor:default}
-.settings-extension-confirm{padding:10px;border-radius:var(--r-sm);background:var(--bg-float);font-size:var(--fs-xs);line-height:1.5}
-.settings-extension-confirm p{margin:0 0 8px;color:var(--tx-2)}
-.settings-extension-confirm .btn{margin-right:8px;padding:5px 8px}
 
 /* Export uses the same quiet fields, type and orange accent as the inspector. */
 .export-modal{top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}

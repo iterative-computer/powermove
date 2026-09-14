@@ -40,6 +40,14 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
   el.setAttribute('role', 'listbox');
   el.tabIndex = -1;
 
+  // One hover layer glides between rows instead of each row painting its own
+  // background (after beautiful-ui's GlideMenu and the command palette).
+  const glider = document.createElement('div');
+  glider.className = 'pm-menu-glider';
+  glider.setAttribute('aria-hidden', 'true');
+  el.append(glider);
+  let gliderOn = false;
+
   const items: HTMLElement[] = [];
   let active = Math.max(0, req.options.findIndex((o) => o.value === req.value));
   for (const [i, option] of req.options.entries()) {
@@ -62,12 +70,31 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     el.append(item);
   }
 
+  function glideTo(item: HTMLElement): void {
+    // The first appearance lands in place; every move after that glides.
+    if (!gliderOn) glider.style.transition = 'none';
+    glider.style.transform = `translateY(${item.offsetTop}px)`;
+    glider.style.height = `${item.offsetHeight}px`;
+    if (!gliderOn) { void glider.offsetHeight; glider.style.transition = ''; }
+    gliderOn = true;
+    glider.classList.add('on');
+  }
+
+  function rest(): void {
+    // The highlight leaves with the pointer; the keyboard index stays put.
+    items[active]?.removeAttribute('data-active');
+    glider.classList.remove('on');
+    gliderOn = false;
+  }
+
   function setActive(i: number): void {
     if (i < 0 || i >= items.length) return;
     items[active]?.removeAttribute('data-active');
     active = i;
-    items[active]?.setAttribute('data-active', '');
-    items[active]?.scrollIntoView({ block: 'nearest' });
+    const item = items[active]!;
+    item.setAttribute('data-active', '');
+    item.scrollIntoView({ block: 'nearest' });
+    glideTo(item);
   }
 
   function step(delta: number): void {
@@ -166,7 +193,8 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
   document.body.append(el);
   place();
   el.dataset.state = 'open';
-  setActive(active);
+  // Nothing is lit until the pointer or the arrow keys pick a row; the index still starts on the current value.
+  el.addEventListener('pointerleave', rest);
   el.focus({ preventScroll: true });
   el.addEventListener('keydown', onKey);
   document.addEventListener('pointerdown', onPointerDown, true);

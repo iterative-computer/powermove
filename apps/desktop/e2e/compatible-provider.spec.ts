@@ -7,6 +7,8 @@ test('connects a local model, streams chat, recovers after a broken stream and r
   const server = createServer(async (req, res) => {
     if (req.method === 'GET') { res.writeHead(404).end(); return; }
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+    // Port scanners on the host (IDE port forwarding) probe new listeners with bodiless requests; only chat calls carry JSON.
+    if (!chunks.length) { res.statusCode = 400; res.end('{}'); return; }
     const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
     if (!body.stream) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })); return; }
     res.setHeader('Content-Type', 'text/event-stream');
@@ -25,6 +27,7 @@ test('connects a local model, streams chat, recovers after a broken stream and r
     const page = session.page;
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.getByRole('tab', { name: 'Accounts', exact: true }).click();
     await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
     await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('local-test');
     await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
@@ -58,6 +61,8 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
       res.end(JSON.stringify({ data: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'].map(id => ({ id })) })); return;
     }
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+    // Port scanners on the host (IDE port forwarding) probe new listeners with bodiless requests; only chat calls carry JSON.
+    if (!chunks.length) { res.statusCode = 400; res.end('{}'); return; }
     const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
     if (!body.stream) { res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })); return; }
     if (fail) { res.writeHead(429).end(); return; }

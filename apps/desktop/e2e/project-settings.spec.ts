@@ -102,6 +102,8 @@ test('Settings opens once, whichever entry point asks for it', async () => {
     const { page } = session;
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
 
+    // The Project page exists only inside the editor; the home screen has none.
+    await session.openEditor();
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     await expect(settings).toBeVisible();
 

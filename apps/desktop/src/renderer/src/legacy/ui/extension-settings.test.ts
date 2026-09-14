@@ -94,9 +94,12 @@ describe('extension settings control', () => {
     const harness = bridge([base, custom]);
     harness.api.remove.mockResolvedValue([base]);
     const control = createExtensionSettingsControl(harness.api);
-    await vi.waitFor(() => expect(control.element.textContent).toContain('Replaces Composition viewer'));
+    await vi.waitFor(() => expect(control.element.querySelector('[data-extension-id="custom-viewer"] .settings-extension-open')).not.toBeNull());
+    expect(control.element.querySelector('[data-extension-id="viewer"]')).toBeNull();
+    control.element.querySelector<HTMLButtonElement>('[data-extension-id="custom-viewer"] .settings-extension-open')!.click();
+    expect(control.element.textContent).toContain('Replaces');
+    expect(control.element.textContent).toContain('Composition viewer');
     expect(control.element.textContent).toContain('Panels · Keyboard shortcuts');
-    expect(control.element.querySelector('[data-extension-id="viewer"] .settings-extension-delete')).toBeNull();
     const remove = () => control.element.querySelector<HTMLButtonElement>('[aria-label="Delete Custom viewer"]')!;
     remove().click();
     expect(harness.api.remove).not.toHaveBeenCalled();
@@ -115,7 +118,9 @@ describe('extension settings control', () => {
     const harness = bridge([record('failed')]);
     harness.api.remove.mockRejectedValue(new Error('Permission denied'));
     const control = createExtensionSettingsControl(harness.api);
-    await vi.waitFor(() => expect(control.element.querySelector('[aria-label="Delete failed"]')).not.toBeNull());
+    await vi.waitFor(() => expect(control.element.querySelector('[data-extension-id="failed"] .settings-extension-open')).not.toBeNull());
+    control.element.querySelector<HTMLButtonElement>('[data-extension-id="failed"] .settings-extension-open')!.click();
+    expect(control.element.querySelector('[aria-label="Delete failed"]')).not.toBeNull();
     control.element.querySelector<HTMLButtonElement>('[aria-label="Delete failed"]')!.click();
     control.element.querySelector<HTMLButtonElement>('.settings-extension-confirm .settings-extension-delete')!.click();
     await vi.waitFor(() => expect(control.element.textContent).toContain('Permission denied'));

@@ -19,6 +19,7 @@
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.261",
     "@anthropic-ai/claude-code-darwin-arm64": "2.1.261",
+    "@lisse/core": "0.7.2",
     "@motion-core/motion-gpu": "0.15.1",
     "@openai/codex": "0.153.4",
     "@openai/codex-darwin-arm64": "npm:@openai/codex@0.153.4-darwin-arm64",

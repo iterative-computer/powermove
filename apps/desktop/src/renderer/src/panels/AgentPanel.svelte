@@ -55,7 +55,7 @@
   }
 
   async function connectProvider(): Promise<void> {
-    if (agentState.provider === 'compatible') { PM.SettingsUI?.open('general'); return; }
+    if (agentState.provider === 'compatible') { PM.SettingsUI?.open('accounts'); return; }
     const api = providerApi();
     if (!api || accountBusy) return;
     const provider = agentState.provider;
@@ -74,7 +74,7 @@
   }
 
   async function retryProvider(): Promise<void> {
-    if (agentState.provider === 'compatible') { PM.SettingsUI?.open('general'); return; }
+    if (agentState.provider === 'compatible') { PM.SettingsUI?.open('accounts'); return; }
     const api = providerApi();
     if (!api || accountBusy) return;
     const provider = agentState.provider;
@@ -179,7 +179,7 @@
         disabled={accountBusy || accountStatus.state === 'connecting'}
         onclick={accountStatus.state === 'unavailable' ? retryProvider : connectProvider}
       >{accountStatus.state === 'connecting' ? 'Waiting…' : accountStatus.state === 'unavailable' ? 'Try again' : `Connect ${providerName}`}</button>
-      <button type="button" class="btn" onclick={() => PM.SettingsUI?.open('general')}>All connection options</button>
+      <button type="button" class="btn" onclick={() => PM.SettingsUI?.open('accounts')}>All connection options</button>
     </div>
   {/if}
     <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
