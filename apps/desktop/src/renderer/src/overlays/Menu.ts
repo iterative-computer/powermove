@@ -3,8 +3,18 @@ import { flushSync, mount, unmount } from 'svelte';
 import Menu from './Menu.svelte';
 import type { MenuAction, MenuItem, MenuOptions, OverlayPM } from './types';
 import { consumeMenuTriggerPress, markMenuDismissal } from './dismissal';
+import { canRenderNatively, planNativeMenu } from './native-menu';
 
 type MenuInstance = ReturnType<typeof mount> & { element(): HTMLElement };
+
+function nativeMenuBridge(): NonNullable<Window['powermove']['menu']> | null {
+  try {
+    const bridge = (globalThis as unknown as Partial<Window>).powermove?.menu;
+    return bridge && typeof bridge.popup === 'function' ? bridge : null;
+  } catch {
+    return null;
+  }
+}
 
 function focusTarget(anchor: HTMLElement): HTMLElement | null {
   const active = document.activeElement;
@@ -27,6 +37,16 @@ export class MenuController {
     this.trigger = focusTarget(anchor);
     const rect = anchor.getBoundingClientRect();
     const cursorOrigin = options.x != null || options.y != null;
+    /* Pointer menus are real NSMenus when the desktop bridge is present; the
+       DOM menu stays for anchored dropdowns and curve pickers. */
+    const native = cursorOrigin ? nativeMenuBridge() : null;
+    if (native && canRenderNatively(items)) {
+      const plan = planNativeMenu(items);
+      void native.popup({ items: plan.items, x: options.x, y: options.y }).then((id) => {
+        if (id != null) plan.actions.get(id)?.run?.();
+      }).catch(() => undefined);
+      return document.createElement('div');
+    }
     const x = options.x ?? (options.right ? rect.right : rect.left);
     const y = options.y ?? rect.bottom + 5;
     let instance: MenuInstance;
