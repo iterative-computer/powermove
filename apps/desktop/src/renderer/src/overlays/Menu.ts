@@ -37,14 +37,18 @@ export class MenuController {
     this.trigger = focusTarget(anchor);
     const rect = anchor.getBoundingClientRect();
     const cursorOrigin = options.x != null || options.y != null;
-    /* Pointer menus are real NSMenus when the desktop bridge is present; the
-       DOM menu stays for anchored dropdowns and curve pickers. */
-    const native = cursorOrigin ? nativeMenuBridge() : null;
+    /* Every menu is a real NSMenu when the desktop bridge is present, so
+       pointer menus and button dropdowns share one design. Anchored menus pop
+       from the anchor's bottom-left, as NSPopUpButton does. Only curve pickers
+       stay in the DOM: they draw bezier previews. */
+    const native = nativeMenuBridge();
     if (native && canRenderNatively(items)) {
+      const x = options.x ?? rect.left;
+      const y = options.y ?? rect.bottom + 4;
       /* Icons rasterize once per name and are cached, so the await is a
          microtask after the first menu. */
       void planNativeMenu(items, iconRasterizer(this.PM.ICONS as Record<string, string> | undefined))
-        .then((plan) => native.popup({ items: plan.items, x: options.x, y: options.y })
+        .then((plan) => native.popup({ items: plan.items, x, y })
           .then((id) => { if (id != null) plan.actions.get(id)?.run?.(); }))
         .catch(() => undefined);
       return document.createElement('div');
