@@ -322,7 +322,7 @@ export type MenuLocation = 'titlebar:right' | 'panel:context' | 'layer:context' 
 export type MenuContribution =
   | '-'
   | { header: string }
-  | { label: string; kb?: string | null; on?: boolean; disabled?: boolean; run?: () => unknown };
+  | { label: string; icon?: string; kb?: string | null; on?: boolean; disabled?: boolean; run?: () => unknown };
 
 export interface MenusAPI {
   contribute(location: MenuLocation, items: (ctx: Record<string, unknown>) => MenuContribution[]): Disposable;

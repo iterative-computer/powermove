@@ -26,23 +26,23 @@ export function installLayerMenu(PM: PMRegistry): void {
     const more = (title: string, items: any[]) => open([{ label: '‹ Back', run: () => PM.showLayerMenu(layer, event, origin) }, { header: title }, ...items]);
     const items: any[] = [
       { header: selected.length > 1 ? `${selected.length} layers` : layer.name },
-      { label: 'Duplicate', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
-      { label: 'Group layers', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
+      { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
+      { label: 'Group layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
     ];
-    if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split text into layers…', disabled: !editable, run: () => more('Split text into layers',
+    if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split text into layers…', icon: 'type', disabled: !editable, run: () => more('Split text into layers',
       ([['By word', 'words'], ['By character', 'characters'], ['By line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) }))) });
-    if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D layer', on: selected.every((item: any) => item.threeD), disabled: !editable, run: () => patch({threeD: !selected.every((item: any) => item.threeD)}, '3D layer') });
-    if (selected.some((item: any) => item.type === 'group')) items.push({ label: 'Ungroup layers', kb: '⌘⇧G', disabled: !editable, run: () => PM.cmd('ungroupLayers') });
+    if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D layer', icon: 'cube', on: selected.every((item: any) => item.threeD), disabled: !editable, run: () => patch({threeD: !selected.every((item: any) => item.threeD)}, '3D layer') });
+    if (selected.some((item: any) => item.type === 'group')) items.push({ label: 'Ungroup layers', icon: 'layers', kb: '⌘⇧G', disabled: !editable, run: () => PM.cmd('ungroupLayers') });
     const groups = PM.proj.layers.filter((item: any) => item.type === 'group' && !item.lock && !PM.expandGroups(PM.sel.layers).includes(item.id));
-    if (groups.length || selected.some((item: any) => item.group)) items.push({ label: 'Move to group…', disabled: !editable, run: () => more('Move to group', [
+    if (groups.length || selected.some((item: any) => item.group)) items.push({ label: 'Move to group…', icon: 'stack', disabled: !editable, run: () => more('Move to group', [
       { label: 'Outside groups', run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: null }, 'Move out of group') },
       ...groups.map((group: any) => ({ label: group.name, run: () => apply({ type: 'move_to_group', targets: PM.sel.layers, group: group.id }, 'Move to group') }))
     ]) });
-    if (selected.every((item: any) => PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Parent…', disabled: !editable, run: () => more('Parent', parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin)) });
+    if (selected.every((item: any) => PM.TYPE_META[item.type]?.transform !== false)) items.push({ label: 'Parent…', icon: 'link', disabled: !editable, run: () => more('Parent', parentMenuItems(PM, selected.map((item: any) => item.id), editOrigin)) });
     if (selected.every((item: any) => item.type !== 'group')) {
       const inside = selected.every((item: any) => PM.time > item.from && PM.time < item.from + item.dur);
-      items.push({ label: 'Timing…', disabled: !editable, run: () => more('Timing', [
-        { label: 'Split at playhead', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
+      items.push({ label: 'Timing…', icon: 'clock', disabled: !editable, run: () => more('Timing', [
+        { label: 'Split at playhead', icon: 'scissors', kb: '⌘⇧D', disabled: !inside, run: () => PM.cmd('split') },
         { label: 'Trim in to playhead', disabled: !inside, run: () => apply(selected.flatMap((item: any) => [
           { type: 'set_layer', target: item.id, patch: { from: PM.time, duration: item.dur - (PM.time - item.from) } },
           ...(PM.MediaTiming.isTimed(item) ? [{ type: 'set_content', target: item.id, patch: { trim: PM.MediaTiming.trimAtStart(item, PM.time) } }] : [])
@@ -51,12 +51,12 @@ export function installLayerMenu(PM: PMRegistry): void {
         { label: 'Fit to composition', run: () => patch({ from: 0, duration: PM.proj.dur }, 'Fit duration') },
       ]) });
     }
-    if (selected.length === 1 && layer.type === 'video' && layer.d?.embeddedAudio === true) items.push({ label: 'Separate audio', disabled: !editable, run: () => PM.cmd('separateAudio', layer.id) });
+    if (selected.length === 1 && layer.type === 'video' && layer.d?.embeddedAudio === true) items.push({ label: 'Separate audio', icon: 'speaker', disabled: !editable, run: () => PM.cmd('separateAudio', layer.id) });
     items.push('-',
-      { label: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') ? 'Hide' : 'Show', disabled: !editable, run: () => patch({ visible: !evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') }, 'Visibility') },
-      { label: layer.solo ? 'Unsolo' : 'Solo', disabled: !editable, run: () => patch({ solo: !layer.solo }, 'Solo layers') },
-      { label: lockedGroup ? 'Unlock group' : layer.lock ? 'Unlock' : 'Lock', run: () => lockedGroup ? apply({type:'set_layer',target:lockedGroup.id,patch:{locked:false}}, 'Unlock group') : patch({ locked: !layer.lock }, 'Lock layers') },
-      '-', { label: 'Delete', kb: '⌫', disabled: !editable, run: () => PM.cmd('delete') });
+      { label: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') ? 'Hide' : 'Show', icon: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') ? 'eyeoff' : 'eye', disabled: !editable, run: () => patch({ visible: !evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') }, 'Visibility') },
+      { label: layer.solo ? 'Unsolo' : 'Solo', icon: 'headphones', disabled: !editable, run: () => patch({ solo: !layer.solo }, 'Solo layers') },
+      { label: lockedGroup ? 'Unlock group' : layer.lock ? 'Unlock' : 'Lock', icon: 'lock', run: () => lockedGroup ? apply({type:'set_layer',target:lockedGroup.id,patch:{locked:false}}, 'Unlock group') : patch({ locked: !layer.lock }, 'Lock layers') },
+      '-', { label: 'Delete', icon: 'trash', kb: '⌫', disabled: !editable, run: () => PM.cmd('delete') });
     const contributed = [...(PM.Kernel?.collectMenu?.('layer:context', { layerId: layer.id }) || []),
       ...(PM.Kernel?.collectMenu?.(`${origin}:context`, { kind: 'layer', layerId: layer.id, time: PM.time }) || [])];
     if (contributed.length) items.push('-', ...contributed);

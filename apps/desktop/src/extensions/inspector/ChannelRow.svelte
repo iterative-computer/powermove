@@ -239,9 +239,9 @@
     const easing = ['power', 'linear', 'easeInOut', 'expoOut', 'backOut', 'glide', 'snap'];
     const items: Array<MenuContribution | null> = [
       { header: label },
-      { label: 'Add keyframe at playhead', run: addKeyframe },
-      animated ? { label: 'Remove animation', run: () => toggleStopwatch(new MouseEvent('click')) } : null,
-      { label: 'Show in graph editor', run: showGraphEditor },
+      { label: 'Add keyframe at playhead', icon: 'diamond', run: addKeyframe },
+      animated ? { label: 'Remove animation', icon: 'x', run: () => toggleStopwatch(new MouseEvent('click')) } : null,
+      { label: 'Show in graph editor', icon: 'graph', run: showGraphEditor },
       '-',
       { header: 'Easing for all keys' },
       ...easing.map((name) => ({
@@ -250,12 +250,13 @@
         run: () => api.history.do('Ease', () => properties.forEach((p) => api.anim.applyEaseTo(p.kf, name)))
       })),
       '-',
-      { label: expression ? 'Edit expression…' : 'Add expression…', run: editExpression },
+      { label: expression ? 'Edit expression…' : 'Add expression…', icon: 'code', run: editExpression },
       expression ? {
         label: 'Remove expression',
+        icon: 'x',
         run: () => applyExpression(null, 'Remove expression')
       } : null,
-      { label: 'Reset', run: resetChannel }
+      { label: 'Reset', icon: 'undo', run: resetChannel }
     ];
     api.ui.menu({ x: event.clientX, y: event.clientY }, items.filter((item): item is MenuContribution => item !== null));
   }
