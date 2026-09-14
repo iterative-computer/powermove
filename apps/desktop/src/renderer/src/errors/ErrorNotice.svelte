@@ -1,6 +1,7 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { presentError } from './presentation';
-  let { error, live = true }: { error: unknown; live?: boolean } = $props();
+  let { error, live = true, actions }: { error: unknown; live?: boolean; actions?: Snippet } = $props();
   const presentation = $derived(presentError(error));
   let copyState = $state('Copy details');
   async function copy() {
@@ -23,10 +24,12 @@
       <button type="button" onclick={copy}>{copyState}</button>
     </details>
   {/if}
+  {#if actions}<div class="error-actions">{@render actions()}</div>{/if}
 </div>
 
 <style>
-  .error-notice{min-width:0;width:100%;padding:12px;border:1px solid color-mix(in srgb,var(--danger) 22%,transparent);border-radius:10px;background:color-mix(in srgb,var(--danger) 4%,var(--bg-float));color:var(--tx);font:var(--fs-sm)/1.5 var(--f-ui);box-sizing:border-box;overflow-wrap:anywhere}
+  .error-notice{min-width:0;width:100%;padding:12px;border:0;border-radius:10px;background:color-mix(in srgb,var(--danger) 4%,var(--bg-float));color:var(--tx);font:var(--fs-sm)/1.5 var(--f-ui);box-sizing:border-box;overflow-wrap:anywhere}
+  .error-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
   .error-heading{display:flex;align-items:center;gap:8px;margin-bottom:6px}
   strong{font-weight:600;font-size:var(--fs-sm)}
   .error-marker{display:grid;place-items:center;flex:none;width:16px;height:16px;border-radius:50%;background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger);font-size:11px;font-weight:700}

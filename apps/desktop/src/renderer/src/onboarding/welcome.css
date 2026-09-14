@@ -85,7 +85,7 @@ h1 {
 
 #begin:hover { background: var(--accent-hover); }
 #begin:active { transform: translateY(1px); }
-#begin:focus { outline: none; box-shadow: var(--shadow-raise); }
+#begin:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 #begin:focus-visible { background: var(--accent-hover); }
 #begin:disabled { opacity: var(--disabled); }
 

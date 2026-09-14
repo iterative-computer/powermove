@@ -219,6 +219,9 @@ and the closest built-in panel's rows, fields, sections, buttons, and icons.
 Match the same spacing, type sizes, label alignment, control heights, radii,
 borders, and surfaces using the app's tokens. Inherit light/dark mode; do not
 introduce a nested card, duplicate title bar, custom palette, or decorative UI.
+Use flat tonal fills or transparent buttons without bevels, decorative gradients,
+or raised shadows. Put recovery actions inside their borderless error surface.
+Keep keyboard focus and selection indicators visible. See [the interface language](design-language.md).
 Keep controls source-connected and undoable. An explicit user style request
 overrides this default only for the requested surface.
 

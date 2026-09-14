@@ -34,7 +34,7 @@
 </div>
 
 <style>
-  .agent-mod-result{--mod-tint:var(--accent);display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:11px;border-radius:var(--r-md);background:linear-gradient(to top,color-mix(in srgb,var(--mod-tint) 4%,var(--bg-field)),color-mix(in srgb,var(--mod-tint) 1%,var(--bg-field)) 42%,var(--bg-field) 78%);min-width:0}
+  .agent-mod-result{--mod-tint:var(--accent);display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:11px;border-radius:var(--r-md);background:color-mix(in srgb,var(--mod-tint) 4%,var(--bg-field));min-width:0}
   .mod-mark{display:grid;place-items:center;flex:none;width:30px;height:30px;border-radius:var(--r-sm);color:var(--accent-tx);background:var(--accent-dim)}
   svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linejoin:round;stroke-linecap:round}
   .mod-copy{display:flex;flex:1;flex-direction:column;min-width:70px;gap:2px;overflow-wrap:anywhere}

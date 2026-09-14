@@ -3,6 +3,8 @@ export interface CompatibleProviderConfig {
   model: string;
   vision: boolean;
   hasKey: boolean;
+  /** Advertised model IDs; older connections fall back to the configured model. */
+  models?: string[];
 }
 export interface CompatibleProviderInput {
   baseUrl: string;
