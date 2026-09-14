@@ -154,14 +154,16 @@
     scrollEl?.scrollTo({ top: 0 });
   });
 
-  /* Rebuild the Project page when the open project changes underneath it. */
+  /* Rebuild the Project page when the open project changes underneath it, or
+     when the home screen comes and goes. */
   $effect(() => {
     if (!shown) return;
-    const off = PM.bus?.on?.('project', () => {
+    const rebuild = () => {
       buildProject();
       if (page === 'project' && !controls?.project) page = 'general';
-    });
-    return () => off?.();
+    };
+    const offs = ['project', 'projects:screen'].map((event) => PM.bus?.on?.(event, rebuild));
+    return () => offs.forEach((off) => off?.());
   });
 
   /* Lisse squircles on every card and control while the screen is up. The

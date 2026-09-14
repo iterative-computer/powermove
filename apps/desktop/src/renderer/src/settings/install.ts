@@ -51,9 +51,10 @@ export function install(PM: PMRegistry): void {
         target: document.body,
         props: {
           PM,
-          /* The Project page only makes sense with a project open; without one
-             it is left out entirely rather than shown empty. */
-          projectBridge: () => (PM.proj ? projectSettingsBridge(PM) : null)
+          /* The Project page only makes sense inside the editor. On the home
+             screen PM.proj is the placeholder home project, so the page is
+             left out entirely rather than editing a project nobody sees. */
+          projectBridge: () => (PM.proj && !PM.ProjectsScreen?.isOpen ? projectSettingsBridge(PM) : null)
         }
       });
     }
