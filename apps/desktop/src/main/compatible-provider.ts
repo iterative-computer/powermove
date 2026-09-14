@@ -6,6 +6,8 @@ import type { CodexRunRequest, CodexRunResult, CodexTraceEvent, AgentToolRespons
 import { POWERMOVE_AGENT_TOOLS, POWERMOVE_LIVE_INSPECTION_TOOLS } from './agent-tools/spec';
 import { fragmentText, humanLabel, outputExcerpt, toolDetail } from './agent-tools/trace-format';
 
+import { modelEffort } from '../shared/agent-models';
+
 type Saved = CompatibleProviderConfig & { secret?: string };
 const MAX_RESPONSE = 2_000_000;
 
@@ -39,10 +41,26 @@ export class CompatibleProvider {
     if (!response.ok) { await response.body?.cancel(); throw this.httpError(response.status); }
     const test = await response.json() as any;
     if (!test.choices?.[0]?.message) throw new Error('This address did not return a compatible chat response. Check the API address and model.');
+    config.models = await this.discoverModels(baseUrl, key, config.model);
     await mkdir(this.directory, { recursive: true });
     await writeFile(this.file + '.tmp', JSON.stringify(config), { mode: 0o600 });
     await rename(this.file + '.tmp', this.file);
     return this.status();
+  }
+  private async discoverModels(baseUrl: string, key: string, configured: string): Promise<string[]> {
+    try {
+      const response = await this.request(baseUrl + '/models', {
+        method: 'GET', redirect: 'error', signal: AbortSignal.timeout(10_000), headers: this.headers(key),
+      });
+      if (!response.ok) { await response.body?.cancel(); return [configured]; }
+      const payload = await response.json() as { data?: { id?: unknown }[] };
+      const ids = Array.isArray(payload.data) ? payload.data
+        .map(item => item?.id).filter((id): id is string => typeof id === 'string' && id.trim().length > 0 && id.length <= 200 && !/[\u0000-\u001f\u007f]/.test(id)) : [];
+      return [...new Set([configured, ...ids.slice(0, 1000)])];
+    } catch {
+      // Model discovery is optional on compatible services, including local servers.
+      return [configured];
+    }
   }
   private headers(key: string): Record<string, string> { return { 'Content-Type': 'application/json', ...(key ? { Authorization: `Bearer ${key}` } : {}) }; }
   private httpError(status: number): Error {
@@ -60,6 +78,9 @@ export class CompatibleProvider {
     try {
       const config = await this.read();
       if (!config.model) throw new Error('Connect an API or local model in Settings to start chatting.');
+      const model = !req.model || req.model === 'configured' ? config.model : req.model;
+      if (model !== config.model && !config.models?.includes(model)) throw new Error('This model is no longer available in the saved connection. Test and connect again in Settings.');
+      const effort = modelEffort('compatible', model, req.reasoningEffort);
       const key = this.key(config);
       const autonomous = req.mode === 'autonomous';
       const availableTools = autonomous ? POWERMOVE_AGENT_TOOLS : POWERMOVE_LIVE_INSPECTION_TOOLS;
@@ -77,7 +98,8 @@ export class CompatibleProvider {
         signal.throwIfAborted();
         const response = await this.request(providerUrl(config.baseUrl) + '/chat/completions', {
           method: 'POST', redirect: 'error', headers: this.headers(key), signal,
-          body: JSON.stringify({ model: config.model, messages, stream: true,
+          body: JSON.stringify({ model, messages, stream: true,
+            ...(effort ? { reasoning_effort: effort } : {}),
             ...(callTool ? { tools: availableTools.map(tool => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}) }),
         });
         if (!response.ok) { await response.body?.cancel(); throw this.httpError(response.status); }

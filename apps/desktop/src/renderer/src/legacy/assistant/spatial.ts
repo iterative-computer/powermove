@@ -266,15 +266,30 @@ const AGENT_PROVIDERS: any = [
   { id: 'claude', label: 'Claude' },
   { id: 'compatible', label: 'API / local model' },
 ];
-S.reasoningEffort = modelEffort(S.provider, S.model, S.reasoningEffort) || S.reasoningEffort;
+S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort) || S.reasoningEffort;
 if (S.provider === 'compatible') S.accessMode = 'editor';
+function selectedModelName(provider: string, model: string): string {
+  return provider === 'compatible' && model === 'configured' ? AGENT_MODELS.compatible[0]!.label : model;
+}
+function updateCompatibleModels(config: { model: string; models?: string[] }): void {
+  if (!config.model) return;
+  AGENT_MODELS.compatible = [
+    { id: 'configured', label: config.model },
+    ...[...new Set(config.models || [])].filter(id => id !== config.model).map(id => ({ id, label: id })),
+  ];
+  if (S.provider === 'compatible') {
+    if (!AGENT_MODELS.compatible.some(item => item.id === S.model)) S.model = 'configured';
+    S.reasoningEffort = modelEffort('compatible', selectedModelName('compatible', S.model), S.reasoningEffort) || S.reasoningEffort;
+  }
+}
 globalThis.window?.addEventListener('pm-provider-connected', (event: Event) => {
   const config = (event as CustomEvent).detail;
-  if (config?.model) AGENT_MODELS.compatible[0]!.label = config.model;
+  if (config?.model) updateCompatibleModels(config);
   PM.AgentUI?.setProvider('compatible');
 });
 void globalThis.window?.powermove?.compatible?.status().then(config => {
-  if (config.model) { AGENT_MODELS.compatible[0]!.label = config.model; PM.AgentUI?.update(); }
+  updateCompatibleModels(config);
+  PM.AgentUI?.update();
 }).catch(() => undefined);
 const AGENT_ACCESS_MODES: any = [
   { id: 'editor', label: 'Edit project', detail: 'Edit the current composition' },
@@ -463,7 +478,7 @@ function agentUISnapshot(): AgentSnapshot {
     pendingEntering: S.pendingEntering,
     models: AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS],
     providers: AGENT_PROVIDERS,
-    reasoningEfforts: modelEfforts(S.provider, S.model),
+    reasoningEfforts: modelEfforts(S.provider, selectedModelName(S.provider, S.model)),
     accessModes: S.provider === 'compatible' ? AGENT_ACCESS_MODES.filter((item: any) => item.id === 'editor') : AGENT_ACCESS_MODES,
   };
   S.conversation.forEach((message: any) => { message.entering = false; });
@@ -488,7 +503,7 @@ registerAgentPanel(PM, {
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
     if (!AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS].some((item) => item.id === model) || !REASONING_EFFORTS.includes(effort as ReasoningEffort)) return;
-    S.model = model; S.reasoningEffort = modelEffort(S.provider, model, effort as ReasoningEffort) || effort;
+    S.model = model; S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, model), effort as ReasoningEffort) || effort;
     PM.store.set(`agentModel.${S.provider}`, model); PM.store.set('agentReasoningEffort', S.reasoningEffort);
     PM.AgentUI?.update({ focusComposer: true });
   },
@@ -497,7 +512,7 @@ registerAgentPanel(PM, {
     S.provider = provider;
     if (provider === 'compatible') S.accessMode = 'editor';
     S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
-    S.reasoningEffort = modelEffort(provider, S.model, S.reasoningEffort) || S.reasoningEffort;
+    S.reasoningEffort = modelEffort(provider, selectedModelName(provider, S.model), S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
   },

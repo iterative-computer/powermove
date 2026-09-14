@@ -108,13 +108,13 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     el.style.minWidth = `${Math.ceil(a.width)}px`;
     el.style.maxHeight = `${MAX_HEIGHT}px`;
     const h = Math.min(el.offsetHeight, MAX_HEIGHT);
-    const below = vh - a.bottom - EDGE;
-    const above = a.top - EDGE;
+    const below = Math.max(0, vh - a.bottom - EDGE - GAP);
+    const above = Math.max(0, a.top - EDGE - GAP);
     const side = below >= h || below >= above ? 'bottom' : 'top';
     el.dataset.side = side;
-    el.style.maxHeight = `${Math.min(MAX_HEIGHT, side === 'bottom' ? below - GAP : above - GAP)}px`;
+    el.style.maxHeight = `${Math.min(MAX_HEIGHT, side === 'bottom' ? below : above)}px`;
     const top = side === 'bottom' ? a.bottom + GAP : a.top - GAP - el.offsetHeight;
-    const left = Math.min(Math.max(EDGE, a.left), vw - el.offsetWidth - EDGE);
+    const left = Math.max(EDGE, Math.min(a.left, vw - el.offsetWidth - EDGE));
     el.style.top = `${Math.round(top)}px`;
     el.style.left = `${Math.round(left)}px`;
   }

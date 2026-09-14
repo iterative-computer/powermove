@@ -59,7 +59,7 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
     await expect(dialog.getByLabel('Export width in pixels')).toHaveValue('1000');
     await page.screenshot({path:'/tmp/powermove-export-video.png'});
     await page.evaluate(() => { (window as any).PM.theme.apply('dark'); });
-    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector('.export-select')!).backgroundColor)).toBe('rgb(23, 20, 18)');
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector('.export-select')!).backgroundColor)).toBe('rgba(245, 245, 244, 0.06)');
     await page.screenshot({path:'/tmp/powermove-export-video-dark.png'});
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {

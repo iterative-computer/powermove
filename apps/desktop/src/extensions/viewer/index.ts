@@ -21,10 +21,10 @@ const VIEWER_STYLES = `
   [data-preview-corners="rounded"] #stage-inner{border-radius:var(--r-md);corner-shape:var(--ui-corner-smoothing)}
   #gl{display:block;width:100%;height:100%;background:#000}
   #overlay{position:absolute;inset:0;pointer-events:none}
-  #composition-recovery{position:absolute;z-index:5;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:10px;padding:7px 8px 7px 11px;border:1px solid color-mix(in srgb,var(--line) 72%,white 10%);border-radius:var(--r-md);background:color-mix(in srgb,var(--bg-panel) 92%,transparent);box-shadow:0 10px 32px rgb(0 0 0/.28);backdrop-filter:blur(14px);color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap}
+  #composition-recovery{position:absolute;z-index:5;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:10px;padding:7px 8px 7px 11px;border:0;border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap}
   #composition-recovery[hidden]{display:none}
   #composition-recovery b{padding:4px 7px;border-radius:var(--r-sm);background:var(--accent);color:var(--on-accent);font-weight:var(--fw-medium)}
-  #composition-recovery:hover{color:var(--tx);border-color:color-mix(in srgb,var(--accent) 38%,var(--line))}
+  #composition-recovery:hover{color:var(--tx);background:var(--bg-row-hi)}
   #composition-recovery:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   #stage.fx-drop-over > #stage-inner{outline:2px solid var(--accent);outline-offset:-2px;box-shadow:0 0 0 4px color-mix(in oklab, var(--accent) 28%, transparent);transition:box-shadow 120ms ease}
 `;

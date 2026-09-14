@@ -8,6 +8,25 @@ import { providerUrl } from '../shared/compatible-provider';
 const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const event = (delta: any, finish_reason: any = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason }] })}\r\n\r\n`;
+it('discovers provider models and sends the selected model and reasoning on every tool turn', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-model-picker-')); directories.push(directory);
+  const requests: any[] = [];
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return Response.json({ data: [{ id: 'gpt-6-astra' }, { id: 'gpt-5.6-sol' }, { id: 'gpt-6-astra' }] });
+    const body = JSON.parse(options.body); requests.push(body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_project_state', arguments: '{}' } }] }, 'tool_calls'));
+    return streamed(event({ content: 'Ready.' }, 'stop'));
+  }) as typeof fetch;
+  const provider = new CompatibleProvider(directory, fetcher);
+  const config = await provider.configure({ baseUrl: 'https://example.com/v1', model: 'gpt-6-astra', vision: false });
+  expect(config.models).toEqual(['gpt-6-astra', 'gpt-5.6-sol']);
+  const result = await provider.run({ id: 'r', mode: 'autonomous', access: 'editor', model: 'gpt-5.6-sol', reasoningEffort: 'max', prompt: 'Hello', images: [], attachments: [] } as any, () => {},
+    async () => ({ runId: 'r', callId: 'c1', ok: true, content: [] }));
+  expect(result.ok).toBe(true);
+  expect(requests.filter(body => body.stream)).toHaveLength(2);
+  expect(requests.filter(body => body.stream).every(body => body.model === 'gpt-5.6-sol' && body.reasoning_effort === 'max')).toBe(true);
+});
 function streamed(text: string) {
   const bytes = new TextEncoder().encode(text);
   return new Response(new ReadableStream({ start(controller) { for (let i = 0; i < bytes.length; i += 3) controller.enqueue(bytes.slice(i, i + 3)); controller.close(); } }));
@@ -22,6 +41,7 @@ it('keeps keys out of status, does not forward saved keys to another provider, a
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-provider-')); directories.push(directory);
   const requests: any[] = [];
   const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return new Response(null, { status: 404 });
     const body = JSON.parse(options.body); requests.push({ body, headers: options.headers });
     if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
     if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'c1', function: { name: 'get_panel_state', arguments: '{\"panelId\":\"inspector\"}' } }] }, 'tool_calls'));
@@ -49,6 +69,7 @@ it('exposes only live inspection tools to compatible editor runs and forwards ca
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-provider-editor-')); directories.push(directory);
   const requests: any[] = [];
   const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return new Response(null, { status: 404 });
     const body = JSON.parse(options.body); requests.push(body);
     if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
     if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'capture-1', function: { name: 'capture_panel', arguments: '{"panelId":"inspector"}' } }] }, 'tool_calls'));
