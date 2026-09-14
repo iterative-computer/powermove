@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Icon from '../panels/Icon.svelte';
   import { createChatGPTSettingsControl, createClaudeSettingsControl } from '../legacy/ui/chatgpt-settings';
   import { createCompatibleSettingsControl } from '../legacy/ui/compatible-settings';
@@ -58,6 +58,9 @@
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
+  let navEl = $state<HTMLElement | null>(null);
+  let glider = $state<HTMLElement | null>(null);
+  let gliderOn = $state(false);
   let lastFocus: HTMLElement | null = null;
 
   const hasProject = $derived(!!controls?.project);
@@ -147,6 +150,25 @@
   function show(id: SettingsPage): void {
     page = id;
   }
+
+  /* The selected highlight is one layer that glides between nav rows, the
+     way the command palette's does. It lands in place the first time and
+     whenever the list re-flows under a search. */
+  $effect(() => {
+    if (!shown) { gliderOn = false; return; }
+    const id = current.id;
+    groups;
+    void tick().then(() => {
+      const row = navEl?.querySelector<HTMLElement>(`[data-settings-tab="${id}"]`);
+      if (!row || !glider) { gliderOn = false; return; }
+      const first = !untrack(() => gliderOn);
+      if (first) glider.style.transition = 'none';
+      glider.style.transform = `translateY(${row.offsetTop}px)`;
+      glider.style.height = `${row.offsetHeight}px`;
+      if (first) { void glider.offsetHeight; glider.style.transition = ''; }
+      gliderOn = true;
+    });
+  });
 
   /* A new page starts at its top; the scroll position belongs to the page. */
   $effect(() => {
@@ -246,7 +268,8 @@
         bind:value={searchText}
       />
     </label>
-    <div class="sg-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
+    <div class="sg-nav" role="tablist" aria-label="Settings sections" aria-orientation="vertical" bind:this={navEl}>
+      <div class="sg-nav-glider" class:on={gliderOn} bind:this={glider} aria-hidden="true"></div>
       {#each groups as group (group.title)}
         <div class="sg-nav-group">
           <span class="sg-nav-title">{group.title}</span>
