@@ -105,7 +105,7 @@ project.
 - Renderer `import()`s the bundle inside try/catch; `activate` runs in try/catch;
   runtime errors thrown from an extension's callbacks are attributed by extension id
   (wrappers in `host.ts`). Two runtime failures in 10 s → auto-disable + toast
-  *"<name> stopped working — Fix it / Turn off"*.
+  *"<name> stopped working — Turn off"*.
 - Disabled/errored extensions never affect boot; state in store key `extensions`.
 - **Explicit trust decision:** extensions are trusted code running in the app's
   main frame with access to the preload bridge (store, codex, save, capture).
@@ -130,7 +130,7 @@ project.
   `electron-builder.yml`), and the manifest of a built-in as example.
 - Result schema gains `extensions: [{id, action: created|updated|removed}]`; the app
   reloads those ids and surfaces compile/activation errors back into the conversation.
-- "Fix it" sends the error, stack, and file list of the failing extension as a prompt.
+- Agent-authored changes automatically continue with their load diagnostics and live verification tools. The agent repairs failures and verifies the loaded result; persistent errors remain visible without a Fix it button.
 - Forking: agent copies `src/extensions/<id>` (shipped inside the app bundle at
   `resources/builtin-extensions/<id>/`, readable) into the user dir with
   `replaces` + `forkedFrom`.

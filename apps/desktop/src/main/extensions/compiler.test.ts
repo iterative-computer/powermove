@@ -37,7 +37,8 @@ describe('compileExtension', () => {
       .sort((left, right) => left.id.localeCompare(right.id));
     const extensions = [
       ...builtIns,
-      { id: 'media-browser', dir: path.resolve('docs/samples/media-browser') }
+      { id: 'media-browser', dir: path.resolve('docs/samples/media-browser') },
+      { id: 'gradient-tint', dir: path.resolve('docs/samples/gradient-tint') }
     ];
 
     for (const { id, dir } of extensions) {

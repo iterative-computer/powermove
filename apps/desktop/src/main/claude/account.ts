@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import type { ChildProcess, SpawnOptions } from 'node:child_process';
+import { spawnClaudeProcess } from './process';
 
 import type { ClaudeAccountStatus } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
@@ -50,6 +51,7 @@ export class ClaudeAccountClient {
   private current: ClaudeAccountStatus = {
     state: 'checking', email: null, planType: null, detail: null
   };
+  private statusRequest: Promise<ClaudeAccountStatus> | null = null;
   private loginChild: ChildProcess | null = null;
   private loginTimer: NodeJS.Timeout | null = null;
 
@@ -60,7 +62,7 @@ export class ClaudeAccountClient {
     this.deps = {
       discoverBinary: discoverClaudeBinary,
       prepareHome: prepareIsolatedClaudeHome,
-      spawnProcess: (command, args, spawnOptions) => spawn(command, [...args], spawnOptions),
+      spawnProcess: spawnClaudeProcess,
       statusTimeoutMs: STATUS_TIMEOUT_MS,
       loginTimeoutMs: LOGIN_TIMEOUT_MS,
       ...dependencies
@@ -72,14 +74,21 @@ export class ClaudeAccountClient {
     return () => this.listeners.delete(listener);
   }
 
-  async status(): Promise<ClaudeAccountStatus> {
-    if (this.current.state === 'connecting') return this.current;
+  status(): Promise<ClaudeAccountStatus> {
+    if (this.current.state === 'connecting') return Promise.resolve(this.current);
+    if (this.statusRequest !== null) return this.statusRequest;
+    this.statusRequest = this.readStatus().finally(() => { this.statusRequest = null; });
+    return this.statusRequest;
+  }
+
+  private async readStatus(): Promise<ClaudeAccountStatus> {
     try {
       const result = await this.command(['auth', 'status'], this.deps.statusTimeoutMs, true);
       const text = result.stdout.trim() || result.stderr.trim();
       let parsed: unknown;
       try { parsed = JSON.parse(text); } catch { parsed = null; }
       if (parsed !== null) return this.publish(claudeAccountStatusFromJson(parsed));
+      if (result.code === 126 || result.code === 127) return this.publish(unavailable('Claude could not be started. Check its installation and try again.'));
       if (result.code !== 0) return this.publish(disconnected('Sign in to Claude to use your subscription.'));
       return this.publish(disconnected());
     } catch (error) {

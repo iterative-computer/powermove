@@ -2,6 +2,43 @@ import { describe, expect, it, vi } from 'vitest';
 import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './project-file';
 
 describe('portable project media', () => {
+  it.each(['current', 'undo', 'redo', 'all missing'])('saves with missing %s media while preserving editable source and history', async location => {
+    const missing = { id: 'missing', name: '01-window-plate.png', kind: 'image' };
+    const available = { id: 'available', name: 'available.png', kind: 'image' };
+    const patch = { path: ['assets', missing.id], exists: true, value: missing };
+    const document = {
+      proj: {
+        layers: [{ id: 'image-layer', type: 'image', d: { asset: missing.id } }],
+        assets: {
+          ...(location === 'current' || location === 'all missing' ? { missing } : {}),
+          ...(location !== 'all missing' ? { available } : {}),
+        },
+      },
+      history: { entries: [{
+        forward: location === 'redo' ? [patch] : [],
+        backward: location === 'undo' ? [patch] : [],
+      }], cursor: location === 'redo' ? 0 : 1 },
+    };
+    const original = JSON.stringify(document);
+    const data = new Uint8Array([0, 127, 255]);
+    const store = {
+      get: async (asset: any) => asset.id === available.id ? new Blob([data], { type: 'image/png' }) : null,
+      put: vi.fn(async (_id: string, _blob: Blob, _metadata: any) => true),
+    };
+    const reopened = unpackProjectFile(await packProjectFile(document, store));
+    expect(reopened.proj).toEqual(document.proj);
+    expect(reopened.history).toEqual(document.history);
+    expect(JSON.stringify(document)).toBe(original);
+    await restoreProjectFileMedia(reopened, store);
+    expect(store.put).toHaveBeenCalledTimes(location === 'all missing' ? 0 : 1);
+    if (location !== 'all missing') {
+      const [id, blob, metadata] = store.put.mock.calls[0]!;
+      expect(id).toBe(available.id);
+      expect(metadata).toEqual(available);
+      expect(new Uint8Array(await blob.arrayBuffer())).toEqual(data);
+    }
+  });
+
   it('stores media as raw PMV3 bytes and restores it losslessly', async () => {
     const original = new Uint8Array([0, 1, 2, 127, 128, 254, 255]);
     const packed = await packProjectFile({ proj: {

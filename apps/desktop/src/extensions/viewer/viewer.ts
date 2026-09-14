@@ -535,10 +535,9 @@ export function resizeCursorForHandle(matrix: AffineMatrix, handle: ResizeHandle
   return RESIZE_CURSORS[Math.round(angle / 45) % RESIZE_CURSORS.length]!;
 }
 
-/** Canvas-handle policy mirrors Figma/Motioner semantics: typography and
-    intrinsic media never stretch through ordinary selection handles. */
+/** Text handles resize layout; intrinsic media keeps its aspect ratio. */
 export function resizeLocksAspect(type: string, shiftKey = false): boolean {
-  return shiftKey || type === 'text' || type === 'image' || type === 'video';
+  return shiftKey || type === 'image' || type === 'video';
 }
 
 export interface ResizeCalculation {
@@ -1852,15 +1851,21 @@ function handleAt(selection: SelectionGeometry, x: any, y: any) {
   const tolerance = 9 / Math.max(.02, V.shown);
   const rotate = rotationHandlePoint(selection);
   if (Math.hypot(x - rotate.x, y - rotate.y) <= tolerance * 1.2) return { rotate: true };
+  let closest: { i: number; corner: Corner; handle: ResizeHandle } | null = null;
+  let distance = tolerance;
   for (let i = 0; i < HANDLE_NAMES.length; i++) {
     const handle = HANDLE_NAMES[i]!;
     const corner = HANDLES[i]!;
     const point = selection.handles[handle];
-    if (Math.hypot(x - point.x, y - point.y) <= tolerance) {
-      return { i, corner, handle };
+    const candidateDistance = Math.hypot(x - point.x, y - point.y);
+    // Small text boxes have overlapping hit areas. Prefer the actual edge
+    // under the pointer instead of the first nearby corner.
+    if (candidateDistance <= distance) {
+      closest = { i, corner, handle };
+      distance = candidateDistance;
     }
   }
-  return null;
+  return closest;
 }
 
 function startMove(e: any, layers: any, T: any, options: any = {}) {
@@ -1976,7 +1981,8 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
     x: ev(api, L, 'position.x', T), y: ev(api, L, 'position.y', T),
     r: ev(api, L, 'rotation', T),
   };
-  const textSize0 = L.type === 'text' ? Math.max(4, Number(resolvedContent(api, L, api.transport.time()).size) || 4) : null;
+  const textContent0 = L.type === 'text' ? resolvedContent(api, L, T) : null;
+  const textPadding = textContent0 ? api.util.clamp(Number(textContent0.size) * .055, 3, 12) * 2 : 0;
   const m = [...api.anim.worldMatrix(L, T)] as [number, number, number, number, number, number];
   const pivotWorld = selection.pivotWorld;
   const pointerStart = pointerComp(e);
@@ -1986,19 +1992,16 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
   const grabOffset = pointerStartLocal && handleLocal
     ? { x: pointerStartLocal.x - handleLocal.x, y: pointerStartLocal.y - handleLocal.y }
     : { x: 0, y: 0 };
-  const applied = { sx: s0.sx, sy: s0.sy, x: s0.x, y: s0.y };
-  let appliedTextSize = textSize0;
+  const applied = {
+    sx: s0.sx, sy: s0.sy, x: s0.x, y: s0.y,
+    width: Number(textContent0?.boxWidth) || 0, height: Number(textContent0?.boxHeight) || 0,
+  };
   const applyValue = (path: string, value: number, key: keyof typeof applied) => {
     if (Math.abs(value - applied[key]) < .0005) return;
     setOrKey(L, path, value, T);
     applied[key] = value;
   };
-  const applyTextSize = (value: number) => {
-    if (appliedTextSize == null || Math.abs(value - appliedTextSize) < .0005) return;
-    api.edit.dispatch({ type: 'set_content', target: L.id, patch: { size: value } });
-    appliedTextSize = value;
-  };
-  api.edit.begin(hit.rotate ? 'Rotate layer' : textSize0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
+  api.edit.begin(hit.rotate ? 'Rotate layer' : textContent0 == null ? 'Scale layer' : 'Resize text', { origin: 'canvas' });
   let moved = false;
   beginDrag(e, {
     cursor: cursorForHit(selection, hit),
@@ -2017,19 +2020,27 @@ function startSingleTransform(e: any, selection: SelectionGeometry, hit: any, T:
         const pointerLocal = invertPoint(m, pointerWorld);
         if (!pointerLocal) return;
         const next = calculateResize(b, hit.corner, pointerLocal, grabOffset,
-          { x: s0.sx, y: s0.sy }, {
+          { x: textContent0 ? 1 : s0.sx, y: textContent0 ? 1 : s0.sy }, {
             fromCenter: ev.altKey,
+            minScale: textContent0 ? .001 : undefined,
             lockAspect: resizeLocksAspect(L.type, ev.shiftKey),
           });
+        // Width-only paragraph resizing grows downward as lines wrap.
+        if (textContent0 && !Number(textContent0.boxHeight) && hit.corner[1] === .5 && !ev.altKey && !ev.shiftKey) {
+          next.pivotLocal.y = b.y0;
+        }
         const fixedWorld = applyMatrix(m, next.pivotLocal);
 
         let renderedPivotLocal = next.pivotLocal;
-        if (textSize0 != null) {
-          /* Text owns its visual size through the typography model. Canvas
-             resizing changes Size; Scale X/Y remain explicit transform
-             overrides instead of becoming an accidental second font size. */
-          const factor = next.scaleX / Math.max(.001, s0.sx);
-          applyTextSize(api.util.round(Math.max(4, textSize0 * factor), 2));
+        if (textContent0) {
+          // Subtract the raster's interaction padding so the authored box
+          // follows the handle exactly, even with existing transform scales.
+          applyValue('c.boxWidth', api.util.round(Math.max(1, b.w * next.scaleX - textPadding), 3), 'width');
+          if (hit.corner[1] !== .5 || ev.shiftKey) {
+            applyValue('c.boxHeight', api.util.round(Math.max(1, b.h * next.scaleY - textPadding), 3), 'height');
+          } else {
+            applyValue('c.boxHeight', Number(textContent0.boxHeight) || 0, 'height');
+          }
           const resizedBounds = layerBounds(api, L, T);
           if (resizedBounds) {
             const pivotRatio: Corner = [

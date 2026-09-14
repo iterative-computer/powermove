@@ -1,6 +1,7 @@
 import { registerAgentNotifications } from './agent-notifications';
 import { installUpdates } from './updates';
 import { installTextContextMenu } from './text-context-menu';
+import { installPermissionHandlers } from './permissions';
 import { registerRenderEncoder } from './render-encoder';
 import {
   app,
@@ -229,23 +230,10 @@ function secureWebContents(webContents: WebContents, devRendererUrl: string | un
   });
 }
 
-// Default-deny; only the app's main frame may enumerate local fonts
-// (PM.Fonts is fed from queryLocalFonts() at boot — see docs/phase0-decisions.md).
-const GRANTED_PERMISSIONS = new Set(['local-fonts']);
-
 function isAppMainFrame(webContents: WebContents | null, requestingUrl: string | undefined): boolean {
   if (!webContents || webContents.isDestroyed()) return false;
   const url = requestingUrl ?? webContents.getURL();
   return isAllowedNavigation(url, devRendererUrl);
-}
-
-function installPermissionHandlers(): void {
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
-    callback(GRANTED_PERMISSIONS.has(permission) && isAppMainFrame(webContents, details.requestingUrl));
-  });
-  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
-    return GRANTED_PERMISSIONS.has(permission) && isAppMainFrame(webContents, requestingOrigin);
-  });
 }
 
 // A packaged build must never load a renderer URL inherited from the environment.
@@ -410,7 +398,7 @@ if (!hasSingleInstanceLock) {
       : path.join(app.getAppPath(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
     const mediaProxies = new MediaProxyService(app.getPath('temp'), playbackConverter(proxyEncoder));
     registerAppProtocol();
-    installPermissionHandlers();
+    installPermissionHandlers(session.defaultSession, isAppMainFrame);
 
     // Boot barrier: the legacy renderer reads PM.store synchronously while its
     // scripts load, so the store must be in memory before the window exists.
@@ -492,6 +480,9 @@ if (!hasSingleInstanceLock) {
       ['extensions.ts', 'src/shared/extensions.ts'],
       ['project.ts', 'src/renderer/src/core/types/project.ts'],
       ['commands.ts', 'src/renderer/src/core/types/commands.ts'],
+      ['samples/gradient-tint/manifest.json', 'docs/samples/gradient-tint/manifest.json'],
+      ['samples/gradient-tint/index.ts', 'docs/samples/gradient-tint/index.ts'],
+      ['samples/gradient-tint/README.md', 'docs/samples/gradient-tint/README.md'],
       ['samples/media-browser/manifest.json', 'docs/samples/media-browser/manifest.json'],
       ['samples/media-browser/index.ts', 'docs/samples/media-browser/index.ts'],
       ['samples/media-browser/MediaBrowserPanel.svelte', 'docs/samples/media-browser/MediaBrowserPanel.svelte'],

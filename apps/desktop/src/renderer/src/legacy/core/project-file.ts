@@ -18,7 +18,7 @@ function fileAssets(document: any): Record<string, any> {
   return Object.assign(assets, (document.proj || document).assets || {});
 }
 
-/** Saved files own their media; session-local blob URLs cannot survive reopening. */
+/** Embed available media; keep missing-media references editable on reopening. */
 export async function packProjectFile(snapshot: string | any, store: MediaStore, serialized?: string): Promise<Uint8Array> {
   const document = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
   const assets = fileAssets(document);
@@ -29,7 +29,9 @@ export async function packProjectFile(snapshot: string | any, store: MediaStore,
   if (estimatedBytes > LIMITS.fileSaveBytes) throw new Error('This project is too large to save as one file (256 MB maximum).');
   for (const [id, asset] of Object.entries<any>(assets)) {
     const blob = await store.get(asset);
-    if (!blob) throw new Error(`The original media for “${asset.name || id}” is missing. Reimport it before saving.`);
+    // Missing sources (including deleted assets retained by undo/redo) must not
+    // prevent saving edits. Their metadata stays in the document and history.
+    if (!blob) continue;
     estimatedBytes += blob.size + 1024;
     if (estimatedBytes > LIMITS.fileSaveBytes) throw new Error('This project is too large to save as one file (256 MB maximum).');
     const data = new Uint8Array(await blob.arrayBuffer());

@@ -106,7 +106,7 @@ describe('CodexAppServerRunner steering', () => {
           required: true,
           enabled_tools: [
             'get_project_state', 'get_panel_layout', 'open_panel', 'get_panel_state',
-            'capture_panel', 'get_workspace_state', 'render_frames'
+            'capture_panel', 'get_workspace_state', 'validate_effect', 'render_frames'
           ],
           default_tools_approval_mode: 'approve'
         }

@@ -20,6 +20,8 @@ export interface AgentMessage {
   entering?: boolean;
   /** Run failures render with the error treatment. */
   error?: boolean;
+  /** Editor mode could not author the requested extension. */
+  requiresProject?: boolean;
   fixExtensionId?: string;
   modResult?: AgentModResult;
   focusLabels?: string[];
@@ -212,7 +214,7 @@ function reconcileConversation(next: AgentMessage[]): void {
       continue;
     }
     assignChangedFields(currentMessage, nextMessage, [
-      'text', 'steering', 'entering', 'error', 'fixExtensionId'
+      'text', 'steering', 'entering', 'error', 'fixExtensionId', 'requiresProject'
     ]);
     if (!jsonEqual(currentMessage.modResult, nextMessage.modResult)) {
       currentMessage.modResult = nextMessage.modResult ? { ...nextMessage.modResult } : undefined;

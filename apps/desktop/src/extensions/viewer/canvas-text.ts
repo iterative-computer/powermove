@@ -37,7 +37,13 @@ export function editCanvasText(api: PowermoveAPI,V:CanvasTextState,layer:any,eve
   };
   place();V.inner.appendChild(el);V.canvasTextEditing=layer.id;api.edit.begin('Edit source text',{origin:'canvas'});
   const capture=()=>{const s=window.getSelection();if(!s?.rangeCount || !el.contains(s.anchorNode) || !el.contains(s.focusNode))return;const r=s.getRangeAt(0),start=r.cloneRange(),end=r.cloneRange();start.selectNodeContents(el);start.setEnd(r.startContainer,r.startOffset);end.selectNodeContents(el);end.setEnd(r.endContainer,r.endOffset);V.textSelection={layer:layer.id,start:start.toString().length,end:end.toString().length};};
-  const update=()=>{const value=el.innerText.replace(/\r/g,'');api.edit.dispatch({type:'set_property',target:layer.id,path:'c.text',value,time:api.transport.time(),mode:'auto',preserveHandEdits:false});place();capture();};
+  const update=()=>{
+    // Cutting/deleting everything leaves Chromium's caret placeholder BR.
+    // Preserve actual line breaks, but never save that placeholder as text.
+    const emptyPlaceholder=el.childNodes.length===1&&el.firstChild?.nodeName==='BR';
+    const value=emptyPlaceholder?'':el.innerText.replace(/\r/g,'');
+    api.edit.dispatch({type:'set_property',target:layer.id,path:'c.text',value,time:api.transport.time(),mode:'auto',preserveHandEdits:false});place();capture();
+  };
   let done=false;const finish=(cancel=false)=>{if(done)return;done=true;capture();document.removeEventListener('selectionchange',capture);document.removeEventListener('pointerdown',outside,true);el.remove();V.canvasTextEditing=null;V.finishCanvasText=null;cancel?api.edit.cancel():api.edit.commit();api.transport.invalidate();V.requestOverlay?.();api.services.get<{refresh():void}>('inspector')?.refresh();};
   const outside=(e:PointerEvent)=>{
     if(el.contains(e.target as Node))return;

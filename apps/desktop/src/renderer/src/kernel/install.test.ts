@@ -73,6 +73,51 @@ afterEach(() => {
 });
 
 describe('installKernel', () => {
+  it('routes native and API raster calls through disposable extension overrides', () => {
+    const PM = fakePM();
+    const native = vi.fn(() => ({ cv: document.createElement('canvas'), w: 20, h: 10 }));
+    PM.raster = native;
+    installed = installKernel(PM);
+    const api = installed.api('typing');
+    const original = api.services.get<(...args: any[]) => any>('raster');
+    expect(original).toBeTypeOf('function');
+    const layer = { type: 'text' } as any;
+    const override = api.services.register('raster', (...args: any[]) => ({ ...original!(...args), w: 30 }));
+    expect(PM.raster(layer).w).toBe(30);
+    expect(api.render.raster(layer)?.w).toBe(30);
+    expect(native).toHaveBeenCalledTimes(2);
+    override.dispose();
+    expect(PM.raster(layer).w).toBe(20);
+    installed.uninstall();
+    installed = null;
+    expect(PM.raster).toBe(native);
+  });
+
+  it('accepts the rasterizer installed after kernel boot and forwards all arguments', () => {
+    const PM = fakePM();
+    installed = installKernel(PM);
+    const native = vi.fn(() => null);
+    PM.raster = native;
+    const api = installed.api('typing');
+    const original = api.services.get<(...args: any[]) => any>('raster')!;
+    const args = [{ type: 'shape' }, 2, 1.5, vi.fn(), { x: 1, y: 2, width: 3, height: 4 }] as const;
+    api.services.register('raster', (...values: any[]) => original(...values));
+    PM.raster(...args);
+    expect(native).toHaveBeenCalledExactlyOnceWith(...args);
+  });
+
+  it('allows legacy instrumentation to wrap the installed raster without recursion', () => {
+    const PM = fakePM();
+    installed = installKernel(PM);
+    const native = vi.fn(() => ({ w: 20 }));
+    PM.raster = native;
+    const original = PM.raster;
+    PM.raster = vi.fn((...args: any[]) => original(...args));
+    expect(installed.api('probe').render.raster({ type: 'text' } as any)?.w).toBe(20);
+    expect(native).toHaveBeenCalledOnce();
+    expect(PM.raster).toHaveBeenCalledOnce();
+  });
+
   it('installs the svelte runtime globals and publishes the kernel on PM', () => {
     const PM = fakePM();
     installed = installKernel(PM);

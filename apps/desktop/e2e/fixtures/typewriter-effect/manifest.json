@@ -1,0 +1,13 @@
+{
+  "id": "typewriter-effect",
+  "name": "Typewriter",
+  "version": "3.0.0",
+  "apiVersion": 1,
+  "description": "Actual character-by-character text rendering with a measured, keyframeable gradient cursor.",
+  "entry": "index.ts",
+  "contributes": [
+    "effects",
+    "hooks"
+  ],
+  "author": "agent"
+}

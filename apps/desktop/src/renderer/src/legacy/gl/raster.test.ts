@@ -232,6 +232,22 @@ describe('legacy raster install', () => {
     expect(Math.abs(centered.x0 + centered.x1)).toBeLessThan(1);
   });
 
+  it('includes every wrapped line in auto-height paragraph selection bounds', () => {
+    const PM = rasterRegistry();
+    const layer = {
+      type: 'text', d: {
+        text: 'one two three four', font: 'SF Pro Display', weight: 500, size: 40,
+        tracking: 0, leading: 1, color: '#fff', align: 'left',
+        boxWidth: 130, boxHeight: 0,
+      },
+    };
+    const lines = PM.textLayout(layer).lines;
+    expect(lines.length).toBeGreaterThan(1);
+    const bounds = PM.raster(layer).selection;
+    expect(bounds.y0).toBeLessThan(0);
+    expect(bounds.y1).toBeGreaterThan(lines.length * 40);
+  });
+
   it('atomically replaces media in place and restores metadata plus runtime with one Undo and Redo', async () => {
     const disposed: any[] = [];
     const oldRuntime = { id: 'asset-1', name: 'old.wav', kind: 'audio', marker: 'old' };

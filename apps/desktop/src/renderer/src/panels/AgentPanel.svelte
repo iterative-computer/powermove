@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { fancySelect } from '../controls/select/enhance';
   import type { ChatGPTAccountStatus } from '../../../shared/ipc';
   import type { PanelProps } from './registerSveltePanel';
   import Composer from './agent/Composer.svelte';
+  import ConnectionGate from './agent/ConnectionGate.svelte';
   import Conversation from './agent/Conversation.svelte';
   import PlanPreview from './agent/PlanPreview.svelte';
   import ResultActions from './agent/ResultActions.svelte';
@@ -31,7 +31,14 @@
 
   const showPreview = $derived(agentState.phase === 'preview');
   const showResult = $derived(agentState.phase === 'result' && (agentState.panelRun || !agentState.run?.autonomous));
-  const showConnectionGate = $derived(accountStatus.state !== 'connected' && accountStatus.state !== 'checking');
+  // Keep setup mounted when switching providers or retrying a connection so
+  // the composer does not flash between asynchronous status responses.
+  let connectionRequired = $state(false);
+  $effect(() => {
+    if (accountStatus.state !== 'checking') connectionRequired = accountStatus.state !== 'connected';
+  });
+  const showConnectionGate = $derived(accountStatus.state === 'checking' ? connectionRequired : accountStatus.state !== 'connected');
+  const showSetup = $derived(showConnectionGate && agentState.phase === 'idle' && !agentState.conversation.length && !agentState.activity);
 
   onMount(() => {
     // Panels mount before app.ts chooses the boot project. Synchronize on the
@@ -90,10 +97,6 @@
     }
   }
 
-  function changeGateProvider(event: Event): void {
-    PM.AgentUI?.setProvider?.((event.currentTarget as HTMLSelectElement).value);
-  }
-
   function distanceFromBottom(): number {
     if (!scroller) return 0;
     return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
@@ -117,12 +120,12 @@
     agentState.threadId;
     userScrolled = false;
     showJump = false;
-    if (scroller) window.requestAnimationFrame(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
+    if (scroller && !showSetup) window.requestAnimationFrame(() => scroller?.scrollTo({ top: scroller.scrollHeight }));
   });
 
   $effect(() => {
     agentState.revision;
-    if (!scroller || hasConversationSelection()) return;
+    if (!scroller || showSetup || hasConversationSelection()) return;
     if (!userScrolled || distanceFromBottom() < 160) {
       const el = scroller;
       window.requestAnimationFrame(() => { if (!hasConversationSelection()) el.scrollTo({ top: el.scrollHeight }); });
@@ -159,45 +162,28 @@
 
 <div class="agent-panel-body agent-shell" data-svelte-panel={panelId} data-agent-panel data-agent-phase={agentState.phase}>
   <ThreadPicker {PM} />
-  {#if showConnectionGate}
-    <div class="agent-connect-gate" role="status" aria-live="polite">
-      <select class="agent-connect-provider" aria-label="Provider" use:fancySelect={agentState.provider} value={agentState.provider} onchange={changeGateProvider}>
-        {#each agentState.providers as provider (provider.id)}
-          <option value={provider.id}>{provider.label}</option>
-        {/each}
-      </select>
-      <div class="agent-connect-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M12 3.5c.7 4.6 3.3 7.2 7.9 7.9-4.6.7-7.2 3.3-7.9 7.9-.7-4.6-3.3-7.2-7.9-7.9 4.6-.7 7.2-3.3 7.9-7.9Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" /></svg>
-      </div>
-      <b>{accountStatus.state === 'connecting' ? `Finish connecting ${providerName}` : `Connect ${providerName}`}</b>
-      <span>{accountStatus.detail || (accountStatus.state === 'unavailable'
-        ? `Powermove could not start its ${providerName} service.`
-        : `Use your ${providerName} subscription to power the Powermove agent.`)}</span>
-      <button
-        class="btn pri agent-connect-button"
-        type="button"
-        disabled={accountBusy || accountStatus.state === 'connecting'}
-        onclick={accountStatus.state === 'unavailable' ? retryProvider : connectProvider}
-      >{accountStatus.state === 'connecting' ? 'Waiting…' : accountStatus.state === 'unavailable' ? 'Try again' : `Connect ${providerName}`}</button>
-      <button type="button" class="btn" onclick={() => PM.SettingsUI?.open('accounts')}>All connection options</button>
-    </div>
-  {/if}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
-    <div
-      class="agent-scroll"
-      data-native-text
-      tabindex="0"
-      onpointerdown={() => { selectingText = true; }}
-      role="log"
-      aria-label="Agent conversation"
-      aria-live="polite"
-      aria-atomic="false"
-      bind:this={scroller}
-      onscroll={onScroll}
-      data-overflow-bottom={showJump ? '1' : '0'}
-    >
-      {#key agentState.threadId}<Conversation {PM} />{/key}
-    </div>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex (The scrollable transcript needs keyboard focus for text selection and scrolling.) -->
+  <div
+    class="agent-scroll"
+    class:agent-setup-scroll={showSetup}
+    data-native-text
+    tabindex="0"
+    onpointerdown={() => { selectingText = true; }}
+    role={showSetup ? 'region' : 'log'}
+    aria-label={showSetup ? 'Agent setup' : 'Agent conversation'}
+    aria-live="polite"
+    aria-atomic="false"
+    bind:this={scroller}
+    onscroll={onScroll}
+    data-overflow-bottom={showJump ? '1' : '0'}
+  >
+    {#if showConnectionGate}
+      <ConnectionGate {PM} status={accountStatus} busy={accountBusy} {providerName}
+        compact={!showSetup} connect={connectProvider} retry={retryProvider} />
+    {/if}
+    {#if !showSetup}{#key agentState.threadId}<Conversation {PM} />{/key}{/if}
+  </div>
+  {#if !showSetup}
     <div class="agent-footer">
       {#if showJump}
         <button class="agent-jump" type="button" aria-label="Scroll to latest" onclick={jumpToLatest}>
@@ -208,12 +194,11 @@
       {#if showResult}<ResultActions {PM} />{/if}
       <Composer {PM} {panelId} />
     </div>
+  {/if}
 </div>
 
 <style>
-  .agent-connect-gate { flex: 0 1 auto; padding: 8px 12px; }
-  .agent-connect-mark { display: none; }
-  .agent-connect-button { margin-top: 8px; }
+  .agent-setup-scroll { padding: 10px 16px 16px; mask-image: none; }
   /* The set-height variable is updated by explicit splitter resizing. The
      important basis also pins older live sessions whose inline style is fluid. */
   :global(#panel-agent:not([data-collapsed="1"])) {

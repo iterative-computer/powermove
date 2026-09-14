@@ -185,7 +185,9 @@ export interface EffectDefinition {
   id: string;
   label: string;
   group: string;
+  /** At most 32 params; keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
   params: EffectParamDefinition[];
+  /** Non-empty shader body, at most 65,536 characters. */
   frag: string;
   passes?: number; // 1..8
   keepOrig?: boolean;
@@ -200,6 +202,7 @@ export interface TransitionDefinition {
   id: string;
   label: string;
   group?: string;
+  /** Same 32-param limit and key restrictions as effects. */
   params: EffectParamDefinition[];
   frag: string;
   rawShader?: boolean;
@@ -549,7 +552,7 @@ export interface MediaAPI {
 
 export interface PreviewViewport { x: number; y: number; width: number; height: number; [key: string]: unknown }
 export interface RasterWindow { x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
-export interface RasterSurface { canvas?: HTMLCanvasElement; bitmap?: ImageBitmap; x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
+export interface RasterSurface { cv?: HTMLCanvasElement; canvas?: HTMLCanvasElement; bitmap?: ImageBitmap; anchorX?: number; anchorY?: number; x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
 
 /**
  * Render provides WebGL setup, picking/bounds, raster cache access and frame capture. Rendering may allocate or invalidate GPU/CPU caches and temporarily change preview quality, but it does not make durable project edits.
@@ -807,6 +810,11 @@ export interface ShaderHooks { syncShaderUniforms(layer: Layer): void }
 
 /**
  * Services is a typed LIFO compatibility registry for extension-owned runtime capabilities. Registering the same name shadows the prior implementation; disposing restores it. Registration itself has no project side effects.
+ * The host registers `raster` (RenderAPI['raster']). Capture that service before
+ * wrapping it; calling api.render.raster from inside its override would recurse.
+ * Native surfaces expose their pixels as `cv`; preserve key, dimensions, anchor
+ * and selection geometry. Overrides affect preview and export and must delegate
+ * unaffected layers to the captured service.
  */
 export interface ServicesAPI {
   register<T>(name: string, implementation: T): Disposable;

@@ -60,16 +60,20 @@ export function bundledClaudeCandidates(
   return candidates;
 }
 
-export async function discoverClaudeBinary(preference: string | null = null): Promise<string> {
+export async function discoverClaudeBinary(
+  preference: string | null = null,
+  options: { bundledCandidates?: readonly string[] } = {}
+): Promise<string> {
   for (const candidate of [
     process.env.CLAUDE_BINARY,
     preference,
-    ...bundledClaudeCandidates(),
-    await probeLoginShell()
+    ...(options.bundledCandidates ?? bundledClaudeCandidates())
   ]) {
     const found = await executable(candidate);
     if (found) return found;
   }
+  const shellBinary = await probeLoginShell();
+  if (shellBinary !== null) return shellBinary;
   throw new Error(CLAUDE_NOT_FOUND_MESSAGE);
 }
 

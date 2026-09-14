@@ -50,6 +50,46 @@ describe('Claude account client', () => {
     });
   });
 
+  it('shares one pending status check across simultaneous requests', async () => {
+    const statusChild = waitingChild();
+    const spawnProcess = vi.fn(() => statusChild as never);
+    const client = new ClaudeAccountClient({ userData: '/tmp/claude-account', claudeBinaryPref: () => null }, {
+      discoverBinary: async () => '/bin/claude', prepareHome: async () => '/tmp/claude-account', spawnProcess
+    });
+    const first = client.status();
+    const second = client.status();
+    await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalled());
+    const spawnCount = spawnProcess.mock.calls.length;
+    statusChild.stdout.end('{"loggedIn":false}');
+    statusChild.emit('close', 1, null);
+    await expect(first).resolves.toMatchObject({ state: 'disconnected' });
+    await expect(second).resolves.toMatchObject({ state: 'disconnected' });
+    expect(spawnCount).toBe(1);
+    await client.shutdown();
+  });
+
+  it('keeps the event loop available while a real status process is still running', async () => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const directory = await mkdtemp(path.join(tmpdir(), 'pm-claude-slow-check-'));
+    const binary = path.join(directory, 'slow claude');
+    await writeFile(binary, `#!/bin/sh
+sleep 0.2
+printf '%s\\n' '{"loggedIn":false}'
+`, { mode: 0o755 });
+    const client = new ClaudeAccountClient({ userData: directory, claudeBinaryPref: () => null }, {
+      discoverBinary: async () => binary, prepareHome: async () => directory
+    });
+    let completed = false;
+    try {
+      const status = client.status().then(value => { completed = true; return value; });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(completed).toBe(false);
+      await expect(status).resolves.toMatchObject({ state: 'disconnected' });
+    } finally { await client.shutdown(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('starts the official subscription login in Powermove private config and can stop it', async () => {
     const login = waitingChild();
     const spawnProcess = vi.fn((_binary: string, args: readonly string[]) => {

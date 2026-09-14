@@ -42,7 +42,7 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     await expect(settings.getByRole('button', { name: 'Connect', exact: true }).first()).toBeEnabled();
     await expect(settings).toContainText('Use your ChatGPT subscription with Powermove.');
     await expect(page.locator('[data-agent-panel] .agent-connect-gate')).toContainText('Connect ChatGPT');
-    await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toHaveCount(1);
+    await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toHaveCount(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session.close();
@@ -75,7 +75,7 @@ test('Connect opens the trusted ChatGPT browser flow and enters waiting state', 
     const connect = gate.getByRole('button', { name: 'Connect ChatGPT', exact: true });
     await expect(connect).toBeEnabled();
     await connect.click();
-    await expect(gate.getByRole('button', { name: 'Waiting…', exact: true })).toBeDisabled();
+    await expect(gate.getByRole('button', { name: 'Waiting for sign-in…', exact: true })).toBeDisabled();
     await expect(gate).toContainText('Finish signing in in your browser.');
     await expect.poll(() => session.app.evaluate(() =>
       (globalThis as any).__powermoveOpenedAuthUrl

@@ -124,6 +124,11 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
     inputSchema: closedObject({})
   },
   {
+    name: 'validate_effect',
+    description: 'Check a complete proposed EffectDefinition using the actual kernel registration validator before returning an effect extension. Catches invalid ids, duplicate/invalid parameter keys, more than 32 params, invalid pass counts and oversized shader bodies. Does not register an effect, change the project or compile/render GLSL. After loading, verify registration and render_frames output separately.',
+    inputSchema: closedObject({ definition: { type: 'object', description: 'The complete object passed to api.effects.register, including id, label, group, params and frag.' } }, ['definition'])
+  },
+  {
     name: 'stage_fork_rebase',
     description: 'Stage a stale user fork for a three-way rebase onto the built-in version shipped by this Powermove app. Returns only run-private working/base/ours paths plus sorted user, upstream, and conflict file lists. Call this before editing the fork.',
     inputSchema: closedObject({ id: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{1,63}$' } }, ['id'])
@@ -140,6 +145,7 @@ export const POWERMOVE_LIVE_INSPECTION_TOOL_NAMES = [
   'get_panel_state',
   'capture_panel',
   'get_workspace_state',
+  'validate_effect',
   'render_frames'
 ] as const;
 

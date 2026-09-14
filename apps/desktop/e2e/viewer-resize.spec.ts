@@ -107,7 +107,7 @@ test.describe('@viewer direct resize', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('maps text handle resizing to typography Size without touching Scale X/Y', async ({ session }) => {
+  test('resizes the text box without changing typography Size or Scale X/Y', async ({ session }) => {
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
@@ -115,7 +115,7 @@ test.describe('@viewer direct resize', () => {
       const PM = (window as any).PM;
       const viewer = PM.Kernel.services.get('viewer');
       const tool = PM.Kernel.services.get('tool');
-      const project = PM.mkProject({ name: 'Proportional text resize', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
+      const project = PM.mkProject({ name: 'Text box resize', w: 640, h: 360, fps: 30, dur: 4, bg: '#000000' });
       const text = PM.mkLayer('text', {
         name: 'Selected text', dur: 4,
         d: { text: 'MAKE THE MOVE.', font: 'SF Pro Display', weight: 700, size: 64, tracking: -2, leading: 1, color: '#FFFFFF', align: 'center' },
@@ -140,6 +140,7 @@ test.describe('@viewer direct resize', () => {
       return {
         textId: text.id,
         top: point(.5, 0),
+        bounds,
         size: text.d.size,
         scaleX: PM.ev(text, 'scale.x', 1), scaleY: PM.ev(text, 'scale.y', 1),
       };
@@ -167,13 +168,17 @@ test.describe('@viewer direct resize', () => {
       const bounds = PM.GL.bounds(text, 1), matrix = PM.worldMatrix(text, 1);
       const x = bounds.x0 + bounds.w * .5, y = bounds.y0;
       return {
+        bounds, boxWidth: PM.resolveContent(text, 1).boxWidth, boxHeight: PM.resolveContent(text, 1).boxHeight,
         size: text.d.size,
         scaleX: PM.ev(text, 'scale.x', 1), scaleY: PM.ev(text, 'scale.y', 1),
         scaleXKeys: text.p['scale.x'].kf.length, scaleYKeys: text.p['scale.y'].kf.length,
         top: { x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] },
       };
     }, setup.textId);
-    expect(resized.size).toBeGreaterThan(setup.size);
+    expect(resized.size).toEqual(setup.size);
+    expect(resized.boxWidth).toBeGreaterThan(0);
+    expect(resized.boxHeight).toBeGreaterThan(setup.bounds.h);
+    expect(resized.bounds.w).toBeCloseTo(setup.bounds.w, 2);
     expect(resized.scaleX).toBe(setup.scaleX);
     expect(resized.scaleY).toBe(setup.scaleY);
     expect(resized.scaleXKeys).toBe(1);
@@ -267,7 +272,7 @@ test.describe('@viewer direct resize', () => {
       };
     });
     expect(setup.mode).toBe('common');
-    expect(setup.rootIds).toEqual([setup.shapeId, setup.textId]);
+    expect([...setup.rootIds].sort()).toEqual([setup.shapeId, setup.textId].sort());
 
     const frame = page.locator('#stage-inner');
     const box = await frame.boundingBox();

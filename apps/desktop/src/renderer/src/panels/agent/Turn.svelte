@@ -71,11 +71,11 @@
       <ModResult {PM} result={modResult} />
     {:else}
       <div class="agent-reply"><Markdown text={message.text || ''} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
-    {/if}
-    {#if message.fixExtensionId}
-      <div class="agent-card-actions">
-        <button class="agent-btn" type="button" onclick={() => PM.SpatialAssistant?.requestFix?.(message.fixExtensionId)}>Fix it</button>
-      </div>
+      {#if message.requiresProject && messageIndex !== undefined && agentState.provider !== 'compatible'}
+        <button type="button" class="btn agent-error-retry"
+          disabled={agentState.phase === 'running'}
+          onclick={() => PM.AgentUI?.continueWithProject?.(messageIndex)}>Continue with Project access</button>
+      {/if}
     {/if}
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>

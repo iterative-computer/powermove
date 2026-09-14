@@ -1,11 +1,22 @@
-import { expect, test } from './helpers/app';
+import path from 'node:path';
+import { expect, launchApp, repoRoot, test } from './helpers/app';
+
+// This workflow edits through the composer, so use a deterministic connected account.
+const libraryTest = test.extend({
+  session: async ({}, use) => {
+    const session = await launchApp({ env: {
+      CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh')
+    } });
+    try { await use(session); } finally { await session.close(); }
+  }
+});
 
 test.beforeEach(async ({ session }) => {
   await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
 });
 
-test('library shows a panel grid, adds panels to the workspace, and edits panels with the agent', async ({ session }) => {
+libraryTest('library shows a panel grid, adds panels to the workspace, and edits panels with the agent', async ({ session }) => {
   const { page } = session;
   await expect(page.locator('.panel-refine')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Ask Powermove agent', exact: true })).toHaveCount(0);
