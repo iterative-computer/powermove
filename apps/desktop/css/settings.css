@@ -67,8 +67,8 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 /* ── card + rows ── */
 .sg-group{margin:0 -14px;display:flex;flex-direction:column;border:1px solid var(--sg-edge);border-radius:var(--r-lg);background:var(--sg-row);overflow:hidden}
 .sg-group>*+*{border-top:1px solid var(--line)}
-.sg-group>.settings-row,.sg-group>.settings-extension-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px}
-.sg-group>.settings-row>:last-child{flex:none}
+.sg-group>.settings-row,.settings-provider-fields>.settings-row,.sg-group>.settings-extension-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px}
+.sg-group>.settings-row>:last-child,.settings-provider-fields>.settings-row>:last-child{flex:none}
 .settings-copy,.settings-extension-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;padding:0 4px}
 .settings-copy>b,.settings-extension-name>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
 .settings-copy>span,.settings-extension-copy>span{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
@@ -101,18 +101,11 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-column .settings-row,.sg-column label,.sg-column .toggle,.sg-column input[type="checkbox"]{cursor:default;user-select:none;-webkit-user-select:none}
 .sg-column input,.sg-column textarea{-webkit-user-select:auto;user-select:auto}
 
-/* API or local model: one stacked row, fields as label/value pairs. */
-.sg-group>.settings-provider.settings-sections{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:12px 14px 14px}
-.sg-group>.settings-provider.settings-sections>b{display:none}
-.sg-group>.settings-provider.settings-sections>b+span{margin:0 0 2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
-.sg-group>.settings-provider.settings-sections>.pm-select{align-self:flex-start;min-width:220px}
-.sg-group>.settings-provider.settings-sections>.field{height:30px;gap:12px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;font-size:var(--fs-sm);color:var(--tx-2);white-space:nowrap}
-.sg-group>.settings-provider.settings-sections>.field:focus-within{background:var(--bg-float);box-shadow:none}
-.sg-group>.settings-provider.settings-sections>.field input{min-width:0;flex:1;text-align:right;font-size:var(--fs-md);color:var(--tx)}
-.sg-group>.settings-provider.settings-sections>label:not(.field){display:flex;align-items:center;gap:7px;padding:2px 0;font-size:var(--fs-sm);color:var(--tx-2)}
-.sg-group>.settings-provider.settings-sections>.btn{align-self:flex-start;margin-top:2px}
-.sg-group>.settings-provider.settings-sections>[role="status"]{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
-.sg-group>.settings-provider.settings-sections>[role="status"]:empty{display:none}
+/* API or local model: ordinary settings rows, one field per row. */
+.settings-provider-fields{display:flex;flex-direction:column}
+.settings-provider-fields>*+*{border-top:1px solid var(--line)}
+.settings-provider-fields .settings-row>.pm-select{max-width:220px}
+.settings-provider-fields [role="status"]{overflow-wrap:anywhere}
 
 /* ── extensions ── */
 /* Every row is a destination: a tone dot beside the name, the description on
