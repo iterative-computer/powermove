@@ -106,22 +106,22 @@ test('Projects screen exposes file state and saves active, duplicated, and opene
     .getByRole('button', { name: 'Create', exact: true }).click();
   await rename(session, 'Velocity Study');
   await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
-  await expect(card('Velocity Study')).toContainText('Not saved to a file');
+  await expect(card('Velocity Study')).not.toContainText('.pmv');
 
   await saveTo(session, first);
   await runAction('Velocity Study', 'Save');
   await expect.poll(() => savedName(first)).toBe('Velocity Study');
-  await expect(card('Velocity Study')).toContainText('Saved · From Projects.pmv');
+  await expect(card('Velocity Study')).toContainText('From Projects.pmv');
 
   await rename(session, 'Projects workflow');
   await expect(card('Projects workflow')).toContainText('Unsaved changes · From Projects.pmv');
   await saveTo(session, saveAs);
   await runAction('Projects workflow', 'Save As…');
   await expect.poll(() => savedName(saveAs)).toBe('Projects workflow');
-  await expect(card('Projects workflow')).toContainText('Saved · Projects Save As.pmv');
+  await expect(card('Projects workflow')).toContainText('Projects Save As.pmv');
 
   await runAction('Projects workflow', 'Duplicate');
-  await expect(card('Projects workflow copy')).toContainText('Not saved to a file');
+  await expect(card('Projects workflow copy')).not.toContainText('.pmv');
   await saveTo(session, duplicate);
   await runAction('Projects workflow copy', 'Save');
   await expect.poll(() => savedName(duplicate)).toBe('Projects workflow copy');

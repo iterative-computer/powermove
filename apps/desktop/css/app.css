@@ -5,7 +5,7 @@ html,body{height:100%;overflow:hidden}
    intentionally outside this selector, so project geometry and exports cannot change. */
 /* Smoothing only where the radius is large enough to read (≥12px). Small
    controls stay circular so nested radii stay concentric: outer = inner + padding. */
-:where(.panel,.drop,.modal,#library-screen,.sg-main,.library-card,.spatial-compose,.spatial-outline,.panel-ghost-card,.panel-drop-preview.dock-edge,.pop-mirror,.fill-picker,#workspace-editbar){
+:where(.panel,.drop,.modal,#library-screen,.sg-main,.library-card,.ps-grid:not(.list) .ps-thumb,.spatial-compose,.spatial-outline,.panel-ghost-card,.panel-drop-preview.dock-edge,.pop-mirror,.fill-picker,#workspace-editbar){
   corner-shape:var(--ui-corner-smoothing);
 }
 body{
@@ -976,15 +976,25 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-view{display:flex;align-items:center;gap:3px}.ps-view button{width:32px;height:32px;display:grid;place-items:center;border-radius:var(--r-md);color:var(--tx-3)}.ps-view button:hover{background:var(--bg-row);color:var(--tx)}.ps-view button.on{background:var(--ink-2);color:var(--tx)}.ps-view svg{width:15px;height:15px}
 .ps-sort{height:32px;min-width:132px;padding:0 28px 0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);outline:0}.ps-sort:focus-visible{box-shadow:var(--focus-ring)}
 .ps-content{min-height:0;flex:1;overflow:auto;padding:8px clamp(20px,3vw,28px) 40px}.ps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:16px;align-content:start;min-height:100%}.ps-grid.list{display:flex;flex-direction:column;gap:3px}.ps-grid.empty{display:grid;grid-template-columns:1fr;place-items:center}
-/* Project cards: quiet at rest, a raised neutral surface when hovered or active. Accent never touches them. */
-.ps-card{position:relative;min-width:0;border:1px solid transparent;border-radius:var(--r-xl);padding:6px;cursor:pointer;transition:background var(--dur-2),border-color var(--dur-2),transform var(--dur-2)}.ps-card:hover{background:var(--bg-row);border-color:var(--line);transform:translateY(-1px)}.ps-card.active{background:var(--bg-row);border-color:var(--line-2)}.ps-card.active:hover{background:var(--bg-row-hi)}
-.ps-card:active{transform:translateY(0) scale(.99)}
-.ps-thumb{position:relative;aspect-ratio:16/9;border-radius:var(--r-lg);overflow:hidden;background:var(--bg-sunken);box-shadow:inset 0 0 0 var(--hairline) var(--line-2)}.ps-thumb-inner{height:100%;overflow:hidden;border-radius:inherit;background:var(--bg-sunken)}.ps-thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.ps-card-badge,.library-card-badge{height:20px;padding:0 7px;display:flex;align-items:center;border-radius:var(--r-sm);background:rgb(10 10 12 / .55);backdrop-filter:blur(8px);color:rgb(255 255 255 / .92);font-size:var(--fs-xs);font-weight:var(--fw-medium);box-shadow:inset 0 0 0 var(--hairline) rgb(255 255 255 / .12)}
-.ps-card-badges{position:absolute;left:9px;top:9px;display:flex;align-items:center;gap:5px}
-.ps-meta{display:flex;align-items:center;gap:8px;padding:8px 5px 2px}.ps-meta-copy{min-width:0;flex:1}.ps-name{font-weight:var(--fw-medium);font-size:var(--fs-md);line-height:1.3;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ps-sub{font-size:var(--fs-sm);line-height:1.3;color:var(--tx-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Project cards: every card has the same silhouette, a frame with a caption.
+   State lives on the frame's ring (hover, active) and in a quiet text tag
+   beside the name, never in a slab behind the card. Accent never touches them. */
+.ps-card{position:relative;min-width:0;border:0;border-radius:var(--r-lg);padding:0;cursor:pointer}
+.ps-thumb{position:relative;aspect-ratio:16/9;border-radius:var(--r-lg);overflow:hidden;background:var(--bg-sunken);box-shadow:inset 0 0 0 var(--hairline) var(--line-2);transition:box-shadow var(--dur-2),transform var(--dur-2) var(--ease)}
+.ps-card:hover .ps-thumb{box-shadow:inset 0 0 0 1px var(--tx-4),var(--shadow-lift)}
+.ps-card.active .ps-thumb{box-shadow:inset 0 0 0 1px var(--line-strong)}
+.ps-card.active:hover .ps-thumb{box-shadow:inset 0 0 0 1px var(--tx-4),var(--shadow-lift)}
+.ps-card:active .ps-thumb{transform:scale(.985)}
+.ps-thumb-inner{height:100%;overflow:hidden;border-radius:inherit;background:var(--bg-sunken)}.ps-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+/* No render yet: the frame carries the composition size so it still reads as this project's canvas. */
+.ps-thumb-empty{position:absolute;inset:0;display:grid;place-items:center;font:400 var(--fs-xs)/1 var(--f-mono);letter-spacing:.04em;color:var(--tx-4);pointer-events:none}
+.library-card-badge{height:20px;padding:0 7px;display:flex;align-items:center;border-radius:var(--r-sm);background:rgb(10 10 12 / .55);backdrop-filter:blur(8px);color:rgb(255 255 255 / .92);font-size:var(--fs-xs);font-weight:var(--fw-medium);box-shadow:inset 0 0 0 var(--hairline) rgb(255 255 255 / .12)}
+.ps-meta{display:flex;align-items:flex-start;gap:6px;padding:9px 2px 0}.ps-meta-copy{min-width:0;flex:1}
+.ps-name-row{display:flex;align-items:baseline;gap:7px;min-width:0}.ps-name{min-width:0;font-weight:var(--fw-medium);font-size:var(--fs-md);line-height:1.3;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ps-tag{flex:none;font-size:var(--fs-xs);font-weight:var(--fw-medium);line-height:1;color:var(--tx-3)}
+.ps-sub{font-size:var(--fs-sm);line-height:1.3;color:var(--tx-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ps-more{position:relative;z-index:2;width:28px;height:28px;border-radius:var(--r-md);display:grid;place-items:center;color:var(--tx-3);opacity:0}.ps-card:hover .ps-more,.ps-more:focus-visible{opacity:1}.ps-more:hover{background:var(--bg-row-hi);color:var(--tx)}.ps-more svg{width:13px;height:13px}
-.ps-grid.list .ps-card{height:62px;display:flex;align-items:center;padding:5px 8px;border-radius:var(--r-lg)}.ps-grid.list .ps-thumb{width:82px;flex:none}.ps-grid.list .ps-meta{flex:1;padding:0 10px}.ps-grid.list .ps-more{opacity:1}
+.ps-grid.list .ps-card{height:62px;display:flex;align-items:center;padding:5px 8px;border-radius:var(--r-lg);transition:background var(--dur-2)}.ps-grid.list .ps-card:hover,.ps-grid.list .ps-card.active{background:var(--bg-row)}.ps-grid.list .ps-card:hover .ps-thumb,.ps-grid.list .ps-card.active .ps-thumb{box-shadow:inset 0 0 0 var(--hairline) var(--line-2)}.ps-grid.list .ps-thumb{width:82px;flex:none;border-radius:var(--r-sm)}.ps-grid.list .ps-thumb-empty{display:none}.ps-grid.list .ps-meta{flex:1;padding:0 10px;align-items:center}.ps-grid.list .ps-more{opacity:1}
 .ps-empty{grid-column:1/-1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 20px;text-align:center;color:var(--tx-3)}.ps-empty > svg{width:30px;height:30px;margin-bottom:14px;color:var(--tx-4)}.ps-empty b{font-size:var(--fs-lg);font-weight:var(--fw-medium);color:var(--tx);margin-bottom:5px}.ps-empty span{font-size:var(--fs-md);max-width:38ch;line-height:1.55;text-wrap:pretty}.ps-empty button{margin-top:15px}
 
 /* ── select (trigger + floating listbox) ───────────────── */

@@ -122,15 +122,17 @@ function card(m: any, trashed: any) {
   const file = !trashed ? PM.projectFileState?.(m.id) : null;
   const raw = PM.Projects.get(m.id);
   const inner = h('div.ps-thumb-inner');
+  const dims = raw && raw.w && raw.h ? `${raw.w}×${raw.h}` : '';
   if (m.thumb) inner.appendChild(h('img', { src: m.thumb, alt: '' }));
-  /* The meta line already says when a project is unsaved; the thumbnail only
-     carries where it is: Active or Open. */
-  const badges = h('div.ps-card-badges',
-    active || open ? h('span.ps-card-badge', active ? 'Active' : 'Open') : null);
-  const thumb = h('div.ps-thumb', inner, badges);
+  /* An unrendered project shows its canvas size in the frame instead of a blank slab. */
+  const thumb = h('div.ps-thumb', inner, !m.thumb && dims ? h('div.ps-thumb-empty', dims) : null);
   const more = h('button.ps-more', { title: 'Project actions', 'aria-label': 'Project actions' }, PM.icon('more'));
   const sub = projectSub(m, raw, trashed, file);
-  const meta = h('div.ps-meta', h('div.ps-meta-copy', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'),
+  /* Where the project is (Active, Open) is a quiet tag beside the name, so
+     every card keeps one silhouette and the frame stays clean. */
+  const tag = active || open ? h('span.ps-tag', active ? 'Active' : 'Open') : null;
+  const meta = h('div.ps-meta', h('div.ps-meta-copy',
+    h('div.ps-name-row', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'), tag),
     h('div.ps-sub', { title: sub.title }, sub.text)), more);
   const c = h('article.ps-card' + (active ? '.active' : ''), thumb, meta);
   c.onclick = () => {
@@ -145,13 +147,13 @@ function projectSub(m: any, raw: any, trashed: any, file: any) {
   const dims = raw && raw.w && raw.h ? `${raw.w}×${raw.h}` : '';
   const date = trashed ? `Deleted ${ago(m.deletedAt)}` : `Edited ${ago(m.at)}`;
   if (trashed) return { text: dims ? `${date} · ${dims}` : date, title: date };
+  /* The date leads because it is what people scan for; the file only speaks
+     up when there is one (name, or unsaved changes). Size fits when room allows. */
   const location = file?.path ? file.path.split(/[\\/]/).pop() : '';
-  const status = file?.path
-    ? file.dirty ? `Unsaved changes · ${location}` : `Saved · ${location}`
-    : 'Not saved to a file';
+  const status = file?.path ? (file.dirty ? `Unsaved changes · ${location}` : location) : '';
   return {
-    text: [status, date, dims].filter(Boolean).join(' · '),
-    title: file?.path ? `${status}\n${file.path}` : status,
+    text: [date, status, dims].filter(Boolean).join(' · '),
+    title: file?.path ? `${file.dirty ? 'Unsaved changes' : 'Saved'}\n${file.path}` : 'Not saved to a file',
   };
 }
 function projectMenu(anchor: any, m: any, trashed: any, x?: any, y?: any) {
