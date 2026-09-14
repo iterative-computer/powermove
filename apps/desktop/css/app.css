@@ -30,29 +30,28 @@ html{background:transparent}
    no gradients, no bloom, no hover states. The backdrop is blurred and
    saturated so content passing beneath reads through the material. */
 :root{
-  --glass-fill:rgb(var(--paper-rgb) / .55);
+  --glass-fill:rgb(var(--paper-rgb) / .45);
   --glass-edge:
-    inset 0 0 0 1px rgb(var(--ink-rgb) / .06),
-    inset 1px 1px 0 rgb(var(--paper-rgb) / .7),
-    inset -1px -1px 0 rgb(var(--paper-rgb) / .4),
-    0 1px 2px rgb(var(--ink-rgb) / .05);
+    inset 0 0 0 1px rgb(var(--ink-rgb) / .07),
+    inset 0 1px 0 rgb(var(--paper-rgb) / .8);
   --glass-fill-hi:rgb(var(--paper-rgb) / .95);
   --glass-edge-hi:
-    inset 1px 1px 0 rgb(var(--paper-rgb) / 1),
-    0 1px 2px rgb(var(--ink-rgb) / .1);
+    inset 0 1px 0 rgb(var(--paper-rgb) / 1),
+    0 0 0 var(--hairline) rgb(var(--ink-rgb) / .08);
   --glass-backdrop:blur(20px) saturate(1.5);
 }
+/* Measured from a Tahoe toolbar button over a dark canvas: the glass body
+   sits ~20% toward black (glass darkens what's behind it), the rim is a 6%
+   white hairline, and the top edge alone rises to ~10%. */
 :root[data-theme="dark"]{
-  --glass-fill:rgb(var(--paper-rgb) / .065);
+  --glass-fill:rgb(0 0 0 / .19);
   --glass-edge:
-    inset 0 0 0 1px rgb(var(--paper-rgb) / .04),
-    inset 1px 1px 0 rgb(var(--paper-rgb) / .06),
-    inset -1px -1px 0 rgb(var(--paper-rgb) / .045),
-    0 1px 2px rgb(0 0 0 / .2);
-  --glass-fill-hi:rgb(var(--paper-rgb) / .13);
+    inset 0 0 0 1px rgb(var(--paper-rgb) / .06),
+    inset 0 1px 0 rgb(var(--paper-rgb) / .045),
+    inset 1px 0 0 rgb(var(--paper-rgb) / .025);
+  --glass-fill-hi:rgb(var(--paper-rgb) / .1);
   --glass-edge-hi:
-    inset 1px 1px 0 rgb(var(--paper-rgb) / .09),
-    0 1px 2px rgb(0 0 0 / .25);
+    inset 0 1px 0 rgb(var(--paper-rgb) / .08);
 }
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
   background:var(--glass-fill);
