@@ -31,7 +31,15 @@ export const AGENT_MODELS = {
 export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function modelEfforts(provider: string, model: string | null): ReasoningEffort[] {
-  if (provider === 'compatible') return [];
+  if (provider === 'compatible') {
+    if (/^gpt-(6-astra|5\.6)(?:-|$)/.test(model || '')) return REASONING_EFFORTS;
+    if (/^gpt-5\.[2345]-chat(?:-|$)/.test(model || '')) return [];
+    if (/^gpt-5\.[245]-pro(?:-|$)/.test(model || '')) return ['medium', 'high', 'xhigh'];
+    if (/^gpt-5\.[2345](?:-|$)/.test(model || '')) return ['low', 'medium', 'high', 'xhigh'];
+    if (/^(o[134]|gpt-oss)(?:-|$)/.test(model || '')) return ['low', 'medium', 'high'];
+    // Compatible services also host models without this OpenAI parameter.
+    return [];
+  }
   if (provider !== 'claude') return REASONING_EFFORTS;
   if (model?.includes('haiku')) return [];
   if (model === 'claude-opus-4-6' || model === 'claude-sonnet-4-6') {

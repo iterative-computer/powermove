@@ -222,7 +222,7 @@
     margin-top: 1px;
     border-radius: var(--r-pill);
     background: var(--ink-3);
-    box-shadow: var(--ctl-edge-inset);
+    box-shadow: none;
     transition: background var(--dur-2) var(--ease-io);
   }
 

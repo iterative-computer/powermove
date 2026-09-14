@@ -401,7 +401,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .fill-picker-tools{display:flex;align-items:center;gap:7px;padding-top:1px}.fill-angle{display:flex;align-items:center;gap:6px;flex:1;color:var(--tx-2);font-size:var(--fs-xs)}.fill-angle input{flex:1}.fill-angle .mono{min-width:34px;text-align:right;font-size:var(--fs-xs)}
 .fill-color-workbench[hidden],.fill-preview[hidden],.fill-stops[hidden]{display:none!important}
 .fill-angle[hidden],.fill-picker-tools .btn[hidden]{display:none!important}
-.toggle{width:32px;height:18px;border-radius:var(--r-pill);background:var(--ink-3);position:relative;flex:none;box-shadow:var(--ctl-edge-inset);transition:background var(--dur-2) var(--ease-io)}
+.toggle{width:32px;height:18px;border-radius:var(--r-pill);background:var(--ink-3);position:relative;flex:none;box-shadow:none;transition:background var(--dur-2) var(--ease-io)}
 .toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--bg-float);box-shadow:var(--shadow-raise);transition:transform var(--dur-2) var(--ease-io)}
 .toggle.on{background:var(--accent)}
 .toggle.on i{transform:translateX(14px)}
@@ -491,13 +491,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .modal .mb{padding:12px 18px 18px;display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:8px;overflow:auto}
 .modal .mf{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line)}
 .modal .mf .btn{white-space:nowrap}
-/* Buttons get their edge from layered hairline shadows, never borders. */
+/* Actions use flat tonal fills; focus and selection provide their own cues. */
 .btn{position:relative;isolation:isolate;height:var(--ctl-h);padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);color:var(--tx);font-size:var(--fs-sm);font-weight:var(--fw-medium);box-shadow:var(--ctl-edge);display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;transition:color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease)}
 .btn svg{width:13px;height:13px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .btn.ghost{background:transparent;box-shadow:none;color:var(--tx-2);transition:background var(--dur-1),color var(--dur-1)}
 .btn.ghost:hover{background:var(--ink-1);color:var(--tx)}
-.btn.pri{background:var(--accent);color:var(--on-accent);box-shadow:inset 0 var(--hairline) 0 rgb(255 255 255 / .22);transition:background var(--dur-2),transform var(--dur-1) var(--ease)}
+.btn.pri{background:var(--accent);color:var(--on-accent);box-shadow:none;transition:background var(--dur-2),transform var(--dur-1) var(--ease)}
 .btn.pri:hover{background:var(--accent-hover)}
+.btn:not(.pri):not(.ghost):hover{background:var(--ink-2)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn.danger{color:var(--danger)}
 .field{height:var(--ctl-h);border-radius:var(--r-sm);background:var(--bg-field);box-shadow:var(--ctl-edge-inset);padding:0 10px;
   display:flex;align-items:center;font-size:var(--fs-md);width:100%;transition:box-shadow var(--dur-1),background var(--dur-1)}
@@ -718,7 +720,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-shell :is(.agent-word,.agent-thinking-word){max-width:100%;overflow-wrap:anywhere}
 .agent-shell .agent-option-bar{flex-wrap:wrap}
 .agent-shell .agent-modelbar{max-width:100%;flex-wrap:nowrap;overflow:hidden}
-.agent-shell .agent-modelbar select{max-width:100%;flex:none}
+.agent-shell .agent-modelbar .pm-select{min-width:0}
 .agent-shell .agent-scroll{overflow-x:hidden}
 @container (max-width:280px){.agent-composer .agent-input-row{gap:3px}}
 .agent-shell .agent-card-actions{flex-wrap:wrap}
@@ -997,9 +999,15 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .pm-select:disabled{opacity:.5;pointer-events:none}
 .pm-select.sel{height:28px;padding:0 24px 0 8px}
 .pm-select.sel .pm-select-chevron{right:6px;width:11px;height:11px;margin-top:-5.5px}
-.pm-select.ps-sort,.pm-select.settings-select,.pm-select.settings-appearance,.pm-select.export-select{border:0;box-shadow:inset 0 0 0 1px var(--line)}
+/* Visible controls replace native selects, including their sizing rules. */
+.agent-modelbar .pm-select{flex:0 1 auto;min-width:0;max-width:160px;padding:2px 20px 2px 4px;border:0;border-radius:var(--r-sm);background:transparent;box-shadow:none;color:inherit;font:inherit}
+.agent-modelbar .pm-select.provider{max-width:112px}
+.agent-modelbar .pm-select.effort{flex:none;max-width:76px;color:var(--tx-3)}
+.agent-modelbar .pm-select-chevron{right:4px;width:10px;height:10px;margin-top:-5px}
+.agent-modelbar .pm-select:hover,.agent-modelbar .pm-select:focus-visible{background:var(--ink-1);color:var(--tx)}
+.pm-select.ps-sort,.pm-select.settings-select,.pm-select.settings-appearance,.pm-select.export-select{border:0;box-shadow:none}
 /* Listbox after beautiful-ui's menus: a raised sheet, 4px inset, 30px rows on a 6px corner, and one hover layer that glides between rows. */
-.pm-menu{position:fixed;z-index:600;overflow:auto;padding:4px;border-radius:10px;background:var(--bg-float);box-shadow:0 0 0 var(--hairline) var(--line-strong),0 8px 24px -8px rgb(var(--ink-rgb) / .22),0 2px 6px rgb(var(--ink-rgb) / .06);outline:0;font-size:12.5px;font-weight:var(--fw-medium);color:var(--tx);scrollbar-width:thin}
+.pm-menu{position:fixed;z-index:600;max-width:calc(100vw - 16px);overflow-x:hidden;overflow-y:auto;padding:4px;border-radius:10px;background:var(--bg-float);box-shadow:0 0 0 var(--hairline) var(--line-strong),0 8px 24px -8px rgb(var(--ink-rgb) / .22),0 2px 6px rgb(var(--ink-rgb) / .06);outline:0;font-size:12.5px;font-weight:var(--fw-medium);color:var(--tx);scrollbar-width:thin}
 :root[data-theme="dark"] .pm-menu{box-shadow:0 0 0 var(--hairline) rgb(255 255 255 / .1),0 12px 32px -8px rgb(0 0 0 / .6),0 2px 6px rgb(0 0 0 / .3)}
 .pm-menu,.pm-menu *{cursor:default;user-select:none;-webkit-user-select:none}
 .pm-menu[data-side=bottom]{transform-origin:top left}
