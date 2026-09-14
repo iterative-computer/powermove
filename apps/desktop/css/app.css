@@ -8,6 +8,16 @@ html,body{height:100%;overflow:hidden}
 :where(.panel,.drop,.modal,#library-screen,.sg-main,.library-card,.ps-grid:not(.list) .ps-thumb,.spatial-compose,.spatial-outline,.panel-ghost-card,.panel-drop-preview.dock-edge,.pop-mirror,.fill-picker,#workspace-editbar){
   corner-shape:var(--ui-corner-smoothing);
 }
+/* ── material ──────────────────────────────────────────── */
+/* The window body is a native under-window material (see createWindow in
+   src/main/index.ts). The canvas the renderer paints is a tint over that
+   material, so the stone palette holds on any desktop while the blur still
+   reads through. Solid surfaces (panels, floats, fields) are unchanged: only
+   the canvas between them is vibrant, as in Finder and Xcode. Anything that
+   must stay opaque mixes from --bg-window-solid instead. */
+:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .2)}
+:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .22)}
+html{background:transparent}
 body{
   background:var(--bg-window);color:var(--tx);
   font-family:var(--f-ui);font-size:var(--fs-md);
@@ -42,7 +52,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .panel::-webkit-scrollbar,.panel *::-webkit-scrollbar,.library-content::-webkit-scrollbar,.spatial-preview::-webkit-scrollbar,.pop-mirror::-webkit-scrollbar,.pop-mirror *::-webkit-scrollbar,.fill-picker-body::-webkit-scrollbar{display:none}
 
 /* ── shell ─────────────────────────────────────────────── */
-#app{display:flex;flex-direction:column;height:100vh;background:var(--bg-window)}
+#app{display:flex;flex-direction:column;height:100vh;background:transparent}
 
 #titlebar{
   --titlebar-h:44px;--traffic-inset:96px;
@@ -951,10 +961,12 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 
 /* ── production project library ──────────────────────── */
 /* The titlebar and sidebar share the window colour as one piece of chrome; the library itself is an inset panel. */
-#projects-screen{position:fixed;inset:44px 0 0;z-index:35;background:var(--bg-window);display:none;min-height:0;padding:0 10px 10px 0}
+#projects-screen{position:fixed;inset:44px 0 0;z-index:35;background:transparent;display:none;min-height:0;padding:0 10px 10px 0}
 #projects-screen.on{display:flex}
 /* The editor panels under the home screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
-body:has(#projects-screen.on) #body{visibility:hidden}
+/* The screen's canvas is the window material, so it can't cover what sits
+   beneath it. Hide the editor and its status line instead of painting over them. */
+body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibility:hidden}
 .ps-sidebar{width:236px;flex:none;padding:6px 12px 18px;display:flex;flex-direction:column;gap:14px}
 .ps-search{height:32px;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-3);transition:box-shadow var(--dur-1)}
 .ps-search:focus-within{outline:0;box-shadow:var(--focus-ring)}
@@ -969,7 +981,7 @@ body:has(#projects-screen.on) #body{visibility:hidden}
 .ps-updates .btn{align-self:flex-start;height:28px;padding:0 12px}
 .ps-updates+.ps-sidefoot{margin-top:0}
 .ps-sidefoot{margin-top:auto;padding:0 10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.5}
-.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window));box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
+.ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid));box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
 /* Everything on the top row is 32px tall. */
 .ps-top .btn{height:32px;padding:0 14px}
 .ps-title{min-width:0;flex:1;display:flex;align-items:baseline;gap:9px}.ps-title b{font-size:var(--fs-lg);font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}.ps-title span{font-size:var(--fs-xs);color:var(--tx-4)}

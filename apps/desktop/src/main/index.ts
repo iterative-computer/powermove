@@ -33,7 +33,7 @@ import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './security-policy';
 import { createStore, installQuitFlush, registerStoreIpc } from './storage';
-import { DARK_BACKGROUND, registerThemeIpc } from './theme';
+import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
 
@@ -280,7 +280,12 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
     minHeight: 640,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 15 },
-    backgroundColor: DARK_BACKGROUND,
+    // The window canvas is a native material: the desktop blurs through
+    // behind the panels, and it goes flat when the window loses focus, the
+    // way Finder and Xcode do. The renderer paints only a tint over it
+    // (see `--bg-window` in css/app.css), so no opaque backgroundColor here.
+    vibrancy: 'sidebar',
+    visualEffectState: 'followWindow',
     webPreferences: {
       ...testOptions.webPreferences,
       preload: path.join(__dirname, '../preload/index.js'),
