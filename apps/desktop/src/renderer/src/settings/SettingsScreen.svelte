@@ -273,12 +273,13 @@
         <p class="sg-nav-empty">No settings found.</p>
       {/each}
     </div>
+    <button class="sg-navbtn sg-done" type="button" aria-label="Done" onclick={close}>
+      <Icon {PM} name="chev" />
+      <span>Done</span>
+    </button>
   </aside>
 
   <main class="sg-main">
-    <div class="sg-top">
-      <button class="btn" type="button" onclick={close}>Done</button>
-    </div>
     <div class="sg-scroll" bind:this={scrollEl}>
       <div class="sg-column">
         {#each pages as item (item.id)}
