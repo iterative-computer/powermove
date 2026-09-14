@@ -35,6 +35,7 @@ export const SQUIRCLE_SELECTOR = [
   '.sg-search',
   '.sg-column .pm-select',
   '.sg-column .settings-input',
+  '.sg-column .settings-row > .color-field',
   '.sg-column .field'
 ].join(', ');
 

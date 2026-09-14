@@ -6,6 +6,8 @@ test('connects a local model, streams chat, recovers after a broken stream and r
   const requests: any[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+    // Port scanners on the host (IDE port forwarding) probe new listeners with bodiless requests; only chat calls carry JSON.
+    if (!chunks.length) { res.statusCode = 400; res.end('{}'); return; }
     const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
     if (!body.stream) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] })); return; }
     res.setHeader('Content-Type', 'text/event-stream');

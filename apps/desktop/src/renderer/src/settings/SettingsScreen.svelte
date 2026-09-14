@@ -58,7 +58,6 @@
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
-  let searchEl = $state<HTMLInputElement | null>(null);
   let lastFocus: HTMLElement | null = null;
 
   const hasProject = $derived(!!controls?.project);
@@ -114,7 +113,10 @@
   export function open(target?: SettingsPage): void {
     build();
     themeMode = PM.theme?.mode ?? 'system';
-    if (target) page = target === 'project' && !controls?.project ? 'general' : target;
+    /* Every entry point lands on the page it asked for; a plain open() starts
+       at General, the way the old dialog did. */
+    const wanted = target ?? 'general';
+    page = wanted === 'project' && !controls?.project ? 'general' : wanted;
     if (shown) {
       PM.bus?.emit?.('settings:screen');
       return;
@@ -122,7 +124,9 @@
     lastFocus = document.activeElement as HTMLElement | null;
     shown = true;
     PM.bus?.emit?.('settings:screen');
-    void tick().then(() => searchEl?.focus());
+    /* Focus the screen itself, not a field: Tab then reaches the search first,
+       and nothing opens already lit with a focus edge. */
+    void tick().then(() => rootEl?.focus({ preventScroll: true }));
   }
 
   export function close(): void {
@@ -237,7 +241,6 @@
         type="search"
         placeholder="Search settings"
         aria-label="Search settings"
-        bind:this={searchEl}
         bind:value={searchText}
       />
     </label>

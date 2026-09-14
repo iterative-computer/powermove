@@ -45,7 +45,7 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-main{position:relative;min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window));box-shadow:0 0 0 var(--hairline) var(--line)}
 .sg-top{position:absolute;top:14px;right:16px;z-index:1;display:flex;align-items:center;gap:8px}
 .sg-top .btn{height:32px;padding:0 14px}
-.sg-scroll{min-height:0;flex:1;overflow:auto;padding:56px 40px 96px;container-type:inline-size}
+.sg-scroll{min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:56px 40px 96px;container-type:inline-size}
 .sg-column{width:608px;max-width:100%;margin:0 auto}
 
 /* ── page ── */
@@ -81,17 +81,19 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 
 /* ── controls: one 30px height, hairline edge, squircle corners ── */
 .sg-column .settings-select,.sg-column .settings-input,.sg-column .pm-select.settings-select,.sg-column .pm-select.settings-appearance{height:30px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}
-.sg-column .pm-select{padding-right:28px}
+.sg-column .pm-select.settings-select,.sg-column .pm-select.settings-appearance{max-width:240px;padding-right:28px}
 .sg-column .settings-input{font-weight:var(--fw-regular)}
 .sg-column .settings-input.is-wide{width:220px}
 .sg-column .settings-input:focus-visible,.sg-column .pm-select:focus-visible{box-shadow:none}
 .sg-column .settings-field-pair{gap:6px}
 .sg-column .toggle{flex:none}
+/* The composition background is the app's fill field; here it wears the same edge as the fields beside it. */
+.sg-column .settings-row>.color-field{width:170px;height:30px;padding:0 10px 0 6px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none}
 
 /* API or local model: one stacked row, fields as label/value pairs. */
 .sg-group>.settings-provider.settings-sections{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:12px 14px 14px}
-.sg-group>.settings-provider.settings-sections>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
-.sg-group>.settings-provider.settings-sections>b+span{margin:-7px 0 4px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.sg-group>.settings-provider.settings-sections>b{display:none}
+.sg-group>.settings-provider.settings-sections>b+span{margin:0 0 2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
 .sg-group>.settings-provider.settings-sections>.pm-select{align-self:flex-start;min-width:220px}
 .sg-group>.settings-provider.settings-sections>.field{height:30px;gap:12px;padding:0 10px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;font-size:var(--fs-sm);color:var(--tx-2);white-space:nowrap}
 .sg-group>.settings-provider.settings-sections>.field:focus-within{background:var(--bg-float);box-shadow:none}
