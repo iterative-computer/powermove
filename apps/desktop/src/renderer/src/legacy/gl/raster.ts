@@ -12,6 +12,24 @@ import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
+import { capturePoster } from '../core/poster';
+
+const posterUrls = new Map<string, string>();
+
+function revokePoster(id: any) {
+  const previous = posterUrls.get(String(id));
+  posterUrls.delete(String(id));
+  if (!previous) return;
+  try { window.URL?.revokeObjectURL?.(previous); } catch (error) { }
+}
+
+function setPoster(id: any, blob: Blob) {
+  revokePoster(id);
+  try {
+    if (typeof window.URL?.createObjectURL !== 'function') return;
+    posterUrls.set(String(id), window.URL.createObjectURL(blob));
+  } catch (error) { }
+}
 
 const VIDEO_READ_FAILURE = 'Could not read this video file';
 
@@ -666,6 +684,7 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     playbackProxyVersion: Number(prepared.playbackProxyVersion) || 0,
     persisted: persisted === true,
     ...(prepared.imageSequence ? { imageSequence: prepared.imageSequence } : {}),
+    ...(prepared.poster === true ? { poster: true } : {}),
     ...(prepared.format ? { format: prepared.format } : {}),
     ...(prepared.svg ? { editablePaths: prepared.svg.paths.length } : {}),
     ...(kind === 'video' ? {
@@ -723,6 +742,16 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
     if (prepared) disposeAsset(prepared);
     throw preparedResult.status === 'rejected' ? preparedResult.reason : persistedResult.reason;
   }
+  let posterBlob: Blob | null = null;
+  try {
+    posterBlob = await capturePoster(prepared);
+    if (posterBlob) {
+      const posterKey = PM.MediaImport.posterKeyFor(storageKey);
+      const stored = await PM.MediaStore.put(posterKey, posterBlob, { storageKey: posterKey, type: posterBlob.type });
+      if (stored) prepared.poster = true;
+      else posterBlob = null;
+    }
+  } catch (error) { posterBlob = null; }
   try { assertCurrentProject(); }
   catch (error) { disposeAsset(prepared); throw error; }
   const persisted = persistedResult.value;
@@ -734,6 +763,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
   const wasMissing = !!(existingMeta && !existingLive);
   const id = plan.canonicalId || provisionalId;
+  if (!identity.poster && existingMeta?.poster) identity.poster = true;
   let asset = prepared;
   const upgradesPlayback = !!(existingLive && prepared.playbackProxy
     && (!existingLive.playbackProxy || prepared.playbackProxyVersion > (existingLive.playbackProxyVersion || 0)));
@@ -752,6 +782,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   }
   Object.assign(asset, identity, { id, persisted });
   PM.proj.assets[id] = { id, ...identity, persisted };
+  if (posterBlob) setPoster(id, posterBlob);
   const relinkedLayers = PM.MediaImport.coalesce(PM.proj, id, plan.aliases);
   plan.aliases.forEach((alias: any) => {
     const duplicate = PM.assets.map.get(alias);
@@ -832,20 +863,38 @@ PM.assets = {
         storageKey, fingerprint, type: persistBlob.type || file.type,
       });
       if (!persisted) throw new Error('Could not store the replacement media · the original file is unchanged');
+      let nextPoster: Blob | null = null;
+      try {
+        nextPoster = await capturePoster(prepared);
+        if (nextPoster) {
+          const posterKey = PM.MediaImport.posterKeyFor(storageKey);
+          const stored = await PM.MediaStore.put(posterKey, nextPoster, { storageKey: posterKey, type: nextPoster.type });
+          if (stored) prepared.poster = true;
+          else nextPoster = null;
+        }
+      } catch (error) { nextPoster = null; }
       assertCurrentProject();
 
       const previousRuntime = PM.assets.map.get(id) || null;
       const previousMeta = JSON.parse(JSON.stringify(currentMeta));
+      let previousPoster: Blob | null = null;
+      if (currentMeta.poster && currentMeta.storageKey && typeof PM.MediaStore.get === 'function') {
+        try { previousPoster = await PM.MediaStore.get(PM.MediaImport.posterKeyFor(currentMeta.storageKey)); }
+        catch (error) { }
+      }
+      assertCurrentProject();
       const nextMeta = assetIdentity(id, file, kind, prepared, fingerprint, storageKey, sourcePath, true, currentMeta.layerDefinition);
       Object.assign(prepared, nextMeta);
 
-      const applyVersion = (meta: any, runtime: any) => {
+      const applyVersion = (meta: any, runtime: any, poster: Blob | null) => {
         if (!PM.proj || PM.proj.id !== targetProjectId || !PM.proj.assets?.[id]) return;
         viewerService(PM)?.preview?.clear();
         if (kind === 'audio' || kind === 'video') PM.Audio?.pause?.();
         PM.proj.assets[id] = JSON.parse(JSON.stringify(meta));
         if (runtime) PM.assets.map.set(id, runtime);
         else PM.assets.map.delete(id);
+        if (poster) setPoster(id, poster);
+        else revokePoster(id);
         PM.rasterClear?.();
         PM.GL?.dropTextures?.(`a:${id}`);
         PM.GL?.dropMesh?.(id);
@@ -859,20 +908,20 @@ PM.assets = {
         PM.autosave?.();
       };
 
-      applyVersion(nextMeta, prepared);
+      applyVersion(nextMeta, prepared, nextPoster);
       const retainedRuntimes = [...new Set([previousRuntime, prepared].filter(Boolean))];
       retainedRuntimes.forEach(retainHistoryAsset);
       const historyId = PM.hist.external(
         `Replace ${currentMeta.name || 'media'}`,
-        () => applyVersion(previousMeta, previousRuntime),
-        () => applyVersion(nextMeta, prepared),
+        () => applyVersion(previousMeta, previousRuntime, previousPoster),
+        () => applyVersion(nextMeta, prepared, nextPoster),
         {
           bytes: Number(previousMeta.size || 0) + Number(nextMeta.size || 0),
           cleanup: () => retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id)),
         },
       );
       if (!historyId) {
-        applyVersion(previousMeta, previousRuntime);
+        applyVersion(previousMeta, previousRuntime, previousPoster);
         retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id));
         throw new Error('Could not add the replacement to Undo history · the original file is unchanged');
       }
@@ -884,10 +933,13 @@ PM.assets = {
     }
   },
   get: (id: any) => PM.assets.map.get(id),
+  poster: (id: any) => posterUrls.get(String(id)) || '',
+  revokePoster,
   clear() {
     assetEpoch++;
     for (const a of PM.assets.map.values()) disposeAsset(a);
     PM.assets.map.clear();
+    for (const id of [...posterUrls.keys()]) revokePoster(id);
   },
   async restoreProject(project: any) {
     const epoch = assetEpoch;
@@ -896,8 +948,15 @@ PM.assets = {
     const restored: any[] = [], missing: any[] = [];
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
-      const blob = await PM.MediaStore.get(meta);
-      if (!blob) return { meta, missing: true };
+      const posterKey = meta.poster && meta.storageKey
+        ? PM.MediaImport.posterKeyFor(meta.storageKey)
+        : null;
+      const [blob, posterBlob] = await Promise.all([
+        PM.MediaStore.get(meta),
+        posterKey ? Promise.resolve(PM.MediaStore.get(posterKey)).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
+      if (!blob) return { meta, missing: true, posterBlob };
       try {
         const asset = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
         Object.assign(asset, {
@@ -905,8 +964,8 @@ PM.assets = {
           channels: asset.channels || meta.channels || 0,
           sampleRate: asset.sampleRate || meta.sampleRate || 0,
         });
-        return { asset };
-      } catch (error) { return { meta, missing: true, error }; }
+        return { asset, meta, posterBlob };
+      } catch (error) { return { meta, missing: true, posterBlob, error }; }
     });
     results.forEach((result: any) => {
       if (result.asset) restored.push(result.asset);
@@ -916,6 +975,9 @@ PM.assets = {
       restored.forEach(disposeAsset);
       return { restored: [], missing: [], stale: true };
     }
+    results.forEach((result: any) => {
+      if (result.posterBlob && result.meta?.id) setPoster(result.meta.id, result.posterBlob);
+    });
     restored.forEach((a: any) => {
       /* Older projects already preserve the original .svg bytes and name but
          predate the explicit vector marker. Hydrate that marker in place so
@@ -924,6 +986,35 @@ PM.assets = {
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
       PM.assets.map.set(a.id, a);
     });
+    const backfill = results.filter((result: any) => result.asset && !result.posterBlob);
+    if (backfill.length) setTimeout(() => {
+      void (async () => {
+        if (epoch !== assetEpoch || PM.proj !== project) return;
+        const completed = await PM.MediaImport.mapBounded(backfill, 3, async (result: any) => {
+          if (epoch !== assetEpoch || PM.proj !== project) return null;
+          const blob = await capturePoster(result.asset);
+          if (!blob || epoch !== assetEpoch || PM.proj !== project) return null;
+          const meta = project.assets?.[result.asset.id];
+          if (!meta?.storageKey || meta !== result.meta || PM.assets.map.get(result.asset.id) !== result.asset) return null;
+          const posterKey = PM.MediaImport.posterKeyFor(meta.storageKey);
+          try {
+            const stored = await PM.MediaStore.put(posterKey, blob, { storageKey: posterKey, type: blob.type });
+            return stored ? { id: result.asset.id, blob, meta, asset: result.asset } : null;
+          } catch (error) { return null; }
+        });
+        if (epoch !== assetEpoch || PM.proj !== project) return;
+        const available = completed.filter(Boolean);
+        if (!available.length) return;
+        let applied = 0;
+        available.forEach(({ id, blob, meta, asset }: any) => {
+          if (project.assets?.[id] !== meta || PM.assets.map.get(id) !== asset) return;
+          meta.poster = true;
+          setPoster(id, blob);
+          applied++;
+        });
+        if (applied) PM.bus?.emit?.('assets');
+      })();
+    }, 0);
     return { restored, missing };
   },
   /** Procedural placeholder so demo projects work with zero imports. */

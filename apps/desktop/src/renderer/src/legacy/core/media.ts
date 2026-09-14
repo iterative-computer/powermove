@@ -195,6 +195,7 @@ function removeAsset(project: any, assetId: any) {
     if (layer && removed.has(layer.parent)) layer.parent = null;
   }));
   delete project.assets[assetId];
+  PM.assets?.revokePoster?.(assetId);
   return { removedLayers: removedLayerIds.length, removedLayerIds };
 }
 
@@ -229,7 +230,10 @@ function coalesce(project: any, canonicalId: any, aliases: any) {
   layerLists(project).forEach((layers: any) => layers.forEach((layer: any) => {
     if (retired.has(layerAssetId(layer))) { replaceLayerAssetId(layer, canonicalId); changed++; }
   }));
-  retired.forEach((id: any) => { if (project.assets && project.assets[id]) delete project.assets[id]; });
+  retired.forEach((id: any) => {
+    if (project.assets && project.assets[id]) delete project.assets[id];
+    PM.assets?.revokePoster?.(id);
+  });
   return changed;
 }
 
@@ -238,6 +242,7 @@ PM.MediaImport = {
   normalizedName,
   fingerprint,
   storageKeyFor: (value: any) => value ? `media:${value}` : null,
+  posterKeyFor: (storageKey: string) => `${storageKey}:poster`,
   mapBounded,
   match,
   coalesce,

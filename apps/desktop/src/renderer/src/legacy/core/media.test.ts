@@ -10,6 +10,12 @@ function mediaRegistry(): PMRegistry {
 }
 
 describe('legacy media install', () => {
+  it('derives poster storage next to its media bytes', () => {
+    const PM = mediaRegistry();
+
+    expect(PM.MediaImport.posterKeyFor('media:v2:123:abc')).toBe('media:v2:123:abc:poster');
+  });
+
   it('preserves source time for video trim timing', () => {
     const PM = mediaRegistry();
     const video = { type: 'video', from: 2, d: { trim: 1, speed: 2 } };
