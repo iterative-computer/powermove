@@ -24,6 +24,7 @@ import { createExtensionRegistry } from './extensions/registry';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
+import { registerContextMenuIpc } from './context-menu';
 import { MediaProxyService, playbackConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
@@ -467,6 +468,7 @@ if (!hasSingleInstanceLock) {
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
+    registerContextMenuIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);

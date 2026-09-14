@@ -181,6 +181,9 @@ const bridge: PowermoveBridge = {
       ipcRenderer.send(IPC.hapticAlignment);
     }
   },
+  menu: {
+    popup: (request) => ipcRenderer.invoke(IPC.menuPopup, request) as Promise<string | null>
+  },
   log: (level, text) => {
     ipcRenderer.send(IPC.log, { level, text });
   },

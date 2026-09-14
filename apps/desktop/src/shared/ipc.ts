@@ -72,6 +72,7 @@ export const IPC = {
 
   themeSet: 'theme:set',
   hapticAlignment: 'haptic:alignment',
+  menuPopup: 'menu:popup',
   log: 'log',
   openExternal: 'shell:open-external',
   nativeEdit: 'edit:native',
@@ -409,6 +410,26 @@ export interface PowermoveExtensionsBridge extends ExtensionsBridge {
   fork(req: ExtensionForkRequest): Promise<ExtensionForkResult>;
 }
 
+/** One row of a native context menu. Headers become disabled labels; NSMenu has no section titles. */
+export type NativeMenuItem =
+  | { type: 'separator' }
+  | {
+      type: 'normal' | 'checkbox' | 'header';
+      id: string;
+      label: string;
+      enabled?: boolean;
+      checked?: boolean;
+      /** Electron accelerator string, shown as the key equivalent. */
+      accelerator?: string;
+    };
+
+export type NativeMenuRequest = {
+  items: NativeMenuItem[];
+  /** Window-relative CSS pixels; omitted means "at the pointer". */
+  x?: number;
+  y?: number;
+};
+
 export interface PowermoveBridge {
   compatible?: {
     status(): Promise<import('./compatible-provider').CompatibleProviderConfig>;
@@ -502,6 +523,10 @@ export interface PowermoveBridge {
   setTheme(theme: ThemeSource): void;
   haptic: {
     alignment(): void;
+  };
+  /** Native NSMenu context menus. Resolves with the chosen item id, or null when dismissed. */
+  menu?: {
+    popup(request: NativeMenuRequest): Promise<string | null>;
   };
   log(level: LogLevel, text: string): void;
   openExternal(url: string): Promise<void>;
