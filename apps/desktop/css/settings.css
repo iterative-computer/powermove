@@ -13,7 +13,7 @@
   --ctl-h:30px;
   --sg-edge:var(--line-2);
   --sg-edge-hot:var(--line-strong);
-  --sg-edge-focus:color-mix(in srgb,var(--accent) 60%,transparent);
+  --sg-edge-focus:var(--line-strong);
   --sg-row:var(--bg-panel);
   position:fixed;inset:44px 0 0;z-index:36;display:none;min-height:0;padding:0 10px 10px 0;background:var(--bg-window);
 }
@@ -87,15 +87,19 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-column .settings-input:focus-visible,.sg-column .pm-select:focus-visible{box-shadow:none}
 .sg-column .settings-field-pair{gap:6px}
 /* Checkboxes: shadcn's Checkbox — size-4, rounded 4px, border-input, checked = bg-primary with a 14px check, transition-none on the indicator. */
-.sg-column input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:16px;height:16px;margin:0;flex:none;border:1px solid var(--line-strong);border-radius:4px;background:var(--bg-float);box-shadow:0 1px 2px rgb(var(--ink-rgb) / .05);display:grid;place-items:center;cursor:pointer;transition:box-shadow var(--dur-1)}
-.sg-column input[type="checkbox"]::before{content:"";display:none;width:14px;height:14px;background:var(--bg-panel);mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat;-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat}
+.sg-column input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:16px;height:16px;margin:0;flex:none;border:1px solid var(--line-strong);border-radius:4px;background:var(--bg-float);box-shadow:0 1px 2px rgb(var(--ink-rgb) / .05);display:grid;place-items:center;cursor:default;transition:background 120ms var(--ease-io),border-color 120ms var(--ease-io),box-shadow var(--dur-1)}
+.sg-column input[type="checkbox"]::before{content:"";width:14px;height:14px;opacity:0;transform:scale(.6);transition:opacity 150ms cubic-bezier(0,0,.2,1),transform 150ms cubic-bezier(0,0,.2,1);background:var(--bg-panel);mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat;-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat}
 .sg-column input[type="checkbox"]:checked{background:var(--tx);border-color:var(--tx)}
-.sg-column input[type="checkbox"]:checked::before{display:block}
-.sg-column input[type="checkbox"]:focus-visible{outline:0;border-color:var(--line-strong);box-shadow:0 0 0 3px var(--ink-2)}
+.sg-column input[type="checkbox"]:checked::before{opacity:1;transform:none}
+.sg-column input[type="checkbox"]:focus-visible{outline:0;box-shadow:0 0 0 3px var(--ink-2)}
 .sg-column input[type="checkbox"]:disabled{opacity:var(--disabled);cursor:default}
 .sg-column .toggle{flex:none}
 /* The composition background is the app's fill field; here it wears the same edge as the fields beside it. */
 .sg-column .settings-row>.color-field{width:170px;height:30px;padding:0 10px 0 6px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);box-shadow:none}
+
+/* Row labels and toggles are controls, not copy: arrow cursor, nothing selectable. */
+.sg-column .settings-row,.sg-column label,.sg-column .toggle,.sg-column input[type="checkbox"]{cursor:default;user-select:none;-webkit-user-select:none}
+.sg-column input,.sg-column textarea{-webkit-user-select:auto;user-select:auto}
 
 /* API or local model: one stacked row, fields as label/value pairs. */
 .sg-group>.settings-provider.settings-sections{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding:12px 14px 14px}

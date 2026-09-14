@@ -169,6 +169,8 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
   place();
   el.dataset.state = 'open';
   setActive(active);
+  // Nothing is lit until the pointer or the arrow keys pick a row; the index still starts on the current value.
+  items[active]?.removeAttribute('data-active');
   el.focus({ preventScroll: true });
   el.addEventListener('keydown', onKey);
   document.addEventListener('pointerdown', onPointerDown, true);

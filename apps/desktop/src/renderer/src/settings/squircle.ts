@@ -122,7 +122,8 @@ function attach(el: HTMLElement): void {
   if (el.matches(INTERACTIVE)) {
     const enter = () => { entry.hover = true; paint(entry); };
     const leave = () => { entry.hover = false; paint(entry); };
-    const focusin = () => { entry.focus = true; paint(entry); };
+    // Only keyboard focus lights the edge, like a native control; a click does not.
+    const focusin = () => { entry.focus = el.matches(':focus-visible') || !!el.querySelector(':focus-visible'); paint(entry); };
     const focusout = () => { entry.focus = false; paint(entry); };
     el.addEventListener('mouseenter', enter);
     el.addEventListener('mouseleave', leave);

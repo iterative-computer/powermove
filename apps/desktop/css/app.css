@@ -17,7 +17,7 @@ body{
 /* WKWebView still honors the prefixed selection property for descendants.
    App chrome is inert, while real editing surfaces keep normal caret/selection. */
 body *{-webkit-user-select:none;user-select:none}
-input:not([type=range]):not([type=color]):not([type=file]),textarea,
+input:not([type=range]):not([type=color]):not([type=file]):not([type=checkbox]):not([type=radio]),textarea,
 [contenteditable]:not([contenteditable="false"]),[contenteditable]:not([contenteditable="false"]) *,
 .editable-text,.selectable-text{-webkit-user-select:text;user-select:text;cursor:text}
 ::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
@@ -1005,7 +1005,8 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 @keyframes pm-menu-in{from{opacity:0;transform:scale(.95) translateY(var(--pm-menu-slide,-8px))}to{opacity:1;transform:none}}
 @keyframes pm-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.95)}}
 .pm-menu[data-side=top]{--pm-menu-slide:8px}
-.pm-menu-item{position:relative;display:flex;align-items:center;gap:8px;min-height:28px;padding:0 28px 0 8px;border-radius:var(--r-xs);color:var(--tx);white-space:nowrap;cursor:default;user-select:none}
+.pm-menu,.pm-menu *{cursor:default;user-select:none;-webkit-user-select:none}
+.pm-menu-item{position:relative;display:flex;align-items:center;gap:8px;min-height:28px;padding:0 28px 0 8px;border-radius:var(--r-xs);color:var(--tx);white-space:nowrap}
 .pm-menu-item[data-active]{background:var(--ink-2)}
 .pm-menu-item[aria-disabled=true]{color:var(--tx-4);pointer-events:none}
 .pm-menu-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
