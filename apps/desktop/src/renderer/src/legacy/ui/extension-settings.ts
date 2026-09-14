@@ -73,9 +73,13 @@ export function createExtensionSettingsControl(
       copy.className = 'settings-extension-copy';
       const heading = document.createElement('div');
       heading.className = 'settings-extension-name';
+      const dot = document.createElement('i');
+      dot.className = 'settings-extension-dot';
+      dot.dataset.tone = state.tone;
+      dot.setAttribute('aria-hidden', 'true');
       const name = document.createElement('b');
       name.textContent = nameOf(record);
-      heading.append(name);
+      heading.append(dot, name);
       if (record.scope !== 'builtin' && record.manifest?.author !== 'agent') {
         const tag = document.createElement('span');
         tag.className = 'settings-extension-tag';
@@ -176,8 +180,8 @@ export function createExtensionSettingsControl(
           summary.textContent = error instanceof Error ? error.message : 'The extension could not be updated.';
         }
       });
-      // Distinguish enabled intent from active, replaced, and failed extensions.
-      {
+      // The dot carries the state; only trouble gets a word beside the switch.
+      if (state.tone === 'warning') {
         const status = document.createElement('span');
         status.className = `settings-extension-status is-${state.tone}`;
         status.textContent = state.label;
@@ -188,7 +192,9 @@ export function createExtensionSettingsControl(
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'settings-extension-delete';
-        remove.textContent = 'Delete…';
+        remove.title = 'Delete…';
+        remove.innerHTML = (window as any).PM?.icon?.('trash')?.outerHTML ?? '';
+        if (!remove.innerHTML) remove.textContent = 'Delete…';
         remove.setAttribute('aria-label', `Delete ${nameOf(record)}`);
         remove.disabled = busy.has(record.id);
         remove.onclick = () => { pendingDelete = record.id; render(records); };

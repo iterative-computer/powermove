@@ -86,13 +86,12 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-column .settings-input.is-wide{width:220px}
 .sg-column .settings-input:focus-visible,.sg-column .pm-select:focus-visible{box-shadow:none}
 .sg-column .settings-field-pair{gap:6px}
-/* Checkboxes: the shadcn primitive — a 16px box with a hairline edge that fills with ink and shows a check. */
-.sg-column input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:16px;height:16px;margin:0;flex:none;border:1px solid var(--line-strong);border-radius:var(--r-xs);background:var(--bg-float);display:grid;place-items:center;cursor:pointer;transition:background var(--dur-1),border-color var(--dur-1),box-shadow var(--dur-1)}
-.sg-column input[type="checkbox"]::before{content:"";width:10px;height:10px;background:currentColor;color:var(--bg-float);opacity:0;transform:scale(.6);transition:opacity var(--dur-1),transform var(--dur-1) var(--ease);mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat;-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat}
-.sg-column input[type="checkbox"]:hover{border-color:var(--tx-3)}
+/* Checkboxes: shadcn's Checkbox — size-4, rounded 4px, border-input, checked = bg-primary with a 14px check, transition-none on the indicator. */
+.sg-column input[type="checkbox"]{appearance:none;-webkit-appearance:none;width:16px;height:16px;margin:0;flex:none;border:1px solid var(--line-strong);border-radius:4px;background:var(--bg-float);box-shadow:0 1px 2px rgb(var(--ink-rgb) / .05);display:grid;place-items:center;cursor:pointer;transition:box-shadow var(--dur-1)}
+.sg-column input[type="checkbox"]::before{content:"";display:none;width:14px;height:14px;background:var(--bg-panel);mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat;-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 6 9 17l-5-5'/></svg>") center/contain no-repeat}
 .sg-column input[type="checkbox"]:checked{background:var(--tx);border-color:var(--tx)}
-.sg-column input[type="checkbox"]:checked::before{opacity:1;transform:none}
-.sg-column input[type="checkbox"]:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+.sg-column input[type="checkbox"]:checked::before{display:block}
+.sg-column input[type="checkbox"]:focus-visible{outline:0;border-color:var(--line-strong);box-shadow:0 0 0 3px var(--ink-2)}
 .sg-column input[type="checkbox"]:disabled{opacity:var(--disabled);cursor:default}
 .sg-column .toggle{flex:none}
 /* The composition background is the app's fill field; here it wears the same edge as the fields beside it. */
@@ -112,24 +111,47 @@ body:has(#settings-screen.on) #body{visibility:hidden}
 .sg-group>.settings-provider.settings-sections>[role="status"]:empty{display:none}
 
 /* ── extensions ── */
-.sg-group>.settings-extension-row{align-items:flex-start}
-.settings-extension-name{display:flex;min-width:0;align-items:center;gap:6px}
+/* One row per extension: a tone dot beside the name, the description on one
+   line, a neutral switch and a quiet trash. Details fold under the copy. */
+.sg-group>.settings-extension-row{align-items:flex-start;padding:10px 10px 10px 12px}
+.settings-extension-name{display:flex;min-width:0;align-items:center;gap:7px}
 .settings-extension-name>b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.settings-extension-tag{flex:none;padding:1px 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:1.3}
+.settings-extension-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--tx-4)}
+.settings-extension-dot[data-tone="ok"]{background:var(--success)}
+.settings-extension-dot[data-tone="warning"]{background:var(--danger)}
+.settings-extension-tag{flex:none;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
+.settings-extension-copy>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .settings-extension-copy>.settings-extension-error{color:var(--danger)}
-.settings-extension-controls{flex:none;min-height:32px;display:flex;align-items:center;gap:10px}
-.settings-extension-status{font-size:var(--fs-sm);color:var(--tx-3);white-space:nowrap}
-.settings-extension-status.is-ok{color:var(--success)}
-.settings-extension-status.is-warning{color:var(--danger)}
+.settings-extension-controls{flex:none;min-height:35px;display:flex;align-items:center;gap:6px}
+.settings-extension-status{margin-right:4px;font-size:var(--fs-sm);color:var(--danger);white-space:nowrap}
+.settings-extension-delete{width:28px;height:28px;display:grid;place-items:center;border-radius:var(--r-sm);background:transparent;color:var(--tx-4);transition:background var(--dur-1),color var(--dur-1)}
+.settings-extension-delete svg{width:14px;height:14px}
+.settings-extension-delete:hover:not(:disabled){background:var(--ink-1);color:var(--danger)}
+.settings-extension-delete:disabled{opacity:var(--disabled)}
 .settings-extension-impact{color:var(--tx-3);font-size:var(--fs-sm);line-height:16px;overflow-wrap:anywhere}
 .settings-extension-impact strong{color:var(--tx-2);font-weight:var(--fw-medium)}
 .settings-extension-impact.is-replacement{color:var(--accent-tx)}
-.settings-extension-details{margin-top:4px;color:var(--tx-3);font-size:var(--fs-sm);line-height:16px;overflow-wrap:anywhere}
-.settings-extension-details summary{width:fit-content;cursor:pointer;color:var(--tx-2)}
-.settings-extension-details>div{padding-top:4px}
-.settings-extension-details .btn{margin-top:6px}
-.settings-extension-confirm{margin-top:8px}
+.settings-extension-details{margin-top:3px;color:var(--tx-3);font-size:var(--fs-sm);line-height:16px;overflow-wrap:anywhere}
+.settings-extension-details summary{display:inline-flex;align-items:center;gap:4px;width:fit-content;list-style:none;cursor:pointer;color:var(--tx-3);transition:color var(--dur-1)}
+.settings-extension-details summary::-webkit-details-marker{display:none}
+.settings-extension-details summary::before{content:"";width:10px;height:10px;background:currentColor;mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m9 6 6 6-6 6'/></svg>") center/contain no-repeat;-webkit-mask:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m9 6 6 6-6 6'/></svg>") center/contain no-repeat;transition:transform var(--dur-2) var(--ease)}
+.settings-extension-details[open] summary::before{transform:rotate(90deg)}
+.settings-extension-details summary:hover{color:var(--tx)}
+.settings-extension-details>div{padding-top:6px}
+.settings-extension-details .btn{margin-top:8px}
+.settings-extension-confirm{margin-top:8px;padding:10px 12px;border:1px solid var(--sg-edge);border-radius:var(--r-md);background:var(--bg-float);font-size:var(--fs-sm);line-height:16px}
+.settings-extension-confirm p{margin:0 0 8px;color:var(--tx-2);text-wrap:pretty}
+.settings-extension-confirm .btn{margin-right:6px}
+.settings-extension-confirm .btn.settings-extension-delete{width:auto;height:var(--ctl-h);padding:0 12px;color:var(--danger)}
 .settings-extension-empty{padding:16px 14px;color:var(--tx-3);font-size:var(--fs-md)}
+
+/* The switch: shadcn's Switch — 32×18 track, thumb 14, primary when on. */
+.sg-column .toggle{width:32px;height:18px;flex:none;border-radius:var(--r-pill);background:var(--ink-3);box-shadow:none;transition:background var(--dur-2) var(--ease-io)}
+.sg-column .toggle i{top:2px;left:2px;width:14px;height:14px;background:var(--bg-float);box-shadow:0 1px 2px rgb(0 0 0 / .18);transition:transform var(--dur-2) var(--ease-io),background var(--dur-2)}
+.sg-column .toggle.on{background:var(--tx)}
+.sg-column .toggle.on i{transform:translateX(14px);background:var(--bg-panel)}
+.sg-column .toggle:focus-visible{outline:0;box-shadow:0 0 0 3px var(--ink-2)}
+.sg-column .toggle:disabled{opacity:var(--disabled)}
 
 /* ── narrow ── */
 @container (max-width:28rem){
