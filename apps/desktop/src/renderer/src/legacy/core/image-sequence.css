@@ -12,7 +12,6 @@
   align-items: center;
   gap: 12px;
   padding: 14px;
-  border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--bg-panel-2);
 }
@@ -61,14 +60,14 @@
   gap: 8px;
   height: 38px;
   padding: 0 10px;
-  border: 1px solid var(--line-strong);
+  border: 0;
   border-radius: var(--r-sm);
-  background: var(--bg-float);
+  background: var(--bg-field);
 }
 
 .sequence-import-input:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-dim);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .sequence-import input.sequence-import-fps {
@@ -98,7 +97,6 @@
   display: grid;
   gap: 8px;
   padding: 14px;
-  border: 1px solid color-mix(in srgb, var(--warning) 24%, transparent);
   border-radius: var(--r-md);
   background: color-mix(in srgb, var(--warning) 7%, transparent);
   overflow-wrap: anywhere;
@@ -108,4 +106,3 @@
 .sequence-import-warning strong { color: var(--warning); }
 .sequence-import-warning p { color: var(--tx-2); font-size: var(--fs-sm); }
 .sequence-import-reimport { justify-self: start; margin-top: 4px; }
-.sequence-import-note { color: var(--tx-2); font-size: var(--fs-xs); }

@@ -63,8 +63,7 @@ export function chooseSequence(PM: PMRegistry, files: File[], required: boolean)
           h('span.sequence-import-input', fps, h('span', { 'aria-hidden': 'true' }, 'fps')),
           h('small', '1–240 fps')),
         h('div.sequence-import-timing', h('span', 'Clip duration'), duration)),
-      warning,
-      h('p.sequence-import-note', 'Ordered by frame number · Transparency preserved'));
+      warning);
     fps.addEventListener('input', update); update();
     PM.modal({ title: 'Import image sequence', width: 480, body,
       onClose: () => { closed = true; cleanupPicker(); resolve(null); },

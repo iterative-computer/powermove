@@ -503,7 +503,9 @@ export function registerCodexIpc(
     await revealArtifact(root, reference.path);
   });
 
-  app.once('before-quit', () => {
+  // before-quit can be cancelled by the document save prompt or recovery flush.
+  // Keep active runs and their tool bridge alive until closing is confirmed.
+  app.once('will-quit', () => {
     compatible.cancelAll();
     void runner.cancelAll();
     void appServerRunner.shutdown();
