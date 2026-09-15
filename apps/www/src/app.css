@@ -83,6 +83,10 @@ h1 .muted{color:var(--tx-3)}
 .eyebrow{display:flex;align-items:center;justify-content:center;gap:8px;width:fit-content;margin:0 auto 28px;font-size:var(--fs-md);font-weight:500;color:var(--tx);transition:color var(--dur-1)}
 .eyebrow .muted{font-weight:400;color:var(--tx-3);transition:color var(--dur-1)}
 .eyebrow:hover .muted{color:var(--tx-2)}
+.eyebrow.ph{display:block;line-height:0}
+.eyebrow.ph img{display:block;width:250px;height:54px;transition:opacity var(--dur-1)}
+.eyebrow.ph:hover img{opacity:.9}
+.button.primary .muted{color:var(--on-accent);opacity:.7;font-weight:400}
 .eyebrow-sep{width:1px;height:12px;background:var(--line-strong)}
 .hero-art{position:relative;width:min(100%,840px);height:clamp(72px,8vw,104px);margin-inline:auto;overflow:hidden}
 .hero-vector{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
