@@ -125,6 +125,8 @@ describe('viewer runtime', () => {
     expect(viewerWheelMode({ deltaX: 0, deltaY: 3, deltaMode: 1 })).toBe('zoom');
     expect(viewerWheelMode({ deltaX: 0, deltaY: 4, wheelDeltaY: -120 })).toBe('zoom');
     expect(viewerWheelMode({ deltaX: 0, deltaY: -12, ctrlKey: true })).toBe('zoom');
+    expect(viewerWheelMode({ deltaX: 0, deltaY: -12, metaKey: true })).toBe('zoom');
+    expect(viewerWheelMode({ deltaX: 2, deltaY: -12, metaKey: true })).toBe('zoom');
     expect(viewerWheelMode({ deltaX: 1.5, deltaY: 8.25 })).toBe('pan');
     expect(viewerWheelMode({ deltaX: 0, deltaY: 8.25 })).toBe('pan');
     expect(viewerWheelMode({ deltaX: 0, deltaY: 120 })).toBe('pan');

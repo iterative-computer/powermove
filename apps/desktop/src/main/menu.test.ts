@@ -103,6 +103,9 @@ describe('application menu', () => {
       'Save Project',
       'Save Project As…',
       'separator',
+      'Import Media…',
+      'Import Image Sequence…',
+      'separator',
       'Export…'
     ]);
     expect(fileItems.filter((item) => item.click).map((item) => item.accelerator)).toEqual([
@@ -110,12 +113,14 @@ describe('application menu', () => {
       'CommandOrControl+O',
       'CommandOrControl+S',
       'CommandOrControl+Shift+S',
+      'CommandOrControl+I',
+      undefined,
       'CommandOrControl+E'
     ]);
     for (const item of fileItems) {
       item.click?.({} as never, undefined, {} as never);
     }
-    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'export']);
+    expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'import', 'importSequence', 'export']);
 
     const editItems = submenu(topLevel(template, 'Edit'));
     const undo = editItems.find((item) => item.label === 'Undo');
@@ -133,7 +138,7 @@ describe('application menu', () => {
     undo?.click?.({} as never, undefined, {} as never);
     redo?.click?.({} as never, undefined, {} as never);
     expect(sent).toEqual([
-      'newProject', 'open', 'save', 'saveAs', 'export', 'contextUndo', 'contextRedo',
+      'newProject', 'open', 'save', 'saveAs', 'import', 'importSequence', 'export', 'contextUndo', 'contextRedo',
     ]);
     expect(editItems.filter((item) => item.role)).toEqual([]);
     const contextCommands = editItems.slice(3, 7);

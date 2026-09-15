@@ -116,6 +116,7 @@ def('newSolid', 'New solid', '⌘Y', () => addLayer('solid', { name: 'Solid' }),
 def('newShape', 'New shape', '⌘⇧Y', () => addLayer('shape', { name: 'Shape', p: center() }), 'Create');
 def('newNull', 'New null object', '⌘⌥⇧Y', () => addLayer('null', { name: 'Null', p: center() }), 'Create');
 def('import', 'Import media…', '⌘I', () => PM.pickFiles(), 'Create');
+def('importSequence', 'Import image sequence…', null, () => PM.pickFiles(true), 'Create');
 const selectTool = (tool: string, detail?: string): boolean => {
   const tools = toolService(PM);
   if (!tools) return false;
@@ -218,7 +219,7 @@ def('addFromAsset', 'Add layer from asset', null, (id?: any) => {
 def('duplicate', 'Duplicate layers', '⌘D', () => {
   const selected = selectedStackLayers(PM);
   if (!selected.length || selected.some((layer: any) => layer.lock || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock))) return;
-  return pasteLayers(PM, () => selected);
+  return pasteLayers(PM, () => selected, { atPlayhead: false });
 }, 'Edit');
 def('delete', 'Delete selection', '⌫', () => deleteSelection(PM), 'Edit');
 def('split', 'Split at playhead', '⌘⇧D', () => splitLayers(PM), 'Edit');
@@ -661,8 +662,8 @@ export function cutLayers(PM: PMRegistry, setClipboard: (value: any[]) => void =
   });
 }
 
-/** Paste beside the topmost selected layer, preserving valid parent links. */
-export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = () => null): unknown {
+/** Paste at the playhead beside the topmost selection, preserving relative timing and links. */
+export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = () => null, options: { atPlayhead?: boolean } = {}): unknown {
   const clipboard = getClipboard();
   if (!Array.isArray(clipboard) || !clipboard.length) return false;
   const layers = currentLayers(PM);
@@ -672,6 +673,11 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
     .filter((index: number) => index >= 0);
   const insertAt = selectedIndexes.length ? Math.min(...selectedIndexes) : 0;
   const currentIds = new Set(layers.map((layer: any) => layer.id));
+  // Group clocks are independent of their visible spans. Anchor to the copied
+  // contents, then shift every clock equally so group animation stays in sync.
+  const contents = clipboard.filter((layer: any) => layer.type !== 'group');
+  const start = Math.min(...(contents.length ? contents : clipboard).map((layer: any) => Number(layer.from) || 0));
+  const offset = options.atPlayhead === false ? 0 : (Number(PM.time) || 0) - start;
 
   return runAtomic(PM, 'Paste layers', () => {
     const pairs = clipboard.map((source: any) => [source, cloneForCommand(PM, JSON.parse(JSON.stringify(source)))]);
@@ -682,6 +688,8 @@ export function pasteLayers(PM: PMRegistry, getClipboard: () => any[] | null = (
       idMap.set(source.id, clone.id);
     });
     const pasted = pairs.map(([source, clone]: any) => {
+      // Animation keys and media trim are layer-local and move with this start.
+      clone.from = (Number(source.from) || 0) + offset;
       if (source.parent && idMap.has(source.parent)) clone.parent = idMap.get(source.parent);
       else clone.parent = source.parent && currentIds.has(source.parent) ? source.parent : null;
       clone.group = idMap.get(source.group) || (currentIds.has(source.group) ? source.group : null);

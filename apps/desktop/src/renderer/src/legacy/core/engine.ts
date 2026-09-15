@@ -1,3 +1,4 @@
+import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { prepareFrame } from './frame-preparation';
 import { installPreviewCache } from './preview-cache';
 import { sourceTime } from './retiming';
@@ -93,10 +94,10 @@ function scrubVideos(T: any) {
     const inRange = PM.active(L, T);
     const d = resolveContent(PM, L, T);
     /* playback position must respect layer speed, matching the compositor's vt math */
-    const vt = PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, (a.dur || 0) - .04));
+    const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, (a.dur || 0) - .04));
     if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(a.el, vt, Math.max(.0001, Number(d.speed) || 1));
     else ensureMediaPaused(a.el);
-    if ((!PM.playing || d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) && Math.abs(a.el.currentTime - vt) > .02) { try { a.el.currentTime = vt; } catch (e) { } }
+    if ((!PM.playing || d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) && Math.abs(a.el.currentTime - vt) > (a.imageSequence ? .0005 : .02)) { try { a.el.currentTime = vt; } catch (e) { } }
   }
 }
 

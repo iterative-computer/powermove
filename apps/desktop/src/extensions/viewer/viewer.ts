@@ -190,13 +190,14 @@ export type ViewerWheelMode = 'zoom' | 'pan';
     wheel retains discrete line/page or legacy 120-step deltas. */
 export function viewerWheelMode(event: {
   ctrlKey?: boolean;
+  metaKey?: boolean;
   shiftKey?: boolean;
   deltaMode?: number;
   deltaX: number;
   deltaY: number;
   wheelDeltaY?: number;
 }): ViewerWheelMode {
-  if (event.ctrlKey) return 'zoom';
+  if (event.ctrlKey || event.metaKey) return 'zoom';
   if (event.shiftKey || Math.abs(event.deltaX) > .01) return 'pan';
   if ((event.deltaMode || 0) !== 0) return 'zoom';
   const legacy = Math.abs(Number(event.wheelDeltaY) || 0);
@@ -1368,7 +1369,9 @@ function bindStage(stage: any, inner: any): () => void {
     if (viewerWheelMode(e) === 'zoom') {
       zoomGestureUntil = window.performance.now() + 80;
       navigationUntil = window.performance.now() + 250;
-      const factor = clamp(Math.exp(-wheelZoomDelta(e) * .0015), .5, 2);
+      // Match timeline navigation: responsive, reversible magnification with
+      // a bounded step for coarse mouse wheels and page-mode events.
+      const factor = clamp(Math.exp(-wheelZoomDelta(e) * .006), .5, 2);
       zoomAtEvent(e, factor);
       return;
     }

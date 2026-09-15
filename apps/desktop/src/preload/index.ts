@@ -77,6 +77,11 @@ const bridge: PowermoveBridge = {
         name: file.name
       }) as Promise<MediaProxyResult>;
     },
+    createImageSequence: (files, fps) => {
+      const sourcePaths = files.map(file => webUtils.getPathForFile(file));
+      if (sourcePaths.some(source => !source)) return Promise.resolve({ ok: false, error: 'The original image files are no longer available' });
+      return ipcRenderer.invoke(IPC.mediaSequenceCreate, { sourcePaths, fps }) as Promise<MediaProxyResult>;
+    },
     readPlaybackProxy: (token, offset, length) =>
       ipcRenderer.invoke(IPC.mediaProxyRead, { token, offset, length }) as Promise<Uint8Array>,
     releasePlaybackProxy: (token) =>

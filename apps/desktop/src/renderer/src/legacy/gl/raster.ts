@@ -1,3 +1,4 @@
+import { importedSequences } from '../core/image-sequence';
 import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, textControlValues } from '../core/text-animation';
 import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
@@ -525,6 +526,7 @@ async function playbackProxy(file: any, name: string): Promise<any> {
   }
 }
 async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
+  const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
     if (Number(blob?.size) > 64 * 1024 * 1024) throw new Error('OBJ files larger than 64 MB are not supported');
@@ -608,6 +610,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
       playbackProxy: playbackProxyUsed,
       playbackProxyVersion,
       persistBlob: sourceBlob,
+      ...(imageSequence ? { imageSequence } : {}),
       ...(imageFormat ? { format: imageFormat } : {}),
       ...(svg ? { svg } : {}),
     };
@@ -657,6 +660,7 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     playbackProxy: prepared.playbackProxy === true,
     playbackProxyVersion: Number(prepared.playbackProxyVersion) || 0,
     persisted: persisted === true,
+    ...(prepared.imageSequence ? { imageSequence: prepared.imageSequence } : {}),
     ...(prepared.format ? { format: prepared.format } : {}),
     ...(prepared.svg ? { editablePaths: prepared.svg.paths.length } : {}),
     ...(kind === 'video' ? {

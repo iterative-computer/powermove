@@ -184,6 +184,10 @@ describe('preload bridge', () => {
     });
     await bridge().media.releasePlaybackProxy('a'.repeat(32));
     expect(electronMocks.invoke).toHaveBeenNthCalledWith(4, IPC.mediaProxyRelease, 'a'.repeat(32));
+    await bridge().media.createImageSequence([file, file], 24);
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(5, IPC.mediaSequenceCreate, {
+      sourcePaths: ['/Users/editor/source.mov', '/Users/editor/source.mov'], fps: 24,
+    });
   });
 
   it('sends bytes-only attachments to the dedicated reveal channel', async () => {

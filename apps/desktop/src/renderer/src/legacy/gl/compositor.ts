@@ -1,3 +1,4 @@
+import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane, affinePlane } from '../core/space-3d';
@@ -787,8 +788,8 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     if (!a) return null;
     let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || a.el, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
-      const vt = PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
-      if (!PM.playing && Math.abs(el.currentTime - vt) > .02) { try { el.currentTime = vt; } catch (e) { } }
+      const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
+      if (!PM.playing && Math.abs(el.currentTime - vt) > (a.imageSequence ? .0005 : .02)) { try { el.currentTime = vt; } catch (e) { } }
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
     const bw = d.w || W, bh = d.h || H;
