@@ -1,30 +1,57 @@
-import { orderedSequence, sequenceFrame, validSequenceFps } from '../../../../shared/image-sequence';
+import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, validSequenceFps } from '../../../../shared/image-sequence';
 import type { PMRegistry } from '../registry';
 
 export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
 
-export function chooseSequence(PM: PMRegistry, files: File[], required: boolean): Promise<number | 'images' | null> {
+export function chooseSequence(PM: PMRegistry, files: File[], required: boolean): Promise<{ files: File[]; fps: number | null } | null> {
   return new Promise(resolve => {
     const h = PM.h;
+    let selected = files;
+    let picker: HTMLInputElement | null = null;
+    let closed = false;
     const fps = h('input', { type: 'number', min: 1, max: 240, step: 'any', value: PM.curComp?.().fps || PM.proj.fps || 30, 'aria-label': 'Sequence frame rate' });
     const duration = h('p');
+    const warning = h('p', { role: 'status', 'aria-live': 'polite' });
+    const cleanupPicker = () => { picker?.remove(); picker = null; };
+    const reimport = h('button.btn', { type: 'button', style: { justifySelf: 'start' }, onclick: () => {
+      cleanupPicker();
+      const input = document.createElement('input');
+      input.type = 'file'; input.multiple = true; input.accept = IMAGE_SEQUENCE_ACCEPT;
+      input.style.display = 'none'; picker = input;
+      input.onchange = () => {
+        if (!closed && input.files?.length) { selected = Array.from(input.files); update(); }
+        cleanupPicker();
+      };
+      input.addEventListener('cancel', cleanupPicker, { once: true });
+      body.appendChild(input); input.click();
+    } }, 'Reimport…');
     const update = () => {
       duration.textContent = validSequenceFps(Number(fps.value))
-        ? `${files.length} frames · ${(files.length / Number(fps.value)).toFixed(3)} seconds`
+        ? `${selected.length} frames · ${(selected.length / Number(fps.value)).toFixed(3)} seconds`
         : 'Enter a frame rate between 1 and 240 fps.';
+      try {
+        const gaps = sequenceGaps(selected);
+        const missing = gaps.reduce((count, gap) => count + gap.end - gap.start + 1, 0);
+        const ranges = gaps.slice(0, 8).map(gap => gap.start === gap.end ? String(gap.start) : `${gap.start}–${gap.end}`).join(', ');
+        warning.textContent = missing
+          ? `Missing frame ${missing === 1 ? 'number' : 'numbers'}: ${ranges}${gaps.length > 8 ? `, and ${gaps.length - 8} more gaps` : ''}. Importing skips missing frames and plays the available images consecutively. Reimport to choose files again, or cancel.`
+          : '';
+      } catch (error) { warning.textContent = error instanceof Error ? error.message : 'Choose numbered image frames'; }
+      warning.hidden = !warning.textContent;
+      reimport.hidden = !warning.textContent;
     };
+    const body = h('div', { style: { display: 'grid', gap: '12px' } }, h('p', 'Import numbered images as one clip. Frames are ordered by number and transparency is preserved.'),
+      h('label', { style: { display: 'grid', gap: '6px' } }, h('span', 'Frame rate (fps)'), fps), duration, warning, reimport);
     fps.addEventListener('input', update); update();
-    PM.modal({ title: 'Import image sequence', width: 460,
-      body: h('div', h('p', 'Import numbered images as one clip. Frames are ordered by number and transparency is preserved.'),
-        h('label.field', h('span', 'Frame rate (fps)'), fps), duration),
-      onClose: () => resolve(null),
+    PM.modal({ title: 'Import image sequence', width: 460, body,
+      onClose: () => { closed = true; cleanupPicker(); resolve(null); },
       actions: [
         { label: 'Cancel' },
-        ...(!required ? [{ label: 'Individual images', run: () => { resolve('images'); } }] : []),
+        ...(!required ? [{ label: 'Individual images', run: () => { resolve({ files: selected, fps: null }); } }] : []),
         { label: 'Import sequence', pri: true, run: () => {
-          orderedSequence(files);
+          orderedSequence(selected);
           if (!validSequenceFps(Number(fps.value))) throw new Error('Frame rate must be between 1 and 240 fps');
-          resolve(Number(fps.value));
+          resolve({ files: selected, fps: Number(fps.value) });
         } },
       ],
     });

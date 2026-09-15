@@ -62,9 +62,9 @@ describe('media playback proxies', () => {
 
 
 describe('native image sequence conversion', () => {
-  it('orders local frames safely and releases the generated clip', async () => {
+  it('packs sparse local frames consecutively and releases the generated clip', async () => {
     const { root } = await fixture();
-    const first = path.join(root, "shot's 009.png"), second = path.join(root, "shot's 10.png");
+    const first = path.join(root, "shot's 009.png"), second = path.join(root, "shot's 11.png");
     await writeFile(first, 'first'); await writeFile(second, 'second');
     const service = new MediaProxyService(root, async () => {}, async (pattern, fps, count, output) => {
       expect(fps).toBe(23.976); expect(count).toBe(2);
@@ -84,7 +84,7 @@ describe('native image sequence conversion', () => {
     const service = new MediaProxyService(root, async () => {}, async () => { throw new Error('decode failed'); });
     await expect(service.createSequence(files, 0)).rejects.toThrow('Frame rate');
     await expect(service.createSequence(['relative1.png', 'relative2.png'], 30)).rejects.toThrow('local');
-    await expect(service.createSequence([files[0]!, path.join(root, 'f3.png')], 30)).rejects.toThrow('Missing frame');
+    await expect(service.createSequence([files[0]!, path.join(root, 'f01.png')], 30)).rejects.toThrow('Duplicate frame');
     await expect(service.createSequence(files, 30)).rejects.toThrow('decode failed');
     expect((await readdir(root)).filter(name => name.startsWith('powermove-image-sequence-'))).toEqual([]);
     const handlers = new Map<string, (...args: any[]) => any>();
