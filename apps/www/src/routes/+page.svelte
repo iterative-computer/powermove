@@ -31,14 +31,14 @@
   <meta property="og:site_name" content="Powermove" />
   <meta property="og:url" content="https://trypowermove.com/" />
   <meta property="og:title" content="Powermove — Make your move." />
-  <meta property="og:description" content="A motion editor with an agent in the loop and you in the driver’s seat. Free and open source. Launching September 18." />
+  <meta property="og:description" content="A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and an editor you can rewrite." />
   <meta property="og:image" content="https://trypowermove.com/og.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:image:alt" content="The Powermove editor with a layer stack, inspector, agent panel, and keyframe timeline." />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Powermove — Make your move." />
-  <meta name="twitter:description" content="A motion editor with an agent in the loop and you in the driver’s seat. Free and open source. Launching September 18." />
+  <meta name="twitter:description" content="A motion editor with AI in the loop and you in the driver’s seat. Real layers, editable keyframes, and an editor you can rewrite." />
   <meta name="twitter:image" content="https://trypowermove.com/og.png" />
 </svelte:head>
 
