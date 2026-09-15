@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Workspace } from '../../layout/model';
-import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions, UI_PLACEMENT_PREFIX } from './ui-placement';
+import { isUIPlacementMessage, parseUIPlacement, splitUIPlacementText, uiPlacementInstructions, UI_PLACEMENT_PREFIX } from './ui-placement';
 import { ghostRowCount, ghostSlotIndex } from './ui-placement-geometry';
 
 const workspace: Workspace = { layout: { docks: [
@@ -13,6 +13,27 @@ const dock = { kind: 'dock', id: 'right', beforePanelId: null, label: 'Easing co
 const message = (value: unknown) => UI_PLACEMENT_PREFIX + JSON.stringify(value);
 
 describe('early UI placement', () => {
+  it('withholds every streamed marker prefix and extracts the finished target without hiding prose', () => {
+    const raw = message(panel);
+    for (let end = 1; end <= raw.length; end++) {
+      expect(splitUIPlacementText(raw.slice(0, end), true).text).toBe('');
+    }
+    expect(splitUIPlacementText(raw)).toEqual({ text: '', messages: [raw] });
+    expect(splitUIPlacementText(`Starting.\n${raw}\nContinuing.`)).toEqual({ text: 'Starting.\n\nContinuing.', messages: [raw] });
+    expect(splitUIPlacementText('Please wait.', true).text).toBe('Please wait.');
+    expect(splitUIPlacementText('P', true).text).toBe('');
+    expect(splitUIPlacementText('P').text).toBe('P');
+    expect(splitUIPlacementText(`Example: ${raw}`).text).toBe(`Example: ${raw}`);
+  });
+
+  it('handles newlines, quoted braces and malformed or interrupted metadata', () => {
+    const raw = message({ ...panel, label: 'A } and "quoted" label' });
+    expect(splitUIPlacementText(raw + '\nDone.').text).toBe('\nDone.');
+    expect(splitUIPlacementText(raw.replace('TARGET ', 'TARGET\n')).messages).toEqual([raw]);
+    expect(splitUIPlacementText(UI_PLACEMENT_PREFIX + '{"kind":"panel"').text).toBe('');
+    expect(splitUIPlacementText(UI_PLACEMENT_PREFIX + 'bad\nStill working.').text).toBe('\nStill working.');
+    expect(splitUIPlacementText(`${message(panel)}\n${message(dock)}`).messages).toEqual([message(panel), message(dock)]);
+  });
   it('accepts existing panels and exact new-panel insertion points', () => {
     expect(parseUIPlacement(message(panel), workspace)).toEqual(panel);
     expect(parseUIPlacement(message(dock), workspace)).toEqual(dock);

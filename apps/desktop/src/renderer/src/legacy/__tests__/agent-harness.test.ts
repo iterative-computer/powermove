@@ -22,6 +22,42 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('observes source without capturing frames unless the agent requests times', async () => {
+    const PM = harnessEditor();
+    const snapshot = vi.fn(PM.Export.snapshot);
+    PM.Export.snapshot = snapshot;
+    for (const times of [undefined, [], [NaN]]) {
+      const observation = await PM.AgentHarness.observe(times);
+      expect(observation.state.composition.playhead).toBe(1);
+      expect(observation.times).toEqual([]);
+      expect(observation.images).toEqual([]);
+    }
+    expect(snapshot).not.toHaveBeenCalled();
+    expect(PM.AgentHarness.sanitizeProposal({ commands: [] }).reviewTimes).toEqual([]);
+    expect(PM.AgentHarness.sanitizeProposal({ commands: [], reviewTimes: [] }).reviewTimes).toEqual([]);
+    const requested = await PM.AgentHarness.observe([0, 2]);
+    expect(requested.times).toEqual([0, 2]);
+    expect(requested.images).toHaveLength(2);
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    expect(PM.time).toBe(1);
+  });
+
+  it('reviews and completes an edit without frames when the agent leaves reviewTimes empty', async () => {
+    const PM = harnessEditor();
+    PM.Export.snapshot = vi.fn(() => { throw new Error('Unexpected frame capture'); });
+    PM.CodexBridge = { request: vi.fn(async () => JSON.stringify({ status: 'pass', message: 'Source checked', commands: [], reviewTimes: [] })) };
+    const proposal = PM.AgentHarness.sanitizeProposal({
+      commands: [{ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Hello' } }],
+      reviewTimes: [],
+    });
+    const run = await PM.AgentHarness.execute('Add a title', proposal);
+    expect(PM.proj.layers).toHaveLength(1);
+    expect(run.reviewError).toBe('');
+    expect(run.frames.images).toEqual([]);
+    expect(PM.CodexBridge.request.mock.calls[0][2]).toEqual([]);
+    expect(PM.Export.snapshot).not.toHaveBeenCalled();
+  });
+
   it('preflights effect definitions with the registration validator without changing the project', async () => {
     const PM = harnessEditor();
     const before = JSON.stringify(PM.proj);
@@ -224,7 +260,7 @@ describe('agent harness oracle', () => {
     expect(PM.proj.revision).toBe(1);
     expect(PM.proj.edits[0].origin).toBe('agent');
     expect(bridgeCalls[0].images.length).toBeGreaterThanOrEqual(3);
-    expect(bridgeCalls[0].prompt).toMatch(/visual review stage/);
+    expect(bridgeCalls[0].prompt).toMatch(/review stage/);
     expect(run.frames.images.length).toBeGreaterThanOrEqual(3);
     expect(PM.hist.list()).toHaveLength(1);
     expect(PM.AgentHarness.rollback(run.checkpoint)).toBe(true);

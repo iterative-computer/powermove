@@ -18,15 +18,16 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
       return canvas.toDataURL('image/png').split(',')[1]!;
     });
   });
-  const paths = ['frame_009.png', 'frame_10.png', 'frame_11.png'].map(name => path.join(session.userData, name));
+  const paths = ['frame_009.png', 'frame_10.png', fps === 12 ? 'frame_12.png' : 'frame_11.png'].map(name => path.join(session.userData, name));
   for (let i = 0; i < paths.length; i++) await writeFile(paths[i]!, Buffer.from(images[i]!, 'base64'));
   const chooser = page.waitForEvent('filechooser');
   await page.evaluate(() => (window as any).PM.pickFiles());
   await (await chooser).setFiles([paths[2]!, paths[0]!, paths[1]!]);
   const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
   await expect(dialog).toBeVisible();
+  if (fps === 12) await expect(dialog).toContainText('Missing frame number: 11');
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill(String(fps));
-  await expect(dialog).toContainText(`3 frames · ${(3 / fps).toFixed(3)} seconds`);
+  await expect(dialog).toContainText(`${(3 / fps).toFixed(3)} s`);
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
   await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'frame sequence.webm'));
   const imported = await page.evaluate(() => {
@@ -85,7 +86,7 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('sequence import validates gaps and permits importing individual stills or cancelling', async ({ session }) => {
+test('sequence import warns about gaps and permits importing individual stills or cancelling', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   await page.evaluate(() => {
@@ -94,12 +95,58 @@ test('sequence import validates gaps and permits importing individual stills or 
     canvas.toBlob(blob => { void PM.importFiles([new File([blob!], 'f1.png'), new File([blob!], 'f3.png')]); });
   });
   const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
-  await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
-  await expect(dialog).toContainText('Missing frame 2');
+  await expect(dialog).toContainText('Missing frame number: 2');
   await dialog.getByRole('button', { name: 'Individual images', exact: true }).click();
   await page.waitForFunction(() => (window as any).PM.proj.layers.filter((l: any) => l.type === 'image').length === 2);
   await page.evaluate(() => { void (window as any).PM.importFiles([new File([], 'a1.png'), new File([], 'a2.png')]); });
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.evaluate(() => (window as any).PM.flushProject());
   expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(2);
+});
+
+test('reimport replaces missing frames, preserves the frame rate and insertion time, and allows cancellation', async ({ session }) => {
+  await session.openEditor();
+  const { page } = session;
+  const png = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    PM.setTime(1, { raw: true, force: true });
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 16;
+    return canvas.toDataURL('image/png').split(',')[1]!;
+  });
+  const paths = ['f1.png', 'f2.png', 'f3.png'].map(name => path.join(session.userData, name));
+  for (const file of paths) await writeFile(file, Buffer.from(png, 'base64'));
+  const chooser = page.waitForEvent('filechooser');
+  await page.evaluate(() => (window as any).PM.pickFiles(true));
+  await (await chooser).setFiles([paths[0]!, paths[2]!]);
+  const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  await expect(dialog).toContainText('Missing frame number: 2');
+  await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('24');
+  await dialog.screenshot({ path: test.info().outputPath('missing-frames.png') });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  await dialog.screenshot({ path: test.info().outputPath('missing-frames-dark.png') });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+  const cancelled = page.waitForEvent('filechooser');
+  await dialog.getByRole('button', { name: 'Reimport…', exact: true }).click();
+  await (await cancelled).setFiles([]);
+  await expect(dialog).toContainText('Missing frame number: 2');
+  await expect(dialog).toContainText('0.083 s');
+  const replacement = page.waitForEvent('filechooser');
+  await dialog.getByRole('button', { name: 'Reimport…', exact: true }).click();
+  await (await replacement).setFiles([paths[2]!, paths[0]!, paths[1]!]);
+  await expect(dialog).not.toContainText('Missing frame');
+  await expect(dialog.getByRole('spinbutton', { name: 'Sequence frame rate' })).toHaveValue('24');
+  await expect(dialog).toContainText('0.125 s');
+  await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
+  await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'f sequence.webm'));
+  expect(await page.evaluate(() => {
+    const PM = (window as any).PM, layer = PM.proj.layers.find((l: any) => l.name === 'f sequence.webm');
+    return { from: layer.from, sequence: PM.assets.get(layer.d.asset).imageSequence };
+  })).toEqual({ from: 1, sequence: { fps: 24, frames: 3 } });
+  const again = page.waitForEvent('filechooser');
+  await page.evaluate(() => (window as any).PM.pickFiles(true));
+  await (await again).setFiles([paths[0]!, paths[2]!]);
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.evaluate(() => (window as any).PM.flushProject());
+  expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(1);
+  expect(session.diagnostics.pageErrors).toEqual([]);
 });

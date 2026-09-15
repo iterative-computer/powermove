@@ -19,6 +19,46 @@ export function isUIPlacementMessage(text: unknown): text is string {
   return typeof text === 'string' && text.trimStart().startsWith(UI_PLACEMENT_PREFIX);
 }
 
+/** Separate line-leading protocol messages from prose, including incomplete
+ * streamed prefixes. Never interpret an example embedded in a sentence. */
+export function splitUIPlacementText(source: string, streaming = false): { text: string; messages: string[] } {
+  const marker = UI_PLACEMENT_PREFIX.trimEnd();
+  const pattern = /(^|\n)[ \t]*POWERMOVE_UI_TARGET(?=\s|\{|$)/g;
+  const messages: string[] = [];
+  let text = '', cursor = 0;
+  for (let match; (match = pattern.exec(source));) {
+    text += source.slice(cursor, match.index) + match[1];
+    const start = pattern.lastIndex;
+    let jsonStart = start;
+    while (/\s/.test(source[jsonStart] || '') && jsonStart < source.length) jsonStart++;
+    let end = source.length;
+    if (source[jsonStart] === '{') {
+      let depth = 0, quoted = false, escaped = false;
+      for (let i = jsonStart; i < source.length; i++) {
+        const char = source[i];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') quoted = false;
+        } else if (char === '"') quoted = true;
+        else if (char === '{') depth++;
+        else if (char === '}' && --depth === 0) { end = i + 1; break; }
+      }
+      if (end <= source.length && source[end - 1] === '}') messages.push(UI_PLACEMENT_PREFIX + source.slice(jsonStart, end));
+    } else {
+      const newline = source.indexOf('\n', start);
+      if (newline !== -1) end = newline;
+    }
+    cursor = end;
+    pattern.lastIndex = end;
+  }
+  text += source.slice(cursor);
+  if (streaming) {
+    text = text.replace(/(^|\n)([ \t]*)([A-Z_]+)$/, (match, newline, _space, tail) => marker.startsWith(tail) ? newline : match);
+  }
+  return { text, messages };
+}
+
 export function parseUIPlacement(text: string, workspace: Workspace | null | undefined): UIPlacement | null {
   if (!isUIPlacementMessage(text) || text.length > 600) return null;
   try {

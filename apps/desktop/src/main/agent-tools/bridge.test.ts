@@ -156,6 +156,27 @@ describe('native Powermove agent tool bridge', () => {
     expect(owner.requests).toEqual([]);
     await expect(fs.readFile(path.join(result.dir, '.forked-from', 'manifest.json'), 'utf8'))
       .resolves.toContain('"id":"timeline"');
+    const apiFork = await bridge.callTool(session, 'fork_builtin_extension', { id: 'timeline', forkId: 'api-timeline' });
+    expect(apiFork.ok).toBe(true);
+    expect(JSON.parse((apiFork.content[0] as { text: string }).text).forkId).toBe('api-timeline');
+    expect(owner.requests).toEqual([]);
+  });
+
+  it('uses the API run’s explicit stage without racing filesystem discovery', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const discover = vi.fn(async () => { throw new Error('The filesystem snapshot raced workspace setup'); });
+    const stageForkRebase = vi.fn(async ({ stagingDirectory }) => ({ workingDir: `${stagingDirectory}/my-fork` }));
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      command: process.execPath, mcpServerPath: path.join(__dirname, 'mcp-server.mjs'), stageForkRebase
+    });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'api-rebase', owner: owner as never, baseRevision: 0, resolveStagingDirectory: discover });
+    session.stagingDirectory = '/private/run-stage';
+    const result = await bridge.callTool(session, 'stage_fork_rebase', { id: 'my-fork' });
+    expect(result.ok).toBe(true);
+    expect(stageForkRebase).toHaveBeenCalledWith({ forkId: 'my-fork', stagingDirectory: '/private/run-stage' });
+    expect(discover).not.toHaveBeenCalled();
   });
 
   it('runs fork rebase staging in main for the owning run directory', async () => {

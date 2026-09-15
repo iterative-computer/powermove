@@ -217,7 +217,7 @@ test('drawing a box notes every touched panel and sends that focus with the prom
   await expect(options).toBeHidden();
   await page.mouse.up();
   await expect(options).toBeVisible();
-  await expect(options.getByRole('button', { name: 'Choose focused panels' })).toBeVisible();
+  await expect(options.getByRole('button', { name: 'Choose focused panels' })).toHaveCount(0);
   await expect(options.getByRole('combobox', { name: 'Model', exact: true })).toBeVisible();
   await expect(options.getByRole('combobox', { name: 'Reasoning effort', exact: true })).toBeVisible();
   await expect(page.locator('.spatial-compose textarea')).toHaveValue('Keep this draft');

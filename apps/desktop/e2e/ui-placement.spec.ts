@@ -29,7 +29,11 @@ test.describe('@ui-placement early panel loading', () => {
       const run = (window as any).__ghostRun;
       const text = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
       run.options.onProgress(text);
-      run.options.onTrace({ kind: 'answer', text });
+      for (const fragment of text) {
+        run.options.onTrace({ kind: 'answer', text: fragment });
+        const trace = (window as any).PM.AgentUI.state.trace;
+        if (trace.some((step: any) => step.kind === 'text' && step.text.trim())) throw new Error('Placement fragment leaked into conversation');
+      }
     });
     await expect(ghost).toBeVisible();
     await expect(ghost).toContainText('Updating Timeline controls');

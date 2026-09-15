@@ -848,9 +848,10 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     if (choice === null) return;
     try {
       assertCurrent();
-      if (choice !== 'images') {
+      files = choice.files;
+      if (choice.fps !== null) {
         PM.toast(`Preparing ${files.length} image frames…`, 30_000);
-        files = [await convertImageSequence(files, choice, assertCurrent)];
+        files = [await convertImageSequence(files, choice.fps, assertCurrent)];
         assertCurrent();
       }
     } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000); return; }

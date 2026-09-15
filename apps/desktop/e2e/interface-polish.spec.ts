@@ -1,9 +1,12 @@
-import { expect, test } from './helpers/app';
+import path from 'node:path';
+import { expect, test, repoRoot } from './helpers/app';
+
+test.use({ desktopLaunchOptions: { env: { CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') } } });
 import { importFixture } from './helpers/media';
 
 test.beforeEach(async ({ session }) => { await session.openEditor(); });
 
-test('panel picker, independent hover states, media icons, and titlebar spacing', async ({ session }, info) => {
+test('agent controls, independent hover states, media icons, and titlebar spacing', async ({ session }, info) => {
   const { page } = session;
   await importFixture(page, 'tone.wav');
   await importFixture(page, 'h264-aac.mp4');
@@ -38,15 +41,7 @@ test('panel picker, independent hover states, media icons, and titlebar spacing'
     await page.screenshot({ path: info.outputPath(`panel-icons-${theme}.png`) });
     await page.keyboard.press('Escape');
   }
-  await page.locator('#panel-agent').getByRole('button', { name: 'Choose focused panels' }).click();
-  const picker = page.getByRole('dialog', { name: 'Panel focus', exact: true });
-  await expect(picker).toBeVisible();
-  await expect(picker.getByRole('button', { name: 'All panels', exact: true })).toHaveCount(0);
-  await expect(picker.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
-  await picker.getByRole('checkbox', { name: 'Timeline', exact: true }).check();
-  await expect(picker.getByRole('checkbox', { name: 'Timeline', exact: true })).toBeChecked();
-  await page.screenshot({ path: info.outputPath('panel-focus.png') });
-  await page.keyboard.press('Escape');
-  await expect(picker).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Choose focused panels' })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Panel focus', exact: true })).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -1,10 +1,21 @@
-import { expect, test } from './helpers/app';
+import path from 'node:path';
+import { expect, test, repoRoot } from './helpers/app';
 
-test('dropdown triggers close on the second click and reopen on the third', async ({ session }) => {
+test.use({ desktopLaunchOptions: { env: { CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') } } });
+
+test('native dropdowns reopen and custom pickers toggle on repeated clicks', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
   await page.evaluate(() => (window as any).PM.Kernel.loader.builtinsReady);
+  await session.app.evaluate(({ Menu }) => {
+    (globalThis as any).__menuRequests = 0;
+    Menu.prototype.popup = function (options) {
+      (globalThis as any).__menuRequests++;
+      options?.callback?.();
+    };
+  });
+  let menuRequests = 0;
   const triggers = page.locator('button[aria-haspopup="menu"], button.panel-options');
   expect(await triggers.count()).toBeGreaterThan(5);
   const checked: string[] = [];
@@ -13,20 +24,16 @@ test('dropdown triggers close on the second click and reopen on the third', asyn
     if (!await trigger.isVisible() || !await trigger.isEnabled()) continue;
     const label = await trigger.getAttribute('aria-label');
     await test.step(label || `Dropdown ${index}`, async () => {
-      await trigger.click();
-      await expect(page.locator('.drop[role="menu"]')).toHaveCount(1);
-      await trigger.click();
-      await expect(page.locator('.drop[role="menu"]')).toHaveCount(0);
-      await trigger.click();
-      await expect(page.locator('.drop[role="menu"]')).toHaveCount(1);
-      await page.keyboard.press('Escape');
-      await expect(page.locator('.drop[role="menu"]')).toHaveCount(0);
+      for (let click = 0; click < 3; click++) {
+        await trigger.click();
+        await expect.poll(() => session.app.evaluate(() => (globalThis as any).__menuRequests)).toBe(++menuRequests);
+      }
     });
     checked.push(label || String(index));
   }
   await test.info().attach('checked-dropdowns', { body: JSON.stringify(checked, null, 2), contentType: 'application/json' });
 
-  for (const selector of ['.thread-trigger', '.panel-focus-trigger']) {
+  for (const selector of ['.thread-trigger']) {
     const trigger = page.locator(selector);
     await expect(trigger).toBeVisible();
     await trigger.click();

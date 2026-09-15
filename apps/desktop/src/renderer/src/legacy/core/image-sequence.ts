@@ -1,30 +1,78 @@
-import { orderedSequence, sequenceFrame, validSequenceFps } from '../../../../shared/image-sequence';
+import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, validSequenceFps } from '../../../../shared/image-sequence';
 import type { PMRegistry } from '../registry';
 
 export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
 
-export function chooseSequence(PM: PMRegistry, files: File[], required: boolean): Promise<number | 'images' | null> {
+export function chooseSequence(PM: PMRegistry, files: File[], required: boolean): Promise<{ files: File[]; fps: number | null } | null> {
   return new Promise(resolve => {
     const h = PM.h;
-    const fps = h('input', { type: 'number', min: 1, max: 240, step: 'any', value: PM.curComp?.().fps || PM.proj.fps || 30, 'aria-label': 'Sequence frame rate' });
-    const duration = h('p');
+    let selected = files;
+    let picker: HTMLInputElement | null = null;
+    let closed = false;
+    const fps = h('input.sequence-import-fps', { type: 'number', min: 1, max: 240, step: 'any', value: PM.curComp?.().fps || PM.proj.fps || 30, 'aria-label': 'Sequence frame rate' });
+    const count = h('strong');
+    const filenames = h('p.sequence-import-files');
+    const duration = h('output.sequence-import-duration', { 'aria-label': 'Sequence duration' });
+    const warningTitle = h('strong');
+    const warningText = h('p');
+    const cleanupPicker = () => { picker?.remove(); picker = null; };
+    const reimport = h('button.btn.sequence-import-reimport', { type: 'button', onclick: () => {
+      cleanupPicker();
+      const input = document.createElement('input');
+      input.type = 'file'; input.multiple = true; input.accept = IMAGE_SEQUENCE_ACCEPT;
+      input.style.display = 'none'; picker = input;
+      input.onchange = () => {
+        if (!closed && input.files?.length) { selected = Array.from(input.files); update(); }
+        cleanupPicker();
+      };
+      input.addEventListener('cancel', cleanupPicker, { once: true });
+      body.appendChild(input); input.click();
+    } }, 'Reimport…');
+    const warning = h('div.sequence-import-warning', { role: 'status', 'aria-live': 'polite' },
+      warningTitle, warningText, reimport);
     const update = () => {
-      duration.textContent = validSequenceFps(Number(fps.value))
-        ? `${files.length} frames · ${(files.length / Number(fps.value)).toFixed(3)} seconds`
-        : 'Enter a frame rate between 1 and 240 fps.';
+      const validFps = validSequenceFps(Number(fps.value));
+      count.textContent = `${selected.length} frames selected`;
+      duration.textContent = validFps ? `${(selected.length / Number(fps.value)).toFixed(3)} s` : '—';
+      fps.setAttribute('aria-invalid', String(!validFps));
+      let ordered = selected;
+      try {
+        ordered = orderedSequence(selected);
+        const gaps = sequenceGaps(ordered);
+        const missing = gaps.reduce((count, gap) => count + gap.end - gap.start + 1, 0);
+        const ranges = gaps.slice(0, 8).map(gap => gap.start === gap.end ? String(gap.start) : `${gap.start}–${gap.end}`).join(', ');
+        warningTitle.textContent = missing
+          ? `Missing frame ${missing === 1 ? 'number' : 'numbers'}: ${ranges}${gaps.length > 8 ? `, and ${gaps.length - 8} more gaps` : ''}`
+          : '';
+        warningText.textContent = 'You can still import. Available images will play consecutively, skipping the missing frames.';
+      } catch (error) {
+        warningTitle.textContent = 'Check your selection';
+        warningText.textContent = error instanceof Error ? error.message : 'Choose numbered image frames';
+      }
+      filenames.textContent = `${ordered[0]?.name ?? ''} → ${ordered[ordered.length - 1]?.name ?? ''}`;
+      filenames.title = filenames.textContent;
+      warning.hidden = !warningTitle.textContent;
     };
+    const body = h('div.sequence-import',
+      h('p.sequence-import-intro', 'Turn your numbered images into one clip.'),
+      h('div.sequence-import-source', h('span.sequence-import-icon', PM.icon('film')),
+        h('div.sequence-import-source-text', count, filenames)),
+      h('div.sequence-import-settings',
+        h('label.sequence-import-rate', h('span', 'Frame rate'),
+          h('span.sequence-import-input', fps, h('span', { 'aria-hidden': 'true' }, 'fps')),
+          h('small', '1–240 fps')),
+        h('div.sequence-import-timing', h('span', 'Clip duration'), duration)),
+      warning);
     fps.addEventListener('input', update); update();
-    PM.modal({ title: 'Import image sequence', width: 460,
-      body: h('div', h('p', 'Import numbered images as one clip. Frames are ordered by number and transparency is preserved.'),
-        h('label.field', h('span', 'Frame rate (fps)'), fps), duration),
-      onClose: () => resolve(null),
+    PM.modal({ title: 'Import image sequence', width: 480, body,
+      onClose: () => { closed = true; cleanupPicker(); resolve(null); },
       actions: [
         { label: 'Cancel' },
-        ...(!required ? [{ label: 'Individual images', run: () => { resolve('images'); } }] : []),
+        ...(!required ? [{ label: 'Individual images', run: () => { resolve({ files: selected, fps: null }); } }] : []),
         { label: 'Import sequence', pri: true, run: () => {
-          orderedSequence(files);
+          orderedSequence(selected);
           if (!validSequenceFps(Number(fps.value))) throw new Error('Frame rate must be between 1 and 240 fps');
-          resolve(Number(fps.value));
+          resolve({ files: selected, fps: Number(fps.value) });
         } },
       ],
     });

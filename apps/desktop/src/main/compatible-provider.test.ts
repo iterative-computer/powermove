@@ -1,13 +1,90 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, access } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 vi.mock('electron', () => ({ safeStorage: { isEncryptionAvailable: () => true, encryptString: (value: string) => Buffer.from('encrypted:' + value), decryptString: (value: Buffer) => value.toString().slice(10) } }));
 import { CompatibleProvider, readCompletion } from './compatible-provider';
 import { providerUrl } from '../shared/compatible-provider';
+import { restoreExtensionChangeSet } from './codex/change-history';
+import { prepareAgentWorkspace } from './codex/workspace';
+import { agentResultSchema } from './codex/instructions';
 const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const event = (delta: any, finish_reason: any = null) => `data: ${JSON.stringify({ choices: [{ delta, finish_reason }] })}\r\n\r\n`;
+it('authors and publishes a real effect through API tools, collects artifacts and preserves recovery history', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-api-authoring-')); directories.push(directory);
+  const sample = path.resolve('docs/samples/gradient-tint');
+  const manifest = await readFile(path.join(sample, 'manifest.json'), 'utf8');
+  const source = await readFile(path.join(sample, 'index.ts'), 'utf8');
+  let stage = '', turn = 0;
+  const requests: any[] = [];
+  const complete = { summary: 'Created Gradient Tint.', commands: [], artifacts: [], extensions: [{ id: 'gradient-tint', action: 'created', summary: 'Keyframeable gradient tint' }], notes: [], externalActions: [] };
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return new Response(null, { status: 404 });
+    const body = JSON.parse(options.body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    requests.push(body);
+    const calls = [
+      ['read_file', { path: 'powermove-api/api.ts' }],
+      ['write_file', { path: path.join(stage, 'gradient-tint/manifest.json'), text: manifest }],
+      ['write_file', { path: path.join(stage, 'gradient-tint/index.ts'), text: source }],
+      ['compile_extension', { id: 'gradient-tint' }],
+      ['complete_task', complete]
+    ];
+    const [name, args] = calls[turn++]!;
+    return streamed(event({ tool_calls: [{ index: 0, id: `c${turn}`, function: { name, arguments: JSON.stringify(args) } }] }, 'tool_calls'));
+  }) as typeof fetch;
+  const provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
+  const result = await provider.run({ id: 'authoring', provider: 'compatible', mode: 'autonomous', access: 'project', projectId: 'proof', projectName: 'Proof', projectJSON: '{}', prompt: 'Create a gradient tint effect', images: [], attachments: [] } as any, () => {}, undefined, {
+    extensionsDir: path.join(directory, 'extensions'), apiPackFiles: async () => [{ name: 'api.ts', text: 'export interface PowermoveAPI {}' }],
+    onWorkspace: value => { stage = value; }
+  });
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  if (!result.ok) return;
+  expect(result.extensions).toEqual(complete.extensions);
+  expect(await readFile(path.join(directory, 'extensions/gradient-tint/index.ts'), 'utf8')).toBe(source);
+  expect(JSON.parse(result.text).artifacts).toEqual([]);
+  expect(requests[0].messages[0].content).not.toContain('require Claude or ChatGPT');
+  expect(requests[1].messages.at(-1).content).toContain('PowermoveAPI');
+  expect(requests[4].messages.at(-1).content).toContain('bundlePath');
+  await expect(access(stage)).rejects.toThrow();
+  await restoreExtensionChangeSet({ liveDirectory: path.join(directory, 'extensions'), historyRoot: path.join(directory, 'Agent Change History/proof'), changeSetId: result.extensionChangeSetId! });
+  await expect(access(path.join(directory, 'extensions/gradient-tint'))).rejects.toThrow();
+});
+
+it('requires fresh Computer approval before calling an API or preparing a workspace', async () => {
+  const fetcher = vi.fn();
+  const provider = new CompatibleProvider('/unused', fetcher);
+  const result = await provider.run({ id: 'computer', mode: 'autonomous', access: 'computer', consentToken: null } as any, () => {});
+  expect(result).toMatchObject({ ok: false, error: 'Computer access requires fresh approval for this run.' });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
+it('keeps cancelled extension work in its isolated stage for the next run', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-api-cancel-')); directories.push(directory);
+  let stage = '';
+  const fetcher = vi.fn(async (_url: any, options: any) => {
+    if (options.method === 'GET') return new Response(null, { status: 404 });
+    const body = JSON.parse(options.body);
+    if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
+    if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'write', function: {
+      name: 'write_file', arguments: JSON.stringify({ path: `${stage}/partial/index.ts`, text: 'export function activate() {}' })
+    } }] }, 'tool_calls'));
+    provider.cancel('cancel-run');
+    throw new Error('Cancelled');
+  }) as typeof fetch;
+  const provider = new CompatibleProvider(directory, fetcher);
+  await provider.configure({ baseUrl: 'http://localhost:11434/v1', model: 'local', vision: false });
+  const req = { id: 'cancel-run', threadId: 'thread', provider: 'compatible', mode: 'autonomous', access: 'project', projectId: 'proof', projectName: 'Proof', projectJSON: '{}', prompt: 'Build an effect', images: [], attachments: [] } as const;
+  const extensionsDir = path.join(directory, 'extensions');
+  const result = await provider.run(req as any, () => {}, undefined, { extensionsDir, apiPackFiles: async () => [], onWorkspace: value => { stage = value; } });
+  expect(result).toMatchObject({ ok: false, cancelled: true });
+  expect(await readFile(`${stage}/partial/index.ts`, 'utf8')).toContain('activate');
+  await expect(access(path.join(extensionsDir, 'partial'))).rejects.toThrow();
+  const resumed = await prepareAgentWorkspace(req as any, directory, 'project', agentResultSchema(), { extensionsDir, apiPackFiles: [] });
+  expect(resumed.stagingDirectory).toBe(stage);
+});
 it('discovers provider models and sends the selected model and reasoning on every tool turn', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-model-picker-')); directories.push(directory);
   const requests: any[] = [];
@@ -72,7 +149,10 @@ it('exposes only live inspection tools to compatible editor runs and forwards ca
     if (options.method === 'GET') return new Response(null, { status: 404 });
     const body = JSON.parse(options.body); requests.push(body);
     if (!body.stream) return Response.json({ choices: [{ message: { content: 'OK' } }] });
-    if (body.messages.length === 2) return streamed(event({ tool_calls: [{ index: 0, id: 'capture-1', function: { name: 'capture_panel', arguments: '{"panelId":"inspector"}' } }] }, 'tool_calls'));
+    if (body.messages.length === 2) return streamed(event({ tool_calls: [
+      { index: 0, id: 'capture-1', function: { name: 'capture_panel', arguments: '{"panelId":"inspector"}' } },
+      { index: 1, id: 'state-1', function: { name: 'get_workspace_state', arguments: '{}' } }
+    ] }, 'tool_calls'));
     return streamed(event({ content: '{"kind":"panels"}' }, 'stop'));
   }) as unknown as typeof fetch;
   const provider = new CompatibleProvider(directory, fetcher);
@@ -92,6 +172,7 @@ it('exposes only live inspection tools to compatible editor runs and forwards ca
   expect(toolNames).not.toContain('apply_commands');
   expect(toolNames).not.toContain('computer_use_panel');
   expect(requests.at(-1).messages.at(-1).content[0].image_url.url).toBe('data:image/png;base64,iVBORw==');
+  expect(requests.at(-1).messages.slice(-3).map((message: any) => message.role)).toEqual(['tool', 'tool', 'user']);
   expect(call).toHaveBeenCalledWith('capture_panel', { panelId: 'inspector' });
   expect(result).toMatchObject({ ok: true, text: '{"kind":"panels"}', access: 'editor' });
 });

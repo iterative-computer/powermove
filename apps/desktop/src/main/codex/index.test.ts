@@ -191,9 +191,25 @@ describe('registerCodexIpc', () => {
       IPC.artifactRead,
       IPC.artifactReveal
     ]);
-    expect(mocks.appOnce).toHaveBeenCalledWith('before-quit', expect.any(Function));
-    const beforeQuit = mocks.appOnce.mock.calls.at(-1)?.[1] as (() => void) | undefined;
-    beforeQuit?.();
+  });
+
+  it('keeps agent services alive through a cancelled quit and cleans up only on confirmed shutdown', async () => {
+    const owner = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+    const emit = (event: string) => {
+      for (const [name, callback] of mocks.appOnce.mock.calls) if (name === event) callback();
+    };
+    // A save prompt can cancel before-quit. No agent or tool session may be stopped yet.
+    emit('before-quit');
+    expect(mocks.cancelAll).not.toHaveBeenCalled();
+    expect(mocks.appShutdown).not.toHaveBeenCalled();
+    expect(mocks.accountShutdown).not.toHaveBeenCalled();
+    expect(mocks.toolShutdown).not.toHaveBeenCalled();
+    emit('before-quit');
+    expect(mocks.appShutdown).not.toHaveBeenCalled();
+    mocks.resolve({ ok: true, text: '{}', access: 'editor' });
+    await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+    emit('will-quit');
     expect(mocks.cancelAll).toHaveBeenCalledOnce();
     expect(mocks.appShutdown).toHaveBeenCalledOnce();
     expect(mocks.accountShutdown).toHaveBeenCalledTimes(2);

@@ -24,9 +24,20 @@ export function orderedSequence<T extends { name: string }>(files: T[]): T[] {
     const previous = sequenceFrame(sorted[i - 1]!.name)!.index;
     const current = sequenceFrame(sorted[i]!.name)!.index;
     if (current === previous) throw new Error(`Duplicate frame number ${current}`);
-    if (current !== previous + 1) throw new Error(`Missing frame ${previous + 1} · select a continuous sequence`);
   }
   return sorted;
+}
+
+/** Report gaps as ranges so a sparse sequence never allocates every missing index. */
+export function sequenceGaps(files: Array<{ name: string }>): Array<{ start: number; end: number }> {
+  const sorted = orderedSequence(files);
+  const gaps: Array<{ start: number; end: number }> = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const previous = sequenceFrame(sorted[i - 1]!.name)!.index;
+    const current = sequenceFrame(sorted[i]!.name)!.index;
+    if (current > previous + 1) gaps.push({ start: previous + 1, end: current - 1 });
+  }
+  return gaps;
 }
 
 export function sequenceCandidate(files: Array<{ name: string }>): boolean {
