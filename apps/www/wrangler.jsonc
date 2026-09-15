@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "powermove-www",
+  "compatibility_date": "2026-09-01",
+  "account_id": "98dbb6e46f4901896327e5ff4035d637",
+  "assets": { "directory": "./build", "html_handling": "auto-trailing-slash", "not_found_handling": "404-page" },
+  "routes": [
+    { "pattern": "trypowermove.com", "custom_domain": true },
+    { "pattern": "www.trypowermove.com", "custom_domain": true }
+  ]
+}
