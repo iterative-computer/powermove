@@ -16,6 +16,15 @@ const tool = (over: Partial<Extract<TraceStep, { kind: 'tool' }>>): TraceStep =>
 } as TraceStep);
 
 describe('activityRows', () => {
+  it('hides saved placement metadata while retaining surrounding prose and tool history', () => {
+    const marker = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"fxbrowser","label":"Tracery-inspired effect"}';
+    const rows = activityRows([tool({ id: 'before' }), { kind: 'text', id: 'protocol', text: marker }, tool({ id: 'after' }),
+      { kind: 'text', id: 'reply', text: `${marker}\nThe effect is ready.` }]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ kind: 'tools', toolCount: 2 });
+    expect(rows[1]).toMatchObject({ kind: 'text', text: '\nThe effect is ready.' });
+    expect(JSON.stringify(rows)).not.toContain('POWERMOVE_UI_TARGET');
+  });
   it('groups consecutive tool calls into one natural-language row', () => {
     const rows = activityRows([
       tool({ id: '1', toolName: 'bash' }),

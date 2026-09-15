@@ -14,6 +14,7 @@
   import { modResultForMessage } from './mod-result';
   import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
+  import { splitUIPlacementText } from './ui-placement';
 
   let {
     PM,
@@ -70,8 +71,8 @@
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}
-      <div class="agent-reply"><Markdown text={message.text || ''} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
-      {#if message.requiresProject && messageIndex !== undefined && agentState.provider !== 'compatible'}
+      <div class="agent-reply"><Markdown text={splitUIPlacementText(message.text || '').text} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
+      {#if message.requiresProject && messageIndex !== undefined}
         <button type="button" class="btn agent-error-retry"
           disabled={agentState.phase === 'running'}
           onclick={() => PM.AgentUI?.continueWithProject?.(messageIndex)}>Continue with Project access</button>

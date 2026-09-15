@@ -9,9 +9,20 @@
   import ResultActions from './agent/ResultActions.svelte';
   import ThreadPicker from './agent/ThreadPicker.svelte';
   import { agentState } from './agent/agent-state.svelte';
+  import { panelFocusContext } from './agent/panel-focus';
 
   let { panelId }: PanelProps = $props();
   const PM = window.PM as Record<string, any>;
+
+  // Scope validation belongs to the panel even without the optional focus picker.
+  $effect(() => {
+    void agentState.revision;
+    const current = agentState.scope;
+    const normalized = panelFocusContext(current, PM.WS?.current, PM.PANELS || {}).scope;
+    if (normalized !== current) queueMicrotask(() => {
+      if (agentState.scope === current) PM.AgentUI?.setScope(normalized);
+    });
+  });
 
   /* The transcript owns its vertical scroll. Only edits awaiting review belong
      in the footer; autonomous replies and their files stay in the thread. */

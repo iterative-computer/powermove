@@ -190,9 +190,10 @@ async function attachDiagnostics(testInfo: TestInfo, diagnostics: RendererDiagno
   });
 }
 
-export const test = base.extend<{ session: LaunchedApp }>({
-  session: async ({}, use, testInfo) => {
-    const session = await launchApp();
+export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: LaunchOptions }>({
+  desktopLaunchOptions: [{}, { option: true }],
+  session: async ({ desktopLaunchOptions }, use, testInfo) => {
+    const session = await launchApp(desktopLaunchOptions);
     try {
       await use(session);
     } finally {

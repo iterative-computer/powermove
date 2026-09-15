@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Turn from './Turn.svelte';
 import { WORD_REVEAL_SETTLE_MS } from './motion';
 import type { AgentMessage } from './agent-state.svelte';
-import { resetAgentState } from './agent-state.svelte';
+import { agentState, resetAgentState } from './agent-state.svelte';
 
 let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
@@ -30,7 +30,8 @@ afterEach(() => {
 });
 
 describe('assistant word reveal', () => {
-  it('continues the original capability request only when the user chooses Project access', () => {
+  it.each(['chatgpt', 'claude', 'compatible'] as const)('offers Project continuation for %s only when the user chooses it', (provider) => {
+    agentState.provider = provider;
     const continueWithProject = vi.fn();
     instance = mount(Turn, { target, props: {
       PM: { AgentUI: { continueWithProject } }, messageIndex: 3,

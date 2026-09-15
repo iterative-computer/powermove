@@ -704,8 +704,9 @@ function placementHarness() {
 const placementMessage = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
 const emptyAgentResult = { text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) };
 
-it('preserves an effect-authoring request in Editor mode until Project access is chosen', async () => {
+it.each(['claude', 'chatgpt', 'compatible'])('preserves an effect-authoring request in Editor mode until Project access is chosen with %s', async (provider) => {
   const { PM, jobs } = placementHarness();
+  PM.AgentUI.setProvider(provider);
   PM.AgentUI.setAccess('editor');
   const request = 'make a typewriter effect that lets me control the gradient color of the typing cursor';
   PM.AgentUI.submit(request);
@@ -797,11 +798,12 @@ it('uses Claude to title the first request when Claude is the selected provider'
   assert.equal(PM.AgentThreadTitles.generate.mock.calls[0][1], 'claude');
 });
 
-it('restores the chosen access mode after leaving an API provider instead of stranding extension authoring in Editor', () => {
+it('preserves Project and Editor access when switching to and from an API provider', () => {
   const { PM } = placementHarness();
   PM.AgentUI.setAccess('project');
   PM.AgentUI.setProvider('compatible');
-  assert.equal(PM.AgentUI.state.accessMode, 'editor');
+  assert.equal(PM.AgentUI.state.accessMode, 'project');
+  assert.ok(PM.AgentUI.state.accessModes.some((mode: any) => mode.id === 'project'));
   PM.AgentUI.setProvider('claude');
   assert.equal(PM.AgentUI.state.accessMode, 'project');
   PM.AgentUI.setAccess('editor');
@@ -863,6 +865,22 @@ it('announces the ghost through public progress before any final result, then cl
   jobs[0].resolve(emptyAgentResult);
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
   assert.equal(PM.AgentUI.state.uiPlacement, null);
+});
+
+it('keeps fragmented placement metadata out of live and saved conversation text', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.submit('Adjust the timeline controls');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  for (const text of placementMessage) {
+    jobs[0].options.onTrace({ kind: 'answer', text });
+    assert.equal(PM.AgentUI.state.trace.filter(step => step.kind === 'text').map(step => step.text).join(''), '');
+  }
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.uiPlacement?.id, 'timeline'));
+  jobs[0].options.onTrace({ kind: 'answer', text: '\nI’m updating the controls.' });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.trace.filter(step => step.kind === 'text').map(step => step.text).join('').trim(), 'I’m updating the controls.'));
+  jobs[0].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.ok(!JSON.stringify(PM.AgentUI.state.conversation).includes('POWERMOVE_UI_TARGET'));
 });
 
 it('clears placement on stop and ignores late events from stopped or steered runs', async () => {
@@ -1134,7 +1152,7 @@ it('caps traces at 200 steps by dropping old thought and tool rows before text',
   assert.equal(PM.AgentUI.state.trace.at(-1).id, 'tool-204');
 });
 
-it('keeps the trace array across snapshots and clears it for a new request', () => {
+it('keeps the trace array across snapshots and archives it before a new request', () => {
   const { PM, assistant } = spatialHarness();
   assistant.lifecycle.reduceTrace({ kind: 'thought', text: 'Old run' });
   PM.AgentUI.update({ flush: true });
@@ -1145,7 +1163,29 @@ it('keeps the trace array across snapshots and clears it for a new request', () 
   assert.equal(PM.AgentUI.state.trace, priorSnapshot);
   PM.AgentUI.submit('New run');
   assert.deepEqual(PM.AgentUI.state.trace, []);
+  const archived = PM.AgentUI.state.conversation.find(message => message.role === 'trace');
+  assert.equal(archived?.steps[0].label, 'Old run');
+  assert.equal(archived?.steps[0].live, false);
+  assert.ok(PM.AgentUI.state.conversation.indexOf(archived) < PM.AgentUI.state.conversation.findIndex(message => message.text === 'New run'));
   PM.AgentUI.stop();
+});
+
+it('preserves traces arriving while a steering request falls back to a new run', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.submit('First request');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].options.onTrace({ kind: 'thought', text: 'Before steering' });
+  let resolveSteer;
+  PM.CodexBridge.steer = vi.fn(() => new Promise(resolve => { resolveSteer = resolve; }));
+  PM.AgentUI.submit('New direction');
+  jobs[0].options.onTrace({ kind: 'thought', text: 'While steering' });
+  resolveSteer(false);
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  const conversation = PM.AgentUI.state.conversation;
+  assert.deepEqual(conversation.filter(message => message.role === 'trace').flatMap(message => message.steps).map(step => step.label), ['Before steering', 'While steering']);
+  assert.equal(conversation.filter(message => message.text === 'New direction').length, 1);
+  PM.AgentUI.stop();
+  jobs.forEach(job => job.resolve(emptyAgentResult));
 });
 
 it('forwards typed extension changes through the Electron shim payload', async () => {

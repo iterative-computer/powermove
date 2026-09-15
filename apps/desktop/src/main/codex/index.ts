@@ -389,7 +389,9 @@ export function registerCodexIpc(
       }
       let result = req.provider === 'compatible'
         ? await compatible.run(req, step => { if (!owner.isDestroyed()) owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step }); },
-          toolSession && toolBridge ? (name, args) => toolBridge.callRenderer(toolSession!, name, args) : undefined)
+          toolSession && toolBridge ? (name, args) => toolBridge.callTool(toolSession!, name, args) : undefined,
+          { extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles,
+            onWorkspace: directory => { if (toolSession) toolSession.stagingDirectory = directory; } })
         : await selectedRunner.run(req, {
         userData: ctx.userData,
         extensionsDir: ctx.extensionsDir,

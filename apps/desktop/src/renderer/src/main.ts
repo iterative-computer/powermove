@@ -1,6 +1,7 @@
 import '@powermove/tokens/tokens.css';
 import '../../../css/app.css';
 import '../../../css/settings.css';
+import './legacy/core/image-sequence.css';
 import './legacy/bootstrap';
 import { autoEnhanceSelects } from './controls/select/enhance';
 

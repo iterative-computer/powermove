@@ -100,11 +100,10 @@ export class PowermoveAgentToolSession {
 
   isClosed(): boolean { return this.closed; }
 
-  /** Staging dir for a fork rebase: the run's resolver when the host supplied
-   * one, otherwise the stage already discovered for this session. */
+  /** Prefer the run's known stage; discover it lazily for native CLI runs. */
   async rebaseStagingDirectory(forkId: string, workspace: string): Promise<string> {
-    if (this.resolveStagingDirectory) return this.resolveStagingDirectory(forkId);
     if (this.stagingDirectory) return this.stagingDirectory;
+    if (this.resolveStagingDirectory) return this.resolveStagingDirectory(forkId);
     const discovered = await resolveCurrentStagingDirectory(workspace, this.openedAt);
     this.stagingDirectory = discovered;
     return discovered;
@@ -355,34 +354,40 @@ export class PowermoveAgentToolBridge {
     if (!POWERMOVE_AGENT_TOOLS.some((tool) => tool.name === request.tool)) {
       throw new Error(`Unknown Powermove tool: ${request.tool}`);
     }
-    if (request.tool === 'fork_builtin_extension') {
-      const result = await this.forkBuiltinExtension(session, request);
-      return {
-        id: request.id,
-        ok: true,
-        content: [{ type: 'text', text: JSON.stringify(result) }]
-      };
-    }
-    const response = request.tool === 'stage_fork_rebase'
-      ? await this.callStageForkRebase(session, request.arguments, request.workspace)
-      : request.tool === 'capture_panel'
-      ? await this.capturePanel(session, request.arguments)
-      : request.tool === 'computer_use_panel'
-        ? await this.computerUsePanel(session, request.arguments)
-        : await this.callRenderer(session, request.tool, request.arguments);
-    session.noteResponse(response);
+    const response = await this.callTool(session, request.tool, request.arguments, request.workspace);
     return {
       id: request.id,
       ok: response.ok,
       ...(response.error ? { error: response.error } : {}),
       content: response.content.map((item) => item.type === 'text'
         ? item
-        : {
-            type: 'image',
-            data: Buffer.from(item.data).toString('base64'),
-            mimeType: item.mimeType
-          })
+        : { type: 'image', data: Buffer.from(item.data).toString('base64'), mimeType: item.mimeType })
     };
+  }
+
+  /** Both native MCP and API providers need main-process capture, input and
+   * staging handlers, not just the renderer's editing dispatcher. */
+  async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = ''): Promise<AgentToolResponseEvent> {
+    if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
+    if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
+    if (tool === 'fork_builtin_extension') {
+      const request: ToolSocketRequest = { token: session.token, runId: session.runId, id: null, tool, arguments: args, workspace };
+      const result = await this.forkBuiltinExtension(session, request);
+      return {
+        runId: session.runId, callId: `tool-${randomUUID()}`,
+        ok: true,
+        content: [{ type: 'text', text: JSON.stringify(result) }]
+      };
+    }
+    const response = tool === 'stage_fork_rebase'
+      ? await this.callStageForkRebase(session, args, workspace)
+      : tool === 'capture_panel'
+      ? await this.capturePanel(session, args)
+      : tool === 'computer_use_panel'
+        ? await this.computerUsePanel(session, args)
+        : await this.callRenderer(session, tool, args);
+    session.noteResponse(response);
+    return response;
   }
 
   private async callStageForkRebase(

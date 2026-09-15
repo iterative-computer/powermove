@@ -10,6 +10,7 @@
 
 export type { TraceStep } from './agent-state.svelte';
 import type { TraceStep } from './agent-state.svelte';
+import { splitUIPlacementText } from './ui-placement';
 
 export type ToolsRowStatus = 'running' | 'partial' | 'error' | 'done';
 
@@ -246,11 +247,17 @@ export function activityRows(steps: TraceStep[] = []): ActivityRow[] {
   // Reasoning and calls share one group; only model prose breaks it, so the
   // trail reads text → work → text in stream order.
   for (const step of steps) {
+    if (step?.kind === 'text') {
+      const text = splitUIPlacementText(step.text).text;
+      if (!text.trim()) continue;
+      flushWork();
+      rows.push({ ...step, text });
+      continue;
+    }
     if (step?.kind === 'tool' || step?.kind === 'thought') {
       work.push(step);
     } else {
       flushWork();
-      if (step?.kind === 'text') rows.push(step);
     }
   }
   flushWork();

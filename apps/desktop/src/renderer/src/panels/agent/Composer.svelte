@@ -159,5 +159,5 @@
       </button>
     {/if}
   </div>
-  <AgentOptions {PM} showPanelFocus={panelId !== 'library'} />
+  <AgentOptions {PM} />
 </div>

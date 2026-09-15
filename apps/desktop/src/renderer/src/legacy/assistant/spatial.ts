@@ -6,7 +6,7 @@ import { LIMITS, type CodexTraceEvent, type ReasoningEffort } from '../../../../
 import { addPanel, findPanel, hidePanel, movePanel, restorePanel } from '../../layout/model';
 import { composerMode, type AgentSnapshot } from '../../panels/agent/agent-state.svelte';
 import { registerAgentPanel } from '../../panels/register-agent';
-import { isUIPlacementMessage, parseUIPlacement, uiPlacementInstructions } from '../../panels/agent/ui-placement';
+import { isUIPlacementMessage, parseUIPlacement, splitUIPlacementText, uiPlacementInstructions } from '../../panels/agent/ui-placement';
 import { flushSync, mount, unmount } from 'svelte';
 import AgentOptions from '../../panels/agent/AgentOptions.svelte';
 import { isAgentImageAttachment, mountPromptAttachments, readPromptAttachment, requestFileAttachments } from '../../panels/agent/attachments';
@@ -76,7 +76,7 @@ function boundedEditableSource(catalog: any, request: string, selectedLayerIds: 
 function boundedAgentPrompt(prompt: string, request: string, maxChars = LIMITS.codexPromptChars - AGENT_PROMPT_HEADROOM_CHARS) {
   if (prompt.length <= maxChars) return prompt;
   const suffix = `\n\nUSER REQUEST\n${String(request || '').slice(0, AGENT_REQUEST_CHARS)}`;
-  const notice = '\n\n[Earlier project context was clipped to fit the agent request limit. Use the editable catalog and rendered frames above, then preserve unrelated source.]';
+  const notice = '\n\n[Earlier project context was clipped to fit the agent request limit. Use the editable catalog above, then preserve unrelated source.]';
   const prefixChars = Math.max(0, maxChars - notice.length - suffix.length);
   return `${prompt.slice(0, prefixChars).trimEnd()}${notice}${suffix}`.slice(0, maxChars);
 }
@@ -268,7 +268,6 @@ const AGENT_PROVIDERS: any = [
   { id: 'compatible', label: 'API / local model' },
 ];
 S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort) || S.reasoningEffort;
-if (S.provider === 'compatible') S.accessMode = 'editor';
 function selectedModelName(provider: string, model: string): string {
   return provider === 'compatible' && model === 'configured' ? AGENT_MODELS.compatible[0]!.label : model;
 }
@@ -480,7 +479,7 @@ function agentUISnapshot(): AgentSnapshot {
     models: AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS],
     providers: AGENT_PROVIDERS,
     reasoningEfforts: modelEfforts(S.provider, selectedModelName(S.provider, S.model)),
-    accessModes: S.provider === 'compatible' ? AGENT_ACCESS_MODES.filter((item: any) => item.id === 'editor') : AGENT_ACCESS_MODES,
+    accessModes: AGENT_ACCESS_MODES,
   };
   S.conversation.forEach((message: any) => { message.entering = false; });
   S.pendingEntering = false;
@@ -510,14 +509,7 @@ registerAgentPanel(PM, {
   },
   setProvider: (provider: string) => {
     if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || S.activeRequest) return;
-    const leavingCompatible = S.provider === 'compatible' && provider !== 'compatible';
     S.provider = provider;
-    if (provider === 'compatible') S.accessMode = 'editor';
-    else if (leavingCompatible) {
-      // The API provider's forced restriction is not the user's saved choice.
-      const access = PM.store?.get?.('agentAccessMode', 'project');
-      S.accessMode = access === 'editor' ? 'editor' : 'project';
-    }
     S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
     S.reasoningEffort = modelEffort(provider, selectedModelName(provider, S.model), S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
@@ -533,7 +525,7 @@ registerAgentPanel(PM, {
   },
   setAccess: setAgentAccessMode,
   continueWithProject: (messageIndex: number) => {
-    if (S.activeRequest || S.provider === 'compatible' || !Number.isInteger(messageIndex)
+    if (S.activeRequest || !Number.isInteger(messageIndex)
       || !S.conversation[messageIndex]?.requiresProject) return;
     setAgentAccessMode('project');
     PM.AgentUI?.retry?.(messageIndex);
@@ -1327,19 +1319,12 @@ function trimTrace() {
   }
 }
 
+// Raw fragments are transient: protocol metadata never enters saved traces.
+const traceAnswerSources = new WeakMap<object, string>();
+
 function reduceTrace(step: CodexTraceEvent) {
   if (!step || typeof step !== 'object') return;
-  if ((step.kind === 'answer' || step.kind === 'thought') && isUIPlacementMessage(step.text)) {
-    // Only explicit public commentary can place a ghost, never reasoning or tool output.
-    if (step.kind === 'answer' && S.phase === 'working') {
-      const placement = parseUIPlacement(step.text, PM.WS?.current);
-      if (placement) {
-        S.uiPlacement = placement;
-        S.activity = `Working on ${placement.label}…`;
-      }
-    }
-    return;
-  }
+  if (step.kind === 'thought' && isUIPlacementMessage(step.text)) return;
   if (step.kind === 'thought') {
     if (!step.text) return;
     let thought: any = S.trace.at(-1);
@@ -1356,7 +1341,20 @@ function reduceTrace(step: CodexTraceEvent) {
       text = { kind: 'text', id: PM.uid('trace-text-'), text: '' };
       S.trace.push(text);
     }
-    text.text = `${text.text}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
+    const previous = traceAnswerSources.get(text) ?? text.text;
+    const separator = previous && isUIPlacementMessage(step.text) ? '\n' : '';
+    const raw = `${previous}${separator}${step.text}`.slice(0, TRACE_TEXT_LIMIT);
+    traceAnswerSources.set(text, raw);
+    const split = splitUIPlacementText(raw, true);
+    text.text = split.text;
+    // Only public answer metadata may place a ghost, never reasoning or tools.
+    if (S.phase === 'working') for (const message of split.messages) {
+      const placement = parseUIPlacement(message, PM.WS?.current);
+      if (placement) {
+        S.uiPlacement = placement;
+        S.activity = `Working on ${placement.label}…`;
+      }
+    }
   } else if (step.kind === 'tool-start') {
     finishTraceThought();
     const tool: any = S.trace.find((entry: any) => entry.kind === 'tool' && entry.id === step.itemId);
@@ -1384,6 +1382,8 @@ function reduceTrace(step: CodexTraceEvent) {
 function sealTrace() {
   finishTraceThought();
   S.trace.forEach((step: any) => {
+    const raw = traceAnswerSources.get(step);
+    if (step.kind === 'text' && raw !== undefined) step.text = splitUIPlacementText(raw).text;
     if (step.kind === 'tool' && step.status === 'running') step.status = 'continued';
   });
 }
@@ -1394,7 +1394,7 @@ function sealTrace() {
    when a separate assistant turn replaces it (stop, plans, errors). */
 function archiveTrace(preserveText = false) {
   sealTrace();
-  const steps: any = preserveText ? [...S.trace] : S.trace.filter((step: any) => step.kind !== 'text');
+  const steps: any = S.trace.filter((step: any) => step.kind !== 'text' || (preserveText && step.text.trim()));
   S.trace = [];
   if (steps.length) S.conversation.push({ role: 'trace', steps });
 }
@@ -1842,7 +1842,9 @@ async function sendRequest(input: any) {
   S.activeRequest = controller;
   previousRequest?.abort();
   S.requestText = request;
-  S.trace = [];
+  // Keep residual activity from a settled run, and events received while a
+  // rejected steering request was waiting, before starting the next message.
+  archiveTrace(true);
   S.uiPlacement = null;
   S.requestAttachments = S.attachments.splice(0);
   S.composerDraft = '';
@@ -1859,7 +1861,7 @@ async function sendRequest(input: any) {
     generateThreadTitle(threads.projectId, threadIdAtStart, typedRequest, S.provider);
   }
   const accessAtStart: any = S.accessMode;
-  const autonomous: any = accessAtStart !== 'editor' || S.provider === 'compatible';
+  const autonomous: any = accessAtStart !== 'editor';
   updateSteps(autonomous ? [
     'Understand the request and project',
     'Research and operate the required tools',
@@ -2054,7 +2056,7 @@ RULES
 - Return 2–6 short steps that describe the actual work you will carry out. Each step must start with a verb and be specific enough to show in the interface as a to-do item.
 - While working, emit concise user-visible reasoning summaries about what you are inspecting, deciding, or validating. Do not expose private chain-of-thought.
 - kind=scene for changes to layers, content, motion, timing, effects, or composition settings. Each sceneEdit.commands item must be one JSON-encoded source-edit object using only availableOperations. Use stable explicit ids for new layers that later commands target. Never output JavaScript, shell commands, or whole-project JSON.
-- For scene requests, inspect the live source and attached rendered frames. Preserve locked layers, hand-edited channels, and unrelated work. Set reviewTimes to the most revealing moments. Return neutral section and chromeEdit fields.
+- For scene requests, inspect the live source. Preview frames are not captured by default. Use render_frames only when you decide visual inspection is needed; for structured scene edits, leave reviewTimes empty unless you explicitly need frames at particular moments. Preserve locked layers, hand-edited channels, and unrelated work. Return neutral section and chromeEdit fields.
 - kind=panels for direct changes to the current panel layout. panelEdit must be one JSON-encoded object shaped like {"actions":[{"type":"add|restore|hide|move|reorder|resize|resizeDock|rename|collapse|expand","panelId":"PANEL_ID","dockId":"left|center|right|EXISTING_DOCK","position":0,"size":300,"title":"New title"}]}. You may return up to 16 ordered actions. Use add for an available panel that is not present, restore for a hidden panel, move for a different dock, reorder for an exact zero-based position, resize for panel height, resizeDock for dock width, rename for its visible title, and collapse/expand for its collapsed state. Never hide or collapse viewer. Prefer a direct panels plan over rebuilding the whole workspace when the user asks to rearrange existing panels.
 - kind=workspace when the user asks for a complete workspace, layout, editing environment, or a coordinated group of panels. workspaceEdit must be one JSON-encoded manifest shaped like {"name":"...","density":"compact|normal|comfy","accent":"#RRGGBB","docks":[{"id":"left|center|right","size":number,"flex":boolean,"panels":[{"id":"viewer|timeline|inspector|assets|fxbrowser|takes|notes|CUSTOM_ID","size":number,"flex":boolean}]}],"sections":[SECTION_OBJECTS]}. Include viewer, keep all panels reachable, and make every generated section control source-connected under the same rules below.
 - For non-panel requests return panelEdit="{\"actions\":[]}". For non-workspace requests return workspaceEdit="{}". For non-interface requests return interfaceEdit="{}". For non-scene requests return an empty neutral sceneEdit. For non-section requests return a neutral empty section with tool="".
@@ -2079,7 +2081,7 @@ RULES
 VISUAL REFERENCES
 ${attachedFiles.some((file: any) => file.image) ? '- User-attached images come first and are direct visual references.' : '- No user image attachment was provided.'}
 ${S.regionImage ? '- After user images, the next attached image is an exact screenshot of the selected editor region before the Ripple overlay appeared.' : '- No editor region was selected.'}
-- Remaining attached images are rendered composition frames at the times listed below.
+${observation?.images?.length ? '- Remaining attached images are rendered composition frames at the times listed below.' : '- No composition preview frames were captured. Request render_frames if visual inspection is needed.'}
 
 ATTACHED FILES
 ${JSON.stringify(attachedFiles)}
@@ -2741,7 +2743,6 @@ async function undoSceneRun() {
 
 function onKey(event: any) {
   if (!S.active) return;
-  if (event.target?.closest?.('.panel-focus-popup')) return;
   if (event.key === 'Escape') {
     event.preventDefault(); event.stopPropagation();
     if (S.phase === 'applying') return;

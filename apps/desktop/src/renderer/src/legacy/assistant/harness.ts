@@ -135,8 +135,11 @@ async function capture(times = defaultTimes(), width = 480) {
   return { times: chosen, images };
 }
 
-async function observe(times: any) {
-  const frames = await capture(times);
+async function observe(times?: any) {
+  // Reading context must not decode frames or touch playback. Only explicit
+  // agent-selected review times opt into capture; render_frames calls capture directly.
+  const chosen = safeTimes(times, []);
+  const frames = chosen.length ? await capture(chosen) : { times: [], images: [] };
   return { state: projectState(), ...frames };
 }
 
@@ -186,7 +189,7 @@ function sanitizeProposal(raw: any) {
     label: text(raw?.label, 'Agent composition edit', 80),
     summary: text(raw?.summary, 'A structured composition change is ready to review.', 260),
     commands,
-    reviewTimes: safeTimes(raw?.reviewTimes, defaultTimes()),
+    reviewTimes: safeTimes(raw?.reviewTimes, []),
     baseRevision: Number(PM.proj.revision) || 0,
   };
 }
@@ -236,7 +239,7 @@ function promptContext(observation: any) {
 }
 
 function reviewPrompt(request: any, applied: any, pass: any, observation: any) {
-  return `You are the visual review stage inside Powermove's bounded motion-editing harness. The attached images are real rendered frames after source edits. Judge the result against the user's request and the live semantic source.
+  return `You are the review stage inside Powermove's bounded motion-editing harness. Judge the result against the user's request and the live semantic source. Frames are only attached when explicitly requested through reviewTimes; when there are no frames, do not claim visual verification. Leave reviewTimes empty unless you need to inspect specific moments.
 
 USER REQUEST
 ${request}
@@ -271,12 +274,12 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
   const applied = results ? results.map((item: any) => item.command) : proposal.commands.slice();
   const skipped = (results || []).flatMap((item: any) => item.data?.skippedLocked || []);
   if (skipped.length && first.message) progress(first.message.split('. ').find((part: any) => part.startsWith('Skipped locked')) || first.message);
-  let review = { status: 'pass', message: 'The rendered change is ready.', critique: '' };
+  let review = { status: 'pass', message: 'The editable change is ready.', critique: '' };
   let frames = null;
   let reviewError = '';
   try {
     for (let pass = 0; pass <= MAX_REPAIRS; pass++) {
-      progress(pass ? `Reviewing repair ${pass} of ${MAX_REPAIRS}…` : 'Reviewing rendered frames…');
+      progress(pass ? `Reviewing repair ${pass} of ${MAX_REPAIRS}…` : 'Reviewing the source edit…');
       frames = await observe(proposal.reviewTimes);
       const raw = await PM.CodexBridge.request(
         reviewPrompt(request, applied, pass, frames), reviewSchema(), frames.images,
@@ -296,7 +299,7 @@ async function execute(request: any, proposal: any, progress: any = () => {}) {
   } catch (error: any) {
     reviewError = String(error.message || error);
   }
-  /* Always present pixels from the final source, including after the last repair. */
+  /* Refresh final source, capturing pixels only at agent-requested times. */
   try { frames = await observe(proposal.reviewTimes); }
   catch (error: any) {
     reviewError = reviewError || String(error.message || error);

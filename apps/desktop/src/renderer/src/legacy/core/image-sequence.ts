@@ -1,4 +1,3 @@
-import './image-sequence.css';
 import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, validSequenceFps } from '../../../../shared/image-sequence';
 import type { PMRegistry } from '../registry';
 
