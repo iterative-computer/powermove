@@ -66,17 +66,25 @@ extraMetadata:
   main: out/main/index.js
 
 afterPack: ./scripts/after-pack.mjs
+# Releases live in this repository. electron-updater reads the GitHub release
+# feed (latest-mac.yml / beta-mac.yml), so the repo must be public for updates
+# to work on user machines. Drafts first: parallel asset uploads race release
+# creation, and the workflow publishes the draft once every asset is up.
 publish:
   provider: github
-  owner: motionerapp
-  repo: powermove-releases
-  releaseType: prerelease
+  owner: iterative-computer
+  repo: powermove
+  releaseType: draft
 
 artifactName: ${productName}-${version}-mac-${arch}.${ext}
 
 mac:
+  # Local dist:mac builds stay unsigned. scripts/release-mac.mjs flips
+  # identity, hardenedRuntime and notarize on for CI releases.
   identity: null
   hardenedRuntime: false
+  category: public.app-category.graphics-design
+  entitlementsInherit: resources/entitlements.mac.plist
   icon: resources/icon.icns
   target:
     - target: dmg
