@@ -27,7 +27,7 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
   await expect(dialog).toBeVisible();
   if (fps === 12) await expect(dialog).toContainText('Missing frame number: 11');
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill(String(fps));
-  await expect(dialog).toContainText(`3 frames · ${(3 / fps).toFixed(3)} seconds`);
+  await expect(dialog).toContainText(`${(3 / fps).toFixed(3)} s`);
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
   await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'frame sequence.webm'));
   const imported = await page.evaluate(() => {
@@ -122,17 +122,20 @@ test('reimport replaces missing frames, preserves the frame rate and insertion t
   await expect(dialog).toContainText('Missing frame number: 2');
   await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('24');
   await dialog.screenshot({ path: test.info().outputPath('missing-frames.png') });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  await dialog.screenshot({ path: test.info().outputPath('missing-frames-dark.png') });
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
   const cancelled = page.waitForEvent('filechooser');
   await dialog.getByRole('button', { name: 'Reimport…', exact: true }).click();
   await (await cancelled).setFiles([]);
   await expect(dialog).toContainText('Missing frame number: 2');
-  await expect(dialog).toContainText('2 frames · 0.083 seconds');
+  await expect(dialog).toContainText('0.083 s');
   const replacement = page.waitForEvent('filechooser');
   await dialog.getByRole('button', { name: 'Reimport…', exact: true }).click();
   await (await replacement).setFiles([paths[2]!, paths[0]!, paths[1]!]);
   await expect(dialog).not.toContainText('Missing frame');
   await expect(dialog.getByRole('spinbutton', { name: 'Sequence frame rate' })).toHaveValue('24');
-  await expect(dialog).toContainText('3 frames · 0.125 seconds');
+  await expect(dialog).toContainText('0.125 s');
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
   await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'f sequence.webm'));
   expect(await page.evaluate(() => {

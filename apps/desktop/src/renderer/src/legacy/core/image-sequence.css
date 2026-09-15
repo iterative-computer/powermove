@@ -1,0 +1,111 @@
+.sequence-import {
+  display: grid;
+  gap: 20px;
+  line-height: 1.5;
+}
+
+.sequence-import p { margin: 0; }
+.sequence-import-intro { color: var(--tx-2); }
+
+.sequence-import-source {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-panel-2);
+}
+
+.sequence-import-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-md);
+  background: var(--accent-dim);
+  color: var(--accent-tx);
+}
+
+.sequence-import-icon svg { width: 24px; height: 24px; }
+.sequence-import-source-text { min-width: 0; }
+.sequence-import strong { font-weight: var(--fw-semibold); }
+
+.sequence-import-files {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tx-2);
+  font-size: var(--fs-sm);
+}
+
+.sequence-import-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.sequence-import-rate,
+.sequence-import-timing {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  color: var(--tx-2);
+  font-size: var(--fs-sm);
+}
+
+.sequence-import-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-float);
+}
+
+.sequence-import-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.sequence-import input.sequence-import-fps {
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+  color: var(--tx);
+  font: var(--fs-md) var(--f-mono);
+}
+
+.sequence-import-rate small { font-size: var(--fs-xs); }
+.sequence-import-duration {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  color: var(--tx);
+  font: var(--fs-xl) var(--f-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.sequence-import-warning {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 24%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.sequence-import-warning[hidden] { display: none; }
+.sequence-import-warning strong { color: var(--warning); }
+.sequence-import-warning p { color: var(--tx-2); font-size: var(--fs-sm); }
+.sequence-import-reimport { justify-self: start; margin-top: 4px; }
+.sequence-import-note { color: var(--tx-2); font-size: var(--fs-xs); }
