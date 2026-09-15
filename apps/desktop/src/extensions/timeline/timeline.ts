@@ -1867,7 +1867,11 @@ function bind(cv: any, wrap: any) {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
       const tAt = x2t(e.offsetX);
-      T.pps = clamp(T.pps * (1 - e.deltaY * .004), 4, 4000);
+      const pixels = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? Math.max(100, T.hgt) : 1);
+      // Match composition navigation. Exponential scaling makes reversing a
+      // pinch restore the original scale instead of gradually zooming out.
+      const factor = clamp(Math.exp(-pixels * .006), .5, 2);
+      T.pps = clamp(T.pps * factor, 4, 4000);
       T.scrollT = tAt - (e.offsetX - T.gut) / T.pps;
     } else if (e.shiftKey) {
       T.scrollT += e.deltaY / T.pps;

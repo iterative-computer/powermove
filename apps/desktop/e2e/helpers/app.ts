@@ -170,7 +170,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       if (closed) return;
       closed = true;
       await active.app.close().catch(() => undefined);
-      if (ownsUserData) await rm(userData, { recursive: true, force: true });
+      if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   };
   return session;
@@ -203,3 +203,28 @@ export const test = base.extend<{ session: LaunchedApp }>({
 });
 
 export { expect };
+
+/** Exercise the native menu IPC without showing an AppKit popup in hidden tests. */
+export async function chooseNativeMenu(session: LaunchedApp, label: string, trigger: () => Promise<unknown>): Promise<void> {
+  await session.app.evaluate(({ Menu }, label) => {
+    const state = { original: Menu.prototype.popup, result: 'waiting' };
+    (globalThis as any).__testNativeMenu = state;
+    Menu.prototype.popup = function (options) {
+      Menu.prototype.popup = state.original;
+      const item = this.items.find(item => item.label === label && item.enabled);
+      state.result = item ? 'selected' : `Missing enabled native menu item: ${label}; got ${this.items.map(item => item.label).join(', ')}`;
+      item?.click(item, options?.window, {} as any);
+      options?.callback?.();
+    };
+  }, label);
+  try {
+    await trigger();
+    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenu.result)).toBe('selected');
+  } finally {
+    await session.app.evaluate(({ Menu }) => {
+      const state = (globalThis as any).__testNativeMenu;
+      if (state) Menu.prototype.popup = state.original;
+      delete (globalThis as any).__testNativeMenu;
+    });
+  }
+}

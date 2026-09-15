@@ -439,6 +439,64 @@ describe('pro editor shortcut behavior', () => {
     expect(ids(PM).slice(0, 3)).toEqual(['parent', 'child', 'locked']);
   });
 
+  it('pastes at the current playhead with relative timing, animation, media trim, and undo intact', () => {
+    const PM = editorRuntime();
+    const later = layer(PM, 'later', { from: 4, dur: 3 });
+    const first = layer(PM, 'first', { type: 'video', from: 2, dur: 6, d: { trim: 1.5, speed: 2 } });
+    PM.setKey(first, 'opacity', 2, 0);
+    PM.setKey(first, 'opacity', 4, 100);
+    PM.selectLayers([later.id, first.id]);
+    PM.cmd('copyLayers');
+    const original = JSON.stringify(PM.proj.layers);
+    PM.time = 7.25;
+    PM.hist.clear();
+    PM.cmd('pasteLayers');
+    const copies = PM.selLayers();
+    expect(copies.map((value: any) => value.from)).toEqual([9.25, 7.25]);
+    expect(copies.map((value: any) => value.dur)).toEqual([3, 6]);
+    expect(copies[1].d).toMatchObject({ trim: 1.5, speed: 2 });
+    expect(PM.ev(copies[1], 'opacity', 8.25)).toBeCloseTo(PM.ev(first, 'opacity', 3));
+    expect(JSON.stringify(PM.proj.layers.filter((value: any) => [later.id, first.id].includes(value.id)))).toBe(original);
+    expect(PM.hist.list()).toEqual(['Paste layers']);
+    expect(PM.hist.undo()).toBe(true);
+    expect(JSON.stringify(PM.proj.layers)).toBe(original);
+    expect(PM.hist.redo()).toBe(true);
+    expect(PM.proj.layers.slice(0, 2).map((value: any) => value.from)).toEqual([9.25, 7.25]);
+    PM.time = 0;
+    PM.cmd('pasteLayers');
+    expect(PM.selLayers().map((value: any) => value.from)).toEqual([2, 0]);
+  });
+
+  it('keeps duplicated layers at their original times regardless of the playhead', () => {
+    const PM = editorRuntime();
+    const source = layer(PM, 'source', { from: 2, dur: 3 });
+    PM.selectLayers([source.id]);
+    PM.time = 8;
+    PM.cmd('duplicate');
+    expect(PM.firstSel()).toMatchObject({ from: 2, dur: 3 });
+    expect(PM.firstSel().id).not.toBe(source.id);
+  });
+
+  it('pastes a group by its visible span and shifts its animation clock with its children', () => {
+    const PM = editorRuntime();
+    const first = layer(PM, 'first', { from: 2, dur: 3 });
+    const later = layer(PM, 'later', { from: 4, dur: 2 });
+    const inner = PM.groupLayers([first.id]);
+    const outer = PM.groupLayers([inner.id, later.id]);
+    PM.setKey(outer, 'opacity', 2, 0);
+    PM.setKey(outer, 'opacity', 4, 100);
+    PM.selectLayers([outer.id]);
+    PM.cmd('copyLayers');
+    PM.time = 0;
+    PM.cmd('pasteLayers');
+    const copies = PM.selLayers();
+    expect(copies.map((value: any) => value.from)).toEqual([-2, -2, 0, 2]);
+    expect(PM.groupSpan(copies[0])).toEqual({ from: 0, dur: 4 });
+    expect(PM.ev(copies[0], 'opacity', 1)).toBeCloseTo(PM.ev(outer, 'opacity', 3));
+    expect(copies[1].group).toBe(copies[0].id);
+    expect(copies[2].group).toBe(copies[1].id);
+  });
+
   it('drops an external clipboard parent only when that parent is gone', () => {
     const PM = editorRuntime();
     const parent = layer(PM, 'parent');

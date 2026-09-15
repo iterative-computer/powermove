@@ -1,3 +1,5 @@
+import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
+import { chooseSequence, convertImageSequence } from './core/image-sequence';
 import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
@@ -813,18 +815,18 @@ PM.prepareToClose = async () => {
 };
 
 /* ── media import ──────────────────────────────────────── */
-PM.pickFiles = () => {
+PM.pickFiles = (sequence = false) => {
   const targetProject = PM.proj;
   const inp = h('input', {
     // Chromium's video/* picker omits codecs it cannot decode natively.
     // These containers also support the native playback conversion path.
-    type: 'file', multiple: true, accept: 'image/*,.svg,video/*,.mov,.mp4,.m4v,.webm,audio/*,.obj,.pmv',
+    type: 'file', multiple: true, accept: sequence ? IMAGE_SEQUENCE_ACCEPT : 'image/*,.svg,video/*,.mov,.mp4,.m4v,.webm,audio/*,.obj,.pmv',
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
   });
   const cleanup = () => { inp.onchange = null; inp.remove(); };
   inp.onchange = async () => {
     const files = [...inp.files];
-    try { if (files.length) await PM.importFiles(files, { project: targetProject }); }
+    try { if (files.length) await PM.importFiles(files, { project: targetProject, sequence: sequence || undefined }); }
     finally { cleanup(); }
   };
   inp.addEventListener('cancel', cleanup, { once: true });
@@ -835,7 +837,24 @@ PM.pickFiles = () => {
    - undefined → layers at the playhead (pickers, window-level drops)
    - null      → assets only, no layers (drop on the Media panel)
    - {at,index}→ layers at a time and layer-stack position (drop on the timeline) */
-async function importFiles(files: any, placement?: { at: number; index?: number } | null) {
+async function importFiles(files: any, placement?: { at: number; index?: number } | null, sequence?: boolean) {
+  const targetProject = PM.proj;
+  const importAt = placement ? placement.at : PM.time;
+  const assertCurrent = () => {
+    if (PM.proj !== targetProject) throw new Error('Import stopped because you switched projects · import again in the intended project');
+  };
+  if (sequence === true || (sequence !== false && sequenceCandidate(files))) {
+    const choice = await chooseSequence(PM, files, sequence === true);
+    if (choice === null) return;
+    try {
+      assertCurrent();
+      if (choice !== 'images') {
+        PM.toast(`Preparing ${files.length} image frames…`, 30_000);
+        files = [await convertImageSequence(files, choice, assertCurrent)];
+        assertCurrent();
+      }
+    } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000); return; }
+  }
   const mediaFiles: any = [];
   for (const f of files) {
     if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
@@ -843,7 +862,6 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     mediaFiles.push(f);
   }
   if (!mediaFiles.length) return;
-  const importAt = placement ? placement.at : PM.time;
   if (mediaFiles.length > 1) PM.toast(`Preparing ${mediaFiles.length} media files…`, 2400);
   const results = await PM.assets.importBatch(mediaFiles, {
     onProgress: (progress: any) => PM.bus.emit('import:progress', progress),
@@ -884,13 +902,13 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
 /* File pickers and drag/drop can fire while an earlier batch is still decoding.
    Preserve user order and project identity by serializing batches; each batch
    still performs its expensive work through the bounded parallel pool. */
-PM.importFiles = (files: any, { project = PM.proj, placement }: any = {}) => {
+PM.importFiles = (files: any, { project = PM.proj, placement, sequence }: any = {}) => {
   const run = () => {
     if (PM.proj !== project) {
       PM.toast('Import stopped because you switched projects · import again in the intended project', 5000);
       return [];
     }
-    return importFiles(Array.from(files || []), placement);
+    return importFiles(Array.from(files || []), placement, sequence);
   };
   APP.importQueue = APP.importQueue.then(run, run);
   return APP.importQueue;

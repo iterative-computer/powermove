@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -57,5 +57,39 @@ describe('media playback proxies', () => {
     await expect(trustedHandlers.get(IPC.mediaProxyRead)?.(event, {
       token: '../not-a-token', offset: 0, length: 1
     })).rejects.toThrow('media-proxy:read');
+  });
+});
+
+
+describe('native image sequence conversion', () => {
+  it('orders local frames safely and releases the generated clip', async () => {
+    const { root } = await fixture();
+    const first = path.join(root, "shot's 009.png"), second = path.join(root, "shot's 10.png");
+    await writeFile(first, 'first'); await writeFile(second, 'second');
+    const service = new MediaProxyService(root, async () => {}, async (pattern, fps, count, output) => {
+      expect(fps).toBe(23.976); expect(count).toBe(2);
+      expect(await readFile(pattern.replace('%08d', '00000000'), 'utf8')).toBe('first');
+      expect(await readFile(pattern.replace('%08d', '00000001'), 'utf8')).toBe('second');
+      await writeFile(output, 'sequence');
+    });
+    const result = await service.createSequence([second, first], 23.976);
+    expect(Buffer.from(await service.read(result.token, 0, 8)).toString()).toBe('sequence');
+    await service.release(result.token);
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-image-sequence-'))).toEqual([]);
+  });
+  it('rejects invalid inputs and cleans temporary files after failed conversion', async () => {
+    const { root } = await fixture();
+    const files = [path.join(root, 'f1.png'), path.join(root, 'f2.png')];
+    for (const file of files) await writeFile(file, 'frame');
+    const service = new MediaProxyService(root, async () => {}, async () => { throw new Error('decode failed'); });
+    await expect(service.createSequence(files, 0)).rejects.toThrow('Frame rate');
+    await expect(service.createSequence(['relative1.png', 'relative2.png'], 30)).rejects.toThrow('local');
+    await expect(service.createSequence([files[0]!, path.join(root, 'f3.png')], 30)).rejects.toThrow('Missing frame');
+    await expect(service.createSequence(files, 30)).rejects.toThrow('decode failed');
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-image-sequence-'))).toEqual([]);
+    const handlers = new Map<string, (...args: any[]) => any>();
+    registerMediaProxyIpc({ handle: (channel: string, handler: (...args: any[]) => any) => handlers.set(channel, handler) } as unknown as IpcMain,
+      service, { isTrustedSender: () => false });
+    await expect(handlers.get(IPC.mediaSequenceCreate)!({}, { sourcePaths: files, fps: 30 })).rejects.toThrow('Unauthorized');
   });
 });

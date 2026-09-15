@@ -9,11 +9,11 @@ test('Settings › Project edits the live composition and its export settings', 
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await expect(settings).toBeVisible();
 
-    const projectTab = settings.getByRole('tab', { name: 'Project', exact: true });
+    const projectTab = settings.getByRole('button', { name: 'Project', exact: true });
     await projectTab.click();
-    await expect(projectTab).toHaveAttribute('aria-selected', 'true');
+    await expect(projectTab).toHaveAttribute('aria-current', 'location');
 
-    const panel = settings.getByRole('tabpanel', { name: 'Project', exact: true });
+    const panel = settings.getByRole('region', { name: 'Project', exact: true });
     await expect(panel).toContainText('Composition');
     await expect(panel).toContainText('Export');
 
@@ -114,16 +114,16 @@ test('Settings opens once, whichever entry point asks for it', async () => {
     await page.evaluate(() => (window as any).PM.SettingsUI.open());
     await page.evaluate(() => (window as any).PM.SettingsUI.open('project'));
     await expect(settings).toHaveCount(1);
-    await expect(settings.getByRole('tab', { name: 'Project', exact: true }))
-      .toHaveAttribute('aria-selected', 'true');
+    await expect(settings.getByRole('button', { name: 'Project', exact: true }))
+      .toHaveAttribute('aria-current', 'location');
 
     // Closing it releases the singleton, so Settings still opens afterwards.
     await settings.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(settings).toHaveCount(0);
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     await expect(settings).toHaveCount(1);
-    await expect(settings.getByRole('tab', { name: 'General', exact: true }))
-      .toHaveAttribute('aria-selected', 'true');
+    await expect(settings.getByRole('button', { name: 'General', exact: true }))
+      .toHaveAttribute('aria-current', 'location');
 
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {

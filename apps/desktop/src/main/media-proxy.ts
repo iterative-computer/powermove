@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, open, realpath, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, realpath, rm, stat, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +13,7 @@ import {
   type MediaProxyResult
 } from '../shared/ipc';
 import { IpcValidationError } from '../shared/guards';
+import { MAX_SEQUENCE_FRAMES, orderedSequence, validSequenceFps } from '../shared/image-sequence';
 
 const execFileAsync = promisify(execFile);
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -40,12 +41,28 @@ export function playbackConverter(binary: string): Convert {
   };
 }
 
+type ConvertSequence = (pattern: string, fps: number, count: number, output: string) => Promise<void>;
+
+export function imageSequenceConverter(binary: string): ConvertSequence {
+  return async (pattern, fps, count, output) => {
+    await execFileAsync(binary, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-framerate', String(fps), '-start_number', '0', '-i', pattern,
+      '-frames:v', String(count), '-an', '-c:v', 'libvpx-vp9',
+      '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
+      '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
+      '-f', 'webm', '-y', output,
+    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+  };
+}
+
 export class MediaProxyService {
   readonly #entries = new Map<string, ProxyEntry>();
 
   constructor(
     private readonly tempRoot: string,
-    private readonly convert: Convert
+    private readonly convert: Convert,
+    private readonly convertSequence?: ConvertSequence
   ) {}
 
   async create(sourcePath: string): Promise<{ token: string; size: number }> {
@@ -64,6 +81,38 @@ export class MediaProxyService {
       await this.convert(resolved, output);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The playback proxy was empty');
+      const token = randomUUID().replaceAll('-', '');
+      this.#entries.set(token, { directory, file: output, size: converted.size });
+      return { token, size: converted.size };
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  async createSequence(sourcePaths: string[], fps: number): Promise<{ token: string; size: number }> {
+    if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
+    if (!Array.isArray(sourcePaths) || sourcePaths.length < 2 || sourcePaths.length > MAX_SEQUENCE_FRAMES
+      || sourcePaths.some(source => typeof source !== 'string' || source.length > 16_384 || !path.isAbsolute(source))) {
+      throw new Error('Choose local numbered image files');
+    }
+    if (!this.convertSequence) throw new Error('Image sequence conversion is unavailable');
+    const frames = orderedSequence(sourcePaths.map(source => ({ name: path.basename(source), source })));
+    const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-image-sequence-'));
+    const output = path.join(directory, 'sequence.webm');
+    try {
+      const extension = path.extname(frames[0]!.name).toLowerCase();
+      // Only generated names enter FFmpeg's pattern; user filenames never become
+      // demuxer directives. Symlinks avoid copying an entire sequence into RAM.
+      for (let index = 0; index < frames.length; index++) {
+        const source = await realpath(frames[index]!.source);
+        const info = await stat(source);
+        if (!info.isFile() || info.size <= 0 || info.size > MAX_SOURCE_BYTES) throw new Error(`Could not read ${frames[index]!.name}`);
+        await symlink(source, path.join(directory, `frame-${String(index).padStart(8, '0')}${extension}`));
+      }
+      await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output);
+      const converted = await stat(output);
+      if (!converted.isFile() || converted.size <= 0) throw new Error('The image sequence was empty');
       const token = randomUUID().replaceAll('-', '');
       this.#entries.set(token, { directory, file: output, size: converted.size });
       return { token, size: converted.size };
@@ -145,6 +194,18 @@ export function registerMediaProxyIpc(
           ? `Could not optimize this video for playback · ${error.message}`
           : 'Could not optimize this video for playback'
       };
+    }
+  });
+
+  ipcMain.handle(IPC.mediaSequenceCreate, async (event, value: unknown): Promise<MediaProxyResult> => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaSequenceCreate, 'expected an object');
+    const { sourcePaths, fps } = value as { sourcePaths: string[]; fps: number };
+    try {
+      const proxy = await service.createSequence(sourcePaths, fps);
+      return { ok: true, ...proxy, type: 'video/webm' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Could not import image sequence' };
     }
   });
 

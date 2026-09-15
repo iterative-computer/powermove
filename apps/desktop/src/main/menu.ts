@@ -96,6 +96,9 @@ export function appMenuTemplate(
         commandItem('Save Project', 'CommandOrControl+S', 'save', send),
         commandItem('Save Project As…', 'CommandOrControl+Shift+S', 'saveAs', send),
         { type: 'separator' },
+        commandItem('Import Media…', 'CommandOrControl+I', 'import', send),
+        { id: 'importSequence', label: 'Import Image Sequence…', click: () => send('importSequence') },
+        { type: 'separator' },
         commandItem('Export…', 'CommandOrControl+E', 'export', send)
       ]
     },

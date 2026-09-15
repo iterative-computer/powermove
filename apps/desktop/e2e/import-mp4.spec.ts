@@ -1,4 +1,4 @@
-import { expect, test } from './helpers/app';
+import { expect, test, chooseNativeMenu } from './helpers/app';
 import { importFixture } from './helpers/media';
 import {copyFile,unlink} from 'node:fs/promises';
 import path from 'node:path';
@@ -137,10 +137,7 @@ test.describe('@import-mp4 H.264 import smoke', () => {
       const index = timeline.rows.findIndex((row: any) => row.kind === 'layer' && row.L.id === layer.id);
       return { x: Math.min(100, timeline.gut / 2), y: timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
     });
-    await page.locator('#tl-canvas').click({ button: 'right', position: rowPosition });
-    const separate = page.getByRole('menuitem', { name: 'Separate audio' });
-    await expect(separate).toBeVisible();
-    await separate.click();
+    await chooseNativeMenu(session, 'Separate audio', () => page.locator('#tl-canvas').click({ button: 'right', position: rowPosition }));
 
     const separated = await page.evaluate(() => {
       const PM = (window as any).PM;

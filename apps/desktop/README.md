@@ -113,3 +113,18 @@ project. The animation performance baseline now measures actual frame changes
 - [macOS release process](docs/release.md)
 - [Phase 6 deletion manifest](docs/phase6-deletions.md)
 - [e2e media fixtures](e2e/fixtures/README.md)
+
+## Image sequences
+
+Select consecutive numbered PNG, JPEG, WebP, or BMP frames through Import media
+(Command+I) or drag them into the editor. Choose **Import sequence** and set the
+source frame rate (1–240 fps, defaulting to the composition rate). Choose
+**Individual images** to keep the stills separate. **Import image sequence…**
+is also available in the File menu and command palette.
+
+Frames must share a filename prefix, extension, and dimensions, with no missing
+or duplicate frame numbers. Selection order and zero padding do not matter. The
+sequence becomes one video clip with transparency, source duration, and the
+normal trim, speed, undo, playback, and export controls. Powermove stores the
+converted clip in project media, so saving a `.pmv` embeds it and reopening does
+not require the original frame files.

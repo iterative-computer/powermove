@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { expect, test } from './helpers/app';
+import { expect, test, chooseNativeMenu } from './helpers/app';
 import { importFixture } from './helpers/media';
 
 test.beforeEach(async ({ session }) => { await session.openEditor(); });
@@ -43,9 +43,8 @@ test('right-click replacement preserves layers, renders new pixels, undoes/redoe
     return { id: layer.d.asset, layers: JSON.stringify(PM.proj.layers) };
   });
   expect(await renderedPixel(page)).toEqual([255, 0, 0, 255]);
-  await page.locator('.asset-card').filter({ hasText: 'original-red.png' }).click({ button: 'right' });
   const replaceChooser = page.waitForEvent('filechooser');
-  await page.getByRole('menuitem', { name: /Replace File/i }).click();
+  await chooseNativeMenu(session, 'Replace File…', () => page.locator('.asset-card').filter({ hasText: 'original-red.png' }).click({ button: 'right' }));
   await (await replaceChooser).setFiles(replacement);
   await expect.poll(() => page.evaluate(id => (window as any).PM.proj.assets[id]?.name, before.id)).toBe('replacement-blue.png');
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj.layers))).toBe(before.layers);
@@ -88,9 +87,8 @@ test('replacement picker cancellation and unreadable or incompatible files leave
     const PM = (window as any).PM;
     return { id: PM.proj.layers.find((l: any) => l.name === 'tone.wav').d.asset, project: JSON.stringify(PM.proj) };
   });
-  await page.locator('.asset-card').filter({ hasText: 'tone.wav' }).click({ button: 'right' });
   const chooser = page.waitForEvent('filechooser');
-  await page.getByRole('menuitem', { name: /Replace File/i }).click();
+  await chooseNativeMenu(session, 'Replace File…', () => page.locator('.asset-card').filter({ hasText: 'tone.wav' }).click({ button: 'right' }));
   await (await chooser).setFiles([]);
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(before.project);
   const outcomes = await page.evaluate(async id => {
@@ -112,9 +110,8 @@ for (const media of [{ original: 'tone.wav', replacement: 'tone.mp3', kind: 'aud
       layer.from = 2; layer.dur = 1; layer.d.trim = .25;
       return { id: layer.d.asset, layer: JSON.stringify(layer) };
     }, media.original);
-    await page.locator('.asset-card').filter({ hasText: media.original }).click({ button: 'right' });
     const chooser = page.waitForEvent('filechooser');
-    await page.getByRole('menuitem', { name: /Replace File/i }).click();
+    await chooseNativeMenu(session, 'Replace File…', () => page.locator('.asset-card').filter({ hasText: media.original }).click({ button: 'right' }));
     await (await chooser).setFiles(path.join(__dirname, './fixtures', media.replacement));
     await expect.poll(() => page.evaluate(id => (window as any).PM.proj.assets[id]?.name, before.id)).toBe(media.replacement);
     const after = await page.evaluate(async id => {

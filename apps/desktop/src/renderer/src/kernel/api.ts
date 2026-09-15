@@ -522,7 +522,7 @@ export interface EditAPI {
 }
 
 export interface ImportPlacement { at: number; index?: number }
-export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null }
+export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null; sequence?: boolean }
 export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
 export interface WaveformOptions { [key: string]: unknown }
 export interface FontCatalog {

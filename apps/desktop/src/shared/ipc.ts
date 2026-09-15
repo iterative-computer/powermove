@@ -28,6 +28,7 @@ export const IPC = {
   renderFinish: 'render:finish',
   renderCancel: 'render:cancel',
   mediaProxyCreate: 'media-proxy:create',
+  mediaSequenceCreate: 'media-sequence:create',
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
   mediaRevealSource: 'media:reveal-source',
@@ -372,6 +373,8 @@ export type MenuCommand =
   | 'save'
   | 'saveAs'
   | 'open'
+  | 'import'
+  | 'importSequence'
   | 'export'
   | 'contextUndo'
   | 'contextRedo'
@@ -461,6 +464,7 @@ export interface PowermoveBridge {
     sourcePath(file: File): string | null;
     revealSource(sourcePath: string): Promise<void>;
     createPlaybackProxy(file: File): Promise<MediaProxyResult>;
+    createImageSequence(files: File[], fps: number): Promise<MediaProxyResult>;
     readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
     releasePlaybackProxy(token: string): Promise<void>;
   };
