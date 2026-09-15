@@ -32,13 +32,13 @@
 
 <main id="top">
   <section class="hero" aria-labelledby="headline">
-    <a class="eyebrow" href="https://github.com/motionerapp/Powermove" target="_blank" rel="noopener">Open source <span class="eyebrow-sep"></span><span class="muted">Star Powermove on GitHub</span> <ArrowUpRight size={13} aria-hidden="true" /></a>
+    <a class="eyebrow" href="https://github.com/iterative-computer/powermove" target="_blank" rel="noopener">Open source <span class="eyebrow-sep"></span><span class="muted">Star Powermove on GitHub</span> <ArrowUpRight size={13} aria-hidden="true" /></a>
     <h1 id="headline" class="sr-only">Shape your video editor</h1>
     <HeroAnimation />
     <div class="wrap hero-intro">
       <p class="lede">A motion editor with an agent in the loop and you in the driver’s seat. Real layers, editable keyframes, and an interface that rewrites itself around the work.</p>
       <div class="cta center">
-        <a class="button primary lg" href="mailto:hello@motioner.app?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={15} /></a>
+        <a class="button primary lg" href="mailto:hello@iterative.computer?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={15} /></a>
         <a class="button lg" href="#editor">See the editor</a>
       </div>
     </div>
@@ -77,7 +77,7 @@
     <div class="wrap">
       <h2 id="final-title">Make your move.</h2>
       <div class="cta center">
-        <a class="button primary lg" href="mailto:hello@motioner.app?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={15} /></a>
+        <a class="button primary lg" href="mailto:hello@iterative.computer?subject=Powermove%20waitlist">Join the waitlist <ArrowUpRight size={15} /></a>
         <a class="button lg" href="#editor">See the editor</a>
       </div>
     </div>
@@ -92,7 +92,7 @@
       </div>
       <div>
         <span class="foot-title">Company</span>
-        <ul><li><a href="https://github.com/motionerapp/Powermove" target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@motioner.app">hello@motioner.app</a></li><li><a href="mailto:hello@motioner.app?subject=Powermove%20waitlist">Waitlist</a></li></ul>
+        <ul><li><a href="https://github.com/iterative-computer/powermove" target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="mailto:hello@iterative.computer?subject=Powermove%20waitlist">Waitlist</a></li></ul>
       </div>
       <div class="foot-copy">© Powermove {year}. Open source, in development.</div>
     </div>
