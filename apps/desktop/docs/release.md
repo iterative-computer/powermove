@@ -70,26 +70,31 @@ bunx @electron/fuses read --app apps/desktop/dist/mac-arm64/Powermove.app
 Fuses are one-way release hardening in practice: rebuild from Electron rather than trying to mutate a distributed app.
 
 
-## Beta distribution and OTA updates
+## Distribution and OTA updates
 
-The source stays private in `motionerapp/Powermove`. Installers and update
-metadata are public at https://github.com/motionerapp/powermove-releases/releases.
-These betas target **Apple Silicon Macs only**. A public feed means anyone with
-the link can download the beta; it is not an access-controlled tester program.
+Releases are GitHub releases on this repository, `iterative-computer/powermove`.
+electron-updater reads the release feed (`latest-mac.yml` for stable releases,
+`beta-mac.yml` for prereleases) straight from GitHub, so **the repository must
+be public for updates to reach user machines**. While it is private, only
+clients with a `GH_TOKEN` in their environment can check for updates.
+Releases target **Apple Silicon Macs only**.
 
-`.github/workflows/release-beta.yml` at the repository root runs on tags like
-`v1.0.0-beta.1`. It uses an arm64 macOS runner, installs the workspace with bun
+`.github/workflows/release.yml` runs on `v*` tags. `vX.Y.Z` publishes a stable
+release marked latest; `vX.Y.Z-beta.N` publishes a prerelease. Apps built from
+a beta version opt into prereleases; stable builds only see stable releases.
+The job uses an arm64 macOS runner, installs the workspace with bun
 (`bun install --frozen-lockfile`), writes the tag's version into
 `apps/desktop/package.json` with `bun pm version`, tests the update/session
 lifecycle with the desktop Vitest subset, signs and notarizes the app through
 `bun run dist:release`, and verifies the result in `apps/desktop/dist/`.
-It uploads the DMG, ZIP, blockmaps, and `beta-mac.yml` into a draft before
-publishing the complete GitHub prerelease. Nothing is published by the packager
-itself. Never publish a partial release or replace assets on an existing tag.
+It uploads the DMG, ZIP, blockmaps, and the channel manifest into a draft
+before publishing the complete release with the workflow's own `GITHUB_TOKEN`.
+Nothing is published by the packager itself. Never publish a partial release
+or replace assets on an existing tag.
 
 ### One-time GitHub configuration
 
-Add these Actions secrets to the **private source repository**:
+Add these Actions secrets to the repository:
 
 | Secret | Value |
 | --- | --- |
@@ -98,26 +103,26 @@ Add these Actions secrets to the **private source repository**:
 | `APPLE_API_KEY_P8` | Contents of the App Store Connect notarization API key |
 | `APPLE_API_KEY_ID` | API key ID |
 | `APPLE_API_ISSUER_ID` | API issuer ID |
-| `RELEASES_TOKEN` | Token with Contents read/write permission on `motionerapp/powermove-releases` |
 
 An Apple Development certificate cannot replace Developer ID Application.
 Enter secret values through GitHub Settings → Secrets and variables → Actions;
 do not put credentials in source files, release notes, or app configuration.
 The built app reads the public feed without a token.
 
-### Ship a beta
+### Ship a release
 
 Commit and push the intended source first, then tag that exact commit:
 
 ```sh
-git tag v1.0.0-beta.1
-git push origin v1.0.0-beta.1
+git tag v1.0.0            # stable
+git tag v1.0.1-beta.1     # prerelease
+git push origin <tag>
 ```
 
-For each update increment the beta number, for example `v1.0.0-beta.2`.
+Increment the version for every release; a beta increments the beta number.
 The workflow sets the packaged version; the local development version does not
 need to change. A failed publish may leave a draft: inspect and remove that draft
-before rerunning. The manual workflow trigger must select a beta tag, not a branch.
+before rerunning. The manual workflow trigger must select a tag, not a branch.
 
 Share the release's DMG. Testers drag Powermove into Applications and launch it.
 Packaged beta apps check 30 seconds after startup and every four hours, download
@@ -130,5 +135,4 @@ Before inviting testers, install beta.1 on a separate Mac/profile, create and
 save a project, publish beta.2, and verify download, normal quit, updated version,
 and restored project content. Unit tests and an unsigned local build do not
 prove this signed end-to-end update path. Keep the same app ID and Developer ID
-signing identity for subsequent betas. Stable release publishing is a separate
-future lane; do not use the beta workflow for a stable tag.
+signing identity for every release.

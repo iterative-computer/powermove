@@ -1,5 +1,5 @@
 export const GITHUB = 'https://github.com/iterative-computer/powermove';
-export const RELEASES_REPO = 'motionerapp/powermove-releases';
+export const RELEASES_REPO = 'iterative-computer/powermove';
 export const RELEASES = `https://github.com/${RELEASES_REPO}/releases`;
 export const PRODUCT_HUNT =
   'https://www.producthunt.com/products/powermove-2?launch=powermove-2&utm_source=badge-featured&utm_medium=badge&utm_campaign=powermove';
