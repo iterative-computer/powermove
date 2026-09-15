@@ -94,7 +94,7 @@
         <span class="foot-title">Company</span>
         <ul><li><a href="https://github.com/iterative-computer/powermove" target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="mailto:hello@iterative.computer?subject=Powermove%20waitlist">Waitlist</a></li></ul>
       </div>
-      <div class="foot-copy">© Powermove {year}. Open source, in development.</div>
+      <div class="foot-copy">© Iterative Computer {year}. Open source, in development.</div>
     </div>
   </footer>
 </main>
