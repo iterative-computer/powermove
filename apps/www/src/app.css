@@ -352,6 +352,7 @@ h1 .muted{color:var(--tx-3)}
 
 /* ---- final ---- */
 .final .wrap{text-align:center}
+.final-note{margin:16px auto 0;max-width:40ch;font-size:var(--fs-md);color:var(--tx-3);text-wrap:pretty}
 .final h2{margin-inline:auto;font-size:clamp(36px,5vw,64px);font-weight:500;color:var(--tx)}
 
 /* ---- footer ---- */
