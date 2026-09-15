@@ -11,15 +11,15 @@ html,body{height:100%;overflow:hidden}
 /* ── material ──────────────────────────────────────────── */
 /* The window body is a native under-window material (see createWindow in
    src/main/index.ts). The canvas the renderer paints is a tint over that
-   material, so the stone palette holds on any desktop while the blur still
-   reads through. Solid surfaces (panels, floats, fields) are unchanged: only
-   the canvas between them is vibrant, as in Finder and Xcode. Anything that
+   material. The tint is nearly opaque, so the desktop only faintly
+   colours the canvas: a hint of material, not a showcase of it. Solid surfaces (panels, floats, fields) are
+   unchanged: only the canvas between them carries the material. Anything that
    must stay opaque mixes from --bg-window-solid instead. */
-:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .3)}
-:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .32)}
-/* Content areas of the full-screen views (projects, settings) are nearly
-   solid, with a little of the material left showing through. */
-:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 70%,transparent)}
+:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .86)}
+:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .86)}
+/* Content areas of the full-screen views (projects, settings) are all but
+   solid; the material is a whisper behind them. */
+:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 94%,transparent)}
 html{background:transparent}
 
 /* ── glass chrome ──────────────────────────────────────── */
