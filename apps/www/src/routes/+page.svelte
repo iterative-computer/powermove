@@ -112,7 +112,7 @@
       </div>
       <div>
         <span class="foot-title">Company</span>
-        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href={PRODUCT_HUNT} target="_blank" rel="noopener">Product Hunt</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li></ul>
+        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href={PRODUCT_HUNT} target="_blank" rel="noopener">Product Hunt</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
       </div>
       <div class="foot-copy">© Iterative Computer {year}. Open source.</div>
     </div>
