@@ -285,7 +285,9 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    margin: 0 10px;
+    /* The trigger's text starts where the panel title does (header padding
+       18px = 16px here + the trigger's own 2px). */
+    margin: 0 10px 0 16px;
     padding: 0 0 6px;
     flex-shrink: 0;
   }
