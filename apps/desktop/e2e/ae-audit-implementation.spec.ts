@@ -1,4 +1,4 @@
-import {test,expect} from './helpers/app';
+import {test,expect,chooseNativeMenu} from './helpers/app';
 import path from 'node:path';
 import {importFixture} from './helpers/media';
 import {mkdir,readFile} from 'node:fs/promises';
@@ -9,7 +9,7 @@ async function point(page:any,x:number,y:number){const b=await page.locator('#st
 test('editable Pen, canvas text, graph and preview controls render coherently',async({session})=>{
  await session.openEditor();
  const {page}=session;await clean(page);await mkdir(evidence,{recursive:true});
- await page.getByRole('button',{name:'Drawing tools',exact:true}).click();await page.getByRole('menuitem',{name:/Pen Tool/}).click();
+ await chooseNativeMenu(session, /Pen Tool/, () => page.getByRole('button',{name:'Drawing tools',exact:true}).click());
  for(const [x,y] of [[100,100],[260,80],[300,230]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
  const first=await point(page,100,100);await page.mouse.dblclick(first.x,first.y);
  expect(await page.evaluate(()=>{const PM=(window as any).PM,l=PM.proj.layers[0];return {count:l.d.paths[0].vertices.length,closed:l.d.paths[0].p.closed.v};})).toEqual({count:3,closed:true});
@@ -53,8 +53,7 @@ test('multiple graph curves, velocity editing and a cached preview retain editab
  await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline._graph?.series?.length>=2;});
  await page.evaluate(()=>{const PM=(window as any).PM;PM.sel.keys=PM.proj.layers.flatMap((l:any)=>l.p['position.y'].kf.map((k:any)=>k.i));});
  const graphKey=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),p=timeline._graph.points.find((p:any)=>p.x>timeline.gut+8);return {x:p.x,y:p.y};});
- await page.locator('#tl-canvas').click({button:'right',position:graphKey});
- await page.getByText('Keyframe Velocity…',{exact:true}).click();await page.getByRole('spinbutton',{name:'Outgoing speed',exact:true}).fill('80');await page.getByRole('button',{name:'Apply',exact:true}).click();
+ await chooseNativeMenu(session, 'Keyframe Velocity…', () => page.locator('#tl-canvas').click({button:'right',position:graphKey}));await page.getByRole('spinbutton',{name:'Outgoing speed',exact:true}).fill('80');await page.getByRole('button',{name:'Apply',exact:true}).click();
  expect(await page.evaluate(()=>(window as any).PM.proj.layers.map((l:any)=>l.p['position.y'].kf[0].outEase.speed))).toEqual([80,80]);
  await page.screenshot({path:path.join(evidence,'multi-graph.png')});
  await page.evaluate(()=>(window as any).PM.theme.apply('dark'));await session.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1100,800));await page.screenshot({path:path.join(evidence,'multi-graph-dark-narrow.png')});
@@ -82,7 +81,7 @@ test('a drawn mask, luma matte and live text selector change pixels and undo',as
  await session.openEditor();
  const {page}=session;await clean(page);
  await page.evaluate(()=>{const PM=(window as any).PM,l=PM.mkLayer('solid',{d:{w:640,h:360,color:'#ffffff'}});PM.proj.layers=[l];PM.ProjectIndex.invalidate();PM.selectLayers(l.id);PM.touch();PM.invalidate();});
- await page.getByRole('button',{name:'Drawing tools',exact:true}).click();await page.getByRole('menuitem',{name:/Pen Tool/}).click();for(const [x,y] of [[100,100],[300,100],[300,240],[100,240],[100,100]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
+ await chooseNativeMenu(session, /Pen Tool/, () => page.getByRole('button',{name:'Drawing tools',exact:true}).click());for(const [x,y] of [[100,100],[300,100],[300,240],[100,240],[100,100]]){const p=await point(page,x!,y!);await page.mouse.click(p.x,p.y);}
  const mask=await page.evaluate(()=>{const PM=(window as any).PM,l=PM.proj.layers[0],px=PM.GL.renderToPixels(0,640,360,{transparent:true,mblur:false});return {count:l.masks[0].path.vertices.length,center:px[(180*640+200)*4+3],corner:px[3],saved:PM.serialize()};});expect(mask.count).toBe(4);expect(mask.center).toBeGreaterThan(245);expect(mask.corner).toBe(0);expect(JSON.stringify(mask.saved)).toContain('vertices');
  await clean(page);
  const output=await page.evaluate(()=>{const PM=(window as any).PM,l=PM.mkLayer('text',{p:{'position.x':70,'position.y':100},d:{text:'Live type',size:48,color:'#ffffff'}});PM.proj.layers=[l];PM.ProjectIndex.invalidate();PM.touch();PM.selectLayers(l.id);const render=()=>PM.GL.renderToPixels(0,640,360,{transparent:true,mblur:false});const before=render();PM.Edit.mutate('Add selector',()=>{l.d.animators=[{id:'a',p:Object.fromEntries(Object.entries({unit:'characters',start:0,end:100,offset:0,smoothness:0,x:0,y:0,rotation:0,scale:100,opacity:0,tracking:0}).map(([k,v])=>[k,PM.P(v)]))}];PM.touch();});const after=render();PM.hist.undo();const restored=render();return {before:before.reduce((a:number,v:number)=>a+v,0),after:after.reduce((a:number,v:number)=>a+v,0),restored:restored.reduce((a:number,v:number)=>a+v,0)};});expect(output.before).toBeGreaterThan(10000);expect(output.after).toBe(0);expect(output.restored).toBe(output.before);

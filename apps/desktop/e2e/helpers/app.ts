@@ -206,18 +206,22 @@ export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: La
 export { expect };
 
 /** Exercise the native menu IPC without showing an AppKit popup in hidden tests. */
-export async function chooseNativeMenu(session: LaunchedApp, label: string, trigger: () => Promise<unknown>): Promise<void> {
-  await session.app.evaluate(({ Menu }, label) => {
-    const state = { original: Menu.prototype.popup, result: 'waiting' };
+export async function chooseNativeMenu(session: LaunchedApp, label: string | RegExp | (string | RegExp)[], trigger: () => Promise<unknown>): Promise<void> {
+  const path = (Array.isArray(label) ? label : [label]).map(item => typeof item === 'string' ? item : { source: item.source, flags: item.flags });
+  await session.app.evaluate(({ Menu }, path) => {
+    const state = { original: Menu.prototype.popup, result: 'waiting', index: 0 };
     (globalThis as any).__testNativeMenu = state;
     Menu.prototype.popup = function (options) {
-      Menu.prototype.popup = state.original;
-      const item = this.items.find(item => item.label === label && item.enabled);
-      state.result = item ? 'selected' : `Missing enabled native menu item: ${label}; got ${this.items.map(item => item.label).join(', ')}`;
+      const match = path[state.index]!;
+      const matches = typeof match === 'string' ? (label: string) => label === match : (label: string) => new RegExp(match.source, match.flags).test(label);
+      const item = this.items.find(item => matches(item.label) && item.enabled);
+      state.index++;
+      state.result = item ? (state.index === path.length ? 'selected' : 'waiting') : `Missing enabled native menu item: ${JSON.stringify(match)}; got ${this.items.map(item => item.label).join(', ')}`;
+      if (!item || state.index === path.length) Menu.prototype.popup = state.original;
       item?.click(item, options?.window, {} as any);
       options?.callback?.();
     };
-  }, label);
+  }, path);
   try {
     await trigger();
     await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenu.result)).toBe('selected');
@@ -226,6 +230,30 @@ export async function chooseNativeMenu(session: LaunchedApp, label: string, trig
       const state = (globalThis as any).__testNativeMenu;
       if (state) Menu.prototype.popup = state.original;
       delete (globalThis as any).__testNativeMenu;
+    });
+  }
+}
+
+/** Inspect the native menu model without opening an AppKit popup. */
+export async function inspectNativeMenu(session: LaunchedApp, trigger: () => Promise<unknown>): Promise<{ label: string; enabled: boolean }[]> {
+  await session.app.evaluate(({ Menu }) => {
+    const state = { original: Menu.prototype.popup, items: null as { label: string; enabled: boolean }[] | null };
+    (globalThis as any).__testNativeMenuInspection = state;
+    Menu.prototype.popup = function (options) {
+      Menu.prototype.popup = state.original;
+      state.items = this.items.filter(item => item.type !== 'separator').map(item => ({ label: item.label, enabled: item.enabled }));
+      options?.callback?.();
+    };
+  });
+  try {
+    await trigger();
+    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenuInspection.items)).not.toBeNull();
+    return await session.app.evaluate(() => (globalThis as any).__testNativeMenuInspection.items);
+  } finally {
+    await session.app.evaluate(({ Menu }) => {
+      const state = (globalThis as any).__testNativeMenuInspection;
+      if (state) Menu.prototype.popup = state.original;
+      delete (globalThis as any).__testNativeMenuInspection;
     });
   }
 }
