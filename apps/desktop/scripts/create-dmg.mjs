@@ -49,15 +49,15 @@ async function main() {
   await rm(`${target}.blockmap`, { force: true });
 
   const bin = path.join(repository, 'node_modules/.bin/create-dmg');
-  const identity = process.env.CSC_LINK ? [] : ['--no-code-sign'];
+  // create-dmg signs with the Developer ID it finds in the keychain search
+  // list and exits 2 when there is none. Local builds may go unsigned; CI
+  // may not.
   try {
-    const { stdout, stderr } = await execFileAsync(bin, [app, dist, '--overwrite', ...identity], { cwd: repository, maxBuffer: 20 * 1024 * 1024 });
+    const { stdout, stderr } = await execFileAsync(bin, [app, dist, '--overwrite'], { cwd: repository, maxBuffer: 20 * 1024 * 1024 });
     process.stdout.write(stdout); process.stderr.write(stderr);
   } catch (error) {
-    // Exit code 2 means the DMG was written but not signed; only fatal when a
-    // signing identity was expected.
-    if (error.code !== 2 || process.env.CSC_LINK) throw error;
-    process.stderr.write(String(error.stderr ?? error.message));
+    if (error.code !== 2 || process.env.CI) throw error;
+    process.stderr.write(`${String(error.stderr ?? '').trim()}\nDMG left unsigned (no Developer ID in the keychain).\n`);
   }
 
   // create-dmg names the image "<Product> <version>.dmg" from the bundle.
