@@ -1,18 +1,35 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { agentState } from './agent-state.svelte';
   import { relativeOpened } from './threads';
 
   let { PM }: { PM: Record<string, any> } = $props();
   let trigger = $state<HTMLButtonElement>();
   let popup = $state<HTMLDivElement>();
+  let list = $state<HTMLDivElement>();
+  let glider = $state<HTMLDivElement>();
   let search: HTMLInputElement | undefined = $state();
+  // `open` is the logical state (aria-expanded flips at once); `shown` keeps
+  // the sheet mounted while the close animation plays.
   let open = $state(false);
+  let shown = $state(false);
+  let side = $state<'bottom' | 'top'>('bottom');
   let dismissByPress = false;
   let query = $state('');
   let left = $state(0);
   let top = $state(0);
-  let width = $state(240);
+  let width = $state(248);
+  let maxHeight = $state(360);
   let openedAt = $state(Date.now());
+  // Long histories render in pages: the first page paints at once, the rest
+  // arrives as the list scrolls, so a thousand threads never block the open.
+  const PAGE = 60;
+  let visible = $state(PAGE);
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const GAP = 6;
+  const EDGE = 8;
+  const MAX_HEIGHT = 360;
 
   const blocked = $derived(agentState.threadSwitchBlocked);
   const hint = $derived(blocked ? 'Finish or stop the current run to switch threads' : 'Switch thread');
@@ -22,34 +39,109 @@
     const needle = query.trim().toLowerCase();
     return needle ? threads.filter(thread => thread.title.toLowerCase().includes(needle)) : threads;
   });
+  const page = $derived(matches.slice(0, visible));
+  const reduce = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // The popover API drives light dismiss and top-layer stacking; `open` mirrors
-  // it so the list only exists while shown (and so tests without popover work).
-  function close(focusTrigger = true): void {
-    open = false;
-    popup?.hidePopover?.();
-    if (focusTrigger) trigger?.focus();
+  function finishClose(): void {
+    shown = false;
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = undefined; }
+    detach();
   }
 
-  function toggle(event: MouseEvent): void {
+  function close(focusTrigger = true): void {
+    if (!open) return;
+    open = false;
+    rest();
+    if (focusTrigger) trigger?.focus();
+    if (reduce() || !popup) { finishClose(); return; }
+    // The sheet leaves the way it came; if the animation never fires, still clean up.
+    popup.dataset.state = 'closed';
+    popup.addEventListener('animationend', finishClose, { once: true });
+    closeTimer = setTimeout(finishClose, 200);
+  }
+
+  function place(): void {
+    if (!trigger || !popup) return;
+    const a = trigger.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    width = Math.max(Math.ceil(a.width), 248);
+    const h = Math.min(popup.offsetHeight || MAX_HEIGHT, MAX_HEIGHT);
+    const below = Math.max(0, vh - a.bottom - EDGE - GAP);
+    const above = Math.max(0, a.top - EDGE - GAP);
+    side = below >= h || below >= above ? 'bottom' : 'top';
+    maxHeight = Math.min(MAX_HEIGHT, side === 'bottom' ? below : above);
+    const height = Math.min(h, maxHeight);
+    top = side === 'bottom' ? a.bottom + GAP : a.top - GAP - height;
+    left = Math.max(EDGE, Math.min(a.left, vw - width - EDGE));
+  }
+
+  async function toggle(event: MouseEvent): Promise<void> {
     const dismiss = open || (event.detail > 0 && dismissByPress);
     dismissByPress = false;
     if (dismiss) { close(); return; }
-    const rect = trigger!.getBoundingClientRect();
-    // The rows carry two lines each, so the popup is measured from the list it will hold.
-    const height = Math.min(360, 92 + Math.max(1, threads.length) * 46);
-    width = Math.max(rect.width, 248);
-    left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-    top = rect.bottom + 6 + height > window.innerHeight - 8 && rect.top >= height + 8
-      ? rect.top - height - 6
-      : Math.min(rect.bottom + 6, Math.max(8, window.innerHeight - height - 8));
+    if (closeTimer) finishClose();
     query = '';
+    visible = PAGE;
     openedAt = Date.now();
+    shown = true;
     open = true;
-    popup?.showPopover?.();
+    await tick();
+    if (!popup) return;
+    popup.dataset.state = '';
+    place();
+    popup.dataset.state = 'open';
+    attach();
+    search?.focus();
   }
 
-  $effect(() => { if (open) search?.focus(); });
+  // ── outside dismissal, like the select listbox ──
+  function onPointerDown(event: PointerEvent): void {
+    const t = event.target as Node;
+    if (popup?.contains(t) || trigger?.contains(t)) return;
+    close(false);
+  }
+  function onScroll(event: Event): void {
+    if (popup?.contains(event.target as Node)) return;
+    close(false);
+  }
+  const onWindowClose = (): void => close(false);
+  function attach(): void {
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onWindowClose);
+    window.addEventListener('blur', onWindowClose);
+  }
+  function detach(): void {
+    document.removeEventListener('pointerdown', onPointerDown, true);
+    document.removeEventListener('scroll', onScroll, true);
+    window.removeEventListener('resize', onWindowClose);
+    window.removeEventListener('blur', onWindowClose);
+  }
+
+  // ── one hover layer glides between rows ──
+  let gliderOn = false;
+  function glideTo(row: HTMLElement): void {
+    if (!glider) return;
+    if (!gliderOn) glider.style.transition = 'none';
+    glider.style.transform = `translateY(${row.offsetTop}px)`;
+    glider.style.height = `${row.offsetHeight}px`;
+    if (!gliderOn) { void glider.offsetHeight; glider.style.transition = ''; }
+    gliderOn = true;
+    glider.classList.add('on');
+  }
+  function rest(): void {
+    glider?.classList.remove('on');
+    gliderOn = false;
+  }
+  function onRowPointer(event: PointerEvent): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('.thread-row');
+    if (row) glideTo(row);
+  }
+  function onListScroll(): void {
+    if (!list || visible >= matches.length) return;
+    if (list.scrollTop + list.clientHeight > list.scrollHeight - 120) visible += PAGE;
+  }
 
   function rows(): HTMLElement[] {
     return Array.from(popup?.querySelectorAll<HTMLElement>('.thread-row') || []);
@@ -60,8 +152,12 @@
     if (!all.length) return;
     const index = from ? all.indexOf(from) : -1;
     const next = index < 0 ? (delta > 0 ? 0 : all.length - 1) : index + delta;
-    if (next < 0) { search?.focus(); return; }
-    all[Math.min(next, all.length - 1)]?.focus();
+    if (next < 0) { search?.focus(); rest(); return; }
+    const row = all[Math.min(next, all.length - 1)];
+    if (!row) return;
+    row.focus({ preventScroll: true });
+    row.scrollIntoView({ block: 'nearest' });
+    glideTo(row);
   }
 
   function choose(id: string): void {
@@ -80,6 +176,7 @@
     const target = event.target as HTMLElement;
     const row = target.closest<HTMLElement>('.thread-row');
     if (event.key === 'Escape') { event.preventDefault(); close(); return; }
+    if (event.key === 'Tab') { event.preventDefault(); close(); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); step(row, 1); return; }
     if (event.key === 'ArrowUp') { event.preventDefault(); step(row, -1); return; }
     if (event.key === 'Enter' && target === search) { event.preventDefault(); if (matches[0]) choose(matches[0].id); }
@@ -112,32 +209,43 @@
   {#if agentState.threadSaveError}<p class="thread-warning" role="status">Thread history couldn’t be saved. Keep this window open.</p>{/if}
 {/if}
 
-<div
-  class="thread-popup"
-  bind:this={popup}
-  popover="auto"
-  role="dialog"
-  tabindex="-1"
-  aria-label="Threads"
-  style:left={`${left}px`}
-  style:top={`${top}px`}
-  style:width={`${width}px`}
-  onbeforetoggle={(event) => { open = (event as ToggleEvent).newState === 'open'; }}
-  onkeydown={onKeydown}
->
-  {#if open}
+{#if shown}
+  <div
+    class="pm-menu thread-popup"
+    bind:this={popup}
+    role="dialog"
+    tabindex="-1"
+    aria-label="Threads"
+    data-side={side}
+    style:left={`${left}px`}
+    style:top={`${top}px`}
+    style:width={`${width}px`}
+    style:max-height={`${maxHeight}px`}
+    onkeydown={onKeydown}
+  >
     <input
       class="thread-search"
       type="text"
       bind:this={search}
       bind:value={query}
+      oninput={() => { visible = PAGE; }}
       placeholder="Search threads…"
       aria-label="Search threads"
       autocomplete="off"
       spellcheck="false"
     />
-    <div class="thread-list" role="listbox" aria-label="Threads">
-      {#each matches as thread (thread.id)}
+    <div
+      class="thread-list"
+      bind:this={list}
+      role="listbox"
+      aria-label="Threads"
+      tabindex="-1"
+      onpointermove={onRowPointer}
+      onpointerleave={rest}
+      onscroll={onListScroll}
+    >
+      <div class="pm-menu-glider thread-glider" bind:this={glider} aria-hidden="true"></div>
+      {#each page as thread (thread.id)}
         <div
           class="thread-row"
           class:current={thread.id === agentState.threadId}
@@ -145,6 +253,7 @@
           tabindex="-1"
           aria-selected={thread.id === agentState.threadId}
           onclick={() => choose(thread.id)}
+          onfocus={(event) => glideTo(event.currentTarget as HTMLElement)}
           onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(thread.id); } }}
         >
           <span class="thread-row-text">
@@ -167,8 +276,8 @@
         <p class="thread-empty">No threads match “{query.trim()}”.</p>
       {/each}
     </div>
-  {/if}
-</div>
+  </div>
+{/if}
 
 <style>
   .thread-bar {
@@ -176,47 +285,38 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    margin: 0 10px;
+    /* The trigger's text starts where the panel title does (header padding
+       18px = 16px here + the trigger's own 2px). */
+    margin: 0 10px 0 16px;
     padding: 0 0 6px;
     flex-shrink: 0;
   }
-  .thread-trigger { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; height: 28px; padding: 0 2px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-2); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
+  .thread-trigger { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; height: 28px; padding: 0 2px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-2); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: default; }
   .thread-trigger span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thread-chevron { width: 14px; height: 14px; flex-shrink: 0; }
-  .thread-new { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; padding: 6px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3); cursor: pointer; }
+  .thread-new { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; padding: 6px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3); cursor: default; }
   .thread-trigger:hover:not(:disabled), .thread-new:hover:not(:disabled) { color: var(--tx-2); }
   .thread-new:hover:not(:disabled) { background: var(--ink-1); }
-  .thread-new:focus-visible, .thread-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   :disabled { opacity: var(--disabled); cursor: default; }
   svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
   .thread-warning { margin: 0 10px 6px 18px; font-size: var(--fs-xs); color: var(--accent); }
 
-  .thread-popup {
-    position: fixed; inset: auto; margin: 0; box-sizing: border-box;
-    max-height: min(360px, calc(100vh - 16px));
-    /* A styled `display` would defeat the UA rule that hides a closed popover. */
-    display: none; flex-direction: column;
-    padding: 6px; border: 0; border-radius: var(--r-lg);
-    background: color-mix(in srgb, var(--bg-float) 88%, transparent);
-    backdrop-filter: blur(24px) saturate(140%);
-    color: var(--tx); box-shadow: var(--shadow-float);
-    font: var(--fs-md)/var(--lh) var(--f-ui);
-    overflow: hidden;
-  }
-  .thread-popup:popover-open { display: flex; }
-  .thread-popup::backdrop { background: transparent; }
-  .thread-search { flex-shrink: 0; margin-bottom: 2px; height: var(--ctl-h); padding: 0 8px; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx); font: inherit; }
+  /* The sheet is the select listbox (.pm-menu: raised sheet, open/close motion,
+     glider) with a fixed search field above a scrolling list. */
+  .thread-popup { display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; font-weight: var(--fw-regular); }
+  .thread-search { flex-shrink: 0; margin: 0 0 2px; height: var(--ctl-h); padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--tx); font: inherit; }
   .thread-search::placeholder { color: var(--tx-3); }
   .thread-search:focus { outline: none; }
-  .thread-list { flex: 1; min-height: 0; overflow-y: auto; }
-  .thread-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--r-md); cursor: pointer; }
-  .thread-row:hover, .thread-row:focus-visible { background: var(--ink-1); outline: none; }
-  .thread-row.current { background: var(--ink-2); }
+  .thread-list { position: relative; flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+  .thread-glider { left: 0; right: 0; }
+  .thread-row { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px; }
+  .thread-row:focus-visible { outline: none; }
+  .thread-row.current { background: var(--ink-1); }
   .thread-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .thread-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thread-row-meta { color: var(--tx-3); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thread-row-meta.current { color: var(--blue); }
-  .thread-delete { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--tx-3); opacity: 0; cursor: pointer; }
+  .thread-delete { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--tx-3); opacity: 0; }
   .thread-row:hover .thread-delete, .thread-row.current .thread-delete, .thread-delete:focus-visible { opacity: 1; }
   .thread-delete:hover { color: var(--tx); background: var(--ink-2); }
   .thread-empty { margin: 4px 8px 8px; color: var(--tx-3); font-size: var(--fs-sm); }

@@ -226,6 +226,7 @@ export function createLoader(options: LoaderOptions): Loader {
 
     const handle = createExtensionAPI(kernel, record, hostDeps);
     try {
+      handle.setActivating(true);
       const result = await withTimeout(Promise.resolve(module.default(handle.api)), timeoutMs, `activate() of "${id}" timed out`);
       const disposable = result as Disposable | void;
       if (disposable && typeof disposable.dispose === 'function') handle.api.onDispose(() => disposable.dispose());
@@ -233,6 +234,8 @@ export function createLoader(options: LoaderOptions): Loader {
       handle.disposeAll();
       failActivation(record, error);
       return false;
+    } finally {
+      handle.setActivating(false);
     }
 
     active.set(id, { record, module, handle });

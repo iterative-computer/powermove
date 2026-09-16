@@ -1,60 +1,61 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { MenuContribution } from '../kernel/api';
 import { createKernel } from '../kernel/registries';
 import { openPanelMenu } from './menu';
 import type { DockSpec, PanelSpec, Workspace } from './model';
 
-function harness(x = 10, y = 10) {
+function harness(panelId = 'notes', x = 10, y = 10) {
   const kernel = createKernel();
-  const workspace = { layout: { docks: [{ id: 'right', panels: [{ id: 'notes' }] }] }, hiddenPanels: [] } as unknown as Workspace;
+  const workspace = {
+    layout: { docks: [{ id: 'right', panels: [{ id: panelId }] }] },
+    hiddenPanels: []
+  } as unknown as Workspace;
+  const menu = vi.fn();
   const PM: any = {
     Kernel: kernel,
     Layout: { ws: workspace },
-    PANELS: { notes: { id: 'notes', title: 'Notes' } },
+    PANELS: { [panelId]: { id: panelId, title: panelId === 'viewer' ? 'Viewer' : 'Notes' } },
+    Popout: { open: vi.fn() },
     WS: { mutate: vi.fn((fn: any) => fn(workspace)) },
-    closeMenus: vi.fn(),
-    clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
+    menu
   };
   const dock = workspace.layout.docks[0] as DockSpec;
   const spec = dock.panels[0] as PanelSpec;
   const trigger = document.createElement('button');
   document.body.append(trigger);
-  const open = (): HTMLElement | null =>
-    openPanelMenu(PM, new MouseEvent('contextmenu', { clientX: x, clientY: y }), spec, dock, trigger);
-  return { PM, kernel, open };
+  const open = (): MenuContribution[] => {
+    openPanelMenu(PM, spec, dock, trigger, { x, y });
+    return menu.mock.calls.at(-1)?.[1] as MenuContribution[];
+  };
+  return { PM, kernel, menu, open, trigger };
 }
 
 afterEach(() => {
   document.body.replaceChildren();
-  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe('panel context menu contributions', () => {
-  it('places the whole menu below or above the cursor based on available space', () => {
-    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(180);
-    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(400);
-    vi.stubGlobal('innerWidth', 800);
-    vi.stubGlobal('innerHeight', 600);
+  it('opens from the trigger at the requested pointer position', () => {
+    const { menu, open, trigger } = harness('notes', 70, 24);
 
-    const below = harness(70, 24).open()!;
-    expect({ top: below.style.top, side: below.dataset.side }).toEqual({ top: '30px', side: 'below' });
-    below.remove();
-    const above = harness(70, 520).open()!;
-    expect({ top: above.style.top, side: above.dataset.side }).toEqual({ top: '114px', side: 'above' });
+    open();
+
+    expect(menu).toHaveBeenCalledWith(trigger, expect.any(Array), { x: 70, y: 24 });
   });
 
-  it('only shows the essential built-in panel actions', () => {
+  it('only shows the essential built-in panel actions with native icons', () => {
     const { open } = harness();
-    const menu = open()!;
-    const labels = [...menu.querySelectorAll('button')].map((button) => button.textContent);
 
-    expect(menu.querySelector('.hd')?.textContent).toBe('Notes');
-    expect(labels).toEqual(['Pop out to window', 'Close panel']);
-    expect(menu.textContent).not.toContain('Move to');
-    expect(menu.textContent).not.toContain('Add panel');
-    expect(menu.textContent).not.toContain('Restore ');
+    expect(open().map((item) => item === '-' ? item : 'header' in item ? item.header : item.label))
+      .toEqual(['Notes', 'Pop out to window', 'Close panel']);
+    expect(open()).toMatchObject([
+      { header: 'Notes' },
+      { label: 'Pop out to window', icon: 'export' },
+      { label: 'Close panel', icon: 'x' }
+    ]);
   });
 
   it('appends contributed items after the built-in rows, behind a separator', () => {
@@ -62,13 +63,11 @@ describe('panel context menu contributions', () => {
     const run = vi.fn();
     kernel.contributeMenu('ext', 'panel:context', () => [{ label: 'Duplicate panel', run }]);
 
-    const menu = open()!;
-    const buttons = [...menu.querySelectorAll('button')];
+    const items = open();
 
-    expect(buttons.at(-1)!.textContent).toBe('Duplicate panel');
-    expect(menu.lastElementChild).toBe(buttons.at(-1));
-    expect(menu.children[menu.children.length - 2]!.className).toBe('sep');
-    buttons.at(-1)!.click();
+    expect(items.slice(-2)).toEqual(['-', { label: 'Duplicate panel', run }]);
+    const duplicate = items.at(-1);
+    if (duplicate !== '-' && duplicate && 'label' in duplicate) duplicate.run?.();
     expect(run).toHaveBeenCalledOnce();
   });
 
@@ -82,19 +81,28 @@ describe('panel context menu contributions', () => {
     expect(items).toHaveBeenCalledWith({ panelId: 'notes', dockId: 'right' });
   });
 
-  it('renders contributed headers, separators and disabled rows', () => {
+  it('preserves contributed headers, separators, icons, shortcuts and states', () => {
     const { open, kernel } = harness();
+    const run = vi.fn();
     kernel.contributeMenu('ext', 'panel:context', () => [
       { header: 'Mods' },
       '-',
-      { label: 'Not yet', disabled: true, run: () => {} }
+      { label: 'Not yet', icon: 'gear', kb: '⌘K', on: true, disabled: true, run }
     ]);
 
-    const menu = open()!;
-    const headers = [...menu.querySelectorAll('.hd')].map((node) => node.textContent);
+    expect(open().slice(-4)).toEqual([
+      '-',
+      { header: 'Mods' },
+      '-',
+      { label: 'Not yet', icon: 'gear', kb: '⌘K', on: true, disabled: true, run }
+    ]);
+  });
 
-    expect(headers).toContain('Mods');
-    const disabled = [...menu.querySelectorAll('button')].find((button) => button.textContent === 'Not yet');
-    expect(disabled?.getAttribute('aria-disabled')).toBe('true');
+  it('does not offer Close panel for the viewer', () => {
+    const { open } = harness('viewer');
+    const items = open();
+
+    expect(items).toEqual([{ header: 'Viewer' }]);
+    expect(items).not.toContainEqual(expect.objectContaining({ label: 'Close panel' }));
   });
 });

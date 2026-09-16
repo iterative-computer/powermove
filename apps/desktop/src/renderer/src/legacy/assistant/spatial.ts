@@ -406,6 +406,12 @@ function switchThread(id?: string) {
   }
   if (id === threads.activeId || (id && !threads.threads.some(t => t.id === id))) return;
   persistThreads();
+  // "+" on a thread that has nothing in it yet is already a new thread: just
+  // put the caret back in the composer instead of minting another empty one.
+  if (!id && AgentThreads.isBlank(threads.active)) {
+    PM.AgentUI?.update({ flush: true, focusComposer: true });
+    return;
+  }
   threadResults.set(`${threads.projectId}/${threads.activeId}`, {
     revision: Number(PM.proj?.revision || 0), phase: S.phase,
     plan: S.plan, run: S.run, panelRun: S.panelRun, steps: S.steps,

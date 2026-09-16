@@ -41,8 +41,11 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .sg-navbtn.on svg{color:var(--tx)}
 .sg-navbtn:focus-visible{outline:0}
 /* Keep the way out at the top right, outside the scrolling settings. */
+/* Two ways out: a plain Done button in the sheet's corner, and one more nav
+   row (chevron first) pinned to the foot of the sidebar. */
 .sg-actions{height:48px;flex:none;display:flex;align-items:center;justify-content:flex-end;padding:8px 16px}
-.sg-done{width:auto;flex:none;color:var(--tx-3)}
+.sg-actions .btn{height:32px;padding:0 14px}
+.sg-done{margin-top:auto;width:auto;flex:none;color:var(--tx-3)}
 .sg-done svg{transform:rotate(180deg)}
 .sg-done:hover{color:var(--tx)}
 

@@ -247,35 +247,33 @@ describe('Svelte DockLayout panel pool', () => {
     expect(panel.querySelector(domContract.panel.moveHandle)).not.toBeNull();
   });
 
-  it('opens a native-button menu with roving arrow focus and a pop-out entry', () => {
+  it('routes the panel options button and header right-click to the native menu bridge', () => {
     register(PM, 'alpha');
     register(PM, 'viewer', { headless: true, hideMoveHandle: true });
     register(PM, 'beta');
+    PM.menu = vi.fn();
     installSvelteLayout(PM);
     PM.Layout.apply(PM.WS.current);
-    const trigger = document.querySelector<HTMLButtonElement>('#panel-alpha .panel-options')!;
-    const removeListener = vi.spyOn(window, 'removeEventListener');
 
+    const trigger = document.querySelector<HTMLButtonElement>('#panel-alpha .panel-options')!;
+    trigger.getBoundingClientRect = () => ({ width: 20, height: 20, left: 30, right: 50, top: 10, bottom: 30, x: 30, y: 10, toJSON() {} });
     trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 40, clientY: 40 }));
-    const menu = document.querySelector<HTMLElement>('.drop[role="menu"]')!;
-    const buttons = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]')];
-    expect(menu.getAttribute('aria-label')).toBe('Alpha panel options');
-    expect(buttons).toHaveLength(2);
-    expect(buttons.every((button) => button instanceof HTMLButtonElement)).toBe(true);
-    expect(menu.textContent).toContain('Pop out to window');
-    expect(buttons.map((button) => button.textContent)).toEqual(['Pop out to window', 'Close panel']);
-    expect(buttons.every((button) => !button.disabled)).toBe(true);
-    expect(buttons.every((button) => button.style.background === '')).toBe(true);
-    // Pointer-opened: focus parks on the menu, no row is painted; arrows enter the list.
-    expect(document.activeElement).toBe(menu);
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-    expect(document.activeElement).toBe(buttons[0]);
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
-    expect(document.activeElement).toBe(buttons[1]);
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const menu = PM.menu as ReturnType<typeof vi.fn>;
+    expect(menu).toHaveBeenCalledTimes(1);
+    const [anchor, items, position] = menu.mock.calls[0]!;
+    expect(anchor).toBe(trigger);
+    // Anchored menus open from the button's bottom-left corner.
+    expect(position).toEqual({ x: 30, y: 30 });
+    expect(items[0]).toEqual({ header: 'Alpha' });
+    expect(items.slice(1).map((item: any) => item.label)).toEqual(['Pop out to window', 'Close panel']);
+    expect(items.slice(1).map((item: any) => item.icon)).toEqual(['export', 'x']);
+    // No HTML menu is ever built for panels.
     expect(document.querySelector('.drop')).toBeNull();
-    expect(document.activeElement).toBe(trigger);
-    expect(removeListener).toHaveBeenCalledWith('keydown', expect.any(Function), true);
+
+    const header = document.querySelector<HTMLElement>('#panel-alpha header')!;
+    header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 80 }));
+    expect(menu).toHaveBeenCalledTimes(2);
+    expect(menu.mock.calls[1]![2]).toEqual({ x: 120, y: 80 });
   });
 
   it('resizes and clamps a dock from the keyboard splitter', () => {

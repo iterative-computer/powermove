@@ -540,6 +540,14 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .asset-preview img,.asset-preview video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .asset-preview video{opacity:0}
 .asset-preview video[data-ready="true"]{opacity:1}
+/* Offline media: the cached poster stays visible but drained, so the user can
+   still tell what the file was; the pill reads like an NLE's media-offline tile. */
+.asset-card.is-offline .asset-preview img,.asset-card.is-offline .asset-preview video{opacity:.32;filter:saturate(.15)}
+.asset-card.is-offline .asset-preview{background:color-mix(in srgb,var(--red) 10%,rgb(var(--ink-rgb) / .09))}
+.asset-card.is-offline .asset-preview>svg{opacity:0}
+.asset-offline{position:absolute;left:4px;bottom:4px;z-index:2;height:16px;padding:0 5px 0 4px;display:flex;align-items:center;gap:3px;border-radius:var(--r-xs);background:var(--red);color:#fff;font-size:10px;font-weight:var(--fw-medium);letter-spacing:.01em;white-space:nowrap}
+.asset-offline svg{width:10px;height:10px}
+.asset-copy small.asset-missing{color:var(--red)}
 .asset-preview.audio{background:#25473C}
 .asset-wave{position:absolute;inset:26px 0 3px;display:flex;align-items:flex-end;gap:0;padding:0 2px}
 .asset-wave i{flex:1;min-width:0;background:#5FC29C;opacity:.9}
@@ -551,10 +559,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .asset-actions{position:absolute;right:4px;top:4px;z-index:3;display:flex;gap:3px;opacity:0;transition:opacity var(--dur-1)}
 .asset-card:hover .asset-actions,.asset-card:focus-within .asset-actions{opacity:1}
 .asset-card:hover .asset-badge,.asset-card:focus-within .asset-badge{opacity:0}
-.asset-add,.asset-reveal,.asset-delete{width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff}
-.asset-add svg,.asset-reveal svg,.asset-delete svg{width:11px;height:11px}
+.asset-add,.asset-reveal,.asset-locate,.asset-delete{width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff}
+.asset-add svg,.asset-reveal svg,.asset-locate svg,.asset-delete svg{width:11px;height:11px}
 .asset-reveal:hover{background:var(--bg-float);color:var(--tx)}
-.asset-add:hover{background:var(--accent);color:var(--on-accent)}
+.asset-add:hover,.asset-locate:hover{background:var(--accent);color:var(--on-accent)}
 .asset-delete:hover{background:var(--red);color:#fff}
 .asset-empty{grid-column:1/-1;min-height:160px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px 16px;color:var(--tx-4);text-align:center}
 .asset-empty svg{width:32px;height:32px;color:var(--tx-4)}

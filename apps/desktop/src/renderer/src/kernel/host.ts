@@ -72,6 +72,8 @@ import { performanceMonitor } from '../runtime/performance-monitor';
 
 export interface PanelsBackend {
   open(id: string, dock?: PanelDock | PanelOpenOptions): void;
+  /** True when the user closed this panel and the workspace remembers it hidden. */
+  isHidden?(id: string): boolean;
   close(id: string): void;
   isOpen(id: string): boolean;
   refresh(id: string): void;
@@ -125,6 +127,8 @@ export interface ExtensionHandle {
   readonly api: PowermoveAPI;
   /** Release every registration, event handler, and user disposer. */
   disposeAll(): void;
+  /** Marks the window during which activate(api) runs. */
+  setActivating(on: boolean): void;
 }
 
 const FALLBACK_MANIFEST = (id: string): ExtensionManifest => ({ id, name: id, version: '0.0.0', apiVersion: 1 });
@@ -134,6 +138,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
   const manifest = record.manifest ?? FALLBACK_MANIFEST(id);
   const disposers: Array<() => void> = [];
   let disposed = false;
+  let activating = false;
 
   const log = (level: 'info' | 'warn' | 'error', message: string, ...data: unknown[]): void => {
     const line = `[ext:${id}] ${message}`;
@@ -241,7 +246,14 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     },
     /* The backend merges kernel ids with panels the legacy PM still owns. */
     list: () => deps.panelsBackend.list(),
-    open: (panelId, dock) => deps.panelsBackend.open(panelId, dock),
+    open: (panelId, dock) => {
+      /* Extensions habitually open their panel from activate(), which runs on
+         every launch. If the user closed that panel, their choice wins over the
+         extension's boot-time reveal; explicit opens later (commands, menus)
+         still bring it back. */
+      if (activating && deps.panelsBackend.isHidden?.(panelId)) return;
+      deps.panelsBackend.open(panelId, dock);
+    },
     close: (panelId) => deps.panelsBackend.close(panelId),
     isOpen: (panelId) => deps.panelsBackend.isOpen(panelId),
     refresh: (panelId) => deps.panelsBackend.refresh(panelId)
@@ -424,6 +436,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
   return {
     id,
     api,
+    setActivating(on: boolean) { activating = on; },
     disposeAll() {
       if (disposed) return;
       disposed = true;

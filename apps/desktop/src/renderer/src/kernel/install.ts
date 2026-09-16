@@ -627,6 +627,7 @@ function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
       PM?.WS?.mutate?.((workspace: unknown) => hide(workspace, id));
     },
     isOpen: (id) => !!PM?.Layout?.hasPanel?.(current(), id),
+    isHidden: (id) => ((current() as { hiddenPanels?: Array<{ id?: string }> } | undefined)?.hiddenPanels ?? []).some((item) => item.id === id),
     refresh: (id) => PM?.Layout?.refresh?.(id),
     list: () => [...new Set([...kernel.panels.ids(), ...Object.keys(PM?.PANELS ?? {})])]
   };

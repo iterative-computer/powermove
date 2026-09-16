@@ -85,6 +85,23 @@
     return PM.assets.get(asset.id);
   }
 
+  /* A cached still captured at import. It survives the source bytes going
+     missing, so an offline card can still show what the media looked like. */
+  function posterUrl(asset: Asset): string {
+    return String(PM.assets.poster?.(asset.id) || '');
+  }
+
+  /* Project meta without a live asset means the bytes could not be restored
+     from the media store: the file is offline until the user locates it. */
+  function isOffline(asset: Asset): boolean {
+    return !liveAsset(asset);
+  }
+
+  function offlineDetail(asset: Asset): string {
+    const source = finderPath(asset);
+    return source ? `Missing · ${source}` : 'Missing · locate the file to relink it';
+  }
+
   function finderPath(asset: Asset): string {
     return asset.sourcePath || asset.path || '';
   }
@@ -140,10 +157,11 @@
     event.stopPropagation();
     selectAsset(asset.id, event.currentTarget as HTMLElement);
     const sourcePath = finderPath(asset);
+    const offline = isOffline(asset);
     PM.menu(event.currentTarget, [
       { header: asset.name },
-      { label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) },
-      { label: 'Replace File…', run: () => pickReplacement(asset) },
+      ...(offline ? [] : [{ label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) }]),
+      { label: offline ? 'Locate File…' : 'Replace File…', run: () => pickReplacement(asset) },
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
       '-',
       { label: 'Delete media…', run: () => requestDelete(asset) },
@@ -216,6 +234,13 @@
 
   function addAsset(event: MouseEvent | KeyboardEvent, asset: Asset): void {
     event.stopPropagation();
+    /* Offline media has nothing to put on the timeline; the primary action
+       becomes locating the file, the same way a broken tile works in an NLE. */
+    if (isOffline(asset)) {
+      selectAsset(asset.id);
+      pickReplacement(asset);
+      return;
+    }
     PM.cmd('addFromAsset', asset.id);
     status = `Added ${asset.name} to the timeline`;
   }
@@ -376,8 +401,7 @@
 
   function handleRowDoubleClick(event: MouseEvent, asset: Asset): void {
     if ((event.target as Element).closest('button')) return;
-    PM.cmd('addFromAsset', asset.id);
-    status = `Added ${asset.name} to the timeline`;
+    addAsset(event, asset);
   }
 
   function focusAsset(index: number): void {
@@ -441,17 +465,20 @@
   <div class="asset-list" role="listbox" tabindex="-1" aria-label="Project media" bind:this={listElement} onpointerdown={handleListPointerDown}>
     {#each assets as asset, index (asset.id)}
       {@const currentAsset = liveAsset(asset)}
+      {@const posterSrc = posterUrl(asset)}
+      {@const offline = isOffline(asset)}
       <div
         class="asset-card"
         class:is-dragging={draggingId === asset.id}
+        class:is-offline={offline}
         role="option"
-        draggable="true"
+        draggable={!offline}
         ondragstart={(event) => handleDragStart(event, asset)}
         ondragend={handleDragEnd}
         tabindex={activeAssetId ? (activeAssetId === asset.id ? 0 : -1) : (index === 0 ? 0 : -1)}
         aria-selected={activeAssetId === asset.id}
         data-asset-id={asset.id}
-        title="Select media · double-click to add, or drag onto the timeline"
+        title={offline ? offlineDetail(asset) : 'Select media · double-click to add, or drag onto the timeline'}
         onpointerdown={(event) => handleRowPointerDown(event, asset)}
         oncontextmenu={(event) => showAssetMenu(event, asset)}
         ondblclick={(event) => handleRowDoubleClick(event, asset)}
@@ -464,22 +491,35 @@
             </span>
           {:else}
             <Icon {PM} name={assetIcon(asset.kind)} />
-            {#if asset.kind === 'image' && currentAsset?.url}
+            {#if posterSrc}
+              <img class="asset-poster" src={posterSrc} alt="" />
+            {:else if asset.kind === 'image' && currentAsset?.url}
               <img src={currentAsset.url} alt="" />
             {:else if asset.kind === 'video' && videoSource(currentAsset)}
               <video src={videoSource(currentAsset)} muted playsinline preload="auto" use:poster></video>
             {/if}
           {/if}
-          {#if asset.dur}<span class="asset-badge">{mediaDuration(asset.dur)}</span>{/if}
+          {#if offline}
+            <span class="asset-offline" role="img" aria-label="Media offline">
+              <Icon {PM} name="missing" />
+              Media offline
+            </span>
+          {:else if asset.dur}<span class="asset-badge">{mediaDuration(asset.dur)}</span>{/if}
           <span class="asset-actions">
             {#if finderPath(asset)}
               <button class="asset-reveal" type="button" title="Reveal in Finder" aria-label={`Reveal ${asset.name} in Finder`} onclick={(event) => revealAsset(event, asset)}>
                 <Icon {PM} name="project" />
               </button>
             {/if}
-            <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
-              <Icon {PM} name="plus" />
-            </button>
+            {#if offline}
+              <button class="asset-locate" type="button" title="Locate file" aria-label={`Locate ${asset.name}`} onclick={(event) => addAsset(event, asset)}>
+                <Icon {PM} name="link" />
+              </button>
+            {:else}
+              <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
+                <Icon {PM} name="plus" />
+              </button>
+            {/if}
             <button
               class="asset-delete"
               type="button"
@@ -497,7 +537,11 @@
         </span>
         <span class="asset-copy">
           <b title={asset.name}>{asset.name}</b>
-          <small title={mediaDetails(asset)}>{mediaDetails(asset)}</small>
+          {#if offline}
+            <small class="asset-missing" title={offlineDetail(asset)}>{offlineDetail(asset)}</small>
+          {:else}
+            <small title={mediaDetails(asset)}>{mediaDetails(asset)}</small>
+          {/if}
         </span>
       </div>
     {:else}
