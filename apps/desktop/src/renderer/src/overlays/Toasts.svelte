@@ -14,7 +14,7 @@
     dismissible: boolean;
     timeout: number;
     key?: string;
-    corner?: 'top-right';
+    corner?: 'top-right' | 'bottom-right';
     action?: { label: string; run: () => void };
     onDismiss?: () => void;
   };
@@ -71,7 +71,8 @@
   }
 
   const bottom = $derived(queue.filter(item => !item.corner));
-  const corner = $derived(queue.filter(item => item.corner === 'top-right'));
+  const topRight = $derived(queue.filter(item => item.corner === 'top-right'));
+  const bottomRight = $derived(queue.filter(item => item.corner === 'bottom-right'));
 
   /** Remove a keyed notice without treating it as a user dismissal. */
   export function dismissKey(key: string): void {
@@ -136,9 +137,14 @@
 {/snippet}
 
 {#each bottom as item (item.id)}{@render toast(item)}{/each}
-{#if corner.length}
+{#if topRight.length}
   <div class="toast-corner" role="status" aria-live="polite" use:portal>
-    {#each corner as item (item.id)}{@render toast(item)}{/each}
+    {#each topRight as item (item.id)}{@render toast(item)}{/each}
+  </div>
+{/if}
+{#if bottomRight.length}
+  <div class="toast-corner bottom-right" role="status" aria-live="polite" use:portal>
+    {#each bottomRight as item (item.id)}{@render toast(item)}{/each}
   </div>
 {/if}
 

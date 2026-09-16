@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'ele
 
 import {
   IPC,
+  type AppUpdateState,
   type ArtifactFile,
   type AttachmentRevealRequest,
   type CaptureResult,
@@ -194,6 +195,17 @@ const bridge: PowermoveBridge = {
   },
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
   nativeEdit: (action: NativeEditAction) => ipcRenderer.send(IPC.nativeEdit, action),
+  updates: {
+    status: () => ipcRenderer.invoke(IPC.updateStatus) as Promise<AppUpdateState>,
+    check: () => ipcRenderer.invoke(IPC.updateCheck) as Promise<void>,
+    install: () => ipcRenderer.invoke(IPC.updateInstall) as Promise<void>,
+    onChanged: (cb) => {
+      const listener = (_event: IpcRendererEvent, state: AppUpdateState): void => cb(state);
+      ipcRenderer.on(IPC.updateChanged, listener);
+      return () => ipcRenderer.removeListener(IPC.updateChanged, listener);
+    }
+  },
+
   onMenuCommand: (cb) => {
     const listener = (_event: IpcRendererEvent, command: MenuCommand): void => cb(command);
     ipcRenderer.on(IPC.menuCommand, listener);

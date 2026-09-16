@@ -77,8 +77,22 @@ export const IPC = {
   log: 'log',
   openExternal: 'shell:open-external',
   nativeEdit: 'edit:native',
-  menuCommand: 'menu:command' // main → renderer
+  menuCommand: 'menu:command', // main → renderer
+  updateStatus: 'update:status',
+  updateCheck: 'update:check',
+  updateInstall: 'update:install',
+  updateChanged: 'update:changed' // main → renderer
 } as const;
+
+/** Auto-update lifecycle as the renderer sees it. `ready` means Squirrel has
+ * staged the new version and a normal quit installs it. */
+export interface AppUpdateState {
+  status: 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
+  /** Running app version. */
+  current: string;
+  /** Version being downloaded or staged, when known. */
+  version: string | null;
+}
 
 export interface OnboardingLogoTarget {
   x: number;
@@ -538,6 +552,14 @@ export interface PowermoveBridge {
   openExternal(url: string): Promise<void>;
   nativeEdit(action: NativeEditAction): void;
   onMenuCommand(cb: (cmd: MenuCommand) => void): () => void;
+
+  updates: {
+    status(): Promise<AppUpdateState>;
+    check(): Promise<void>;
+    /** Quit normally (save barrier included), install the staged update, relaunch. */
+    install(): Promise<void>;
+    onChanged(cb: (state: AppUpdateState) => void): () => void;
+  };
 
   extensions: PowermoveExtensionsBridge;
 }
