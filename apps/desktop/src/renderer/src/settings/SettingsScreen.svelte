@@ -318,14 +318,15 @@
         <p class="sg-nav-empty">No settings found.</p>
       {/each}
     </nav>
+    <button class="sg-navbtn sg-done" type="button" aria-label="Done" onclick={close}>
+      <Icon {PM} name="chev" />
+      <span>Done</span>
+    </button>
   </aside>
 
   <main class="sg-main">
     <div class="sg-actions">
-      <button class="sg-navbtn sg-done" type="button" aria-label="Done" onclick={close}>
-        <Icon {PM} name="chev" />
-        <span>Done</span>
-      </button>
+      <button class="btn" type="button" onclick={close}>Done</button>
     </div>
     <div class="sg-scroll" bind:this={scrollEl} onscroll={syncSection}>
       {#if query}
