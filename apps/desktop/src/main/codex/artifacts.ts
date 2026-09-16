@@ -2,7 +2,6 @@ import { readdir, realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { ArtifactFile } from '../../shared/ipc';
-import { LIMITS } from '../../shared/ipc';
 
 const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   '.aac': 'audio/aac',
@@ -70,7 +69,7 @@ function rejectUnsafeRelativePath(relativePath: string): void {
 
 /**
  * Resolve an artifact path through the filesystem and prove that its final
- * target is a regular, size-bounded file below the real artifact root.
+ * target is a regular file below the real artifact root.
  */
 export async function validatedArtifactPath(root: string, relativePath: string): Promise<string> {
   rejectUnsafeRelativePath(relativePath);
@@ -84,18 +83,16 @@ export async function validatedArtifactPath(root: string, relativePath: string):
 
   const metadata = await stat(candidate);
   if (!metadata.isFile()) throw new Error('Artifact is not a regular file.');
-  if (metadata.size > LIMITS.artifactBytes) throw new Error('Artifact is larger than 64 MB.');
   return candidate;
 }
 
 export async function readArtifact(root: string, relativePath: string): Promise<ArtifactFile> {
   const filePath = await validatedArtifactPath(root, relativePath);
   const data = await readFile(filePath);
-  if (data.byteLength > LIMITS.artifactBytes) throw new Error('Artifact is larger than 64 MB.');
   return {
     name: path.basename(filePath),
     mime: mimeTypeForPath(filePath),
-    data: new Uint8Array(data)
+    data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
   };
 }
 
@@ -169,7 +166,6 @@ export async function collectArtifacts(
   const discovered: Array<{ localPath: string; fullPath: string }> = [];
 
   async function walk(directory: string, prefix: string): Promise<void> {
-    if (discovered.length >= 80) return;
     let entries;
     try {
       entries = await readdir(directory, { withFileTypes: true });
@@ -178,7 +174,6 @@ export async function collectArtifacts(
     }
     entries.sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
-      if (discovered.length >= 80) return;
       if (entry.name.startsWith('.')) continue;
       const localPath = prefix ? `${prefix}/${entry.name}` : entry.name;
       const fullPath = path.join(directory, entry.name);
@@ -192,7 +187,7 @@ export async function collectArtifacts(
 
   await walk(runDirectory, '');
   const artifacts: CollectedArtifact[] = [];
-  for (const item of discovered.sort((left, right) => left.localPath.localeCompare(right.localPath)).slice(0, 80)) {
+  for (const item of discovered.sort((left, right) => left.localPath.localeCompare(right.localPath))) {
     let metadata;
     try {
       metadata = await stat(item.fullPath);

@@ -85,3 +85,29 @@ describe('portable web export', () => {
     expect(planExport(opts, { w: 100, h: 100, dur: 2, work: [0, 1] }).note).toContain('full composition');
   });
 });
+
+
+it('packages media beyond 256 MB and preserves ZIP offsets and final media bytes', async () => {
+  const PM = fixture();
+  PM.proj.assets = { video: { id: 'video', kind: 'video', name: 'large.webm' } };
+  PM.proj.layers.push(PM.mkLayer('video', { d: { asset: 'video' } }, PM.proj));
+  const data = new Uint8Array(256 * 1024 * 1024 + 1);
+  data[data.length - 1] = 123;
+  PM.MediaStore.get = async () => ({ size: data.length, arrayBuffer: async () => data.buffer });
+  const result = await buildWebExport(PM);
+  const view = new DataView(result.bytes.buffer);
+  const end = result.bytes.length - 22;
+  expect(view.getUint32(end, true)).toBe(0x06054b50);
+  const directory = view.getUint32(end + 16, true);
+  expect(view.getUint32(directory, true)).toBe(0x02014b50);
+  expect(view.getUint32(directory + 24, true)).toBe(data.length);
+  const start = 30 + view.getUint16(26, true);
+  expect(result.bytes[start + data.length - 1]).toBe(123);
+}, 30_000);
+
+
+it('rejects ZIP fields that would otherwise overflow their file-format widths', () => {
+  expect(() => zipFiles(new Map([['a'.repeat(65536), new Uint8Array()]]))).toThrow('path is too long');
+  expect(() => zipFiles(new Map(Array.from({ length: 65535 }, (_, i) => [`${i}.txt`, new Uint8Array()])))).toThrow('ZIP64');
+  expect(() => zipFiles(new Map([['large.bin', { length: 0xffffffff } as Uint8Array]]))).toThrow('ZIP64');
+});

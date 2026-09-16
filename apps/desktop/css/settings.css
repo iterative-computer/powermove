@@ -40,14 +40,15 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .sg-navbtn.on{background:var(--ink-2);color:var(--tx)}
 .sg-navbtn.on svg{color:var(--tx)}
 .sg-navbtn:focus-visible{outline:0}
-/* The way out sits at the foot of the sidebar as one more row, chevron first. */
-.sg-done{margin-top:auto;flex:none;color:var(--tx-3)}
+/* Keep the way out at the top right, outside the scrolling settings. */
+.sg-actions{height:48px;flex:none;display:flex;align-items:center;justify-content:flex-end;padding:8px 16px}
+.sg-done{width:auto;flex:none;color:var(--tx-3)}
 .sg-done svg{transform:rotate(180deg)}
 .sg-done:hover{color:var(--tx)}
 
 /* ── the inset sheet ── */
 .sg-main{position:relative;min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}
-.sg-scroll{min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:48px 40px 96px;container-type:inline-size}
+.sg-scroll{min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:0 40px 96px;container-type:inline-size}
 .sg-column{width:608px;max-width:100%;margin:0 auto}
 
 /* ── page ── */
@@ -175,7 +176,7 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 }
 @media (max-width:760px){
   .sg-sidebar{width:180px}
-  .sg-scroll{padding:56px 20px 64px}
+  .sg-scroll{padding:8px 20px 64px}
 }
 
 @media (prefers-reduced-motion:reduce){}

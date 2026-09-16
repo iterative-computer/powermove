@@ -206,6 +206,18 @@ describe('legacy engine install', () => {
     expect(PM.time).toBeCloseTo(1.022);
   });
 
+  it.each([true, false])('inactive copies cannot pause a shared active video (inactive first: %s)', async first => {
+    const media = delayedVideo();
+    const layer = { id: 'active', type: 'video', from: 0, dur: 2, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const inactive = { ...layer, id: 'later', from: 2 };
+    const { PM, runFrame } = engine({ layer, media });
+    PM.proj.layers = first ? [inactive, layer] : [layer, inactive];
+    PM.play(); runFrame(16); media.finishPlay(); await Promise.resolve(); runFrame(32);
+    expect(media.el.paused).toBe(false);
+    expect(media.el.pauseCalls).toBe(0);
+    expect(media.el.playCalls).toBe(1);
+  });
+
   it('lets pause win when a video start finishes late', async () => {
     const media = delayedVideo();
     const layer = { id: 'video-1', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'asset-1', speed: 1, trim: 0 } };

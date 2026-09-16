@@ -37,3 +37,12 @@ it('selects the exact source frame at boundaries and retains the final frame at 
   expect(sequencePlaybackTime(asset, -2)).toBeCloseTo(.001);
   expect(sequencePlaybackTime({}, 1)).toBeUndefined();
 });
+
+
+it('accepts sequences longer than 20,000 frames without dropping frames', () => {
+  const frames = Array.from({ length: 20_001 }, (_, index) => ({ name: `frame_${20_000 - index}.png` }));
+  const sorted = orderedSequence(frames);
+  expect(sorted).toHaveLength(20_001);
+  expect(sorted[0]?.name).toBe('frame_0.png');
+  expect(sorted.at(-1)?.name).toBe('frame_20000.png');
+});

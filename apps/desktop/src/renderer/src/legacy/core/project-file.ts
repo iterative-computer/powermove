@@ -1,5 +1,4 @@
-import { LIMITS } from '../../../../shared/ipc';
-import { decodeProjectContainer, encodeProjectContainerAsync, encodeTextChunks } from '../../../../shared/project-container';
+import { decodeProjectContainer, encodeProjectContainerBlob, encodeTextChunks, isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../../../../shared/project-container';
 import { stringifyAsync } from './serialize-async';
 
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any): Promise<boolean> };
@@ -19,34 +18,35 @@ function fileAssets(document: any): Record<string, any> {
 }
 
 /** Embed available media; keep missing-media references editable on reopening. */
-export async function packProjectFile(snapshot: string | any, store: MediaStore, serialized?: string): Promise<Uint8Array> {
+export async function packProjectFileBlob(snapshot: string | any, store: MediaStore, serialized?: string): Promise<Blob> {
   const document = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
   const assets = fileAssets(document);
-  const media: Array<{ id: string; type: string; data: Uint8Array }> = [];
+  const media: Array<{ id: string; type: string; data: Blob }> = [];
   const documentJSON = serialized ?? await stringifyAsync(document);
   const documentBytes = await encodeTextChunks(documentJSON);
-  let estimatedBytes = documentBytes.reduce((sum, chunk) => sum + chunk.length, 0);
-  if (estimatedBytes > LIMITS.fileSaveBytes) throw new Error('This project is too large to save as one file (256 MB maximum).');
   for (const [id, asset] of Object.entries<any>(assets)) {
     const blob = await store.get(asset);
     // Missing sources (including deleted assets retained by undo/redo) must not
     // prevent saving edits. Their metadata stays in the document and history.
     if (!blob) continue;
-    estimatedBytes += blob.size + 1024;
-    if (estimatedBytes > LIMITS.fileSaveBytes) throw new Error('This project is too large to save as one file (256 MB maximum).');
-    const data = new Uint8Array(await blob.arrayBuffer());
-    media.push({ id, type: blob.type || asset.type || '', data });
+    media.push({ id, type: blob.type || asset.type || '', data: blob });
   }
-  return encodeProjectContainerAsync(documentBytes, media);
+  const packed = encodeProjectContainerBlob(documentBytes, media);
+  return packed;
+}
+
+/** Byte API for callers that need a complete container; native Save streams the Blob. */
+export async function packProjectFile(snapshot: string | any, store: MediaStore, serialized?: string): Promise<Uint8Array> {
+  return new Uint8Array(await (await packProjectFileBlob(snapshot, store, serialized)).arrayBuffer());
 }
 
 export async function restoreProjectFileMedia(document: any, store: MediaStore): Promise<void> {
   if (document?.containerMedia) {
     const assets = fileAssets(document);
-    for (const source of document.containerMedia as Array<{ id: string; type: string; data: Uint8Array }>) {
+    for (const source of document.containerMedia as Array<{ id: string; type: string; data: Uint8Array | Blob }>) {
       const asset = assets[source.id];
-      if (!asset || !(source.data instanceof Uint8Array)) continue;
-      if (!await store.put(source.id, new Blob([new Uint8Array(source.data)], { type: source.type }), asset)) {
+      if (!asset || !(source.data instanceof Uint8Array) && !(source.data instanceof Blob)) continue;
+      if (!await store.put(source.id, source.data instanceof Blob ? source.data : new Blob([new Uint8Array(source.data)], { type: source.type }), asset)) {
         throw new Error(`Could not restore ${asset.name || source.id}. Check available disk space.`);
       }
     }
@@ -55,15 +55,12 @@ export async function restoreProjectFileMedia(document: any, store: MediaStore):
   if (!document.media) return; // Older files still use the local media store.
   const assets = fileAssets(document);
   const entries: Array<{ id: string; asset: any; blob: Blob }> = [];
-  let bytes = 0;
   for (const [id, source] of Object.entries<any>(document.media)) {
     const asset = assets[id];
     if (!asset) continue;
     if (!source || typeof source.type !== 'string' || typeof source.data !== 'string') {
       throw new Error(`Invalid saved media: ${asset.name || id}`);
     }
-    bytes += source.data.length;
-    if (bytes > LIMITS.fileSaveBytes) throw new Error('Saved media exceeds the project file size limit.');
     // A repeated four-character capture can overflow the regex stack on video
     // files. This flat scan stays safe for the full supported project size.
     if (source.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(source.data)) {
@@ -83,4 +80,48 @@ export function unpackProjectFile(input: string | Uint8Array | ArrayBuffer): any
   const decoded = decodeProjectContainer(input);
   if (decoded.media.length) decoded.document.containerMedia = decoded.media;
   return decoded.document;
+}
+
+/** Browser file imports keep source media as file-backed slices. */
+export async function unpackProjectFileBlob(file: Blob): Promise<any> {
+  const prefix = new Uint8Array(await file.slice(0, 9).arrayBuffer());
+  if (!isProjectContainer(prefix)) return JSON.parse(await file.text());
+  if (prefix.length < 9) throw new Error('The project container is truncated.');
+  const headerLength = new DataView(prefix.buffer).getUint32(5, true);
+  if (headerLength < 2 || headerLength > file.size - 9) throw new Error('The project container header is invalid.');
+  const index = projectContainerIndex(JSON.parse(await file.slice(9, 9 + headerLength).text()), 9 + headerLength, file.size);
+  index.document.containerMedia = index.media.map(item => ({ ...item, data: file.slice(item.offset, item.offset + item.length, item.type) }));
+  return index.document;
+}
+
+/** Stage native ranges on disk, then commit file-backed Blobs to the media store. */
+export async function restoreProjectFileStream(document: any, media: ProjectMediaRange[], store: MediaStore,
+  read: (offset: number, length: number) => Promise<Uint8Array>): Promise<void> {
+  const assets = fileAssets(document);
+  const sources = media.filter(source => assets[source.id]);
+  if (!sources.length) { await restoreProjectFileMedia(document, store); return; }
+  const root = await navigator.storage.getDirectory();
+  for (const source of sources) {
+    const name = 'project-import-' + crypto.randomUUID();
+    const file = await root.getFileHandle(name, { create: true });
+    let writer: FileSystemWritableFileStream | undefined;
+    try {
+      writer = await file.createWritable();
+      for (let offset = 0; offset < source.length;) {
+        const length = Math.min(1024 * 1024, source.length - offset);
+        const chunk = await read(source.offset + offset, length);
+        if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
+        await writer.write(new Uint8Array(chunk));
+        offset += chunk.length;
+      }
+      await writer.close(); writer = undefined;
+      const blob = (await file.getFile()).slice(0, source.length, source.type);
+      if (!await store.put(source.id, blob, assets[source.id])) {
+        throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
+      }
+    } finally {
+      await writer?.abort().catch(() => undefined);
+      await root.removeEntry(name);
+    }
+  }
 }

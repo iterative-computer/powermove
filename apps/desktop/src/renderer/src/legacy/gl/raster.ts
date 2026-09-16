@@ -1,3 +1,4 @@
+import { prepareVideoPreview } from '../core/video-preview';
 import { importedSequences } from '../core/image-sequence';
 import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, textControlValues } from '../core/text-animation';
@@ -457,6 +458,10 @@ function disposeAsset(a: any) {
     if (disposedAssets.has(a)) return;
     disposedAssets.add(a);
   }
+  if (a.preview) {
+    a.preview.el.pause(); a.preview.el.removeAttribute('src'); a.preview.el.load();
+    window.URL.revokeObjectURL(a.preview.url); delete a.preview;
+  }
   if ((a.kind === 'audio' || a.audioBlob) && PM.Audio) PM.Audio.disposeAsset(a);
   try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
   try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
@@ -529,7 +534,6 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
-    if (Number(blob?.size) > 64 * 1024 * 1024) throw new Error('OBJ files larger than 64 MB are not supported');
     const sourceText = await blob.text();
     const mesh = parseObj(sourceText);
     return {
@@ -643,6 +647,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
         asset.hasAudio = false;
       }
     } else if (kind === 'video') asset.hasAudio = false;
+    if (kind === 'video') asset.previewReady = prepareVideoPreview(PM, asset, sourceBlob, () => disposedAssets.has(asset));
     return asset;
   } catch (error) {
     try { if (el && el.close) el.close(); } catch (e) { }

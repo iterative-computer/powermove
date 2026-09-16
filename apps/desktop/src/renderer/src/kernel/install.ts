@@ -576,7 +576,6 @@ function makeAssets(PM: LegacyPM): AssetsAPI {
       if (typeof live?.sourceText === 'string') return live.sourceText;
       const blob = live?.blob instanceof Blob ? live.blob : await PM?.MediaStore?.get?.(meta);
       if (!(blob instanceof Blob)) throw new Error(`Asset data is missing: ${meta.name || id}`);
-      if (blob.size > 64 * 1024 * 1024) throw new Error('Text asset is larger than 64 MB');
       return blob.text();
     }
   };

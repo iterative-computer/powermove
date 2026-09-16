@@ -47,6 +47,36 @@ test('imports ProRes 4444 with transparency and restores playable media', async 
     expect(imported.proxy).toBe(true);
     expect(imported.min).toBe(0);
     expect(imported.max).toBe(255);
+    const previewAlpha = await session.page.evaluate(async id => {
+      const PM = (window as any).PM, media = (window as any).powermove.media;
+      const original = await PM.MediaStore.get(PM.proj.assets[id]);
+      const token = await media.beginPreview(original.size);
+      try {
+        for (let offset = 0; offset < original.size; offset += 1024 * 1024) {
+          await media.writePreview(token, offset, new Uint8Array(await original.slice(offset, offset + 1024 * 1024).arrayBuffer()));
+        }
+        const result = await media.finishPreview(token), chunks = [];
+        for (let offset = 0; offset < result.size;) {
+          const data = await media.readPlaybackProxy(token, offset, Math.min(1024 * 1024, result.size - offset));
+          chunks.push(data); offset += data.length;
+        }
+        const url = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
+        const el = document.createElement('video'); el.muted = true;
+        try {
+          await new Promise<void>((resolve, reject) => { el.onloadeddata = () => resolve(); el.onerror = () => reject(Error('Preview decode failed')); el.src = url; });
+          await el.play();
+          await new Promise<void>(resolve => el.requestVideoFrameCallback(() => resolve())); el.pause();
+          const cv = document.createElement('canvas'); cv.width = el.videoWidth; cv.height = el.videoHeight;
+          const ctx = cv.getContext('2d')!; ctx.drawImage(el, 0, 0);
+          const data = ctx.getImageData(0, 0, cv.width, cv.height).data;
+          let min = 255, max = 0;
+          for (let i = 3; i < data.length; i += 4) { min = Math.min(min, data[i]!); max = Math.max(max, data[i]!); }
+          return { min, max, originalBytes: (await PM.MediaStore.get(PM.proj.assets[id])).size, before: original.size };
+        } finally { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); }
+      } finally { await media.releasePlaybackProxy(token); }
+    }, imported.id);
+    expect(previewAlpha.min).toBe(0); expect(previewAlpha.max).toBe(255);
+    expect(previewAlpha.originalBytes).toBe(previewAlpha.before);
     if (!process.env.POWERMOVE_ALPHA_FIXTURE) {
       const upgraded = await session.page.evaluate(async id => {
         const PM = (window as any).PM, old = PM.assets.map.get(id);

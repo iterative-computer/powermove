@@ -16,7 +16,7 @@ import {
   planExport
 } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
-import { packProjectFile } from './project-file';
+import { packProjectFileBlob } from './project-file';
 import { buildWebExport, inspectWebExport } from '../../player/export-web';
 import { viewerService } from './services';
 
@@ -377,12 +377,12 @@ async function run(opts: any) {
       const name = (p.name || 'powermove') + '-web.zip';
       const bridge = (window as any).powermove;
       if (bridge?.saveFile) {
-        const saved = await bridge.saveFile({ name, data: new Uint8Array(result.bytes) });
+        const saved = await bridge.saveFile({ name, data: result.bytes });
         if (!saved.ok) {
           if (saved.cancelled) return { cancelled: true };
           throw new Error(saved.error || 'Could not save web animation');
         }
-      } else await PM.download(new Blob([new Uint8Array(result.bytes)], { type: 'application/zip' }), name);
+      } else await PM.download(new Blob([result.bytes], { type: 'application/zip' }), name);
       PM.toast(result.scene.warnings.length ? 'Web animation exported · see README for compatibility notes' : 'Web animation exported');
       return { cancelled: false };
     } catch (error) {
@@ -396,8 +396,9 @@ async function run(opts: any) {
     X.busy = true;
     try {
       await PM.app?.importQueue;
-      const data = await packProjectFile({ ...JSON.parse(PM.serialize()), history: PM.hist.export?.() }, PM.MediaStore);
-      await PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), (p.name || 'powermove') + '.pmv');
+      const data = await packProjectFileBlob({ ...JSON.parse(PM.serialize()), history: PM.hist.export?.() }, PM.MediaStore);
+      const saved = await PM.download(data, (p.name || 'powermove') + '.pmv');
+      if (saved?.cancelled) return { cancelled: true };
       PM.toast('Project exported');return {cancelled:false};
     } catch (error) { const message=error instanceof Error?error.message:String(error);PM.toast('Could not export project: '+message,6000);return {error:message}; }
     finally { X.busy = false; }

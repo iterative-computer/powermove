@@ -68,6 +68,39 @@ describe('assistant word reveal', () => {
       steps: [{ kind: 'text', id: 'before-steer', text: 'I have started building the blur.' }]
     });
     expect(target.querySelector('.agent-trace-text')?.textContent).toBe('I have started building the blur.');
+    expect(target.querySelector('.agent-work-log')).toBeNull();
+  });
+
+  it.each([false, true])('collapses completed work above the final reply (tools: %s)', (withTools) => {
+    render({
+      role: 'trace', durationMs: 543000,
+      steps: [
+        { kind: 'text', id: 'progress', text: 'Inspecting the original audio.' },
+        { kind: 'thought', id: 'thought-1', label: 'Check the original timing.', live: false },
+        ...(withTools ? [{ kind: 'tool' as const, id: 'read', toolName: 'bash', label: 'Inspect timeline', status: 'done' as const }] : []),
+        { kind: 'thought', id: 'thought-2', label: 'Keep both stems aligned.', live: false },
+        { kind: 'text', id: 'reply', text: 'Both stems are ready.' }
+      ]
+    });
+    const work = target.querySelector<HTMLDetailsElement>('details.agent-work-log')!;
+    expect(work).not.toBeNull();
+    expect(work.open).toBe(false);
+    expect(work.querySelector('summary')?.textContent).toBe('Worked for 9m 3s');
+    expect(work.textContent).toContain('Inspecting the original audio.');
+    expect(work.textContent).toContain('Check the original timing.');
+    expect(work.textContent).toContain('Keep both stems aligned.');
+    expect(work.textContent).not.toContain('Both stems are ready.');
+    const tools = work.querySelector<HTMLDetailsElement>('details.agent-tool-activity');
+    expect(Boolean(tools)).toBe(withTools);
+    if (tools) expect(tools.querySelector('summary')?.textContent).toContain('1 tool call');
+    expect(target.querySelector('.is-archived > .agent-trace-prose')?.textContent).toBe('Both stems are ready.');
+  });
+
+  it('uses recorded tool timestamps for older history and omits empty work disclosures', () => {
+    render({ role: 'trace', steps: [
+      { kind: 'tool', id: 'tool', toolName: 'bash', label: 'Inspect', status: 'done', startedAt: 1000, endedAt: 5100 }
+    ] });
+    expect(target.querySelector('.agent-work-log > summary')?.textContent).toBe('Worked for 4s');
   });
 
   it('keeps archived tool details expandable without live motion', () => {

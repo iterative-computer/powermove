@@ -25,7 +25,7 @@
   });
 
   /* The transcript owns its vertical scroll. Only edits awaiting review belong
-     in the footer; autonomous replies and their files stay in the thread. */
+     in the footer; autonomous replies stay in the thread. */
   let scroller = $state<HTMLDivElement>();
   let showJump = $state(false);
   let userScrolled = false;

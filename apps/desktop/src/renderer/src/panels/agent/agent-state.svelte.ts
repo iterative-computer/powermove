@@ -16,6 +16,8 @@ export interface AgentMessage {
   steering?: boolean;
   /** role 'trace': the sealed activity steps of a completed run. */
   steps?: TraceStep[];
+  /** Elapsed wall time captured when the run's activity is archived. */
+  durationMs?: number;
   attachments?: Array<Record<string, any> | string>;
   entering?: boolean;
   /** Run failures render with the error treatment. */
@@ -214,7 +216,7 @@ function reconcileConversation(next: AgentMessage[]): void {
       continue;
     }
     assignChangedFields(currentMessage, nextMessage, [
-      'text', 'steering', 'entering', 'error', 'fixExtensionId', 'requiresProject'
+      'text', 'steering', 'entering', 'error', 'fixExtensionId', 'requiresProject', 'durationMs'
     ]);
     if (!jsonEqual(currentMessage.modResult, nextMessage.modResult)) {
       currentMessage.modResult = nextMessage.modResult ? { ...nextMessage.modResult } : undefined;

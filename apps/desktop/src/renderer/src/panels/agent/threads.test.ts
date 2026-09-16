@@ -73,3 +73,14 @@ it('restores structured mod results with their status and action', () => {
   const restored = make(); restored.load('mods');
   expect(restored.active.conversation[0]?.modResult).toEqual(modResult);
 });
+
+it('restores completed work timing and thinking alongside the final reply', () => {
+  const { make } = setup(); const threads = make(); threads.load('work-history');
+  threads.active.conversation.push({ role: 'trace', durationMs: 543000, steps: [
+    { kind: 'thought', id: 'thought', label: 'Check the timing.', live: false },
+    { kind: 'text', id: 'answer', text: 'Both stems are ready.' }
+  ] });
+  threads.save();
+  const restored = make(); restored.load('work-history');
+  expect(restored.active.conversation[0]).toMatchObject(threads.active.conversation[0]!);
+});

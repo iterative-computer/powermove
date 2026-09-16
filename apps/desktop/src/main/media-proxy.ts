@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, open, realpath, rm, stat, symlink } from 'node:fs/promises';
+import { mkdtemp, open, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -13,16 +13,15 @@ import {
   type MediaProxyResult
 } from '../shared/ipc';
 import { IpcValidationError } from '../shared/guards';
-import { MAX_SEQUENCE_FRAMES, orderedSequence, validSequenceFps } from '../shared/image-sequence';
+import { orderedSequence, validSequenceFps } from '../shared/image-sequence';
 
 const execFileAsync = promisify(execFile);
 const TOKEN = /^[a-f0-9]{32}$/;
 const VIDEO_EXTENSIONS = new Set(['.mov', '.mp4', '.m4v']);
-const MAX_SOURCE_BYTES = 1024 * 1024 * 1024 * 1024; // 1 TiB safety bound; conversion itself streams.
 const TRANSCODE_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_PROXY_CHUNK_BYTES = 4 * 1024 * 1024;
 
-type ProxyEntry = { directory: string; file: string; size: number };
+type ProxyEntry = { directory: string; file: string; size: number; upload?: { total: number; received: number; queue: Promise<void>; finishing: boolean } };
 type Convert = (source: string, output: string) => Promise<void>;
 
 export function playbackConverter(binary: string): Convert {
@@ -37,6 +36,22 @@ export function playbackConverter(binary: string): Convert {
       // make timeline scrubbing and frame-by-frame exports decode seconds repeatedly.
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
       '-c:a', 'libopus', '-b:a', '192k', '-f', 'webm', '-y', output
+    ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+  };
+}
+
+/** All-intra preview frames avoid decoding a long 4K GOP for every arrow press. */
+export function previewConverter(binary: string): Convert {
+  return async (source, output) => {
+    await execFileAsync(binary, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      // libvpx preserves WebM alpha; the native VP9 decoder discards it.
+      ...(path.extname(source) === '.webm' ? ['-c:v', 'libvpx-vp9'] : []),
+      '-i', source, '-map', '0:v:0', '-an',
+      '-vf', "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+      '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '18',
+      '-g', '1', '-deadline', 'realtime', '-cpu-used', '6', '-row-mt', '1', '-threads', '4',
+      '-f', 'webm', '-y', output,
     ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
 }
@@ -62,8 +77,49 @@ export class MediaProxyService {
   constructor(
     private readonly tempRoot: string,
     private readonly convert: Convert,
-    private readonly convertSequence?: ConvertSequence
+    private readonly convertSequence?: ConvertSequence,
+    private readonly convertPreview?: Convert
   ) {}
+
+  async beginPreview(total: number): Promise<string> {
+    if (!this.convertPreview || !Number.isSafeInteger(total) || total < 1) throw new Error('Invalid preview source size');
+    const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-preview-'));
+    const token = randomUUID().replaceAll('-', '');
+    this.#entries.set(token, { directory, file: path.join(directory, 'source'), size: 0,
+      upload: { total, received: 0, queue: Promise.resolve(), finishing: false } });
+    return token;
+  }
+
+  async writePreview(token: string, offset: number, data: Uint8Array): Promise<void> {
+    const entry = this.#entries.get(token), upload = entry?.upload;
+    if (!upload || upload.finishing || offset !== upload.received || !(data instanceof Uint8Array)
+      || data.length < 1 || data.length > MAX_PROXY_CHUNK_BYTES || offset + data.length > upload.total) throw new Error('Invalid preview source chunk');
+    upload.received += data.length;
+    upload.queue = upload.queue.then(() => writeFile(entry!.file, data, { flag: 'a', mode: 0o600 }));
+    await upload.queue;
+  }
+
+  async finishPreview(token: string): Promise<{ token: string; size: number }> {
+    const entry = this.#entries.get(token), upload = entry?.upload;
+    if (!entry || !upload || upload.finishing || upload.received !== upload.total) throw new Error('Incomplete preview source');
+    upload.finishing = true;
+    try {
+      await upload.queue;
+      // Detect the WebM container signature without trusting a user filename.
+      const handle = await open(entry.file, 'r'), prefix = Buffer.alloc(4);
+      try { await handle.read(prefix, 0, 4, 0); } finally { await handle.close(); }
+      if (prefix.equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
+        const named = entry.file + '.webm';
+        await symlink(entry.file, named); entry.file = named;
+      }
+      const output = path.join(entry.directory, 'preview.webm');
+      await this.convertPreview!(entry.file, output);
+      const info = await stat(output);
+      if (!info.isFile() || info.size < 1) throw new Error('The preview was empty');
+      entry.file = output; entry.size = info.size; delete entry.upload;
+      return { token, size: info.size };
+    } catch (error) { await this.release(token); throw error; }
+  }
 
   async create(sourcePath: string): Promise<{ token: string; size: number }> {
     if (!path.isAbsolute(sourcePath) || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
@@ -71,7 +127,7 @@ export class MediaProxyService {
     }
     const resolved = await realpath(sourcePath);
     const source = await stat(resolved);
-    if (!source.isFile() || source.size <= 0 || source.size > MAX_SOURCE_BYTES) {
+    if (!source.isFile() || source.size <= 0) {
       throw new Error('The selected video file is not readable');
     }
 
@@ -92,7 +148,7 @@ export class MediaProxyService {
 
   async createSequence(sourcePaths: string[], fps: number): Promise<{ token: string; size: number }> {
     if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
-    if (!Array.isArray(sourcePaths) || sourcePaths.length < 2 || sourcePaths.length > MAX_SEQUENCE_FRAMES
+    if (!Array.isArray(sourcePaths) || sourcePaths.length < 2
       || sourcePaths.some(source => typeof source !== 'string' || source.length > 16_384 || !path.isAbsolute(source))) {
       throw new Error('Choose local numbered image files');
     }
@@ -107,7 +163,7 @@ export class MediaProxyService {
       for (let index = 0; index < frames.length; index++) {
         const source = await realpath(frames[index]!.source);
         const info = await stat(source);
-        if (!info.isFile() || info.size <= 0 || info.size > MAX_SOURCE_BYTES) throw new Error(`Could not read ${frames[index]!.name}`);
+        if (!info.isFile() || info.size <= 0) throw new Error(`Could not read ${frames[index]!.name}`);
         await symlink(source, path.join(directory, `frame-${String(index).padStart(8, '0')}${extension}`));
       }
       await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output);
@@ -147,6 +203,7 @@ export class MediaProxyService {
     const entry = this.#entries.get(token);
     if (!entry) return;
     this.#entries.delete(token);
+    await entry.upload?.queue.catch(() => undefined);
     await rm(entry.directory, { recursive: true, force: true });
   }
 
@@ -176,6 +233,20 @@ export function registerMediaProxyIpc(
   service: MediaProxyService,
   { isTrustedSender }: { isTrustedSender(event: IpcMainInvokeEvent): boolean }
 ): void {
+  ipcMain.handle(IPC.mediaPreviewBegin, async (event, size: number) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return service.beginPreview(size);
+  });
+  ipcMain.handle(IPC.mediaPreviewChunk, async (event, value: unknown) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!value || typeof value !== 'object') throw new Error('Invalid preview source chunk');
+    const { token, offset, data } = value as { token: string; offset: number; data: Uint8Array };
+    return service.writePreview(token, offset, data);
+  });
+  ipcMain.handle(IPC.mediaPreviewFinish, async (event, token: string) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    return service.finishPreview(token);
+  });
   ipcMain.handle(IPC.mediaProxyCreate, async (event, value: unknown): Promise<MediaProxyResult> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const request = proxyRequest(value);

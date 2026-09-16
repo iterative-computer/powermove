@@ -299,6 +299,18 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
 };
 
 PM.download = (blob: any, name: any) => {
+  const upload = window.powermove?.fileUpload;
+  if (upload) return (async () => {
+    const token = await upload.begin(blob.size);
+    try {
+      for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
+        await upload.chunk(token, new Uint8Array(await blob.slice(offset, offset + 1024 * 1024).arrayBuffer()));
+      }
+      const result = await upload.finish(token, { name: String(name || 'powermove.bin') });
+      if (!result.ok && !result.cancelled) throw new Error(result.error || 'Save failed');
+      return result;
+    } finally { await upload.abort(token).catch(() => undefined); }
+  })();
   /* Native WKWebView has no browser download shelf — route through the AppKit save bridge. */
   const bridge = (window as any).webkit && (window as any).webkit.messageHandlers && (window as any).webkit.messageHandlers.saveFile;
   if (bridge) {

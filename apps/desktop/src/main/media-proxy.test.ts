@@ -93,3 +93,52 @@ describe('native image sequence conversion', () => {
     await expect(handlers.get(IPC.mediaSequenceCreate)!({}, { sourcePaths: files, fps: 30 })).rejects.toThrow('Unauthorized');
   });
 });
+
+describe('editing preview uploads', () => {
+  it('streams the original in ordered chunks and releases both source and preview', async () => {
+    const { root } = await fixture();
+    const before = await readdir(root);
+    const convert = async (source: string, output: string) => {
+      expect([...await readFile(source)]).toEqual([1, 2, 3, 4]);
+      await writeFile(output, new Uint8Array([9, 8]));
+    };
+    const service = new MediaProxyService(root, convert, undefined, convert);
+    const token = await service.beginPreview(4);
+    await expect(service.writePreview(token, 1, new Uint8Array([1]))).rejects.toThrow('Invalid');
+    await service.writePreview(token, 0, new Uint8Array([1, 2]));
+    await expect(service.finishPreview(token)).rejects.toThrow('Incomplete');
+    await service.writePreview(token, 2, new Uint8Array([3, 4]));
+    expect(await service.finishPreview(token)).toEqual({ token, size: 2 });
+    expect([...await service.read(token, 0, 2)]).toEqual([9, 8]);
+    await service.release(token);
+    expect(await readdir(root)).toEqual(before);
+  });
+
+  it('cleans up a cancelled upload and a failed conversion', async () => {
+    const { root } = await fixture();
+    const before = await readdir(root);
+    const fail = async () => { throw Error('conversion failed'); };
+    const service = new MediaProxyService(root, fail, undefined, fail);
+    const cancelled = await service.beginPreview(4);
+    await service.writePreview(cancelled, 0, new Uint8Array([1, 2]));
+    await service.release(cancelled);
+    const failed = await service.beginPreview(1);
+    await service.writePreview(failed, 0, new Uint8Array([1]));
+    await expect(service.finishPreview(failed)).rejects.toThrow('conversion failed');
+    expect(await readdir(root)).toEqual(before);
+  });
+});
+
+
+it('allows preview uploads above 1 GB while retaining chunk validation and cleanup', async () => {
+  const { root } = await fixture();
+  const before = await readdir(root);
+  const service = new MediaProxyService(root, async () => {}, undefined, async () => {});
+  try {
+    const token = await service.beginPreview(1024 * 1024 * 1024 + 1);
+    await service.writePreview(token, 0, new Uint8Array([1]));
+    await expect(service.finishPreview(token)).rejects.toThrow('Incomplete');
+    await expect(service.beginPreview(Infinity)).rejects.toThrow('Invalid');
+  } finally { await service.dispose(); }
+  expect(await readdir(root)).toEqual(before);
+});
