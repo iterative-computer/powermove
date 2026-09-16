@@ -17,16 +17,6 @@
   <h1>Terms of Service</h1>
   <p class="meta">Last updated {updated}</p>
 
-  <section class="tldr">
-    <h2>TL;DR</h2>
-    <ul>
-      <li>Powermove is free and open source under GPLv3. That license governs the code; these terms govern the app and website.</li>
-      <li>It's provided as is. The agent can edit your files, so keep backups. We're not liable if something goes wrong.</li>
-      <li>You bring your own Anthropic, OpenAI, or other provider account, and you follow their terms.</li>
-      <li>What you make with Powermove is yours. Don't use it to break the law or harm others.</li>
-    </ul>
-  </section>
-
   <h2>Who we are</h2>
   <p>Powermove is made by Iterative Computer. By downloading or using the app, or using trypowermove.com, you agree to these terms. If you don't agree, don't use it.</p>
 
@@ -81,7 +71,4 @@
   .legal p { margin-top: 12px; font-size: var(--fs-lg); line-height: 1.6; color: var(--tx-2); text-wrap: pretty; }
   .legal a { color: var(--tx); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
   .legal a:hover { text-decoration-color: var(--tx); }
-  .tldr { margin-top: 32px; padding: 20px 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-panel); }
-  .tldr h2 { margin-top: 0; font-size: var(--fs-md); text-transform: uppercase; letter-spacing: 0.06em; color: var(--tx-3); }
-  .tldr ul { margin-top: 12px; display: grid; gap: 10px; padding-left: 18px; font-size: var(--fs-lg); line-height: 1.5; color: var(--tx); }
 </style>
