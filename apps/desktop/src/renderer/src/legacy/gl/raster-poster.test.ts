@@ -8,7 +8,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function posterRegistry(): { PM: PMRegistry; put: ReturnType<typeof vi.fn>; posterBlob: Blob } {
+function posterRegistry(): {
+  PM: PMRegistry;
+  put: ReturnType<typeof vi.fn>;
+  checkpoint: ReturnType<typeof vi.fn>;
+  posterBlob: Blob;
+} {
   let nextUrl = 0;
   const posterBlob = new Blob(['poster'], { type: 'image/webp' });
   const canvas: any = {
@@ -30,10 +35,12 @@ function posterRegistry(): { PM: PMRegistry; put: ReturnType<typeof vi.fn>; post
   PM.proj = { id: 'project-1', assets: {}, layers: [], comps: {} };
   PM.touch = vi.fn();
   PM.autosave = vi.fn();
+  const checkpoint = vi.fn();
+  PM.Projects = { put: checkpoint };
   PM.MediaImport.fingerprint = vi.fn(async () => 'fingerprint');
   const put = vi.fn(async () => true);
   PM.MediaStore = { put, get: vi.fn(async () => null) };
-  return { PM, put, posterBlob };
+  return { PM, put, checkpoint, posterBlob };
 }
 
 function imageFile(name = 'photo.png') {
@@ -76,6 +83,53 @@ describe('raster media posters', () => {
     expect(PM.assets.poster(meta.id)).toBe('blob:test-1');
     PM.assets.clear();
     expect(window.URL.revokeObjectURL).toHaveBeenCalledWith('blob:test-1');
+  });
+
+  it('repairs missing poster metadata when the stored poster exists', async () => {
+    const { PM, checkpoint, posterBlob } = posterRegistry();
+    const meta: any = {
+      id: 'unflagged-image', name: 'unflagged.png', kind: 'image',
+      storageKey: 'media:unflagged',
+    };
+    PM.proj.assets[meta.id] = meta;
+    PM.MediaStore.get = vi.fn(async (value: any) =>
+      value === 'media:unflagged:poster' ? posterBlob : imageFile(meta.name));
+
+    const result = await PM.assets.restoreProject(PM.proj);
+
+    expect(result.restored).toHaveLength(1);
+    expect(PM.MediaStore.get).toHaveBeenCalledWith('media:unflagged:poster');
+    expect(PM.assets.poster(meta.id)).not.toBe('');
+    expect(meta.poster).toBe(true);
+    expect(PM.touch).toHaveBeenCalledOnce();
+    expect(checkpoint).toHaveBeenCalledWith(PM.proj);
+    PM.assets.clear();
+  });
+
+  it('backfills a poster when neither metadata nor a stored poster exists', async () => {
+    vi.useFakeTimers();
+    const { PM, put } = posterRegistry();
+    const meta: any = {
+      id: 'posterless-image', name: 'posterless.png', kind: 'image',
+      storageKey: 'media:posterless',
+    };
+    PM.proj.assets[meta.id] = meta;
+    PM.MediaStore.get = vi.fn(async (value: any) =>
+      typeof value === 'object' ? imageFile(meta.name) : null);
+
+    const result = await PM.assets.restoreProject(PM.proj);
+    expect(result.restored).toHaveLength(1);
+    expect(PM.MediaStore.get).toHaveBeenCalledWith('media:posterless:poster');
+    expect(meta.poster).toBeUndefined();
+
+    await vi.runAllTimersAsync();
+
+    expect(put).toHaveBeenCalledWith('media:posterless:poster', expect.any(Blob), {
+      storageKey: 'media:posterless:poster', type: 'image/webp',
+    });
+    expect(meta.poster).toBe(true);
+    expect(PM.assets.poster(meta.id)).not.toBe('');
+    PM.assets.clear();
   });
 
   it('refreshes the poster when replacing an asset in place', async () => {

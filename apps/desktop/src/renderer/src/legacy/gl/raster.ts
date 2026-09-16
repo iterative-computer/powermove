@@ -700,6 +700,12 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
   };
 }
 let assetEpoch = 0;
+function checkpointAssetMetadata(project: any) {
+  if (!project || PM.proj !== project) return;
+  /* Asset metadata is mutated outside typed history, so an existing recovery
+     journal cannot replay it. Force the smallest full project checkpoint. */
+  try { PM.Projects?.put?.(project); } catch (error) { }
+}
 async function ingestAsset(file: any, { silent = false, layerDefinition }: any = {}) {
   const targetProject = PM.proj;
   const targetEpoch = assetEpoch;
@@ -799,6 +805,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   };
   if (!silent) {
     PM.touch();
+    checkpointAssetMetadata(PM.proj);
     PM.bus.emit('assets');
     if (relinkedLayers) PM.bus.emit('layers');
   }
@@ -826,6 +833,7 @@ PM.assets = {
     });
     if (results.some((result: any) => result.status !== 'failed')) {
       PM.touch();
+      checkpointAssetMetadata(PM.proj);
       PM.bus.emit('assets');
       if (results.some((result: any) => result.relinkedLayers)) PM.bus.emit('layers');
     }
@@ -900,6 +908,7 @@ PM.assets = {
         PM.GL?.dropMesh?.(id);
         PM.preparedVideoFrames?.clear?.();
         PM.touch();
+        checkpointAssetMetadata(PM.proj);
         PM.bus.emit('assets');
         PM.bus.emit('layers');
         PM.bus.emit('project');
@@ -948,7 +957,7 @@ PM.assets = {
     const restored: any[] = [], missing: any[] = [];
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
-      const posterKey = meta.poster && meta.storageKey
+      const posterKey = meta.storageKey
         ? PM.MediaImport.posterKeyFor(meta.storageKey)
         : null;
       const [blob, posterBlob] = await Promise.all([
@@ -975,9 +984,19 @@ PM.assets = {
       restored.forEach(disposeAsset);
       return { restored: [], missing: [], stale: true };
     }
+    let repairedPosterMetadata = false;
     results.forEach((result: any) => {
-      if (result.posterBlob && result.meta?.id) setPoster(result.meta.id, result.posterBlob);
+      if (!result.posterBlob || !result.meta?.id) return;
+      setPoster(result.meta.id, result.posterBlob);
+      if (result.meta.poster !== true) {
+        result.meta.poster = true;
+        repairedPosterMetadata = true;
+      }
     });
+    if (repairedPosterMetadata) {
+      PM.touch();
+      checkpointAssetMetadata(project);
+    }
     restored.forEach((a: any) => {
       /* Older projects already preserve the original .svg bytes and name but
          predate the explicit vector marker. Hydrate that marker in place so
@@ -1012,7 +1031,11 @@ PM.assets = {
           setPoster(id, blob);
           applied++;
         });
-        if (applied) PM.bus?.emit?.('assets');
+        if (applied) {
+          PM.touch();
+          checkpointAssetMetadata(project);
+          PM.bus?.emit?.('assets');
+        }
       })();
     }, 0);
     return { restored, missing };
