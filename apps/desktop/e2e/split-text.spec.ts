@@ -1,4 +1,4 @@
-import { expect, test } from './helpers/app';
+import { expect, test, chooseNativeMenu, inspectNativeMenu } from './helpers/app';
 
 for (const [label, expected] of [
   ['By word', ['Hello', 'world', 'Hello', '👨‍👩‍👧‍👦!']],
@@ -27,9 +27,7 @@ for (const [label, expected] of [
     const x = glyph.x + 15, y = glyph.y + 20, rect = document.querySelector('#stage-inner')!.getBoundingClientRect();
     return { x: rect.x + (m[0]*x + m[2]*y + m[4])*viewer.shown, y: rect.y + (m[1]*x + m[3]*y + m[5])*viewer.shown };
   });
-  await page.mouse.click(point.x, point.y, { button: 'right' });
-  await page.getByText('Split text into layers…', { exact: true }).click();
-  await page.getByText(label, { exact: true }).click();
+  await chooseNativeMenu(session, ['Split text into layers…', label], () => page.mouse.click(point.x, point.y, { button: 'right' }));
   const result = await page.evaluate(() => {
     const PM = (window as any).PM;
     const group = PM.firstSel(), members = PM.proj.layers.filter((layer: any) => layer.group === group.id);
@@ -65,10 +63,11 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
     const layer = PM.mkLayer('text', { d: { text: 'One two three four five', size: 40, paragraph: true, boxWidth: 130, boxHeight: 400 } }, project);
     project.layers = [layer]; PM.replaceProject(project); PM.selectLayers(layer.id); PM.hist.clear();
     (window as any).expectedLines = PM.textLayout(layer).lines.map((p: any) => p.text);
-    PM.showLayerMenu(layer, {clientX: 300, clientY: 200}, 'timeline');
   });
-  await page.getByText('Split text into layers…', { exact: true }).click();
-  await page.getByText('By line', { exact: true }).click();
+  const openMenu = () => page.evaluate(() => {
+    const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200}, 'timeline');
+  });
+  await chooseNativeMenu(session, ['Split text into layers…', 'By line'], openMenu);
   expect(await page.evaluate(() => {
     const PM = (window as any).PM;
     return PM.selLayers().map((l: any) => l.d.text);
@@ -76,15 +75,12 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
   await page.evaluate(() => {
     const PM = (window as any).PM; PM.hist.undo();
     const layer = PM.proj.layers[0]; layer.lock = true;
-    PM.showLayerMenu(layer, {clientX: 300, clientY: 200});
   });
-  await expect(page.locator('.di').filter({ hasText: 'Split text into layers…' })).toHaveAttribute('aria-disabled', 'true');
-  await page.keyboard.press('Escape');
+  expect(await inspectNativeMenu(session, openMenu)).toContainEqual({ label: 'Split text into layers…', enabled: false });
   const before = await page.evaluate(() => {
     const PM = (window as any).PM, layer = PM.proj.layers[0]; layer.lock = false; layer.d.text = '';
-    PM.showLayerMenu(layer, {clientX: 300, clientY: 200}); return JSON.stringify(PM.proj);
+    return JSON.stringify(PM.proj);
   });
-  await page.getByText('Split text into layers…', { exact: true }).click();
-  await page.getByText('By character', { exact: true }).click();
+  await chooseNativeMenu(session, ['Split text into layers…', 'By character'], openMenu);
   expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(before);
 });

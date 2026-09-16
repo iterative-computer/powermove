@@ -461,8 +461,7 @@ test('project rename is available from the tab menu and persists the live docume
   await scaleFixture(page);
   const tab = page.locator('#tabs .project-doc.on');
   const id = await tab.getAttribute('data-tab-id');
-  await tab.click({ button: 'right' });
-  await page.getByRole('menuitem', { name: 'Rename project…' }).click();
+  await chooseNativeMenu(session, 'Rename project…', () => tab.click({ button: 'right' }));
   const input = page.getByRole('textbox', { name: 'Rename project', exact: true });
   await input.fill('Renamed composition');
   await input.press('Enter');

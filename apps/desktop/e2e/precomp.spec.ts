@@ -1,4 +1,4 @@
-import { expect, test } from './helpers/app';
+import { expect, test, chooseNativeMenu, inspectNativeMenu } from './helpers/app';
 
 test.describe('@groups editable timeline groups', () => {
   test.beforeEach(async ({session}) => {
@@ -56,20 +56,19 @@ test.describe('@groups editable timeline groups', () => {
       const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer'),rect=viewer.stage.getBoundingClientRect();
       return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
     });
-    await page.mouse.click(coords.x,coords.y,{button:'right'});
-    await expect(page.getByRole('menuitem',{name:/^Group layers/})).toBeVisible();
-    const canvasItems=await page.getByRole('menuitem').allTextContents();
+    const openCanvasMenu = () => page.mouse.click(coords.x,coords.y,{button:'right'});
+    const canvasItems=(await inspectNativeMenu(session, openCanvasMenu)).map(item => item.label);
+    expect(canvasItems).toContain('Group layers');
     expect(canvasItems.join(' ')).not.toContain('Shy layer');
     expect(canvasItems.join(' ')).not.toContain('Motion blur');
-    await page.getByRole('menuitem',{name:'Lock',exact:true}).click();
-    await page.mouse.click(coords.x,coords.y,{button:'right'});
-    await page.getByRole('menuitem',{name:'Unlock',exact:true}).click();
+    await chooseNativeMenu(session, 'Lock', openCanvasMenu);
+    await chooseNativeMenu(session, 'Unlock', openCanvasMenu);
     expect(await page.evaluate(()=>(window as any).PM.firstSel().lock)).toBe(false);
     await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.L?.name==='Menu card');});
     const row=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return {x:r.left+110,y:r.top+timeline.ruler+timeline.row/2-timeline.scrollY};});
-    await page.mouse.click(row.x,row.y,{button:'right'});
-    expect(await page.getByRole('menuitem').allTextContents()).toEqual(canvasItems);
-    await page.getByRole('menuitem',{name:/^Group layers/}).click();
+    const openTimelineMenu = () => page.mouse.click(row.x,row.y,{button:'right'});
+    expect((await inspectNativeMenu(session, openTimelineMenu)).map(item => item.label)).toEqual(canvasItems);
+    await chooseNativeMenu(session, 'Group layers', openTimelineMenu);
     await page.waitForFunction(()=>(window as any).PM.firstSel()?.type==='group');
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
@@ -96,8 +95,7 @@ test.describe('@groups editable timeline groups', () => {
     const result=await page.evaluate((id)=>{const PM=(window as any).PM,child=PM.L(id);const result={parent:child.parent,pose:PM.worldMatrix(child,1)};PM.hist.undo();return {...result,undone:PM.L(id).parent};},ids.child);
     expect(result.parent).toBe(ids.parent);result.pose.forEach((v:number,i:number)=>expect(v).toBeCloseTo(ids.before[i],6));expect(result.undone).toBeNull();
     const parentCell = await page.evaluate(() => {const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return{x:r.left+timeline.gut-12,y:r.top+timeline.ruler+timeline.row/2-timeline.scrollY};});
-    await page.mouse.click(parentCell.x,parentCell.y);
-    await page.getByRole('menuitem',{name:'Parent rig',exact:true}).click();
+    await chooseNativeMenu(session, 'Parent rig', () => page.mouse.click(parentCell.x,parentCell.y));
     expect(await page.evaluate(id=>(window as any).PM.L(id).parent,ids.child)).toBe(ids.parent);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
