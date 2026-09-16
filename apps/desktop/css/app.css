@@ -11,15 +11,15 @@ html,body{height:100%;overflow:hidden}
 /* ── material ──────────────────────────────────────────── */
 /* The window body is a native under-window material (see createWindow in
    src/main/index.ts). The canvas the renderer paints is a tint over that
-   material, so the stone palette holds on any desktop while the blur still
-   reads through. Solid surfaces (panels, floats, fields) are unchanged: only
-   the canvas between them is vibrant, as in Finder and Xcode. Anything that
+   material. The tint is nearly opaque, so the desktop only faintly
+   colours the canvas: a hint of material, not a showcase of it. Solid surfaces (panels, floats, fields) are
+   unchanged: only the canvas between them carries the material. Anything that
    must stay opaque mixes from --bg-window-solid instead. */
-:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .3)}
-:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .32)}
-/* Content areas of the full-screen views (projects, settings) are nearly
-   solid, with a little of the material left showing through. */
-:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 70%,transparent)}
+:root{--bg-window-solid:#EEEEF1;--bg-window:rgb(238 238 241 / .86)}
+:root[data-theme="dark"]{--bg-window-solid:#0C0A09;--bg-window:rgb(12 10 9 / .86)}
+/* Content areas of the full-screen views (projects, settings) are all but
+   solid; the material is a whisper behind them. */
+:root{--bg-content:color-mix(in srgb,color-mix(in srgb,var(--bg-panel) 55%,var(--bg-window-solid)) 94%,transparent)}
 html{background:transparent}
 
 /* ── glass chrome ──────────────────────────────────────── */
@@ -653,6 +653,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .toast>button.toast-action:hover{background:var(--ink-2)}
 .toast-corner{position:fixed;top:48px;right:16px;z-index:201;display:flex;flex-direction:column;gap:6px;align-items:flex-end;pointer-events:none}
 .toast-corner>.toast{pointer-events:auto}
+.toast-corner.bottom-right{top:auto;bottom:40px}
 .drop{position:absolute;z-index:300;background:var(--bg-float);border:0;border-radius:var(--r-md);
   box-shadow:var(--shadow-float);padding:4px;min-width:180px;max-height:60vh;overflow:auto}
 .drop .di{display:flex;width:100%;align-items:center;gap:8px;height:28px;padding:0 8px 0 24px;border-radius:var(--r-xs);font-size:var(--fs-md);color:var(--tx);text-align:left;white-space:nowrap;position:relative;transition:background var(--dur-1),color var(--dur-1)}
@@ -1032,6 +1033,7 @@ body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibi
 .ps-updates b{display:block;color:var(--tx);font-weight:var(--fw-medium)}
 .ps-updates .btn{align-self:flex-start;height:28px;padding:0 12px}
 .ps-updates+.ps-sidefoot{margin-top:0}
+.ps-updates+.ps-updates{margin-top:0}
 .ps-sidefoot{margin-top:auto;padding:0 10px;color:var(--tx-4);font-size:var(--fs-xs);line-height:1.5}
 .ps-main{min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}.ps-top{height:64px;flex:none;display:flex;align-items:center;gap:10px;padding:16px clamp(20px,3vw,28px) 8px}
 /* Everything on the top row is 32px tall. */

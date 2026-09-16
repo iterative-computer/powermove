@@ -10,7 +10,7 @@ export type ToastOptions = {
   /** A stable key replaces an earlier toast with the same key instead of stacking. */
   key?: string;
   /** Persistent notices (updates, attention) sit in the top-right corner; status stays bottom-center. */
-  corner?: 'top-right';
+  corner?: 'top-right' | 'bottom-right';
   /** One primary action rendered as a quiet button inside the toast. */
   action?: { label: string; run: () => void };
   /** Called when the user dismisses the toast explicitly (not on replace or timeout). */

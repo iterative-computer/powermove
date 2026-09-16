@@ -730,8 +730,8 @@ export interface UIAPI {
       icon?: string;
       /** Replace an earlier toast with the same key instead of stacking. */
       key?: string;
-      /** Persistent notices sit top-right; status toasts stay bottom-center. */
-      corner?: 'top-right';
+      /** Persistent notices sit in a corner; status toasts stay bottom-center. */
+      corner?: 'top-right' | 'bottom-right';
       /** One primary action rendered inside the toast. */
       action?: { label: string; run: () => void };
       /** Called only on explicit user dismissal. */

@@ -1,0 +1,116 @@
+name: Release macOS
+# Pushing a v* tag builds, signs, notarizes, and publishes the Apple Silicon
+# app as a GitHub release in this repository. vX.Y.Z is a stable release
+# (updater channel: latest); vX.Y.Z-beta.N is a prerelease (channel: beta).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # Node stays available for electron-builder, the desktop release script,
+      # and the native addon build; bun is the package manager and script runner.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Validate tag and Apple Silicon runner
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$(uname -m)" = arm64
+          node -e '
+            const t = process.env.RELEASE_TAG;
+            if (!/^v\d+\.\d+\.\d+(-beta\.\d+)?$/.test(t)) throw Error("Select a vX.Y.Z or vX.Y.Z-beta.N tag");
+            const beta = t.includes("-beta.");
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT,
+              `version=${t.slice(1)}\nchannel=${beta ? "beta" : "latest"}\nprerelease=${beta}\n`);
+          '
+      - run: bun install --frozen-lockfile
+      - name: Set release version
+        working-directory: apps/desktop
+        run: bun pm version "${{ steps.tag.outputs.version }}" --no-git-tag-version
+      - name: Test update and session lifecycle
+        run: bun run --cwd apps/desktop test -- src/main/updates.test.ts src/main/menu.test.ts src/main/storage.test.ts
+      - name: Write notarization key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          test -n "$APPLE_API_KEY_P8"
+          umask 077
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+      # electron-builder imports CSC_LINK into a private keychain and removes
+      # it afterwards, so create-dmg cannot see the identity. Import it into a
+      # temporary keychain on the search list for the whole job instead.
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          test -n "$APPLE_CERTIFICATE_P12"
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          umask 077
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application"
+      - name: Build, sign, notarize, and verify
+        run: bun run dist:release
+        env:
+          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ runner.temp }}/notary.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+      - name: Verify update manifest
+        env:
+          CHANNEL: ${{ steps.tag.outputs.channel }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          test -s "apps/desktop/dist/${CHANNEL}-mac.yml"
+          test -s "apps/desktop/dist/Powermove-${VERSION}-mac-arm64.zip"
+          test -s "apps/desktop/dist/Powermove-${VERSION}-mac-arm64.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powermove-${{ github.ref_name }}
+          path: |
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.zip
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/*-mac.yml
+          if-no-files-found: error
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.tag.outputs.channel }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          flags=(--draft --title "Powermove ${VERSION}" --generate-notes)
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); else flags+=(--latest); fi
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
+            apps/desktop/dist/*.dmg apps/desktop/dist/*.zip apps/desktop/dist/*.blockmap "apps/desktop/dist/${CHANNEL}-mac.yml"
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+      - name: Remove signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/certificate.p12"
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
