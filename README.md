@@ -51,3 +51,7 @@ To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or 
 - [Website](apps/www/README.md): the SvelteKit marketing site.
 - [Design language](docs/design.md): the implementation guide for every Powermove interface.
 - [macOS release process](apps/desktop/docs/release.md): signing, notarization, and the beta workflow.
+
+## License
+
+Powermove is free software, licensed under the [GNU General Public License v3.0 or later](LICENSE).
