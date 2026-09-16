@@ -17,16 +17,6 @@
   <h1>Privacy Policy</h1>
   <p class="meta">Last updated {updated}</p>
 
-  <section class="tldr">
-    <h2>TL;DR</h2>
-    <ul>
-      <li>Powermove is a desktop app. Your projects, media, and edits stay on your Mac.</li>
-      <li>We don't have accounts, and we don't run analytics or telemetry.</li>
-      <li>When you use the agent, your prompts and relevant project files go to the AI provider you configured: Anthropic, OpenAI, or a local or OpenAI-compatible endpoint you point it at. Their privacy policies apply to that data.</li>
-      <li>The only thing the app contacts on its own is GitHub, to check for updates.</li>
-    </ul>
-  </section>
-
   <h2>What Powermove processes</h2>
   <p>
     Powermove opens and edits video projects on your computer. Project files, imported media, renders, and settings are stored locally. We never see them, and there is no Powermove server that receives them.
@@ -73,7 +63,4 @@
   .legal p { margin-top: 12px; font-size: var(--fs-lg); line-height: 1.6; color: var(--tx-2); text-wrap: pretty; }
   .legal a { color: var(--tx); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
   .legal a:hover { text-decoration-color: var(--tx); }
-  .tldr { margin-top: 32px; padding: 20px 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-panel); }
-  .tldr h2 { margin-top: 0; font-size: var(--fs-md); text-transform: uppercase; letter-spacing: 0.06em; color: var(--tx-3); }
-  .tldr ul { margin-top: 12px; display: grid; gap: 10px; padding-left: 18px; font-size: var(--fs-lg); line-height: 1.5; color: var(--tx); }
 </style>
