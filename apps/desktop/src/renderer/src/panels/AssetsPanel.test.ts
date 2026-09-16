@@ -413,4 +413,22 @@ describe('AssetsPanel', () => {
     expect(rows()).toHaveLength(1);
     expect(rows()[0]!.tabIndex).toBe(0);
   });
+
+  it('does not apply a pending deletion confirmation to a different project', () => {
+    const { PM, project, removeAsset, events } = setup([IMAGE], { references: { 'image-1': 1 } });
+    target.querySelector<HTMLButtonElement>('.asset-delete')!.click();
+    const confirm = PM.modal.mock.calls[0][0].actions[1].run;
+    const nextProject = { id: 'project-2', assets: { [IMAGE.id]: { ...IMAGE } }, layers: [] };
+    PM.proj = nextProject;
+    doc.replace(nextProject as any);
+    flushSync();
+    confirm();
+
+    expect(removeAsset).not.toHaveBeenCalled();
+    expect(PM.hist.do).not.toHaveBeenCalled();
+    expect(project.assets[IMAGE.id]).toBeDefined();
+    expect(nextProject.assets[IMAGE.id]).toBeDefined();
+    expect(events).toEqual([]);
+    expect(PM.toast).toHaveBeenCalledWith('Deletion stopped because you switched projects');
+  });
 });
