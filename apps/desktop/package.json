@@ -1,5 +1,6 @@
 {
   "name": "@powermove/desktop",
+  "license": "GPL-3.0-or-later",
   "version": "1.0.0",
   "private": true,
   "description": "Powermove: a GPU-native, AI-authored motion editor for macOS.",
