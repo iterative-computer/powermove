@@ -105,14 +105,14 @@
 
   <footer>
     <div class="wrap foot">
-      <a class="logo" href="#top" aria-label="Powermove home"><img src="/powermove-logo.svg" width="24" height="21" alt="" /></a>
+      <a class="logo" href="/#top" aria-label="Powermove home"><img src="/powermove-logo.svg" width="24" height="21" alt="" /></a>
       <div>
         <span class="foot-title">Product</span>
         <ul><li><a href="#editor">Editor</a></li><li><a href="#agent">Agent</a></li><li><a href="#mods">Mods</a></li><li><a href="#export">Export</a></li></ul>
       </div>
       <div>
         <span class="foot-title">Company</span>
-        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href={PRODUCT_HUNT} target="_blank" rel="noopener">Product Hunt</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li></ul>
+        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href={PRODUCT_HUNT} target="_blank" rel="noopener">Product Hunt</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
       </div>
       <div class="foot-copy">© Iterative Computer {year}. Open source.</div>
     </div>

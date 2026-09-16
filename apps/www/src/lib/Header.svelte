@@ -4,10 +4,10 @@
   import { download, resolveDownload } from '$lib/download.svelte';
 
   const items = [
-    { label: 'Editor', href: '#editor' },
-    { label: 'Agent', href: '#agent' },
-    { label: 'Mods', href: '#mods' },
-    { label: 'Export', href: '#export' },
+    { label: 'Editor', href: '/#editor' },
+    { label: 'Agent', href: '/#agent' },
+    { label: 'Mods', href: '/#mods' },
+    { label: 'Export', href: '/#export' },
   ];
 
   let open = $state(false);
@@ -30,7 +30,7 @@
 <header class="site-header" data-state={open ? 'active' : undefined}>
   <nav aria-label="Main navigation">
     <div class="bar">
-      <a class="logo" href="#top" aria-label="Powermove home">
+      <a class="logo" href="/#top" aria-label="Powermove home">
         <img src="/powermove-logo.svg" width="24" height="21" alt="" />
         <span>Powermove</span>
       </a>
