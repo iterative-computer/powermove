@@ -1,4 +1,4 @@
-import type { Workspace } from './model';
+import { ensureDockFill, type Workspace } from './model';
 
 type Rect = {
   left: number;
@@ -136,11 +136,16 @@ export function transferPanelHeights(
   return { before, after: total - before };
 }
 
+/* Every rendered side column needs one panel that absorbs the window's spare
+   height. Saved workspaces from older builds, and a splitter drag that pins
+   both neighbours when nothing else was fluid, can leave a dock with every
+   panel sized; the column then stops short of the bottom when the window
+   grows. Repairing here, on the render path, covers both. */
 export function visibleDockPlan(
   workspace: Workspace,
   isDetached: (id: string) => boolean = () => false
 ): Array<{ dock: Workspace['layout']['docks'][number]; specs: Workspace['layout']['docks'][number]['panels'] }> {
   return (workspace.layout?.docks || [])
-    .map((dock) => ({ dock, specs: (dock.panels || []).filter((spec) => !isDetached(spec.id)) }))
+    .map((dock) => ({ dock: ensureDockFill(dock) ?? dock, specs: (dock.panels || []).filter((spec) => !isDetached(spec.id)) }))
     .filter((item) => !item.dock.hidden && item.specs.length > 0);
 }
