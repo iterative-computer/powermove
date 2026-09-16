@@ -254,6 +254,25 @@ describe('createExtensionAPI', () => {
     expect(api.panels.isOpen('notes')).toBe(false);
   });
 
+  it('an open() during activate() does not undo a panel the user closed', () => {
+    const { kernel, deps, opened } = harness();
+    const hidden = new Set(['notes']);
+    deps.panelsBackend.isHidden = (id) => hidden.has(id);
+    const handle = createExtensionAPI(kernel, record(), deps);
+    handle.api.panels.register({ id: 'notes', title: 'Notes', build: () => {} });
+    // Boot-time reveal of a panel the user hid: ignored.
+    handle.setActivating(true);
+    handle.api.panels.open('notes', 'left');
+    expect(opened).toEqual([]);
+    // A panel that was never hidden still opens during activation.
+    handle.api.panels.open('fresh', 'left');
+    expect(opened).toEqual(['fresh']);
+    // After activation, an explicit open (command, menu) brings the hidden panel back.
+    handle.setActivating(false);
+    handle.api.panels.open('notes', 'left');
+    expect(opened).toEqual(['fresh', 'notes']);
+  });
+
   it('registrations made after disposal are dropped immediately', () => {
     const { kernel, deps } = harness();
     const handle = createExtensionAPI(kernel, record(), deps);

@@ -158,6 +158,12 @@ Place a panel at a stable dock position with:
 api.panels.open('media-browser', { dock: 'left', index: 0 });
 ```
 
+Calling `open` from `activate()` is fine for a first reveal, but it runs on
+every launch. The host therefore ignores an activation-time `open` for a panel
+the user has closed: their layout wins, and the panel comes back only through
+an explicit open later (a command, a menu item, a button). Don't try to work
+around this; a panel that reappears after being closed reads as a bug.
+
 Asset import and project history are deliberately separate. The imported asset
 stays in the media library; dropping it on the timeline creates the undoable
 layer edit. `api.project.undo()` is the simple project façade. `api.history.undo()`
