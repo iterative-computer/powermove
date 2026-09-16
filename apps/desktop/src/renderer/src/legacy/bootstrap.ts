@@ -7,6 +7,7 @@ import { installShell } from '../shell/install';
 import { installSvelteLayout } from '../layout/install';
 import { installSvelteOverlays } from '../overlays/install';
 import { installForkUpdates } from '../shell/fork-updates';
+import { installAppUpdates } from '../shell/app-updates';
 
 import { BUILTIN_EXTENSIONS } from '../kernel/builtins';
 import { bootExtensions, installKernel } from '../kernel/install';
@@ -100,6 +101,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['layout/svelte', installSvelteLayout],
   ['overlays/svelte', installSvelteOverlays],
   ['shell/fork-updates', (PM) => void installForkUpdates(PM)],
+  ['shell/app-updates', (PM) => void installAppUpdates(PM)],
   ['runtime/bridge', installLegacyRuntime],
   ['panels/svelte', installSveltePanels],
   ['app', installApp],

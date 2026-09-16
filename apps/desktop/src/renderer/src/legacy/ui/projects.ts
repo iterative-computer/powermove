@@ -1,6 +1,8 @@
 /* Ported from js/ui/projects.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { subscribeForkUpdates, updateAll, type ForkUpdate } from '../../shell/fork-updates';
+import { installUpdate, subscribeAppUpdates } from '../../shell/app-updates';
+import type { AppUpdateState } from '../../../../shared/ipc';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -50,7 +52,20 @@ function ensure() {
       h('button.btn', { onclick: () => { updateAll(); PM.ProjectsScreen.hide(); } }, 'Update with agent'));
   };
   S.offUpdates = subscribeForkUpdates(paintUpdates);
-  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.updates,
+  /* A new app version staged by the background updater. Installing is a
+     normal quit (session saved) followed by a relaunch. */
+  S.appUpdate = h('div.ps-updates', { hidden: true });
+  const paintAppUpdate = (state: AppUpdateState | null) => {
+    S.appUpdate.textContent = '';
+    S.appUpdate.hidden = state?.status !== 'ready';
+    if (state?.status !== 'ready') return;
+    S.appUpdate.append(
+      h('b', state.version ? `Powermove ${state.version} is ready` : 'A Powermove update is ready'),
+      h('span', `You’re on ${state.current}. Restarting saves your session, installs the update, and reopens Powermove.`),
+      h('button.btn', { onclick: installUpdate }, 'Restart to update'));
+  };
+  S.offAppUpdate = subscribeAppUpdates(paintAppUpdate);
+  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.appUpdate, S.updates,
     h('div.ps-sidefoot', 'Local recovery is automatic. Use Save to update a .pmv file you can move, copy, or back up.'));
 
   S.title = h('b'); S.count = h('span');
@@ -263,6 +278,7 @@ function ago(t: any) {
 const offTabs = PM.bus.on('projects:tabs', () => { if (PM.ProjectsScreen.isOpen) paint(); });
 PM.__disposeProjectsScreen = () => {
   S.offUpdates?.(); S.offUpdates = null;
+  S.offAppUpdate?.(); S.offAppUpdate = null;
   offTabs?.();
   S.el?.remove?.();
   S.el = null;
