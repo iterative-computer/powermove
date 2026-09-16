@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { test, expect } from './helpers/app';
 
-test('agent results keep activity, files and composer readable at narrow widths', async ({ session }, testInfo) => {
+test('agent results collapse work above the reply and omit file and external activity panels', async ({ session }, testInfo) => {
   await session.openEditor();
   const { page } = session;
   const output = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
@@ -24,11 +24,15 @@ test('agent results keep activity, files and composer readable at narrow widths'
     Object.assign(PM.AgentUI.state, {
       phase: 'result', legacyPhase: 'result', activity: '', trace: [], panelRun: null,
       conversation: [
-        { role: 'trace', steps },
+        { role: 'trace', durationMs: 543000, steps: [
+          { kind: 'thought', id: 'thinking', label: 'Check the media before importing.', live: false }, ...steps
+        ] },
         { role: 'assistant', text: 'Created a Pexels panel with photo/video search, thumbnails, and import into Assets.' },
-        { role: 'assistant', text: 'Added mod Pexels Browser' }
+        { role: 'assistant', text: 'Added mod Pexels Browser', modResult: {
+          id: 'pexels-browser', name: 'Pexels Browser', action: 'created', status: 'ready'
+        } }
       ],
-      run: { autonomous: true, changed: true, artifacts: ['check.cjs', 'library.cjs', 'panel.cjs', 'verification.txt'].map((name, index) => ({
+      run: { autonomous: true, changed: true, externalActions: ['Downloaded reference media'], artifacts: ['check.cjs', 'library.cjs', 'panel.cjs', 'verification.txt'].map((name, index) => ({
         name, path: `artifacts/${name}`, mime: index === 3 ? 'text/plain' : 'application/octet-stream', size: [4096, 3072, 12288, 1024][index]
       })) }
     });
@@ -39,6 +43,13 @@ test('agent results keep activity, files and composer readable at narrow widths'
     await panel.evaluate((el, width) => { (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`; }, width);
     await page.locator('.agent-scroll').evaluate(el => { el.scrollTop = 0; });
     await panel.screenshot({ path: path.join(output, `result-layout-${width}.png`) });
+    const worked = page.locator('.agent-work-log > summary');
+    await expect(worked).toHaveText('Worked for 9m 3s');
+    await expect(page.locator('.agent-work-details')).not.toBeVisible();
+    await worked.click();
+    await expect(page.locator('.agent-work-details')).toBeVisible();
+    await expect(page.locator('.agent-work-details')).toContainText('Check the media before importing.');
+    await panel.screenshot({ path: path.join(output, `work-history-${width}.png`) });
     // The header reads "18 tool calls · 1 failed · …" inline; the status must
     // stay one line tall and inside the header box at every width.
     const layout = await page.locator('.agent-tool-activity summary').evaluate(el => {
@@ -57,18 +68,20 @@ test('agent results keep activity, files and composer readable at narrow widths'
     expect.soft(composer.border).toBe('0px');
     expect.soft(Math.abs(composer.attach - composer.send)).toBeLessThanOrEqual(1);
     expect.soft(Math.abs(composer.attach - composer.input)).toBeLessThanOrEqual(1);
-    const fileHeights = await page.locator('.agent-artifact').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().height));
-    expect.soft(Math.max(...fileHeights)).toBeLessThanOrEqual(34);
     const overflow = await page.locator('.agent-shell').evaluate(root => [root, ...root.querySelectorAll('*')].filter(el =>
       el.clientWidth > 0 && !el.classList.contains('panel-sr-only') && getComputedStyle(el).display !== 'inline'
-      && getComputedStyle(el).textOverflow !== 'ellipsis' && el.scrollWidth > el.clientWidth + 1).map(el => el.className));
+      && getComputedStyle(el).textOverflow !== 'ellipsis' && el.scrollWidth > el.clientWidth + 1).map(el => ({
+        tag: el.tagName, class: el.getAttribute('class'), width: el.clientWidth, scroll: el.scrollWidth, text: el.textContent?.slice(0, 80)
+      })));
     expect.soft(overflow).toEqual([]);
+    await worked.click();
   }
   await expect(page.locator('.agent-mod-result')).toContainText('Pexels Browser');
   await page.getByRole('button', { name: 'Open Pexels Browser', exact: true }).click();
   expect(await page.evaluate(() => (window as any).__openedResultPanel)).toBe('pexels-panel');
-  await expect(page.locator('.agent-artifacts')).not.toContainText('application/octet-stream');
-  await expect(page.locator('.agent-artifacts')).toContainText('Files');
+  await expect(page.locator('.agent-artifacts')).toHaveCount(0);
+  await expect(page.locator('.agent-external-actions')).toHaveCount(0);
+  await page.locator('.agent-work-log > summary').click();
   await page.locator('.agent-tool-activity summary').click();
   await expect(page.locator('.agent-tool-details')).toBeVisible();
   await expect(page.locator('.agent-tool-details > div')).toHaveCount(18);

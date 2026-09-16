@@ -58,6 +58,10 @@ const bridge: PowermoveBridge = {
     } finally { await ipcRenderer.invoke(IPC.fileSaveAbort, uploadId).catch(() => undefined); }
   },
   openProjectFile: () => ipcRenderer.invoke(IPC.projectOpen),
+  projectRead: {
+    read: (token, offset, length) => ipcRenderer.invoke(IPC.projectRead, { token, offset, length }),
+    close: token => ipcRenderer.invoke(IPC.projectReadClose, token),
+  },
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
 
   render: {
@@ -67,6 +71,9 @@ const bridge: PowermoveBridge = {
     cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
   },
   media: {
+    beginPreview: size => ipcRenderer.invoke(IPC.mediaPreviewBegin, size),
+    writePreview: (token, offset, data) => ipcRenderer.invoke(IPC.mediaPreviewChunk, { token, offset, data }),
+    finishPreview: token => ipcRenderer.invoke(IPC.mediaPreviewFinish, token),
     sourcePath: (file) => webUtils.getPathForFile(file) || null,
     revealSource: (sourcePath) => ipcRenderer.invoke(IPC.mediaRevealSource, sourcePath) as Promise<void>,
     createPlaybackProxy: (file) => {

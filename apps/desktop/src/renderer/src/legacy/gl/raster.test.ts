@@ -369,3 +369,18 @@ describe('legacy raster install', () => {
     expect(disposed).toContain(prepared);
   });
 });
+
+
+it('restores OBJ assets beyond 64 MB without marking their geometry missing', async () => {
+  const text = '#' + ' '.repeat(64 * 1024 * 1024) + '\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n';
+  const blob = new Blob([text], { type: 'model/obj' });
+  const project = { assets: { model: { id: 'model', name: 'large.obj', kind: 'model' } } };
+  const PM = rasterRegistry({
+    proj: project,
+    MediaStore: { get: async () => blob },
+    MediaImport: { mapBounded: async (items: any[], _concurrency: number, fn: (item: any) => Promise<any>) => Promise.all(items.map(fn)) },
+  } as any);
+  await PM.assets.restoreProject(project);
+  expect(PM.assets.get('model')?.mesh.triangleCount).toBe(1);
+  expect(PM.assets.get('model')?.size).toBe(blob.size);
+});

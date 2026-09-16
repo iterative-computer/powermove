@@ -1,3 +1,5 @@
+import { previewVideoElement } from '../core/video-preview';
+import { seekPreviewVideo } from '../core/video-seek';
 import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
@@ -55,6 +57,7 @@ export function effectParamValue(PM: PMRegistry, layer: any, effect: any, param:
     can advance in bursts before the corresponding frame is available to WebGL. */
 export function trackPresentedVideoFrames(el: any, onFrame: () => void): { version: number; supported: boolean } {
   const state = { version: 0, supported: typeof el?.requestVideoFrameCallback === 'function' };
+  el.addEventListener?.('seeked', () => { state.version++; onFrame(); });
   if (!state.supported) return state;
   const presented = () => {
     state.version++;
@@ -175,6 +178,8 @@ function completeProgram(key: any, pending: { pr: any; v: any; f: any }) {
 const viewportPathRasters = new Map<string, any>();
 let viewportPathFrame = 0;
 let viewportPathVersion = 0;
+
+let useVideoPreviews = false;
 
 function videoTextureVersion(el: any): number {
   let state = presentedVideoFrames.get(el);
@@ -786,22 +791,23 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
     if (!a) return null;
-    let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || a.el, sw = a.w || 1, sh = a.h || 1;
+    const liveVideo = L.type === 'video' && useVideoPreviews ? previewVideoElement(PM, a) : a.el;
+    let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || liveVideo, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
       const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
-      if (!PM.playing && Math.abs(el.currentTime - vt) > (a.imageSequence ? .0005 : .02)) { try { el.currentTime = vt; } catch (e) { } }
+      if (!PM.playing && el === liveVideo) seekPreviewVideo(el, vt, .0005);
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
     const bw = d.w || W, bh = d.h || H;
     let textureSource = el;
-    let textureKey = 'a:' + a.id + (el===a.el?'':':'+L.id+'@'+T);
+    let textureKey = 'a:' + a.id + (el===liveVideo?(el===a.el?'':':preview'):':'+L.id+'@'+T);
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
       const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
       textureSource = raster.cv;
       textureKey = 'r:' + raster.key;
     }
-    const videoVersion = L.type === 'video' ? (el===a.el?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
+    const videoVersion = L.type === 'video' ? (el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
     const tex = texFor(textureKey, textureSource, { version: videoVersion });
     let uv = [0, 0, 1, 1];
     if (d.fit === 'cover' || d.fit === 'contain') {
@@ -1484,6 +1490,7 @@ GL.render = (T: any, opt: any = {}) => {
   PM.scope.push(PM.proj);
   previewViewportActive = !!GL.previewViewport;
   // Full sources remain available as a reference for pixel/performance checks.
+  useVideoPreviews = !opt.exporting;
   previewSourceClipping = opt.sourceClipping !== false && !opt.exporting;
   let acc;
   const priorParallel = allowParallelCompile; allowParallelCompile = !opt.exporting;
@@ -1526,6 +1533,7 @@ GL.render = (T: any, opt: any = {}) => {
     Used for transparent PNG export where the canvas itself is opaque. */
 GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
   const gl = GL.gl; if (!gl) return null;
+  const previousPreviews = useVideoPreviews; useVideoPreviews = false;
   PM.beginEval(T);
   let acc;
   try {
@@ -1561,6 +1569,7 @@ GL.renderToPixels = (T: any, W: any, H: any, opt: any = {}) => {
     }
     return px;
   } finally {
+    useVideoPreviews = previousPreviews;
     if (acc) free(acc);
     GL.pool.forEach((f: any) => f.busy = f === presentedFrame);
     trimPool();

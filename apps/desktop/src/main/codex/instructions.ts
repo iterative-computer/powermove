@@ -115,7 +115,6 @@ export function agentResultSchema(): Record<string, unknown> {
       commands: { type: 'array', maxItems: 80, items: { type: 'string' } },
       artifacts: {
         type: 'array',
-        maxItems: 80,
         items: {
           type: 'object',
           additionalProperties: false,

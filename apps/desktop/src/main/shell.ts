@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { isBytes, isRecord, isString, IpcValidationError } from '../shared/guards';
-import { IPC, LIMITS } from '../shared/ipc';
+import { IPC } from '../shared/ipc';
 
 export interface ShellIpcContext {
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
@@ -21,8 +21,8 @@ function attachmentName(value: unknown): string | null {
 export async function materializeAttachment(cacheDirectory: string, raw: unknown): Promise<string> {
   if (!isRecord(raw)) throw new IpcValidationError(IPC.attachmentReveal, 'expected attachment bytes');
   const name = attachmentName(raw.name);
-  if (name === null || !isBytes(raw.data, LIMITS.artifactBytes)) {
-    throw new IpcValidationError(IPC.attachmentReveal, 'expected a safe name and at most 64 MB');
+  if (name === null || !isBytes(raw.data)) {
+    throw new IpcValidationError(IPC.attachmentReveal, 'expected a safe name and attachment bytes');
   }
   await mkdir(cacheDirectory, { recursive: true });
   const digest = createHash('sha256').update(raw.data).digest('hex').slice(0, 16);

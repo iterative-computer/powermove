@@ -1,3 +1,5 @@
+import { previewVideoElement } from './video-preview';
+import { cancelPreviewVideoSeek, seekPreviewVideo } from './video-seek';
 import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { prepareFrame } from './frame-preparation';
 import { installPreviewCache } from './preview-cache';
@@ -38,6 +40,7 @@ const mediaState = new WeakMap<any, any>();
 const VIDEO_DRIFT_SECONDS = 0.12;
 let videoSeekGeneration = 0;
 function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number) {
+  cancelPreviewVideoSeek(el);
   let state = mediaState.get(el);
   if (!state) {
     state = { desired: false, pending: false, expectedTime, playbackRate, seekGeneration: -1 };
@@ -88,16 +91,29 @@ function ensureMediaPaused(el: any) {
 }
 function scrubVideos(T: any) {
   const videos = PM.ProjectIndex?.layersOfType?.('video', PM.proj) || PM.proj.layers.filter((layer: any) => layer.type === 'video');
-  for (const L of videos) {
-    if (!L.d.asset) continue;
-    const a = PM.assets.get(L.d.asset); if (!a) continue;
+  // Choose the active instance before touching a shared decoder. A later,
+  // inactive copy must never cancel the visible clip's play promise.
+  const owners = new Map<any, any>();
+  for (const layer of videos) {
+    const asset = PM.assets.get(layer.d.asset);
+    if (!asset?.el) continue;
+    const el = previewVideoElement(PM, asset);
+    const unused = el === asset.el ? asset.preview?.el : asset.el;
+    if (unused) { cancelPreviewVideoSeek(unused); ensureMediaPaused(unused); }
+    if (!owners.has(el) || PM.active(layer, T)) owners.set(el, { layer, asset, el });
+  }
+  for (const { layer: L, asset: a, el } of owners.values()) {
     const inRange = PM.active(L, T);
+    if (!inRange) { ensureMediaPaused(el); continue; }
+    const previous = mediaState.get(el);
+    if (previous && previous.layer !== L.id) previous.seekGeneration = -1;
     const d = resolveContent(PM, L, T);
     /* playback position must respect layer speed, matching the compositor's vt math */
     const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, (a.dur || 0) - .04));
-    if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(a.el, vt, Math.max(.0001, Number(d.speed) || 1));
-    else ensureMediaPaused(a.el);
-    if ((!PM.playing || d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) && Math.abs(a.el.currentTime - vt) > (a.imageSequence ? .0005 : .02)) { try { a.el.currentTime = vt; } catch (e) { } }
+    if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(el, vt, Math.max(.0001, Number(d.speed) || 1));
+    else ensureMediaPaused(el);
+    const state = mediaState.get(el); if (state) state.layer = L.id;
+    if (!PM.playing || d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) seekPreviewVideo(el, vt, .0005);
   }
 }
 

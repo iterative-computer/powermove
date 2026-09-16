@@ -5,7 +5,7 @@ import { canAnimateContent, isProperty } from './core/content-properties';
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
 import type { PMRegistry } from './registry';
-import { packProjectFile, restoreProjectFileMedia, unpackProjectFile } from './core/project-file';
+import { packProjectFileBlob, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile } from './core/project-file';
 import { projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
 import { createNewProjectForm } from './ui/project-settings';
@@ -81,7 +81,12 @@ PM.theme = (() => {
   };
   const render = () => {
     if (resolved() === 'dark') root.dataset.theme = 'dark'; else delete root.dataset.theme;
-    /* layout event re-resolves CSS-token caches (timeline canvas) */
+    /* Publish only after the CSS scheme changes: canvas panels cache computed
+       colors in their theme listener. System appearance changes use this path too. */
+    if (PM.Kernel?.theme) {
+      PM.Kernel.theme.scheme = mode;
+      PM.Kernel.events?.emit?.('theme:changed', { id: PM.Kernel.theme.activeId, scheme: resolved() });
+    }
     PM.bus.emit('layout');
     PM.invalidate();
   };
@@ -89,13 +94,6 @@ PM.theme = (() => {
     mode = ['light', 'dark', 'system'].includes(t) ? t : 'system';
     PM.store.set('themeMode', mode);
     PM.store.set('theme', mode);
-    /* Legacy owns the preference and its persistence; the kernel owns the
-       active theme's tokens. Push the resolved scheme across so a registered
-       theme repaints its dark/light variant with the switch. */
-    if (PM.Kernel?.theme) {
-      PM.Kernel.theme.scheme = mode;
-      PM.Kernel.events?.emit?.('theme:changed', { id: PM.Kernel.theme.activeId, scheme: resolved() });
-    }
     syncNative();
     render();
   };
@@ -608,7 +606,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     }
     const state = fileState(projectId);
     const suggestedName = safeName(project.name) + '.pmv';
-    const data = await packProjectFile(snapshot, PM.MediaStore, serialized);
+    const data = await packProjectFileBlob(snapshot, PM.MediaStore, serialized);
     const finish = async (path?: string) => {
       state.path = path || state.path;
       state.savedHash = await projectFingerprint(projectJSON);
@@ -624,13 +622,13 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       const metadata = { name: suggestedName, projectId, saveAs };
       const upload = window.powermove.fileUpload;
       const result = await (async () => {
-        if (!upload || data.length <= 4 * 1024 * 1024) return window.powermove!.saveFile({ ...metadata, data });
-        const token = await upload.begin(data.length);
+        if (!upload || data.size <= 4 * 1024 * 1024) return window.powermove!.saveFile({ ...metadata, data: new Uint8Array(await data.arrayBuffer()) });
+        const token = await upload.begin(data.size);
         try {
-          for (let offset = 0; offset < data.length; offset += 1024 * 1024) {
+          for (let offset = 0; offset < data.size; offset += 1024 * 1024) {
             // A subarray still owns the complete backing buffer. Electron's
             // context bridge would clone the entire project for every slice.
-            await upload.chunk(token, data.slice(offset, offset + 1024 * 1024));
+            await upload.chunk(token, new Uint8Array(await data.slice(offset, offset + 1024 * 1024).arrayBuffer()));
           }
           return await upload.finish(token, metadata);
         } finally { await upload.abort(token).catch(() => undefined); }
@@ -648,7 +646,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       state.handle = handle;
       return await finish(handle.name);
     }
-    PM.download(new window.Blob([new Uint8Array(data)], { type: 'application/x-powermove' }), safeName(PM.proj.name) + '.pmv');
+    PM.download(data, safeName(PM.proj.name) + '.pmv');
     PM.toast('Download started'); return false;
   } catch (error: any) {
     if (error.name === 'AbortError') return false;
@@ -671,7 +669,7 @@ PM.saveProject = (options: any = {}) => {
 PM.openProject = async () => {
   if (window.powermove?.openProjectFile) {
     const result = await window.powermove.openProjectFile();
-    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), arrayBuffer: async () => result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength) }, result);
+    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
     else if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
     return;
   }
@@ -681,13 +679,22 @@ PM.openProject = async () => {
 };
 async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
   try {
-    const input = file.arrayBuffer ? await file.arrayBuffer() : await file.text();
-    const o = unpackProjectFile(input);
+    let o: any, mediaRestored = false;
+    if (file.native && 'token' in file.native) {
+      const bridge = window.powermove!.projectRead!;
+      const { token, document, media } = file.native;
+      try {
+        await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length));
+        o = document; mediaRestored = true;
+      } finally { await bridge.close(token); }
+    } else if (file.native) o = unpackProjectFile(file.native.data);
+    else if (file instanceof Blob) o = await unpackProjectFileBlob(file);
+    else o = unpackProjectFile(file.arrayBuffer ? await file.arrayBuffer() : await file.text());
     const source = o.proj || o;
     if (!source || !Array.isArray(source.layers) || !Number.isFinite(source.w) || !Number.isFinite(source.h)) throw new Error('This is not a Powermove project.');
     source.id = association?.projectId || PM.uid('project');
     const project = hydrate(source);
-    await restoreProjectFileMedia(o, PM.MediaStore);
+    if (!mediaRestored) await restoreProjectFileMedia(o, PM.MediaStore);
     // File opens receive a fresh document ID to keep independent copies safe.
     // Recover the most recent layout for this file, rather than reverting to
     // the older workspace embedded the last time its content was saved.

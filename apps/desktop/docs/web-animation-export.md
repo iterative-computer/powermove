@@ -36,7 +36,8 @@ Used effect, transition, and extension-layer definitions are captured from the a
 - Original media is bundled; playback depends on browser codec support. Desktop-only video transcoding is unavailable in the exported player.
 - Fonts accessible through the editor's CSS font-face rules are bundled. System fonts must be provided by the host app; the preview and README list missing font families. Their absence can change text layout. Variable-font rendering uses bundled font bytes without requesting local-font access.
 - Audio playback may require a user gesture. The runtime supports audio disabling through `audio: false`.
-- Missing rendering definitions, unsupported expressions, missing media, composition cycles, and exports over 256 MB produce errors. Runtime shader failures are surfaced instead of silently dropping the failing effect.
+- Missing rendering definitions, unsupported expressions, missing media, and composition cycles produce errors. Runtime shader failures are surfaced instead of silently dropping the failing effect.
+- Export size has no application quota. The current classic ZIP writer requires archives below 4 GiB and fewer than 65,535 entries; larger archives require ZIP64 support. Packaging currently retains media and the archive in memory, so available memory is a practical constraint.
 - Project notes, edit history, workspace state, unused media, and local asset storage paths are excluded. The `.pmv` save format is unchanged.
 
 ## Implementation

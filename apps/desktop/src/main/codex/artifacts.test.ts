@@ -4,7 +4,6 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { LIMITS } from '../../shared/ipc';
 import { collectArtifacts, mimeTypeForPath, readArtifact, reveal, validatedArtifactPath } from './artifacts';
 
 const temporaryPaths: string[] = [];
@@ -56,16 +55,36 @@ describe('validatedArtifactPath', () => {
     await expect(validatedArtifactPath(root, 'run-1/escape.txt')).rejects.toThrow(/escapes/);
   });
 
-  it('rejects directories and files over the artifact limit', async () => {
+  it('rejects directories', async () => {
     const { root } = await makeFixture();
     await expect(validatedArtifactPath(root, 'run-1')).rejects.toThrow(/regular file/);
+  });
 
-    const oversized = path.join(root, 'run-1', 'oversized.bin');
+  it('reads and reveals artifacts larger than 64 MB without losing their tail', async () => {
+    const { root } = await makeFixture();
+    const file = path.join(root, 'run-1', 'large.bin');
     const { open } = await import('node:fs/promises');
-    const handle = await open(oversized, 'w');
-    await handle.truncate(LIMITS.artifactBytes + 1);
-    await handle.close();
-    await expect(validatedArtifactPath(root, 'run-1/oversized.bin')).rejects.toThrow(/64 MB/);
+    const size = 64 * 1024 * 1024 + 1;
+    const handle = await open(file, 'w');
+    try { await handle.write(new Uint8Array([123]), 0, 1, size - 1); }
+    finally { await handle.close(); }
+    const realFile = await realpath(file);
+    await expect(validatedArtifactPath(root, 'run-1/large.bin')).resolves.toBe(realFile);
+    const showItemInFolder = vi.fn();
+    await reveal(root, 'run-1/large.bin', { showItemInFolder });
+    expect(showItemInFolder).toHaveBeenCalledWith(realFile);
+    const result = await readArtifact(root, 'run-1/large.bin');
+    expect(result.data.byteLength).toBe(size);
+    expect(result.data.at(-1)).toBe(123);
+  });
+
+  it('collects every artifact beyond the former 80-file cutoff', async () => {
+    const { root } = await makeFixture();
+    const run = path.join(root, 'run-1');
+    for (let i = 0; i < 85; i++) await writeFile(path.join(run, `output-${i}.txt`), 'output');
+    const result = await collectArtifacts(run, 'run-1', [{ path: 'output-84.txt', importToTimeline: true }]);
+    expect(result).toHaveLength(86);
+    expect(result.find(item => item.name === 'output-84.txt')?.importToTimeline).toBe(true);
   });
 });
 

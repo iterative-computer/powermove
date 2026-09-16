@@ -64,6 +64,16 @@ describe('legacy compositor install', () => {
     expect(capped).toEqual({ width: 8192, height: 4096, scale: 81.92 });
   });
 
+  it('invalidates a paused seek as soon as the decoded frame is available', () => {
+    const video = new EventTarget() as any;
+    video.requestVideoFrameCallback = vi.fn();
+    const invalidated = vi.fn();
+    const state = trackPresentedVideoFrames(video, invalidated);
+    video.dispatchEvent(new Event('seeked'));
+    expect(state.version).toBe(1);
+    expect(invalidated).toHaveBeenCalledOnce();
+  });
+
   it('versions textures from each frame the browser presents', () => {
     const callbacks: Array<() => void> = [];
     const invalidated = vi.fn();

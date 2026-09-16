@@ -1,5 +1,4 @@
 export const IMAGE_SEQUENCE_ACCEPT = '.png,.jpg,.jpeg,.webp,.bmp';
-export const MAX_SEQUENCE_FRAMES = 20_000;
 
 /** The last number before the extension is the frame index. Padding may vary. */
 export function sequenceFrame(name: string) {
@@ -11,8 +10,8 @@ export function sequenceFrame(name: string) {
 }
 
 export function orderedSequence<T extends { name: string }>(files: T[]): T[] {
-  if (files.length < 2 || files.length > MAX_SEQUENCE_FRAMES) {
-    throw new Error(`Choose between 2 and ${MAX_SEQUENCE_FRAMES.toLocaleString('en-US')} numbered image frames`);
+  if (files.length < 2) {
+    throw new Error('Choose at least 2 numbered image frames');
   }
   const first = sequenceFrame(files[0]!.name);
   if (!first || files.some(file => {

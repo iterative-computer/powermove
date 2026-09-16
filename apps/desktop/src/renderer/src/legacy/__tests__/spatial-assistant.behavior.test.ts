@@ -486,6 +486,7 @@ it('keeps the prose the model streamed as the reply instead of replacing it with
   const conversation = PM.AgentUI.state.conversation;
   const trace = conversation.find(turn => turn.role === 'trace');
   assert.ok(trace, 'the run archives its trail');
+  assert.ok(Number.isFinite(trace.durationMs) && trace.durationMs >= 0, 'the completed work keeps its elapsed time');
   assert.deepEqual(trace.steps.map((step) => step.kind), ['tool', 'text']);
   assert.equal(trace.steps[1].text, spoken);
   assert.ok(!conversation.some(turn => turn.role === 'assistant' && turn.text === 'Updated the panel.'), 'no duplicate summary turn');
@@ -1238,4 +1239,26 @@ it('sending an agent message does not clone or rewrite the saved Takes archive',
   expect(PM.takes.save).not.toHaveBeenCalled();
   expect(PM.takes.all).not.toHaveBeenCalled();
   expect(JSON.stringify(PM.AgentUI.state.run.checkpoint)).not.toContain('layers');
+});
+
+
+it('retains all artifacts beyond 80 in the agent result', () => {
+  const artifacts = Array.from({ length: 85 }, (_, index) => ({ path: `result-${index}.png`, importToTimeline: true }));
+  const result = spatialModel().math.normalizeAutonomousResult({ artifacts });
+  expect(result.artifacts).toHaveLength(85);
+  expect(result.artifacts.at(-1).path).toBe('result-84.png');
+});
+
+it.each(['bytes', 'base64'])('loads artifact files from %s without changing the payload', async format => {
+  const { PM } = spatialHarness();
+  window.File = File;
+  window.webkit = { messageHandlers: { pmAgentArtifact: { postMessage: request => {
+    PM.AgentArtifacts.resolve(request.id, {
+      ok: true, name: 'result.bin', mime: 'application/octet-stream',
+      ...(format === 'bytes' ? { data: new Uint8Array([0, 123, 255]) } : { dataBase64: 'AHv/' }),
+    });
+  } } } };
+  const file = await PM.AgentArtifacts.load({ projectId: 'p', path: 'result.bin' });
+  expect(file.name).toBe('result.bin');
+  expect([...new Uint8Array(await file.arrayBuffer())]).toEqual([0, 123, 255]);
 });

@@ -278,7 +278,7 @@ export interface AssetsAPI {
   /** Import into Powermove's durable project media store. The file remains after layer Undo. */
   import(file: File, options?: { layerDefinition?: string }): Promise<AssetRecord>;
   get(id: string): AssetRecord | undefined;
-  /** Read a text asset from the live cache or durable media store (64 MB maximum). */
+  /** Read a text asset from the live cache or durable media store. */
   readText(id: string): Promise<string>;
 }
 

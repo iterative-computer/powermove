@@ -376,6 +376,51 @@ describe('AgentPanel', () => {
     expect(userTurns[1]?.querySelector('.agent-bubble')?.textContent).toBe('continue');
   });
 
+  it('filters slash commands, selects a model with the keyboard, and returns to typing', () => {
+    renderPanel();
+    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    flushSync(() => textarea.focus());
+    textarea.value = '/mod';
+    flushSync(() => textarea.dispatchEvent(new InputEvent('input', { bubbles: true })));
+    expect(target.querySelector('[role="listbox"][aria-label="Slash commands"]')?.textContent).toContain('/model');
+    const key = (value: string) => flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true })));
+    key('Tab');
+    expect(textarea.value).toBe('/model ');
+    expect(target.querySelectorAll('[role="option"]')).toHaveLength(2);
+    key('ArrowDown');
+    key('Enter');
+    expect(PM.AgentUI.setModel).toHaveBeenCalledExactlyOnceWith('gpt-5.6-terra', 'high');
+    expect(PM.AgentUI.submit).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('');
+    expect(document.activeElement).toBe(textarea);
+    expect(target.querySelector('.agent-slash-menu')).toBeNull();
+  });
+
+  it('dismisses shortcuts without consuming a literal slash prompt, and blocks new threads while working', () => {
+    renderPanel(snapshot({ legacyPhase: 'working', requestToken: 1, threadSwitchBlocked: true }));
+    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    flushSync(() => textarea.focus());
+    textarea.value = '/';
+    flushSync(() => textarea.dispatchEvent(new InputEvent('input', { bubbles: true })));
+    const menu = target.querySelector('.agent-slash-menu')!;
+    expect(menu.textContent).not.toContain('/new');
+    expect(menu.textContent).toContain('/stop');
+    flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    expect(target.querySelector('.agent-slash-menu')).toBeNull();
+    expect(textarea.value).toBe('/');
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    expect(PM.AgentUI.submit).toHaveBeenCalledExactlyOnceWith('/');
+  });
+
+  it('keeps IME confirmation and Shift+Enter local to the draft', () => {
+    renderPanel(snapshot({ composerDraft: 'Animate this' }));
+    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }));
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+    expect(PM.AgentUI.submit).not.toHaveBeenCalled();
+    expect(textarea.value).toBe('Animate this');
+  });
+
   it('keeps error recovery inside the diagnostic card', () => {
     renderPanel(snapshot({
       conversation: [{ role: 'assistant', text: 'codex:run: invalid request', error: true }]
@@ -513,7 +558,7 @@ describe('AgentPanel', () => {
     expect(log.querySelector('details img')?.getAttribute('alt')).toBe('Rendered composition at 0 seconds');
   });
 
-  it('keeps files, notes, and warnings inline for an autonomous response with no source changes', () => {
+  it('omits files and external activity after completion while keeping review notes', () => {
     PM.assetKind.mockReturnValue('video');
     renderPanel(snapshot({
       legacyPhase: 'result',
@@ -530,13 +575,13 @@ describe('AgentPanel', () => {
     const log = target.querySelector('[role="log"]')!;
     expect(log.textContent).toContain('Review the license before publishing.');
     expect(log.textContent).toContain('The clip could not be imported.');
-    expect(log.textContent).toContain('Downloaded reference footage');
+    expect(log.textContent).not.toContain('Downloaded reference footage');
+    expect(log.querySelector('.agent-artifacts')).toBeNull();
+    expect(log.querySelector('.agent-external-actions')).toBeNull();
     expect(target.textContent).not.toContain('Undo change');
     expect(target.textContent).not.toContain('Done');
-    log.querySelector<HTMLButtonElement>('[aria-label="Add clip.mp4 to timeline"]')!.click();
-    log.querySelector<HTMLButtonElement>('[aria-label="Reveal clip.mp4 in Finder"]')!.click();
-    expect(PM.AgentUI.importArtifact).toHaveBeenCalledOnce();
-    expect(PM.AgentUI.revealArtifact).toHaveBeenCalledOnce();
+    expect(log.querySelector('[aria-label="Add clip.mp4 to timeline"]')).toBeNull();
+    expect(log.querySelector('[aria-label="Reveal clip.mp4 in Finder"]')).toBeNull();
     expect(target.querySelector('textarea')?.disabled).toBe(false);
 
     flushSync(() => setAgentSnapshot(snapshot({

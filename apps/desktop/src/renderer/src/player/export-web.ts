@@ -94,10 +94,7 @@ export async function buildWebExport(PM: any) {
     warnings: [...inspection.warnings],
   };
   validateScene(scene);
-  let total = 0;
   const put = (name: string, data: Uint8Array) => {
-    total += data.length;
-    if (total > 256 * 1024 * 1024) throw new Error('Web exports are limited to 256 MB');
     files.set(name, data);
   };
   let index = 0;
@@ -108,7 +105,6 @@ export async function buildWebExport(PM: any) {
     if (!meta) throw new Error(`Missing media metadata: ${id}`);
     const blob = await PM.MediaStore.get(meta);
     if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
-    if (total + blob.size > 256 * 1024 * 1024) throw new Error('Web exports are limited to 256 MB');
     const extension = /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj)$/i.exec(meta.name || '')?.[1]?.toLowerCase() || 'bin';
     const location = `assets/media-${index++}.${extension}`;
     put(location, new Uint8Array(await blob.arrayBuffer())); scene.assets[id] = location;

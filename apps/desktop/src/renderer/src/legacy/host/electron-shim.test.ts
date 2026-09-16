@@ -200,7 +200,7 @@ describe('legacy Electron shim install', () => {
     }));
   });
 
-  it('preserves exact artifact and window-capture base64 result shapes', async () => {
+  it('passes artifact bytes directly and preserves window-capture base64', async () => {
     const { PM, bridge, window } = loadShim();
     bridge.artifacts.read.mockResolvedValue({
       name: 'report.txt',
@@ -218,7 +218,7 @@ describe('legacy Electron shim install', () => {
       ok: true,
       name: 'report.txt',
       mime: 'text/plain',
-      dataBase64: 'aGk=',
+      data: new Uint8Array([104, 105]),
     });
     expect(PM.WindowCapture.resolve).toHaveBeenCalledWith('capture-1', {
       ok: true,

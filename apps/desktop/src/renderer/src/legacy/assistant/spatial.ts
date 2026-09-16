@@ -199,7 +199,8 @@ PM.AgentArtifacts = {
     artifactPending.delete(id); window.clearTimeout(job.timer);
     if (!result?.ok) { job.reject(new Error(result?.message || 'The artifact could not be loaded')); return; }
     try {
-      const bytes: any = Uint8Array.from(window.atob(result.dataBase64 || ''), (character: any) => character.charCodeAt(0));
+      const bytes: any = result.data instanceof Uint8Array ? result.data
+        : Uint8Array.from(window.atob(result.dataBase64 || ''), (character: any) => character.charCodeAt(0));
       job.resolve(new window.File([bytes], result.name || 'agent-artifact', { type: result.mime || 'application/octet-stream' }));
     } catch { job.reject(new Error('The artifact could not be decoded')); }
   },
@@ -247,7 +248,7 @@ const S: any = {
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
   requestText: '', run: null, conversation: [], activity: '', trace: [], activeRequest: null, composerDraft: '',
-  uiPlacement: null,
+  uiPlacement: null, requestStartedAt: null,
   focusPicker: null,
   rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
@@ -1396,7 +1397,9 @@ function archiveTrace(preserveText = false) {
   sealTrace();
   const steps: any = S.trace.filter((step: any) => step.kind !== 'text' || (preserveText && step.text.trim()));
   S.trace = [];
-  if (steps.length) S.conversation.push({ role: 'trace', steps });
+  if (steps.length) S.conversation.push({ role: 'trace', steps,
+    durationMs: S.requestStartedAt === null ? undefined : Math.max(0, Date.now() - S.requestStartedAt),
+  });
 }
 
 function normalizeAutonomousResult(raw: any, rawExtensions: any) {
@@ -1417,7 +1420,7 @@ function normalizeAutonomousResult(raw: any, rawExtensions: any) {
     summary: text(raw?.summary || 'The autonomous agent finished its run.').slice(0, 30_000),
     commands: (Array.isArray(raw?.commands) ? raw.commands : [])
       .slice(0, 80).map(PM.AgentHarness.cleanCommand).filter(Boolean),
-    artifacts: (Array.isArray(raw?.artifacts) ? raw.artifacts : []).slice(0, 80).map((item: any) => ({
+    artifacts: (Array.isArray(raw?.artifacts) ? raw.artifacts : []).map((item: any) => ({
       projectId,
       path: text(item?.path).slice(0, 600),
       name: text(item?.name || String(item?.path || '').split('/').pop() || 'Agent artifact').slice(0, 240),
@@ -1845,6 +1848,7 @@ async function sendRequest(input: any) {
   // Keep residual activity from a settled run, and events received while a
   // rejected steering request was waiting, before starting the next message.
   archiveTrace(true);
+  S.requestStartedAt = Date.now();
   S.uiPlacement = null;
   S.requestAttachments = S.attachments.splice(0);
   S.composerDraft = '';

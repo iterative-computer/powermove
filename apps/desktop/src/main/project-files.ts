@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { copyFile, mkdir, open, readFile, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { LIMITS, PROJECT_ID } from '../shared/ipc';
-import { decodeProjectContainer } from '../shared/project-container';
+import { PROJECT_ID } from '../shared/ipc';
+import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
+import { FILE_CHUNK_BYTES } from './file-upload';
 
 /** Replace only after every byte has reached disk; a failed write preserves the original. */
-export async function atomicWrite(filePath: string, data: Uint8Array): Promise<void> {
+export async function atomicWrite(filePath: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>): Promise<void> {
   const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${randomUUID()}.tmp`);
   try {
     const handle = await open(temporary, 'wx', 0o600);
@@ -19,7 +20,6 @@ export async function atomicWrite(filePath: string, data: Uint8Array): Promise<v
 }
 
 type Association = { path: string; hash: string };
-const hash = (data: Uint8Array) => createHash('sha256').update(data).digest('hex');
 const hashFile = (filePath: string): Promise<string> => new Promise((resolve, reject) => {
   const digest = createHash('sha256');
   const stream = createReadStream(filePath);
@@ -30,6 +30,7 @@ const hashFile = (filePath: string): Promise<string> => new Promise((resolve, re
 
 /** Main-process-only grants: renderer data can never invent an overwrite path. */
 export class ProjectFiles {
+  private readers = new Map<string, { handle: FileHandle; size: number; mtime: number; ctime: number; busy: boolean }>();
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
@@ -60,7 +61,7 @@ export class ProjectFiles {
     this.queue = next.catch(() => undefined);
     return next;
   }
-  save(id: string, data: Uint8Array, selectedPath?: string): Promise<string> {
+  save(id: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>, selectedPath?: string): Promise<string> {
     return this.serial(async () => {
       const known = this.associations.get(id);
       const destination = selectedPath || known?.path;
@@ -69,7 +70,7 @@ export class ProjectFiles {
       let previousHash: string | undefined;
       try {
         const info = await stat(destination);
-        if (!info.isFile() || info.size > LIMITS.fileSaveBytes) throw new Error('The destination cannot be safely backed up. Choose another file with Save As.');
+        if (!info.isFile()) throw new Error('The destination cannot be safely backed up. Choose another file with Save As.');
         previous = true;
         previousHash = await hashFile(destination);
       } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
@@ -77,28 +78,84 @@ export class ProjectFiles {
         throw new Error('The project file was moved, deleted, or changed outside Powermove. Use Save As to avoid overwriting other work.');
       }
       if (previous) await copyFile(destination, destination + '1');
-      await atomicWrite(destination, data);
+      const digest = createHash('sha256');
+      async function* writing() {
+        for await (const chunk of data instanceof Uint8Array ? [data] : data) {
+          digest.update(chunk); yield chunk;
+        }
+      }
+      await atomicWrite(destination, writing());
       // Other open copies of this file keep their old hash, so they cannot silently overwrite it.
-      this.associations.set(id, { path: destination, hash: hash(data) });
+      this.associations.set(id, { path: destination, hash: digest.digest('hex') });
       await this.persist();
       return destination;
     });
   }
-  open(filePath: string): Promise<{ path: string; projectId: string; data: Uint8Array }> {
+  open(filePath: string): Promise<{ path: string; projectId: string; token: string; size: number; document: any; media: ProjectMediaRange[] }> {
     return this.serial(async () => {
-      const info = await stat(filePath);
-      if (!info.isFile() || info.size > LIMITS.fileSaveBytes) throw new Error('Project files must be smaller than 256 MB.');
-      const data = await readFile(filePath);
-      const document = decodeProjectContainer(data).document;
-      const project = document?.proj || document;
-      if (!project || !Array.isArray(project.layers) || !Number.isFinite(project.w) || !Number.isFinite(project.h)) {
-        throw new Error('This is not a Powermove project.');
-      }
-      // Opening a copy never replaces another open document with the same embedded id.
-      const projectId = randomUUID();
-      this.associations.set(projectId, { path: filePath, hash: hash(data) });
-      await this.persist();
-      return { path: filePath, projectId, data };
+      const handle = await open(filePath, 'r');
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || !Number.isSafeInteger(info.size)) throw new Error('This is not a readable project file.');
+        const readExactly = async (position: number, length: number) => {
+          const buffer = Buffer.allocUnsafe(length);
+          for (let offset = 0; offset < length;) {
+            const { bytesRead } = await handle.read(buffer, offset, length - offset, position + offset);
+            if (!bytesRead) throw new Error('The project container is truncated.');
+            offset += bytesRead;
+          }
+          return buffer;
+        };
+        const prefix = await readExactly(0, Math.min(9, info.size));
+        let document: any, media: ProjectMediaRange[] = [];
+        if (isProjectContainer(prefix)) {
+          if (prefix.length < 9) throw new Error('The project container is truncated.');
+          const headerLength = prefix.readUInt32LE(5);
+          if (headerLength < 2 || headerLength > info.size - 9) throw new Error('The project container header is invalid.');
+          const header = JSON.parse((await readExactly(9, headerLength)).toString('utf8'));
+          ({ document, media } = projectContainerIndex(header, 9 + headerLength, info.size));
+        } else {
+          // Legacy JSON stores its media inside the document itself. Keep that
+          // format readable; all newly saved projects use the streamed PMV3 body.
+          document = JSON.parse((await readExactly(0, info.size)).toString('utf8'));
+        }
+        const project = document?.proj || document;
+        if (!project || !Array.isArray(project.layers) || !Number.isFinite(project.w) || !Number.isFinite(project.h)) throw new Error('This is not a Powermove project.');
+        const digest = createHash('sha256');
+        for await (const chunk of handle.createReadStream({ start: 0, autoClose: false, highWaterMark: FILE_CHUNK_BYTES })) digest.update(chunk);
+        const after = await handle.stat();
+        if (after.size !== info.size || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) throw new Error('The project changed while opening. Try opening it again.');
+        const projectId = randomUUID(), token = randomUUID();
+        this.associations.set(projectId, { path: filePath, hash: digest.digest('hex') });
+        await this.persist();
+        this.readers.set(token, { handle, size: info.size, mtime: info.mtimeMs, ctime: info.ctimeMs, busy: false });
+        return { path: filePath, projectId, token, size: info.size, document, media };
+      } catch (error) { await handle.close(); throw error; }
     });
+  }
+
+  async read(token: string, offset: number, length: number): Promise<Uint8Array> {
+    const reader = this.readers.get(token);
+    if (!reader || reader.busy || !Number.isSafeInteger(offset) || offset < 0 || offset > reader.size
+      || !Number.isSafeInteger(length) || length < 1 || length > FILE_CHUNK_BYTES || length > reader.size - offset) throw new Error('Invalid project read range');
+    reader.busy = true;
+    try {
+      const data = Buffer.allocUnsafe(length);
+      const { bytesRead } = await reader.handle.read(data, 0, length, offset);
+      if (!bytesRead) throw new Error('The project container is truncated.');
+      return data.subarray(0, bytesRead);
+    } finally { reader.busy = false; }
+  }
+
+  async close(token: string, verify = true): Promise<void> {
+    const reader = this.readers.get(token);
+    if (!reader) return;
+    this.readers.delete(token);
+    try {
+      if (verify) {
+        const info = await reader.handle.stat();
+        if (info.size !== reader.size || info.mtimeMs !== reader.mtime || info.ctimeMs !== reader.ctime) throw new Error('The project changed while opening. Try opening it again.');
+      }
+    } finally { await reader.handle.close(); }
   }
 }

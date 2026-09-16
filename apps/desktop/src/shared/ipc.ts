@@ -21,6 +21,8 @@ export const IPC = {
   fileSaveChunk: 'file:save-chunk',
   fileSaveAbort: 'file:save-abort',
   projectOpen: 'project:open',
+  projectRead: 'project:read',
+  projectReadClose: 'project:read-close',
   projectConfirmClose: 'project:confirm-close',
 
   renderStart: 'render:start',
@@ -28,6 +30,9 @@ export const IPC = {
   renderFinish: 'render:finish',
   renderCancel: 'render:cancel',
   mediaProxyCreate: 'media-proxy:create',
+  mediaPreviewBegin: 'media-preview:begin',
+  mediaPreviewChunk: 'media-preview:chunk',
+  mediaPreviewFinish: 'media-preview:finish',
   mediaSequenceCreate: 'media-sequence:create',
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
@@ -103,8 +108,7 @@ export type IpcChannel = (typeof IPC)[keyof typeof IPC];
 const PROJECT_SNAPSHOT_BYTES = 32 * 1024 * 1024;
 
 export const LIMITS = {
-  fileSaveBytes: 256 * 1024 * 1024, // larger payloads stream via File System Access
-  artifactBytes: 64 * 1024 * 1024,
+  fileSaveBytes: 256 * 1024 * 1024, // direct IPC / local recovery bound
   codexImages: 6,
   codexImageBytes: 4 * 1024 * 1024,
   codexAttachments: 6,
@@ -130,7 +134,11 @@ export interface FileSaveRequest {
   saveAs?: boolean;
 }
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
-export type ProjectOpenResult = { ok: true; path: string; projectId: string; data: Uint8Array } | { ok: false; cancelled: boolean; error?: string };
+export type ProjectOpenResult = {
+  ok: true; path: string; projectId: string; token: string; size: number;
+  document: any; media: import('./project-container').ProjectMediaRange[];
+} | { ok: true; path: string; projectId: string; data: Uint8Array }
+  | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
 
 /* ── media playback proxies ─────────────────────────────── */
@@ -452,6 +460,10 @@ export interface PowermoveBridge {
   };
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
+  projectRead?: {
+    read(token: string, offset: number, length: number): Promise<Uint8Array>;
+    close(token: string): Promise<void>;
+  };
   confirmProjectClose(name: string): Promise<CloseDecision>;
 
   render: {
@@ -461,6 +473,9 @@ export interface PowermoveBridge {
     cancel(token:string):Promise<void>;
   };
   media: {
+    beginPreview(size: number): Promise<string>;
+    writePreview(token: string, offset: number, data: Uint8Array): Promise<void>;
+    finishPreview(token: string): Promise<{ token: string; size: number }>;
     sourcePath(file: File): string | null;
     revealSource(sourcePath: string): Promise<void>;
     createPlaybackProxy(file: File): Promise<MediaProxyResult>;

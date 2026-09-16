@@ -691,3 +691,13 @@ describe('installKernel', () => {
     expect(PM.Layout.apply).toHaveBeenCalledTimes(2);
   });
 });
+
+
+it('reads durable text assets larger than 64 MB', async () => {
+  const PM = fakePM();
+  PM.proj.assets.large = { id: 'large', name: 'large.obj' };
+  const text = 'x'.repeat(64 * 1024 * 1024) + 'end';
+  PM.MediaStore = { get: vi.fn(async () => new Blob([text])) };
+  installed = installKernel(PM);
+  expect(await installed.api('models').assets.readText('large')).toBe(text);
+});

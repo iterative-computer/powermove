@@ -253,7 +253,7 @@ export function install(PM: PMRegistry): void {
               ok: true,
               name: file.name,
               mime: file.mime,
-              dataBase64: bytesToBase64(file.data)
+              data: file.data
             });
           }).catch((error: any) => {
             PM.AgentArtifacts.resolve(id, {

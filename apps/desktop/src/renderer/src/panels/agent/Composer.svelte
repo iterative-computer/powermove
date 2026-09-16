@@ -5,15 +5,52 @@
   import { ATTACHMENT_HINT } from './attachments';
   import { agentState, composerMode } from './agent-state.svelte';
   import AgentOptions from './AgentOptions.svelte';
+  import SlashMenu from './SlashMenu.svelte';
+  import { slashCommands, type SlashCommand } from './slash-commands';
 
   let { PM, panelId }: { PM: Record<string, any>; panelId: string } = $props();
-  let textarea: HTMLTextAreaElement;
+  let textarea = $state<HTMLTextAreaElement>(null!);
   let fileInput: HTMLInputElement;
   let draft = $state('');
   let dragDepth = $state(0);
   let lastFocusVersion = 0;
+  let focused = $state(false);
+  let dismissedDraft = $state<string | null>(null);
+  let selectedCommand = $state(0);
   const mode = $derived(composerMode(agentState.legacyPhase));
   const textareaId = $derived(`agent-composer-${panelId}`);
+  const menuId = $derived(`${textareaId}-commands`);
+  const commands = $derived(slashCommands(draft, agentState));
+  const showCommands = $derived(focused && !mode.disabled && dismissedDraft !== draft && commands.length > 0);
+  const commandIndex = $derived(Math.min(selectedCommand, Math.max(0, commands.length - 1)));
+
+  function setDraft(value: string): void {
+    draft = value;
+    textarea.value = value;
+    PM.AgentUI?.setDraft(value);
+    selectedCommand = 0;
+    dismissedDraft = null;
+    autosize();
+  }
+
+  function chooseCommand(command: SlashCommand): void {
+    if (!command.value && ['model', 'provider', 'effort'].includes(command.action)) {
+      setDraft(`/${command.action} `);
+      textarea.focus();
+      return;
+    }
+    setDraft('');
+    switch (command.action) {
+      case 'new': PM.AgentUI?.newThread(); break;
+      case 'model': PM.AgentUI?.setModel(command.value, agentState.reasoningEffort); break;
+      case 'provider': PM.AgentUI?.setProvider(command.value); break;
+      case 'effort': PM.AgentUI?.setModel(agentState.model, command.value); break;
+      case 'attach': fileInput.click(); break;
+      case 'stop': PM.AgentUI?.stop(); break;
+      case 'settings': PM.SettingsUI?.open('accounts'); return;
+    }
+    textarea.focus();
+  }
 
   /* Track only the draft and the phase (placeholder copy) — not the snapshot
      revision — so streaming ticks never re-measure the textarea. */
@@ -58,20 +95,34 @@
   }
 
   function input(): void {
-    draft = textarea.value;
-    PM.AgentUI?.setDraft(draft);
-    autosize();
+    setDraft(textarea.value);
   }
 
   function submit(): void {
+    if (showCommands && commands[commandIndex]) { chooseCommand(commands[commandIndex]!); return; }
     if (!textarea.value.trim() && !agentState.attachments.length) return;
     PM.AgentUI?.submit(textarea.value);
+    textarea.focus();
   }
 
   function keydown(event: KeyboardEvent): void {
     // The field-aware keymap dispatches Electron's native clipboard paste.
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'v') return;
     event.stopPropagation();
+    // Enter confirms IME composition; it must never submit an unfinished word.
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Enter' && event.repeat) { event.preventDefault(); return; }
+    if (showCommands) {
+      if (event.key === 'Escape') { event.preventDefault(); dismissedDraft = draft; return; }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        selectedCommand = (commandIndex + (event.key === 'ArrowDown' ? 1 : -1) + commands.length) % commands.length;
+        return;
+      }
+      if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
+        event.preventDefault(); chooseCommand(commands[commandIndex]!); return;
+      }
+    }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'a') {
       /* Keep select-all local to the draft. Powermove also owns this chord for
          layer selection, and Electron's native menu routing can otherwise win
@@ -126,6 +177,9 @@
     </div>
   {/if}
   <div class="agent-input-row">
+    {#if showCommands && textarea}
+      <SlashMenu id={menuId} anchor={textarea} options={commands} selected={commandIndex} choose={chooseCommand} dismiss={() => { dismissedDraft = draft; }} />
+    {/if}
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
     <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
@@ -134,6 +188,10 @@
       rows="1"
       placeholder={mode.placeholder}
       aria-label="Message Powermove agent"
+      aria-controls={showCommands ? menuId : undefined}
+      aria-activedescendant={showCommands ? `${menuId}-${commandIndex}` : undefined}
+      aria-autocomplete="list"
+      title="Enter to send · Shift+Enter for a new line · / for shortcuts"
       data-autosize="true"
       disabled={mode.disabled}
       bind:this={textarea}
@@ -141,6 +199,8 @@
       oninput={input}
       onpaste={paste}
       onkeydown={keydown}
+      onfocus={() => { focused = true; }}
+      onblur={() => { focused = false; }}
     ></textarea>
     {#if mode.working}
       <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>
@@ -152,7 +212,8 @@
         type="button"
         aria-label={mode.sendLabel}
         title={mode.sendLabel}
-        disabled={mode.disabled}
+        disabled={mode.disabled || (!draft.trim() && !agentState.attachments.length)}
+        onpointerdown={event => event.preventDefault()}
         onclick={submit}
       >
         {#if mode.disabled}<i class="agent-spin" aria-hidden="true"></i>{:else}<Icon {PM} name="return" />{/if}

@@ -1,4 +1,4 @@
-const MAGIC = new Uint8Array([0x50, 0x4d, 0x56, 0x33, 0x0a]); // PMV3\n
+export const MAGIC = new Uint8Array([0x50, 0x4d, 0x56, 0x33, 0x0a]); // PMV3\n
 export interface ProjectContainerMedia {
   id: string;
   type: string;
@@ -84,6 +84,45 @@ export async function encodeProjectContainerAsync(documentJSON: string | Uint8Ar
   return result;
 }
 
+/** Blob parts retain media without reading every source into renderer memory. */
+export function encodeProjectContainerBlob(document: Uint8Array[], media: Array<{ id: string; type: string; data: Blob }>): Blob {
+  let offset = 0;
+  const descriptors = media.map(item => {
+    const entry = { id: item.id, type: item.type, offset, length: item.data.size };
+    offset += item.data.size;
+    if (!Number.isSafeInteger(offset)) throw new Error('The media offsets exceed the project format’s numeric range.');
+    return entry;
+  });
+  const header = new Blob(['{"document":', ...document as Uint8Array<ArrayBuffer>[], ',"media":', JSON.stringify(descriptors), '}']);
+  if (header.size > 0xffffffff) throw new Error('The document metadata exceeds the PMV3 header format.');
+  const prefix = new Uint8Array(MAGIC.length + 4);
+  prefix.set(MAGIC);
+  new DataView(prefix.buffer).setUint32(MAGIC.length, header.size, true);
+  return new Blob([prefix, header, ...media.map(item => item.data)], { type: 'application/x-powermove' });
+}
+
+export interface ProjectMediaRange { id: string; type: string; offset: number; length: number }
+
+/** Validate every range before any imported media can be persisted. */
+export function projectContainerIndex(header: any, bodyStart: number, fileSize: number): { document: any; media: ProjectMediaRange[] } {
+  if (!header || typeof header !== 'object' || !header.document || !Array.isArray(header.media)
+    || !Number.isSafeInteger(bodyStart) || !Number.isSafeInteger(fileSize) || bodyStart < 0 || bodyStart > fileSize) {
+    throw new Error('The project container header is invalid.');
+  }
+  const ids = new Set<string>();
+  const media = header.media.map((item: any) => {
+    if (!item || typeof item.id !== 'string' || ids.has(item.id) || typeof item.type !== 'string'
+      || !Number.isSafeInteger(item.offset) || item.offset < 0
+      || !Number.isSafeInteger(item.length) || item.length < 0
+      || item.offset > fileSize - bodyStart || item.length > fileSize - bodyStart - item.offset) {
+      throw new Error('The project container media index is invalid.');
+    }
+    ids.add(item.id);
+    return { id: item.id, type: item.type, offset: bodyStart + item.offset, length: item.length };
+  });
+  return { document: header.document, media };
+}
+
 export function decodeProjectContainer(input: string | Uint8Array | ArrayBuffer): DecodedProjectContainer {
   if (typeof input === 'string') return { document: JSON.parse(input), media: [], binary: false };
   const data = bytes(input);
@@ -95,17 +134,7 @@ export function decodeProjectContainer(input: string | Uint8Array | ArrayBuffer)
   const bodyStart = MAGIC.length + 4 + headerLength;
   if (headerLength < 2 || bodyStart > data.byteLength) throw new Error('The project container header is invalid.');
   const header = JSON.parse(new TextDecoder().decode(data.subarray(MAGIC.length + 4, bodyStart)));
-  if (!header || typeof header !== 'object' || !header.document || !Array.isArray(header.media)) {
-    throw new Error('The project container header is invalid.');
-  }
-  const media: ProjectContainerMedia[] = header.media.map((item: any) => {
-    if (!item || typeof item.id !== 'string' || typeof item.type !== 'string'
-      || !Number.isSafeInteger(item.offset) || item.offset < 0
-      || !Number.isSafeInteger(item.length) || item.length < 0
-      || bodyStart + item.offset + item.length > data.byteLength) {
-      throw new Error('The project container media index is invalid.');
-    }
-    return { id: item.id, type: item.type, data: data.slice(bodyStart + item.offset, bodyStart + item.offset + item.length) };
-  });
-  return { document: header.document, media, binary: true };
+  const index = projectContainerIndex(header, bodyStart, data.byteLength);
+  const media = index.media.map(item => ({ id: item.id, type: item.type, data: data.subarray(item.offset, item.offset + item.length) }));
+  return { document: index.document, media, binary: true };
 }
