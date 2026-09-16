@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -54,10 +54,17 @@ async function main() {
     return;
   }
 
+  // electron-builder names the update manifest after publish.channel and
+  // defaults to latest-mac.yml. electron-updater asks for beta-mac.yml on
+  // prerelease versions (falling back to latest), so keep the two in step.
+  const { version } = JSON.parse(await readFile(path.join(repository, 'package.json'), 'utf8'));
+  const channel = /^\d+\.\d+\.\d+-([a-z]+)\./i.exec(version)?.[1]?.toLowerCase() ?? 'latest';
+
   await run('bun', ['run', 'build']);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
     '--mac', '--arm64', '--publish', 'never',
     '--config', 'electron-builder.yml',
+    `--config.publish.channel=${channel}`,
     '--config.mac.identity=Developer ID Application',
     '--config.mac.hardenedRuntime=true',
     '--config.mac.notarize=true',
