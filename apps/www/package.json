@@ -1,5 +1,6 @@
 {
   "name": "@powermove/www",
+  "license": "GPL-3.0-or-later",
   "version": "0.0.0",
   "private": true,
   "description": "Powermove marketing website (SvelteKit, prerendered static output).",
