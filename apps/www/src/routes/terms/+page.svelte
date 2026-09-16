@@ -20,7 +20,7 @@
   <section class="tldr">
     <h2>TL;DR</h2>
     <ul>
-      <li>Powermove is free and open source. The source license governs the code; these terms govern the app and website.</li>
+      <li>Powermove is free and open source under GPLv3. That license governs the code; these terms govern the app and website.</li>
       <li>It's provided as is. The agent can edit your files, so keep backups. We're not liable if something goes wrong.</li>
       <li>You bring your own Anthropic, OpenAI, or other provider account, and you follow their terms.</li>
       <li>What you make with Powermove is yours. Don't use it to break the law or harm others.</li>
@@ -32,7 +32,7 @@
 
   <h2>License</h2>
   <p>
-    The Powermove source code is available <a href={GITHUB} target="_blank" rel="noopener">on GitHub</a> under the license included in the repository. That license controls what you may do with the code. These terms cover your use of the built app and this website, and add nothing that restricts rights the license grants you.
+    The Powermove source code is available <a href={GITHUB} target="_blank" rel="noopener">on GitHub</a> under the <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GNU General Public License v3.0</a>. That license controls what you may do with the code, including running, studying, modifying, and redistributing it. These terms cover your use of the built app and this website, and add nothing that restricts rights the GPL grants you. Where these terms and the GPL conflict about the code, the GPL wins.
   </p>
 
   <h2>Your content</h2>
