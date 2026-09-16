@@ -86,26 +86,9 @@ mac:
   category: public.app-category.graphics-design
   entitlementsInherit: resources/entitlements.mac.plist
   icon: resources/icon.icns
+  # The DMG comes from scripts/create-dmg.mjs; electron-builder only builds
+  # the ZIP that electron-updater downloads.
   target:
-    - target: dmg
-      arch:
-        - arm64
     - target: zip
       arch:
         - arm64
-dmg:
-  title: ${productName}
-  background: resources/dmg-background.png
-  window:
-    width: 660
-    height: 400
-  iconSize: 128
-  iconTextSize: 13
-  contents:
-    - x: 165
-      y: 190
-      type: file
-    - x: 495
-      y: 190
-      type: link
-      path: /Applications
