@@ -29,6 +29,27 @@ describe('agent thread archive', () => {
     expect(restored.select('missing')).toBe(false);
     expect(restored.activeId).toBe(first);
   });
+  it('reuses a blank thread instead of stacking empties on "new thread"', () => {
+    const { make } = setup(); const threads = make(); threads.load('project-a');
+    const first = threads.activeId;
+    expect(AgentThreads.isBlank(threads.active)).toBe(true);
+    // "+" on a thread that has nothing in it stays put.
+    expect(threads.create().id).toBe(first);
+    expect(threads.threads).toHaveLength(1);
+    threads.active.conversation.push({ role: 'user', text: 'Now it exists' });
+    const second = threads.create().id;
+    expect(second).not.toBe(first);
+    expect(threads.threads).toHaveLength(2);
+    // Switching back to the old thread and pressing "+" returns to the blank one rather than making a third.
+    threads.select(first);
+    expect(threads.create().id).toBe(second);
+    expect(threads.threads).toHaveLength(2);
+    // A draft or an attachment makes a thread real enough to keep.
+    threads.active.composerDraft = 'half-typed';
+    expect(AgentThreads.isBlank(threads.active)).toBe(false);
+    expect(threads.create().id).not.toBe(second);
+    expect(threads.threads).toHaveLength(3);
+  });
   it('isolates projects and saves a snapshot, not mutable references', () => {
     const { make } = setup(); const threads = make(); threads.load('a');
     threads.active.composerDraft = 'Saved'; threads.save();
