@@ -393,6 +393,14 @@ export function install(PM: PMRegistry): void {
     trim: (target: number) => {
       maxBytes = Math.max(0, target);
       while (totalBytes > target && stack.length > 1) {
+        // Redo patches depend on every preceding step. Discard the distant
+        // redo tail before removing applied entries from the undo head.
+        if (stack.length > idx + 1) {
+          const removed = stack.pop()!;
+          totalBytes -= removed.bytes;
+          removed.cleanup?.();
+          continue;
+        }
         const removed = stack.shift()!;
         totalBytes -= removed.bytes;
         removed.cleanup?.();
