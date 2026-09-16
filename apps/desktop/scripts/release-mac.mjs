@@ -70,6 +70,8 @@ async function main() {
     '--config.mac.notarize=true',
   ]);
 
+  await run('node', [path.join(repository, 'scripts/create-dmg.mjs')]);
+
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
