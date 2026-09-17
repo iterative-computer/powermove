@@ -61,7 +61,8 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .sg-page{display:flex;flex-direction:column;gap:32px}
 .sg-page[hidden]{display:none}
 .sg-column [data-settings-search-hidden],.sg-column [hidden]{display:none!important}
-.sg-column>.sg-page:not([data-settings-search-hidden])~.sg-page:not([data-settings-search-hidden]){margin-top:64px;padding-top:48px;border-top:1px solid var(--line)}
+/* Pages stack with breathing room alone; no rule between them. */
+.sg-column>.sg-page:not([data-settings-search-hidden])~.sg-page:not([data-settings-search-hidden]){margin-top:136px}
 .sg-search-results{width:608px;max-width:100%;margin:0 auto 28px;font-size:var(--fs-md);line-height:20px;color:var(--tx-3);overflow-wrap:anywhere}
 ::highlight(settings-search){background:var(--tx);color:var(--bg-content)}
 .sg-page:focus-visible{outline:0}
