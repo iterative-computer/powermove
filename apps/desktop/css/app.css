@@ -933,20 +933,19 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 /* Contrast comes from the fills, not from rings: the tray steps away from the
    panel and the inset steps back to the panel colour, so it reads as a hole
    cut into the tray in both themes. The inset shows an edge only on focus. */
-.agent-composer{--composer-pad:6px;--composer-tray:var(--ink-1);--composer-inset:var(--bg-panel);flex:none;display:flex;flex-direction:column;gap:0;padding:var(--composer-pad);border-radius:var(--r-lg);background:var(--composer-tray);border:0;box-shadow:none}
-:root[data-theme="dark"] .agent-composer{--composer-tray:var(--ink-2)}
+.agent-composer{--composer-pad:4px;--composer-tray:var(--ink-1);--composer-inset:var(--bg-panel);flex:none;display:flex;flex-direction:column;gap:0;padding:var(--composer-pad);border-radius:var(--r-lg);background:var(--composer-tray);border:0;box-shadow:none}
 .agent-composer-field{display:flex;flex-direction:column;min-width:0;border-radius:calc(var(--r-lg) - var(--composer-pad));background:var(--composer-inset);box-shadow:inset 0 0 0 var(--hairline) transparent;transition:box-shadow var(--dur-2)}
 .agent-composer-field:focus-within{box-shadow:inset 0 0 0 var(--hairline) color-mix(in srgb,var(--tx) 16%,transparent)}
 .agent-composer.is-dropping .agent-composer-field{box-shadow:inset 0 0 0 1px var(--accent)}
 /* One left edge for everything: the draft text, the attach glyph and the
-   provider label all start 18px in from the tray. */
-.agent-input-row{display:flex;align-items:flex-start;padding:11px 12px 0}
-.agent-composer textarea{display:block;flex:1;min-width:0;min-height:36px;max-height:140px;resize:none;padding:0;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
-.agent-composer-actions{display:flex;align-items:center;gap:2px;min-width:0;padding:6px 6px 6px}
+   provider label all start 14px in from the tray. */
+.agent-input-row{display:flex;align-items:flex-start;padding:8px 10px 0}
+.agent-composer textarea{display:block;flex:1;min-width:0;min-height:32px;max-height:140px;resize:none;padding:0;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
+.agent-composer-actions{display:flex;align-items:center;gap:2px;min-width:0;padding:2px 4px 4px}
 .agent-composer-actions .sp{flex:1}
-.agent-composer-foot{display:flex;align-items:center;min-width:0;padding:5px 8px 1px 8px}
+.agent-composer-foot{display:flex;align-items:center;min-width:0;padding:3px 6px 0 6px}
 .agent-composer-foot .agent-option-bar{flex:1 1 auto;min-width:0;padding:0}
-.agent-composer-foot .agent-modelbar{color:var(--tx-3)}
+.agent-composer-foot .agent-modelbar{color:var(--tx-2)}
 .agent-composer-foot .agent-modelbar .pm-select{padding-right:16px}
 /* Chevrons are noise at rest on three adjacent triggers; they appear on hover,
    focus and while open. */
