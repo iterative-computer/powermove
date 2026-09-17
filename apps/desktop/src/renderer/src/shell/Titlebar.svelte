@@ -278,7 +278,8 @@
   });
 </script>
 
-<ToolbarMount {PM} />
+<!-- Window first, document second: the project tabs lead the row, right after
+     the traffic lights, and the tool strip is centred on the window. -->
 <!-- The strip is centred by a flex rail instead of a transform: Electron's
      drag-region rectangles come from layout boxes, and a transformed,
      absolutely positioned no-drag box is exactly the case that goes stale. -->
@@ -286,8 +287,11 @@
      titlebar itself is not a drag region, so no native drag rectangle can
      ever cover a tab, whatever Electron does with its subtractions. -->
 <div class="titlebar-drag titlebar-drag-traffic" aria-hidden="true"></div>
-<div id="tabs-center" aria-hidden="false">
+<div id="tools-center" aria-hidden="false">
 <div class="titlebar-drag" aria-hidden="true"></div>
+<ToolbarMount {PM} />
+<div class="titlebar-drag" aria-hidden="true"></div>
+</div>
 <div id="tabs" data-svelte-shell="tabs">
   <!-- Phase 5.4 follow-up: connect these tabs to a tabpanel with aria-controls. -->
   <div role="tablist" aria-label="Open projects" style="display: contents">
@@ -383,8 +387,6 @@
       PM.newProject?.();
     }}
   ><Icon {PM} name="plus" /></button>
-</div>
-<div class="titlebar-drag" aria-hidden="true"></div>
 </div>
 
 <div class="tb-right" id="tb-right">

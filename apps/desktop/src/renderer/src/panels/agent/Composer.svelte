@@ -171,17 +171,15 @@
   ondragleave={() => { dragDepth = Math.max(0, dragDepth - 1); }}
   ondrop={drop}
 >
-  {#if agentState.attachments.length}
-    <div class="agent-attachment-rail">
-      <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
-    </div>
-  {/if}
+  <!-- Two surfaces: an inset field that holds the draft, its actions and any
+       attachments, sitting on an outer card whose foot row carries the run
+       options. Only the inset reacts to focus. -->
+  <div class="agent-composer-field">
   <div class="agent-input-row">
     {#if showCommands && textarea}
       <SlashMenu id={menuId} anchor={textarea} options={commands} selected={commandIndex} choose={chooseCommand} dismiss={() => { dismissedDraft = draft; }} />
     {/if}
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
-    <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
     <textarea
       id={textareaId}
@@ -202,6 +200,10 @@
       onfocus={() => { focused = true; }}
       onblur={() => { focused = false; }}
     ></textarea>
+  </div>
+  <div class="agent-composer-actions">
+    <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <span class="sp"></span>
     {#if mode.working}
       <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>
     {/if}
@@ -220,5 +222,13 @@
       </button>
     {/if}
   </div>
-  <AgentOptions {PM} />
+  {#if agentState.attachments.length}
+    <div class="agent-attachment-rail">
+      <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
+    </div>
+  {/if}
+  </div>
+  <div class="agent-composer-foot">
+    <AgentOptions {PM} />
+  </div>
 </div>

@@ -118,12 +118,17 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   padding:0 var(--pad) 0 var(--traffic-inset);
   position:relative;z-index:40;-webkit-app-region:no-drag;
 }
-/* The strip sits between two flexible drag spacers inside a rail, so it is
-   centred without a transform and never overlapped by a drag rectangle. */
-#tabs-center{position:absolute;top:0;bottom:0;left:var(--traffic-inset);right:var(--pad);display:flex;align-items:center;justify-content:center;pointer-events:none}
+/* The tool strip sits between two flexible drag spacers inside a rail that
+   spans the window, so it is centred on the window without a transform and
+   never overlapped by a drag rectangle. Tabs and the right-hand actions are
+   in flow and paint above the rail. */
+#tools-center{position:absolute;top:0;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+#tools-center #toolbar-strip{pointer-events:auto}
+/* Tabs lead the row. Their width is capped so they stop short of the centred
+   tool strip at any window width the app supports. */
 #tabs{
   position:relative;pointer-events:auto;
-  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(52%,calc(100% - 400px));min-width:0;
+  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:calc(50% - var(--traffic-inset) - 150px);min-width:0;
   padding:2px;border:0;border-radius:var(--r-md);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
@@ -201,7 +206,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .iconbtn.dis{opacity:var(--disabled);pointer-events:none}
 .iconbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 
-/* ── tool toolbar, inline with the native titlebar ─────── */
+/* ── tool toolbar, centred in the native titlebar ──────── */
 #toolbar-strip{
   flex:0 0 auto;min-width:0;height:30px;display:flex;align-items:center;
   margin:0;padding:2px;border:0;border-radius:var(--r-md);
@@ -657,7 +662,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .drop .di.disabled:hover{background:transparent}
 .drop .sep{height:1px;background:var(--line);margin:4px 6px}
 .drop .hd{font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--tx-4);padding:6px 8px 3px}
-.font-select{min-width:0;max-width:155px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Same width as every other field in the column; long family names ellipsize. */
+.font-select{min-width:0;max-width:100%;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .font-drop{display:flex;flex-direction:column;overflow:hidden;padding:6px}
 .font-search{flex:none;width:100%;height:32px;padding:0 9px;border-radius:var(--r-sm);background:var(--bg-field);box-shadow:var(--ctl-edge-inset);font-family:var(--f-ui);font-size:var(--fs-sm);color:var(--tx)}
 .font-search:focus{outline:0;box-shadow:var(--ctl-edge-inset),0 0 0 1px color-mix(in srgb,var(--accent) 60%,transparent)}
@@ -920,24 +926,43 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 .agent-btn.pri{background:var(--tx);color:var(--bg-panel)}
 .agent-btn.pri:hover{background:var(--tx);opacity:.9}
 /* composer card */
-/* The draft and run options share one native inset surface. */
-.agent-composer{flex:none;display:flex;flex-direction:column;gap:7px;padding:8px;border-radius:var(--r-md);background:var(--bg-field);border:0;box-shadow:none;transition:background var(--dur-2)}
-.agent-composer:focus-within{background:color-mix(in srgb,var(--bg-field) 94%,var(--tx) 6%)}
-.agent-composer.is-dropping{background:color-mix(in srgb,var(--accent) 10%,var(--bg-field))}
-.agent-input-row{display:flex;align-items:center;gap:6px}
-.agent-composer textarea{display:block;flex:1;min-width:0;min-height:28px;max-height:96px;resize:none;align-self:center;padding:4px 2px;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
+/* Two concentric surfaces (athas composer). The outer card is a quiet raised
+   tray; the inset field inside it holds the draft, its actions and any
+   attachments. Only the inset reacts to focus, and only through its hairline
+   edge, so typing never tints a fill. The run options sit on the tray below. */
+/* Contrast comes from the fills, not from rings: the tray steps away from the
+   panel and the inset steps back to the panel colour, so it reads as a hole
+   cut into the tray in both themes. The inset shows an edge only on focus. */
+.agent-composer{--composer-pad:4px;--composer-tray:color-mix(in srgb,var(--ink-1) 62%,var(--bg-panel));--composer-inset:var(--bg-panel);flex:none;display:flex;flex-direction:column;gap:0;padding:var(--composer-pad);border-radius:var(--r-lg);background:var(--composer-tray);border:0;box-shadow:none}
+.agent-composer-field{display:flex;flex-direction:column;min-width:0;border-radius:calc(var(--r-lg) - var(--composer-pad));background:var(--composer-inset);box-shadow:inset 0 0 0 var(--hairline) transparent;transition:box-shadow var(--dur-2)}
+.agent-composer-field:focus-within{box-shadow:inset 0 0 0 var(--hairline) color-mix(in srgb,var(--tx) 16%,transparent)}
+.agent-composer.is-dropping .agent-composer-field{box-shadow:inset 0 0 0 1px var(--accent)}
+/* One left edge for everything: the draft text, the attach glyph and the
+   provider label all start 14px in from the tray. */
+.agent-input-row{display:flex;align-items:flex-start;padding:8px 10px 0}
+.agent-composer textarea{display:block;flex:1;min-width:0;min-height:32px;max-height:140px;resize:none;padding:0;border:0;background:transparent;color:var(--tx);font:var(--fs-md)/1.5 var(--f-ui);outline:0;scrollbar-width:none}
+.agent-composer-actions{display:flex;align-items:center;gap:2px;min-width:0;padding:2px 4px 4px}
+.agent-composer-actions .sp{flex:1}
+.agent-composer-foot{display:flex;align-items:center;min-width:0;padding:3px 6px 0 6px}
+.agent-composer-foot .agent-option-bar{flex:1 1 auto;min-width:0;padding:0}
+.agent-composer-foot .agent-modelbar{color:var(--tx-2)}
+.agent-composer-foot .agent-modelbar .pm-select{padding-right:16px}
+/* Chevrons are noise at rest on three adjacent triggers; they appear on hover,
+   focus and while open. */
+.agent-composer-foot .agent-modelbar .pm-select-chevron{opacity:0;transition:opacity var(--dur-1),color var(--dur-1)}
+.agent-composer-foot .agent-modelbar .pm-select:hover .pm-select-chevron,.agent-composer-foot .agent-modelbar .pm-select:focus-visible .pm-select-chevron,.agent-composer-foot .agent-modelbar .pm-select[aria-expanded=true] .pm-select-chevron{opacity:1}
 .agent-composer textarea::-webkit-scrollbar{display:none}
 .agent-composer textarea::placeholder{color:var(--tx-4)}
-.agent-round{width:28px;height:28px;flex:none;display:grid;place-items:center;border-radius:var(--r-xs);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
+.agent-round{width:26px;height:26px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
 .agent-round:active{transform:scale(.94)}
 .agent-attach{color:var(--tx-4);background:transparent}
 .agent-attach:hover{background:var(--ink-1);color:var(--tx)}
 .agent-attach svg{width:14px;height:14px}
 /* Grey until sendable, accent when there's something to send (supermove). */
-.agent-composer .agent-send.agent-send{background:var(--ink-2);color:var(--tx-4);border:0;padding:0;box-shadow:none}
+.agent-composer .agent-send.agent-send{background:var(--ink-1);color:var(--tx-4);border:0;padding:0;box-shadow:none}
 .agent-composer .agent-send.agent-send.is-sendable{background:var(--accent);color:var(--on-accent)}
 .agent-send.is-sendable:hover{background:var(--accent-hover)}
-.agent-send:disabled{background:var(--ink-2);color:var(--tx-4)}
+.agent-send:disabled{background:var(--ink-1);color:var(--tx-4)}
 .agent-send svg{width:14px;height:14px}
 .agent-send svg[data-icon="return"]{transform:translate(-.35px,.45px)}
 .agent-send>i.agent-spin{width:11px;height:11px;border:2px solid rgb(255 255 255 / .38);border-top-color:#fff;border-radius:50%;animation:agent-spin .75s linear infinite}
@@ -973,7 +998,7 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 .agent-approval>i{display:none}
 .agent-approval[aria-pressed="true"]{color:var(--accent-tx)}
 /* attachments */
-.agent-attachment-rail{display:flex;flex-wrap:wrap;gap:5px;padding:0 1px}
+.agent-attachment-rail{display:flex;flex-wrap:wrap;gap:5px;padding:0 6px 6px}
 .agent-attachment{min-width:0;max-width:100%;height:32px;display:flex;align-items:center;gap:6px;padding:3px 3px 3px 4px;border-radius:var(--r-md);background:var(--ink-1);color:var(--tx-2);font-size:var(--fs-xs);animation:agent-chip-in var(--dur-2) var(--ease)}
 @keyframes agent-chip-in{from{opacity:0;transform:translateY(3px) scale(.94)}to{opacity:1;transform:none}}
 .agent-attachment-open{min-width:0;display:flex;align-items:center;gap:6px;color:inherit;text-align:left}

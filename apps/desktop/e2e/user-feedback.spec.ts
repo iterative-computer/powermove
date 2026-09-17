@@ -87,9 +87,10 @@ test('centered tabs and explicit effect actions keep legacy hidden layers access
     const toolbar = await page.locator('#toolbar-strip').boundingBox();
     const tabs = await page.locator('#tabs').boundingBox();
     const actions = await page.locator('#tb-right').boundingBox();
-    expect(Math.abs(tabs!.x + tabs!.width / 2 - width / 2)).toBeLessThan(1);
-    expect(toolbar!.x + toolbar!.width).toBeLessThan(tabs!.x);
-    expect(tabs!.x + tabs!.width).toBeLessThan(actions!.x);
+    // Tabs lead the row, tools are centred on the window, actions trail.
+    expect(Math.abs(toolbar!.x + toolbar!.width / 2 - width / 2)).toBeLessThan(1);
+    expect(tabs!.x + tabs!.width).toBeLessThan(toolbar!.x);
+    expect(toolbar!.x + toolbar!.width).toBeLessThan(actions!.x);
   }
   await expect(page.locator('.project-strip-divider')).toHaveCount(0);
   const effect = page.locator('.fxb-row[data-id="blur"]');

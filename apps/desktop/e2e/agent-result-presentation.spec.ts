@@ -63,11 +63,12 @@ test('agent results collapse work above the reply and omit file and external act
       const attach = el.querySelector('.agent-attach')!.getBoundingClientRect();
       const send = el.querySelector('.agent-send')!.getBoundingClientRect();
       const input = el.querySelector('textarea')!.getBoundingClientRect();
-      return { border: getComputedStyle(el).borderTopWidth, attach: attach.y + attach.height / 2, send: send.y + send.height / 2, input: input.y + input.height / 2 };
+      return { border: getComputedStyle(el).borderTopWidth, attach: attach.y + attach.height / 2, send: send.y + send.height / 2, inputBottom: input.bottom, attachTop: attach.top };
     });
     expect.soft(composer.border).toBe('0px');
+    // Controls share the foot row; the draft sits alone above them.
     expect.soft(Math.abs(composer.attach - composer.send)).toBeLessThanOrEqual(1);
-    expect.soft(Math.abs(composer.attach - composer.input)).toBeLessThanOrEqual(1);
+    expect.soft(composer.inputBottom).toBeLessThanOrEqual(composer.attachTop + 1);
     const overflow = await page.locator('.agent-shell').evaluate(root => [root, ...root.querySelectorAll('*')].filter(el =>
       el.clientWidth > 0 && !el.classList.contains('panel-sr-only') && getComputedStyle(el).display !== 'inline'
       && getComputedStyle(el).textOverflow !== 'ellipsis' && el.scrollWidth > el.clientWidth + 1).map(el => ({

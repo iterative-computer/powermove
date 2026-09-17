@@ -80,7 +80,7 @@ function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
       { id: 'gpt-5.6-terra', label: '5.6 Terra' }
     ],
     providers: [
-      { id: 'chatgpt', label: 'ChatGPT' },
+      { id: 'chatgpt', label: 'Codex' },
       { id: 'claude', label: 'Claude' }
     ],
     reasoningEfforts: ['low', 'high'],
