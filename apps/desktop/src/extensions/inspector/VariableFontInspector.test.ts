@@ -150,7 +150,11 @@ describe('type settings', () => {
   it('distinguishes static fonts and keeps saved custom axes without invented sliders', async () => {
     vi.spyOn(fontCatalog,'inspectFont').mockResolvedValue({family:'Static',status:'static',axes:[]});
     setup({'fontAxis.XTRA':{v:37,kf:[],expr:null}});
-    await vi.waitFor(()=>{flushSync();expect(target.textContent).toContain('is a static font');});
+    // A static font has nothing to set: no note, no button. The saved axis
+    // value keeps the section visible as a plain row.
+    await vi.waitFor(()=>{flushSync();expect(target.querySelector('[data-font-status="static"]')).not.toBeNull();});
+    expect(target.textContent).not.toContain('static font');
+    expect(target.querySelector('.type-settings-action')).toBeNull();
     expect(target.querySelector('[data-channel="c.fontAxis.XTRA"]')).not.toBeNull();
     expect(target.querySelector('[aria-label="Custom OpenType axis tag"]')).toBeNull();
     expect(target.querySelector('input[type="range"]')).toBeNull();

@@ -105,6 +105,69 @@ describe('NumField', () => {
     vi.useRealTimers();
   });
 
+  it('keeps a negative value when the editor is opened and left, and treats a bare minus as a number', async () => {
+    const { api, Edit, drag } = fakeAPI();
+    let current = -2;
+    Edit.dispatch.mockImplementation((command: any) => { current = command.value; });
+    Edit.apply.mockImplementation((command: any) => { current = command.value; return { ok: true }; });
+    const target = render(NumField, { api, get: () => current, edit: commandEdit('Tracking'), step: 1, label: 'Tracking' });
+    const input = target.querySelector<HTMLInputElement>('input.num')!;
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().up();
+    await tick();
+    expect(input.readOnly).toBe(false);
+    input.dispatchEvent(new FocusEvent('blur'));
+    expect(Edit.apply).not.toHaveBeenCalled();
+    expect(current).toBe(-2);
+
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().up();
+    await tick();
+    input.value = '-7';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({ value: -7 }), expect.anything());
+
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().up();
+    await tick();
+    input.value = '-=3';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({ value: -10 }), expect.anything());
+  });
+
+  it('aborts a scrub cleanly when another edit transaction is already live', () => {
+    const { api, Edit, drag } = fakeAPI();
+    Edit.begin.mockImplementationOnce(() => { throw new Error('A source edit is already active'); });
+    const target = render(NumField, { api, get: () => 10, edit: commandEdit('Size'), label: 'Size' });
+    const input = target.querySelector<HTMLInputElement>('input.num')!;
+    expect(() => input.dispatchEvent(pointer('pointerdown'))).not.toThrow();
+    expect(api.ui.drag).not.toHaveBeenCalled();
+    expect(Edit.cancel).not.toHaveBeenCalled();
+    // The next gesture works normally.
+    input.dispatchEvent(pointer('pointerdown'));
+    expect(api.ui.drag).toHaveBeenCalledTimes(1);
+    drag().up();
+  });
+
+  it('scrubs on both axes: right or up raises, left or down lowers', () => {
+    const { api, Edit, drag } = fakeAPI();
+    let current = 10;
+    Edit.dispatch.mockImplementation((command: any) => { current = command.value; });
+    const target = render(NumField, { api, get: () => current, edit: commandEdit('Size'), step: 1, speed: 1, label: 'Size' });
+    const input = target.querySelector<HTMLInputElement>('input.num')!;
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().move(0, -2, pointer('pointermove'));
+    expect(Edit.dispatch).not.toHaveBeenCalled();
+    drag().move(0, -8, pointer('pointermove'));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: 18 }));
+    drag().move(-4, 6, pointer('pointermove'));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: 0 }));
+    drag().up();
+    expect(Edit.commit).toHaveBeenCalledWith('Size');
+  });
+
   it('scrubs through begin → writes → commit and opens editing after a click/cancel', async () => {
     const { api, Edit, drag } = fakeAPI();
     let current = 10;
@@ -209,7 +272,11 @@ describe('one-shot fields', () => {
   it('ToggleField applies the inverted getter value once', () => {
     const { api, Edit, invalidate } = fakeAPI();
     const target = render(ToggleField, { api, get: () => false, edit: commandEdit('Enabled'), label: 'Enabled' });
-    target.querySelector<HTMLButtonElement>('button.toggle')!.click();
+    const [off, on] = target.querySelectorAll<HTMLButtonElement>('.onoff button');
+    expect(off!.getAttribute('aria-checked')).toBe('true');
+    off!.click();
+    expect(Edit.apply).not.toHaveBeenCalled();
+    on!.click();
     expect(Edit.apply).toHaveBeenCalledWith(expect.objectContaining({ value: true }), { label: 'Enabled', origin: 'inspector' });
     expect(invalidate).toHaveBeenCalledWith();
   });
@@ -247,13 +314,16 @@ describe('one-shot fields', () => {
     const trigger = target.querySelector<HTMLButtonElement>('button.font-select')!;
     trigger.click();
     await tick();
-    expect(target.querySelector('.font-drop')).not.toBeNull();
+    expect(target.querySelector('.font-menu')).not.toBeNull();
     trigger.click();
     await tick();
-    expect(target.querySelector('.font-drop')).toBeNull();
+    // The sheet stays mounted while its close animation plays.
+    expect(target.querySelector<HTMLElement>('.font-menu')?.dataset.state ?? 'closed').toBe('closed');
+    await new Promise((resolve) => setTimeout(resolve, 230));
+    expect(target.querySelector('.font-menu')).toBeNull();
     trigger.click();
     await tick();
-    expect(target.querySelector('.font-drop')).not.toBeNull();
+    expect(target.querySelector('.font-menu')).not.toBeNull();
   });
 
   it('FontField uses the font list, invalidates all views, and exposes a dialog/listbox', async () => {
@@ -263,7 +333,7 @@ describe('one-shot fields', () => {
     await tick();
     expect(closeMenus).toHaveBeenCalledTimes(1);
     expect(target.querySelector('[role="dialog"] [role="listbox"]')).not.toBeNull();
-    target.querySelectorAll<HTMLButtonElement>('.font-item')[1]!.click();
+    target.querySelectorAll<HTMLElement>('.font-menu-row')[1]!.click();
     expect(Edit.apply).toHaveBeenCalledWith(expect.objectContaining({ value: 'Avenir Next' }), { label: 'Font', origin: 'inspector' });
     expect(invalidate).toHaveBeenCalledWith();
     expect(fonts.ensure).toHaveBeenCalledWith('Avenir Next', 400);

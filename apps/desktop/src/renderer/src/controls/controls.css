@@ -40,10 +40,6 @@ select.sel {
   border: 0;
 }
 
-.pm-control-font-drop {
-  position: fixed;
-}
-
 /* ── Colour picker ─────────────────────────────────────────
    A popover with the dropdown menu's surface and motion (pm-menu-in/out from
    app.css), holding dialkit-style stacked rows: plane, hue, value, swatches. */
@@ -311,3 +307,55 @@ select.sel {
   }
   .color-picker[data-state] { animation: none; }
 }
+
+/* ── On/off ─────────────────────────────────────────────────
+   Two segments, Off and On, with one pill gliding between them (after
+   dialkit's Toggle). Same well material as the value fields; the pill is
+   the raised panel colour like a pressed alignment segment. */
+.onoff {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 28px;
+  padding: 2px;
+  gap: 0;
+  border-radius: var(--r-sm);
+  background: rgb(var(--ink-rgb) / .06);
+  flex: 1 1 0;
+  min-width: 0;
+}
+.onoff-pill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  border-radius: calc(var(--r-sm) - 2px);
+  background: var(--bg-panel);
+  transform: translateX(0);
+  transition: transform .2s cubic-bezier(.25, 1, .5, 1);
+  pointer-events: none;
+}
+.onoff.on .onoff-pill { transform: translateX(100%); }
+.onoff > button {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  background: transparent;
+  color: var(--tx-3);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: default;
+  transition: color var(--dur-1);
+}
+.onoff > button:hover { color: var(--tx-2); }
+.onoff > button[aria-checked="true"] { color: var(--tx); }
+.onoff > button:active { transform: scale(.94); transition: none; }
+.onoff > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.onoff.mixed > button { color: var(--tx-3); }
+@media (prefers-reduced-motion: reduce) { .onoff-pill { transition: none; } }

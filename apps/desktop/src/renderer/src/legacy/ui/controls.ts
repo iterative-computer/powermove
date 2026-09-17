@@ -1,4 +1,5 @@
 /* Ported from js/ui/controls.js — behavior-preserving. */
+import { cssFontStack } from '../../typography/font-stack';
 import { horizontalScrub } from '../../controls/horizontal-scrub';
 import type { PMRegistry } from '../registry';
 import { consumeMenuTriggerPress, markMenuDismissal } from '../../overlays/dismissal';
@@ -416,13 +417,21 @@ function openFillPicker(anchor: any, initial: any, apply: any, label: any) {
 }
 
 PM.toggleField = (get: any, set: any, opt: any = {}) => {
-  const t = h('div.toggle' + (get() ? '.on' : ''), h('i'));
-  t.sync = () => t.classList.toggle('on', !!get());
-  t.addEventListener('pointerdown', (e: any) => {
-    e.stopPropagation();
-    once(set, !get(), opt, opt.label || 'Toggle');
-    t.sync(); PM.invalidate();
-  });
+  // Off | On segments with a gliding pill; shares .onoff styles with ToggleField.svelte.
+  const off = h('button.onoff-off', { type: 'button', role: 'radio' }, 'Off');
+  const on = h('button.onoff-on', { type: 'button', role: 'radio' }, 'On');
+  const t = h('div.onoff' + (get() ? '.on' : ''), h('span.onoff-pill', { 'aria-hidden': 'true' }), off, on);
+  t.setAttribute('role', 'radiogroup');
+  t.sync = () => {
+    const value = !!get();
+    t.classList.toggle('on', value);
+    off.setAttribute('aria-checked', String(!value)); on.setAttribute('aria-checked', String(value));
+  };
+  t.sync();
+  t.addEventListener('pointerdown', (e: any) => e.stopPropagation());
+  const choose = (next: boolean) => { if (next === !!get()) return; once(set, next, opt, opt.label || 'Toggle'); t.sync(); PM.invalidate(); };
+  off.addEventListener('click', () => choose(false));
+  on.addEventListener('click', () => choose(true));
   return t;
 };
 
@@ -445,7 +454,7 @@ PM.selectField = (get: any, set: any, options: any, opt: any = {}) => {
 };
 
 PM.fontField = (get: any, set: any, opt: any = {}) => {
-  const familyStyle = (value: any) => `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const familyStyle = (value: any) => cssFontStack(String(value || ''));
   const b = h('button.sel.font-select', String(get()));
   b.sync = () => {
     b.textContent = String(get());

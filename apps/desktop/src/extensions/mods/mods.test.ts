@@ -170,14 +170,14 @@ describe('ModsPanel', () => {
     render(harness);
     harness.calls.list.mockClear();
 
-    const toggle = rowFor(target, 'Bounce').querySelector<HTMLButtonElement>('.toggle');
-    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
-    toggle?.click();
+    const toggle = rowFor(target, 'Bounce').querySelector<HTMLElement>('.onoff');
+    expect(toggle?.getAttribute('data-enabled')).toBe('true');
+    toggle?.querySelector<HTMLButtonElement>('button[aria-label^="Turn off"]')?.click();
     flushSync();
 
     expect(harness.calls.setEnabled).toHaveBeenCalledWith('mine', false);
     // Optimistic: the switch flips before the promise settles.
-    expect(rowFor(target, 'Bounce').querySelector('.toggle')?.getAttribute('aria-pressed')).toBe('false');
+    expect(rowFor(target, 'Bounce').querySelector('.onoff')?.getAttribute('data-enabled')).toBe('false');
     await settle();
     expect(harness.calls.list).toHaveBeenCalled();
   });

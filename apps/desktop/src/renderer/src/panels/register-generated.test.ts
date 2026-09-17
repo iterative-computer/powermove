@@ -174,7 +174,7 @@ describe('GeneratedPanel', () => {
     await vi.advanceTimersByTimeAsync(140);
     expect(PM.WS.save).toHaveBeenCalledTimes(1);
 
-    const toggle = target.querySelector<HTMLButtonElement>('button.toggle')!;
+    const toggle = target.querySelector<HTMLButtonElement>('.onoff button[role="radio"]:last-child')!;
     toggle.click();
     expect(PM.Edit.apply).toHaveBeenCalledWith(
       { type: 'set_scene_parameter', name: 'enabled', value: true },

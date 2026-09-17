@@ -425,8 +425,8 @@ describe('InspectorPanel', () => {
     expect(headings).toContain('Masks');
     expect(target.querySelector('[aria-label="Add effect"]')).not.toBeNull();
     expect(labelledSelect('Blend mode')).not.toBeNull();
-    expect([...target.querySelectorAll('button[aria-labelledby]')].some((button) =>
-      document.getElementById(button.getAttribute('aria-labelledby')!)?.textContent?.trim() === 'Motion blur'
+    expect([...target.querySelectorAll('button[aria-labelledby], [role="radiogroup"][aria-labelledby]')].some((control) =>
+      document.getElementById(control.getAttribute('aria-labelledby')!)?.textContent?.trim() === 'Motion blur'
     )).toBe(true);
     expect(labelledSelect('Track matte')).not.toBeNull();
 

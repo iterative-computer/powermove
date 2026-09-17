@@ -340,6 +340,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
       get context() { return PM?.GL?.gl ?? null; }
     },
     raster: (...args) => PM?.raster?.(...args) ?? null,
+    textLayout: (layer, time) => PM?.textCaretLayout?.(layer, time ?? PM?.time ?? 0) ?? null,
     renderFrameTo: (...args) => PM?.renderFrameTo?.(...args),
     snapshot: (...args) => PM?.Export?.snapshot?.(...args) ?? ''
   } as RenderAPI;

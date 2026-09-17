@@ -3,6 +3,13 @@
   import TypeAxis from './TypeAxis.svelte';
   import { inspectorContext } from './context';
   import { inspectFont, isAxisTag, type FontInspection } from 'powermove';
+
+  /* Variable font axes, in the inspector's own row grammar. A variable font
+     shows one row per axis under a quiet "Type settings" heading. A static
+     font has nothing to set, so the section stays out of the way: only saved
+     axis values (from a font that used to be variable) keep it visible. A
+     font that cannot be read gets a single status row with a refresh action. */
+
   const { doc } = inspectorContext();
   let { layer, family, onVariableWeight }: { layer: any; family: string; onVariableWeight?: (value: boolean) => void } = $props();
   let info = $state<FontInspection | null>(null), attempt = $state(0);
@@ -18,30 +25,32 @@
     if (!isAxisTag(tag) || !prop?.kf || info?.axes.some(axis => axis.tag === tag)) return [];
     return [{ tag, label: tag, default: Number(prop.v) || 0 }];
   })));
+  const unreadable = $derived(!!info && info.status !== 'variable' && info.status !== 'static');
+  const shown = $derived(!!info && (info.axes.length > 0 || saved.length > 0 || unreadable));
 </script>
-<details class="type-settings" data-font-variations open>
-  <summary><span>Type settings</span><span class="font-status">{!info ? 'Loading…' : info.status === 'variable' ? 'Variable' : info.status === 'static' ? 'Static' : 'Unavailable'}</span></summary>
-  {#if info?.axes.length}
-    {#each info.axes as axis (axis.tag)}<TypeAxis {layer} {axis} />{/each}
-  {:else if info}
-    <p class="font-note">{info.status === 'static' ? `${family} is a static font. Choose a variable font to adjust its axes.` : info.status === 'missing' ? `${family} could not be found among installed fonts.` : 'Font details could not be read. Try refreshing the installed fonts.'}</p>
-    <button type="button" class="chip refresh-fonts" onclick={() => { attempt++; }}>Refresh fonts</button>
-  {/if}
-  {#if saved.length}
-    <details class="saved-axes"><summary>Saved axis values</summary>
-      <p class="font-note">These values remain editable. The selected font has not reported matching axes.</p>
-      {#each saved as axis (axis.tag)}<TypeAxis {layer} {axis} />{/each}
-    </details>
-  {/if}
-</details>
+
+{#if shown}
+  <div class="type-settings" data-font-variations data-font-status={info?.status}>
+    <div class="sec type-settings-head">
+      <span>Type settings</span>
+      {#if unreadable}
+        <button type="button" class="type-settings-action" onclick={() => { attempt++; }}>Refresh fonts</button>
+      {/if}
+    </div>
+    {#each info?.axes ?? [] as axis (axis.tag)}<TypeAxis {layer} {axis} />{/each}
+    {#each saved as axis (axis.tag)}<TypeAxis {layer} {axis} />{/each}
+    {#if unreadable}
+      <div class="row split">
+        <div class="k">Font</div>
+        <div class="vwrap"><span class="type-settings-status">{info?.status === 'missing' ? 'Not installed' : 'Could not be read'}</span></div>
+      </div>
+    {/if}
+  </div>
+{/if}
+
 <style>
-  .type-settings { margin:6px 0; padding:4px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-  summary { display:flex; align-items:center; min-height:28px; padding:0 4px; color:var(--tx-2); font-size:var(--fs-xs); cursor:pointer; list-style:none; }
-  summary::-webkit-details-marker { display:none; }
-  summary::before { content:'›'; width:14px; color:var(--tx-4); }
-  details[open] > summary::before { transform:rotate(90deg); }
-  .font-status { margin-left:auto; color:var(--tx-4); }
-  .font-note { color:var(--tx-4); font-size:var(--fs-xs); line-height:1.5; margin:3px 5px 8px; }
-  .refresh-fonts { margin:0 4px 7px; }
-  .saved-axes { margin-top:4px; }
+  .type-settings-head { display: flex; align-items: center; justify-content: space-between; }
+  .type-settings-action { padding: 0; border: 0; background: transparent; color: var(--tx-3); font: inherit; font-size: var(--fs-xs); font-weight: var(--fw-regular); cursor: default; }
+  .type-settings-action:hover { color: var(--tx); }
+  .type-settings-status { color: var(--tx-3); font-size: var(--fs-xs); }
 </style>
