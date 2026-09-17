@@ -230,15 +230,9 @@ select.sel {
   transition: background var(--dur-1), color var(--dur-1), transform var(--dur-1) var(--ease);
 }
 .cp-eyedropper svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.4;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 16px;
+  height: 16px;
 }
-.cp-eyedropper-bulb { fill: currentColor; stroke: none; }
 .cp-eyedropper:hover { background: var(--ink-2); color: var(--tx); }
 .cp-eyedropper:active { transform: scale(.94); }
 .cp-eyedropper:disabled { opacity: var(--disabled); }
