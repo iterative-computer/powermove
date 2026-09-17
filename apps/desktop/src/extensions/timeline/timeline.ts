@@ -2358,11 +2358,10 @@ function gutterDown(e: any, x: any, y: any) {
 }
 
 function slide(e: any) {
-  const selectedIds = api.groups.expand(api.selection.layers()) || api.selection.layers();
-  if (selectedLayers(api).some((layer: any) => layer.type === 'group') && api.project.get().layers.some((layer: any) => selectedIds.includes(layer.id) && layer.lock)) return;
-  const layers = api.project.get().layers.filter((l: any) => (api.groups.expand(api.selection.layers()) || api.selection.layers()).includes(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
-  const groupIds = api.groups.expand(api.selection.layers()) || api.selection.layers();
-  const groups = api.project.get().layers.filter((L: any) => groupIds.includes(L.id) && L.type === 'group' && !L.lock && !(api.groups.ancestors(L) || []).some((g: any) => g.lock));
+  const selectedIds = new Set(api.groups.expand(api.selection.layers()) || api.selection.layers());
+  if (selectedLayers(api).some((layer: any) => layer.type === 'group') && api.project.get().layers.some((layer: any) => selectedIds.has(layer.id) && layer.lock)) return;
+  const layers = api.project.get().layers.filter((l: any) => selectedIds.has(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
+  const groups = api.project.get().layers.filter((L: any) => selectedIds.has(L.id) && L.type === 'group' && !L.lock && !(api.groups.ancestors(L) || []).some((g: any) => g.lock));
   const groupStart = groups.map((L: any) => ({L, from:L.from}));
   const start = layers.map((L: any) => ({ L, from: L.from }));
   api.edit.begin('Move clip', { origin: 'timeline' });
@@ -2393,7 +2392,8 @@ function snapDelta(start: any, dt: any, side?: 'in' | 'out') {
 }
 
 function trim(e: any, side: any) {
-  const layers = api.project.get().layers.filter((l: any) => (api.groups.expand(api.selection.layers()) || api.selection.layers()).includes(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
+  const selectedIds = new Set(api.groups.expand(api.selection.layers()) || api.selection.layers());
+  const layers = api.project.get().layers.filter((l: any) => selectedIds.has(l.id) && l.type !== 'group' && !l.lock && !(api.groups.ancestors(l) || []).some((g: any) => g.lock));
   const start = layers.map((L: any) => ({ L, from: L.from, dur: L.dur, trim: Number(L.d && L.d.trim) || 0 }));
   api.edit.begin('Trim clip', { origin: 'timeline' });
   let moved = false;
