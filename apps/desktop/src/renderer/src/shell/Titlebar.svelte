@@ -282,7 +282,12 @@
 <!-- The strip is centred by a flex rail instead of a transform: Electron's
      drag-region rectangles come from layout boxes, and a transformed,
      absolutely positioned no-drag box is exactly the case that goes stale. -->
+<!-- Drag zones are explicit spacers on either side of the strip; the
+     titlebar itself is not a drag region, so no native drag rectangle can
+     ever cover a tab, whatever Electron does with its subtractions. -->
+<div class="titlebar-drag titlebar-drag-traffic" aria-hidden="true"></div>
 <div id="tabs-center" aria-hidden="false">
+<div class="titlebar-drag" aria-hidden="true"></div>
 <div id="tabs" data-svelte-shell="tabs">
   <!-- Phase 5.4 follow-up: connect these tabs to a tabpanel with aria-controls. -->
   <div role="tablist" aria-label="Open projects" style="display: contents">
@@ -379,9 +384,9 @@
     }}
   ><Icon {PM} name="plus" /></button>
 </div>
+<div class="titlebar-drag" aria-hidden="true"></div>
 </div>
 
-<div class="titlebar-drag" aria-hidden="true"></div>
 <div class="tb-right" id="tb-right">
   {#if !homeOpen}
     <button class="btn tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>

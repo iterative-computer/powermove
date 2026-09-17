@@ -116,10 +116,10 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   --titlebar-h:44px;--traffic-inset:96px;
   height:var(--titlebar-h);flex:0 0 var(--titlebar-h);display:flex;align-items:center;gap:8px;
   padding:0 var(--pad) 0 var(--traffic-inset);
-  position:relative;z-index:40;-webkit-app-region:drag;
+  position:relative;z-index:40;-webkit-app-region:no-drag;
 }
-/* A pointer-transparent rail centres the strip without a transform, so the
-   strip's no-drag rectangle is a plain layout box Electron can track. */
+/* The strip sits between two flexible drag spacers inside a rail, so it is
+   centred without a transform and never overlapped by a drag rectangle. */
 #tabs-center{position:absolute;top:0;bottom:0;left:var(--traffic-inset);right:var(--pad);display:flex;align-items:center;justify-content:center;pointer-events:none}
 #tabs{
   position:relative;pointer-events:auto;
@@ -128,7 +128,8 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
 #tabs::-webkit-scrollbar{display:none}
-.titlebar-drag{flex:1;align-self:stretch;min-width:24px}
+.titlebar-drag{flex:1 1 0;align-self:stretch;min-width:24px;pointer-events:auto;-webkit-app-region:drag}
+.titlebar-drag-traffic{position:absolute;left:0;top:0;bottom:0;width:var(--traffic-inset);flex:none}
 #titlebar button,#titlebar input,#titlebar a{-webkit-app-region:no-drag}
 .project-strip-btn{width:26px;height:26px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
 .project-strip-btn:hover{background:var(--bg-row-hi);color:var(--tx)}
@@ -152,7 +153,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .project-doc-close:hover{background:var(--bg-row-hi);color:var(--tx)}
 .project-doc-close svg{width:9px;height:9px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
 
-.tb-right{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag}
+.tb-right{display:flex;align-items:center;gap:2px;margin-left:auto;position:relative;-webkit-app-region:no-drag}
 /* Export is the app's terminal action, so it is the one labelled control in the
    titlebar; the icon-only buttons beside it stay secondary. */
 .tb-export{padding:0 10px;margin-right:6px}
