@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { cssFontStack } from '../typography/font-stack';
   import { sel } from '../state/selection.svelte';
   import { tick } from 'svelte';
   import { doc } from '../state/document.svelte';
@@ -41,7 +42,7 @@
   const allFonts = $derived(api.media.fonts.options(value));
   const matches = $derived(allFonts.filter((name) => !query.trim() || name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
 
-  const familyStyle = (name: string): string => `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const familyStyle = (name: string): string => cssFontStack(name);
 
   function show(): void {
     if (open) { close(); return; }
@@ -105,6 +106,7 @@
   aria-labelledby={labelledBy}
   aria-label={labelledBy ? undefined : (label ?? edit.label)}
   style:font-family={familyStyle(value)}
+  style:font-weight={weight ? String(Math.min(700, Math.max(400, weight()))) : undefined}
   onpointerdown={(event) => event.stopPropagation()}
   onclick={show}
 >{isMixed?'Mixed':value}</button>

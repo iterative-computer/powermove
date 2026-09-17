@@ -1,4 +1,5 @@
 /* Ported from js/ui/controls.js — behavior-preserving. */
+import { cssFontStack } from '../../typography/font-stack';
 import { horizontalScrub } from '../../controls/horizontal-scrub';
 import type { PMRegistry } from '../registry';
 import { consumeMenuTriggerPress, markMenuDismissal } from '../../overlays/dismissal';
@@ -445,7 +446,7 @@ PM.selectField = (get: any, set: any, options: any, opt: any = {}) => {
 };
 
 PM.fontField = (get: any, set: any, opt: any = {}) => {
-  const familyStyle = (value: any) => `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  const familyStyle = (value: any) => cssFontStack(String(value || ''));
   const b = h('button.sel.font-select', String(get()));
   b.sync = () => {
     b.textContent = String(get());
