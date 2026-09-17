@@ -326,8 +326,10 @@ describe('picker drafts', () => {
     hex.dispatchEvent(new InputEvent('input', { bubbles: true }));
     flushSync();
     expect(document.body.querySelector('.color-picker footer')).toBeNull();
-    document.body.querySelector<HTMLElement>('.fill-picker-layer')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    document.body.querySelector<HTMLElement>('.color-picker-layer')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     flushSync();
+    // The popover plays the menu's exit before it unmounts.
+    await new Promise((resolve) => setTimeout(resolve, 250));
     expect(Edit.begin).toHaveBeenCalledWith('Color', { origin: 'inspector' });
     expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#34C759' }));
     expect(Edit.commit).toHaveBeenCalledWith('Color');
@@ -355,10 +357,11 @@ describe('picker drafts', () => {
     const colorTarget = render(ColorField, { api, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
     colorTarget.querySelector<HTMLButtonElement>('button.color-field')!.click();
     await tick();
-    expect(document.body.querySelector('.fill-picker-layer')?.parentElement).toBe(document.body);
+    expect(document.body.querySelector('.color-picker-layer')?.parentElement).toBe(document.body);
 
-    document.body.querySelector<HTMLButtonElement>('.color-picker [aria-label="Close color picker"]')!.click();
-    await tick();
+    document.body.querySelector<HTMLElement>('.color-picker')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(document.body.querySelector('.color-picker')).toBeNull();
 
     const fillTarget = render(FillField, {
       api,

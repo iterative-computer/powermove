@@ -59,7 +59,8 @@ test('color picker stays above adjacent panels and inside the viewport', async (
   await page.screenshot({ path: testInfo.outputPath('color-picker-overlay.png') });
   // Exercise both sides and the constrained middle without depending on inspector row order.
   for (const top of [70, 520, 290]) {
-    await page.getByRole('button', { name: 'Close color picker', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await expect(picker).toHaveCount(0);
     const trigger = fillRow.locator('.color-field');
     await trigger.evaluate((element, y) => {
       Object.assign((element as HTMLElement).style, { position: 'fixed', top: `${y}px`, right: '24px' });

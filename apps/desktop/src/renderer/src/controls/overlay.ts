@@ -27,6 +27,8 @@ export function anchorPicker(node: HTMLElement, trigger: HTMLElement | undefined
     const above = Math.max(0, anchor.top - margin - gap);
     const useBelow = bounds.height <= below || (bounds.height > above && below >= above);
     const available = useBelow ? below : above;
+    // Enter/exit motion grows from the trigger's edge, like every dropdown menu.
+    node.dataset.side = useBelow ? 'bottom' : 'top';
     node.style.maxHeight = `${available}px`;
     const height = Math.min(bounds.height, available);
     node.style.left = `${Math.max(margin, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - margin))}px`;
