@@ -8,6 +8,7 @@
   import EffectsSection from './EffectsSection.svelte';
   import ExtensionLayerParams from './ExtensionLayerParams.svelte';
   import InspectorHeader from './InspectorHeader.svelte';
+  import AlignmentStrip from './AlignmentStrip.svelte';
   import LayerOptions from './LayerOptions.svelte';
   import MasksSection from './MasksSection.svelte';
   import ShaderUniforms from './ShaderUniforms.svelte';
@@ -34,6 +35,7 @@
 
 <div class="insp" data-svelte-panel={panelId} data-inspector-refresh={inspectorRefresh.version}>
   {#if firstLayer}<InspectorHeader layer={firstLayer} />{/if}
+  {#if firstLayer && selectedLayers.every((layer: any) => layer.type !== 'audio')}<AlignmentStrip layers={selectedLayers} />{/if}
 
   {#if selectedLayers.length === 0}
     <CompositionSection />
