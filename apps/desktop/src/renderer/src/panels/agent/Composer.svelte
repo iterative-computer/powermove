@@ -176,12 +176,13 @@
       <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
     </div>
   {/if}
+  <!-- The draft owns the top of the card; every control lives on the foot
+       row beneath it, so the text never shares a line with buttons. -->
   <div class="agent-input-row">
     {#if showCommands && textarea}
       <SlashMenu id={menuId} anchor={textarea} options={commands} selected={commandIndex} choose={chooseCommand} dismiss={() => { dismissedDraft = draft; }} />
     {/if}
     <input class="panel-sr-only" bind:this={fileInput} type="file" multiple onchange={() => { if (fileInput.files) void PM.AgentUI?.addAttachments([...fileInput.files]); fileInput.value = ''; }} />
-    <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     <label class="panel-sr-only" for={textareaId}>Message Powermove agent</label>
     <textarea
       id={textareaId}
@@ -202,6 +203,11 @@
       onfocus={() => { focused = true; }}
       onblur={() => { focused = false; }}
     ></textarea>
+  </div>
+  <div class="agent-composer-foot">
+    <AgentOptions {PM} />
+    <div class="agent-composer-actions">
+    <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
     {#if mode.working}
       <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>
     {/if}
@@ -219,6 +225,6 @@
         {#if mode.disabled}<i class="agent-spin" aria-hidden="true"></i>{:else}<Icon {PM} name="return" />{/if}
       </button>
     {/if}
+    </div>
   </div>
-  <AgentOptions {PM} />
 </div>
