@@ -68,10 +68,15 @@
 </div>
 
 <style>
+  /* Each button is its own well; a 1px seam of panel shows between them and
+     only the outer corners of a group are rounded. Hover and press are per
+     button. A wider gap separates the horizontal and vertical groups. */
   .align-strip { display: flex; gap: 6px; margin: 2px 4px 10px; }
-  .align-group { display: flex; flex: 1; gap: 2px; padding: 2px; background: var(--bg-row); border-radius: var(--r-sm); }
-  button { display: flex; align-items: center; justify-content: center; flex: 1; height: 24px; padding: 0; border: 0; border-radius: calc(var(--r-sm) - 2px); background: transparent; color: var(--tx-3); cursor: default; }
+  .align-group { display: flex; flex: 1; gap: 1px; }
+  button { display: flex; align-items: center; justify-content: center; flex: 1; height: 28px; padding: 0; border: 0; border-radius: 0; background: var(--bg-row); color: var(--tx-3); cursor: default; }
+  button:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+  button:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
   button:hover { background: var(--bg-hover); color: var(--tx); }
-  button:active { background: var(--bg-panel); color: var(--tx); }
+  button:active { background: var(--ink-2); color: var(--tx); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>

@@ -108,7 +108,12 @@
     line-height: 1.2;
   }
   .insp :global(.row.split) { gap: 6px; }
+  /* Tall rows (the text field) keep their label and stopwatch on the same
+     28px band as every single-line row, so the diamond and the title stay
+     centered on each other while the field grows below. */
   .insp :global(.row.split:has(textarea)) { height: auto; min-height: 54px; align-items: start; }
+  .insp :global(.row.split:has(textarea) > .k) { height: 28px; }
+  .insp :global(.row.split:has(textarea) > .stopwatch) { margin-top: 5px; }
   .insp :global(.property-stopwatch) { width: 18px; height: 24px; }
 
   /* Panel actions use the same flat material as property fields. */
