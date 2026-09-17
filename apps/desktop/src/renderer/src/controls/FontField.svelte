@@ -111,7 +111,8 @@
     shown = true;
     open = true;
     await tick();
-    if (!popup) return;
+    // A second click may already have closed the sheet while this open awaited.
+    if (!popup || !open) return;
     popup.dataset.state = '';
     place();
     popup.dataset.state = 'open';
