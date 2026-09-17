@@ -370,14 +370,17 @@
           disabled={sampling}
           onclick={sampleScreenColor}
         >
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="m15 6 3.4-3.4a2.1 2.1 0 0 1 3 3L18 9m-3-3-6.5 6.5 3 3L18 9m-6.5 6.5L6 21H3v-3l5.5-5.5" />
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <!-- Pipette: filled bulb, tube down to the tip, drop below. -->
+            <path class="cp-eyedropper-bulb" d="M10.2 2.3a2.2 2.2 0 0 1 3.5 3.5l-1.4 1.4-3.5-3.5z" />
+            <path d="M9.5 4.4 3.9 10a1.4 1.4 0 0 0-.4.9L3.2 13a.6.6 0 0 0 .7.7l2.1-.3c.35-.05.66-.2.9-.4l5.6-5.6" />
+            <path d="M8.3 5.6 10.4 7.7" />
           </svg>
         </button>
       </div>
 
       <div class="cp-swatches">
-        <div class="cp-compare" aria-label="Original and new color">
+        <div class="cp-compare" role="group" aria-label="Original and new color">
           <button
             type="button"
             title={`Original ${before} — click to restore`}
@@ -387,6 +390,7 @@
           ></button>
           <span title={`New ${chosen}`} style={`--sw-color:${chosen}`}></span>
         </div>
+        <span class="cp-swatches-rule" aria-hidden="true"></span>
         <div class="cp-presets" role="group" aria-label="Color presets">
           {#each presets as color (color)}
             <button

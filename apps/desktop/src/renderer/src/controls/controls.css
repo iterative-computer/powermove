@@ -230,47 +230,58 @@ select.sel {
   transition: background var(--dur-1), color var(--dur-1), transform var(--dur-1) var(--ease);
 }
 .cp-eyedropper svg {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.6;
+  stroke-width: 1.4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.cp-eyedropper-bulb { fill: currentColor; stroke: none; }
 .cp-eyedropper:hover { background: var(--ink-2); color: var(--tx); }
 .cp-eyedropper:active { transform: scale(.94); }
 .cp-eyedropper:disabled { opacity: var(--disabled); }
 
-/* Swatches: original | new, then the presets. Light and dark chips need an edge. */
+/* Swatches: the original | new pair, a hairline, then the presets.
+   The pair is the largest chip; presets are smaller and inset so the row reads as
+   "your colour, then a palette" instead of ten equal squares. */
 .cp-swatches {
   display: flex;
   align-items: center;
   gap: 10px;
   height: 22px;
+  margin-top: 4px;
+  padding: 0 2px 2px;
 }
 .cp-compare {
   display: flex;
   flex: none;
   height: 100%;
-  border-radius: 5px;
+  border-radius: 6px;
   overflow: hidden;
   box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .16);
 }
 .cp-compare > * {
-  width: 22px;
+  width: 26px;
   height: 100%;
   padding: 0;
   border: 0;
   background: var(--sw-color);
 }
 .cp-compare > button { cursor: pointer; }
+.cp-swatches-rule {
+  flex: none;
+  width: var(--hairline);
+  height: 14px;
+  background: var(--line-strong);
+}
 .cp-presets {
   flex: 1;
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: var(--cp-gap);
-  height: 100%;
+  gap: 7px;
+  height: 18px;
 }
 .cp-preset {
   position: relative;
