@@ -105,6 +105,38 @@ describe('NumField', () => {
     vi.useRealTimers();
   });
 
+  it('keeps a negative value when the editor is opened and left, and treats a bare minus as a number', async () => {
+    const { api, Edit, drag } = fakeAPI();
+    let current = -2;
+    Edit.dispatch.mockImplementation((command: any) => { current = command.value; });
+    Edit.apply.mockImplementation((command: any) => { current = command.value; });
+    const target = render(NumField, { api, get: () => current, edit: commandEdit('Tracking'), step: 1, label: 'Tracking' });
+    const input = target.querySelector<HTMLInputElement>('input.num')!;
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().up();
+    await tick();
+    expect(input.readOnly).toBe(false);
+    input.dispatchEvent(new FocusEvent('blur'));
+    expect(Edit.apply).not.toHaveBeenCalled();
+    expect(current).toBe(-2);
+
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().up();
+    await tick();
+    input.value = '-7';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({ value: -7 }), expect.anything());
+
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().up();
+    await tick();
+    input.value = '-=3';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({ value: -10 }), expect.anything());
+  });
+
   it('scrubs on both axes: right or up raises, left or down lowers', () => {
     const { api, Edit, drag } = fakeAPI();
     let current = 10;

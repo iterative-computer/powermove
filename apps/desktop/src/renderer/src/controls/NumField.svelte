@@ -66,15 +66,21 @@
   const isMixed = $derived((sel.layers,doc.tick.values, doc.tick.structure, doc.proj, transport.time, mixed?.(edit,value) ?? false));
   const shown = $derived(editing ? draft : isMixed ? 'Mixed' : format(value));
 
+  let initialDraft = '';
   function openEditor(): void {
     draft = String(round(api, Number(get()), 3));
+    initialDraft = draft;
     editing = true;
     void tick().then(() => { input.focus(); input.select(); });
   }
 
+  /* "+5", "*2", "/4" and "-=3" apply to the current value. A leading minus
+     alone is a negative number ("-2" means minus two, not "subtract two"),
+     otherwise merely opening and leaving a negative field would double it. */
   function parseDraft(): number {
     const raw = draft.trim();
-    return parseArithmetic(/^[-+*/]/.test(raw) ? `${Number(get())}${raw}` : raw);
+    const relative = /^[+*/]/.test(raw) || /^-=/.test(raw);
+    return parseArithmetic(relative ? `${Number(get())}${raw.replace(/^([-+])=/, '$1')}` : raw);
   }
 
   function clampValue(next: number): number {
@@ -85,7 +91,7 @@
 
   function finish(commit: boolean): void {
     if (!editing) return;
-    if (commit) {
+    if (commit && draft.trim() !== initialDraft) {
       const next = parseDraft();
       if (Number.isFinite(next)) {
         const rounded = round(api, next, 4);
