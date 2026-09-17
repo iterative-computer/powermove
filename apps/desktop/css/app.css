@@ -118,9 +118,12 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   padding:0 var(--pad) 0 var(--traffic-inset);
   position:relative;z-index:40;-webkit-app-region:drag;
 }
+/* A pointer-transparent rail centres the strip without a transform, so the
+   strip's no-drag rectangle is a plain layout box Electron can track. */
+#tabs-center{position:absolute;top:0;bottom:0;left:var(--traffic-inset);right:var(--pad);display:flex;align-items:center;justify-content:center;pointer-events:none}
 #tabs{
-  position:absolute;left:50%;transform:translateX(-50%);
-  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(40%,calc(100% - var(--traffic-inset) * 2 - 400px));min-width:0;
+  position:relative;pointer-events:auto;
+  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(52%,calc(100% - 400px));min-width:0;
   padding:2px;border:0;border-radius:var(--r-md);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
