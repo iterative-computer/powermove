@@ -108,10 +108,13 @@
     if (parsed && commitHex(parsed)) previewChosen();
   }
 
+  /* Leaving the field tidies its text; it never writes after the popover has begun closing. */
   function settleDraft(): void {
+    if (phase === 'closed') return;
     const parsed = parse(draft, format);
-    if (parsed) setHex(parsed);
-    else invalid = true;
+    if (!parsed) { invalid = true; return; }
+    if (parsed === chosen) { draft = formatted(chosen, format); invalid = false; return; }
+    setHex(parsed);
   }
 
   function switchFormat(next: Format): void {
@@ -301,7 +304,8 @@
       aria-label={label}
       tabindex="-1"
       data-state={phase}
-      style={`--cp-color:${chosen};--cp-hue:${hueColor}`}
+      style:--cp-color={chosen}
+      style:--cp-hue={hueColor}
       use:anchorPicker={trigger}
       onkeydown={keydown}
     >
