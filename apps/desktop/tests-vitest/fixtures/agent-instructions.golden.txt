@@ -40,6 +40,13 @@ The extension staging directory is \(extensionsDir). When the user asks to chang
 
 Read powermove-api/EXTENSIONS.md and the included TypeScript types. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in with the `fork_builtin_extension` tool. After creating, updating, or removing extensions, list each id, action, and summary in the result's extensions array so Powermove can reload it. Return extensions: [] when none changed.
 
+RESPONSE STYLE
+Write for a narrow panel column. Open with the outcome, then only what the user can act on. One or two sentences per paragraph; past two facts, one short bullet each. Name the concrete token — layer, property path, file, count, time — instead of describing it.
+Cut preamble, restatement of the request, recap of the visible work log, self-assessment, and closing offers of help. Mention a tool only when its result is the point.
+Shorten, never omit. Every change, failed check, side effect, unverified claim and blocker still appears; a caveat is a clause, not a section. Cut words, not facts.
+Progress lines obey the same rule: one clause naming what you are inspecting or deciding.
+summary is one to three sentences: what changed, plus anything unverified. Each note is one line for a fact that did not fit; never pad the array to look thorough.
+
 DELIVERABLES AND SIDE EFFECTS
 Put non-extension deliverables under: \(artifactRelativePath). Do not leave deliverables elsewhere. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.
 

@@ -55,11 +55,15 @@ export type TraceStep =
 
 export interface AgentSnapshot {
   threadId?: string;
-  threads?: Array<{ id: string; title: string; updatedAt?: number }>;
+  threads?: Array<{ id: string; title: string; updatedAt?: number; busy?: boolean }>;
   threadSwitchBlocked?: boolean;
+  /** Runs still working in threads other than the one on screen. */
+  backgroundRuns?: number;
   threadSaveError?: boolean;
   legacyPhase: string;
   requestToken: number;
+  /** When the visible thread's run actually began, across thread switches. */
+  runStartedAt?: number | null;
   conversation: AgentMessage[];
   activity: string;
   uiPlacement?: UIPlacement | null;
@@ -102,9 +106,11 @@ const EMPTY_SNAPSHOT: AgentSnapshot = {
   threadId: '',
   threads: [],
   threadSwitchBlocked: false,
+  backgroundRuns: 0,
   threadSaveError: false,
   legacyPhase: 'idle',
   requestToken: 0,
+  runStartedAt: null,
   conversation: [],
   activity: '',
   uiPlacement: null,
@@ -241,7 +247,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
   const tokenChanged = snapshot.requestToken !== agentState.requestToken;
   const enteringRun = phase === 'running' && agentState.phase !== 'running';
   const threadChanged = (snapshot.threadId || '') !== agentState.threadId;
-  let progressLines = tokenChanged || enteringRun ? [] : [...agentState.progressLines];
+  let progressLines = tokenChanged || enteringRun || threadChanged ? [] : [...agentState.progressLines];
   if (phase === 'running' && snapshot.activity && progressLines.at(-1) !== snapshot.activity) {
     progressLines = [...progressLines, snapshot.activity].slice(-20);
   }
@@ -258,6 +264,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
     threads = [],
     threadId,
     threadSwitchBlocked,
+    backgroundRuns,
     threadSaveError,
     attachments,
     uiPlacement,
@@ -282,10 +289,12 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
   Object.assign(agentState, scalarSnapshot, {
     threadId: threadId || '',
     threadSwitchBlocked: threadSwitchBlocked || false,
+    backgroundRuns: backgroundRuns || 0,
     threadSaveError: threadSaveError || false,
     phase,
     workingStartedAt: phase === 'running'
-      ? (enteringRun || tokenChanged || threadChanged ? Date.now() : agentState.workingStartedAt)
+      ? (enteringRun || tokenChanged || threadChanged
+        ? (snapshot.runStartedAt ?? Date.now()) : agentState.workingStartedAt)
       : null,
     workingConversationIndex: phase === 'running'
       ? (enteringRun || tokenChanged || threadChanged

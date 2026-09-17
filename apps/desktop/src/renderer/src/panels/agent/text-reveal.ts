@@ -23,11 +23,3 @@ export function revealText(node: HTMLElement, enabled = true): { destroy(): void
     duration: 200, delay: Math.min(index * 28, 280), easing: 'ease-out', fill: 'backwards'
   });
 }
-/** Mount-only: clearing the transient entering flag must not cut a send short. */
-export function sendMessage(node: HTMLElement, enabled = true): { destroy(): void } {
-  return motion(node, enabled, [
-    { opacity: 0.3, transform: 'translateY(14px) scale(0.97)', transformOrigin: 'bottom right' },
-    { opacity: 1, transform: 'translateY(-1px) scale(1.003)', transformOrigin: 'bottom right', offset: 0.75 },
-    { opacity: 1, transform: 'none', transformOrigin: 'bottom right' }
-  ], { duration: 360, easing: 'cubic-bezier(0.2, 0.75, 0.25, 1)' });
-}
