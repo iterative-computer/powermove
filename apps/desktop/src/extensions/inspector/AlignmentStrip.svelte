@@ -79,6 +79,6 @@
   button:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
   button:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
   button:hover { background: rgb(var(--ink-rgb) / .085); color: var(--tx); }
-  button:active { background: rgb(var(--ink-rgb) / .12); color: var(--tx); transition: none; }
+  button:active { background: rgb(var(--ink-rgb) / .12); color: var(--tx); transform: scale(.94); transition: none; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>
