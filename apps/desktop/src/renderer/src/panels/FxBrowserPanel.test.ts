@@ -39,6 +39,8 @@ const secs = (target: HTMLElement) => [...target.querySelectorAll('.fxb-sec')].m
 
 afterEach(() => {
   fxBrowser.query = ''; fxBrowser.searchOpen = false;
+  fxBrowser.category = 'all';
+  window.localStorage?.clear();
   document.body.replaceChildren();
   delete window.PM;
   vi.clearAllMocks();
@@ -53,13 +55,17 @@ describe('FxBrowserPanel', () => {
     expect(secs(target)).toEqual(['Blur', 'Stylize']);
     expect(labels(target)).toEqual(['Gaussian Blur', 'Sharpen', 'Glow']);
 
-    const card = target.querySelector<HTMLButtonElement>('.fxb-row');
+    const card = target.querySelector<HTMLElement>('.fxb-row');
     expect(card?.textContent).toContain('Gaussian Blur');
-    expect(card?.getAttribute('draggable')).toBe('true');
+    const pick = card!.querySelector<HTMLButtonElement>('.fxb-pick')!;
+    expect(pick.getAttribute('draggable')).toBe('true');
     flushSync(() => {
-      card?.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
-      card?.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
+      pick.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      pick.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
     });
+    expect(PM.Edit.apply).not.toHaveBeenCalled();
+    const add = card!.querySelector<HTMLButtonElement>('button[aria-label="Add Gaussian Blur"]')!;
+    flushSync(() => add.click());
 
     expect(PM.Edit.apply).toHaveBeenCalledOnce();
     expect(PM.Edit.apply).toHaveBeenCalledWith(
@@ -105,8 +111,8 @@ describe('FxBrowserPanel', () => {
     const PM = basePM({ firstSel: () => null });
     window.PM = PM as any;
     const { target, component } = mountPanel();
-    const card = target.querySelector<HTMLButtonElement>('.fxb-row');
-    flushSync(() => card?.click());
+    const add = target.querySelector<HTMLButtonElement>('.fxb-add');
+    flushSync(() => add?.click());
     expect(PM.toast).toHaveBeenCalledWith('Select a layer first');
     expect(PM.Edit.apply).not.toHaveBeenCalled();
     expect(target.querySelector('[role="status"]')?.textContent).toBe('Select a layer first');
@@ -116,7 +122,7 @@ describe('FxBrowserPanel', () => {
   it('sets the drag payload on dragstart', async () => {
     window.PM = basePM({ firstSel: () => null }) as any;
     const { target, component } = mountPanel();
-    const card = target.querySelector<HTMLButtonElement>('.fxb-row')!;
+    const card = target.querySelector<HTMLElement>('.fxb-pick')!;
 
     const setData = vi.fn();
     const dataTransfer = { setData, effectAllowed: 'none' };
@@ -128,6 +134,7 @@ describe('FxBrowserPanel', () => {
       JSON.stringify({ kind: 'effect', id: 'blur', label: 'Gaussian Blur' })
     );
     expect(dataTransfer.effectAllowed).toBe('copy');
+    expect(window.PM!.Edit.apply).not.toHaveBeenCalled();
 
     await unmount(component);
   });

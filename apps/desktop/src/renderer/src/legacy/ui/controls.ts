@@ -212,7 +212,7 @@ function openColorPicker(initial: any, edit: any, label: any) {
   };
   const fromHsv = (next: any) => {
     hsv = { h: clampChannel(next.h, 359), s: clampChannel(next.s, 100), v: clampChannel(next.v, 100) };
-    chosen = rgbToHex(hsvToRgb(hsv)); sync();
+    chosen = rgbToHex(hsvToRgb(hsv)); sync(); edit.preview(chosen);
   };
 
   const pickSv = (event: any) => {

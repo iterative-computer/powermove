@@ -12,6 +12,7 @@
   const category = $derived(fxBrowser.category);
   let recent = $state<string[]>(readRecent());
   let status = $state('');
+  let selectedId = $state<string | null>(null);
   let rail: HTMLDivElement | undefined = $state();
   let list: HTMLDivElement | undefined = $state();
   let searchEl: HTMLInputElement | undefined = $state();
@@ -98,8 +99,8 @@
   }
 
   function listKey(event: KeyboardEvent): void {
-    const rows = [...(list?.querySelectorAll<HTMLButtonElement>('.fxb-row') ?? [])];
-    const index = rows.indexOf(event.currentTarget as HTMLButtonElement);
+    const rows = [...(list?.querySelectorAll<HTMLElement>('.fxb-pick') ?? [])];
+    const index = rows.indexOf(event.currentTarget as HTMLElement);
     if (index < 0) return;
     const map: Record<string, number> = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: rows.length - 1 };
     const next = map[event.key];
@@ -145,23 +146,29 @@
     {#each sections as section (section.group ?? '')}
       {#if section.group}<div class="fxb-sec">{section.group}</div>{/if}
       {#each section.items as item, index (key(item))}
-        <button
-          type="button"
+        <div
+          role="group"
+          aria-label={item.label}
           class="fxb-row"
-          draggable="true"
-          tabindex={index === 0 && section === sections[0] ? 0 : -1}
+          class:on={selectedId === item.id}
           data-kind="effect"
           data-id={item.id}
-          title="Click to add to the selected layer · drag onto a layer"
-          onclick={(event) => apply(event, item)}
-          onkeydown={listKey}
-          ondragstart={(event) => dragStart(event, item)}
         >
-          <span class="fxb-label">{item.label}</span>
-          <span class="fxb-add" aria-hidden="true">
+          <button
+            type="button"
+            class="fxb-pick fxb-label"
+            draggable="true"
+            tabindex={index === 0 && section === sections[0] ? 0 : -1}
+            aria-pressed={selectedId === item.id}
+            title="Drag onto a layer or use the plus button to add"
+            onclick={() => selectedId = item.id}
+            onkeydown={listKey}
+            ondragstart={(event) => dragStart(event, item)}
+          >{item.label}</button>
+          <button type="button" class="fxb-add" aria-label={`Add ${item.label}`} title={`Add ${item.label}`} draggable="false" onclick={(event) => apply(event, item)}>
             <svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></svg>
-          </span>
-        </button>
+          </button>
+        </div>
       {/each}
     {:else}
       <div class="fxb-empty">{searching ? `No effects match “${query}”` : 'Nothing here yet'}</div>
