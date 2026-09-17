@@ -247,13 +247,16 @@ describe('one-shot fields', () => {
     const trigger = target.querySelector<HTMLButtonElement>('button.font-select')!;
     trigger.click();
     await tick();
-    expect(target.querySelector('.font-drop')).not.toBeNull();
+    expect(target.querySelector('.font-menu')).not.toBeNull();
     trigger.click();
     await tick();
-    expect(target.querySelector('.font-drop')).toBeNull();
+    // The sheet stays mounted while its close animation plays.
+    expect(target.querySelector<HTMLElement>('.font-menu')?.dataset.state ?? 'closed').toBe('closed');
+    await new Promise((resolve) => setTimeout(resolve, 230));
+    expect(target.querySelector('.font-menu')).toBeNull();
     trigger.click();
     await tick();
-    expect(target.querySelector('.font-drop')).not.toBeNull();
+    expect(target.querySelector('.font-menu')).not.toBeNull();
   });
 
   it('FontField uses the font list, invalidates all views, and exposes a dialog/listbox', async () => {
@@ -263,7 +266,7 @@ describe('one-shot fields', () => {
     await tick();
     expect(closeMenus).toHaveBeenCalledTimes(1);
     expect(target.querySelector('[role="dialog"] [role="listbox"]')).not.toBeNull();
-    target.querySelectorAll<HTMLButtonElement>('.font-item')[1]!.click();
+    target.querySelectorAll<HTMLElement>('.font-menu-row')[1]!.click();
     expect(Edit.apply).toHaveBeenCalledWith(expect.objectContaining({ value: 'Avenir Next' }), { label: 'Font', origin: 'inspector' });
     expect(invalidate).toHaveBeenCalledWith();
     expect(fonts.ensure).toHaveBeenCalledWith('Avenir Next', 400);

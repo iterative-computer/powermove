@@ -40,10 +40,6 @@ select.sel {
   border: 0;
 }
 
-.pm-control-font-drop {
-  position: fixed;
-}
-
 /* ── Colour picker ─────────────────────────────────────────
    A popover with the dropdown menu's surface and motion (pm-menu-in/out from
    app.css), holding dialkit-style stacked rows: plane, hue, value, swatches. */
