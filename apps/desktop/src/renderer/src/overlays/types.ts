@@ -2,7 +2,22 @@ import type { PMRegistry } from '../legacy/registry';
 
 export type OverlayPM = PMRegistry;
 
+/** Three families of notice, told apart by who is at fault and what it costs
+    the reader. `status` is routine and passes on its own. `error` is the
+    editor itself failing an operation the user asked for, and carries the
+    diagnostics. `alert` is a notice raised by an extension — a refusal, a
+    precondition, or the extension breaking — where the editor is intact and
+    the message belongs to whoever sent it. */
+export type ToastKind = 'status' | 'alert' | 'error';
+
 export type ToastOptions = {
+  /** Which family this notice belongs to. Stated here it wins over both
+      `error` and the message sniffing. */
+  kind?: ToastKind;
+  /** The extension that raised the notice, stamped by the kernel. A notice
+      with a source is never an editor error: at worst it is that extension's
+      alert, and it is attributed to it by name. */
+  source?: { id: string; name: string };
   /** State the outcome instead of letting the message text be sniffed. A
       success notice that quotes a file, layer or project name must stay a
       success even when that name reads like a failure ("Imported error.png"). */

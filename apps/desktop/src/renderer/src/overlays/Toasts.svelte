@@ -1,7 +1,7 @@
 <script lang="ts">
   import ToastError from '../errors/ToastError.svelte';
   import Icon from '../panels/Icon.svelte';
-  import type { ToastOptions } from './types';
+  import type { ToastKind, ToastOptions } from './types';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -9,7 +9,10 @@
     id: number;
     message: string;
     icon: string;
+    kind: ToastKind;
     error: boolean;
+    /** The extension that spoke, shown above the message on an alert. */
+    source?: string;
     sticky: boolean;
     dismissible: boolean;
     timeout: number;
@@ -24,26 +27,28 @@
 
   export function push(message: unknown, milliseconds = 2200, options: ToastOptions = {}): void {
     if (message == null) return;
-    const inferredError = options.error ?? isErrorToast(message);
+    const kind = toastKind(message, options);
     const text = String(message);
     if (options.key) {
       const keyed = queue.find(item => item.key === options.key);
       if (keyed) { window.clearTimeout(keyed.timeout); queue = queue.filter(item => item !== keyed); }
     } else {
-      const existing = queue.find(item => item.message === text && item.error === inferredError);
+      const existing = queue.find(item => item.message === text && item.kind === kind);
       if (existing) return;
     }
-    // Routine status updates replace each other. Errors and corner notices remain available to read.
+    // Routine status updates replace each other. Errors, alerts and corner notices remain available to read.
     for (const item of [...queue]) {
-      if (!item.error && !item.sticky && !item.corner) dismiss(item.id);
+      if (item.kind === 'status' && !item.sticky && !item.corner) dismiss(item.id);
     }
     const item: ToastItem = {
       id: nextId++,
       message: String(message),
-      icon: options.icon || toastIcon(message, inferredError),
-      error: inferredError,
-      sticky: options.sticky ?? inferredError,
-      dismissible: options.dismissible ?? inferredError,
+      icon: options.icon || toastIcon(message, kind),
+      kind,
+      error: kind === 'error',
+      source: kind === 'alert' ? options.source?.name : undefined,
+      sticky: options.sticky ?? kind !== 'status',
+      dismissible: options.dismissible ?? kind !== 'status',
       timeout: 0,
       key: options.key,
       corner: options.corner,
@@ -87,6 +92,16 @@
     queue = [];
   }
 
+  /** Sort a notice into its family. An extension's notice never becomes an
+      editor error: the editor is intact, so the worst it can be is that
+      extension's alert, said in its name. */
+  export function toastKind(message: unknown, options: ToastOptions = {}): ToastKind {
+    if (options.kind) return options.kind;
+    const failed = options.error ?? isErrorToast(message);
+    if (!failed) return 'status';
+    return options.source ? 'alert' : 'error';
+  }
+
   /** A last resort for legacy string-only calls. Callers that know the outcome
       pass `error` instead, because this reads the whole message — including any
       file or project name the user chose. */
@@ -95,9 +110,10 @@
   }
 
   /** Keep legacy string-only calls expressive without making every caller choose an icon. */
-  export function toastIcon(message: unknown, error = isErrorToast(message)): string {
+  export function toastIcon(message: unknown, kind: ToastKind = toastKind(message)): string {
     const text = String(message);
-    if (error) return 'warning';
+    if (kind === 'error') return 'warning';
+    if (kind === 'alert') return 'caution';
     if (/^undo\b|\bundone\b/i.test(text)) return 'undo';
     if (/^redo\b|\bredone\b/i.test(text)) return 'redo';
     if (/\b(delet(?:e|ed)|trash(?:ed)?|removed?)\b/i.test(text)) return 'trash';
@@ -122,10 +138,17 @@
     class="toast"
     role={item.error ? 'alert' : 'status'}
     data-toast-id={item.id}
+    data-toast-kind={item.kind}
     data-toast-error={item.error ? 'true' : undefined}
   >
     {#if item.error}
       <ToastError {PM} error={item.message} />
+    {:else if item.kind === 'alert'}
+      <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
+      <div class="alert-body">
+        {#if item.source}<strong>{item.source}</strong>{/if}
+        <span>{item.message}</span>
+      </div>
     {:else}
       <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
       <span>{item.message}</span>
@@ -148,10 +171,18 @@
 
 <style>
   /* An error keeps the status toast's shell and gutter and only grows
-     downward, so the stack stays one column of like objects. */
-  .toast[data-toast-error]{align-items:flex-start;min-width:min(300px,calc(100vw - 32px))}
+     downward, so the stack stays one column of like objects. An alert grows
+     the same way, and is told apart by its marker and by the name of the
+     extension speaking rather than by a shape of its own. */
+  .toast[data-toast-error],
+  .toast[data-toast-kind="alert"]{align-items:flex-start;min-width:min(300px,calc(100vw - 32px))}
   .toast[data-toast-error] :global(.toast-icon),
-  .toast[data-toast-error]>button{margin-top:1px}
+  .toast[data-toast-kind="alert"] :global(.toast-icon),
+  .toast[data-toast-error]>button,
+  .toast[data-toast-kind="alert"]>button{margin-top:1px}
+  .alert-body{display:flex;flex-direction:column;gap:2px;min-width:0;padding:1px 0}
+  .alert-body>strong{font-weight:var(--fw-semibold);font-size:var(--fs-xs);line-height:14px;color:var(--tx-2)}
+  .alert-body>span{min-width:0;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
   /* The wrapper scrolls once the stack outgrows 45vh, and a scroll container
      clips at its padding edge. Pad it past the reach of --shadow-float
      (~60px below, ~40px beside). Offset the top padding so the first toast

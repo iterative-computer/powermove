@@ -644,6 +644,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
   box-shadow:var(--shadow-float)}
 .toast-icon{width:16px;height:16px;display:grid;place-items:center;flex:none;color:var(--tx-2)}
 .toast[data-toast-error] .toast-icon{color:var(--danger)}
+.toast[data-toast-kind="alert"] .toast-icon{color:var(--warning)}
 .toast-icon .pm-icon{width:16px;height:16px;display:block}
 .toast>span:not(.toast-icon){min-width:0;white-space:pre-wrap}
 .toast>button{width:22px;height:22px;flex:none;display:grid;place-items:center;margin-left:2px;border-radius:var(--r-xs);color:var(--tx-3);font-size:var(--fs-lg);line-height:1}
