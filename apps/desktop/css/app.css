@@ -120,7 +120,10 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 }
 /* The strip sits between two flexible drag spacers inside a rail, so it is
    centred without a transform and never overlapped by a drag rectangle. */
-#tabs-center{position:absolute;top:0;bottom:0;left:var(--traffic-inset);right:var(--pad);display:flex;align-items:center;justify-content:center;pointer-events:none}
+/* The rail spans the whole window so the strip is centred on the window, not
+   on the space right of the traffic lights; its max-width keeps it clear of
+   both the lights and the right-hand actions, which paint above the rail. */
+#tabs-center{position:absolute;top:0;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
 #tabs{
   position:relative;pointer-events:auto;
   height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(52%,calc(100% - 400px));min-width:0;
@@ -201,12 +204,16 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .iconbtn.dis{opacity:var(--disabled);pointer-events:none}
 .iconbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 
-/* ── tool toolbar, inline with the native titlebar ─────── */
+/* ── tool toolbar, floating over the viewer ────────────── */
+/* Tools act on the document, so they sit on the canvas (Figma, tldraw), not in
+   the window chrome. The titlebar is tabs only. The strip is moved into
+   #panel-viewer by ToolbarMount; it clears the panel's centred move handle. */
 #toolbar-strip{
-  flex:0 0 auto;min-width:0;height:30px;display:flex;align-items:center;
+  position:absolute;top:8px;left:8px;z-index:30;
+  height:30px;display:flex;align-items:center;
   margin:0;padding:2px;border:0;border-radius:var(--r-md);
-  position:relative;z-index:30;-webkit-app-region:no-drag;
 }
+#titlebar #toolbar-strip{display:none}
 #toolbar-strip[hidden]{display:none}
 #toolbar{display:flex;align-items:center;gap:1px;width:max-content}
 #toolbar .iconbtn{width:26px;height:26px;border-radius:var(--r-sm)}

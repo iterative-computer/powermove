@@ -85,11 +85,16 @@ test('centered tabs and explicit effect actions keep legacy hidden layers access
     await session.app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
     await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width);
     const toolbar = await page.locator('#toolbar-strip').boundingBox();
+    const viewer = await page.locator('#panel-viewer').boundingBox();
+    const titlebar = await page.locator('#titlebar').boundingBox();
     const tabs = await page.locator('#tabs').boundingBox();
     const actions = await page.locator('#tb-right').boundingBox();
     expect(Math.abs(tabs!.x + tabs!.width / 2 - width / 2)).toBeLessThan(1);
-    expect(toolbar!.x + toolbar!.width).toBeLessThan(tabs!.x);
     expect(tabs!.x + tabs!.width).toBeLessThan(actions!.x);
+    // Tools live on the canvas, below the tab row.
+    expect(toolbar!.y).toBeGreaterThanOrEqual(titlebar!.y + titlebar!.height);
+    expect(toolbar!.x).toBeGreaterThanOrEqual(viewer!.x);
+    expect(toolbar!.x + toolbar!.width).toBeLessThan(viewer!.x + viewer!.width);
   }
   await expect(page.locator('.project-strip-divider')).toHaveCount(0);
   const effect = page.locator('.fxb-row[data-id="blur"]');
