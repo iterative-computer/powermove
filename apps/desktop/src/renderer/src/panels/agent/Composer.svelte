@@ -171,13 +171,10 @@
   ondragleave={() => { dragDepth = Math.max(0, dragDepth - 1); }}
   ondrop={drop}
 >
-  {#if agentState.attachments.length}
-    <div class="agent-attachment-rail">
-      <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
-    </div>
-  {/if}
-  <!-- The draft owns the top of the card; every control lives on the foot
-       row beneath it, so the text never shares a line with buttons. -->
+  <!-- Two surfaces: an inset field that holds the draft, its actions and any
+       attachments, sitting on an outer card whose foot row carries the run
+       options. Only the inset reacts to focus. -->
+  <div class="agent-composer-field">
   <div class="agent-input-row">
     {#if showCommands && textarea}
       <SlashMenu id={menuId} anchor={textarea} options={commands} selected={commandIndex} choose={chooseCommand} dismiss={() => { dismissedDraft = draft; }} />
@@ -204,10 +201,9 @@
       onblur={() => { focused = false; }}
     ></textarea>
   </div>
-  <div class="agent-composer-foot">
-    <AgentOptions {PM} />
-    <div class="agent-composer-actions">
+  <div class="agent-composer-actions">
     <button class="agent-round agent-attach" type="button" title={ATTACHMENT_HINT} aria-label="Add attachments" onclick={() => fileInput.click()} disabled={mode.disabled}><Icon {PM} name="plus" /></button>
+    <span class="sp"></span>
     {#if mode.working}
       <button class="agent-round agent-stop" type="button" aria-label="Stop current run" title="Stop current run" onclick={() => PM.AgentUI?.stop()}><i aria-hidden="true"></i></button>
     {/if}
@@ -225,6 +221,14 @@
         {#if mode.disabled}<i class="agent-spin" aria-hidden="true"></i>{:else}<Icon {PM} name="return" />{/if}
       </button>
     {/if}
+  </div>
+  {#if agentState.attachments.length}
+    <div class="agent-attachment-rail">
+      <AttachmentChips {PM} items={agentState.attachments} removable onRemove={(id) => PM.AgentUI?.removeAttachment(id)} />
     </div>
+  {/if}
+  </div>
+  <div class="agent-composer-foot">
+    <AgentOptions {PM} />
   </div>
 </div>
