@@ -9,7 +9,7 @@ describe('keyframe navigation', () => {
     harness.state.time = 2;
     harness.state.project = { dur: 8, layers: [
       { id: 'a', from: 1, shy: false, threeD: false, props: [property('position.x', [0, 2]), property('scale.x', [1]), property('scale.y', [3])] },
-      { id: 'b', from: 0, shy: false, threeD: false, props: [property('opacity', [1, 5, NaN, 20])] },
+      { id: 'b', from: 0, shy: true, threeD: false, props: [property('opacity', [1, 5, NaN, 20])] },
     ] };
     harness.api.anim.allProps = ((layer: any) => layer.props) as typeof harness.api.anim.allProps;
     return harness;

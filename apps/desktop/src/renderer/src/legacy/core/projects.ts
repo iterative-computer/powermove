@@ -56,7 +56,7 @@ R.unwrap = (raw: any) => {
 /** Upsert registry metadata for a project and persist its data. */
 R.put = (proj: any, thumb: any) => {
   if (!proj || !proj.id) return;
-  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now() };
+  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== proj.id));
@@ -70,7 +70,7 @@ R.put = (proj: any, thumb: any) => {
 /** Lightweight crash recovery: compact typed-history patches between checkpoints. */
 R.recover = (proj: any, thumb: any) => {
   if (!proj?.id) return null;
-  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now() };
+  const meta: any = { id: proj.id, name: proj.name || 'Untitled', at: Date.now(), w: proj.w, h: proj.h };
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
@@ -89,6 +89,7 @@ R.upsertMeta = (meta: any) => {
   const list = R.list();
   const i = list.findIndex((x: any) => x.id === meta.id);
   if (i >= 0) {
+    meta = { ...list[i], ...meta };
     if (!meta.thumb && list[i].thumb) meta.thumb = list[i].thumb;
     list[i] = meta;
   } else list.unshift(meta);
@@ -176,7 +177,7 @@ R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, getState = R.get
     const project = R.unwrap(get(item.id));
     if (project && Array.isArray(project.layers)) return project;
   }
-  const ids = [...tabs, ...metas.map((m: any) => m.id).filter((id: any) => !tabs.includes(id))];
+  const ids = [...new Set([...tabs, ...metas.map((m: any) => m.id)])];
   let namedEmpty = null;
   for (const id of ids) {
     const p = R.unwrap(get(id));
@@ -232,7 +233,9 @@ R.destroy = (id: any) => {
 /* ── open-tab bookkeeping ──────────────────────────────── */
 R.tabs = () => {
   const t = PM.store.get(R.openKey, []);
-  return Array.isArray(t) ? t.filter((id: any) => R.list().some((m: any) => m.id === id)) : [];
+  if (!Array.isArray(t)) return [];
+  const known = new Set(R.list().map((m: any) => m?.id));
+  return [...new Set(t)].filter(id => typeof id === 'string' && known.has(id));
 };
 R.markOpen = (id: any) => {
   const t = R.tabs();
@@ -240,7 +243,7 @@ R.markOpen = (id: any) => {
      A genuinely new open is the only implicit ordering change, and it appends
      where the user can predictably find it. */
   if (!t.includes(id)) t.push(id);
-  PM.store.set(R.openKey, t.slice(0, 8));
+  PM.store.set(R.openKey, t);
 };
 R.markClosed = (id: any) => PM.store.set(R.openKey, R.tabs().filter((x: any) => x !== id));
 

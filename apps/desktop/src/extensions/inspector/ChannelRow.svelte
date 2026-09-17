@@ -320,9 +320,11 @@
       {/if}
       {#snippet action()}
         {#if isScale}
-          <button type="button" class="kf link-axes" class:on={scaleLinked} aria-label="Link Scale X and Y" aria-pressed={scaleLinked}
-            title={scaleLinked ? 'Adjust X and Y separately' : 'Adjust X and Y together · preserve proportions'}
-            onclick={() => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}><Icon name="link" /></button>
+          <button type="button" class="kf link-axes" class:on={scaleLinked} aria-label="Lock aspect ratio" aria-pressed={scaleLinked}
+            title={scaleLinked ? 'Unlock aspect ratio' : 'Lock aspect ratio'}
+            onclick={() => inspectorEdit.apply({ type: 'set_layer', target: layer.id, patch: { scaleLinked: !scaleLinked } }, { label: 'Link scale axes', origin: 'inspector' })}>
+            <Icon name="aspectRatio" />
+          </button>
         {/if}
       {/snippet}
     </Row>
@@ -334,10 +336,16 @@
 <style>
   .link-axes {
     position: static;
-    color: var(--tx-4);
+    width: 20px;
+    height: 20px;
+    display: grid;
+    place-items: center;
+    color: var(--tx-3);
+    background: var(--ink-1);
     border-radius: var(--r-xs);
   }
   .link-axes:hover { color: var(--tx-2); background: var(--ink-1); }
-  .link-axes.on { color: var(--accent); }
-  .link-axes :global(svg) { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  .link-axes.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .link-axes:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .link-axes :global(svg) { width: 16px; height: 16px; }
 </style>

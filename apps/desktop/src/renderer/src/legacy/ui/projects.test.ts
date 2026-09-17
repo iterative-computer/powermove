@@ -106,7 +106,7 @@ describe('legacy projects screen install', () => {
     PM.ProjectsScreen.show('projects');
     const text = elements.flatMap(el => el.children).filter(value => typeof value === 'string');
     expect(elements.some(el => el.attrs.placeholder === 'Search projects')).toBe(true);
-    expect(text).toContain('All Projects');
+    expect(text).not.toContain('All Projects');
     expect(text).toContain('Recently edited');
     expect(text).toContain('Open Project…');
     expect(text.some(value => value.includes('Unsaved changes · Hero.pmv'))).toBe(true);

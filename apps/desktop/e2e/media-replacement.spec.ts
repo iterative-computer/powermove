@@ -2,8 +2,71 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test, chooseNativeMenu } from './helpers/app';
 import { importFixture } from './helpers/media';
+import { MEDIA_ACCEPT } from '../src/shared/media-formats';
 
 test.beforeEach(async ({ session }) => { await session.openEditor(); });
+
+test('replacement uses the import picker, progress, and image sequence flow', async ({ session }) => {
+  const { page } = session;
+  await importFixture(page, 'h264-aac.mp4');
+  await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'h264-aac.mp4'));
+  const before = await page.evaluate(() => {
+    const PM = (window as any).PM;
+    return { id: PM.proj.layers.find((l: any) => l.name === 'h264-aac.mp4').d.asset, layers: JSON.stringify(PM.proj.layers), count: Object.keys(PM.proj.assets).length };
+  });
+  const frames = [await imageFile(page, session.userData, 'frame_01.png', 'red'), await imageFile(page, session.userData, 'frame_02.png', 'blue')];
+  const chooser = page.waitForEvent('filechooser');
+  await chooseNativeMenu(session, 'Replace File…', () => page.locator('.asset-card').filter({ hasText: 'h264-aac.mp4' }).click({ button: 'right' }));
+  const picker = await chooser;
+  expect(picker.isMultiple()).toBe(true);
+  expect(await picker.element().getAttribute('accept')).toBe(MEDIA_ACCEPT);
+  expect(MEDIA_ACCEPT).toContain('.gif');
+  await picker.setFiles(frames);
+  const dialog = page.getByRole('dialog', { name: 'Import image sequence', exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('spinbutton', { name: 'Sequence frame rate' }).fill('12');
+  await page.evaluate(() => {
+    const PM = (window as any).PM, original = PM.MediaStore.put;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    PM.MediaStore.put = async (...args: any[]) => { await gate; return original(...args); };
+    (window as any).releaseReplacement = () => { PM.MediaStore.put = original; release(); };
+  });
+  await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
+  const progress = page.getByRole('region', { name: 'Importing image sequence', exact: true });
+  await expect(progress).toContainText('Saving media · frame sequence.webm');
+  await progress.screenshot({ path: test.info().outputPath('replacement-progress.png') });
+  expect(await page.evaluate(id => (window as any).PM.proj.assets[id].name, before.id)).toBe('h264-aac.mp4');
+  await page.evaluate(async () => { (window as any).releaseReplacement(); await (window as any).PM.app.importQueue; });
+  await expect(progress).toHaveCount(0);
+  expect(await page.evaluate(id => {
+    const PM = (window as any).PM;
+    return { name: PM.proj.assets[id].name, sequence: PM.proj.assets[id].imageSequence, layers: JSON.stringify(PM.proj.layers), count: Object.keys(PM.proj.assets).length };
+  }, before.id)).toEqual({ name: 'frame sequence.webm', sequence: { fps: 12, frames: 2 }, layers: before.layers, count: before.count });
+  await page.evaluate(() => (window as any).PM.hist.undo());
+  expect(await page.evaluate(id => (window as any).PM.proj.assets[id].name, before.id)).toBe('h264-aac.mp4');
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('replacement picker remains bound to its original project', async ({ session }) => {
+  const { page } = session;
+  await importFixture(page, 'tone.wav');
+  await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'tone.wav'));
+  const chooser = page.waitForEvent('filechooser');
+  await chooseNativeMenu(session, 'Replace File…', () => page.locator('.asset-card').filter({ hasText: 'tone.wav' }).click({ button: 'right' }));
+  const picker = await chooser;
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Another project' }) }));
+  });
+  await picker.setFiles(path.join(__dirname, './fixtures/tone.mp3'));
+  await page.evaluate(() => (window as any).PM.app.importQueue);
+  expect(await page.evaluate(() => Object.keys((window as any).PM.proj.assets))).toEqual([]);
+  await expect(page.locator('.import-progress')).toHaveCount(0);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+  // Project-close behavior is covered separately; finish this isolated picker session.
+  await session.app.evaluate(({ app }) => app.exit(0)).catch(() => undefined);
+});
 
 async function imageFile(page: any, directory: string, name: string, color: string) {
   const encoded = await page.evaluate((fill: string) => {
@@ -98,6 +161,10 @@ test('replacement picker cancellation and unreadable or incompatible files leave
     return { project: JSON.stringify(PM.proj), runtimeName: PM.assets.get(id)?.name };
   }, before.id);
   expect(outcomes).toEqual({ project: before.project, runtimeName: 'tone.wav' });
+  await page.evaluate(id => (window as any).PM.importFiles([new File(['invalid'], 'broken.wav', { type: 'audio/wav' })], { replaceAssetId: id }), before.id);
+  expect(await page.evaluate(() => JSON.stringify((window as any).PM.proj))).toBe(before.project);
+  await expect(page.locator('.import-progress')).toHaveCount(0);
+  expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
 for (const media of [{ original: 'tone.wav', replacement: 'tone.mp3', kind: 'audio' }, { original: 'h264-aac.mp4', replacement: 'vp8-opus.webm', kind: 'video' }]) {

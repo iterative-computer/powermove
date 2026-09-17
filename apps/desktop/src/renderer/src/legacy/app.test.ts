@@ -489,6 +489,19 @@ describe('legacy app install', () => {
     expect(toasts.at(-1)).toMatch(/switched projects/);
   });
 
+  it('rejects multiple replacement files and project files without mutating the project', async () => {
+    const { PM, toasts } = appRegistry();
+    PM.proj.assets = { original: { id: 'original', name: 'Original.png', kind: 'image' } };
+    const before = JSON.stringify(PM.proj);
+    const importBatch = PM.assets.importBatch = vi.fn();
+    await PM.importFiles([{ name: 'A.png' }, { name: 'B.png' }], { replaceAssetId: 'original', sequence: false });
+    expect(toasts.at(-1)).toContain('Choose one file or one image sequence');
+    await PM.importFiles([{ name: 'Another.pmv' }], { replaceAssetId: 'original' });
+    expect(toasts.at(-1)).toContain('Choose a media file');
+    expect(importBatch).not.toHaveBeenCalled();
+    expect(JSON.stringify(PM.proj)).toBe(before);
+  });
+
   it('cancels the APP-owned autosave timer before unload persistence', () => {
     const { PM, listeners, timers, clearedTimers } = appRegistry();
     PM.autosave();

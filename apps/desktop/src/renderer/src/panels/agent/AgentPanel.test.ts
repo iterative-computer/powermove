@@ -359,6 +359,55 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
   });
 
+  it('releases composer focus before another surface consumes a pointer interaction', () => {
+    renderPanel(snapshot({ composerDraft: 'Keep this draft' }));
+    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const canvas = document.createElement('canvas');
+    target.append(canvas);
+    const focusedAtPointer = vi.fn();
+    canvas.addEventListener('pointerdown', event => {
+      focusedAtPointer(document.activeElement === textarea);
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    for (const button of [0, 1]) {
+      flushSync(() => textarea.focus());
+      canvas.dispatchEvent(new PointerEvent('pointerdown', { button, bubbles: true, cancelable: true }));
+      expect(document.activeElement).not.toBe(textarea);
+    }
+    expect(focusedAtPointer.mock.calls).toEqual([[false], [false]]);
+    expect(textarea.value).toBe('Keep this draft');
+    expect(agentState.composerDraft).toBe('Keep this draft');
+  });
+
+  it('keeps composer interactions and context clicks from dismissing the draft focus', () => {
+    renderPanel(snapshot({ composerDraft: 'Keep this draft' }));
+    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    flushSync(() => textarea.focus());
+    for (const element of [textarea, target.querySelector('.agent-send')!]) {
+      element.dispatchEvent(new PointerEvent('pointerdown', { button: 0, bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(textarea);
+    }
+    target.dispatchEvent(new PointerEvent('pointerdown', { button: 2, bubbles: true, cancelable: true }));
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('leaves the composer on Escape after dismissing slash commands', () => {
+    renderPanel(snapshot({ composerDraft: '/' }));
+    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    flushSync(() => textarea.focus());
+    const escape = () => flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape', bubbles: true, cancelable: true
+    })));
+    escape();
+    expect(target.querySelector('.agent-slash-menu')).toBeNull();
+    expect(document.activeElement).toBe(textarea);
+    escape();
+    expect(document.activeElement).not.toBe(textarea);
+    expect(textarea.value).toBe('/');
+    expect(PM.AgentUI.submit).not.toHaveBeenCalled();
+  });
+
   it('renders steering as a compact continuation of the active user request', () => {
     renderPanel(snapshot({
       legacyPhase: 'working',

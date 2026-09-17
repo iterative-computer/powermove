@@ -1,9 +1,10 @@
+import { AUDIO_EXTENSIONS as ACCEPTED_EXTENSIONS } from '../../../../shared/media-formats';
 import { evaluatedValue, isProperty, resolveContent } from './content-properties';
 /* Ported from js/core/audio.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
 export function install(PM: PMRegistry): void {
-const AUDIO_EXTENSIONS: any = new Set(['wav', 'mp3', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'aif', 'aiff']);
+const AUDIO_EXTENSIONS: any = new Set<string>(ACCEPTED_EXTENSIONS);
 const MAX_DECODED_BYTES: any = PM.Memory?.budget?.('audio') || 256 * 1024 * 1024;
 const MAX_PRECOMP_DEPTH: any = 8;
 const LIVE_LOOKAHEAD: any = 1;

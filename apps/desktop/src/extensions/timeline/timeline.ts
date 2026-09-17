@@ -346,6 +346,19 @@ export function pickKeyframeHit<T extends { i?: string }>(
   return hits.find((key) => keyMembers(key).some(member => selected.has(member.key.i))) || hits[0]!;
 }
 
+const GRAPH_POINT_HIT = 8;
+const GRAPH_HANDLE_HIT = 7;
+/** Bias for overlapping graph targets: a key point outranks a handle unless the
+    handle is clearly the closer target. Handles collapse onto their key on flat
+    or near-vertical segments, where grabbing the handle silently reshapes the
+    curve instead of moving the key the user aimed at. */
+const GRAPH_POINT_BIAS = 4;
+export function preferGraphPoint(pointDistance: number, handleDistance: number): boolean {
+  if (!(pointDistance < GRAPH_POINT_HIT)) return false;
+  if (!(handleDistance < GRAPH_HANDLE_HIT)) return true;
+  return handleDistance + GRAPH_POINT_BIAS >= pointDistance;
+}
+
 export const timelinePanelOptions = {
   title: 'Timeline', flush: true, noscroll: true, headless: true, size: 340, moveSlot: '#tl-head',
   library: { width: 800, height: 440 },
@@ -736,7 +749,6 @@ function buildRows() {
     const L = layers[i];
     const ancestors = api.groups.ancestors(L) || [];
     if (!T.search && ancestors.some((group: any) => api.uiState.getGroupCollapsed(group))) continue;
-    if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
     const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
     if (query && !L.name.toLowerCase().includes(query) && !matching.length) continue;
@@ -1489,11 +1501,18 @@ function icoAnimationDiamond(c: any, x: number, y: number, animated: boolean, cu
   c.beginPath(); c.moveTo(x, y - 5); c.lineTo(x + 4, y); c.lineTo(x, y + 5); c.lineTo(x - 4, y); c.closePath();
   if (current) c.fill(); else c.stroke(); c.restore();
 }
+let scaleLinkPaths: Path2D[] | null = null;
 function icoScaleLink(c: any, x: number, y: number, linked: boolean) {
-  c.save(); c.translate(x, y); c.rotate(-Math.PI / 4);
-  c.strokeStyle = linked ? theme.accent : theme.tx3; c.lineWidth = 1.3;
-  roundRect(c, -7, -4, 9, 5, 2.5); c.stroke();
-  roundRect(c, -2, -1, 9, 5, 2.5); c.stroke();
+  // Canvas and Properties consume the same Phosphor glyph from the app registry.
+  scaleLinkPaths ??= Array.from(iconNode(api, 'aspectRatio').querySelectorAll('path'), path => new Path2D(path.getAttribute('d') ?? ''));
+  c.save(); c.translate(x, y);
+  c.fillStyle = linked ? theme.accent : INK.over;
+  if (linked) c.globalAlpha = .14;
+  roundRect(c, -10, -10, 20, 20, 4); c.fill();
+  c.globalAlpha = 1;
+  c.fillStyle = linked ? theme.accent : theme.tx3;
+  c.translate(-8, -8); c.scale(16 / 256, 16 / 256);
+  for (const path of scaleLinkPaths) c.fill(path);
   c.restore();
 }
 function drawKeyArrow(c: any, x: number, y: number, direction: number, enabled: boolean) {
@@ -1900,14 +1919,15 @@ function onMove(e: any) {
   if (T.graph && x > T.gut && y >= T.ruler) {
     const graph = T._graph;
     const keys = graph?.series?.flatMap((axis: any) => axis.prop.kf) ?? [];
-    const nearHandle = keys.some((key: any) => {
+    const distanceTo = (point: any) => point ? Math.hypot(x - point[0], y - point[1]) : Infinity;
+    const handleDistance = Math.min(...keys.map((key: any) => {
       const handles = keyHandles(key);
-      return [handles?.ho, handles?.hi].some((point: any) => point && Math.hypot(x - point[0], y - point[1]) < 7);
-    });
-    const nearPoint = keys.some((key: any) => {
-      const point = keyHandles(key)?.pt;
-      return point && Math.hypot(x - point[0], y - point[1]) < 8;
-    });
+      return Math.min(distanceTo(handles?.ho), distanceTo(handles?.hi));
+    }), Infinity);
+    const pointDistance = Math.min(...keys.map((key: any) => distanceTo(keyHandles(key)?.pt)), Infinity);
+    // Same precedence as graphDown, so the cursor never promises a handle the click gives to the point.
+    const nearPoint = preferGraphPoint(pointDistance, handleDistance);
+    const nearHandle = !nearPoint && handleDistance < GRAPH_HANDLE_HIT;
     T.cv.style.cursor = nearHandle ? 'crosshair'
       : pointInGraphSelection(graph?.selectionBounds, x, y) ? 'move'
       : nearPoint ? 'pointer' : 'crosshair';
@@ -1941,7 +1961,7 @@ function onMove(e: any) {
     } else if (row?.kind === 'prop' && !row.L.lock) {
       if (isScaleTrack(row) && x >= T.gut - 24) {
         cur = 'pointer';
-        title = row.L.scaleLinked ? 'Adjust Scale X and Y separately' : 'Link Scale X and Y';
+        title = row.L.scaleLinked ? 'Unlock aspect ratio' : 'Lock aspect ratio';
       } else if (x >= 76 && x < 96) cur = 'pointer';
       else if (x >= T.propertyValueX - 4) cur = trackChannels(row).every(axis => typeof api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key) === 'number') ? 'ew-resize' : 'pointer';
     }
@@ -2183,16 +2203,28 @@ function isScaleTrack(row: any) {
   return row?.key === 'scale' && trackChannels(row).length === 2;
 }
 
+function scaleValueIndex(x: number) {
+  const columns = propertyValueColumns(T.propertyValueX, T.gut, 2, 24);
+  return x < (columns[0]!.right + columns[1]!.left) / 2 ? 0 : 1;
+}
+
+function scaleValueCommand(row: any, index: number, time: number) {
+  const binding = api.ui.controls.binding.channelBinding(row.L.id, trackChannels(row)[index]!.key, { time });
+  if (binding.mode !== 'command') throw new Error('Scale requires a channel command binding');
+  // Share the inspector's ratio snapshot, paired keyframes, and zero handling.
+  binding.prepare?.();
+  return (value: number) => typeof binding.command === 'function' ? binding.command(value) : { ...binding.command, value };
+}
+
 function dragPropertyValue(event: any, row: any, rowIndex: number) {
   let axes = trackChannels(row).map(axis => ({ ...axis, value: api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key), meta: propertyMetadata(api, row.L, axis.key) }));
+  const scaleIndex = isScaleTrack(row) ? scaleValueIndex(event.offsetX) : 0;
   if (!axes.every(axis => typeof axis.value === 'number')) {
-    editPropertyValue(row, rowIndex); return;
-  }
-  if (row.channels && !row.L.scaleLinked) {
-    const index = Math.min(axes.length - 1, Math.max(0, Math.floor((event.offsetX - T.propertyValueX) / ((T.gut - T.propertyValueX - 8) / axes.length))));
-    axes = [axes[index]];
+    editPropertyValue(row, rowIndex, scaleIndex); return;
   }
   const time = api.transport.time();
+  const scaleCommand = isScaleTrack(row) ? scaleValueCommand(row, scaleIndex, time) : null;
+  if (scaleCommand) axes = [axes[scaleIndex]!];
   let editing = false;
   let control: any;
   const cancelOnEscape = (event: KeyboardEvent) => {
@@ -2207,34 +2239,37 @@ function dragPropertyValue(event: any, row: any, rowIndex: number) {
     move: (dx: number, _dy: number, ev: any) => {
       if (!editing && Math.abs(dx) < 3) return;
       if (!editing) { api.edit.begin(`Adjust ${row.label}`, { origin: 'timeline' }); editing = true; }
-      axes.forEach((axis, index) => {
-        const delta = draggedPropertyValue(axes[0].value, dx, axes[0].meta, !!ev.altKey, !!ev.shiftKey) - axes[0].value;
-        const value = row.channels && row.L.scaleLinked && index > 0
-          ? axis.value + delta * (axes[0].value ? axis.value / axes[0].value : 1)
-          : draggedPropertyValue(axis.value, dx, axis.meta, !!ev.altKey, !!ev.shiftKey);
-        api.edit.dispatch({ type: 'set_property', target: row.L.id, path: axis.key, value, time, mode: 'auto', preserveHandEdits: false });
+      axes.forEach(axis => {
+        const value = draggedPropertyValue(axis.value, dx, axis.meta, !!ev.altKey, !!ev.shiftKey);
+        if (scaleCommand) {
+          const commands = scaleCommand(value);
+          for (const command of Array.isArray(commands) ? commands : [commands]) api.edit.dispatch(command);
+        } else api.edit.dispatch({ type: 'set_property', target: row.L.id, path: axis.key, value, time, mode: 'auto', preserveHandEdits: false });
       });
       invalidate();
     },
-    up: () => { cleanup(); if (editing) api.edit.commit(`Adjust ${row.label}`); else editPropertyValue(row, rowIndex); },
+    up: () => { cleanup(); if (editing) api.edit.commit(`Adjust ${row.label}`); else editPropertyValue(row, rowIndex, scaleIndex); },
     cancel: () => { cleanup(); if (editing) api.edit.cancel(); }
   });
 }
 
-function editPropertyValue(row: any, rowIndex: number) {
+function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
   if (row.L.lock) return;
-  const axes = trackChannels(row);
+  const scale = isScaleTrack(row);
+  const axes = scale ? [trackChannels(row)[scaleIndex]!] : trackChannels(row);
   const values = axes.map(axis => api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key));
   const time = api.transport.time();
+  const scaleCommand = scale ? scaleValueCommand(row, scaleIndex, time) : null;
+  const column = scale ? propertyValueColumns(T.propertyValueX, T.gut, 2, 24)[scaleIndex]! : null;
   const choices: Record<string, readonly string[]> = {
     'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
     'c.fit': ['cover', 'contain', 'stretch']
   };
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
-  const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': row.label,
-    style: { position: 'absolute', left: `${T.propertyValueX}px`, top: `${rowY(rowIndex) + 3}px`,
-      width: `${T.gut - T.propertyValueX - 6}px`, height: `${T.row - 6}px`, background: 'var(--bg-row)',
+  const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': scale ? `Scale ${scaleIndex === 0 ? 'X' : 'Y'}` : row.label,
+    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${rowY(rowIndex) + 3}px`,
+      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${T.row - 6}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: '0 4px', zIndex: 9 } });
   if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
   else if (typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0])) input.type = 'color';
@@ -2246,7 +2281,7 @@ function editPropertyValue(row: any, rowIndex: number) {
     if (save) {
       const parts = axes.length > 1 ? input.value.split(',').map((value: string) => value.trim()) : [input.value];
       const next = values.map((value, index) => typeof value === 'number' ? Number(parts[index] ?? parts[0]) : typeof value === 'boolean' ? parts[index] === 'true' : parts[index]);
-      if (next.every(value => typeof value !== 'number' || Number.isFinite(value))) api.edit.apply(axes.map((axis, index) => ({
+      if (next.every(value => typeof value !== 'number' || Number.isFinite(value))) api.edit.apply(scaleCommand ? scaleCommand(Number(next[0])) : axes.map((axis, index) => ({
         type: 'set_property', target: row.L.id, path: axis.key, value: next[index], time, mode: 'auto', preserveHandEdits: false
       })), { label: `Edit ${row.label}`, origin: 'timeline' });
     }
@@ -2268,7 +2303,7 @@ function gutterDown(e: any, x: any, y: any) {
     api.selection.select(r.L.id); T.keySelectionActive = true; invalidate('timeline');
     if (r.prop.kf.length && x >= 16 && x < 64) { navigateKeyframe(x < 40 ? -1 : 1, r); return; }
     if (r.L.lock) return;
-    if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(api, r.L); return; }
+    if (isScaleTrack(r) && x >= T.gut - 24) { toggleTimelineScaleLink(api, r.L); onMove(e); return; }
     if (x >= 76 && x < 96) { togglePropertyAnimation(r); return; }
     if (x >= T.propertyValueX - 4) dragPropertyValue(e, r, hr.i);
     return;
@@ -2578,20 +2613,23 @@ function graphDown(e: any, x: any, y: any) {
     return { ...item, i: item.key.i, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
   }).sort((a, b) => a.distance - b.distance);
   const closestDistance = pointHits[0]?.distance ?? Infinity;
-  const pointHit = pickKeyframeHit(pointHits.filter(item => item.distance <= closestDistance + 1), api.selection.keys(), item => item.distance, 8) ?? pointHits[0];
-  if (!pointHit || pointHit.distance >= 6) {
+  const pointHit = pickKeyframeHit(pointHits.filter(item => item.distance <= closestDistance + 1), api.selection.keys(), item => item.distance, GRAPH_POINT_HIT) ?? pointHits[0];
+  const pointDistance = pointHit?.distance ?? Infinity;
+  {
     const handles = points.flatMap(item => (['eo', 'ei'] as const).map(which => {
       const pt = keyHandles(item.key)?.[which === 'eo' ? 'ho' : 'hi'];
       return { ...item, which, distance: pt ? Math.hypot(x - pt[0], y - pt[1]) : Infinity };
     })).sort((a, b) => a.distance - b.distance);
     const nearest = handles[0]?.distance ?? Infinity;
     const handle = handles.find(item => item.distance <= nearest + 1 && api.selection.keys().includes(item.key.i)) ?? handles[0];
-    if (handle && handle.distance < 7) return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L, handle.axis);
+    if (handle && handle.distance < GRAPH_HANDLE_HIT && !preferGraphPoint(pointDistance, handle.distance)) {
+      return dragHandle(e, handle.key, handle.which, g, handle.axis.prop.kf, handle.axis.L, handle.axis);
+    }
   }
-  if ((!pointHit || pointHit.distance >= 8) && pointInGraphSelection(g.selectionBounds, x, y)) {
+  if (pointDistance >= GRAPH_POINT_HIT && pointInGraphSelection(g.selectionBounds, x, y)) {
     return dragGraphSelection(e, g, L);
   }
-  if (!pointHit || pointHit.distance >= 8) return marquee(e, { additive: e.shiftKey || e.metaKey, graph: true });
+  if (!pointHit || pointDistance >= GRAPH_POINT_HIT) return marquee(e, { additive: e.shiftKey || e.metaKey, graph: true });
   L = pointHit.axis.L;
   const hit = pointHit.key;
   const additive = e.shiftKey || e.metaKey;

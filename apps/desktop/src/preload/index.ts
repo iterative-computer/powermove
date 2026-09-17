@@ -27,6 +27,7 @@ import {
   type ExtensionsChangedEvent
 } from '../shared/extensions';
 
+let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
   compatible: {
     status: () => ipcRenderer.invoke(IPC.compatibleStatus),
@@ -85,10 +86,35 @@ const bridge: PowermoveBridge = {
         name: file.name
       }) as Promise<MediaProxyResult>;
     },
-    createImageSequence: (files, fps) => {
+    createImageSequence: async (files, fps, onProgress) => {
       const sourcePaths = files.map(file => webUtils.getPathForFile(file));
-      if (sourcePaths.some(source => !source)) return Promise.resolve({ ok: false, error: 'The original image files are no longer available' });
-      return ipcRenderer.invoke(IPC.mediaSequenceCreate, { sourcePaths, fps }) as Promise<MediaProxyResult>;
+      if (sourcePaths.some(source => !source)) return { ok: false, error: 'The original image files are no longer available' };
+      const requestId = `sequence-${Date.now()}-${++nextMediaRequest}`;
+      const listener = (_event: IpcRendererEvent, progress: { requestId: string; completed: number }) => {
+        if (progress.requestId === requestId) onProgress?.(progress.completed);
+      };
+      ipcRenderer.on(IPC.mediaSequenceProgress, listener);
+      try {
+        return await ipcRenderer.invoke(IPC.mediaSequenceCreate, { sourcePaths, fps, requestId }) as MediaProxyResult;
+      } finally { ipcRenderer.removeListener(IPC.mediaSequenceProgress, listener); }
+    },
+    beginAnimation: (fps, repeats) => ipcRenderer.invoke(IPC.mediaAnimationBegin, { fps, repeats }) as Promise<string>,
+    writeAnimationFrame: (token, index, offset, data) =>
+      ipcRenderer.invoke(IPC.mediaAnimationFrame, { token, index, offset, data }) as Promise<void>,
+    finishAnimation: async (token, onProgress) => {
+      const requestId = `animation-${Date.now()}-${++nextMediaRequest}`;
+      const listener = (_event: IpcRendererEvent, progress: { requestId: string; completed: number }) => {
+        if (progress.requestId === requestId) onProgress?.(progress.completed);
+      };
+      ipcRenderer.on(IPC.mediaAnimationProgress, listener);
+      try {
+        return await ipcRenderer.invoke(IPC.mediaAnimationFinish, { token, requestId }) as MediaProxyResult;
+      } finally { ipcRenderer.removeListener(IPC.mediaAnimationProgress, listener); }
+    },
+    createStillImage: (file) => {
+      const sourcePath = webUtils.getPathForFile(file);
+      if (!sourcePath) return Promise.resolve({ ok: false, error: 'The original file is no longer available' });
+      return ipcRenderer.invoke(IPC.mediaImageCreate, { sourcePath, name: file.name }) as Promise<MediaProxyResult>;
     },
     readPlaybackProxy: (token, offset, length) =>
       ipcRenderer.invoke(IPC.mediaProxyRead, { token, offset, length }) as Promise<Uint8Array>,

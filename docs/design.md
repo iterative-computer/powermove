@@ -334,7 +334,7 @@ label?: string
 
 Selected segments are raised neutral surfaces. They are not accent-filled.
 
-Inside a dialog or overlay the control takes the Settings tab material: a `--bg-field` track with `--ctl-edge-inset`, 28px segments, and a `--bg-float` selected segment lifted by `--ctl-edge`.
+Inside a dialog or overlay, use filled tracks and neutral selected segments without resting outlines or inset shadows. The Library uses a `--bg-field` track and a `--bg-float` selected segment. Derive each segment radius from the track radius minus its padding, and retain a visible keyboard focus indicator.
 
 ### Section: `Section.svelte` / `.sec`
 
@@ -532,7 +532,11 @@ api.ui.modal({
 
 The modal owns scrim, focus trap, Escape, initial focus, `--r-xl`, floating shadow, body scroll, and action alignment. Use 400–540px for common dialogs. Put the primary action last. Do not use a modal for a reversible, low-risk action that can happen directly.
 
-Settings is the reference dialog, and every other popped surface follows it. Any sheet that floats over the app — including the full-overlay `#library-screen` — is `--bg-float` with `--r-xl` and `--shadow-float` and **no border**; the float shadow already carries the hairline. Its scrim is the modal's scrim (`rgb(var(--ink-rgb) / .32)` with a 3px blur, `rgb(0 0 0 / .5)` in dark), its title is `--fs-lg` semibold at `-.01em`, its view switcher is the Settings tab bar, and its fields are 32px `--bg-field` wells that show `--focus-ring` on focus. Do not give a floating surface its own scrim color, outline, field height, or focus treatment.
+Settings is a full-screen inset sheet. Retain its group, text-field, and button fills, but omit resting outlines around groups and controls. Keep keyboard focus visible. Nested Settings controls derive their corner radius from the group radius minus the row inset (`--sg-control-radius`).
+
+Floating dialogs use the shared modal material: `--bg-float` with `--r-xl`, `--shadow-float`, and **no border**; the float shadow already carries the hairline. Its scrim is the modal's scrim (`rgb(var(--ink-rgb) / .32)` with a 3px blur, `rgb(0 0 0 / .5)` in dark), its title is `--fs-lg` semibold at `-.01em`, its view switcher uses flat neutral fills, and its fields are borderless 32px `--bg-field` wells that show `--focus-ring` on focus. Do not give a floating surface its own scrim color, outline, field height, or focus treatment.
+
+Collection surfaces follow Settings' fill hierarchy: Library and command palette shells use the opaque equivalent of `--bg-content`, groups use `--bg-panel`, and nested controls use `--bg-float`. Workspace preview tiles use `--ink-1` to stay distinct in both themes. Workspace cards retain the Active label instead of outlining the card and every miniature panel. Their 16px outer radius minus the 10px inset gives nested tiles a 6px radius. Use tone changes for hover, and inset focus rings where clipping would hide an outer ring. Search controls in collection browsers and fields in New Composition and Export keep their backgrounds without decorative borders. Preserve meaningful selection, drag target, and color-swatch indicators.
 
 A dialog that can be reached from more than one place (menu item, shortcut, titlebar button) opens once. Reuse the open instance and move it to the requested tab instead of stacking a second copy — `PM.SettingsUI.open(tab)` is the reference.
 
@@ -632,7 +636,7 @@ Use preview-first UI when an operation is expensive, broad, generated, or hard t
 
 ### Loading and progress
 
-Use a restrained spinner, a changing status line, or the existing panel placement ghost. Loading overlays must not block interaction unless the underlying operation truly cannot be used. The UI placement ghost is click-through, and it stands exactly where the panel will: a new panel's ghost takes a real slot in its dock, so the surrounding panels settle into their final sizes while it is still being built, and a ghost for an existing panel is pinned inside that panel. It previews the shape that is coming — a panel header naming the work, then skeleton rows filling the height it was given — over a Motion GPU field: a slow flowing, breathing violet light that shares the shake ripple's palette. It falls back to the plain static card whenever WebGPU is unavailable or reduced motion is preferred.
+Use a restrained spinner, a changing status line, or the existing panel placement ghost. Loading overlays must not block interaction unless the underlying operation truly cannot be used. The UI placement ghost is click-through, and it stands exactly where the panel will: a new panel's ghost takes a real slot in its dock, so the surrounding panels settle into their final sizes while it is still being built, and a ghost for an existing panel is pinned inside that panel. It previews the shape that is coming — a panel header naming the work, then skeleton rows filling the height it was given — over a Motion GPU field: a slow flowing, breathing violet light that shares the spatial ripple's palette. It falls back to the plain static card whenever WebGPU is unavailable or reduced motion is preferred.
 
 Never show a decorative “sneak peek” that looks like generated content but is not real content.
 

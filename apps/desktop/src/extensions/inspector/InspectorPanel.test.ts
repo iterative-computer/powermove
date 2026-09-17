@@ -278,7 +278,8 @@ function setup(
     TYPE_META: { solid: { label: 'Solid' }, text: { label: 'Text' }, shape: { label: 'Shape' }, null: { label: 'Null' }, group: { label: 'Group', transform: true } },
     FX: {
       blur: { label: 'Gaussian Blur', group: 'Blur', params: [{ k: 'amount', label: 'Amount', step: 1, min: 0, max: 100 }] },
-      duotone: { label: 'Duotone', group: 'Color', params: [{ k: 'shadow', label: 'Shadow', type: 'color' }] }
+      duotone: { label: 'Duotone', group: 'Color', params: [{ k: 'shadow', label: 'Shadow', type: 'color' }] },
+      gradient: { label: 'Gradient Ramp', group: 'Generate', params: [{ k: 'radial', label: 'Radial', type: 'toggle' }] }
     },
     ICONS: Object.fromEntries(['layers', 'plus', 'clock', 'diamond', 'chev', 'eye', 'x'].map((name) => [name, '<path/>'])),
     sel: { layers: [...selected], keys: [], chan: null },
@@ -566,7 +567,10 @@ describe('InspectorPanel', () => {
     expect(row.getAttribute('aria-label')).toBe('Scale property');
     expect(row.querySelectorAll('[role="spinbutton"]')).toHaveLength(2);
     expect(target.querySelector('[data-channel="scale.y"]')).toBeNull();
-    const link = row.querySelector<HTMLButtonElement>('[aria-label="Link Scale X and Y"]')!;
+    const link = row.querySelector<HTMLButtonElement>('[aria-label="Lock aspect ratio"]')!;
+    expect(link.querySelector('[data-icon="aspectRatio"]')).not.toBeNull();
+    expect(link.title).toBe('Unlock aspect ratio');
+    expect(link.getAttribute('aria-pressed')).toBe('true');
     link.click();
     expect(apply).toHaveBeenCalledExactlyOnceWith(
       { type: 'set_layer', target: 'A', patch: { scaleLinked: false } },
@@ -583,6 +587,7 @@ describe('InspectorPanel', () => {
     expect(labelledSpinbutton('Scale X').value).toBe('180%');
     expect(labelledSpinbutton('Scale Y').value).toBe('90%');
     expect(link.getAttribute('aria-pressed')).toBe('false');
+    expect(link.title).toBe('Lock aspect ratio');
     candidate.scaleLinked = true;
     bump('values');
     flushSync();
@@ -903,11 +908,12 @@ describe('InspectorPanel', () => {
     );
   });
 
-  it('exposes direct keyframe controls for numeric and color effect parameters', () => {
+  it('exposes direct keyframe controls for numeric, color, and toggle effect parameters', () => {
     const candidate = layer('A');
     candidate.fx.push(
       { id: 'fx-blur', type: 'blur', on: true, p: { amount: { v: 5, kf: [], expr: null } } },
-      { id: 'fx-duotone', type: 'duotone', on: true, p: { shadow: { v: '#1B2A4A', kf: [], expr: null } } }
+      { id: 'fx-duotone', type: 'duotone', on: true, p: { shadow: { v: '#1B2A4A', kf: [], expr: null } } },
+      { id: 'fx-gradient', type: 'gradient', on: true, p: { radial: { v: false, kf: [], expr: null } } }
     );
     const { apply, runtime } = setup([candidate], ['A'], { fxOpen: true });
     runtime.findProp = (_layer: any, path: string) => { const [id, key] = path.split('.'); return candidate.fx.find((fx: any) => fx.id === id)?.p[key!]; };
@@ -924,6 +930,18 @@ describe('InspectorPanel', () => {
     shadow!.click();
     expect(apply).toHaveBeenCalledWith([expect.objectContaining({type:'set_property',path:'fx-blur.amount',value:5,mode:'keyframe',time:2})],expect.objectContaining({origin:'inspector'}));
     expect(apply).toHaveBeenCalledWith([expect.objectContaining({ type: 'set_property', path: 'fx-duotone.shadow', value: '#1B2A4A', mode: 'keyframe', time: 2 })], expect.objectContaining({ origin: 'inspector' }));
+
+    /* Toggle params get a switch rather than a numeric scrubber. */
+    const radial = target.querySelector<HTMLButtonElement>('[aria-label="Add keyframe for Radial"]');
+    expect(radial).not.toBeNull();
+    const radialRow = [...target.querySelectorAll<HTMLElement>('.row')]
+      .find((row) => row.querySelector('.k')?.textContent === 'Radial');
+    apply.mockClear();
+    radialRow!.querySelector<HTMLButtonElement>('button.toggle')!.click();
+    expect(apply).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'set_property', path: 'fx-gradient.radial', value: true }),
+      expect.objectContaining({ origin: 'inspector' })
+    );
   });
 
   it('uses set_effect for toggles and exposes one controlled expansion button', () => {

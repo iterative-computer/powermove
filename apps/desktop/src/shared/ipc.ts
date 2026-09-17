@@ -34,6 +34,12 @@ export const IPC = {
   mediaPreviewChunk: 'media-preview:chunk',
   mediaPreviewFinish: 'media-preview:finish',
   mediaSequenceCreate: 'media-sequence:create',
+  mediaSequenceProgress: 'media-sequence:progress',
+  mediaAnimationBegin: 'media-animation:begin',
+  mediaAnimationFrame: 'media-animation:frame',
+  mediaAnimationFinish: 'media-animation:finish',
+  mediaAnimationProgress: 'media-animation:progress',
+  mediaImageCreate: 'media-image:create',
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
   mediaRevealSource: 'media:reveal-source',
@@ -161,7 +167,7 @@ export interface MediaProxyRequest {
   name: string;
 }
 export type MediaProxyResult =
-  | { ok: true; token: string; type: 'video/webm'; size: number }
+  | { ok: true; token: string; type: 'video/webm' | 'image/png'; size: number }
   | { ok: false; error: string };
 export interface MediaProxyReadRequest {
   token: string;
@@ -493,7 +499,13 @@ export interface PowermoveBridge {
     sourcePath(file: File): string | null;
     revealSource(sourcePath: string): Promise<void>;
     createPlaybackProxy(file: File): Promise<MediaProxyResult>;
-    createImageSequence(files: File[], fps: number): Promise<MediaProxyResult>;
+    createImageSequence(files: File[], fps: number, onProgress?: (completed: number) => void): Promise<MediaProxyResult>;
+    /** Encode frames the renderer decoded from an animated image into a proxy. */
+    beginAnimation(fps: number, repeats: number[]): Promise<string>;
+    writeAnimationFrame(token: string, index: number, offset: number, data: Uint8Array): Promise<void>;
+    finishAnimation(token: string, onProgress?: (completed: number) => void): Promise<MediaProxyResult>;
+    /** Convert a still Chromium cannot decode, such as TIFF or HEIC, to PNG. */
+    createStillImage(file: File): Promise<MediaProxyResult>;
     readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
     releasePlaybackProxy(token: string): Promise<void>;
   };

@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
 import { IPC } from '../shared/ipc';
-import { MAX_PROXY_CHUNK_BYTES, MediaProxyService, registerMediaProxyIpc } from './media-proxy';
+import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
+import { MAX_PROXY_CHUNK_BYTES, MediaProxyService, registerMediaProxyIpc, sequenceProgressReader } from './media-proxy';
 
 const roots: string[] = [];
 
@@ -62,6 +63,13 @@ describe('media playback proxies', () => {
 
 
 describe('native image sequence conversion', () => {
+  it('parses split FFmpeg frame updates without regressing or exceeding the frame count', () => {
+    const updates: number[] = [];
+    const read = sequenceProgressReader(3, completed => updates.push(completed));
+    read('frame=1\nfps=0\nfra');
+    read(Buffer.from('me=2\nframe=1\nframe=2\nframe=9\nprogress=end\n'));
+    expect(updates).toEqual([1, 2, 3]);
+  });
   it('packs sparse local frames consecutively and releases the generated clip', async () => {
     const { root } = await fixture();
     const first = path.join(root, "shot's 009.png"), second = path.join(root, "shot's 11.png");
@@ -141,4 +149,107 @@ it('allows preview uploads above 1 GB while retaining chunk validation and clean
     await expect(service.beginPreview(Infinity)).rejects.toThrow('Invalid');
   } finally { await service.dispose(); }
   expect(await readdir(root)).toEqual(before);
+});
+
+describe('animated image conversion', () => {
+  const frames = async (pattern: string, count: number) =>
+    Promise.all(Array.from({ length: count }, (_, index) =>
+      readFile(pattern.replace('%08d', String(index).padStart(8, '0')), 'utf8')));
+
+  it('holds each decoded frame for its own delay and releases the clip', async () => {
+    const { root } = await fixture();
+    const service = new MediaProxyService(root, async () => {}, async (pattern, fps, count, output, onProgress) => {
+      expect(fps).toBe(100);
+      expect(count).toBe(5);
+      // A frame that lasts three slots is simply written three times.
+      expect(await frames(pattern, count)).toEqual(['one', 'one', 'two', 'two', 'two']);
+      onProgress?.(5);
+      await writeFile(output, 'animation');
+    });
+
+    const progress: number[] = [];
+    const token = await service.beginAnimation(100, [2, 3]);
+    await service.writeAnimationFrame(token, 0, 0, Buffer.from('one'));
+    // Frames larger than one IPC chunk arrive in order and append.
+    await service.writeAnimationFrame(token, 1, 0, Buffer.from('tw'));
+    await service.writeAnimationFrame(token, 1, 2, Buffer.from('o'));
+    expect(await service.finishAnimation(token, completed => progress.push(completed))).toEqual({ token, size: 9 });
+    expect(progress).toEqual([5]);
+    expect(Buffer.from(await service.read(token, 0, 9)).toString()).toBe('animation');
+
+    await service.release(token);
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-animation-'))).toEqual([]);
+  });
+
+  it('rejects timing, chunks and frame counts it cannot encode, and cleans up after a failure', async () => {
+    const { root } = await fixture();
+    const service = new MediaProxyService(root, async () => {}, async () => { throw new Error('encode failed'); });
+
+    await expect(service.beginAnimation(0, [1])).rejects.toThrow('Frame rate');
+    await expect(service.beginAnimation(30, [])).rejects.toThrow('Invalid animation frame timing');
+    await expect(service.beginAnimation(30, [0])).rejects.toThrow('Invalid animation frame timing');
+    await expect(service.beginAnimation(30, [MAX_SEQUENCE_FRAMES, MAX_SEQUENCE_FRAMES]))
+      .rejects.toThrow('too many frames');
+
+    const token = await service.beginAnimation(30, [1, 1]);
+    await expect(service.writeAnimationFrame(token, 2, 0, Buffer.from('x'))).rejects.toThrow('Invalid animation frame chunk');
+    await expect(service.writeAnimationFrame(token, 0, 4, Buffer.from('x'))).rejects.toThrow('Invalid animation frame chunk');
+    await service.writeAnimationFrame(token, 0, 0, Buffer.from('x'));
+    await expect(service.finishAnimation(token)).rejects.toThrow('missing frames');
+    // An unfinished upload keeps its frames so the sender can still complete it.
+    await service.writeAnimationFrame(token, 1, 0, Buffer.from('x'));
+    await expect(service.finishAnimation(token)).rejects.toThrow('encode failed');
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-animation-'))).toEqual([]);
+  });
+
+  it('turns a conversion failure into a message instead of an unhandled IPC rejection', async () => {
+    const { root } = await fixture();
+    const service = new MediaProxyService(root, async () => {}, async () => { throw new Error('encode failed'); });
+    const handlers = new Map<string, (...args: any[]) => any>();
+    registerMediaProxyIpc({ handle: (channel: string, handler: (...args: any[]) => any) => handlers.set(channel, handler) } as unknown as IpcMain,
+      service, { isTrustedSender: () => true });
+    const event = { sender: { isDestroyed: () => true, send: () => undefined } } as unknown as IpcMainInvokeEvent;
+
+    const token = await handlers.get(IPC.mediaAnimationBegin)!(event, { fps: 30, repeats: [1] });
+    await handlers.get(IPC.mediaAnimationFrame)!(event, { token, index: 0, offset: 0, data: Buffer.from('x') });
+    expect(await handlers.get(IPC.mediaAnimationFinish)!(event, { token }))
+      .toEqual({ ok: false, error: 'Could not import this animation · encode failed' });
+    await expect(handlers.get(IPC.mediaAnimationFrame)!(event, { token: '../escape', index: 0, offset: 0, data: Buffer.from('x') }))
+      .rejects.toThrow(IPC.mediaAnimationFrame);
+  });
+});
+
+describe('still image conversion', () => {
+  it('converts a format Chromium cannot decode and releases the result', async () => {
+    const { root } = await fixture();
+    const source = path.join(root, 'photo.heic');
+    await writeFile(source, 'heif');
+    const service = new MediaProxyService(root, async () => {}, undefined, undefined, async (input, extension, output) => {
+      expect(await readFile(input, 'utf8')).toBe('heif');
+      expect(extension).toBe('heic');
+      await writeFile(output, 'png!');
+    });
+
+    const converted = await service.createStillImage(source);
+    expect(Buffer.from(await service.read(converted.token, 0, 4)).toString()).toBe('png!');
+    await service.release(converted.token);
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-image-'))).toEqual([]);
+  });
+
+  it('refuses formats that need no conversion and cleans up after a failed one', async () => {
+    const { root } = await fixture();
+    const png = path.join(root, 'already.png'), tiff = path.join(root, 'scan.tiff');
+    await writeFile(png, 'png'); await writeFile(tiff, 'tiff');
+    const service = new MediaProxyService(root, async () => {}, undefined, undefined,
+      async () => { throw new Error('convert failed'); });
+
+    await expect(service.createStillImage(png)).rejects.toThrow('does not need converting');
+    await expect(service.createStillImage('scan.tiff')).rejects.toThrow('does not need converting');
+    await expect(service.createStillImage(path.join(root, 'missing.tiff'))).rejects.toThrow();
+    await expect(service.createStillImage(tiff)).rejects.toThrow('convert failed');
+    expect((await readdir(root)).filter(name => name.startsWith('powermove-image-'))).toEqual([]);
+
+    const unavailable = new MediaProxyService(root, async () => {});
+    await expect(unavailable.createStillImage(tiff)).rejects.toThrow('unavailable');
+  });
 });

@@ -9,6 +9,7 @@ FFPROBE="/opt/homebrew/bin/ffprobe"
 AVCONVERT="/usr/bin/avconvert"
 SIPS="/usr/bin/sips"
 CWEBP="$(command -v cwebp || true)"
+IMG2WEBP="$(command -v img2webp || true)"
 MAX_BYTES=$((300 * 1024))
 
 if [[ ! -x "$FFMPEG" || ! -x "$FFPROBE" ]]; then
@@ -39,6 +40,8 @@ OUTPUTS=(
   prores422.mov prores4444-alpha.mov vp9-opus.webm vp8-opus.webm av1.mp4
   tone.wav tone.m4a tone.mp3 tone.opus tone.flac
   still-red.png still-alpha.png still.webp still.avif still.heic
+  animated.gif animated-apng.png animated.webp
+  still.tiff converted.mkv
 )
 rm -f -- "${OUTPUTS[@]}" fixtures.json.tmp
 
@@ -288,6 +291,15 @@ else
   still_avif_skip="AV1 encoder unavailable"
 fi
 
+still_tiff_skip=""
+still_tiff_generated=""
+if "$FFMPEG" -hide_banner -loglevel error -y -i still-red.png -frames:v 1 -update 1 -c:v tiff still.tiff; then
+  still_tiff_generated="ffmpeg tiff"
+else
+  still_tiff_skip="ffmpeg TIFF encoding failed"
+  rm -f -- still.tiff
+fi
+
 still_heic_skip=""
 still_heic_generated=""
 if [[ -x "$SIPS" ]]; then
@@ -300,6 +312,67 @@ if [[ -x "$SIPS" ]]; then
 else
   still_heic_skip="sips unavailable"
 fi
+
+converted_mkv_skip=""
+converted_mkv_generated=""
+if has_encoder libx264 && has_encoder aac; then
+  "$FFMPEG" -hide_banner -loglevel error -y "${COMMON_VIDEO_INPUT[@]}" \
+    -c:v libx264 -profile:v main -preset veryfast -crf 28 -pix_fmt yuv420p -g 30 \
+    -c:a aac -b:a 64k "${COMMON_AUDIO[@]}" -f matroska converted.mkv
+  converted_mkv_generated="ffmpeg libx264 + aac in Matroska"
+else
+  converted_mkv_skip="libx264 and/or aac encoder unavailable"
+fi
+
+# Animated stills: three 100 ms frames, red then green then blue, right half
+# transparent. Every one of these decodes through Chromium's ImageDecoder.
+ANIMATION_FRAMES="$SCRIPT_DIR/.animation-frames"
+rm -rf -- "$ANIMATION_FRAMES"
+mkdir -p "$ANIMATION_FRAMES"
+animation_index=1
+for animation_color in 0xff0000 0x00ff00 0x0000ff; do
+  "$FFMPEG" -hide_banner -loglevel error -y -f lavfi \
+    -i "color=c=$animation_color:s=160x90:d=1[base];color=c=white:s=160x90:d=1,format=gray,geq=lum='if(lt(X,W/2),255,0)'[alpha];[base][alpha]alphamerge,format=rgba" \
+    -map 0:v -frames:v 1 -c:v png -pix_fmt rgba "$ANIMATION_FRAMES/f-$animation_index.png"
+  animation_index=$((animation_index + 1))
+done
+
+animated_gif_skip=""
+animated_gif_generated=""
+if "$FFMPEG" -hide_banner -loglevel error -y -framerate 10 -i "$ANIMATION_FRAMES/f-%d.png" \
+    -filter_complex "split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128" \
+    -loop 0 animated.gif; then
+  animated_gif_generated="ffmpeg gif with reserved transparency"
+else
+  animated_gif_skip="ffmpeg GIF encoding failed"
+  rm -f -- animated.gif
+fi
+
+animated_apng_skip=""
+animated_apng_generated=""
+if "$FFMPEG" -hide_banner -loglevel error -y -framerate 10 -i "$ANIMATION_FRAMES/f-%d.png" \
+    -plays 0 -f apng animated-apng.png; then
+  animated_apng_generated="ffmpeg apng"
+else
+  animated_apng_skip="ffmpeg APNG encoding failed"
+  rm -f -- animated-apng.png
+fi
+
+animated_webp_skip=""
+animated_webp_generated=""
+if [[ -n "$IMG2WEBP" && -x "$IMG2WEBP" ]]; then
+  if "$IMG2WEBP" -lossless -d 100 -loop 0 \
+      "$ANIMATION_FRAMES/f-1.png" "$ANIMATION_FRAMES/f-2.png" "$ANIMATION_FRAMES/f-3.png" \
+      -o animated.webp >/dev/null 2>&1; then
+    animated_webp_generated="img2webp -lossless -d 100"
+  else
+    animated_webp_skip="img2webp is present but animated WebP encoding failed"
+    rm -f -- animated.webp
+  fi
+else
+  animated_webp_skip="img2webp unavailable"
+fi
+rm -rf -- "$ANIMATION_FRAMES"
 
 FIRST_ENTRY=1
 exec 3>fixtures.json.tmp
@@ -358,6 +431,16 @@ emit_image() {
   printf ' }' >&3
 }
 
+emit_animation() {
+  local file="$1" container="$2" generated="$3" skipped="$4"
+  begin_entry
+  printf '  { "file": "%s", "kind": "animation", "container": "%s", "width": 160, "height": 90, "frames": 3, "frameDelayMs": 100, "hasAlpha": true, "alphaLayout": "right-half-transparent", "expectedColors": [[255,0,0],[0,255,0],[0,0,255]], "bytes": %s, "generatedBy": ' "$file" "$container" "$(file_bytes "$file")" >&3
+  json_string_or_null "$generated"
+  printf ', "skipped": ' >&3
+  json_string_or_null "$skipped"
+  printf ' }' >&3
+}
+
 emit_video h264-aac.mp4 mp4 avc1 aac false "" 1.5 0.5 "$h264_generated" "$h264_skip"
 emit_video h264-aac.mov mov avc1 aac false "" 1.5 0.5 "$h264_generated" "$h264_skip"
 emit_video hevc.mov mov hvc1 aac false "" 1.5 0.5 "$hevc_generated" "$hevc_skip"
@@ -378,6 +461,11 @@ emit_image still-alpha.png png png true right-half-transparent '[0,255,0]' "$sti
 emit_image still.webp webp webp false "" '[255,0,0]' "$still_webp_generated" "$still_webp_skip"
 emit_image still.avif avif av1 false "" '[255,0,0]' "$still_avif_generated" "$still_avif_skip"
 emit_image still.heic heic hevc false "" '[255,0,0]' "$still_heic_generated" "$still_heic_skip"
+emit_image still.tiff tiff tiff false "" '[255,0,0]' "$still_tiff_generated" "$still_tiff_skip"
+emit_video converted.mkv matroska avc1 aac false "" 1.5 0.5 "$converted_mkv_generated" "$converted_mkv_skip"
+emit_animation animated.gif gif "$animated_gif_generated" "$animated_gif_skip"
+emit_animation animated-apng.png apng "$animated_apng_generated" "$animated_apng_skip"
+emit_animation animated.webp webp "$animated_webp_generated" "$animated_webp_skip"
 
 printf '\n]\n' >&3
 exec 3>&-

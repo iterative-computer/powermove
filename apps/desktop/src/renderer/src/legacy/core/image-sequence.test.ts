@@ -27,3 +27,25 @@ it('releases a finished native conversion if the project changed while it was ru
   expect(readPlaybackProxy).not.toHaveBeenCalled();
   expect(releasePlaybackProxy).toHaveBeenCalledWith('test-token');
 });
+
+it('reports validation, native frame conversion, and loading progress in order', async () => {
+  const updates: any[] = [];
+  const releasePlaybackProxy = vi.fn(async () => {});
+  (window as any).powermove = { media: {
+    createImageSequence: async (_files: File[], _fps: number, report: (completed: number) => void) => {
+      report(1); report(2);
+      return { ok: true, token: 'sequence', size: 2, type: 'video/webm' };
+    },
+    readPlaybackProxy: async () => new Uint8Array([1, 2]), releasePlaybackProxy,
+  } };
+  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 64, height: 64, close() {} })));
+  const file = await convertImageSequence(frames(), 24, () => {}, update => updates.push(update));
+  expect(file.name).toBe('f sequence.webm');
+  expect(updates.map(update => update.label)).toEqual([
+    'Checking frames · 0 of 2', 'Checking frames · 1 of 2', 'Checking frames · 2 of 2',
+    'Creating image sequence…', 'Creating sequence · 1 of 2 frames', 'Creating sequence · 2 of 2 frames',
+    'Loading image sequence…', 'Loading image sequence…',
+  ]);
+  expect(updates.at(-1)).toMatchObject({ completed: 2, total: 2 });
+  expect(releasePlaybackProxy).toHaveBeenCalledWith('sequence');
+});

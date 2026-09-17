@@ -123,6 +123,11 @@
         event.preventDefault(); chooseCommand(commands[commandIndex]!); return;
       }
     }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      textarea.blur();
+      return;
+    }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'a') {
       /* Keep select-all local to the draft. Powermove also owns this chord for
          layer selection, and Electron's native menu routing can otherwise win
@@ -158,7 +163,21 @@
     if (files.length) void PM.AgentUI?.addAttachments(files);
   }
 
-  onMount(() => queueMicrotask(autosize));
+  onMount(() => {
+    queueMicrotask(autosize);
+    const owner = textarea.ownerDocument;
+    const releaseFocus = (event: PointerEvent) => {
+      if (event.button !== 0 && event.button !== 1) return;
+      if (owner.activeElement !== textarea) return;
+      const composer = textarea.closest('.agent-composer');
+      if (composer && event.composedPath().includes(composer)) return;
+      // Canvas drags cancel the browser's default focus change. Release the
+      // draft before those handlers run so Space returns to editor playback.
+      textarea.blur();
+    };
+    owner.addEventListener('pointerdown', releaseFocus, true);
+    return () => owner.removeEventListener('pointerdown', releaseFocus, true);
+  });
 </script>
 
 <div

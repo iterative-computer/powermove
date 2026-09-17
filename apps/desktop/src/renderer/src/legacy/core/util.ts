@@ -75,6 +75,8 @@ PM.icon = (name: any) => {
 };
 /* Phosphor Icons 2.1.1, regular weight. MIT licensed. */
 PM.ICONS = {
+  // Phosphor arrows-out-simple, regular: shared aspect-ratio control glyph.
+  aspectRatio: '<path d="M216,48V96a8,8,0,0,1-16,0V67.31l-50.34,50.35a8,8,0,0,1-11.32-11.32L188.69,56H160a8,8,0,0,1,0-16h48A8,8,0,0,1,216,48ZM106.34,138.34,56,188.69V160a8,8,0,0,0-16,0v48a8,8,0,0,0,8,8H96a8,8,0,0,0,0-16H67.31l50.35-50.34a8,8,0,0,0-11.32-11.32Z"/>',
   music: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><path d="M56 128v0m0-16v32m36-64v96m36-128v160m36-128v96m36-64v32"/></g>',
   film: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="32" y="40" width="192" height="176" rx="16"/><path d="M72 40v176m112-176v176M32 88h40m-40 80h40m112-80h40m-40 80h40m-116-68 48 28-48 28z"/></g>',
   image: '<g fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"><rect x="32" y="40" width="192" height="176" rx="16"/><circle cx="92" cy="92" r="16"/><path d="m32 176 56-48 40 32 40-48 56 64"/></g>',
@@ -248,7 +250,6 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     window.removeEventListener('pointermove', mv, true);
     window.removeEventListener('pointerup', fin, true);
     window.removeEventListener('pointercancel', pc, true);
-    captureEl?.removeEventListener?.('lostpointercapture', lostCapture);
     window.removeEventListener('mousemove', lockMove, true);
     window.removeEventListener('mouseup', fin, true);
     window.removeEventListener('blur', pc);
@@ -280,9 +281,10 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     if (stop() && up) up(finalX, finalY, ev);
   };
   const pc = () => { if (stop() && cancel) cancel(); };
-  const lostCapture = () => { if (!requested) pc(); };
   try { captureEl?.setPointerCapture(pointerId); } catch { }
-  captureEl?.addEventListener?.('lostpointercapture', lostCapture);
+  /* Capture can be lost when a live panel reparents its canvas. That is not a
+     cancelled gesture: the window listeners still receive its moves/release.
+     Rolling back here makes a valid canvas move snap back to its old position. */
   /* WKWebView can stop bubbling pointer movement while a canvas owns the
      gesture. Capture-phase listeners plus explicit pointer capture keep direct
      manipulation alive until the matching up/cancel event. */
@@ -290,8 +292,8 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     doc.addEventListener?.('pointerlockchange', lockChange);
     window.addEventListener('mousemove', lockMove, true);
     window.addEventListener('mouseup', fin, true);
-    window.addEventListener('blur', pc);
   }
+  window.addEventListener('blur', pc);
   window.addEventListener('pointermove', mv, true);
   window.addEventListener('pointerup', fin, true);
   window.addEventListener('pointercancel', pc, true);

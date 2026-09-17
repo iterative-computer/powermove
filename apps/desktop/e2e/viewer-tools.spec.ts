@@ -1,4 +1,4 @@
-import { expect, test } from './helpers/app';
+import { chooseNativeMenu, expect, test } from './helpers/app';
 
 async function cleanProject(page: any, name: string) {
   return page.evaluate(async (projectName: string) => {
@@ -35,10 +35,9 @@ test.describe('@viewer After Effects tool behavior', () => {
       buttons.map((button) => button.dataset.tool));
     expect(tools).toEqual(['select', 'hand', 'shape', 'text']);
     await page.locator('#toolbar').screenshot({ path: '/private/tmp/powermove-toolbar.png' });
-    await page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click();
-    await expect(page.getByRole('menuitem', { name: 'Rotation Tool (W)', exact: true })).toBeVisible();
-    await page.screenshot({ path: '/private/tmp/powermove-toolbar-menu.png' });
-    await page.keyboard.press('Escape');
+    await chooseNativeMenu(session, 'Rotation Tool (W)', () =>
+      page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click());
+    await expect(page.locator('#toolbar button[data-tool="rotate"]')).toHaveAttribute('aria-pressed', 'true');
     await page.locator('#toolbar button[data-tool="shape"]').click();
     expect(await page.evaluate(() => { const PM = (window as any).PM; const tool = PM.Kernel.services.get('tool'); return [tool.tool, tool.toolShape]; })).toEqual(['shape', 'rect']);
 
@@ -186,15 +185,15 @@ test.describe('@viewer After Effects tool behavior', () => {
     });
 
     // Zoom follows the pointer; Space temporarily pans and restores the active tool.
-    await page.getByRole('button', { name: 'Navigation tools', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Zoom Tool (Z)', exact: true }).click();
+    await chooseNativeMenu(session, 'Zoom Tool (Z)', () =>
+      page.getByRole('button', { name: 'Navigation tools', exact: true }).click());
     const zoomAt = await compositionPoint(page, 160, 90);
     await page.mouse.click(zoomAt.x, zoomAt.y);
     const zoomed = await page.evaluate(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); const tool = PM.Kernel.services.get('tool'); return ({ tool: tool.tool, fit: viewer.fit, zoom: viewer.zoom }); });
     expect(zoomed.tool).toBe('zoom'); expect(zoomed.fit).toBe(false); expect(zoomed.zoom).toBeGreaterThan(0);
 
-    await page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Selection Tool (V)', exact: true }).click();
+    await chooseNativeMenu(session, 'Selection Tool (V)', () =>
+      page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click());
     await page.mouse.move(zoomAt.x, zoomAt.y);
     await page.keyboard.down('Space');
     await expect(page.locator('#stage-inner')).toHaveCSS('cursor', 'grab');

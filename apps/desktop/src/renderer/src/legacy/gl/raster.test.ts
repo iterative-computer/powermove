@@ -288,10 +288,23 @@ describe('legacy raster install', () => {
     PM.replaceProject = (project: any) => { PM.proj = project; };
 
     const file = { name: 'new.wav', type: 'audio/wav', size: 3 };
-    await PM.assets.replace('asset-1', file);
+    const stages: string[] = [];
+    await PM.assets.replace('asset-1', file, { onStage: (label: string) => stages.push(label) });
 
+    expect(stages).toEqual(['Reading file', 'Preparing media', 'Saving media']);
     expect(PM.proj.assets['asset-1']).toMatchObject({ id: 'asset-1', name: 'new.wav', kind: 'audio', sourcePath: '/replacement/new.wav', persisted: true });
     expect(PM.assets.get('asset-1')).toBe(newRuntime);
+
+    PM.MediaStore.put.mockResolvedValueOnce(false);
+    const failedRuntime = { id: 'asset-1', name: 'failed.wav', kind: 'audio' };
+    PM.Audio.prepareAsset.mockResolvedValueOnce(failedRuntime);
+    const metadataBeforeFailure = JSON.stringify(PM.proj.assets);
+    await expect(PM.assets.replace('asset-1', { name: 'failed.wav', type: 'audio/wav', size: 3 }))
+      .rejects.toThrow('Could not store the replacement media');
+    expect(JSON.stringify(PM.proj.assets)).toBe(metadataBeforeFailure);
+    expect(PM.assets.get('asset-1')).toBe(newRuntime);
+    expect(disposed).toContain(failedRuntime);
+    disposed.length = 0;
     expect(JSON.stringify(PM.proj.layers[0])).toBe(layerBefore);
     expect(PM.hist.list()).toEqual(['Replace old.wav']);
     PM.hist.do('Move existing layer', () => { PM.proj.layers[0].from = 7; });
@@ -355,7 +368,8 @@ describe('legacy raster install', () => {
     expect(PM.hist.list()).toEqual([]);
 
     const replacing = PM.assets.replace('asset-1', { name: 'new.wav', type: 'audio/wav', size: 4 });
-    await Promise.resolve();
+    // The discarded work only exists once decoding has started.
+    await vi.waitFor(() => expect(PM.Audio.prepareAsset).toHaveBeenCalled());
     const projectB = { id: 'B', assets: {}, layers: [], comps: {} };
     PM.proj = projectB;
     PM.assets.clear();

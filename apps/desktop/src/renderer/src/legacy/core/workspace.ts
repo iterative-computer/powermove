@@ -846,7 +846,7 @@ function registerCustom(w: any) {
                   PM.Edit.apply(cmds, { label: ct.label, origin: 'generated-ui' });
                 }
                 else if (ct.cmd) PM.cmd(ct.cmd);
-                else if (ct.prompt) PM.toast('Shake the pointer and drag across this section to change it');
+                else if (ct.prompt) PM.toast('Ask the Powermove agent to change this section');
               },
             }, ct.label);
             button.sync = () => {

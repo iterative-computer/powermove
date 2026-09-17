@@ -62,7 +62,7 @@
     if (byUser) item.onDismiss?.();
   }
 
-  /* #toasts is a transformed, scrolling wrapper anchored bottom-center, so a
+  /* #toasts is a transformed, scrolling wrapper anchored top-center, so a
      fixed child would be positioned and clipped by it. Corner notices live
      directly under <body>. */
   function portal(node: HTMLElement) {
@@ -70,9 +70,9 @@
     return { destroy() { node.remove(); } };
   }
 
-  const bottom = $derived(queue.filter(item => !item.corner));
-  const topRight = $derived(queue.filter(item => item.corner === 'top-right'));
-  const bottomRight = $derived(queue.filter(item => item.corner === 'bottom-right'));
+  const top = $derived(queue.filter(item => !item.corner));
+  // Keep legacy bottom-right requests in the same top-right stack.
+  const topRight = $derived(queue.filter(item => item.corner));
 
   /** Remove a keyed notice without treating it as a user dismissal. */
   export function dismissKey(key: string): void {
@@ -136,15 +136,10 @@
   </div>
 {/snippet}
 
-{#each bottom as item (item.id)}{@render toast(item)}{/each}
+{#each top as item (item.id)}{@render toast(item)}{/each}
 {#if topRight.length}
   <div class="toast-corner" role="status" aria-live="polite" use:portal>
     {#each topRight as item (item.id)}{@render toast(item)}{/each}
-  </div>
-{/if}
-{#if bottomRight.length}
-  <div class="toast-corner bottom-right" role="status" aria-live="polite" use:portal>
-    {#each bottomRight as item (item.id)}{@render toast(item)}{/each}
   </div>
 {/if}
 
@@ -154,8 +149,8 @@
   .toast[data-toast-error]>button{margin-top:8px}
   /* The wrapper scrolls once the stack outgrows 45vh, and a scroll container
      clips at its padding edge. Pad it past the reach of --shadow-float
-     (~60px below, ~40px beside) and pull the anchor down by the same amount
-     so the toast itself sits where it always did. */
-  :global(.toastwrap){box-sizing:border-box;bottom:-28px;max-height:calc(45vh + 96px);max-width:100vw;overflow-y:auto;overscroll-behavior:contain;padding:32px 48px 64px;pointer-events:none}
+     (~60px below, ~40px beside). Offset the top padding so the first toast
+     sits 60px from the window top, below the title bar. */
+  :global(.toastwrap){box-sizing:border-box;top:28px;max-height:calc(45vh + 96px);max-width:100vw;overflow-y:auto;overscroll-behavior:contain;padding:32px 48px 64px;pointer-events:none}
   .toast{pointer-events:auto;flex-shrink:0}
 </style>

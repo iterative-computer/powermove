@@ -51,33 +51,6 @@ function spatialModel(adapterFactory) {
   return spatialHarness(adapterFactory).assistant;
 }
 
-function sampledShake(step) {
-  const turns = [0, 60, 0, 60, 0];
-  const out = [];
-  for (let t = 0; t <= 480; t += step) {
-    const segment = Math.min(3, Math.floor(t / 120));
-    const f = (t - segment * 120) / 120;
-    out.push({ x: turns[segment] + (turns[segment + 1] - turns[segment]) * f, y: 80, t });
-  }
-  return out;
-}
-
-it('shake activation uses timestamp-normalized inertia and repeated reversals', () => {
-  const math = spatialModel().math;
-  const deliberate60hz = sampledShake(16);
-  const deliberate120hz = sampledShake(8);
-  const slow = sampledShake(80).map(point => ({ ...point, t: point.t * 4 }));
-  const sweep = Array.from({ length: 14 }, (_, i) => ({ x: i * 24, y: 80, t: i * 24 }));
-  const jitter = Array.from({ length: 80 }, (_, i) => ({ x: i % 2 ? 3 : 0, y: 80, t: i * 5 }));
-  assert.equal(math.shakeReady(deliberate60hz), true, 'short deliberate shake activates');
-  assert.equal(math.shakeReady(deliberate120hz), true, 'sampling rate does not change the outcome');
-  assert.equal(math.shakeReady(slow), false, 'slow navigation does not activate');
-  assert.equal(math.shakeReady(sweep), false, 'one fast sweep has no repeated reversals');
-  assert.equal(math.shakeReady(jitter), false, 'high-frequency tiny jitter lacks useful span');
-  assert.ok(math.motionProfile(deliberate60hz).reversals >= 3);
-  assert.equal(math.shakeIntent(deliberate60hz.slice(0, 14)), true, 'early intentional inertia prewarms Ripple');
-});
-
 it('selected regions become cropped visual attachments with workspace semantics', () => {
   const math = spatialModel().math;
   assert.deepEqual({ ...math.bitmapCropRect(

@@ -77,6 +77,44 @@ describe('Svelte shell', () => {
     document.body.replaceChildren();
   });
 
+  it('does not reload tab metadata or move the strip on history-only changes', () => {
+    const { PM, bus } = fakePM();
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+    PM.Projects.list.mockClear();
+    PM.Projects.tabs.mockClear();
+    flushSync(() => { PM.app.dirty = true; bus.emit('history'); });
+    expect(target.querySelector('[data-tab-id="p1"]')?.classList.contains('dirty')).toBe(true);
+    expect(PM.Projects.list).not.toHaveBeenCalled();
+    expect(PM.Projects.tabs).not.toHaveBeenCalled();
+  });
+
+  it('coalesces repeated close clicks while confirmation is pending and selects the nearest tab', async () => {
+    const { PM } = fakePM();
+    const ids = ['p1', 'p2', 'p3', 'p4'];
+    PM.Projects.tabs.mockImplementation(() => [...ids]);
+    PM.Projects.markClosed.mockImplementation((id: string) => ids.splice(ids.indexOf(id), 1));
+    PM.Projects.get.mockImplementation((id: string) => ({ id, name: id }));
+    PM.proj = { id: 'p3' };
+    let resolve!: (value: boolean) => void;
+    PM.confirmCloseProject = vi.fn(() => new Promise<boolean>(done => { resolve = done; }));
+    const opened = vi.fn();
+    window.addEventListener('pm-open-project', opened, { once: true });
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+    const close = target.querySelector<HTMLButtonElement>('[data-tab-id="p3"] .project-doc-close')!;
+    close.click();
+    close.click();
+    expect(PM.confirmCloseProject).toHaveBeenCalledTimes(1);
+    resolve(true);
+    await vi.waitFor(() => expect(PM.Projects.markClosed).toHaveBeenCalledOnce());
+    expect((opened.mock.calls[0]![0] as CustomEvent).detail.id).toBe('p4');
+  });
+
   it('renders project tabs and moves the roving tab stop with arrows, Home, and End', () => {
     const { PM } = fakePM();
     const target = document.getElementById('titlebar')!;

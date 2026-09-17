@@ -442,8 +442,149 @@
         0
       ]
     },
-    "bytes": null,
-    "generatedBy": null,
-    "skipped": "sips advertised HEIC output but conversion failed"
+    "bytes": 486,
+    "generatedBy": "sips -s format heic",
+    "skipped": null
+  },
+  {
+    "file": "still.tiff",
+    "kind": "image",
+    "container": "tiff",
+    "video": "tiff",
+    "width": 160,
+    "height": 90,
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColor": {
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 43825,
+    "generatedBy": "ffmpeg tiff",
+    "skipped": null
+  },
+  {
+    "file": "animated.gif",
+    "kind": "animation",
+    "container": "gif",
+    "width": 160,
+    "height": 90,
+    "frames": 3,
+    "frameDelayMs": 100,
+    "hasAlpha": true,
+    "alphaLayout": "right-half-transparent",
+    "expectedColors": [
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        0,
+        0,
+        255
+      ]
+    ],
+    "bytes": 1290,
+    "generatedBy": "ffmpeg gif with reserved transparency",
+    "skipped": null
+  },
+  {
+    "file": "animated-apng.png",
+    "kind": "animation",
+    "container": "apng",
+    "width": 160,
+    "height": 90,
+    "frames": 3,
+    "frameDelayMs": 100,
+    "hasAlpha": true,
+    "alphaLayout": "right-half-transparent",
+    "expectedColors": [
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        0,
+        0,
+        255
+      ]
+    ],
+    "bytes": 1827,
+    "generatedBy": "ffmpeg apng",
+    "skipped": null
+  },
+  {
+    "file": "animated.webp",
+    "kind": "animation",
+    "container": "webp",
+    "width": 160,
+    "height": 90,
+    "frames": 3,
+    "frameDelayMs": 100,
+    "hasAlpha": true,
+    "alphaLayout": "right-half-transparent",
+    "expectedColors": [
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        0,
+        0,
+        255
+      ]
+    ],
+    "bytes": 224,
+    "generatedBy": "img2webp -lossless -d 100",
+    "skipped": null
+  },
+  {
+    "file": "converted.mkv",
+    "kind": "video",
+    "container": "matroska",
+    "video": "avc1",
+    "audio": "aac",
+    "hasAlpha": false,
+    "alphaLayout": null,
+    "expectedColorAt": {
+      "t": 1.5,
+      "rgb": [
+        0,
+        255,
+        0
+      ]
+    },
+    "expectedColorAt2": {
+      "t": 0.5,
+      "rgb": [
+        255,
+        0,
+        0
+      ]
+    },
+    "bytes": 19405,
+    "generatedBy": "ffmpeg libx264 + aac in Matroska",
+    "skipped": null
   }
 ]

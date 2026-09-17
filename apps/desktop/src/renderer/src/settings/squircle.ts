@@ -6,9 +6,8 @@
  * controls under 40px, where a full squircle would read as mismatched.
  *
  * Recipe: strip the CSS border into SVG effects drawn on an overlay in the
- * parent, clip the element to the squircle, re-measure on resize. Hover and
- * focus repaint the border from tokens because the stripped CSS border can
- * no longer change on its own.
+ * parent, clip the element to the squircle, re-measure on resize. Keyboard
+ * focus is drawn from tokens independently of resting borders.
  */
 import {
   acquirePosition,
@@ -48,7 +47,6 @@ type Entry = {
   effects?: SvgEffectsHandle;
   extracted: ReturnType<typeof extractAndStripEffects> | null;
   radius: number;
-  hover: boolean;
   focus: boolean;
   unobserve: () => void;
   cleanupEvents: () => void;
@@ -85,9 +83,10 @@ function paint(entry: Entry): void {
   const options = { radius: Math.min(radius, Math.min(width, height) / 2), smoothing };
   el.style.clipPath = generateClipPath(width, height, options);
   let effects: EffectsConfig | undefined = entry.extracted?.effects;
-  if (effects?.innerBorder && (entry.hover || entry.focus)) {
-    const color = entry.focus ? tokenColor(el, '--sg-edge-focus') : tokenColor(el, '--sg-edge-hot');
-    if (color) effects = { ...effects, innerBorder: { ...effects.innerBorder, color, opacity: 1 } };
+  // Borderless controls still need a visible keyboard focus indicator.
+  if (entry.focus) {
+    const color = tokenColor(el, '--sg-edge-focus');
+    if (color) effects = { ...effects, innerBorder: { width: 2, color, opacity: 1 } };
   }
   if (effects && hasEffects(effects)) {
     if (!entry.effects) entry.effects = createSvgEffects(entry.anchor, el);
@@ -106,7 +105,7 @@ function attach(el: HTMLElement): void {
   if (!anchor) return;
   const didAcquire = acquirePosition(anchor);
   const entry: Entry = {
-    el, anchor, didAcquire, radius, hover: false, focus: false,
+    el, anchor, didAcquire, radius, focus: false,
     extracted: extractAndStripEffects(el),
     unobserve: () => {},
     cleanupEvents: () => {}
@@ -120,18 +119,12 @@ function attach(el: HTMLElement): void {
   entry.unobserve = () => { stopSelf(); stopAnchor(); };
   live.add(entry);
   if (el.matches(INTERACTIVE)) {
-    const enter = () => { entry.hover = true; paint(entry); };
-    const leave = () => { entry.hover = false; paint(entry); };
     // Only keyboard focus lights the edge, like a native control; a click does not.
     const focusin = () => { entry.focus = el.matches(':focus-visible') || !!el.querySelector(':focus-visible'); paint(entry); };
     const focusout = () => { entry.focus = false; paint(entry); };
-    el.addEventListener('mouseenter', enter);
-    el.addEventListener('mouseleave', leave);
     el.addEventListener('focusin', focusin);
     el.addEventListener('focusout', focusout);
     entry.cleanupEvents = () => {
-      el.removeEventListener('mouseenter', enter);
-      el.removeEventListener('mouseleave', leave);
       el.removeEventListener('focusin', focusin);
       el.removeEventListener('focusout', focusout);
     };

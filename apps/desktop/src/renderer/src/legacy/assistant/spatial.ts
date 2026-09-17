@@ -243,14 +243,14 @@ const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'project');
 const storedProvider: any = PM.store?.get?.('agentProvider', 'chatgpt');
 const initialProvider: any = ['chatgpt', 'claude', 'compatible'].includes(storedProvider) ? storedProvider : 'chatgpt';
 const S: any = {
-  initialized: false, active: false, pressed: false, phase: 'idle',
-  samples: [], points: [], lastTrigger: 0, origin: { x: 0, y: 0 },
+  initialized: false, active: false, phase: 'idle',
+  points: [], origin: { x: 0, y: 0 },
   root: null, ink: null, path: null, shadePath: null, hint: null, card: null, outline: null,
   region: null, context: null, plan: null, renderStop: null, requestToken: 0,
   requestText: '', run: null, conversation: [], activity: '', trace: [], activeRequest: null, composerDraft: '',
   uiPlacement: null, requestStartedAt: null,
   focusPicker: null,
-  rippleWarmup: null, sceneCache: null, sceneCacheAt: 0, cachePending: null,
+  sceneCache: null, sceneCacheAt: 0, cachePending: null,
   sceneFrame: null, regionImage: null,
   hintFrame: 0, hintPoint: null,
   attachments: [], requestAttachments: [], steps: [], stepsExpanded: false,
@@ -435,7 +435,7 @@ const Spatial: any = {
   cancel,
   get active() { return S.active; },
   /* Small pure seams are exposed for deterministic regression tests. */
-  math: { motionProfile, shakeReady, shakeIntent, selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
+  math: { selectionRect, bitmapCropRect, isClickGesture, overlayPointerAction, pointInPolygon, sanitizePlan, sanitizePanelEdit, applyPanelEdit, applyChromeEdit, hintPosition, clampFloatingPosition, textareaLayout, composerMode, normalizeAutonomousResult, boundedEditableSource, boundedAgentPrompt },
   lifecycle: { applyExtensionChanges, reduceTrace, sealTrace },
 };
 PM.SpatialAssistant = Spatial;
@@ -566,10 +566,7 @@ function init() {
   // placeholder thread as soon as the first app frame initializes the agent.
   ensureThreadProject();
   PM.AgentUI?.update({ flush: true });
-  window.addEventListener('pointerdown', () => { S.pressed = true; }, true);
-  window.addEventListener('pointerup', () => { S.pressed = false; }, true);
-  window.addEventListener('pointercancel', () => { S.pressed = false; }, true);
-  window.addEventListener('pointermove', watchShake, true);
+  window.addEventListener('pointermove', trackActivePointer, true);
   refreshSceneCache();
   // Fetch and compile the optional ripple after initial UI work. First use
   // remains immediate if the user activates it before the idle callback.
@@ -652,105 +649,12 @@ async function requestExtensionRebase(id: any) {
   }
 }
 
-function watchShake(event: any) {
-  /* Once summoned, keep the short-lived distortion centered on the live
-     pointer. S.origin is the same object read by the WebGPU render loop. */
-  if (S.active) {
-    const live: any = event.getCoalescedEvents?.().at(-1) || event;
-    S.origin.x = live.clientX; S.origin.y = live.clientY;
-    scheduleHint(live.clientX, live.clientY);
-    return;
-  }
-  if (!isEditorPointer(event)) { S.samples = []; return; }
-  if (S.pressed || event.buttons || window.performance.now() - S.lastTrigger < 1600) return;
-  if (!S.cachePending && window.performance.now() - S.sceneCacheAt > 1100) refreshSceneCache();
-  const events: any = event.getCoalescedEvents?.().length ? event.getCoalescedEvents() : [event];
-  for (const e of events) {
-    /* event.timeStamp preserves the real spacing of coalesced samples. Using
-       performance.now() for every point made fast mice look like zero-time
-       teleports and slow event streams look artificially weak. */
-    const eventTime: any = Number.isFinite(e.timeStamp) ? e.timeStamp : window.performance.now();
-    const sample: any = { x: e.clientX, y: e.clientY, t: eventTime };
-    const last: any = S.samples[S.samples.length - 1];
-    if (!last || sample.t > last.t && Math.hypot(sample.x - last.x, sample.y - last.y) >= 1.5) S.samples.push(sample);
-  }
-  const newest: any = S.samples.at(-1)?.t ?? window.performance.now();
-  const cutoff: any = newest - 900;
-  S.samples = S.samples.filter((p: any) => p.t >= cutoff).slice(-160);
-  if (shakeIntent(S.samples) && !S.rippleWarmup) warmRipple();
-  if (shakeReady(S.samples)) {
-    const p: any = S.samples[S.samples.length - 1];
-    S.samples = []; S.lastTrigger = window.performance.now();
-    const warmup: any = S.rippleWarmup;
-    if (warmup) warmup.claimed = true;
-    S.rippleWarmup = null;
-    activate(p.x, p.y, warmup);
-  }
-}
-
-function isEditorPointer(event: any) {
-  const target: any = event?.target;
-  return window.opener == null
-    && !(PM.ProjectsScreen && PM.ProjectsScreen.isOpen)
-    && !(PM.LibraryUI && PM.LibraryUI.isOpen)
-    && !window.document.querySelector('#scrim.on,.modal')
-    && !!target?.closest?.('#body');
-}
-
-function motionProfile(points: any) {
-  if (!Array.isArray(points) || points.length < 3) return { duration: 0, path: 0, span: 0, net: 0, reversals: 0, oscillation: 0, peakSpeed: 0, energy: 0 };
-  let path: any = 0, reversals: any = 0, oscillation: any = 0, peakSpeed: any = 0, energy: any = 0;
-  let minX: any = points[0].x, maxX: any = minX, minY: any = points[0].y, maxY: any = minY;
-  let priorVelocity: any = null, distanceSinceTurn: any = 0;
-  for (let i: any = 1; i < points.length; i++) {
-    const dt: any = points[i].t - points[i - 1].t;
-    if (!(dt > 0) || dt > 140) { priorVelocity = null; distanceSinceTurn = 0; continue; }
-    const dx: any = points[i].x - points[i - 1].x;
-    const dy: any = points[i].y - points[i - 1].y;
-    const distance: any = Math.hypot(dx, dy);
-    if (distance < .5) continue;
-    const seconds: any = Math.max(dt, 4) / 1000;
-    const velocity: any = { x: dx / seconds, y: dy / seconds };
-    const speed: any = Math.hypot(velocity.x, velocity.y);
-    path += distance; distanceSinceTurn += distance;
-    peakSpeed = Math.max(peakSpeed, speed);
-    energy += speed * speed * seconds;
-    if (priorVelocity) {
-      const priorSpeed: any = Math.hypot(priorVelocity.x, priorVelocity.y);
-      const alignment: any = (velocity.x * priorVelocity.x + velocity.y * priorVelocity.y) / (speed * priorSpeed);
-      /* A reversal needs real momentum and travel on both sides. This rejects
-         hand tremor/high-frequency sensor jitter without penalizing event rate. */
-      if (speed >= 260 && priorSpeed >= 260 && alignment < -.35 && distanceSinceTurn >= 18) {
-        reversals++; oscillation += distanceSinceTurn; distanceSinceTurn = 0;
-      }
-    }
-    if (speed >= 120) priorVelocity = velocity;
-    minX = Math.min(minX, points[i].x); maxX = Math.max(maxX, points[i].x);
-    minY = Math.min(minY, points[i].y); maxY = Math.max(maxY, points[i].y);
-  }
-  const duration: any = Math.max(0, points.at(-1).t - points[0].t);
-  const net: any = Math.hypot(points.at(-1).x - points[0].x, points.at(-1).y - points[0].y);
-  return { duration, path, span: Math.max(maxX - minX, maxY - minY), net, reversals, oscillation, peakSpeed, energy: duration ? energy / (duration / 1000) : 0 };
-}
-
-function shakeIntent(points: any) {
-  const m: any = motionProfile(points);
-  return m.duration <= 900 && m.path >= 72 && m.span >= 32 && m.peakSpeed >= 420 && m.reversals >= 1;
-}
-
-function warmRipple() {
-  const warmup: any = {
-    claimed: false,
-    /* A selected-region attachment must represent this gesture, not an older
-       idle cache. Start a fresh native snapshot as soon as shake intent is clear. */
-    capture: PM.WindowCapture.request(),
-  };
-  S.rippleWarmup = warmup;
-  window.setTimeout(() => {
-    if (warmup.claimed || S.rippleWarmup !== warmup) return;
-    S.rippleWarmup = null;
-    warmup.capture?.then((bitmap: any) => bitmap?.close?.());
-  }, 1000);
+function trackActivePointer(event: any) {
+  if (!S.active) return;
+  // Keep an explicitly opened spatial overlay attached to the live pointer.
+  const live: any = event.getCoalescedEvents?.().at(-1) || event;
+  S.origin.x = live.clientX; S.origin.y = live.clientY;
+  scheduleHint(live.clientX, live.clientY);
 }
 
 function refreshSceneCache() {
@@ -764,16 +668,6 @@ function refreshSceneCache() {
     S.sceneCache?.close?.();
     S.sceneCache = bitmap; S.sceneCacheAt = window.performance.now();
   });
-}
-
-function shakeReady(points: any) {
-  const m: any = motionProfile(points);
-  /* Three momentum reversals over about 180 CSS pixels is a short intentional
-     shake. CSS pixels make the gesture consistent across Retina scale factors;
-     timestamp-normalized speed makes it consistent across mouse event rates. */
-  return m.duration >= 120 && m.duration <= 900
-    && m.path >= 180 && m.span >= 44 && m.oscillation >= 108
-    && m.peakSpeed >= 430 && m.reversals >= 3 && m.net < m.path * .62;
 }
 
 function hintPosition(x: any, y: any, width: any, height: any, viewportWidth: any, viewportHeight: any, offset: any = 18) {
@@ -813,7 +707,7 @@ function scheduleHint(x: any, y: any) {
   });
 }
 
-function activate(x: any, y: any, warmup: any = null) {
+function activate(x: any, y: any) {
   if (S.active) return;
   // Load the current project's thread before creating a selection. The first
   // composer publish must not reset this new overlay's region or arming phase.
@@ -833,12 +727,7 @@ function activate(x: any, y: any, warmup: any = null) {
      WGSL pass genuinely displaces instead of merely painting over the UI. */
   const cachedScene: any = S.sceneCache;
   if (cachedScene) { S.sceneCache = null; S.sceneCacheAt = 0; }
-  const sceneRequest: any = warmup?.capture
-    ? warmup.capture.then((fresh: any) => {
-      if (fresh) { cachedScene?.close?.(); return fresh; }
-      return cachedScene;
-    })
-    : cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request();
+  const sceneRequest: any = cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request();
   sceneRequest.then((sceneBitmap: any) => {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     /* Preserve clean pre-overlay pixels for the eventual selected-region

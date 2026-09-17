@@ -220,6 +220,43 @@ const FX: Record<string, Omit<EffectDefinition, 'id' | 'rawShader'>> = {
       vec4 c = texture(u_tex, v_st); if (c.a<.0005){o=c;return;}
       vec3 x = c.rgb/c.a; o = vec4(mix(x, 1.-x, u_p0/100.)*c.a, c.a);`, 'uniform float u_p0;'),
   },
+  gradient: {
+    label: 'Gradient Ramp', group: 'Generate', passes: 1,
+    params: [{ k: 'startColor', label: 'Start Color', def: '#FFFFFF', type: 'color' },
+             { k: 'endColor', label: 'End Color', def: '#000000', type: 'color' },
+             { k: 'angle', label: 'Angle', def: 90, min: -360, max: 360, step: 1, unit: '°' },
+             { k: 'centerX', label: 'Center X', def: 0, min: -100, max: 100, step: .5, unit: '%' },
+             { k: 'centerY', label: 'Center Y', def: 0, min: -100, max: 100, step: .5, unit: '%' },
+             { k: 'spread', label: 'Spread', def: 100, min: 1, max: 400, step: 1, unit: '%' },
+             { k: 'midpoint', label: 'Midpoint', def: 50, min: 1, max: 99, step: .5, unit: '%' },
+             { k: 'radial', label: 'Radial', def: false, type: 'toggle' },
+             { k: 'shade', label: 'Keep Luminance', def: false, type: 'toggle' },
+             { k: 'dither', label: 'Dither', def: 1, min: 0, max: 20, step: .1, unit: '' },
+             { k: 'amount', label: 'Amount', def: 100, min: 0, max: 100, step: 1, unit: '%' }],
+    /* Named uniforms (the current param contract) rather than the positional
+       u_p<i> of the older effects above — eleven params read better by name.
+       The ramp spans the frame like Vignette, and paints inside the layer's own
+       alpha, so text and shapes keep their edges instead of being replaced by a
+       full-frame fill. */
+    frag: F(`
+      vec4 c = texture(u_tex, v_st); if (c.a < .0005) { o = c; return; }
+      vec3 x = c.rgb / c.a;
+      vec2 p = (v_st - .5) - vec2(u_centerX, -u_centerY) / 200.;
+      float span = max(u_spread / 100., .001);
+      float a = radians(u_angle);
+      /* Aspect-correct the radial distance so the rings stay circular. */
+      float t = u_radial > .5
+        ? length(p * vec2(u_res.x / max(u_res.y, 1.), 1.)) * 2. / span
+        : dot(p, vec2(cos(a), -sin(a))) / span + .5;
+      /* Static per-pixel jitter breaks 8-bit banding without shimmering. */
+      t = clamp(t + (hash(v_px) - .5) * u_dither * .004, 0., 1.);
+      t = pow(t, log(.5) / log(clamp(u_midpoint / 100., .01, .99)));
+      vec3 g = mix(u_startColor, u_endColor, t);
+      if (u_shade > .5) { vec3 h = rgb2hsv(g); g = hsv2rgb(vec3(h.x, h.y, rgb2hsv(max(x, 0.)).z)); }
+      o = vec4(mix(x, g, u_amount / 100.) * c.a, c.a);`,
+      `uniform vec3 u_startColor,u_endColor;
+       uniform float u_angle,u_centerX,u_centerY,u_spread,u_midpoint,u_radial,u_shade,u_dither,u_amount;`),
+  },
 };
 
 

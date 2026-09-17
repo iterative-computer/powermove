@@ -1,5 +1,5 @@
-import { previewVideoElement } from '../core/video-preview';
 import { seekPreviewVideo } from '../core/video-seek';
+import { layerVideoElement, videoInstanceTextureKey } from '../core/video-instances';
 import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
@@ -791,7 +791,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
     if (!a) return null;
-    const liveVideo = L.type === 'video' && useVideoPreviews ? previewVideoElement(PM, a) : a.el;
+    const liveVideo = L.type === 'video' && useVideoPreviews ? layerVideoElement(PM, a, L.id) : a.el;
     let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || liveVideo, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
       const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
@@ -801,6 +801,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     const bw = d.w || W, bh = d.h || H;
     let textureSource = el;
     let textureKey = 'a:' + a.id + (el===liveVideo?(el===a.el?'':':preview'):':'+L.id+'@'+T);
+    if (L.type === 'video' && el === liveVideo) textureKey = videoInstanceTextureKey(el);
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
       const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
@@ -1299,7 +1300,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       covers[i] = largest;
       const layer = layers[i];
       if (layer.type !== 'shape' || layer.d.paths?.length || !PM.active(layer, T)
-          || viewerService(PM)?.canvasTextEditing === layer.id || layer.shy && opt.hideShy || PM.worldOpacity(layer, T) < 1) continue;
+          || viewerService(PM)?.canvasTextEditing === layer.id || PM.worldOpacity(layer, T) < 1) continue;
       const d = resolveContent(PM, layer, T), m = scaledWorld(layer, T, W, H);
       if (d.shape !== 'rect' || !/^#[0-9a-f]{6}$/i.test(d.color) || Math.abs(m[1]) > 1e-9 || Math.abs(m[2]) > 1e-9) continue;
       const geometry = shapeRasterGeometry(d, continuousRasterScale(m));
@@ -1343,7 +1344,6 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
         && !opt.mattePass) continue;
     if (L.type !== 'group' && PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
-    if (L.shy && opt.hideShy) continue;
     /* Each group owns an offscreen compositing boundary, so opacity is applied
        once at its own level instead of being multiplied into every descendant. */
     const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);

@@ -40,7 +40,7 @@ fn frag(uv: vec2f) -> vec4f {
   let propagationFade = exp(-motiongpuUniforms.uElapsed * 0.38);
   let front = motiongpuUniforms.uElapsed * 1.32;
 
-  // Wide, low-energy feedback bands make the deliberate shake legible
+  // Wide, low-energy feedback bands make spatial activation legible
   // across the editor instead of reading as tiny lines near the cursor.
   let crest = exp(-pow((distanceFromSource - front) * 4.4, 2.0)) * propagationFade;
   let echo = exp(-pow((distanceFromSource - front + 0.28) * 6.2, 2.0)) * propagationFade;

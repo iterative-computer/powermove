@@ -1,20 +1,25 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import Icon from '../panels/Icon.svelte';
   import ToolbarMount from './ToolbarMount.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
   let refreshToken = $state(0);
+  let metadataToken = $state(0);
+  let strip: HTMLDivElement;
+  let overflowing = $state(false);
+  const closing = new Set<string>();
   let rovingId = $state('');
   let renamingId = $state<string | null>(null);
   let renameValue = $state('');
 
   const tabIds = $derived.by(() => {
-    refreshToken;
+    metadataToken;
     return [...(PM.Projects?.tabs?.() ?? [])] as string[];
   });
   const metas = $derived.by(() => {
-    refreshToken;
-    return [...(PM.Projects?.list?.() ?? [])] as Array<{ id: string; name?: string }>;
+    metadataToken;
+    return new Map<string, string>((PM.Projects?.list?.() ?? []).map((meta: { id: string; name?: string }) => [meta.id, meta.name || 'Untitled']));
   });
   const homeOpen = $derived.by(() => {
     refreshToken;
@@ -33,10 +38,16 @@
     return !!PM.app?.dirty;
   });
   const selectedId = $derived(homeOpen ? 'home' : (activeProjectId ?? tabIds[0] ?? 'home'));
+  // Per-tab file metadata is read lazily, so the lookup — not its result —
+  // is what re-derives when a save, rename or dirty change bumps the token.
+  const fileStateFor = $derived.by(() => {
+    refreshToken;
+    return (id: string) => PM.projectFileState?.(id, { initialize: false });
+  });
 
 
   function nameFor(id: string): string {
-    return metas.find((meta) => meta.id === id)?.name || 'Untitled';
+    return metas.get(id) || 'Untitled';
   }
 
   function tabIndex(id: string): 0 | -1 {
@@ -78,23 +89,61 @@
   }
 
   async function closeProject(id: string): Promise<void> {
-    if (PM.confirmCloseProject && !await PM.confirmCloseProject(id)) return;
-    if (rovingId === id) rovingId = '';
-    const active = id === PM.proj?.id;
-    if (active) {
-      try {
-        PM.Projects?.put?.(PM.proj);
-      } catch (error) {
-        window.console.warn('Project save failed', error);
+    if (closing.has(id)) return;
+    closing.add(id);
+    try {
+      if (PM.confirmCloseProject && !await PM.confirmCloseProject(id)) return;
+      const before = [...(PM.Projects?.tabs?.() ?? [])] as string[];
+      const index = before.indexOf(id);
+      if (index < 0) return;
+      const focused = document.activeElement?.closest('[data-tab-id]')?.getAttribute('data-tab-id') === id;
+      const active = id === PM.proj?.id;
+      // Keep the tab available if its recovery checkpoint cannot be written.
+      if (active) PM.Projects?.put?.(PM.proj);
+      PM.Projects?.markClosed?.(id);
+      const remaining = [...(PM.Projects?.tabs?.() ?? [])] as string[];
+      const next = remaining[Math.min(index, remaining.length - 1)];
+      if (rovingId === id) rovingId = PM.ProjectsScreen?.isOpen ? 'home' : (next ?? 'home');
+      if (active) {
+        if (next) openProject(next);
+        else PM.ProjectsScreen?.show?.();
       }
+      PM.bus?.emit?.('projects:tabs');
+      if (focused) {
+        await tick();
+        const target = PM.ProjectsScreen?.isOpen ? 'home' : (next ?? 'home');
+        [...document.querySelectorAll<HTMLElement>('#tabs [role="tab"]')]
+          .find(node => node.dataset.tabId === target)?.focus();
+      }
+    } catch (error) {
+      PM.toast?.(`Could not close project: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      closing.delete(id);
     }
-    PM.Projects?.markClosed?.(id);
-    const remaining = [...(PM.Projects?.tabs?.() ?? [])] as string[];
-    if (active) {
-      if (remaining.length) openProject(remaining[0]!);
-      else PM.ProjectsScreen?.show?.();
-    }
-    PM.bus?.emit?.('projects:tabs');
+  }
+
+  function updateOverflow(): void {
+    overflowing = !!strip && strip.scrollWidth > strip.clientWidth + 1;
+  }
+
+  function scrollTabs(event: WheelEvent): void {
+    if (!strip || event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+    if (strip.scrollWidth <= strip.clientWidth) return;
+    const scale = event.deltaMode === 1 ? 24 : event.deltaMode === 2 ? strip.clientWidth : 1;
+    strip.scrollLeft += event.deltaY * scale;
+    event.preventDefault();
+  }
+
+  function showOpenProjects(event: MouseEvent): void {
+    PM.menu?.(event.currentTarget, tabIds.map(id => ({
+      label: nameFor(id),
+      on: id === activeProjectId && !homeOpen,
+      run: () => {
+        rovingId = id;
+        PM.ProjectsScreen?.hide?.();
+        openProject(id);
+      }
+    })));
   }
 
   function beginRename(id: string): void {
@@ -195,12 +244,11 @@
   }
 
   $effect(() => {
-    const events = ['projects:tabs', 'projects:screen', 'settings:screen', 'workspaces', 'project', 'history'];
+    const events = ['projects:tabs', 'projects:screen', 'settings:screen', 'project', 'history'];
     const offs = events.map((event) => PM.bus?.on?.(event, () => {
-      if (!renamingId) {
-        if (!document.getElementById('tabs')?.contains(document.activeElement)) rovingId = '';
-        refreshToken++;
-      }
+      if (!document.getElementById('tabs')?.contains(document.activeElement)) rovingId = '';
+      if (event === 'projects:tabs' || event === 'project') metadataToken++;
+      refreshToken++;
     }));
     return () => offs.forEach((off) => off?.());
   });
@@ -216,8 +264,22 @@
   });
 
   $effect(() => {
-    refreshToken;
-    activeProjectId;
+    const node = strip;
+    if (!node) return;
+    node.addEventListener('wheel', scrollTabs, { passive: false });
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateOverflow);
+    observer?.observe(node);
+    return () => { observer?.disconnect(); node.removeEventListener('wheel', scrollTabs); };
+  });
+
+  $effect(() => {
+    tabIds;
+    const frame = window.requestAnimationFrame(updateOverflow);
+    return () => window.cancelAnimationFrame(frame);
+  });
+
+  $effect(() => {
+    selectedId;
     const frame = window.requestAnimationFrame(() => {
       document.querySelector<HTMLElement>('#tabs .project-doc.on')?.scrollIntoView?.({
         block: 'nearest',
@@ -230,7 +292,7 @@
 
 <div id="tabs" data-svelte-shell="tabs">
   <!-- Phase 5.4 follow-up: connect these tabs to a tabpanel with aria-controls. -->
-  <div role="tablist" aria-label="Open projects" style="display: contents">
+  <div role="tablist" aria-label="Open projects" class="project-tablist">
     <button
       class="project-strip-btn project-home"
       class:on={homeOpen}
@@ -245,18 +307,19 @@
       onfocus={() => (rovingId = 'home')}
       onkeydown={focusTab}
     ><Icon {PM} name="home" /></button>
-    <i class="project-strip-divider" aria-hidden="true"></i>
 
+    <div class="project-tab-scroll" bind:this={strip}>
     {#each tabIds as id (id)}
       {@const active = id === activeProjectId && !homeOpen}
-      {@const dirty = PM.projectFileState?.(id)?.dirty ?? (id === activeProjectId && appDirty)}
+      {@const file = fileStateFor(id)}
+      {@const dirty = file?.dirty ?? (id === activeProjectId && appDirty)}
       {@const tabName = nameFor(id)}
       <div
         class="project-doc"
         class:on={active}
         class:dirty
         class:renaming={renamingId === id}
-        title={PM.projectFileState?.(id)?.path || `${tabName} — Not saved to a file`}
+        title={file?.path ? `${tabName} — ${file.path}` : `${tabName} — Not saved to a file`}
         role="tab"
         data-tab-id={id}
         aria-selected={active}
@@ -312,7 +375,12 @@
         {/if}
       </div>
     {/each}
+    </div>
   </div>
+
+  {#if overflowing}
+    <button class="project-strip-btn project-overflow" type="button" title={`All open projects (${tabIds.length})`} aria-label={`All open projects (${tabIds.length})`} aria-haspopup="menu" onclick={showOpenProjects}><Icon {PM} name="chevDown" /></button>
+  {/if}
 
   <button
     class="project-strip-btn project-new"

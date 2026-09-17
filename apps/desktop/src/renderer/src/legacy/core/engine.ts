@@ -1,6 +1,7 @@
 import { previewVideoElement } from './video-preview';
+import { layerVideoElement, pruneVideoInstances } from './video-instances';
 import { cancelPreviewVideoSeek, seekPreviewVideo } from './video-seek';
-import { sequencePlaybackTime } from '../../../../shared/image-sequence';
+import { sequencePlaybackTime, sequenceStreamTime } from '../../../../shared/image-sequence';
 import { prepareFrame } from './frame-preparation';
 import { installPreviewCache } from './preview-cache';
 import { sourceTime } from './retiming';
@@ -37,6 +38,9 @@ PM.perf = E;
    reassert pause when a late start completes. Audio has its own decoded-buffer
    scheduler in core/audio.js and never uses this race-prone path. */
 const mediaState = new WeakMap<any, any>();
+/* The rate the compositor actually draws at, which is what a playing decoder
+   has to be placed against. */
+const drawnFps = () => Math.max(1, Number(PM.previewFps || PM.proj?.fps) || 30);
 const VIDEO_DRIFT_SECONDS = 0.12;
 let videoSeekGeneration = 0;
 function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number) {
@@ -57,7 +61,9 @@ function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number)
   if (!el.paused && !state.pending) {
     // A real timeline jump needs one seek. Ordinary decoder drift does not:
     // repeatedly assigning currentTime flushes queued 4K frames and turns a
-    // small clock difference into visibly low-frame-rate playback.
+    // small clock difference into visibly low-frame-rate playback. The element
+    // sweeps continuously through a frame the target only steps between, so
+    // any tolerance near one frame trips on healthy playback as well.
     if (state.seekGeneration !== videoSeekGeneration) {
       try { el.currentTime = expectedTime; state.seekGeneration = videoSeekGeneration; } catch (e) { }
     }
@@ -89,19 +95,28 @@ function ensureMediaPaused(el: any) {
   state.desired = false;
   if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
 }
+let playingVideos = new Set<any>();
 function scrubVideos(T: any) {
   const videos = PM.ProjectIndex?.layersOfType?.('video', PM.proj) || PM.proj.layers.filter((layer: any) => layer.type === 'video');
-  // Choose the active instance before touching a shared decoder. A later,
-  // inactive copy must never cancel the visible clip's play promise.
+  /* The playhead runs continuously but the compositor draws whole frames, so a
+     decoder chasing the raw clock is aimed between two source frames. Place a
+     playing one against the frame actually being drawn. */
+  const drawn = PM.playing ? Math.floor(T * drawnFps()) / drawnFps() : T;
+  // Resolve only active clips, so inactive copies never claim or pause a
+  // decoder owned by a visible clip.
   const owners = new Map<any, any>();
   for (const layer of videos) {
     const asset = PM.assets.get(layer.d.asset);
     if (!asset?.el) continue;
-    const el = previewVideoElement(PM, asset);
-    const unused = el === asset.el ? asset.preview?.el : asset.el;
+    if (!PM.active(layer, T)) continue;
+    const source = previewVideoElement(PM, asset);
+    const el = layerVideoElement(PM, asset, layer.id);
+    const unused = source === asset.el ? asset.preview?.el : asset.el;
     if (unused) { cancelPreviewVideoSeek(unused); ensureMediaPaused(unused); }
-    if (!owners.has(el) || PM.active(layer, T)) owners.set(el, { layer, asset, el });
+    owners.set(el, { layer, asset, el });
   }
+  for (const el of playingVideos) if (!owners.has(el)) { cancelPreviewVideoSeek(el); ensureMediaPaused(el); }
+  playingVideos = new Set(owners.keys());
   for (const { layer: L, asset: a, el } of owners.values()) {
     const inRange = PM.active(L, T);
     if (!inRange) { ensureMediaPaused(el); continue; }
@@ -110,12 +125,28 @@ function scrubVideos(T: any) {
     const d = resolveContent(PM, L, T);
     /* playback position must respect layer speed, matching the compositor's vt math */
     const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, (a.dur || 0) - .04));
-    if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(el, vt, Math.max(.0001, Number(d.speed) || 1));
+    /* A still is snapped to the frame's first millisecond, which is where a
+       seek belongs. A decoder running on its own clock always joins a little
+       late, and on that leading edge the lag presents the frame before — which
+       is what held a clip's first frame over two composition frames. Aim it at
+       the middle of the frame being drawn, which absorbs the lag. Only a
+       sequence publishes the frame grid that needs; other media keeps the
+       continuous position it has always used. */
+    const streamAt = sequenceStreamTime(a, sourceTime(PM,L,drawn)) ?? vt;
+    if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(el, streamAt, Math.max(.0001, Number(d.speed) || 1));
     else ensureMediaPaused(el);
     const state = mediaState.get(el); if (state) state.layer = L.id;
     if (!PM.playing || d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) seekPreviewVideo(el, vt, .0005);
   }
 }
+
+for (const event of ['layers', 'project', 'assets']) PM.bus.on(event, () => {
+  const layers = PM.ProjectIndex?.allLayers?.() || PM.proj.layers;
+  for (const asset of PM.assets.map?.values() ?? []) {
+    const ids = new Set<string>(layers.filter((layer: any) => layer.type === 'video' && layer.d.asset === asset.id).map((layer: any) => layer.id));
+    pruneVideoInstances(asset, ids);
+  }
+});
 
 /* ── transport ─────────────────────────────────────────── */
 PM.setTime = (t: any, opt: any = {}) => {

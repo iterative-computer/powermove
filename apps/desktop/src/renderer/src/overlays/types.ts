@@ -9,7 +9,7 @@ export type ToastOptions = {
   icon?: string;
   /** A stable key replaces an earlier toast with the same key instead of stacking. */
   key?: string;
-  /** Persistent notices (updates, attention) sit in the top-right corner; status stays bottom-center. */
+  /** Persistent notices sit top-right; routine status sits top-center. bottom-right is a legacy alias. */
   corner?: 'top-right' | 'bottom-right';
   /** One primary action rendered as a quiet button inside the toast. */
   action?: { label: string; run: () => void };

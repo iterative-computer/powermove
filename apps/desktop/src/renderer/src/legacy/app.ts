@@ -1,5 +1,7 @@
 import { IMAGE_SEQUENCE_ACCEPT, sequenceCandidate } from '../../../shared/image-sequence';
+import { MEDIA_ACCEPT } from '../../../shared/media-formats';
 import { chooseSequence, convertImageSequence } from './core/image-sequence';
+import { createImportProgress } from './core/import-progress';
 import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
 import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
@@ -27,8 +29,9 @@ function fileState(id = PM.proj.id): FileState {
     fileStates.set(id, state);
     // A local project can be unchanged without ever having been saved to a
     // file. Keep its original baseline across recovery and tab switches.
-    const project = id === PM.proj?.id ? PM.proj : PM.Projects.get(id);
-    if (!state.savedHash && !state.baselineHash && project) {
+    const project = !state.savedHash && !state.baselineHash
+      ? (id === PM.proj?.id ? PM.proj : PM.Projects.get(id)) : null;
+    if (project) {
       const initialState = state;
       initialState.baselineReady = projectFingerprint(JSON.stringify(project)).then(hash => {
         initialState.baselineHash = hash;
@@ -64,7 +67,13 @@ async function refreshFileDirty(project = PM.proj): Promise<boolean> {
 function rememberFile(id: string, state: FileState) {
   PM.Projects.putState(id, { ...PM.Projects.getState(id, { history: false }), file: { path: state.path, savedHash: state.savedHash, baselineHash: state.baselineHash } });
 }
-PM.projectFileState = (id: string) => fileState(id);
+// Chrome and library cards only need file metadata. Reading a label must not
+// load and fingerprint every inactive composition in a restored session.
+PM.projectFileState = (id: string, { initialize = true }: { initialize?: boolean } = {}) => {
+  if (initialize || fileStates.has(id)) return fileState(id);
+  const saved = PM.Projects.getState(id, { history: false })?.file;
+  return { path: saved?.path, dirty: saved?.dirty ?? true };
+};
 let saveGeneration = 0;
 PM.app = APP;
 
@@ -822,18 +831,18 @@ PM.prepareToClose = async () => {
 };
 
 /* ── media import ──────────────────────────────────────── */
-PM.pickFiles = (sequence = false) => {
+PM.pickFiles = (sequence = false, { replaceAssetId }: { replaceAssetId?: string } = {}) => {
   const targetProject = PM.proj;
   const inp = h('input', {
-    // Chromium's video/* picker omits codecs it cannot decode natively.
-    // These containers also support the native playback conversion path.
-    type: 'file', multiple: true, accept: sequence ? IMAGE_SEQUENCE_ACCEPT : 'image/*,.svg,video/*,.mov,.mp4,.m4v,.webm,audio/*,.obj,.pmv',
+    // Chromium's image/* and video/* pickers omit everything it cannot decode
+    // natively, so every converted container is named explicitly as well.
+    type: 'file', multiple: true, accept: sequence ? IMAGE_SEQUENCE_ACCEPT : MEDIA_ACCEPT,
     style: { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' },
   });
   const cleanup = () => { inp.onchange = null; inp.remove(); };
   inp.onchange = async () => {
     const files = [...inp.files];
-    try { if (files.length) await PM.importFiles(files, { project: targetProject, sequence: sequence || undefined }); }
+    try { if (files.length) await PM.importFiles(files, { project: targetProject, sequence: sequence || undefined, replaceAssetId }); }
     finally { cleanup(); }
   };
   inp.addEventListener('cancel', cleanup, { once: true });
@@ -844,79 +853,105 @@ PM.pickFiles = (sequence = false) => {
    - undefined → layers at the playhead (pickers, window-level drops)
    - null      → assets only, no layers (drop on the Media panel)
    - {at,index}→ layers at a time and layer-stack position (drop on the timeline) */
-async function importFiles(files: any, placement?: { at: number; index?: number } | null, sequence?: boolean) {
-  const targetProject = PM.proj;
-  const importAt = placement ? placement.at : PM.time;
-  const assertCurrent = () => {
-    if (PM.proj !== targetProject) throw new Error('Import stopped because you switched projects · import again in the intended project');
-  };
-  if (sequence === true || (sequence !== false && sequenceCandidate(files))) {
-    const choice = await chooseSequence(PM, files, sequence === true);
-    if (choice === null) return;
-    try {
-      assertCurrent();
-      files = choice.files;
-      if (choice.fps !== null) {
-        PM.toast(`Preparing ${files.length} image frames…`, 30_000);
-        files = [await convertImageSequence(files, choice.fps, assertCurrent)];
+async function importFiles(files: any, placement?: { at: number; index?: number } | null, sequence?: boolean, replaceAssetId?: string) {
+  let progress: ReturnType<typeof createImportProgress> | undefined;
+  try {
+    const targetProject = PM.proj;
+    const replacement = replaceAssetId != null ? targetProject.assets?.[replaceAssetId] : null;
+    if (replaceAssetId != null && !replacement) throw new Error('This media item is no longer in the project');
+    const importAt = placement ? placement.at : PM.time;
+    const assertCurrent = () => {
+      if (PM.proj !== targetProject) throw new Error('Import stopped because you switched projects · import again in the intended project');
+      if (replacement && targetProject.assets?.[replaceAssetId!] !== replacement) throw new Error('The media item changed · choose the replacement again');
+    };
+    if (sequence === true || (sequence !== false && sequenceCandidate(files))) {
+      const choice = await chooseSequence(PM, files, sequence === true);
+      if (choice === null) return;
+      try {
         assertCurrent();
-      }
-    } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000); return; }
-  }
-  const mediaFiles: any = [];
-  for (const f of files) {
-    if (/\.pmv$/i.test(f.name)) { await openProjectFile(f); continue; }
-    if (!PM.assetKind(f)) { PM.toast('Unsupported file · ' + f.name); continue; }
-    mediaFiles.push(f);
-  }
-  if (!mediaFiles.length) return;
-  if (mediaFiles.length > 1) PM.toast(`Preparing ${mediaFiles.length} media files…`, 2400);
-  const results = await PM.assets.importBatch(mediaFiles, {
-    onProgress: (progress: any) => PM.bus.emit('import:progress', progress),
-  });
-  const failures = results.filter((result: any) => result.status === 'failed');
-  failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000));
-  const layerResults = results.filter((result: any) => result.status === 'created' || result.status === 'reused');
-  const commands = placement === null ? [] : layerResults.map((result: any, n: number) => {
-    const command = PM.commandForAsset(result.asset.id, importAt);
-    if (command && placement?.index != null) command.index = placement.index + n;
-    return command;
-  }).filter(Boolean);
-  if (commands.length) {
-    PM.Edit.apply(commands, {
-      label: commands.length === 1 ? 'Import file' : `Import ${commands.length} files`,
-      origin: 'import',
-    });
-  }
-  const relinked = results.filter((result: any) => result.status === 'relinked');
-  const volatile = results.filter((result: any) => result.status !== 'failed' && !result.persisted);
-  if (layerResults.length || relinked.length) {
-    PM.autosave();
-    if (placement === null) PM.bus.emit('assets');
-    const parts: any = [];
-    if (layerResults.length) {
-      const editableSvg = layerResults.length === 1 && layerResults[0].asset.format === 'svg' && layerResults[0].asset.svg?.paths?.length;
-      parts.push(layerResults.length === 1
-        ? `Imported ${layerResults[0].asset.name}${editableSvg ? ' as editable paths' : ''}`
-        : `Imported ${layerResults.length} files`);
+        files = choice.files;
+        if (choice.fps !== null) {
+          progress = createImportProgress('Importing image sequence');
+          files = [await convertImageSequence(files, choice.fps, assertCurrent, update => progress!.update(update))];
+          assertCurrent();
+        }
+      } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000); return; }
     }
-    if (relinked.length) parts.push(`relinked ${relinked.length} missing ${relinked.length === 1 ? 'asset' : 'assets'}`);
-    const svgWarnings = layerResults.flatMap((result: any) => result.asset.svg?.warnings || []);
-    if (svgWarnings.length) parts.push(`${svgWarnings.length} SVG ${svgWarnings.length === 1 ? 'feature needs' : 'features need'} review`);
-    if (volatile.length) parts.push('durable storage unavailable');
-    PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400);
-  }
+    if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
+    const mediaFiles: any = [];
+    for (const f of files) {
+      if (/\.pmv$/i.test(f.name)) {
+        if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
+        const opening = createImportProgress('Opening project');
+        opening.update({ label: f.name });
+        try { await openProjectFile(f); } finally { opening.close(); }
+        continue;
+      }
+      if (!PM.assetKind(f)) { PM.toast('Unsupported file · ' + f.name); continue; }
+      mediaFiles.push(f);
+    }
+    if (!mediaFiles.length) return;
+    progress ??= createImportProgress(mediaFiles.length === 1 ? 'Importing file' : `Importing ${mediaFiles.length} files`);
+    progress.update({ label: mediaFiles.length === 1 ? mediaFiles[0].name : `Preparing files · 0 of ${mediaFiles.length}` });
+    const results = await PM.assets.importBatch(mediaFiles, {
+      replaceAssetId,
+      onStage: ({ file, label, completed, total }: any) => progress!.update({
+        label: mediaFiles.length === 1 ? `${label} · ${file.name}` : `${completed} of ${total} files · ${label} · ${file.name}`,
+        ...(mediaFiles.length > 1 ? { completed, total } : {}),
+      }),
+      onProgress: (update: any) => {
+        progress!.update({ label: `Processed ${update.completed} of ${update.total} ${update.total === 1 ? 'file' : 'files'}`, completed: update.completed, total: update.total });
+        PM.bus.emit('import:progress', update);
+      },
+    });
+    const failures = results.filter((result: any) => result.status === 'failed');
+    failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000));
+    const layerResults = results.filter((result: any) => result.status === 'created' || result.status === 'reused');
+    const commands = placement === null ? [] : layerResults.map((result: any, n: number) => {
+      const command = PM.commandForAsset(result.asset.id, importAt);
+      if (command && placement?.index != null) command.index = placement.index + n;
+      return command;
+    }).filter(Boolean);
+    if (commands.length) {
+      PM.Edit.apply(commands, {
+        label: commands.length === 1 ? 'Import file' : `Import ${commands.length} files`,
+        origin: 'import',
+      });
+    }
+    const relinked = results.filter((result: any) => result.status === 'relinked');
+    const replaced = results.filter((result: any) => result.status === 'replaced');
+    const volatile = results.filter((result: any) => result.status !== 'failed' && !result.persisted);
+    if (layerResults.length || relinked.length || replaced.length) {
+      PM.autosave();
+      if (placement === null) PM.bus.emit('assets');
+      const parts: any = [];
+      if (layerResults.length) {
+        const editableSvg = layerResults.length === 1 && layerResults[0].asset.format === 'svg' && layerResults[0].asset.svg?.paths?.length;
+        parts.push(layerResults.length === 1
+          ? `Imported ${layerResults[0].asset.name}${editableSvg ? ' as editable paths' : ''}`
+          : `Imported ${layerResults.length} files`);
+      }
+      if (replaced.length) parts.push(`Replaced ${replaced[0].previousName} with ${replaced[0].asset.name}`);
+      if (relinked.length) parts.push(`relinked ${relinked.length} missing ${relinked.length === 1 ? 'asset' : 'assets'}`);
+      const svgWarnings = [...layerResults, ...replaced].flatMap((result: any) => result.asset.svg?.warnings || []);
+      if (svgWarnings.length) parts.push(`${svgWarnings.length} SVG ${svgWarnings.length === 1 ? 'feature needs' : 'features need'} review`);
+      if (volatile.length) parts.push('durable storage unavailable');
+      PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400);
+    }
+  } catch (error: any) {
+    PM.toast(error.message || 'Could not import files', 6000);
+  } finally { progress?.close(); }
 }
 /* File pickers and drag/drop can fire while an earlier batch is still decoding.
    Preserve user order and project identity by serializing batches; each batch
    still performs its expensive work through the bounded parallel pool. */
-PM.importFiles = (files: any, { project = PM.proj, placement, sequence }: any = {}) => {
+PM.importFiles = (files: any, { project = PM.proj, placement, sequence, replaceAssetId }: any = {}) => {
   const run = () => {
     if (PM.proj !== project) {
       PM.toast('Import stopped because you switched projects · import again in the intended project', 5000);
       return [];
     }
-    return importFiles(Array.from(files || []), placement, sequence);
+    return importFiles(Array.from(files || []), placement, sequence, replaceAssetId);
   };
   APP.importQueue = APP.importQueue.then(run, run);
   return APP.importQueue;
@@ -947,11 +982,30 @@ if (PM.proj.id === homeProjectId) {
   persistCurrent(false);
   void refreshFileDirty();
 }
-for (const id of PM.Projects.tabs()) {
-  if (id === PM.proj.id) continue;
-  const project = PM.Projects.get(id);
-  if (project) void refreshFileDirty(project);
+// Restore the chrome first, then check inactive files one at a time. Hundreds
+// of open tabs must not clone/hash all their documents in the first frame.
+const restoredTabs = PM.Projects.tabs().filter((id: string) => id !== PM.proj.id);
+let restoredIndex = 0;
+async function refreshNextRestoredTab() {
+  const id = restoredTabs[restoredIndex++];
+  if (!id) return;
+  try {
+    if (!fileStates.has(id) && PM.Projects.tabs().includes(id)) {
+      const project = PM.Projects.get(id);
+      if (project) {
+        await refreshFileDirty(project);
+        PM.bus.emit('projects:tabs');
+      }
+    }
+  } catch (error) { console.warn('Could not check restored project', error); }
+  scheduleRestoredTab();
 }
+function scheduleRestoredTab() {
+  if (restoredIndex >= restoredTabs.length) return;
+  if (window.requestIdleCallback) window.requestIdleCallback(() => { void refreshNextRestoredTab(); }, { timeout: 2000 });
+  else window.setTimeout(() => { void refreshNextRestoredTab(); }, 50);
+}
+scheduleRestoredTab();
 PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
 
 /* first full frame after persistent panels have measured */

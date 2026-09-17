@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './projects';
@@ -19,6 +19,29 @@ function projectsRegistry(): { PM: PMRegistry; memory: Map<string, any> } {
 }
 
 describe('legacy project registry install', () => {
+  it('keeps every open project beyond eight tabs and restores their stable order', () => {
+    const { PM, memory } = projectsRegistry();
+    const ids = Array.from({ length: 100 }, (_, index) => `P${index}`);
+    for (const id of ids) {
+      PM.Projects.put({ id, name: id, layers: [] });
+      PM.Projects.markOpen(id);
+    }
+    PM.Projects.markOpen(ids[50]);
+    install(PM);
+    expect(PM.Projects.tabs()).toEqual(ids);
+    expect(memory.get('openTabs')).toEqual(ids);
+  });
+
+  it('validates many restored tabs in one metadata read and removes duplicates and stale ids', () => {
+    const { PM, memory } = projectsRegistry();
+    const ids = Array.from({ length: 1000 }, (_, index) => `P${index}`);
+    memory.set('projects', ids.map(id => ({ id, name: id })));
+    memory.set('openTabs', [...ids, ids[0], 'missing', null]);
+    const get = vi.spyOn(PM.store, 'get');
+    expect(PM.Projects.tabs()).toEqual(ids);
+    expect(get.mock.calls.filter(([key]) => key === 'projects')).toHaveLength(1);
+  });
+
   it('renames the active live document without reverting unsaved layers to the saved snapshot', () => {
     const { PM } = projectsRegistry();
     const files = new Map<string, any>([['P2', { path: '/tmp/Other.pmv', dirty: false }]]);
