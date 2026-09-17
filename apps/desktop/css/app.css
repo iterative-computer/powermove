@@ -118,12 +118,17 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   padding:0 var(--pad) 0 var(--traffic-inset);
   position:relative;z-index:40;-webkit-app-region:no-drag;
 }
-/* The strip sits between two flexible drag spacers inside a rail, so it is
-   centred without a transform and never overlapped by a drag rectangle. */
-#tabs-center{position:absolute;top:0;bottom:0;left:var(--traffic-inset);right:var(--pad);display:flex;align-items:center;justify-content:center;pointer-events:none}
+/* The tool strip sits between two flexible drag spacers inside a rail that
+   spans the window, so it is centred on the window without a transform and
+   never overlapped by a drag rectangle. Tabs and the right-hand actions are
+   in flow and paint above the rail. */
+#tools-center{position:absolute;top:0;bottom:0;left:0;right:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+#tools-center #toolbar-strip{pointer-events:auto}
+/* Tabs lead the row. Their width is capped so they stop short of the centred
+   tool strip at any window width the app supports. */
 #tabs{
   position:relative;pointer-events:auto;
-  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(52%,calc(100% - 400px));min-width:0;
+  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:calc(50% - var(--traffic-inset) - 150px);min-width:0;
   padding:2px;border:0;border-radius:var(--r-md);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
@@ -201,7 +206,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .iconbtn.dis{opacity:var(--disabled);pointer-events:none}
 .iconbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 
-/* ── tool toolbar, inline with the native titlebar ─────── */
+/* ── tool toolbar, centred in the native titlebar ──────── */
 #toolbar-strip{
   flex:0 0 auto;min-width:0;height:30px;display:flex;align-items:center;
   margin:0;padding:2px;border:0;border-radius:var(--r-md);
