@@ -73,10 +73,12 @@
      button. A wider gap separates the horizontal and vertical groups. */
   .align-strip { display: flex; gap: 6px; margin: 2px 4px 10px; }
   .align-group { display: flex; flex: 1; gap: 1px; }
-  button { display: flex; align-items: center; justify-content: center; flex: 1; height: 28px; padding: 0; border: 0; border-radius: 0; background: var(--bg-row); color: var(--tx-3); cursor: default; }
+  /* Same material as every value well: tinted rest, a touch more on hover,
+     pressed a step darker. */
+  button { display: flex; align-items: center; justify-content: center; flex: 1; height: 28px; padding: 0; border: 0; border-radius: 0; background: rgb(var(--ink-rgb) / .06); color: var(--tx-3); cursor: default; transition: background var(--dur-1), color var(--dur-1); }
   button:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
   button:last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
-  button:hover { background: var(--bg-hover); color: var(--tx); }
-  button:active { background: var(--ink-2); color: var(--tx); }
+  button:hover { background: rgb(var(--ink-rgb) / .085); color: var(--tx); }
+  button:active { background: rgb(var(--ink-rgb) / .12); color: var(--tx); transition: none; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 </style>
