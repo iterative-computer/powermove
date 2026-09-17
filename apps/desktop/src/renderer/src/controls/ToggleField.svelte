@@ -7,6 +7,11 @@
   import './controls.css';
   import type { PowermoveAPI } from '../kernel/api';
 
+  /* On/off as a two-segment control with a gliding pill, after dialkit's
+     Toggle: the state is read as a word, not a switch position, and the
+     control shares the inspector's well material. Left/Right arrows move
+     between the segments. */
+
   let {
     api,
     get,
@@ -23,26 +28,34 @@
 
   const labelledBy = rowLabelId();
   const value = $derived((doc.tick.values, doc.proj, transport.time, !!get()));
-  const isMixed=$derived((sel.layers,doc.tick.values,doc.proj,transport.time,mixed?.(edit,value)??false));
+  const isMixed = $derived((sel.layers, doc.tick.values, doc.proj, transport.time, mixed?.(edit, value) ?? false));
   const gesture = $derived(new EditGesture(api, edit));
 
-  function toggle(event: MouseEvent): void {
-    event.stopPropagation();
-    gesture.once(isMixed?true:!value);
+  function set(next: boolean): void {
+    if (!isMixed && next === value) return;
+    gesture.once(next);
     api.transport.invalidate();
+  }
+
+  function onKey(event: KeyboardEvent): void {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') { event.preventDefault(); set(false); }
+    else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') { event.preventDefault(); set(true); }
+    else if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); set(isMixed ? true : !value); }
   }
 </script>
 
-<button
-  type="button"
+<div
+  class="onoff"
   class:on={value}
-  class="toggle"
   class:mixed={isMixed}
-  aria-pressed={isMixed?'mixed':value}
+  role="radiogroup"
+  tabindex="-1"
   aria-labelledby={labelledBy}
   aria-label={labelledBy ? undefined : (label ?? edit.label)}
   onpointerdown={(event) => event.stopPropagation()}
-  onclick={toggle}
-><i aria-hidden="true"></i></button>
-
-<style>.toggle.mixed{background:var(--tx-3)}.toggle.mixed i{transform:translateX(6px);border-radius:2px;height:3px}</style>
+  onkeydown={onKey}
+>
+  {#if !isMixed}<span class="onoff-pill" aria-hidden="true"></span>{/if}
+  <button type="button" role="radio" aria-checked={!isMixed && !value} tabindex={!value || isMixed ? 0 : -1} onclick={() => set(false)}>Off</button>
+  <button type="button" role="radio" aria-checked={!isMixed && value} tabindex={value && !isMixed ? 0 : -1} onclick={() => set(true)}>On</button>
+</div>

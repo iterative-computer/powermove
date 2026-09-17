@@ -114,6 +114,10 @@
   .insp :global(.row.split:has(textarea)) { height: auto; min-height: 54px; align-items: start; }
   .insp :global(.row.split:has(textarea) > .k) { height: 28px; }
   .insp :global(.row.split:has(textarea) > .stopwatch) { margin-top: 5px; }
+  /* Rows without a keyframe diamond keep their label at the same x, but the
+     control column starts where it does on animated rows (18px diamond + 8px
+     gap), so every well in a section shares one left edge. */
+  .insp :global(.row.split:not(:has(> .stopwatch)) > .k) { width: 114px; }
   .insp :global(.property-stopwatch) { width: 18px; height: 24px; }
 
   /* Panel actions use the same flat material as property fields. */

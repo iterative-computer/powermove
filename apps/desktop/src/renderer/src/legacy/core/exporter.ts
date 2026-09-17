@@ -146,9 +146,17 @@ X.dialog = () => {
     return field;
   };
   const toggle = (get: any, set: any, opt: any) => {
-    const field = h('button.toggle', { type: 'button', role: 'switch', 'aria-label': opt.label }, h('i'));
-    field.sync = () => { field.classList.toggle('on', !!get()); field.setAttribute('aria-checked', String(!!get())); };
-    field.onclick = () => { set(!get()); field.sync(); };
+    // Off | On segments with a gliding pill; shares .onoff styles with ToggleField.svelte.
+    const off = h('button', { type: 'button', role: 'radio' }, 'Off');
+    const on = h('button', { type: 'button', role: 'radio' }, 'On');
+    const field = h('div.onoff', { role: 'radiogroup', 'aria-label': opt.label }, h('span.onoff-pill', { 'aria-hidden': 'true' }), off, on);
+    field.sync = () => {
+      const value = !!get();
+      field.classList.toggle('on', value);
+      off.setAttribute('aria-checked', String(!value)); on.setAttribute('aria-checked', String(value));
+    };
+    off.onclick = () => { if (get()) { set(false); field.sync(); } };
+    on.onclick = () => { if (!get()) { set(true); field.sync(); } };
     field.sync(); return field;
   };
   const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';

@@ -272,7 +272,11 @@ describe('one-shot fields', () => {
   it('ToggleField applies the inverted getter value once', () => {
     const { api, Edit, invalidate } = fakeAPI();
     const target = render(ToggleField, { api, get: () => false, edit: commandEdit('Enabled'), label: 'Enabled' });
-    target.querySelector<HTMLButtonElement>('button.toggle')!.click();
+    const [off, on] = target.querySelectorAll<HTMLButtonElement>('.onoff button');
+    expect(off!.getAttribute('aria-checked')).toBe('true');
+    off!.click();
+    expect(Edit.apply).not.toHaveBeenCalled();
+    on!.click();
     expect(Edit.apply).toHaveBeenCalledWith(expect.objectContaining({ value: true }), { label: 'Enabled', origin: 'inspector' });
     expect(invalidate).toHaveBeenCalledWith();
   });
