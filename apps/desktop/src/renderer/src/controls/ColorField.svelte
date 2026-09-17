@@ -64,7 +64,7 @@
     const rgb = hexToRgb(hex) ?? { r: 0, g: 0, b: 0 };
     if (as === 'rgb') return `${rgb.r}, ${rgb.g}, ${rgb.b}`;
     const next = rgbToHsv(rgb);
-    return `${next.h}°, ${next.s}%, ${next.v}%`;
+    return `${next.h}, ${next.s}, ${next.v}`;
   }
 
   function parse(text: string, as: Format): string | null {
