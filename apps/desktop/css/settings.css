@@ -54,7 +54,7 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 
 /* ── the inset sheet ── */
 .sg-main{position:relative;min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}
-.sg-scroll{min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:36px 40px 96px;container-type:inline-size}
+.sg-scroll{min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:72px 40px 96px;container-type:inline-size}
 .sg-column{width:608px;max-width:100%;margin:0 auto}
 
 /* ── page ── */
