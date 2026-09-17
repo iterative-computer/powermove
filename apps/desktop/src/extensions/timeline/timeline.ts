@@ -19,11 +19,16 @@ import {
 } from './bezier-drag';
 import {
   graphSelectionBounds,
+  graphTransformCursor,
+  graphTransformHandleAtPoint,
+  graphTransformHandles,
   planGraphKeyframeMove,
+  planGraphKeyframeScale,
   pointInGraphSelection,
   resolveGraphTarget,
   selectionAfterKeyGesture,
   selectionAfterMarquee,
+  type GraphTransformHandle,
 } from './graph-selection';
 
 export interface KeyframeMoveSnapshotItem<Property = unknown> {
@@ -584,10 +589,16 @@ function buildHead(head: any) {
   const graphOptions = btn('more', () => api.ui.menu(graphOptions, [
     { label: 'Value graph', on: T.graphType !== 'speed', run: () => { T.graphType = 'value'; invalidate('timeline'); } },
     { label: 'Speed graph', on: T.graphType === 'speed', run: () => { T.graphType = 'speed'; invalidate('timeline'); } },
+    { label: 'Merge selected curves', on: Boolean(T.graphMerge), disabled: (T._graph?.series?.length ?? 0) < 2,
+      run: () => { T.graphMerge = !T.graphMerge; T.graphViewBounds = null; invalidate('timeline'); } },
     { label: 'Fit selected curves', disabled: !T._graph, run: () => {
+      /* Merged curves draw no per-key points, so fall back to the selected
+         series' keys: "fit" still has something to frame. */
       const points = T._graph?.points || [];
-      if (!points.length) return;
-      const times = points.map((point: any) => point.axis.L.from + point.key.t);
+      const times = points.length
+        ? points.map((point: any) => point.axis.L.from + point.key.t)
+        : (T._graph?.series ?? []).flatMap((axis: any) => axis.prop.kf.map((key: any) => axis.L.from + key.t));
+      if (!times.length) return;
       const first = Math.min(...times), last = Math.max(...times);
       T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
       T.scrollT = Math.max(-.4, first - 24 / T.pps);
@@ -898,6 +909,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
   if (T.graph) drawGraph(c, W, H);
   else { drawClips(c, W, H); drawDropGhost(c, W, H); }
   drawGutter(c, W, H);
+  if (T.graph) drawGraphReadout(c, W, H);
   if (T.reorder) {
     const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
     c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
@@ -1636,6 +1648,78 @@ function drawQuickOffset(c: any, W: number, H: number) {
 }
 
 /* ── graph editor ──────────────────────────────────────── */
+/* After Effects draws graph vertices as squares: solid in the curve's color
+   when selected, hollow over the track surface when not. Half-pixel offsets
+   keep the 1px ring crisp at every device ratio. */
+const GRAPH_VERTEX = 8;
+const GRAPH_BOX_INSET = 8;
+function drawGraphVertex(c: any, x: number, y: number, color: string, selected: boolean) {
+  const left = Math.round(x - GRAPH_VERTEX / 2), top = Math.round(y - GRAPH_VERTEX / 2);
+  if (selected) { c.fillStyle = color; c.fillRect(left, top, GRAPH_VERTEX, GRAPH_VERTEX); return; }
+  c.fillStyle = theme.sunken;
+  c.fillRect(left, top, GRAPH_VERTEX, GRAPH_VERTEX);
+  c.strokeStyle = color; c.lineWidth = 1;
+  c.strokeRect(left + .5, top + .5, GRAPH_VERTEX - 1, GRAPH_VERTEX - 1);
+}
+
+/* AE's "Show Transform Box": a hairline frame with eight grips that scale the
+   selection in time and value. Where scaling does not apply the frame stays
+   dashed and only marks the draggable group. */
+function drawGraphTransformBox(c: any, bounds: any, grips: boolean) {
+  c.save();
+  c.strokeStyle = INK.hi; c.lineWidth = 1;
+  if (!grips) c.setLineDash([3, 3]);
+  c.strokeRect(Math.round(bounds.x0) + .5, Math.round(bounds.y0) + .5,
+    Math.round(bounds.x1 - bounds.x0), Math.round(bounds.y1 - bounds.y0));
+  if (grips) for (const grip of graphTransformHandles(bounds)) {
+    c.fillStyle = theme.sunken;
+    c.fillRect(Math.round(grip.x) - 3, Math.round(grip.y) - 3, 6, 6);
+    c.strokeRect(Math.round(grip.x) - 2.5, Math.round(grip.y) - 2.5, 5, 5);
+  }
+  c.restore();
+}
+
+/* AE keeps the dragged key's numbers under the pointer instead of making you
+   read them off the axis. One key reports where it landed; a group reports how
+   far it travelled. */
+function drawGraphReadout(c: any, W: number, H: number) {
+  const readout = T.graphReadout;
+  if (!readout) return;
+  c.save();
+  c.font = '500 10px ' + fui(); c.textBaseline = 'middle';
+  const width = c.measureText(readout.text).width + 12, height = 18;
+  const x = clamp(readout.x + 14, T.gut + 4, Math.max(T.gut + 4, W - width - 4));
+  const y = clamp(readout.y - height - 8, T.ruler + 32, Math.max(T.ruler + 32, H - height - 4));
+  roundRect(c, x, y, width, height, 3);
+  c.fillStyle = theme.accent; c.fill();
+  c.fillStyle = css('--on-accent') || '#fff';
+  c.fillText(readout.text, x + 6, y + height / 2);
+  c.restore();
+}
+
+function graphValueText(value: any) {
+  return typeof value === 'number' && Number.isFinite(value) ? String(api.util.round(value, 2)) : '';
+}
+
+/* One selected key reads as an absolute position; several read as the offset
+   applied to the whole group, which is the only number shared by all of them. */
+function graphMoveReadout(snapshot: any, x: number, y: number, timeDelta: number, valueDelta: number) {
+  const selected = snapshot.items.filter((item: any) => item.selected);
+  const fps = api.project.get().fps;
+  /* The speed graph plots rate of change, so a key's stored value is not the
+     number the pointer is reading off the axis: report the time alone there. */
+  const plotsValue = T.graphType !== 'speed';
+  if (selected.length === 1) {
+    const item = selected[0];
+    const layerFrom = (Number.isFinite(item.compositionTime) ? item.compositionTime : item.time) - item.time;
+    const value = plotsValue ? graphValueText(item.key.v) : '';
+    return { x, y, text: (value && value + '  ·  ') + api.util.tc(layerFrom + item.key.t, fps) };
+  }
+  const time = (timeDelta >= 0 ? '+' : '\u2212') + api.util.tc(Math.abs(timeDelta), fps);
+  const value = plotsValue ? graphValueText(valueDelta) : '';
+  return { x, y, text: (value ? '\u0394 ' + value + '  ·  ' : '') + time };
+}
+
 const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(api, axis, time, speed));
 function drawGraph(c: any, W: any, H: any) {
   graphSamples.begin(api.project.get(), [api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
@@ -1663,7 +1747,21 @@ function drawGraph(c: any, W: any, H: any) {
     c.textAlign = 'left'; c.restore(); return;
   }
   const L = target.L, speedMode=T.graphType==='speed';
-  const viewKey = api.project.get().id + ':' + T.graphType + ':' + series.map((axis: any) => axis.L.id + ':' + axis.key).join('|');
+  /* "Merge selected curves" folds the selected channels into the single curve
+     they describe together: the magnitude of the combined vector (combined
+     speed in speed mode). Two axes of one motion read as one motion curve
+     instead of two that have to be compared by eye. It is a view of the same
+     keys, so per-key handles stay hidden while it is on. */
+  const merged = Boolean(T.graphMerge) && series.length > 1;
+  const mergedSample = (time: number) => {
+    let total = 0;
+    for (const axis of series) {
+      const v = graphSamples.sample(axis, time, speedMode);
+      if (Number.isFinite(v)) total += v * v;
+    }
+    return Math.sqrt(total);
+  };
+  const viewKey = api.project.get().id + ':' + T.graphType + ':' + (merged ? 'merged:' : '') + series.map((axis: any) => axis.L.id + ':' + axis.key).join('|');
   if (T.graphViewKey !== viewKey) { T.graphViewKey = viewKey; T.graphViewBounds = null; }
   series.forEach((axis:any)=>temporalKeys(axis.prop.kf));
   let vmin = Infinity, vmax = -Infinity;
@@ -1671,7 +1769,7 @@ function drawGraph(c: any, W: any, H: any) {
     const keys=axis.prop.kf;
     for(let i=0;i<keys.length;i++) for(let sample=0;sample<=48;sample++) {
       const t=axis.L.from+keys[i].t+((keys[i+1]?.t ?? keys[i].t)-keys[i].t)*sample/48;
-      const v=graphSamples.sample(axis,t,speedMode); if(Number.isFinite(v)){vmin=Math.min(vmin,v);vmax=Math.max(vmax,v);}
+      const v=merged?mergedSample(t):graphSamples.sample(axis,t,speedMode); if(Number.isFinite(v)){vmin=Math.min(vmin,v);vmax=Math.max(vmax,v);}
     }
   });
   if (!isFinite(vmin)) { vmin = 0; vmax = 1; }
@@ -1682,7 +1780,7 @@ function drawGraph(c: any, W: any, H: any) {
   if (T.graphDragBounds) [vmin, vmax] = T.graphDragBounds;
   const top = T.ruler + 42, bot = Math.max(top + 1, H - 16);
   const v2y = (v: any) => bot - (v - vmin) / (vmax - vmin) * (bot - top);
-  T._graph = { target, series, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null };
+  T._graph = { target, series, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null, transform: null };
 
   /* value gridlines */
   c.strokeStyle = INK.grid; c.font = '400 9.5px ' + fui(); c.fillStyle = theme.tx3;
@@ -1692,6 +1790,24 @@ function drawGraph(c: any, W: any, H: any) {
     c.fillText(api.util.round(v, 1), T.gut + 5, y - 4);
   }
   /* curve */
+  if (merged) {
+    const x0 = Math.max(T.gut, Math.min(...series.map((axis: any) => t2x(axis.L.from + Math.min(0, ...axis.prop.kf.map((key: any) => key.t))))));
+    const x1 = Math.min(W, Math.max(...series.map((axis: any) => t2x(axis.L.from + Math.max(axis.L.dur, ...axis.prop.kf.map((key: any) => key.t))))));
+    c.strokeStyle = theme.accent; c.lineWidth = 1.8;
+    c.beginPath();
+    for (let x = x0; x <= x1; x += 1.5) {
+      const y = v2y(mergedSample(x2t(x)));
+      x === x0 ? c.moveTo(x, y) : c.lineTo(x, y);
+    }
+    c.stroke();
+    /* The merged curve has no keys of its own; drop any handles left from the
+       per-axis pass so hit-testing cannot pick up a stale point. */
+    series.forEach((axis: any) => axis.prop.kf.forEach((key: any) => api.uiState.setKeyHandles(key, { ho: null, hi: null, pt: null })));
+  } else {
+  /* Vertex fill and tangents follow the live selection, so a marquee lights
+     keys up as it sweeps. `selectedKeyIds` only decides which curves are on
+     screen, and stays frozen for the duration of that marquee. */
+  const liveSelected = new Set(api.selection.keys());
   series.forEach((axis: any, axisIndex: number) => {
   const L = axis.L;
   const kf = axis.prop.kf;
@@ -1710,49 +1826,64 @@ function drawGraph(c: any, W: any, H: any) {
   /* handles + keys */
   kf.forEach((k: any, i: any) => {
     api.uiState.setKeyHandles(k, { ho: null, hi: null, pt: null });
-    if (!selectedKeyIds.has(k.i)) return;
     const x = t2x(L.from + k.t), y = v2y(speedMode ? graphSamples.sample(axis,L.from+k.t,true) : k.v);
+    const sel = liveSelected.has(k.i);
     const nx = kf[i + 1], pv = kf[i - 1];
-    c.strokeStyle = INK.sub; c.lineWidth = 1;
-    if (nx && !k.hold && !speedMode) {
-      const handle = visibleBezierHandle(k, nx, 'eo');
-      const [hx, hy] = pointForBezierHandle(handle, [x, y], [t2x(L.from + nx.t), v2y(nx.v)]);
-      c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
-      c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
-      api.uiState.setKeyHandles(k, { ho: [hx, hy] });
+    /* AE draws tangents for the selected keys only, so a crowded curve stays
+       readable, while every key on a shown curve still draws its vertex. */
+    if (sel) {
+      c.strokeStyle = INK.sub; c.lineWidth = 1;
+      if (nx && !k.hold && !speedMode) {
+        const handle = visibleBezierHandle(k, nx, 'eo');
+        const [hx, hy] = pointForBezierHandle(handle, [x, y], [t2x(L.from + nx.t), v2y(nx.v)]);
+        c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
+        c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 2.6, 0, 7); c.fill();
+        api.uiState.setKeyHandles(k, { ho: [hx, hy] });
+      }
+      if (pv && !pv.hold && !speedMode) {
+        const handle = visibleBezierHandle(k, pv, 'ei');
+        const px = t2x(L.from + pv.t), py = v2y(pv.v);
+        const [hx, hy] = pointForBezierHandle(handle, [px, py], [x, y]);
+        c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
+        c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 2.6, 0, 7); c.fill();
+        api.uiState.setKeyHandles(k, { hi: [hx, hy] });
+      }
     }
-    if (pv && !pv.hold && !speedMode) {
-      const handle = visibleBezierHandle(k, pv, 'ei');
-      const px = t2x(L.from + pv.t), py = v2y(pv.v);
-      const [hx, hy] = pointForBezierHandle(handle, [px, py], [x, y]);
-      c.beginPath(); c.moveTo(x, y); c.lineTo(hx, hy); c.stroke();
-      c.fillStyle = INK.handle; c.beginPath(); c.arc(hx, hy, 3, 0, 7); c.fill();
-      api.uiState.setKeyHandles(k, { hi: [hx, hy] });
-    }
-    const sel = api.selection.keys().includes(k.i);
-    c.fillStyle = sel ? curveColor : INK.inv;
-    c.beginPath(); c.arc(x, y, 4.2, 0, 7); c.fill();
+    drawGraphVertex(c, x, y, curveColor, sel);
     api.uiState.setKeyHandles(k, { pt: [x, y] });
   });
   });
+  }
   const graphPoints: any[] = series.flatMap((axis: any) => axis.prop.kf.map((key: any) => {
     const point = keyHandles(key)?.pt;
     return point ? { id: key.i, key, axis, x: point[0], y: point[1] } : null;
   })).filter(Boolean);
   const selectedIds = new Set(api.selection.keys());
   T._graph.points = graphPoints;
-  T._graph.selectionBounds = graphSelectionBounds(graphPoints.filter(point => selectedIds.has(point.id)));
-  if (T._graph.selectionBounds) {
-    const bounds = T._graph.selectionBounds;
-    c.save(); c.strokeStyle = rgba(theme.accent, .4); c.lineWidth = 1;
-    c.setLineDash([3, 3]);
-    c.strokeRect(bounds.x0 + .5, bounds.y0 + .5, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
-    c.restore();
-  }
+  const boxed = graphPoints.filter((point: any) => selectedIds.has(point.id));
+  /* The box stands off the outermost keys so its corner grips never land on
+     top of the very keys they scale. */
+  T._graph.selectionBounds = graphSelectionBounds(boxed, 16, GRAPH_BOX_INSET);
+  /* Scaling reads key values straight off the curve, which the speed graph
+     does not plot; there the box only marks the movable group. */
+  T._graph.transform = !speedMode && !merged && boxed.length > 1 ? {
+    t0: Math.min(...boxed.map((point: any) => point.axis.L.from + point.key.t)),
+    t1: Math.max(...boxed.map((point: any) => point.axis.L.from + point.key.t)),
+    v0: Math.min(...boxed.map((point: any) => point.key.v)),
+    v1: Math.max(...boxed.map((point: any) => point.key.v)),
+  } : null;
+  if (T._graph.selectionBounds) drawGraphTransformBox(c, T._graph.selectionBounds, Boolean(T._graph.transform));
   // Keep the legend in its own strip, clear of curves and value ticks.
   c.fillStyle = theme.panel; c.fillRect(T.gut, T.ruler, W - T.gut, 28);
   c.font = '500 10px ' + fui();
   let legendX = T.gut + 12;
+  if (merged) {
+    c.fillStyle = theme.accent;
+    c.fillRect(legendX, T.ruler + 11, 10, 2);
+    c.fillStyle = theme.tx2;
+    c.fillText(`Merged · ${series.length} curves${speedMode ? ' (/s)' : ''}`, legendX + 15, T.ruler + 17);
+    c.restore(); return;
+  }
   for (const [index, axis] of series.entries()) {
     const label = axis.label === 'fontAxis.wght' ? 'Weight' : axis.label;
     const unit = api.model.CH[axis.key]?.unit;
@@ -1918,6 +2049,8 @@ function onMove(e: any) {
   setHoverRow(hitRow(y)?.i ?? null);
   if (T.graph && x > T.gut && y >= T.ruler) {
     const graph = T._graph;
+    const grip = graph?.transform ? graphTransformHandleAtPoint(graph.selectionBounds, x, y) : null;
+    if (grip) { T.cv.style.cursor = graphTransformCursor(grip); return; }
     const keys = graph?.series?.flatMap((axis: any) => axis.prop.kf) ?? [];
     const distanceTo = (point: any) => point ? Math.hypot(x - point[0], y - point[1]) : Infinity;
     const handleDistance = Math.min(...keys.map((key: any) => {
@@ -2267,18 +2400,28 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
   };
   const options = typeof values[0] === 'boolean' ? ['true', 'false'] : choices[row.key]
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
+  const isColor = !options && typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0]);
   const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': scale ? `Scale ${scaleIndex === 0 ? 'X' : 'Y'}` : row.label,
     style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${rowY(rowIndex) + 3}px`,
       width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${T.row - 6}px`, background: 'var(--bg-row)',
-      border: '1px solid var(--accent)', color: 'var(--tx)', padding: '0 4px', zIndex: 9 } });
+      border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
   if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
-  else if (typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0])) input.type = 'color';
-  document.querySelector<HTMLElement>('#tl-canvas-wrap')?.appendChild(input); input.focus(); input.select?.();
+  else if (isColor) { input.type = 'color'; input.value = String(values[0]).toLowerCase(); }
+  document.querySelector<HTMLElement>('#tl-canvas-wrap')?.appendChild(input); input.focus(); if (!isColor) input.select?.();
+  // The OS color panel is its own window, so the swatch blurs the moment it opens:
+  // a color edit lives on input/change and an outside click, never on blur.
+  let previewing = false;
+  const preview = () => {
+    if (!previewing) { api.edit.begin(`Edit ${row.label}`, { origin: 'timeline' }); previewing = true; }
+    for (const axis of axes) api.edit.dispatch({ type: 'set_property', target: row.L.id, path: axis.key, value: input.value, time, mode: 'auto', preserveHandEdits: false });
+    invalidate();
+  };
   let closed = false;
   const finish = (save: boolean) => {
     if (closed) return;
     closed = true;
-    if (save) {
+    if (previewing) { save ? api.edit.commit(`Edit ${row.label}`) : api.edit.cancel(); }
+    else if (save) {
       const parts = axes.length > 1 ? input.value.split(',').map((value: string) => value.trim()) : [input.value];
       const next = values.map((value, index) => typeof value === 'number' ? Number(parts[index] ?? parts[0]) : typeof value === 'boolean' ? parts[index] === 'true' : parts[index]);
       if (next.every(value => typeof value !== 'number' || Number.isFinite(value))) api.edit.apply(scaleCommand ? scaleCommand(Number(next[0])) : axes.map((axis, index) => ({
@@ -2288,6 +2431,18 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
     input.remove(); invalidate();
   };
   if (options) input.onchange = () => finish(true);
+  else if (isColor) {
+    input.oninput = preview;
+    const outside = (event: Event) => { if (event.target !== input) close(true); };
+    const detach = () => document.removeEventListener('pointerdown', outside, true);
+    const close = (save: boolean) => { detach(); finish(save); };
+    setTimeout(() => document.addEventListener('pointerdown', outside, true));
+    input.onchange = preview;
+    input.onkeydown = (event: KeyboardEvent) => { event.stopPropagation(); if (event.key === 'Enter' || event.key === 'Escape') { event.preventDefault(); close(event.key === 'Enter'); } };
+    canvasCleanups.push(() => { detach(); input.remove(); });
+    try { input.showPicker?.(); } catch { input.click(); }
+    return;
+  }
   input.onblur = () => finish(true);
   input.onkeydown = (event: KeyboardEvent) => { event.stopPropagation(); if (event.key === 'Enter' || event.key === 'Escape') { event.preventDefault(); finish(event.key === 'Enter'); } };
   canvasCleanups.push(() => { input.onblur = null; input.remove(); });
@@ -2604,6 +2759,10 @@ function keyDown(e: any, r: any, x: any, y: any, rowIdx: any) {
 function graphDown(e: any, x: any, y: any) {
   const g = T._graph; if (!g) return;
   if (y < T.ruler + 28) return;
+  /* The box is inset from the outermost keys, so a grip and the key it scales
+     never compete for the same press. */
+  const grip = g.transform ? graphTransformHandleAtPoint(g.selectionBounds, x, y) : null;
+  if (grip) return dragGraphTransform(e, g, grip);
   let L = g.target.L;
   const series = g.series as any[];
   // Pick the closest visible point/handle, not whichever axis was iterated first.
@@ -2651,6 +2810,7 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
   const snapshot = captureKeyframeGesture(entries);
   const speeds = entries.map((e:any)=>({key:e.key,inSpeed:e.key.inEase?.speed ?? 0,outSpeed:e.key.outEase?.speed ?? 0}));
   const canvasBounds = T.cv.getBoundingClientRect();
+  const anchorX = e.clientX - canvasBounds.left;
   const anchorY = e.clientY - canvasBounds.top;
   T.graphDragBounds = [g.vmin, g.vmax];
   const timeScale = T.pps;
@@ -2672,18 +2832,113 @@ function dragGraphSelection(e: any, g: any, L: any, click?: () => void) {
         const snap = snapKeyframeGesture(snapshot, delta, snapLock);
         delta = snap.delta; snapLock = snap.lock;
       } else snapLock = null;
-      applyKeyframeGesture(snapshot, delta, (item: any) => item.value + (T.graphType==='speed'?0:dv), planGraphKeyframeMove);
+      const plan = applyKeyframeGesture(snapshot, delta, (item: any) => item.value + (T.graphType==='speed'?0:dv), planGraphKeyframeMove);
+      T.graphReadout = graphMoveReadout(snapshot, anchorX + dx, anchorY + dy, plan.delta, dv);
       if(T.graphType==='speed'){ for(const item of speeds){ item.key.inInterp=item.key.outInterp='bezier'; item.key.inEase.speed=item.inSpeed+dv; item.key.outEase.speed=item.outSpeed+dv; } api.anim.touch(); invalidate(); }
     },
     up: () => {
-      T.graphDragBounds = null;
+      T.graphDragBounds = null; T.graphReadout = null;
       if (moved) api.history.commit('Edit curve');
       else click?.();
       invalidate();
     },
     cancel: () => {
       if (moved) { restoreKeyframeGesture(snapshot); api.history.cancel(); api.anim.touch(); }
-      T.graphDragBounds = null;
+      T.graphDragBounds = null; T.graphReadout = null;
+      invalidate();
+    },
+  });
+}
+
+/* Rebuild from the pointer-down snapshot on every move, like the move gesture:
+   a scale the box later backs away from leaves nothing behind. */
+function applyGraphKeyframeScale(snapshot: any, request: any, eases: any[]) {
+  restoreKeyframeGesture(snapshot);
+  const plan = planGraphKeyframeScale(snapshot.items, request, api.project.get().fps);
+  plan.moves.forEach(({ item, time, value }: any) => {
+    item.key.t = time;
+    if (typeof item.key.v === 'number' && Number.isFinite(value)) item.key.v = api.util.round(value, 3);
+  });
+  /* Influence is a ratio and survives a scale untouched, but the stored speed
+     is value-per-second, so it has to follow value over time to keep the drawn
+     curve through the rescaled keys. */
+  const ratio = plan.timeScale > 1e-6 ? plan.valueScale / plan.timeScale : 1;
+  for (const ease of eases) {
+    if (typeof ease.inSpeed === 'number' && ease.key.inEase) ease.key.inEase.speed = ease.inSpeed * ratio;
+    if (typeof ease.outSpeed === 'number' && ease.key.outEase) ease.key.outEase.speed = ease.outSpeed * ratio;
+  }
+  snapshot.properties.forEach(({ prop, keys }: any) => {
+    const order = new Map(keys.map(({ key, order }: any) => [key, order]));
+    prop.kf = keys.map(({ key }: any) => key)
+      .sort((a: any, b: any) => a.t - b.t || (order.get(a) as number) - (order.get(b) as number));
+  });
+  api.anim.touch(); invalidate();
+  return plan;
+}
+
+/* Drag a transform-box grip: corners scale time and value together, edges one
+   axis. The opposite edge stays put, or the box centre while Cmd/Ctrl is held. */
+function dragGraphTransform(e: any, g: any, grip: GraphTransformHandle) {
+  const box = g.transform;
+  const visibleProperties = new Set(g.series.map((axis: any) => axis.prop));
+  const entries = selectedKeyEntries().filter((entry: any) => !entry.L.lock && visibleProperties.has(entry.prop));
+  if (!box || entries.length < 2) return;
+  const snapshot = captureKeyframeGesture(entries);
+  const eases = snapshot.items.filter((item: any) => item.selected).map((item: any) => ({
+    key: item.key, inSpeed: item.key.inEase?.speed, outSpeed: item.key.outEase?.speed,
+  }));
+  /* y grows downward, so the northern grips carry the *highest* value. */
+  const east = grip.includes('e'), west = grip.includes('w');
+  const north = grip.includes('n'), south = grip.includes('s');
+  const canvasBounds = T.cv.getBoundingClientRect();
+  const anchorX = e.clientX - canvasBounds.left, anchorY = e.clientY - canvasBounds.top;
+  T.graphDragBounds = [g.vmin, g.vmax];
+  let moved = false;
+  beginDrag(e, {
+    cursor: graphTransformCursor(grip),
+    move: (dx: any, dy: any, event: PointerEvent) => {
+      if (!moved && Math.hypot(dx, dy) < 3) return;
+      if (!moved) { moved = true; api.history.begin('Scale keyframes'); }
+      const centered = Boolean(event?.metaKey || event?.ctrlKey);
+      const midTime = (box.t0 + box.t1) / 2, midValue = (box.v0 + box.v1) / 2;
+      const anchorTime = centered ? midTime : east ? box.t0 : box.t1;
+      const movingTime = east ? box.t1 : box.t0;
+      const anchorValue = centered ? midValue : north ? box.v0 : box.v1;
+      const movingValue = north ? box.v1 : box.v0;
+      const timeSpan = movingTime - anchorTime, valueSpan = movingValue - anchorValue;
+      const request = {
+        anchorTime: east || west ? anchorTime : midTime,
+        anchorValue: north || south ? anchorValue : midValue,
+        timeScale: (east || west) && Math.abs(timeSpan) > 1e-9
+          ? (x2t(anchorX + dx) - anchorTime) / timeSpan : 1,
+        valueScale: (north || south) && Math.abs(valueSpan) > 1e-9
+          ? (g.y2v(anchorY + dy) - anchorValue) / valueSpan : 1,
+      };
+      const plan = applyGraphKeyframeScale(snapshot, request, eases);
+      const percent = (scale: number) => Math.round(scale * 1000) / 10 + '%';
+      const parts = [
+        ...(east || west ? ['T ' + percent(plan.timeScale)] : []),
+        ...(north || south ? ['V ' + percent(plan.valueScale)] : []),
+      ];
+      T.graphReadout = { x: anchorX + dx, y: anchorY + dy, text: parts.join('  ·  ') };
+    },
+    up: () => {
+      T.graphDragBounds = null; T.graphReadout = null;
+      if (moved) api.history.commit('Scale keyframes');
+      invalidate();
+    },
+    cancel: () => {
+      if (moved) {
+        /* restoreKeyframeGesture only knows times and values; the eases this
+           gesture rescaled have to be put back by hand. */
+        restoreKeyframeGesture(snapshot);
+        for (const ease of eases) {
+          if (typeof ease.inSpeed === 'number' && ease.key.inEase) ease.key.inEase.speed = ease.inSpeed;
+          if (typeof ease.outSpeed === 'number' && ease.key.outEase) ease.key.outEase.speed = ease.outSpeed;
+        }
+        api.history.cancel(); api.anim.touch();
+      }
+      T.graphDragBounds = null; T.graphReadout = null;
       invalidate();
     },
   });
@@ -2888,6 +3143,16 @@ function marquee(e: any, opt: any = {}) {
 
 function onDbl(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  if (T.graph && x > T.gut && y >= T.ruler + 28) {
+    const hit = [...(T._graph?.points || [])]
+      .map((point: any) => ({ point, distance: Math.hypot(x - point.x, y - point.y) }))
+      .sort((a: any, b: any) => a.distance - b.distance)[0];
+    if (hit && hit.distance < GRAPH_POINT_HIT) {
+      const clicked = [{ key: hit.point.key, prop: hit.point.axis.prop, L: hit.point.axis.L }];
+      editKeyframeValues(keyframeContextEntries(clicked, api.selection.keys(), selectedKeyEntries()));
+    }
+    return;
+  }
   const workHit: any = x > T.gut && workAreaHit(x, y);
   if (workHit?.kind === 'bar') {
     api.edit.apply({ type: 'set_composition', patch: { workArea: [0, api.project.get().dur] } }, { label: 'Reset work area', origin: 'timeline' });
@@ -2905,8 +3170,8 @@ function renameLayer(L: any, rowIdx: any) {
     value: L.name,
     style: {
       position: 'absolute', left: '94px', top: (rowY(rowIdx) + 5) + 'px', width: (T.gut - 110) + 'px',
-      height: '20px', background: '#000', border: '1px solid var(--accent)', borderRadius: '4px',
-      color: 'var(--tx)', fontSize: '11.5px', padding: '0 5px', zIndex: 9,
+      height: '20px', background: 'var(--bg-row)', border: '1px solid var(--accent)', borderRadius: '4px',
+      color: 'var(--tx)', fontFamily: 'inherit', fontSize: '11.5px', padding: '0 5px', zIndex: 9,
     },
   });
   if (!wrap) return;
@@ -2921,13 +3186,74 @@ function renameLayer(L: any, rowIdx: any) {
   inp.onkeydown = (ev: any) => { ev.stopPropagation(); if (ev.key === 'Enter') done(true); if (ev.key === 'Escape') done(false); };
 }
 
+/* Menu and dialog entries reach us with only { key, prop }; recover the owning
+   layer so a time edit can be measured against that layer's span. */
+function layerForProperty(prop: any) {
+  return api.project.get().layers.find((L: any) => api.anim.allProps(L).some((entry: any) => entry.prop === prop)) ?? null;
+}
+
+/* AE's "Edit Value…". Dragging a key in the graph is the fast path; this is
+   the exact one. Time is a single key's to change — a group would have to move
+   rigidly, which is what dragging already does. */
+function editKeyframeValues(clickedEntries: any[]) {
+  const entries = clickedEntries
+    .map((entry: any) => ({ ...entry, L: entry.L ?? layerForProperty(entry.prop) }))
+    .filter((entry: any) => typeof entry.key.v === 'number' && entry.L && !entry.L.lock);
+  if (!entries.length) { api.ui.toast('Select a numeric keyframe first'); return; }
+  const single = entries.length === 1;
+  const fps = api.project.get().fps;
+  const body = document.createElement('div');
+  const field = (label: string, value: number | null) => {
+    const row = document.createElement('label'), input = document.createElement('input');
+    row.textContent = label;
+    input.type = 'number'; input.step = 'any'; input.setAttribute('aria-label', label);
+    if (value == null) { input.placeholder = 'mixed'; } else { input.value = String(api.util.round(value, 4)); }
+    row.style.cssText = 'display:grid;grid-template-columns:1fr 120px;gap:12px;margin:10px 0';
+    row.append(input); body.append(row);
+    return input;
+  };
+  const values = entries.map((entry: any) => entry.key.v);
+  const time = single ? field('Time (s)', entries[0].L.from + entries[0].key.t) : null;
+  const value = field('Value', values.every((v: number) => v === values[0]) ? values[0] : null);
+  const message = document.createElement('div'); message.setAttribute('role', 'status'); body.append(message);
+  api.ui.modal({
+    title: single ? 'Edit keyframe' : `Edit ${entries.length} keyframes`,
+    body,
+    actions: [{ label: 'Cancel' }, { label: 'Apply', pri: true, run: () => {
+      const nextValue = value.value.trim() === '' ? null : value.valueAsNumber;
+      if (nextValue != null && !Number.isFinite(nextValue)) { message.textContent = 'Enter a finite value.'; return false; }
+      let nextTime: number | null = null;
+      if (single && time && time.value.trim() !== '') {
+        const entry = entries[0];
+        if (!Number.isFinite(time.valueAsNumber)) { message.textContent = 'Enter a finite time.'; return false; }
+        nextTime = api.util.snapF(time.valueAsNumber - entry.L.from, fps);
+        if (nextTime < 0 || nextTime > entry.L.dur) { message.textContent = 'That time falls outside the layer.'; return false; }
+        if (entry.prop.kf.some((key: any) => key !== entry.key && Math.abs(key.t - nextTime!) < .5 / fps)) {
+          message.textContent = 'Another keyframe already sits on that frame.'; return false;
+        }
+      }
+      if (nextValue == null && nextTime == null) return;
+      api.history.do(single ? 'Edit keyframe' : 'Edit keyframes', () => {
+        if (nextValue != null) entries.forEach((entry: any) => { entry.key.v = nextValue; });
+        if (nextTime != null) {
+          entries[0].key.t = nextTime;
+          entries[0].prop.kf.sort((a: any, b: any) => a.t - b.t);
+        }
+        api.anim.touch();
+      });
+      api.transport.invalidate();
+    } }],
+  });
+}
+
 function pushKeyframeMenu(items: any[], clickedEntries: any[]) {
   const entries = keyframeContextEntries(clickedEntries, api.selection.keys(), selectedKeyEntries());
   entries.forEach((entry:any)=>temporalKeys(entry.prop.kf));
   const keys = entries.map((entry: any) => entry.key);
   const multiple = keys.length > 1;
   items.push({ header: multiple ? `${keys.length} keyframes` : 'Keyframe' });
-  items.push({label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale keyframes…',run:()=>scaleGraphDialog(api,selectedKeyEntries())});
+  items.push({label:'Edit Value…',run:()=>editKeyframeValues(entries)},
+    {label:'Keyframe Velocity…',run:()=>velocityDialog(api,entries)}, {label:'Scale keyframes…',run:()=>scaleGraphDialog(api,selectedKeyEntries())});
   const labels: Record<string, string> = {
     linear: 'Linear', power: 'Power', easeOut: 'Ease out', easeInOut: 'Ease in / out',
     expoOut: 'Exponential out', backOut: 'Overshoot', snap: 'Snap', glide: 'Glide',
@@ -2976,7 +3302,7 @@ function onCtx(e: any) {
       .sort((a: any, b: any) => a.distance - b.distance)[0]
     : null;
   if (graphPoint?.distance < 8) {
-    pushKeyframeMenu(items, [{ key: graphPoint.key, prop: graphPoint.axis.prop }]);
+    pushKeyframeMenu(items, [{ key: graphPoint.key, prop: graphPoint.axis.prop, L: graphPoint.axis.L }]);
   } else if (!T.graph && hr && hr.row.kind === 'prop') {
     const r = hr.row;
     const key = r.prop.kf.find((k: any) => Math.abs(t2x(r.L.from + k.t) - x) < 7);
