@@ -16,7 +16,7 @@ type AccountApi = PowermoveBridge['chatgpt'] | PowermoveBridge['claude'];
 
 function createAccountSettingsControl(
   name: 'ChatGPT' | 'Claude',
-  runtime: 'ChatGPT' | 'Claude Code',
+  runtime: 'Codex' | 'Claude Code',
   accountApi: AccountApi | undefined
 ): ChatGPTSettingsControl {
   const row = document.createElement('div');
@@ -123,7 +123,7 @@ function createAccountSettingsControl(
 export function createChatGPTSettingsControl(
   api?: PowermoveBridge['chatgpt']
 ): ChatGPTSettingsControl {
-  return createAccountSettingsControl('ChatGPT', 'ChatGPT', api ?? window.powermove?.chatgpt);
+  return createAccountSettingsControl('ChatGPT', 'Codex', api ?? window.powermove?.chatgpt);
 }
 
 export function createClaudeSettingsControl(

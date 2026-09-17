@@ -264,7 +264,7 @@ const S: any = {
 };
 
 const AGENT_PROVIDERS: any = [
-  { id: 'chatgpt', label: 'ChatGPT' },
+  { id: 'chatgpt', label: 'Codex' },
   { id: 'claude', label: 'Claude' },
   { id: 'compatible', label: 'API / local model' },
 ];
