@@ -24,50 +24,30 @@ html{background:transparent}
 
 /* ── glass chrome ──────────────────────────────────────── */
 /* Floating chrome (tab strip, tool cluster, Export, sidebar selection) reads
-   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas, a
-   uniform hairline, and a one-pixel glint where light enters at the upper-left
-   and leaves at the lower-right. Everything is inset shadows on one element;
-   no gradients, no bloom, no hover states. The backdrop is blurred and
-   saturated so content passing beneath reads through the material. */
+   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas
+   and one uniform hairline. No gradients, no glint, no bloom, no hover
+   states. The backdrop is blurred and saturated so content passing beneath
+   reads through the material. */
+/* One flat hairline all the way round; no directional glint. */
 :root{
   --glass-fill:rgb(var(--paper-rgb) / .45);
   --glass-edge:none;
-  --glass-rim:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / .95) 0,rgb(var(--ink-rgb) / .07) 16%,
-    rgb(var(--ink-rgb) / .07) 36%,rgb(var(--paper-rgb) / .7) 50%,
-    rgb(var(--ink-rgb) / .07) 64%,rgb(var(--ink-rgb) / .07) 84%,
-    rgb(var(--paper-rgb) / .95) 100%);
+  --glass-rim:rgb(var(--ink-rgb) / .07);
   --glass-fill-hi:rgb(var(--paper-rgb) / .9);
   --glass-edge-hi:none;
-  --glass-rim-hi:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / 1) 0,rgb(var(--ink-rgb) / .1) 16%,
-    rgb(var(--ink-rgb) / .1) 36%,rgb(var(--paper-rgb) / .9) 50%,
-    rgb(var(--ink-rgb) / .1) 64%,rgb(var(--ink-rgb) / .1) 84%,
-    rgb(var(--paper-rgb) / 1) 100%);
+  --glass-rim-hi:rgb(var(--ink-rgb) / .1);
   --glass-backdrop:blur(20px) saturate(1.5);
 }
 /* Measured from a Tahoe toolbar button over a dark canvas: the glass body
-   sits ~20% toward black (glass darkens what's behind it), the rim is a 6%
-   white hairline, and the top edge alone rises to ~10%. */
-/* Measured from a Tahoe toolbar button over a dark canvas: the glass body
    sits ~20% toward black (glass darkens what's behind it); the rim is a 6%
-   white hairline that lifts to ~12% where light enters at the upper-left and
-   ~10% where it leaves at the lower-right. */
+   white hairline, flat. */
 :root[data-theme="dark"]{
   --glass-fill:rgb(0 0 0 / .19);
   --glass-edge:none;
-  --glass-rim:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / .13) 0,rgb(var(--paper-rgb) / .06) 16%,
-    rgb(var(--paper-rgb) / .06) 36%,rgb(var(--paper-rgb) / .1) 50%,
-    rgb(var(--paper-rgb) / .06) 64%,rgb(var(--paper-rgb) / .06) 84%,
-    rgb(var(--paper-rgb) / .13) 100%);
+  --glass-rim:rgb(var(--paper-rgb) / .06);
   --glass-fill-hi:rgb(var(--paper-rgb) / .07);
   --glass-edge-hi:none;
-  --glass-rim-hi:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / .2) 0,rgb(var(--paper-rgb) / .09) 16%,
-    rgb(var(--paper-rgb) / .09) 36%,rgb(var(--paper-rgb) / .15) 50%,
-    rgb(var(--paper-rgb) / .09) 64%,rgb(var(--paper-rgb) / .09) 84%,
-    rgb(var(--paper-rgb) / .2) 100%);
+  --glass-rim-hi:rgb(var(--paper-rgb) / .09);
 }
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
   position:relative;isolation:isolate;
@@ -75,7 +55,7 @@ html{background:transparent}
   box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
 }
-/* The rim is a 1px ring whose brightness turns softly around the shape. */
+/* The rim is a flat 1px ring. */
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim);opacity:1;transition:none;
@@ -136,16 +116,20 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   --titlebar-h:44px;--traffic-inset:96px;
   height:var(--titlebar-h);flex:0 0 var(--titlebar-h);display:flex;align-items:center;gap:8px;
   padding:0 var(--pad) 0 var(--traffic-inset);
-  position:relative;z-index:40;-webkit-app-region:drag;
+  position:relative;z-index:40;-webkit-app-region:no-drag;
 }
+/* The strip sits between two flexible drag spacers inside a rail, so it is
+   centred without a transform and never overlapped by a drag rectangle. */
+#tabs-center{position:absolute;top:0;bottom:0;left:var(--traffic-inset);right:var(--pad);display:flex;align-items:center;justify-content:center;pointer-events:none}
 #tabs{
-  position:absolute;left:50%;transform:translateX(-50%);
-  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(40%,calc(100% - var(--traffic-inset) * 2 - 400px));min-width:0;
+  position:relative;pointer-events:auto;
+  height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(52%,calc(100% - 400px));min-width:0;
   padding:2px;border:0;border-radius:var(--r-md);
   overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-webkit-app-region:no-drag;
 }
 #tabs::-webkit-scrollbar{display:none}
-.titlebar-drag{flex:1;align-self:stretch;min-width:24px}
+.titlebar-drag{flex:1 1 0;align-self:stretch;min-width:24px;pointer-events:auto;-webkit-app-region:drag}
+.titlebar-drag-traffic{position:absolute;left:0;top:0;bottom:0;width:var(--traffic-inset);flex:none}
 #titlebar button,#titlebar input,#titlebar a{-webkit-app-region:no-drag}
 .project-strip-btn{width:26px;height:26px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
 .project-strip-btn:hover{background:var(--bg-row-hi);color:var(--tx)}
@@ -169,7 +153,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .project-doc-close:hover{background:var(--bg-row-hi);color:var(--tx)}
 .project-doc-close svg{width:9px;height:9px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
 
-.tb-right{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag}
+.tb-right{display:flex;align-items:center;gap:2px;margin-left:auto;position:relative;-webkit-app-region:no-drag}
 /* Export is the app's terminal action, so it is the one labelled control in the
    titlebar; the icon-only buttons beside it stay secondary. */
 .tb-export{padding:0 10px;margin-right:6px}

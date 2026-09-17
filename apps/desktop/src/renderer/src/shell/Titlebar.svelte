@@ -205,6 +205,56 @@
     return () => offs.forEach((off) => off?.());
   });
 
+  /* Electron carves the tab strip out of the titlebar's native drag region
+     using rectangles it derives from layout. Those rectangles can go stale
+     (the strip is absolutely centred and changes width with every rename or
+     open tab), and a stale rectangle turns a click on a tab into a window
+     drag that the page never sees. Flipping the titlebar's app-region for
+     one frame forces Chromium to recompute and resend the regions. Do it
+     whenever the strip changes shape, the window resizes, or the pointer
+     arrives on the titlebar, so the regions are fresh before any click. */
+  let dragRegionFrame = 0;
+  function refreshDragRegions(): void {
+    if (dragRegionFrame) return;
+    const titlebar = document.getElementById('titlebar');
+    if (!titlebar) return;
+    titlebar.style.setProperty('-webkit-app-region', 'no-drag');
+    dragRegionFrame = window.requestAnimationFrame(() => {
+      dragRegionFrame = 0;
+      titlebar.style.removeProperty('-webkit-app-region');
+    });
+  }
+
+  $effect(() => {
+    refreshToken;
+    activeProjectId;
+    homeOpen;
+    refreshDragRegions();
+  });
+
+  $effect(() => {
+    const titlebar = document.getElementById('titlebar');
+    const tabs = document.getElementById('tabs');
+    if (!titlebar) return;
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => refreshDragRegions()) : null;
+    if (tabs) observer?.observe(tabs);
+    observer?.observe(titlebar);
+    let lastEnter = 0;
+    const onEnter = () => { const now = performance.now(); if (now - lastEnter > 250) { lastEnter = now; refreshDragRegions(); } };
+    titlebar.addEventListener('pointerenter', onEnter);
+    titlebar.addEventListener('pointermove', onEnter);
+    window.addEventListener('resize', refreshDragRegions);
+    window.addEventListener('focus', refreshDragRegions);
+    return () => {
+      observer?.disconnect();
+      titlebar.removeEventListener('pointerenter', onEnter);
+      titlebar.removeEventListener('pointermove', onEnter);
+      window.removeEventListener('resize', refreshDragRegions);
+      window.removeEventListener('focus', refreshDragRegions);
+      if (dragRegionFrame) window.cancelAnimationFrame(dragRegionFrame);
+    };
+  });
+
   $effect(() => {
     const titlebar = document.getElementById('titlebar');
     titlebar?.addEventListener('pointerdown', startWindowDrag as EventListener);
@@ -229,6 +279,15 @@
 </script>
 
 <ToolbarMount {PM} />
+<!-- The strip is centred by a flex rail instead of a transform: Electron's
+     drag-region rectangles come from layout boxes, and a transformed,
+     absolutely positioned no-drag box is exactly the case that goes stale. -->
+<!-- Drag zones are explicit spacers on either side of the strip; the
+     titlebar itself is not a drag region, so no native drag rectangle can
+     ever cover a tab, whatever Electron does with its subtractions. -->
+<div class="titlebar-drag titlebar-drag-traffic" aria-hidden="true"></div>
+<div id="tabs-center" aria-hidden="false">
+<div class="titlebar-drag" aria-hidden="true"></div>
 <div id="tabs" data-svelte-shell="tabs">
   <!-- Phase 5.4 follow-up: connect these tabs to a tabpanel with aria-controls. -->
   <div role="tablist" aria-label="Open projects" style="display: contents">
@@ -325,8 +384,9 @@
     }}
   ><Icon {PM} name="plus" /></button>
 </div>
-
 <div class="titlebar-drag" aria-hidden="true"></div>
+</div>
+
 <div class="tb-right" id="tb-right">
   {#if !homeOpen}
     <button class="btn tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
