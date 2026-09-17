@@ -4,7 +4,6 @@ import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
 import { is3DLayer, planeMatrix, planeContains, depthOrderedLayers, inversePlane, affinePlane } from '../core/space-3d';
-import { viewerService } from '../core/services';
 import { pathValues, rasterPathsToViewport, tracePath } from '../core/vector-paths';
 import { createPreviewWarmup } from './preview-warmup';
 import { sourceTime } from '../core/retiming';
@@ -1299,7 +1298,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       covers[i] = largest;
       const layer = layers[i];
       if (layer.type !== 'shape' || layer.d.paths?.length || !PM.active(layer, T)
-          || viewerService(PM)?.canvasTextEditing === layer.id || PM.worldOpacity(layer, T) < 1) continue;
+          || PM.worldOpacity(layer, T) < 1) continue;
       const d = resolveContent(PM, layer, T), m = scaledWorld(layer, T, W, H);
       if (d.shape !== 'rect' || !/^#[0-9a-f]{6}$/i.test(d.color) || Math.abs(m[1]) > 1e-9 || Math.abs(m[2]) > 1e-9) continue;
       const geometry = shapeRasterGeometry(d, continuousRasterScale(m));
@@ -1335,7 +1334,6 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
 
   for (let i = layers.length - 1; i >= 0; i--) {
     const L = layers[i];
-    if(viewerService(PM)?.canvasTextEditing===L.id && !opt.exporting)continue;
     if (!opt.mattePass && matteSources.has(L.id)) continue;
     const groupAncestors = PM.groupAncestors?.(L, proj.layers) || [];
     if (solo && !L.solo && !groupAncestors.some((group: any) => group.solo)

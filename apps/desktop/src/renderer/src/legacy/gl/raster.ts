@@ -159,34 +159,97 @@ function resolvedTextContent(input: any, time = PM.time) {
 /** The Type tool's drag gesture creates AE-style paragraph text. Keep the
     complete source string, but wrap its rendered lines inside the authored
     box and clip overflow below the box. */
-function textLines(d: any, context: any, lineHeight: number): string[] {
-  const source = String(d.text == null ? '' : d.text).split('\n');
+interface SourceLine { text: string; start: number }
+
+/** Wrapped display lines with the source offset each one starts at. Caret
+    placement maps a source index to the line whose range contains it, so
+    every branch below records where its line begins in the source string. */
+function textSourceLines(d: any, context: any, lineHeight: number): SourceLine[] {
+  const text = String(d.text == null ? '' : d.text);
+  const paragraphs = text.split('\n');
   const boxWidth = Number(d.boxWidth);
-  if (!d.paragraph || !Number.isFinite(boxWidth) || boxWidth <= 0) return source;
+  const lines: SourceLine[] = [];
+  let offset = 0;
+  if (!d.paragraph || !Number.isFinite(boxWidth) || boxWidth <= 0) {
+    for (const paragraph of paragraphs) { lines.push({ text: paragraph, start: offset }); offset += paragraph.length + 1; }
+    return lines;
+  }
   const width = (value: string) => context.measureText(value).width;
-  const wrapped: string[] = [];
-  for (const paragraph of source) {
-    if (!paragraph) { wrapped.push(''); continue; }
-    let line = '';
+  for (const paragraph of paragraphs) {
+    const paragraphStart = offset;
+    offset += paragraph.length + 1;
+    if (!paragraph) { lines.push({ text: '', start: paragraphStart }); continue; }
+    let line = '', lineStart = paragraphStart, tokenStart = paragraphStart;
     for (const token of paragraph.split(/(\s+)/u).filter(Boolean)) {
       const candidate = line + token;
       if (line && width(candidate) > boxWidth) {
-        wrapped.push(line.trimEnd());
+        lines.push({ text: line.trimEnd(), start: lineStart });
         line = token.trimStart();
-      } else line = candidate;
+        lineStart = tokenStart + (token.length - line.length);
+      } else {
+        if (!line) lineStart = tokenStart;
+        line = candidate;
+      }
+      tokenStart += token.length;
       while (line && width(line) > boxWidth) {
         let cut = 1;
         while (cut < line.length && width(line.slice(0, cut + 1)) <= boxWidth) cut++;
-        wrapped.push(line.slice(0, cut));
+        lines.push({ text: line.slice(0, cut), start: lineStart });
         line = line.slice(cut);
+        lineStart += cut;
       }
     }
-    wrapped.push(line.trimEnd());
+    lines.push({ text: line.trimEnd(), start: lineStart });
   }
   const boxHeight = Number(d.boxHeight);
-  if (!Number.isFinite(boxHeight) || boxHeight <= 0) return wrapped;
-  return wrapped.slice(0, Math.max(1, Math.floor(boxHeight / Math.max(1, lineHeight))));
+  if (!Number.isFinite(boxHeight) || boxHeight <= 0) return lines;
+  return lines.slice(0, Math.max(1, Math.floor(boxHeight / Math.max(1, lineHeight))));
 }
+
+function textLines(d: any, context: any, lineHeight: number): string[] {
+  return textSourceLines(d, context, lineHeight).map(line => line.text);
+}
+
+function graphemesOf(value: string): string[] {
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(item => item.segment);
+  }
+  return Array.from(value);
+}
+
+interface CaretLine { text: string; start: number; x: number; y: number; baseline: number; width: number; boundaries: { index: number; x: number }[] }
+interface CaretLayout { lines: CaretLine[]; lineHeight: number; size: number; length: number; align: 'left' | 'center' | 'right'; boxWidth: number; boxHeight: number }
+
+/* Caret and selection geometry for the on-canvas text editor. Every x comes
+   from the same measuring context and wrapping as the rasterizer, so the
+   caret sits between the painted glyphs at any zoom. Coordinates are in the
+   layer's local space: the first baseline is at size * .82 below the origin
+   and x is measured from the alignment origin. */
+function textCaretLayout(d: any): CaretLayout {
+  const size = Math.max(1, Number(d.size) || 16);
+  const meas = getCanvas(8, 8).getContext('2d') as any;
+  const align = d.align === 'center' ? 'center' : d.align === 'right' ? 'right' : 'left';
+  meas.font = fontStr(d);
+  meas.textAlign = 'left';
+  meas.textBaseline = 'alphabetic';
+  if ('letterSpacing' in meas) meas.letterSpacing = (d.tracking || 0) + 'px';
+  const lh = size * (d.leading || 1.15);
+  const width = (value: string) => meas.measureText(value).width;
+  const text = String(d.text == null ? '' : d.text);
+  const lines = textSourceLines(d, meas, lh).map((line, row): CaretLine => {
+    const lineWidth = width(line.text);
+    const startX = align === 'center' ? -lineWidth / 2 : align === 'right' ? -lineWidth : 0;
+    const boundaries = [{ index: line.start, x: startX }];
+    let prefix = '';
+    for (const segment of graphemesOf(line.text)) {
+      prefix += segment;
+      boundaries.push({ index: line.start + prefix.length, x: startX + width(prefix) });
+    }
+    return { text: line.text, start: line.start, x: startX, y: row * lh, baseline: row * lh + size * .82, width: lineWidth, boundaries };
+  });
+  return { lines, lineHeight: lh, size, length: text.length, align, boxWidth: Number(d.boxWidth) || 0, boxHeight: Number(d.boxHeight) || 0 };
+}
+PM.textCaretLayout = (input: any, time = PM.time) => textCaretLayout(resolvedTextContent(input, time));
 
 /* Use the exact same canvas text metrics as the rasterizer when a procedural
    tool needs to reason about glyph placement. The returned offsets are in the

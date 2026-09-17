@@ -248,6 +248,39 @@ describe('legacy raster install', () => {
     expect(bounds.y1).toBeGreaterThan(lines.length * 40);
   });
 
+  it('reports caret layout lines with exact source offsets that match the painted wrapping', () => {
+    const PM = rasterRegistry();
+    const layer = {
+      type: 'text', d: {
+        text: 'one two  three\n\nfour', font: 'SF Pro Display', weight: 500, size: 40,
+        tracking: 0, leading: 1.2, color: '#fff', align: 'left',
+        boxWidth: 130, boxHeight: 0,
+      },
+    };
+    const caret = PM.textCaretLayout(layer);
+    const painted = PM.textLayout(layer).lines.map((line: any) => line.text);
+    expect(caret.lines.filter((line: any) => line.text.length).map((line: any) => line.text)).toEqual(painted);
+    // Every line starts where its text sits in the source string, including
+    // after the double space dropped at a wrap and across the empty paragraph.
+    for (const line of caret.lines) expect(layer.d.text.slice(line.start, line.start + line.text.length)).toBe(line.text);
+    expect(caret.lines.some((line: any) => line.text === '' && line.start === 15)).toBe(true);
+    const last = caret.lines.at(-1);
+    expect(last.start + last.text.length).toBe(layer.d.text.length);
+    expect(caret.lines.find((line: any) => line.start === 16)).toBeTruthy();
+    expect(caret.lineHeight).toBe(48);
+    expect(caret.length).toBe(layer.d.text.length);
+    const first = caret.lines[0];
+    expect(first.boundaries[0]).toEqual({ index: 0, x: 0 });
+    expect(first.boundaries.at(-1)).toMatchObject({ index: first.text.length });
+    expect(first.boundaries.at(-1).x).toBeCloseTo(first.width, 5);
+    for (let k = 1; k < first.boundaries.length; k++) expect(first.boundaries[k].x).toBeGreaterThan(first.boundaries[k - 1].x);
+
+    const centered = PM.textCaretLayout({ ...layer, d: { ...layer.d, boxWidth: 0, text: 'AB' } });
+    expect(centered.lines[0].x).toBe(0);
+    const right = PM.textCaretLayout({ ...layer, d: { ...layer.d, boxWidth: 0, text: 'AB', align: 'right' } });
+    expect(right.lines[0].x).toBeCloseTo(-right.lines[0].width, 5);
+  });
+
   it('atomically replaces media in place and restores metadata plus runtime with one Undo and Redo', async () => {
     const disposed: any[] = [];
     const oldRuntime = { id: 'asset-1', name: 'old.wav', kind: 'audio', marker: 'old' };

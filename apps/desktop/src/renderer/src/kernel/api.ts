@@ -552,6 +552,8 @@ export interface MediaAPI {
 
 export interface PreviewViewport { x: number; y: number; width: number; height: number; [key: string]: unknown }
 export interface RasterWindow { x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
+export interface TextCaretLine { text: string; start: number; x: number; y: number; baseline: number; width: number; boundaries: { index: number; x: number }[] }
+export interface TextCaretLayout { lines: TextCaretLine[]; lineHeight: number; size: number; length: number; align: 'left' | 'center' | 'right'; boxWidth: number; boxHeight: number }
 export interface RasterSurface { cv?: HTMLCanvasElement; canvas?: HTMLCanvasElement; bitmap?: ImageBitmap; anchorX?: number; anchorY?: number; x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
 
 /**
@@ -568,6 +570,9 @@ export interface RenderAPI {
     readonly context: WebGL2RenderingContext | null;
   };
   raster(layer: Layer, scale?: number, time?: number, uploaded?: (key: string) => unknown, crop?: RasterWindow): RasterSurface | null;
+  /** Caret geometry for a text layer in its local space, produced by the same
+      measuring and wrapping as the rasterizer. */
+  textLayout(layer: Layer, time?: number): TextCaretLayout | null;
   renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement;
   snapshot(time: number, maxWidth?: number): string;
 }
