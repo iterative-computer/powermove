@@ -26,7 +26,10 @@ import {
 } from './bezier-drag';
 import {
   graphSelectionBounds,
+  graphTransformCursor,
+  graphTransformHandleAtPoint,
   planGraphKeyframeMove,
+  planGraphKeyframeScale,
   pointInGraphSelection,
   resolveGraphTarget,
   selectionAfterMarquee,
@@ -184,6 +187,53 @@ describe('timeline runtime', () => {
     expect(pointInGraphSelection(bounds, 50, 45)).toBe(true);
     expect(selectionAfterMarquee(['a', 'b'], ['b', 'c'], true)).toEqual(['a', 'c']);
     expect(selectionAfterMarquee(['a'], ['b', 'b'], false)).toEqual(['b']);
+  });
+
+  it('stands the transform box off its keys and names a grip per corner', () => {
+    const bounds = graphSelectionBounds([{ id: 'a', x: 20, y: 30 }, { id: 'b', x: 80, y: 60 }], 16, 8)!;
+    expect(bounds).toEqual({ x0: 12, y0: 22, x1: 88, y1: 68 });
+    // The outermost keys sit inside the frame, so a grip never steals their press.
+    expect(graphTransformHandleAtPoint(bounds, 20, 30)).toBeNull();
+    expect(graphTransformHandleAtPoint(bounds, 12, 22)).toBe('nw');
+    expect(graphTransformHandleAtPoint(bounds, 88, 45)).toBe('e');
+    expect(graphTransformHandleAtPoint(bounds, 50, 68)).toBe('s');
+    expect(graphTransformCursor('e')).toBe('ew-resize');
+    expect(graphTransformCursor('ne')).toBe('nesw-resize');
+  });
+
+  it('scales a graph selection about an anchor and stops at the keys it does not own', () => {
+    const items = [
+      { id: 'a', property: 'p', time: 1, compositionTime: 1, value: 10, selected: true, maxTime: 10 },
+      { id: 'b', property: 'p', time: 2, compositionTime: 2, value: 20, selected: true, maxTime: 10 },
+      { id: 'fixed', property: 'p', time: 3, compositionTime: 3, value: 50, selected: false, maxTime: 10 },
+    ];
+    const doubled = planGraphKeyframeScale(items, {
+      timeScale: 2, valueScale: 2, anchorTime: 1, anchorValue: 10,
+    }, 10);
+    // 'b' would land on 3s, where an unselected key already sits: one frame short.
+    expect(doubled.timeScale).toBeCloseTo(1.9);
+    expect(doubled.moves.map(move => move.time)).toEqual([1, 2.9]);
+    expect(doubled.moves.map(move => move.value)).toEqual([10, 30]);
+
+    // Collapsing keeps the pair a frame apart instead of stacking them.
+    const collapsed = planGraphKeyframeScale(items, {
+      timeScale: 0, valueScale: 1, anchorTime: 1, anchorValue: 10,
+    }, 10);
+    expect(collapsed.timeScale).toBeCloseTo(.1);
+    expect(collapsed.moves.map(move => move.time)).toEqual([1, 1.1]);
+  });
+
+  it('anchors a scale in composition time for a layer that starts late', () => {
+    const items = [
+      { id: 'a', property: 'p', time: 0, compositionTime: 4, value: 0, selected: true, maxTime: 10 },
+      { id: 'b', property: 'p', time: 2, compositionTime: 6, value: 8, selected: true, maxTime: 10 },
+    ];
+    const plan = planGraphKeyframeScale(items, {
+      timeScale: .5, valueScale: -1, anchorTime: 4, anchorValue: 0,
+    }, 30);
+    expect(plan.moves.map(move => move.time)).toEqual([0, 1]);
+    // A negative value scale flips the curve, which AE allows.
+    expect(plan.moves.map(move => move.value)).toEqual([0, -8]);
   });
 
   it('keeps the focused curve when another layer strip is selected', () => {
