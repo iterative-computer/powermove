@@ -624,7 +624,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       if (projectId === PM.proj.id) captureProjectSession();
       await PM.store.flush?.();
       PM.bus.emit('project:saved');
-      PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName));
+      PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName), 2200, { error: false });
       return true;
     };
     if (typeof window.powermove?.saveFile === 'function') {
@@ -739,7 +739,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     const workspace = rememberedWorkspace || o.ws;
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
     captureProjectSession();
-    PM.toast('Opened ' + file.name);
+    PM.toast('Opened ' + file.name, 2200, { error: false });
   } catch (e: any) { PM.toast('Could not open project: ' + e.message, 4500); }
 }
 PM.newProject = () => {
@@ -875,7 +875,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
           files = [await convertImageSequence(files, choice.fps, assertCurrent, update => progress!.update(update))];
           assertCurrent();
         }
-      } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000); return; }
+      } catch (error: any) { PM.toast(error.message || 'Could not import image sequence', 6000, { error: true }); return; }
     }
     if (replaceAssetId != null && files.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const mediaFiles: any = [];
@@ -887,7 +887,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
         try { await openProjectFile(f); } finally { opening.close(); }
         continue;
       }
-      if (!PM.assetKind(f)) { PM.toast('Unsupported file · ' + f.name); continue; }
+      if (!PM.assetKind(f)) { PM.toast('Unsupported file · ' + f.name, 2200, { error: true }); continue; }
       mediaFiles.push(f);
     }
     if (!mediaFiles.length) return;
@@ -905,7 +905,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       },
     });
     const failures = results.filter((result: any) => result.status === 'failed');
-    failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000));
+    failures.forEach((result: any) => PM.toast(result.error?.message || ('Could not import ' + result.file?.name), 5000, { error: true }));
     const layerResults = results.filter((result: any) => result.status === 'created' || result.status === 'reused');
     const commands = placement === null ? [] : layerResults.map((result: any, n: number) => {
       const command = PM.commandForAsset(result.asset.id, importAt);
@@ -936,10 +936,10 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       const svgWarnings = [...layerResults, ...replaced].flatMap((result: any) => result.asset.svg?.warnings || []);
       if (svgWarnings.length) parts.push(`${svgWarnings.length} SVG ${svgWarnings.length === 1 ? 'feature needs' : 'features need'} review`);
       if (volatile.length) parts.push('durable storage unavailable');
-      PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400);
+      PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400, { error: false });
     }
   } catch (error: any) {
-    PM.toast(error.message || 'Could not import files', 6000);
+    PM.toast(error.message || 'Could not import files', 6000, { error: true });
   } finally { progress?.close(); }
 }
 /* File pickers and drag/drop can fire while an earlier batch is still decoding.
@@ -948,7 +948,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
 PM.importFiles = (files: any, { project = PM.proj, placement, sequence, replaceAssetId }: any = {}) => {
   const run = () => {
     if (PM.proj !== project) {
-      PM.toast('Import stopped because you switched projects · import again in the intended project', 5000);
+      PM.toast('Import stopped because you switched projects · import again in the intended project', 5000, { error: true });
       return [];
     }
     return importFiles(Array.from(files || []), placement, sequence, replaceAssetId);

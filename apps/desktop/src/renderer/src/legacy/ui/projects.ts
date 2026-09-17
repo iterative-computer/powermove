@@ -271,7 +271,7 @@ function duplicate(m: any) {
       delete copiedState.file;
       PM.Projects.putState(raw.id, copiedState);
     }
-    paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”');
+    paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”', 2200, { error: false });
   } catch (error: any) { PM.toast('Could not duplicate project: ' + (error.message || 'Unknown error')); }
 }
 function trashDialog(m: any) {

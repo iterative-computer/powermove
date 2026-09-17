@@ -725,6 +725,9 @@ export interface UIAPI {
   toast(
     text: string,
     opts?: {
+      /** State the outcome rather than letting the message text be sniffed, so a
+          success that quotes a user-chosen name stays a success. */
+      error?: boolean;
       sticky?: boolean;
       dismissible?: boolean;
       icon?: string;

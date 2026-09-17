@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ErrorNotice from '../errors/ErrorNotice.svelte';
+  import ToastError from '../errors/ToastError.svelte';
   import Icon from '../panels/Icon.svelte';
   import type { ToastOptions } from './types';
 
@@ -24,7 +24,7 @@
 
   export function push(message: unknown, milliseconds = 2200, options: ToastOptions = {}): void {
     if (message == null) return;
-    const inferredError = isErrorToast(message);
+    const inferredError = options.error ?? isErrorToast(message);
     const text = String(message);
     if (options.key) {
       const keyed = queue.find(item => item.key === options.key);
@@ -87,6 +87,9 @@
     queue = [];
   }
 
+  /** A last resort for legacy string-only calls. Callers that know the outcome
+      pass `error` instead, because this reads the whole message — including any
+      file or project name the user chose. */
   export function isErrorToast(message: unknown): boolean {
     return message instanceof Error || /\b(error|failed|failure|invalid|unsupported|unable|ENOSPC|EACCES|EPERM|ENOENT)\b|could not|couldn[’']t|can(?:no|')t|larger than|stopped because/i.test(String(message));
   }
@@ -94,7 +97,7 @@
   /** Keep legacy string-only calls expressive without making every caller choose an icon. */
   export function toastIcon(message: unknown, error = isErrorToast(message)): string {
     const text = String(message);
-    if (error) return 'x';
+    if (error) return 'warning';
     if (/^undo\b|\bundone\b/i.test(text)) return 'undo';
     if (/^redo\b|\bredone\b/i.test(text)) return 'redo';
     if (/\b(delet(?:e|ed)|trash(?:ed)?|removed?)\b/i.test(text)) return 'trash';
@@ -117,12 +120,12 @@
 {#snippet toast(item: ToastItem)}
   <div
     class="toast"
-    role={item.error ? undefined : 'status'}
+    role={item.error ? 'alert' : 'status'}
     data-toast-id={item.id}
     data-toast-error={item.error ? 'true' : undefined}
   >
     {#if item.error}
-      <ErrorNotice error={item.message} />
+      <ToastError {PM} error={item.message} />
     {:else}
       <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
       <span>{item.message}</span>
@@ -144,9 +147,11 @@
 {/if}
 
 <style>
-  .toast[data-toast-error]{align-items:flex-start;padding:0 6px 0 0;width:min(440px,calc(100vw - 32px));gap:0}
-  .toast[data-toast-error] :global(.error-notice){border:0;background:transparent}
-  .toast[data-toast-error]>button{margin-top:8px}
+  /* An error keeps the status toast's shell and gutter and only grows
+     downward, so the stack stays one column of like objects. */
+  .toast[data-toast-error]{align-items:flex-start;min-width:min(300px,calc(100vw - 32px))}
+  .toast[data-toast-error] :global(.toast-icon),
+  .toast[data-toast-error]>button{margin-top:1px}
   /* The wrapper scrolls once the stack outgrows 45vh, and a scroll container
      clips at its padding edge. Pad it past the reach of --shadow-float
      (~60px below, ~40px beside). Offset the top padding so the first toast

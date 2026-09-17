@@ -1163,7 +1163,7 @@ async function importAutonomousArtifact(artifact: any) {
     if (!PM.assetKind(file)) throw new Error('This artifact is not a supported image, video, or audio file');
     await PM.importFiles([file]);
     artifact.imported = true;
-    PM.toast(`Added ${artifact.name} to the timeline`);
+    PM.toast(`Added ${artifact.name} to the timeline`, 2200, { error: false });
   } catch (error: any) {
     PM.toast(String(error.message || error), 6000);
   } finally {
@@ -2460,7 +2460,7 @@ async function applyPlan() {
       custom: manifest.sections,
       layout: { docks: manifest.docks },
     });
-    PM.toast(`Created workspace · ${created.name}`);
+    PM.toast(`Created workspace · ${created.name}`, 2200, { error: false });
     finishWorkspaceRun(checkpoint, `Created ${created.name}`);
     return;
   }
@@ -2515,7 +2515,7 @@ async function applyPlan() {
       dock.panels.splice(index, 0, spec);
     }
   });
-  PM.toast((replacing ? 'Redesigned ' : 'Added ') + plan.section.title);
+  PM.toast((replacing ? 'Redesigned ' : 'Added ') + plan.section.title, 2200, { error: false });
   finishWorkspaceRun(checkpoint, `${replacing ? 'Redesigned' : 'Added'} ${plan.section.title}`);
 }
 

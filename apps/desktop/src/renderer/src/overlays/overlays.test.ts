@@ -19,6 +19,7 @@ function registry(): Record<string, any> {
     proj: { layers: [{ id: 'layer-1', name: 'Hero title' }] },
     ICONS: {
       undo: '<path/>', redo: '<path/>', x: '<path/>', trash: '<path/>', export: '<path/>',
+      warning: '<path/>', chevD: '<path/>',
       project: '<path/>', layers: '<path/>', plus: '<path/>', hand: '<path/>', cursor: '<path/>',
       eye: '<path/>', music: '<path/>', film: '<path/>', image: '<path/>', panel: '<path/>',
       sparkle: '<path/>', note: '<path/>', missing: '<path/>'
@@ -471,7 +472,7 @@ describe('installSvelteOverlays', () => {
     expect(target.getAttribute('aria-live')).toBe('polite');
     expect((target as HTMLElement).style.zIndex).toBe('402');
     expect(document.querySelectorAll('.toast')).toHaveLength(1);
-    expect(document.querySelector('.toast [role="alert"]')).toBeTruthy();
+    expect(document.querySelector('.toast[role="alert"]')).toBeTruthy();
     expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(false);
     document.querySelector<HTMLButtonElement>('.toast[data-toast-error="true"] > button')?.click();
     flushSync();
@@ -500,6 +501,30 @@ describe('installSvelteOverlays', () => {
     document.querySelector<HTMLButtonElement>('.toast button')?.click();
     flushSync();
     expect(document.querySelector('.toast')).toBeNull();
+  });
+
+  it('lets a caller state the outcome instead of sniffing a user-chosen name', () => {
+    vi.useFakeTimers();
+    // A success that quotes the user's file name must not become a sticky error
+    // just because the file is called "error.png".
+    PM.toast('Imported error.png', 100, { error: false });
+    flushSync();
+
+    expect(document.querySelector('.toast[data-toast-error]')).toBeNull();
+    expect(document.querySelector('.toast [data-icon="plus"]')).toBeTruthy();
+    expect(document.querySelector('.toast button')).toBeNull();
+    vi.advanceTimersByTime(200);
+    flushSync();
+    expect(document.querySelector('.toast')).toBeNull();
+
+    // A genuine failure whose wording the sniffer does not recognize must still
+    // read as one.
+    PM.toast('The optimized video did not produce a playable frame', 100, { error: true });
+    flushSync();
+    expect(document.querySelector('.toast[data-toast-error="true"]')).toBeTruthy();
+    vi.advanceTimersByTime(10_000);
+    flushSync();
+    expect(document.querySelector('.toast[data-toast-error="true"]')).toBeTruthy();
   });
 
   it('keeps errors available until dismissed', () => {

@@ -526,7 +526,7 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string) 
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
   }
   if (onStage) onStage('Optimizing video for playback');
-  else PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000);
+  else PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000, { error: false });
   const result = await media.createPlaybackProxy(file);
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading optimized video');

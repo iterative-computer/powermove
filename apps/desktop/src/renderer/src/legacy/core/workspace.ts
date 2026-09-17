@@ -444,7 +444,7 @@ WS.activate = (id: any, silent: any) => {
   PM.store.set('workspace', id);
   if (!silent) persistProjectWorkspace();
   PM.bus.emit('workspaces');
-  if (!silent) PM.toast('Workspace · ' + w.name);
+  if (!silent) PM.toast('Workspace · ' + w.name, 2200, { error: false });
 };
 
 WS.snapshot = () => WS.current ? copy(WS.current) : null;

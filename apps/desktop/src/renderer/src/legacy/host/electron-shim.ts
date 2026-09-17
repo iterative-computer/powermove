@@ -163,7 +163,7 @@ export function install(PM: PMRegistry): void {
             try {
               const name = String(body.name || 'powermove.bin');
               const result = await bridge.saveFile({ name, data: decodeBinary(body.data) });
-              if (result.ok) PM.toast(`Saved ${savedName(result.path, name)}`);
+              if (result.ok) PM.toast(`Saved ${savedName(result.path, name)}`, 2200, { error: false });
               else if (!result.cancelled) PM.toast(result.error || 'Save failed');
             } catch (error) {
               PM.toast(errorText(error, 'Save failed'));

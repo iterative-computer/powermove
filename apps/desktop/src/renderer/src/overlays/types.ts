@@ -3,6 +3,10 @@ import type { PMRegistry } from '../legacy/registry';
 export type OverlayPM = PMRegistry;
 
 export type ToastOptions = {
+  /** State the outcome instead of letting the message text be sniffed. A
+      success notice that quotes a file, layer or project name must stay a
+      success even when that name reads like a failure ("Imported error.png"). */
+  error?: boolean;
   sticky?: boolean;
   dismissible?: boolean;
   /** Prefer a Powermove icon name. When omitted, the toast message selects one. */
