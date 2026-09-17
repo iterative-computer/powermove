@@ -12,6 +12,9 @@
 #settings-screen{
   --ctl-h:30px;
   --sg-edge:var(--line-2);
+  /* Group cards sit on the page with barely a hairline; the rows' own
+     separators and the tinted fill do the grouping. */
+  --sg-group-edge:var(--ink-1);
   --sg-edge-hot:var(--line-strong);
   --sg-edge-focus:var(--line-strong);
   --sg-row:var(--bg-panel);
@@ -75,7 +78,7 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 .settings-note{margin-top:8px;padding:0 1px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);text-wrap:pretty}
 
 /* ── card + rows ── */
-.sg-group{margin:0 -14px;display:flex;flex-direction:column;border:1px solid var(--sg-edge);border-radius:var(--r-lg);background:var(--sg-row);overflow:hidden}
+.sg-group{margin:0 -14px;display:flex;flex-direction:column;border:1px solid var(--sg-group-edge);border-radius:var(--r-lg);background:var(--sg-row);overflow:hidden}
 .sg-group>*+*{border-top:1px solid var(--line)}
 .sg-group>.settings-row,.settings-provider-fields>.settings-row,.sg-group>.settings-extension-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px}
 .sg-group>.settings-row>:last-child,.settings-provider-fields>.settings-row>:last-child{flex:none}

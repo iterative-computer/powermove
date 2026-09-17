@@ -24,50 +24,30 @@ html{background:transparent}
 
 /* ── glass chrome ──────────────────────────────────────── */
 /* Floating chrome (tab strip, tool cluster, Export, sidebar selection) reads
-   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas, a
-   uniform hairline, and a one-pixel glint where light enters at the upper-left
-   and leaves at the lower-right. Everything is inset shadows on one element;
-   no gradients, no bloom, no hover states. The backdrop is blurred and
-   saturated so content passing beneath reads through the material. */
+   like Tahoe's toolbar buttons: a flat fill a step lighter than the canvas
+   and one uniform hairline. No gradients, no glint, no bloom, no hover
+   states. The backdrop is blurred and saturated so content passing beneath
+   reads through the material. */
+/* One flat hairline all the way round; no directional glint. */
 :root{
   --glass-fill:rgb(var(--paper-rgb) / .45);
   --glass-edge:none;
-  --glass-rim:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / .95) 0,rgb(var(--ink-rgb) / .07) 16%,
-    rgb(var(--ink-rgb) / .07) 36%,rgb(var(--paper-rgb) / .7) 50%,
-    rgb(var(--ink-rgb) / .07) 64%,rgb(var(--ink-rgb) / .07) 84%,
-    rgb(var(--paper-rgb) / .95) 100%);
+  --glass-rim:rgb(var(--ink-rgb) / .07);
   --glass-fill-hi:rgb(var(--paper-rgb) / .9);
   --glass-edge-hi:none;
-  --glass-rim-hi:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / 1) 0,rgb(var(--ink-rgb) / .1) 16%,
-    rgb(var(--ink-rgb) / .1) 36%,rgb(var(--paper-rgb) / .9) 50%,
-    rgb(var(--ink-rgb) / .1) 64%,rgb(var(--ink-rgb) / .1) 84%,
-    rgb(var(--paper-rgb) / 1) 100%);
+  --glass-rim-hi:rgb(var(--ink-rgb) / .1);
   --glass-backdrop:blur(20px) saturate(1.5);
 }
 /* Measured from a Tahoe toolbar button over a dark canvas: the glass body
-   sits ~20% toward black (glass darkens what's behind it), the rim is a 6%
-   white hairline, and the top edge alone rises to ~10%. */
-/* Measured from a Tahoe toolbar button over a dark canvas: the glass body
    sits ~20% toward black (glass darkens what's behind it); the rim is a 6%
-   white hairline that lifts to ~12% where light enters at the upper-left and
-   ~10% where it leaves at the lower-right. */
+   white hairline, flat. */
 :root[data-theme="dark"]{
   --glass-fill:rgb(0 0 0 / .19);
   --glass-edge:none;
-  --glass-rim:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / .13) 0,rgb(var(--paper-rgb) / .06) 16%,
-    rgb(var(--paper-rgb) / .06) 36%,rgb(var(--paper-rgb) / .1) 50%,
-    rgb(var(--paper-rgb) / .06) 64%,rgb(var(--paper-rgb) / .06) 84%,
-    rgb(var(--paper-rgb) / .13) 100%);
+  --glass-rim:rgb(var(--paper-rgb) / .06);
   --glass-fill-hi:rgb(var(--paper-rgb) / .07);
   --glass-edge-hi:none;
-  --glass-rim-hi:conic-gradient(from 315deg,
-    rgb(var(--paper-rgb) / .2) 0,rgb(var(--paper-rgb) / .09) 16%,
-    rgb(var(--paper-rgb) / .09) 36%,rgb(var(--paper-rgb) / .15) 50%,
-    rgb(var(--paper-rgb) / .09) 64%,rgb(var(--paper-rgb) / .09) 84%,
-    rgb(var(--paper-rgb) / .2) 100%);
+  --glass-rim-hi:rgb(var(--paper-rgb) / .09);
 }
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
   position:relative;isolation:isolate;
@@ -75,7 +55,7 @@ html{background:transparent}
   box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
 }
-/* The rim is a 1px ring whose brightness turns softly around the shape. */
+/* The rim is a flat 1px ring. */
 :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim);opacity:1;transition:none;
