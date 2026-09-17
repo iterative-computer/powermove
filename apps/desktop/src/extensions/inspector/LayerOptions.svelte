@@ -27,7 +27,6 @@
 
 <Section {api} title="Layer" />
 <Row {api} label="Solo"><ToggleField {api} {mixed} get={() => layer.solo ?? false} edit={edit('solo','Solo layer')} label="Solo layer" /></Row>
-<Row {api} label="Shy"><ToggleField {api} {mixed} get={() => layer.shy} edit={edit('shy','Shy layer')} label="Shy layer" /></Row>
 
 <Row {api} label="Visible"><ToggleField {api} {mixed} get={() => value('on')} edit={edit('visible', 'Visibility')} label="Visibility" /></Row>
 

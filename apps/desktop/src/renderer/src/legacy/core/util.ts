@@ -248,7 +248,6 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     window.removeEventListener('pointermove', mv, true);
     window.removeEventListener('pointerup', fin, true);
     window.removeEventListener('pointercancel', pc, true);
-    captureEl?.removeEventListener?.('lostpointercapture', lostCapture);
     window.removeEventListener('mousemove', lockMove, true);
     window.removeEventListener('mouseup', fin, true);
     window.removeEventListener('blur', pc);
@@ -280,9 +279,10 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     if (stop() && up) up(finalX, finalY, ev);
   };
   const pc = () => { if (stop() && cancel) cancel(); };
-  const lostCapture = () => { if (!requested) pc(); };
   try { captureEl?.setPointerCapture(pointerId); } catch { }
-  captureEl?.addEventListener?.('lostpointercapture', lostCapture);
+  /* Capture can be lost when a live panel reparents its canvas. That is not a
+     cancelled gesture: the window listeners still receive its moves/release.
+     Rolling back here makes a valid canvas move snap back to its old position. */
   /* WKWebView can stop bubbling pointer movement while a canvas owns the
      gesture. Capture-phase listeners plus explicit pointer capture keep direct
      manipulation alive until the matching up/cancel event. */
@@ -290,8 +290,8 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     doc.addEventListener?.('pointerlockchange', lockChange);
     window.addEventListener('mousemove', lockMove, true);
     window.addEventListener('mouseup', fin, true);
-    window.addEventListener('blur', pc);
   }
+  window.addEventListener('blur', pc);
   window.addEventListener('pointermove', mv, true);
   window.addEventListener('pointerup', fin, true);
   window.addEventListener('pointercancel', pc, true);

@@ -736,7 +736,6 @@ function buildRows() {
     const L = layers[i];
     const ancestors = api.groups.ancestors(L) || [];
     if (!T.search && ancestors.some((group: any) => api.uiState.getGroupCollapsed(group))) continue;
-    if (L.shy && !T.showShy) continue;
     const query = String(T.search || '').trim().toLowerCase();
     const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
     if (query && !L.name.toLowerCase().includes(query) && !matching.length) continue;

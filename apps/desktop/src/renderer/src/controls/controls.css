@@ -49,12 +49,12 @@ select.sel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 12px 92px;
   gap: 8px;
-  height: 176px;
+  min-height: 176px;
 }
 
 .color-sv,
 .color-hue {
-  height: 100%;
+  align-self: stretch;
 }
 
 .color-side {
@@ -90,7 +90,7 @@ select.sel {
 }
 
 .color-channels {
-  flex: 1;
+  flex: none;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -105,6 +105,7 @@ select.sel {
 }
 
 .color-channel {
+  flex: none;
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr) 10px;
   align-items: center;
@@ -195,7 +196,7 @@ select.sel {
 }
 .fill-picker.color-picker > header b { font-weight: var(--fw-medium); }
 .color-picker .color-dialog { padding: var(--pad); gap: 8px; }
-.color-picker .color-workbench { height: calc(6 * var(--ctl-h)); }
+.color-picker .color-workbench { min-height: calc(6 * var(--ctl-h)); }
 .color-picker .color-channels { gap: 0; }
 .color-picker .color-channel { gap: 4px; }
 .color-picker .color-channel input { height: calc(var(--ctl-h) - 2px); border-radius: var(--r-sm); }

@@ -925,7 +925,6 @@ function sourceCatalog() {
       { path: 'layer.duration', label: 'Duration', control: 'slider', value: layer.dur, min: 1 / Math.max(1, p.fps), max: Math.max(p.dur, layer.dur), step: 1 / Math.max(1, p.fps), unit: 's' },
       { path: 'layer.visible', label: 'Visible', control: 'toggle', value: evaluatedValue(PM, layer, layer.on, PM.time, 'l.on') },
       { path: 'layer.locked', label: 'Locked', control: 'toggle', value: layer.lock },
-      { path: 'layer.shy', label: 'Shy', control: 'toggle', value: layer.shy },
       { path: 'layer.collapsed', label: 'Collapsed', control: 'toggle', value: layer.collapsed },
       { path: 'layer.color', label: 'Label color', control: 'color', value: layer.color },
     ];

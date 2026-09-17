@@ -228,6 +228,7 @@
   });
 </script>
 
+<ToolbarMount {PM} />
 <div id="tabs" data-svelte-shell="tabs">
   <!-- Phase 5.4 follow-up: connect these tabs to a tabpanel with aria-controls. -->
   <div role="tablist" aria-label="Open projects" style="display: contents">
@@ -245,7 +246,6 @@
       onfocus={() => (rovingId = 'home')}
       onkeydown={focusTab}
     ><Icon {PM} name="home" /></button>
-    <i class="project-strip-divider" aria-hidden="true"></i>
 
     {#each tabIds as id (id)}
       {@const active = id === activeProjectId && !homeOpen}
@@ -327,7 +327,6 @@
 </div>
 
 <div class="titlebar-drag" aria-hidden="true"></div>
-<ToolbarMount {PM} />
 <div class="tb-right" id="tb-right">
   {#if !homeOpen}
     <button class="btn tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>

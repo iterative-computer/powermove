@@ -124,7 +124,7 @@ describe('panel drag and layout behavior survivors', () => {
     expect(commits).toBe(0);
   });
 
-  it('captures the originating pointer and cleans up after capture loss', () => {
+  it('keeps tracking a drag after capture loss and commits on release', () => {
     const addListener = vi.spyOn(window, 'addEventListener');
     const PM = makePM('core/util');
     const target = document.createElement('div') as HTMLElement & {
@@ -136,6 +136,7 @@ describe('panel drag and layout behavior survivors', () => {
     target.hasPointerCapture = vi.fn(() => true);
     target.releasePointerCapture = vi.fn();
     let cancellations = 0;
+    const move = vi.fn(), up = vi.fn();
 
     PM.drag({
       clientX: 5,
@@ -143,13 +144,29 @@ describe('panel drag and layout behavior survivors', () => {
       pointerId: 17,
       currentTarget: target,
       preventDefault() {},
-    }, { cancel: () => { cancellations++; } });
+    }, { move, up, cancel: () => { cancellations++; } });
 
     expect(target.setPointerCapture).toHaveBeenCalledWith(17);
     expect(addListener).toHaveBeenCalledWith('pointermove', expect.any(Function), true);
     target.dispatchEvent(new Event('lostpointercapture'));
-    expect(cancellations).toBe(1);
+    window.dispatchEvent(new PointerEvent('pointermove', { pointerId: 17, clientX: 25, clientY: 35 }));
+    window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 17, clientX: 25, clientY: 35 }));
+    expect(cancellations).toBe(0);
+    expect(move).toHaveBeenCalledWith(20, 30, expect.any(PointerEvent));
+    expect(up).toHaveBeenCalledWith(20, 30, expect.any(PointerEvent));
+    expect(up).toHaveBeenCalledOnce();
     expect(target.hasPointerCapture).toHaveBeenCalledWith(17);
     expect(target.releasePointerCapture).toHaveBeenCalledWith(17);
+  });
+
+  it('cancels a regular canvas drag when the window loses focus', () => {
+    const PM = makePM('core/util');
+    const cancel = vi.fn(), up = vi.fn();
+    PM.drag({ clientX: 5, clientY: 5, preventDefault() {} }, { cancel, up, cursor: 'move' });
+    window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(new PointerEvent('pointerup', { clientX: 30, clientY: 30 }));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(up).not.toHaveBeenCalled();
+    expect(document.body.style.cursor).toBe('');
   });
 });

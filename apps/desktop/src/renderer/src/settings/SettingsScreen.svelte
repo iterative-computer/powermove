@@ -21,17 +21,17 @@
 
   const NAV: NavGroup[] = [
     {
+      title: 'Project',
+      items: [
+        { id: 'project', label: 'Project', icon: 'frame' }
+      ]
+    },
+    {
       title: 'App',
       items: [
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
         { id: 'extensions', label: 'Extensions', icon: 'puzzle' }
-      ]
-    },
-    {
-      title: 'Project',
-      items: [
-        { id: 'project', label: 'Project', icon: 'frame' }
       ]
     }
   ];
@@ -116,9 +116,7 @@
   export function open(target?: SettingsPage): void {
     build();
     themeMode = PM.theme?.mode ?? 'system';
-    /* Every entry point lands on the page it asked for; a plain open() starts
-       at General, the way the old dialog did. */
-    const wanted = target ?? 'general';
+    const wanted = target ?? (controls?.project ? 'project' : 'general');
     const destination = wanted === 'project' && !controls?.project ? 'general' : wanted;
     page = destination;
     searchText = '';

@@ -1299,7 +1299,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
       covers[i] = largest;
       const layer = layers[i];
       if (layer.type !== 'shape' || layer.d.paths?.length || !PM.active(layer, T)
-          || viewerService(PM)?.canvasTextEditing === layer.id || layer.shy && opt.hideShy || PM.worldOpacity(layer, T) < 1) continue;
+          || viewerService(PM)?.canvasTextEditing === layer.id || PM.worldOpacity(layer, T) < 1) continue;
       const d = resolveContent(PM, layer, T), m = scaledWorld(layer, T, W, H);
       if (d.shape !== 'rect' || !/^#[0-9a-f]{6}$/i.test(d.color) || Math.abs(m[1]) > 1e-9 || Math.abs(m[2]) > 1e-9) continue;
       const geometry = shapeRasterGeometry(d, continuousRasterScale(m));
@@ -1343,7 +1343,6 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
         && !opt.mattePass) continue;
     if (L.type !== 'group' && PM.TYPE_META[L.type] && PM.TYPE_META[L.type].visual === false) continue;
     if (!PM.active(L, T)) continue;
-    if (L.shy && opt.hideShy) continue;
     /* Each group owns an offscreen compositing boundary, so opacity is applied
        once at its own level instead of being multiplied into every descendant. */
     const alpha = PM.clamp(PM.ev(L, 'opacity', T) / 100, 0, 1);
