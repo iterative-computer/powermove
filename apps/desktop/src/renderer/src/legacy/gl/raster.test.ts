@@ -281,6 +281,39 @@ describe('legacy raster install', () => {
     expect(right.lines[0].x).toBeCloseTo(-right.lines[0].width, 5);
   });
 
+  it('retries a text raster that painted nothing instead of caching the blank bitmap', () => {
+    let alpha = 0;
+    const context2d: any = {
+      font: '', letterSpacing: '', textBaseline: '', textAlign: '', fillStyle: '',
+      scale() {}, fillText() {}, drawImage() {},
+      getImageData: () => ({ data: new Uint8ClampedArray(24 * 24 * 4).fill(alpha) }),
+      measureText: (text: string) => ({ width: Math.max(1, text.length * 48), actualBoundingBoxLeft: 0, actualBoundingBoxRight: text.length * 48, actualBoundingBoxAscent: 78, actualBoundingBoxDescent: 18 }),
+    };
+    const timers: Array<() => void> = [];
+    vi.stubGlobal('window', {
+      document: { createElement: () => ({ width: 0, height: 0, getContext: () => context2d }), fonts: { ready: { then(fn: () => void) { timers.push(fn); } } } },
+      setTimeout: (fn: () => void) => { timers.push(fn); return 1; },
+    });
+    const invalidate = vi.fn();
+    const PM: PMRegistry = { clamp: (v: number, a: number, b: number) => Math.max(a, Math.min(b, v)), invalidate, time: 0 } as any;
+    install(PM);
+    const layer = { type: 'text', d: { text: 'Hello', font: 'Loading Face', weight: 500, size: 40, tracking: 0, leading: 1, color: '#fff', align: 'left' } };
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const first = PM.raster(layer);
+    expect(first.blank).toBe(true);
+    // The blank bitmap is reused until the retry moment, never as a GPU stub.
+    expect(PM.raster(layer, 1, 0, () => ({ ...first, blank: true }))).toBe(first);
+    timers.splice(0).forEach(fn => fn());
+    expect(invalidate).toHaveBeenCalled();
+    alpha = 255;
+    now.mockReturnValue(1300);
+    const second = PM.raster(layer);
+    expect(second).not.toBe(first);
+    expect(second.blank).toBe(false);
+    expect(PM.raster(layer)).toBe(second);
+    now.mockRestore();
+  });
+
   it('atomically replaces media in place and restores metadata plus runtime with one Undo and Redo', async () => {
     const disposed: any[] = [];
     const oldRuntime = { id: 'asset-1', name: 'old.wav', kind: 'audio', marker: 'old' };

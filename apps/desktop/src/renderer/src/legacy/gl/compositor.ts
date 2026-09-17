@@ -430,11 +430,15 @@ function texFor(key: any, source: any, opts: any = {}) {
   bindTex(0, t.tex);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-  try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch (e) { }
+  let stored = true;
+  try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source); } catch (e) { stored = false; }
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-  t.v = opts.version === undefined ? t.v : opts.version;
   const width = Number(source?.videoWidth || source?.naturalWidth || source?.width || 0);
   const height = Number(source?.videoHeight || source?.naturalHeight || source?.height || 0);
+  // An empty or failed upload must not be stamped as current, or the key
+  // would draw nothing until its texture is dropped. Leave it unversioned so
+  // the next frame uploads again from a real source.
+  if (stored && width > 0 && height > 0) t.v = opts.version === undefined ? t.v : opts.version;
   const bytes = Math.max(0, width * height * 4);
   textureBytes += bytes - (t.bytes || 0);
   t.bytes = bytes;
@@ -779,7 +783,8 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     const r = PM.raster(L, ss, T, (key: string) => GL.texes.get('r:' + key)?.raster, crop);
     const tex = texFor('r:' + r.key, r.cv, { version: 1 });
     const uploaded = GL.texes.get('r:' + r.key);
-    if (!uploaded.raster && !r.fontOffset) {
+    // A blank raster is retried by PM.raster; never let it stand in for the bitmap.
+    if (!uploaded.raster && !r.fontOffset && !r.blank) {
       const { cv: _canvas, ...metadata } = r;
       uploaded.raster = metadata;
     }

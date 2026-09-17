@@ -388,6 +388,25 @@ function textRasterGeometry(d: any, scale: number) {
 // anchoring continue through their existing complete-source rendering path.
 PM.textRasterGeometry = (layer: any, scale: number, time = PM.time) => textRasterGeometry(resolvedTextContent(layer, time), scale);
 
+/* A text raster can come out empty although the layer has visible text: a
+   font that is still loading paints nothing on a 2D canvas, and a canvas the
+   browser refused to allocate reads back as transparent. Cached as-is, that
+   blank bitmap would stay on screen until the app restarts. Sample a small
+   downscale of the result so such a raster can be retried instead. */
+const BLANK_RETRY_MS = 250;
+const warnedBlank = new Set<string>();
+function rasterLooksBlank(cv: HTMLCanvasElement): boolean {
+  try {
+    const probe = getCanvas(24, 24), ctx = probe.getContext('2d') as any;
+    if (!ctx?.drawImage || !ctx.getImageData) return false;
+    ctx.drawImage(cv, 0, 0, 24, 24);
+    const data = ctx.getImageData(0, 0, 24, 24)?.data;
+    if (!data) return false;
+    for (let i = 3; i < data.length; i += 4) if (data[i]! > 0) return false;
+    return true;
+  } catch { return false; }
+}
+
 function rasterText(d: any, scale: number) {
   const g = textRasterGeometry(d, scale);
   const cv = getCanvas(g.width, g.height);
@@ -397,7 +416,13 @@ function rasterText(d: any, scale: number) {
   if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
   c.textBaseline = 'alphabetic'; c.textAlign = g.align; c.fillStyle = d.color || '#fff';
   g.lines.forEach((line: string, i: number) => c.fillText(line, g.x, g.pad + g.lh * i + g.size * .82));
-  return { cv, w: g.w, h: g.h, anchorX: g.anchorX, anchorY: g.anchorY, selection: g.selection };
+  const visible = g.lines.some((line: string) => line.trim().length) && !/^(transparent|rgba?\(.*,\s*0\s*\))$/i.test(String(d.color || ''));
+  const blank = visible && rasterLooksBlank(cv);
+  if (blank && !warnedBlank.has(c.font)) {
+    warnedBlank.add(c.font);
+    console.warn('[raster] text painted nothing; retrying shortly', { font: c.font, size: g.width + 'x' + g.height, text: String(d.text).slice(0, 40) });
+  }
+  return { cv, w: g.w, h: g.h, anchorX: g.anchorX, anchorY: g.anchorY, selection: g.selection, blank };
 }
 
 function rasterAnimatedText(layer:any,d:any,time:number,scale:number) {
@@ -478,12 +503,22 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   // Typography anchoring may need a separate, unanimated CPU measurement.
   // Keep that path intact; otherwise the renderer can reuse uploaded pixels
   // and their geometry without retaining a second canvas in memory.
-  let e = cache.get(key) || (!L.d.fontAnchorBounds && uploaded?.(key));
+  let e = cache.get(key);
+  if (e?.blank) {
+    // Give a loading font a moment, then paint again instead of keeping the blank bitmap.
+    if (Date.now() >= e.retryAt) { release(key, e); e = null; }
+  }
+  if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
   if (!e) {
     e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (L.d.animators?.length||L.d.styles?.length ? rasterAnimatedText(L,d,time,scale) : rasterText(d, scale)) : rasterShape(d, scale, crop);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
+    if (e.blank) {
+      e.retryAt = Date.now() + BLANK_RETRY_MS;
+      window.setTimeout(() => PM.invalidate?.('render'), BLANK_RETRY_MS + 16);
+      (window.document as any)?.fonts?.ready?.then?.(() => PM.invalidate?.('render'));
+    }
     cache.set(key, e);
     cacheBytes += e.bytes;
     if (PM.Memory?.maintain) PM.Memory.maintain('raster', cache.size > MAX);
