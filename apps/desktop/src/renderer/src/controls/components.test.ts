@@ -105,6 +105,23 @@ describe('NumField', () => {
     vi.useRealTimers();
   });
 
+  it('scrubs on both axes: right or up raises, left or down lowers', () => {
+    const { api, Edit, drag } = fakeAPI();
+    let current = 10;
+    Edit.dispatch.mockImplementation((command: any) => { current = command.value; });
+    const target = render(NumField, { api, get: () => current, edit: commandEdit('Size'), step: 1, speed: 1, label: 'Size' });
+    const input = target.querySelector<HTMLInputElement>('input.num')!;
+    input.dispatchEvent(pointer('pointerdown'));
+    drag().move(0, -2, pointer('pointermove'));
+    expect(Edit.dispatch).not.toHaveBeenCalled();
+    drag().move(0, -8, pointer('pointermove'));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: 18 }));
+    drag().move(-4, 6, pointer('pointermove'));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: 0 }));
+    drag().up();
+    expect(Edit.commit).toHaveBeenCalledWith('Size');
+  });
+
   it('scrubs through begin → writes → commit and opens editing after a click/cancel', async () => {
     const { api, Edit, drag } = fakeAPI();
     let current = 10;

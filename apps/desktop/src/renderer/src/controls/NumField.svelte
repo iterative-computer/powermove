@@ -119,11 +119,18 @@
   let cancelScrub: (() => void) | undefined;
   onDestroy(() => cancelScrub?.());
 
+  /* Drag anywhere on the field to scrub: right or up raises the value, left
+     or down lowers it. Past a small threshold the pointer is locked, so the
+     cursor stays put and the gesture has unlimited travel. Shift steps by
+     ten, Option by a tenth. Each change of the shown value ticks the
+     trackpad, like the horizontal wheel scrub. A click without a drag opens
+     the text editor instead. */
   function pointerdown(event: PointerEvent): void {
     if (editing || event.button !== 0) return;
     event.preventDefault();
     const start = Number(get());
     let moved = false;
+    let lastShown = format(start), lastHaptic = -Infinity;
     const scrub = gesture;
     let active = true;
     const cleanup = () => { active = false; window.removeEventListener('keydown', escape, true); cancelScrub = undefined; };
@@ -139,16 +146,22 @@
     const handle = api.ui.drag(event, {
       cursor: 'ew-resize',
       infinite: true,
-      move: (dx: number, _dy: number, nextEvent: PointerEvent) => {
-        if (!active || (!moved && Math.abs(dx) < 3)) return;
+      move: (dx: number, dy: number, nextEvent: PointerEvent) => {
+        if (!active || (!moved && Math.hypot(dx, dy) < 3)) return;
         moved = true;
         const multiplier = nextEvent.shiftKey ? 10 : nextEvent.altKey ? 0.1 : 1;
-        let next = start + dx * effectiveStep * multiplier * effectiveSpeed;
+        let next = start + (dx - dy) * effectiveStep * multiplier * effectiveSpeed;
         if (min != null) next = Math.max(min, next);
         if (max != null) next = Math.min(max, next);
         next = round(api, next, 3);
         scrub.write(next);
         onInput?.(next);
+        const shownNext = format(next), now = performance.now();
+        if (shownNext !== lastShown && now - lastHaptic >= 40) {
+          window.powermove?.haptic?.alignment();
+          lastHaptic = now;
+        }
+        lastShown = shownNext;
       },
       up: () => {
         if (!active) return;
