@@ -4,7 +4,7 @@ import { createViewerRuntime, viewerPanelOptions } from './viewer';
 import { installSourcePreview } from './source-preview';
 
 const VIEWER_STYLES = `
-  .canvas-text-editor::selection,.canvas-text-editor *::selection{background:rgba(70,155,235,.4);color:inherit}
+  .canvas-text-input::selection{background:transparent;color:transparent}
   #panel-viewer{background:var(--bg-panel-2)}
   #panel-viewer > .panel-move-handle{
     top:7px;left:8px;transform:none;width:24px;height:24px;border:0;border-radius:0;
