@@ -662,7 +662,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .drop .di.disabled:hover{background:transparent}
 .drop .sep{height:1px;background:var(--line);margin:4px 6px}
 .drop .hd{font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--tx-4);padding:6px 8px 3px}
-.font-select{min-width:0;max-width:155px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Same width as every other field in the column; long family names ellipsize. */
+.font-select{min-width:0;max-width:100%;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .font-drop{display:flex;flex-direction:column;overflow:hidden;padding:6px}
 .font-search{flex:none;width:100%;height:32px;padding:0 9px;border-radius:var(--r-sm);background:var(--bg-field);box-shadow:var(--ctl-edge-inset);font-family:var(--f-ui);font-size:var(--fs-sm);color:var(--tx)}
 .font-search:focus{outline:0;box-shadow:var(--ctl-edge-inset),0 0 0 1px color-mix(in srgb,var(--accent) 60%,transparent)}
