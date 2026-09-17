@@ -83,7 +83,12 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
   V.finishCanvasText?.();
   api.selection.select([layer.id]);
   api.transport.pause();
-  if (!options.fresh) api.edit.begin('Edit text', { origin: 'canvas' });
+  if (!options.fresh) {
+    // A transaction left open elsewhere would otherwise throw here and block
+    // every structural edit in the app; close it rather than inherit it.
+    try { api.edit.begin('Edit text', { origin: 'canvas' }); }
+    catch { api.edit.commit(); api.edit.begin('Edit text', { origin: 'canvas' }); }
+  }
 
   const id: string = layer.id;
   const current = () => api.model.layer(id) ?? layer;
@@ -221,8 +226,10 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
   const onDocumentPointerDown = (e: PointerEvent) => {
     const target = e.target as Element | null;
     if (!target?.closest || target.closest('#panel-viewer, .canvas-text-input')) return;
-    // The inspector's own Text field runs its own edit transaction.
-    if (target.closest('[data-inspector-text-layer]')) { finish(); return; }
+    // Inspector value fields (text field, scrubbable numbers) open their own
+    // edit transaction, so the canvas session commits first. One-shot
+    // controls (font, weight, align, colour) keep the session alive.
+    if (target.closest('[data-inspector-text-layer], #panel-inspector input, #panel-inspector textarea')) { finish(); return; }
     if (target.closest('#panel-inspector, [data-inspector], [role="menu"], [role="listbox"], [role="dialog"], .popover')) return;
     // A toolbar tool button is an explicit choice; its own command sets the tool.
     keepTool = !!target.closest('#toolbar button[data-tool]');

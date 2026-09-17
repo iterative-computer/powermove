@@ -176,6 +176,25 @@ describe('text editing session', () => {
     expect(api.edit.commit).toHaveBeenCalledWith('Edit text');
   });
 
+  it('commits before an inspector value field starts its own transaction', () => {
+    const { api, V, layer } = fixture();
+    const inspector = document.createElement('div'); inspector.id = 'panel-inspector';
+    const number = document.createElement('input'); number.className = 'num'; inspector.append(number);
+    document.body.append(inspector);
+    beginTextEdit(api, V, layer);
+    number.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    expect(V.canvasTextEditing).toBeNull();
+    expect(api.edit.commit).toHaveBeenCalledWith('Edit text');
+  });
+
+  it('closes a transaction left open elsewhere instead of failing to start', () => {
+    const { api, V, layer } = fixture();
+    (api.edit.begin as any).mockImplementationOnce(() => { throw new Error('A source edit is already active'); });
+    expect(beginTextEdit(api, V, layer)).not.toBeNull();
+    expect(api.edit.commit).toHaveBeenCalledTimes(1);
+    expect(api.edit.begin).toHaveBeenCalledTimes(2);
+  });
+
   it('handles Command+A itself and offers style shortcuts', () => {
     const { api, V, layer, dispatched } = fixture('Hello world');
     beginTextEdit(api, V, layer);

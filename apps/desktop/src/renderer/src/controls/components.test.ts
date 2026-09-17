@@ -137,6 +137,20 @@ describe('NumField', () => {
     expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({ value: -10 }), expect.anything());
   });
 
+  it('aborts a scrub cleanly when another edit transaction is already live', () => {
+    const { api, Edit, drag } = fakeAPI();
+    Edit.begin.mockImplementationOnce(() => { throw new Error('A source edit is already active'); });
+    const target = render(NumField, { api, get: () => 10, edit: commandEdit('Size'), label: 'Size' });
+    const input = target.querySelector<HTMLInputElement>('input.num')!;
+    expect(() => input.dispatchEvent(pointer('pointerdown'))).not.toThrow();
+    expect(api.ui.drag).not.toHaveBeenCalled();
+    expect(Edit.cancel).not.toHaveBeenCalled();
+    // The next gesture works normally.
+    input.dispatchEvent(pointer('pointerdown'));
+    expect(api.ui.drag).toHaveBeenCalledTimes(1);
+    drag().up();
+  });
+
   it('scrubs on both axes: right or up raises, left or down lowers', () => {
     const { api, Edit, drag } = fakeAPI();
     let current = 10;

@@ -139,6 +139,7 @@
     let lastShown = format(start), lastHaptic = -Infinity;
     const scrub = gesture;
     let active = true;
+    let handle: { cancel(): void } | undefined;
     const cleanup = () => { active = false; window.removeEventListener('keydown', escape, true); cancelScrub = undefined; };
     const cancel = () => { if (!active) return; cleanup(); scrub.cancel(); };
     const escape = (key: KeyboardEvent) => {
@@ -148,8 +149,10 @@
     };
     cancelScrub = () => { handle?.cancel(); cancel(); };
     window.addEventListener('keydown', escape, true);
-    scrub.begin();
-    const handle = api.ui.drag(event, {
+    // Another live transaction refuses a new one. Abort this gesture cleanly
+    // instead of throwing out of the event handler with listeners attached.
+    try { scrub.begin(); } catch (error) { cleanup(); console.warn('[controls] scrub could not start', error); return; }
+    handle = api.ui.drag(event, {
       cursor: 'ew-resize',
       infinite: true,
       move: (dx: number, dy: number, nextEvent: PointerEvent) => {
