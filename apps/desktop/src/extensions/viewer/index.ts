@@ -37,6 +37,18 @@ export default function activate(api: PowermoveAPI): void {
   api.onDispose(() => disposeRuntime());
   api.services.register('viewer', runtime);
 
+  // Enter on a single selected text layer starts editing it (Figma).
+  api.commands.register({
+    id: 'text.editSelected', label: 'Edit selected text', category: 'Text',
+    run: () => {
+      const selected = api.selection.layers().map((id) => api.model.layer(id)).filter(Boolean);
+      const layer = selected.length === 1 ? selected[0] : null;
+      if (!layer || layer.type !== 'text' || layer.lock || runtime.textSession) return false;
+      return !!runtime.editText?.(layer, { selectAll: true });
+    },
+  });
+  api.keybindings.bind({ key: 'enter', command: 'text.editSelected' });
+
   api.panels.register({
     id: 'viewer',
     icon: 'frame',

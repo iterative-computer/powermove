@@ -169,3 +169,22 @@ test('clicking inside the edited text moves the caret; double-click selects a wo
   expect(await page.evaluate(id => { const d = (window as any).PM.L(id).d; return d.text?.v ?? d.text; }, id)).toBe('X');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('Enter edits the selected text layer; Command+A selects all inside the editor; focus survives a save', async ({ session }) => {
+  const { page, id, state, editor } = await setup(session);
+  await page.keyboard.press('Enter');
+  await expect(editor).toBeFocused();
+  expect((await state()).selection).toEqual({ layer: id, start: 0, end: 9 });
+  await page.keyboard.press('End');
+  expect((await state()).selection).toEqual({ layer: id, start: 9, end: 9 });
+  await page.keyboard.press('Meta+A');
+  expect((await state()).selection).toEqual({ layer: id, start: 0, end: 9 });
+  await page.keyboard.press('Meta+B');
+  expect(await page.evaluate(id => { const d = (window as any).PM.L(id).d; return d.weight?.v ?? d.weight; }, id)).toBe(700);
+  // Drop focus to the body the way a toast or save can; the editor takes it back.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await expect(editor).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(editor).toHaveCount(0);
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

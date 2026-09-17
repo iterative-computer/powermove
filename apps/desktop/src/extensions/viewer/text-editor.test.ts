@@ -176,6 +176,41 @@ describe('text editing session', () => {
     expect(api.edit.commit).toHaveBeenCalledWith('Edit text');
   });
 
+  it('handles Command+A itself and offers style shortcuts', () => {
+    const { api, V, layer, dispatched } = fixture('Hello world');
+    beginTextEdit(api, V, layer);
+    const all = key({ key: 'a', metaKey: true });
+    expect(all.defaultPrevented).toBe(true);
+    expect(V.textSelection).toEqual({ layer: 'text-1', start: 0, end: 11 });
+    key({ key: 'b', metaKey: true });
+    expect(dispatched.at(-1)).toMatchObject({ type: 'set_property', path: 'c.weight', value: 700 });
+    layer.d.weight = 700;
+    key({ key: 'b', metaKey: true });
+    expect(dispatched.at(-1)).toMatchObject({ path: 'c.weight', value: 400 });
+    key({ key: 'i', metaKey: true });
+    expect(dispatched.at(-1)).toEqual({ type: 'set_content', target: 'text-1', patch: { italic: true } });
+    key({ key: '>', code: 'Period', metaKey: true, shiftKey: true });
+    expect(dispatched.at(-1)).toMatchObject({ path: 'c.size', value: 49 });
+    key({ key: '<', code: 'Comma', metaKey: true, shiftKey: true, altKey: true });
+    expect(dispatched.at(-1)).toMatchObject({ path: 'c.size', value: 38 });
+    key({ key: 't', code: 'KeyT', metaKey: true, altKey: true });
+    expect(dispatched.at(-1)).toEqual({ type: 'set_content', target: 'text-1', patch: { align: 'center' } });
+    expect(V.canvasTextEditing).toBe('text-1');
+  });
+
+  it('takes focus back when nothing else holds it', () => {
+    const { api, V, layer } = fixture();
+    const session = beginTextEdit(api, V, layer)!;
+    const other = document.createElement('input'); document.body.append(other);
+    const c = { save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, stroke() {}, fill() {}, fillRect() {} } as unknown as CanvasRenderingContext2D;
+    other.focus();
+    session.draw(c, 1, '#fff');
+    expect(document.activeElement).toBe(other);
+    other.blur();
+    session.draw(c, 1, '#fff');
+    expect(document.activeElement).toBe(field());
+  });
+
   it('refuses locked layers', () => {
     const { api, V, layer } = fixture('Hello', { lock: true });
     expect(beginTextEdit(api, V, layer)).toBeNull();

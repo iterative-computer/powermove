@@ -21,7 +21,10 @@ import { caretAt, indexAtPoint, paragraphRangeAt, selectionRects, textFrame, ver
      history entry at all).
    - After editing, the tool returns to Select.
    - Clicking inside the edited text moves the caret; dragging selects;
-     double-click selects a word; triple-click selects a paragraph. */
+     double-click selects a word; triple-click selects a paragraph.
+   - Command+A selects all, Command+B / I toggle weight and italic,
+     Command+Shift+> / < step the size (Option: by ten), Command+Option+L /
+     T / R align. Enter with one text layer selected starts editing it. */
 
 export interface TextEditorHost {
   inner: HTMLElement;
@@ -158,6 +161,16 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
     el.wrap = lay.boxWidth > 0 ? 'soft' : 'off';
   };
 
+  const setProperty = (path: string, value: number) => {
+    api.edit.dispatch({ type: 'set_property', target: id, path, value, time: time(), mode: 'auto', preserveHandEdits: false } as any);
+    api.transport.invalidate('render'); V.requestOverlay?.();
+    api.services.get<{ refresh(): void }>('inspector')?.refresh();
+  };
+  const patchContent = (patch: Record<string, unknown>) => {
+    api.edit.dispatch({ type: 'set_content', target: id, patch } as any);
+    api.transport.invalidate('render'); V.requestOverlay?.();
+    api.services.get<{ refresh(): void }>('inspector')?.refresh();
+  };
   const write = () => {
     const value = el.value.replace(/\r/g, '');
     if (value === sourceText()) return;
@@ -208,6 +221,8 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
   const onDocumentPointerDown = (e: PointerEvent) => {
     const target = e.target as Element | null;
     if (!target?.closest || target.closest('#panel-viewer, .canvas-text-input')) return;
+    // The inspector's own Text field runs its own edit transaction.
+    if (target.closest('[data-inspector-text-layer]')) { finish(); return; }
     if (target.closest('#panel-inspector, [data-inspector], [role="menu"], [role="listbox"], [role="dialog"], .popover')) return;
     // A toolbar tool button is an explicit choice; its own command sets the tool.
     keepTool = !!target.closest('#toolbar button[data-tool]');
@@ -223,6 +238,30 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(); return; }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finish(); return; }
     if (e.key === 'Tab') { e.preventDefault(); return; }
+    const mod = e.metaKey || e.ctrlKey, key = e.key.toLowerCase();
+    // Select All is handled here so it works whatever the menu or keymap
+    // routing does with Command+A on the way in.
+    if (mod && !e.altKey && !e.shiftKey && key === 'a') { e.preventDefault(); e.stopPropagation(); setSelection(0, el.value.length); return; }
+    if (mod && !e.altKey && !e.shiftKey && (key === 'b' || key === 'i')) {
+      e.preventDefault(); e.stopPropagation();
+      const d = content();
+      if (key === 'b') setProperty('c.weight', (Number(d?.weight) || 400) >= 600 ? 400 : 700);
+      else patchContent({ italic: !d?.italic });
+      return;
+    }
+    // Command+Shift+> / < step the size; add Option for tens (Figma).
+    if (mod && e.shiftKey && (e.code === 'Period' || e.code === 'Comma')) {
+      e.preventDefault(); e.stopPropagation();
+      const step = (e.code === 'Period' ? 1 : -1) * (e.altKey ? 10 : 1);
+      setProperty('c.size', Math.max(4, Math.round((Number(content()?.size) || 16) + step)));
+      return;
+    }
+    // Command+Option+L / T / R align left, center, right (Figma).
+    if (mod && e.altKey && !e.shiftKey && (e.code === 'KeyL' || e.code === 'KeyT' || e.code === 'KeyR')) {
+      e.preventDefault(); e.stopPropagation();
+      patchContent({ align: e.code === 'KeyL' ? 'left' : e.code === 'KeyT' ? 'center' : 'right' });
+      return;
+    }
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.metaKey && !e.ctrlKey) {
       const lay = layout(); if (!lay) return;
       e.preventDefault();
@@ -293,6 +332,10 @@ export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, 
   const draw = (c: CanvasRenderingContext2D, S: number, ink: string) => {
     if (done) return;
     sync(); place();
+    /* A save, toast or panel refresh can drop focus to the body while the
+       session is still open. Keys must keep reaching the text, so take focus
+       back whenever nothing else holds it. */
+    if (document.activeElement !== el && (!document.activeElement || document.activeElement === document.body) && document.hasFocus()) el.focus({ preventScroll: true });
     const lay = layout(); if (!lay) return;
     const m = matrix();
     const quad = (r: Rect) => [

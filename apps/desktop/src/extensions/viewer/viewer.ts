@@ -272,6 +272,7 @@ type ViewerRuntime = ViewerService & {
   finishCanvasText?: (() => void) | null;
   textSelection?: { layer: string; start: number; end: number } | null;
   textSession?: TextEditSession | null;
+  editText?(layer: any, options?: Omit<TextEditOptions, 'drag' | 'onFinish'>): TextEditSession | null;
   requestOverlay?(): void;
   inner: HTMLElement;
   _runtimeToken?: symbol | null;
@@ -646,6 +647,7 @@ const refreshInspector = () => api.services.get<InspectorService>('inspector')?.
 const selectLayers = (ids: string | string[], add = false) => api.selection.select(Array.isArray(ids) ? ids : [ids], add);
 const invalidate = (what?: string) => { api.transport.invalidate(what); schedulePresentation(); };
 V.requestOverlay = schedulePresentation;
+V.editText = (layer: any, options: Omit<TextEditOptions, 'drag' | 'onFinish'> = {}) => openTextEditor(layer, options);
 let disposed = false;
 let unbindStage: (() => void) | null = null;
 let resizeObserver: ResizeObserver | null = null;
