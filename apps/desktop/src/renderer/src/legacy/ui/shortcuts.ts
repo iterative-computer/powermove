@@ -745,7 +745,7 @@ export function setLayerLocks(PM: PMRegistry, locked: boolean, all = false): unk
 
 /** Cmd/Ctrl+Up/Down follows the visible layer stack; Shift extends the range. */
 export function selectAdjacentLayer(PM: PMRegistry, direction: -1 | 1, extend = false): unknown {
-  const layers = currentLayers(PM).filter((layer: any) => !layer.shy);
+  const layers = currentLayers(PM);
   if (!layers.length) return false;
   const selected = new Set((PM.sel?.layers || []).filter(Boolean));
   const selectedIndexes = layers
