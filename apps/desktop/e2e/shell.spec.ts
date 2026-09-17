@@ -8,8 +8,7 @@ test.describe('@shell Svelte shell', () => {
     await expect(titlebar).toHaveCount(1);
     await expect(titlebar.locator('#tabs [role="tablist"]')).toHaveCount(1);
     await expect(titlebar.locator('#tabs [role="tablist"] .project-new')).toHaveCount(0);
-    await expect(titlebar.locator('#toolbar-strip')).toHaveCount(0);
-    await expect(page.locator('#panel-viewer > #toolbar-strip[data-svelte-toolbar]')).toHaveCount(1);
+    await expect(titlebar.locator('#toolbar-strip[data-svelte-toolbar]')).toHaveCount(1);
     await expect(page.locator('#body .panel')).not.toHaveCount(0);
 
     const secondId = await page.evaluate(() => {
