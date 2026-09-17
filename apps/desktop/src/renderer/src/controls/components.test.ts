@@ -109,7 +109,7 @@ describe('NumField', () => {
     const { api, Edit, drag } = fakeAPI();
     let current = -2;
     Edit.dispatch.mockImplementation((command: any) => { current = command.value; });
-    Edit.apply.mockImplementation((command: any) => { current = command.value; });
+    Edit.apply.mockImplementation((command: any) => { current = command.value; return { ok: true }; });
     const target = render(NumField, { api, get: () => current, edit: commandEdit('Tracking'), step: 1, label: 'Tracking' });
     const input = target.querySelector<HTMLInputElement>('input.num')!;
     input.dispatchEvent(pointer('pointerdown'));
