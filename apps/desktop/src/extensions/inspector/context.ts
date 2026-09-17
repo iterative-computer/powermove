@@ -135,8 +135,15 @@ function createReactiveState(api: PowermoveAPI): Pick<InspectorContext, 'doc' | 
 export function provideInspectorContext(api: PowermoveAPI): InspectorContext {
   const state = createReactiveState(api);
   const edit = createInspectorEdit(api);
+  /*
+   * Controls build their own EditGesture from the `api` they are handed, so the
+   * inspector hands them one whose `edit` already fans a change out over the
+   * selection. Without this every field would write to the primary layer alone
+   * while still rendering "Mixed" for the rest.
+   */
+  const editingApi: PowermoveAPI = { ...api, edit };
   const context: InspectorContext = {
-    api,
+    api: editingApi,
     ...state,
     edit,
     mixed: (binding, value) => inspectorMixed(api, binding, value),
