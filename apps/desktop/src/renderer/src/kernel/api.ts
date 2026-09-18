@@ -522,7 +522,7 @@ export interface EditAPI {
 }
 
 export interface ImportPlacement { at: number; index?: number }
-export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null; sequence?: boolean }
+export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null; sequence?: boolean; replaceAssetId?: string }
 export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
 export interface WaveformOptions { [key: string]: unknown }
 export interface FontCatalog {
@@ -730,6 +730,14 @@ export interface UIAPI {
   toast(
     text: string,
     opts?: {
+      /** Which family the notice belongs to. An extension raises a `status` or
+          an `alert`; it cannot raise an editor error, and the kernel attributes
+          whatever it sends to the extension by name. */
+      kind?: 'status' | 'alert';
+      /** State the outcome rather than letting the message text be sniffed, so a
+          success that quotes a user-chosen name stays a success. A failure the
+          extension states becomes its alert, not an editor error. */
+      error?: boolean;
       sticky?: boolean;
       dismissible?: boolean;
       icon?: string;

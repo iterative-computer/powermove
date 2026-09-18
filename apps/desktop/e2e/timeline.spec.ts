@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test';
-import { test } from './helpers/app';
+import { chooseNativeMenu, test } from './helpers/app';
 import type { Page } from '@playwright/test';
 
 async function scaleFixture(page: Page) {
@@ -84,9 +84,8 @@ test('Scale keys move outside the layer, delete together, and never delete their
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.y'].kf.length, id)).toBe(2);
   await page.evaluate(async () => {
     const PM = (window as any).PM;
-    // replaceProject sets fixture data; register its tab as a real open project
-    // before exercising close/reopen instead of reopening the demo tab.
-    PM.Projects.markOpen(PM.proj.id);
+    // replaceProject sets fixture data; this window already owns that document,
+    // so the relaunch below restores it rather than the welcome demo.
     await PM.flushProject();
   });
   await session.relaunch();
@@ -455,23 +454,22 @@ test('layer-strip clicks do not replace the curve focused in the Graph Editor', 
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('project rename is available from the tab menu and persists the live document', async ({ session }) => {
+test('project rename is available from the document menu and persists the live document', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   await scaleFixture(page);
-  const tab = page.locator('#tabs .project-doc.on');
-  const id = await tab.getAttribute('data-tab-id');
-  await tab.click({ button: 'right' });
-  await page.getByRole('menuitem', { name: 'Rename project…' }).click();
+  const chip = page.locator('#doc-strip .project-doc');
+  const id = await chip.getAttribute('data-project-id');
+  await chooseNativeMenu(session, 'Rename project…', () => chip.click({ button: 'right' }));
   const input = page.getByRole('textbox', { name: 'Rename project', exact: true });
   await input.fill('Renamed composition');
   await input.press('Enter');
-  await expect(tab).toContainText('Renamed composition');
+  await expect(chip).toContainText('Renamed composition');
   await page.evaluate(() => (window as any).PM.flushProject());
   expect(await page.evaluate((id) => (window as any).PM.Projects.get(id).name, id)).toBe('Renamed composition');
   await session.relaunch();
   await session.openEditor();
-  await expect(session.page.locator('#tabs .project-doc.on')).toContainText('Renamed composition');
+  await expect(session.page.locator('#doc-strip .project-doc')).toContainText('Renamed composition');
 });
 
 test('empty timeline clicks preserve the playhead and marquee selection still works', async ({ session }) => {

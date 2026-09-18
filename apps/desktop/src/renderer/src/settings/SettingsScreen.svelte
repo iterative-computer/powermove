@@ -56,6 +56,10 @@
   let searchText = $state('');
   const query = $derived(searchText.trim().toLowerCase());
   let themeMode = $state<string>('system');
+  /* Reopening last session's windows is the default; the store only ever holds
+     the opt-out, so an untouched profile needs no migration. */
+  let restoreWindows = $state(true);
+  const multiWindow = $derived(!!PM.windows?.supported);
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
@@ -116,6 +120,7 @@
   export function open(target?: SettingsPage): void {
     build();
     themeMode = PM.theme?.mode ?? 'system';
+    restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
     const wanted = target ?? (controls?.project ? 'project' : 'general');
     const destination = wanted === 'project' && !controls?.project ? 'general' : wanted;
     page = destination;
@@ -247,6 +252,11 @@
     PM.theme?.apply?.(value);
   }
 
+  function toggleRestoreWindows(): void {
+    restoreWindows = !restoreWindows;
+    PM.store?.set?.('restoreWindows', restoreWindows);
+  }
+
   function keydown(event: KeyboardEvent): void {
     event.stopPropagation();
     if (event.key === 'Escape' || ((event.metaKey || event.ctrlKey) && event.key === ',' && !event.shiftKey && !event.altKey)) {
@@ -363,6 +373,27 @@
                   </div>
                 </div>
               </section>
+              {#if multiWindow}
+                <section class="sg-section">
+                  <h3 class="sg-section-title">Windows</h3>
+                  <div class="sg-group">
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Reopen windows on launch</b>
+                        <span>Start Powermove with the projects that had a window when you quit. Off, it opens one window.</span>
+                      </div>
+                      <button
+                        class="toggle"
+                        class:on={restoreWindows}
+                        type="button"
+                        aria-pressed={restoreWindows}
+                        aria-label="Reopen windows on launch"
+                        onclick={toggleRestoreWindows}
+                      ><i aria-hidden="true"></i></button>
+                    </div>
+                  </div>
+                </section>
+              {/if}
             {:else if item.id === 'accounts'}
               <header class="sg-heading">
                 <h2>Accounts</h2>

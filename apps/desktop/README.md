@@ -86,6 +86,8 @@ macOS packaging is currently ad-hoc signed for development distribution; see the
 
 - Unsupported MOV/ProRes video is converted automatically to a durable H.264
   editing proxy while the original media stays embedded in the editable project.
+- Containers Chromium cannot open — MKV, AVI, WMV, FLV, MPEG-PS/TS, MXF and the
+  rest — convert on import through the same proxy path.
 - Export includes playable H.264/AAC MP4, frame-exact WebM/VP9/Opus,
   realtime WebM, still PNG, and PNG-sequence delivery.
 - Local builds remain ad-hoc signed. `bun run dist:release` is the guarded
@@ -113,6 +115,36 @@ project. The animation performance baseline now measures actual frame changes
 - [macOS release process](docs/release.md)
 - [Phase 6 deletion manifest](docs/phase6-deletions.md)
 - [e2e media fixtures](e2e/fixtures/README.md)
+
+## Supported media
+
+| Kind | Imports directly | Converted on import |
+| --- | --- | --- |
+| Still image | PNG, JPEG, WebP, AVIF, BMP, ICO, SVG | TIFF, HEIC/HEIF |
+| Animated image | — | GIF, APNG, animated WebP, animated AVIF |
+| Video | MP4, MOV, M4V, WebM | MKV, AVI, WMV, ASF, FLV, MPG/MPEG, M2V, TS/M2TS/MTS, 3GP/3G2, MXF, OGV, DV, VOB |
+| Audio | WAV, MP3, M4A, AAC, OGG/OGA, Opus, WEBA, FLAC, AIF/AIFF | — |
+| Model | OBJ | — |
+
+A MOV or MP4 holding a codec Chromium refuses (notably ProRes) also converts,
+after the decode attempt fails. Conversion happens in the main process with the
+bundled FFmpeg; HEIC and HEIF go through macOS `sips`, which reads the HEIF
+variants FFmpeg 6 cannot. Powermove stores the converted media in the project,
+so a saved `.pmv` never depends on the original file.
+
+## Animated images
+
+An animated GIF, APNG, WebP or AVIF imports as a video clip rather than a still,
+with the normal trim, speed, undo, playback, and export controls. Chromium
+decodes the frames — it is the only decoder here that reads all four containers —
+and the frames encode into the same transparent VP9 clip numbered image
+sequences produce, so transparency and frame order survive.
+
+Each frame is held for its own delay. When the delays share a divisor, the clip
+plays at exactly that rate; when they do not, the frames are oversampled onto a
+bounded rate instead, which keeps the total duration right. A still saved in one
+of these containers still imports as an image. Animations above 2,400 frames are
+rejected rather than encoded.
 
 ## Image sequences
 

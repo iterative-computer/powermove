@@ -22,6 +22,7 @@ function harness(kernel: Kernel = createKernel()) {
   const applied: Array<{ commands: unknown; meta: unknown }> = [];
   const reported: Array<{ id: string; error: unknown }> = [];
   const toasts: string[] = [];
+  const toastCalls: Array<{ text: string; opts: unknown }> = [];
   const opened: string[] = [];
   const bag: Record<string, Record<string, unknown>> = {};
 
@@ -55,7 +56,7 @@ function harness(kernel: Kernel = createKernel()) {
     state: { doc: {}, sel: {}, transport: {}, perf: {} },
     ui: {
       controls: {} as HostDeps['ui']['controls'],
-      toast: (text) => void toasts.push(text),
+      toast: (text, opts) => { toasts.push(text); toastCalls.push({ text, opts }); },
       confirm: async () => true,
       menu: vi.fn(),
       modal: () => ({ close: () => {}, body: document.createElement('div') }),
@@ -81,10 +82,23 @@ function harness(kernel: Kernel = createKernel()) {
     reportRuntimeError: (id, error) => void reported.push({ id, error })
   };
 
-  return { kernel, deps, applied, reported, toasts, opened, bag };
+  return { kernel, deps, applied, reported, toasts, toastCalls, opened, bag };
 }
 
 describe('createExtensionAPI', () => {
+  it('attributes every notice to the extension that raised it', () => {
+    const { kernel, deps, toastCalls } = harness();
+    const handle = createExtensionAPI(kernel, record(), deps);
+
+    handle.api.ui.toast('Select a layer first');
+    expect(toastCalls[0]?.opts).toEqual({ source: { id: 'vhs', name: 'VHS effect' } });
+
+    // An extension cannot dress its notice up as the editor's own error, or
+    // claim to speak for another extension.
+    handle.api.ui.toast('Render failed', { error: true, source: { id: 'timeline', name: 'Timeline' } } as never);
+    expect(toastCalls[1]?.opts).toEqual({ error: true, source: { id: 'vhs', name: 'VHS effect' } });
+  });
+
   it('contains asynchronous command failures and ignores disposed callbacks', async () => {
     const { kernel, deps, reported } = harness();
     const handle = createExtensionAPI(kernel, record(), deps);

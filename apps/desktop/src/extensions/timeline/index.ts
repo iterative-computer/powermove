@@ -51,6 +51,7 @@ export function toggleLayerStrips(api: PowermoveAPI): void {
   for (const layer of layers) {
     layer.collapsed = collapsed;
     api.uiState.setLayerCollapsed(layer, collapsed);
+    if (collapsed && layer.type === 'group') api.uiState.setGroupCollapsed(layer, true);
   }
   api.transport.invalidate('timeline');
 }

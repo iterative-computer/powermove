@@ -3,6 +3,7 @@ import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } f
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
 import { validateEffect } from '../../kernel/glsl';
+import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import type {
@@ -255,7 +256,9 @@ REVIEW CONTRACT
 - Each commands item must be one JSON-encoded source-edit object. Never output JavaScript, shell commands, or project JSON.
 - Preserve locked layers and hand-edited channels by default. When the user explicitly requests changing a hand-edited channel, use preserveHandEdits: false on that set_property or replace_keyframes command. Do not bypass this through inspector controls or broaden the user's scope.
 - This is repair pass ${pass + 1} of ${MAX_REPAIRS}. Return no repair commands after the limit.
-- Keep message and critique concise.`;
+- message and critique follow the response style below: one or two sentences each, naming the layer or property at issue.
+
+${AGENT_RESPONSE_STYLE}`;
 }
 
 async function execute(request: any, proposal: any, progress: any = () => {}) {
@@ -435,7 +438,9 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
         id: PM.proj.id, name: PM.proj.name, revision: currentRevision(),
         layerCount: PM.proj.layers.length, file: file?.path || null, unsaved: file?.dirty ?? null,
       },
-      openProjects: (PM.Projects?.tabs?.() || []).map((id: string) => ({
+      /* Every project with an editor window, across all of them. `active` marks
+         the one this window — the one the agent is running in — is editing. */
+      openProjects: (PM.Projects?.openProjects?.() || []).map((id: string) => ({
         id, name: projects.find((p: any) => p.id === id)?.name || null, active: id === PM.proj.id,
       })),
       extensions: extensionRecords().map(record => ({

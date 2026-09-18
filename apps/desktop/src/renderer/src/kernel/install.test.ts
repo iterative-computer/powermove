@@ -395,10 +395,13 @@ describe('installKernel', () => {
     installed = installKernel(PM);
     const api = installed.api('demo');
 
+    // Notices carry the extension that raised them, so the overlay can tell an
+    // extension's alert from the editor's own error.
+    const source = { source: { id: 'demo', name: 'demo' } };
     api.ui.toast('hi');
-    expect(PM.toast).toHaveBeenCalledWith('hi', 2200, {});
+    expect(PM.toast).toHaveBeenCalledWith('hi', 2200, source);
     api.ui.toast('sticky', { sticky: true });
-    expect(PM.toast).toHaveBeenLastCalledWith('sticky', 8000, { sticky: true });
+    expect(PM.toast).toHaveBeenLastCalledWith('sticky', 8000, { sticky: true, ...source });
 
     api.ui.menu({ x: 10, y: 20 }, [{ label: 'A' }]);
     expect(PM.menu).toHaveBeenCalledWith(document.body, [{ label: 'A' }], { x: 10, y: 20 });

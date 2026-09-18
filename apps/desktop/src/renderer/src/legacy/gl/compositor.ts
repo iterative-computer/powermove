@@ -1,5 +1,5 @@
-import { previewVideoElement } from '../core/video-preview';
 import { seekPreviewVideo } from '../core/video-seek';
+import { layerVideoElement, videoInstanceTextureKey } from '../core/video-instances';
 import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { GPUTiming } from './gpu-timing';
 import { performanceMonitor } from '../../runtime/performance-monitor';
@@ -795,7 +795,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
     if (!a) return null;
-    const liveVideo = L.type === 'video' && useVideoPreviews ? previewVideoElement(PM, a) : a.el;
+    const liveVideo = L.type === 'video' && useVideoPreviews ? layerVideoElement(PM, a, L.id) : a.el;
     let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || liveVideo, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
       const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
@@ -805,6 +805,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     const bw = d.w || W, bh = d.h || H;
     let textureSource = el;
     let textureKey = 'a:' + a.id + (el===liveVideo?(el===a.el?'':':preview'):':'+L.id+'@'+T);
+    if (L.type === 'video' && el === liveVideo) textureKey = videoInstanceTextureKey(el);
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
       const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
@@ -812,7 +813,12 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
       textureKey = 'r:' + raster.key;
     }
     const videoVersion = L.type === 'video' ? (el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
-    const tex = texFor(textureKey, textureSource, { version: videoVersion });
+    // A seek can be pending while the previous decoded frame is still usable.
+    // Gate on available pixels, not seeking, or seek-driven playback freezes.
+    const waiting = L.type === 'video' && el === liveVideo
+      && (el.readyState < 2 || !el.videoWidth || !el.videoHeight);
+    if (waiting && !GL.texes.get(textureKey)?.bytes) return null;
+    const tex = texFor(textureKey, textureSource, { version: waiting ? GL.texes.get(textureKey).v : videoVersion });
     let uv = [0, 0, 1, 1];
     if (d.fit === 'cover' || d.fit === 'contain') {
       const ar = sw / sh, br = bw / bh;

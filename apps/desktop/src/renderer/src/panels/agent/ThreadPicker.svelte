@@ -32,7 +32,8 @@
   const MAX_HEIGHT = 360;
 
   const blocked = $derived(agentState.threadSwitchBlocked);
-  const hint = $derived(blocked ? 'Finish or stop the current run to switch threads' : 'Switch thread');
+  const hint = $derived(blocked ? 'Finish applying the current change to switch threads' : 'Switch thread');
+  const running = $derived((agentState.threads || []).filter(thread => thread.busy).length);
   const threads = $derived(agentState.threads || []);
   const active = $derived(threads.find(thread => thread.id === agentState.threadId));
   const matches = $derived.by(() => {
@@ -199,6 +200,11 @@
       onclick={toggle}
     >
       <span>{active?.title || 'New thread'}</span>
+      {#if agentState.backgroundRuns}
+        <span class="thread-running" title={`${agentState.backgroundRuns} thread${agentState.backgroundRuns === 1 ? '' : 's'} still working`}>
+          <span class="thread-dot" aria-hidden="true"></span>{agentState.backgroundRuns}
+        </span>
+      {/if}
       <svg class="thread-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6.25 3.5 3.5 3.5-3.5" /></svg>
     </button>
     <button class="thread-new" type="button" aria-label="New thread" title={blocked ? hint : 'New thread'} disabled={blocked}
@@ -257,16 +263,18 @@
           onkeydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(thread.id); } }}
         >
           <span class="thread-row-text">
-            <span class="thread-row-title">{thread.title}</span>
+            <span class="thread-row-title">
+              {#if thread.busy}<span class="thread-dot" aria-hidden="true"></span>{/if}{thread.title}
+            </span>
             <span class="thread-row-meta" class:current={thread.id === agentState.threadId}>
-              {thread.id === agentState.threadId ? 'Current' : relativeOpened(thread.updatedAt ?? 0, openedAt)}
+              {thread.busy ? 'Working…' : thread.id === agentState.threadId ? 'Current' : relativeOpened(thread.updatedAt ?? 0, openedAt)}
             </span>
           </span>
           <button
             class="thread-delete"
             type="button"
             aria-label={`Delete thread: ${thread.title}`}
-            title="Delete thread"
+            title={thread.busy ? 'Delete thread and stop its run' : 'Delete thread'}
             onclick={(event) => { event.stopPropagation(); remove(thread.id); }}
           >
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5 5 13h6l.5-8.5M6.75 6.75v3.75M9.25 6.75v3.75" /></svg>
@@ -313,7 +321,11 @@
   .thread-row:focus-visible { outline: none; }
   .thread-row.current { background: var(--ink-1); }
   .thread-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .thread-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .thread-row-title { display: flex; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .thread-running { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 0 5px; border-radius: 999px; background: var(--ink-1); color: var(--tx-3); font-size: var(--fs-xs); }
+  .thread-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--blue); animation: thread-pulse 1.6s ease-in-out infinite; }
+  @keyframes thread-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .thread-dot { animation: none; } }
   .thread-row-meta { color: var(--tx-3); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .thread-row-meta.current { color: var(--blue); }
   .thread-delete { display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--tx-3); opacity: 0; }

@@ -136,7 +136,7 @@ fn frag(uv: vec2f) -> vec4f {
   let innerBloom = exp(-max(-edge, 0.0) / 26.0) * interior;
   let outerHaze = exp(-max(edge, 0.0) / 7.0) * (1.0 - smoothstep(9.0, 18.0, edge));
 
-  // The same travelling crest as the shake ripple, wrapped around the border.
+  // The same travelling crest as the spatial ripple, wrapped around the border.
   let direction = centered / resolution;
   let travel = atan2(direction.y, direction.x) - elapsed * 0.42;
   let crest = pow(0.5 + 0.5 * cos(travel), 6.0);

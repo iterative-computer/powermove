@@ -102,7 +102,7 @@ function setup(
       missing: '<path data-test-icon="missing"></path>'
     },
     assets: liveAssets,
-    Viewer: { preview: { clear: vi.fn(), toggle: vi.fn(), playing: false } },
+    Kernel: { services: new Map([['viewer', { preview: { clear: vi.fn(), toggle: vi.fn(), show: vi.fn(() => true), playing: false } }]]) },
     pickFiles: vi.fn(),
     cmd: vi.fn(),
     hist: { do: vi.fn((_label: string, operation: () => unknown) => operation()) },
@@ -208,7 +208,8 @@ describe('AssetsPanel', () => {
 
     card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     expect(PM.cmd).not.toHaveBeenCalledWith('addFromAsset', 'video-1');
-    expect(document.querySelector('input[type="file"][aria-label="Replace Product.mp4"]')).not.toBeNull();
+    expect(PM.pickFiles).toHaveBeenCalledExactlyOnceWith(false, { replaceAssetId: 'video-1' });
+    expect(PM.Kernel.services.get('viewer').preview.show).not.toHaveBeenCalled();
   });
 
   it('enables the same media card when its bytes and poster arrive after render', () => {
@@ -267,7 +268,7 @@ describe('AssetsPanel', () => {
     flushSync();
 
     expect(rows().map((row) => row.getAttribute('aria-selected'))).toEqual(['false', 'false']);
-    expect(PM.Viewer.preview.clear).toHaveBeenCalledOnce();
+    expect(PM.Kernel.services.get('viewer').preview.clear).toHaveBeenCalledOnce();
     timeline.remove();
   });
 
@@ -282,17 +283,29 @@ describe('AssetsPanel', () => {
     flushSync();
 
     expect(target.querySelectorAll('[aria-selected="true"]')).toHaveLength(0);
-    expect(PM.Viewer.preview.clear).toHaveBeenCalledOnce();
+    expect(PM.Kernel.services.get('viewer').preview.clear).toHaveBeenCalledOnce();
   });
 
-  it('adds media from its button and double-click', () => {
+  it('adds media from its button', () => {
     const { PM } = setup();
 
     target.querySelector<HTMLButtonElement>('button[aria-label="Add Backdrop.png to timeline"]')?.click();
-    rows()[1]!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+    expect(PM.cmd).toHaveBeenCalledExactlyOnceWith('addFromAsset', 'image-1');
+  });
 
-    expect(PM.cmd).toHaveBeenNthCalledWith(1, 'addFromAsset', 'image-1');
-    expect(PM.cmd).toHaveBeenNthCalledWith(2, 'addFromAsset', 'audio-1');
+  it.each([IMAGE, AUDIO, VIDEO])('opens $kind source preview on double-click without adding a layer', (asset) => {
+    const { PM } = setup([asset]);
+    const row = rows()[0]!;
+    row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+    flushSync();
+    expect(PM.Kernel.services.get('viewer').preview.show).toHaveBeenCalledExactlyOnceWith(asset.id);
+    expect(PM.cmd).not.toHaveBeenCalled();
+    expect(row.getAttribute('aria-selected')).toBe('true');
+    expect(row.title).toContain('double-click to preview');
+    expect(target.textContent).toContain(`Previewing ${asset.name}`);
+    PM.Kernel.services.get('viewer').preview.show.mockClear();
+    row.querySelector('button')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+    expect(PM.Kernel.services.get('viewer').preview.show).not.toHaveBeenCalled();
   });
 
   it('reveals the original media file in Finder without adding it to the timeline', async () => {
@@ -305,7 +318,7 @@ describe('AssetsPanel', () => {
     expect(PM.cmd).not.toHaveBeenCalled();
   });
 
-  it('opens media actions on right-click and replaces through a compatible single-file picker', async () => {
+  it('opens media actions on right-click and replaces through the shared import picker', () => {
     const { PM } = setup([IMAGE]);
     const row = rows()[0]!;
     row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 37, clientY: 49 }));
@@ -321,29 +334,8 @@ describe('AssetsPanel', () => {
     ]);
 
     items.find((item: any) => item?.label === 'Replace File…').run();
-    const input = document.querySelector<HTMLInputElement>('input[type="file"][aria-label="Replace Backdrop.png"]')!;
-    expect(input).not.toBeNull();
-    expect(input.accept).toBe('image/*,.svg');
-    expect(input.multiple).toBe(false);
-
-    const replacement = new File(['new pixels'], 'New Backdrop.png', { type: 'image/png' });
-    Object.defineProperty(input, 'files', { configurable: true, value: [replacement] });
-    input.dispatchEvent(new Event('change'));
-    await vi.waitFor(() => expect(PM.assets.replace).toHaveBeenCalledWith('image-1', replacement));
-    await vi.waitFor(() => expect(PM.toast).toHaveBeenCalledWith('Replaced Backdrop.png with New Backdrop.png'));
-    expect(document.body.contains(input)).toBe(false);
-  });
-
-  it('does not mutate media when the replacement picker is cancelled', () => {
-    const { PM } = setup([AUDIO]);
-    rows()[0]!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
-    PM.menu.mock.calls[0][1].find((item: any) => item?.label === 'Replace File…').run();
-    const input = document.querySelector<HTMLInputElement>('input[type="file"][aria-label="Replace Theme.wav"]')!;
-
-    input.dispatchEvent(new Event('cancel'));
-
+    expect(PM.pickFiles).toHaveBeenCalledExactlyOnceWith(false, { replaceAssetId: 'image-1' });
     expect(PM.assets.replace).not.toHaveBeenCalled();
-    expect(document.body.contains(input)).toBe(false);
   });
 
   it('uses roving tabindex and supports arrows, Home, End, Space, and Enter', () => {

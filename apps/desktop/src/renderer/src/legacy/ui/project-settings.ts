@@ -226,7 +226,7 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   const sizeRow = row('Size', 'Width and height of every frame, in pixels.', size);
   const durationRow = row('Duration', 'Total length of the composition, in seconds.', duration);
   composition.body.append(
-    row('Name', 'Shown on the project tab and used for exported file names.', name).element,
+    row('Name', 'Shown in the titlebar and used for exported file names.', name).element,
     row('Resolution', 'Pick a common size, or set your own pixel dimensions.', preset).element,
     sizeRow.element,
     row('Frame rate', 'Frames rendered per second of the composition — any rate from 1 to 240.', frameRate).element,

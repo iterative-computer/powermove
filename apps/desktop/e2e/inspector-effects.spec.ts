@@ -108,9 +108,9 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   expect(await graph.evaluate((button) => ({
     graphSlot: !!button.closest('.tl-graph-slot'),
     transport: !!button.closest('.tl-transport'),
-    first: button.parentElement?.firstElementChild === button,
+    last: button.parentElement?.lastElementChild === button,
     previousGroup: button.parentElement?.previousElementSibling?.classList.contains('tl-transport')
-  }))).toEqual({ graphSlot: true, transport: false, first: true, previousGroup: true });
+  }))).toEqual({ graphSlot: true, transport: false, last: true, previousGroup: true });
   for (const name of ['Previous edge', 'Next edge', 'Frame entire composition (⇧F)', 'Loop']) {
     await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
   }
@@ -120,7 +120,10 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
     const timeline = PM.Kernel.services.get('timeline');
     const head = document.querySelector('#tl-head')!.getBoundingClientRect();
     const canvas = document.querySelector('#tl-canvas')!.getBoundingClientRect();
+    /* Graph options stays display:none until the graph editor opens, and a
+       control with no box reports an all-zero rect that is not a position. */
     const controls = [...document.querySelectorAll('#tl-head button, #tl-head input')]
+      .filter((element) => element.getClientRects().length > 0)
       .map((element) => element.getBoundingClientRect());
     return {
       head: { x: head.x, y: head.y, width: head.width, height: head.height },

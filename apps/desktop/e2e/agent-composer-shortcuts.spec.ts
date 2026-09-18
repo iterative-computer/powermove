@@ -1,5 +1,40 @@
 import { test, expect } from './helpers/app';
 
+for (const surface of ['viewer', 'timeline']) {
+  test(`Space returns to playback after leaving the agent for the ${surface}`, async ({ session }) => {
+    await session.openEditor();
+    const { page } = session;
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.AgentUI.state.conversation = [{ role: 'assistant', text: 'Ready.' }];
+      PM.pause();
+      (window as any).__playbackToggles = 0;
+      PM.toggle = () => { (window as any).__playbackToggles += 1; };
+    });
+    const input = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+    const destination = page.locator(surface === 'viewer' ? '#viewer-stage, #stage' : '#tl-canvas-wrap canvas').first();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await input.fill('Keep this draft');
+      await input.press('Space');
+      await expect(input).toHaveValue('Keep this draft ');
+      await destination.click({ position: { x: 40, y: 40 } });
+      await page.keyboard.press('Space');
+      await expect(input).toHaveValue('Keep this draft ');
+      await expect(input).not.toBeFocused();
+      expect(await page.evaluate(() => (window as any).__playbackToggles)).toBe(attempt + 1);
+    }
+    await input.fill('/');
+    await input.press('Escape');
+    await expect(input).toBeFocused();
+    await input.press('Escape');
+    await expect(input).not.toBeFocused();
+    await page.keyboard.press('Space');
+    await expect(input).toHaveValue('/');
+    expect(await page.evaluate(() => (window as any).__playbackToggles)).toBe(4);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+}
+
 test('slash shortcuts support keyboard selection, dismissal, pointer selection, and multiline drafts', async ({ session }, testInfo) => {
   await session.openEditor();
   const { page } = session;

@@ -171,6 +171,15 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     };
   }
 
+  /* What an extension says is that extension's notice, not the editor's. Stamp
+     its identity last so the toast can name the speaker and keep the message
+     out of the editor's error family, whatever the extension passed. */
+  const extensionUI = {
+    ...(deps.ui as UIAPI),
+    toast: (text: string, opts?: Parameters<UIAPI['toast']>[1]): void =>
+      deps.ui.toast(text, { ...opts, source: { id, name: manifest.name } } as Parameters<UIAPI['toast']>[1])
+  } as UIAPI;
+
   const collect = (disposable: Disposable): Disposable => {
     if (disposed) {
       disposable.dispose();
@@ -410,7 +419,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     media: deps.media as MediaAPI,
     render: deps.render as RenderAPI,
     uiState: deps.uiState as UIStateAPI,
-    ui: deps.ui as UIAPI,
+    ui: extensionUI,
     dnd: deps.dnd as DndAPI,
     workspace: deps.workspace as WorkspaceAPI,
     util: deps.util as UtilAPI,

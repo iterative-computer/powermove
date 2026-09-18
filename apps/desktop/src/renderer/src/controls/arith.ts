@@ -4,6 +4,10 @@
  */
 export function parseArithmetic(source: string): number {
   let index = 0;
+  const finite = (value: number): number => {
+    if (!Number.isFinite(value)) throw new RangeError('Non-finite arithmetic');
+    return value;
+  };
 
   const whitespace = (): void => {
     while (/\s/.test(source[index] ?? '')) index++;
@@ -14,7 +18,7 @@ export function parseArithmetic(source: string): number {
     const match = /^(?:(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)/i.exec(source.slice(index));
     if (!match) throw new SyntaxError('Expected a number');
     index += match[0].length;
-    return Number(match[0]);
+    return finite(Number(match[0]));
   };
 
   const primary = (): number => {
@@ -45,7 +49,7 @@ export function parseArithmetic(source: string): number {
       if (operator !== '*' && operator !== '/') return value;
       index++;
       const right = unary();
-      value = operator === '*' ? value * right : value / right;
+      value = finite(operator === '*' ? value * right : value / right);
     }
   };
 
@@ -57,7 +61,7 @@ export function parseArithmetic(source: string): number {
       if (operator !== '+' && operator !== '-') return value;
       index++;
       const right = product();
-      value = operator === '+' ? value + right : value - right;
+      value = finite(operator === '+' ? value + right : value - right);
     }
   };
 

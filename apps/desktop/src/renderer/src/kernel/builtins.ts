@@ -45,7 +45,7 @@ if (import.meta.hot) {
       if (!module || !id || typeof module.default !== 'function') continue;
       BUILTIN_EXTENSIONS[id] = () => Promise.resolve(module as unknown as ExtensionModule);
       try { await window.PM?.Kernel?.loader?.reload(id); }
-      catch (error) { console.error('[panel hot update]', error); window.PM?.toast?.('Panel update failed. Your editing session is still open.'); }
+      catch (error) { console.error('[panel hot update]', error); window.PM?.toast?.('Panel update failed. Your editing session is still open.', 2200, { kind: 'alert' }); }
     }
   });
 }

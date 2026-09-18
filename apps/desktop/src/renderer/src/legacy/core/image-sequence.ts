@@ -1,5 +1,6 @@
 import { IMAGE_SEQUENCE_ACCEPT, orderedSequence, sequenceFrame, sequenceGaps, validSequenceFps } from '../../../../shared/image-sequence';
 import type { PMRegistry } from '../registry';
+import type { ImportProgress } from './import-progress';
 
 export const importedSequences = new WeakMap<File, { fps: number; frames: number }>();
 
@@ -80,12 +81,14 @@ export function chooseSequence(PM: PMRegistry, files: File[], required: boolean)
 }
 
 /** Decode one source at a time to validate dimensions without retaining bitmaps. */
-export async function convertImageSequence(files: File[], fps: number, assertCurrent: () => void): Promise<File> {
+export async function convertImageSequence(files: File[], fps: number, assertCurrent: () => void, onProgress?: (progress: ImportProgress) => void): Promise<File> {
   const frames = orderedSequence(files);
   if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
   const media = window.powermove?.media;
   if (!media?.createImageSequence) throw new Error('Image sequence import requires the desktop app');
   let width = 0, height = 0;
+  let checked = 0;
+  onProgress?.({ label: `Checking frames · 0 of ${frames.length}`, completed: 0, total: frames.length });
   for (const file of frames) {
     assertCurrent();
     const bitmap = await createImageBitmap(file);
@@ -93,20 +96,26 @@ export async function convertImageSequence(files: File[], fps: number, assertCur
       if (!width) { width = bitmap.width; height = bitmap.height; }
       if (bitmap.width !== width || bitmap.height !== height) throw new Error(`Frame dimensions differ: ${file.name} · all frames must be ${width} × ${height}`);
     } finally { bitmap.close(); }
+    onProgress?.({ label: `Checking frames · ${++checked} of ${frames.length}`, completed: checked, total: frames.length });
   }
   assertCurrent();
-  const result = await media.createImageSequence(frames, fps);
+  onProgress?.({ label: 'Creating image sequence…' });
+  const result = await media.createImageSequence(frames, fps, completed => {
+    onProgress?.({ label: `Creating sequence · ${completed} of ${frames.length} frames`, completed, total: frames.length });
+  });
   if (!result.ok) throw new Error(result.error);
   try {
     assertCurrent();
     const parts: ArrayBuffer[] = [];
     const chunkSize = 4 * 1024 * 1024;
+    onProgress?.({ label: 'Loading image sequence…', completed: 0, total: result.size });
     for (let offset = 0; offset < result.size;) {
       assertCurrent();
       const chunk = await media.readPlaybackProxy(result.token, offset, Math.min(chunkSize, result.size - offset));
       if (!chunk.byteLength) throw new Error('The image sequence ended unexpectedly');
       parts.push(new Uint8Array(chunk).buffer);
       offset += chunk.byteLength;
+      onProgress?.({ label: 'Loading image sequence…', completed: offset, total: result.size });
     }
     const frame = sequenceFrame(frames[0]!.name)!;
     const name = frame.prefix.replace(/[-_. ]+$/, '') || 'Image';

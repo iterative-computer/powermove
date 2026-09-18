@@ -40,3 +40,18 @@ it('lets offline frame preparation own a paused decoder', () => {
   video.dispatchEvent(new Event('seeked'));
   expect(video.currentTime).toBe(4);
 });
+
+it('retries a trim seek once a cold decoder has metadata', () => {
+  const video = new EventTarget() as any;
+  let time = 0, loaded = false;
+  Object.assign(video, { paused: true, seeking: false });
+  Object.defineProperty(video, 'currentTime', {
+    get: () => time,
+    set: value => { if (loaded) time = value; },
+  });
+  seekPreviewVideo(video, 1, .0005);
+  expect(time).toBe(0);
+  loaded = true;
+  video.dispatchEvent(new Event('loadedmetadata'));
+  expect(time).toBe(1);
+});

@@ -8,11 +8,11 @@ import { EFFECTS } from './effects';
 const IDS = [
   'blur', 'motionblurDir', 'sharpen', 'glow', 'color',
   'levels', 'duotone', 'grain', 'vignette', 'chroma',
-  'pixelate', 'posterize', 'displace', 'shadow', 'invert'
+  'pixelate', 'posterize', 'displace', 'shadow', 'invert', 'gradient'
 ];
 
 describe('effects-basic', () => {
-  it('exports and registers all 15 raw shader effects', () => {
+  it('exports and registers all 16 raw shader effects', () => {
     const register = vi.fn();
     activate({ effects: { register } } as unknown as PowermoveAPI);
 

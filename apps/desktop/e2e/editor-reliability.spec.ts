@@ -35,7 +35,7 @@ test('inspector keyframes animate, linked scale edits undo together, and handles
       return Math.round(PM.worldMatrix(L, PM.time)[4] - PM.ev(L, 'position.x', PM.time));
     })).toBe(0);
   }
-  await page.getByRole('button', { name: 'Link Scale X and Y', exact: true }).click();
+  await page.getByRole('button', { name: 'Lock aspect ratio', exact: true }).click();
   const sx = page.getByRole('spinbutton', { name: 'Scale X', exact: true });
   await sx.click(); await sx.fill('150'); await sx.press('Enter');
   await expect(page.getByRole('spinbutton', { name: 'Scale Y', exact: true })).toHaveValue('150%');

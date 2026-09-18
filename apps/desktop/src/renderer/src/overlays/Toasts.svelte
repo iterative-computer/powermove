@@ -1,7 +1,7 @@
 <script lang="ts">
-  import ErrorNotice from '../errors/ErrorNotice.svelte';
+  import ToastError from '../errors/ToastError.svelte';
   import Icon from '../panels/Icon.svelte';
-  import type { ToastOptions } from './types';
+  import type { ToastKind, ToastOptions } from './types';
 
   let { PM }: { PM: Record<string, any> } = $props();
 
@@ -9,7 +9,10 @@
     id: number;
     message: string;
     icon: string;
+    kind: ToastKind;
     error: boolean;
+    /** The extension that spoke, shown above the message on an alert. */
+    source?: string;
     sticky: boolean;
     dismissible: boolean;
     timeout: number;
@@ -24,26 +27,28 @@
 
   export function push(message: unknown, milliseconds = 2200, options: ToastOptions = {}): void {
     if (message == null) return;
-    const inferredError = isErrorToast(message);
+    const kind = toastKind(message, options);
     const text = String(message);
     if (options.key) {
       const keyed = queue.find(item => item.key === options.key);
       if (keyed) { window.clearTimeout(keyed.timeout); queue = queue.filter(item => item !== keyed); }
     } else {
-      const existing = queue.find(item => item.message === text && item.error === inferredError);
+      const existing = queue.find(item => item.message === text && item.kind === kind);
       if (existing) return;
     }
-    // Routine status updates replace each other. Errors and corner notices remain available to read.
+    // Routine status updates replace each other. Errors, alerts and corner notices remain available to read.
     for (const item of [...queue]) {
-      if (!item.error && !item.sticky && !item.corner) dismiss(item.id);
+      if (item.kind === 'status' && !item.sticky && !item.corner) dismiss(item.id);
     }
     const item: ToastItem = {
       id: nextId++,
       message: String(message),
-      icon: options.icon || toastIcon(message, inferredError),
-      error: inferredError,
-      sticky: options.sticky ?? inferredError,
-      dismissible: options.dismissible ?? inferredError,
+      icon: options.icon || toastIcon(message, kind),
+      kind,
+      error: kind === 'error',
+      source: kind === 'alert' ? options.source?.name : undefined,
+      sticky: options.sticky ?? kind !== 'status',
+      dismissible: options.dismissible ?? kind !== 'status',
       timeout: 0,
       key: options.key,
       corner: options.corner,
@@ -62,7 +67,7 @@
     if (byUser) item.onDismiss?.();
   }
 
-  /* #toasts is a transformed, scrolling wrapper anchored bottom-center, so a
+  /* #toasts is a transformed, scrolling wrapper anchored top-center, so a
      fixed child would be positioned and clipped by it. Corner notices live
      directly under <body>. */
   function portal(node: HTMLElement) {
@@ -70,9 +75,9 @@
     return { destroy() { node.remove(); } };
   }
 
-  const bottom = $derived(queue.filter(item => !item.corner));
-  const topRight = $derived(queue.filter(item => item.corner === 'top-right'));
-  const bottomRight = $derived(queue.filter(item => item.corner === 'bottom-right'));
+  const top = $derived(queue.filter(item => !item.corner));
+  // Keep legacy bottom-right requests in the same top-right stack.
+  const topRight = $derived(queue.filter(item => item.corner));
 
   /** Remove a keyed notice without treating it as a user dismissal. */
   export function dismissKey(key: string): void {
@@ -87,14 +92,28 @@
     queue = [];
   }
 
+  /** Sort a notice into its family. An extension's notice never becomes an
+      editor error: the editor is intact, so the worst it can be is that
+      extension's alert, said in its name. */
+  export function toastKind(message: unknown, options: ToastOptions = {}): ToastKind {
+    if (options.kind) return options.kind;
+    const failed = options.error ?? isErrorToast(message);
+    if (!failed) return 'status';
+    return options.source ? 'alert' : 'error';
+  }
+
+  /** A last resort for legacy string-only calls. Callers that know the outcome
+      pass `error` instead, because this reads the whole message — including any
+      file or project name the user chose. */
   export function isErrorToast(message: unknown): boolean {
     return message instanceof Error || /\b(error|failed|failure|invalid|unsupported|unable|ENOSPC|EACCES|EPERM|ENOENT)\b|could not|couldn[’']t|can(?:no|')t|larger than|stopped because/i.test(String(message));
   }
 
   /** Keep legacy string-only calls expressive without making every caller choose an icon. */
-  export function toastIcon(message: unknown, error = isErrorToast(message)): string {
+  export function toastIcon(message: unknown, kind: ToastKind = toastKind(message)): string {
     const text = String(message);
-    if (error) return 'x';
+    if (kind === 'error') return 'warning';
+    if (kind === 'alert') return 'caution';
     if (/^undo\b|\bundone\b/i.test(text)) return 'undo';
     if (/^redo\b|\bredone\b/i.test(text)) return 'redo';
     if (/\b(delet(?:e|ed)|trash(?:ed)?|removed?)\b/i.test(text)) return 'trash';
@@ -117,12 +136,19 @@
 {#snippet toast(item: ToastItem)}
   <div
     class="toast"
-    role={item.error ? undefined : 'status'}
+    role={item.error ? 'alert' : 'status'}
     data-toast-id={item.id}
+    data-toast-kind={item.kind}
     data-toast-error={item.error ? 'true' : undefined}
   >
     {#if item.error}
-      <ErrorNotice error={item.message} />
+      <ToastError {PM} error={item.message} />
+    {:else if item.kind === 'alert'}
+      <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
+      <div class="alert-body">
+        {#if item.source}<strong>{item.source}</strong>{/if}
+        <span>{item.message}</span>
+      </div>
     {:else}
       <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
       <span>{item.message}</span>
@@ -136,26 +162,31 @@
   </div>
 {/snippet}
 
-{#each bottom as item (item.id)}{@render toast(item)}{/each}
+{#each top as item (item.id)}{@render toast(item)}{/each}
 {#if topRight.length}
   <div class="toast-corner" role="status" aria-live="polite" use:portal>
     {#each topRight as item (item.id)}{@render toast(item)}{/each}
   </div>
 {/if}
-{#if bottomRight.length}
-  <div class="toast-corner bottom-right" role="status" aria-live="polite" use:portal>
-    {#each bottomRight as item (item.id)}{@render toast(item)}{/each}
-  </div>
-{/if}
 
 <style>
-  .toast[data-toast-error]{align-items:flex-start;padding:0 6px 0 0;width:min(440px,calc(100vw - 32px));gap:0}
-  .toast[data-toast-error] :global(.error-notice){border:0;background:transparent}
-  .toast[data-toast-error]>button{margin-top:8px}
+  /* An error keeps the status toast's shell and gutter and only grows
+     downward, so the stack stays one column of like objects. An alert grows
+     the same way, and is told apart by its marker and by the name of the
+     extension speaking rather than by a shape of its own. */
+  .toast[data-toast-error],
+  .toast[data-toast-kind="alert"]{align-items:flex-start;min-width:min(300px,calc(100vw - 32px))}
+  .toast[data-toast-error] :global(.toast-icon),
+  .toast[data-toast-kind="alert"] :global(.toast-icon),
+  .toast[data-toast-error]>button,
+  .toast[data-toast-kind="alert"]>button{margin-top:1px}
+  .alert-body{display:flex;flex-direction:column;gap:2px;min-width:0;padding:1px 0}
+  .alert-body>strong{font-weight:var(--fw-semibold);font-size:var(--fs-xs);line-height:14px;color:var(--tx-2)}
+  .alert-body>span{min-width:0;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
   /* The wrapper scrolls once the stack outgrows 45vh, and a scroll container
      clips at its padding edge. Pad it past the reach of --shadow-float
-     (~60px below, ~40px beside) and pull the anchor down by the same amount
-     so the toast itself sits where it always did. */
-  :global(.toastwrap){box-sizing:border-box;bottom:-28px;max-height:calc(45vh + 96px);max-width:100vw;overflow-y:auto;overscroll-behavior:contain;padding:32px 48px 64px;pointer-events:none}
+     (~60px below, ~40px beside). Offset the top padding so the first toast
+     sits 60px from the window top, below the title bar. */
+  :global(.toastwrap){box-sizing:border-box;top:28px;max-height:calc(45vh + 96px);max-width:100vw;overflow-y:auto;overscroll-behavior:contain;padding:32px 48px 64px;pointer-events:none}
   .toast{pointer-events:auto;flex-shrink:0}
 </style>

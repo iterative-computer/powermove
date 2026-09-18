@@ -6,7 +6,6 @@
   import type { AgentMessage } from './agent-state.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { activityRows, durationLabel } from './activity-rows';
-  import { sendMessage } from './text-reveal';
   import Markdown from './Markdown.svelte';
   import { mountPromptGlow } from './prompt-glow';
   import { glowFade } from './motion';
@@ -33,6 +32,10 @@
     return modResultForMessage(message, PM.Kernel?.panels?.entries?.() || []);
   });
   function promptSignal(node: HTMLElement) { return { destroy: mountPromptGlow(node) }; }
+
+  /* A turn that failed is not automatically the editor's error. Messages
+     written before the distinction existed carry no kind and stay errors. */
+  const notice = $derived(message.notice ?? 'error');
 
   // Autonomous replies are stored as trace text. Keep the last reply outside
   // the disclosure so collapsing the work never hides the agent's answer.
@@ -74,19 +77,27 @@
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}
-    <div class="agent-prompt" class:is-answering={answering} use:sendMessage={Boolean(message.entering)}>
+    <div class="agent-prompt" class:is-answering={answering}>
       {#if answering}<div class="agent-prompt-signal" data-prompt-halo aria-hidden="true" use:promptSignal out:glowFade={{duration: 220}}></div>{/if}
       <div class="agent-bubble">{message.text}</div>
     </div>
   </div>
 {:else}
-  <div class="agent-msg assistant" class:is-error={message.error}>
-    {#if message.error}
-      <ErrorNotice error={message.text} live={Boolean(message.entering)}>
+  <div class="agent-msg assistant" class:is-error={message.error && notice === 'error'}>
+    {#if message.error && notice !== 'plain'}
+      <ErrorNotice error={message.text} live={Boolean(message.entering)} kind={notice}>
         {#snippet actions()}
           <button type="button" class="btn" disabled={agentState.phase === 'running'} onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
         {/snippet}
       </ErrorNotice>
+    {:else if message.error}
+      <!-- Nothing broke and nothing was lost: the agent is simply answering,
+           so the turn reads like any other reply, with the retry it still
+           deserves. -->
+      <div class="agent-reply"><Markdown text={message.text || ''} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
+      <button type="button" class="btn agent-error-retry"
+        disabled={agentState.phase === 'running'}
+        onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}

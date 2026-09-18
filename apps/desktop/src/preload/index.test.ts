@@ -111,6 +111,14 @@ describe('preload bridge', () => {
     expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexSteer, steering);
   });
 
+  it('marks a steering replacement cancellation to preserve completed edits', async () => {
+    electronMocks.invoke.mockResolvedValue(undefined);
+    await bridge().codex.cancel('request-1234', true);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexCancel, {
+      id: 'request-1234', preserveChanges: true
+    });
+  });
+
   it('requests a fork rebase prompt over its dedicated IPC channel', async () => {
     electronMocks.invoke.mockResolvedValue('rebase prompt');
     await expect(bridge().codex.rebasePrompt({ id: 'my-fork' })).resolves.toBe('rebase prompt');
@@ -187,7 +195,25 @@ describe('preload bridge', () => {
     await bridge().media.createImageSequence([file, file], 24);
     expect(electronMocks.invoke).toHaveBeenNthCalledWith(5, IPC.mediaSequenceCreate, {
       sourcePaths: ['/Users/editor/source.mov', '/Users/editor/source.mov'], fps: 24,
+      requestId: expect.stringMatching(/^sequence-/),
     });
+  });
+
+  it.each([false, true])('isolates image sequence progress and cleans listeners (failure: %s)', async (fails) => {
+    electronMocks.getPathForFile.mockReturnValue('/tmp/f1.png');
+    let resolve!: (value: unknown) => void, reject!: (error: Error) => void;
+    electronMocks.invoke.mockImplementation(() => new Promise((yes, no) => { resolve = yes; reject = no; }));
+    const onProgress = vi.fn();
+    const pending = bridge().media.createImageSequence([{ name: 'f1.png' } as File], 24, onProgress);
+    const requestId = electronMocks.invoke.mock.calls[0]![1].requestId;
+    const listener = electronMocks.on.mock.calls[0]![1];
+    listener({ sender: 'private' }, { requestId: 'another-request', completed: 99 });
+    listener({ sender: 'private' }, { requestId, completed: 1 });
+    expect(onProgress).toHaveBeenCalledExactlyOnceWith(1);
+    if (fails) { reject(new Error('conversion failed')); await expect(pending).rejects.toThrow('conversion failed'); }
+    else { resolve({ ok: true }); await pending; }
+    expect(electronMocks.removeListener).toHaveBeenCalledExactlyOnceWith(IPC.mediaSequenceProgress, listener);
+    electronMocks.invoke.mockReset();
   });
 
   it('sends bytes-only attachments to the dedicated reveal channel', async () => {

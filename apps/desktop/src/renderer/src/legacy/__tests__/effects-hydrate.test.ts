@@ -56,7 +56,7 @@ function bootWith(fx, { registerBefore = false } = {}) {
     bootVersion: 0,
     Projects: {
       pickBoot: () => raw, list: () => [{ id: raw.id, name: raw.name }], get: () => raw,
-      put: noop, remove: noop, getState: () => null, putState: noop, markOpen: noop, markClosed: noop,
+      put: noop, remove: noop, getState: () => null, putState: noop, openProjects: () => [],
       tabs: () => [raw.id], rename: noop
     },
     WS: { init: noop, restoreSnapshot: noop, snapshot: () => ({}), editing: false },

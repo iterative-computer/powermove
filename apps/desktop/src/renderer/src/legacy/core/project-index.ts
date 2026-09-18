@@ -14,7 +14,10 @@ export function layerPropertyChannels(PM: PMRegistry, layer: any): any[] {
 type CompIndex = {
   generation: number;
   layers: any[];
-  layersRef: any[];
+  /* Layer count captured when the index was built. The editing engine and the
+     specs push into `comp.layers` in place, so the live array keeps its
+     identity; only a remembered count can tell that the index went stale. */
+  count: number;
   byId: Map<string, any>;
   exactName: Map<string, any>;
   children: Map<string, any[]>;
@@ -25,9 +28,13 @@ type CompIndex = {
 /** Maintained, non-serializable indexes over the editable project graph. */
 export function installProjectIndex(PM: PMRegistry): void {
   let generation = 0;
+  /* Bumped by every comp rebuild, so the flattened project view can tell in
+     O(1) whether any composition below it changed shape. */
+  let structure = 0;
   let comps = new WeakMap<object, CompIndex>();
   let rootProject: any = null;
   let flatLayers: any[] | null = null;
+  let flatStructure = -1;
   let keyframes: Map<string, any> | null = null;
   let keyframeLayers: Map<string, any> | null = null;
 
@@ -53,7 +60,8 @@ export function installProjectIndex(PM: PMRegistry): void {
     }
     const intervals = layers.filter((layer: any) => layer?.on !== false)
       .sort((left: any, right: any) => Number(left.from || 0) - Number(right.from || 0));
-    const result = { generation, layers, layersRef: layers, byId, exactName, children, byType, intervals };
+    const result = { generation, layers, count: layers.length, byId, exactName, children, byType, intervals };
+    structure++;
     if (comp && typeof comp === 'object') comps.set(comp, result);
     return result;
   };
@@ -62,7 +70,7 @@ export function installProjectIndex(PM: PMRegistry): void {
     const current = comp && typeof comp === 'object' ? comps.get(comp) : null;
     const layers = Array.isArray(comp?.layers) ? comp.layers : [];
     return current && current.generation === generation
-      && current.layersRef === layers && current.layers.length === layers.length
+      && current.layers === layers && current.count === layers.length
       ? current
       : build(comp);
   };
@@ -82,12 +90,20 @@ export function installProjectIndex(PM: PMRegistry): void {
 
 
   const ensureRoot = () => {
-    if (rootProject === PM.proj && flatLayers) return;
-    rootProject = PM.proj;
+    if (rootProject !== PM.proj) {
+      rootProject = PM.proj;
+      flatLayers = null;
+    }
+    /* Refresh every composition index first: that is what notices a layer
+       pushed straight into `comp.layers` and bumps `structure`. */
+    const indexes: CompIndex[] = [];
+    visitProjects(PM.proj, comp => indexes.push(ensure(comp)));
+    if (flatLayers && flatStructure === structure) return;
     flatLayers = [];
+    for (const index of indexes) flatLayers.push(...index.layers);
+    flatStructure = structure;
     keyframes = null;
     keyframeLayers = null;
-    visitProjects(PM.proj, comp => flatLayers!.push(...ensure(comp).layers));
   };
 
   const ensureKeyframes = () => {
@@ -109,9 +125,11 @@ export function installProjectIndex(PM: PMRegistry): void {
   const API: any = {
     invalidate() {
       generation++;
+      structure++;
       comps = new WeakMap();
       rootProject = null;
       flatLayers = null;
+      flatStructure = -1;
       keyframes = null;
       keyframeLayers = null;
     },

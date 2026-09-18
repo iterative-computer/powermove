@@ -7,11 +7,13 @@ export function seekPreviewVideo(video: HTMLVideoElement, target: number, tolera
   if (!state) {
     state = { target, tolerance, active: true };
     pending.set(video, state);
-    video.addEventListener?.('seeked', () => {
+    const resume = () => {
       if (state!.active && video.paused && !video.seeking && Math.abs(video.currentTime - state!.target) > state!.tolerance) {
         try { video.currentTime = state!.target; } catch { /* Detached media. */ }
       }
-    });
+    };
+    video.addEventListener?.('seeked', resume);
+    video.addEventListener?.('loadedmetadata', resume);
   }
   state.target = target; state.tolerance = tolerance; state.active = true;
   if (!video.seeking && Math.abs(video.currentTime - target) > tolerance) {

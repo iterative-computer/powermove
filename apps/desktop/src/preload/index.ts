@@ -18,7 +18,10 @@ import {
   type NativeEditAction,
   type PowermoveBridge,
   type StoreErrorEvent,
-  type StoreSnapshot
+  type StoreSnapshot,
+  type WindowClaimResult,
+  type WindowInitialProject,
+  type WindowOpenResult
 } from '../shared/ipc';
 import {
   EXT_IPC,
@@ -27,6 +30,7 @@ import {
   type ExtensionsChangedEvent
 } from '../shared/extensions';
 
+let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
   compatible: {
     status: () => ipcRenderer.invoke(IPC.compatibleStatus),
@@ -91,10 +95,35 @@ const bridge: PowermoveBridge = {
         name: file.name
       }) as Promise<MediaProxyResult>;
     },
-    createImageSequence: (files, fps) => {
+    createImageSequence: async (files, fps, onProgress) => {
       const sourcePaths = files.map(file => webUtils.getPathForFile(file));
-      if (sourcePaths.some(source => !source)) return Promise.resolve({ ok: false, error: 'The original image files are no longer available' });
-      return ipcRenderer.invoke(IPC.mediaSequenceCreate, { sourcePaths, fps }) as Promise<MediaProxyResult>;
+      if (sourcePaths.some(source => !source)) return { ok: false, error: 'The original image files are no longer available' };
+      const requestId = `sequence-${Date.now()}-${++nextMediaRequest}`;
+      const listener = (_event: IpcRendererEvent, progress: { requestId: string; completed: number }) => {
+        if (progress.requestId === requestId) onProgress?.(progress.completed);
+      };
+      ipcRenderer.on(IPC.mediaSequenceProgress, listener);
+      try {
+        return await ipcRenderer.invoke(IPC.mediaSequenceCreate, { sourcePaths, fps, requestId }) as MediaProxyResult;
+      } finally { ipcRenderer.removeListener(IPC.mediaSequenceProgress, listener); }
+    },
+    beginAnimation: (fps, repeats) => ipcRenderer.invoke(IPC.mediaAnimationBegin, { fps, repeats }) as Promise<string>,
+    writeAnimationFrame: (token, index, offset, data) =>
+      ipcRenderer.invoke(IPC.mediaAnimationFrame, { token, index, offset, data }) as Promise<void>,
+    finishAnimation: async (token, onProgress) => {
+      const requestId = `animation-${Date.now()}-${++nextMediaRequest}`;
+      const listener = (_event: IpcRendererEvent, progress: { requestId: string; completed: number }) => {
+        if (progress.requestId === requestId) onProgress?.(progress.completed);
+      };
+      ipcRenderer.on(IPC.mediaAnimationProgress, listener);
+      try {
+        return await ipcRenderer.invoke(IPC.mediaAnimationFinish, { token, requestId }) as MediaProxyResult;
+      } finally { ipcRenderer.removeListener(IPC.mediaAnimationProgress, listener); }
+    },
+    createStillImage: (file) => {
+      const sourcePath = webUtils.getPathForFile(file);
+      if (!sourcePath) return Promise.resolve({ ok: false, error: 'The original file is no longer available' });
+      return ipcRenderer.invoke(IPC.mediaImageCreate, { sourcePath, name: file.name }) as Promise<MediaProxyResult>;
     },
     readPlaybackProxy: (token, offset, length) =>
       ipcRenderer.invoke(IPC.mediaProxyRead, { token, offset, length }) as Promise<Uint8Array>,
@@ -125,7 +154,7 @@ const bridge: PowermoveBridge = {
       }
     },
     steer: (req) => ipcRenderer.invoke(IPC.codexSteer, req),
-    cancel: (id) => ipcRenderer.invoke(IPC.codexCancel, { id }) as Promise<void>,
+    cancel: (id, preserveChanges = false) => ipcRenderer.invoke(IPC.codexCancel, { id, preserveChanges }) as Promise<void>,
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
     rebasePrompt: (req) => ipcRenderer.invoke(IPC.codexRebasePrompt, req) as Promise<string>,
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),
@@ -189,6 +218,25 @@ const bridge: PowermoveBridge = {
       const listener = (_event: IpcRendererEvent, error: StoreErrorEvent): void => cb(error);
       ipcRenderer.on(IPC.storeError, listener);
       return () => ipcRenderer.removeListener(IPC.storeError, listener);
+    },
+    getSync: (key) => ipcRenderer.sendSync(IPC.storeGetSync, { key }) as string | null,
+    onChanged: (cb) => {
+      const listener = (_event: IpcRendererEvent, payload: { keys?: string[] }): void =>
+        cb(Array.isArray(payload?.keys) ? payload.keys : []);
+      ipcRenderer.on(IPC.storeChanged, listener);
+      return () => ipcRenderer.removeListener(IPC.storeChanged, listener);
+    }
+  },
+
+  windows: {
+    initialProject: () => ipcRenderer.sendSync(IPC.windowInitialProject) as WindowInitialProject,
+    claimProject: (projectId) =>
+      ipcRenderer.invoke(IPC.windowClaimProject, { projectId }) as Promise<WindowClaimResult>,
+    openProject: (projectId) =>
+      ipcRenderer.invoke(IPC.windowOpenProject, { projectId }) as Promise<WindowOpenResult>,
+    create: () => ipcRenderer.invoke(IPC.windowNew) as Promise<void>,
+    close: () => {
+      ipcRenderer.send(IPC.windowClose);
     }
   },
 

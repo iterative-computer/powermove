@@ -78,6 +78,14 @@ export function inspectWebExport(PM: any) {
   return { errors: [...errors], warnings: [...warnings], definitions, fonts, assets };
 }
 
+const STORED_EXTENSIONS: Readonly<Record<string, string>> = {
+  'video/webm': 'webm', 'video/mp4': 'mp4', 'video/quicktime': 'mov',
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
+  'image/avif': 'avif', 'image/bmp': 'bmp', 'image/svg+xml': 'svg',
+  'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/mpeg': 'mp3',
+  'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/flac': 'flac',
+};
+
 export async function buildWebExport(PM: any) {
   // Freeze source and definitions before awaiting assets; user edits cannot mix revisions.
   const serialized = PM.serialize();
@@ -105,7 +113,12 @@ export async function buildWebExport(PM: any) {
     if (!meta) throw new Error(`Missing media metadata: ${id}`);
     const blob = await PM.MediaStore.get(meta);
     if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
-    const extension = /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj)$/i.exec(meta.name || '')?.[1]?.toLowerCase() || 'bin';
+    /* The stored bytes decide the extension: a converted animation or playback
+       proxy keeps the name the user chose while holding WebM, and a static host
+       serves these files by extension alone. */
+    const extension = STORED_EXTENSIONS[String(blob.type || '').toLowerCase()]
+      || /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj)$/i.exec(meta.name || '')?.[1]?.toLowerCase()
+      || 'bin';
     const location = `assets/media-${index++}.${extension}`;
     put(location, new Uint8Array(await blob.arrayBuffer())); scene.assets[id] = location;
     metadata[id] = Object.fromEntries(['id', 'name', 'kind', 'format', 'w', 'h', 'dur', 'channels', 'sampleRate', 'type'].filter(k => meta[k] !== undefined).map(k => [k, meta[k]]));

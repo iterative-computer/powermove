@@ -14,7 +14,8 @@ export interface PromptAttachment {
 
 export async function readPromptAttachment(file: File, id: string): Promise<PromptAttachment> {
   const imageTypes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml', avif: 'image/avif', bmp: 'image/bmp' };
-  const type = file.type || imageTypes[file.name.split('.').pop()?.toLowerCase() || ''] || 'application/octet-stream';
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  const type = file.type || (Object.hasOwn(imageTypes, extension) ? imageTypes[extension]! : 'application/octet-stream');
   const image = isPreviewableImageType(type);
   const dataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -140,15 +141,33 @@ export function mountPromptAttachments(PM: Record<string, any>, card: HTMLElemen
     rail.hidden = !items().length;
     card.classList.toggle('has-attachments', !!items().length);
   }
+  let pendingReads = 0;
+  let disposed = false;
+  let previousReadOnly = false;
+  let previousSendDisabled = false;
+  const send = card.querySelector<HTMLButtonElement>('.spatial-send');
   async function add(files: File[]) {
-    if (!files.length) return;
+    if (!files.length || disposed) return;
+    if (pendingReads++ === 0) {
+      previousReadOnly = textarea.readOnly;
+      previousSendDisabled = send?.disabled ?? false;
+    }
     button.disabled = true;
-    const send = card.querySelector<HTMLButtonElement>('.spatial-send');
     if (send) send.disabled = true;
     textarea.readOnly = true;
     try { await PM.AgentUI.addAttachments(files); }
     catch (error) { PM.toast(String(error instanceof Error ? error.message : error), 6000); }
-    finally { button.disabled = false; if (send) send.disabled = false; textarea.readOnly = false; refresh(); if (card.isConnected) textarea.focus(); }
+    finally {
+      if (--pendingReads === 0) {
+        button.disabled = false;
+        if (send) send.disabled = previousSendDisabled;
+        textarea.readOnly = previousReadOnly;
+      }
+      if (!disposed) {
+        refresh();
+        if (!pendingReads && card.isConnected) textarea.focus();
+      }
+    }
   }
   input.onchange = () => { void add(Array.from(input.files || [])); input.value = ''; };
   const paste = (event: ClipboardEvent) => {
@@ -163,6 +182,7 @@ export function mountPromptAttachments(PM: Record<string, any>, card: HTMLElemen
   card.addEventListener('dragover', dragover); card.addEventListener('drop', drop);
   refresh();
   return { refresh, dispose() {
+    disposed = true;
     textarea.removeEventListener('paste', paste); textarea.removeEventListener('keydown', keydown, true);
     card.removeEventListener('dragover', dragover); card.removeEventListener('drop', drop);
     input.remove(); button.remove(); rail.remove();

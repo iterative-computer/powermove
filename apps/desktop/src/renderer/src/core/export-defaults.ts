@@ -174,7 +174,7 @@ function bool(value: unknown, fallback: boolean): boolean {
 export function normalizeExportDefaults(raw: unknown, fallbackFps = 30): ExportDefaults {
   const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const fps = Number(source.fps);
-  const baseFps = Number.isFinite(fallbackFps) && fallbackFps > 0 ? fallbackFps : 30;
+  const baseFps = Number.isFinite(fallbackFps) && fallbackFps > 0 ? Math.min(240, fallbackFps) : 30;
   return {
     format: pick(FORMATS, source.format, 'mp4'),
     scale: clampExportScale(source.scale),

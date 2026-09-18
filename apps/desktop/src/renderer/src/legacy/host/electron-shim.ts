@@ -163,7 +163,7 @@ export function install(PM: PMRegistry): void {
             try {
               const name = String(body.name || 'powermove.bin');
               const result = await bridge.saveFile({ name, data: decodeBinary(body.data) });
-              if (result.ok) PM.toast(`Saved ${savedName(result.path, name)}`);
+              if (result.ok) PM.toast(`Saved ${savedName(result.path, name)}`, 2200, { error: false });
               else if (!result.cancelled) PM.toast(result.error || 'Save failed');
             } catch (error) {
               PM.toast(errorText(error, 'Save failed'));
@@ -228,7 +228,7 @@ export function install(PM: PMRegistry): void {
       },
       pmCodexCancel: {
         postMessage(body: any = {}) {
-          void bridge.codex.cancel(String(body.id || '')).catch(() => {});
+          void bridge.codex.cancel(String(body.id || ''), body.preserveChanges === true).catch(() => {});
         }
       },
       pmCodexSteer: {
@@ -304,6 +304,22 @@ export function install(PM: PMRegistry): void {
   const saveErrors = new Map<string, string>();
   const asyncWrites = new Map<string, Promise<void>>();
   const writeVersions = new Map<string, number>();
+  /* Every window caches the store, so a sibling's write leaves this copy stale.
+     Main names the keys that moved; they are re-read from the store on the next
+     access rather than pushed, which keeps a neighbour's multi-megabyte history
+     write off this window's IPC channel. */
+  const stale = new Set<string>();
+  const refill = (service: string) => {
+    stale.delete(service);
+    if (!bridge.store.getSync) return;
+    try {
+      const serialized = bridge.store.getSync(service);
+      if (serialized === null) cached.delete(legacyKey(service));
+      else cached.set(legacyKey(service), JSON.parse(serialized));
+    } catch (error) {
+      bridge.log('warn', `store refresh failed for ${service}: ${errorText(error, 'unknown error')}`);
+    }
+  };
 
   PM.store = {
     // A development renderer may reload before its native process. Keep using
@@ -311,6 +327,7 @@ export function install(PM: PMRegistry): void {
     separateHistory: (snapshot as any).__powermoveAsyncStore === true && typeof bridge.store.setSerialized === 'function',
     get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
+      if (stale.has(serviceKey(key))) refill(serviceKey(key));
       if (!cached.has(stored)) return fallback;
       try {
         const value: any = cached.get(stored);
@@ -325,6 +342,7 @@ export function install(PM: PMRegistry): void {
     setAsync(key: string, value: any) {
       if (!bridge.store.setSerialized) return Promise.resolve(PM.store.set(key, value));
       const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
+      stale.delete(service);
       writeVersions.set(service, version);
       cached.set(legacyKey(service), value);
       const write = stringifyAsync(value, async () => {
@@ -342,6 +360,7 @@ export function install(PM: PMRegistry): void {
     },
     set(key: any, value: any) {
       const service = serviceKey(key);
+      stale.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       try {
         const copy = cloneValue(value);
@@ -357,6 +376,7 @@ export function install(PM: PMRegistry): void {
     },
     del(key: any) {
       const service = serviceKey(key);
+      stale.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));
       bridge.store.delete(service);
@@ -367,6 +387,49 @@ export function install(PM: PMRegistry): void {
       if (saveErrors.size) throw new Error([...saveErrors.values()][0]);
     }
   };
+
+  /* One project per window. Everything that opens, swaps or closes a document
+     goes through here so the native side stays the single source of truth for
+     which window owns what. A build without the native bridge keeps the older
+     one-window behaviour: claims always succeed and nothing else is offered. */
+  PM.windows = {
+    get supported() { return !!bridge.windows; },
+    initialProject() {
+      try { return bridge.windows?.initialProject() ?? { projectId: null, taken: [] }; }
+      catch { return { projectId: null, taken: [] }; }
+    },
+    async claimProject(projectId: string | null) {
+      if (!bridge.windows) return { claimed: true, focused: false };
+      try { return await bridge.windows.claimProject(projectId); }
+      catch (error) {
+        bridge.log('warn', `window claim failed: ${errorText(error, 'unknown error')}`);
+        return { claimed: true, focused: false };
+      }
+    },
+    async openProject(projectId: string) {
+      if (!bridge.windows) return { opened: false, focused: false, error: 'Windows are not available' };
+      try { return await bridge.windows.openProject(projectId); }
+      catch (error) {
+        return { opened: false, focused: false, error: errorText(error, 'The window could not be opened') };
+      }
+    },
+    async create() {
+      if (!bridge.windows) return false;
+      try { await bridge.windows.create(); return true; }
+      catch (error) {
+        PM.toast(errorText(error, 'The window could not be opened'));
+        return false;
+      }
+    },
+    close() { bridge.windows?.close(); },
+  };
+
+  bridge.store.onChanged?.((keys: string[]) => {
+    const changed = keys.filter(key => typeof key === 'string');
+    if (!changed.length) return;
+    for (const key of changed) stale.add(serviceKey(key));
+    PM.bus?.emit('store:external', changed);
+  });
 
   bridge.store.onError((event: any) => {
     saveErrors.set(event.key, String(event.error));

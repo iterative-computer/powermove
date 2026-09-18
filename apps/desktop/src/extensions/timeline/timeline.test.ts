@@ -11,8 +11,10 @@ import {
   propertyValueColumns,
   resolveTimelineSnap,
   shouldDrawClipLabel,
+  timelinePropertyTargets,
   timelineWorkArea,
   toggleTimelineDisclosure,
+  toggleTimelinePropertyKeys,
   toggleTimelineScaleLink,
   type KeyframeMoveSnapshotItem,
 } from './timeline';
@@ -26,7 +28,10 @@ import {
 } from './bezier-drag';
 import {
   graphSelectionBounds,
+  graphTransformCursor,
+  graphTransformHandleAtPoint,
   planGraphKeyframeMove,
+  planGraphKeyframeScale,
   pointInGraphSelection,
   resolveGraphTarget,
   selectionAfterMarquee,
@@ -103,6 +108,52 @@ describe('timeline runtime', () => {
       { type: 'set_layer', target: 'layer', patch: { scaleLinked: true } },
       { label: 'Link scale axes', origin: 'timeline' },
     );
+  });
+
+  it('adds and removes timeline property keys across the compatible unlocked selection', () => {
+    const harness = timelineHarness();
+    const channel = (value: number, keys: any[] = []) => ({ v: value, kf: keys, expr: null });
+    const first = { id: 'first', type: 'solid', name: 'First', from: 0, lock: false, p: { 'position.y': channel(20, [{ i: 'existing', t: 0, v: 20 }]) }, fx: [], masks: [] };
+    const second = { id: 'second', type: 'text', name: 'Second', from: 0, lock: false, p: { 'position.y': channel(40) }, fx: [], masks: [] };
+    const locked = { id: 'locked', type: 'solid', name: 'Locked', from: 0, lock: true, p: { 'position.y': channel(60) }, fx: [], masks: [] };
+    harness.state.project.layers = [first, second, locked];
+    harness.state.selection.layers = [first.id, second.id, locked.id];
+    vi.mocked(harness.api.anim.findProp).mockImplementation((layer: any, path) => layer.p[path] ?? null);
+    vi.mocked(harness.api.anim.evP).mockImplementation((_layer: any, property: any) => property.v);
+    vi.mocked(harness.api.anim.hasKeyAt).mockImplementation((_layer: any, property: any, time) => property.kf.find((key: any) => key.t === time) ?? null);
+    vi.mocked(harness.api.anim.setKeyOn).mockImplementation((property: any, time, value) => { property.kf.push({ i: `key-${value}`, t: time, v: value }); return property.kf.at(-1); });
+    vi.mocked(harness.api.anim.removeKey).mockImplementation((property: any, key: any) => { property.kf.splice(property.kf.indexOf(key), 1); });
+    const row = { kind: 'prop', L: first, key: 'position.y', label: 'Position Y', prop: first.p['position.y'] };
+
+    toggleTimelinePropertyKeys(harness.api, row);
+    expect(first.p['position.y'].kf).toHaveLength(1);
+    expect(second.p['position.y'].kf).toEqual([{ i: 'key-40', t: 0, v: 40 }]);
+    expect(locked.p['position.y'].kf).toEqual([]);
+    expect(harness.api.history.do).toHaveBeenLastCalledWith('Add keyframe', expect.any(Function));
+
+    toggleTimelinePropertyKeys(harness.api, row);
+    expect(first.p['position.y'].kf).toEqual([]);
+    expect(second.p['position.y'].kf).toEqual([]);
+    expect(harness.api.history.do).toHaveBeenLastCalledWith('Remove keyframe', expect.any(Function));
+  });
+
+  it('maps effect property rows by effect position and type across selected layers', () => {
+    const harness = timelineHarness();
+    const firstProp = { v: 10, kf: [], expr: null };
+    const secondProp = { v: 30, kf: [], expr: null };
+    const first = { id: 'first', type: 'solid', name: 'First', lock: false, p: {}, masks: [], fx: [{ id: 'blur-a', type: 'blur', p: { amount: firstProp } }] };
+    const second = { id: 'second', type: 'text', name: 'Second', lock: false, p: {}, masks: [], fx: [{ id: 'blur-b', type: 'blur', p: { amount: secondProp } }] };
+    harness.state.project.layers = [first, second];
+    harness.state.selection.layers = [first.id, second.id];
+    vi.mocked(harness.api.anim.findProp).mockImplementation((layer: any, path) => path === 'blur-a.amount' ? firstProp : path === 'blur-b.amount' ? secondProp : null);
+    vi.mocked(harness.api.anim.allProps).mockImplementation((layer: any) => layer === first
+      ? [{ key: 'blur-a.amount', label: 'Amount', group: 'Effects', prop: firstProp }]
+      : [{ key: 'blur-b.amount', label: 'Amount', group: 'Effects', prop: secondProp }]);
+
+    const targets = timelinePropertyTargets(harness.api, { L: first, key: 'blur-a.amount', prop: firstProp });
+    expect(targets.map(target => [target.layer.id, target.path])).toEqual([
+      ['first', 'blur-a.amount'], ['second', 'blur-b.amount'],
+    ]);
   });
 
   it('gives every property value a right-aligned column with a readable gap', () => {
@@ -184,6 +235,65 @@ describe('timeline runtime', () => {
     expect(pointInGraphSelection(bounds, 50, 45)).toBe(true);
     expect(selectionAfterMarquee(['a', 'b'], ['b', 'c'], true)).toEqual(['a', 'c']);
     expect(selectionAfterMarquee(['a'], ['b', 'b'], false)).toEqual(['b']);
+  });
+
+  it('stands the transform box off its keys and names a grip per corner', () => {
+    const bounds = graphSelectionBounds([{ id: 'a', x: 20, y: 30 }, { id: 'b', x: 80, y: 60 }], 16, 8)!;
+    expect(bounds).toEqual({ x0: 12, y0: 22, x1: 88, y1: 68 });
+    // The outermost keys sit inside the frame, so a grip never steals their press.
+    expect(graphTransformHandleAtPoint(bounds, 20, 30)).toBeNull();
+    expect(graphTransformHandleAtPoint(bounds, 12, 22)).toBe('nw');
+    expect(graphTransformHandleAtPoint(bounds, 88, 45)).toBe('e');
+    expect(graphTransformHandleAtPoint(bounds, 50, 68)).toBe('s');
+    expect(graphTransformCursor('e')).toBe('ew-resize');
+    expect(graphTransformCursor('ne')).toBe('nesw-resize');
+  });
+
+  it('preserves sub-frame timing when only graph values are scaled', () => {
+    const items = [
+      { id: 'a', property: 'p', time: .01, value: 10, selected: true },
+      { id: 'b', property: 'p', time: 1.01, value: 20, selected: true },
+    ];
+    const plan = planGraphKeyframeScale(items, {
+      timeScale: 1, valueScale: 2, anchorTime: 0, anchorValue: 0,
+    }, 30);
+    expect(plan.moves.map(move => move.time)).toEqual([.01, 1.01]);
+    expect(plan.moves.map(move => move.value)).toEqual([20, 40]);
+  });
+
+  it('scales a graph selection about an anchor and stops at the keys it does not own', () => {
+    const items = [
+      { id: 'a', property: 'p', time: 1, compositionTime: 1, value: 10, selected: true, maxTime: 10 },
+      { id: 'b', property: 'p', time: 2, compositionTime: 2, value: 20, selected: true, maxTime: 10 },
+      { id: 'fixed', property: 'p', time: 3, compositionTime: 3, value: 50, selected: false, maxTime: 10 },
+    ];
+    const doubled = planGraphKeyframeScale(items, {
+      timeScale: 2, valueScale: 2, anchorTime: 1, anchorValue: 10,
+    }, 10);
+    // 'b' would land on 3s, where an unselected key already sits: one frame short.
+    expect(doubled.timeScale).toBeCloseTo(1.9);
+    expect(doubled.moves.map(move => move.time)).toEqual([1, 2.9]);
+    expect(doubled.moves.map(move => move.value)).toEqual([10, 30]);
+
+    // Collapsing keeps the pair a frame apart instead of stacking them.
+    const collapsed = planGraphKeyframeScale(items, {
+      timeScale: 0, valueScale: 1, anchorTime: 1, anchorValue: 10,
+    }, 10);
+    expect(collapsed.timeScale).toBeCloseTo(.1);
+    expect(collapsed.moves.map(move => move.time)).toEqual([1, 1.1]);
+  });
+
+  it('anchors a scale in composition time for a layer that starts late', () => {
+    const items = [
+      { id: 'a', property: 'p', time: 0, compositionTime: 4, value: 0, selected: true, maxTime: 10 },
+      { id: 'b', property: 'p', time: 2, compositionTime: 6, value: 8, selected: true, maxTime: 10 },
+    ];
+    const plan = planGraphKeyframeScale(items, {
+      timeScale: .5, valueScale: -1, anchorTime: 4, anchorValue: 0,
+    }, 30);
+    expect(plan.moves.map(move => move.time)).toEqual([0, 1]);
+    // A negative value scale flips the curve, which AE allows.
+    expect(plan.moves.map(move => move.value)).toEqual([0, -8]);
   });
 
   it('keeps the focused curve when another layer strip is selected', () => {

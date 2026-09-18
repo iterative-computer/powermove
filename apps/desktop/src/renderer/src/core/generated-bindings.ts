@@ -312,7 +312,7 @@ export async function resolveButtonAction(
     return { kind: 'command' };
   }
   if (authored.prompt) {
-    PM.toast('Shake the pointer and drag across this section to change it');
+    PM.toast('Ask the Powermove agent to change this section');
     return { kind: 'prompt' };
   }
   return { kind: 'none' };

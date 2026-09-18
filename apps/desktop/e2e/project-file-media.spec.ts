@@ -105,20 +105,26 @@ test('saved project files restore imported audio without the original session me
   expect(restored.peaks).toBeGreaterThan(0);
 });
 
-test('closing a local project tab and reopening it keeps imported audio', async ({ session }) => {
+test('leaving a local project for another and coming back keeps imported audio', async ({ session }) => {
   const { page } = session;
   await importFixture(page, 'tone.wav');
   await page.waitForFunction(() => [...(window as any).PM.assets.map.values()]
     .some((asset: any) => asset.name === 'tone.wav' && asset.audioBlob?.size > 0));
   const project = await page.evaluate(async () => {
     const PM = (window as any).PM;
-    PM.Projects.markOpen(PM.proj.id);
     await PM.flushProject();
     return { id: PM.proj.id, name: PM.proj.name };
   });
 
-  await page.locator(`[data-tab-id="${project.id}"] .project-doc-close`).click();
-  await expect.poll(() => page.evaluate(() => (window as any).PM.ProjectsScreen.isOpen)).toBe(true);
+  // The window swaps to a scratch composition, then back to the audio project.
+  await page.evaluate(async () => {
+    const PM = (window as any).PM;
+    const other = PM.mkProject({ name: 'Somewhere else', dur: 4, w: 640, h: 360, fps: 24, bg: '#09090A' });
+    PM.Projects.put(other);
+    await PM.openProjectHere(other.id);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).PM.proj.name)).toBe('Somewhere else');
+
   await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
   await page.locator('.ps-card').filter({ has: page.locator('.ps-name', { hasText: project.name }) }).click();
 
@@ -141,7 +147,6 @@ test('local recovery keeps imported audio after closing and relaunching Powermov
   await importFixture(session.page, 'tone.wav');
   const projectId = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
-    PM.Projects.markOpen(PM.proj.id);
     await PM.flushProject();
     return PM.proj.id;
   });

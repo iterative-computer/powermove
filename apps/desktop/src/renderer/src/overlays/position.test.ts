@@ -30,3 +30,9 @@ describe('context menu cursor placement', () => {
     });
   });
 });
+
+it.each([-100, 900])('keeps menus visible after a cursor falls outside the viewport: %s', y => {
+  const result = positionMenuAtCursor(80, y, 180, 120, 800, 600);
+  expect(result.top).toBeGreaterThanOrEqual(6);
+  expect(result.top + 120).toBeLessThanOrEqual(594);
+});

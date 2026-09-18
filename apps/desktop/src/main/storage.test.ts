@@ -404,6 +404,52 @@ describe('store IPC and quit integration', () => {
     expect(() => handlers.get(IPC.storeSnapshot)?.(untrustedEvent)).toThrow(IpcValidationError);
   });
 
+  it('tells sibling windows which keys moved, coalesced, and never the writer', async () => {
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    const listeners = new Map<string, (...args: any[]) => unknown>();
+    const ipcMain = {
+      handle: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler),
+      on: (channel: string, listener: (...args: any[]) => unknown) => {
+        listeners.set(channel, listener);
+        return ipcMain;
+      }
+    };
+    const broadcastChange = vi.fn();
+    const store = storeStub({ snapshot: () => ({ projects: [{ id: 'P1' }] }) });
+    registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, {
+      isTrustedSender: (event) => Boolean((event as unknown as { trusted?: boolean }).trusted),
+      broadcastChange
+    });
+    const sender = { send: vi.fn() };
+    const event = { trusted: true, sender, returnValue: undefined as unknown };
+
+    // A rename touches the registry and the slot; siblings hear about it once.
+    listeners.get(IPC.storeSet)?.(event, { key: 'projects', value: [] });
+    listeners.get(IPC.storeSet)?.(event, { key: 'project.P1', value: {} });
+    listeners.get(IPC.storeDelete)?.(event, { key: 'projectJournal.P1' });
+    expect(broadcastChange).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(broadcastChange).toHaveBeenCalledTimes(1);
+    expect(broadcastChange).toHaveBeenCalledWith(
+      ['projects', 'project.P1', 'projectJournal.P1'],
+      sender
+    );
+
+    // An untrusted write is not applied, so nothing is announced either.
+    listeners.get(IPC.storeSet)?.({ trusted: false, sender }, { key: 'projects', value: [] });
+    await Promise.resolve();
+    expect(broadcastChange).toHaveBeenCalledTimes(1);
+
+    // Refilling one invalidated key, and nothing at all for an untrusted asker.
+    listeners.get(IPC.storeGetSync)?.(event, { key: 'projects' });
+    expect(event.returnValue).toBe(JSON.stringify([{ id: 'P1' }]));
+    listeners.get(IPC.storeGetSync)?.(event, { key: 'openWindows' });
+    expect(event.returnValue).toBeNull();
+    const untrusted = { trusted: false, sender, returnValue: undefined as unknown };
+    listeners.get(IPC.storeGetSync)?.(untrusted, { key: 'projects' });
+    expect(untrusted.returnValue).toBeNull();
+  });
+
   it('prevents the first quit until flushing completes, then quits once more', async () => {
     const emitter = new EventEmitter();
     const quit = vi.fn();

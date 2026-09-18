@@ -44,7 +44,7 @@ const FONT_AXIS_PREFIX = 'fontAxis.';
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const EFFECT_TYPES = new Set([
   'blur', 'motionblurDir', 'sharpen', 'glow', 'color', 'levels', 'duotone', 'grain',
-  'vignette', 'chroma', 'pixelate', 'posterize', 'displace', 'shadow', 'invert'
+  'vignette', 'chroma', 'pixelate', 'posterize', 'displace', 'shadow', 'invert', 'gradient'
 ]);
 
 let nextId = 0;

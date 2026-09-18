@@ -74,7 +74,7 @@ for (const loseCapture of [false, true]) test(`imported image drag commits and u
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('centered tabs and explicit effect actions keep legacy hidden layers accessible', async ({ session }, info) => {
+test('titlebar layout and explicit effect actions keep legacy hidden layers accessible', async ({ session }, info) => {
   await session.openEditor();
   const { page } = session;
   await page.evaluate(() => {
@@ -85,12 +85,13 @@ test('centered tabs and explicit effect actions keep legacy hidden layers access
     await session.app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
     await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(width);
     const toolbar = await page.locator('#toolbar-strip').boundingBox();
-    const tabs = await page.locator('#tabs').boundingBox();
+    const documents = await page.locator('#doc-strip').boundingBox();
     const actions = await page.locator('#tb-right').boundingBox();
-    // Tabs lead the row, tools are centred on the window, actions trail.
+    // The tools are the centred strip; the window's document sits left of them
+    // and the actions right, with neither overlapping the toolbar.
     expect(Math.abs(toolbar!.x + toolbar!.width / 2 - width / 2)).toBeLessThan(1);
-    expect(tabs!.x + tabs!.width).toBeLessThan(toolbar!.x);
-    expect(toolbar!.x + toolbar!.width).toBeLessThan(actions!.x);
+    expect(documents!.x + documents!.width).toBeLessThanOrEqual(toolbar!.x);
+    expect(toolbar!.x + toolbar!.width).toBeLessThanOrEqual(actions!.x);
   }
   await expect(page.locator('.project-strip-divider')).toHaveCount(0);
   const effect = page.locator('.fxb-row[data-id="blur"]');

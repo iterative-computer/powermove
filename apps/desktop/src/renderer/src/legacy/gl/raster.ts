@@ -1,5 +1,10 @@
 import { prepareVideoPreview } from '../core/video-preview';
+import { disposeVideoInstances } from '../core/video-instances';
 import { importedSequences } from '../core/image-sequence';
+import { convertAnimatedImage, convertStillImage, isAnimatedImage, mayAnimate, readProxyFile } from '../core/media-conversion';
+import {
+  isImageExtension, isVideoExtension, mayNeedVideoProxy, mediaExtension, needsImageConversion, needsVideoProxy,
+} from '../../../../shared/media-formats';
 import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, textControlValues } from '../core/text-animation';
 import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
@@ -559,13 +564,23 @@ function assetKind(file: any) {
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
-  const ext = (String(file.name || '').split('.').pop() as any).toLowerCase();
+  const ext = mediaExtension(file.name);
   if (ext === 'obj' || mime === 'model/obj' || mime === 'text/plain+obj') return 'model';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'].includes(ext)) return 'image';
-  if (['mp4', 'mov', 'm4v', 'webm'].includes(ext)) return 'video';
+  if (isImageExtension(ext)) return 'image';
+  if (isVideoExtension(ext)) return 'video';
   return null;
 }
 PM.assetKind = assetKind;
+/* An animated GIF, APNG or WebP is a still to `assetKind` and a clip to the
+   editor. Only the decoder can tell the two apart, so import and replacement
+   both settle the question before anything else looks at the file. */
+async function resolveAssetKind(file: any) {
+  const kind = assetKind(file);
+  if (kind !== 'image') return { kind, animated: false };
+  const animated = mayAnimate(file) && await isAnimatedImage(file);
+  return { kind: animated ? 'video' : 'image', animated };
+}
+PM.resolveAssetKind = resolveAssetKind;
 const disposedAssets = new WeakSet<object>();
 const historyAssetRetains = new WeakMap<object, number>();
 function disposeAsset(a: any) {
@@ -574,6 +589,7 @@ function disposeAsset(a: any) {
     if (disposedAssets.has(a)) return;
     disposedAssets.add(a);
   }
+  disposeVideoInstances(a);
   if (a.preview) {
     a.preview.el.pause(); a.preview.el.removeAttribute('src'); a.preview.el.load();
     window.URL.revokeObjectURL(a.preview.url); delete a.preview;
@@ -620,33 +636,19 @@ function waitForVideoMetadata(el: any, fileName: any, timeout: any = 15000) {
     loaded();
   });
 }
-async function playbackProxy(file: any, name: string): Promise<any> {
+async function playbackProxy(file: any, name: string, onStage?: (label: string) => void): Promise<any> {
   const media = window.powermove?.media;
   if (!media?.createPlaybackProxy) {
     throw new Error(videoImportFailureMessage(name, { code: 4 }));
   }
-  PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000);
+  if (onStage) onStage('Optimizing video for playback');
+  else PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000, { error: false });
   const result = await media.createPlaybackProxy(file);
   if (!result.ok) throw new Error(result.error);
-  try {
-    const parts: ArrayBuffer[] = [];
-    const chunkSize = 4 * 1024 * 1024;
-    for (let offset = 0; offset < result.size; offset += chunkSize) {
-      const chunk = await media.readPlaybackProxy(result.token, offset, Math.min(chunkSize, result.size - offset));
-      if (!chunk.byteLength) throw new Error('The optimized playback file ended unexpectedly');
-      const owned = new Uint8Array(chunk.byteLength);
-      owned.set(chunk);
-      parts.push(owned.buffer);
-    }
-    return new window.File(parts, name, {
-      type: result.type,
-      lastModified: Number(file.lastModified) || Date.now(),
-    });
-  } finally {
-    await media.releasePlaybackProxy(result.token).catch(() => undefined);
-  }
+  onStage?.('Loading optimized video');
+  return readProxyFile(result, name, file.lastModified);
 }
-async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
+async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
@@ -697,23 +699,30 @@ async function prepareAsset({ id, name, kind, blob, meta = {} }: any) {
         await ready;
         w = el.videoWidth || 0; hh = el.videoHeight || 0; dur = el.duration || 0;
       };
-      const canProxy = !playbackProxyUsed && /\.(mov|mp4|m4v)$/i.test(String(name || ''));
-      let needsProxy = false;
-      try { await openVideo(); }
-      catch (error) {
-        if (!canProxy) throw error;
-        needsProxy = true;
+      const extension = mediaExtension(name);
+      const canProxy = !playbackProxyUsed && mayNeedVideoProxy(extension);
+      /* Chromium opens none of MKV, AVI, MPEG-TS and friends, so those skip
+         straight to conversion instead of waiting out a decode failure. */
+      let needsProxy = canProxy && needsVideoProxy(extension);
+      if (!needsProxy) {
+        try { await openVideo(); }
+        catch (error) {
+          if (!canProxy) throw error;
+          needsProxy = true;
+        }
       }
       /* A MOV can expose valid dimensions and advance its audio clock even when
          Chromium cannot decode a single video frame (notably Apple ProRes).
          Probe one presented frame, then stream an alpha-preserving VP9 proxy
          if metadata or frame decoding fails. Known proxies skip the probe on restore. */
       if (canProxy && (needsProxy || !await waitForPresentedVideoFrame(el))) {
-        try { el.pause(); } catch (e) { }
-        el.removeAttribute('src');
-        el.load();
+        if (el) {
+          try { el.pause(); } catch (e) { }
+          el.removeAttribute('src');
+          el.load();
+        }
         window.URL.revokeObjectURL(url);
-        sourceBlob = await playbackProxy(blob, name);
+        sourceBlob = await playbackProxy(blob, name, onStage);
         playbackProxyUsed = true;
         playbackProxyVersion = 3;
         url = window.URL.createObjectURL(sourceBlob);
@@ -804,7 +813,64 @@ function checkpointAssetMetadata(project: any) {
      journal cannot replay it. Force the smallest full project checkpoint. */
   try { PM.Projects?.put?.(project); } catch (error) { }
 }
-async function ingestAsset(file: any, { silent = false, layerDefinition }: any = {}) {
+/** Import and replacement share all reading, decoding, conversion, and storage. */
+async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage }: any) {
+  const resolved = settled || await resolveAssetKind(file);
+  const kind = resolved.kind;
+  if (!kind) throw new Error('Unsupported media file');
+  const sourcePath = window.powermove?.media?.sourcePath?.(file) || '';
+  onStage?.('Reading file');
+  /* Fingerprint the file the user chose, not the conversion, so re-importing
+     the same GIF still resolves to the media already in the project. */
+  const fingerprint = await PM.MediaImport.fingerprint(file);
+  assertCurrentProject();
+  const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
+  /* Formats Chromium cannot show become ones it can before anything decodes,
+     stores, or measures them. */
+  const extension = mediaExtension(file.name);
+  let source = file;
+  let meta: any = {};
+  if (resolved.animated) {
+    const animation = await convertAnimatedImage(file, { onStage });
+    assertCurrentProject();
+    source = animation.file;
+    meta = { format: extension, imageSequence: { fps: animation.fps, frames: animation.frames } };
+  } else if (kind === 'image' && needsImageConversion(extension)) {
+    source = await convertStillImage(file, { onStage });
+    assertCurrentProject();
+    meta = { format: extension };
+  }
+  onStage?.('Preparing media');
+  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta, onStage });
+  /* Images/audio can persist while they decode. Video preparation may replace
+     an unsupported source with a much smaller playback proxy, so wait for that
+     decision before writing any video bytes to durable storage. */
+  const mayNeedPlaybackProxy = kind === 'video' && !resolved.animated && mayNeedVideoProxy(extension);
+  // Observe storage failures immediately, even while decoding is still pending.
+  const persist = (blob: any) => Promise.resolve().then(() => PM.MediaStore.put(storageKey, blob, {
+    storageKey, fingerprint, type: blob.type || file.type,
+  })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
+  const eagerPersist = mayNeedPlaybackProxy ? null : persist(source);
+  const preparedResult: any = await Promise.resolve(preparation).then(
+    value => ({ status: 'fulfilled', value }),
+    reason => ({ status: 'rejected', reason })
+  );
+  const prepared = preparedResult.status === 'fulfilled' ? preparedResult.value : null;
+  const persistBlob = prepared?.persistBlob || source;
+  if (prepared) delete prepared.persistBlob;
+  if (prepared) onStage?.('Saving media');
+  const persistedResult: any = await (eagerPersist || (prepared
+    ? persist(persistBlob) : { status: 'fulfilled', value: false }));
+  if (preparedResult.status === 'rejected' || persistedResult.status === 'rejected') {
+    if (prepared) disposeAsset(prepared);
+    throw preparedResult.status === 'rejected' ? preparedResult.reason : persistedResult.reason;
+  }
+  try { assertCurrentProject(); }
+  catch (error) { disposeAsset(prepared); throw error; }
+  const persisted = persistedResult.value;
+  return { prepared, kind, fingerprint, storageKey, sourcePath, persisted };
+}
+async function ingestAsset(file: any, { silent = false, layerDefinition, onStage }: any = {}) {
   const targetProject = PM.proj;
   const targetEpoch = assetEpoch;
   const assertCurrentProject = () => {
@@ -814,38 +880,10 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
       throw error;
     }
   };
-  const kind = assetKind(file);
-  if (!kind) throw new Error('Unsupported media file');
-  const sourcePath = window.powermove?.media?.sourcePath?.(file) || '';
-  const fingerprint = await PM.MediaImport.fingerprint(file);
-  assertCurrentProject();
-  const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
   const provisionalId = PM.uid('a');
-  const preparation = prepareAsset({ id: provisionalId, name: file.name, kind, blob: file });
-  /* Images/audio can persist while they decode. Video preparation may replace
-     an unsupported source with a much smaller playback proxy, so wait for that
-     decision before writing any video bytes to durable storage. */
-  const mayNeedPlaybackProxy = kind === 'video' && /\.(mov|mp4|m4v)$/i.test(String(file.name || ''));
-  const eagerPersist = mayNeedPlaybackProxy ? null
-    : PM.MediaStore.put(storageKey, file, { storageKey, fingerprint, type: file.type });
-  const preparedResult: any = await Promise.resolve(preparation).then(
-    value => ({ status: 'fulfilled', value }),
-    reason => ({ status: 'rejected', reason })
-  );
-  const prepared = preparedResult.status === 'fulfilled' ? preparedResult.value : null;
-  const persistBlob = prepared?.persistBlob || file;
-  if (prepared) delete prepared.persistBlob;
-  const persistedResult: any = preparedResult.status === 'fulfilled'
-    ? await Promise.resolve(eagerPersist || PM.MediaStore.put(storageKey, persistBlob, {
-      storageKey, fingerprint, type: persistBlob.type || file.type,
-    })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }))
-    : eagerPersist
-      ? await Promise.resolve(eagerPersist).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }))
-      : { status: 'fulfilled', value: false };
-  if (preparedResult.status === 'rejected' || persistedResult.status === 'rejected') {
-    if (prepared) disposeAsset(prepared);
-    throw preparedResult.status === 'rejected' ? preparedResult.reason : persistedResult.reason;
-  }
+  const { prepared, kind, fingerprint, storageKey, sourcePath, persisted } = await prepareImportedAsset(file, {
+    id: provisionalId, assertCurrentProject, onStage,
+  });
   let posterBlob: Blob | null = null;
   try {
     posterBlob = await capturePoster(prepared);
@@ -858,7 +896,6 @@ async function ingestAsset(file: any, { silent = false, layerDefinition }: any =
   } catch (error) { posterBlob = null; }
   try { assertCurrentProject(); }
   catch (error) { disposeAsset(prepared); throw error; }
-  const persisted = persistedResult.value;
   const { id: _identityId, persisted: _identityPersisted, ...identity } = assetIdentity(
     provisionalId, file, kind, prepared, fingerprint, storageKey, sourcePath, persisted, layerDefinition,
   );
@@ -916,20 +953,27 @@ PM.assets = {
     result.asset.importResult = result;
     return result.asset;
   },
-  async importBatch(files: any, { concurrency, onProgress }: any = {}) {
+  async importBatch(files: any, { concurrency, onProgress, onStage, replaceAssetId }: any = {}) {
     const list = Array.from(files || []);
+    if (replaceAssetId != null && list.length !== 1) throw new Error('Choose one file or one image sequence to replace this media');
     const cores = Math.max(1, Number(window.navigator && window.navigator.hardwareConcurrency) || 4);
     const limit = concurrency == null ? Math.max(1, Math.min(3, Math.floor(cores / 2))) : concurrency;
     let completed = 0;
     const results = await PM.MediaImport.mapBounded(list, limit, async (file: any, index: any) => {
       let result: any;
-      try { result = await ingestAsset(file, { silent: true }); }
+      const options = { silent: true, onStage: onStage
+        ? (label: string) => onStage({ file, index, label, completed, total: list.length }) : undefined };
+      try {
+        result = replaceAssetId != null
+          ? { ...await PM.assets.replace(replaceAssetId, file, options), status: 'replaced' }
+          : await ingestAsset(file, options);
+      }
       catch (error) { result = { file, status: 'failed', error }; }
       completed++;
       if (onProgress) onProgress({ completed, total: list.length, index, file, result });
       return result;
     });
-    if (results.some((result: any) => result.status !== 'failed')) {
+    if (results.some((result: any) => result.status !== 'failed' && result.status !== 'replaced')) {
       PM.touch();
       checkpointAssetMetadata(PM.proj);
       PM.bus.emit('assets');
@@ -937,13 +981,14 @@ PM.assets = {
     }
     return results;
   },
-  async replace(id: any, file: any) {
+  async replace(id: any, file: any, { onStage }: any = {}) {
     const targetProject = PM.proj;
     const targetProjectId = targetProject?.id;
     const targetEpoch = assetEpoch;
     const currentMeta: any = targetProject?.assets?.[id];
     if (!currentMeta) throw new Error('This media item is no longer in the project');
-    const kind = assetKind(file);
+    const resolved = await resolveAssetKind(file);
+    const kind = resolved.kind;
     if (!kind) throw new Error('Unsupported media file');
     if (kind !== currentMeta.kind) {
       const article = currentMeta.kind === 'image' || currentMeta.kind === 'audio' ? 'an' : 'a';
@@ -956,18 +1001,11 @@ PM.assets = {
         throw error;
       }
     };
-    const sourcePath = window.powermove?.media?.sourcePath?.(file) || '';
-    const fingerprint = await PM.MediaImport.fingerprint(file);
-    assertCurrentProject();
-    const storageKey = PM.MediaImport.storageKeyFor(fingerprint);
     let prepared: any = null;
     try {
-      prepared = await prepareAsset({ id, name: file.name, kind, blob: file });
-      const persistBlob = prepared.persistBlob || file;
-      delete prepared.persistBlob;
-      const persisted = await PM.MediaStore.put(storageKey, persistBlob, {
-        storageKey, fingerprint, type: persistBlob.type || file.type,
-      });
+      const imported = await prepareImportedAsset(file, { id, assertCurrentProject, resolved, onStage });
+      prepared = imported.prepared;
+      const { fingerprint, storageKey, sourcePath, persisted } = imported;
       if (!persisted) throw new Error('Could not store the replacement media · the original file is unchanged');
       let nextPoster: Blob | null = null;
       try {
@@ -1033,7 +1071,7 @@ PM.assets = {
         throw new Error('Could not add the replacement to Undo history · the original file is unchanged');
       }
       if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
-      return { asset: prepared, previous: previousRuntime, meta: nextMeta, persisted: true };
+      return { asset: prepared, previous: previousRuntime, previousName: currentMeta.name, meta: nextMeta, persisted: true };
     } catch (error) {
       if (prepared && PM.assets.map.get(id) !== prepared) disposeAsset(prepared);
       throw error;

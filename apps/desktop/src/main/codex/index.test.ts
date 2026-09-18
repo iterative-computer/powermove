@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => {
     finish: toolFinish
   };
   const toolOpenSession = vi.fn(async () => toolSession);
+  const toolFinishRun = vi.fn(async () => ({ changed: true, revision: 2, historyId: 'native-history-1' }));
   const toolShutdown = vi.fn(async () => undefined);
   const readForkRebaseInfo = vi.fn(async ({ forkId }: { forkId: string }) => ({
     forkId, forkedFrom: 'timeline', base: '1.0.0', current: '2.0.0'
@@ -77,6 +78,7 @@ const mocks = vi.hoisted(() => {
     toolFinish,
     toolSession,
     toolOpenSession,
+    toolFinishRun,
     toolShutdown,
     readForkRebaseInfo,
     stageForkRebase,
@@ -107,6 +109,7 @@ vi.mock('./runner', () => ({
 vi.mock('../agent-tools/bridge', () => ({
   PowermoveAgentToolBridge: class {
     openSession = mocks.toolOpenSession;
+    finishRun = mocks.toolFinishRun;
     shutdown = mocks.toolShutdown;
   }
 }));
@@ -261,6 +264,31 @@ describe('registerCodexIpc', () => {
 
     mocks.resolve({ ok: true, text: '{}', access: 'editor' });
     await expect(pending).resolves.toEqual({ ok: true, text: '{}', access: 'editor' });
+  });
+
+  it('commits completed live edits before a steering fallback replaces the run', async () => {
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null,
+      userData: '/tmp/powermove-index-test',
+      extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles,
+      isTrustedSender: () => true,
+      codexBinaryPref: () => null,
+      openExternal: async () => undefined,
+      agentToolServerPath: '/test/mcp-server.mjs',
+      agentToolCommand: '/test/electron'
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    const owner = new Sender();
+    const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
+
+    await handlers.get(IPC.codexCancel)!({ sender: owner }, {
+      id: 'ipc-run-1234', preserveChanges: true
+    });
+
+    expect(mocks.toolFinishRun).toHaveBeenCalledExactlyOnceWith('ipc-run-1234', true);
+    expect(mocks.cancel).toHaveBeenCalledWith('ipc-run-1234');
+    mocks.resolve({ ok: false, error: 'cancelled', cancelled: true });
+    await pending;
   });
 
   it('gives editor App Server runs a live inspection tool session', async () => {

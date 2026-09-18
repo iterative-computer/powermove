@@ -9,10 +9,15 @@
  * The kernel keeps running with one fewer contributor and the Mods panel shows
  * why.
  */
-import type { Disposable, ExtensionModule } from './api';
+import type { Disposable, ExtensionModule, UIAPI } from './api';
 import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../shared/extensions';
 import { MANIFEST_LIMITS } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
+
+/* The loader speaks about an extension rather than as one, so it stamps the
+   attribution itself. `source` is host-side and not part of the extension's
+   own toast options. */
+type ToastArgs = Parameters<UIAPI['toast']>[1];
 import type { Kernel } from './registries';
 import { activeIds as storeActiveIds, patchRecord, recordFor, records as storeRecords, setActiveIds, setHealth, setRecords } from './extensions.svelte';
 
@@ -270,7 +275,10 @@ export function createLoader(options: LoaderOptions): Loader {
     console.error(`[kernel] extension "${id}" failed to activate`, error);
     kernel.disposeOwner(id);
     reportHealth(id, { state: 'activation-error', error: errorText(error) });
-    deps.ui.toast(`${nameOf(recordFor(id) ?? record, id)} failed to load`, { sticky: true });
+    const name = nameOf(recordFor(id) ?? record, id);
+    /* An extension that will not load is that extension's alert. The editor is
+       still whole, and the notice belongs to whoever broke. */
+    deps.ui.toast(`${name} failed to load`, { sticky: true, source: { id, name } } as ToastArgs);
   }
 
   async function deactivate(id: string): Promise<void> {
@@ -347,7 +355,7 @@ export function createLoader(options: LoaderOptions): Loader {
       patchRecord(id, { enabled: false, health });
       await deactivate(id);
       reportHealth(id, health);
-      deps.ui.toast(`${name} stopped working — check Mods`, { sticky: true });
+      deps.ui.toast(`${name} stopped working — check Mods`, { sticky: true, source: { id, name } } as ToastArgs);
     });
   }
 

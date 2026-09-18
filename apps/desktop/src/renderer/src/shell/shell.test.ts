@@ -11,7 +11,7 @@ import { installShell, unmountShell } from './install';
 
 function fakePM() {
   const listeners = new Map<string, Set<() => void>>();
-  const tabs = ['p1', 'p2'];
+  const open = ['p1', 'p2'];
   const projects: Record<string, any> = {
     p1: { id: 'p1', name: 'First', w: 1920, h: 1080, fps: 30, layers: [] },
     p2: { id: 'p2', name: 'Second', w: 1280, h: 720, fps: 24, layers: [] }
@@ -33,17 +33,16 @@ function fakePM() {
     proj: projects.p1,
     app: { dirty: false },
     Projects: {
-      tabs: vi.fn(() => [...tabs]),
+      openProjects: vi.fn(() => [...open]),
       list: vi.fn(() => Object.values(projects)),
       get: vi.fn((id: string) => projects[id] ?? null),
       put: vi.fn(),
-      markClosed: vi.fn((id: string) => {
-        const index = tabs.indexOf(id);
-        if (index >= 0) tabs.splice(index, 1);
-      }),
       rename: vi.fn()
     },
     ProjectsScreen: { isOpen: false, show: vi.fn(), hide: vi.fn() },
+    windows: { supported: true },
+    newWindow: vi.fn(),
+    menu: vi.fn(),
     PANELS: {},
     GL: { gl: {} },
     allProps: (layer: any) => Object.values(layer.p ?? {}).map((prop) => ({ prop })),
@@ -62,7 +61,7 @@ describe('Svelte shell', () => {
 
   beforeEach(() => {
     instances = [];
-    document.body.innerHTML = '<div id="app"><div id="titlebar"><div id="tabs"></div><div class="titlebar-drag"></div><div id="tb-right"></div></div><div id="body"></div><div id="status"></div></div>';
+    document.body.innerHTML = '<div id="app"><div id="titlebar"><div id="doc-strip"></div><div class="titlebar-drag"></div><div id="tb-right"></div></div><div id="body"></div><div id="status"></div></div>';
     window.history.replaceState({}, '', '/');
     perf.fps = 0;
     perf.ms = 0;
@@ -77,78 +76,91 @@ describe('Svelte shell', () => {
     document.body.replaceChildren();
   });
 
-  it('renders project tabs and moves the roving tab stop with arrows, Home, and End', () => {
-    const { PM } = fakePM();
+  it('does not reload document metadata on history-only changes', () => {
+    const { PM, bus } = fakePM();
     const target = document.getElementById('titlebar')!;
     target.replaceChildren();
     instances.push(mount(Titlebar, { target, props: { PM } }));
     flushSync();
-
-    const first = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
-    const second = target.querySelector<HTMLElement>('[data-tab-id="p2"]')!;
-    const home = target.querySelector<HTMLElement>('[data-tab-id="home"]')!;
-    const tablist = target.querySelector<HTMLElement>('[role="tablist"]')!;
-    expect(tablist.getAttribute('aria-label')).toBe('Open projects');
-    expect(tablist.querySelector('.project-new')).toBeNull();
-    expect(target.querySelector<HTMLButtonElement>('.project-doc-close')?.tabIndex).toBe(-1);
-    expect(first.tabIndex).toBe(0);
-    expect(second.tabIndex).toBe(-1);
-
-    flushSync(() => first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })));
-    expect(document.activeElement).toBe(second);
-    expect(second.tabIndex).toBe(0);
-    expect(first.tabIndex).toBe(-1);
-
-    flushSync(() => second.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })));
-    expect(document.activeElement).toBe(home);
-    flushSync(() => home.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })));
-    expect(document.activeElement).toBe(second);
+    PM.Projects.list.mockClear();
+    PM.Projects.openProjects.mockClear();
+    flushSync(() => { PM.app.dirty = true; bus.emit('history'); });
+    expect(target.querySelector('[data-project-id="p1"]')?.classList.contains('dirty')).toBe(true);
+    expect(PM.Projects.list).not.toHaveBeenCalled();
+    expect(PM.Projects.openProjects).not.toHaveBeenCalled();
   });
 
-  it('updates a saved tab from the same mutable file state after the file bridge appears', () => {
+  it('names only this window\'s document, whatever else is open', () => {
     const { PM } = fakePM();
     const target = document.getElementById('titlebar')!;
     target.replaceChildren();
     instances.push(mount(Titlebar, { target, props: { PM } }));
     flushSync();
 
-    const tab = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
+    const documents = target.querySelectorAll('.project-doc');
+    expect(documents).toHaveLength(1);
+    expect(documents[0]!.getAttribute('data-project-id')).toBe('p1');
+    expect(target.querySelector('.project-doc-label')?.textContent).toBe('First');
+    expect(target.querySelector('[role="tablist"]')).toBeNull();
+    expect(target.querySelector('.project-doc-close')).toBeNull();
+    expect(target.querySelector('.project-new')).toBeNull();
+    expect(documents[0]!.classList.contains('dirty')).toBe(false);
+  });
+
+  it('updates the window document from the same mutable file state after the file bridge appears', () => {
+    const { PM } = fakePM();
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    const tab = target.querySelector<HTMLElement>('[data-project-id="p1"]')!;
     expect(tab.title).toBe('First — Not saved to a file');
     const file = { path: '/tmp/First.pmv', dirty: false };
     PM.projectFileState = vi.fn(() => file);
-    flushSync(() => PM.bus.emit('projects:tabs'));
-    expect(target.querySelector('[data-tab-id="p1"]')).toBe(tab);
-    expect(tab.title).toBe('/tmp/First.pmv');
+    flushSync(() => PM.bus.emit('projects:open'));
+    expect(target.querySelector('[data-project-id="p1"]')).toBe(tab);
+    expect(tab.title).toBe('First — /tmp/First.pmv');
     expect(tab.classList.contains('dirty')).toBe(false);
 
     file.dirty = true;
-    flushSync(() => PM.bus.emit('projects:tabs'));
+    flushSync(() => PM.bus.emit('projects:open'));
     expect(tab.classList.contains('dirty')).toBe(true);
     expect(tab.getAttribute('aria-label')).toBe('First, unsaved');
 
     file.dirty = false;
     file.path = '/tmp/First-renamed.pmv';
-    flushSync(() => PM.bus.emit('projects:tabs'));
+    flushSync(() => PM.bus.emit('projects:open'));
     expect(tab.classList.contains('dirty')).toBe(false);
-    expect(tab.title).toBe('/tmp/First-renamed.pmv');
+    expect(tab.title).toBe('First — /tmp/First-renamed.pmv');
   });
 
-  it('opens the clicked project through the legacy project-open event', () => {
-    const { PM, projects } = fakePM();
+  it('goes back to the composition from Projects when the document is clicked', () => {
+    const { PM } = fakePM();
     PM.ProjectsScreen.isOpen = true;
-    const opened = vi.fn();
-    window.addEventListener('pm-open-project', opened, { once: true });
     const target = document.getElementById('titlebar')!;
     target.replaceChildren();
     instances.push(mount(Titlebar, { target, props: { PM } }));
     flushSync();
 
-    flushSync(() => target.querySelector<HTMLElement>('[data-tab-id="p2"]')!.click());
-
-    expect(PM.Projects.get).toHaveBeenCalledWith('p2');
+    flushSync(() => target.querySelector<HTMLElement>('[data-project-id="p1"]')!.click());
     expect(PM.ProjectsScreen.hide).toHaveBeenCalledOnce();
-    expect(opened).toHaveBeenCalledOnce();
-    expect((opened.mock.calls[0]![0] as CustomEvent).detail).toBe(projects.p2);
+  });
+
+  it('offers rename and a new window from the document context menu', () => {
+    const { PM } = fakePM();
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    flushSync(() => target.querySelector<HTMLElement>('[data-project-id="p1"]')!
+      .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true })));
+    const items = PM.menu.mock.calls[0]![1] as Array<any>;
+    expect(items.filter((item) => typeof item === 'object').map((item) => item.label))
+      .toEqual(['Rename project…', 'New Window']);
+    items.find((item: any) => item?.label === 'New Window').run();
+    expect(PM.newWindow).toHaveBeenCalledOnce();
   });
 
   it('opens the export dialog from the labelled titlebar button', () => {
@@ -209,7 +221,14 @@ describe('Svelte shell', () => {
       PM.bus.emit('project');
     });
     expect(status.textContent).toContain('UNSAVED');
-    expect(titlebar.querySelector('[data-tab-id="p1"]')?.getAttribute('aria-label')).toBe('First, unsaved');
+    expect(titlebar.querySelector('[data-project-id="p1"]')?.getAttribute('aria-label')).toBe('First, unsaved');
+
+    flushSync(() => {
+      PM.app.dirty = false;
+      PM.bus.emit('project');
+    });
+    expect(titlebar.querySelector('[data-project-id="p1"]')?.classList.contains('dirty')).toBe(false);
+    expect(titlebar.querySelector('[data-project-id="p1"]')?.getAttribute('aria-label')).toBe('First');
   });
 
   it('renames on Enter through Projects.rename and cancels on Escape', () => {
@@ -219,9 +238,9 @@ describe('Svelte shell', () => {
     instances.push(mount(Titlebar, { target, props: { PM } }));
     flushSync();
 
-    const first = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
-    flushSync(() => first.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
-    const committed = first.querySelector<HTMLInputElement>('.project-doc-input')!;
+    const document1 = target.querySelector<HTMLElement>('[data-project-id="p1"]')!;
+    flushSync(() => document1.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+    const committed = document1.querySelector<HTMLInputElement>('.project-doc-input')!;
     expect(committed).not.toBeNull();
     flushSync(() => {
       committed.value = 'Renamed project';
@@ -229,19 +248,18 @@ describe('Svelte shell', () => {
       committed.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
     expect(PM.Projects.rename).toHaveBeenCalledWith('p1', 'Renamed project');
-    expect(first.querySelector('.project-doc-input')).toBeNull();
+    expect(document1.querySelector('.project-doc-input')).toBeNull();
 
-    const second = target.querySelector<HTMLElement>('[data-tab-id="p2"]')!;
-    flushSync(() => second.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
-    const cancelled = second.querySelector<HTMLInputElement>('.project-doc-input')!;
+    flushSync(() => document1.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+    const cancelled = document1.querySelector<HTMLInputElement>('.project-doc-input')!;
     flushSync(() => {
       cancelled.value = 'Do not keep';
       cancelled.dispatchEvent(new Event('input', { bubbles: true }));
       cancelled.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     });
-    expect(PM.Projects.rename).not.toHaveBeenCalledWith('p2', expect.anything());
-    expect(second.querySelector('.project-doc-input')).toBeNull();
-    expect(second.querySelector('.project-doc-label')?.textContent).toBe('Second');
+    expect(PM.Projects.rename).not.toHaveBeenCalledWith('p1', 'Do not keep');
+    expect(document1.querySelector('.project-doc-input')).toBeNull();
+    expect(document1.querySelector('.project-doc-label')?.textContent).toBe('First');
   });
 
   it('opens project rename with F2 and keeps the draft when saving fails', () => {
@@ -250,9 +268,9 @@ describe('Svelte shell', () => {
     target.replaceChildren();
     instances.push(mount(Titlebar, { target, props: { PM } }));
     flushSync();
-    const tab = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
-    flushSync(() => tab.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true })));
-    const input = tab.querySelector<HTMLInputElement>('.project-doc-input')!;
+    const chip = target.querySelector<HTMLElement>('[data-project-id="p1"]')!;
+    flushSync(() => chip.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true })));
+    const input = chip.querySelector<HTMLInputElement>('.project-doc-input')!;
     expect(input).not.toBeNull();
     PM.Projects.rename.mockImplementation(() => { throw new Error('Disk full'); });
     flushSync(() => {
@@ -260,49 +278,7 @@ describe('Svelte shell', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
-    expect(tab.querySelector<HTMLInputElement>('.project-doc-input')?.value).toBe('Keep this draft');
-  });
-
-  it('middle-click closes a tab without hiding Projects or retaining its roving id', () => {
-    const { PM, projects } = fakePM();
-    PM.ProjectsScreen.isOpen = true;
-    const opened = vi.fn();
-    window.addEventListener('pm-open-project', opened, { once: true });
-    const target = document.getElementById('titlebar')!;
-    target.replaceChildren();
-    instances.push(mount(Titlebar, { target, props: { PM } }));
-    flushSync();
-
-    const first = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
-    first.focus();
-    flushSync(() => first.dispatchEvent(new MouseEvent('auxclick', { button: 1, bubbles: true })));
-
-    expect(PM.Projects.markClosed).toHaveBeenCalledWith('p1');
-    expect(PM.ProjectsScreen.hide).not.toHaveBeenCalled();
-    expect((opened.mock.calls[0]![0] as CustomEvent).detail).toBe(projects.p2);
-    expect(target.querySelector('[data-tab-id="p1"]')).toBeNull();
-    expect(target.querySelector<HTMLElement>('[data-tab-id="home"]')?.tabIndex).toBe(0);
-  });
-
-  it('closes the last project tab and returns to Projects without creating a replacement', async () => {
-    const { PM } = fakePM();
-    PM.confirmCloseProject = vi.fn(async () => true);
-    const opened = vi.fn();
-    window.addEventListener('pm-open-project', opened);
-    const target = document.getElementById('titlebar')!;
-    target.replaceChildren();
-    instances.push(mount(Titlebar, { target, props: { PM } }));
-    flushSync();
-
-    target.querySelector<HTMLButtonElement>('[data-tab-id="p2"] .project-doc-close')!.click();
-    await vi.waitFor(() => expect(target.querySelector('[data-tab-id="p2"]')).toBeNull());
-    target.querySelector<HTMLButtonElement>('[data-tab-id="p1"] .project-doc-close')!.click();
-    await vi.waitFor(() => expect(target.querySelectorAll('.project-doc')).toHaveLength(0));
-
-    expect(PM.confirmCloseProject).toHaveBeenCalledTimes(2);
-    expect(PM.ProjectsScreen.show).toHaveBeenCalledOnce();
-    expect(opened).not.toHaveBeenCalled();
-    expect(PM.Projects.put).toHaveBeenCalledWith(PM.proj);
+    expect(chip.querySelector<HTMLInputElement>('.project-doc-input')?.value).toBe('Keep this draft');
   });
 
   it('installs unconditionally when both shell mount targets exist', () => {

@@ -6,6 +6,7 @@ import type { AppUpdateState } from '../../../../shared/ipc';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
+const PAGE_SIZE = 60;
 const wasOpen = !!PM.ProjectsScreen?.isOpen;
 const previousSection = PM.ProjectsScreen?.section;
 PM.__disposeProjectsScreen?.();
@@ -14,6 +15,7 @@ const S: any = {
   section: PM.store.get('projectsSection', 'recents'),
   view: PM.store.get('projectsView', 'grid'),
   sort: PM.store.get('projectsSort', 'recent'),
+  page: 0, queryKey: '',
 };
 if (!['recents', 'projects', 'trash'].includes(S.section)) S.section = 'recents';
 
@@ -26,7 +28,8 @@ PM.ProjectsScreen = {
     paint(); S.el.classList.add('on'); PM.bus.emit('projects:screen');
   },
   hide() {
-    if (!PM.Projects?.tabs?.().length) return;
+    // Nothing to fall back to: this window has no composition behind the screen.
+    if (!PM.proj?.id || PM.isHomeProject?.()) return;
     if (S.el) S.el.classList.remove('on');
     PM.bus.emit('projects:screen');
   },
@@ -79,7 +82,9 @@ function ensure() {
     h('button.btn', { onclick: openProjectFromDisk }, 'Open Project…'),
     h('button.btn.pri', { onclick: () => { PM.ProjectsScreen.hide(); PM.newProject(); } }, PM.icon('plus'), 'New Project'));
   S.grid = h('div.ps-grid');
-  S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, h('div.ps-content', S.grid)));
+  S.pager = h('nav.ps-pagination', { 'aria-label': 'Project pages', hidden: true });
+  S.content = h('div.ps-content', S.grid, S.pager);
+  S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, S.content));
   document.body.appendChild(S.el);
   S.el.addEventListener('keydown', (e: any) => {
     e.stopPropagation();
@@ -114,38 +119,61 @@ function paint() {
   const live = [...PM.Projects.list()], trash = [...PM.Projects.trashList()];
   S.nav.textContent = '';
   S.nav.append(navButton('recents', 'Recents', 'clock', Math.min(12, live.length)),
-    navButton('projects', 'All Projects', 'project', live.length), navButton('trash', 'Trash', 'trash', trash.length));
+    navButton('projects', 'Projects', 'project', live.length),
+    navButton('trash', 'Trash', 'trash', trash.length));
   const labels: any = { recents: 'Recents', projects: 'Projects', trash: 'Trash' };
   let metas = S.section === 'trash' ? trash : live;
   if (S.sort === 'name') metas.sort((a: any, b: any) => String(a.name).localeCompare(String(b.name)));
   else metas.sort((a: any, b: any) => (b.at || b.deletedAt || 0) - (a.at || a.deletedAt || 0));
-  if (S.section === 'recents') metas = metas.slice(0, 12);
   const q = S.search.value.trim().toLowerCase();
   if (q) metas = metas.filter((m: any) => String(m.name || '').toLowerCase().includes(q));
+  else if (S.section === 'recents') metas = metas.slice(0, 12);
+  const queryKey = JSON.stringify([S.section, S.sort, S.view, q]);
+  if (queryKey !== S.queryKey) { S.page = 0; S.queryKey = queryKey; S.content.scrollTop = 0; }
+  const pages = Math.max(1, Math.ceil(metas.length / PAGE_SIZE));
+  S.page = Math.min(S.page, pages - 1);
   S.title.textContent = labels[S.section];
   S.count.textContent = `${metas.length} ${metas.length === 1 ? 'project' : 'projects'}`;
   S.el.querySelectorAll('.ps-view button').forEach((b: any) => b.classList.toggle('on', b.dataset.view === S.view));
   S.grid.className = 'ps-grid' + (S.view === 'list' ? ' list' : '') + (!metas.length ? ' empty' : '');
   S.grid.textContent = '';
-  metas.forEach((m: any) => S.grid.appendChild(card(m, S.section === 'trash')));
+  const openIds = new Set<string>(PM.Projects.openProjects());
+  metas.slice(S.page * PAGE_SIZE, (S.page + 1) * PAGE_SIZE)
+    .forEach((m: any) => S.grid.appendChild(card(m, S.section === 'trash', openIds)));
   if (!metas.length) S.grid.appendChild(emptyState(q));
+  S.pager.textContent = '';
+  S.pager.hidden = pages === 1;
+  if (pages > 1) {
+    const turnPage = (delta: number) => {
+      S.page += delta;
+      paint();
+      S.content.scrollTop = 0;
+      S.pager.querySelector('button:not(:disabled)')?.focus();
+    };
+    S.pager.append(
+      h('button.btn', { disabled: S.page === 0, onclick: () => turnPage(-1) }, 'Previous page'),
+      h('span', { 'aria-live': 'polite' }, `Page ${S.page + 1} of ${pages}`),
+      h('button.btn', { disabled: S.page === pages - 1, onclick: () => turnPage(1) }, 'Next page'));
+  }
 }
 
-function card(m: any, trashed: any) {
-  const open = !trashed && PM.Projects.tabs().includes(m.id);
-  const active = open && m.id === PM.proj.id;
-  const file = !trashed ? PM.projectFileState?.(m.id) : null;
-  const raw = PM.Projects.get(m.id);
+function card(m: any, trashed: any, openIds: Set<string>) {
+  const active = !trashed && m.id === PM.proj.id;
+  /* "Open" is now a window somewhere, which may be this one or another. */
+  const open = !trashed && (active || openIds.has(m.id));
+  const file = !trashed ? PM.projectFileState?.(m.id, { initialize: false }) : null;
+  // Dimensions belong in the index; cards must never clone whole compositions.
+  const raw = m;
   const inner = h('div.ps-thumb-inner');
   const dims = raw && raw.w && raw.h ? `${raw.w}×${raw.h}` : '';
-  if (m.thumb) inner.appendChild(h('img', { src: m.thumb, alt: '' }));
+  if (m.thumb) inner.appendChild(h('img', { src: m.thumb, alt: '', loading: 'lazy', decoding: 'async' }));
   /* An unrendered project shows its canvas size in the frame instead of a blank slab. */
   const thumb = h('div.ps-thumb', inner, !m.thumb && dims ? h('div.ps-thumb-empty', dims) : null);
   const more = h('button.ps-more', { title: 'Project actions', 'aria-label': 'Project actions' }, PM.icon('more'));
   const sub = projectSub(m, raw, trashed, file);
   /* Where the project is (Active, Open) is a quiet tag beside the name, so
      every card keeps one silhouette and the frame stays clean. */
-  const tag = active || open ? h('span.ps-tag', active ? 'Active' : 'Open') : null;
+  const tag = active || open ? h('span.ps-tag', active ? 'This window' : 'Open') : null;
   const meta = h('div.ps-meta', h('div.ps-meta-copy',
     h('div.ps-name-row', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'), tag),
     h('div.ps-sub', { title: sub.title }, sub.text)), more);
@@ -177,6 +205,9 @@ function projectMenu(anchor: any, m: any, trashed: any, x?: any, y?: any) {
     '-', { label: 'Delete Forever…', run: () => destroyDialog(m) },
   ] : [
     { label: 'Open', disabled: m.id === PM.proj.id, run: () => openLocalProject(m) },
+    ...(PM.windows?.supported
+      ? [{ label: 'Open in New Window', disabled: m.id === PM.proj.id, run: () => openInNewWindow(m) }]
+      : []),
     { label: 'Save', run: () => save(m, false) },
     { label: 'Save As…', run: () => save(m, true) },
     '-',
@@ -191,14 +222,21 @@ async function openProjectFromDisk() {
   await PM.openProject?.();
   if (PM.proj.id !== before) PM.ProjectsScreen.hide();
 }
+/* A click loads the project into this window. A document lives in one window at
+   a time, so one already open elsewhere brings its own window forward instead
+   and this window keeps what it had. */
 function openLocalProject(m: any) {
-  const project = PM.Projects.get(m.id);
-  if (!project) return PM.toast('Could not open this project because its local data is missing.');
-  if (project.id === PM.proj.id) {
-    PM.Projects.markOpen?.(project.id);
-    PM.bus.emit('projects:tabs');
-  } else window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: project }));
-  PM.ProjectsScreen.hide();
+  if (m.id === PM.proj.id) {
+    PM.ProjectsScreen.hide();
+    return;
+  }
+  void Promise.resolve(PM.openProjectHere?.(m.id) ?? false).then((opened: boolean) => {
+    if (opened) PM.ProjectsScreen.hide();
+    else paint();
+  });
+}
+function openInNewWindow(m: any) {
+  void Promise.resolve(PM.openProjectInNewWindow?.(m.id) ?? false).then(() => paint());
 }
 async function save(m: any, saveAs: boolean) {
   if (!PM.Projects.get(m.id)) return PM.toast('Could not save this project because its local data is missing.');
@@ -207,7 +245,7 @@ async function save(m: any, saveAs: boolean) {
 }
 function restore(m: any) {
   if (!PM.Projects.restore(m.id)) return PM.toast('Could not restore this project because its local data is missing.');
-  paint(); PM.bus.emit('projects:tabs'); PM.toast('Project restored');
+  paint(); PM.bus.emit('projects:open'); PM.toast('Project restored');
 }
 
 function emptyState(searching: any) {
@@ -226,7 +264,7 @@ function renameDialog(m: any) {
     { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => {
       try {
         if (!PM.Projects.rename(m.id, name.value)) throw new Error('Project data is missing');
-        paint(); PM.bus.emit('projects:tabs'); PM.bus.emit('project');
+        paint(); PM.bus.emit('projects:open'); PM.bus.emit('project');
       } catch (error: any) { PM.toast('Could not rename project: ' + (error.message || 'Unknown error')); }
     } },
   ] });
@@ -245,7 +283,7 @@ function duplicate(m: any) {
       delete copiedState.file;
       PM.Projects.putState(raw.id, copiedState);
     }
-    paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”');
+    paint(); PM.bus.emit('projects:open'); PM.toast('Duplicated “' + m.name + '”', 2200, { error: false });
   } catch (error: any) { PM.toast('Could not duplicate project: ' + (error.message || 'Unknown error')); }
 }
 function trashDialog(m: any): Promise<void> {
@@ -262,15 +300,18 @@ function trashDialog(m: any): Promise<void> {
       }
     }
     if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
-    if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
+    if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:open');
   });
 }
 function destroyDialog(m: any): Promise<void> {
   return PM.confirm({ message: 'Delete “' + m.name + '” forever?', detail: 'This permanently removes the local project. This cannot be undone.', confirmLabel: 'Delete Forever', destructive: true })
     .then((ok: boolean) => { if (ok) { PM.Projects.destroy(m.id); paint(); } });
 }
+/* Trashing the composition this window is editing leaves it with nothing, so it
+   falls back to another project that no other window holds, or a blank one. */
 function switchUnderlying() {
-  const id = PM.Projects.tabs()[0] || (PM.Projects.list()[0] || {}).id;
+  const taken = new Set(PM.Projects.openProjects().filter((id: string) => id !== PM.proj.id));
+  const id = PM.Projects.list().map((m: any) => m.id).find((candidate: string) => !taken.has(candidate));
   const p = id && PM.Projects.get(id);
   window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: p || PM.mkProject({ name: 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' }) }));
 }
@@ -281,11 +322,11 @@ function ago(t: any) {
   return new Date(t).toLocaleDateString();
 }
 
-const offTabs = PM.bus.on('projects:tabs', () => { if (PM.ProjectsScreen.isOpen) paint(); });
+const offOpen = PM.bus.on('projects:open', () => { if (PM.ProjectsScreen.isOpen) paint(); });
 PM.__disposeProjectsScreen = () => {
   S.offUpdates?.(); S.offUpdates = null;
   S.offAppUpdate?.(); S.offAppUpdate = null;
-  offTabs?.();
+  offOpen?.();
   S.el?.remove?.();
   S.el = null;
 };

@@ -145,7 +145,7 @@ function saveVersion(id: any, ids: any, options: any = {}) {
     if (s.versions.length > MAX_VERSIONS) s.versions.splice(0, s.versions.length - MAX_VERSIONS);
     persistLibraryProject(project);
   }
-  PM.toast(`Saved version ${s.versions.length} of "${s.name}"`);
+  PM.toast(`Saved version ${s.versions.length} of "${s.name}"`, 2200, { error: false });
   return s;
 }
 
@@ -203,7 +203,7 @@ function insertSection(id: any, options: any = {}) {
     for (let i: any = clones.length - 1; i >= 0; i--) PM.addLayer(clones[i], 0);
     PM.selectLayers(clones.map((c: any) => c.id));
   });
-  PM.toast('Inserted "' + s.name + '" · ' + clones.length + (clones.length === 1 ? ' layer' : ' layers'));
+  PM.toast('Inserted "' + s.name + '" · ' + clones.length + (clones.length === 1 ? ' layer' : ' layers'), 2200, { error: false });
   return clones;
 }
 
@@ -288,7 +288,7 @@ function applyLook(id: any, options: any = {}) {
     PM.GL.dropProgram(L._shaderKey);
     PM.selectLayers(L.id);
   });
-  PM.toast('Applied look "' + k.name + '"');
+  PM.toast('Applied look "' + k.name + '"', 2200, { error: false });
   return true;
 }
 

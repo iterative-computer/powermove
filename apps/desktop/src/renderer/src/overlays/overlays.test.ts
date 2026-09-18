@@ -19,6 +19,7 @@ function registry(): Record<string, any> {
     proj: { layers: [{ id: 'layer-1', name: 'Hero title' }] },
     ICONS: {
       undo: '<path/>', redo: '<path/>', x: '<path/>', trash: '<path/>', export: '<path/>',
+      warning: '<path/>', caution: '<path/>', chevD: '<path/>',
       project: '<path/>', layers: '<path/>', plus: '<path/>', hand: '<path/>', cursor: '<path/>',
       eye: '<path/>', music: '<path/>', film: '<path/>', image: '<path/>', panel: '<path/>',
       sparkle: '<path/>', note: '<path/>', missing: '<path/>'
@@ -471,7 +472,7 @@ describe('installSvelteOverlays', () => {
     expect(target.getAttribute('aria-live')).toBe('polite');
     expect((target as HTMLElement).style.zIndex).toBe('402');
     expect(document.querySelectorAll('.toast')).toHaveLength(1);
-    expect(document.querySelector('.toast [role="alert"]')).toBeTruthy();
+    expect(document.querySelector('.toast[role="alert"]')).toBeTruthy();
     expect(document.querySelector<HTMLElement>('.toast')?.classList.contains('leaving')).toBe(false);
     document.querySelector<HTMLButtonElement>('.toast[data-toast-error="true"] > button')?.click();
     flushSync();
@@ -498,6 +499,82 @@ describe('installSvelteOverlays', () => {
     flushSync();
     expect(document.querySelectorAll('.toast')).toHaveLength(1);
     document.querySelector<HTMLButtonElement>('.toast button')?.click();
+    flushSync();
+    expect(document.querySelector('.toast')).toBeNull();
+  });
+
+  it('lets a caller state the outcome instead of sniffing a user-chosen name', () => {
+    vi.useFakeTimers();
+    // A success that quotes the user's file name must not become a sticky error
+    // just because the file is called "error.png".
+    PM.toast('Imported error.png', 100, { error: false });
+    flushSync();
+
+    expect(document.querySelector('.toast[data-toast-error]')).toBeNull();
+    expect(document.querySelector('.toast [data-icon="plus"]')).toBeTruthy();
+    expect(document.querySelector('.toast button')).toBeNull();
+    vi.advanceTimersByTime(200);
+    flushSync();
+    expect(document.querySelector('.toast')).toBeNull();
+
+    // A genuine failure whose wording the sniffer does not recognize must still
+    // read as one.
+    PM.toast('The optimized video did not produce a playable frame', 100, { error: true });
+    flushSync();
+    expect(document.querySelector('.toast[data-toast-error="true"]')).toBeTruthy();
+    vi.advanceTimersByTime(10_000);
+    flushSync();
+    expect(document.querySelector('.toast[data-toast-error="true"]')).toBeTruthy();
+  });
+
+  it('tells an extension alert apart from an editor error', () => {
+    vi.useFakeTimers();
+    // The same wording from an extension is that extension's alert: the editor
+    // is intact, so it gets the alert marker and the extension's name, not the
+    // error card and its diagnostics.
+    PM.toast('Timeline update failed', 100, { source: { id: 'timeline', name: 'Timeline' } });
+    flushSync();
+
+    const alert = document.querySelector<HTMLElement>('.toast[data-toast-kind="alert"]')!;
+    expect(alert).toBeTruthy();
+    expect(alert.getAttribute('data-toast-error')).toBeNull();
+    expect(alert.textContent).toContain('Timeline');
+    expect(alert.textContent).toContain('Timeline update failed');
+    expect(alert.querySelector('[data-icon="caution"]')).toBeTruthy();
+    expect(alert.querySelector('.disclosure')).toBeNull();
+
+    // It stays put like an error, because it still needs reading.
+    vi.advanceTimersByTime(10_000);
+    flushSync();
+    expect(document.querySelector('.toast[data-toast-kind="alert"]')).toBeTruthy();
+    document.querySelector<HTMLButtonElement>('.toast[data-toast-kind="alert"] > button')?.click();
+    flushSync();
+    expect(document.querySelector('.toast')).toBeNull();
+
+    // The editor failing the same operation is still an error.
+    PM.toast('Timeline update failed', 100);
+    flushSync();
+    expect(document.querySelector('.toast[data-toast-error="true"]')).toBeTruthy();
+    expect(document.querySelector('.toast[data-toast-kind="error"]')).toBeTruthy();
+  });
+
+  it('keeps an extension notice out of the error family even when it states a failure', () => {
+    vi.useFakeTimers();
+    PM.toast('Could not import scene.obj', 100, { error: true, source: { id: 'layers-3d', name: '3D layers' } });
+    flushSync();
+
+    expect(document.querySelector('.toast[data-toast-error]')).toBeNull();
+    expect(document.querySelector('.toast[data-toast-kind="alert"]')?.textContent).toContain('3D layers');
+  });
+
+  it('lets a routine extension notice pass on its own', () => {
+    vi.useFakeTimers();
+    PM.toast('Copied 2 effects', 100, { source: { id: 'inspector', name: 'Inspector' } });
+    flushSync();
+
+    expect(document.querySelector('.toast[data-toast-kind="status"]')).toBeTruthy();
+    expect(document.querySelector('.toast')?.textContent).not.toContain('Inspector');
+    vi.advanceTimersByTime(200);
     flushSync();
     expect(document.querySelector('.toast')).toBeNull();
   });

@@ -13,10 +13,12 @@ function decodeBase64(value: string): string {
   return Buffer.from(value, 'base64').toString('utf8');
 }
 
-function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string> } = {}) {
+function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string>; windows?: boolean; storeSync?: boolean } = {}) {
+  const emitted: Array<[string, unknown]> = [];
   const PM: PMRegistry = {
     uid: vi.fn((prefix: string) => `${prefix}test`),
     toast: vi.fn(),
+    bus: { emit: (event: string, payload: unknown) => emitted.push([event, payload]), on: vi.fn() },
     CodexBridge: { progress: vi.fn(), trace: vi.fn(), resolve: vi.fn() },
     AgentArtifacts: { resolve: vi.fn() },
     WindowCapture: { resolve: vi.fn() },
@@ -41,7 +43,24 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
       delete: vi.fn(),
       flush: vi.fn(),
       onError: vi.fn(),
+      ...(options.storeSync
+        ? {
+          getSync: vi.fn((key: string) => key === 'projects' ? JSON.stringify([{ id: 'from-sibling' }]) : null),
+          onChanged: vi.fn(),
+        }
+        : {}),
     },
+    ...(options.windows
+      ? {
+        windows: {
+          initialProject: vi.fn(() => ({ projectId: 'P1', taken: ['P2'] })),
+          claimProject: vi.fn(async () => ({ claimed: false, focused: true })),
+          openProject: vi.fn(async () => ({ opened: true, focused: false })),
+          create: vi.fn(async () => undefined),
+          close: vi.fn(),
+        }
+      }
+      : {}),
     setTheme: vi.fn(),
     log: vi.fn(),
     onMenuCommand: vi.fn(),
@@ -65,7 +84,7 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
   vi.stubGlobal('window', shimWindow);
 
   install(PM);
-  return { PM, bridge, window: shimWindow, addEventListener };
+  return { PM, bridge, window: shimWindow, addEventListener, emitted };
 }
 
 afterEach(() => {
@@ -77,6 +96,51 @@ describe('legacy Electron shim install', () => {
     expect(loadShim({ serializedBridge: true }).PM.store.separateHistory).toBe(false);
     expect(loadShim({ nativeAsyncStore: true }).PM.store.separateHistory).toBe(false);
     expect(loadShim({ nativeAsyncStore: true, serializedBridge: true }).PM.store.separateHistory).toBe(true);
+  });
+
+  it('re-reads a key a sibling window wrote, and only when it is next asked for', () => {
+    const { PM, bridge, emitted } = loadShim({ storeSync: true });
+    const changed = bridge.store.onChanged.mock.calls[0]![0] as (keys: string[]) => void;
+
+    changed(['projects', 'openWindows']);
+    // Invalidation is lazy: a neighbour's write costs nothing until it is read.
+    expect(bridge.store.getSync).not.toHaveBeenCalled();
+    expect(emitted).toContainEqual(['store:external', ['projects', 'openWindows']]);
+
+    expect(PM.store.get('projects', null)).toEqual([{ id: 'from-sibling' }]);
+    expect(bridge.store.getSync).toHaveBeenCalledWith('projects');
+    // The refreshed value is cached again, so a second read is free.
+    expect(PM.store.get('projects', null)).toEqual([{ id: 'from-sibling' }]);
+    expect(bridge.store.getSync).toHaveBeenCalledTimes(1);
+
+    // A key the store no longer holds falls back rather than serving a stale copy.
+    expect(PM.store.get('openWindows', 'fallback')).toBe('fallback');
+
+    // This window's own write settles the key; nothing is re-read behind it.
+    bridge.store.getSync.mockClear();
+    changed(['projects']);
+    PM.store.set('projects', [{ id: 'mine' }]);
+    expect(PM.store.get('projects', null)).toEqual([{ id: 'mine' }]);
+    expect(bridge.store.getSync).not.toHaveBeenCalled();
+  });
+
+  it('routes window work through the native bridge and degrades without one', async () => {
+    const { PM, bridge } = loadShim({ windows: true });
+    expect(PM.windows.supported).toBe(true);
+    expect(PM.windows.initialProject()).toEqual({ projectId: 'P1', taken: ['P2'] });
+    // A refused claim is reported as-is: the caller keeps the document it had.
+    await expect(PM.windows.claimProject('P2')).resolves.toEqual({ claimed: false, focused: true });
+    await expect(PM.windows.openProject('P2')).resolves.toEqual({ opened: true, focused: false });
+    await expect(PM.windows.create()).resolves.toBe(true);
+    PM.windows.close();
+    expect(bridge.windows.close).toHaveBeenCalledOnce();
+
+    // Without the bridge a claim still succeeds, so a lone window keeps working.
+    const plain = loadShim();
+    expect(plain.PM.windows.supported).toBe(false);
+    expect(plain.PM.windows.initialProject()).toEqual({ projectId: null, taken: [] });
+    await expect(plain.PM.windows.claimProject('P1')).resolves.toEqual({ claimed: true, focused: false });
+    await expect(plain.PM.windows.create()).resolves.toBe(false);
   });
 
   it('flushes the newest asynchronous history snapshot before native storage', async () => {

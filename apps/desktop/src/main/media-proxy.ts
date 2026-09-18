@@ -8,20 +8,31 @@ import type { IpcMain, IpcMainInvokeEvent } from 'electron';
 
 import {
   IPC,
+  REQUEST_ID,
   type MediaProxyReadRequest,
   type MediaProxyRequest,
   type MediaProxyResult
 } from '../shared/ipc';
 import { IpcValidationError } from '../shared/guards';
 import { orderedSequence, validSequenceFps } from '../shared/image-sequence';
+import { MAX_SEQUENCE_FRAMES } from '../shared/animated-image';
+import { CONVERTED_VIDEO_EXTENSIONS, NATIVE_VIDEO_EXTENSIONS, mediaExtension, needsImageConversion } from '../shared/media-formats';
 
 const execFileAsync = promisify(execFile);
+const STILL_TIMEOUT_MS = 2 * 60 * 1000;
 const TOKEN = /^[a-f0-9]{32}$/;
-const VIDEO_EXTENSIONS = new Set(['.mov', '.mp4', '.m4v']);
+const VIDEO_EXTENSIONS = new Set([...NATIVE_VIDEO_EXTENSIONS, ...CONVERTED_VIDEO_EXTENSIONS].map(extension => `.${extension}`));
+/** A decoded animation frame stays well under this even at 4K. */
+const MAX_ANIMATION_FRAME_BYTES = 64 * 1024 * 1024;
+const MAX_STILL_IMAGE_BYTES = 512 * 1024 * 1024;
 const TRANSCODE_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_PROXY_CHUNK_BYTES = 4 * 1024 * 1024;
 
-type ProxyEntry = { directory: string; file: string; size: number; upload?: { total: number; received: number; queue: Promise<void>; finishing: boolean } };
+type ProxyEntry = {
+  directory: string; file: string; size: number;
+  upload?: { total: number; received: number; queue: Promise<void>; finishing: boolean };
+  animation?: { fps: number; repeats: number[]; written: number[]; queue: Promise<void>; finishing: boolean };
+};
 type Convert = (source: string, output: string) => Promise<void>;
 
 export function playbackConverter(binary: string): Convert {
@@ -56,18 +67,58 @@ export function previewConverter(binary: string): Convert {
   };
 }
 
-type ConvertSequence = (pattern: string, fps: number, count: number, output: string) => Promise<void>;
+type ConvertSequence = (pattern: string, fps: number, count: number, output: string, onProgress?: (completed: number) => void) => Promise<void>;
+
+/** FFmpeg can split its line-oriented progress records across stdout chunks. */
+export function sequenceProgressReader(count: number, onProgress?: (completed: number) => void) {
+  let pending = '', previous = -1;
+  return (chunk: string | Buffer) => {
+    pending += chunk.toString();
+    const lines = pending.split('\n');
+    pending = lines.pop()!;
+    for (const line of lines) {
+      const match = /^frame=\s*(\d+)\s*$/.exec(line);
+      if (!match) continue;
+      const completed = Math.min(count, Number(match[1]));
+      if (completed <= previous) continue;
+      previous = completed;
+      onProgress?.(completed);
+    }
+  };
+}
 
 export function imageSequenceConverter(binary: string): ConvertSequence {
-  return async (pattern, fps, count, output) => {
-    await execFileAsync(binary, [
+  return async (pattern, fps, count, output, onProgress) => {
+    const conversion = execFileAsync(binary, [
       '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-progress', 'pipe:1', '-nostats', '-stats_period', '1',
       '-framerate', String(fps), '-start_number', '0', '-i', pattern,
       '-frames:v', String(count), '-an', '-c:v', 'libvpx-vp9',
       '-pix_fmt', 'yuva420p', '-lossless', '1', '-b:v', '0',
       '-g', '15', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-threads', '4',
       '-f', 'webm', '-y', output,
     ], { timeout: TRANSCODE_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+    conversion.child.stdout?.on('data', sequenceProgressReader(count, onProgress));
+    await conversion;
+  };
+}
+
+type ConvertStill = (source: string, extension: string, output: string) => Promise<void>;
+
+/** Chromium decodes neither TIFF nor HEIF, so those stills become PNG on import. */
+export function stillImageConverter(binary: string): ConvertStill {
+  return async (source, extension, output) => {
+    if (extension === 'heic' || extension === 'heif') {
+      // FFmpeg 6 cannot open the HEIF variants Apple devices write; sips, which
+      // ships with macOS, reads them through the same decoder Preview uses.
+      await execFileAsync('/usr/bin/sips', ['-s', 'format', 'png', source, '--out', output],
+        { timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
+      return;
+    }
+    await execFileAsync(binary, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-i', source, '-frames:v', '1', '-update', '1', '-c:v', 'png', '-f', 'image2', '-y', output,
+    ], { timeout: STILL_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
   };
 }
 
@@ -78,7 +129,8 @@ export class MediaProxyService {
     private readonly tempRoot: string,
     private readonly convert: Convert,
     private readonly convertSequence?: ConvertSequence,
-    private readonly convertPreview?: Convert
+    private readonly convertPreview?: Convert,
+    private readonly convertStill?: ConvertStill
   ) {}
 
   async beginPreview(total: number): Promise<string> {
@@ -123,7 +175,7 @@ export class MediaProxyService {
 
   async create(sourcePath: string): Promise<{ token: string; size: number }> {
     if (!path.isAbsolute(sourcePath) || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) {
-      throw new Error('Only local MOV, MP4, and M4V video files can be optimized');
+      throw new Error('This video container is not one Powermove can convert');
     }
     const resolved = await realpath(sourcePath);
     const source = await stat(resolved);
@@ -146,7 +198,7 @@ export class MediaProxyService {
     }
   }
 
-  async createSequence(sourcePaths: string[], fps: number): Promise<{ token: string; size: number }> {
+  async createSequence(sourcePaths: string[], fps: number, onProgress?: (completed: number) => void): Promise<{ token: string; size: number }> {
     if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
     if (!Array.isArray(sourcePaths) || sourcePaths.length < 2
       || sourcePaths.some(source => typeof source !== 'string' || source.length > 16_384 || !path.isAbsolute(source))) {
@@ -166,9 +218,94 @@ export class MediaProxyService {
         if (!info.isFile() || info.size <= 0) throw new Error(`Could not read ${frames[index]!.name}`);
         await symlink(source, path.join(directory, `frame-${String(index).padStart(8, '0')}${extension}`));
       }
-      await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output);
+      await this.convertSequence(path.join(directory, `frame-%08d${extension}`), fps, frames.length, output, onProgress);
       const converted = await stat(output);
       if (!converted.isFile() || converted.size <= 0) throw new Error('The image sequence was empty');
+      const token = randomUUID().replaceAll('-', '');
+      this.#entries.set(token, { directory, file: output, size: converted.size });
+      return { token, size: converted.size };
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  /* Animated GIF, APNG and animated WebP have no FFmpeg demuxer worth trusting,
+     but Chromium decodes all of them. The renderer sends the frames it decoded,
+     each with the number of sequence slots it has to fill, and they encode
+     through exactly the same converter numbered image sequences already use. */
+  async beginAnimation(fps: number, repeats: number[]): Promise<string> {
+    if (!this.convertSequence) throw new Error('Animated image conversion is unavailable');
+    if (!validSequenceFps(fps)) throw new Error('Frame rate must be between 1 and 240 fps');
+    if (!Array.isArray(repeats) || repeats.length < 1
+      || repeats.some(count => !Number.isSafeInteger(count) || count < 1 || count > MAX_SEQUENCE_FRAMES)) {
+      throw new Error('Invalid animation frame timing');
+    }
+    const frames = repeats.reduce((total, count) => total + count, 0);
+    if (frames > MAX_SEQUENCE_FRAMES) throw new Error('This animation has too many frames to import');
+    const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-animation-'));
+    const token = randomUUID().replaceAll('-', '');
+    this.#entries.set(token, { directory, file: '', size: 0,
+      animation: { fps, repeats, written: repeats.map(() => 0), queue: Promise.resolve(), finishing: false } });
+    return token;
+  }
+
+  async writeAnimationFrame(token: string, index: number, offset: number, data: Uint8Array): Promise<void> {
+    const entry = this.#entries.get(token), animation = entry?.animation;
+    if (!animation || animation.finishing || !Number.isSafeInteger(index)
+      || index < 0 || index >= animation.repeats.length
+      || !(data instanceof Uint8Array) || data.length < 1 || data.length > MAX_PROXY_CHUNK_BYTES
+      || offset !== animation.written[index]
+      || offset + data.length > MAX_ANIMATION_FRAME_BYTES) throw new Error('Invalid animation frame chunk');
+    animation.written[index] = offset + data.length;
+    // Only generated names reach the filesystem; the decoded frame carries none.
+    const file = path.join(entry!.directory, `source-${String(index).padStart(8, '0')}.png`);
+    animation.queue = animation.queue.then(() => writeFile(file, data, { flag: offset ? 'a' : 'w', mode: 0o600 }));
+    await animation.queue;
+  }
+
+  async finishAnimation(token: string, onProgress?: (completed: number) => void): Promise<{ token: string; size: number }> {
+    const entry = this.#entries.get(token), animation = entry?.animation;
+    if (!entry || !animation || animation.finishing) throw new Error('Unknown animation import');
+    if (animation.written.some(bytes => bytes < 1)) throw new Error('The animation is missing frames');
+    animation.finishing = true;
+    try {
+      await animation.queue;
+      // Repeating a frame holds it on screen for its own delay at a fixed rate.
+      let slot = 0;
+      for (let index = 0; index < animation.repeats.length; index++) {
+        const source = path.join(entry.directory, `source-${String(index).padStart(8, '0')}.png`);
+        for (let repeat = 0; repeat < animation.repeats[index]!; repeat++) {
+          await symlink(source, path.join(entry.directory, `frame-${String(slot++).padStart(8, '0')}.png`));
+        }
+      }
+      const output = path.join(entry.directory, 'animation.webm');
+      await this.convertSequence!(path.join(entry.directory, 'frame-%08d.png'), animation.fps, slot, output, onProgress);
+      const converted = await stat(output);
+      if (!converted.isFile() || converted.size < 1) throw new Error('The converted animation was empty');
+      entry.file = output; entry.size = converted.size; delete entry.animation;
+      return { token, size: converted.size };
+    } catch (error) { await this.release(token); throw error; }
+  }
+
+  /** TIFF and HEIF stills become a PNG the renderer can decode like any other. */
+  async createStillImage(sourcePath: string): Promise<{ token: string; size: number }> {
+    if (!this.convertStill) throw new Error('Image conversion is unavailable');
+    const extension = mediaExtension(sourcePath);
+    if (!path.isAbsolute(sourcePath) || !needsImageConversion(extension)) {
+      throw new Error('This image format does not need converting');
+    }
+    const resolved = await realpath(sourcePath);
+    const source = await stat(resolved);
+    if (!source.isFile() || source.size <= 0) throw new Error('The selected image file is not readable');
+    if (source.size > MAX_STILL_IMAGE_BYTES) throw new Error('This image file is too large to convert');
+    const directory = await mkdtemp(path.join(this.tempRoot, 'powermove-image-'));
+    const output = path.join(directory, 'image.png');
+    try {
+      // The requested name picks the decoder, never wherever a symlink points.
+      await this.convertStill(resolved, extension, output);
+      const converted = await stat(output);
+      if (!converted.isFile() || converted.size <= 0) throw new Error('The converted image was empty');
       const token = randomUUID().replaceAll('-', '');
       this.#entries.set(token, { directory, file: output, size: converted.size });
       return { token, size: converted.size };
@@ -204,6 +341,7 @@ export class MediaProxyService {
     if (!entry) return;
     this.#entries.delete(token);
     await entry.upload?.queue.catch(() => undefined);
+    await entry.animation?.queue.catch(() => undefined);
     await rm(entry.directory, { recursive: true, force: true });
   }
 
@@ -213,17 +351,17 @@ export class MediaProxyService {
   }
 }
 
-function proxyRequest(value: unknown): MediaProxyRequest {
+function proxyRequest(value: unknown, channel: string = IPC.mediaProxyCreate): MediaProxyRequest {
   if (!value || typeof value !== 'object') {
-    throw new IpcValidationError(IPC.mediaProxyCreate, 'expected an object');
+    throw new IpcValidationError(channel, 'expected an object');
   }
   const sourcePath = (value as { sourcePath?: unknown }).sourcePath;
   const name = (value as { name?: unknown }).name;
   if (typeof sourcePath !== 'string' || sourcePath.length > 16_384 || !path.isAbsolute(sourcePath)) {
-    throw new IpcValidationError(IPC.mediaProxyCreate, 'invalid source path');
+    throw new IpcValidationError(channel, 'invalid source path');
   }
   if (typeof name !== 'string' || name.length < 1 || name.length > 1_000) {
-    throw new IpcValidationError(IPC.mediaProxyCreate, 'invalid file name');
+    throw new IpcValidationError(channel, 'invalid file name');
   }
   return { sourcePath, name };
 }
@@ -271,12 +409,69 @@ export function registerMediaProxyIpc(
   ipcMain.handle(IPC.mediaSequenceCreate, async (event, value: unknown): Promise<MediaProxyResult> => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaSequenceCreate, 'expected an object');
-    const { sourcePaths, fps } = value as { sourcePaths: string[]; fps: number };
+    const { sourcePaths, fps, requestId } = value as { sourcePaths: string[]; fps: number; requestId?: string };
+    if (requestId !== undefined && (typeof requestId !== 'string' || !REQUEST_ID.test(requestId))) {
+      throw new IpcValidationError(IPC.mediaSequenceCreate, 'invalid request id');
+    }
     try {
-      const proxy = await service.createSequence(sourcePaths, fps);
+      const proxy = await service.createSequence(sourcePaths, fps, completed => {
+        if (requestId && !event.sender.isDestroyed()) event.sender.send(IPC.mediaSequenceProgress, { requestId, completed });
+      });
       return { ok: true, ...proxy, type: 'video/webm' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Could not import image sequence' };
+    }
+  });
+
+  ipcMain.handle(IPC.mediaAnimationBegin, async (event, value: unknown) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaAnimationBegin, 'expected an object');
+    const { fps, repeats } = value as { fps: number; repeats: number[] };
+    return service.beginAnimation(fps, repeats);
+  });
+
+  ipcMain.handle(IPC.mediaAnimationFrame, async (event, value: unknown) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaAnimationFrame, 'expected an object');
+    const { token, index, offset, data } = value as { token: string; index: number; offset: number; data: Uint8Array };
+    if (typeof token !== 'string' || !TOKEN.test(token)) {
+      throw new IpcValidationError(IPC.mediaAnimationFrame, 'invalid animation token');
+    }
+    return service.writeAnimationFrame(token, index, offset, data);
+  });
+
+  ipcMain.handle(IPC.mediaAnimationFinish, async (event, value: unknown): Promise<MediaProxyResult> => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!value || typeof value !== 'object') throw new IpcValidationError(IPC.mediaAnimationFinish, 'expected an object');
+    const { token, requestId } = value as { token: string; requestId?: string };
+    if (typeof token !== 'string' || !TOKEN.test(token)) {
+      throw new IpcValidationError(IPC.mediaAnimationFinish, 'invalid animation token');
+    }
+    if (requestId !== undefined && (typeof requestId !== 'string' || !REQUEST_ID.test(requestId))) {
+      throw new IpcValidationError(IPC.mediaAnimationFinish, 'invalid request id');
+    }
+    try {
+      const proxy = await service.finishAnimation(token, completed => {
+        if (requestId && !event.sender.isDestroyed()) event.sender.send(IPC.mediaAnimationProgress, { requestId, completed });
+      });
+      return { ok: true, ...proxy, type: 'video/webm' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error && error.message
+        ? `Could not import this animation · ${error.message}`
+        : 'Could not import this animation' };
+    }
+  });
+
+  ipcMain.handle(IPC.mediaImageCreate, async (event, value: unknown): Promise<MediaProxyResult> => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const request = proxyRequest(value, IPC.mediaImageCreate);
+    try {
+      const proxy = await service.createStillImage(request.sourcePath);
+      return { ok: true, ...proxy, type: 'image/png' };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error && error.message
+        ? `Could not convert this image · ${error.message}`
+        : 'Could not convert this image' };
     }
   });
 

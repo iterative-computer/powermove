@@ -54,8 +54,16 @@ const commandItem = (
   click: () => send(command)
 });
 
+/** Window-level actions main performs itself: no renderer is involved in
+ *  making a window or in asking one to close. */
+export interface WindowActions {
+  newWindow(): void;
+  closeWindow(): void;
+}
+
 export function appMenuTemplate(
-  send: (command: MenuCommand) => void
+  send: (command: MenuCommand) => void,
+  windows?: WindowActions
 ): MenuItemConstructorOptions[] {
   const viewItems: MenuItemConstructorOptions[] = [
     commandItem('Zoom In', 'CommandOrControl+=', 'zoomIn', send, false),
@@ -94,6 +102,13 @@ export function appMenuTemplate(
       label: 'File',
       submenu: [
         commandItem('New Project', 'CommandOrControl+N', 'newProject', send),
+        {
+          id: 'newWindow',
+          label: 'New Window',
+          accelerator: 'CommandOrControl+Shift+N',
+          enabled: !!windows,
+          click: () => windows?.newWindow()
+        },
         commandItem('Open Project…', 'CommandOrControl+O', 'open', send),
         { role: 'close', accelerator: 'CommandOrControl+W' },
         { type: 'separator' },
@@ -103,7 +118,15 @@ export function appMenuTemplate(
         commandItem('Import Media…', 'CommandOrControl+I', 'import', send),
         { id: 'importSequence', label: 'Import Image Sequence…', click: () => send('importSequence') },
         { type: 'separator' },
-        commandItem('Export…', 'CommandOrControl+E', 'export', send)
+        commandItem('Export…', 'CommandOrControl+E', 'export', send),
+        { type: 'separator' },
+        {
+          id: 'closeWindow',
+          label: 'Close Window',
+          accelerator: 'CommandOrControl+W',
+          enabled: !!windows,
+          click: () => windows?.closeWindow()
+        }
       ]
     },
     {
@@ -134,6 +157,13 @@ export function appMenuTemplate(
         { role: 'minimize' },
         { role: 'zoom' },
         { type: 'separator' },
+        {
+          id: 'windowNewWindow',
+          label: 'New Window',
+          enabled: !!windows,
+          click: () => windows?.newWindow()
+        },
+        { type: 'separator' },
         { role: 'front' }
       ]
     }
@@ -141,13 +171,15 @@ export function appMenuTemplate(
 }
 
 export function buildAppMenu(
-  send: (command: MenuCommand) => void
+  send: (command: MenuCommand) => void,
+  windows?: WindowActions
 ): Menu {
-  return Menu.buildFromTemplate(appMenuTemplate(send));
+  return Menu.buildFromTemplate(appMenuTemplate(send, windows));
 }
 
 export function installMenu(
-  getWindow: () => BrowserWindowType | null
+  getWindow: () => BrowserWindowType | null,
+  windows?: WindowActions
 ): Menu {
   const menu = buildAppMenu((command) => {
     const focusedWindow = BrowserWindow.getFocusedWindow();
@@ -155,7 +187,7 @@ export function installMenu(
     const target = command.startsWith('context') ? (focusedWindow ?? editorWindow) : editorWindow;
     if (!target || target.isDestroyed() || target.webContents.isDestroyed()) return;
     target.webContents.send(IPC.menuCommand, command);
-  });
+  }, windows);
   Menu.setApplicationMenu(menu);
   return menu;
 }

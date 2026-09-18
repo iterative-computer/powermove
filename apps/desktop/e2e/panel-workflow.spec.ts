@@ -211,7 +211,7 @@ test('drawing a box notes every touched panel and sends that focus with the prom
   await expect(page.locator('.spatial-compose textarea')).toHaveAttribute('placeholder', 'Full composition');
   await expect(page.locator('.spatial-send')).toBeVisible();
   await page.locator('.spatial-compose textarea').fill('Keep this draft');
-  await page.waitForTimeout(360); // The deliberate arming interval protects a shake from becoming a selection.
+  await page.waitForTimeout(360); // The deliberate arming interval prevents activation from becoming a selection.
   await page.mouse.move(region.x, region.y); await page.mouse.down();
   await page.mouse.move(region.toX, region.toY, { steps: 12 });
   await expect(options).toBeHidden();

@@ -326,6 +326,8 @@ export function createKernel(): Kernel {
         const event = raw as KeyboardEvent;
         const chord = chordOfEvent(event);
         if (!chord) return;
+        // Enter belongs to a focused control before canvas editing shortcuts.
+        if (chord === 'enter' && (event.target as Element | null)?.closest?.('button,a[href],select,[role="button"],[role="radio"]')) return;
         /* A highlighted transcript or other selectable document surface owns
            Copy just like a focused input. Let Chromium place that text on the
            system clipboard instead of dispatching the editor's Copy Layers. */

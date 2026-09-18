@@ -51,33 +51,6 @@ function spatialModel(adapterFactory) {
   return spatialHarness(adapterFactory).assistant;
 }
 
-function sampledShake(step) {
-  const turns = [0, 60, 0, 60, 0];
-  const out = [];
-  for (let t = 0; t <= 480; t += step) {
-    const segment = Math.min(3, Math.floor(t / 120));
-    const f = (t - segment * 120) / 120;
-    out.push({ x: turns[segment] + (turns[segment + 1] - turns[segment]) * f, y: 80, t });
-  }
-  return out;
-}
-
-it('shake activation uses timestamp-normalized inertia and repeated reversals', () => {
-  const math = spatialModel().math;
-  const deliberate60hz = sampledShake(16);
-  const deliberate120hz = sampledShake(8);
-  const slow = sampledShake(80).map(point => ({ ...point, t: point.t * 4 }));
-  const sweep = Array.from({ length: 14 }, (_, i) => ({ x: i * 24, y: 80, t: i * 24 }));
-  const jitter = Array.from({ length: 80 }, (_, i) => ({ x: i % 2 ? 3 : 0, y: 80, t: i * 5 }));
-  assert.equal(math.shakeReady(deliberate60hz), true, 'short deliberate shake activates');
-  assert.equal(math.shakeReady(deliberate120hz), true, 'sampling rate does not change the outcome');
-  assert.equal(math.shakeReady(slow), false, 'slow navigation does not activate');
-  assert.equal(math.shakeReady(sweep), false, 'one fast sweep has no repeated reversals');
-  assert.equal(math.shakeReady(jitter), false, 'high-frequency tiny jitter lacks useful span');
-  assert.ok(math.motionProfile(deliberate60hz).reversals >= 3);
-  assert.equal(math.shakeIntent(deliberate60hz.slice(0, 14)), true, 'early intentional inertia prewarms Ripple');
-});
-
 it('selected regions become cropped visual attachments with workspace semantics', () => {
   const math = spatialModel().math;
   assert.deepEqual({ ...math.bitmapCropRect(
@@ -742,8 +715,6 @@ it('keeps thread history, drafts and Codex sessions separate; ignores late stopp
   PM.AgentUI.submit('First thread request');
   await vi.waitFor(() => assert.equal(jobs.length, 1));
   assert.equal(jobs[0].options.threadId, first);
-  PM.AgentUI.newThread();
-  assert.equal(PM.AgentUI.state.threadId, first, 'switching must not interrupt the active run');
   PM.AgentUI.stop();
   PM.AgentUI.setDraft('First draft');
   PM.AgentUI.newThread();
@@ -770,6 +741,65 @@ it('keeps thread history, drafts and Codex sessions separate; ignores late stopp
   assert.ok(jobs[2].prompt.includes('First thread request'));
   assert.ok(!jobs[2].prompt.includes('Second thread request'));
   jobs[2].resolve(emptyAgentResult);
+});
+
+it('keeps a thread working in the background while you prompt a new one', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.update({ flush: true });
+  const first = PM.AgentUI.state.threadId;
+  PM.AgentUI.submit('Long running first request');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+
+  // Leaving a working thread neither stops it nor drags its run along.
+  PM.AgentUI.newThread();
+  const second = PM.AgentUI.state.threadId;
+  assert.notEqual(second, first);
+  assert.equal(PM.AgentUI.state.phase, 'idle', 'the new thread opens clean');
+  assert.equal(PM.AgentUI.state.conversation.length, 0);
+  assert.equal(PM.AgentUI.state.backgroundRuns, 1);
+  assert.equal(PM.AgentUI.state.threads.find(thread => thread.id === first).busy, true);
+  assert.equal(PM.AgentUI.state.threadSwitchBlocked, false);
+
+  // Both agents run at once, each against its own thread.
+  PM.AgentUI.submit('Second request');
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  assert.equal(jobs[1].options.threadId, second);
+  assert.ok(!jobs[1].prompt.includes('Long running first request'));
+  // The view's vocabulary, not the legacy one: 'working' reaches the panel as 'running'.
+  assert.equal(PM.AgentUI.state.phase, 'running');
+  assert.equal(PM.AgentUI.state.threads.filter(thread => thread.busy).length, 2);
+
+  // The background run lands in its own thread without disturbing this one.
+  jobs[0].options.onProgress('background progress');
+  jobs[0].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.threads.find(t => t.id === first).busy, false));
+  assert.equal(PM.AgentUI.state.threadId, second, 'a finished background run never steals the view');
+  assert.equal(PM.AgentUI.state.backgroundRuns, 0);
+  assert.ok(!PM.AgentUI.state.conversation.some(m => m.text === 'Long running first request'));
+  assert.equal(PM.AgentUI.state.activity, '', 'background progress stays out of the visible thread');
+
+  jobs[1].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+
+  // Returning to the first thread shows the run that finished while away.
+  PM.AgentUI.switchThread(first);
+  assert.ok(PM.AgentUI.state.conversation.some(m => m.text === 'Long running first request'));
+  assert.ok(!PM.AgentUI.state.conversation.some(m => m.text === 'Second request'));
+});
+
+it('deleting a working thread stops its run', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.update({ flush: true });
+  const first = PM.AgentUI.state.threadId;
+  PM.AgentUI.submit('Doomed request');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  PM.AgentUI.newThread();
+  assert.equal(PM.AgentUI.state.backgroundRuns, 1);
+
+  PM.AgentUI.deleteThread(first);
+  assert.equal(PM.AgentUI.state.backgroundRuns, 0);
+  assert.ok(!PM.AgentUI.state.threads.some(thread => thread.id === first));
+  assert.equal(jobs[0].options.signal.aborted, true, 'the deleted thread’s run is aborted');
 });
 
 it('replaces the temporary first-request label with a generated thread title', async () => {
@@ -831,7 +861,7 @@ it('binds the first typed draft to the boot project before it can target an olde
 
   assert.equal(PM.AgentUI.state.threadId, 'existing-thread');
   assert.deepEqual(PM.AgentUI.state.threads, [{
-    id: 'existing-thread', title: 'Existing conversation', updatedAt: PM.AgentUI.state.threads[0].updatedAt,
+    id: 'existing-thread', title: 'Existing conversation', updatedAt: PM.AgentUI.state.threads[0].updatedAt, busy: false,
   }]);
   assert.equal(PM.AgentUI.state.composerDraft, 'A genuinely new request');
   assert.ok(PM.AgentUI.state.conversation.some(message => message.text === 'Earlier request'));

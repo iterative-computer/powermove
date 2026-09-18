@@ -4,6 +4,7 @@ import { AGENT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
 import { EXTENSION_ID } from '../../shared/extensions';
 import { AGENT_TESTING_INSTRUCTIONS } from '../../shared/agent-testing';
 import { EFFECT_AUTHORING_INSTRUCTIONS } from '../../shared/effect-authoring';
+import { AGENT_RESPONSE_STYLE } from '../../shared/response-style';
 
 export interface AgentInstructionsOptions {
   projectName: string;
@@ -48,6 +49,9 @@ Read powermove-api/samples/gradient-tint/README.md for new effects. Call validat
 The extension staging directory is ${extensionsDir}. When the user asks to change or add Powermove functionality, create or edit extensions only under that directory. Powermove validates staged changes, promotes them atomically, and keeps the previous version for recovery. Never edit the app bundle. Never edit the live user-extension folder or the source checkout. The folder name must equal the extension manifest id.
 
 Read powermove-api/EXTENSIONS.md and the included TypeScript types. Prefer the smallest extension shape in this order: contribute a new capability; override an existing contribution by id; fork a built-in with the \`fork_builtin_extension\` tool. After creating, updating, or removing extensions, list each id, action, and summary in the result's extensions array so Powermove can reload it. Return extensions: [] when none changed.
+
+${AGENT_RESPONSE_STYLE}
+summary is one to three sentences: what changed, plus anything unverified. Each note is one line for a fact that did not fit; never pad the array to look thorough.
 
 DELIVERABLES AND SIDE EFFECTS
 Put non-extension deliverables under: ${artifactPath}. Do not leave deliverables elsewhere. Files that should become editable media layers must be listed in artifacts with importToTimeline=true.

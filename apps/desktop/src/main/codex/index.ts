@@ -50,7 +50,11 @@ const FIX_PROMPT_FILES = 40;
 const FIX_PROMPT_FILE_BYTES = 64 * 1024;
 
 export interface CodexIpcContext {
+  /** The window a request belongs to — the focused editor, or the last one
+   *  focused when the request came from somewhere else. */
   getWindow(): BrowserWindow | null;
+  /** Account state is app-wide, so it reaches every open window, not just one. */
+  broadcast?(send: (webContents: BrowserWindow['webContents']) => void): void;
   userData: string;
   extensionsDir: string;
   apiPackFiles(): Promise<AgentApiPackFile[]>;
@@ -93,10 +97,11 @@ function requireRunRequest(value: unknown): CodexRunRequest {
 }
 
 function requireCancelRequest(value: unknown): CodexCancelRequest {
-  if (!isRecord(value) || !isString(value.id) || !REQUEST_ID.test(value.id)) {
+  if (!isRecord(value) || !isString(value.id) || !REQUEST_ID.test(value.id) ||
+      (value.preserveChanges !== undefined && typeof value.preserveChanges !== 'boolean')) {
     throw new IpcValidationError(IPC.codexCancel, 'invalid request id');
   }
-  return { id: value.id };
+  return { id: value.id, preserveChanges: value.preserveChanges === true };
 }
 
 function requireSteerRequest(value: unknown): CodexSteerRequest {
@@ -309,19 +314,19 @@ export function registerCodexIpc(
       })
     : null;
 
-  account.onChanged((status) => {
+  const announce = (channel: string, status: unknown): void => {
+    if (ctx.broadcast) {
+      ctx.broadcast((webContents) => webContents.send(channel, status));
+      return;
+    }
     const window = ctx.getWindow();
     if (window !== null && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-      window.webContents.send(IPC.chatgptChanged, status);
+      window.webContents.send(channel, status);
     }
-  });
+  };
 
-  claudeAccount.onChanged((status) => {
-    const window = ctx.getWindow();
-    if (window !== null && !window.isDestroyed() && !window.webContents.isDestroyed()) {
-      window.webContents.send(IPC.claudeChanged, status);
-    }
-  });
+  account.onChanged((status) => announce(IPC.chatgptChanged, status));
+  claudeAccount.onChanged((status) => announce(IPC.claudeChanged, status));
 
   ipcMain.handle(IPC.chatgptStatus, async (event) => {
     requireTrusted(event, ctx);
@@ -451,6 +456,10 @@ export function registerCodexIpc(
     requireTrusted(event, ctx);
     const req = requireCancelRequest(rawRequest);
     if (owners.get(req.id) === event.sender) {
+      // A provider without live steering is replaced by a continuation run.
+      // Seal its completed edits before interrupting it; an explicit Stop still
+      // takes the ordinary rollback path.
+      if (req.preserveChanges) await toolBridge?.finishRun(req.id, true).catch(() => undefined);
       compatible.cancel(req.id);
       await Promise.all([runner.cancel(req.id), appServerRunner.cancel(req.id), claudeRunner.cancel(req.id)]);
     }

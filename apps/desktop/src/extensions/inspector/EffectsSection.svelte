@@ -282,6 +282,12 @@
                     get={() => (doc.tick.values, doc.proj, api.anim.evP(layer, property, transport.time, parameter.k))}
                     edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)} label={parameter.label} />
                 </AnimatedRow>
+              {:else if parameter.type === 'toggle'}
+                <AnimatedRow {layer} path={`${effect.id}.${parameter.k}`} label={parameter.label}>
+                  <ToggleField {api} {mixed}
+                    get={() => (doc.tick.values, doc.proj, api.anim.evP(layer, property, transport.time, parameter.k))}
+                    edit={propertyEdit(`${effect.id}.${parameter.k}`, parameter.label)} label={parameter.label} />
+                </AnimatedRow>
               {:else}
                 <ChannelRow
 

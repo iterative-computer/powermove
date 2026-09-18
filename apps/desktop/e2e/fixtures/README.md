@@ -18,6 +18,10 @@ bun run test:e2e -- e2e/import-mp4.spec.ts e2e/import-prores.spec.ts
 
 `expectedColorAt` records the source-color contract. Lossy YUV codecs and matrix/range round trips can decode one or two integer levels away from the nominal RGB triplet; verification should use a small tolerance.
 
+## Animation contract
+
+`animated.gif`, `animated-apng.png` (APNG) and `animated.webp` are the same animation in three containers: 160×90, three 100 ms frames of solid red, green, then blue, each with an opaque left half and a fully transparent right half. Importing one produces a 0.3 s clip, so frame *n* is on screen at `t = n / 10`. Chromium decodes all three through `ImageDecoder`, which is how Powermove reads them; FFmpeg cannot demux animated WebP at all.
+
 ## Audio size exception
 
 A 2.0 s, 48 kHz, stereo, 16-bit PCM WAV is 384,000 bytes before its header and cannot satisfy the 300 KiB fixture limit. `tone.wav` is therefore 1.5 s (288,000 bytes of samples); all compressed audio fixtures remain 2.0 s. The manifest records the duration.

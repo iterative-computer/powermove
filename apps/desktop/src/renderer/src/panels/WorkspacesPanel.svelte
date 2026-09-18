@@ -96,6 +96,6 @@
       JSON
     </button>
   </div>
-  <div class="simple-panel-hint">Shake the pointer, then drag across a panel to redesign or add an interface section.</div>
+  <div class="simple-panel-hint">Ask the Powermove agent to redesign or add an interface section.</div>
   <span class="panel-sr-only" role="status">{status}</span>
 </div>
