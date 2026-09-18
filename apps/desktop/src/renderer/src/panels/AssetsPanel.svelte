@@ -284,19 +284,11 @@
       deleteAsset(asset);
       return;
     }
-    PM.modal({
-      title: `Delete “${asset.name}”?`,
-      width: 420,
-      body: PM.h(
-        'div',
-        { style: { color: 'var(--tx-2)', fontSize: '12.5px', lineHeight: 1.6 } },
-        `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`
-      ),
-      actions: [
-        { label: 'Cancel' },
-        { label: 'Delete', pri: true, run: () => deleteAsset(asset) }
-      ]
-    });
+    void PM.confirm({
+      message: `Delete “${asset.name}”?`,
+      detail: `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`,
+      confirmLabel: 'Delete'
+    }).then((ok: boolean) => { if (ok) deleteAsset(asset); });
     status = `Confirm deletion of ${asset.name}`;
   }
 

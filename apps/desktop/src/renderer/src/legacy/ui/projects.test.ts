@@ -151,14 +151,13 @@ describe('legacy projects screen install', () => {
     PM.Projects.tabs = () => ['P3'];
     const flushProject = vi.fn(async () => {});
     const trash = vi.fn(() => true);
-    const modal = vi.fn();
+    const confirm = vi.fn(async () => true);
     PM.flushProject = flushProject;
     PM.Projects.trash = trash;
-    PM.modal = modal;
+    PM.confirm = confirm;
     const activeMore = [...elements].reverse().find(el => el.attrs['aria-label'] === 'Project actions')!;
     activeMore.onclick({ stopPropagation() {} });
-    menuItems.find(item => item?.label === 'Move to Trash…').run();
-    await modal.mock.calls.at(-1)![0].actions[1].run();
+    await menuItems.find(item => item?.label === 'Move to Trash…').run();
     expect(flushProject).toHaveBeenCalledOnce();
     expect(trash).toHaveBeenCalledWith('P1');
     expect(flushProject.mock.invocationCallOrder[0]!).toBeLessThan(trash.mock.invocationCallOrder[0]!);
@@ -168,8 +167,7 @@ describe('legacy projects screen install', () => {
     flushProject.mockClear();
     dispatch.mockClear();
     activeMore.onclick({ stopPropagation() {} });
-    menuItems.find(item => item?.label === 'Move to Trash…').run();
-    await modal.mock.calls.at(-1)![0].actions[1].run();
+    await menuItems.find(item => item?.label === 'Move to Trash…').run();
     expect(trash).toHaveBeenCalledTimes(2);
     expect(flushProject).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pm-open-project' }));
@@ -177,16 +175,15 @@ describe('legacy projects screen install', () => {
     PM.proj = { id: 'P1' };
     PM.flushProject = vi.fn(async () => { throw new Error('Disk full'); });
     activeMore.onclick({ stopPropagation() {} });
-    menuItems.find(item => item?.label === 'Move to Trash…').run();
-    await modal.mock.calls.at(-1)![0].actions[1].run();
+    await menuItems.find(item => item?.label === 'Move to Trash…').run();
     expect(trash).toHaveBeenCalledTimes(2);
     expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pm-open-project' }));
 
     let finishFlush!: () => void;
     PM.flushProject = vi.fn(() => new Promise<void>(resolve => { finishFlush = resolve; }));
     activeMore.onclick({ stopPropagation() {} });
-    menuItems.find(item => item?.label === 'Move to Trash…').run();
-    const pendingTrash = modal.mock.calls.at(-1)![0].actions[1].run();
+    const pendingTrash = menuItems.find(item => item?.label === 'Move to Trash…').run();
+    await Promise.resolve();
     PM.proj = { id: 'P3' };
     finishFlush();
     await pendingTrash;

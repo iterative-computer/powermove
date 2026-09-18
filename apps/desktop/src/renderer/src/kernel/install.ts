@@ -66,6 +66,7 @@ import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
 import { perf, transport } from '../state/transport.svelte';
 import { EditGesture, type EditBinding } from '../controls/gesture';
+import { confirm as confirmPrompt } from '../overlays/confirm';
 import {
   CHANNELS_3D,
   inversePlane,
@@ -481,25 +482,7 @@ function makeUI(
   return {
     controls: boundControls(controlAPI),
     toast: (text, opts) => PM?.toast?.(text, opts?.sticky ? 8000 : 2200, opts ?? {}),
-    confirm: (title, body) =>
-      new Promise<boolean>((resolve) => {
-        let settled = false;
-        const done = (value: boolean): void => {
-          if (settled) return;
-          settled = true;
-          resolve(value);
-        };
-        const handle = PM?.modal?.({
-          title,
-          body: body ?? '',
-          actions: [
-            { label: 'Cancel', run: () => done(false) },
-            { label: 'OK', pri: true, run: () => done(true) }
-          ],
-          onClose: () => done(false)
-        });
-        if (!handle) done(false);
-      }),
+    confirm: (title, body) => confirmPrompt(PM, { message: title, ...(body ? { detail: body } : {}) }),
     menu: (anchor, items: MenuContribution[]) => {
       if (anchor && typeof (anchor as HTMLElement).getBoundingClientRect === 'function') PM?.menu?.(anchor, items);
       else {

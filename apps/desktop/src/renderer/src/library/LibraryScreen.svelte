@@ -290,21 +290,15 @@
 
   function confirmDeletePanel(event: MouseEvent, panel: any): void {
     event.stopPropagation();
-    PM.modal?.({
-      title: `Delete “${panel.title}” panel?`,
-      body: 'This removes the panel from the Library and every workspace. This cannot be undone.',
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Delete panel',
-          pri: true,
-          run: () => {
-            if (!deletePanel(PM, panel.id)) return false;
-            deletedIds = deletedPanelIds(PM);
-            version += 1;
-          }
-        }
-      ]
+    void PM.confirm?.({
+      message: `Delete “${panel.title}” panel?`,
+      detail: 'This removes the panel from the Library and every workspace. This cannot be undone.',
+      confirmLabel: 'Delete Panel',
+      destructive: true
+    })?.then((ok: boolean) => {
+      if (!ok || !deletePanel(PM, panel.id)) return;
+      deletedIds = deletedPanelIds(PM);
+      version += 1;
     });
   }
 
@@ -471,20 +465,14 @@
 
   function deleteWorkspace(event: MouseEvent, workspace: any): void {
     event.stopPropagation();
-    PM.modal?.({
-      title: `Delete “${workspace.name}” workspace?`,
-      body: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Delete workspace',
-          pri: true,
-          run: () => {
-            PM.WS?.remove?.(workspace.id);
-            version += 1;
-          }
-        }
-      ]
+    void PM.confirm?.({
+      message: `Delete “${workspace.name}” workspace?`,
+      detail: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
+      confirmLabel: 'Delete Workspace'
+    })?.then((ok: boolean) => {
+      if (!ok) return;
+      PM.WS?.remove?.(workspace.id);
+      version += 1;
     });
   }
 

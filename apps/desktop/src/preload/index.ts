@@ -69,6 +69,7 @@ const bridge: PowermoveBridge = {
     close: token => ipcRenderer.invoke(IPC.projectReadClose, token),
   },
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
+  confirm: (request) => ipcRenderer.invoke(IPC.dialogConfirm, request) as Promise<boolean>,
 
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),

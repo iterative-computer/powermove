@@ -26,6 +26,7 @@ import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
+import { registerConfirmIpc } from './native-confirm';
 import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
@@ -515,6 +516,7 @@ if (!hasSingleInstanceLock) {
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerContextMenuIpc(ipcMain, ctx);
+    registerConfirmIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
