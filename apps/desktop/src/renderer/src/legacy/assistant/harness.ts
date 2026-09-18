@@ -438,7 +438,9 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
         id: PM.proj.id, name: PM.proj.name, revision: currentRevision(),
         layerCount: PM.proj.layers.length, file: file?.path || null, unsaved: file?.dirty ?? null,
       },
-      openProjects: (PM.Projects?.tabs?.() || []).map((id: string) => ({
+      /* Every project with an editor window, across all of them. `active` marks
+         the one this window — the one the agent is running in — is editing. */
+      openProjects: (PM.Projects?.openProjects?.() || []).map((id: string) => ({
         id, name: projects.find((p: any) => p.id === id)?.name || null, active: id === PM.proj.id,
       })),
       extensions: extensionRecords().map(record => ({

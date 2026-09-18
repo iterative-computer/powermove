@@ -111,6 +111,14 @@ describe('preload bridge', () => {
     expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexSteer, steering);
   });
 
+  it('marks a steering replacement cancellation to preserve completed edits', async () => {
+    electronMocks.invoke.mockResolvedValue(undefined);
+    await bridge().codex.cancel('request-1234', true);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC.codexCancel, {
+      id: 'request-1234', preserveChanges: true
+    });
+  });
+
   it('requests a fork rebase prompt over its dedicated IPC channel', async () => {
     electronMocks.invoke.mockResolvedValue('rebase prompt');
     await expect(bridge().codex.rebasePrompt({ id: 'my-fork' })).resolves.toBe('rebase prompt');

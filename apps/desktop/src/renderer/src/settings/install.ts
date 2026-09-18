@@ -16,7 +16,7 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
       name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur
     }),
     applyComposition: (patch: CompositionPatch) => {
-      /* Renaming goes through the project registry so the tab strip and the
+      /* Renaming goes through the project registry so the titlebar and the
          stored project slot stay in step, exactly like an inline tab rename. */
       if (patch.name != null) { PM.Projects.rename(PM.proj.id, patch.name); return; }
       try {

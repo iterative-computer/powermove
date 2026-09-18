@@ -69,14 +69,14 @@ html{background:transparent}
     rgb(var(--paper-rgb) / .09) 64%,rgb(var(--paper-rgb) / .09) 84%,
     rgb(var(--paper-rgb) / .2) 100%);
 }
-:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
+:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){
   position:relative;isolation:isolate;
   background:var(--glass-fill);
   box-shadow:var(--glass-edge);
   -webkit-backdrop-filter:var(--glass-backdrop);backdrop-filter:var(--glass-backdrop);
 }
 /* The rim is a 1px ring whose brightness turns softly around the shape. */
-:is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
+:is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after{
   content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;pointer-events:none;
   padding:1px;background:var(--glass-rim);opacity:1;transition:none;
   -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
@@ -92,8 +92,8 @@ html{background:transparent}
   -webkit-mask-composite:xor;mask-composite:exclude;
 }
 @media (prefers-reduced-transparency: reduce){
-  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
-  :is(.glass,#tabs,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
+  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on){background:var(--ink-2);box-shadow:none;-webkit-backdrop-filter:none;backdrop-filter:none}
+  :is(.glass,#doc-strip,#toolbar-strip,.tb-export,.ps-navbtn.on,.sg-navbtn.on)::after,:is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on)::after{display:none}
   :is(.glass-hi,#toolbar .iconbtn.tl.on,#toolbar .iconbtn.tg.on,.project-doc.on,.project-strip-btn.on){background:var(--ctl-raised)!important;box-shadow:var(--ctl-edge)!important}
 }
 body{
@@ -138,15 +138,14 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
   padding:0 var(--pad) 0 var(--traffic-inset);
   position:relative;z-index:40;-webkit-app-region:drag;
 }
-#tabs{
+/* One project per window: the strip names this window's document rather than
+   listing every open one, so it needs no scrolling or overflow affordance. */
+#doc-strip{
   height:30px;width:max-content;display:flex;align-items:center;gap:2px;flex:0 1 auto;max-width:min(40%,calc(50% - var(--traffic-inset) - 110px));min-width:0;
   padding:2px;border:0;border-radius:var(--r-md);
   overflow:hidden;-webkit-app-region:no-drag;
 }
-.project-tablist{display:flex;align-items:center;gap:2px;min-width:0;flex:1}
-.project-tab-scroll{display:flex;align-items:center;gap:2px;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain}
-.project-tab-scroll::-webkit-scrollbar{display:none}
-#tabs :is([role="tab"],button):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+#doc-strip :is([role="button"],button):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .titlebar-drag{flex:1;align-self:stretch;min-width:24px}
 #titlebar button,#titlebar input,#titlebar a{-webkit-app-region:no-drag}
 .project-strip-btn{width:26px;height:26px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
@@ -155,21 +154,21 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .project-strip-btn.on{background:var(--ctl-raised);color:var(--tx);box-shadow:var(--ctl-edge)}
 .project-strip-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .project-doc{
-  position:relative;height:26px;min-width:88px;max-width:170px;flex:0 0 142px;
-  display:flex;align-items:center;gap:7px;padding:0 8px;border:0;border-radius:var(--r-sm);
+  position:relative;height:26px;min-width:88px;max-width:220px;flex:0 1 auto;
+  display:flex;align-items:center;gap:7px;padding:0 9px;border:0;border-radius:var(--r-sm);
   color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;transition:background var(--dur-1),color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease);
 }
+/* Unsaved work reads as a dot beside the name, the way a document window's
+   close button does on macOS. The tab strip used to carry this on its close
+   button, which no longer exists. */
+.project-doc.dirty::before{content:"";width:6px;height:6px;flex:none;border-radius:50%;background:var(--tx-4)}
+.project-doc.dirty.on::before{background:var(--accent)}
 .project-doc:hover{background:var(--ink-1);color:var(--tx-2)}
 .project-doc:active{transform:scale(.985)}
 .project-doc.on{background:var(--ctl-raised);color:var(--tx);box-shadow:var(--ctl-edge)}
 .project-doc-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis}
 .project-doc.renaming{transform:none;border-color:color-mix(in srgb,var(--accent) 58%,var(--line-2));box-shadow:0 0 0 2px var(--accent-dim)}
 .project-doc-input{min-width:0;width:100%;height:20px;color:var(--tx);font:inherit;line-height:20px;background:transparent}
-.project-doc.renaming .project-doc-close{display:none}
-.project-doc-close{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:var(--r-xs);color:var(--tx-4);opacity:0;transition:opacity var(--dur-1),background var(--dur-1),color var(--dur-1)}
-.project-doc:hover .project-doc-close,.project-doc.on .project-doc-close,.project-doc:focus-within .project-doc-close{opacity:1}
-.project-doc-close:hover{background:var(--bg-row-hi);color:var(--tx)}
-.project-doc-close svg{width:9px;height:9px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round}
 
 .tb-right{display:flex;align-items:center;gap:2px;-webkit-app-region:no-drag}
 /* Export is the app's terminal action, so it is the one labelled control in the
@@ -840,6 +839,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .agent-msg.assistant p{margin:0;white-space:pre-wrap}
 .agent-word{display:inline-block;white-space:pre-wrap;opacity:0;animation:agent-word-roll .55s linear(0,.1052,.3155,.532,.7112,.8414,.9265,.9765,1.0023,1.013,1.0151,1.0133,1.01,1.0068,1.0041,1.0022,1.001,1) forwards;animation-delay:var(--word-delay,0ms)}
 .agent-msg-files{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.agent-msg.user .agent-msg-files{justify-content:flex-end;align-self:flex-end;max-width:100%}
 /* activity timeline */
 .agent-timeline{display:flex;flex-direction:column;gap:12px;padding-left:2px}
 .agent-step{display:flex;align-items:center;gap:9px;color:var(--tx-3);font-size:var(--fs-md);font-weight:var(--fw-medium);line-height:1.4}
@@ -886,6 +886,10 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 .agent-msg.assistant.is-error p{color:var(--danger)}
 /* Live row — a slow left-to-right sweep of light across the text itself. */
 .shimmer-text{background:linear-gradient(100deg,var(--tx-3) 30%,var(--tx) 50%,var(--tx-3) 70%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shimmer-sweep 1.6s linear infinite}
+/* A selected live status must stop borrowing its ink from the clipped
+   background. WebKit otherwise keeps `color:transparent` for the selection,
+   leaving only an empty accent bar where the selected words should be. */
+.shimmer-text::selection{background:color-mix(in srgb,var(--accent) 28%,transparent);color:var(--tx);-webkit-text-fill-color:var(--tx)}
 @keyframes shimmer-sweep{to{background-position:-200% 0}}
 @media (prefers-reduced-motion:reduce){.panel-library-glider,.pglider{transition:none}}
 @media (prefers-reduced-motion:reduce){

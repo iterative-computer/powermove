@@ -18,7 +18,10 @@ import {
   type NativeEditAction,
   type PowermoveBridge,
   type StoreErrorEvent,
-  type StoreSnapshot
+  type StoreSnapshot,
+  type WindowClaimResult,
+  type WindowInitialProject,
+  type WindowOpenResult
 } from '../shared/ipc';
 import {
   EXT_IPC,
@@ -145,7 +148,7 @@ const bridge: PowermoveBridge = {
       }
     },
     steer: (req) => ipcRenderer.invoke(IPC.codexSteer, req),
-    cancel: (id) => ipcRenderer.invoke(IPC.codexCancel, { id }) as Promise<void>,
+    cancel: (id, preserveChanges = false) => ipcRenderer.invoke(IPC.codexCancel, { id, preserveChanges }) as Promise<void>,
     fixPrompt: (req) => ipcRenderer.invoke(IPC.codexFixPrompt, req) as Promise<string>,
     rebasePrompt: (req) => ipcRenderer.invoke(IPC.codexRebasePrompt, req) as Promise<string>,
     restoreChangeSet: (req) => ipcRenderer.invoke(IPC.codexRestoreChangeSet, req),
@@ -209,6 +212,25 @@ const bridge: PowermoveBridge = {
       const listener = (_event: IpcRendererEvent, error: StoreErrorEvent): void => cb(error);
       ipcRenderer.on(IPC.storeError, listener);
       return () => ipcRenderer.removeListener(IPC.storeError, listener);
+    },
+    getSync: (key) => ipcRenderer.sendSync(IPC.storeGetSync, { key }) as string | null,
+    onChanged: (cb) => {
+      const listener = (_event: IpcRendererEvent, payload: { keys?: string[] }): void =>
+        cb(Array.isArray(payload?.keys) ? payload.keys : []);
+      ipcRenderer.on(IPC.storeChanged, listener);
+      return () => ipcRenderer.removeListener(IPC.storeChanged, listener);
+    }
+  },
+
+  windows: {
+    initialProject: () => ipcRenderer.sendSync(IPC.windowInitialProject) as WindowInitialProject,
+    claimProject: (projectId) =>
+      ipcRenderer.invoke(IPC.windowClaimProject, { projectId }) as Promise<WindowClaimResult>,
+    openProject: (projectId) =>
+      ipcRenderer.invoke(IPC.windowOpenProject, { projectId }) as Promise<WindowOpenResult>,
+    create: () => ipcRenderer.invoke(IPC.windowNew) as Promise<void>,
+    close: () => {
+      ipcRenderer.send(IPC.windowClose);
     }
   },
 

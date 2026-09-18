@@ -99,6 +99,7 @@ describe('application menu', () => {
     const fileItems = submenu(topLevel(template, 'File'));
     expect(fileItems.map((item) => item.label ?? item.type)).toEqual([
       'New Project',
+      'New Window',
       'Open Project…',
       'Save Project',
       'Save Project As…',
@@ -106,20 +107,25 @@ describe('application menu', () => {
       'Import Media…',
       'Import Image Sequence…',
       'separator',
-      'Export…'
+      'Export…',
+      'separator',
+      'Close Window'
     ]);
     expect(fileItems.filter((item) => item.click).map((item) => item.accelerator)).toEqual([
       'CommandOrControl+N',
+      'CommandOrControl+Shift+N',
       'CommandOrControl+O',
       'CommandOrControl+S',
       'CommandOrControl+Shift+S',
       'CommandOrControl+I',
       undefined,
-      'CommandOrControl+E'
+      'CommandOrControl+E',
+      'CommandOrControl+W'
     ]);
     for (const item of fileItems) {
       item.click?.({} as never, undefined, {} as never);
     }
+    // Making and closing windows is main's own work, so neither reaches the renderer.
     expect(sent).toEqual(['newProject', 'open', 'save', 'saveAs', 'import', 'importSequence', 'export']);
 
     const editItems = submenu(topLevel(template, 'Edit'));
@@ -182,6 +188,27 @@ describe('application menu', () => {
     expect(topLevel(template, 'Window').role).toBe('window');
     expect(submenu(topLevel(template, 'Window')).filter((item) => item.role).map((item) => item.role))
       .toEqual(['minimize', 'zoom', 'front']);
+  });
+
+  it('makes and closes windows in main, and disables both without window actions', () => {
+    const windows = { newWindow: vi.fn(), closeWindow: vi.fn() };
+    const template = appMenuTemplate(() => undefined, windows);
+    const fileItems = submenu(topLevel(template, 'File'));
+    const windowItems = submenu(topLevel(template, 'Window'));
+
+    for (const item of [...fileItems, ...windowItems]) {
+      if (item.label === 'New Window' || item.label === 'Close Window') {
+        expect(item.enabled).toBe(true);
+        item.click?.({} as never, undefined, {} as never);
+      }
+    }
+    // Both File and Window carry New Window, the way macOS document apps do.
+    expect(windows.newWindow).toHaveBeenCalledTimes(2);
+    expect(windows.closeWindow).toHaveBeenCalledTimes(1);
+
+    const unwired = submenu(topLevel(appMenuTemplate(() => undefined), 'File'));
+    expect(unwired.find((item) => item.label === 'New Window')?.enabled).toBe(false);
+    expect(unwired.find((item) => item.label === 'Close Window')?.enabled).toBe(false);
   });
 
   it('includes development view tools only in unpackaged builds', () => {

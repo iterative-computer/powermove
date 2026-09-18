@@ -7,7 +7,12 @@
 
 export const STATIC_KEYS = [
   'projects',
+  // Projects that had an editor window at quit, in window-creation order.
+  // `openTabs` is the pre-window key it migrates from; it stays registered so
+  // an older profile can still be read once.
+  'openWindows',
   'openTabs',
+  'restoreWindows',
   'projectTrash',
   'takes',
   'workspaces',

@@ -185,7 +185,7 @@ Motion confirms cause and effect. It must never be the only indicator. Respect `
 The shell has four planes:
 
 ```text
-44px native titlebar: project tabs + tool strip + global actions
+44px native titlebar: this window's project + tool strip + global actions
 main body: left dock | fluid center dock | right dock
 22px status line
 overlays: menus < drag previews < scrim/modal

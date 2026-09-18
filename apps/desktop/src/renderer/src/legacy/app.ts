@@ -43,7 +43,7 @@ function fileState(id = PM.proj.id): FileState {
 }
 function fileUI() {
   APP.dirty = fileState().dirty;
-  PM.invalidate('status'); PM.bus.emit('projects:tabs');
+  PM.invalidate('status'); PM.bus.emit('projects:open');
   document.title = `${APP.dirty ? '• ' : ''}${PM.proj.name} — Powermove`;
 }
 async function refreshFileDirty(project = PM.proj): Promise<boolean> {
@@ -124,8 +124,22 @@ function emptyHomeProject() {
   homeProjectId = project.id;
   return project;
 }
+/** True while this window holds the unnamed placeholder composition rather than
+ *  a project of the user's, which is when Projects has nothing to go back to. */
+PM.isHomeProject = () => !!homeProjectId && PM.proj?.id === homeProjectId;
+/* A window is either told which document it is for — a restored session, or an
+   Open in New Window — or left to choose, skipping whatever the other windows
+   already have open. */
 function loadBootProject() {
-  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null) });
+  const request = PM.windows?.initialProject?.() ?? { projectId: null, taken: [] };
+  if (request.projectId) {
+    const requested = PM.Projects.get(request.projectId);
+    if (requested) {
+      try { return hydrate(requested); }
+      catch (e) { console.warn('Saved project could not be loaded', request.projectId, e); return emptyHomeProject(); }
+    }
+  }
+  const raw = PM.Projects.pickBoot({ legacy: PM.store.get('autosave', null), taken: request.taken });
   if (!raw) return emptyHomeProject();
   try { return hydrate(raw); }
   catch (e) { console.warn('Saved project could not be loaded', raw.id, e); return emptyHomeProject(); }
@@ -332,8 +346,7 @@ function hydrate(p: any) {
 /* Shared project boundary for import/open flows and deterministic regression tests. */
 PM.hydrateProject = hydrate;
 /* Boot hygiene: repeated launches can leave several untouched "Untitled" projects
-   in the registry and the tab strip. Keep at most one, and none at all while real
-   projects exist. */
+   in the registry. Keep at most one, and none at all while real projects exist. */
 (function pruneEmptyUntitled() {
   const metas = PM.Projects.list();
   const empties = metas.filter((m: any) => m.name === 'Untitled');
@@ -584,7 +597,7 @@ PM.autosave = () => {
       PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
       console.warn('Project save failed', error);
     }
-    PM.invalidate('status'); PM.bus.emit('projects:tabs');
+    PM.invalidate('status'); PM.bus.emit('projects:open');
   }, 550);
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
@@ -763,12 +776,28 @@ PM.newProject = () => {
   ] });
   window.setTimeout(() => form.focus(), 30);
 };
+/**
+ * Binds the document now on screen to this window. A refusal means a sibling
+ * window owns it and has been raised — reached through File ▸ Open on a file
+ * another window already has, or two windows restoring the same id — so this
+ * window steps back to an empty composition rather than running a second editor
+ * over one storage slot.
+ */
+function claimForThisWindow(id: string): void {
+  void Promise.resolve(PM.windows?.claimProject?.(id) ?? { claimed: true }).then((claim: any) => {
+    if (claim?.claimed || PM.proj?.id !== id) return;
+    PM.toast('That project is already open in another window.');
+    switchProject(emptyHomeProject());
+    PM.ProjectsScreen?.show?.('recents');
+  });
+}
+
 function switchProject(p: any, history?: any) {
   PM.pause();
   if (PM.proj?.id && PM.proj.id !== p.id) captureProjectSession();
   closeProjectTransients();
   PM.proj = hydrate(p);
-  PM.Projects.markOpen(PM.proj.id);
+  claimForThisWindow(PM.proj.id);
   const session = PM.Projects.getState(PM.proj.id);
   PM.Projects.putState(PM.proj.id, { ...session, lastActiveAt: Date.now() });
   const projectWorkspace = PM.store.get(`projectWorkspace.${PM.proj.id}`, null) || session?.workspace;
@@ -776,7 +805,7 @@ function switchProject(p: any, history?: any) {
   else PM.WS.activate('design', true);
   PM.hist.import?.(history ?? session?.history);
   persistCurrent(false);
-  PM.bus.emit('projects:tabs');
+  PM.bus.emit('projects:open');
   PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
   PM.sel.layers = (session?.selection?.layers || []).filter((id: any) => PM.L(id));
   PM.sel.keys = [...new Set((session?.selection?.keys || []).filter((key: any) => typeof key === 'string'))];
@@ -824,11 +853,7 @@ PM.confirmCloseProject = async (id: string) => {
   }
   return true;
 };
-PM.prepareToClose = async () => {
-  const ids = [...new Set([PM.proj.id, ...PM.Projects.tabs()])];
-  for (const id of ids) if (!await PM.confirmCloseProject(id)) return false;
-  return true;
-};
+PM.prepareToClose = async () => PM.confirmCloseProject(PM.proj.id);
 
 /* ── media import ──────────────────────────────────────── */
 PM.pickFiles = (sequence = false, { replaceAssetId }: { replaceAssetId?: string } = {}) => {
@@ -973,40 +998,64 @@ window.addEventListener('pm-open-project', (e: any) => {
   if (p && typeof p === 'object') switchProject(p);
 });
 
-/* A fresh profile has no document tabs or recovery entries. */
+/**
+ * Loads a project into this window, having first asked for it. A document lives
+ * in one window at a time, so a refusal means another window already has it and
+ * has been brought forward; this window keeps what it had.
+ */
+PM.openProjectHere = async (id: string) => {
+  if (!id || id === PM.proj.id) return true;
+  const project = PM.Projects.get(id);
+  if (!project) {
+    PM.toast('Could not open this project because its local data is missing.');
+    return false;
+  }
+  const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));
+  if (!claim.claimed) {
+    if (!claim.focused) PM.toast('That project is already open in another window.');
+    return false;
+  }
+  switchProject(project);
+  return true;
+};
+
+/** Opens a project in a window of its own, or raises the one that has it. */
+PM.openProjectInNewWindow = async (id: string) => {
+  if (!id) return false;
+  if (!PM.windows?.supported) return PM.openProjectHere(id);
+  if (id === PM.proj.id) {
+    // The document is already here; handing it to a new window would mean two
+    // editors on one slot, so this window keeps it.
+    PM.toast('This project is already open in this window.');
+    return false;
+  }
+  const result = await PM.windows.openProject(id);
+  if (!result.opened && !result.focused) PM.toast(result.error || 'The window could not be opened');
+  return result.opened || result.focused;
+};
+
+/** A new, empty window. Its own renderer decides what to show. */
+PM.newWindow = () => PM.windows?.create?.() ?? Promise.resolve(false);
+PM.closeWindow = () => PM.windows?.close?.();
+
+/* A fresh profile has no window state or recovery entries. */
 if (PM.proj.id === homeProjectId) {
   PM.ProjectsScreen.show('recents');
   document.title = 'Powermove';
 } else {
-  PM.Projects.markOpen(PM.proj.id);
   persistCurrent(false);
   void refreshFileDirty();
 }
-// Restore the chrome first, then check inactive files one at a time. Hundreds
-// of open tabs must not clone/hash all their documents in the first frame.
-const restoredTabs = PM.Projects.tabs().filter((id: string) => id !== PM.proj.id);
-let restoredIndex = 0;
-async function refreshNextRestoredTab() {
-  const id = restoredTabs[restoredIndex++];
-  if (!id) return;
-  try {
-    if (!fileStates.has(id) && PM.Projects.tabs().includes(id)) {
-      const project = PM.Projects.get(id);
-      if (project) {
-        await refreshFileDirty(project);
-        PM.bus.emit('projects:tabs');
-      }
-    }
-  } catch (error) { console.warn('Could not check restored project', error); }
-  scheduleRestoredTab();
-}
-function scheduleRestoredTab() {
-  if (restoredIndex >= restoredTabs.length) return;
-  if (window.requestIdleCallback) window.requestIdleCallback(() => { void refreshNextRestoredTab(); }, { timeout: 2000 });
-  else window.setTimeout(() => { void refreshNextRestoredTab(); }, 50);
-}
-scheduleRestoredTab();
-PM.bus.on('project:saved', () => PM.bus.emit('projects:tabs'));
+/* Two windows restored onto one document would autosave over each other, so the
+   window it was handed to confirms the claim the moment it boots. */
+if (PM.proj.id !== homeProjectId) claimForThisWindow(PM.proj.id);
+PM.bus.on('project:saved', () => PM.bus.emit('projects:open'));
+/* Another window renaming, trashing or saving a project changes what this one
+   should be showing. Repaint on the keys that describe the shared library. */
+PM.bus.on('store:external', (keys: string[]) => {
+  const shared = keys.some(key => key === 'projects' || key === 'projectTrash' || key === 'openWindows');
+  if (shared) PM.bus.emit('projects:open');
+});
 
 /* first full frame after persistent panels have measured */
 window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
@@ -1024,7 +1073,7 @@ window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
   window.requestAnimationFrame(() => {
     lastThumbAt = 0;
     persistCurrent(true);
-    PM.bus.emit('projects:tabs');
+    PM.bus.emit('projects:open');
   });
 }));
 }

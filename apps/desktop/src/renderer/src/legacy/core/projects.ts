@@ -5,8 +5,12 @@ export function install(PM: PMRegistry): void {
 const R: any = {
   KEY: 'projects',          // [{id, name, at, thumb}]
   SLOT: 'project.',         // + id → serialized project
-  STATE: 'projectState.',   // + id → tab-owned editor/workspace session
-  openKey: 'openTabs',      // [id] in stable visible tab order
+  STATE: 'projectState.',   // + id → window-owned editor/workspace session
+  /* [id] for every project that has an editor window, in window order. The
+     native side owns this list — only it can see every window — so nothing here
+     writes it; the renderer reads it to know what is already open elsewhere. */
+  openKey: 'openWindows',
+  legacyOpenKey: 'openTabs', // the pre-window profiles' key, read once
   trashKey: 'projectTrash', // metadata for recoverable deletion; slots stay intact
   JOURNAL: 'projectJournal.',
 };
@@ -120,7 +124,7 @@ R.rename = (id: any, name: any) => {
     if (file) file.dirty = true;
   }
   if (active) active.name = next;
-  PM.bus?.emit?.('projects:tabs');
+  PM.bus?.emit?.('projects:open');
   if (active) { PM.touch?.(); PM.bus?.emit?.('project'); }
   return next;
 };
@@ -168,16 +172,22 @@ R.putState = (id: any, state: any) => {
   PM.store.set(`projectMeta.${id}`, metadata);
 };
 
-/** Pure boot choice: content first (open tabs, then registry), then a named
-    empty project. Anonymous empty projects never win over the welcome demo. */
-R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, getState = R.getState, legacy = null }: any = {}) => {
-  const active = tabs.map((id: string) => ({ id, at: Number(getState(id, { history: false })?.lastActiveAt) || 0 }))
+/** Pure boot choice: content first (projects with a window, then registry),
+    then a named empty project. Anonymous empty projects never win over the
+    welcome demo. */
+R.pickBoot = ({ open = R.openProjects(), metas = R.list(), get = R.get, getState = R.getState, legacy = null, taken = [] }: any = {}) => {
+  /* A document belongs to one window at a time, so a second window must never
+     boot into something its sibling already has open. */
+  const spoken = new Set((Array.isArray(taken) ? taken : []).filter((id: any) => typeof id === 'string'));
+  const free = (id: any) => typeof id === 'string' && !spoken.has(id);
+  const active = open.filter(free)
+    .map((id: string) => ({ id, at: Number(getState(id, { history: false })?.lastActiveAt) || 0 }))
     .filter((item: any) => item.at > 0).sort((a: any, b: any) => b.at - a.at);
   for (const item of active) {
     const project = R.unwrap(get(item.id));
     if (project && Array.isArray(project.layers)) return project;
   }
-  const ids = [...new Set([...tabs, ...metas.map((m: any) => m.id)])];
+  const ids = [...new Set([...open, ...metas.map((m: any) => m.id)])].filter(free);
   let namedEmpty = null;
   for (const id of ids) {
     const p = R.unwrap(get(id));
@@ -186,7 +196,7 @@ R.pickBoot = ({ tabs = R.tabs(), metas = R.list(), get = R.get, getState = R.get
     if (!namedEmpty && p.name && p.name !== 'Untitled') namedEmpty = p;
   }
   const old = R.unwrap(legacy && legacy.proj ? legacy.proj : legacy);
-  if (old && Array.isArray(old.layers) && old.layers.length && !metas.some((m: any) => m.id === old.id)) return old;
+  if (old && Array.isArray(old.layers) && old.layers.length && free(old.id) && !metas.some((m: any) => m.id === old.id)) return old;
   return namedEmpty;
 };
 
@@ -209,7 +219,6 @@ R.trash = (id: any) => {
   const trash = R.trashList().filter((x: any) => x.id !== id);
   trash.unshift({ ...meta, deletedAt: Date.now() });
   PM.store.set(R.trashKey, trash);
-  R.markClosed(id);
   return true;
 };
 R.restore = (id: any) => {
@@ -230,22 +239,15 @@ R.destroy = (id: any) => {
   try { PM.store.del(R.JOURNAL + id); } catch (e) { }
 };
 
-/* ── open-tab bookkeeping ──────────────────────────────── */
-R.tabs = () => {
-  const t = PM.store.get(R.openKey, []);
-  if (!Array.isArray(t)) return [];
+/* ── open windows ──────────────────────────────────────── */
+/** Projects that currently have an editor window, this one included. */
+R.openProjects = () => {
+  const stored = PM.store.get(R.openKey, null);
+  const list = Array.isArray(stored) ? stored : PM.store.get(R.legacyOpenKey, []);
+  if (!Array.isArray(list)) return [];
   const known = new Set(R.list().map((m: any) => m?.id));
-  return [...new Set(t)].filter(id => typeof id === 'string' && known.has(id));
+  return [...new Set(list)].filter(id => typeof id === 'string' && known.has(id));
 };
-R.markOpen = (id: any) => {
-  const t = R.tabs();
-  /* Selecting an already-open project must never reshuffle the visible strip.
-     A genuinely new open is the only implicit ordering change, and it appends
-     where the user can predictably find it. */
-  if (!t.includes(id)) t.push(id);
-  PM.store.set(R.openKey, t);
-};
-R.markClosed = (id: any) => PM.store.set(R.openKey, R.tabs().filter((x: any) => x !== id));
 
 PM.Projects = R;
 PM.bus?.on?.('history:project-patch', (entry: any) => {

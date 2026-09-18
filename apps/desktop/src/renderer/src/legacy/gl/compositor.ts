@@ -809,7 +809,12 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
       textureKey = 'r:' + raster.key;
     }
     const videoVersion = L.type === 'video' ? (el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
-    const tex = texFor(textureKey, textureSource, { version: videoVersion });
+    // A seek can be pending while the previous decoded frame is still usable.
+    // Gate on available pixels, not seeking, or seek-driven playback freezes.
+    const waiting = L.type === 'video' && el === liveVideo
+      && (el.readyState < 2 || !el.videoWidth || !el.videoHeight);
+    if (waiting && !GL.texes.get(textureKey)?.bytes) return null;
+    const tex = texFor(textureKey, textureSource, { version: waiting ? GL.texes.get(textureKey).v : videoVersion });
     let uv = [0, 0, 1, 1];
     if (d.fit === 'cover' || d.fit === 'contain') {
       const ar = sw / sh, br = bw / bh;

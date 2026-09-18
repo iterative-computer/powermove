@@ -22,8 +22,8 @@ export function positionMenuAtCursor(
   const left = clamp(x, inset, viewportWidth - width - inset);
   const belowTop = y + gap;
   const aboveTop = y - gap - height;
-  const fitsBelow = belowTop + height <= viewportHeight - inset;
-  const fitsAbove = aboveTop >= inset;
+  const fitsBelow = belowTop >= inset && belowTop + height <= viewportHeight - inset;
+  const fitsAbove = aboveTop >= inset && aboveTop + height <= viewportHeight - inset;
   if (fitsBelow) return { left, top: belowTop, side: 'below' };
   if (fitsAbove) return { left, top: aboveTop, side: 'above' };
 

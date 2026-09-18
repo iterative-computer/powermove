@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { activatePromptAttachment, readPromptAttachment, requestFileAttachments } from './attachments';
+import { activatePromptAttachment, mountPromptAttachments, readPromptAttachment, requestFileAttachments } from './attachments';
 
 describe('prompt attachments', () => {
   it('keeps arbitrary binary files byte for byte', async () => {
@@ -44,4 +44,55 @@ describe('prompt attachments', () => {
     await activatePromptAttachment({ modal, toast }, { name: 'old.txt' });
     expect(toast).toHaveBeenCalledWith('The original location for old.txt is no longer available.');
   });
+});
+
+it.each(['constructor', '__proto__'])('reads unknown file extension %s as binary', async extension => {
+  const item = await readPromptAttachment(new File(['data'], `reference.${extension}`), 'one');
+  expect(item.type).toBe('application/octet-stream');
+  expect(Buffer.from(item.dataBase64!, 'base64').toString()).toBe('data');
+});
+
+it.each([false, true])('keeps the composer locked until overlapping attachment reads finish (initially locked: %s)', async initiallyLocked => {
+  const pending: Array<() => void> = [];
+  const card = document.createElement('div');
+  card.innerHTML = '<div class="spatial-input-row"><textarea></textarea><button class="spatial-send"></button></div>';
+  const PM = { icon: () => document.createElement('span'), toast: vi.fn(), AgentUI: {
+    addAttachments: vi.fn(() => new Promise<void>(resolve => pending.push(resolve)))
+  } };
+  const textarea = card.querySelector('textarea')!;
+  textarea.readOnly = initiallyLocked;
+  card.querySelector<HTMLButtonElement>('.spatial-send')!.disabled = initiallyLocked;
+  const mounted = mountPromptAttachments(PM, card, () => []);
+  for (let i = 0; i < 2; i++) {
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: { files: [new File(['x'], 'a.txt')] } });
+    textarea.dispatchEvent(event);
+  }
+  expect(PM.AgentUI.addAttachments).toHaveBeenCalledTimes(2);
+  pending[0]!();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(textarea.readOnly).toBe(true);
+  expect(card.querySelector<HTMLButtonElement>('.spatial-send')!.disabled).toBe(true);
+  pending[1]!();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(textarea.readOnly).toBe(initiallyLocked);
+  expect(card.querySelector<HTMLButtonElement>('.spatial-send')!.disabled).toBe(initiallyLocked);
+  mounted.dispose();
+});
+
+it('restores composer controls and reports a failed attachment read', async () => {
+  const card = document.createElement('div');
+  card.innerHTML = '<div class="spatial-input-row"><textarea></textarea><button class="spatial-send"></button></div>';
+  const PM = { icon: () => document.createElement('span'), toast: vi.fn(), AgentUI: {
+    addAttachments: vi.fn().mockRejectedValue(new Error('File unavailable'))
+  } };
+  const mounted = mountPromptAttachments(PM, card, () => []);
+  const event = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', { value: { files: [new File(['x'], 'a.txt')] } });
+  card.querySelector('textarea')!.dispatchEvent(event);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(PM.toast).toHaveBeenCalledWith('File unavailable', 6000);
+  expect(card.querySelector('textarea')!.readOnly).toBe(false);
+  expect(card.querySelector<HTMLButtonElement>('.spatial-send')!.disabled).toBe(false);
+  mounted.dispose();
 });

@@ -218,6 +218,41 @@ describe('legacy engine install', () => {
     expect(media.el.playCalls).toBe(1);
   });
 
+  it('keeps the outgoing decoder active until its last displayed frame ends', async () => {
+    const media = delayedVideo();
+    const layer = { id: 'outgoing', type: 'video', from: 0, dur: .05, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, runFrame } = engine({ layer, media });
+    PM.play(); runFrame(16); media.finishPlay(); await Promise.resolve();
+    runFrame(51); // The displayed frame is still 1/30, inside this clip.
+    expect(media.el.paused).toBe(false);
+    runFrame(70);
+    expect(media.el.paused).toBe(true);
+  });
+
+  it('prepares an upcoming trimmed clip without playing it early', () => {
+    const media = delayedVideo();
+    const layer = { id: 'incoming', type: 'video', from: .3, dur: 2, d: { asset: 'asset-1', speed: 1, trim: 1 } };
+    const { PM, runFrame } = engine({ layer, media });
+    PM.play(); runFrame(16);
+    expect(media.el.currentTime).toBe(1);
+    expect(media.el.playCalls).toBe(0);
+  });
+
+  it('presents a decoded retimed frame before requesting the next seek', () => {
+    const media = delayedVideo();
+    const layer = { id: 'retimed', type: 'video', from: 0, dur: 2, d: { asset: 'asset-1', speed: 1, trim: 0, timeRemap: true } };
+    const { PM, runFrame } = engine({ layer, media });
+    PM.GL.gl = {};
+    const presented: number[] = [];
+    PM.GL.render = () => presented.push(media.el.currentTime);
+    PM.play(); runFrame(100);
+    expect(presented).toEqual([0]);
+    expect(media.el.currentTime).toBeCloseTo(.1);
+    runFrame(200);
+    expect(presented).toEqual([0, .1]);
+    expect(media.el.currentTime).toBeCloseTo(.2);
+  });
+
   it('lets pause win when a video start finishes late', async () => {
     const media = delayedVideo();
     const layer = { id: 'video-1', type: 'video', on: true, from: 0, dur: 10, d: { asset: 'asset-1', speed: 1, trim: 0 } };

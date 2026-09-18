@@ -16,7 +16,13 @@ import {
 import { mkdir, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
-import { IPC } from '../shared/ipc';
+import {
+  IPC,
+  PROJECT_ID,
+  type WindowClaimResult,
+  type WindowInitialProject,
+  type WindowOpenResult
+} from '../shared/ipc';
 import { registerCaptureIpc } from './capture';
 import { registerCodexIpc } from './codex';
 import { recoverAllInterruptedExtensionTransactions } from './codex/change-history';
@@ -33,9 +39,10 @@ import { registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './security-policy';
-import { createStore, installQuitFlush, registerStoreIpc } from './storage';
+import { createStore, installQuitFlush, registerStoreIpc, type Store } from './storage';
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
+import { EditorWindows, restorableProjects } from './windows';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
 
 const APP_ORIGIN = 'app://powermove';
@@ -104,7 +111,16 @@ if (userDataOverride && path.isAbsolute(userDataOverride)) {
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
-let mainWindow: BrowserWindow | null = null;
+/* One project per window, any number of windows. `editors` is the whole of the
+   app's window state; nothing below may assume a single "main" window. */
+const editors = new EditorWindows<BrowserWindow>();
+/** The window a menu command or a Dock activation belongs to. */
+const currentEditor = (): BrowserWindow | null => {
+  const focused = BrowserWindow.getFocusedWindow();
+  return focused && editors.has(focused) ? focused : editors.mostRecent();
+};
+/* Set once the store exists; before that a window cannot have a project yet. */
+let persistOpenWindows: () => void = () => {};
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
 let quitPrepared = () => false;
@@ -257,11 +273,39 @@ function isTrustedSenderContents(sender: WebContents): boolean {
   return !!win && !win.isDestroyed() && isAllowedNavigation(sender.getURL(), devRendererUrl);
 }
 
-function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWindow {
+interface EditorWindowOptions {
+  /** Plays the first-run entrance animation and defers showing the window. */
+  entrance?: boolean;
+  onEntranceReady?: () => void;
+  /** The project this window opens. Null lets the renderer pick, the way a
+   *  single-window launch did. */
+  projectId?: string | null;
+}
+
+/* Windows after the first are offset so a new one never lands exactly on the
+   window it was opened from. */
+function cascadeBounds(): { x: number; y: number } | null {
+  const from = currentEditor();
+  if (!from || from.isDestroyed()) return null;
+  const { x, y } = from.getBounds();
+  const area = screen.getDisplayMatching(from.getBounds()).workArea;
+  const next = { x: x + 26, y: y + 26 };
+  // Walking off the display resets to its top-left instead of opening a window
+  // whose titlebar the user cannot reach.
+  if (next.x + 480 > area.x + area.width || next.y + 320 > area.y + area.height) {
+    return { x: area.x + 40, y: area.y + 40 };
+  }
+  return next;
+}
+
+function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
+  const { entrance = false, onEntranceReady, projectId = null } = options;
   const testOptions = backgroundWindowOptions(isBackgroundTest);
+  const cascade = editors.size > 0 ? cascadeBounds() : null;
   const window = new BrowserWindow({
     ...testOptions,
     ...(entrance ? { show: false } : {}),
+    ...(cascade ?? {}),
     width: 1440,
     height: 900,
     minWidth: 980,
@@ -284,7 +328,9 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
     }
   });
 
-  mainWindow = window;
+  editors.add(window, projectId);
+  persistOpenWindows();
+  window.on('focus', () => editors.touch(window));
   installRendererMenuShortcutRouting(window.webContents);
   installTextContextMenu(window.webContents);
 
@@ -305,9 +351,8 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
   });
 
   window.on('closed', () => {
-    if (mainWindow === window) {
-      mainWindow = null;
-    }
+    editors.remove(window);
+    persistOpenWindows();
   });
 
   if (entrance) {
@@ -356,6 +401,102 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
   return window;
 }
 
+/** The project id in a window request, or null for "no project". */
+function readProjectId(payload: unknown, channel: string): string | null {
+  if (payload === null || payload === undefined) return null;
+  if (typeof payload !== 'object') throw new Error(`${channel}: expected { projectId }`);
+  const value = (payload as { projectId?: unknown }).projectId;
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string' || !PROJECT_ID.test(value)) {
+    throw new Error(`${channel}: invalid projectId`);
+  }
+  return value;
+}
+
+function registerWindowIpc(): void {
+  const senderWindow = (event: { sender: WebContents }): BrowserWindow | null => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return window && editors.has(window) ? window : null;
+  };
+
+  // Read during the renderer's synchronous boot, before it decides which
+  // project to load, so it must answer without a round trip of its own.
+  ipcMain.on(IPC.windowInitialProject, (event) => {
+    const window = isTrustedSender(event) ? senderWindow(event) : null;
+    if (!window) {
+      // Nothing about the open documents is told to a sender we do not trust.
+      event.returnValue = { projectId: null, taken: [] } satisfies WindowInitialProject;
+      return;
+    }
+    const projectId = editors.projectOf(window);
+    event.returnValue = {
+      projectId,
+      taken: editors.openProjectIds().filter((id) => id !== projectId)
+    } satisfies WindowInitialProject;
+  });
+
+  // A window taking a document over as its own. Refused when another window
+  // already has it, because two editors autosaving one slot would lose edits.
+  ipcMain.handle(IPC.windowClaimProject, (event, payload: unknown): WindowClaimResult => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const window = senderWindow(event);
+    if (!window) return { claimed: false, focused: false };
+    const projectId = readProjectId(payload, IPC.windowClaimProject);
+    const holder = projectId ? editors.windowForProject(projectId) : null;
+    if (holder && holder !== window) {
+      editors.reveal(holder);
+      return { claimed: false, focused: true };
+    }
+    editors.claim(window, projectId);
+    persistOpenWindows();
+    return { claimed: true, focused: false };
+  });
+
+  ipcMain.handle(IPC.windowOpenProject, (event, payload: unknown): WindowOpenResult => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const projectId = readProjectId(payload, IPC.windowOpenProject);
+    if (!projectId) return { opened: false, focused: false, error: 'A project is required' };
+    const holder = editors.windowForProject(projectId);
+    if (holder) {
+      editors.reveal(holder);
+      return { opened: false, focused: true };
+    }
+    createWindow({ projectId });
+    return { opened: true, focused: false };
+  });
+
+  ipcMain.handle(IPC.windowNew, (event) => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    createWindow();
+  });
+
+  // Routed through the window's own close, so the unsaved-changes guard runs.
+  ipcMain.on(IPC.windowClose, (event) => {
+    if (!isTrustedSender(event)) return;
+    senderWindow(event)?.close();
+  });
+}
+
+/** Reopens last session's windows, or opens one window when the preference is
+ *  off, nothing was open, or those projects are gone. */
+function restoreWindows(store: Store): void {
+  const snapshot = store.snapshot();
+  if (snapshot['restoreWindows'] === false) {
+    createWindow();
+    return;
+  }
+  const metas = Array.isArray(snapshot['projects']) ? snapshot['projects'] : [];
+  const known = new Set(
+    metas.map((meta) => (meta as { id?: unknown } | null)?.id).filter((id): id is string => typeof id === 'string')
+  );
+  const ids = restorableProjects(snapshot['openWindows'], snapshot['openTabs'], (id) => known.has(id));
+  if (!ids.length) {
+    createWindow();
+    return;
+  }
+  for (const projectId of ids) createWindow({ projectId });
+}
+
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -369,15 +510,9 @@ if (!hasSingleInstanceLock) {
       onboardingFlow.focus();
       return;
     }
-    if (mainWindow === null) {
-      createWindow();
-      return;
-    }
-    if (mainWindow.isMinimized()) {
-      mainWindow.restore();
-    }
-    mainWindow.show();
-    mainWindow.focus();
+    // A second launch raises the window the user was last in rather than
+    // adding one; New Window is how they ask for another.
+    if (!editors.reveal(currentEditor())) createWindow();
   });
 
   // Every WebContents (not just the main window's) gets the navigation guards.
@@ -404,7 +539,26 @@ if (!hasSingleInstanceLock) {
     // scripts load, so the store must be in memory before the window exists.
     const store = createStore(path.join(app.getPath('userData'), 'store'));
     await store.load();
-    registerStoreIpc(ipcMain, store, { isTrustedSender });
+    registerStoreIpc(ipcMain, store, {
+      isTrustedSender,
+      // One window's write is another window's stale cache. Tell the others
+      // which keys moved so their next read goes back to the store.
+      broadcastChange: (keys, sender) => {
+        for (const window of editors.all()) {
+          if (window.webContents === sender || window.webContents.isDestroyed()) continue;
+          window.webContents.send(IPC.storeChanged, { keys });
+        }
+      }
+    });
+    // Quitting closes every window in turn; the restore list must survive that,
+    // so it stops tracking as soon as the quit begins.
+    let quitting = false;
+    app.on('before-quit', () => { quitting = true; });
+    persistOpenWindows = () => {
+      if (quitting) return;
+      store.set('openWindows', editors.openProjectIds());
+    };
+    registerWindowIpc();
     const quitBarrier = installQuitFlush(app, store, async () => {
       for (const window of BrowserWindow.getAllWindows()) await prepareEditorClose(window);
     });
@@ -504,7 +658,12 @@ if (!hasSingleInstanceLock) {
     };
 
     registerCodexIpc(ipcMain, {
-      getWindow: () => mainWindow,
+      getWindow: () => currentEditor(),
+      broadcast: (send) => {
+        for (const window of editors.all()) {
+          if (!window.webContents.isDestroyed()) send(window.webContents);
+        }
+      },
       userData: app.getPath('userData'),
       extensionsDir: userDir,
       apiPackFiles,
@@ -521,24 +680,26 @@ if (!hasSingleInstanceLock) {
     onboardingFlow = new OnboardingFlow(ipcMain, {
       appOrigin: (devRendererUrl ?? APP_ORIGIN).replace(/\/$/, ''),
       displayBounds: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          return screen.getDisplayMatching(mainWindow.getBounds()).bounds;
+        const editor = currentEditor();
+        if (editor && !editor.isDestroyed()) {
+          return screen.getDisplayMatching(editor.getBounds()).bounds;
         }
         return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds;
       },
       backgroundTest: isBackgroundTest,
       userData: app.getPath('userData'),
       createEditor: () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          if (mainWindow.isMinimized()) mainWindow.restore();
+        const existing = currentEditor();
+        if (existing && !existing.isDestroyed()) {
+          if (existing.isMinimized()) existing.restore();
           if (!isBackgroundTest) {
-            mainWindow.show();
-            mainWindow.focus();
+            existing.show();
+            existing.focus();
           }
-          return mainWindow;
+          return existing;
         }
         return new Promise<BrowserWindow>((resolve, reject) => {
-          const editor = createWindow(true, () => resolve(editor));
+          const editor = createWindow({ entrance: true, onEntranceReady: () => resolve(editor) });
           editor.webContents.once('did-fail-load', (_event, _code, description) => {
             editor.destroy();
             reject(new Error(description));
@@ -547,7 +708,10 @@ if (!hasSingleInstanceLock) {
       },
       secure: (window) => secureWebContents(window.webContents, devRendererUrl)
     });
-    const menu = installMenu(() => mainWindow);
+    const menu = installMenu(() => currentEditor(), {
+      newWindow: () => createWindow(),
+      closeWindow: () => currentEditor()?.close()
+    });
     if (!isBackgroundTest) installUpdates(menu);
 
     if (isBackgroundTest) app.dock?.hide();
@@ -559,7 +723,7 @@ if (!hasSingleInstanceLock) {
       });
       onboardingFlow.start();
     } else {
-      createWindow();
+      restoreWindows(store);
     }
     startupInitialized = true;
 
@@ -569,9 +733,8 @@ if (!hasSingleInstanceLock) {
         onboardingFlow.focus();
         return;
       }
-      if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
-      }
+      if (editors.size === 0) createWindow();
+      else editors.reveal(currentEditor());
     });
   });
 }

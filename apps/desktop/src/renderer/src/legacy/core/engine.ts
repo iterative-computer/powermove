@@ -70,7 +70,11 @@ function ensureMediaPlaying(el: any, expectedTime: number, playbackRate: number)
     return;
   }
   if (state.pending) return;
-  try { el.currentTime = expectedTime; state.seekGeneration = videoSeekGeneration; } catch (e) { }
+  try {
+    // Do not flush a frame already decoded by lookahead at the cut.
+    if (Math.abs(el.currentTime - expectedTime) > 1 / drawnFps()) el.currentTime = expectedTime;
+    state.seekGeneration = videoSeekGeneration;
+  } catch (e) { }
   state.pending = true;
   let started;
   try { started = el.play(); }
@@ -96,7 +100,13 @@ function ensureMediaPaused(el: any) {
   if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
 }
 let playingVideos = new Set<any>();
+const frameVideoSeeks = new Map<any, number>();
+function flushFrameVideoSeeks() {
+  for (const [el, target] of frameVideoSeeks) seekPreviewVideo(el, target, .0005);
+  frameVideoSeeks.clear();
+}
 function scrubVideos(T: any) {
+  frameVideoSeeks.clear();
   const videos = PM.ProjectIndex?.layersOfType?.('video', PM.proj) || PM.proj.layers.filter((layer: any) => layer.type === 'video');
   /* The playhead runs continuously but the compositor draws whole frames, so a
      decoder chasing the raw clock is aimed between two source frames. Place a
@@ -108,7 +118,7 @@ function scrubVideos(T: any) {
   for (const layer of videos) {
     const asset = PM.assets.get(layer.d.asset);
     if (!asset?.el) continue;
-    if (!PM.active(layer, T)) continue;
+    if (!PM.active(layer, drawn)) continue;
     const source = previewVideoElement(PM, asset);
     const el = layerVideoElement(PM, asset, layer.id);
     const unused = source === asset.el ? asset.preview?.el : asset.el;
@@ -117,8 +127,20 @@ function scrubVideos(T: any) {
   }
   for (const el of playingVideos) if (!owners.has(el)) { cancelPreviewVideoSeek(el); ensureMediaPaused(el); }
   playingVideos = new Set(owners.keys());
+  // Decode the next cut while it is still offscreen. Limit lookahead so a
+  // long timeline does not eagerly allocate every clip's decoder.
+  if (PM.playing) for (const layer of videos) {
+    if (layer.from <= drawn || layer.from > drawn + .5 || !PM.active(layer, layer.from)) continue;
+    const asset = PM.assets.get(layer.d.asset);
+    if (!asset?.el) continue;
+    const el = layerVideoElement(PM, asset, layer.id);
+    ensureMediaPaused(el);
+    const at = sourceTime(PM, layer, layer.from);
+    seekPreviewVideo(el, sequencePlaybackTime(asset, at) ?? PM.clamp(at, 0, Math.max(0, (asset.dur || 0) - .04)), .0005);
+  }
+
   for (const { layer: L, asset: a, el } of owners.values()) {
-    const inRange = PM.active(L, T);
+    const inRange = PM.active(L, drawn);
     if (!inRange) { ensureMediaPaused(el); continue; }
     const previous = mediaState.get(el);
     if (previous && previous.layer !== L.id) previous.seekGeneration = -1;
@@ -136,7 +158,12 @@ function scrubVideos(T: any) {
     if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(el, streamAt, Math.max(.0001, Number(d.speed) || 1));
     else ensureMediaPaused(el);
     const state = mediaState.get(el); if (state) state.layer = L.id;
-    if (!PM.playing || d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) seekPreviewVideo(el, vt, .0005);
+    if (!PM.playing) seekPreviewVideo(el, vt, .0005);
+    else if (d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) {
+      // Present the completed decode before starting another seek. Starting it
+      // before render drops readyState and starves the texture of every frame.
+      frameVideoSeeks.set(el, vt);
+    }
   }
 }
 
@@ -253,6 +280,7 @@ function frame(now: any) {
     mblur: !interactive, mbSamples: PM.playing ? 6 : 12,
     shutter: p.shutter || .5, hideShy: false,
   });
+  flushFrameVideoSeeks();
   lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration;
   PM.bus.emit('overlay');
   const ms = window.performance.now() - t0;

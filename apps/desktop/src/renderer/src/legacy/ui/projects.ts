@@ -28,7 +28,8 @@ PM.ProjectsScreen = {
     paint(); S.el.classList.add('on'); PM.bus.emit('projects:screen');
   },
   hide() {
-    if (!PM.Projects?.tabs?.().length) return;
+    // Nothing to fall back to: this window has no composition behind the screen.
+    if (!PM.proj?.id || PM.isHomeProject?.()) return;
     if (S.el) S.el.classList.remove('on');
     PM.bus.emit('projects:screen');
   },
@@ -136,7 +137,7 @@ function paint() {
   S.el.querySelectorAll('.ps-view button').forEach((b: any) => b.classList.toggle('on', b.dataset.view === S.view));
   S.grid.className = 'ps-grid' + (S.view === 'list' ? ' list' : '') + (!metas.length ? ' empty' : '');
   S.grid.textContent = '';
-  const openIds = new Set<string>(PM.Projects.tabs());
+  const openIds = new Set<string>(PM.Projects.openProjects());
   metas.slice(S.page * PAGE_SIZE, (S.page + 1) * PAGE_SIZE)
     .forEach((m: any) => S.grid.appendChild(card(m, S.section === 'trash', openIds)));
   if (!metas.length) S.grid.appendChild(emptyState(q));
@@ -157,8 +158,9 @@ function paint() {
 }
 
 function card(m: any, trashed: any, openIds: Set<string>) {
-  const open = !trashed && openIds.has(m.id);
-  const active = open && m.id === PM.proj.id;
+  const active = !trashed && m.id === PM.proj.id;
+  /* "Open" is now a window somewhere, which may be this one or another. */
+  const open = !trashed && (active || openIds.has(m.id));
   const file = !trashed ? PM.projectFileState?.(m.id, { initialize: false }) : null;
   // Dimensions belong in the index; cards must never clone whole compositions.
   const raw = m;
@@ -171,7 +173,7 @@ function card(m: any, trashed: any, openIds: Set<string>) {
   const sub = projectSub(m, raw, trashed, file);
   /* Where the project is (Active, Open) is a quiet tag beside the name, so
      every card keeps one silhouette and the frame stays clean. */
-  const tag = active || open ? h('span.ps-tag', active ? 'Active' : 'Open') : null;
+  const tag = active || open ? h('span.ps-tag', active ? 'This window' : 'Open') : null;
   const meta = h('div.ps-meta', h('div.ps-meta-copy',
     h('div.ps-name-row', h('div.ps-name', { title: m.name || 'Untitled' }, m.name || 'Untitled'), tag),
     h('div.ps-sub', { title: sub.title }, sub.text)), more);
@@ -203,6 +205,9 @@ function projectMenu(anchor: any, m: any, trashed: any, x?: any, y?: any) {
     '-', { label: 'Delete Forever…', run: () => destroyDialog(m) },
   ] : [
     { label: 'Open', disabled: m.id === PM.proj.id, run: () => openLocalProject(m) },
+    ...(PM.windows?.supported
+      ? [{ label: 'Open in New Window', disabled: m.id === PM.proj.id, run: () => openInNewWindow(m) }]
+      : []),
     { label: 'Save', run: () => save(m, false) },
     { label: 'Save As…', run: () => save(m, true) },
     '-',
@@ -217,14 +222,21 @@ async function openProjectFromDisk() {
   await PM.openProject?.();
   if (PM.proj.id !== before) PM.ProjectsScreen.hide();
 }
+/* A click loads the project into this window. A document lives in one window at
+   a time, so one already open elsewhere brings its own window forward instead
+   and this window keeps what it had. */
 function openLocalProject(m: any) {
-  const project = PM.Projects.get(m.id);
-  if (!project) return PM.toast('Could not open this project because its local data is missing.');
-  if (project.id === PM.proj.id) {
-    PM.Projects.markOpen?.(project.id);
-    PM.bus.emit('projects:tabs');
-  } else window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: project }));
-  PM.ProjectsScreen.hide();
+  if (m.id === PM.proj.id) {
+    PM.ProjectsScreen.hide();
+    return;
+  }
+  void Promise.resolve(PM.openProjectHere?.(m.id) ?? false).then((opened: boolean) => {
+    if (opened) PM.ProjectsScreen.hide();
+    else paint();
+  });
+}
+function openInNewWindow(m: any) {
+  void Promise.resolve(PM.openProjectInNewWindow?.(m.id) ?? false).then(() => paint());
 }
 async function save(m: any, saveAs: boolean) {
   if (!PM.Projects.get(m.id)) return PM.toast('Could not save this project because its local data is missing.');
@@ -233,7 +245,7 @@ async function save(m: any, saveAs: boolean) {
 }
 function restore(m: any) {
   if (!PM.Projects.restore(m.id)) return PM.toast('Could not restore this project because its local data is missing.');
-  paint(); PM.bus.emit('projects:tabs'); PM.toast('Project restored');
+  paint(); PM.bus.emit('projects:open'); PM.toast('Project restored');
 }
 
 function emptyState(searching: any) {
@@ -252,7 +264,7 @@ function renameDialog(m: any) {
     { label: 'Cancel' }, { label: 'Rename', pri: true, run: () => {
       try {
         if (!PM.Projects.rename(m.id, name.value)) throw new Error('Project data is missing');
-        paint(); PM.bus.emit('projects:tabs'); PM.bus.emit('project');
+        paint(); PM.bus.emit('projects:open'); PM.bus.emit('project');
       } catch (error: any) { PM.toast('Could not rename project: ' + (error.message || 'Unknown error')); }
     } },
   ] });
@@ -271,7 +283,7 @@ function duplicate(m: any) {
       delete copiedState.file;
       PM.Projects.putState(raw.id, copiedState);
     }
-    paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”', 2200, { error: false });
+    paint(); PM.bus.emit('projects:open'); PM.toast('Duplicated “' + m.name + '”', 2200, { error: false });
   } catch (error: any) { PM.toast('Could not duplicate project: ' + (error.message || 'Unknown error')); }
 }
 function trashDialog(m: any) {
@@ -279,7 +291,7 @@ function trashDialog(m: any) {
     'You can restore this project from Trash.'), width: 420, actions: [
     { label: 'Cancel' }, { label: 'Move to Trash', pri: true, run: () => {
       if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
-      if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
+      if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:open');
     } },
   ] });
 }
@@ -289,8 +301,11 @@ function destroyDialog(m: any) {
     { label: 'Cancel' }, { label: 'Delete Forever', pri: true, run: () => { PM.Projects.destroy(m.id); paint(); } },
   ] });
 }
+/* Trashing the composition this window is editing leaves it with nothing, so it
+   falls back to another project that no other window holds, or a blank one. */
 function switchUnderlying() {
-  const id = PM.Projects.tabs()[0] || (PM.Projects.list()[0] || {}).id;
+  const taken = new Set(PM.Projects.openProjects().filter((id: string) => id !== PM.proj.id));
+  const id = PM.Projects.list().map((m: any) => m.id).find((candidate: string) => !taken.has(candidate));
   const p = id && PM.Projects.get(id);
   window.dispatchEvent(new window.CustomEvent('pm-open-project', { detail: p || PM.mkProject({ name: 'Untitled', dur: 10, w: 1920, h: 1080, fps: 30, bg: '#09090A' }) }));
 }
@@ -301,11 +316,11 @@ function ago(t: any) {
   return new Date(t).toLocaleDateString();
 }
 
-const offTabs = PM.bus.on('projects:tabs', () => { if (PM.ProjectsScreen.isOpen) paint(); });
+const offOpen = PM.bus.on('projects:open', () => { if (PM.ProjectsScreen.isOpen) paint(); });
 PM.__disposeProjectsScreen = () => {
   S.offUpdates?.(); S.offUpdates = null;
   S.offAppUpdate?.(); S.offAppUpdate = null;
-  offTabs?.();
+  offOpen?.();
   S.el?.remove?.();
   S.el = null;
 };

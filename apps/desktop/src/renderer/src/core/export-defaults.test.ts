@@ -98,3 +98,8 @@ describe('planExport', () => {
       .toBe('300 PNG files · transparent');
   });
 });
+
+it('clamps the project frame rate when stored fps is absent or invalid', () => {
+  expect(normalizeExportDefaults({}, 900).fps).toBe(240);
+  expect(normalizeExportDefaults({ fps: -1 }, 900).fps).toBe(240);
+});

@@ -128,9 +128,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
       remove: (id: string) => projects.delete(id),
       getState: (id: string) => states.get(id) || null,
       putState: (id: string, state: any) => states.set(id, state),
-      tabs: () => [raw.id],
-      markOpen() {},
-      markClosed() {},
+      openProjects: () => [raw.id],
       rename() {},
     },
     mkProject(input: any) {

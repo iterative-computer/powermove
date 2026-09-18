@@ -19,7 +19,7 @@ function fakePM(kernel: ReturnType<typeof createKernel>) {
     bus: { on: () => () => {}, emit() {} },
     proj: { id: 'p1', name: 'First', w: 1920, h: 1080, fps: 30, layers: [] },
     app: { dirty: false },
-    Projects: { tabs: () => [], list: () => [], get: () => null },
+    Projects: { openProjects: () => [], list: () => [], get: () => null },
     ProjectsScreen: { isOpen: false },
     PANELS: {},
     GL: { gl: {} },

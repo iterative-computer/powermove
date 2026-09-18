@@ -187,6 +187,12 @@ export class PowermoveAgentToolBridge {
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
+  /** Seal a live run's completed edits before a steering fallback replaces it. */
+  async finishRun(runId: string, commit: boolean): Promise<AgentToolFinishResult | null> {
+    const session = this.sessionsByRun.get(runId);
+    return session ? await session.finish(commit) : null;
+  }
+
   async callRenderer(
     session: PowermoveAgentToolSession,
     tool: string,

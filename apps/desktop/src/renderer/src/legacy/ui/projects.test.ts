@@ -74,7 +74,8 @@ describe('legacy projects screen install', () => {
     const saveProject = vi.fn(async () => true);
     const put = vi.fn();
     const putState = vi.fn();
-    const markOpen = vi.fn();
+    const openProjectHere = vi.fn(async () => true);
+    const openProjectInNewWindow = vi.fn(async () => true);
     let PM: PMRegistry;
     const openProject = vi.fn(async () => { PM.proj = { id: 'P3' }; });
     PM = {
@@ -86,13 +87,15 @@ describe('legacy projects screen install', () => {
         list: () => [live],
         trashList: () => [trashed],
         get: (id: string) => ({ id, name: id === 'P1' ? 'Hero' : 'Old', w: 1920, h: 1080, layers: [] }),
-        tabs: () => ['P1'],
+        openProjects: () => ['P1'],
         getState: () => ({ time: 4, file: { path: '/tmp/Hero.pmv', savedHash: 'hash' } }),
         put,
         putState,
-        markOpen,
       },
-      proj: { id: 'P1' },
+      proj: { id: 'P2' },
+      windows: { supported: true },
+      openProjectHere,
+      openProjectInNewWindow,
       projectFileState: () => ({ path: '/tmp/Hero.pmv', dirty: true }),
       menu: (_anchor: any, items: any[]) => { menuItems = items; },
       newProject() {},
@@ -123,8 +126,12 @@ describe('legacy projects screen install', () => {
 
     const projectCard = elements.find(el => el.tag.startsWith('article.ps-card'))!;
     projectCard.onclick();
-    expect(markOpen).toHaveBeenCalledWith('P1');
-    expect(PM.ProjectsScreen.isOpen).toBe(false);
+    await vi.waitFor(() => expect(PM.ProjectsScreen.isOpen).toBe(false));
+    expect(openProjectHere).toHaveBeenCalledWith('P1');
+
+    // A window of its own is the card menu's job, never a plain click.
+    await menuItems.find(item => item?.label === 'Open in New Window').run();
+    expect(openProjectInNewWindow).toHaveBeenCalledWith('P1');
 
     menuItems.find(item => item?.label === 'Duplicate').run();
     expect(put).toHaveBeenCalledWith(expect.objectContaining({ id: 'P-copy', name: 'Hero copy' }), undefined);

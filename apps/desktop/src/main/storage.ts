@@ -327,13 +327,41 @@ export function createStore(dir: string, options: StoreOptions = {}): Store {
 
 type StoreIpcEvent = IpcMainEvent | IpcMainInvokeEvent;
 
+export interface StoreIpcContext {
+  isTrustedSender(event: StoreIpcEvent): boolean;
+  /**
+   * Tells the other windows which keys a window just wrote. Each renderer keeps
+   * its own cache of the store, so without this a second window would answer
+   * reads from a snapshot taken before the first window's edits and overwrite
+   * them on its next write.
+   */
+  broadcastChange?(keys: string[], sender: unknown): void;
+}
+
 export function registerStoreIpc(
   ipcMain: Pick<IpcMain, 'handle' | 'on'>,
   store: Store,
-  ctx: { isTrustedSender(event: StoreIpcEvent): boolean }
+  ctx: StoreIpcContext
 ): void {
   const requireTrusted = (event: StoreIpcEvent, channel: string): void => {
     if (!ctx.isTrustedSender(event)) throw new IpcValidationError(channel, 'untrusted sender');
+  };
+  /* Writes arrive in bursts (a rename touches the registry and the slot), so
+     the keys are coalesced into one message per turn of the event loop. */
+  const pendingChanges = new Map<unknown, Set<string>>();
+  const announce = (key: string, sender: unknown): void => {
+    if (!ctx.broadcastChange) return;
+    const existing = pendingChanges.get(sender);
+    if (existing) {
+      existing.add(key);
+      return;
+    }
+    pendingChanges.set(sender, new Set([key]));
+    queueMicrotask(() => {
+      const keys = pendingChanges.get(sender);
+      pendingChanges.delete(sender);
+      if (keys?.size) ctx.broadcastChange?.([...keys], sender);
+    });
   };
 
   ipcMain.handle(IPC.storeSnapshot, (event) => {
@@ -346,6 +374,7 @@ export function registerStoreIpc(
     if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeSetSerialized, 'expected key and serialized JSON');
     if (store.setSerialized) store.setSerialized(payload.key, payload.serialized);
     else store.set(payload.key, JSON.parse(payload.serialized));
+    announce(payload.key, event.sender);
   });
 
   // JSON values cross IPC and contextBridge without recursively copying and
@@ -374,6 +403,7 @@ export function registerStoreIpc(
       }
       const request = payload as unknown as StoreSetRequest;
       store.set(request.key, request.value);
+      announce(request.key, event.sender);
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
@@ -391,6 +421,7 @@ export function registerStoreIpc(
       }
       const request = payload as unknown as StoreDeleteRequest;
       store.delete(request.key);
+      announce(request.key, event.sender);
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
@@ -398,6 +429,17 @@ export function registerStoreIpc(
       }
       throw error;
     }
+  });
+
+  // Refills one key a sibling window invalidated. Synchronous because the
+  // renderer's PM.store.get is synchronous everywhere it is called from.
+  ipcMain.on(IPC.storeGetSync, (event, payload: unknown) => {
+    if (!ctx.isTrustedSender(event) || !isRecord(payload) || typeof payload['key'] !== 'string') {
+      event.returnValue = null;
+      return;
+    }
+    const value = store.snapshot()[payload['key'] as string];
+    event.returnValue = value === undefined ? null : JSON.stringify(value);
   });
 
   ipcMain.handle(IPC.storeFlush, async (event) => {

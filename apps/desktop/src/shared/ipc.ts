@@ -81,6 +81,14 @@ export const IPC = {
   storeDelete: 'store:delete',
   storeFlush: 'store:flush',
   storeError: 'store:error', // main → renderer
+  storeChanged: 'store:changed', // main → renderer, keys another window wrote
+  storeGetSync: 'store:get-sync', // ipcRenderer.sendSync, refills one invalidated key
+
+  windowInitialProject: 'window:initial-project', // ipcRenderer.sendSync, boot barrier only
+  windowClaimProject: 'window:claim-project',
+  windowOpenProject: 'window:open-project',
+  windowNew: 'window:new',
+  windowClose: 'window:close',
 
   themeSet: 'theme:set',
   hapticAlignment: 'haptic:alignment',
@@ -103,6 +111,32 @@ export interface AppUpdateState {
   current: string;
   /** Version being downloaded or staged, when known. */
   version: string | null;
+}
+
+/* ── windows ────────────────────────────────────── */
+/** What a window is asked to show when it boots. `projectId` is null for a
+ * window that picks its own project the way a single-window launch did; it then
+ * has to skip everything in `taken`, because those documents belong to the
+ * windows that already have them. */
+export interface WindowInitialProject {
+  projectId: string | null;
+  taken: string[];
+}
+
+/** Outcome of asking for a project to be opened in its own window.
+ * `focused` means another window already held it and was raised instead, so the
+ * asking window must not load a second copy of the same document. */
+export type WindowOpenResult =
+  | { opened: true; focused: false }
+  | { opened: false; focused: true }
+  | { opened: false; focused: false; error: string };
+
+/** Outcome of a window asking to take a project over as its own document.
+ * A refused claim always means another window has it and was raised instead, so
+ * the asking window keeps whatever it already had open. */
+export interface WindowClaimResult {
+  claimed: boolean;
+  focused: boolean;
 }
 
 export interface OnboardingLogoTarget {
@@ -237,6 +271,8 @@ export type CodexRunResult =
 
 export interface CodexCancelRequest {
   id: string;
+  /** Keep edits already committed through the live tool transaction. */
+  preserveChanges?: boolean;
 }
 
 export interface CodexSteerRequest {
@@ -521,7 +557,7 @@ export interface PowermoveBridge {
       onTrace?: (step: CodexTraceEvent) => void
     ): Promise<CodexRunResult>;
     steer(req: CodexSteerRequest): Promise<CodexSteerResult>;
-    cancel(id: string): Promise<void>;
+    cancel(id: string, preserveChanges?: boolean): Promise<void>;
     fixPrompt(req: CodexFixPromptRequest): Promise<string>;
     rebasePrompt(req: CodexRebasePromptRequest): Promise<string>;
     restoreChangeSet(req: AgentChangeSetRestoreRequest): Promise<AgentChangeSetRestoreResult>;
@@ -565,6 +601,21 @@ export interface PowermoveBridge {
     delete(key: string): void;
     flush(): Promise<void>;
     onError(cb: (e: StoreErrorEvent) => void): () => void;
+    /** Re-reads one key another window wrote. Null when the key is unset. */
+    getSync?(key: string): string | null;
+    /** Keys another window wrote, so this one can drop them from its cache. */
+    onChanged?(cb: (keys: string[]) => void): () => void;
+  };
+
+  /** This renderer's own window. One project per window; opening a document
+   *  another window already has raises that window instead. */
+  windows?: {
+    /** The project this window was created for, read during boot. */
+    initialProject(): WindowInitialProject;
+    claimProject(projectId: string | null): Promise<WindowClaimResult>;
+    openProject(projectId: string): Promise<WindowOpenResult>;
+    create(): Promise<void>;
+    close(): void;
   };
 
   setTheme(theme: ThemeSource): void;

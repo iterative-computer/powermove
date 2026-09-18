@@ -303,7 +303,7 @@
 
   /* Selection is temporary ownership: preserve it only while the next press
      is inside the currently selected card. Capture runs before timeline drags
-     and project-tab handlers, so the preview disappears at pointerdown.
+     and titlebar handlers, so the preview disappears at pointerdown.
      The source monitor itself is part of that ownership — its transport and
      close button must survive the press that reaches them. */
   function handleWindowPointerDown(event: PointerEvent): void {

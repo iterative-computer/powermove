@@ -105,15 +105,15 @@ PM.CodexBridge = {
     const id: any = PM.uid('spatial-codex-');
     return new Promise((resolve: any, reject: any) => {
       const signal: any = options.signal;
-      const stopNative: any = () => (window as any).webkit?.messageHandlers?.pmCodexCancel?.postMessage({ id });
-      const settle: any = (error: any) => {
+      const stopNative: any = (preserveChanges = false) => (window as any).webkit?.messageHandlers?.pmCodexCancel?.postMessage({ id, preserveChanges });
+      const settle: any = (error: any, preserveChanges = false) => {
         const job: any = pending.get(id); if (!job) return;
         pending.delete(id); window.clearTimeout(job.timer);
         if (activeCodexRequestId === id) activeCodexRequestId = null;
         job.signal?.removeEventListener('abort', job.abort);
-        stopNative(); reject(error);
+        stopNative(preserveChanges); reject(error);
       };
-      const abort: any = () => settle(codexAbortError());
+      const abort: any = () => settle(codexAbortError(), signal?.reason === 'steering-replacement');
       const timeout: any = Math.max(30_000, Math.min(Number(options.timeoutMs) || 120_000, 3_600_000));
       const timer: any = window.setTimeout(() => settle(new Error('The coding agent took too long to respond')), timeout);
       pending.set(id, { resolve, reject, timer, signal, abort, onProgress: options.onProgress, onTrace: options.onTrace, mode: options.mode });
@@ -1290,7 +1290,6 @@ function stopSession(session: any) {
   sealTrace(session);
   session.steps = []; session.activity = ''; session.plan = null; session.phase = 'conversation';
   archiveTrace(false, session);
-  session.conversation.push({ entering: true, role: 'assistant', text: 'Stopped. Add direction whenever you are ready.' });
   touch(session, { focusComposer: true });
 }
 
@@ -1844,7 +1843,7 @@ async function sendRequest(input: any) {
   const token: any = (session.requestToken = ++runToken);
   const controller: any = new window.AbortController();
   session.activeRequest = controller;
-  previousRequest?.abort();
+  previousRequest?.abort('steering-replacement');
   session.requestText = request;
   // Keep residual activity from a settled run, and events received while a
   // rejected steering request was waiting, before starting the next message.

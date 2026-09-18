@@ -78,6 +78,19 @@ describe('timeline extension', () => {
     expect(value.api.transport.invalidate).toHaveBeenCalledWith('timeline');
   });
 
+  it('closes selected group hierarchies when M collapses their layer strips', () => {
+    const value = harness();
+    const group = { id: 'group-1', type: 'group', collapsed: false, groupCollapsed: false } as any;
+    value.state.project.layers = [group];
+    value.state.selection.layers = [group.id];
+
+    toggleLayerStrips(value.api);
+
+    expect(group.collapsed).toBe(true);
+    expect(group.groupCollapsed).toBe(true);
+    expect(value.api.uiState.setGroupCollapsed).toHaveBeenCalledWith(group, true);
+  });
+
   it('selects only the new right-hand segments after splitting', () => {
     const value = harness();
     const left = { id: 'left', type: 'solid', name: 'Left', from: 2, dur: 6, d: {}, p: { x: { v: 10, kf: [{ i: 'a', t: 0, v: 10 }, { i: 'b', t: 6, v: 70 }] } } } as any;
@@ -348,5 +361,25 @@ describe('timeline extension', () => {
     pointer(canvas, timeline.gut + timeline.pps, timeline.ruler + timeline.row / 2, { cancelable: true });
     expect(document.activeElement).not.toBe(composer);
     expect(value.api.ui.drag).toHaveBeenCalledOnce();
+  });
+
+  it.each(['timecode', 'toolbar gutter'])('releases an external text field when the %s starts a pointer gesture', (area) => {
+    const value = harness();
+    vi.mocked(value.api.ui.drag).mockImplementation((event: PointerEvent) => {
+      event.preventDefault();
+      return { cancel: vi.fn() };
+    });
+    activate(value);
+    const body = build(value);
+    const composer = document.createElement('textarea');
+    document.body.append(composer);
+    composer.focus();
+
+    const target = area === 'timecode'
+      ? body.querySelector('#tl-time')!
+      : body.querySelector('#tl-head')!;
+    pointer(target, 0, 0, { bubbles: true, cancelable: true });
+
+    expect(document.activeElement).not.toBe(composer);
   });
 });

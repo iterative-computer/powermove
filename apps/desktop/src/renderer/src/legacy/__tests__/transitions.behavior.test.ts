@@ -216,7 +216,7 @@ it('hydrate preserves unknown transitions as disabled missing placeholders', () 
     bootVersion: 0,
     Projects: {
       pickBoot: () => raw, list: () => [{ id: raw.id, name: raw.name }], get: () => raw,
-      put: noop, remove: noop, getState: () => null, putState: noop, markOpen: noop, markClosed: noop, tabs: () => [raw.id], rename: noop,
+      put: noop, remove: noop, getState: () => null, putState: noop, openProjects: () => [raw.id], rename: noop,
     },
     WS: { init: noop, restoreSnapshot: noop, snapshot: () => ({}), editing: false },
     setTime(value) { PM.time = value; },

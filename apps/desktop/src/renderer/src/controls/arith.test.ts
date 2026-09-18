@@ -15,7 +15,7 @@ describe('parseArithmetic', () => {
   });
 
   it.each([
-    '', '1+', '(1+2', '1 2', '2**3', '1/0', 'NaN', 'Infinity',
+    '1 / 1e999', '1 / (1e308 * 1e308)', '', '1+', '(1+2', '1 2', '2**3', '1/0', 'NaN', 'Infinity',
     'globalThis.alert(1)', 'constructor.constructor("return 1")()',
     '1; globalThis.pwned = true', '${globalThis.process}'
   ])('rejects invalid or executable input: %s', (source) => {
