@@ -39,10 +39,10 @@
   .hero-video{position:relative;aspect-ratio:16/9;border-radius:var(--r-xl);box-shadow:var(--shadow-panel);overflow:hidden;background:#f7f7f8;isolation:isolate}
   .hero-video::after{content:'';position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 1px rgb(var(--ink-rgb) / .08);pointer-events:none}
   video{display:block;width:100%;height:100%;object-fit:cover}
-  .sound{position:absolute;right:14px;bottom:14px;display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px 0 9px;border-radius:999px;font-size:12.5px;font-weight:500;letter-spacing:.005em;color:#fff;background:rgb(0 0 0 / .42);backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);box-shadow:inset 0 0 0 1px rgb(255 255 255 / .14);opacity:.78;transition:opacity var(--dur-2),background var(--dur-2),transform var(--dur-1) var(--ease)}
+  .sound{position:absolute;right:14px;bottom:14px;display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 11px 0 9px;border-radius:999px;font-size:12.5px;font-weight:500;letter-spacing:.005em;color:#fff;background:rgb(0 0 0 / .42);backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);box-shadow:inset 0 0 0 1px rgb(255 255 255 / .14);opacity:.78;transition:opacity var(--dur-2),background var(--dur-2),transform var(--dur-3) var(--ease-io)}
   .hero-video:hover .sound,.sound:focus-visible{opacity:1}
   .sound:hover{background:rgb(0 0 0 / .56)}
-  .sound:active{transform:scale(.97)}
+  .sound:active{transform:scale(.985)}
   .sound:focus-visible{outline:2px solid #fff;outline-offset:2px}
   @media(min-width:768px){.sound{right:18px;bottom:18px}}
   @media(prefers-reduced-motion:reduce){.sound{transition:none}}
