@@ -1,5 +1,16 @@
+/* Simple list panels (Takes, Workspaces, effects): quiet text rows for
+   recall-by-name. No glyphs, no dividers; meta sits right in tabular numerals
+   and the row's secondary action is answered on approach. */
 [data-svelte-panel].simple-panel-list {
-  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px 8px;
+}
+
+.simple-panel-row {
+  height: 28px;
+  padding: 0 4px 0 8px;
+  gap: 4px;
 }
 
 .simple-panel-row .simple-row-action {
@@ -8,9 +19,27 @@
   height: 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   text-align: left;
+  color: inherit;
 }
+
+.simple-panel-row .simple-row-action .nm { color: var(--tx-2); transition: color var(--dur-1); }
+.simple-panel-row:hover .simple-row-action .nm,
+.simple-panel-row.sel .simple-row-action .nm,
+.simple-panel-row:focus-within .simple-row-action .nm { color: var(--tx); }
+
+/* Delete is a secondary action: present for keyboard and hover, quiet otherwise. */
+.simple-panel-row > .stopwatch {
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+  transition: opacity var(--dur-1), background var(--dur-1), color var(--dur-1);
+}
+.simple-panel-row:hover > .stopwatch,
+.simple-panel-row:focus-within > .stopwatch,
+.simple-panel-row > .stopwatch:focus-visible { opacity: 1; }
+.simple-panel-row > .stopwatch:hover { color: var(--tx); }
 
 .simple-effect-row {
   width: 100%;
@@ -21,16 +50,25 @@
   margin: 8px 6px 4px;
 }
 
+/* One footer action row, hairline above, flush with the list gutter. */
 .simple-panel-actions {
   display: flex;
   gap: 6px;
-  padding: 8px 4px;
+  margin-top: 6px;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line);
 }
+.simple-panel-actions .chip { flex: 1 1 0; min-width: 0; height: var(--ctl-h); }
+.simple-panel-actions .chip.quiet { flex: none; }
 
 .simple-panel-hint {
-  padding: 10px 8px;
+  padding: 10px 8px 2px;
   text-align: left;
+  font-size: var(--fs-xs);
+  color: var(--tx-4);
 }
+
+.simple-panel-list > .empty { padding: 22px 12px; }
 
 .notes-panel {
   width: 100%;
