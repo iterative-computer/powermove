@@ -175,7 +175,6 @@
     padding: 3px 6px 3px 4px;
     border-radius: var(--r-sm);
     list-style: none;
-    cursor: pointer;
     line-height: 1.5;
     color: var(--tx-2);
     transition: background var(--dur-2), color var(--dur-2);
@@ -223,7 +222,6 @@
     text-align: left;
     transition: background var(--dur-2);
   }
-  button.agent-tool-row { cursor: pointer; }
   button.agent-tool-row:hover, .is-open > .agent-tool-row { background: var(--ink-1); }
   button.agent-tool-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   .agent-tool-row > span { min-width: 0; flex: 0 1 auto; overflow-wrap: anywhere; font-weight: var(--fw-medium); color: var(--tx); }

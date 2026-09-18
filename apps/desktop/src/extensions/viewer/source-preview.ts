@@ -35,7 +35,7 @@ const STYLES = `
   #source-preview .sp-close:active,#source-preview .sp-play:active{background:var(--bg-sunken)}
   #source-preview :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   #source-preview .sp-close svg,#source-preview .sp-play svg{width:14px;height:14px}
-  #source-preview .sp-scrub{flex:1;min-width:24px;height:var(--hit);display:flex;align-items:center;cursor:pointer;touch-action:none;border-radius:var(--r-xs)}
+  #source-preview .sp-scrub{flex:1;min-width:24px;height:var(--hit);display:flex;align-items:center;touch-action:none;border-radius:var(--r-xs)}
   #source-preview .sp-scrub i{width:100%;height:3px;border-radius:var(--r-pill);background:rgb(var(--ink-rgb) / .22)}
   #source-preview .sp-scrub i b{display:block;width:0;height:100%;border-radius:inherit;background:var(--accent)}
   #source-preview [hidden]{display:none!important}

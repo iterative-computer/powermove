@@ -73,7 +73,6 @@
   .agent-run-details:empty { display: none; }
   .agent-run-details p { margin: 0; white-space: pre-wrap; }
   .agent-run-details details { color: var(--tx-3); font-size: var(--fs-sm); }
-  .agent-run-details summary { cursor: pointer; }
   .agent-run-undo { align-self: flex-start; padding: 2px 0; color: var(--tx-3); font-size: var(--fs-sm); }
   .agent-run-undo:hover { color: var(--tx); }
 </style>

@@ -259,7 +259,6 @@ select.sel {
   border: 0;
   background: var(--sw-color);
 }
-.cp-compare > button { cursor: pointer; }
 .cp-swatches-rule {
   flex: none;
   width: var(--hairline);
