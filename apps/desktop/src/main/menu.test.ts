@@ -81,6 +81,7 @@ describe('application menu', () => {
     ]);
 
     const appItems = submenu(topLevel(template, 'Powermove'));
+    const fileItems = submenu(topLevel(template, 'File'));
     expect(appItems.filter((item) => item.role).map((item) => item.role)).toEqual([
       'about',
       'services',
@@ -93,13 +94,16 @@ describe('application menu', () => {
       'Command+Alt+H'
     );
     expect(appItems.find((item) => item.role === 'quit')?.accelerator).toBe('Command+Q');
+    expect(appItems.find((item) => item.id === 'settings')).toMatchObject({ label: 'Settings…', accelerator: 'CommandOrControl+,', registerAccelerator: false });
+    expect(fileItems.find((item) => item.role === 'close')?.accelerator).toBe('CommandOrControl+W');
     const replay = appItems.find((item) => item.id === 'replayOnboarding');
     expect(replay).toBeUndefined();
 
-    const fileItems = submenu(topLevel(template, 'File'));
-    expect(fileItems.map((item) => item.label ?? item.type)).toEqual([
+    expect(fileItems.map((item) => item.label ?? item.role ?? item.type)).toEqual([
       'New Project',
       'Open Project…',
+      'close',
+      'separator',
       'Save Project',
       'Save Project As…',
       'separator',
