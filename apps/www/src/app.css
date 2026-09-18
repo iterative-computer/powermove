@@ -98,6 +98,8 @@ h1 .muted{color:var(--tx-3)}
 .stage{margin:56px auto 0;max-width:1280px;padding-inline:8px}
 @media(min-width:768px){.stage{margin-top:72px}}
 .stage img{border-radius:var(--r-xl);box-shadow:var(--shadow-panel)}
+.stage-video{position:relative;aspect-ratio:16/9;border-radius:var(--r-xl);box-shadow:var(--shadow-panel);overflow:hidden;background:#000}
+.stage-video iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:block}
 .logo-cloud{padding:56px 24px 0;text-align:center}
 .logo-cloud-caption{font-size:var(--fs-sm);letter-spacing:.02em;color:var(--tx-3)}
 .logo-cloud-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:20px 56px;margin-top:22px;color:var(--tx-3)}
