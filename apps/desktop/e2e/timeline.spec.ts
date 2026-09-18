@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test';
-import { test } from './helpers/app';
+import { chooseNativeMenu, test } from './helpers/app';
 import type { Page } from '@playwright/test';
 
 async function scaleFixture(page: Page) {
@@ -460,8 +460,7 @@ test('project rename is available from the document menu and persists the live d
   await scaleFixture(page);
   const chip = page.locator('#doc-strip .project-doc');
   const id = await chip.getAttribute('data-project-id');
-  await chip.click({ button: 'right' });
-  await page.getByRole('menuitem', { name: 'Rename project…' }).click();
+  await chooseNativeMenu(session, 'Rename project…', () => chip.click({ button: 'right' }));
   const input = page.getByRole('textbox', { name: 'Rename project', exact: true });
   await input.fill('Renamed composition');
   await input.press('Enter');

@@ -35,7 +35,8 @@
   // re-derives when a save, rename or dirty change bumps the token.
   const file = $derived.by(() => {
     refreshToken;
-    return activeProjectId ? PM.projectFileState?.(activeProjectId, { initialize: false }) : null;
+    const state = activeProjectId ? PM.projectFileState?.(activeProjectId, { initialize: false }) : null;
+    return state ? { path: state.path, dirty: state.dirty } : null;
   });
   const dirty = $derived(file?.dirty ?? appDirty);
   const multiWindow = $derived(!!PM.windows?.supported);
@@ -157,6 +158,56 @@
     return () => offs.forEach((off) => off?.());
   });
 
+  /* Electron carves the tab strip out of the titlebar's native drag region
+     using rectangles it derives from layout. Those rectangles can go stale
+     (the strip is absolutely centred and changes width with every rename or
+     open tab), and a stale rectangle turns a click on a tab into a window
+     drag that the page never sees. Flipping the titlebar's app-region for
+     one frame forces Chromium to recompute and resend the regions. Do it
+     whenever the strip changes shape, the window resizes, or the pointer
+     arrives on the titlebar, so the regions are fresh before any click. */
+  let dragRegionFrame = 0;
+  function refreshDragRegions(): void {
+    if (dragRegionFrame) return;
+    const titlebar = document.getElementById('titlebar');
+    if (!titlebar) return;
+    titlebar.style.setProperty('-webkit-app-region', 'no-drag');
+    dragRegionFrame = window.requestAnimationFrame(() => {
+      dragRegionFrame = 0;
+      titlebar.style.removeProperty('-webkit-app-region');
+    });
+  }
+
+  $effect(() => {
+    refreshToken;
+    activeProjectId;
+    homeOpen;
+    refreshDragRegions();
+  });
+
+  $effect(() => {
+    const titlebar = document.getElementById('titlebar');
+    const tabs = document.getElementById('tabs');
+    if (!titlebar) return;
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => refreshDragRegions()) : null;
+    if (tabs) observer?.observe(tabs);
+    observer?.observe(titlebar);
+    let lastEnter = 0;
+    const onEnter = () => { const now = performance.now(); if (now - lastEnter > 250) { lastEnter = now; refreshDragRegions(); } };
+    titlebar.addEventListener('pointerenter', onEnter);
+    titlebar.addEventListener('pointermove', onEnter);
+    window.addEventListener('resize', refreshDragRegions);
+    window.addEventListener('focus', refreshDragRegions);
+    return () => {
+      observer?.disconnect();
+      titlebar.removeEventListener('pointerenter', onEnter);
+      titlebar.removeEventListener('pointermove', onEnter);
+      window.removeEventListener('resize', refreshDragRegions);
+      window.removeEventListener('focus', refreshDragRegions);
+      if (dragRegionFrame) window.cancelAnimationFrame(dragRegionFrame);
+    };
+  });
+
   $effect(() => {
     const titlebar = document.getElementById('titlebar');
     titlebar?.addEventListener('pointerdown', startWindowDrag as EventListener);
@@ -168,6 +219,12 @@
   });
 </script>
 
+<div class="titlebar-drag titlebar-drag-traffic" aria-hidden="true"></div>
+<div id="tools-center" aria-hidden="false">
+<div class="titlebar-drag" aria-hidden="true"></div>
+<ToolbarMount {PM} />
+<div class="titlebar-drag" aria-hidden="true"></div>
+</div>
 <div id="doc-strip" data-svelte-shell="doc-strip">
   <button
     class="project-strip-btn project-home"
@@ -220,8 +277,6 @@
 
 </div>
 
-<div class="titlebar-drag" aria-hidden="true"></div>
-<ToolbarMount {PM} />
 <div class="tb-right" id="tb-right">
   {#if !homeOpen}
     <button class="btn tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>

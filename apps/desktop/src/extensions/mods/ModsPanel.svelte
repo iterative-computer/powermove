@@ -16,10 +16,13 @@
     `${records.length} ${records.length === 1 ? 'mod' : 'mods'}` + (attention > 0 ? ` · ${attention} needs attention` : '')
   );
 
-  // There is no records-changed event on the API, so the list is re-read on the
-  // two load events plus after every action this panel triggers.
+  // Health and discovery updates can change records without loading a mod.
   $effect(() => {
-    const stops = [api.events.on('extension:loaded', refresh), api.events.on('extension:unloaded', refresh)];
+    const stops = [
+      api.events.on('extension:loaded', refresh),
+      api.events.on('extension:unloaded', refresh),
+      api.events.on('extensions:changed', refresh)
+    ];
     return () => {
       for (const stop of stops) stop.dispose();
     };

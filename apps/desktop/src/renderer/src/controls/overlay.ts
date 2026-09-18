@@ -22,11 +22,14 @@ export function anchorPicker(node: HTMLElement, trigger: HTMLElement | undefined
     const anchor = trigger.getBoundingClientRect();
     node.style.maxHeight = '';
     node.style.maxWidth = `${Math.max(0, window.innerWidth - margin * 2)}px`;
-    const bounds = node.getBoundingClientRect();
+    // Layout size, not the transformed box: the picker may be mid-scale as it opens.
+    const bounds = { width: node.offsetWidth, height: node.offsetHeight };
     const below = Math.max(0, window.innerHeight - margin - anchor.bottom - gap);
     const above = Math.max(0, anchor.top - margin - gap);
     const useBelow = bounds.height <= below || (bounds.height > above && below >= above);
     const available = useBelow ? below : above;
+    // Enter/exit motion grows from the trigger's edge, like every dropdown menu.
+    node.dataset.side = useBelow ? 'bottom' : 'top';
     node.style.maxHeight = `${available}px`;
     const height = Math.min(bounds.height, available);
     node.style.left = `${Math.max(margin, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - margin))}px`;

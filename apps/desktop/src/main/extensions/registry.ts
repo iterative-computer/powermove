@@ -133,7 +133,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
 
     for (const [id, candidate] of candidates) {
       if (filter !== null && !filter.has(id)) continue;
-      const enabled = enabledFor(id);
+      let enabled = enabledFor(id);
       const updatedAt = now();
       if (candidate.scope === 'builtin') {
         const health = healthForBuiltin(enabled, candidate);
@@ -174,7 +174,7 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       try {
         signature = await directorySignature(candidate.dir);
       } catch (error) {
-        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, errorText(error), updatedAt, update));
+        records.set(id, buildErrorRecord(candidate, candidate.manifest, enabledFor(id), errorText(error), updatedAt, update));
         continue;
       }
 
@@ -195,6 +195,8 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
         buildCache.set(candidate.dir, { signature, result });
       }
 
+      // Compilation can yield while a runtime health report disables this ID.
+      enabled = enabledFor(id);
       if (!result.ok) {
         records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, result.error, updatedAt, update));
         continue;
@@ -357,7 +359,15 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       const id = validateId(report.id);
       const health = validateReportedHealth(report.health);
       const record = requireRecord(records, id);
-      record.health = record.enabled ? health : { state: 'disabled' };
+      if (record.enabled && health.state === 'runtime-error') {
+        enabledState.set(id, false);
+        persistEnabledState(options.store, enabledState);
+        record.enabled = false;
+        record.health = health;
+      } else if (record.enabled) {
+        record.health = health;
+      } // Ignore late health reports from a runtime already disabled.
+
       record.updatedAt = now();
       /* 'health' refreshes UI lists without triggering a loader reload — a
          reload here would re-report health and loop forever. */

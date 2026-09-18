@@ -116,7 +116,7 @@
 
 <style>
   .agent-work-log { min-width: 0; color: var(--tx-3); font-size: var(--fs-sm); border-bottom: 1px solid var(--line); padding-bottom: 6px; }
-  .agent-work-log > summary { display: flex; align-items: center; gap: 6px; width: fit-content; max-width: 100%; padding: 3px 4px 3px 0; list-style: none; cursor: pointer; line-height: 1.5; border-radius: var(--r-sm); }
+  .agent-work-log > summary { display: flex; align-items: center; gap: 6px; width: fit-content; max-width: 100%; padding: 3px 4px 3px 0; list-style: none; line-height: 1.5; border-radius: var(--r-sm); }
   .agent-work-log > summary::-webkit-details-marker { display: none; }
   .agent-work-log > summary:hover { color: var(--tx); }
   .agent-work-log > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

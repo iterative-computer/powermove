@@ -40,190 +40,321 @@ select.sel {
   border: 0;
 }
 
+/* ── Colour picker ─────────────────────────────────────────
+   A popover with the dropdown menu's surface and motion (pm-menu-in/out from
+   app.css), holding dialkit-style stacked rows: plane, hue, value, swatches. */
+.color-picker-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 460;
+  background: transparent;
+}
+.color-picker-layer[data-state="closed"] { pointer-events: none; }
+
 .color-picker {
-  width: 352px;
-}
-
-/* Match inspector field density while keeping the color surface dominant. */
-.color-workbench {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 12px 92px;
-  gap: 8px;
-  min-height: 176px;
-}
-
-.color-sv,
-.color-hue {
-  align-self: stretch;
-}
-
-.color-side {
+  --cp-gap: 6px;
+  --cp-row: 28px;
+  --cp-radius: 8px;
+  position: fixed;
+  z-index: 461;
+  width: 280px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-width: 0;
+  gap: var(--cp-gap);
+  padding: 8px;
+  border-radius: 12px;
+  background: var(--bg-float);
+  box-shadow: 0 0 0 var(--hairline) var(--line-strong), 0 8px 24px -8px rgb(var(--ink-rgb) / .22), 0 2px 6px rgb(var(--ink-rgb) / .06);
+  color: var(--tx);
+  outline: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+:root[data-theme="dark"] .color-picker {
+  box-shadow: 0 0 0 var(--hairline) rgb(255 255 255 / .1), 0 12px 32px -8px rgb(0 0 0 / .6), 0 2px 6px rgb(0 0 0 / .3);
+}
+.color-picker[data-side="bottom"] { transform-origin: top right; }
+.color-picker[data-side="top"] { transform-origin: bottom right; --pm-menu-slide: 4px; }
+.color-picker[data-state="open"] { animation: pm-menu-in .18s cubic-bezier(.23, 1, .32, 1) both; }
+.color-picker[data-state="closed"] { animation: pm-menu-out .12s cubic-bezier(.4, 0, 1, 1) both; pointer-events: none; }
+
+.color-picker :is(button, [role="slider"]):focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 1px;
 }
 
-.color-compare {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  width: 48px;
-  height: var(--ctl-h);
+/* Plane: saturation across, brightness down, in the current hue. */
+.color-sv {
+  position: relative;
+  height: 148px;
+  border-radius: var(--cp-radius);
+  background:
+    linear-gradient(to top, #000, transparent),
+    linear-gradient(to right, #fff, transparent),
+    var(--cp-hue);
+  cursor: crosshair;
+  touch-action: none;
+}
+.color-sv::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 var(--hairline) rgb(0 0 0 / .12);
+  pointer-events: none;
+}
+.color-sv i,
+.cp-hue i {
+  position: absolute;
+  border: 2px solid #fff;
+  background: var(--cp-color);
+  box-shadow: 0 1px 4px rgb(0 0 0 / .35);
+  pointer-events: none;
+}
+.color-sv i {
+  width: 12px;
+  height: 12px;
+  margin: -6px;
+  border-radius: 50%;
+}
+
+/* Hue: a slim spectrum with a swatch thumb that stays inside the track. */
+.cp-hue {
+  display: flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  cursor: ew-resize;
+  touch-action: none;
+  border-radius: var(--cp-radius);
+}
+.cp-hue-track {
+  position: relative;
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+  box-shadow: inset 0 0 0 var(--hairline) rgb(0 0 0 / .12);
+}
+.cp-hue i {
+  top: 50%;
+  width: 14px;
+  height: 18px;
+  margin: -9px 0 0 -7px;
+  border-radius: 5px;
+  background: var(--cp-hue);
+}
+
+/* Value: format switch with a gliding pill, one mono field, eyedropper. */
+.cp-value {
+  display: flex;
+  align-items: center;
+  gap: var(--cp-gap);
+  height: var(--cp-row);
+}
+.cp-formats {
+  position: relative;
+  display: flex;
   flex: none;
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18);
+  height: 100%;
+  padding: 2px;
+  border-radius: var(--cp-radius);
+  background: var(--ink-1);
 }
+.cp-formats-pill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc((100% - 4px) / 3);
+  border-radius: calc(var(--cp-radius) - 2px);
+  background: var(--ctl-raised);
+  box-shadow: var(--ctl-edge);
+  transition: transform .2s cubic-bezier(.25, 1, .5, 1);
+  pointer-events: none;
+}
+.cp-format {
+  position: relative;
+  z-index: 1;
+  width: 38px;
+  padding: 0;
+  border: 0;
+  border-radius: calc(var(--cp-radius) - 2px);
+  background: none;
+  color: var(--tx-3);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  transition: color var(--dur-1);
+}
+.cp-format:hover,
+.cp-format[aria-checked="true"] { color: var(--tx); }
 
-.color-compare-swatch {
-  display: block;
-  width: 100%;
+.color-picker .color-hex {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--cp-radius);
+  background: var(--ink-1);
+  box-shadow: none;
+  color: var(--tx);
+  font-family: var(--f-mono);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+  outline: 0;
+  user-select: text;
+  -webkit-user-select: text;
+  transition: background var(--dur-1);
+}
+.color-picker .color-hex:hover { background: var(--ink-2); }
+.color-picker .color-hex:focus { background: var(--ink-2); }
+.color-picker .color-hex[aria-invalid="true"] { color: #ef7777; }
+
+.cp-eyedropper {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--cp-row);
+  height: var(--cp-row);
+  padding: 0;
+  border: 0;
+  border-radius: var(--cp-radius);
+  background: var(--ink-1);
+  color: var(--tx-2);
+  transition: background var(--dur-1), color var(--dur-1), transform var(--dur-1) var(--ease);
+}
+.cp-eyedropper svg {
+  width: 16px;
+  height: 16px;
+}
+.cp-eyedropper:hover { background: var(--ink-2); color: var(--tx); }
+.cp-eyedropper:active { transform: scale(.94); }
+.cp-eyedropper:disabled { opacity: var(--disabled); }
+
+/* Swatches: the original | new pair, a hairline, then the presets.
+   The pair is the largest chip; presets are smaller and inset so the row reads as
+   "your colour, then a palette" instead of ten equal squares. */
+.cp-swatches {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 22px;
+  margin-top: 4px;
+  padding: 0 2px 2px;
+}
+.cp-compare {
+  display: flex;
+  flex: none;
+  height: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .16);
+}
+.cp-compare > * {
+  width: 26px;
   height: 100%;
   padding: 0;
   border: 0;
   background: var(--sw-color);
 }
-
-.color-compare-swatch.is-before {
-  cursor: pointer;
-  box-shadow: none;
-}
-
-.color-channels {
+.cp-swatches-rule {
   flex: none;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  min-height: 0;
+  width: var(--hairline);
+  height: 14px;
+  background: var(--line-strong);
 }
-
-.color-channels hr {
-  height: var(--hairline);
-  margin: 2px 0;
-  border: 0;
-  background: var(--line);
-}
-
-.color-channel {
-  flex: none;
+.cp-presets {
+  flex: 1;
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) 10px;
-  align-items: center;
-  gap: 6px;
-  height: var(--ctl-h);
-  color: var(--tx-3);
-  font-size: var(--fs-xs);
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 7px;
+  height: 18px;
 }
-
-.color-channel em {
-  font-style: normal;
-  color: var(--tx-3);
-  font-size: var(--fs-xs);
-}
-
-.color-channel input {
-  width: 100%;
-  min-width: 0;
-  height: var(--ctl-h);
-  padding: 0 5px;
+.cp-preset {
+  position: relative;
+  height: 100%;
+  padding: 0;
   border: 0;
-  border-radius: var(--r-xs);
-  background: var(--bg-field);
-  box-shadow: var(--ctl-edge-inset);
-  color: var(--tx);
-  font: var(--fs-sm) var(--f-mono);
-  text-align: right;
+  border-radius: 5px;
+  background: var(--sw-color);
+  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .16);
+  transition: transform var(--dur-2) var(--ease);
 }
-
-.pm-control-font-drop {
-  position: fixed;
+.cp-preset:hover { transform: scale(1.1); }
+.cp-preset[aria-pressed="true"]::after {
+  content: '';
+  position: absolute;
+  left: calc(50% - 2px);
+  top: calc(50% - 2px);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #fff;
+  mix-blend-mode: difference;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .toggle,
   .toggle i,
-  .fill-spectrum-color {
+  .fill-spectrum-color,
+  .cp-formats-pill,
+  .cp-preset,
+  .cp-eyedropper {
     transition: none;
   }
+  .color-picker[data-state] { animation: none; }
 }
 
-.color-dialog .color-grid {
-  gap: 6px;
-}
-
-.color-dialog .color-choice {
-  aspect-ratio: auto;
-  height: 22px;
-  border-radius: var(--r-xs);
-  /* White and near-black swatches need an edge to read against either theme. */
-  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18);
-}
-
-.color-dialog .color-choice.on {
-  box-shadow: inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .18), 0 0 0 2px var(--accent);
-}
-
-.color-dialog .color-hex {
-  height: var(--ctl-h);
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-}
-
-.color-dialog .color-eyedropper {
-  width: var(--ctl-h);
-  height: var(--ctl-h);
-  flex: none;
+/* ── On/off ─────────────────────────────────────────────────
+   Two segments, Off and On, with one pill gliding between them (after
+   dialkit's Toggle). Same well material as the value fields; the pill is
+   the raised panel colour like a pressed alignment segment. */
+.onoff {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 28px;
+  padding: 2px;
+  gap: 0;
   border-radius: var(--r-sm);
-  background: var(--bg-field);
-  box-shadow: var(--ctl-edge-inset);
-  color: var(--tx-2);
+  background: rgb(var(--ink-rgb) / .06);
+  flex: 1 1 0;
+  min-width: 0;
 }
-
-.color-dialog .color-eyedropper:hover {
-  color: var(--tx);
-  background: var(--bg-row-hi);
-}
-
-.color-dialog .color-eyedropper:disabled {
-  opacity: var(--disabled);
-}
-
-/* Scoped overlay chrome: shared theme, density and focus treatment. */
-.fill-picker.color-picker > header {
-  height: var(--hdr-h);
-  flex: none;
-  padding-inline: var(--pad);
-}
-.fill-picker.color-picker > header b { font-weight: var(--fw-medium); }
-.color-picker .color-dialog { padding: var(--pad); gap: 8px; }
-.color-picker .color-workbench { min-height: calc(6 * var(--ctl-h)); }
-.color-picker .color-channels { gap: 0; }
-.color-picker .color-channel { gap: 4px; }
-.color-picker .color-channel input { height: calc(var(--ctl-h) - 2px); border-radius: var(--r-sm); }
-.color-picker .color-sv { border-radius: var(--r-sm); }
-.color-picker .color-hue { border-radius: var(--r-pill); }
-.color-picker .color-hex { min-width: 0; color: var(--tx); font-size: var(--fs-sm); }
-.color-picker .color-dialog-value { gap: 8px; }
-.color-picker :is(button,input,[role="slider"]):focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Flat fields and swatches follow the inspector's borderless controls. */
-.color-picker :is(.color-channel input, .color-hex, .color-eyedropper,
-  .color-compare, .color-compare-swatch.is-before, .color-choice, .color-choice.on) {
-  box-shadow: none;
-  border: 0;
-}
-.color-picker .color-choice { position: relative; }
-.color-picker .color-choice.on::after {
-  content: '';
+.onoff-pill {
   position: absolute;
-  width: 4px;
-  height: 4px;
-  left: calc(50% - 2px);
-  bottom: 3px;
-  border-radius: 50%;
-  background: white;
-  mix-blend-mode: difference;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  border-radius: calc(var(--r-sm) - 2px);
+  background: var(--bg-panel);
+  transform: translateX(0);
+  transition: transform .2s cubic-bezier(.25, 1, .5, 1);
+  pointer-events: none;
 }
+.onoff.on .onoff-pill { transform: translateX(100%); }
+.onoff > button {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: calc(var(--r-sm) - 2px);
+  background: transparent;
+  color: var(--tx-3);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: default;
+  transition: color var(--dur-1);
+}
+.onoff > button:hover { color: var(--tx-2); }
+.onoff > button[aria-checked="true"] { color: var(--tx); }
+.onoff > button:active { transform: scale(.94); transition: none; }
+.onoff > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.onoff.mixed > button { color: var(--tx-3); }
+@media (prefers-reduced-motion: reduce) { .onoff-pill { transition: none; } }

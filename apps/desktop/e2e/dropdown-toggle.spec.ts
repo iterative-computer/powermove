@@ -49,13 +49,13 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
   const font = page.locator('button.font-select').first();
   await expect(font).toBeVisible();
   await font.click();
-  await expect(page.locator('.font-drop')).toBeVisible();
+  await expect(page.locator('.font-menu')).toBeVisible();
   await font.click();
-  await expect(page.locator('.font-drop')).toHaveCount(0);
+  await expect(page.locator('.font-menu')).toHaveCount(0);
   await font.click();
-  await expect(page.locator('.font-drop')).toBeVisible();
+  await expect(page.locator('.font-menu')).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(page.locator('.font-drop')).toHaveCount(0);
+  await expect(page.locator('.font-menu')).toHaveCount(0);
   // Older installed viewer extensions still emit inline background shorthand.
   // Verify the shell CSS also works without remounting those controls.
   await page.evaluate(() => {

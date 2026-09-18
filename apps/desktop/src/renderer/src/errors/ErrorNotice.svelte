@@ -47,7 +47,7 @@
   .alert-text{display:flex;align-items:flex-start;gap:8px;margin:0;color:var(--tx)!important;font:inherit}
   .error-notice p{margin:0;color:var(--tx-2)!important;font:inherit}
   details{margin-top:10px;color:var(--tx-3);font-size:var(--fs-xs)}
-  summary{cursor:pointer;width:fit-content;max-width:100%}
+  summary{width:fit-content;max-width:100%}
   summary:hover{color:var(--tx)}
   pre{margin:8px 0;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font:11px/1.5 var(--f-mono,monospace);color:var(--tx-2)}
   button{padding:4px 7px;border-radius:5px;background:var(--ink-1);color:var(--tx-2);font:inherit;text-align:left}

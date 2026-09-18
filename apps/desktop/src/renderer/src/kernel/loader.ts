@@ -85,7 +85,7 @@ export function planLoad(records: ExtensionRecord[], builtinOrder: string[]): Lo
 
   for (const record of records) {
     if (record.enabled === false) {
-      skipped.push({ id: record.id, health: { state: 'disabled' } });
+      skipped.push({ id: record.id, health: record.health.state === 'runtime-error' ? record.health : { state: 'disabled' } });
       continue;
     }
     if (BLOCKED.has(record.health?.state)) continue; // main already recorded why
@@ -231,6 +231,25 @@ export function createLoader(options: LoaderOptions): Loader {
 
     const handle = createExtensionAPI(kernel, record, hostDeps);
     try {
+      // Compiled bundles expose inert CSS. The activation owns every style,
+      // including extracted Svelte styles, so cached modules can be re-enabled.
+      const bundle = module as ExtensionModule & {
+        __powermoveStyles?: string[];
+        __powermoveAcquireStyles?: (add: (css: string) => void) => () => void;
+      };
+      const addStyle = (css: string): void => {
+        const style = document.createElement('style');
+        style.dataset.powermoveExtension = id;
+        style.textContent = css;
+        handle.api.onDispose(() => style.remove());
+        document.head.appendChild(style);
+      };
+      if (bundle.__powermoveAcquireStyles) {
+        handle.api.onDispose(bundle.__powermoveAcquireStyles(addStyle));
+      } else {
+        for (const css of bundle.__powermoveStyles ?? []) addStyle(css);
+      }
+      handle.setActivating(true);
       const result = await withTimeout(Promise.resolve(module.default(handle.api)), timeoutMs, `activate() of "${id}" timed out`);
       const disposable = result as Disposable | void;
       if (disposable && typeof disposable.dispose === 'function') handle.api.onDispose(() => disposable.dispose());
@@ -238,6 +257,8 @@ export function createLoader(options: LoaderOptions): Loader {
       handle.disposeAll();
       failActivation(record, error);
       return false;
+    } finally {
+      handle.setActivating(false);
     }
 
     active.set(id, { record, module, handle });
@@ -328,10 +349,12 @@ export function createLoader(options: LoaderOptions): Loader {
     if (stamps.length < limit) return;
     failures.delete(id);
     const name = nameOf(recordFor(id), id);
+    activationFailures.add(id);
     enqueue(async () => {
+      const health = { state: 'runtime-error' as const, error: errorText(error) };
+      patchRecord(id, { enabled: false, health });
       await deactivate(id);
-      patchRecord(id, { enabled: false });
-      reportHealth(id, { state: 'runtime-error', error: errorText(error) });
+      reportHealth(id, health);
       deps.ui.toast(`${name} stopped working — check Mods`, { sticky: true, source: { id, name } } as ToastArgs);
     });
   }
@@ -388,13 +411,15 @@ export function createLoader(options: LoaderOptions): Loader {
   }
 
   function onChanged(event: ExtensionsChangedEvent): void {
-    kernel.events.emit('extensions:changed', { ids: [...event.ids], reason: event.reason });
     enqueue(async () => {
       const list = await refreshRecords();
       /* Health events are round-trips from this renderer. Re-plan so a failed
          replacement can expose its fallback, but do not reload the reporting
          extension and start another report loop. */
       await reconcile(list, event.reason === 'health' ? [] : event.ids);
+      // List subscribers must observe the reconciled snapshot, not the state
+      // from before the asynchronous main-process registry read.
+      kernel.events.emit('extensions:changed', { ids: [...event.ids], reason: event.reason });
     });
   }
 

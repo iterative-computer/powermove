@@ -13,7 +13,7 @@ const RENDERER_MENU_CHORDS = new Set([
   'KeyZ', 'shift+KeyZ',
   'KeyX', 'KeyC', 'KeyV', 'KeyA', 'KeyD', 'shift+KeyD', 'KeyB', 'shift+KeyH',
   'BracketRight', 'BracketLeft', 'shift+BracketRight', 'shift+BracketLeft',
-  'Equal', 'shift+Equal', 'Minus', 'Digit0', 'Digit1',
+  'Equal', 'shift+Equal', 'Minus', 'Digit0', 'Digit1', 'Comma',
 ]);
 
 export function isRendererOwnedMenuInput(input: Partial<Input>): boolean {
@@ -88,6 +88,8 @@ export function appMenuTemplate(
       submenu: [
         { role: 'about' },
         { type: 'separator' },
+        commandItem('Settings…', 'CommandOrControl+,', 'settings', send, false),
+        { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
         { role: 'hide', accelerator: 'Command+H' },
@@ -108,6 +110,8 @@ export function appMenuTemplate(
           click: () => windows?.newWindow()
         },
         commandItem('Open Project…', 'CommandOrControl+O', 'open', send),
+        { role: 'close', accelerator: 'CommandOrControl+W' },
+        { type: 'separator' },
         commandItem('Save Project', 'CommandOrControl+S', 'save', send),
         commandItem('Save Project As…', 'CommandOrControl+Shift+S', 'saveAs', send),
         { type: 'separator' },

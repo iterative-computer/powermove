@@ -88,7 +88,15 @@ export class AgentThreads {
 
   get active(): AgentThread { return this.threads.find(t => t.id === this.activeId)!; }
   get key(): string { return `agentThreads.${this.projectId}`; }
+  /** A thread nobody has typed into yet: nothing said, nothing drafted, nothing attached. */
+  static isBlank(thread: AgentThread | undefined): boolean {
+    return !!thread && thread.conversation.length === 0 && !thread.composerDraft.trim() && thread.attachments.length === 0;
+  }
+  /** "New thread" reuses a blank one rather than stacking empties: a thread
+   * only really exists once its first message is sent. */
   create(): AgentThread {
+    const blank = this.threads.find(t => AgentThreads.isBlank(t));
+    if (blank) { this.activeId = blank.id; return blank; }
     const thread = newAgentThread(this.uid());
     this.threads.unshift(thread); this.activeId = thread.id;
     return thread;

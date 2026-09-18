@@ -14,7 +14,7 @@ afterEach(() => {
   else delete (globalThis as any).window;
 });
 
-function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?: any): {
+function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?: any, bridge?: any): {
   PM: PMRegistry;
   memory: Map<string, any>;
   listeners: Map<string, any[]>;
@@ -75,6 +75,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   const fakeWindow: any = {
     document,
     Blob,
+    powermove: bridge,
     addEventListener(name: string, listener: any) {
       const bucket = listeners.get(name) || [];
       bucket.push(listener);
@@ -205,6 +206,35 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
 }
 
 describe('legacy app install', () => {
+  it('opens a project delivered by the external-open subscription', async () => {
+    let externalOpen!: (result: any) => Promise<void>;
+    const onProjectOpenExternal = vi.fn((callback: typeof externalOpen) => {
+      externalOpen = callback;
+      return () => {};
+    });
+    const { PM, toasts } = appRegistry(true, undefined, undefined, { onProjectOpenExternal });
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    PM.replaceProject = (next: any) => { PM.proj = next; };
+    const hide = vi.fn();
+    PM.ProjectsScreen = { hide };
+    const document = { proj: { ...PM.proj, id: 'from-finder', name: 'Finder Project' } };
+
+    await externalOpen({
+      ok: true,
+      path: '/tmp/Finder Project.pmv',
+      projectId: 'from-finder',
+      data: new TextEncoder().encode(JSON.stringify(document))
+    });
+
+    expect(onProjectOpenExternal).toHaveBeenCalledOnce();
+    expect(PM.proj.id).toBe('from-finder');
+    expect(hide).toHaveBeenCalledOnce();
+    expect(toasts).toContain('Opened Finder Project.pmv');
+  });
+
   it('compacts oversized provenance when reopening without removing source', () => {
     const { PM } = appRegistry();
     const source = { ...PM.proj, edits: [{ id: 'bulk', summary: ['Cut out subject'], operations: [{ value: 'x'.repeat(200_000) }] }] };
@@ -562,8 +592,15 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(saved.history.index).toBe(0);
   expect(saved.history.entries.map((entry: any) => entry.label)).toEqual(['Rename one', 'Rename two']);
   expect(PM.Projects.getState('P1').history).toEqual(saved.history);
+  const hideHome = vi.fn();
+  PM.ProjectsScreen = { isOpen: true, hide: hideHome };
+  (window as any).powermove.openProjectFile = async () => ({ ok: false, cancelled: true });
+  await PM.openProject();
+  expect(hideHome).not.toHaveBeenCalled();
+  expect(PM.proj.id).toBe('P1');
   (window as any).powermove.openProjectFile = async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data: saveFile.mock.calls[0]![0].data });
   await PM.openProject();
+  expect(hideHome).toHaveBeenCalledOnce();
   expect(toasts).not.toEqual(expect.arrayContaining([expect.stringContaining('Could not open')]));
   expect(PM.proj.id).toBe('reopened');
   expect(PM.hist.canUndo()).toBe(true);
@@ -572,4 +609,22 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(PM.proj.name).toBe('Two');
   PM.hist.undo();
   expect(PM.proj.name).toBe('One');
+});
+
+it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {
+  for (const trashed of [true, false]) {
+    const { PM, listeners } = appRegistry();
+    const put = vi.spyOn(PM.Projects, 'put');
+    PM.Projects.trashList = () => trashed ? [{ id: 'P1' }] : [];
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    const next = PM.mkProject({ id: 'P2', name: 'Next' });
+
+    listeners.get('pm-open-project')![0]({ detail: next });
+
+    expect(PM.proj.id).toBe('P2');
+    expect(put.mock.calls.map(([project]) => (project as { id: string }).id)).toEqual(trashed ? ['P2'] : ['P1', 'P2']);
+  }
 });

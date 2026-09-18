@@ -226,6 +226,7 @@ const clock = { last: 0, base: 0, origin:0, cycle:0, acc: 0, frames: 0, t0: 0 };
 let needsDraw = true;
 let contentGeneration = 0, renderedGeneration = -1;
 let lastRenderTime = NaN, lastProject: any = null;
+let lastRenderFailure = -Infinity;
 let interactionUntil = 0, refinePending = false, lastQualityChange = -Infinity;
 let inputUntil = 0;
 PM.interactionActive = () => window.performance.now() < Math.max(inputUntil, interactionUntil);
@@ -276,10 +277,21 @@ function frame(now: any) {
   if (!PM.playing && !interactive && PM.quality < 1 && E.auto) { PM.quality = 1; PM.bus.emit('quality'); }
   needsDraw = false;
   const t0 = window.performance.now();
-  PM.GL.render(renderTime, {
-    mblur: !interactive, mbSamples: PM.playing ? 6 : 12,
-    shutter: p.shutter || .5, hideShy: false,
-  });
+  try {
+    PM.GL.render(renderTime, {
+      mblur: !interactive, mbSamples: PM.playing ? 6 : 12,
+      shutter: p.shutter || .5, hideShy: false,
+    });
+  } catch (error) {
+    /* A throw here used to escape the animation frame with the redraw flag
+       already cleared, leaving the last frame (or black) on screen until the
+       next invalidate threw again. Report it and keep the loop alive. */
+    if (now - lastRenderFailure > 2000) {
+      lastRenderFailure = now;
+      console.error('[engine] frame render failed', error);
+      PM.toast?.('The preview could not be rendered. See the console for details.');
+    }
+  }
   flushFrameVideoSeeks();
   lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration;
   PM.bus.emit('overlay');

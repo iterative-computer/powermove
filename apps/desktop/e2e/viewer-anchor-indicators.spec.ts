@@ -104,14 +104,16 @@ test('clicking away commits canvas text and returns to Selection while explicit 
   expect(result).toEqual({ tool: 'select', count: 1, text: 'Keep this text' });
   const undone = await page.evaluate(() => {
     const PM = (window as any).PM;
-    // Click-away also records the now-undoable layer deselection.
+    // Creating the layer and typing into it is one history entry. The
+    // click-away may also record an undoable deselection on top of it.
+    for (let i = 0; i < 3 && PM.hist.label() !== 'Add text'; i++) PM.hist.undo();
+    const label = PM.hist.label();
     PM.hist.undo();
-    PM.hist.undo();
-    return { count: PM.proj.layers.length, text: (PM.proj.layers[0].d.text?.v ?? PM.proj.layers[0].d.text) };
+    return { label, count: PM.proj.layers.length };
   });
-  expect(undone.count).toBe(1);
-  expect(undone.text).not.toBe('Keep this text');
+  expect(undone).toEqual({ label: 'Add text', count: 0 });
   await page.evaluate(() => { const PM = (window as any).PM; const tool = PM.Kernel.services.get('tool'); PM.hist.redo(); tool.setTool('text'); });
+  expect(await page.evaluate(() => { const PM = (window as any).PM; return PM.proj.layers.map((l: any) => l.d.text?.v ?? l.d.text); })).toEqual(['Keep this text']);
   await page.mouse.click(frame.x + frame.width * .3, frame.y + frame.height * .4);
   await expect(editor).toBeVisible();
   await page.getByRole('button', { name: 'Hand Tool (H)', exact: true }).click();

@@ -28,6 +28,16 @@ const press = (init: KeyboardEventInit & { key: string }, target: EventTarget = 
 };
 
 describe('installKeyListener', () => {
+  it('leaves Enter on a focused button available for native activation', () => {
+    const kernel = createKernel();
+    const { runs } = install(kernel);
+    kernel.bind('viewer', { key: 'enter', command: 'text.editSelected' });
+    const button = document.createElement('button');
+    document.body.append(button);
+    expect(press({ key: 'Enter' }, button)).toBe(false);
+    expect(runs).toEqual([]);
+  });
+
   it('dispatches the highest-priority binding first and prevents default', () => {
     const kernel = createKernel();
     const { runs } = install(kernel);

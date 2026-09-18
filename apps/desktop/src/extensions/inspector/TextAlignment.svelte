@@ -32,8 +32,9 @@
 
 <style>
   .text-alignment { display:flex; gap:2px; width:100%; padding:2px; background:var(--bg-row); border-radius:var(--r-sm); }
-  button { display:flex; align-items:center; justify-content:center; flex:1; height:24px; padding:0; border:0; border-radius:calc(var(--r-sm) - 2px); background:transparent; color:var(--tx-3); cursor:pointer; }
-  button:hover { background:var(--bg-hover); color:var(--tx); }
+  button { display:flex; align-items:center; justify-content:center; flex:1; height:24px; padding:0; border:0; border-radius:calc(var(--r-sm) - 2px); background:transparent; color:var(--tx-3);  }
+  button:hover { background:var(--ink-1); color:var(--tx); }
+  button:active { background:var(--ink-2); color:var(--tx); transform:scale(.94); transition:none; }
   button[aria-pressed="true"] { background:var(--bg-panel); color:var(--tx); box-shadow:none; }
   button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 </style>

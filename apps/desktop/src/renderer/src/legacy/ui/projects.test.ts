@@ -56,6 +56,12 @@ describe('legacy projects screen install', () => {
     let menuItems: any[] = [];
     const body = new FakeElement('body');
     vi.stubGlobal('document', { body });
+    const dispatch = vi.fn();
+    vi.stubGlobal('window', {
+      CustomEvent: class { detail: any; constructor(public type: string, init: any) { this.detail = init.detail; } },
+      dispatchEvent: dispatch,
+      setTimeout: vi.fn(),
+    });
 
     const h = (selector: string, ...args: any[]) => {
       const attrs = args[0] && typeof args[0] === 'object' && !(args[0] instanceof FakeElement)
@@ -146,5 +152,49 @@ describe('legacy projects screen install', () => {
     const trashMore = [...elements].reverse().find(el => el.attrs['aria-label'] === 'Project actions')!;
     trashMore.onclick({ stopPropagation() {} });
     expect(menuItems.some(item => item && item.label === 'Delete Forever…')).toBe(true);
+
+    PM.ProjectsScreen.show('projects');
+    PM.proj = { id: 'P1' };
+    PM.Projects.openProjects = () => ['P1'];
+    const flushProject = vi.fn(async () => {});
+    const trash = vi.fn(() => { PM.Projects.list = () => [{ id: 'P3', name: 'Other' }]; return true; });
+    const confirm = vi.fn(async () => true);
+    PM.flushProject = flushProject;
+    PM.Projects.trash = trash;
+    PM.confirm = confirm;
+    const activeMore = [...elements].reverse().find(el => el.attrs['aria-label'] === 'Project actions')!;
+    activeMore.onclick({ stopPropagation() {} });
+    await menuItems.find(item => item?.label === 'Move to Trash…').run();
+    expect(flushProject).toHaveBeenCalledOnce();
+    expect(trash).toHaveBeenCalledWith('P1');
+    expect(flushProject.mock.invocationCallOrder[0]!).toBeLessThan(trash.mock.invocationCallOrder[0]!);
+    expect(dispatch.mock.calls.some(([event]) => event.type === 'pm-open-project' && (event as CustomEvent).detail.id === 'P3')).toBe(true);
+
+    PM.proj = { id: 'P3' };
+    flushProject.mockClear();
+    dispatch.mockClear();
+    activeMore.onclick({ stopPropagation() {} });
+    await menuItems.find(item => item?.label === 'Move to Trash…').run();
+    expect(trash).toHaveBeenCalledTimes(2);
+    expect(flushProject).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pm-open-project' }));
+
+    PM.proj = { id: 'P1' };
+    PM.flushProject = vi.fn(async () => { throw new Error('Disk full'); });
+    activeMore.onclick({ stopPropagation() {} });
+    await menuItems.find(item => item?.label === 'Move to Trash…').run();
+    expect(trash).toHaveBeenCalledTimes(2);
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pm-open-project' }));
+
+    let finishFlush!: () => void;
+    PM.flushProject = vi.fn(() => new Promise<void>(resolve => { finishFlush = resolve; }));
+    activeMore.onclick({ stopPropagation() {} });
+    const pendingTrash = menuItems.find(item => item?.label === 'Move to Trash…').run();
+    await Promise.resolve();
+    PM.proj = { id: 'P3' };
+    finishFlush();
+    await pendingTrash;
+    expect(trash).toHaveBeenCalledTimes(3);
+    expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pm-open-project' }));
   });
 });

@@ -885,7 +885,17 @@ const refreshTheme = () => {
     line: css('--line') || 'rgba(15,15,20,.09)',
   };
 };
-onEvent('theme:changed', () => { refreshTheme(); refreshInk(); invalidate('timeline'); });
+/* Colors are re-read on the next draw rather than inside the event: listeners
+   run in registration order and the document may not have finished switching
+   when this one fires. The attribute observer covers system-appearance
+   changes, which flip data-theme without a kernel event. */
+const invalidateTheme = () => { theme = null; invalidate('timeline'); };
+onEvent('theme:changed', invalidateTheme);
+if (typeof MutationObserver === 'function') {
+  const themeObserver = new MutationObserver(invalidateTheme);
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-timeline-surfaces', 'style'] });
+  runtimeCleanups.push(() => themeObserver.disconnect());
+}
 
 /* Ink-on-paper colors for canvas chrome. Light theme uses black alpha;
    dark theme uses white alpha — resolved on every theme refresh. */
@@ -937,7 +947,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     }
   }
   const c = T.ctx; if (!c) return null;
-  if (!theme) refreshTheme();
+  if (!theme) { refreshTheme(); refreshInk(); }
   const p = api.project.get();
   const W = T.w, H = T.hgt;
   c.setTransform(T.dpr, 0, 0, T.dpr, 0, 0);

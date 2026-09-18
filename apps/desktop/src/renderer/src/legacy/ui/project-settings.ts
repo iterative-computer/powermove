@@ -99,7 +99,7 @@ export function clampDuration(value: unknown, fallback: number): number {
   return Math.min(MAX_DURATION, Math.max(MIN_DURATION, Math.round(number * 1000) / 1000));
 }
 
-interface SettingsRow {
+export interface SettingsRow {
   element: HTMLElement;
   /** Muted description line; rewritten live for context-dependent rows. */
   detail: HTMLElement;
@@ -107,7 +107,7 @@ interface SettingsRow {
   setEnabled(enabled: boolean): void;
 }
 
-function row(title: string, detail: string, control: HTMLElement): SettingsRow {
+export function row(title: string, detail: string, control: HTMLElement): SettingsRow {
   const element = document.createElement('div');
   element.className = 'settings-row';
   const copy = document.createElement('div');
@@ -131,7 +131,7 @@ function row(title: string, detail: string, control: HTMLElement): SettingsRow {
   };
 }
 
-function select(label: string): HTMLSelectElement {
+export function select(label: string): HTMLSelectElement {
   const element = document.createElement('select');
   element.className = 'settings-select';
   element.setAttribute('aria-label', label);
@@ -155,7 +155,7 @@ function fillOptions<T>(
   for (const item of extra ?? []) element.append(option(item.v, item.label));
 }
 
-function numberInput(label: string, min: number, max: number, step: number): HTMLInputElement {
+export function numberInput(label: string, min: number, max: number, step: number): HTMLInputElement {
   const element = document.createElement('input');
   element.type = 'number';
   element.className = 'settings-input';

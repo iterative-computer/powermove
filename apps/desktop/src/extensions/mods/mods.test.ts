@@ -170,14 +170,14 @@ describe('ModsPanel', () => {
     render(harness);
     harness.calls.list.mockClear();
 
-    const toggle = rowFor(target, 'Bounce').querySelector<HTMLButtonElement>('.toggle');
-    expect(toggle?.getAttribute('aria-pressed')).toBe('true');
-    toggle?.click();
+    const toggle = rowFor(target, 'Bounce').querySelector<HTMLElement>('.onoff');
+    expect(toggle?.getAttribute('data-enabled')).toBe('true');
+    toggle?.querySelector<HTMLButtonElement>('button[aria-label^="Turn off"]')?.click();
     flushSync();
 
     expect(harness.calls.setEnabled).toHaveBeenCalledWith('mine', false);
     // Optimistic: the switch flips before the promise settles.
-    expect(rowFor(target, 'Bounce').querySelector('.toggle')?.getAttribute('aria-pressed')).toBe('false');
+    expect(rowFor(target, 'Bounce').querySelector('.onoff')?.getAttribute('data-enabled')).toBe('false');
     await settle();
     expect(harness.calls.list).toHaveBeenCalled();
   });
@@ -314,5 +314,17 @@ describe('ModsPanel', () => {
     flushSync();
     expect(harness.listenerCount('extension:loaded')).toBe(0);
     expect(harness.listenerCount('extension:unloaded')).toBe(0);
+    expect(harness.listenerCount('extensions:changed')).toBe(0);
+  });
+
+  it('refreshes mounted Mods after a health-only auto-disable notification', () => {
+    const harness = fakeApi([record('flaky')]);
+    render(harness);
+    expect(rowFor(target, 'flaky').querySelector('.onoff')?.getAttribute('data-enabled')).toBe('true');
+    harness.setList([record('flaky', { enabled: false, health: { state: 'runtime-error', error: 'boom' } })]);
+    harness.emit('extensions:changed');
+    flushSync();
+    expect(rowFor(target, 'flaky').querySelector('.onoff')?.getAttribute('data-enabled')).toBe('false');
+    expect(target.querySelector('.summary')?.textContent).toContain('1 needs attention');
   });
 });

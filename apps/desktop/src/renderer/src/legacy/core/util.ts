@@ -271,7 +271,7 @@ PM.drag = (e: any, { move, up, cancel, cursor, infinite = false }: any) => {
     dx = ev.clientX - sx; dy = ev.clientY - sy;
     move?.(dx, dy, ev);
     // Wait for a real drag so clicking still enters the numeric editor.
-    if (!done && !requested && lockEl?.requestPointerLock && Math.abs(dx) >= 3) {
+    if (!done && !requested && lockEl?.requestPointerLock && Math.hypot(dx, dy) >= 3) {
       requested = true;
       try {
         Promise.resolve(lockEl.requestPointerLock()).then(() => {

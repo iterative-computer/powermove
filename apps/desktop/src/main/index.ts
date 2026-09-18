@@ -32,10 +32,11 @@ import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
+import { registerConfirmIpc } from './native-confirm';
 import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, stillImageConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
-import { registerSaveIpc } from './save';
+import { openProjectForWindow, registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './security-policy';
@@ -123,7 +124,45 @@ const currentEditor = (): BrowserWindow | null => {
 let persistOpenWindows: () => void = () => {};
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
+let projects: ProjectFiles | null = null;
+const pendingOpenFiles: string[] = [];
+const recentOpenFiles = new Map<string, number>();
 let quitPrepared = () => false;
+
+function queueOrOpen(filePath: string): void {
+  const mainWindow = currentEditor();
+  const normalized = path.resolve(filePath);
+  const now = Date.now();
+  const lastOpen = recentOpenFiles.get(normalized);
+  if (lastOpen !== undefined && now - lastOpen < 1_000) return;
+  recentOpenFiles.set(normalized, now);
+  for (const [candidate, timestamp] of recentOpenFiles) {
+    if (now - timestamp >= 1_000) recentOpenFiles.delete(candidate);
+  }
+  if (!startupInitialized || !mainWindow || mainWindow.isDestroyed()
+    || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isLoading() || !projects) {
+    if (!pendingOpenFiles.includes(normalized)) pendingOpenFiles.push(normalized);
+    return;
+  }
+  const target = mainWindow.webContents;
+  void openProjectForWindow({ projects }, target, normalized).then(result => {
+    if (!target.isDestroyed()) target.send(IPC.projectOpenExternal, result);
+  });
+}
+
+function drainPendingOpenFiles(): void {
+  const mainWindow = currentEditor();
+  if (!startupInitialized || !mainWindow || mainWindow.isDestroyed()
+    || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isLoading() || !projects) return;
+  const queued = pendingOpenFiles.splice(0);
+  for (const filePath of queued) {
+    // The queue has already passed through the duplicate guard.
+    const target = mainWindow.webContents;
+    void openProjectForWindow({ projects }, target, filePath).then(result => {
+      if (!target.isDestroyed()) target.send(IPC.projectOpenExternal, result);
+    });
+  }
+}
 async function prepareEditorClose(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
@@ -331,6 +370,7 @@ function createWindow(options: EditorWindowOptions = {}): BrowserWindow {
   editors.add(window, projectId);
   persistOpenWindows();
   window.on('focus', () => editors.touch(window));
+  window.webContents.once('did-finish-load', drainPendingOpenFiles);
   installRendererMenuShortcutRouting(window.webContents);
   installTextContextMenu(window.webContents);
 
@@ -500,19 +540,30 @@ function restoreWindows(store: Store): void {
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('open-file', (event, filePath) => {
+    event.preventDefault();
+    queueOrOpen(filePath);
+  });
+
+  app.on('second-instance', (_event, argv) => {
     if (isBackgroundTest) return;
+    const projectFiles = argv.filter(candidate => path.isAbsolute(candidate) && candidate.toLowerCase().endsWith('.pmv'));
     // The listener is installed before async startup finishes. Do not let an
     // early second launch create the editor before the first-run gate decides
     // whether onboarding owns startup.
-    if (!startupInitialized) return;
+    if (!startupInitialized) {
+      for (const filePath of projectFiles) queueOrOpen(filePath);
+      return;
+    }
     if (onboardingFlow?.hasActiveWindow() || onboardingFlow?.isFirstRunPending()) {
       onboardingFlow.focus();
+      for (const filePath of projectFiles) queueOrOpen(filePath);
       return;
     }
     // A second launch raises the window the user was last in rather than
     // adding one; New Window is how they ask for another.
     if (!editors.reveal(currentEditor())) createWindow();
+    for (const filePath of projectFiles) queueOrOpen(filePath);
   });
 
   // Every WebContents (not just the main window's) gets the navigation guards.
@@ -603,19 +654,24 @@ if (!hasSingleInstanceLock) {
       // Compile in the background; the renderer receives ext:changed when done.
       void extensionRegistry
         .refresh()
-        .then(() => startExtensionWatcher({ userDir, buildDir, registry: extensionRegistry }))
+        .then(() => {
+          extensionRegistry.emitChanged({ ids: [], reason: 'reload' });
+          return startExtensionWatcher({ userDir, buildDir, registry: extensionRegistry });
+        })
         .catch((error) => console.error('[extensions] initial refresh failed', error));
     } catch (error) {
       console.error('[extensions] boot skipped', error);
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    registerSaveIpc(ipcMain, { ...ctx, projects: new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json')) });
+    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups'));
+    registerSaveIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
     registerContextMenuIpc(ipcMain, ctx);
+    registerConfirmIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);
@@ -726,6 +782,7 @@ if (!hasSingleInstanceLock) {
       restoreWindows(store);
     }
     startupInitialized = true;
+    drainPendingOpenFiles();
 
     app.on('activate', () => {
       if (isBackgroundTest) return;

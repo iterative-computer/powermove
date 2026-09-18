@@ -27,8 +27,19 @@
     return () => off?.();
   });
 
+  /* Same-day takes read as a clock time; older ones as a short date, so the
+     meta column stays one short token and never wraps. */
   function timeLabel(at: number): string {
-    return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const when = new Date(at);
+    const now = new Date();
+    const sameDay = when.getFullYear() === now.getFullYear() && when.getMonth() === now.getMonth() && when.getDate() === now.getDate();
+    return sameDay
+      ? when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : when.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+
+  function fullTime(at: number): string {
+    return new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
   }
 
   function restoreTake(take: Take): void {
@@ -51,7 +62,7 @@
 <div class="simple-panel-list" data-svelte-panel={panelId}>
   {#each takes as take (take.id)}
     <div class="lyr simple-panel-row">
-      <button class="simple-row-action" type="button" onclick={() => restoreTake(take)}>
+      <button class="simple-row-action" type="button" title={`${take.label} · ${fullTime(take.at)}`} onclick={() => restoreTake(take)}>
         <span class="nm">{take.label}</span>
         <span class="idx">{timeLabel(take.at)}</span>
       </button>
@@ -62,9 +73,11 @@
   {:else}
     <div class="empty">Save a take before exploring a new motion direction.</div>
   {/each}
-  <button class="chip wide" style="margin:6px;width:calc(100% - 12px)" type="button" onclick={saveTake}>
-    <Icon {PM} name="plus" />
-    Save take
-  </button>
+  <div class="simple-panel-actions">
+    <button class="chip" type="button" onclick={saveTake}>
+      <Icon {PM} name="plus" />
+      Save take
+    </button>
+  </div>
   <span class="panel-sr-only" role="status">{status}</span>
 </div>

@@ -4,7 +4,7 @@ import { createViewerRuntime, viewerPanelOptions } from './viewer';
 import { installSourcePreview } from './source-preview';
 
 const VIEWER_STYLES = `
-  .canvas-text-editor::selection,.canvas-text-editor *::selection{background:rgba(70,155,235,.4);color:inherit}
+  .canvas-text-input::selection{background:transparent;color:transparent}
   #panel-viewer{background:var(--bg-panel-2)}
   #panel-viewer > .panel-move-handle{
     top:7px;left:8px;transform:none;width:24px;height:24px;border:0;border-radius:0;
@@ -36,6 +36,18 @@ export default function activate(api: PowermoveAPI): void {
   const disposeRuntime = runtime.dispose as () => void;
   api.onDispose(() => disposeRuntime());
   api.services.register('viewer', runtime);
+
+  // Enter on a single selected text layer starts editing it (Figma).
+  api.commands.register({
+    id: 'text.editSelected', label: 'Edit selected text', category: 'Text',
+    run: () => {
+      const selected = api.selection.layers().map((id) => api.model.layer(id)).filter(Boolean);
+      const layer = selected.length === 1 ? selected[0] : null;
+      if (!layer || layer.type !== 'text' || layer.lock || runtime.textSession) return false;
+      return !!runtime.editText?.(layer, { selectAll: true });
+    },
+  });
+  api.keybindings.bind({ key: 'enter', command: 'text.editSelected' });
 
   api.panels.register({
     id: 'viewer',

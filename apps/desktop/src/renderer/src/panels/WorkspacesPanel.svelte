@@ -46,20 +46,14 @@
 
   function remove(event: MouseEvent, workspace: Workspace): void {
     event.stopPropagation();
-    PM.modal?.({
-      title: `Delete “${workspace.name}” workspace?`,
-      body: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Delete workspace',
-          pri: true,
-          run: () => {
-            PM.WS.remove(workspace.id);
-            status = `Deleted ${workspace.name}`;
-          }
-        }
-      ]
+    void PM.confirm?.({
+      message: `Delete “${workspace.name}” workspace?`,
+      detail: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
+      confirmLabel: 'Delete Workspace'
+    })?.then((ok: boolean) => {
+      if (!ok) return;
+      PM.WS.remove(workspace.id);
+      status = `Deleted ${workspace.name}`;
     });
   }
 
@@ -83,7 +77,6 @@
         aria-current={workspace.id === model.currentId ? 'true' : undefined}
         onclick={() => activate(workspace)}
       >
-        <span class="sw2" style:background={workspace.theme?.accent || 'var(--accent)'}></span>
         <span class="nm" title={workspace.name}>{workspace.name}</span>
       </button>
       {#if !workspace.builtin}
@@ -98,11 +91,11 @@
       <Icon {PM} name="plus" />
       Save current
     </button>
-    <button class="chip" type="button" onclick={editJson}>
+    <button class="chip ghost quiet" type="button" title="Edit workspace layout as JSON" onclick={editJson}>
       <Icon {PM} name="code" />
       JSON
     </button>
   </div>
-  <div class="empty simple-panel-hint">Ask the Powermove agent to redesign or add an interface section.</div>
+  <div class="simple-panel-hint">Ask the Powermove agent to redesign or add an interface section.</div>
   <span class="panel-sr-only" role="status">{status}</span>
 </div>

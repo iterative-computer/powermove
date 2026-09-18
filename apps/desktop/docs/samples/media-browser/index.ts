@@ -41,6 +41,7 @@ export default function activate(api: PowermoveAPI): void {
   });
 
   // Indexed placement is deterministic even when the workspace already has
-  // other left-docked panels.
+  // other left-docked panels. This runs on every launch; the host ignores it
+  // once the user has closed the panel, so their layout is never undone.
   api.panels.open('media-browser', { dock: 'left', index: 0 });
 }

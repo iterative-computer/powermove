@@ -158,7 +158,6 @@
     background: transparent;
     color: var(--tx-3);
     font-size: 18px;
-    cursor: pointer;
   }
 
   .section-action:hover {
@@ -191,7 +190,6 @@
     background: var(--bg-field);
     color: var(--tx-2);
     font: inherit;
-    cursor: pointer;
   }
 
   .path-edit:hover,
@@ -222,7 +220,6 @@
     background: transparent;
     color: var(--tx-3);
     font-size: 18px;
-    cursor: pointer;
   }
 
   .path-remove:hover {
@@ -241,7 +238,6 @@
     color: var(--tx-3);
     font-size: var(--fs-xs);
     font-weight: var(--fw-medium);
-    cursor: pointer;
   }
 
   .advanced[open] summary {
@@ -263,7 +259,6 @@
     background: var(--bg-field);
     color: var(--tx-3);
     font: inherit;
-    cursor: pointer;
   }
 
   .compact-toggle.on {
@@ -284,6 +279,5 @@
   details:not(.advanced) > summary {
     padding: 6px 0;
     font-weight: var(--fw-medium);
-    cursor: pointer;
   }
 </style>

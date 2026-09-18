@@ -330,9 +330,36 @@ describe('extension registry', () => {
     await setup.registry.refresh();
 
     setup.registry.reportHealth({ id: 'healthy-ext', health: { state: 'runtime-error', error: 'boom' } });
-    expect(setup.registry.list()[0]?.health).toEqual({ state: 'runtime-error', error: 'boom' });
+    expect(setup.registry.list()[0]).toMatchObject({ enabled: false, health: { state: 'runtime-error', error: 'boom' } });
+    setup.registry.reportHealth({ id: 'healthy-ext', health: { state: 'ok' } });
+    expect(setup.registry.list()[0]?.health.state).toBe('runtime-error');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]?.enabled).toBe(false);
+    await setup.registry.setEnabled({ id: 'healthy-ext', enabled: true });
+    expect(setup.registry.list()[0]).toMatchObject({ enabled: true, health: { state: 'ok' } });
     expect(() => setup.registry.reportHealth({ id: '../bad', health: { state: 'ok' } })).toThrow('Invalid extension id');
     await setup.registry.reveal({ id: 'healthy-ext' });
     expect(revealPath).toHaveBeenCalledWith(directory);
   });
+});
+
+it('does not overwrite an auto-disable received while compilation is pending', async () => {
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  let calls = 0;
+  const setup = await harness({ compile: async () => {
+    if (++calls === 2) { entered(); await pending; }
+    return { ok: true, bundlePath: '/bundle.js', hash: String(calls) };
+  } });
+  const directory = await writeExtension(setup.userDir, 'flaky');
+  await setup.registry.refresh();
+  await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => "changed"');
+  const refresh = setup.registry.refresh();
+  await started;
+  setup.registry.reportHealth({ id: 'flaky', health: { state: 'runtime-error', error: 'boom' } });
+  release();
+  await refresh;
+  expect(setup.registry.list()[0]?.enabled).toBe(false);
 });

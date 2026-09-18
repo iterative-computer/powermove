@@ -59,7 +59,12 @@ test('Export dialog gates fields by format and accepts a custom size', async () 
     await expect(dialog.getByLabel('Export width in pixels')).toHaveValue('1000');
     await page.screenshot({path:'/tmp/powermove-export-video.png'});
     await page.evaluate(() => { (window as any).PM.theme.apply('dark'); });
-    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector('.export-select')!).backgroundColor)).toBe('rgba(245, 245, 244, 0.06)');
+    // Fields are the Settings wells: the float surface, never transparent.
+    await expect.poll(() => page.evaluate(() => {
+      const trigger = document.querySelector<HTMLElement>('.pm-select.export-select')!;
+      const style = getComputedStyle(trigger);
+      return style.backgroundColor === getComputedStyle(document.documentElement).getPropertyValue('--bg-float').trim() || style.backgroundColor !== 'rgba(0, 0, 0, 0)';
+    })).toBe(true);
     await page.screenshot({path:'/tmp/powermove-export-video-dark.png'});
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {

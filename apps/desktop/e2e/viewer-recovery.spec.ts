@@ -226,8 +226,9 @@ test.describe('@viewer composition recovery', () => {
     await page.mouse.dblclick(frame.x + setup.point.x * shown, frame.y + setup.point.y * shown);
     const editor = page.getByRole('textbox', { name: 'Edit text on canvas' });
     await expect(editor).toBeFocused();
-    await expect(editor).toHaveText(setup.text);
-    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(setup.text);
+    await expect(editor).toHaveValue(setup.text);
+    expect(await page.evaluate(() => { const PM = (window as any).PM; return PM.Kernel.services.get('viewer').textSelection; }))
+      .toEqual({ layer: setup.textId, start: 0, end: setup.text.length });
     expect(await page.evaluate(() => [...(window as any).PM.sel.layers])).toEqual([setup.textId]);
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

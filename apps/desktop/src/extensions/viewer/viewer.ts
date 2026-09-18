@@ -14,7 +14,7 @@ export function selectionOutlineColor(project: any): string {
   return '#' + [0, 2, 4].map(i => (255 - parseInt(hex.slice(i, i + 2), 16)).toString(16).padStart(2, '0')).join('');
 }
 
-import { editCanvasText } from './canvas-text';
+import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
 export const viewerPanelOptions = {
@@ -269,8 +269,10 @@ const VIEWER_RUNTIME_TOKEN = Symbol('powermove.viewer.runtime');
 type ViewerRuntime = ViewerService & {
   dispose(): void;
   activePath: string | null;
-  finishCanvasText?: ((cancel?: boolean) => void) | null;
+  finishCanvasText?: (() => void) | null;
   textSelection?: { layer: string; start: number; end: number } | null;
+  textSession?: TextEditSession | null;
+  editText?(layer: any, options?: Omit<TextEditOptions, 'drag' | 'onFinish'>): TextEditSession | null;
   requestOverlay?(): void;
   inner: HTMLElement;
   _runtimeToken?: symbol | null;
@@ -645,6 +647,7 @@ const refreshInspector = () => api.services.get<InspectorService>('inspector')?.
 const selectLayers = (ids: string | string[], add = false) => api.selection.select(Array.isArray(ids) ? ids : [ids], add);
 const invalidate = (what?: string) => { api.transport.invalidate(what); schedulePresentation(); };
 V.requestOverlay = schedulePresentation;
+V.editText = (layer: any, options: Omit<TextEditOptions, 'drag' | 'onFinish'> = {}) => openTextEditor(layer, options);
 let disposed = false;
 let unbindStage: (() => void) | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -747,13 +750,13 @@ V.attach = (stage: HTMLElement) => {
     zoomControl.dataset.globalSpaceShortcut = '';
     // Share the panel chrome row with its move handle, outside the clipped stage.
     zoomHost.append(zoomControl);
-    zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
+    zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
     if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
     preview.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';
     preview.replaceChildren();
-    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
+    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
     quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;
@@ -996,6 +999,8 @@ function drawOverlay() {
     }
     c.restore();
   }
+
+  V.textSession?.draw(c, S, selectionInk);
 
   /* Command+Shift+H is After Effects' Show Layer Controls toggle. Drawing and
      tool feedback remain live; only selection boxes, handles, and paths hide. */
@@ -1345,6 +1350,8 @@ function bindStage(stage: any, inner: any): () => void {
   }) as EventListener;
   const capture = undefined;
   listen(stage, 'contextmenu', guarded((event: MouseEvent) => {
+    // Right-clicking edited text gets the native text services menu.
+    if ((event.target as Element)?.closest?.('.canvas-text-input')) return;
     event.preventDefault();
     const point = pointerComp(event);
     const layer = api.render.gl.pick(point.x, point.y, api.transport.time(), { includeLocked: true });
@@ -1413,6 +1420,7 @@ function bindStage(stage: any, inner: any): () => void {
       e.preventDefault();e.stopPropagation();return;
     }
     const [x, y] = toComp(e);
+    if (V.textSession) { e.preventDefault(); e.stopPropagation(); return; }
     let L = editableTextAtPoint(api, x, y, api.transport.time(), space3d);
     const remembered = V.textDoubleClickCandidate;
     if (!L && remembered && Date.now() - remembered.at < 700) {
@@ -1425,7 +1433,7 @@ function bindStage(stage: any, inner: any): () => void {
     if (L) {
       e.preventDefault();
       e.stopPropagation();
-      editCanvasText(api, V, L, undefined, true);
+      openTextEditor(L, { selectAll: true });
     }
   }), capture);
   /* FX browser drops (effects / transitions). Non-fx drags (OS files) are left
@@ -1472,6 +1480,7 @@ function cursorForHit(selection: SelectionGeometry, hit: any) {
 function updateStageCursor(e: any) {
   if (!V.inner) return;
   const tool = V.temporaryTool || toolService()?.tool;
+  if (V.textSession && tool !== 'hand' && tool !== 'zoom') { setStageCursor(V.textSession.contains(pointerComp(e)) ? 'text' : 'default'); return; }
   if (tool === 'hand') { setStageCursor('grab'); return; }
   if (tool === 'zoom') { setStageCursor(e.altKey ? 'zoom-out' : 'zoom-in'); return; }
   if (tool === 'rotate') { setStageCursor(ROTATE_CURSOR); return; }
@@ -1506,6 +1515,15 @@ function onDown(e: any) {
   if (e.button === 1) return startPan(e);
   if (e.button !== 0) return;
 
+  /* An active text edit owns clicks on its own text (caret, drag-select,
+     word and paragraph selection). Any other click commits the edit first,
+     then falls through as an ordinary Select-tool click: clicking away
+     selects or deselects, and never plants another text layer. */
+  if (V.textSession && !V.temporaryTool) {
+    if (V.textSession.pointerDown(e, pointerComp(e))) { e.stopPropagation(); return; }
+    V.textSession.finish();
+  }
+
   /* The first click of a double-click may legitimately select a full-frame
      layer above the text. Remember the selected text hit briefly so the
      ensuing dblclick can still enter that text editor and select all. */
@@ -1518,7 +1536,7 @@ function onDown(e: any) {
         V.textDoubleClickCandidate = null;
         e.preventDefault();
         e.stopPropagation();
-        editCanvasText(api, V, layer, undefined, true);
+        openTextEditor(layer, { selectAll: true });
         return;
       }
     }
@@ -1733,11 +1751,26 @@ function createShape(box: DragBox): void {
   refreshInspector();
 }
 
+function openTextEditor(layer: any, options: Omit<TextEditOptions, 'drag' | 'onFinish'> = {}): TextEditSession | null {
+  const session = beginTextEdit(api, V, layer, {
+    ...options,
+    drag: (event, dragOptions) => { beginDrag(event, dragOptions); },
+    onFinish: () => { if (V.textSession === session) V.textSession = null; invalidate(); refreshInspector(); },
+  });
+  V.textSession = session;
+  return session;
+}
+
+/** Text tool. A click on existing text edits it with the caret at the
+    pointer. A click on empty canvas creates point text; a drag creates a
+    fixed-width paragraph whose height follows its lines. The new layer is
+    created inside the editing transaction, so an empty result leaves no
+    layer and no history entry, and Undo removes text and layer together. */
 function startText(e: any): void {
   const [hitX, hitY] = toComp(e);
   const hit = api.render.gl.pick(hitX, hitY, api.transport.time());
-  if (hit?.type === 'text' && !e.shiftKey) {
-    editCanvasText(api,V,hit,e);
+  if (hit?.type === 'text' && !hit.lock && !e.shiftKey) {
+    openTextEditor(hit, { caretAt: { x: hitX, y: hitY } });
     return;
   }
   const start = pointerComp(e);
@@ -1753,19 +1786,23 @@ function startText(e: any): void {
     up: (_dx: number, _dy: number, ev: any) => {
       const box = moved ? shapeBoxFromDrag(start, pointerComp(ev), { fromCenter: ev.altKey }) : null;
       clearToolRect();
-      const position = box ? { x: box.x0, y: box.y0 } : start;
-      const result = api.edit.apply({
+      const paragraph = !!box && box.w >= 8;
+      const position = paragraph ? { x: box.x0, y: box.y0 } : start;
+      const project = api.project.get();
+      api.edit.begin('Add text', { origin: 'canvas' });
+      const result = api.edit.dispatch({
         type: 'add_layer', layerType: 'text', name: 'Text',
-        from: api.util.snapF(api.transport.time(), api.project.get().fps), duration: Math.max(1 / api.project.get().fps, api.project.get().dur - api.transport.time()),
+        from: api.util.snapF(api.transport.time(), project.fps), duration: Math.max(1 / project.fps, project.dur - api.transport.time()),
         content: {
           text: '', align: 'left',
-          boxWidth: api.model.P(box?.w || 0), boxHeight: api.model.P(box?.h || 0),
+          boxWidth: api.model.P(paragraph ? api.util.round(box.w, 3) : 0), boxHeight: api.model.P(0),
         } as unknown as Extract<EditCommand, { type: 'add_layer' }>['content'],
         properties: { 'position.x': position.x, 'position.y': position.y },
         select: true,
-      }, { label: box ? 'New paragraph text' : 'New point text', origin: 'canvas' });
+      });
       const layer = result?.ok && result.data?.results?.[0]?.data?.layer;
-      if (layer) editCanvasText(api,V,layer);
+      if (!layer) { api.edit.cancel(); invalidate(); return; }
+      openTextEditor(layer, { fresh: true });
       invalidate();
     },
     cancel: clearToolRect,

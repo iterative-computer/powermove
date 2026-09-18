@@ -62,7 +62,12 @@ function domHelper(tag: string, attrs: Record<string, any> | string | null, ...c
 
 function setup(
   fixtureAssets: AssetFixture[] = [IMAGE, AUDIO],
-  options: { references?: Record<string, number>; removals?: Record<string, { removedLayers: number; removedLayerIds: string[] }> } = {}
+  options: {
+    references?: Record<string, number>;
+    removals?: Record<string, { removedLayers: number; removedLayerIds: string[] }>;
+    offline?: string[];
+    posters?: Record<string, string>;
+  } = {}
 ) {
   const project = {
     id: 'project-1',
@@ -76,9 +81,12 @@ function setup(
   });
   const liveAssets: any = new Map([
     ['image-1', { url: 'blob:backdrop' }],
-    ['video-1', { el: { currentSrc: 'blob:product-video' } }]
+    ['video-1', { el: { currentSrc: 'blob:product-video' } }],
+    ['audio-1', { peaks: undefined }]
   ]);
   liveAssets.replace = vi.fn(async () => ({ persisted: true }));
+  options.offline?.forEach((id) => liveAssets.delete(id));
+  liveAssets.poster = vi.fn((id: string) => options.posters?.[id] ?? '');
   const PM: Record<string, any> = {
     proj: project,
     ICONS: {
@@ -112,6 +120,7 @@ function setup(
     toast: vi.fn(),
     menu: vi.fn(),
     modal: vi.fn(),
+    confirm: vi.fn(async () => true),
     h: domHelper
   };
 
@@ -173,6 +182,64 @@ describe('AssetsPanel', () => {
     expect(video).not.toBeNull();
     expect(video?.src).toBe('blob:product-video');
     expect(target.textContent).toContain('Product.mp4');
+  });
+
+  it('prefers the cached poster over decoding the live video again', () => {
+    setup([VIDEO], { posters: { 'video-1': 'blob:poster-video' } });
+
+    expect(target.querySelector<HTMLImageElement>('.asset-preview.video img.asset-poster')?.src).toBe('blob:poster-video');
+    expect(target.querySelector('.asset-preview.video video')).toBeNull();
+  });
+
+  it('marks media whose bytes could not be restored as offline', () => {
+    const { PM } = setup([{ ...VIDEO, sourcePath: '/Volumes/Footage/Product.mp4' }], {
+      offline: ['video-1'],
+      posters: { 'video-1': 'blob:poster-video' }
+    });
+
+    const card = rows()[0]!;
+    expect(card.classList.contains('is-offline')).toBe(true);
+    expect(card.getAttribute('draggable')).toBe('false');
+    expect(card.querySelector('.asset-offline')?.textContent).toContain('Media offline');
+    expect(card.querySelector('.asset-poster')).not.toBeNull();
+    expect(card.querySelector('.asset-missing')?.textContent).toBe('Missing · /Volumes/Footage/Product.mp4');
+    expect(card.querySelector('button[aria-label="Add Product.mp4 to timeline"]')).toBeNull();
+    expect(card.querySelector('button[aria-label="Locate Product.mp4"]')).not.toBeNull();
+
+    card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    expect(PM.cmd).not.toHaveBeenCalledWith('addFromAsset', 'video-1');
+    expect(PM.pickFiles).toHaveBeenCalledExactlyOnceWith(false, { replaceAssetId: 'video-1' });
+    expect(PM.Kernel.services.get('viewer').preview.show).not.toHaveBeenCalled();
+  });
+
+  it('enables the same media card when its bytes and poster arrive after render', () => {
+    const { PM } = setup([VIDEO], { offline: ['video-1'] });
+    const card = rows()[0]!;
+    expect(card.classList.contains('is-offline')).toBe(true);
+    expect(card.getAttribute('draggable')).toBe('false');
+
+    PM.assets.set('video-1', { el: { currentSrc: 'blob:restored-video' } });
+    PM.assets.poster.mockReturnValue('blob:restored-poster');
+    PM.bus.emit('assets');
+    flushSync();
+
+    expect(rows()[0]).toBe(card);
+    expect(card.classList.contains('is-offline')).toBe(false);
+    expect(card.getAttribute('draggable')).toBe('true');
+    expect(card.querySelector('.asset-offline')).toBeNull();
+    expect(card.querySelector<HTMLImageElement>('.asset-poster')?.src).toBe('blob:restored-poster');
+    card.querySelector<HTMLButtonElement>('button[aria-label="Add Product.mp4 to timeline"]')?.click();
+    expect(PM.cmd).toHaveBeenCalledWith('addFromAsset', 'video-1');
+  });
+
+  it('offers Locate instead of Add in the context menu for offline media', () => {
+    const { PM } = setup([VIDEO], { offline: ['video-1'] });
+
+    rows()[0]!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }));
+    const items = (PM.menu.mock.calls[0]![1] as any[]).filter((item) => item && typeof item === 'object' && item.label);
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain('Locate File…');
+    expect(labels).not.toContain('Add to timeline');
   });
 
   it('selects video cards with the same state used by audio cards', () => {
@@ -320,7 +387,7 @@ describe('AssetsPanel', () => {
     expect(target.querySelector('[data-asset-id="image-1"]')).toBeNull();
   });
 
-  it('confirms referenced deletion and removes affected layer selections after approval', () => {
+  it('confirms referenced deletion and removes affected layer selections after approval', async () => {
     const { PM, events } = setup([IMAGE], {
       references: { 'image-1': 1 },
       removals: { 'image-1': { removedLayers: 1, removedLayerIds: ['image-layer'] } }
@@ -328,12 +395,14 @@ describe('AssetsPanel', () => {
 
     rows()[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
     expect(PM.hist.do).not.toHaveBeenCalled();
-    expect(PM.modal).toHaveBeenCalledOnce();
-    const modal = PM.modal.mock.calls[0][0];
-    expect(modal).toMatchObject({ title: 'Delete “Backdrop.png”?', width: 420 });
-    expect(modal.body.textContent).toContain('This also removes 1 layer that uses this media. You can undo this.');
+    expect(PM.confirm).toHaveBeenCalledOnce();
+    expect(PM.confirm.mock.calls[0][0]).toEqual({
+      message: 'Delete “Backdrop.png”?',
+      detail: 'This also removes 1 layer that uses this media. You can undo this.',
+      confirmLabel: 'Delete'
+    });
 
-    modal.actions[1].run();
+    await PM.confirm.mock.results[0].value;
     flushSync();
     expect(PM.sel.layers).toEqual(['keep-layer']);
     expect(events).toEqual(['assets', 'layers', 'sel', 'project']);

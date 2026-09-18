@@ -66,6 +66,7 @@ import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
 import { perf, transport } from '../state/transport.svelte';
 import { EditGesture, type EditBinding } from '../controls/gesture';
+import { confirm as confirmPrompt } from '../overlays/confirm';
 import {
   CHANNELS_3D,
   inversePlane,
@@ -340,6 +341,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
       get context() { return PM?.GL?.gl ?? null; }
     },
     raster: (...args) => PM?.raster?.(...args) ?? null,
+    textLayout: (layer, time) => PM?.textCaretLayout?.(layer, time ?? PM?.time ?? 0) ?? null,
     renderFrameTo: (...args) => PM?.renderFrameTo?.(...args),
     snapshot: (...args) => PM?.Export?.snapshot?.(...args) ?? ''
   } as RenderAPI;
@@ -480,25 +482,7 @@ function makeUI(
   return {
     controls: boundControls(controlAPI),
     toast: (text, opts) => PM?.toast?.(text, opts?.sticky ? 8000 : 2200, opts ?? {}),
-    confirm: (title, body) =>
-      new Promise<boolean>((resolve) => {
-        let settled = false;
-        const done = (value: boolean): void => {
-          if (settled) return;
-          settled = true;
-          resolve(value);
-        };
-        const handle = PM?.modal?.({
-          title,
-          body: body ?? '',
-          actions: [
-            { label: 'Cancel', run: () => done(false) },
-            { label: 'OK', pri: true, run: () => done(true) }
-          ],
-          onClose: () => done(false)
-        });
-        if (!handle) done(false);
-      }),
+    confirm: (title, body) => confirmPrompt(PM, { message: title, ...(body ? { detail: body } : {}) }),
     menu: (anchor, items: MenuContribution[]) => {
       if (anchor && typeof (anchor as HTMLElement).getBoundingClientRect === 'function') PM?.menu?.(anchor, items);
       else {
@@ -627,6 +611,7 @@ function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
       PM?.WS?.mutate?.((workspace: unknown) => hide(workspace, id));
     },
     isOpen: (id) => !!PM?.Layout?.hasPanel?.(current(), id),
+    isHidden: (id) => ((current() as { hiddenPanels?: Array<{ id?: string }> } | undefined)?.hiddenPanels ?? []).some((item) => item.id === id),
     refresh: (id) => PM?.Layout?.refresh?.(id),
     list: () => [...new Set([...kernel.panels.ids(), ...Object.keys(PM?.PANELS ?? {})])]
   };

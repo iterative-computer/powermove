@@ -48,7 +48,7 @@
 
 <style>
   .agent-slash-menu { position: fixed; inset: auto; margin: 0; padding: 5px; box-sizing: border-box; overflow-y: auto; border: 0; border-radius: var(--r-lg); background: var(--bg-float); box-shadow: var(--shadow-float); color: var(--tx); font: var(--fs-sm)/1.5 var(--f-ui); }
-  button { display: flex; flex-direction: column; gap: 1px; width: 100%; min-width: 0; padding: 7px 9px; border: 0; border-radius: var(--r-sm); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+  button { display: flex; flex-direction: column; gap: 1px; width: 100%; min-width: 0; padding: 7px 9px; border: 0; border-radius: var(--r-sm); background: transparent; color: inherit; font: inherit; text-align: left;  overflow-wrap: anywhere; }
   button[aria-selected="true"], button:hover { background: var(--ink-2); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   small { color: var(--tx-3); font-size: var(--fs-xs); }

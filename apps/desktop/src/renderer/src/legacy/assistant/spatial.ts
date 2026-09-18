@@ -267,7 +267,7 @@ const S: any = {
 };
 
 const AGENT_PROVIDERS: any = [
-  { id: 'chatgpt', label: 'ChatGPT' },
+  { id: 'chatgpt', label: 'Codex' },
   { id: 'claude', label: 'Claude' },
   { id: 'compatible', label: 'API / local model' },
 ];
@@ -503,6 +503,12 @@ function switchThread(id?: string) {
   ensureThreadProject();
   if (id === threads.activeId || (id && !threads.threads.some(t => t.id === id))) return;
   persistThreads();
+  // "+" on a thread that has nothing in it yet is already a new thread: just
+  // put the caret back in the composer instead of minting another empty one.
+  if (!id && AgentThreads.isBlank(threads.active)) {
+    PM.AgentUI?.update({ flush: true, focusComposer: true });
+    return;
+  }
   // Stamp the revision the outgoing preview was built against: coming back to a
   // plan or checkpoint is only safe while the document is unchanged.
   activeSession().revision = Number(PM.proj?.revision || 0);

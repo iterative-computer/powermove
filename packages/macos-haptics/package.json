@@ -9,5 +9,5 @@
     "install": "node scripts/build.cjs"
   },
   "gypfile": true,
-  "license": "UNLICENSED"
+  "license": "GPL-3.0-or-later"
 }

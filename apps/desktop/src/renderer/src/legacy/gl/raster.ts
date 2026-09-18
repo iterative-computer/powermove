@@ -17,6 +17,24 @@ import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
+import { capturePoster } from '../core/poster';
+
+const posterUrls = new Map<string, string>();
+
+function revokePoster(id: any) {
+  const previous = posterUrls.get(String(id));
+  posterUrls.delete(String(id));
+  if (!previous) return;
+  try { window.URL?.revokeObjectURL?.(previous); } catch (error) { }
+}
+
+function setPoster(id: any, blob: Blob) {
+  revokePoster(id);
+  try {
+    if (typeof window.URL?.createObjectURL !== 'function') return;
+    posterUrls.set(String(id), window.URL.createObjectURL(blob));
+  } catch (error) { }
+}
 
 const VIDEO_READ_FAILURE = 'Could not read this video file';
 
@@ -146,34 +164,97 @@ function resolvedTextContent(input: any, time = PM.time) {
 /** The Type tool's drag gesture creates AE-style paragraph text. Keep the
     complete source string, but wrap its rendered lines inside the authored
     box and clip overflow below the box. */
-function textLines(d: any, context: any, lineHeight: number): string[] {
-  const source = String(d.text == null ? '' : d.text).split('\n');
+interface SourceLine { text: string; start: number }
+
+/** Wrapped display lines with the source offset each one starts at. Caret
+    placement maps a source index to the line whose range contains it, so
+    every branch below records where its line begins in the source string. */
+function textSourceLines(d: any, context: any, lineHeight: number): SourceLine[] {
+  const text = String(d.text == null ? '' : d.text);
+  const paragraphs = text.split('\n');
   const boxWidth = Number(d.boxWidth);
-  if (!d.paragraph || !Number.isFinite(boxWidth) || boxWidth <= 0) return source;
+  const lines: SourceLine[] = [];
+  let offset = 0;
+  if (!d.paragraph || !Number.isFinite(boxWidth) || boxWidth <= 0) {
+    for (const paragraph of paragraphs) { lines.push({ text: paragraph, start: offset }); offset += paragraph.length + 1; }
+    return lines;
+  }
   const width = (value: string) => context.measureText(value).width;
-  const wrapped: string[] = [];
-  for (const paragraph of source) {
-    if (!paragraph) { wrapped.push(''); continue; }
-    let line = '';
+  for (const paragraph of paragraphs) {
+    const paragraphStart = offset;
+    offset += paragraph.length + 1;
+    if (!paragraph) { lines.push({ text: '', start: paragraphStart }); continue; }
+    let line = '', lineStart = paragraphStart, tokenStart = paragraphStart;
     for (const token of paragraph.split(/(\s+)/u).filter(Boolean)) {
       const candidate = line + token;
       if (line && width(candidate) > boxWidth) {
-        wrapped.push(line.trimEnd());
+        lines.push({ text: line.trimEnd(), start: lineStart });
         line = token.trimStart();
-      } else line = candidate;
+        lineStart = tokenStart + (token.length - line.length);
+      } else {
+        if (!line) lineStart = tokenStart;
+        line = candidate;
+      }
+      tokenStart += token.length;
       while (line && width(line) > boxWidth) {
         let cut = 1;
         while (cut < line.length && width(line.slice(0, cut + 1)) <= boxWidth) cut++;
-        wrapped.push(line.slice(0, cut));
+        lines.push({ text: line.slice(0, cut), start: lineStart });
         line = line.slice(cut);
+        lineStart += cut;
       }
     }
-    wrapped.push(line.trimEnd());
+    lines.push({ text: line.trimEnd(), start: lineStart });
   }
   const boxHeight = Number(d.boxHeight);
-  if (!Number.isFinite(boxHeight) || boxHeight <= 0) return wrapped;
-  return wrapped.slice(0, Math.max(1, Math.floor(boxHeight / Math.max(1, lineHeight))));
+  if (!Number.isFinite(boxHeight) || boxHeight <= 0) return lines;
+  return lines.slice(0, Math.max(1, Math.floor(boxHeight / Math.max(1, lineHeight))));
 }
+
+function textLines(d: any, context: any, lineHeight: number): string[] {
+  return textSourceLines(d, context, lineHeight).map(line => line.text);
+}
+
+function graphemesOf(value: string): string[] {
+  if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+    return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map(item => item.segment);
+  }
+  return Array.from(value);
+}
+
+interface CaretLine { text: string; start: number; x: number; y: number; baseline: number; width: number; boundaries: { index: number; x: number }[] }
+interface CaretLayout { lines: CaretLine[]; lineHeight: number; size: number; length: number; align: 'left' | 'center' | 'right'; boxWidth: number; boxHeight: number }
+
+/* Caret and selection geometry for the on-canvas text editor. Every x comes
+   from the same measuring context and wrapping as the rasterizer, so the
+   caret sits between the painted glyphs at any zoom. Coordinates are in the
+   layer's local space: the first baseline is at size * .82 below the origin
+   and x is measured from the alignment origin. */
+function textCaretLayout(d: any): CaretLayout {
+  const size = Math.max(1, Number(d.size) || 16);
+  const meas = getCanvas(8, 8).getContext('2d') as any;
+  const align = d.align === 'center' ? 'center' : d.align === 'right' ? 'right' : 'left';
+  meas.font = fontStr(d);
+  meas.textAlign = 'left';
+  meas.textBaseline = 'alphabetic';
+  if ('letterSpacing' in meas) meas.letterSpacing = (d.tracking || 0) + 'px';
+  const lh = size * (d.leading || 1.15);
+  const width = (value: string) => meas.measureText(value).width;
+  const text = String(d.text == null ? '' : d.text);
+  const lines = textSourceLines(d, meas, lh).map((line, row): CaretLine => {
+    const lineWidth = width(line.text);
+    const startX = align === 'center' ? -lineWidth / 2 : align === 'right' ? -lineWidth : 0;
+    const boundaries = [{ index: line.start, x: startX }];
+    let prefix = '';
+    for (const segment of graphemesOf(line.text)) {
+      prefix += segment;
+      boundaries.push({ index: line.start + prefix.length, x: startX + width(prefix) });
+    }
+    return { text: line.text, start: line.start, x: startX, y: row * lh, baseline: row * lh + size * .82, width: lineWidth, boundaries };
+  });
+  return { lines, lineHeight: lh, size, length: text.length, align, boxWidth: Number(d.boxWidth) || 0, boxHeight: Number(d.boxHeight) || 0 };
+}
+PM.textCaretLayout = (input: any, time = PM.time) => textCaretLayout(resolvedTextContent(input, time));
 
 /* Use the exact same canvas text metrics as the rasterizer when a procedural
    tool needs to reason about glyph placement. The returned offsets are in the
@@ -312,6 +393,25 @@ function textRasterGeometry(d: any, scale: number) {
 // anchoring continue through their existing complete-source rendering path.
 PM.textRasterGeometry = (layer: any, scale: number, time = PM.time) => textRasterGeometry(resolvedTextContent(layer, time), scale);
 
+/* A text raster can come out empty although the layer has visible text: a
+   font that is still loading paints nothing on a 2D canvas, and a canvas the
+   browser refused to allocate reads back as transparent. Cached as-is, that
+   blank bitmap would stay on screen until the app restarts. Sample a small
+   downscale of the result so such a raster can be retried instead. */
+const BLANK_RETRY_MS = 250;
+const warnedBlank = new Set<string>();
+function rasterLooksBlank(cv: HTMLCanvasElement): boolean {
+  try {
+    const probe = getCanvas(24, 24), ctx = probe.getContext('2d') as any;
+    if (!ctx?.drawImage || !ctx.getImageData) return false;
+    ctx.drawImage(cv, 0, 0, 24, 24);
+    const data = ctx.getImageData(0, 0, 24, 24)?.data;
+    if (!data) return false;
+    for (let i = 3; i < data.length; i += 4) if (data[i]! > 0) return false;
+    return true;
+  } catch { return false; }
+}
+
 function rasterText(d: any, scale: number) {
   const g = textRasterGeometry(d, scale);
   const cv = getCanvas(g.width, g.height);
@@ -321,7 +421,13 @@ function rasterText(d: any, scale: number) {
   if ('letterSpacing' in c) c.letterSpacing = (d.tracking || 0) + 'px';
   c.textBaseline = 'alphabetic'; c.textAlign = g.align; c.fillStyle = d.color || '#fff';
   g.lines.forEach((line: string, i: number) => c.fillText(line, g.x, g.pad + g.lh * i + g.size * .82));
-  return { cv, w: g.w, h: g.h, anchorX: g.anchorX, anchorY: g.anchorY, selection: g.selection };
+  const visible = g.lines.some((line: string) => line.trim().length) && !/^(transparent|rgba?\(.*,\s*0\s*\))$/i.test(String(d.color || ''));
+  const blank = visible && rasterLooksBlank(cv);
+  if (blank && !warnedBlank.has(c.font)) {
+    warnedBlank.add(c.font);
+    console.warn('[raster] text painted nothing; retrying shortly', { font: c.font, size: g.width + 'x' + g.height, text: String(d.text).slice(0, 40) });
+  }
+  return { cv, w: g.w, h: g.h, anchorX: g.anchorX, anchorY: g.anchorY, selection: g.selection, blank };
 }
 
 function rasterAnimatedText(layer:any,d:any,time:number,scale:number) {
@@ -402,12 +508,22 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   // Typography anchoring may need a separate, unanimated CPU measurement.
   // Keep that path intact; otherwise the renderer can reuse uploaded pixels
   // and their geometry without retaining a second canvas in memory.
-  let e = cache.get(key) || (!L.d.fontAnchorBounds && uploaded?.(key));
+  let e = cache.get(key);
+  if (e?.blank) {
+    // Give a loading font a moment, then paint again instead of keeping the blank bitmap.
+    if (Date.now() >= e.retryAt) { release(key, e); e = null; }
+  }
+  if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
   if (!e) {
     e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (L.d.animators?.length||L.d.styles?.length ? rasterAnimatedText(L,d,time,scale) : rasterText(d, scale)) : rasterShape(d, scale, crop);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
+    if (e.blank) {
+      e.retryAt = Date.now() + BLANK_RETRY_MS;
+      window.setTimeout(() => PM.invalidate?.('render'), BLANK_RETRY_MS + 16);
+      (window.document as any)?.fonts?.ready?.then?.(() => PM.invalidate?.('render'));
+    }
     cache.set(key, e);
     cacheBytes += e.bytes;
     if (PM.Memory?.maintain) PM.Memory.maintain('raster', cache.size > MAX);
@@ -675,6 +791,7 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
     playbackProxyVersion: Number(prepared.playbackProxyVersion) || 0,
     persisted: persisted === true,
     ...(prepared.imageSequence ? { imageSequence: prepared.imageSequence } : {}),
+    ...(prepared.poster === true ? { poster: true } : {}),
     ...(prepared.format ? { format: prepared.format } : {}),
     ...(prepared.svg ? { editablePaths: prepared.svg.paths.length } : {}),
     ...(kind === 'video' ? {
@@ -690,6 +807,12 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
   };
 }
 let assetEpoch = 0;
+function checkpointAssetMetadata(project: any) {
+  if (!project || PM.proj !== project) return;
+  /* Asset metadata is mutated outside typed history, so an existing recovery
+     journal cannot replay it. Force the smallest full project checkpoint. */
+  try { PM.Projects?.put?.(project); } catch (error) { }
+}
 /** Import and replacement share all reading, decoding, conversion, and storage. */
 async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage }: any) {
   const resolved = settled || await resolveAssetKind(file);
@@ -761,6 +884,18 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   const { prepared, kind, fingerprint, storageKey, sourcePath, persisted } = await prepareImportedAsset(file, {
     id: provisionalId, assertCurrentProject, onStage,
   });
+  let posterBlob: Blob | null = null;
+  try {
+    posterBlob = await capturePoster(prepared);
+    if (posterBlob) {
+      const posterKey = PM.MediaImport.posterKeyFor(storageKey);
+      const stored = await PM.MediaStore.put(posterKey, posterBlob, { storageKey: posterKey, type: posterBlob.type });
+      if (stored) prepared.poster = true;
+      else posterBlob = null;
+    }
+  } catch (error) { posterBlob = null; }
+  try { assertCurrentProject(); }
+  catch (error) { disposeAsset(prepared); throw error; }
   const { id: _identityId, persisted: _identityPersisted, ...identity } = assetIdentity(
     provisionalId, file, kind, prepared, fingerprint, storageKey, sourcePath, persisted, layerDefinition,
   );
@@ -769,6 +904,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   const existingLive = plan.canonicalId && PM.assets.map.get(plan.canonicalId);
   const wasMissing = !!(existingMeta && !existingLive);
   const id = plan.canonicalId || provisionalId;
+  if (!identity.poster && existingMeta?.poster) identity.poster = true;
   let asset = prepared;
   const upgradesPlayback = !!(existingLive && prepared.playbackProxy
     && (!existingLive.playbackProxy || prepared.playbackProxyVersion > (existingLive.playbackProxyVersion || 0)));
@@ -787,6 +923,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   }
   Object.assign(asset, identity, { id, persisted });
   PM.proj.assets[id] = { id, ...identity, persisted };
+  if (posterBlob) setPoster(id, posterBlob);
   const relinkedLayers = PM.MediaImport.coalesce(PM.proj, id, plan.aliases);
   plan.aliases.forEach((alias: any) => {
     const duplicate = PM.assets.map.get(alias);
@@ -803,6 +940,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   };
   if (!silent) {
     PM.touch();
+    checkpointAssetMetadata(PM.proj);
     PM.bus.emit('assets');
     if (relinkedLayers) PM.bus.emit('layers');
   }
@@ -837,6 +975,7 @@ PM.assets = {
     });
     if (results.some((result: any) => result.status !== 'failed' && result.status !== 'replaced')) {
       PM.touch();
+      checkpointAssetMetadata(PM.proj);
       PM.bus.emit('assets');
       if (results.some((result: any) => result.relinkedLayers)) PM.bus.emit('layers');
     }
@@ -868,25 +1007,44 @@ PM.assets = {
       prepared = imported.prepared;
       const { fingerprint, storageKey, sourcePath, persisted } = imported;
       if (!persisted) throw new Error('Could not store the replacement media · the original file is unchanged');
+      let nextPoster: Blob | null = null;
+      try {
+        nextPoster = await capturePoster(prepared);
+        if (nextPoster) {
+          const posterKey = PM.MediaImport.posterKeyFor(storageKey);
+          const stored = await PM.MediaStore.put(posterKey, nextPoster, { storageKey: posterKey, type: nextPoster.type });
+          if (stored) prepared.poster = true;
+          else nextPoster = null;
+        }
+      } catch (error) { nextPoster = null; }
       assertCurrentProject();
 
       const previousRuntime = PM.assets.map.get(id) || null;
       const previousMeta = JSON.parse(JSON.stringify(currentMeta));
+      let previousPoster: Blob | null = null;
+      if (currentMeta.poster && currentMeta.storageKey && typeof PM.MediaStore.get === 'function') {
+        try { previousPoster = await PM.MediaStore.get(PM.MediaImport.posterKeyFor(currentMeta.storageKey)); }
+        catch (error) { }
+      }
+      assertCurrentProject();
       const nextMeta = assetIdentity(id, file, kind, prepared, fingerprint, storageKey, sourcePath, true, currentMeta.layerDefinition);
       Object.assign(prepared, nextMeta);
 
-      const applyVersion = (meta: any, runtime: any) => {
+      const applyVersion = (meta: any, runtime: any, poster: Blob | null) => {
         if (!PM.proj || PM.proj.id !== targetProjectId || !PM.proj.assets?.[id]) return;
         viewerService(PM)?.preview?.clear();
         if (kind === 'audio' || kind === 'video') PM.Audio?.pause?.();
         PM.proj.assets[id] = JSON.parse(JSON.stringify(meta));
         if (runtime) PM.assets.map.set(id, runtime);
         else PM.assets.map.delete(id);
+        if (poster) setPoster(id, poster);
+        else revokePoster(id);
         PM.rasterClear?.();
         PM.GL?.dropTextures?.(`a:${id}`);
         PM.GL?.dropMesh?.(id);
         PM.preparedVideoFrames?.clear?.();
         PM.touch();
+        checkpointAssetMetadata(PM.proj);
         PM.bus.emit('assets');
         PM.bus.emit('layers');
         PM.bus.emit('project');
@@ -895,20 +1053,20 @@ PM.assets = {
         PM.autosave?.();
       };
 
-      applyVersion(nextMeta, prepared);
+      applyVersion(nextMeta, prepared, nextPoster);
       const retainedRuntimes = [...new Set([previousRuntime, prepared].filter(Boolean))];
       retainedRuntimes.forEach(retainHistoryAsset);
       const historyId = PM.hist.external(
         `Replace ${currentMeta.name || 'media'}`,
-        () => applyVersion(previousMeta, previousRuntime),
-        () => applyVersion(nextMeta, prepared),
+        () => applyVersion(previousMeta, previousRuntime, previousPoster),
+        () => applyVersion(nextMeta, prepared, nextPoster),
         {
           bytes: Number(previousMeta.size || 0) + Number(nextMeta.size || 0),
           cleanup: () => retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id)),
         },
       );
       if (!historyId) {
-        applyVersion(previousMeta, previousRuntime);
+        applyVersion(previousMeta, previousRuntime, previousPoster);
         retainedRuntimes.forEach(runtime => releaseHistoryAsset(runtime, id));
         throw new Error('Could not add the replacement to Undo history · the original file is unchanged');
       }
@@ -920,10 +1078,13 @@ PM.assets = {
     }
   },
   get: (id: any) => PM.assets.map.get(id),
+  poster: (id: any) => posterUrls.get(String(id)) || '',
+  revokePoster,
   clear() {
     assetEpoch++;
     for (const a of PM.assets.map.values()) disposeAsset(a);
     PM.assets.map.clear();
+    for (const id of [...posterUrls.keys()]) revokePoster(id);
   },
   async restoreProject(project: any) {
     const epoch = assetEpoch;
@@ -932,8 +1093,15 @@ PM.assets = {
     const restored: any[] = [], missing: any[] = [];
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
-      const blob = await PM.MediaStore.get(meta);
-      if (!blob) return { meta, missing: true };
+      const posterKey = meta.storageKey
+        ? PM.MediaImport.posterKeyFor(meta.storageKey)
+        : null;
+      const [blob, posterBlob] = await Promise.all([
+        PM.MediaStore.get(meta),
+        posterKey ? Promise.resolve(PM.MediaStore.get(posterKey)).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
+      if (!blob) return { meta, missing: true, posterBlob };
       try {
         const asset = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
         Object.assign(asset, {
@@ -941,8 +1109,8 @@ PM.assets = {
           channels: asset.channels || meta.channels || 0,
           sampleRate: asset.sampleRate || meta.sampleRate || 0,
         });
-        return { asset };
-      } catch (error) { return { meta, missing: true, error }; }
+        return { asset, meta, posterBlob };
+      } catch (error) { return { meta, missing: true, posterBlob, error }; }
     });
     results.forEach((result: any) => {
       if (result.asset) restored.push(result.asset);
@@ -952,6 +1120,19 @@ PM.assets = {
       restored.forEach(disposeAsset);
       return { restored: [], missing: [], stale: true };
     }
+    let repairedPosterMetadata = false;
+    results.forEach((result: any) => {
+      if (!result.posterBlob || !result.meta?.id) return;
+      setPoster(result.meta.id, result.posterBlob);
+      if (result.meta.poster !== true) {
+        result.meta.poster = true;
+        repairedPosterMetadata = true;
+      }
+    });
+    if (repairedPosterMetadata) {
+      PM.touch();
+      checkpointAssetMetadata(project);
+    }
     restored.forEach((a: any) => {
       /* Older projects already preserve the original .svg bytes and name but
          predate the explicit vector marker. Hydrate that marker in place so
@@ -960,6 +1141,39 @@ PM.assets = {
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
       PM.assets.map.set(a.id, a);
     });
+    const backfill = results.filter((result: any) => result.asset && !result.posterBlob);
+    if (backfill.length) setTimeout(() => {
+      void (async () => {
+        if (epoch !== assetEpoch || PM.proj !== project) return;
+        const completed = await PM.MediaImport.mapBounded(backfill, 3, async (result: any) => {
+          if (epoch !== assetEpoch || PM.proj !== project) return null;
+          const blob = await capturePoster(result.asset);
+          if (!blob || epoch !== assetEpoch || PM.proj !== project) return null;
+          const meta = project.assets?.[result.asset.id];
+          if (!meta?.storageKey || meta !== result.meta || PM.assets.map.get(result.asset.id) !== result.asset) return null;
+          const posterKey = PM.MediaImport.posterKeyFor(meta.storageKey);
+          try {
+            const stored = await PM.MediaStore.put(posterKey, blob, { storageKey: posterKey, type: blob.type });
+            return stored ? { id: result.asset.id, blob, meta, asset: result.asset } : null;
+          } catch (error) { return null; }
+        });
+        if (epoch !== assetEpoch || PM.proj !== project) return;
+        const available = completed.filter(Boolean);
+        if (!available.length) return;
+        let applied = 0;
+        available.forEach(({ id, blob, meta, asset }: any) => {
+          if (project.assets?.[id] !== meta || PM.assets.map.get(id) !== asset) return;
+          meta.poster = true;
+          setPoster(id, blob);
+          applied++;
+        });
+        if (applied) {
+          PM.touch();
+          checkpointAssetMetadata(project);
+          PM.bus?.emit?.('assets');
+        }
+      })();
+    }, 0);
     return { restored, missing };
   },
   /** Procedural placeholder so demo projects work with zero imports. */

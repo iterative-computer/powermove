@@ -7,6 +7,7 @@ import {
   type FileFilter,
   type IpcMain,
   type IpcMainInvokeEvent,
+  type WebContents,
   type SaveDialogOptions,
   type SaveDialogReturnValue
 } from 'electron';
@@ -40,6 +41,66 @@ export interface SaveIpcContext {
   isTrustedSender(event: IpcMainInvokeEvent): boolean;
   dialogs?: SaveDialogAdapter;
   projects?: ProjectFiles;
+}
+
+type ReaderState = {
+  readers: Map<string, { owner: WebContents; timer: ReturnType<typeof setTimeout> }>;
+  watchedOwners: WeakSet<WebContents>;
+};
+
+const readerStates = new WeakMap<ProjectFiles, ReaderState>();
+
+function projectReaderState(projects: ProjectFiles): ReaderState {
+  let state = readerStates.get(projects);
+  if (!state) {
+    state = { readers: new Map(), watchedOwners: new WeakSet() };
+    readerStates.set(projects, state);
+  }
+  return state;
+}
+
+async function closeProjectReader(projects: ProjectFiles, token: string, verify = false): Promise<void> {
+  const state = projectReaderState(projects);
+  const reader = state.readers.get(token);
+  if (!reader) return;
+  clearTimeout(reader.timer);
+  state.readers.delete(token);
+  await projects.close(token, verify);
+}
+
+function watchProjectReaderOwner(projects: ProjectFiles, owner: WebContents): void {
+  const state = projectReaderState(projects);
+  if (state.watchedOwners.has(owner)) return;
+  state.watchedOwners.add(owner);
+  owner.once('destroyed', () => {
+    for (const [token, reader] of state.readers) {
+      if (reader.owner === owner) void closeProjectReader(projects, token).catch(() => undefined);
+    }
+  });
+}
+
+export async function openProjectForWindow(
+  ctx: { projects: ProjectFiles },
+  webContents: WebContents,
+  filePath: string
+): Promise<ProjectOpenResult> {
+  try {
+    const opened = await ctx.projects.open(filePath);
+    if (webContents.isDestroyed()) {
+      await ctx.projects.close(opened.token, false);
+      throw new Error('Project window is unavailable');
+    }
+    const state = projectReaderState(ctx.projects);
+    const timer = setTimeout(() => {
+      void closeProjectReader(ctx.projects, opened.token).catch(() => undefined);
+    }, 120_000);
+    timer.unref();
+    state.readers.set(opened.token, { owner: webContents, timer });
+    watchProjectReaderOwner(ctx.projects, webContents);
+    return { ok: true, ...opened };
+  } catch (error: any) {
+    return { ok: false, cancelled: false, error: error.message || 'Could not open project.' };
+  }
 }
 
 /** Convert an untrusted suggestion into one plain filename. */
@@ -77,7 +138,6 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
   const pending = new Set<object>();
   const watchedOwners = new WeakSet<object>();
   const uploads = new Map<object, { id: string; ready: Promise<FileUpload>; timer: ReturnType<typeof setTimeout> }>();
-  const readers = new Map<string, { owner: object; timer: ReturnType<typeof setTimeout> }>();
   const discardUpload = async (owner: object, id?: string) => {
     const upload = uploads.get(owner);
     if (!upload || (id && id !== upload.id)) return;
@@ -85,18 +145,11 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     const staged = await upload.ready.catch(() => undefined);
     await staged?.dispose();
   };
-  const closeReader = async (token: string, verify = false) => {
-    const reader = readers.get(token);
-    if (!reader) return;
-    clearTimeout(reader.timer); readers.delete(token);
-    await ctx.projects?.close(token, verify);
-  };
   const watchOwner = (owner: IpcMainInvokeEvent['sender']) => {
     if (watchedOwners.has(owner)) return;
     watchedOwners.add(owner);
     owner.once('destroyed', () => {
       void discardUpload(owner).catch(() => undefined);
-      for (const [token, reader] of readers) if (reader.owner === owner) void closeReader(token).catch(() => undefined);
     });
   };
   ipcMain.handle(IPC.fileSaveUpload, async (event, size: unknown) => {
@@ -125,6 +178,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
   });
   ipcMain.handle(IPC.projectRead, async (event, request: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!ctx.projects) throw new Error('Project storage is unavailable');
+    const readers = projectReaderState(ctx.projects).readers;
     if (!isRecord(request) || typeof request.token !== 'string' || readers.get(request.token)?.owner !== event.sender) throw new Error('Unknown project read token');
     const reader = readers.get(request.token)!; reader.timer.refresh();
     const data = await ctx.projects!.read(request.token, request.offset as number, request.length as number);
@@ -132,8 +187,10 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
   });
   ipcMain.handle(IPC.projectReadClose, async (event, token: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!ctx.projects) throw new Error('Project storage is unavailable');
+    const readers = projectReaderState(ctx.projects).readers;
     if (typeof token !== 'string' || readers.get(token)?.owner !== event.sender) throw new Error('Unknown project read token');
-    await closeReader(token, true);
+    await closeProjectReader(ctx.projects, token, true);
   });
   ipcMain.handle(IPC.fileSave, async (event, payload: unknown): Promise<FileSaveResult> => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -198,14 +255,10 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     try {
       const result = await dialog.showOpenDialog(window, {
         title: 'Open Project', properties: ['openFile'],
-        filters: [{ name: 'Powermove Project', extensions: ['pmv', 'pmv1', 'json'] }]
+        filters: [{ name: 'Powermove Project', extensions: ['pmv', 'json'] }]
       });
       if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
-      const opened = await ctx.projects.open(result.filePaths[0]);
-      if (event.sender.isDestroyed()) { await ctx.projects.close(opened.token, false); throw new Error('Project window is unavailable'); }
-      const timer = setTimeout(() => { void closeReader(opened.token).catch(() => undefined); }, 120_000); timer.unref();
-      readers.set(opened.token, { owner: event.sender, timer }); watchOwner(event.sender);
-      return { ok: true, ...opened };
+      return await openProjectForWindow({ projects: ctx.projects }, event.sender, result.filePaths[0]);
     } catch (error: any) { return { ok: false, cancelled: false, error: error.message || 'Could not open project.' }; }
   });
   ipcMain.handle(IPC.projectConfirmClose, async (event, name: unknown): Promise<CloseDecision> => {
