@@ -19,6 +19,9 @@ import type { PMRegistry } from '../registry';
 import { packProjectFileBlob } from './project-file';
 import { buildWebExport, inspectWebExport } from '../../player/export-web';
 import { viewerService } from './services';
+import { createSettingsSection } from '../ui/settings-section';
+import { row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
+import { mountSquircles } from '../../settings/squircle';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -132,11 +135,14 @@ X.defaults = () => normalizeExportDefaults(
 X.dialog = () => {
   const p: any = PM.proj;
   const opts: any = Object.assign({}, X.defaults(), { name: p.name });
-  const body: any = h('div.export-form');
+  /* The dialog is the Settings › Project page in a sheet: the same group
+     cards, title-and-description rows and 30px hairline controls, so export
+     reads as one surface with the place its defaults come from. */
+  const body: any = h('div.export-form.sg-column');
   body.addEventListener('keydown', (event: KeyboardEvent) => event.stopPropagation());
-  // Native selects stay inside the modal's focus and inert boundary.
-  const select = (get: any, set: any, options: any[]) => {
-    const field = h('select.sel.export-select');
+  const select = (label: string, get: any, set: any, options: any[]) => {
+    const field: any = settingsSelect(label);
+    field.classList.add('export-select');
     field.sync = () => {
       field.replaceChildren(...options.map((option: any) => h('option', { value: String(option.v) }, option.label)));
       field.value = String(get());
@@ -145,31 +151,25 @@ X.dialog = () => {
     field.sync();
     return field;
   };
-  const toggle = (get: any, set: any, opt: any) => {
-    // Off | On segments with a gliding pill; shares .onoff styles with ToggleField.svelte.
-    const off = h('button', { type: 'button', role: 'radio' }, 'Off');
-    const on = h('button', { type: 'button', role: 'radio' }, 'On');
-    const field = h('div.onoff', { role: 'radiogroup', 'aria-label': opt.label }, h('span.onoff-pill', { 'aria-hidden': 'true' }), off, on);
-    field.sync = () => {
-      const value = !!get();
-      field.classList.toggle('on', value);
-      off.setAttribute('aria-checked', String(!value)); on.setAttribute('aria-checked', String(value));
-    };
-    off.onclick = () => { if (get()) { set(false); field.sync(); } };
-    on.onclick = () => { if (!get()) { set(true); field.sync(); } };
-    field.sync(); return field;
+  /* shadcn's Switch, as on the Settings pages. */
+  const toggle = (get: any, set: any, label: string) => {
+    const field: any = h('button.toggle', { type: 'button', role: 'switch', 'aria-label': label }, h('i'));
+    field.sync = () => { const value = !!get(); field.classList.toggle('on', value); field.setAttribute('aria-checked', String(value)); };
+    field.onclick = () => { set(!get()); field.sync(); };
+    field.sync();
+    return field;
   };
   const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
   const remembered: Record<string, string> = { code: 'web', video: 'mp4', images: 'still', project: 'json' };
   remembered[category(opts.format)] = opts.format;
-  /* Destination is a segmented switcher, the same track as the Settings and
-     library view switchers; one caption beneath it names what the chosen
-     destination produces, so the segments stay a single quiet word each. */
+
   const destinations = [
-    ['code', 'Code', 'Apps & agents'], ['video', 'Video', 'MP4, WebM, ProRes'],
-    ['images', 'Images', 'Still or sequence'], ['project', 'Project', 'Editable .pmv'],
+    ['code', 'Code', 'A live animation for apps and coding agents.'],
+    ['video', 'Video', 'MP4, WebM or ProRes for delivery and editing.'],
+    ['images', 'Images', 'A single frame, or every frame as a PNG sequence.'],
+    ['project', 'Project', 'An editable .pmv with every layer and its media.'],
   ] as const;
-  const choices = h('div.export-destinations.segmented', { role: 'group', 'aria-label': 'Export type' });
+  const choices = h('div.export-destinations', { role: 'group', 'aria-label': 'Export type' });
   const buttons: Record<string, HTMLButtonElement> = {};
   for (const [id, title] of destinations) {
     const button = h('button.export-destination', { type: 'button', 'aria-label': title }, title);
@@ -178,46 +178,49 @@ X.dialog = () => {
   }
   const destinationNote = h('p.export-destination-note');
   body.append(choices, destinationNote);
-  const codeDetails = h('div.export-code-details',
-    h('h3', 'Put your animation in an app'),
-    h('p', 'Export a live animation with playback controls and editable text and colors.'),
-    h('div.export-code-includes', h('span', 'JavaScript player'), h('span', 'React component'), h('span', 'Agent handoff')),
-    h('p.export-code-delivery', 'One ZIP with your scene, assets and generated effects. Give it to a developer or coding agent to integrate.'));
-  const projectDetails = h('div.export-code-details',
-    h('h3', 'Keep every layer editable'),
-    h('p', 'Save a portable Powermove project with its media, effects, keyframes and composition settings.'),
-    h('div.export-code-includes', h('span', 'Editable layers'), h('span', 'Original media'), h('span', 'Animation & effects')));
+
+  const about = (title: string, copy: string, includes: string[], delivery?: string) => h('div.sg-group.export-about',
+    h('div.export-about-copy', h('b', title), h('p', copy),
+      h('div.export-code-includes', ...includes.map((item) => h('span', item))),
+      delivery ? h('p.export-code-delivery', delivery) : null));
+  const codeDetails = about('Put your animation in an app',
+    'Export a live animation with playback controls and editable text and colors.',
+    ['JavaScript player', 'React component', 'Agent handoff'],
+    'One ZIP with your scene, assets and generated effects. Give it to a developer or coding agent to integrate.');
+  const projectDetails = about('Keep every layer editable',
+    'Save a portable Powermove project with its media, effects, keyframes and composition settings.',
+    ['Editable layers', 'Original media', 'Animation & effects']);
   body.append(codeDetails, projectDetails);
-  const rows: any = {};
-  const mk: any = (key: any, label: any, ctl: any) => {
-    const r: any = PM.row(label, ctl);
-    ctl.setAttribute?.('aria-label', label);
-    rows[key] = r;
-    body.appendChild(r);
-    return r;
-  };
-  /* toggleField's `label` is the undo-history label, not visible text, so the
-     affordance hints beside each switch are rendered here instead. A single
-     wrapper: PM.row takes one node, and h() reads a bare array as attributes. */
-  const withHint: any = (toggle: any, text: any) => h('div.export-toggle', toggle, h('span.export-hint', text));
+
   const hasWC: any = typeof window.VideoEncoder !== 'undefined';
   const plan: any = () => planExport(opts, { w: p.w, h: p.h, dur: p.dur, work: p.work });
+  const rows: Record<string, SettingsRow> = {};
+  const output = createSettingsSection('Output');
+  const rendering = createSettingsSection('Rendering');
+  const presetSection = createSettingsSection('Presets');
+  body.append(output.element, rendering.element, presetSection.element);
+  const mk = (section: { body: HTMLElement }, key: string, title: string, detail: string, control: HTMLElement): SettingsRow => {
+    const r = settingsRow(title, detail, control);
+    rows[key] = r;
+    section.body.append(r.element);
+    return r;
+  };
 
   const formatOptions: any[] = [];
-  const formatField = select(() => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
+  const formatField = select('Format', () => opts.format, (v: any) => { opts.format = v; sync(); }, formatOptions);
   const allFormats = EXPORT_FORMAT_OPTIONS.map((o: any) => {
       if (o.v === 'mp4') return { v: o.v, label: (window as any).powermove?.render ? 'MP4 · H.264 (frame-exact)' : 'MP4 · H.264 (real-time)' };
       if (o.v === 'webm' && hasWC) return { v: o.v, label: 'WebM · VP9 (frame-exact)' };
       return { ...o };
     });
-  mk('format', 'Format', formatField);
+  mk(output, 'format', 'Format', 'Container and codec of the exported file.', formatField);
 
   /* Resolution: the common multiples of the composition, or any pixel size.
      Custom sizes keep the composition's aspect so nothing renders stretched. */
   const CUSTOM: any = '__custom__';
   const presetScales: any = EXPORT_SCALE_OPTIONS.map((o: any) => o.v);
   let customOpen: any = !presetScales.includes(opts.scale);
-  const scaleField: any = select(
+  const scaleField: any = select('Resolution',
     () => (customOpen ? CUSTOM : opts.scale),
     (v: any) => {
       customOpen = v === CUSTOM;
@@ -230,13 +233,10 @@ X.dialog = () => {
       })),
       { v: CUSTOM, label: 'Custom size…' },
     ]);
-  mk('scale', 'Resolution', scaleField);
-  const sizeInput: any = (aria: any) => h('input.export-size-input', {
-    type: 'number', min: '16', max: '8192', step: '2', 'aria-label': aria,
-  });
-  const wIn: any = sizeInput('Export width in pixels');
-  const hIn: any = sizeInput('Export height in pixels');
-  const sizeRow: any = mk('size', 'Size', h('div.export-size', wIn, h('span', '×'), hIn));
+  mk(output, 'scale', 'Resolution', 'Rendered size relative to the composition, or any pixel size.', scaleField);
+  const wIn: any = settingsNumberInput('Export width in pixels', 16, 8192, 2);
+  const hIn: any = settingsNumberInput('Export height in pixels', 16, 8192, 2);
+  const sizeRow = mk(output, 'size', 'Size', 'Exact pixel size to render; keeps the composition aspect.', h('div.settings-field-pair', wIn, h('span', '×'), hIn));
   const applyCustom: any = (fromWidth: any) => {
     const typed: any = Number(fromWidth ? wIn.value : hIn.value);
     if (!Number.isFinite(typed) || typed < 2) return sync();
@@ -251,31 +251,29 @@ X.dialog = () => {
     if (e.key === 'Enter') inp.blur();
   });
 
-  mk('fps', 'Frame rate', select(() => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: (Number.isInteger(f)?f:f.toFixed(3)) + ' fps' }))));
+  mk(output, 'fps', 'Frame rate', 'Frames written per second of exported video.', select('Frame rate', () => opts.fps, (v: any) => { opts.fps = v; sync(); }, EXPORT_FRAME_RATES.map((f: any) => ({ v: f, label: (Number.isInteger(f)?f:f.toFixed(3)) + ' fps' }))));
   const hasWork: any = !!(p.work && p.work[1] > p.work[0]);
-  mk('range', 'Range', select(() => opts.range, (v: any) => { opts.range = v; sync(); },
+  mk(output, 'range', 'Range', 'Export the work area or the whole composition.', select('Range', () => opts.range, (v: any) => { opts.range = v; sync(); },
     EXPORT_RANGE_OPTIONS.map((o: any) => o.v === 'work' && !hasWork
       ? { v: o.v, label: 'Work area · not set' } : { ...o })));
-  mk('quality', 'Quality', select(() => opts.quality, (v: any) => { opts.quality = v; sync(); }, EXPORT_QUALITY_OPTIONS.map((o: any) => ({ ...o }))));
-  mk('mblur', 'Motion blur', toggle(() => opts.mblur, (v: any) => { opts.mblur = v; sync(); }, { label: 'Motion blur', local: true }));
+  mk(output, 'quality', 'Quality', 'Video bitrate used for video exports.', select('Quality', () => opts.quality, (v: any) => { opts.quality = v; sync(); }, EXPORT_QUALITY_OPTIONS.map((o: any) => ({ ...o }))));
+  mk(rendering, 'mblur', 'Motion blur', 'Render motion blur for moving layers.', toggle(() => opts.mblur, (v: any) => { opts.mblur = v; sync(); }, 'Motion blur'));
   const hasAudio: any = PM.Audio.hasAudibleLayers(p);
-  mk('audio', 'Include audio', withHint(
-    toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, { label: 'Include audio', local: true }),
-    hasAudio ? 'Mixes composition audio into the video' : 'No audio layers in this project'));
-  mk('alpha', 'Transparent background', toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background', local: true }));
+  mk(rendering, 'audio', 'Include audio', hasAudio ? 'Mix composition audio into the video.' : 'No audio layers in this project.',
+    toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, 'Include audio'));
+  mk(rendering, 'alpha', 'Transparent background', 'Keep the background see-through, with straight alpha.',
+    toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, 'Transparent background'));
 
   let presets=PM.store.get('renderPresets',[]);
   let chosenPreset='';const presetOptions=[{v:'',label:'Choose preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
-  const presetSelect=select(()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows) as any[])r.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
-  presetSelect.setAttribute('aria-label', 'Saved preset');
-  const presetName=h('input.export-preset-name',{type:'text',placeholder:'Preset name','aria-label':'Render preset name'});
-  const savePreset=h('button.chip','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
+  const presetSelect=select('Saved preset',()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows))r.element.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
+  const presetName=h('input.settings-input.is-wide.export-preset-name',{type:'text',placeholder:'Preset name','aria-label':'Render preset name'});
+  const savePreset=h('button.btn','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
   presetName.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); savePreset.click(); } });
-  /* Presets are their own row in the same label / control grid as the
-     options above, separated by a hairline rather than a box. */
-  const presetRow = h('div.export-presets', PM.row('Preset', h('div.export-preset-controls', presetSelect, presetName, savePreset)));
-  const colorNote = h('p.export-color-note','Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.');
-  body.append(presetRow, colorNote);
+  const presetRow = mk(presetSection, 'preset', 'Saved preset', 'Load a set of export settings you saved earlier.', presetSelect);
+  const saveRow = mk(presetSection, 'presetSave', 'Save as preset', 'Name these settings to reuse them in any project.', h('div.export-preset-save', presetName, savePreset));
+  const colorNote = h('p.settings-note','Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.');
+  presetSection.element.append(colorNote);
   const nfoMain: any = h('b');
   const nfoNote: any = h('span');
   const nfo: any = h('div.export-summary', nfoMain, nfoNote);
@@ -292,16 +290,20 @@ X.dialog = () => {
     codeDetails.hidden = kind !== 'code';
     projectDetails.hidden = kind !== 'project';
     body.querySelectorAll('select, [role=switch]').forEach((field: any) => field.sync?.());
-    presetRow.hidden = colorNote.hidden = kind === 'code' || kind === 'project';
+    const settingsFree = kind === 'code' || kind === 'project';
     formatOptions.splice(0, formatOptions.length, ...allFormats.filter(o => category(o.v) === kind));
     formatField.sync?.();
-    rows.format.classList.toggle('is-off', kind === 'code' || kind === 'project');
     const support: any = exportFieldSupport(opts.format);
     for (const key of Object.keys(rows)) {
-      if (key === 'format' || key === 'size') continue;
-      rows[key].classList.toggle('is-off', !support[key]);
+      if (key === 'format' || key === 'size' || key === 'preset' || key === 'presetSave') continue;
+      rows[key]!.element.hidden = !support[key];
     }
-    sizeRow.classList.toggle('is-off', !support.scale || !customOpen);
+    rows.format!.element.hidden = settingsFree;
+    sizeRow.element.hidden = !support.scale || !customOpen;
+    presetRow.element.hidden = saveRow.element.hidden = settingsFree;
+    for (const section of [output, rendering, presetSection]) {
+      section.element.hidden = settingsFree || ![...section.body.children].some((child) => !(child as HTMLElement).hidden);
+    }
     const est: any = plan();
     if (customOpen) {
       if (window.document.activeElement !== wIn) wIn.value = String(est.width);
@@ -326,12 +328,15 @@ X.dialog = () => {
     if (pri) pri.textContent = exportActionLabel(opts.format);
   }
   sync();
+  let unmountSquircles = () => {};
   m = PM.modal({
-    title: 'Export', body, width: 520,
+    title: 'Export', body, width: 560,
+    onClose: () => unmountSquircles(),
     actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
   });
   m.el.classList.add('export-modal');
   sync();
+  try { unmountSquircles = mountSquircles(body); } catch { /* The sheet still reads without smoothed corners. */ }
 };
 
 /** Keep the dialog's last choices as this project's export settings. */

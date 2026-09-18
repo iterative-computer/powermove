@@ -164,60 +164,51 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .tb-export{padding:0 10px;margin-right:6px}
 
 /* ── export dialog ─────────────────────────────────────────
-   Settings is the reference sheet: one label / control grid, 32px field wells
-   with no border, hairlines between groups instead of boxes, a single orange
-   action. The destination switcher is the shared segmented track. */
-.export-modal{top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}
-.export-modal .mb{padding:10px 18px 16px;gap:0}
-.export-form{display:flex;flex-direction:column;gap:2px}
+   The Settings › Project page in a sheet: the same group cards, title-and-
+   description rows, 30px hairline controls and shadcn switch, scoped with the
+   Settings tokens so settings.css paints it unchanged. */
+.export-modal{
+  --ctl-h:30px;
+  --sg-edge:var(--line-2);
+  --sg-group-edge:var(--ink-1);
+  --sg-edge-hot:var(--line-strong);
+  --sg-edge-focus:var(--line-strong);
+  --sg-row:var(--bg-row);
+  top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}
+.export-modal .mb{padding:8px 20px 20px;gap:0}
+.export-form.sg-column{width:auto;max-width:none;margin:0;display:flex;flex-direction:column;gap:22px}
 .export-form [hidden]{display:none!important}
-.export-destinations.segmented{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%;padding:2px;gap:1px;background:var(--ink-2);border-radius:var(--r-md)}
-.export-destinations.segmented .export-destination{height:calc(var(--ctl-h) - 2px);min-width:0;padding:0 8px;border:0;border-radius:calc(var(--r-md) - 2px);background:transparent;color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;transition:color var(--dur-1),background var(--dur-1)}
-.export-destinations.segmented .export-destination:hover{color:var(--tx)}
-.export-destinations.segmented .export-destination.on,.export-destinations.segmented .export-destination[aria-pressed=true]{background:var(--ctl-raised);box-shadow:var(--ctl-edge);color:var(--tx)}
-.export-destinations.segmented .export-destination:focus-visible{outline:none;box-shadow:var(--focus-ring)}
-.export-destination-note{margin:8px 2px 14px;font-size:var(--fs-xs);color:var(--tx-3);min-height:1.4em}
-/* Code and Project have no settings; they explain what the file is instead. */
-.export-code-details{padding:2px 2px 6px}
-.modal .export-code-details h3{margin:0 0 6px;padding:0;font-size:var(--fs-md);font-weight:var(--fw-medium);letter-spacing:0;color:var(--tx)}
-.export-code-details p{margin:0 0 12px;font-size:var(--fs-sm);line-height:1.55;color:var(--tx-2);text-wrap:pretty}
-.export-code-includes{display:flex;flex-wrap:wrap;gap:0 6px;margin:0 0 12px;font-size:var(--fs-sm);color:var(--tx-2)}
+.export-form .settings-section{gap:0}
+.export-form .sg-group{margin:0}
+/* Destination: four quiet words on one hairline track; the chosen one is
+   the raised float surface, nothing coloured. */
+.export-destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;padding:2px;border:1px solid var(--sg-group-edge);border-radius:var(--r-md);background:var(--sg-row)}
+.export-destination{height:28px;min-width:0;padding:0 8px;border:0;border-radius:calc(var(--r-md) - 3px);background:transparent;color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;transition:color var(--dur-1),background var(--dur-1)}
+.export-destination:hover{color:var(--tx)}
+.export-destination.on,.export-destination[aria-pressed=true]{background:var(--bg-float);box-shadow:0 0 0 1px var(--sg-edge);color:var(--tx)}
+.export-destination:focus-visible{outline:0;box-shadow:0 0 0 1px var(--sg-edge-focus)}
+.export-destination-note{margin:-12px 1px 0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);min-height:16px}
+/* Code and Project have no settings; one card explains the file instead. */
+.export-about{padding:14px}
+.export-about-copy{display:flex;flex-direction:column;gap:6px}
+.export-about-copy>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
+.export-about-copy>p{margin:0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.export-code-includes{display:flex;flex-wrap:wrap;gap:0 6px;margin:2px 0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-2)}
 .export-code-includes span+span::before{content:'·';margin-right:6px;color:var(--tx-4)}
-.export-code-details .export-code-delivery{color:var(--tx-3);margin-bottom:0}
-/* Rows: 140px label column, 36px rhythm, the control owns the rest. */
-.export-form .row.split{margin:0;padding:0;height:auto;min-height:36px;gap:12px}
-.export-form .row.split .k{width:140px;color:var(--tx-2);font-size:var(--fs-sm)}
-.export-form .row.split .vwrap{height:auto;gap:8px}
-.export-form .row.split.is-off{display:none}
-.export-form select.export-select,.export-form .pm-select.export-select{appearance:none;-webkit-appearance:none;cursor:default;text-align:left;font-family:var(--f-ui);font-size:var(--fs-sm);height:32px;padding:0 28px 0 10px;color:var(--tx);background:rgb(var(--ink-rgb) / .06);border:0;box-shadow:none;border-radius:var(--r-sm);transition:background var(--dur-1)}
-.export-form select.export-select:hover,.export-form .pm-select.export-select:hover{background:rgb(var(--ink-rgb) / .085)}
-.export-form select.export-select:focus-visible,.export-form .pm-select.export-select:focus-visible{outline:0;box-shadow:var(--focus-ring)}
-/* Toggles share one width so their pills line up down the column; the hint
-   beside them is metadata, not a second label. */
-.export-form .export-toggle{min-width:0;flex:1;display:flex;align-items:center;gap:10px}
-.export-form .onoff{flex:none;width:140px;height:32px}
-.export-form .onoff-pill{border-radius:calc(var(--r-sm) - 2px)}
-.export-form .export-hint{min-width:0;color:var(--tx-4);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.export-size{display:flex;align-items:center;gap:8px;color:var(--tx-4);font-size:var(--fs-xs)}
-.export-size-input{width:82px;height:32px;padding:0 10px;border:0;border-radius:var(--r-sm);background:rgb(var(--ink-rgb) / .06);color:var(--tx);font:inherit;font-size:var(--fs-sm);text-align:right;font-variant-numeric:tabular-nums;transition:background var(--dur-1)}
-.export-size-input:hover{background:rgb(var(--ink-rgb) / .085)}
-.export-size-input:focus-visible{outline:0;box-shadow:var(--focus-ring)}
-/* Presets sit in the same grid below a hairline; the name field and Save are
-   one line with the preset picker. */
-.export-presets{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
-.export-preset-controls{flex:1;min-width:0;display:flex;align-items:center;gap:6px}
-.export-preset-controls .export-select{flex:1 1 0;min-width:0}
-.export-preset-name{flex:0 1 128px;min-width:72px;height:32px;padding:0 10px;border:0;border-radius:var(--r-sm);background:rgb(var(--ink-rgb) / .06);color:var(--tx);font:inherit;font-size:var(--fs-sm);transition:background var(--dur-1)}
-.export-preset-name::placeholder{color:var(--tx-4)}
-.export-preset-name:hover{background:rgb(var(--ink-rgb) / .085)}
-.export-preset-name:focus-visible{outline:0;box-shadow:var(--focus-ring)}
-.export-form .chip{height:32px;padding:0 12px;background:rgb(var(--ink-rgb) / .06);color:var(--tx);box-shadow:none;border:0}
-.export-form .chip:hover{background:rgb(var(--ink-rgb) / .085)}
-.export-color-note{margin:6px 2px 0;font-size:var(--fs-xs);line-height:1.5;color:var(--tx-4);text-wrap:pretty}
-/* The readout is a footer line, not a card. */
-.export-form .export-summary{display:flex;flex-direction:column;gap:2px;margin:14px 0 0;padding:12px 2px 0;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent;font-size:var(--fs-sm);line-height:1.5;color:var(--tx-3);font-variant-numeric:tabular-nums}
-.export-form .export-summary>b{color:var(--tx);font-weight:var(--fw-medium)}
-.export-form .export-summary>span:empty{display:none}
+.export-about-copy .export-code-delivery{color:var(--tx-4)}
+/* Rows are the Settings rows; controls are the Settings controls. */
+.export-form .sg-group>.settings-row{min-height:52px}
+.export-form .settings-copy>span{max-width:300px}
+.export-form .pm-select.settings-select{min-width:170px;max-width:240px}
+.export-form .settings-input{width:82px}
+.export-form .export-preset-save{display:flex;align-items:center;gap:6px}
+.export-form .export-preset-save .settings-input{width:150px;text-align:left}
+.export-form .export-preset-save .btn{height:30px;padding:0 12px;border-radius:var(--r-md)}
+.export-form .settings-note{margin-top:8px}
+/* The readout: one line of the result, one line of how it gets there. */
+.export-summary{display:flex;flex-direction:column;gap:2px;margin:0 1px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);font-variant-numeric:tabular-nums}
+.export-summary>b{color:var(--tx-2);font-weight:var(--fw-medium)}
+.export-summary>span:empty{display:none}
 /* Progress sheet. */
 .export-progress{display:flex;flex-direction:column;gap:10px}
 .export-preview-stage{position:relative;overflow:hidden;border-radius:var(--r-md);background:var(--bg-field)}
@@ -614,6 +605,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .modal .mb{padding:12px 18px 18px;display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:8px;overflow:auto}
 .modal .mf{display:flex;gap:8px;justify-content:flex-end;padding:12px 18px;border-top:1px solid var(--line)}
 .modal .mf .btn{white-space:nowrap}
+/* Sheets follow their content: Modal.svelte writes the measured height and
+   the change eases; the body stops scrolling for the duration so a
+   scrollbar never flashes mid-motion. */
+.modal.is-measured{transition:height var(--dur-3) var(--ease)}
+.modal.is-resizing .mb{overflow:hidden}
+@media (prefers-reduced-motion:reduce){.modal.is-measured{transition:none}}
 /* Actions use flat tonal fills; focus and selection provide their own cues. */
 .btn{position:relative;isolation:isolate;height:var(--ctl-h);padding:0 12px;border-radius:var(--r-sm);background:var(--ctl-raised);color:var(--tx);font-size:var(--fs-sm);font-weight:var(--fw-medium);box-shadow:var(--ctl-edge);display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;transition:color var(--dur-1),box-shadow var(--dur-1),transform var(--dur-1) var(--ease)}
 .btn svg{width:13px;height:13px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
