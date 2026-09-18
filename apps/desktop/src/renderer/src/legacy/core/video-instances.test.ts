@@ -51,3 +51,14 @@ it('releases deleted clips and quality replacements without revoking shared medi
   previewCopy.dispatchEvent(new Event('loadeddata'));
   expect(PM.invalidate).not.toHaveBeenCalled();
 });
+
+it('releases inactive nested decoders while preserving another instance of the same layer', () => {
+  vi.stubGlobal('document', { createElement: vi.fn(video) });
+  const PM = { invalidate: vi.fn() }, asset = { el: video() };
+  const first = layerVideoElement(PM, asset, 'first/clip');
+  const second = layerVideoElement(PM, asset, 'second/clip');
+  pruneVideoInstances(asset, new Set(['first/clip']), true);
+  expect(second.removeAttribute).toHaveBeenCalledWith('src');
+  expect(first.pause).not.toHaveBeenCalled();
+  expect(layerVideoElement(PM, asset, 'first/clip')).toBe(first);
+});

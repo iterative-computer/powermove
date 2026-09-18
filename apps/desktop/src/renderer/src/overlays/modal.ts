@@ -25,6 +25,7 @@ export class ModalController {
     instance: ModalInstance;
     handle: ModalHandle;
     trigger: HTMLElement | null;
+    dismiss: () => void;
     onClose?: () => void;
   }> = [];
   private inertSnapshot: InertSnapshot = [];
@@ -43,6 +44,9 @@ export class ModalController {
     const titleId = `pm-modal-title-${++modalId}`;
     let handle!: ModalHandle;
     let pending = false;
+    const dismiss = () => {
+      if (options.dismissible !== false && !pending) handle.close();
+    };
     const instance = mount(Modal, {
       target: document.body,
       props: {
@@ -78,7 +82,7 @@ export class ModalController {
             } else if (result !== false) handle.close();
           } catch (error) { failed(error); }
         },
-        onclose: () => handle.close()
+        onclose: dismiss
       }
     }) as ModalInstance;
     flushSync();
@@ -87,7 +91,7 @@ export class ModalController {
       body: instance.bodyElement(),
       close: () => this.close(handle)
     };
-    this.stack.push({ instance, handle, trigger, onClose: options.onClose });
+    this.stack.push({ instance, handle, trigger, dismiss, onClose: options.onClose });
     this.syncScrim();
     queueMicrotask(() => {
       if (this.stack.some((entry) => entry.handle === handle)) instance.focusInitial();
@@ -130,6 +134,6 @@ export class ModalController {
     if (!scrim) return;
     scrim.classList.toggle('on', this.stack.length > 0);
     const latest = this.stack[this.stack.length - 1];
-    scrim.onclick = latest ? () => latest.handle.close() : null;
+    scrim.onclick = latest ? latest.dismiss : null;
   }
 }

@@ -671,6 +671,17 @@ it('preserves distinct failures across success notifications and deduplicates re
   expect(document.querySelector('#toasts')?.textContent).toContain('second.mov');
 });
 
+it('keeps a non-dismissible operation visible until explicitly closed', () => {
+  const handle = PM.modal({ title: 'Exporting', dismissible: false, actions: [{ label: 'Cancel', run: () => false }] });
+  flushSync();
+  document.querySelector<HTMLElement>('#scrim')!.click();
+  expect(handle.el.isConnected).toBe(true);
+  handle.el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  expect(handle.el.isConnected).toBe(true);
+  handle.close();
+  expect(handle.el.isConnected).toBe(false);
+});
+
 it('waits for asynchronous modal validation without closing or submitting twice', async () => {
   let finish!: (result: boolean) => void;
   const run = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve; }));

@@ -20,6 +20,7 @@ import { packProjectFileBlob } from './project-file';
 import { buildWebExport, inspectWebExport } from '../../player/export-web';
 import { viewerService } from './services';
 import { createSettingsSection } from '../ui/settings-section';
+import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
 import { row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
 
 export function install(PM: PMRegistry): void {
@@ -327,11 +328,14 @@ X.dialog = () => {
     if (pri) pri.textContent = exportActionLabel(opts.format);
   }
   sync();
+  let unmountCorners: (() => void) | undefined;
   m = PM.modal({
     title: 'Export', body, width: 620,
+    onClose: () => unmountCorners?.(),
     actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
   });
   m.el.classList.add('export-modal');
+  unmountCorners = mountSquircles(m.el, `${SQUIRCLE_SELECTOR}, .export-destinations, .export-destination, .btn`);
   sync();
 };
 
@@ -358,8 +362,15 @@ function progressUI(total: any) {
     h('div.export-preview-stage', prev, scan), h('div.bar', { role: 'progressbar', 'aria-label': 'Export progress', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': '0', style: { height: '4px' } }, bar), h('div.export-progress-label', label, eta));
   const mod: any = PM.modal({
     title: 'Exporting ' + (PM.proj.name || 'Untitled'), body, width: 580,
-    onClose: () => { X.cancel = true; stopPreview(); },
-    actions: [{ label: 'Cancel', run: () => { X.cancel = true; } }],
+    dismissible: false,
+    onClose: () => { if (X.busy) X.cancel = true; stopPreview(); },
+    actions: [{ label: 'Cancel', run: () => {
+      X.cancel = true;
+      label.textContent = 'Cancelling…'; eta.textContent = '';
+      const button = mod.el.querySelector('.mf button');
+      if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
+      return false;
+    } }],
   });
   mod.el.classList.add('export-modal');
   try { stopPreview = animateExportPreview(scan); } catch { scan.hidden = true; }
@@ -367,6 +378,7 @@ function progressUI(total: any) {
   return {
     mod, prev,
     set(i: any, extra: any) {
+      if (X.cancel) return;
       bar.parentElement.setAttribute('aria-valuenow', String(Math.round(i / total * 100)));
       bar.style.width = (i / total * 100).toFixed(1) + '%';
       label.textContent = `Frame ${i} / ${total}  ·  ${(i / total * 100).toFixed(0)}%` + (extra ? '  ·  ' + extra : '');

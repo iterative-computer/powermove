@@ -53,11 +53,11 @@ export function pauseVideoInstances(asset: object): void {
   }
 }
 
-export function pruneVideoInstances(asset: object, layerIds: ReadonlySet<string>): void {
+export function pruneVideoInstances(asset: object, layerIds: ReadonlySet<string>, exact = false): void {
   const pool = pools.get(asset);
   if (!pool) return;
   for (const [id, instance] of pool.layers) {
-    if (layerIds.has(id)) continue;
+    if (layerIds.has(id) || (!exact && layerIds.has(id.slice(id.lastIndexOf('/') + 1)))) continue;
     instance.release(); pool.layers.delete(id);
   }
   if (!pool.layers.size) pools.delete(asset);

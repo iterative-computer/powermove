@@ -1,5 +1,5 @@
-import { expect, it } from 'vitest';
-import { cancelPreviewVideoSeek, seekPreviewVideo } from './video-seek';
+import { expect, it, vi } from 'vitest';
+import { cancelPreviewVideoSeek, previewSeekFrame, seekPreviewVideo } from './video-seek';
 
 it('finishes the current decode then seeks only the latest requested frame', () => {
   const video = new EventTarget() as any;
@@ -54,4 +54,31 @@ it('retries a trim seek once a cold decoder has metadata', () => {
   loaded = true;
   video.dispatchEvent(new Event('loadedmetadata'));
   expect(time).toBe(1);
+});
+
+it('keeps completed pixels while a slow decoder starts the newest queued seek', () => {
+  const video = new EventTarget() as any;
+  let time = 0;
+  Object.assign(video, { paused: true, seeking: false, readyState: 2, videoWidth: 64, videoHeight: 64 });
+  Object.defineProperty(video, 'currentTime', {
+    get: () => time,
+    set: value => { time = value; video.seeking = true; video.readyState = 1; },
+  });
+  const decoded: number[] = [];
+  const canvas = { width: 0, height: 0, getContext: () => ({ drawImage: () => decoded.push(video.currentTime) }) };
+  vi.stubGlobal('document', { createElement: () => canvas });
+  try {
+    seekPreviewVideo(video, 1, .0005);
+    seekPreviewVideo(video, 2, .0005);
+    video.seeking = false; video.readyState = 2; video.dispatchEvent(new Event('seeked'));
+    expect(decoded).toEqual([1]);
+    expect(video.currentTime).toBe(2);
+    expect(video.readyState).toBe(1);
+    expect(previewSeekFrame(video)).toMatchObject({ canvas, time: 1, version: 1 });
+    video.seeking = false; video.readyState = 2; video.dispatchEvent(new Event('seeked'));
+    expect(previewSeekFrame(video)).toMatchObject({ time: 2, version: 2 });
+    cancelPreviewVideoSeek(video);
+    expect(previewSeekFrame(video)).toBeUndefined();
+    expect(canvas.width).toBe(0);
+  } finally { vi.unstubAllGlobals(); }
 });

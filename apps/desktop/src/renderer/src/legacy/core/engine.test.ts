@@ -278,7 +278,7 @@ describe('legacy engine install', () => {
     media.el.currentTime = 0;
     media.finishPlay();
     await Promise.resolve();
-    expect(media.el.currentTime).toBeCloseTo(PM.time);
+    expect(media.el.currentTime).toBeCloseTo(Math.floor(PM.time * PM.proj.fps) / PM.proj.fps);
 
     media.el.currentTime = 0;
     runFrame(116);
@@ -297,7 +297,7 @@ describe('legacy engine install', () => {
     PM.setTime(2, { raw: true });
     runFrame(32);
 
-    expect(media.el.currentTime).toBeCloseTo(PM.time);
+    expect(media.el.currentTime).toBeCloseTo(Math.floor(PM.time * PM.proj.fps) / PM.proj.fps);
   });
 
   it('uses the layer speed as the video playback rate', () => {

@@ -30,6 +30,23 @@ afterEach(async () => {
 });
 
 describe('file store', () => {
+  it('serializes individual reads and bootstrap without cloning unrelated project histories', async () => {
+    const store = createStore(await temporaryDirectory());
+    await store.load();
+    store.set('projects', [{ id: 'demo' }]);
+    store.set('projectHistory.demo', { entries: Array.from({ length: 1000 }, (_, i) => ({ i, label: 'Edit' })) });
+    const clone = vi.spyOn(globalThis, 'structuredClone');
+    expect(store.getSerialized!('projects')).toBe('[{"id":"demo"}]');
+    expect(store.getSerialized!('theme')).toBeNull();
+    expect(store.getSerialized!('../invalid')).toBeNull();
+    const snapshot = store.snapshotSerialized!();
+    expect(JSON.parse(snapshot['projectHistory.demo']!).entries).toHaveLength(1000);
+    expect(clone).not.toHaveBeenCalled();
+    snapshot.projects = '[]';
+    expect(store.getSerialized!('projects')).toBe('[{"id":"demo"}]');
+    await store.flushAll();
+  });
+
   it('preserves legacy undo history when a renderer updates metadata only', async () => {
     const directory = await temporaryDirectory(), store = createStore(directory);
     await store.load();

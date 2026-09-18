@@ -140,6 +140,51 @@ export type GraphScalePlan<Property = unknown> = {
   moves: Array<{ item: GraphScaleItem<Property>; time: number; value: number }>;
 };
 
+function lowerBound(values: number[], value: number, inclusive = false): number {
+  let lo = 0, hi = values.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (values[mid]! < value || (inclusive && values[mid] === value)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Build neighbour indexes once per gesture sample rather than comparing every
+ * selected key with every other key on every pointer event. */
+function graphNeighbours<Property>(items: Array<GraphMoveItem<Property>>) {
+  const fixed = new Map<Property, number[]>(), selected = new Map<Property, number[]>();
+  for (const item of items) {
+    if (!Number.isFinite(item.time)) continue;
+    const map = item.selected ? selected : fixed;
+    let times = map.get(item.property);
+    if (!times) map.set(item.property, times = []);
+    times.push(item.time);
+  }
+  let gap = Infinity;
+  for (const times of fixed.values()) times.sort((a, b) => a - b);
+  for (const times of selected.values()) {
+    times.sort((a, b) => a - b);
+    let next = 1;
+    for (let i = 0; i < times.length; i++) {
+      next = Math.max(next, i + 1);
+      while (next < times.length && times[next]! - times[i]! <= 1e-9) next++;
+      if (next < times.length) gap = Math.min(gap, times[next]! - times[i]!);
+    }
+  }
+  return {
+    gap,
+    before(item: GraphMoveItem<Property>) {
+      const times = fixed.get(item.property) ?? [];
+      return times[lowerBound(times, item.time) - 1];
+    },
+    after(item: GraphMoveItem<Property>) {
+      const times = fixed.get(item.property) ?? [];
+      return times[lowerBound(times, item.time, true)];
+    },
+  };
+}
+
 /** Scale a graph selection about a fixed anchor. Like the move planner, this
  * never overruns a key it does not own: the time scale is clamped to the
  * widest factor that keeps every selected key inside its own window, a frame
@@ -156,6 +201,7 @@ export function planGraphKeyframeScale<Property>(
   const anchorFor = (item: GraphScaleItem<Property>) =>
     request.anchorTime - ((Number.isFinite(item.compositionTime) ? item.compositionTime! : item.time) - item.time);
 
+  const neighbours = graphNeighbours(items);
   // Never mirror keys through the anchor: a negative factor would reorder them.
   let low = 0, high = Infinity;
   for (const item of selected) {
@@ -163,22 +209,16 @@ export function planGraphKeyframeScale<Property>(
     const span = item.time - anchor;
     let min = Number.isFinite(item.minTime) ? Math.min(item.time, item.minTime!) : 0;
     let max = Number.isFinite(item.maxTime) ? Math.max(item.time, item.maxTime!) : Infinity;
-    for (const fixed of items) {
-      if (fixed.selected || fixed.property !== item.property || !Number.isFinite(fixed.time)) continue;
-      if (fixed.time < item.time) min = Math.max(min, fixed.time + frame);
-      else if (fixed.time > item.time) max = Math.min(max, fixed.time - frame);
-    }
+    const before = neighbours.before(item), after = neighbours.after(item);
+    if (before !== undefined) min = Math.max(min, before + frame);
+    if (after !== undefined) max = Math.min(max, after - frame);
     if (Math.abs(span) < 1e-9) continue;
     const a = (min - anchor) / span, b = (max - anchor) / span;
     low = Math.max(low, Math.min(a, b));
     high = Math.min(high, Math.max(a, b));
   }
   // Keep adjacent selected keys at least one frame apart as the box collapses.
-  for (const item of selected) for (const other of selected) {
-    if (other === item || other.property !== item.property) continue;
-    const gap = Math.abs(other.time - item.time);
-    if (gap > 1e-9) low = Math.max(low, frame / gap);
-  }
+  low = Math.max(low, frame / neighbours.gap);
   /* Never force a change on data that already breaks these rules: a project
      carrying sub-frame gaps stays as it is until the drag actually asks. */
   low = Math.min(low, 1); high = Math.max(high, 1);
@@ -227,15 +267,16 @@ export function planGraphKeyframeMove<Property>(
   }));
   delta = Math.max(minDelta, Math.min(maxDelta, delta));
 
-  if (delta > 0) {
-    for (const moving of selected) for (const fixed of items) {
-      if (fixed.selected || fixed.property !== moving.property || fixed.time <= moving.time) continue;
-      delta = Math.min(delta, Math.max(0, fixed.time - moving.time - frame));
-    }
-  } else if (delta < 0) {
-    for (const moving of selected) for (const fixed of items) {
-      if (fixed.selected || fixed.property !== moving.property || fixed.time >= moving.time) continue;
-      delta = Math.max(delta, Math.min(0, fixed.time - moving.time + frame));
+  if (delta !== 0) {
+    const neighbours = graphNeighbours(items);
+    for (const moving of selected) {
+      if (delta > 0) {
+        const after = neighbours.after(moving);
+        if (after !== undefined) delta = Math.min(delta, Math.max(0, after - moving.time - frame));
+      } else if (delta < 0) {
+        const before = neighbours.before(moving);
+        if (before !== undefined) delta = Math.max(delta, Math.min(0, before - moving.time + frame));
+      }
     }
   }
   delta = Math.round(delta * rate) / rate;

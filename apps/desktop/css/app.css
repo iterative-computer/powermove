@@ -168,12 +168,6 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
    description rows, 30px hairline controls and shadcn switch, scoped with the
    Settings tokens so settings.css paints it unchanged. */
 .export-modal{
-  --ctl-h:30px;
-  --sg-edge:var(--line-2);
-  --sg-group-edge:var(--ink-1);
-  --sg-edge-hot:var(--line-strong);
-  --sg-edge-focus:var(--line-strong);
-  --sg-row:var(--bg-row);
   top:10vh;max-height:80vh;max-width:calc(100vw - 32px)}
 /* One text column: the title, section labels, row titles and notes share the
    32px line; cards bleed 14px past it and sit 18px from the sheet's edge,
@@ -186,10 +180,10 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .export-form .sg-group{margin:0 -14px}
 /* Destination: four quiet words on one hairline track; the chosen one is
    the raised float surface, nothing coloured. */
-.export-destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;margin:0 -14px;padding:2px;border:1px solid var(--sg-group-edge);border-radius:var(--r-md);background:var(--sg-row)}
+.export-destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px;margin:0 -14px;padding:3px;border:0;border-radius:var(--r-md);background:var(--sg-row)}
 .export-destination{height:28px;min-width:0;padding:0 8px;border:0;border-radius:calc(var(--r-md) - 3px);background:transparent;color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;transition:color var(--dur-1),background var(--dur-1)}
 .export-destination:hover{color:var(--tx)}
-.export-destination.on,.export-destination[aria-pressed=true]{background:var(--bg-float);box-shadow:0 0 0 1px var(--sg-edge);color:var(--tx)}
+.export-destination.on,.export-destination[aria-pressed=true]{background:var(--bg-float);color:var(--tx)}
 .export-destination:focus-visible{outline:0;box-shadow:0 0 0 1px var(--sg-edge-focus)}
 .export-destination-note{margin:-12px 0 0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);min-height:16px}
 /* Code and Project have no settings; one card explains the file instead. */
@@ -203,13 +197,14 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 /* Rows are the Settings rows; controls are the Settings controls. */
 .export-form .sg-group>.settings-row{min-height:52px}
 /* The card's 1px edge would push row titles a pixel past the text column. */
-.export-form .settings-copy{padding:0 3px}
+.export-form .settings-copy{padding:0 4px}
 .export-form .settings-copy>span{max-width:360px}
 .export-form .pm-select.settings-select{min-width:170px;max-width:240px}
 .export-form .settings-input{width:82px}
 .export-form .export-preset-save{display:flex;align-items:center;gap:6px}
 .export-form .export-preset-save .settings-input{width:150px;text-align:left}
-.export-form .export-preset-save .btn{height:30px;padding:0 12px;border-radius:var(--r-md)}
+.export-form .export-preset-save .btn{height:30px;padding:0 12px}
+.export-modal .mf .btn{border-radius:var(--sg-control-radius)}
 .export-form .settings-note{margin-top:8px}
 /* The readout: one line of the result, one line of how it gets there. */
 .export-summary{display:flex;flex-direction:column;gap:2px;margin:0;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);font-variant-numeric:tabular-nums}

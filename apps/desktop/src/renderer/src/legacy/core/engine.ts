@@ -1,11 +1,11 @@
+import { videoClipsAt } from './video-timeline';
 import { previewVideoElement } from './video-preview';
 import { layerVideoElement, pruneVideoInstances } from './video-instances';
 import { cancelPreviewVideoSeek, seekPreviewVideo } from './video-seek';
-import { sequencePlaybackTime, sequenceStreamTime } from '../../../../shared/image-sequence';
+import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { prepareFrame } from './frame-preparation';
 import { installPreviewCache } from './preview-cache';
 import { sourceTime } from './retiming';
-import { resolveContent } from './content-properties';
 import { viewerService } from './services';
 /* Ported from js/core/engine.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -100,6 +100,7 @@ function ensureMediaPaused(el: any) {
   if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
 }
 let playingVideos = new Set<any>();
+let decoderAssets = new Set<any>();
 const frameVideoSeeks = new Map<any, number>();
 function flushFrameVideoSeeks() {
   for (const [el, target] of frameVideoSeeks) seekPreviewVideo(el, target, .0005);
@@ -107,6 +108,12 @@ function flushFrameVideoSeeks() {
 }
 function scrubVideos(T: any) {
   frameVideoSeeks.clear();
+  const retained = new Map<any, Set<string>>();
+  const retain = (asset: any, id: string) => {
+    let ids = retained.get(asset);
+    if (!ids) retained.set(asset, ids = new Set());
+    ids.add(id);
+  };
   const videos = PM.ProjectIndex?.layersOfType?.('video', PM.proj) || PM.proj.layers.filter((layer: any) => layer.type === 'video');
   /* The playhead runs continuously but the compositor draws whole frames, so a
      decoder chasing the raw clock is aimed between two source frames. Place a
@@ -115,15 +122,14 @@ function scrubVideos(T: any) {
   // Resolve only active clips, so inactive copies never claim or pause a
   // decoder owned by a visible clip.
   const owners = new Map<any, any>();
-  for (const layer of videos) {
-    const asset = PM.assets.get(layer.d.asset);
-    if (!asset?.el) continue;
-    if (!PM.active(layer, drawn)) continue;
+  for (const clip of videoClipsAt(PM, drawn)) {
+    const { layer, asset } = clip;
     const source = previewVideoElement(PM, asset);
-    const el = layerVideoElement(PM, asset, layer.id);
+    const el = layerVideoElement(PM, asset, clip.id);
+    retain(asset, clip.id);
     const unused = source === asset.el ? asset.preview?.el : asset.el;
     if (unused) { cancelPreviewVideoSeek(unused); ensureMediaPaused(unused); }
-    owners.set(el, { layer, asset, el });
+    owners.set(el, { layer, asset, el, clip });
   }
   for (const el of playingVideos) if (!owners.has(el)) { cancelPreviewVideoSeek(el); ensureMediaPaused(el); }
   playingVideos = new Set(owners.keys());
@@ -134,19 +140,36 @@ function scrubVideos(T: any) {
     const asset = PM.assets.get(layer.d.asset);
     if (!asset?.el) continue;
     const el = layerVideoElement(PM, asset, layer.id);
+    retain(asset, layer.id);
     ensureMediaPaused(el);
     const at = sourceTime(PM, layer, layer.from);
     seekPreviewVideo(el, sequencePlaybackTime(asset, at) ?? PM.clamp(at, 0, Math.max(0, (asset.dur || 0) - .04)), .0005);
   }
 
-  for (const { layer: L, asset: a, el } of owners.values()) {
-    const inRange = PM.active(L, drawn);
-    if (!inRange) { ensureMediaPaused(el); continue; }
+  // Prepare the loop entrance only if it owns a different decoder. Seeking an
+  // active clip early would interrupt the tail of the current loop.
+  const [start, end] = PM.proj.work?.[1] > PM.proj.work?.[0] ? PM.proj.work : [0, PM.proj.dur];
+  if (PM.playing && PM.loop && end - drawn <= .5) for (const clip of videoClipsAt(PM, start)) {
+    const el = layerVideoElement(PM, clip.asset, clip.id);
+    retain(clip.asset, clip.id);
+    if (owners.has(el)) continue;
+    ensureMediaPaused(el); seekPreviewVideo(el, clip.at, .0005);
+  }
+
+  // Do not retain a decoder (and its decoded frame buffers) for every clip
+  // ever visited. Only visible clips and the bounded lookahead stay allocated.
+  const empty = new Set<string>();
+  for (const asset of new Set([...decoderAssets, ...retained.keys()])) {
+    pruneVideoInstances(asset, retained.get(asset) ?? empty, true);
+  }
+  decoderAssets = new Set(retained.keys());
+
+  for (const { layer: L, asset: a, el, clip } of owners.values()) {
     const previous = mediaState.get(el);
-    if (previous && previous.layer !== L.id) previous.seekGeneration = -1;
-    const d = resolveContent(PM, L, T);
+    if (previous && previous.layer !== clip.id) previous.seekGeneration = -1;
+
     /* playback position must respect layer speed, matching the compositor's vt math */
-    const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, (a.dur || 0) - .04));
+    const vt = clip.at;
     /* A still is snapped to the frame's first millisecond, which is where a
        seek belongs. A decoder running on its own clock always joins a little
        late, and on that leading edge the lag presents the frame before — which
@@ -154,12 +177,12 @@ function scrubVideos(T: any) {
        the middle of the frame being drawn, which absorbs the lag. Only a
        sequence publishes the frame grid that needs; other media keeps the
        continuous position it has always used. */
-    const streamAt = sequenceStreamTime(a, sourceTime(PM,L,drawn)) ?? vt;
-    if (PM.playing && inRange && !d.timeRemap && !L.d.speed?.kf?.length && Number(d.speed ?? 1)>0) ensureMediaPlaying(el, streamAt, Math.max(.0001, Number(d.speed) || 1));
+    const streamAt = clip.streamAt ?? vt;
+    if (PM.playing && clip.rate != null) ensureMediaPlaying(el, streamAt, Math.max(.0001, clip.rate));
     else ensureMediaPaused(el);
-    const state = mediaState.get(el); if (state) state.layer = L.id;
+    const state = mediaState.get(el); if (state) state.layer = clip.id;
     if (!PM.playing) seekPreviewVideo(el, vt, .0005);
-    else if (d.timeRemap || L.d.speed?.kf?.length || Number(d.speed ?? 1)<=0) {
+    else if (clip.rate == null) {
       // Present the completed decode before starting another seek. Starting it
       // before render drops readyState and starves the texture of every frame.
       frameVideoSeeks.set(el, vt);
@@ -169,10 +192,15 @@ function scrubVideos(T: any) {
 
 for (const event of ['layers', 'project', 'assets']) PM.bus.on(event, () => {
   const layers = PM.ProjectIndex?.allLayers?.() || PM.proj.layers;
-  for (const asset of PM.assets.map?.values() ?? []) {
-    const ids = new Set<string>(layers.filter((layer: any) => layer.type === 'video' && layer.d.asset === asset.id).map((layer: any) => layer.id));
-    pruneVideoInstances(asset, ids);
+  const byAsset = new Map<string, Set<string>>();
+  for (const layer of layers) {
+    if (layer.type !== 'video') continue;
+    let ids = byAsset.get(layer.d.asset);
+    if (!ids) byAsset.set(layer.d.asset, ids = new Set());
+    ids.add(layer.id);
   }
+  const empty = new Set<string>();
+  for (const asset of PM.assets.map?.values() ?? []) pruneVideoInstances(asset, byAsset.get(asset.id) ?? empty);
 });
 
 /* ── transport ─────────────────────────────────────────── */
@@ -277,11 +305,12 @@ function frame(now: any) {
   if (!PM.playing && !interactive && PM.quality < 1 && E.auto) { PM.quality = 1; PM.bus.emit('quality'); }
   needsDraw = false;
   const t0 = window.performance.now();
+  let presented = true;
   try {
-    PM.GL.render(renderTime, {
+    presented = PM.GL.render(renderTime, {
       mblur: !interactive, mbSamples: PM.playing ? 6 : 12,
       shutter: p.shutter || .5, hideShy: false,
-    });
+    }) !== false;
   } catch (error) {
     /* A throw here used to escape the animation frame with the redraw flag
        already cleared, leaving the last frame (or black) on screen until the
@@ -293,7 +322,8 @@ function frame(now: any) {
     }
   }
   flushFrameVideoSeeks();
-  lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration;
+  if (presented) { lastRenderTime = renderTime; lastProject = p; renderedGeneration = contentGeneration; }
+  else needsDraw = true;
   PM.bus.emit('overlay');
   const ms = window.performance.now() - t0;
   E.ms = E.ms * .85 + ms * .15;
