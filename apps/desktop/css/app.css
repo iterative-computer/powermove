@@ -426,7 +426,11 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .row.split .vwrap.pair{display:flex;gap:8px}
 .row.split .pair-group{display:grid;grid-template-columns:1fr 1fr;gap:1px;flex:1 1 0;min-width:0;height:100%;
   border-radius:var(--r-sm);overflow:clip;background:rgb(var(--ink-rgb) / .06)}
-.row.split .pair-group .num{border-radius:0}
+/* The group paints the well tint once; the two fields inside are clear so the
+   pair reads the same shade as every single well instead of stacking to 12%. */
+.row.split .pair-group .num{border-radius:0;background:transparent}
+.row.split .pair-group .num:hover{background:rgb(var(--ink-rgb) / .03)}
+.row.split .pair-group .num.editing{background:transparent}
 .row.split .pair-group .well + .well{box-shadow:-1px 0 0 var(--bg-panel)}
 .row.split .vwrap > *{min-width:0}
 /* 4px above and below = 8px between rows, independent of the wrapper
@@ -495,7 +499,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .lyr:focus-visible{outline:0;background:var(--ink-1)}
 .lyr .sw2{width:3px;height:14px;border-radius:2px;flex:none}
 .lyr .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lyr .idx{font-size:var(--fs-xs);color:var(--tx-4);width:16px}
+.lyr .idx{flex:none;font-size:var(--fs-xs);color:var(--tx-4);min-width:16px;white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums}
 /* The add affordance is answered on approach, not shouted down the column. */
 .simple-effect-row .idx{opacity:0;text-align:center;font-size:var(--fs-md);transition:opacity var(--dur-1)}
 .simple-effect-row:hover .idx,.simple-effect-row:focus-visible .idx{opacity:1}

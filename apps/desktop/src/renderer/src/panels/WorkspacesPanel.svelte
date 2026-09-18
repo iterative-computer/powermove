@@ -83,7 +83,6 @@
         aria-current={workspace.id === model.currentId ? 'true' : undefined}
         onclick={() => activate(workspace)}
       >
-        <span class="sw2" style:background={workspace.theme?.accent || 'var(--accent)'}></span>
         <span class="nm" title={workspace.name}>{workspace.name}</span>
       </button>
       {#if !workspace.builtin}
@@ -98,11 +97,11 @@
       <Icon {PM} name="plus" />
       Save current
     </button>
-    <button class="chip" type="button" onclick={editJson}>
+    <button class="chip ghost quiet" type="button" title="Edit workspace layout as JSON" onclick={editJson}>
       <Icon {PM} name="code" />
       JSON
     </button>
   </div>
-  <div class="empty simple-panel-hint">Shake the pointer, then drag across a panel to redesign or add an interface section.</div>
+  <div class="simple-panel-hint">Shake the pointer, then drag across a panel to redesign or add an interface section.</div>
   <span class="panel-sr-only" role="status">{status}</span>
 </div>
