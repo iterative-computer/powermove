@@ -750,13 +750,13 @@ V.attach = (stage: HTMLElement) => {
     zoomControl.dataset.globalSpaceShortcut = '';
     // Share the panel chrome row with its move handle, outside the clipped stage.
     zoomHost.append(zoomControl);
-    zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
+    zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
     let preview=zoomHost.querySelector<HTMLElement>('#preview-controls');
     if(!preview){preview=document.createElement('div');preview.id='preview-controls';zoomHost.append(preview);}
     preview.style.cssText='position:absolute;right:124px;top:7px;z-index:6;display:flex;align-items:center';
     preview.replaceChildren();
-    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui);cursor:pointer';
+    const quality=document.createElement('select');quality.setAttribute('aria-label','Preview resolution');quality.style.cssText='width:82px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     for(const [value,label] of [['auto','Auto'],['1','Full'],['0.5','Half'],['0.25','Quarter']]){const option=document.createElement('option');option.value=value!;option.textContent=label!;quality.append(option);}
     quality.value=api.transport.perf.auto?'auto':String(api.transport.quality);quality.onchange=()=>{api.transport.perf.auto=quality.value==='auto';api.transport.quality=quality.value==='auto'?1:Number(quality.value);api.transport.previewResolution=quality.value;V.layout();};preview.append(quality);
     V.previewOff?.(); V.previewOff = undefined;

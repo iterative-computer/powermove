@@ -30,7 +30,7 @@ const STYLES = `
   #source-preview .sp-audio .sp-name{flex:none;max-width:100%;padding:0;text-align:center}
   #source-preview .sp-foot{position:absolute;z-index:2;bottom:var(--pad);left:50%;transform:translateX(-50%);width:min(480px,calc(100% - 2 * var(--pad)));box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:6px;border-radius:calc(var(--r-sm) + 6px);background:var(--bg-float);box-shadow:var(--shadow-float)}
   #source-preview .sp-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-medium);padding-left:4px}
-  #source-preview .sp-close,#source-preview .sp-play{flex:none;width:var(--hit);height:var(--hit);display:grid;place-items:center;border:0;border-radius:var(--r-sm);color:var(--tx-2);background:transparent;cursor:pointer}
+  #source-preview .sp-close,#source-preview .sp-play{flex:none;width:var(--hit);height:var(--hit);display:grid;place-items:center;border:0;border-radius:var(--r-sm);color:var(--tx-2);background:transparent}
   #source-preview .sp-close:hover,#source-preview .sp-play:hover{color:var(--tx);background:var(--bg-row-hi)}
   #source-preview .sp-close:active,#source-preview .sp-play:active{background:var(--bg-sunken)}
   #source-preview :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
