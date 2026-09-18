@@ -29,13 +29,13 @@ Graph timings are medians of seven runs. 4,000 randomized old/new move and scale
 - Full desktop unit suite: 2,315 passed, one opt-in performance test skipped.
 - Subsequent offline-seek and modal regression tests: 40 passed.
 - Final focused Electron suite: 10 passed (video frame integrity, nested instances, scrubbing, decoded-frame readiness, export layout in both themes, progress dismissal/cancellation, export completion/restart, video export frames, agent frame capture).
-- Agent-video capture passed three repeated runs after fixing the seek race.
+- Agent-video capture passed three repeated runs after fixing the seek race. Standalone web export/editor frame parity also passed after that fix.
 - H.264/AAC MP4 and VP8/VP9/Opus WebM delivery passed in the preceding focused run.
 - Desktop typechecking and extension boundaries passed. Export light/dark screenshots visually reviewed.
 
 ## Remaining release coverage
 
-The broad Electron run was stopped to honor the request to conserve usage and merge. It reached 78 passes, 19 failures, three skips and one interrupted test; 239 tests were not run. The agent-video failure from that run was fixed and reverified above. Other failures remain untriaged; some wait for obsolete HTML menus, settings tab roles, or removed UI elements. This is not a clean full-app release certification.
+The broad Electron run was stopped to honor the request to conserve usage and merge. It reached 78 passes, 19 failures, three skips and one interrupted test; 239 tests were not run. The agent-video and web-export frame failures from that run were fixed and reverified above. Other failures remain untriaged; some wait for obsolete HTML menus, settings tab roles, or removed UI elements. This is not a clean full-app release certification.
 
 Website typechecking and production build stalled and were stopped; shared player bundles built successfully. Private 4K/production fixtures, signed/notarized distribution and live paid model integrations were not verified.
 
