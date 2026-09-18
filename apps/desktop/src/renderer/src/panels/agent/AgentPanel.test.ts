@@ -284,10 +284,14 @@ describe('AgentPanel', () => {
     expect(PM.AgentUI.switchThread).toHaveBeenCalledWith('second');
     newThread.click();
     expect(PM.AgentUI.newThread).toHaveBeenCalledOnce();
+    // A run no longer holds the picker: only an in-flight apply does.
+    flushSync(() => setAgentSnapshot(snapshot({threadId:'first',threads,legacyPhase:'working'})));
+    expect(picker.disabled).toBe(false);
+    expect(newThread.disabled).toBe(false);
     flushSync(() => setAgentSnapshot(snapshot({threadId:'first',threads,threadSwitchBlocked:true})));
     expect(picker.disabled).toBe(true);
     expect(newThread.disabled).toBe(true);
-    expect(picker.title).toContain('Finish or stop');
+    expect(picker.title).toContain('Finish applying');
   });
 
   it('filters threads by the picker search field', () => {
@@ -445,14 +449,14 @@ describe('AgentPanel', () => {
     expect(target.querySelector('.agent-slash-menu')).toBeNull();
   });
 
-  it('dismisses shortcuts without consuming a literal slash prompt, and blocks new threads while working', () => {
-    renderPanel(snapshot({ legacyPhase: 'working', requestToken: 1, threadSwitchBlocked: true }));
+  it('dismisses shortcuts without consuming a literal slash prompt, and keeps /new open while working', () => {
+    renderPanel(snapshot({ legacyPhase: 'working', requestToken: 1 }));
     const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
     flushSync(() => textarea.focus());
     textarea.value = '/';
     flushSync(() => textarea.dispatchEvent(new InputEvent('input', { bubbles: true })));
     const menu = target.querySelector('.agent-slash-menu')!;
-    expect(menu.textContent).not.toContain('/new');
+    expect(menu.textContent).toContain('/new');
     expect(menu.textContent).toContain('/stop');
     flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
     expect(target.querySelector('.agent-slash-menu')).toBeNull();

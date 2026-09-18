@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { revealText, sendMessage } from './text-reveal';
+import { revealText } from './text-reveal';
 beforeEach(() => { Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, writable: true, value: vi.fn() }); });
 afterEach(() => { vi.restoreAllMocks(); delete (HTMLElement.prototype as any).animate; });
 it('staggers new words without replaying existing words or changing inline layout', async () => {
@@ -26,20 +26,19 @@ it('staggers new words without replaying existing words or changing inline layou
   expect(animations[3].options.delay).toBe(0);
   actions.forEach(a => a.destroy());
 });
-it('uses mount-only send motion and cancels when reduced motion is enabled', () => {
+it('cancels the reveal when reduced motion is enabled', () => {
   let listener: (() => void) | undefined;
   const media = { matches: false, addEventListener: (_: string, fn: () => void) => { listener = fn; }, removeEventListener: vi.fn() };
   vi.spyOn(window, 'matchMedia').mockReturnValue(media as any);
   const cancel = vi.fn();
   const animate = vi.spyOn(HTMLElement.prototype, 'animate').mockReturnValue({ cancel } as any);
   const node = document.createElement('div');
-  const action = sendMessage(node);
+  const action = revealText(node);
   expect(animate).toHaveBeenCalledOnce();
   expect(action).not.toHaveProperty('update');
   media.matches = true;
   listener!();
   expect(cancel).toHaveBeenCalledOnce();
-  sendMessage(node);
   revealText(node);
   expect(animate).toHaveBeenCalledOnce();
   action.destroy();

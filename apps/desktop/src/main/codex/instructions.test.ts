@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AGENT_COMMAND_TYPES, EDIT_COMMAND_TYPES } from '../../shared/edit-vocabulary';
+import { AGENT_RESPONSE_STYLE } from '../../shared/response-style';
 import { agentInstructions, agentResultSchema, buildFixPrompt, buildRebasePrompt } from './instructions';
 
 function normalizeText(value: string): string {
@@ -63,7 +64,7 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain("result's extensions array");
   });
 
-  it('keeps scene edits on typed commands and stays below 8 KB', () => {
+  it('keeps scene edits on typed commands and stays below 9 KB', () => {
     const instructions = agentInstructions({
       projectName: 'Project',
       artifactPath: 'artifacts/run-1',
@@ -78,7 +79,22 @@ describe('autonomous agent contract', () => {
     expect(instructions).toContain('source checkout, package scripts, and Electron test harness are not available');
     expect(instructions).not.toMatch(/src\/extensions|npm run|bun run/u);
     expect(instructions).toContain('isolated temporary test data');
-    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(8 * 1024);
+    expect(Buffer.byteLength(instructions, 'utf8')).toBeLessThanOrEqual(9 * 1024);
+  });
+
+  it('holds every user-visible field to the shared response style', () => {
+    const instructions = agentInstructions({
+      projectName: 'Project',
+      artifactPath: 'artifacts/run-1',
+      access: 'project',
+      extensionsDir: '/absolute/user/extensions'
+    });
+
+    expect(instructions).toContain(AGENT_RESPONSE_STYLE);
+    expect(instructions).toContain('summary is one to three sentences');
+    expect(instructions).toContain('Each note is one line');
+    // Density may never cost a fact; the panel is narrow, not forgetful.
+    expect(AGENT_RESPONSE_STYLE).toContain('Shorten, never omit');
   });
 
   it('makes editable values keyframeable by default', () => {

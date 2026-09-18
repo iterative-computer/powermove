@@ -24,8 +24,12 @@ export function slashCommands(draft: string, state: Pick<AgentSnapshot,
   }
   const working = state.legacyPhase === 'working';
   const commands: SlashCommand[] = [
-    ...(!state.threadSwitchBlocked && !working && state.legacyPhase !== 'applying'
-      ? [{ id: 'new', label: '/new', description: 'Start a new conversation', action: 'new' as const }] : []),
+    /* A working thread keeps working in the background, so /new stays open —
+       only an in-flight apply, which is mutating the editor, holds it back. */
+    ...(!state.threadSwitchBlocked && state.legacyPhase !== 'applying'
+      ? [{ id: 'new', label: '/new',
+          description: working ? 'Start a new conversation and leave this one running' : 'Start a new conversation',
+          action: 'new' as const }] : []),
     { id: 'model', label: '/model', description: 'Choose a model', action: 'model' },
     { id: 'effort', label: '/effort', description: 'Set reasoning effort', action: 'effort' },
     { id: 'provider', label: '/provider', description: 'Switch AI provider', action: 'provider' },

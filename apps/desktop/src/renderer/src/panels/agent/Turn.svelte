@@ -6,7 +6,6 @@
   import type { AgentMessage } from './agent-state.svelte';
   import AttachmentChips from './AttachmentChips.svelte';
   import { activityRows, durationLabel } from './activity-rows';
-  import { sendMessage } from './text-reveal';
   import Markdown from './Markdown.svelte';
   import { mountPromptGlow } from './prompt-glow';
   import { glowFade } from './motion';
@@ -74,7 +73,7 @@
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}
-    <div class="agent-prompt" class:is-answering={answering} use:sendMessage={Boolean(message.entering)}>
+    <div class="agent-prompt" class:is-answering={answering}>
       {#if answering}<div class="agent-prompt-signal" data-prompt-halo aria-hidden="true" use:promptSignal out:glowFade={{duration: 220}}></div>{/if}
       <div class="agent-bubble">{message.text}</div>
     </div>
