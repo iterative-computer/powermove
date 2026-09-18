@@ -1,6 +1,14 @@
 # Powermove
 
-Powermove is an AI-native motion and video editor for macOS. It combines a GPU-backed editing engine with a dockable Svelte interface and native Codex or Claude Code agents that can inspect, render, and transactionally edit the live project through Powermove's typed, undoable tool layer.
+The video editor that rewrites itself around your work.
+
+![Powermove launch video](assets/brand/launch.gif)
+
+[Watch the launch video](assets/brand/launch.mp4) · [trypowermove.com](https://trypowermove.com)
+
+Powermove is an iterative video editor for macOS. Ask an agent to add or fork panels, effects, and workflows, then load them into the running app. If it is wrong, steer it and try again. Every change can be undone.
+
+The kernel is intentionally tiny. Timeline, effects, inspector, the UI, all of it lives in extensions on top. The Powermove agent writes extensions the same way we built the rest of the editor, through a typed, undoable tool layer that can inspect, render, and transactionally edit the live project.
 
 This repository is a bun workspace monorepo containing the desktop editor, the marketing website, and the packages they share.
 
