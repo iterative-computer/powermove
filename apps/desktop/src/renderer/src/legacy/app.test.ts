@@ -551,8 +551,15 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(saved.history.index).toBe(0);
   expect(saved.history.entries.map((entry: any) => entry.label)).toEqual(['Rename one', 'Rename two']);
   expect(PM.Projects.getState('P1').history).toEqual(saved.history);
+  const hideHome = vi.fn();
+  PM.ProjectsScreen = { isOpen: true, hide: hideHome };
+  (window as any).powermove.openProjectFile = async () => ({ ok: false, cancelled: true });
+  await PM.openProject();
+  expect(hideHome).not.toHaveBeenCalled();
+  expect(PM.proj.id).toBe('P1');
   (window as any).powermove.openProjectFile = async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data: saveFile.mock.calls[0]![0].data });
   await PM.openProject();
+  expect(hideHome).toHaveBeenCalledOnce();
   expect(toasts).not.toEqual(expect.arrayContaining([expect.stringContaining('Could not open')]));
   expect(PM.proj.id).toBe('reopened');
   expect(PM.hist.canUndo()).toBe(true);
@@ -561,4 +568,22 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(PM.proj.name).toBe('Two');
   PM.hist.undo();
   expect(PM.proj.name).toBe('One');
+});
+
+it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {
+  for (const trashed of [true, false]) {
+    const { PM, listeners } = appRegistry();
+    const put = vi.spyOn(PM.Projects, 'put');
+    PM.Projects.trashList = () => trashed ? [{ id: 'P1' }] : [];
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    const next = PM.mkProject({ id: 'P2', name: 'Next' });
+
+    listeners.get('pm-open-project')![0]({ detail: next });
+
+    expect(PM.proj.id).toBe('P2');
+    expect(put.mock.calls.map(([project]) => (project as { id: string }).id)).toEqual(trashed ? ['P2'] : ['P1', 'P2']);
+  }
 });

@@ -39,6 +39,12 @@
     return metas.find((meta) => meta.id === id)?.name || 'Untitled';
   }
 
+  function fileFor(id: string, _refresh: number): { dirty?: boolean; path?: string } {
+    const file = PM.projectFileState?.(id);
+    // Snapshot the mutable host state so same-tab saves invalidate the row.
+    return { dirty: file?.dirty, path: file?.path };
+  }
+
   function tabIndex(id: string): 0 | -1 {
     return (rovingId || selectedId) === id ? 0 : -1;
   }
@@ -312,14 +318,15 @@
 
     {#each tabIds as id (id)}
       {@const active = id === activeProjectId && !homeOpen}
-      {@const dirty = PM.projectFileState?.(id)?.dirty ?? (id === activeProjectId && appDirty)}
+      {@const file = fileFor(id, refreshToken)}
+      {@const dirty = file.dirty ?? (id === activeProjectId && appDirty)}
       {@const tabName = nameFor(id)}
       <div
         class="project-doc"
         class:on={active}
         class:dirty
         class:renaming={renamingId === id}
-        title={PM.projectFileState?.(id)?.path || `${tabName} — Not saved to a file`}
+        title={file.path || `${tabName} — Not saved to a file`}
         role="tab"
         data-tab-id={id}
         aria-selected={active}
