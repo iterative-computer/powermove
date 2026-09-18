@@ -198,7 +198,7 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     try {
       const result = await dialog.showOpenDialog(window, {
         title: 'Open Project', properties: ['openFile'],
-        filters: [{ name: 'Powermove Project', extensions: ['pmv', 'pmv1', 'json'] }]
+        filters: [{ name: 'Powermove Project', extensions: ['pmv', 'json'] }]
       });
       if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
       const opened = await ctx.projects.open(result.filePaths[0]);

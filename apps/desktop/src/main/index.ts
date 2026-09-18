@@ -459,7 +459,7 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    registerSaveIpc(ipcMain, { ...ctx, projects: new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json')) });
+    registerSaveIpc(ipcMain, { ...ctx, projects: new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'), path.join(app.getPath('userData'), 'backups')) });
     registerCaptureIpc(ipcMain, ctx);
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
