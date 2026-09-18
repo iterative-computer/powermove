@@ -678,6 +678,13 @@ PM.openProject = async () => {
   inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
   inp.click();
 };
+window.powermove?.onProjectOpenExternal?.(async result => {
+  if (result.ok) {
+    await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+  } else {
+    PM.toast('Could not open project: ' + result.error, 6000);
+  }
+});
 async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
   try {
     let o: any, mediaRestored = false;

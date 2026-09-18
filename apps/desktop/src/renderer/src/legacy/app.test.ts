@@ -14,7 +14,7 @@ afterEach(() => {
   else delete (globalThis as any).window;
 });
 
-function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?: any): {
+function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?: any, bridge?: any): {
   PM: PMRegistry;
   memory: Map<string, any>;
   listeners: Map<string, any[]>;
@@ -75,6 +75,7 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   const fakeWindow: any = {
     document,
     Blob,
+    powermove: bridge,
     addEventListener(name: string, listener: any) {
       const bucket = listeners.get(name) || [];
       bucket.push(listener);
@@ -207,6 +208,35 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
 }
 
 describe('legacy app install', () => {
+  it('opens a project delivered by the external-open subscription', async () => {
+    let externalOpen!: (result: any) => Promise<void>;
+    const onProjectOpenExternal = vi.fn((callback: typeof externalOpen) => {
+      externalOpen = callback;
+      return () => {};
+    });
+    const { PM, toasts } = appRegistry(true, undefined, undefined, { onProjectOpenExternal });
+    PM.pause = vi.fn();
+    PM.rasterClear = vi.fn();
+    PM.WS.activate = vi.fn();
+    PM.touch = vi.fn();
+    PM.replaceProject = (next: any) => { PM.proj = next; };
+    const hide = vi.fn();
+    PM.ProjectsScreen = { hide };
+    const document = { proj: { ...PM.proj, id: 'from-finder', name: 'Finder Project' } };
+
+    await externalOpen({
+      ok: true,
+      path: '/tmp/Finder Project.pmv',
+      projectId: 'from-finder',
+      data: new TextEncoder().encode(JSON.stringify(document))
+    });
+
+    expect(onProjectOpenExternal).toHaveBeenCalledOnce();
+    expect(PM.proj.id).toBe('from-finder');
+    expect(hide).toHaveBeenCalledOnce();
+    expect(toasts).toContain('Opened Finder Project.pmv');
+  });
+
   it('compacts oversized provenance when reopening without removing source', () => {
     const { PM } = appRegistry();
     const source = { ...PM.proj, edits: [{ id: 'bulk', summary: ['Cut out subject'], operations: [{ value: 'x'.repeat(200_000) }] }] };

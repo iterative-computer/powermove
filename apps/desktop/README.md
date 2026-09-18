@@ -4,7 +4,7 @@ The Electron editor. This is the only supported application; the earlier root-pa
 
 ## Project files
 
-Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file, retain a `.pmv1` backup, and keep unsaved changes separate from local recovery. **Command+O** reopens projects with their embedded media. See [saving and recovery](docs/project-files.md) for details and the current file-size limit.
+Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file, keep the previous version in a hidden backup store, and keep unsaved changes separate from local recovery. **Command+O** reopens projects with their embedded media. See [saving and recovery](docs/project-files.md) for details and the current file-size limit.
 
 ## Kernel and extensions
 
