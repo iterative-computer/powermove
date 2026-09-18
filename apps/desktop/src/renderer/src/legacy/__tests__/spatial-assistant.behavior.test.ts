@@ -765,7 +765,8 @@ it('keeps a thread working in the background while you prompt a new one', async 
   await vi.waitFor(() => assert.equal(jobs.length, 2));
   assert.equal(jobs[1].options.threadId, second);
   assert.ok(!jobs[1].prompt.includes('Long running first request'));
-  assert.equal(PM.AgentUI.state.phase, 'working');
+  // The view's vocabulary, not the legacy one: 'working' reaches the panel as 'running'.
+  assert.equal(PM.AgentUI.state.phase, 'running');
   assert.equal(PM.AgentUI.state.threads.filter(thread => thread.busy).length, 2);
 
   // The background run lands in its own thread without disturbing this one.
