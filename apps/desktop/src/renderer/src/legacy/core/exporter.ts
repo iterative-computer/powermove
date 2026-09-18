@@ -21,7 +21,6 @@ import { buildWebExport, inspectWebExport } from '../../player/export-web';
 import { viewerService } from './services';
 import { createSettingsSection } from '../ui/settings-section';
 import { row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
-import { mountSquircles } from '../../settings/squircle';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -328,15 +327,12 @@ X.dialog = () => {
     if (pri) pri.textContent = exportActionLabel(opts.format);
   }
   sync();
-  let unmountSquircles = () => {};
   m = PM.modal({
-    title: 'Export', body, width: 560,
-    onClose: () => unmountSquircles(),
+    title: 'Export', body, width: 620,
     actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
   });
   m.el.classList.add('export-modal');
   sync();
-  try { unmountSquircles = mountSquircles(body); } catch { /* The sheet still reads without smoothed corners. */ }
 };
 
 /** Keep the dialog's last choices as this project's export settings. */
