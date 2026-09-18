@@ -162,17 +162,22 @@ X.dialog = () => {
   const category = (format: string) => format === 'web' ? 'code' : format === 'json' ? 'project' : ['png', 'still'].includes(format) ? 'images' : 'video';
   const remembered: Record<string, string> = { code: 'web', video: 'mp4', images: 'still', project: 'json' };
   remembered[category(opts.format)] = opts.format;
-  const choices = h('div.export-destinations', { role: 'group', 'aria-label': 'Export type' });
-  const buttons: Record<string, HTMLButtonElement> = {};
-  for (const [id, title, description] of [
+  /* Destination is a segmented switcher, the same track as the Settings and
+     library view switchers; one caption beneath it names what the chosen
+     destination produces, so the segments stay a single quiet word each. */
+  const destinations = [
     ['code', 'Code', 'Apps & agents'], ['video', 'Video', 'MP4, WebM, ProRes'],
     ['images', 'Images', 'Still or sequence'], ['project', 'Project', 'Editable .pmv'],
-  ] as const) {
-    const button = h('button.export-destination', { type: 'button', 'aria-label': title }, h('b', title), h('span', description));
+  ] as const;
+  const choices = h('div.export-destinations.segmented', { role: 'group', 'aria-label': 'Export type' });
+  const buttons: Record<string, HTMLButtonElement> = {};
+  for (const [id, title] of destinations) {
+    const button = h('button.export-destination', { type: 'button', 'aria-label': title }, title);
     button.onclick = () => { remembered[category(opts.format)] = opts.format; opts.format = remembered[id]; sync(); };
     buttons[id] = button; choices.append(button);
   }
-  body.append(choices);
+  const destinationNote = h('p.export-destination-note');
+  body.append(choices, destinationNote);
   const codeDetails = h('div.export-code-details',
     h('h3', 'Put your animation in an app'),
     h('p', 'Export a live animation with playback controls and editable text and colors.'),
@@ -257,18 +262,19 @@ X.dialog = () => {
   mk('audio', 'Include audio', withHint(
     toggle(() => opts.audio !== false, (v: any) => { opts.audio = v; sync(); }, { label: 'Include audio', local: true }),
     hasAudio ? 'Mixes composition audio into the video' : 'No audio layers in this project'));
-  mk('alpha', 'Transparent background', withHint(
-    toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background', local: true }),
-    'Keeps the background see-through'));
+  mk('alpha', 'Transparent background', toggle(() => !!opts.alpha, (v: any) => { opts.alpha = v; sync(); }, { label: 'Transparent background', local: true }));
 
   let presets=PM.store.get('renderPresets',[]);
-  let chosenPreset='';const presetOptions=[{v:'',label:'Choose saved preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
+  let chosenPreset='';const presetOptions=[{v:'',label:'Choose preset'},...presets.map((preset:any)=>({v:preset.id,label:preset.name}))];
   const presetSelect=select(()=>chosenPreset,(id:any)=>{chosenPreset=id;const preset=presets.find((p:any)=>p.id===id);if(preset){Object.assign(opts,preset.options);for(const r of Object.values(rows) as any[])r.querySelectorAll('*').forEach((c:any)=>c.sync?.());customOpen=!presetScales.includes(opts.scale);sync();}},presetOptions);
   presetSelect.setAttribute('aria-label', 'Saved preset');
-  const presetName=h('input',{type:'text',placeholder:'Preset name','aria-label':'Render preset name',style:{width:'120px'}});
+  const presetName=h('input.export-preset-name',{type:'text',placeholder:'Preset name','aria-label':'Render preset name'});
   const savePreset=h('button.chip','Save');savePreset.onclick=()=>{const name=presetName.value.trim();if(!name)return;const next=presets.filter((p:any)=>p.name!==name);const {name:outputName,...settings}=opts;const id=PM.uid('preset');next.push({id,name,options:settings});presets=next;chosenPreset=id;presetOptions.splice(1,presetOptions.length-1,...next.map((p:any)=>({v:p.id,label:p.name})));presetSelect.sync?.();PM.store.set('renderPresets',next);PM.toast('Render preset saved');};
-  const presetRow = h('div',{style:{display:'flex',gap:'8px',alignItems:'center',marginTop:'12px'}},presetSelect,presetName,savePreset);
-  const colorNote = h('p',{style:{fontSize:'11px',color:'var(--tx-3)'}},'Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.');
+  presetName.addEventListener('keydown', (e: KeyboardEvent) => { if (e.key === 'Enter') { e.preventDefault(); savePreset.click(); } });
+  /* Presets are their own row in the same label / control grid as the
+     options above, separated by a hairline rather than a box. */
+  const presetRow = h('div.export-presets', PM.row('Preset', h('div.export-preset-controls', presetSelect, presetName, savePreset)));
+  const colorNote = h('p.export-color-note','Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.');
   body.append(presetRow, colorNote);
   const nfoMain: any = h('b');
   const nfoNote: any = h('span');
@@ -278,7 +284,11 @@ X.dialog = () => {
   let m: any = null;
   function sync() {
     const kind = category(opts.format);
-    for (const [id, button] of Object.entries(buttons)) button.setAttribute('aria-pressed', String(id === kind));
+    for (const [id, button] of Object.entries(buttons)) {
+      button.setAttribute('aria-pressed', String(id === kind));
+      button.classList.toggle('on', id === kind);
+    }
+    destinationNote.textContent = destinations.find(([id]) => id === kind)?.[2] ?? '';
     codeDetails.hidden = kind !== 'code';
     projectDetails.hidden = kind !== 'project';
     body.querySelectorAll('select, [role=switch]').forEach((field: any) => field.sync?.());
@@ -317,7 +327,7 @@ X.dialog = () => {
   }
   sync();
   m = PM.modal({
-    title: 'Export', body, width: 580,
+    title: 'Export', body, width: 520,
     actions: [{ label: 'Cancel' }, { label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } }],
   });
   m.el.classList.add('export-modal');

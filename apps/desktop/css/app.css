@@ -163,35 +163,69 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
    titlebar; the icon-only buttons beside it stay secondary. */
 .tb-export{padding:0 10px;margin-right:6px}
 
-/* The export dialog reuses the inspector row, whose 64px label column is sized
-   for short property names; its option names need the room. */
-.export-form{display:flex;flex-direction:column;gap:4px}
-.export-destinations{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:16px}
-.export-destination{display:flex;flex-direction:column;align-items:flex-start;gap:5px;padding:12px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);color:var(--tx-2);text-align:left;cursor:pointer}
-.export-destination b{font-size:13px;font-weight:600}
-.export-destination span{font-size:10px;color:var(--tx-3);white-space:nowrap}
-.export-destination:hover{border-color:var(--tx-3)}
-.export-destination[aria-pressed=true]{border-color:var(--accent,#4c8dff);background:color-mix(in srgb,var(--accent,#4c8dff) 10%,var(--bg-field));color:var(--tx-1)}
-.export-destination:focus-visible{outline:2px solid var(--accent,#4c8dff);outline-offset:2px}
+/* ── export dialog ─────────────────────────────────────────
+   Settings is the reference sheet: one label / control grid, 32px field wells
+   with no border, hairlines between groups instead of boxes, a single orange
+   action. The destination switcher is the shared segmented track. */
+.export-modal{top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}
+.export-modal .mb{padding:10px 18px 16px;gap:0}
+.export-form{display:flex;flex-direction:column;gap:2px}
 .export-form [hidden]{display:none!important}
-.export-code-details{padding:4px 0 8px}
-.export-code-details h3{margin:0 0 8px;font-size:16px;font-weight:600;color:var(--tx-1)}
-.export-code-details p{margin:0 0 14px;font-size:12px;line-height:1.6;color:var(--tx-2)}
-.export-code-includes{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
-.export-code-includes span{border:1px solid var(--line);border-radius:5px;padding:5px 8px;color:var(--tx-2);font-size:11px}
+.export-destinations.segmented{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));width:100%;padding:2px;gap:1px;background:var(--ink-2);border-radius:var(--r-md)}
+.export-destinations.segmented .export-destination{height:calc(var(--ctl-h) - 2px);min-width:0;padding:0 8px;border:0;border-radius:calc(var(--r-md) - 2px);background:transparent;color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:default;transition:color var(--dur-1),background var(--dur-1)}
+.export-destinations.segmented .export-destination:hover{color:var(--tx)}
+.export-destinations.segmented .export-destination.on,.export-destinations.segmented .export-destination[aria-pressed=true]{background:var(--ctl-raised);box-shadow:var(--ctl-edge);color:var(--tx)}
+.export-destinations.segmented .export-destination:focus-visible{outline:none;box-shadow:var(--focus-ring)}
+.export-destination-note{margin:8px 2px 14px;font-size:var(--fs-xs);color:var(--tx-3);min-height:1.4em}
+/* Code and Project have no settings; they explain what the file is instead. */
+.export-code-details{padding:2px 2px 6px}
+.modal .export-code-details h3{margin:0 0 6px;padding:0;font-size:var(--fs-md);font-weight:var(--fw-medium);letter-spacing:0;color:var(--tx)}
+.export-code-details p{margin:0 0 12px;font-size:var(--fs-sm);line-height:1.55;color:var(--tx-2);text-wrap:pretty}
+.export-code-includes{display:flex;flex-wrap:wrap;gap:0 6px;margin:0 0 12px;font-size:var(--fs-sm);color:var(--tx-2)}
+.export-code-includes span+span::before{content:'·';margin-right:6px;color:var(--tx-4)}
 .export-code-details .export-code-delivery{color:var(--tx-3);margin-bottom:0}
-.export-form .row.split .k{width:132px}
+/* Rows: 140px label column, 36px rhythm, the control owns the rest. */
+.export-form .row.split{margin:0;padding:0;height:auto;min-height:36px;gap:12px}
+.export-form .row.split .k{width:140px;color:var(--tx-2);font-size:var(--fs-sm)}
+.export-form .row.split .vwrap{height:auto;gap:8px}
 .export-form .row.split.is-off{display:none}
-.export-form .export-toggle{min-width:0;flex:1;display:flex;align-items:center;gap:8px}
-.export-form .export-hint{min-width:0;color:var(--tx-3);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.export-size{display:flex;align-items:center;gap:6px;color:var(--tx-3)}
-.export-size-input{width:74px;height:28px;padding:0 8px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--bg-field);color:var(--tx);font:inherit;font-size:var(--fs-sm);text-align:right;font-variant-numeric:tabular-nums}
+.export-form select.export-select,.export-form .pm-select.export-select{appearance:none;-webkit-appearance:none;cursor:default;text-align:left;font-family:var(--f-ui);font-size:var(--fs-sm);height:32px;padding:0 28px 0 10px;color:var(--tx);background:rgb(var(--ink-rgb) / .06);border:0;box-shadow:none;border-radius:var(--r-sm);transition:background var(--dur-1)}
+.export-form select.export-select:hover,.export-form .pm-select.export-select:hover{background:rgb(var(--ink-rgb) / .085)}
+.export-form select.export-select:focus-visible,.export-form .pm-select.export-select:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+/* Toggles share one width so their pills line up down the column; the hint
+   beside them is metadata, not a second label. */
+.export-form .export-toggle{min-width:0;flex:1;display:flex;align-items:center;gap:10px}
+.export-form .onoff{flex:none;width:140px;height:32px}
+.export-form .onoff-pill{border-radius:calc(var(--r-sm) - 2px)}
+.export-form .export-hint{min-width:0;color:var(--tx-4);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.export-size{display:flex;align-items:center;gap:8px;color:var(--tx-4);font-size:var(--fs-xs)}
+.export-size-input{width:82px;height:32px;padding:0 10px;border:0;border-radius:var(--r-sm);background:rgb(var(--ink-rgb) / .06);color:var(--tx);font:inherit;font-size:var(--fs-sm);text-align:right;font-variant-numeric:tabular-nums;transition:background var(--dur-1)}
+.export-size-input:hover{background:rgb(var(--ink-rgb) / .085)}
 .export-size-input:focus-visible{outline:0;box-shadow:var(--focus-ring)}
-.export-summary{display:flex;flex-direction:column;gap:2px;margin-top:10px;padding:9px 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg-field);font-size:var(--fs-xs);line-height:1.5;color:var(--tx-3);font-variant-numeric:tabular-nums}
-.export-summary>b{color:var(--tx-2);font-weight:var(--fw-medium)}
+/* Presets sit in the same grid below a hairline; the name field and Save are
+   one line with the preset picker. */
+.export-presets{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
+.export-preset-controls{flex:1;min-width:0;display:flex;align-items:center;gap:6px}
+.export-preset-controls .export-select{flex:1 1 0;min-width:0}
+.export-preset-name{flex:0 1 128px;min-width:72px;height:32px;padding:0 10px;border:0;border-radius:var(--r-sm);background:rgb(var(--ink-rgb) / .06);color:var(--tx);font:inherit;font-size:var(--fs-sm);transition:background var(--dur-1)}
+.export-preset-name::placeholder{color:var(--tx-4)}
+.export-preset-name:hover{background:rgb(var(--ink-rgb) / .085)}
+.export-preset-name:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+.export-form .chip{height:32px;padding:0 12px;background:rgb(var(--ink-rgb) / .06);color:var(--tx);box-shadow:none;border:0}
+.export-form .chip:hover{background:rgb(var(--ink-rgb) / .085)}
+.export-color-note{margin:6px 2px 0;font-size:var(--fs-xs);line-height:1.5;color:var(--tx-4);text-wrap:pretty}
+/* The readout is a footer line, not a card. */
+.export-form .export-summary{display:flex;flex-direction:column;gap:2px;margin:14px 0 0;padding:12px 2px 0;border:0;border-top:1px solid var(--line);border-radius:0;background:transparent;font-size:var(--fs-sm);line-height:1.5;color:var(--tx-3);font-variant-numeric:tabular-nums}
+.export-form .export-summary>b{color:var(--tx);font-weight:var(--fw-medium)}
+.export-form .export-summary>span:empty{display:none}
+/* Progress sheet. */
 .export-progress{display:flex;flex-direction:column;gap:10px}
-.export-preview{width:100%;border-radius:8px;background:#000;display:block}
-.export-progress-label{display:flex;justify-content:space-between;gap:12px;font-size:var(--fs-xs);color:var(--tx-2);font-variant-numeric:tabular-nums}
+.export-preview-stage{position:relative;overflow:hidden;border-radius:var(--r-md);background:var(--bg-field)}
+.export-preview{display:block;width:100%;max-height:52vh;object-fit:contain;background:#000}
+.export-scan{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.export-progress .bar{overflow:hidden;border-radius:2px;background:var(--ink-2)}
+.export-progress .bar i{display:block;height:100%;background:var(--accent);transition:width .12s linear}
+.export-progress-label{display:flex;justify-content:space-between;gap:12px;font-size:var(--fs-xs);line-height:1.5;color:var(--tx-2);font-variant-numeric:tabular-nums}
 .export-progress-label>span:last-child{color:var(--tx-3)}
 
 .iconbtn{
@@ -1284,26 +1318,3 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 }
 
 
-/* Export uses the same quiet fields, type and orange accent as the inspector. */
-.export-modal{top:50%!important;transform:translate(-50%,-50%)!important;max-height:88vh!important;max-width:calc(100vw - 32px)}
-.export-form{gap:6px}
-.export-destinations{gap:3px;padding:4px;border-radius:var(--r-md);background:var(--bg-field);margin-bottom:14px}
-.export-destination{border:0;background:transparent;padding:10px 9px;border-radius:var(--r-sm)}
-.export-destination[aria-pressed=true]{background:var(--ink-2);box-shadow:inset 0 -2px var(--accent);color:var(--tx)}
-.export-destination span{font-size:10px}
-.export-form .row.split{min-height:34px}
-.export-form select.export-select{appearance:auto;cursor:pointer;text-align:left;font-family:var(--f-ui);height:32px;padding:0 10px;color:var(--tx);background:var(--bg-field);border:1px solid var(--line);border-radius:var(--r-sm)}
-.export-form select.export-select:hover{background:var(--ink-2)}
-.export-form select.export-select:focus-visible{outline:0;box-shadow:var(--focus-ring)}
-.export-form .export-summary{margin-top:14px;padding:12px;background:transparent;border-top:1px solid var(--line);border-right:0;border-bottom:0;border-left:0;border-radius:0}
-.export-preview-stage{position:relative;overflow:hidden;border-radius:var(--r-md);background:var(--bg-field)}
-.export-preview{max-height:52vh;object-fit:contain;border-radius:0}
-.export-scan{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-.export-progress .bar{overflow:hidden;border-radius:2px;background:var(--ink-2)}
-.export-progress .bar i{display:block;height:100%;background:var(--accent);transition:width .12s linear}
-.export-progress-label{line-height:1.5}
-.export-form select.export-select{appearance:none;-webkit-appearance:none;padding-right:28px}
-.export-modal .mf .btn:not(.pri),.export-form .chip{appearance:none;-webkit-appearance:none;background:var(--ink-2);color:var(--tx);box-shadow:none;border:1px solid var(--line)}
-.export-form .toggle{appearance:none;-webkit-appearance:none;background:var(--ink-3)}
-.export-form .toggle.on{background:var(--accent)}
-.export-form .toggle i{background:var(--tx)}
