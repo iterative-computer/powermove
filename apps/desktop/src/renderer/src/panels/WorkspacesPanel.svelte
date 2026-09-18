@@ -46,20 +46,14 @@
 
   function remove(event: MouseEvent, workspace: Workspace): void {
     event.stopPropagation();
-    PM.modal?.({
-      title: `Delete “${workspace.name}” workspace?`,
-      body: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
-      actions: [
-        { label: 'Cancel' },
-        {
-          label: 'Delete workspace',
-          pri: true,
-          run: () => {
-            PM.WS.remove(workspace.id);
-            status = `Deleted ${workspace.name}`;
-          }
-        }
-      ]
+    void PM.confirm?.({
+      message: `Delete “${workspace.name}” workspace?`,
+      detail: 'This removes the saved workspace layout. Your project and its layers will not be deleted.',
+      confirmLabel: 'Delete Workspace'
+    })?.then((ok: boolean) => {
+      if (!ok) return;
+      PM.WS.remove(workspace.id);
+      status = `Deleted ${workspace.name}`;
     });
   }
 

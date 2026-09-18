@@ -25,6 +25,7 @@ export const IPC = {
   projectRead: 'project:read',
   projectReadClose: 'project:read-close',
   projectConfirmClose: 'project:confirm-close',
+  dialogConfirm: 'dialog:confirm',
 
   renderStart: 'render:start',
   renderWrite: 'render:write',
@@ -155,6 +156,14 @@ export type ProjectOpenResult = {
 } | { ok: true; path: string; projectId: string; data: Uint8Array }
   | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
+export interface ConfirmRequest {
+  message: string;
+  detail?: string;
+  /** Primary button label. Defaults to OK. */
+  confirmLabel?: string;
+  /** Marks the primary action as destructive; the sheet defaults focus to Cancel. */
+  destructive?: boolean;
+}
 
 /* ── media playback proxies ─────────────────────────────── */
 export interface MediaProxyRequest {
@@ -481,6 +490,8 @@ export interface PowermoveBridge {
     close(token: string): Promise<void>;
   };
   confirmProjectClose(name: string): Promise<CloseDecision>;
+  /** Native NSAlert-style confirmation sheet. Resolves true when the primary button is chosen. */
+  confirm(request: ConfirmRequest): Promise<boolean>;
 
   render: {
     start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string>;

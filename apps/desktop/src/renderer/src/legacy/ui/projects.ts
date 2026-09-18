@@ -248,30 +248,26 @@ function duplicate(m: any) {
     paint(); PM.bus.emit('projects:tabs'); PM.toast('Duplicated “' + m.name + '”');
   } catch (error: any) { PM.toast('Could not duplicate project: ' + (error.message || 'Unknown error')); }
 }
-function trashDialog(m: any) {
-  PM.modal({ title: 'Move “' + m.name + '” to Trash?', body: h('div', { style: { color: 'var(--tx-2)', fontSize: '12.5px', lineHeight: 1.6 } },
-    'You can restore this project from Trash.'), width: 420, actions: [
-    { label: 'Cancel' }, { label: 'Move to Trash', pri: true, run: async () => {
-      if (m.id === PM.proj.id) {
-        try {
-          // Save the live document and its Undo/session state before removing
-          // its registry entry. The following project switch must not put it back.
-          await PM.flushProject();
-        } catch (error: any) {
-          PM.toast('Could not move this project to Trash: ' + (error?.message || 'Project storage is unavailable'));
-          return;
-        }
+function trashDialog(m: any): Promise<void> {
+  return PM.confirm({ message: 'Move “' + m.name + '” to Trash?', detail: 'You can restore this project from Trash.', confirmLabel: 'Move to Trash' }).then(async (ok: boolean) => {
+    if (!ok) return;
+    if (m.id === PM.proj.id) {
+      try {
+        // Save the live document and its Undo/session state before removing
+        // its registry entry. The following project switch must not put it back.
+        await PM.flushProject();
+      } catch (error: any) {
+        PM.toast('Could not move this project to Trash: ' + (error?.message || 'Project storage is unavailable'));
+        return;
       }
-      if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
-      if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
-    } },
-  ] });
+    }
+    if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
+    if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
+  });
 }
-function destroyDialog(m: any) {
-  PM.modal({ title: 'Delete “' + m.name + '” forever?', body: h('div', { style: { color: 'var(--tx-2)', fontSize: '12.5px', lineHeight: 1.6 } },
-    'This permanently removes the local project. This cannot be undone.'), width: 420, actions: [
-    { label: 'Cancel' }, { label: 'Delete Forever', pri: true, run: () => { PM.Projects.destroy(m.id); paint(); } },
-  ] });
+function destroyDialog(m: any): Promise<void> {
+  return PM.confirm({ message: 'Delete “' + m.name + '” forever?', detail: 'This permanently removes the local project. This cannot be undone.', confirmLabel: 'Delete Forever', destructive: true })
+    .then((ok: boolean) => { if (ok) { PM.Projects.destroy(m.id); paint(); } });
 }
 function switchUnderlying() {
   const id = PM.Projects.tabs()[0] || (PM.Projects.list()[0] || {}).id;

@@ -148,7 +148,6 @@
     padding: 0;
     font: inherit;
     color: inherit;
-    cursor: pointer;
   }
   button.status-contribution:hover {
     color: var(--tx);

@@ -120,6 +120,7 @@ function setup(
     toast: vi.fn(),
     menu: vi.fn(),
     modal: vi.fn(),
+    confirm: vi.fn(async () => true),
     h: domHelper
   };
 
@@ -394,7 +395,7 @@ describe('AssetsPanel', () => {
     expect(target.querySelector('[data-asset-id="image-1"]')).toBeNull();
   });
 
-  it('confirms referenced deletion and removes affected layer selections after approval', () => {
+  it('confirms referenced deletion and removes affected layer selections after approval', async () => {
     const { PM, events } = setup([IMAGE], {
       references: { 'image-1': 1 },
       removals: { 'image-1': { removedLayers: 1, removedLayerIds: ['image-layer'] } }
@@ -402,12 +403,14 @@ describe('AssetsPanel', () => {
 
     rows()[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
     expect(PM.hist.do).not.toHaveBeenCalled();
-    expect(PM.modal).toHaveBeenCalledOnce();
-    const modal = PM.modal.mock.calls[0][0];
-    expect(modal).toMatchObject({ title: 'Delete “Backdrop.png”?', width: 420 });
-    expect(modal.body.textContent).toContain('This also removes 1 layer that uses this media. You can undo this.');
+    expect(PM.confirm).toHaveBeenCalledOnce();
+    expect(PM.confirm.mock.calls[0][0]).toEqual({
+      message: 'Delete “Backdrop.png”?',
+      detail: 'This also removes 1 layer that uses this media. You can undo this.',
+      confirmLabel: 'Delete'
+    });
 
-    modal.actions[1].run();
+    await PM.confirm.mock.results[0].value;
     flushSync();
     expect(PM.sel.layers).toEqual(['keep-layer']);
     expect(events).toEqual(['assets', 'layers', 'sel', 'project']);

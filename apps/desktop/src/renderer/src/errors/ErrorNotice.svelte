@@ -35,7 +35,7 @@
   .error-marker{display:grid;place-items:center;flex:none;width:16px;height:16px;border-radius:50%;background:color-mix(in srgb,var(--danger) 13%,transparent);color:var(--danger);font-size:11px;font-weight:700}
   .error-notice p{margin:0;color:var(--tx-2)!important;font:inherit}
   details{margin-top:10px;color:var(--tx-3);font-size:var(--fs-xs)}
-  summary{cursor:pointer;width:fit-content;max-width:100%}
+  summary{width:fit-content;max-width:100%}
   summary:hover{color:var(--tx)}
   pre{margin:8px 0;max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;font:11px/1.5 var(--f-mono,monospace);color:var(--tx-2)}
   button{padding:4px 7px;border-radius:5px;background:var(--ink-1);color:var(--tx-2);font:inherit;text-align:left}
