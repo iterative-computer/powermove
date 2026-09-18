@@ -21,6 +21,7 @@ export const IPC = {
   fileSaveChunk: 'file:save-chunk',
   fileSaveAbort: 'file:save-abort',
   projectOpen: 'project:open',
+  projectOpenExternal: 'project:open-external', // main → renderer
   projectRead: 'project:read',
   projectReadClose: 'project:read-close',
   projectConfirmClose: 'project:confirm-close',
@@ -474,6 +475,7 @@ export interface PowermoveBridge {
   };
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
+  onProjectOpenExternal(cb: (result: ProjectOpenResult) => void): () => void;
   projectRead?: {
     read(token: string, offset: number, length: number): Promise<Uint8Array>;
     close(token: string): Promise<void>;

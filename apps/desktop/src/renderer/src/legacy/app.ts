@@ -59,6 +59,7 @@ async function refreshFileDirty(project = PM.proj): Promise<boolean> {
   if (comparisonVersions.get(project.id) !== version) return dirty;
   state.dirty = dirty;
   if (PM.proj.id === project.id) fileUI();
+  else PM.bus.emit('projects:tabs');
   return state.dirty;
 }
 function rememberFile(id: string, state: FileState) {
@@ -677,6 +678,13 @@ PM.openProject = async () => {
   inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
   inp.click();
 };
+window.powermove?.onProjectOpenExternal?.(async result => {
+  if (result.ok) {
+    await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+  } else {
+    PM.toast('Could not open project: ' + result.error, 6000);
+  }
+});
 async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
   try {
     let o: any, mediaRestored = false;
@@ -731,6 +739,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (workspace?.layout?.docks) PM.WS.restoreSnapshot(workspace);
     captureProjectSession();
     PM.toast('Opened ' + file.name);
+    PM.ProjectsScreen?.hide?.();
   } catch (e: any) { PM.toast('Could not open project: ' + e.message, 4500); }
 }
 PM.newProject = () => {
@@ -756,7 +765,7 @@ PM.newProject = () => {
 };
 function switchProject(p: any, history?: any) {
   PM.pause();
-  if (PM.proj?.id && PM.proj.id !== p.id) captureProjectSession();
+  if (PM.proj?.id && PM.proj.id !== p.id && !PM.Projects.trashList?.().some((item: any) => item.id === PM.proj.id)) captureProjectSession();
   closeProjectTransients();
   PM.proj = hydrate(p);
   PM.Projects.markOpen(PM.proj.id);

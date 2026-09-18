@@ -68,7 +68,7 @@ describe('compileExtension', () => {
     expect(await readdir(path.dirname(result.bundlePath))).toEqual(['bundle.js']);
   });
 
-  it('injects imported CSS into the single JavaScript bundle', async () => {
+  it('exports imported CSS without global DOM side effects', async () => {
     const { dir, outDir } = await fixture('styled-extension');
     await writeFile(path.join(dir, 'panel.css'), '.compiler-css-fixture { color: rebeccapurple; }');
     await writeFile(path.join(dir, 'index.ts'), "import './panel.css'; export default () => undefined;");
@@ -78,17 +78,25 @@ describe('compileExtension', () => {
     if (!result.ok) return;
 
     const output = await readFile(result.bundlePath, 'utf8');
-    expect(output).toContain('document.createElement("style")');
+    expect(output).not.toContain('document.createElement');
+    expect(output).toContain('__powermoveStyles');
     expect(output).toContain('.compiler-css-fixture { color: rebeccapurple; }');
+    const module = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
+    expect(module.__powermoveStyles).toEqual(['.compiler-css-fixture { color: rebeccapurple; }']);
+    const acquired: string[] = [];
+    const release = module.__powermoveAcquireStyles((css: string) => acquired.push(css));
+    expect(acquired).toEqual(module.__powermoveStyles);
+    release();
     expect(await readdir(path.dirname(result.bundlePath))).toEqual(['bundle.js']);
   });
 
   it('compiles Svelte and replaces its runtime imports with global shims', async () => {
     const { dir, outDir } = await fixture('svelte-panel');
     await writeFile(path.join(dir, 'Panel.svelte'), [
+      '<style>.styled { color: red; }</style>',
       '<script>import { onMount } from "svelte"; import { writable } from "svelte/store";',
       'let count = $state(0); const stored = writable(1); const ready = Promise.resolve("ready"); onMount(() => count++);</script>',
-      '<button onclick={() => count++}>{count}: {$stored}</button>',
+      '<button class="styled" onclick={() => count++}>{count}: {$stored}</button>',
       '{#await ready}<span>waiting</span>{:then text}<span>{text}</span>{/await}'
     ].join(''));
     await writeFile(path.join(dir, 'index.ts'), "import Panel from './Panel.svelte'; export default () => Panel;");
@@ -97,6 +105,9 @@ describe('compileExtension', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const output = await readFile(result.bundlePath, 'utf8');
+    expect(output).toContain('__powermoveStyles');
+    expect(output).not.toMatch(/append_styles\s*\(/);
+    expect(output).toMatch(/add\(.*color: red/);
     expect(output).toContain('globalThis.__powermove_runtime["svelte/internal/client"]');
     expect(output).toContain('globalThis.__powermove_runtime["svelte"]');
     expect(output).toContain('globalThis.__powermove_runtime["svelte/store"]');
@@ -156,4 +167,23 @@ describe('compileExtension', () => {
     const valid = await fixture('valid-id');
     await expect(compileExtension({ ...valid, entry: '../outside.ts' })).resolves.toMatchObject({ ok: false });
   });
+});
+
+it('owns lazy-imported CSS without attaching it after release', async () => {
+  const { dir, outDir } = await fixture('lazy-styles');
+  await writeFile(path.join(dir, 'late.css'), '.late { color: green; }');
+  await writeFile(path.join(dir, 'index.ts'), "export default () => import('./late.css');");
+  const result = await compileExtension({ dir, entry: 'index.ts', outDir });
+  if (!result.ok) throw new Error(result.error);
+  const output = await readFile(result.bundlePath, 'utf8');
+  const module = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
+  const acquired: string[] = [];
+  const release = module.__powermoveAcquireStyles((css: string) => acquired.push(css));
+  expect(acquired).toEqual([]);
+  release();
+  await module.default();
+  expect(acquired).toEqual([]);
+  const releaseAgain = module.__powermoveAcquireStyles((css: string) => acquired.push(css));
+  expect(acquired).toEqual(['.late { color: green; }']);
+  releaseAgain();
 });

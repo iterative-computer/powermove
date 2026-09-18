@@ -580,3 +580,103 @@ describe('loader dispose', () => {
     expect(log).toEqual(['one']);
   });
 });
+
+
+describe('bridge recovery and bundle CSS ownership', () => {
+  it('keeps runtime failures quarantined across a health echo until an explicit retry', async () => {
+    const bridge = fakeBridge([rec('flaky')]);
+    let activations = 0;
+    bridge.bridge.reportHealth = (report) => {
+      bridge.state.records[0]!.health = report.health;
+      bridge.emit({ ids: [report.id], reason: 'health' });
+    };
+    const loader = createLoader({ kernel, bridge: bridge.bridge, deps: fakeDeps().deps,
+      builtins: { flaky: async () => ({ default: () => { activations++; } }) } });
+    await loader.boot();
+    await loader.whenIdle();
+    loader.reportRuntimeError('flaky', new Error('boom'));
+    loader.reportRuntimeError('flaky', new Error('boom'));
+    await loader.whenIdle();
+    await loader.whenIdle();
+    expect(activations).toBe(1);
+    expect(loader.activeIds()).toEqual([]);
+    bridge.emit({ ids: ['flaky'], reason: 'enable' });
+    await loader.whenIdle();
+    expect(activations).toBe(2);
+    await loader.dispose();
+  });
+
+  it('loads extensions discovered after the renderer initial list completes', async () => {
+    const bridge = fakeBridge([]);
+    const loader = createLoader({ kernel, bridge: bridge.bridge, deps: fakeDeps().deps, builtins: {} });
+    await loader.boot();
+    expect(loader.activeIds()).toEqual([]);
+    bridge.state.records = [rec('late', { bundleUrl: 'data:text/javascript,export default () => {}' })];
+    bridge.emit({ ids: [], reason: 'reload' });
+    await loader.whenIdle();
+    expect(loader.activeIds()).toEqual(['late']);
+    await loader.dispose();
+  });
+
+  it('releases styles on disable, reload and failed activation, and reacquires cached styles', async () => {
+    const bridge = fakeBridge([rec('styled')]);
+    let fail = false;
+    const listeners = new Set<(css: string) => void>();
+    const module = { __powermoveAcquireStyles: (listener: (css: string) => void) => {
+      module.__powermoveStyles.forEach(listener);
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    }, __powermoveStyles: ['.plain { color: red; }', '.svelte-scoped { color: blue; }'],
+      default: () => { if (fail) throw new Error('activation failed'); } };
+    const loader = createLoader({ kernel, bridge: bridge.bridge, deps: fakeDeps().deps,
+      builtins: { styled: async () => module } });
+    const styles = () => [...document.head.querySelectorAll('style[data-powermove-extension="styled"]')];
+    await loader.boot();
+    expect(styles()).toHaveLength(2);
+    const initial = styles();
+    await loader.reload('styled');
+    expect(styles()).toHaveLength(2);
+    expect(initial.every(style => !style.isConnected)).toBe(true);
+    bridge.state.records[0]!.enabled = false;
+    bridge.emit({ ids: ['styled'], reason: 'disable' });
+    await loader.whenIdle();
+    expect(styles()).toHaveLength(0);
+    expect(listeners.size).toBe(0);
+    bridge.state.records[0]!.enabled = true;
+    bridge.emit({ ids: ['styled'], reason: 'enable' });
+    await loader.whenIdle();
+    expect(styles()).toHaveLength(2);
+    expect(listeners.size).toBe(1);
+    for (const listener of listeners) listener('.lazy { color: green; }');
+    expect(styles()).toHaveLength(3);
+    fail = true;
+    await loader.reload('styled');
+    expect(styles()).toHaveLength(0);
+    expect(listeners.size).toBe(0);
+    await loader.dispose();
+  });
+});
+
+it('publishes record changes after the async bridge read and runtime state before unload', async () => {
+  const bridge = fakeBridge([rec('flaky')]);
+  const loader = createLoader({ kernel, bridge: bridge.bridge, deps: fakeDeps().deps,
+    builtins: { flaky: async () => ({ default: () => undefined }) } });
+  await loader.boot();
+  const observed: boolean[] = [];
+  kernel.events.on('extensions:changed', () => observed.push(loader.records()[0]!.enabled));
+  bridge.state.records[0]!.enabled = false;
+  bridge.emit({ ids: ['flaky'], reason: 'health' });
+  expect(observed).toEqual([]);
+  await loader.whenIdle();
+  expect(observed).toEqual([false]);
+  bridge.state.records[0]!.enabled = true;
+  bridge.emit({ ids: ['flaky'], reason: 'enable' });
+  await loader.whenIdle();
+  const unloaded: ExtensionRecord[] = [];
+  kernel.events.on('extension:unloaded', () => unloaded.push(loader.records()[0]!));
+  loader.reportRuntimeError('flaky', new Error('boom'));
+  loader.reportRuntimeError('flaky', new Error('boom'));
+  await loader.whenIdle();
+  expect(unloaded).toMatchObject([{ enabled: false, health: { state: 'runtime-error' } }]);
+  await loader.dispose();
+});

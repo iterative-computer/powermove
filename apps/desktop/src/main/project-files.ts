@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, open, readFile, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { constants, createReadStream } from 'node:fs';
+import { copyFile, mkdir, open, readFile, readdir, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { PROJECT_ID } from '../shared/ipc';
 import { isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../shared/project-container';
@@ -34,7 +34,7 @@ export class ProjectFiles {
   private associations = new Map<string, Association>();
   private ready: Promise<void>;
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(private readonly registryPath: string) {
+  constructor(private readonly registryPath: string, private readonly backupDirectory: string) {
     this.ready = this.load();
   }
   private async load(): Promise<void> {
@@ -61,8 +61,45 @@ export class ProjectFiles {
     this.queue = next.catch(() => undefined);
     return next;
   }
+  async backups(id: string): Promise<string[]> {
+    if (!PROJECT_ID.test(id)) throw new Error('Invalid project id');
+    const directory = path.join(this.backupDirectory, id);
+    try {
+      return (await readdir(directory, { withFileTypes: true }))
+        .filter(entry => entry.isFile() && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.pmv(?:-\d+)?$/.test(entry.name))
+        .map(entry => entry.name)
+        .sort((a, b) => b.localeCompare(a))
+        .map(name => path.resolve(directory, name));
+    } catch (error: any) {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }
+  }
+  private async backup(id: string, destination: string): Promise<void> {
+    const directory = path.join(this.backupDirectory, id);
+    await mkdir(directory, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    let collision = 0;
+    while (true) {
+      const name = `${timestamp}.pmv${collision ? `-${collision}` : ''}`;
+      try {
+        await copyFile(destination, path.join(directory, name), constants.COPYFILE_EXCL);
+        break;
+      } catch (error: any) {
+        if (error.code !== 'EEXIST') throw error;
+        collision++;
+      }
+    }
+    try {
+      const backups = await this.backups(id);
+      await Promise.all(backups.slice(5).map(filePath => unlink(filePath)));
+    } catch (error) {
+      console.warn(`Could not prune project backups for ${id}.`, error);
+    }
+  }
   save(id: string, data: Uint8Array | Iterable<Uint8Array> | AsyncIterable<Uint8Array>, selectedPath?: string): Promise<string> {
     return this.serial(async () => {
+      if (!PROJECT_ID.test(id)) throw new Error('Invalid project id');
       const known = this.associations.get(id);
       const destination = selectedPath || known?.path;
       if (!destination) throw new Error('Choose a destination with Save As.');
@@ -77,7 +114,7 @@ export class ProjectFiles {
       if (!selectedPath && known && (!previous || previousHash !== known.hash)) {
         throw new Error('The project file was moved, deleted, or changed outside Powermove. Use Save As to avoid overwriting other work.');
       }
-      if (previous) await copyFile(destination, destination + '1');
+      if (previous) await this.backup(id, destination);
       const digest = createHash('sha256');
       async function* writing() {
         for await (const chunk of data instanceof Uint8Array ? [data] : data) {

@@ -314,5 +314,17 @@ describe('ModsPanel', () => {
     flushSync();
     expect(harness.listenerCount('extension:loaded')).toBe(0);
     expect(harness.listenerCount('extension:unloaded')).toBe(0);
+    expect(harness.listenerCount('extensions:changed')).toBe(0);
+  });
+
+  it('refreshes mounted Mods after a health-only auto-disable notification', () => {
+    const harness = fakeApi([record('flaky')]);
+    render(harness);
+    expect(rowFor(target, 'flaky').querySelector('.onoff')?.getAttribute('data-enabled')).toBe('true');
+    harness.setList([record('flaky', { enabled: false, health: { state: 'runtime-error', error: 'boom' } })]);
+    harness.emit('extensions:changed');
+    flushSync();
+    expect(rowFor(target, 'flaky').querySelector('.onoff')?.getAttribute('data-enabled')).toBe('false');
+    expect(target.querySelector('.summary')?.textContent).toContain('1 needs attention');
   });
 });

@@ -1,7 +1,16 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test, type LaunchedApp } from './helpers/app';
 import { decodeProjectContainer } from '../src/shared/project-container';
+
+async function newestBackup(userData: string): Promise<string> {
+  const root = path.join(userData, 'backups');
+  const files: string[] = [];
+  for (const id of await readdir(root)) for (const name of await readdir(path.join(root, id))) files.push(path.join(root, id, name));
+  files.sort((a, b) => path.basename(b).localeCompare(path.basename(a)));
+  if (!files[0]) throw new Error('No project backup was written');
+  return files[0];
+}
 
 async function saveTo(session: LaunchedApp, destination: string | null) {
   await session.app.evaluate(({ dialog }, filePath) => {
@@ -39,7 +48,7 @@ test('Command+S writes real files, reuses the destination, saves from a field, a
   });
   await session.page.keyboard.press('Meta+S');
   await expect.poll(() => savedName(a)).toBe('Second version');
-  expect(await savedName(a + '1')).toBe('Velocity Study');
+  expect(await savedName(await newestBackup(session.userData))).toBe('Velocity Study');
   expect(await session.app.evaluate(() => (globalThis as any).__saveDialogs)).toBe(1);
   await saveTo(session, b);
   await session.page.keyboard.press('Meta+Shift+S');

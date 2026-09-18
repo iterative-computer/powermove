@@ -464,9 +464,9 @@
 >
   <div class="asset-list" role="listbox" tabindex="-1" aria-label="Project media" bind:this={listElement} onpointerdown={handleListPointerDown}>
     {#each assets as asset, index (asset.id)}
-      {@const currentAsset = liveAsset(asset)}
-      {@const posterSrc = posterUrl(asset)}
-      {@const offline = isOffline(asset)}
+      {@const currentAsset = (doc.tick.assets, liveAsset(asset))}
+      {@const posterSrc = (doc.tick.assets, posterUrl(asset))}
+      {@const offline = !currentAsset}
       <div
         class="asset-card"
         class:is-dragging={draggingId === asset.id}

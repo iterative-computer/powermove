@@ -120,8 +120,11 @@ export async function publishExtensionChanges(
     await fs.rename(pending, final);
     return record;
   } catch (error) {
-    await rollbackPendingChangeSet(pending, stage.liveDirectory, record).catch(() => undefined);
-    await fs.rm(pending, { recursive: true, force: true }).catch(() => undefined);
+    // Retain the journal and backups if rollback itself fails so boot can retry.
+    try {
+      await rollbackPendingChangeSet(pending, stage.liveDirectory, record);
+      await fs.rm(pending, { recursive: true, force: true });
+    } catch { /* Recovery will retry the pending transaction. */ }
     throw error;
   }
 }
@@ -143,18 +146,20 @@ export async function restoreExtensionChangeSet(options: {
   const redo = path.join(directory, 'redo');
   await fs.rm(redo, { recursive: true, force: true });
   await fs.mkdir(redo, { recursive: true });
+  const touched: string[] = [];
   try {
     for (const change of record.changes) {
       const live = path.join(options.liveDirectory, change.id);
       if (await exists(live)) await fs.rename(live, path.join(redo, change.id));
+      touched.push(change.id);
       const snapshot = path.join(before, change.id);
       if (await exists(snapshot)) await copyRegularTree(snapshot, live);
     }
   } catch (error) {
-    for (const change of record.changes) {
-      const live = path.join(options.liveDirectory, change.id);
+    for (const id of touched.reverse()) {
+      const live = path.join(options.liveDirectory, id);
       await fs.rm(live, { recursive: true, force: true }).catch(() => undefined);
-      const previous = path.join(redo, change.id);
+      const previous = path.join(redo, id);
       if (await exists(previous)) await fs.rename(previous, live).catch(() => undefined);
     }
     throw error;
@@ -194,9 +199,21 @@ async function rollbackPendingChangeSet(
   await fs.mkdir(liveDirectory, { recursive: true });
   for (const change of record.changes) {
     const live = path.join(liveDirectory, change.id);
-    await fs.rm(live, { recursive: true, force: true });
+    if (!EXTENSION_ID.test(change.id)) throw new Error('Invalid pending extension id.');
     const previous = path.join(pending, 'before', change.id);
-    if (await exists(previous)) await fs.rename(previous, live);
+    if (await exists(previous)) {
+      // Keep the backup until the entire journal is removed. A crash during
+      // recovery must never turn a partially restored tree into the only copy.
+      const restored = path.join(pending, 'restore', change.id);
+      await fs.rm(restored, { recursive: true, force: true });
+      await copyRegularTree(previous, restored);
+      await fs.rm(live, { recursive: true, force: true });
+      await fs.rename(restored, live);
+    } else if (change.action === 'created' && !await exists(path.join(pending, 'next', change.id))) {
+      // Only a creation whose prepared replacement was moved can be ours.
+      await fs.rm(live, { recursive: true, force: true });
+    }
+    // Updated/removed entries without a backup have not been touched.
   }
 }
 

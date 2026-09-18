@@ -251,7 +251,17 @@ function duplicate(m: any) {
 function trashDialog(m: any) {
   PM.modal({ title: 'Move “' + m.name + '” to Trash?', body: h('div', { style: { color: 'var(--tx-2)', fontSize: '12.5px', lineHeight: 1.6 } },
     'You can restore this project from Trash.'), width: 420, actions: [
-    { label: 'Cancel' }, { label: 'Move to Trash', pri: true, run: () => {
+    { label: 'Cancel' }, { label: 'Move to Trash', pri: true, run: async () => {
+      if (m.id === PM.proj.id) {
+        try {
+          // Save the live document and its Undo/session state before removing
+          // its registry entry. The following project switch must not put it back.
+          await PM.flushProject();
+        } catch (error: any) {
+          PM.toast('Could not move this project to Trash: ' + (error?.message || 'Project storage is unavailable'));
+          return;
+        }
+      }
       if (!PM.Projects.trash(m.id)) return PM.toast('Could not move this project to Trash.');
       if (m.id === PM.proj.id) switchUnderlying(); paint(); PM.bus.emit('projects:tabs');
     } },

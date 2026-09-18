@@ -34,6 +34,8 @@ try run(ictool, [root.appendingPathComponent("resources/icon/Powermove.icon").pa
 guard let image = NSImage(contentsOf: rendered) else { fatalError("Icon Composer produced no image") }
 let iconset = temp.appendingPathComponent("Powermove.iconset")
 try fm.createDirectory(at: iconset, withIntermediateDirectories: true)
+let documentIconset = temp.appendingPathComponent("PowermoveDocument.iconset")
+try fm.createDirectory(at: documentIconset, withIntermediateDirectories: true)
 for points in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {
         let pixels = points * scale
@@ -53,9 +55,65 @@ for points in [16, 32, 128, 256, 512] {
         let suffix = scale == 2 ? "@2x" : ""
         try bitmap.representation(using: .png, properties: [:])!.write(
             to: iconset.appendingPathComponent("icon_\(points)x\(points)\(suffix).png"))
+
+        let document = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: document)
+        NSGraphicsContext.current?.imageInterpolation = .high
+        let canvas = Double(pixels)
+        let page = NSRect(x: canvas * 0.14, y: canvas * 0.05,
+                          width: canvas * 0.72, height: canvas * 0.90)
+        let radius = canvas * 0.035
+        let fold = canvas * 0.15
+        let pagePath = NSBezierPath()
+        pagePath.move(to: NSPoint(x: page.minX + radius, y: page.minY))
+        pagePath.line(to: NSPoint(x: page.maxX - radius, y: page.minY))
+        pagePath.curve(to: NSPoint(x: page.maxX, y: page.minY + radius),
+                       controlPoint1: NSPoint(x: page.maxX - radius * 0.45, y: page.minY),
+                       controlPoint2: NSPoint(x: page.maxX, y: page.minY + radius * 0.45))
+        pagePath.line(to: NSPoint(x: page.maxX, y: page.maxY - fold))
+        pagePath.line(to: NSPoint(x: page.maxX - fold, y: page.maxY))
+        pagePath.line(to: NSPoint(x: page.minX + radius, y: page.maxY))
+        pagePath.curve(to: NSPoint(x: page.minX, y: page.maxY - radius),
+                       controlPoint1: NSPoint(x: page.minX + radius * 0.45, y: page.maxY),
+                       controlPoint2: NSPoint(x: page.minX, y: page.maxY - radius * 0.45))
+        pagePath.line(to: NSPoint(x: page.minX, y: page.minY + radius))
+        pagePath.curve(to: NSPoint(x: page.minX + radius, y: page.minY),
+                       controlPoint1: NSPoint(x: page.minX, y: page.minY + radius * 0.45),
+                       controlPoint2: NSPoint(x: page.minX + radius * 0.45, y: page.minY))
+        pagePath.close()
+        NSColor(calibratedWhite: 0.985, alpha: 1).setFill()
+        pagePath.fill()
+        NSColor(calibratedWhite: 0.72, alpha: 1).setStroke()
+        pagePath.lineWidth = max(1, canvas * 0.012)
+        pagePath.stroke()
+
+        let foldPath = NSBezierPath()
+        foldPath.move(to: NSPoint(x: page.maxX - fold, y: page.maxY))
+        foldPath.line(to: NSPoint(x: page.maxX - fold, y: page.maxY - fold))
+        foldPath.line(to: NSPoint(x: page.maxX, y: page.maxY - fold))
+        foldPath.close()
+        NSColor(calibratedWhite: 0.88, alpha: 1).setFill()
+        foldPath.fill()
+        NSColor(calibratedWhite: 0.72, alpha: 1).setStroke()
+        foldPath.lineWidth = max(1, canvas * 0.009)
+        foldPath.stroke()
+
+        let markSide = canvas * 0.45
+        image.draw(in: NSRect(x: (canvas - markSide) / 2, y: canvas * 0.17,
+                              width: markSide, height: markSide),
+                   from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
+        try document.representation(using: .png, properties: [:])!.write(
+            to: documentIconset.appendingPathComponent("icon_\(points)x\(points)\(suffix).png"))
     }
 }
 let output = temp.appendingPathComponent("icon.icns")
 try run("/usr/bin/iconutil", ["-c", "icns", iconset.path, "-o", output.path])
 try Data(contentsOf: output).write(to: root.appendingPathComponent("resources/icon.icns"), options: .atomic)
-print("Updated resources/icon.icns from resources/icon/Powermove.icon (10 sizes, 16–1024 pixels).")
+let documentOutput = temp.appendingPathComponent("document.icns")
+try run("/usr/bin/iconutil", ["-c", "icns", documentIconset.path, "-o", documentOutput.path])
+try Data(contentsOf: documentOutput).write(to: root.appendingPathComponent("resources/document.icns"), options: .atomic)
+print("Updated resources/icon.icns and resources/document.icns (10 sizes each, 16–1024 pixels).")

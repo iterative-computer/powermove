@@ -124,3 +124,60 @@ describe('agent extension isolation and recovery', () => {
     expect(await readdir(history)).toEqual([]);
   });
 });
+
+// Simulate process death between the filesystem operations of publication and
+// rollback, including an earlier entry already restored before a second crash.
+it.each(['prepared', 'moved', 'installed', 'recovering', 'restored'])('recovers mixed entries at %s and is repeatable', async (phase) => {
+  const root = await temporaryDirectory();
+  const live = path.join(root, 'extensions');
+  const history = path.join(root, 'history');
+  const pending = path.join(history, '.pending-mixed');
+  await extension(live, 'untouched', 'original');
+  await extension(live, 'updated', 'original');
+  await extension(live, 'removed', 'original');
+  await extension(path.join(pending, 'next'), 'created', 'new');
+  await extension(path.join(pending, 'next'), 'updated', 'new');
+  await mkdir(path.join(pending, 'before'), { recursive: true });
+  const { rename, cp } = await import('node:fs/promises');
+  if (phase !== 'prepared') {
+    for (const id of ['updated', 'removed']) await rename(path.join(live, id), path.join(pending, 'before', id));
+  }
+  if (['installed', 'recovering', 'restored'].includes(phase)) {
+    for (const id of ['updated', 'created']) await rename(path.join(pending, 'next', id), path.join(live, id));
+  }
+  if (phase === 'recovering') {
+    await rm(path.join(live, 'updated'), { recursive: true });
+    await extension(path.join(pending, 'restore'), 'updated', 'partial recovery');
+  }
+  if (phase === 'restored') {
+    await rm(path.join(live, 'updated'), { recursive: true });
+    await cp(path.join(pending, 'before', 'updated'), path.join(live, 'updated'), { recursive: true });
+  }
+  await writeFile(path.join(pending, 'change-set.json'), JSON.stringify({ changes: [
+    { id: 'updated', action: 'updated' }, { id: 'created', action: 'created' },
+    { id: 'removed', action: 'removed' }, { id: 'untouched', action: 'updated' }
+  ] }));
+  await recoverInterruptedExtensionTransactions(history, live);
+  await recoverInterruptedExtensionTransactions(history, live);
+  for (const id of ['updated', 'removed', 'untouched']) {
+    expect(await readFile(path.join(live, id, 'index.ts'), 'utf8')).toBe('original');
+  }
+  await expect(stat(path.join(live, 'created'))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await readdir(history)).toEqual([]);
+});
+
+it('does not delete untouched later extensions when restoring a snapshot fails', async () => {
+  const root = await temporaryDirectory();
+  const live = path.join(root, 'extensions');
+  for (const id of ['first', 'later']) await extension(live, id, 'before');
+  const prepared = await stage(root);
+  for (const id of ['first', 'later']) await extension(prepared.stagingDirectory, id, 'after');
+  await publishExtensionChanges(prepared, [
+    { id: 'first', action: 'updated' }, { id: 'later', action: 'updated' }
+  ]);
+  const { symlink } = await import('node:fs/promises');
+  await symlink('/invalid-target', path.join(prepared.historyRoot, 'run-1', 'before', 'first', 'invalid'));
+  await expect(restoreExtensionChangeSet({ liveDirectory: live, historyRoot: prepared.historyRoot, changeSetId: 'run-1' }))
+    .rejects.toThrow(/symbolic/i);
+  for (const id of ['first', 'later']) expect(await readFile(path.join(live, id, 'index.ts'), 'utf8')).toBe('after');
+});

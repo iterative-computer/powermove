@@ -210,6 +210,26 @@ describe('AssetsPanel', () => {
     expect(document.querySelector('input[type="file"][aria-label="Replace Product.mp4"]')).not.toBeNull();
   });
 
+  it('enables the same media card when its bytes and poster arrive after render', () => {
+    const { PM } = setup([VIDEO], { offline: ['video-1'] });
+    const card = rows()[0]!;
+    expect(card.classList.contains('is-offline')).toBe(true);
+    expect(card.getAttribute('draggable')).toBe('false');
+
+    PM.assets.set('video-1', { el: { currentSrc: 'blob:restored-video' } });
+    PM.assets.poster.mockReturnValue('blob:restored-poster');
+    PM.bus.emit('assets');
+    flushSync();
+
+    expect(rows()[0]).toBe(card);
+    expect(card.classList.contains('is-offline')).toBe(false);
+    expect(card.getAttribute('draggable')).toBe('true');
+    expect(card.querySelector('.asset-offline')).toBeNull();
+    expect(card.querySelector<HTMLImageElement>('.asset-poster')?.src).toBe('blob:restored-poster');
+    card.querySelector<HTMLButtonElement>('button[aria-label="Add Product.mp4 to timeline"]')?.click();
+    expect(PM.cmd).toHaveBeenCalledWith('addFromAsset', 'video-1');
+  });
+
   it('offers Locate instead of Add in the context menu for offline media', () => {
     const { PM } = setup([VIDEO], { offline: ['video-1'] });
 

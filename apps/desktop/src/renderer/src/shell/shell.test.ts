@@ -105,6 +105,34 @@ describe('Svelte shell', () => {
     expect(document.activeElement).toBe(second);
   });
 
+  it('updates a saved tab from the same mutable file state after the file bridge appears', () => {
+    const { PM } = fakePM();
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    const tab = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
+    expect(tab.title).toBe('First — Not saved to a file');
+    const file = { path: '/tmp/First.pmv', dirty: false };
+    PM.projectFileState = vi.fn(() => file);
+    flushSync(() => PM.bus.emit('projects:tabs'));
+    expect(target.querySelector('[data-tab-id="p1"]')).toBe(tab);
+    expect(tab.title).toBe('/tmp/First.pmv');
+    expect(tab.classList.contains('dirty')).toBe(false);
+
+    file.dirty = true;
+    flushSync(() => PM.bus.emit('projects:tabs'));
+    expect(tab.classList.contains('dirty')).toBe(true);
+    expect(tab.getAttribute('aria-label')).toBe('First, unsaved');
+
+    file.dirty = false;
+    file.path = '/tmp/First-renamed.pmv';
+    flushSync(() => PM.bus.emit('projects:tabs'));
+    expect(tab.classList.contains('dirty')).toBe(false);
+    expect(tab.title).toBe('/tmp/First-renamed.pmv');
+  });
+
   it('opens the clicked project through the legacy project-open event', () => {
     const { PM, projects } = fakePM();
     PM.ProjectsScreen.isOpen = true;
