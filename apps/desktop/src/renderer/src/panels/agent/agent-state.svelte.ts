@@ -1,3 +1,4 @@
+import type { NoticeKind } from '../../errors/presentation';
 import type { AgentModResult } from './mod-result';
 import type { UIPlacement } from './ui-placement';
 
@@ -22,6 +23,11 @@ export interface AgentMessage {
   entering?: boolean;
   /** Run failures render with the error treatment. */
   error?: boolean;
+  /** How much apparatus the failure earns: the editor's own error keeps the
+      diagnostics, the agent's account of what it could not do is an alert, and
+      a turn where nothing broke reads as an ordinary reply. Absent means
+      'error', so older messages keep their treatment. */
+  notice?: NoticeKind;
   /** Editor mode could not author the requested extension. */
   requiresProject?: boolean;
   fixExtensionId?: string;
@@ -222,7 +228,7 @@ function reconcileConversation(next: AgentMessage[]): void {
       continue;
     }
     assignChangedFields(currentMessage, nextMessage, [
-      'text', 'steering', 'entering', 'error', 'fixExtensionId', 'requiresProject', 'durationMs'
+      'text', 'steering', 'entering', 'error', 'notice', 'fixExtensionId', 'requiresProject', 'durationMs'
     ]);
     if (!jsonEqual(currentMessage.modResult, nextMessage.modResult)) {
       currentMessage.modResult = nextMessage.modResult ? { ...nextMessage.modResult } : undefined;

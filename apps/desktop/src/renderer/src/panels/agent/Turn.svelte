@@ -33,6 +33,10 @@
   });
   function promptSignal(node: HTMLElement) { return { destroy: mountPromptGlow(node) }; }
 
+  /* A turn that failed is not automatically the editor's error. Messages
+     written before the distinction existed carry no kind and stay errors. */
+  const notice = $derived(message.notice ?? 'error');
+
   // Autonomous replies are stored as trace text. Keep the last reply outside
   // the disclosure so collapsing the work never hides the agent's answer.
   const steps = $derived(message.role === 'trace' ? message.steps ?? [] : []);
@@ -79,13 +83,21 @@
     </div>
   </div>
 {:else}
-  <div class="agent-msg assistant" class:is-error={message.error}>
-    {#if message.error}
-      <ErrorNotice error={message.text} live={Boolean(message.entering)}>
+  <div class="agent-msg assistant" class:is-error={message.error && notice === 'error'}>
+    {#if message.error && notice !== 'plain'}
+      <ErrorNotice error={message.text} live={Boolean(message.entering)} kind={notice}>
         {#snippet actions()}
           <button type="button" class="btn" disabled={agentState.phase === 'running'} onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
         {/snippet}
       </ErrorNotice>
+    {:else if message.error}
+      <!-- Nothing broke and nothing was lost: the agent is simply answering,
+           so the turn reads like any other reply, with the retry it still
+           deserves. -->
+      <div class="agent-reply"><Markdown text={message.text || ''} streaming={Boolean(message.entering)} animated={Boolean(message.entering)} /></div>
+      <button type="button" class="btn agent-error-retry"
+        disabled={agentState.phase === 'running'}
+        onclick={() => PM.AgentUI?.retry?.(messageIndex)}>Try again</button>
     {:else if modResult}
       <ModResult {PM} result={modResult} />
     {:else}

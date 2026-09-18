@@ -1,4 +1,5 @@
 import { createAgentCheckpoint } from './checkpoint';
+import { noticeKind, stated } from '../../errors/presentation';
 import { notifyAgentFinished } from '../../panels/agent/notification-preferences';
 /* Ported from js/assistant/spatial.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -1262,7 +1263,7 @@ async function importAutonomousArtifact(artifact: any) {
   artifact.importing = true; PM.AgentUI?.update();
   try {
     const file: any = await PM.AgentArtifacts.load(artifact);
-    if (!PM.assetKind(file)) throw new Error('This artifact is not a supported image, video, or audio file');
+    if (!PM.assetKind(file)) throw stated('This artifact is not a supported image, video, or audio file', 'alert');
     await PM.importFiles([file]);
     artifact.imported = true;
     PM.toast(`Added ${artifact.name} to the timeline`, 2200, { error: false });
@@ -1656,7 +1657,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
         request,
       );
       if (plan.kind !== 'scene' || plan.operation === 'noop') {
-        throw new Error(plan.message || 'The coding agent could not reconcile its edits with the current project');
+        throw stated(plan.message || 'The coding agent could not reconcile its edits with the current project', 'alert');
       }
       result.commands = plan.sceneEdit?.commands || [];
       if (plan.sceneEdit?.summary) result.notes.push(plan.sceneEdit.summary);
@@ -1689,7 +1690,7 @@ The user edited the project during the autonomous run. Return kind=scene and a c
       for (const artifact of result.artifacts.filter((item: any) => item.importToTimeline)) {
         try {
           const file: any = await PM.AgentArtifacts.load(artifact);
-          if (!PM.assetKind(file)) throw new Error(`${artifact.name} is not supported project media`);
+          if (!PM.assetKind(file)) throw stated(`${artifact.name} is not supported project media`, 'alert');
           await PM.importFiles([file]);
           artifact.imported = true; changed = true;
         } catch (error: any) {
@@ -1947,10 +1948,12 @@ async function sendRequest(input: any) {
       touch(session, { focusComposer: true });
       return;
     }
-    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw new Error(plan.message || 'I could not prepare the composition edit');
-    if (plan.kind === 'section' && !plan.section.controls.length) throw new Error('The generated section had no controls connected to editable source');
-    if (plan.kind === 'workspace' && !plan.workspaceEdit) throw new Error('The generated workspace was not safe or complete enough to preview');
-    if (plan.kind === 'panels' && !plan.panelEdit.actions.length) throw new Error('I could not find a valid panel action to perform');
+    /* The agent's own account of what it could not make. Nothing is broken and
+       nothing was lost, so these are the agent speaking, not the editor failing. */
+    if (plan.kind === 'scene' && !plan.sceneEdit.commands.length) throw stated(plan.message || 'I could not prepare the composition edit', 'alert');
+    if (plan.kind === 'section' && !plan.section.controls.length) throw stated('The generated section had no controls connected to editable source', 'alert');
+    if (plan.kind === 'workspace' && !plan.workspaceEdit) throw stated('The generated workspace was not safe or complete enough to preview', 'alert');
+    if (plan.kind === 'panels' && !plan.panelEdit.actions.length) throw stated('I could not find a valid panel action to perform', 'plain');
     updateSteps(plan.steps, -1, session);
     archiveTrace(false, session);
     session.stepsExpanded = session.steps.length > 1;
@@ -1966,7 +1969,8 @@ async function sendRequest(input: any) {
     const current: any = session.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     archiveTrace(false, session);
     session.activity = ''; session.phase = 'conversation';
-    session.conversation.push({ entering: true, role: 'assistant', error: true, text: String(error.message || error).slice(0, 4000) });
+    session.conversation.push({ entering: true, role: 'assistant', error: true, notice: noticeKind(error),
+      text: String(error.message || error).slice(0, 4000) });
     touch(session, { focusComposer: true });
   } finally {
     if (token === session.requestToken) {
@@ -2648,7 +2652,9 @@ async function applyPanelPlan(plan: any) {
       else if (action.type === 'expand') changed = PM.Layout.setCollapsed(action.panelId, false);
       if (changed) result.applied.push(action);
     }
-    if (!result.applied.length) throw new Error('Those panels were already arranged that way');
+    /* Not a failure at all: the panels are as asked, there was simply nothing
+       to do. A red card would tell the user something went wrong. */
+    if (!result.applied.length) throw stated('Those panels were already arranged that way', 'plain');
     const summary: any = `${result.applied.length} panel change${result.applied.length === 1 ? '' : 's'} applied`;
     finishWorkspaceRun(checkpoint, summary, result.applied);
     PM.toast(summary);
@@ -2656,7 +2662,10 @@ async function applyPanelPlan(plan: any) {
     PM.WS.restoreHistorySnapshot(checkpoint);
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.plan = null; S.phase = 'conversation';
-    S.conversation.push({ entering: true, role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
+    /* The checkpoint is restored above, so the project is exactly as it was —
+       which is what the sentence says, and why this need not read as a fault. */
+    S.conversation.push({ entering: true, role: 'assistant', error: true, notice: noticeKind(error),
+      text: `${String(error.message || error).slice(0, 180)}. Nothing was changed.` });
     PM.AgentUI?.update({ focusComposer: true });
   }
 }
@@ -2699,7 +2708,8 @@ async function applyScenePlan(plan: any) {
   } catch (error: any) {
     const current: any = S.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
     S.activity = ''; S.phase = 'conversation';
-    S.conversation.push({ entering: true, role: 'assistant', error: true, text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
+    S.conversation.push({ entering: true, role: 'assistant', error: true, notice: noticeKind(error),
+      text: `${String(error.message || error).slice(0, 180)} Nothing was applied.` });
     PM.AgentUI?.update({ focusComposer: true });
   }
 }

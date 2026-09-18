@@ -168,6 +168,32 @@ describe('assistant word reveal', () => {
   });
 });
 
+it('states what the agent could not do without dressing it as an editor error', () => {
+  const text = 'The generated workspace was not safe or complete enough to preview';
+  render({ role: 'assistant', error: true, notice: 'alert', text, entering: true });
+
+  const notice = target.querySelector('.error-notice')!;
+  expect(notice.classList.contains('is-alert')).toBe(true);
+  expect(notice.textContent).toContain(text);
+  // The agent's own sentence is the whole story: no title to read past, and
+  // nothing technical to unfold.
+  expect(target.querySelector('details')).toBeNull();
+  expect(target.querySelector('strong')).toBeNull();
+  expect(target.querySelector('[role="alert"]')).toBeNull();
+  expect([...target.querySelectorAll('button')].some(button => button.textContent === 'Try again')).toBe(true);
+});
+
+it('lets a turn where nothing broke read as an ordinary reply', () => {
+  const text = 'Those panels were already arranged that way. Nothing was changed.';
+  render({ role: 'assistant', error: true, notice: 'plain', text, entering: false });
+
+  expect(target.querySelector('.error-notice')).toBeNull();
+  expect(target.querySelector('.agent-msg.is-error')).toBeNull();
+  expect(target.textContent).toContain('Those panels were already arranged that way');
+  // It is still a turn the user may want to run again.
+  expect([...target.querySelectorAll('button')].some(button => button.textContent === 'Try again')).toBe(true);
+});
+
 it('shows a readable error with the raw diagnostic behind details', () => {
   const raw = 'The agent failed: Error: thread/resume: thread/resume failed: thread abc already has an active writer (code -32600)';
   render({ role: 'assistant', error: true, text: raw, entering: true });

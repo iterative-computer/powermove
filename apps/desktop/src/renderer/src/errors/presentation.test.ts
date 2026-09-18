@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { presentError } from './presentation';
+import { noticeKind, presentError, stated } from './presentation';
 
 it.each([
   ['Error: ENOSPC: no space left on device', 'Your disk is full'],
@@ -28,4 +28,18 @@ it('does not mistake a provider writer lock for another active Powermove convers
   expect(presentError(raw).title).toBe('Agent session couldn’t reopen');
   expect(presentError(raw).message).not.toContain('current run');
   expect(presentError('An agent is already running in this conversation.').title).toBe('Conversation is busy');
+});
+
+it('keeps an unrecognised failure an error and honours a stated kind', () => {
+  // Nothing states a kind for a transport fault, and softening one would hide
+  // a real problem — so anything unlabelled stays an error.
+  expect(noticeKind(new Error('ENOSPC: no space left on device'))).toBe('error');
+  expect(noticeKind('some string')).toBe('error');
+  expect(noticeKind(null)).toBe('error');
+  expect(noticeKind(Object.assign(new Error('x'), { notice: 'nonsense' }))).toBe('error');
+
+  const alert = stated('The generated workspace was not safe or complete enough to preview', 'alert');
+  expect(noticeKind(alert)).toBe('alert');
+  expect(alert.message).toBe('The generated workspace was not safe or complete enough to preview');
+  expect(noticeKind(stated('Those panels were already arranged that way', 'plain'))).toBe('plain');
 });

@@ -4,6 +4,28 @@ export interface ErrorPresentation {
   details: string;
 }
 
+/** What a failed turn actually was, and so how much apparatus it earns.
+    `error` is the editor or the transport failing, and keeps the diagnostics.
+    `alert` is the agent reporting that it could not do the thing, with the
+    project intact — worth marking, but there is nothing to decipher. `plain`
+    is the agent simply answering: nothing broke, nothing was lost, and a red
+    card would overstate it. */
+export type NoticeKind = 'plain' | 'alert' | 'error';
+
+const NOTICE_KINDS: readonly string[] = ['plain', 'alert', 'error'];
+
+/** An error carries its own kind when the code that threw it knew; anything
+    unrecognised stays an error, so a real fault is never quietly softened. */
+export function noticeKind(value: unknown): NoticeKind {
+  const stated = (value as { notice?: unknown } | null)?.notice;
+  return typeof stated === 'string' && NOTICE_KINDS.includes(stated) ? stated as NoticeKind : 'error';
+}
+
+/** Throw one of these where the outcome is known: `stated('…', 'plain')`. */
+export function stated(message: string, kind: NoticeKind): Error {
+  return Object.assign(new Error(message), { notice: kind });
+}
+
 /** Keep diagnostics available without asking people to decipher transport logs. */
 export function presentError(value: unknown): ErrorPresentation {
   const details = (value instanceof Error ? value.message : String(value ?? '')).trim();
