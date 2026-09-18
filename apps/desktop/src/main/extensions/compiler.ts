@@ -18,8 +18,8 @@ interface CompileExtensionOptions {
 }
 
 interface SvelteCompiler {
-  compile(source: string, options: Record<string, unknown>): { js: { code: string } };
-  compileModule(source: string, options: Record<string, unknown>): { js: { code: string } };
+  compile(source: string, options: Record<string, unknown>): { js: { code: string }; css?: { code: string } | null };
+  compileModule(source: string, options: Record<string, unknown>): { js: { code: string }; css?: { code: string } | null };
 }
 
 const SOURCE_SUFFIXES = ['.ts', '.js', '.mjs', '.svelte', '.svelte.ts', '.svelte.js'] as const;
@@ -162,11 +162,29 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
       name: 'powermove-extension-boundary',
       setup(build) {
         build.onResolve({ filter: /.*/ }, async (args) => {
+          if (args.path === 'powermove:bundle' || args.path === 'powermove:styles') {
+            return { path: args.path, namespace: 'powermove-bundle' };
+          }
           if (isRuntimeImport(args.path)) return { path: args.path, namespace: RUNTIME_NAMESPACE };
           const resolveDir = args.kind === 'entry-point' ? extensionRoot : args.resolveDir;
           const specifier = args.kind === 'entry-point' && !args.path.startsWith('.') ? `./${args.path}` : args.path;
           return { path: await resolveSource(specifier, resolveDir), namespace: SOURCE_NAMESPACE };
         });
+
+        build.onLoad({ filter: /.*/, namespace: 'powermove-bundle' }, (args) => ({
+          contents: args.path === 'powermove:styles'
+            ? `export const styles = [];
+               const listeners = new Set();
+               export function add(css) { styles.push(css); for (const listener of listeners) listener(css); }
+               export function acquire(listener) {
+                 for (const css of styles) listener(css);
+                 listeners.add(listener);
+                 return () => listeners.delete(listener);
+               }`
+            : `export { default } from ${JSON.stringify(`./${entry}`)}; export * from ${JSON.stringify(`./${entry}`)}; export { styles as __powermoveStyles, acquire as __powermoveAcquireStyles } from 'powermove:styles';`,
+          loader: 'js',
+          resolveDir: extensionRoot
+        }));
 
         build.onLoad({ filter: /.*/, namespace: RUNTIME_NAMESPACE }, async (args) => ({
           contents: await runtimeModule(args.path),
@@ -191,24 +209,20 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
 
           const source = (await readFile(args.path)).toString('utf8');
           if (args.path.endsWith('.css')) {
-            return {
-              contents: [
-                'const style = document.createElement("style");',
-                `style.textContent = ${JSON.stringify(source)};`,
-                'document.head.appendChild(style);'
-              ].join('\n'),
-              loader: 'js'
-            };
+            return { contents: `import { add } from 'powermove:styles'; add(${JSON.stringify(source)});`, loader: 'js' };
           }
           if (args.path.endsWith('.svelte')) {
             const compiler = await getSvelteCompiler();
             const compiled = compiler.compile(source, {
               generate: 'client',
-              css: 'injected',
+              css: 'external',
               filename: args.path,
               runes: true
             });
-            return { contents: compiled.js.code, loader: 'js', resolveDir: path.dirname(args.path) };
+            const css = compiled.css?.code
+              ? `\nimport { add as __powermoveCss } from 'powermove:styles'; __powermoveCss(${JSON.stringify(compiled.css.code)});`
+              : '';
+            return { contents: compiled.js.code + css, loader: 'js', resolveDir: path.dirname(args.path) };
           }
           if (args.path.endsWith('.svelte.ts') || args.path.endsWith('.svelte.js')) {
             const compiler = await getSvelteCompiler();
@@ -225,7 +239,7 @@ export async function compileExtension({ dir, entry, outDir }: CompileExtensionO
     };
 
     const result = await esbuild.build({
-      entryPoints: [entry],
+      entryPoints: ['powermove:bundle'],
       bundle: true,
       format: 'esm',
       platform: 'browser',

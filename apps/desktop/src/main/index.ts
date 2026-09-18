@@ -449,7 +449,10 @@ if (!hasSingleInstanceLock) {
       // Compile in the background; the renderer receives ext:changed when done.
       void extensionRegistry
         .refresh()
-        .then(() => startExtensionWatcher({ userDir, buildDir, registry: extensionRegistry }))
+        .then(() => {
+          extensionRegistry.emitChanged({ ids: [], reason: 'reload' });
+          return startExtensionWatcher({ userDir, buildDir, registry: extensionRegistry });
+        })
         .catch((error) => console.error('[extensions] initial refresh failed', error));
     } catch (error) {
       console.error('[extensions] boot skipped', error);

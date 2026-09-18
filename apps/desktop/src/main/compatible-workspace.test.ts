@@ -34,7 +34,7 @@ it('reports real compile errors before publishing and exports created artifacts'
   const result = { summary: 'Done', commands: [], artifacts: [], extensions: [{ id: 'broken-effect', action: 'created' }], notes: [], externalActions: [] };
   await expect(ws.finish(result, signal())).rejects.toThrow('failed compilation');
   await expect(access(path.join(ws.layout.liveDirectory, 'broken-effect'))).rejects.toThrow();
-  await ws.call('write_file', { path: path.join(dir, 'index.ts'), text: 'export function activate() {}' }, signal());
+  await ws.call('write_file', { path: path.join(dir, 'index.ts'), text: 'export default function activate() {}' }, signal());
   await ws.call('write_file', { path: path.join(ws.layout.runDirectory, 'note.txt'), text: 'proof' }, signal());
   const finished = await ws.finish(result, signal());
   expect(finished.ok).toBe(true);
