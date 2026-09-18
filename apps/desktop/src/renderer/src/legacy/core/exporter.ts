@@ -371,6 +371,13 @@ function progressUI(total: any) {
   };
 }
 
+async function deliver(blob: Blob, name: string): Promise<boolean> {
+  const result = await PM.download(blob, name);
+  if (result?.cancelled) return false;
+  if (result?.ok === false) throw new Error(result.error || 'Save failed');
+  return true;
+}
+
 async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
   const p: any = PM.proj;
@@ -390,7 +397,7 @@ async function run(opts: any) {
           if (saved.cancelled) return { cancelled: true };
           throw new Error(saved.error || 'Could not save web animation');
         }
-      } else await PM.download(new Blob([result.bytes], { type: 'application/zip' }), name);
+      } else if (!await deliver(new Blob([result.bytes], { type: 'application/zip' }), name)) return { cancelled: true };
       PM.toast(result.scene.warnings.length ? 'Web animation exported · see README for compatibility notes' : 'Web animation exported');
       return { cancelled: false };
     } catch (error) {
@@ -405,8 +412,7 @@ async function run(opts: any) {
     try {
       await PM.app?.importQueue;
       const data = await packProjectFileBlob({ ...JSON.parse(PM.serialize()), history: PM.hist.export?.() }, PM.MediaStore);
-      const saved = await PM.download(data, (p.name || 'powermove') + '.pmv');
-      if (saved?.cancelled) return { cancelled: true };
+      if (!await deliver(data, (p.name || 'powermove') + '.pmv')) return { cancelled: true };
       PM.toast('Project exported');return {cancelled:false};
     } catch (error) { const message=error instanceof Error?error.message:String(error);PM.toast('Could not export project: '+message,6000);return {error:message}; }
     finally { X.busy = false; }
@@ -416,7 +422,7 @@ async function run(opts: any) {
     try{await prepareFrame(PM,at);
       const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur) : PM.renderFrameTo(at, W, H);
       const blob=await new Promise<Blob>((resolve,reject)=>cv.toBlob((b:Blob|null)=>b?resolve(b):reject(new Error('Could not encode frame'))));
-      await PM.download(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`);
+      if (!await deliver(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`)) return { cancelled: true };
       PM.toast('Frame exported');return {cancelled:false};
     }catch(error){const message=(error as Error).message;PM.toast(message,6000);return {error:message};}
     finally{X.busy=false;PM.preparedVideoFrames=null;PM.setTime(at,{force:true});viewerService(PM)?.layout();if(wasPlaying)PM.play();}
@@ -507,7 +513,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
   const token=await bridge.start({width:W,height:H,fps:opts.fps,format:opts.format,alpha:!!opts.alpha,bitrateMbps:exportBitrateMbps(opts.quality),name:opts.name||PM.proj.name});let released=false;
   const chunks=async(bytes:Uint8Array,audio=false)=>{for(let at=0;at<bytes.length;at+=4*1024*1024)await bridge.write(token,bytes.slice(at,at+4*1024*1024),audio);};
   try{for(let i=0;i<total;i++){if(X.cancel)break;const T=t0+i/opts.fps;await prepareFrame(PM,T);const cv=opts.alpha?alphaFrame(T,W,H,opts.mblur):PM.renderFrameTo(T,W,H,{mblur:opts.mblur});const bytes=new Uint8Array(cv.getContext('2d').getImageData(0,0,W,H).data);await chunks(bytes);pctx.drawImage(cv,0,0,ui.prev.width,ui.prev.height);ui.set(i+1,opts.format==='prores'?'ProRes 4444':'H.264');await new Promise(r=>setTimeout(r,0));}
-    if(X.cancel)return;if(opts.audio!==false&&PM.Audio.hasAudibleLayers(PM.proj)){const mix=await PM.Audio.renderOffline(t0,t1);if(mix)await chunks(wavBytes(mix),true);}const result=await bridge.finish(token);released=true;if(result.cancelled)X.cancel=true;
+    if(X.cancel)return;if(opts.audio!==false&&PM.Audio.hasAudibleLayers(PM.proj)){const mix=await PM.Audio.renderOffline(t0,t1);if(mix)await chunks(wavBytes(mix),true);}const result=await bridge.finish(token);released=true;if(result.cancelled)X.cancel=true;else if(!result.path)throw new Error('Could not save video');
   }finally{if(!released)await bridge.cancel(token).catch(()=>undefined);}
 }
 
@@ -567,7 +573,7 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     }
   }
   const blob: any = muxWebM(frames, { width: W, height: H, fps: opts.fps, codecId: chosen.id, audio: audioPayload });
-  await PM.download(blob, `${PM.proj.name || 'powermove'}.webm`);
+  if (!await deliver(blob, `${PM.proj.name || 'powermove'}.webm`)) X.cancel = true;
   } finally { if (enc.state !== 'closed') enc.close(); }
 }
 
@@ -630,13 +636,17 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
   if (X.cancel) return;
   const extension: any = isMp4 ? 'mp4' : 'webm';
   const type: any = isMp4 ? 'video/mp4' : 'video/webm';
-  PM.download(new window.Blob(chunks, { type }), `${PM.proj.name || 'powermove'}.${extension}`);
+  if (!await deliver(new window.Blob(chunks, { type }), `${PM.proj.name || 'powermove'}.${extension}`)) X.cancel = true;
 }
 
 async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
   let dir: any = null;
   if ((window as any).showDirectoryPicker) {
-    try { dir = await (window as any).showDirectoryPicker({ mode: 'readwrite' }); } catch (e: any) { }
+    try { dir = await (window as any).showDirectoryPicker({ mode: 'readwrite' }); }
+    catch (e: any) {
+      if (e?.name === 'AbortError') { X.cancel = true; return; }
+      throw e;
+    }
   }
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
@@ -644,14 +654,19 @@ async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
     await prepareFrame(PM,T);
     let cv: any;
     if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur);
-    if (!cv) cv = renderInto(T, W, H, opts.mblur);
-    const blob: any = await new Promise((r: any) => cv.toBlob(r, 'image/png'));
+    if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur });
+    const blob: Blob = await new Promise((resolve, reject) => cv.toBlob((encoded: Blob | null) =>
+      encoded ? resolve(encoded) : reject(new Error('Could not encode frame')), 'image/png'));
     const name: any = `${PM.proj.name || 'frame'}_${String(i).padStart(5, '0')}.png`;
     if (dir) {
       const fh: any = await dir.getFileHandle(name, { create: true });
       const w: any = await fh.createWritable();
-      await w.write(blob); await w.close();
-    } else PM.download(blob, name);
+      try { await w.write(blob); await w.close(); }
+      catch (error) {
+        try { await w.abort?.(); } catch { /* Keep the original write error. */ }
+        throw error;
+      }
+    } else if (!await deliver(blob, name)) { X.cancel = true; return; }
     pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
     ui.set(i + 1, dir ? 'writing to folder' : 'downloading');
     await new Promise((r: any) => window.setTimeout(r, 0));
