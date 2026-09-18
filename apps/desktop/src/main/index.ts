@@ -29,7 +29,7 @@ import { registerContextMenuIpc } from './context-menu';
 import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
 import { installMenu, installRendererMenuShortcutRouting } from './menu';
-import { registerSaveIpc } from './save';
+import { openProjectForWindow, registerSaveIpc } from './save';
 import { ProjectFiles } from './project-files';
 import { registerShellIpc } from './shell';
 import { CONTENT_SECURITY_POLICY, SANDBOX_CONTENT_SECURITY_POLICY } from './security-policy';
@@ -107,7 +107,43 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | null = null;
 let onboardingFlow: OnboardingFlow | null = null;
 let startupInitialized = false;
+let projects: ProjectFiles | null = null;
+const pendingOpenFiles: string[] = [];
+const recentOpenFiles = new Map<string, number>();
 let quitPrepared = () => false;
+
+function queueOrOpen(filePath: string): void {
+  const normalized = path.resolve(filePath);
+  const now = Date.now();
+  const lastOpen = recentOpenFiles.get(normalized);
+  if (lastOpen !== undefined && now - lastOpen < 1_000) return;
+  recentOpenFiles.set(normalized, now);
+  for (const [candidate, timestamp] of recentOpenFiles) {
+    if (now - timestamp >= 1_000) recentOpenFiles.delete(candidate);
+  }
+  if (!startupInitialized || !mainWindow || mainWindow.isDestroyed()
+    || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isLoading() || !projects) {
+    if (!pendingOpenFiles.includes(normalized)) pendingOpenFiles.push(normalized);
+    return;
+  }
+  const target = mainWindow.webContents;
+  void openProjectForWindow({ projects }, target, normalized).then(result => {
+    if (!target.isDestroyed()) target.send(IPC.projectOpenExternal, result);
+  });
+}
+
+function drainPendingOpenFiles(): void {
+  if (!startupInitialized || !mainWindow || mainWindow.isDestroyed()
+    || mainWindow.webContents.isDestroyed() || mainWindow.webContents.isLoading() || !projects) return;
+  const queued = pendingOpenFiles.splice(0);
+  for (const filePath of queued) {
+    // The queue has already passed through the duplicate guard.
+    const target = mainWindow.webContents;
+    void openProjectForWindow({ projects }, target, filePath).then(result => {
+      if (!target.isDestroyed()) target.send(IPC.projectOpenExternal, result);
+    });
+  }
+}
 async function prepareEditorClose(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed() || window.webContents.isDestroyed()
     || !isAllowedNavigation(window.webContents.getURL(), devRendererUrl)) return;
@@ -285,6 +321,7 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
   });
 
   mainWindow = window;
+  window.webContents.once('did-finish-load', drainPendingOpenFiles);
   installRendererMenuShortcutRouting(window.webContents);
   installTextContextMenu(window.webContents);
 
@@ -359,18 +396,29 @@ function createWindow(entrance = false, onEntranceReady?: () => void): BrowserWi
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('open-file', (event, filePath) => {
+    event.preventDefault();
+    queueOrOpen(filePath);
+  });
+
+  app.on('second-instance', (_event, argv) => {
     if (isBackgroundTest) return;
+    const projectFiles = argv.filter(candidate => path.isAbsolute(candidate) && candidate.toLowerCase().endsWith('.pmv'));
     // The listener is installed before async startup finishes. Do not let an
     // early second launch create the editor before the first-run gate decides
     // whether onboarding owns startup.
-    if (!startupInitialized) return;
+    if (!startupInitialized) {
+      for (const filePath of projectFiles) queueOrOpen(filePath);
+      return;
+    }
     if (onboardingFlow?.hasActiveWindow() || onboardingFlow?.isFirstRunPending()) {
       onboardingFlow.focus();
+      for (const filePath of projectFiles) queueOrOpen(filePath);
       return;
     }
     if (mainWindow === null) {
       createWindow();
+      for (const filePath of projectFiles) queueOrOpen(filePath);
       return;
     }
     if (mainWindow.isMinimized()) {
@@ -378,6 +426,7 @@ if (!hasSingleInstanceLock) {
     }
     mainWindow.show();
     mainWindow.focus();
+    for (const filePath of projectFiles) queueOrOpen(filePath);
   });
 
   // Every WebContents (not just the main window's) gets the navigation guards.
@@ -459,7 +508,8 @@ if (!hasSingleInstanceLock) {
     }
 
     const ctx = { isTrustedSender, isTrustedSenderContents };
-    registerSaveIpc(ipcMain, { ...ctx, projects: new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json')) });
+    projects = new ProjectFiles(path.join(app.getPath('userData'), 'project-files.json'));
+    registerSaveIpc(ipcMain, { ...ctx, projects });
     registerCaptureIpc(ipcMain, ctx);
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
@@ -565,6 +615,7 @@ if (!hasSingleInstanceLock) {
       createWindow();
     }
     startupInitialized = true;
+    drainPendingOpenFiles();
 
     app.on('activate', () => {
       if (isBackgroundTest) return;

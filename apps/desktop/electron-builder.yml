@@ -78,6 +78,15 @@ publish:
 
 artifactName: ${productName}-${version}-mac-${arch}.${ext}
 
+fileAssociations:
+  - ext: pmv
+    name: Powermove Project
+    description: Powermove Project
+    role: Editor
+    icon: resources/document.icns
+    mimeType: application/vnd.powermove.project
+    isPackage: false
+
 mac:
   # Local dist:mac builds stay unsigned. scripts/release-mac.mjs flips
   # identity, hardenedRuntime and notarize on for CI releases.
@@ -86,6 +95,18 @@ mac:
   category: public.app-category.graphics-design
   entitlementsInherit: resources/entitlements.mac.plist
   icon: resources/icon.icns
+  extendInfo:
+    UTExportedTypeDeclarations:
+      - UTTypeIdentifier: com.zellzoi.powermove.project
+        UTTypeDescription: Powermove Project
+        UTTypeConformsTo:
+          - public.data
+        UTTypeTagSpecification:
+          public.filename-extension:
+            - pmv
+          public.mime-type:
+            - application/vnd.powermove.project
+        UTTypeIconFile: document.icns
   # The DMG comes from scripts/create-dmg.mjs; electron-builder only builds
   # the ZIP that electron-updater downloads.
   target:
