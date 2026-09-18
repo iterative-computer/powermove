@@ -41,7 +41,11 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Set release version
         working-directory: apps/desktop
-        run: bun pm version "${{ steps.tag.outputs.version }}" --no-git-tag-version
+        run: |
+          current=$(node -p "require('./package.json').version")
+          if [ "$current" != "${{ steps.tag.outputs.version }}" ]; then
+            bun pm version "${{ steps.tag.outputs.version }}" --no-git-tag-version
+          fi
       - name: Test update and session lifecycle
         run: bun run --cwd apps/desktop test -- src/main/updates.test.ts src/main/menu.test.ts src/main/storage.test.ts
       - name: Write notarization key
