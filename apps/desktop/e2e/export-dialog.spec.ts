@@ -1,5 +1,44 @@
 import { expect, launchApp, test } from './helpers/app';
 
+test('export inherits Settings spacing and rounded cards and controls in both themes', async ({ session }, testInfo) => {
+  await session.openEditor();
+  const { page } = session;
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => {
+      const PM = (window as any).PM;
+      PM.theme.apply(theme);
+      PM.proj.w = 1080; PM.proj.h = 1920;
+      PM.Export.dialog();
+    }, theme);
+    const dialog = page.getByRole('dialog', { name: 'Export', exact: true });
+    const field = dialog.locator('.pm-select.export-select').first();
+    await expect(field).toHaveAttribute('data-squircle', '');
+    const geometry = await dialog.evaluate(el => {
+      const card = el.querySelector<HTMLElement>('.settings-section-body')!;
+      const row = card.querySelector<HTMLElement>('.settings-row')!;
+      const field = row.querySelector<HTMLElement>('.pm-select')!;
+      const footer = el.querySelector<HTMLElement>('.mf .pri')!;
+      return {
+        padding: parseFloat(getComputedStyle(row).paddingRight),
+        inset: card.getBoundingClientRect().right - field.getBoundingClientRect().right,
+        cardClip: getComputedStyle(card).clipPath,
+        fieldClip: getComputedStyle(field).clipPath,
+        footerClip: getComputedStyle(footer).clipPath,
+        overflow: el.scrollWidth > el.clientWidth,
+      };
+    });
+    expect(geometry.padding).toBeGreaterThan(0);
+    expect(geometry.inset).toBeCloseTo(geometry.padding, 0);
+    expect(geometry.cardClip).not.toBe('none');
+    expect(geometry.fieldClip).not.toBe('none');
+    expect(geometry.footerClip).not.toBe('none');
+    expect(geometry.overflow).toBe(false);
+    await page.screenshot({ path: testInfo.outputPath(`export-${theme}.png`) });
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  }
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
 test('Export dialog gates fields by format and accepts a custom size', async () => {
   const session = await launchApp();
   try {
@@ -121,6 +160,12 @@ test('progress displays actual pixels and cancelling releases the export', async
       return canvas && canvas.getContext('2d')!.getImageData(0,0,1,1).data[0] > 0;
     });
     await expect(progress.getByRole('progressbar')).toHaveAttribute('aria-valuenow', /[1-9]/);
+    await page.locator('#scrim').click({ position: { x: 5, y: 5 } });
+    await expect(progress).toBeVisible();
+    await progress.focus();
+    await page.keyboard.press('Escape');
+    await expect(progress).toBeVisible();
+    expect(await page.evaluate(() => (window as any).PM.Export.cancel)).toBe(false);
     await page.screenshot({path:'/tmp/powermove-export-progress.png'});
     await progress.getByRole('button',{name:'Cancel',exact:true}).click();
     const result = await page.evaluate(async () => ({result:await (window as any).__exportResult,busy:(window as any).PM.Export.busy}));

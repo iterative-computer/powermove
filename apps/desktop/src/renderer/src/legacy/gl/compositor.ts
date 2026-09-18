@@ -1,4 +1,5 @@
-import { seekPreviewVideo } from '../core/video-seek';
+import { videoClipsAt } from '../core/video-timeline';
+import { previewSeekFrame, seekPreviewVideo } from '../core/video-seek';
 import { layerVideoElement, videoInstanceTextureKey } from '../core/video-instances';
 import { sequencePlaybackTime } from '../../../../shared/image-sequence';
 import { GPUTiming } from './gpu-timing';
@@ -179,6 +180,8 @@ let viewportPathFrame = 0;
 let viewportPathVersion = 0;
 
 let useVideoPreviews = false;
+let videoPath = '';
+let previewVideoTimes = new Map<string, number>();
 
 function videoTextureVersion(el: any): number {
   let state = presentedVideoFrames.get(el);
@@ -795,24 +798,27 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
   if (L.type === 'image' || L.type === 'video') {
     const a = PM.assets.get(d.asset);
     if (!a) return null;
-    const liveVideo = L.type === 'video' && useVideoPreviews ? layerVideoElement(PM, a, L.id) : a.el;
-    let el = PM.preparedVideoFrames?.get(L.id+'@'+T) || liveVideo, sw = a.w || 1, sh = a.h || 1;
+    const liveVideo = L.type === 'video' && useVideoPreviews ? layerVideoElement(PM, a, videoPath + L.id) : a.el;
+    const preparedVideo = PM.preparedVideoFrames?.get(L.id+'@'+T);
+    const captured = L.type === 'video' && !preparedVideo && useVideoPreviews ? previewSeekFrame(liveVideo) : undefined;
+    let el = preparedVideo || captured?.canvas || liveVideo, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
-      const vt = sequencePlaybackTime(a, sourceTime(PM,L,T)) ?? PM.clamp(sourceTime(PM,L,T), 0, Math.max(0, a.dur - .04));
+      const videoTime = useVideoPreviews ? (previewVideoTimes.get(videoPath + L.id) ?? T) : T;
+      const vt = sequencePlaybackTime(a, sourceTime(PM,L,videoTime)) ?? PM.clamp(sourceTime(PM,L,videoTime), 0, Math.max(0, a.dur - .04));
       if (!PM.playing && el === liveVideo) seekPreviewVideo(el, vt, .0005);
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
     const bw = d.w || W, bh = d.h || H;
     let textureSource = el;
     let textureKey = 'a:' + a.id + (el===liveVideo?(el===a.el?'':':preview'):':'+L.id+'@'+T);
-    if (L.type === 'video' && el === liveVideo) textureKey = videoInstanceTextureKey(el);
+    if (L.type === 'video' && !preparedVideo) textureKey = videoInstanceTextureKey(liveVideo);
     if (L.type === 'image' && a.format === 'svg' && PM.rasterSvgAsset) {
       const dimensions = svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H));
       const raster = PM.rasterSvgAsset(a, dimensions.width, dimensions.height);
       textureSource = raster.cv;
       textureKey = 'r:' + raster.key;
     }
-    const videoVersion = L.type === 'video' ? (el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
+    const videoVersion = L.type === 'video' ? (captured ? `seek:${captured.version}` : el===liveVideo?videoTextureVersion(el):PM.preparedVideoVersion) : 1;
     // A seek can be pending while the previous decoded frame is still usable.
     // Gate on available pixels, not seeking, or seek-driven playback freezes.
     const waiting = L.type === 'video' && el === liveVideo
@@ -929,6 +935,8 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     const target = boundFbo;
     const f = grab(targetW, targetH);
     bind(f); clear(0, 0, 0, 0);
+    const previousVideoPath = videoPath;
+    videoPath += L.id + '/';
     pmScopePush(sub);
     try {
       const inner = GL.renderProject(sub, sourceTime(PM,L,T), targetW, targetH, { transparent: true });
@@ -946,6 +954,7 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
       free(inner);
     } finally {
       pmScopePop();
+      videoPath = previousVideoPath;
       bind(target);
     }
     return { tex: f.tex, w, h: hh, ax: 0, ay: 0, uv: [0, 0, 1, 1], fromFbo: true, tmp: f };
@@ -958,7 +967,13 @@ function pmScopePop() { PM.scope.pop(); pcDepth--; }
 function hashStr(s: any) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; }
 
 /* Draw one layer's content (with transform) into the bound target. */
-function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWindow) {
+function drawSample(additive: boolean) {
+  if (!additive) { draw(); return; }
+  const gl = GL.gl;
+  gl.blendFunc(gl.ONE, gl.ONE);
+  try { draw(); } finally { gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
+}
+function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWindow, additive = false) {
   const c: any = contentQuad(L, T, W, H, clip);
   if (!c) return false;
   const world = scaledWorld(L, T, W, H);
@@ -978,7 +993,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
     const g = use(p);
     g.u('u_m', projected); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
     g.u('u_color', c.solid[0] * alpha, c.solid[1] * alpha, c.solid[2] * alpha, alpha);
-    draw();
+    drawSample(additive);
     return true;
   }
   const p = program('draw', PM.FRAG_DRAW);
@@ -989,7 +1004,7 @@ function drawContent(L: any, T: any, W: any, H: any, alpha: any, clip?: RasterWi
   g.u('u_uv', c.uv[0], c.uv[1], c.uv[2], c.uv[3]);
   g.u('u_alpha', alpha);
   setI(p, 'u_fromFbo', c.fromFbo ? 1 : 0);
-  draw();
+  drawSample(additive);
   free(c.tmp);
   return true;
 }
@@ -1160,14 +1175,14 @@ function copyFbo(srcF: any, W: any, H: any) {
   return out;
 }
 
-function drawFbo(srcF: any, W: any, H: any, alpha = 1) {
+function drawFbo(srcF: any, W: any, H: any, alpha = 1, additive = false) {
   const p = program('copyA', PM.FRAG_DRAW);
   if (!p) return false;
   const g = use(p);
   bindTex(0, srcF.tex); setI(p, 'u_tex', 0);
   g.u('u_m', fullQuad(W, H)); g.u('u_res', W, H); g.u('u_uv', 0, 0, 1, 1);
   g.u('u_alpha', alpha); setI(p, 'u_fromFbo', 1);
-  draw();
+  drawSample(additive);
   return true;
 }
 
@@ -1411,7 +1426,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
             const sample = GL.renderProject(proj, T + dt, W, H, {
               ...opt, transparent: true, groupParent: L.id, mblur: false,
             });
-            bind(lf); drawFbo(sample, W, H, 1 / n); free(sample);
+            bind(lf); drawFbo(sample, W, H, 1 / n, true); free(sample);
           }
         } else {
           lf = GL.renderProject(proj, T, W, H, { ...opt, transparent: true, groupParent: L.id });
@@ -1423,7 +1438,7 @@ GL.renderProject = (proj: any, T: any, W: any, H: any, opt: any = {}) => {
           const n = opt.mbSamples || 10, shutter = (opt.shutter || .5) / proj.fps;
           for (let s = 0; s < n; s++) {
             const dt = ((s + .5) / n - .5) * shutter;
-            drawContent(L, T + dt, W, H, alpha / n);
+            drawContent(L, T + dt, W, H, alpha / n, undefined, true);
           }
         } else drawContent(L, T, W, H, alpha);
       }
@@ -1503,6 +1518,24 @@ GL.render = (T: any, opt: any = {}) => {
   visibleTextures.clear();
   framePrograms.clear(); compileSubmitMs = 0;
   const gl = GL.gl; if (!gl) return;
+  videoPath = '';
+  previewVideoTimes = new Map();
+  if (!opt.exporting && !PM.agentFrameCapture && !PM.preparedVideoFrames) {
+    let ready = true;
+    for (const clip of videoClipsAt(PM, T)) {
+      previewVideoTimes.set(clip.id, clip.time);
+      const video = layerVideoElement(PM, clip.asset, clip.id);
+      // Register completion invalidation even when we cannot draw yet.
+      videoTextureVersion(video);
+      if (!PM.playing) {
+        seekPreviewVideo(video, clip.at, .0005);
+        if (video.seeking || video.readyState < 2 || Math.abs(video.currentTime - clip.at) > .0005) ready = false;
+      } else if (clip.rate != null && (video.seeking || video.readyState < 2 || !video.videoWidth)) ready = false;
+    }
+    // Keep the last complete composition until all paused clips have decoded.
+    // Mixing old video pixels with new transforms creates visible ghost frames.
+    if (!ready) return false;
+  }
   gpuTiming?.poll();
   const t0 = window.performance.now();
   GL.stats.draws = 0; GL.stats.passes = 0; GL.stats.viewportVectors = 0;

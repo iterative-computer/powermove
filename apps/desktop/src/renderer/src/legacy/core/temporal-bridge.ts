@@ -12,6 +12,9 @@ export function temporalKeys(keys: any[], version?:number): any[] {
   if (keys.every(key=>owners.get(key)===keys)) { refreshAutoBezier(keys); return keys; }
   adoptTemporalEase(keys);
   for (const key of keys) {
+    // Existing accessors already resolve their neighbours from this array.
+    // Appending a key must not redefine every accessor in the track.
+    if (owners.get(key) === keys) continue;
     owners.set(key,keys);
     for (const [legacy,side] of [['eo','out'],['ei','in']] as const) {
       Object.defineProperty(key,legacy,{ configurable:true,enumerable:false,

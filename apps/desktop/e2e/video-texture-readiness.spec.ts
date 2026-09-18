@@ -21,7 +21,7 @@ test('a newly activated video clip waits for a decoded frame before uploading', 
     PM.GL.previewViewport = null; PM.GL.resize(160, 90);
     PM.time = 0; PM.GL.render(0, { mblur: false });
     const gl = PM.GL.gl, upload = gl.texImage2D.bind(gl);
-    const probe = { unavailableUploads: 0, videoUploads: 0, errors: [] as number[] };
+    const probe = { unavailableUploads: 0, videoUploads: 0, canvasUploads: 0, errors: [] as number[] };
     (window as any).videoUploadProbe = probe;
     gl.texImage2D = (...args: any[]) => {
       const source = args[5];
@@ -29,6 +29,7 @@ test('a newly activated video clip waits for a decoded frame before uploading', 
         probe.videoUploads++;
         if (source.readyState < source.HAVE_CURRENT_DATA || !source.videoWidth || !source.videoHeight) probe.unavailableUploads++;
       }
+      if (source instanceof HTMLCanvasElement) probe.canvasUploads++;
       return upload(...args);
     };
     // The second clip allocates its own decoder in this synchronous render.
@@ -48,7 +49,7 @@ test('a newly activated video clip waits for a decoded frame before uploading', 
     return pixel[1]! > 220 && pixel[0]! < 30;
   })).toBe(true);
   const probe = await page.evaluate(() => (window as any).videoUploadProbe);
-  expect(probe.videoUploads).toBeGreaterThan(0);
+  expect(probe.videoUploads + probe.canvasUploads).toBeGreaterThan(0);
   expect(probe.unavailableUploads).toBe(0);
   expect(session.diagnostics.console.filter(record => /texImage2D.*no video/.test(record.text))).toEqual([]);
   expect(session.diagnostics.pageErrors).toEqual([]);

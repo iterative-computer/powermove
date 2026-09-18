@@ -69,6 +69,8 @@ export type ModalOptions = {
   /** Let the dialog use the window's height; for list-shaped bodies that
       would otherwise scroll inside a short frame. */
   fill?: boolean;
+  /** Operations with progress stay visible until completion or an explicit action. */
+  dismissible?: boolean;
   onClose?: () => void;
 };
 

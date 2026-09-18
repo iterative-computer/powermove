@@ -28,6 +28,8 @@ export type StoreFileSystem = Pick<
 export interface Store {
   load(): Promise<void>;
   snapshot(): StoreSnapshot;
+  getSerialized?(key: string): string | null;
+  snapshotSerialized?(): Record<string, string>;
   set(key: string, value: unknown): void;
   setSerialized?(key: string, serialized: string): void;
   delete(key: string): void;
@@ -104,6 +106,18 @@ class FileStore implements Store {
 
   snapshot(): StoreSnapshot {
     return structuredClone(Object.fromEntries(this.values));
+  }
+
+  getSerialized(key: string): string | null {
+    if (!parseStoreKey(key)) return null;
+    const value = this.values.get(key);
+    return value === undefined ? null : JSON.stringify(value);
+  }
+
+  snapshotSerialized(): Record<string, string> {
+    // Strings are immutable: serializing the owned values needs no clone of
+    // every project and undo stack before crossing the bootstrap IPC bridge.
+    return Object.fromEntries([...this.values].map(([key, value]) => [key, JSON.stringify(value)]));
   }
 
   set(key: string, value: unknown): void {
@@ -382,8 +396,7 @@ export function registerStoreIpc(
   // does not have to fit in V8's maximum single-string length.
   ipcMain.on(IPC.storeSnapshotSerializedSync, (event) => {
     event.returnValue = ctx.isTrustedSender(event)
-      ? Object.fromEntries(Object.entries({ ...store.snapshot(), __powermoveAsyncStore: true })
-        .map(([key, value]) => [key, JSON.stringify(value)]))
+      ? { ...(store.snapshotSerialized?.() ?? Object.fromEntries(Object.entries(store.snapshot()).map(([key, value]) => [key, JSON.stringify(value)]))), __powermoveAsyncStore: 'true' }
       : {};
   });
 
@@ -438,8 +451,11 @@ export function registerStoreIpc(
       event.returnValue = null;
       return;
     }
-    const value = store.snapshot()[payload['key'] as string];
-    event.returnValue = value === undefined ? null : JSON.stringify(value);
+    if (store.getSerialized) event.returnValue = store.getSerialized(payload['key'] as string);
+    else {
+      const value = store.snapshot()[payload['key'] as string];
+      event.returnValue = value === undefined ? null : JSON.stringify(value);
+    }
   });
 
   ipcMain.handle(IPC.storeFlush, async (event) => {
