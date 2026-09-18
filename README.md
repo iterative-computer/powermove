@@ -2,9 +2,9 @@
 
 The video editor that rewrites itself around your work.
 
-![Powermove launch video](assets/brand/launch.gif)
+[![Powermove launch video](assets/brand/launch.gif)](https://www.youtube.com/watch?v=r2t1dhxHjkQ)
 
-[Watch the launch video](assets/brand/launch.mp4) · [trypowermove.com](https://trypowermove.com)
+[Watch the launch video](https://www.youtube.com/watch?v=r2t1dhxHjkQ) · [trypowermove.com](https://trypowermove.com)
 
 Powermove is an iterative video editor for macOS. Ask an agent to add or fork panels, effects, and workflows, then load them into the running app. If it is wrong, steer it and try again. Every change can be undone.
 
