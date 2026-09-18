@@ -2,6 +2,7 @@
   import { ArrowUpRight, FileCode2, Layers2, Puzzle, Undo2 } from '@lucide/svelte';
   import Header from '$lib/Header.svelte';
   import HeroAnimation from '$lib/HeroAnimation.svelte';
+  import HeroVideo from '$lib/HeroVideo.svelte';
   import LogoCloud from '$lib/LogoCloud.svelte';
   import Features from '$lib/Features.svelte';
   import Showcase from '$lib/Showcase.svelte';
@@ -61,16 +62,8 @@
       </div>
     </div>
     <figure class="stage" id="editor">
-      <!-- Launch video (2026-09-18). To revert, delete the iframe and uncomment the img below. -->
-      <div class="stage-video">
-        <iframe
-          src="https://www.youtube-nocookie.com/embed/r2t1dhxHjkQ?autoplay=1&mute=1&loop=1&playlist=r2t1dhxHjkQ&controls=1&rel=0&playsinline=1"
-          title="Powermove launch video"
-          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-          allowfullscreen
-          loading="eager"
-        ></iframe>
-      </div>
+      <!-- Launch video (2026-09-18). To revert, remove HeroVideo and uncomment the img below. -->
+      <HeroVideo />
       <!-- <img src="/editor-hero.png" alt="Powermove editor over a desert night sky, with a cinematic title, layer stack, property inspector, agent panel, and keyframe timeline." width="1920" height="1280" fetchpriority="high" /> -->
     </figure>
     <LogoCloud />
