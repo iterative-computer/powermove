@@ -102,7 +102,8 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
   if (!sources.length) { await restoreProjectFileMedia(document, store); return; }
   const root = await navigator.storage.getDirectory();
   for (const source of sources) {
-    const name = 'project-import-' + crypto.randomUUID();
+    // crypto.randomUUID needs a secure context; the served app is plain http.
+    const name = 'project-import-' + (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
     const file = await root.getFileHandle(name, { create: true });
     let writer: FileSystemWritableFileStream | undefined;
     try {
