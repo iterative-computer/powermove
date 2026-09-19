@@ -55,11 +55,20 @@ function parseArgs(argv: string[]): Partial<ServeOptions> & { help?: boolean; co
   return out;
 }
 
-function platformPackage(prefix: string, suffixes: Record<string, string>): string | null {
-  const key = `${process.platform}-${process.arch}`;
-  const suffix = suffixes[key];
+const PLATFORM_SUFFIX: Record<string, string> = {
+  'linux-x64': 'linux-x64', 'linux-arm64': 'linux-arm64', 'darwin-x64': 'darwin-x64', 'darwin-arm64': 'darwin-arm64',
+  'win32-x64': 'win32-x64', 'win32-arm64': 'win32-arm64'
+};
+
+/** A platform package is an optional dependency of its parent, so resolve it from where the parent was installed. */
+function platformPackage(parent: string, prefix: string): string | null {
+  const suffix = PLATFORM_SUFFIX[`${process.platform}-${process.arch}`];
   if (!suffix) return null;
-  try { return path.dirname(require.resolve(`${prefix}${suffix}/package.json`)); } catch { return null; }
+  try {
+    const parentDir = path.dirname(require.resolve(`${parent}/package.json`));
+    const fromParent = createRequire(path.join(parentDir, 'package.json'));
+    return path.dirname(fromParent.resolve(`${prefix}${suffix}/package.json`));
+  } catch { return null; }
 }
 
 /** The Codex binary shipped by @openai/codex's platform package, if installed. */
@@ -69,7 +78,7 @@ export function bundledCodexBinary(): string | null {
     'darwin-x64': 'x86_64-apple-darwin', 'darwin-arm64': 'aarch64-apple-darwin',
     'win32-x64': 'x86_64-pc-windows-msvc', 'win32-arm64': 'aarch64-pc-windows-msvc'
   };
-  const dir = platformPackage('@openai/codex-', { 'linux-x64': 'linux-x64', 'linux-arm64': 'linux-arm64', 'darwin-x64': 'darwin-x64', 'darwin-arm64': 'darwin-arm64', 'win32-x64': 'win32-x64', 'win32-arm64': 'win32-arm64' });
+  const dir = platformPackage('@openai/codex', '@openai/codex-');
   const triple = triples[`${process.platform}-${process.arch}`];
   if (!dir || !triple) return null;
   const binary = path.join(dir, 'vendor', triple, 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex');
@@ -78,7 +87,7 @@ export function bundledCodexBinary(): string | null {
 
 /** The Claude binary shipped by @anthropic-ai/claude-code's platform package, if installed. */
 export function bundledClaudeBinary(): string | null {
-  const dir = platformPackage('@anthropic-ai/claude-code-', { 'linux-x64': 'linux-x64', 'linux-arm64': 'linux-arm64', 'darwin-x64': 'darwin-x64', 'darwin-arm64': 'darwin-arm64', 'win32-x64': 'win32-x64', 'win32-arm64': 'win32-arm64' });
+  const dir = platformPackage('@anthropic-ai/claude-code', '@anthropic-ai/claude-code-');
   if (!dir) return null;
   const binary = path.join(dir, process.platform === 'win32' ? 'claude.exe' : 'claude');
   return existsSync(binary) ? binary : null;
