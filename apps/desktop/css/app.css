@@ -236,7 +236,8 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 #toolbar-strip{
   flex:0 0 auto;min-width:0;height:30px;display:flex;align-items:center;
   margin:0;padding:2px;border:0;border-radius:var(--r-md);
-  position:absolute;left:50%;transform:translateX(-50%);z-index:30;-webkit-app-region:no-drag;
+  /* Stay in the rail's flex flow so native drag spacers stop at the tools. */
+  position:relative;z-index:30;-webkit-app-region:no-drag;
 }
 #toolbar-strip[hidden]{display:none}
 #toolbar{display:flex;align-items:center;gap:1px;width:max-content}
