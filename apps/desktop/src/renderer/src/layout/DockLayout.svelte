@@ -51,7 +51,8 @@
     if (!manifest) return [] as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
     return PM.Layout.visibleDockPlan(
       manifest,
-      (id: string) => PM.Popout?.isOpen?.(id) === true
+      (id: string) => PM.Popout?.isOpen?.(id) === true,
+      (id: string) => !!PM.PANELS?.[id]
     ) as Array<{ dock: DockSpec; specs: PanelSpec[] }>;
   });
 </script>
