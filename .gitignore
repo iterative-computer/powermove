@@ -24,3 +24,6 @@ packages/player/dist/
 .env
 .env.*
 !.env.example
+
+# serve host build (npm package payload)
+packages/cli/dist/

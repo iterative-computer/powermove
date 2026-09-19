@@ -22,6 +22,7 @@ packages/
   tokens/             @powermove/tokens    tokens.css, the design tokens shared by desktop and website
   player/             @powermove/player    browser bundle of the web player and SVG player, built from the desktop sources
   macos-haptics/      @powermove/macos-haptics   native macOS alignment-haptics addon
+  cli/                powermove            `npx powermove serve`: the editor host for any Linux or macOS box, used from a browser
 assets/
   brand/              powermove-light.svg, powermove-dark.svg, powermove-light.png
 docs/
@@ -49,6 +50,7 @@ bun run typecheck      # run every workspace's typecheck script
 bun run test:e2e       # desktop Playwright Electron coverage
 bun run dist:mac       # ad-hoc signed arm64 DMG, ZIP, and app in apps/desktop/dist/
 bun run dist:release   # guarded Developer ID, notarized release lane
+bun run serve          # build the remote host and run it here; open the printed URL in a browser
 ```
 
 To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or `cd` into the workspace). Run the desktop gates with `bun run test`, not `bunx vitest`: the latter runs Vitest under bun's runtime and skews a calibrated performance test.
@@ -59,6 +61,7 @@ To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or 
 - [Website](apps/www/README.md): the SvelteKit marketing site.
 - [Design language](docs/design.md): the implementation guide for every Powermove interface.
 - [macOS release process](apps/desktop/docs/release.md): signing, notarization, and the beta workflow.
+- [Remote host](apps/desktop/docs/remote-serve.md): how `powermove serve` runs the editor without Electron and what changes in a browser.
 
 ## License
 

@@ -135,6 +135,8 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 #doc-strip :is([role="button"],button):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .titlebar-drag{flex:1 1 0;align-self:stretch;min-width:24px;pointer-events:auto;-webkit-app-region:drag}
 .titlebar-drag-traffic{position:absolute;left:0;top:0;bottom:0;width:var(--traffic-inset);flex:none}
+/* Served to a browser there are no traffic lights to leave room for. */
+.remote-app #titlebar{--traffic-inset:var(--pad)}
 #titlebar button,#titlebar input,#titlebar a{-webkit-app-region:no-drag}
 .project-strip-btn{width:26px;height:26px;flex:none;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--tx-3);transition:background var(--dur-1),color var(--dur-1),transform var(--dur-1) var(--ease)}
 .project-strip-btn:hover{background:var(--bg-row-hi);color:var(--tx)}

@@ -15,7 +15,9 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test:e2e": "bun run --cwd apps/desktop test:e2e",
     "dist:mac": "bun run --cwd apps/desktop dist:mac",
-    "dist:release": "bun run --cwd apps/desktop dist:release"
+    "dist:release": "bun run --cwd apps/desktop dist:release",
+    "build:cli": "bun run --cwd packages/cli build",
+    "serve": "bun run --cwd packages/cli build && node packages/cli/bin/powermove.mjs serve"
   },
   "trustedDependencies": [
     "@anthropic-ai/claude-code",

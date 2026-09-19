@@ -1,0 +1,32 @@
+// Served with X-Content-Type-Options: nosniff, so anything not listed here is
+// rejected by <video>/<audio>/WebAssembly rather than sniffed.
+export const MIME_TYPES: Readonly<Record<string, string>> = {
+  '.aac': 'audio/aac',
+  '.avif': 'image/avif',
+  '.css': 'text/css; charset=utf-8',
+  '.flac': 'audio/flac',
+  '.gif': 'image/gif',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.m4a': 'audio/mp4',
+  '.m4v': 'video/mp4',
+  '.map': 'application/json; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.mov': 'video/quicktime',
+  '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4',
+  '.ogg': 'audio/ogg',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ttf': 'font/ttf',
+  '.wasm': 'application/wasm',
+  '.wav': 'audio/wav',
+  '.webm': 'video/webm',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2'
+};
