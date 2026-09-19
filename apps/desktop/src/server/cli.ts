@@ -120,6 +120,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     version: layout.version,
     codexBinary: bundledCodexBinary(),
     claudeBinary: bundledClaudeBinary(),
+    engineScript: existsSync(path.join(layout.distDir, 'engine', 'engine.mjs')) ? path.join(layout.distDir, 'engine', 'engine.mjs') : null,
     ...(parsed.token ? { token: parsed.token } : {}),
     ...(parsed.insecure ? { insecure: true } : {})
   });

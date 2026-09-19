@@ -43,6 +43,12 @@ await build({
 
 await cp(path.join(desktop, 'out/renderer'), path.join(outDir, 'renderer'), { recursive: true });
 
+// The document engine: the renderer's core built for Node by Vite (SSR).
+{
+  const result = spawnSync('bunx', ['vite', 'build', '--config', 'engine.vite.config.ts'], { cwd: desktop, stdio: 'inherit', env: { ...process.env, POWERMOVE_ENGINE_OUT: path.join(outDir, 'engine') } });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
 // Mirrors electron-builder.yml extraResources for what the host needs.
 const resources = path.join(outDir, 'resources');
 const copies = [

@@ -11,7 +11,8 @@
  */
 import { IPC, type AgentToolRequestEvent, type FileSaveResult, type MediaProxyResult, type PowermoveBridge, type ProjectOpenResult, type StoreErrorEvent } from '../../../shared/ipc';
 import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
-import { decodeFrame, encodeFrame, WEB, WEB_UPLOAD_CHUNK_BYTES, type ServerMessage, type WebHello } from '../../../shared/wire';
+import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
+import { Connection } from '../../../shared/link';
 
 const WS_PATH = '/__powermove/ws';
 
@@ -19,83 +20,6 @@ const WS_PATH = '/__powermove/ws';
 let activeLink: Connection | null = null;
 export function remoteLink(): Connection | null { return activeLink; }
 const CONNECT_TIMEOUT_MS = 4000;
-
-type Listener = (...args: unknown[]) => void;
-
-class Connection {
-  private nextId = 1;
-  private readonly pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
-  private readonly listeners = new Map<string, Set<Listener>>();
-  private readonly askHandlers = new Map<string, (...args: unknown[]) => Promise<unknown> | unknown>();
-  private closed = false;
-
-  constructor(private readonly socket: WebSocket) {
-    socket.binaryType = 'arraybuffer';
-    socket.addEventListener('message', (event) => this.receive(event.data as ArrayBuffer));
-    socket.addEventListener('close', () => this.fail(new Error('The connection to the Powermove host closed.')));
-    socket.addEventListener('error', () => this.fail(new Error('The connection to the Powermove host failed.')));
-  }
-
-  invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T> { return this.request<T>('invoke', channel, args); }
-  /** ipcRenderer.sendSync stand-in: async on the wire, answered from the `on` listener. */
-  sync<T = unknown>(channel: string, ...args: unknown[]): Promise<T> { return this.request<T>('sync', channel, args); }
-  send(channel: string, ...args: unknown[]): void { this.socket.send(encodeFrame({ t: 'send', ch: channel, args })); }
-  on(channel: string, listener: Listener): () => void {
-    let set = this.listeners.get(channel);
-    if (!set) { set = new Set(); this.listeners.set(channel, set); }
-    set.add(listener);
-    return () => { set!.delete(listener); };
-  }
-  /** Register the browser's answer to a server question (dialogs). */
-  answer(channel: string, handler: (...args: unknown[]) => Promise<unknown> | unknown): void { this.askHandlers.set(channel, handler); }
-  get isClosed(): boolean { return this.closed; }
-
-  private request<T>(kind: 'invoke' | 'sync', channel: string, args: unknown[]): Promise<T> {
-    if (this.closed) return Promise.reject(new Error('The connection to the Powermove host closed.'));
-    const id = this.nextId++;
-    return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
-      try { this.socket.send(encodeFrame({ t: kind, id, ch: channel, args })); } catch (error) {
-        this.pending.delete(id);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  }
-
-  private receive(data: ArrayBuffer): void {
-    let message: ServerMessage;
-    try { message = decodeFrame(new Uint8Array(data)) as ServerMessage; } catch (error) { console.warn('[web-bridge] bad frame', error); return; }
-    switch (message.t) {
-      case 'result': {
-        const pending = this.pending.get(message.id);
-        if (!pending) return;
-        this.pending.delete(message.id);
-        if (message.ok) pending.resolve(message.value); else pending.reject(new Error(message.error));
-        return;
-      }
-      case 'event':
-        for (const listener of [...(this.listeners.get(message.ch) ?? [])]) {
-          try { listener(...message.args); } catch (error) { console.error(`[web-bridge] ${message.ch}`, error); }
-        }
-        return;
-      case 'ask': {
-        const handler = this.askHandlers.get(message.ch);
-        void Promise.resolve(handler ? handler(...message.args) : null).catch(() => null).then((value) => {
-          this.socket.send(encodeFrame({ t: 'answer', id: message.id, value: value ?? null }));
-        });
-        return;
-      }
-    }
-  }
-
-  private fail(error: Error): void {
-    if (this.closed) return;
-    this.closed = true;
-    for (const [, pending] of this.pending) pending.reject(error);
-    this.pending.clear();
-    for (const listener of [...(this.listeners.get('__closed') ?? [])]) listener();
-  }
-}
 
 function connect(url: string): Promise<Connection> {
   return new Promise((resolve, reject) => {
