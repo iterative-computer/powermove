@@ -25,6 +25,30 @@ async function compositionPoint(page: any, x: number, y: number) {
 }
 
 test.describe('@viewer After Effects tool behavior', () => {
+  test('keeps tool buttons clear of native window drag regions after resizing', async ({ session }) => {
+    await session.openEditor();
+    const { page, app } = session;
+    for (const width of [1280, 980, 1600]) {
+      await app.evaluate(({ BrowserWindow }, nextWidth) => {
+        BrowserWindow.getAllWindows().find(window => !window.isDestroyed())!.setSize(nextWidth, 800);
+      }, width);
+      await expect.poll(() => page.evaluate(() => {
+        const toolbar = document.getElementById('toolbar-strip')!.getBoundingClientRect();
+        return [...document.querySelectorAll('.titlebar-drag')].some(element => {
+          const drag = element.getBoundingClientRect();
+          return drag.left < toolbar.right && drag.right > toolbar.left
+            && drag.top < toolbar.bottom && drag.bottom > toolbar.top;
+        });
+      })).toBe(false);
+      for (const tool of ['text', 'shape', 'hand', 'select']) {
+        await page.locator(`#toolbar button[data-tool="${tool}"]`).click();
+        await expect(page.locator(`#toolbar button[data-tool="${tool}"]`)).toHaveAttribute('aria-pressed', 'true');
+        expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('tool').tool)).toBe(tool);
+      }
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('keeps tools distinct from creation commands and draws an undoable shape', async ({ session }) => {
     await session.openEditor();
     const { page } = session;
