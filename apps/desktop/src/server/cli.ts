@@ -128,6 +128,10 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     if (stopping) return;
     stopping = true;
     console.log('\nStopping…');
+    // Agent shutdowns and ffmpeg cleanup get a few seconds; nothing here is
+    // worth holding the terminal for longer than that.
+    const deadline = setTimeout(() => { console.error('Stop timed out; exiting.'); process.exit(1); }, 5000);
+    deadline.unref();
     await running.close().catch((error) => console.error(error));
     process.exit(0);
   };

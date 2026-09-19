@@ -459,7 +459,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     async close() {
       stopWatcher?.();
       for (const client of ipc.all()) client.destroy();
+      for (const socket of sockets.clients) socket.terminate();
       await new Promise<void>((resolve) => sockets.close(() => resolve()));
+      // Keep-alive HTTP connections would otherwise hold close() open.
+      server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       app.emit('will-quit');
       await mediaProxies.dispose();
