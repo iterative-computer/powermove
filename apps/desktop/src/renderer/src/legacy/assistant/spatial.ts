@@ -307,6 +307,7 @@ const threads = new AgentThreads({
   set: (key, value) => PM.store?.set?.(key, value),
 }, () => PM.uid('thread-'));
 threads.load(PM.proj?.id || '');
+scheduleHostRunResume();
 let threadSaveError = false;
 let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let changingThreadProject = false;
@@ -478,6 +479,7 @@ function ensureThreadProject(): boolean {
   threads.load(projectId);
   restoreThread();
   changingThreadProject = false;
+  scheduleHostRunResume();
   return true;
 }
 
@@ -1791,6 +1793,109 @@ Fix failures in the isolated extension staging directory and return the changed 
   } finally {
     stopWatchingProject();
   }
+}
+
+
+/* ── runs the host kept going after this tab was gone ──────────
+   On a remote host an agent run belongs to the host, not the tab. A tab that
+   reloads, or a second device, asks the host which runs its project has and
+   puts the matching thread back into the live run: replayed activity, live
+   trace, and the result when it lands. */
+const resumedHostRuns = new Set<string>();
+function scheduleHostRunResume(): void {
+  const remote = (window as any).powermove?.remoteRuns;
+  if (!remote) return;
+  window.setTimeout(() => { void resumeHostRuns(remote); }, 0);
+}
+async function resumeHostRuns(remote: any): Promise<void> {
+  const projectId = threads.projectId;
+  if (!projectId) return;
+  let records: any[] = [];
+  try { records = await remote.list(projectId); } catch { return; }
+  if (threads.projectId !== projectId) return;
+  for (const record of records) {
+    if (!record?.threadId || resumedHostRuns.has(record.id)) continue;
+    const thread = threads.threads.find(item => item.id === record.threadId);
+    if (!thread) continue;
+    // Only a thread still waiting on its answer: a user turn with no assistant
+    // reply after it. Trace rows are the run's own scratch, not an answer.
+    const lastUser = thread.conversation.map((m: any) => m.role).lastIndexOf('user');
+    if (lastUser < 0 || thread.conversation.slice(lastUser + 1).some((m: any) => m.role === 'assistant')) continue;
+    const session = sessionFor(thread.id);
+    if (sessionBusy(session)) continue;
+    resumedHostRuns.add(record.id);
+    resumeHostRun(remote, session, record);
+  }
+}
+function resumeHostRun(remote: any, session: any, record: any): void {
+  const token: any = ++session.requestToken;
+  session.codexRequestId = record.id;
+  session.requestStartedAt = record.startedAt || Date.now();
+  session.uiPlacement = null;
+  updateSteps([
+    'Understand the request and project',
+    'Research and operate the required tools',
+    'Bring artifacts and edits into Powermove',
+    'Review the result and external activity',
+  ], 1, session);
+  session.stepsExpanded = false;
+  session.plan = null; session.panelRun = null; session.phase = 'working';
+  session.activity = record.finishedAt ? '' : 'Reconnected to the run on the host…';
+  touch(session);
+  void remote.attach(record.id, {
+    onProgress: (summary: any) => {
+      if (token !== session.requestToken || !summary || isUIPlacementMessage(summary)) return;
+      session.activity = summary; touch(session);
+    },
+    onTrace: (step: CodexTraceEvent) => {
+      if (token !== session.requestToken) return;
+      reduceTrace(step, session); touch(session);
+    },
+  }).then((raw: any) => {
+    if (token !== session.requestToken) return;
+    finishSteps(session);
+    if (!raw?.ok) {
+      const current: any = session.steps.find((step: any) => step.status === 'active'); if (current) current.status = 'error';
+      archiveTrace(false, session);
+      session.conversation.push({ entering: true, role: 'assistant', error: true, notice: 'plain', text: String(raw?.error || 'The run failed on the host.').slice(0, 4000) });
+      session.activity = ''; session.phase = 'conversation';
+      touch(session, { focusComposer: true });
+      return;
+    }
+    let summary: any = raw.text;
+    let notes: any[] = [];
+    try {
+      const decoded: any = JSON.parse(raw.text);
+      if (decoded && typeof decoded === 'object') {
+        if (typeof decoded.summary === 'string') summary = decoded.summary;
+        if (Array.isArray(decoded.notes)) notes = decoded.notes.filter((note: any) => typeof note === 'string');
+      }
+    } catch { /* editor-mode replies are prose */ }
+    const spoke: any = session.trace.some((step: any) => step.kind === 'text' && String(step.text || '').trim());
+    archiveTrace(spoke, session);
+    if (!spoke) session.conversation.push({ entering: true, role: 'assistant', text: summary });
+    // The host's engine made the edits and they arrived through project sync,
+    // so this tab holds no checkpoint for them: extension changes stay
+    // reversible through the host, project edits are not undoable from here.
+    session.run = {
+      autonomous: true, summary, checkpoint: null, projectId: PM.proj.id, applied: [], changed: false,
+      extensionChangeSetId: raw.extensionChangeSetId,
+      artifacts: [], externalActions: [], extensions: raw.extensions || [], undoRuns: [],
+      review: { message: notes.join(' ') || (raw.liveEditsApplied ? 'The result is in the project. It was made on the host, so Undo here does not cover it.' : 'The agent run completed.') },
+      frames: { state: {}, times: [], images: [] }, reviewError: '',
+    };
+    session.revision = Number(PM.proj?.revision || 0);
+    session.activity = ''; session.phase = 'result';
+    touch(session, { focusComposer: true });
+    notifyAgentFinished();
+  }).catch((error: any) => {
+    if (token !== session.requestToken) return;
+    session.activity = ''; session.phase = 'conversation';
+    session.conversation.push({ entering: true, role: 'assistant', error: true, notice: 'plain', text: `Could not reconnect to the run on the host: ${String(error?.message || error)}` });
+    touch(session);
+  }).finally(() => {
+    if (token === session.requestToken) { sealTrace(session); session.codexRequestId = null; touch(session, { flush: true }); }
+  });
 }
 
 async function sendRequest(input: any) {

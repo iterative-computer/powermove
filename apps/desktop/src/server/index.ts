@@ -280,8 +280,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const client = trustedClient(event);
     const owner = typeof runId === 'string' ? runs.owner(runId) : null;
     if (!owner) throw new Error('That run is not on this host.');
-    owner.attach(client);
-    return owner.record;
+    owner.attach(client, true);
+    return { ...owner.record, events: undefined, eventCount: owner.record.events.length };
   });
 
   /* extensions */
