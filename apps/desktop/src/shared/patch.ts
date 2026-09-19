@@ -31,6 +31,49 @@ export function applyPatch(root: any, patches: Patch[]): any {
   return nextRoot;
 }
 
+function isRecord(value: any): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Record only changed leaves. Arrays with the same length are traversed so a
+ * single keyframe/property edit stays tiny; structural array edits use one
+ * replacement because index-by-index patches would be larger and less safe.
+ */
+export function diffPatches(before: any, after: any, path: PathPart[] = [], forward: Patch[] = [], backward: Patch[] = []): { forward: Patch[]; backward: Patch[] } {
+  if (Object.is(before, after)) return { forward, backward };
+  if (Array.isArray(before) && Array.isArray(after)) {
+    const identityOrderChanged = before.length === after.length && before.some((item, index) =>
+      isRecord(item) && isRecord(after[index]) && typeof item.id === 'string' && typeof after[index].id === 'string'
+      && item.id !== after[index].id);
+    if (before.length !== after.length || identityOrderChanged) {
+      forward.push({ path, exists: true, value: clonePatchValue(after) });
+      backward.push({ path, exists: true, value: clonePatchValue(before) });
+      return { forward, backward };
+    }
+    for (let index = 0; index < before.length; index++) {
+      diffPatches(before[index], after[index], [...path, index], forward, backward);
+    }
+    return { forward, backward };
+  }
+  if (isRecord(before) && isRecord(after)) {
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    for (const key of keys) {
+      const inBefore = Object.hasOwn(before, key);
+      const inAfter = Object.hasOwn(after, key);
+      if (!inBefore || !inAfter) {
+        forward.push(inAfter ? { path: [...path, key], exists: true, value: clonePatchValue(after[key]) } : { path: [...path, key], exists: false });
+        backward.push(inBefore ? { path: [...path, key], exists: true, value: clonePatchValue(before[key]) } : { path: [...path, key], exists: false });
+      } else diffPatches(before[key], after[key], [...path, key], forward, backward);
+    }
+    return { forward, backward };
+  }
+  forward.push({ path, exists: true, value: clonePatchValue(after) });
+  backward.push({ path, exists: true, value: clonePatchValue(before) });
+  return { forward, backward };
+}
+
+
 export function isPatchList(value: unknown, maxBytes = 32 * 1024 * 1024): value is Patch[] {
   if (!Array.isArray(value) || value.length === 0) return false;
   let bytes = 0;

@@ -13,6 +13,7 @@ import { IPC, type AgentToolRequestEvent, type CodexRunResult, type FileSaveResu
 import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
+import { attachRemoteMedia } from './remote-media';
 
 const WS_PATH = '/__powermove/ws';
 
@@ -152,6 +153,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
     },
     ping: () => link.invoke<string>(IPC.ping),
     remote: true,
+    wrapMediaStore: (store) => attachRemoteMedia(link, store as never) as never,
     remoteRuns: {
       list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),
       attach: (runId, hooks) => new Promise<CodexRunResult>((resolve, reject) => {

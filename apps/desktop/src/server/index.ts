@@ -11,7 +11,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
+import { copyFile, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Duplex } from 'node:stream';
@@ -88,6 +88,9 @@ const SANDBOX_PATH = 'host/sandbox.html';
 /** The sandbox document's own policy: eval inside, no network, same-origin script only. */
 const SANDBOX_CSP = "default-src 'none'; script-src 'self' 'unsafe-eval'; worker-src blob:; connect-src 'none'";
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+const MEDIA_KEY = /^media:[A-Za-z0-9:._-]{1,200}$/;
+/** One file per key; the key's own characters are safe once ':' is folded. */
+const mediaFileName = (key: string): string => key.replace(/[^A-Za-z0-9._-]/g, '_');
 const API_PACK: Array<[name: string, devPath: string]> = [
   ['EXTENSIONS.md', 'docs/EXTENSIONS.md'],
   ['BACKGROUND_TESTING.md', 'docs/background-testing.md'],
@@ -389,7 +392,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     return { node: process.versions.node, version: options.version, platform: process.platform, exportsDir: options.exportsDir };
   });
   const uploads = new Map<string, Upload>();
-  const uploadsRoot = { media: path.join(userData, 'Remote Uploads'), project: path.join(userData, 'Remote Projects') };
+  const uploadsRoot = { media: path.join(userData, 'Remote Uploads'), project: path.join(userData, 'Remote Projects'), blob: path.join(userData, 'Remote Uploads') };
+  const mediaStoreDir = path.join(userData, 'Media Store');
   const discardUpload = async (upload: Upload, keepFile: boolean): Promise<void> => {
     uploads.delete(upload.id);
     await upload.handle.close().catch(() => undefined);
@@ -400,7 +404,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (!isRecord(payload)) throw new Error('upload: expected { name, size, kind }');
     const name = safeFileName(payload.name);
     const size = payload.size;
-    const kind = payload.kind === 'project' ? 'project' : 'media';
+    const kind = payload.kind === 'project' ? 'project' : payload.kind === 'blob' ? 'blob' : 'media';
     if (!name || typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0 || size > MAX_UPLOAD_BYTES) throw new Error('upload: invalid name or size');
     const id = randomUUID();
     const dir = path.join(uploadsRoot[kind], id);
@@ -450,6 +454,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     return result;
   });
 
+  /* content-addressed media: an uploaded file becomes the bytes for a key */
+  ipc.handle(WEB.mediaCommit, async (event, payload) => {
+    trustedClient(event);
+    if (!isRecord(payload) || typeof payload.key !== 'string' || !MEDIA_KEY.test(payload.key) || typeof payload.path !== 'string') throw new Error('media: expected { key, path, type }');
+    const resolved = await realpath(payload.path);
+    const root = await realpath(uploadsRoot.blob).catch(() => uploadsRoot.blob);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('media: path is not an upload');
+    await mkdir(mediaStoreDir, { recursive: true });
+    const target = path.join(mediaStoreDir, mediaFileName(payload.key));
+    await rename(resolved, target).catch(async () => { await copyFile(resolved, target); });
+    await rm(path.dirname(resolved), { recursive: true, force: true });
+    const type = typeof payload.type === 'string' && /^[\w.+-]+\/[\w.+-]+$/.test(payload.type) ? payload.type : 'application/octet-stream';
+    await writeFile(`${target}.type`, type);
+    return true;
+  });
+  ipc.handle(WEB.mediaHas, async (event, keys) => {
+    trustedClient(event);
+    if (!Array.isArray(keys)) return [];
+    const present: string[] = [];
+    for (const key of keys) {
+      if (typeof key !== 'string' || !MEDIA_KEY.test(key)) continue;
+      try { await stat(path.join(mediaStoreDir, mediaFileName(key))); present.push(key); } catch { /* not here */ }
+    }
+    return present;
+  });
+
   /* http + ws */
   const rendererRoot = path.resolve(options.rendererDir);
   const exportsRoot = path.resolve(options.exportsDir);
@@ -477,6 +508,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         const body = Buffer.from(await asset.arrayBuffer());
         response.writeHead(asset.status, headers('text/javascript; charset=utf-8', { 'Cache-Control': 'no-store', 'Content-Length': String(body.byteLength) }));
         response.end(body);
+        return;
+      }
+      if (pathname === '/__powermove/media') {
+        const key = url.searchParams.get('key') ?? '';
+        if (!MEDIA_KEY.test(key)) { text(response, 400, 'Bad key'); return; }
+        const file = path.join(mediaStoreDir, mediaFileName(key));
+        let info;
+        try { info = await stat(file); } catch { text(response, 404, 'Not found'); return; }
+        const type = await readFile(`${file}.type`, 'utf8').catch(() => 'application/octet-stream');
+        response.writeHead(200, headers(type.trim(), { 'Content-Length': String(info.size), 'Cache-Control': 'private, max-age=31536000, immutable' }));
+        createReadStream(file).pipe(response);
         return;
       }
       if (pathname === '/__powermove/download') {
