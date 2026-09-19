@@ -41,6 +41,10 @@ export interface ExtensionManifest {
   dependsOn?: string[]; // extension ids that must be enabled and load first
   forkedFrom?: string; // "<id>@<version>" when copied from a built-in
   author?: ExtensionAuthor;
+  /** Stable, specific feature identifiers; broad contribution kinds are not features. */
+  features?: string[];
+  /** Built-in release metadata: custom extensions whose functionality is now included. */
+  integrates?: string[];
 }
 
 export const MANIFEST_LIMITS = {
@@ -97,6 +101,10 @@ export function parseManifest(raw: unknown): ManifestParse {
   const dependsOn = list('dependsOn');
   if (dependsOn === null) return { ok: false, error: 'invalid "dependsOn"' };
   if (replaces?.includes(id) || dependsOn?.includes(id)) return { ok: false, error: 'extension cannot reference itself' };
+  const features = list('features');
+  if (features === null) return { ok: false, error: 'invalid "features"' };
+  const integrates = list('integrates');
+  if (integrates === null) return { ok: false, error: 'invalid "integrates"' };
   const forkedFrom = str('forkedFrom', 100, false);
   if (forkedFrom === null) return { ok: false, error: 'invalid "forkedFrom"' };
   const author = m.author;
@@ -110,6 +118,8 @@ export function parseManifest(raw: unknown): ManifestParse {
   if (dependsOn) manifest.dependsOn = dependsOn;
   if (forkedFrom) manifest.forkedFrom = forkedFrom;
   if (author) manifest.author = author as ExtensionAuthor;
+  if (features) manifest.features = [...new Set(features)];
+  if (integrates) manifest.integrates = [...new Set(integrates)];
   return { ok: true, manifest };
 }
 

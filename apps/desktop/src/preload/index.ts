@@ -39,6 +39,8 @@ const bridge: PowermoveBridge = {
   agentNotification: options => ipcRenderer.invoke('agent:notification', options),
   ping: () => ipcRenderer.invoke(IPC.ping) as Promise<string>,
 
+  fontFamilies: () => ipcRenderer.invoke(IPC.fontFamilies),
+
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,

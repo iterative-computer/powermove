@@ -82,3 +82,32 @@ it('keeps completed pixels while a slow decoder starts the newest queued seek', 
     expect(canvas.width).toBe(0);
   } finally { vi.unstubAllGlobals(); }
 });
+
+it('uses only a matching decoded frame during rapid forward and reverse scrubs', () => {
+  const video = new EventTarget() as any;
+  let time = 0;
+  const seeks: number[] = [];
+  Object.assign(video, { paused: true, seeking: false, readyState: 2, videoWidth: 64, videoHeight: 64 });
+  Object.defineProperty(video, 'currentTime', {
+    get: () => time,
+    set: value => { time = value; seeks.push(value); video.seeking = true; video.readyState = 1; },
+  });
+  vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => ({ drawImage() {} }) }) });
+  try {
+    seekPreviewVideo(video, 1, .0005);
+    seekPreviewVideo(video, 2, .0005);
+    video.seeking = false; video.readyState = 2; video.dispatchEvent(new Event('seeked'));
+    expect(previewSeekFrame(video, 1)?.time).toBe(1);
+    expect(previewSeekFrame(video, 2)).toBeUndefined();
+    expect(seeks).toEqual([1, 2]);
+
+    // The first frame remains available even though the second decode is in flight.
+    seekPreviewVideo(video, 1, .0005);
+    expect(previewSeekFrame(video, 1)?.time).toBe(1);
+    video.seeking = false; video.readyState = 2; video.dispatchEvent(new Event('seeked'));
+    expect(seeks).toEqual([1, 2]);
+    expect(previewSeekFrame(video, 1)?.time).toBe(1);
+    expect(previewSeekFrame(video, 2)?.time).toBe(2);
+    expect(previewSeekFrame(video, 3)).toBeUndefined();
+  } finally { vi.unstubAllGlobals(); }
+});

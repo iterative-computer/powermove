@@ -440,17 +440,42 @@ export function install(PM: PMRegistry): void {
     PM.toast(`Could not save ${event.key}: ${event.error}`);
   });
 
-  async function publishSystemFonts() {
+  let fontRefresh: Promise<boolean> | undefined;
+  let fontSignature: string | undefined;
+  async function enumerateSystemFonts() {
     try {
-      if (typeof (window as any).queryLocalFonts === 'function') {
-        const fonts = await (window as any).queryLocalFonts();
-        const families = [...new Set(fonts.map((font: any) => font.family).filter(Boolean))];
-        PM.Fonts?.setSystemFamilies(families);
+      const native = await bridge.fontFamilies?.();
+      if (native || typeof (window as any).queryLocalFonts === 'function') {
+        const families = native ?? [...new Set((await (window as any).queryLocalFonts()).map((font: any) => font.family).filter(Boolean))];
+        families.sort();
+        const signature = JSON.stringify(families);
+        if (signature !== fontSignature) {
+          fontSignature = signature;
+          PM.Fonts?.setSystemFamilies(families);
+          PM.rasterClear?.();
+          PM.invalidate?.();
+        }
         return true;
       }
     } catch { /* PM.Fonts retains its bundled and web fallback families. */ }
     return false;
   }
+
+  function publishSystemFonts() {
+    if (!fontRefresh) fontRefresh = enumerateSystemFonts().finally(() => { fontRefresh = undefined; });
+    return fontRefresh;
+  }
+
+  // Font Book and other installers run outside the editor. Refresh when the
+  // user returns, and while visible to catch installations in the background.
+  window.addEventListener('focus', () => { void publishSystemFonts(); });
+  window.document.addEventListener('visibilitychange', () => {
+    if (!window.document.hidden) void publishSystemFonts();
+  });
+  const fontTimer = window.setInterval?.(() => {
+    if (!window.document.hidden) void publishSystemFonts();
+  }, 2000);
+  window.addEventListener('pagehide', () => window.clearInterval?.(fontTimer));
 
   async function finishBoot() {
     window.document.documentElement.classList.add('native-app');

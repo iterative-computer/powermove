@@ -359,3 +359,20 @@ describe('legacy Electron shim install', () => {
     expect(addEventListener).toHaveBeenCalledWith('DOMContentLoaded', expect.any(Function), { once: true });
   });
 });
+
+it('refreshes installed fonts on focus and invalidates cached text only when families change', async () => {
+  const { PM, bridge, window: win } = loadShim();
+  PM.Fonts = { setSystemFamilies: vi.fn() };
+  PM.rasterClear = vi.fn();
+  PM.invalidate = vi.fn();
+  bridge.fontFamilies = vi.fn(async () => ['Original']);
+  const focus = win.addEventListener.mock.calls.find(([event]: any[]) => event === 'focus')[1];
+  focus(); await flush();
+  expect(PM.Fonts.setSystemFamilies).toHaveBeenLastCalledWith(['Original']);
+  focus(); await flush();
+  expect(PM.Fonts.setSystemFamilies).toHaveBeenCalledTimes(1);
+  bridge.fontFamilies.mockResolvedValue(['Original', 'Newly installed']);
+  focus(); await flush();
+  expect(PM.Fonts.setSystemFamilies).toHaveBeenLastCalledWith(['Newly installed', 'Original']);
+  expect(PM.rasterClear).toHaveBeenCalledTimes(2);
+});

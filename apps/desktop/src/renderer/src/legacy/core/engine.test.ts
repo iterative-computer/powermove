@@ -310,3 +310,13 @@ describe('legacy engine install', () => {
     expect(media.el.playbackRate).toBe(1.5);
   });
 });
+
+it('pauses on the displayed project frame instead of leaving a fractional time that keys round forward', () => {
+  const { PM, runFrame } = engine();
+  PM.play();
+  runFrame(1590);
+  expect(PM.time).toBeCloseTo(1.59);
+  PM.pause();
+  expect(PM.time).toBe(47 / 30);
+  expect(PM.snapF(PM.time, PM.proj.fps)).toBe(47 / 30);
+});

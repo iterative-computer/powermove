@@ -270,3 +270,26 @@ activation error, fix the extension; do not work around by touching the app bund
 The host registers a `raster` service with the `RenderAPI['raster']` signature. Capture it with `api.services.get` before registering a wrapper under the same name. Delegate unaffected layers to the captured implementation; calling `api.render.raster` from inside the wrapper recurses. Native raster surfaces store their canvas in `cv`, with `w`, `h`, `anchorX`, `anchorY`, `selection` and a texture cache `key`. Preserve those fields when replacing pixels. The override affects preview and export and is removed automatically when the extension disposes.
 
 Agent-authored extensions are staged until the agent returns them. After loading, the app continues the same agent task to inspect actual panels, rendered frames and runtime errors and repair failures. Each updated extension gets another verification pass, up to three follow-ups. Failed or incomplete verification is reported explicitly; no Fix it button is required. Undo restores the original change and its repair passes in reverse order.
+
+### App update notices
+
+Powermove records extension health by app version. After an app update, a previously
+working custom extension that reports a build, manifest, activation, runtime, or
+compatibility problem gets a persistent notice with **Review extensions**. Existing
+fork update notices cover customizations based on older built-in versions. Notices
+never automatically disable, delete, or rewrite an extension, and dismissals survive
+restarts.
+
+Release authors can declare that a built-in now includes custom functionality:
+
+- `integrates: ["custom-extension-id"]` explicitly identifies an extension whose
+  functionality has been incorporated. Only declarations on shipped built-ins count.
+- `features: ["specific-stable-feature-id"]` declares precise capabilities on either
+  kind of extension. Use the same identifiers only for equivalent functionality.
+  All features declared by a custom extension must be covered by shipped built-ins
+  before Powermove offers the inclusion notice; partial overlap is insufficient.
+
+Do not use broad categories such as `panels`, extension names, or `forkedFrom` as
+proof of equivalence. A fork may retain custom behavior that the app does not have.
+Feature declarations are additive metadata and do not alter loading or replacement
+rules. Maintainers must include accurate declarations in releases that adopt features.

@@ -8,6 +8,7 @@ if (process.platform === 'darwin') {
 }
 
 module.exports = {
+  fontFamilies() { return native?.fontFamilies?.() ?? null; },
   triggerAlignment() {
     native?.triggerAlignment();
   }

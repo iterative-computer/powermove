@@ -6,6 +6,9 @@
   let { PM }: { PM: Record<string, any> } = $props();
 
   type ToastItem = {
+    progress?: number | null;
+    completed?: boolean;
+    pendingMessage?: string;
     id: number;
     message: string;
     icon: string;
@@ -29,19 +32,23 @@
     if (message == null) return;
     const kind = toastKind(message, options);
     const text = String(message);
+    let previous: ToastItem | undefined;
     if (options.key) {
       const keyed = queue.find(item => item.key === options.key);
-      if (keyed) { window.clearTimeout(keyed.timeout); queue = queue.filter(item => item !== keyed); }
+      if (keyed) { window.clearTimeout(keyed.timeout); previous = keyed; }
     } else {
       const existing = queue.find(item => item.message === text && item.kind === kind);
       if (existing) return;
     }
     // Routine status updates replace each other. Errors, alerts and corner notices remain available to read.
     for (const item of [...queue]) {
-      if (item.kind === 'status' && !item.sticky && !item.corner) dismiss(item.id);
+      if (item !== previous && item.kind === 'status' && !item.sticky && !item.corner) dismiss(item.id);
     }
     const item: ToastItem = {
-      id: nextId++,
+      id: previous?.id ?? nextId++,
+      progress: options.progress,
+      completed: options.completed,
+      pendingMessage: options.completed ? previous?.message : String(message),
       message: String(message),
       icon: options.icon || toastIcon(message, kind),
       kind,
@@ -55,7 +62,7 @@
       action: options.action,
       onDismiss: options.onDismiss
     };
-    queue = [...queue, item];
+    queue = previous ? queue.map(old => old === previous ? item : old) : [...queue, item];
     if (!item.sticky) item.timeout = window.setTimeout(() => dismiss(item.id), milliseconds);
   }
 
@@ -137,6 +144,7 @@
   <div
     class="toast"
     role={item.error ? 'alert' : 'status'}
+    aria-label={item.progress !== undefined ? item.message : undefined}
     data-toast-id={item.id}
     data-toast-kind={item.kind}
     data-toast-error={item.error ? 'true' : undefined}
@@ -150,8 +158,23 @@
         <span>{item.message}</span>
       </div>
     {:else}
-      <span class="toast-icon"><Icon {PM} name={item.icon} /></span>
-      <span>{item.message}</span>
+      <span class="toast-icon save-icon" class:complete={item.completed}>
+        <span class="normal-icon"><Icon {PM} name={item.icon} /></span>
+        {#if item.progress !== undefined}<svg class="saved-check" aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="m5 12 4 4L19 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
+      </span>
+      {#if item.progress !== undefined}
+        <div class="save-body" class:complete={item.completed} aria-label={item.message}>
+          <div class="save-labels" aria-hidden="true">
+            <span class="saving-label">{item.pendingMessage || item.message}</span>
+            <span class="saved-label">{item.completed ? item.message : ''}</span>
+          </div>
+          <div class="progress-space" aria-hidden={item.completed ? true : undefined}>
+            <div class="save-progress" role="progressbar" aria-label={item.pendingMessage || item.message} aria-valuemin="0" aria-valuemax="100" aria-valuenow={item.progress === null ? undefined : Math.round(item.progress * 100)}>
+              <div class="progress-fill" class:indeterminate={item.progress === null} style:transform={item.progress === null ? undefined : `scaleX(${item.progress})`}></div>
+            </div>
+          </div>
+        </div>
+      {:else}<span>{item.message}</span>{/if}
     {/if}
     {#if item.dismissible}
       {#if item.action}
@@ -170,6 +193,26 @@
 {/if}
 
 <style>
+  .save-icon{display:grid}
+  .save-icon>.normal-icon,.saved-check{grid-area:1/1;transition:opacity 240ms ease,transform 240ms ease}
+  .normal-icon{display:flex}
+  .saved-check{width:16px;height:16px;color:var(--success,#3fcf8e);opacity:0;transform:scale(.7)}
+  .save-icon.complete .normal-icon{opacity:0;transform:scale(.7)}
+  .save-icon.complete .saved-check{opacity:1;transform:scale(1)}
+  .save-body{min-width:min(200px,calc(100vw - 100px));overflow-wrap:anywhere}
+  .save-labels{display:grid}
+  .save-labels>span{min-width:0;grid-area:1/1;transition:opacity 240ms ease,transform 240ms ease}
+  .saved-label{opacity:0;transform:translateY(4px)}
+  .complete .saving-label{opacity:0;transform:translateY(-4px)}
+  .complete .saved-label{opacity:1;transform:translateY(0)}
+  .progress-space{display:grid;grid-template-rows:1fr;opacity:1;transition:grid-template-rows 280ms ease 180ms,opacity 200ms ease 180ms}
+  .complete .progress-space{grid-template-rows:0fr;opacity:0}
+  .save-progress{min-height:0;overflow:hidden;position:relative}
+  .save-progress::before{content:'';display:block;height:3px;margin-top:8px;background:var(--tx-2);opacity:.18;border-radius:2px}
+  .progress-fill{position:absolute;bottom:0;left:0;width:100%;height:3px;border-radius:2px;background:var(--tx-1,currentColor);transform-origin:left;transition:transform 240ms ease}
+  .progress-fill.indeterminate{width:35%;animation:save-activity 1.2s ease-in-out infinite}
+  @keyframes save-activity{from{transform:translateX(-100%)}to{transform:translateX(290%)}}
+  @media(prefers-reduced-motion:reduce){.save-labels>span,.progress-space,.progress-fill,.save-icon>.normal-icon,.saved-check{transition:none}.progress-fill.indeterminate{animation:none;transform:translateX(90%)}}
   /* An error keeps the status toast's shell and gutter and only grows
      downward, so the stack stays one column of like objects. An alert grows
      the same way, and is told apart by its marker and by the name of the

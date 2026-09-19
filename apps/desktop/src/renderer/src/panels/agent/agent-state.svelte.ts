@@ -163,6 +163,19 @@ function jsonEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/** Attachment bodies can be megabytes; compare immutable fields without encoding them. */
+function attachmentsEqual(left: Array<Record<string, any> | string> | undefined, right: Array<Record<string, any> | string> | undefined): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((item, index) => {
+    const other = right[index];
+    if (item === other) return true;
+    if (typeof item !== 'object' || !item || typeof other !== 'object' || !other) return false;
+    const keys = Object.keys(item);
+    return keys.length === Object.keys(other).length && keys.every(key => item[key] === other[key]);
+  });
+}
+
 function assignChangedFields(
   current: Record<string, any>,
   next: Record<string, any>,
@@ -236,7 +249,7 @@ function reconcileConversation(next: AgentMessage[]): void {
     if (!jsonEqual(currentMessage.steps, nextMessage.steps)) {
       currentMessage.steps = nextMessage.steps?.map((step) => ({ ...step }));
     }
-    if (!jsonEqual(currentMessage.attachments, nextMessage.attachments)) {
+    if (!attachmentsEqual(currentMessage.attachments, nextMessage.attachments)) {
       currentMessage.attachments = nextMessage.attachments?.map((attachment) =>
         typeof attachment === 'string' ? attachment : { ...attachment }
       );
@@ -288,7 +301,7 @@ export function setAgentSnapshot(snapshot: AgentSnapshot, options: AgentUpdateOp
   if (!jsonEqual(agentState.reasoningEfforts, reasoningEfforts)) agentState.reasoningEfforts = [...reasoningEfforts];
   if (!jsonEqual(agentState.accessModes, accessModes)) agentState.accessModes = accessModes.map((mode) => ({ ...mode }));
   if (!jsonEqual(agentState.threads, threads)) agentState.threads = threads.map((thread) => ({ ...thread }));
-  if (!jsonEqual(agentState.attachments, attachments)) {
+  if (!attachmentsEqual(agentState.attachments, attachments)) {
     agentState.attachments = attachments.map((attachment) => ({ ...attachment }));
   }
 

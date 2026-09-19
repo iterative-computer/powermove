@@ -105,3 +105,19 @@ it('restores completed work timing and thinking alongside the final reply', () =
   const restored = make(); restored.load('work-history');
   expect(restored.active.conversation[0]).toMatchObject(threads.active.conversation[0]!);
 });
+
+it('stores attachment bytes once while draft text and inline positions change', () => {
+  const { make, store, saved } = setup(); const threads = make(); threads.load('large');
+  const dataBase64 = 'abcd'.repeat(250_000);
+  threads.active.attachments = [{ id: 'binary', name: 'scene.aep', dataBase64, promptOffset: 0 }];
+  expect(threads.save()).toBe(true);
+  store.set.mockClear();
+  threads.active.composerDraft = 'Use this file'; threads.active.attachments[0]!.promptOffset = 4;
+  expect(threads.save()).toBe(true);
+  expect(store.set).toHaveBeenCalledOnce();
+  expect(JSON.stringify(saved.get('agentThreads.large')).length).toBeLessThan(1000);
+  const restored = make(); restored.load('large');
+  expect(restored.active.attachments[0]).toMatchObject({ dataBase64, promptOffset: 4 });
+  restored.save();
+  expect(store.set.mock.calls.filter(([key]) => key.startsWith('agentAttachment.'))).toHaveLength(0);
+});

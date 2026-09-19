@@ -1,3 +1,4 @@
+import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
 import { installUpdates } from './updates';
 import { installTextContextMenu } from './text-context-menu';
@@ -638,6 +639,7 @@ if (!hasSingleInstanceLock) {
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
+    registerFontsIpc(ipcMain, ctx);
     registerContextMenuIpc(ipcMain, ctx);
     registerConfirmIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);
@@ -698,6 +700,7 @@ if (!hasSingleInstanceLock) {
         ? path.join(process.resourcesPath, 'agent-tools', 'mcp-server.mjs')
         : path.join(app.getAppPath(), 'src/main/agent-tools/mcp-server.mjs'),
       agentToolCommand: process.execPath,
+      agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
       refreshExtensions: refreshRestoredExtensions,
       openExternal: async (url) => { await shell.openExternal(url); }
     });

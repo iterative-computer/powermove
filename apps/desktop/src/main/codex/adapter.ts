@@ -89,7 +89,8 @@ function nativeMcpArgv(config?: NativeMcpServerConfig): string[] {
   const argv = [
     '--config', `mcp_servers.powermove.command=${JSON.stringify(config.command)}`,
     '--config', `mcp_servers.powermove.args=${JSON.stringify(config.args)}`,
-    '--config', 'mcp_servers.powermove.startup_timeout_sec=10',
+    '--config', 'mcp_servers.powermove.required=true',
+    '--config', 'mcp_servers.powermove.startup_timeout_sec=30',
     '--config', 'mcp_servers.powermove.tool_timeout_sec=120'
   ];
   for (const [name, value] of Object.entries(config.env).sort(([a], [b]) => a.localeCompare(b))) {

@@ -494,6 +494,11 @@ PM.fontField = (get: any, set: any, opt: any = {}) => {
       if (!matches.length) results.appendChild(h('div.font-empty', 'No matching fonts'));
       else if (matches.length > 180) results.appendChild(h('div.font-empty', `${matches.length - 180} more · keep typing to narrow`));
     };
+    const unsubscribeFonts = PM.bus.on('fonts', render);
+    const observer = new MutationObserver(() => {
+      if (!menu.isConnected) { unsubscribeFonts?.(); observer.disconnect(); }
+    });
+    observer.observe(window.document.body, { childList: true });
     search.addEventListener('input', render);
     search.addEventListener('keydown', (e: any) => {
       e.stopPropagation();

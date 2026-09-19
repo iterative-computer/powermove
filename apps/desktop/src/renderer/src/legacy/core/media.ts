@@ -106,7 +106,7 @@ PM.MediaStore = {
 /* On a remote host this browser's IndexedDB is one device's cache: the host
    keeps the bytes for every device. Wrapped here, before the first project
    restore, so a miss is filled from the host. */
-if ((window as any).powermove?.wrapMediaStore) PM.MediaStore = (window as any).powermove.wrapMediaStore(PM.MediaStore);
+if (typeof window !== 'undefined' && (window as any).powermove?.wrapMediaStore) PM.MediaStore = (window as any).powermove.wrapMediaStore(PM.MediaStore);
 
 function normalizedName(value: any) {
   return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
