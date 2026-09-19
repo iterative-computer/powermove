@@ -2,12 +2,19 @@ import '@powermove/tokens/tokens.css';
 import '../../../css/app.css';
 import '../../../css/settings.css';
 import './legacy/core/image-sequence.css';
-import { installWebBridge } from './host/web-bridge';
+import { installWebBridge, remoteLink } from './host/web-bridge';
 
 // Served by `powermove serve`, the browser has no preload: the bridge has to be
 // on window before the engines read the store during their synchronous boot.
-await installWebBridge();
+const remote = await installWebBridge();
 await import('./legacy/bootstrap');
+if (remote) {
+  // Other tabs on the same host edit the same document; keep this one in step.
+  const { attachRemoteSync } = await import('./host/remote-sync');
+  const link = remoteLink();
+  const PM = (window as unknown as { PM?: Parameters<typeof attachRemoteSync>[1] }).PM;
+  if (link && PM) attachRemoteSync(link, PM);
+}
 const { autoEnhanceSelects } = await import('./controls/select/enhance');
 
 // Every native select in the app becomes a trigger with our own listbox.

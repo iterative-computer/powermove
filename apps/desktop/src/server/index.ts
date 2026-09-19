@@ -41,6 +41,7 @@ import { app, configureElectronStub, type MessageBoxOptions } from './electron-s
 import { RemoteClient, RemoteWindow, WebIpcMain, type RemoteEvent } from './clients';
 import { reachableAddresses } from './addresses';
 import { ensureCertificate } from './tls';
+import { ProjectSessions } from './sessions';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
 
 /** Electron's own types for main's modules; the remote stand-ins have the members they use. */
@@ -216,6 +217,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     broadcastChange: (keys, sender) => { for (const client of ipc.all()) if (client !== sender) client.send(IPC.storeChanged, { keys }); }
   });
 
+  /* project sessions: every tab on a project shares the host's document */
+  const sessions = new ProjectSessions({
+    read: (key) => { const raw = store.getSerialized?.(key); return raw == null ? store.snapshot()[key] ?? null : JSON.parse(raw); },
+    set: (key, value) => store.set(key, value)
+  }, { channel: WEB.syncPatch, version: options.version, log });
+  ipc.handle(WEB.syncJoin, (event, payload) => {
+    const client = trustedClient(event);
+    if (!isRecord(payload) || typeof payload.projectId !== 'string' || !PROJECT_ID.test(payload.projectId)) throw new Error('sync: expected { projectId, doc }');
+    return sessions.join(client, payload.projectId, payload.doc ?? null);
+  });
+  ipc.on(WEB.syncLeave, (event, projectId) => {
+    if (isTrustedSender(event) && typeof projectId === 'string') sessions.leave(event.sender, projectId);
+  });
+  ipc.handle(WEB.syncPatch, (event, payload) => {
+    const client = trustedClient(event);
+    if (!isRecord(payload) || typeof payload.projectId !== 'string') throw new Error('sync: expected { projectId, patches }');
+    return sessions.patch(client, payload.projectId, payload.patches);
+  });
+
   /* extensions */
   const userDir = path.join(userData, 'extensions');
   const buildDir = path.join(userData, 'extensions-build');
@@ -288,14 +308,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   ipc.on(IPC.windowInitialProject, (event) => {
     const window = isTrustedSender(event) ? event.sender.window : null;
     if (!window || !editors.has(window)) { event.returnValue = { projectId: null, taken: [] } satisfies WindowInitialProject; return; }
-    const projectId = editors.projectOf(window);
-    event.returnValue = { projectId, taken: editors.openProjectIds().filter((id) => id !== projectId) } satisfies WindowInitialProject;
+    // Tabs share documents, so nothing is "taken"; a tab opened without a
+    // project mirrors the one the user was last in.
+    const own = editors.projectOf(window);
+    const recent = editors.all().filter((other) => other !== window).map((other) => editors.projectOf(other)).find((id) => !!id) ?? null;
+    const projectId = own ?? recent;
+    if (projectId && !own) editors.claim(window, projectId);
+    event.returnValue = { projectId, taken: [] } satisfies WindowInitialProject;
   });
   ipc.handle(IPC.windowClaimProject, (event, payload): WindowClaimResult => {
     const window = trustedClient(event).window;
     const projectId = readProjectId(payload, IPC.windowClaimProject);
-    const holder = projectId ? editors.windowForProject(projectId) : null;
-    if (holder && holder !== window) { holder.webContents.send(WEB.focusWindow); return { claimed: false, focused: true }; }
+    // Unlike desktop windows, tabs share a project through its session, so a
+    // claim never bounces to another tab.
     editors.claim(window, projectId);
     return { claimed: true, focused: false };
   });
@@ -303,8 +328,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const projectId = readProjectId(payload, IPC.windowOpenProject);
     if (!projectId) return { opened: false, focused: false, error: 'A project is required' };
-    const holder = editors.windowForProject(projectId);
-    if (holder) { holder.webContents.send(WEB.focusWindow); return { opened: false, focused: true }; }
     event.sender.send(WEB.openWindow, projectId);
     return { opened: true, focused: false };
   });
@@ -478,6 +501,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       app.emit('will-quit');
       await mediaProxies.dispose();
+      await sessions.flush();
       await store.flushAll();
     }
   };

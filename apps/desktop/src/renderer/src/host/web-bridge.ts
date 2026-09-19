@@ -14,6 +14,10 @@ import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
 import { decodeFrame, encodeFrame, WEB, WEB_UPLOAD_CHUNK_BYTES, type ServerMessage, type WebHello } from '../../../shared/wire';
 
 const WS_PATH = '/__powermove/ws';
+
+/** The live connection, for modules that attach after the engines boot (remote-sync). */
+let activeLink: Connection | null = null;
+export function remoteLink(): Connection | null { return activeLink; }
 const CONNECT_TIMEOUT_MS = 4000;
 
 type Listener = (...args: unknown[]) => void;
@@ -469,6 +473,7 @@ export async function installWebBridge(): Promise<boolean> {
     link.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync),
     link.sync<{ projectId: string | null; taken: string[] }>(IPC.windowInitialProject)
   ]);
+  activeLink = link;
   scope.powermove = createBridge(link, hello, snapshot, initialProject);
   document.documentElement.classList.add('remote-app');
   if (project) history.replaceState(null, '', location.pathname);
