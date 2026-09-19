@@ -71,10 +71,19 @@
 
 <div class="hero-art" role="group" aria-label="Made in Powermove: animated typography showcasing a gradient editor, 3D system, and shader">
   {#if !ready}
-    <!-- Still frame from scene.json at 14s, present in the prerendered HTML before hydration. -->
+    <!-- Match the player's opening hold exactly: separate text layers preserve
+         its word spacing, anchor correction, and baselines during handoff. -->
     <svg class="hero-vector hero-poster" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-      <g fill="#F5F5F4" font-family="Geist, sans-serif" font-size="128" letter-spacing="-4" style="font-variation-settings:'wght' 398.334">
-        <text x="960" y="575.13599" text-anchor="middle">Shape your video editor</text>
+      <g fill="#F5F5F4" font-family="Geist" font-size="128" font-weight="600" letter-spacing="-4" style="font-variation-settings:'wght' 398.334">
+        <g transform="translate(342.9186172485351 470.1759932556153)">
+          <text y="104.96" text-anchor="end" transform="translate(309.7305908203125 1.0422963714599547)">Shape</text>
+        </g>
+        <g transform="translate(686.2853775024414 470.1759932556153)">
+          <text y="104.96" text-anchor="start">your</text>
+        </g>
+        <g transform="translate(967.8048477172852 470.1759932556153)">
+          <text y="104.96" text-anchor="start">video editor</text>
+        </g>
       </g>
     </svg>
   {/if}
