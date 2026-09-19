@@ -2,7 +2,7 @@
    color, type, radii, and motion come from the editor's shared tokens. */
 
 /* ---- base ---- */
-html{line-height:1.5;-webkit-text-size-adjust:100%;scroll-behavior:smooth;scroll-padding-top:96px}
+html{line-height:1.5;-webkit-text-size-adjust:100%;scroll-behavior:auto;scroll-padding-top:96px}
 html.overflow-hidden{overflow:hidden}
 body{margin:0;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 img,svg{display:block}
