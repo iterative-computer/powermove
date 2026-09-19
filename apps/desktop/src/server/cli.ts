@@ -8,19 +8,26 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { serve, type ServeOptions } from './index';
+import { install, logs, status, uninstall, unitPath, unitText, type ServiceSpec } from './install';
 
 const require = createRequire(import.meta.url);
 
 export interface CliLayout {
   /** Directory holding renderer/ and resources/. */
   distDir: string;
+  /** bin/powermove.mjs, what a service runs. */
+  entry: string;
   version: string;
 }
 
-const HELP = `powermove serve — run the Powermove host on this machine and use it from a browser.
+const HELP = `powermove — run the Powermove host on this machine and use it from a browser.
 
 Usage:
-  powermove serve [options]
+  powermove serve [options]      Run the host in this terminal (try it: npx powermove@latest serve)
+  powermove install [options]    Keep it running as a user service (systemd on Linux, launchd on macOS)
+  powermove uninstall            Stop and remove the service
+  powermove status               Is the service running, and at which address
+  powermove logs [-n 200]        Tail the service log
 
 Options:
   --port <n>        Port to listen on (default 4747)
@@ -29,6 +36,8 @@ Options:
   --exports <dir>   Where Save… writes on this machine (default ~/Powermove)
   --token <value>   Access token (default: generated once, kept in the profile)
   --http            Plain http instead of self-signed https (only behind a TLS proxy such as tailscale serve)
+  --dry-run         (install) print the service file instead of installing it
+  -n <lines>        (logs) how many lines to show
   -h, --help        Show this help
 
 Open the printed URL in a browser. Over Tailscale, use the 100.x address. The certificate
@@ -38,8 +47,9 @@ Sign in to ChatGPT or Claude on this machine first (\`codex login\`, \`claude au
 or use Settings › Agents in the browser; the sign-in link opens on your side.
 `;
 
-function parseArgs(argv: string[]): Partial<ServeOptions> & { help?: boolean; command?: string } {
-  const out: Partial<ServeOptions> & { help?: boolean; command?: string } = {};
+type Parsed = Partial<ServeOptions> & { help?: boolean; command?: string; dryRun?: boolean; lines?: number };
+function parseArgs(argv: string[]): Parsed {
+  const out: Parsed = {};
   const rest = [...argv];
   if (rest[0] && !rest[0].startsWith('-')) out.command = rest.shift();
   while (rest.length) {
@@ -52,6 +62,8 @@ function parseArgs(argv: string[]): Partial<ServeOptions> & { help?: boolean; co
       case '--exports': out.exportsDir = value(); break;
       case '--token': out.token = value(); break;
       case '--http': out.insecure = true; break;
+      case '--dry-run': out.dryRun = true; break;
+      case '-n': out.lines = Number(value()); break;
       case '-h': case '--help': out.help = true; break;
       default: throw new Error(`Unknown option ${arg}`);
     }
@@ -107,12 +119,36 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
   let parsed;
   try { parsed = parseArgs(argv); } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(2); }
   if (parsed.help || parsed.command === 'help') { process.stdout.write(HELP); return; }
-  if (parsed.command && parsed.command !== 'serve') { console.error(`Unknown command '${parsed.command}'.\n\n${HELP}`); process.exit(2); }
+  const userData = parsed.userData ?? process.env['POWERMOVE_USER_DATA'] ?? path.join(homedir(), '.powermove');
+  if (parsed.command && parsed.command !== 'serve') {
+    const flags: string[] = [];
+    if (parsed.port !== undefined) flags.push('--port', String(parsed.port));
+    if (parsed.host) flags.push('--host', parsed.host);
+    if (parsed.exportsDir) flags.push('--exports', parsed.exportsDir);
+    if (parsed.token) flags.push('--token', parsed.token);
+    if (parsed.insecure) flags.push('--http');
+    const spec: ServiceSpec = { entry: layout.entry, node: process.execPath, args: flags, userData };
+    const say = (line: string) => console.log(line);
+    try {
+      switch (parsed.command) {
+        case 'install':
+          if (parsed.dryRun) { console.log(`# ${unitPath(spec)}\n${unitText(spec)}`); return; }
+          await install(spec, say); return;
+        case 'uninstall': await uninstall(spec, say); return;
+        case 'status': await status(spec, say); return;
+        case 'logs': await logs(spec, Number.isInteger(parsed.lines) ? parsed.lines! : 200, say); return;
+        default: console.error(`Unknown command '${parsed.command}'.\n\n${HELP}`); process.exit(2);
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  }
 
   const running = await serve({
     host: parsed.host ?? '0.0.0.0',
     port: Number.isInteger(parsed.port) ? parsed.port! : 4747,
-    userData: parsed.userData ?? process.env['POWERMOVE_USER_DATA'] ?? path.join(homedir(), '.powermove'),
+    userData,
     exportsDir: parsed.exportsDir ?? path.join(homedir(), 'Powermove'),
     rendererDir: path.join(layout.distDir, 'renderer'),
     resourcesDir: path.join(layout.distDir, 'resources'),

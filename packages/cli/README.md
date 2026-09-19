@@ -1,10 +1,24 @@
 # powermove
 
-Run the [Powermove](https://powermove.app) host on one machine and use the editor from a browser on another. The agents (ChatGPT via Codex, Claude) run where the host runs, so a Linux box can keep working on your project while your laptop is closed.
+The [Powermove](https://powermove.app) desktop app is the way to use Powermove. This package is for the other case: running the Powermove host on a machine you leave on, and using the editor from a browser on any device. The agents run on the host, edits made anywhere reach every open tab, and a run you started keeps going after you close the lid.
+
+Try it once, nothing installed:
 
 ```sh
 npx powermove@latest serve
 ```
+
+Keep it running on a box:
+
+```sh
+npm i -g powermove
+powermove install          # systemd user service on Linux, launchd agent on macOS
+powermove status           # running? and the address to open
+powermove logs             # the host log
+powermove uninstall
+```
+
+On Linux, `loginctl enable-linger $USER` keeps the service up while you are logged out.
 
 Open the printed URL. Over [Tailscale](https://tailscale.com), use the `100.x` address; on a LAN, the local IP. The URL carries a one-time token that the browser remembers.
 
@@ -35,10 +49,12 @@ Codex and Claude sign in with a browser flow that returns to `localhost` on the 
 --http            Plain http instead of self-signed https (only behind a TLS proxy)
 ```
 
-## What lives where
+## How it works
 
-- Projects, extensions, agent workspaces and history live in the profile on the host.
-- Files you drop into the editor are uploaded to the host.
+- The host keeps the document. Every tab on a project sees the same document; an edit on one device appears on the others, and each device keeps its own undo.
+- Media you import is stored on the host, so a second device opening the project has the footage.
+- Agent runs are owned by the host and served by its document engine, the editor's core running in Node. Close the tab and the run finishes anyway; open a tab later and the thread shows the result. Tools that need pixels (panel capture, panel interaction) wait for an open tab.
+- Projects, extensions, agent workspaces and history live in the profile on the host (`~/.powermove`).
 - Exports are written on the host and also downloaded by the browser.
 - Nothing is sent anywhere else. There is no telemetry.
 

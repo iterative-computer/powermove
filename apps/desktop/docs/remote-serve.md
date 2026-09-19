@@ -28,6 +28,15 @@ The host serves https with a self-signed certificate minted by the machine's `op
 
 Restored project media is staged in memory on a remote client (`restoreProjectFileStream`): current Chromium keeps IndexedDB blobs as references to the OPFS staging file, which is deleted after the write, so the desktop app's disk staging leaves the media unreadable in a browser.
 
+## Sessions, engine, runs (2026-09-19)
+
+- **Sessions** (`src/server/sessions.ts`): the host holds the authoritative document per open project. Tabs diff their document against the last synced copy on every change signal (`src/renderer/src/host/remote-sync.ts`) and send leaf patches; the host applies, sequences, forwards, and persists to the project slot. A synced document that brings new assets triggers the same asset restore a project open gets. Claims never bounce between tabs; a tab opened without a project mirrors the most recent one.
+- **Media** (`src/renderer/src/host/remote-media.ts`): the media store is wrapped at install; imports are mirrored to `<profile>/Media Store` (content-addressed), a miss is filled from the host over `/__powermove/media`.
+- **Engine** (`src/engine/main.ts`, built by `engine.vite.config.ts` for Node): the renderer's core under happy-dom, connected as a client of kind `engine`. It joins sessions and answers the agent's document tools. No browser, no GPU.
+- **Runs** (`src/server/runs.ts`): `codex:run` is intercepted so `event.sender` is a `RunOwner` that lives until the host stops, buffers events, forwards them to attached tabs, routes document tools to the engine and display tools to a live tab. A tab lists runs for its project and attaches with replay; the assistant (`resumeHostRuns` in spatial.ts) puts a thread still waiting on an answer back into the run.
+- **Install** (`src/server/install.ts`): `powermove install|uninstall|status|logs` write and manage a systemd user unit or launchd agent that runs `serve` with the same flags; the log lives in the profile.
+- `scripts/fake-model.mjs` is a scripted OpenAI-compatible model for exercising runs without a provider.
+
 ## Building and publishing
 
 ```sh
