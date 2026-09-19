@@ -104,6 +104,10 @@ body:has(#settings-screen.on) #body,body:has(#settings-screen.on) #status,body:h
 /* Filled controls without resting outlines. Radius = group radius − row inset. */
 .sg-column .settings-select,.sg-column .settings-input,.sg-column .pm-select.settings-select,.sg-column .pm-select.settings-appearance{height:30px;padding:0 10px;border:0;border-radius:var(--sg-control-radius);background:var(--bg-float);box-shadow:none;color:var(--tx);font-size:var(--fs-md);font-weight:var(--fw-medium)}
 .sg-column .pm-select.settings-select,.sg-column .pm-select.settings-appearance{max-width:240px;padding-right:28px}
+/* Light controls need a tinted surface to separate them from the near-white card. */
+:root:not([data-theme="dark"]) .sg-column .pm-select{background:var(--bg-field)}
+:root:not([data-theme="dark"]) .sg-column .pm-select:hover,
+:root:not([data-theme="dark"]) .sg-column .pm-select[aria-expanded="true"]{background:var(--bg-row-hi)}
 .sg-group .btn{border-radius:var(--sg-control-radius)}
 .sg-column .settings-input{font-weight:var(--fw-regular)}
 .sg-column .settings-input.is-wide{width:220px}
