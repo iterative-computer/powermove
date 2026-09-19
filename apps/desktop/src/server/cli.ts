@@ -28,9 +28,12 @@ Options:
   --user-data <dir> Profile directory (default ~/.powermove)
   --exports <dir>   Where Save… writes on this machine (default ~/Powermove)
   --token <value>   Access token (default: generated once, kept in the profile)
+  --http            Plain http instead of self-signed https (only behind a TLS proxy such as tailscale serve)
   -h, --help        Show this help
 
-Open the printed URL in a browser. Over Tailscale, use the 100.x address.
+Open the printed URL in a browser. Over Tailscale, use the 100.x address. The certificate
+is self-signed, so the browser asks once whether to proceed; for a trusted one run
+\`tailscale serve --bg https+insecure://localhost:4747\` and use the ts.net URL it prints.
 Sign in to ChatGPT or Claude on this machine first (\`codex login\`, \`claude auth login\`)
 or use Settings › Agents in the browser; the sign-in link opens on your side.
 `;
@@ -48,6 +51,7 @@ function parseArgs(argv: string[]): Partial<ServeOptions> & { help?: boolean; co
       case '--user-data': out.userData = value(); break;
       case '--exports': out.exportsDir = value(); break;
       case '--token': out.token = value(); break;
+      case '--http': out.insecure = true; break;
       case '-h': case '--help': out.help = true; break;
       default: throw new Error(`Unknown option ${arg}`);
     }
@@ -116,12 +120,15 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     version: layout.version,
     codexBinary: bundledCodexBinary(),
     claudeBinary: bundledClaudeBinary(),
-    ...(parsed.token ? { token: parsed.token } : {})
+    ...(parsed.token ? { token: parsed.token } : {}),
+    ...(parsed.insecure ? { insecure: true } : {})
   });
 
   console.log(`\nPowermove ${layout.version} is serving. Open one of these in a browser:\n`);
   for (const url of running.urls) console.log(`  ${url}`);
-  console.log('\nThe token is remembered by the browser; the plain address works after the first visit.\nPress Ctrl+C to stop.\n');
+  console.log('\nThe token is remembered by the browser; the plain address works after the first visit.');
+  if (!parsed.insecure) console.log('The certificate is self-signed: the browser will ask once whether to proceed.');
+  console.log('Press Ctrl+C to stop.\n');
 
   let stopping = false;
   const stop = async () => {

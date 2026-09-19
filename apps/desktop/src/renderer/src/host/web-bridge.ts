@@ -195,6 +195,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
       notify('Powermove', 'Your agent has finished. Your result is ready.');
     },
     ping: () => link.invoke<string>(IPC.ping),
+    remote: true,
     versions: { electron: '', chrome: /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '', node: hello.node },
 
     fileUpload: {

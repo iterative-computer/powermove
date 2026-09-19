@@ -8,6 +8,15 @@ npx powermove@latest serve
 
 Open the printed URL. Over [Tailscale](https://tailscale.com), use the `100.x` address; on a LAN, the local IP. The URL carries a one-time token that the browser remembers.
 
+The certificate is self-signed, so the browser asks once whether to proceed. For a trusted one:
+
+```sh
+npx powermove@latest serve --http
+tailscale serve --bg https+insecure://localhost:4747
+```
+
+and open the `https://<machine>.<tailnet>.ts.net` URL Tailscale prints, with `?token=` from the first command.
+
 ## Signing in to an agent
 
 Codex and Claude sign in with a browser flow that returns to `localhost` on the host machine. Either:
@@ -23,6 +32,7 @@ Codex and Claude sign in with a browser flow that returns to `localhost` on the 
 --user-data <dir> Profile directory (default ~/.powermove)
 --exports <dir>   Where Save… writes on the host (default ~/Powermove)
 --token <value>   Access token (default: generated once and kept in the profile)
+--http            Plain http instead of self-signed https (only behind a TLS proxy)
 ```
 
 ## What lives where

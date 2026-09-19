@@ -22,7 +22,11 @@ Messages are framed by `src/shared/wire.ts`: a JSON header with every `Uint8Arra
 
 ## Access
 
-The host binds `0.0.0.0:4747` by default and prints a URL with a token. The token is generated once, kept at `<profile>/serve-token` (mode 600), and exchanged for an `HttpOnly; SameSite=Strict` cookie on first visit. Every HTTP request and the WebSocket upgrade require the cookie. There is no TLS; use Tailscale or a LAN you trust, or put it behind a reverse proxy that terminates TLS.
+The host binds `0.0.0.0:4747` by default and prints a URL with a token. The token is generated once, kept at `<profile>/serve-token` (mode 600), and exchanged for an `HttpOnly; Secure; SameSite=Strict` cookie on first visit. Every HTTP request and the WebSocket upgrade require the cookie.
+
+The host serves https with a self-signed certificate minted by the machine's `openssl` (`src/server/tls.ts`), listing localhost and every interface address; it is re-minted when the address list changes. Browsers only expose WebCodecs, OPFS, the clipboard, `crypto.subtle` and `crypto.randomUUID` on a secure origin, and a LAN or tailnet IP over plain http is not one, so this is not optional. The browser warns once per origin. For a trusted certificate, run `--http` behind `tailscale serve --bg https+insecure://localhost:4747` (or any TLS-terminating proxy) and use the URL it prints.
+
+Restored project media is staged in memory on a remote client (`restoreProjectFileStream`): current Chromium keeps IndexedDB blobs as references to the OPFS staging file, which is deleted after the write, so the desktop app's disk staging leaves the media unreadable in a browser.
 
 ## Building and publishing
 
