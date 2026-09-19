@@ -129,17 +129,45 @@ function pickFile(accept: string, multiple = false): Promise<File[]> {
   });
 }
 
-/** A server-side path for a browser File: uploaded in 1 MiB chunks. */
+type Toast = (text: string, ms?: number, options?: { error?: boolean }) => void;
+const toast: Toast = (text, ms, options) => {
+  const pm = (window as unknown as { PM?: { toast?: Toast } }).PM;
+  if (pm?.toast) pm.toast(text, ms, options); else console.info(`[powermove] ${text}`);
+};
+
+const UPLOAD_PARALLEL = 4;
+
+/** A server-side path for a browser File: uploaded in 1 MiB chunks, a few in flight. */
 async function upload(link: Connection, file: File, kind: 'media' | 'project'): Promise<string> {
+  const label = file.name || (kind === 'project' ? 'project' : 'media');
+  const megabytes = (file.size / 1048576).toFixed(file.size < 10 * 1048576 ? 1 : 0);
+  toast(`Uploading ${label} (${megabytes} MB) to the host…`, 60_000, { error: false });
   const id = await link.invoke<string>(WEB.uploadBegin, { name: file.name, size: file.size, kind });
   try {
-    for (let offset = 0; offset < file.size; offset += WEB_UPLOAD_CHUNK_BYTES) {
-      const data = new Uint8Array(await file.slice(offset, offset + WEB_UPLOAD_CHUNK_BYTES).arrayBuffer());
-      await link.invoke(WEB.uploadChunk, { id, data });
-    }
-    return await link.invoke<string>(WEB.uploadFinish, id);
+    let sent = 0, lastShown = -1;
+    const offsets: number[] = [];
+    for (let offset = 0; offset < file.size; offset += WEB_UPLOAD_CHUNK_BYTES) offsets.push(offset);
+    let next = 0;
+    const worker = async () => {
+      while (next < offsets.length) {
+        const offset = offsets[next++]!;
+        const data = new Uint8Array(await file.slice(offset, offset + WEB_UPLOAD_CHUNK_BYTES).arrayBuffer());
+        await link.invoke(WEB.uploadChunk, { id, offset, data });
+        sent += data.byteLength;
+        const percent = Math.floor((sent / file.size) * 100);
+        if (percent !== lastShown && (percent - lastShown >= 5 || percent === 100)) {
+          lastShown = percent;
+          toast(`Uploading ${label}… ${percent}%`, 60_000, { error: false });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, offsets.length || 1) }, worker));
+    const hostPath = await link.invoke<string>(WEB.uploadFinish, id);
+    toast(`Uploaded ${label}. Opening on the host…`, 4000, { error: false });
+    return hostPath;
   } catch (error) {
     await link.invoke(WEB.uploadAbort, id).catch(() => undefined);
+    toast(`Upload of ${label} failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
     throw error;
   }
 }
@@ -228,7 +256,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
     },
     openProjectFile: async () => {
       const [file] = await pickFile('.pmv,.json');
-      if (!file) return { ok: false, cancelled: true };
+      if (!file) { toast('No project file was chosen.', 2500); return { ok: false, cancelled: true }; }
       try {
         const hostPath = await upload(link, file, 'project');
         return await link.invoke<ProjectOpenResult>(WEB.projectOpenPath, hostPath);
