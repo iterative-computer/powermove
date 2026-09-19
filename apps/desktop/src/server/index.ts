@@ -8,7 +8,8 @@
  * Agents (Codex, Claude) run on this machine, so a laptop can close while a
  * Linux box keeps working on the project.
  */
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, readdir, realpath, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -39,6 +40,7 @@ import { EditorWindows } from '../main/windows';
 import { app, configureElectronStub, type MessageBoxOptions } from './electron-stub';
 import { RemoteClient, RemoteWindow, WebIpcMain, type RemoteEvent } from './clients';
 import { reachableAddresses } from './addresses';
+import { ensureCertificate } from './tls';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
 
 /** Electron's own types for main's modules; the remote stand-ins have the members they use. */
@@ -63,6 +65,8 @@ export interface ServeOptions {
   claudeBinary: string | null;
   /** Bearer token. Generated and persisted under userData when omitted. */
   token?: string;
+  /** Plain http instead of a self-signed https. Only for a TLS-terminating proxy in front. */
+  insecure?: boolean;
   log?: (line: string) => void;
 }
 
@@ -375,7 +379,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const rendererRoot = path.resolve(options.rendererDir);
   const exportsRoot = path.resolve(options.exportsDir);
   const authorized = (request: IncomingMessage): boolean => tokenMatches(token, cookieValue(request, COOKIE));
-  const server = createServer(async (request, response) => {
+  const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     try {
       const url = new URL(request.url ?? '/', 'http://localhost');
       const presented = url.searchParams.get('token');
@@ -383,7 +387,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         if (!tokenMatches(token, presented)) { text(response, 403, 'Wrong token. Copy the URL printed by `powermove serve`.'); return; }
         url.searchParams.delete('token');
         response.writeHead(302, {
-          'Set-Cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000`,
+          'Set-Cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${options.insecure ? '' : '; Secure'}`,
           Location: `${url.pathname}${url.search}`
         });
         response.end();
@@ -420,7 +424,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (!response.headersSent) text(response, 500, 'Internal error');
       else response.end();
     }
-  });
+  };
+  const scheme = options.insecure ? 'http' : 'https';
+  const server = options.insecure
+    ? createHttpServer(handler)
+    : createHttpsServer(await ensureCertificate(userData), handler);
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
   server.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
@@ -429,7 +437,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const requested = url.searchParams.get('project');
     const projectId = requested && PROJECT_ID.test(requested) ? requested : null;
     sockets.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-      const origin = `${request.headers.origin ?? 'http://localhost'}/`;
+      const origin = `${request.headers.origin ?? `${scheme}://localhost`}/`;
       const client = ipc.connect({ send: (data) => ws.send(data), close: (code, reason) => ws.close(code, reason) }, origin);
       editors.add(client.window, projectId);
       log(`[serve] client ${client.id} connected${projectId ? ` (project ${projectId})` : ''}`);
@@ -449,7 +457,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   });
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : options.port;
-  const urls = reachableAddresses(options.host, port).map((base) => `${base}/?token=${token}`);
+  const urls = reachableAddresses(options.host, port, scheme).map((base) => `${base}/?token=${token}`);
   if (isLoopback(options.host)) log('[serve] bound to loopback only; pass --host 0.0.0.0 to reach it from another machine');
 
   return {

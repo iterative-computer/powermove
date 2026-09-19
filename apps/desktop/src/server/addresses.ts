@@ -7,9 +7,9 @@ export function isTailnetAddress(address: string): boolean {
   return a === 100 && b !== undefined && b >= 64 && b <= 127;
 }
 
-export function reachableAddresses(host: string, port: number): string[] {
+export function reachableAddresses(host: string, port: number, scheme: 'http' | 'https' = 'http'): string[] {
   const urls: string[] = [];
-  const add = (address: string) => { const url = `http://${address.includes(':') ? `[${address}]` : address}:${port}`; if (!urls.includes(url)) urls.push(url); };
+  const add = (address: string) => { const url = `${scheme}://${address.includes(':') ? `[${address}]` : address}:${port}`; if (!urls.includes(url)) urls.push(url); };
   if (host !== '0.0.0.0' && host !== '::' && host !== '') { add(host); return urls; }
   add('localhost');
   const tailscale: string[] = [], lan: string[] = [];
