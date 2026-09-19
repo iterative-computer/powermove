@@ -40,7 +40,7 @@ export const STATIC_KEYS = [
 
 export type StaticKey = (typeof STATIC_KEYS)[number];
 
-export const DYNAMIC_PREFIXES = ['project', 'projectJournal', 'projectState', 'projectMeta', 'projectHistory', 'projectWorkspace', 'agentThreads', 'agentModel', 'ext'] as const;
+export const DYNAMIC_PREFIXES = ['project', 'projectJournal', 'projectState', 'projectMeta', 'projectHistory', 'projectWorkspace', 'agentThreads', 'agentAttachment', 'agentModel', 'ext'] as const;
 export type DynamicPrefix = (typeof DYNAMIC_PREFIXES)[number];
 
 const ID = /^[A-Za-z0-9_-]{1,120}$/;

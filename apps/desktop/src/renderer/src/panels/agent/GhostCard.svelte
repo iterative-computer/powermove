@@ -3,8 +3,8 @@
   import { ghostRowCount } from './ui-placement-geometry';
   import type { UIPlacement } from './ui-placement';
 
-  // Existing panels own their overlay; new panels reserve a dock slot.
-  let { placement, pinned = false, section = false }: { placement: UIPlacement; pinned?: boolean; section?: boolean } = $props();
+  // Only new sections and panels reserve placeholder space.
+  let { placement, section = false }: { placement: UIPlacement; section?: boolean } = $props();
 
   /* A preview of the shape that is coming: a label and a control on each row,
      at the uneven widths real controls have. Seven of them, so the pattern does
@@ -41,7 +41,6 @@
 
 <div
   class="ui-placement-ghost"
-  class:pinned
   class:section
   class:new-panel={placement.kind === 'dock'}
   data-ui-placement-ghost={placement.id}
@@ -86,18 +85,6 @@
     color: var(--tx, #1b1d23);
     animation: ghost-reserve var(--dur-3, 160ms) var(--ease, ease-out);
   }
-  /* A panel that already exists keeps its own frame; the ghost sits inside it. */
-  .pinned {
-    position: absolute;
-    inset: 0;
-    z-index: 35;
-    flex: none;
-    border: 0;
-    min-height: 0;
-    border-radius: inherit;
-    box-shadow: none;
-    animation: none;
-  }
   .new-panel {
     border: 1px dashed color-mix(in srgb, var(--tx, #1b1d23) 13%, transparent);
     background: var(--bg-panel-2, #f5f5f7);
@@ -105,7 +92,7 @@
   }
   /* A section placeholder participates in the panel's own flow and reserves a
      compact, useful control group without pretending to be a full panel. */
-  .section:not(.pinned) {
+  .section {
     width: 100%;
     flex: 0 0 112px;
     min-height: 88px;

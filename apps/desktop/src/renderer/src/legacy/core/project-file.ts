@@ -18,14 +18,17 @@ function fileAssets(document: any): Record<string, any> {
 }
 
 /** Embed available media; keep missing-media references editable on reopening. */
-export async function packProjectFileBlob(snapshot: string | any, store: MediaStore, serialized?: string): Promise<Blob> {
+export async function packProjectFileBlob(snapshot: string | any, store: MediaStore, serialized?: string, onProgress?: (value: number) => void): Promise<Blob> {
   const document = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
   const assets = fileAssets(document);
   const media: Array<{ id: string; type: string; data: Blob }> = [];
   const documentJSON = serialized ?? await stringifyAsync(document);
   const documentBytes = await encodeTextChunks(documentJSON);
-  for (const [id, asset] of Object.entries<any>(assets)) {
+  const entries = Object.entries<any>(assets);
+  let processed = 0;
+  for (const [id, asset] of entries) {
     const blob = await store.get(asset);
+    onProgress?.(++processed / entries.length);
     // Missing sources (including deleted assets retained by undo/redo) must not
     // prevent saving edits. Their metadata stays in the document and history.
     if (!blob) continue;
@@ -103,7 +106,7 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
   /* A browser served by `powermove serve` stages in memory: OPFS needs a secure
      context, and current Chromium keeps IndexedDB blobs as references to the
      staged file, which is gone once staging is cleaned up. */
-  if ((window as any).powermove?.remote || typeof navigator.storage?.getDirectory !== 'function') {
+  if ((typeof window !== 'undefined' && (window as any).powermove?.remote) || typeof navigator.storage?.getDirectory !== 'function') {
     for (const source of sources) {
       const chunks: Uint8Array[] = [];
       for (let offset = 0; offset < source.length;) {

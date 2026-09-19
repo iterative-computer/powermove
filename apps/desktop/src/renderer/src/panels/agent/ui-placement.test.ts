@@ -72,6 +72,9 @@ describe('early UI placement', () => {
     expect(prompt).toContain("Inspect the panel's DOM or source early");
     expect(prompt).toContain('insert=before or insert=after');
     expect(prompt).toContain('scene/media-only');
+    expect(prompt).toContain('Never replace or claim an entire existing panel');
+    expect(prompt).toContain('without placement metadata');
+    expect(prompt).toContain('App-wide styling, themes, and background work do not claim the viewer');
     expect(prompt).toContain('Never restart or reopen');
     expect(prompt).toContain('"id":"timeline"');
     expect(prompt).not.toContain('"id":"secret"');

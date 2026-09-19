@@ -5,6 +5,8 @@ export interface PromptAttachment {
   name: string;
   type: string;
   size: number;
+  /** Text offset of the inline token in the saved composer draft. */
+  promptOffset?: number;
   dataUrl?: string;
   dataBase64?: string;
   content?: string;

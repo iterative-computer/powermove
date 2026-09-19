@@ -8,6 +8,7 @@
 
 export const IPC = {
   ping: 'app:ping',
+  fontFamilies: 'fonts:families',
 
   onboardingAnimationComplete: 'onboarding:animation-complete',
   onboardingAnimationEnding: 'onboarding:animation-ending',
@@ -529,6 +530,7 @@ export interface PowermoveBridge {
   };
   agentNotification(options: { sound: string; preview?: boolean }): Promise<void>;
   ping(): Promise<string>;
+  fontFamilies?(): Promise<string[] | null>;
   versions: { electron: string; chrome: string; node: string };
   /** True when the page is served by `powermove serve` and the host is another machine. */
   remote?: boolean;

@@ -1,39 +1,24 @@
-import './import-progress.css';
+import type { PMRegistry } from '../registry';
 
 export type ImportProgress = { label: string; completed?: number; total?: number };
+let nextImport = 0;
 
-/** A persistent, non-modal status surface, owned by one import operation. */
-export function createImportProgress(title: string) {
-  const card = document.createElement('section');
-  card.className = 'import-progress';
-  card.setAttribute('aria-label', title);
-  const heading = document.createElement('strong');
-  heading.textContent = title;
-  const detail = document.createElement('div');
-  detail.className = 'import-progress-detail';
-  const label = document.createElement('span');
-  label.setAttribute('role', 'status');
-  const amount = document.createElement('span');
-  amount.className = 'import-progress-amount';
-  amount.setAttribute('aria-hidden', 'true');
-  const bar = document.createElement('progress');
-  bar.max = 1;
-  detail.append(label, amount);
-  card.append(heading, detail, bar);
-  document.body.append(card);
+/** Imports share the same persistent status surface and completion as Save. */
+export function createImportProgress(title: string, PM: PMRegistry) {
+  const key = `import-${++nextImport}`;
+  let finished = false;
+  const show = (progress: number | null) => PM.toast(title, 2200, {
+    key, icon: 'plus', error: false, sticky: true, dismissible: false, progress,
+  });
+  show(null);
   return {
-    update({ label: text, completed, total }: ImportProgress) {
-      label.textContent = text;
-      label.title = text;
-      bar.setAttribute('aria-label', text);
-      if (completed != null && total != null && total > 0) {
-        bar.value = Math.min(1, Math.max(0, completed / total));
-        amount.textContent = `${Math.round(bar.value * 100)}%`;
-      } else {
-        bar.removeAttribute('value');
-        amount.textContent = '';
-      }
+    update({ completed, total }: ImportProgress) {
+      if (!finished) show(completed != null && total != null && total > 0 ? Math.min(.95, Math.max(0, completed / total)) : null);
     },
-    close() { card.remove(); },
+    finish(message: string, milliseconds = 3400) {
+      finished = true;
+      PM.toast(message, milliseconds, { key, icon: 'plus', error: false, progress: 1, completed: true });
+    },
+    close() { if (!finished) PM.dismissToast?.(key); },
   };
 }

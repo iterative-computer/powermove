@@ -856,6 +856,7 @@ export interface KernelEvents {
   'extension:loaded': { id: string };
   'extension:unloaded': { id: string };
   /** Any extension record changed (health, enablement, rebuild) — re-read `extensions.list()`. */
+  'extensions:ready': undefined;
   'extensions:changed': { ids: string[]; reason: string };
   /** The compositor presented a frame. `viewport` is the exact preview viewport
    * object it drew into (identity-comparable with `render.gl.previewViewport`),

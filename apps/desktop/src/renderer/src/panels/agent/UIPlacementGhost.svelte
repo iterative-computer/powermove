@@ -14,13 +14,13 @@
     let target: HTMLElement | null = null;
     let card: ReturnType<typeof mount> | null = null;
     let cardElement: HTMLElement | null = null;
-    let restorePosition: (() => void) | null = null;
+    let restoreHighlight: (() => void) | null = null;
     const clear = () => {
       if (card) void unmount(card);
       card = null;
       cardElement = null;
-      restorePosition?.();
-      restorePosition = null;
+      restoreHighlight?.();
+      restoreHighlight = null;
     };
     const sync = () => {
       const next = document.getElementById(`panel-${current.id}`);
@@ -30,24 +30,24 @@
         try {
           // Generated selectors are panel-scoped and must never retarget the
           // ghost's own skeleton when a broad class happens to match it.
-          const match = [...panel.querySelectorAll(current.selector)].find(
+          const matches = [...panel.querySelectorAll(current.selector)].filter(
             candidate => candidate instanceof HTMLElement && !candidate.closest('[data-ui-placement-ghost]')
           );
-          scoped = match instanceof HTMLElement ? match : null;
-        } catch { /* A stale or malformed generated selector falls back to the panel. */ }
+          scoped = matches.length === 1 && matches[0] instanceof HTMLElement ? matches[0] : null;
+        } catch { /* Unknown targets stay in the agent panel; never cover the whole panel. */ }
       }
-      const resolved = scoped ?? panel;
+      const resolved = scoped;
       const insertionIsPlaced = Boolean(scoped && current.insert && cardElement?.isConnected
         && cardElement.parentElement === scoped.parentElement
         && (current.insert === 'before'
           ? cardElement.nextElementSibling === scoped
           : cardElement.previousElementSibling === scoped));
-      const overlayIsPlaced = Boolean(!(scoped && current.insert) && cardElement?.isConnected && cardElement.parentElement === resolved);
-      if (resolved === target && (insertionIsPlaced || overlayIsPlaced)) return;
+      const highlightIsPlaced = Boolean(!current.insert && resolved?.getAttribute('data-agent-editing') === current.label);
+      if (resolved === target && (insertionIsPlaced || highlightIsPlaced)) return;
       clear();
       target = resolved;
-      // Living inside the panel gives the overlay its exact frame and native
-      // clipping through every scrolling ancestor, including rounded docks.
+      // A verified descendant is required. A missing or broad target must not
+      // turn unrelated existing controls into a loading placeholder.
       if (!target) return;
       if (scoped && current.insert) {
         const parent = scoped.parentElement;
@@ -60,22 +60,14 @@
         ) as HTMLElement | null;
         return;
       }
-      if (getComputedStyle(target).position === 'static') {
-        const value = target.style.getPropertyValue('position');
-        const priority = target.style.getPropertyPriority('position');
-        target.style.setProperty('position', 'relative');
-        const positionedTarget = target;
-        restorePosition = () => {
-          // Preserve a live UI change that deliberately chose another position.
-          if (positionedTarget.style.getPropertyValue('position') !== 'relative') return;
-          if (value) positionedTarget.style.setProperty('position', value, priority);
-          else positionedTarget.style.removeProperty('position');
-        };
-      }
-      card = mount(GhostCard, { target, props: { placement: current, pinned: true, section: Boolean(scoped) } });
-      cardElement = [...target.children].find(child =>
-        child instanceof HTMLElement && child.dataset.uiPlacementGhost === current.id
-      ) as HTMLElement | null;
+      const highlighted = target;
+      const previous = highlighted.getAttribute('data-agent-editing');
+      highlighted.setAttribute('data-agent-editing', current.label);
+      restoreHighlight = () => {
+        if (highlighted.getAttribute('data-agent-editing') !== current.label) return;
+        if (previous === null) highlighted.removeAttribute('data-agent-editing');
+        else highlighted.setAttribute('data-agent-editing', previous);
+      };
     };
     const mutations = new MutationObserver(sync);
     mutations.observe(root, { childList: true, subtree: true });
@@ -86,3 +78,11 @@
     };
   });
 </script>
+
+<style>
+  /* Mark only the actual control or section; retain its content and hit targets. */
+  :global([data-agent-editing]) {
+    outline: 1px solid color-mix(in srgb, var(--accent, currentColor) 55%, transparent);
+    outline-offset: 2px;
+  }
+</style>

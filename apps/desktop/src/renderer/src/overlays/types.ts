@@ -22,6 +22,9 @@ export type ToastOptions = {
       success notice that quotes a file, layer or project name must stay a
       success even when that name reads like a failure ("Imported error.png"). */
   error?: boolean;
+  /** Save progress from 0 to 1; null shows indeterminate activity. */
+  progress?: number | null;
+  completed?: boolean;
   sticky?: boolean;
   dismissible?: boolean;
   /** Prefer a Powermove icon name. When omitted, the toast message selects one. */

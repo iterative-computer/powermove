@@ -64,6 +64,20 @@ describe('native Powermove agent tool bridge', () => {
       fs.rm(directory, { recursive: true, force: true })));
   });
 
+  it('launches the fixed app entrypoint without requiring Electron Node mode', async () => {
+    const ipc = new FakeIpcMain();
+    const bridge = new PowermoveAgentToolBridge(ipc as any, {
+      mcpServerPath: '/resources/agent-tools/mcp-server.mjs',
+      command: '/Applications/Powermove.app/Contents/MacOS/Powermove',
+      commandArgs: ['--powermove-agent-tools']
+    });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'packaged-tools', owner: new FakeWebContents(ipc) as any, baseRevision: 0 });
+    expect(session.mcpConfig.args).toEqual(['--powermove-agent-tools']);
+    expect(session.mcpConfig.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+    expect(session.mcpConfig.env.POWERMOVE_AGENT_RUN_ID).toBe('packaged-tools');
+  });
+
   it('serves the shared tools through the standalone MCP shim and finalizes one history entry', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);

@@ -719,3 +719,23 @@ it('keeps failed modal actions open with useful feedback', async () => {
   await Promise.resolve();
   expect(handle.el.isConnected).toBe(false);
 });
+
+it('keeps one progress popup mounted through updates and its green completion state', () => {
+  vi.useFakeTimers();
+  PM.toast('Saving Test.pmv', 2200, { key: 'save', sticky: true, progress: null });
+  const original = document.querySelector('.toast');
+  expect(original?.querySelector('[role="progressbar"]')?.hasAttribute('aria-valuenow')).toBe(false);
+  vi.advanceTimersByTime(10000);
+  expect(document.querySelector('.toast')).toBe(original);
+  PM.toast('Saving Test.pmv', 2200, { key: 'save', sticky: true, progress: .5 });
+  expect(document.querySelector('.toast')).toBe(original);
+  expect(original?.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('50');
+  PM.toast('Saved Test.pmv', 2200, { key: 'save', progress: 1, completed: true });
+  expect(document.querySelectorAll('.toast')).toHaveLength(1);
+  expect(document.querySelector('.toast')).toBe(original);
+  expect(original?.querySelector('.save-icon.complete .saved-check')).toBeTruthy();
+  expect(original?.querySelector('.save-body.complete')?.getAttribute('aria-label')).toBe('Saved Test.pmv');
+  vi.advanceTimersByTime(2200);
+  flushSync();
+  expect(document.querySelector('.toast')).toBeNull();
+});

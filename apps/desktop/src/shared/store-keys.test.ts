@@ -15,3 +15,8 @@ it('allows compact project recovery journals', () => {
   expect(parsed).toEqual({ kind: 'dynamic', prefix: 'projectJournal', id: 'project-123' });
   expect(storeFileName(parsed!)).toBe('projectJournal.project-123.json');
 });
+
+it('accepts immutable agent attachment payloads with validated ids', () => {
+  expect(parseStoreKey('agentAttachment.attachment-123')).toEqual({ kind: 'dynamic', prefix: 'agentAttachment', id: 'attachment-123' });
+  expect(parseStoreKey('agentAttachment../escape')).toBeNull();
+});

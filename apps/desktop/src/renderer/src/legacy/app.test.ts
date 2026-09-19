@@ -341,6 +341,25 @@ describe('legacy app install', () => {
     expect(PM.app.dirty).toBe(false);
   });
 
+  it('shows saving immediately and completes the same progress notice only after the write', async () => {
+    const { PM } = appRegistry();
+    const toast = PM.toast = vi.fn();
+    PM.dismissToast = vi.fn();
+    let release!: (result: any) => void;
+    const saveFile = vi.fn(() => new Promise(resolve => { release = resolve; }));
+    (window as any).powermove = { saveFile };
+    const saving = PM.saveProject();
+    expect(toast).toHaveBeenCalledWith('Saving Test.pmv', 2200, expect.objectContaining({ key: 'project-save', sticky: true, progress: null }));
+    await vi.waitFor(() => expect(saveFile).toHaveBeenCalledOnce());
+    expect(toast.mock.calls.some(call => call[2]?.completed)).toBe(false);
+    release({ ok: true, path: '/tmp/Test.pmv' });
+    expect(await saving).toBe(true);
+    expect(toast).toHaveBeenLastCalledWith('Saved Test.pmv', 2200, expect.objectContaining({ key: 'project-save', progress: 1, completed: true }));
+    (window as any).powermove.saveFile = async () => ({ ok: false, cancelled: true });
+    await PM.saveProject();
+    expect(PM.dismissToast).toHaveBeenCalledWith('project-save');
+  });
+
   it('does not mark cancellation or a failed write saved', async () => {
     const { PM } = appRegistry();
     (window as any).powermove = { saveFile: async () => ({ ok: false, cancelled: true }) };

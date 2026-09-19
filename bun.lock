@@ -7,7 +7,7 @@
     },
     "apps/desktop": {
       "name": "@powermove/desktop",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "dependencies": {
         "@anthropic-ai/claude-code": "2.1.261",
         "@anthropic-ai/claude-code-darwin-arm64": "2.1.261",

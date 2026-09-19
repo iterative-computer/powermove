@@ -79,7 +79,7 @@ function liveInspectionConfig(nativeTools: NativeMcpServerConfig): Record<string
         command: nativeTools.command,
         args: nativeTools.args,
         env: nativeTools.env,
-        startup_timeout_sec: 10,
+        startup_timeout_sec: 30,
         tool_timeout_sec: 120,
         required: true,
         enabled_tools: [...POWERMOVE_LIVE_INSPECTION_TOOL_NAMES],

@@ -213,6 +213,7 @@ describe('Codex CLI adapter', () => {
     expect(argv).toContain('mcp_servers.powermove.args=["/Applications/Powermove.app/Contents/Resources/agent-tools/mcp-server.mjs"]');
     expect(argv).toContain('mcp_servers.powermove.env.ELECTRON_RUN_AS_NODE="1"');
     expect(argv).toContain('mcp_servers.powermove.env.POWERMOVE_AGENT_TOOL_TOKEN="secret"');
+    expect(argv).toContain('mcp_servers.powermove.required=true');
   });
 
   it('reports supported and missing flags from codex exec --help', async () => {

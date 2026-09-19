@@ -225,7 +225,7 @@ describe('AgentPanel', () => {
     expect(picker).toBeTruthy();
     expect(picker?.textContent).toContain('Saved conversation');
     expect(target.querySelector('.agent-scroll')?.textContent).toContain('Your title animation is ready.');
-    expect(target.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Make it slower');
+    expect(target.querySelector<HTMLDivElement>('.agent-inline-prompt')?.textContent).toBe('Make it slower');
   });
 
   it('keeps setup visible while checking another provider and restores the saved draft', async () => {
@@ -249,7 +249,7 @@ describe('AgentPanel', () => {
     await vi.waitFor(() => {
       flushSync();
       expect(target.querySelector('.agent-connect-gate')).toBeNull();
-      expect(target.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Animate my title');
+      expect(target.querySelector<HTMLDivElement>('.agent-inline-prompt')?.textContent).toBe('Animate my title');
     });
   });
 
@@ -339,11 +339,11 @@ describe('AgentPanel', () => {
 
   it('clears the focused composer after Enter and does not resend an empty draft', () => {
     renderPanel();
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message Powermove agent"]')!;
-    expect(target.querySelector(`label[for="${textarea.id}"]`)?.textContent).toBe('Message Powermove agent');
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt[aria-label="Message Powermove agent"]')!;
+    expect(textarea.getAttribute('aria-label')).toBe('Message Powermove agent');
 
     textarea.focus();
-    textarea.value = 'Make the title bounce';
+    textarea.textContent = 'Make the title bounce';
     flushSync(() => textarea.dispatchEvent(new InputEvent('input', { bubbles: true })));
     PM.AgentUI.submit.mockImplementationOnce(() => {
       setAgentSnapshot(snapshot({
@@ -358,14 +358,14 @@ describe('AgentPanel', () => {
     flushSync();
 
     expect(PM.AgentUI.submit).toHaveBeenCalledExactlyOnceWith('Make the title bounce');
-    expect(textarea.value).toBe('');
+    expect(textarea.textContent).toBe('');
     textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     expect(PM.AgentUI.submit).toHaveBeenCalledOnce();
   });
 
   it('releases composer focus before another surface consumes a pointer interaction', () => {
     renderPanel(snapshot({ composerDraft: 'Keep this draft' }));
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     const canvas = document.createElement('canvas');
     target.append(canvas);
     const focusedAtPointer = vi.fn();
@@ -380,13 +380,13 @@ describe('AgentPanel', () => {
       expect(document.activeElement).not.toBe(textarea);
     }
     expect(focusedAtPointer.mock.calls).toEqual([[false], [false]]);
-    expect(textarea.value).toBe('Keep this draft');
+    expect(textarea.textContent).toBe('Keep this draft');
     expect(agentState.composerDraft).toBe('Keep this draft');
   });
 
   it('keeps composer interactions and context clicks from dismissing the draft focus', () => {
     renderPanel(snapshot({ composerDraft: 'Keep this draft' }));
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     flushSync(() => textarea.focus());
     for (const element of [textarea, target.querySelector('.agent-send')!]) {
       element.dispatchEvent(new PointerEvent('pointerdown', { button: 0, bubbles: true, cancelable: true }));
@@ -398,7 +398,7 @@ describe('AgentPanel', () => {
 
   it('leaves the composer on Escape after dismissing slash commands', () => {
     renderPanel(snapshot({ composerDraft: '/' }));
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     flushSync(() => textarea.focus());
     const escape = () => flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', {
       key: 'Escape', bubbles: true, cancelable: true
@@ -408,7 +408,7 @@ describe('AgentPanel', () => {
     expect(document.activeElement).toBe(textarea);
     escape();
     expect(document.activeElement).not.toBe(textarea);
-    expect(textarea.value).toBe('/');
+    expect(textarea.textContent).toBe('/');
     expect(PM.AgentUI.submit).not.toHaveBeenCalled();
   });
 
@@ -431,47 +431,47 @@ describe('AgentPanel', () => {
 
   it('filters slash commands, selects a model with the keyboard, and returns to typing', () => {
     renderPanel();
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     flushSync(() => textarea.focus());
-    textarea.value = '/mod';
+    textarea.textContent = '/mod';
     flushSync(() => textarea.dispatchEvent(new InputEvent('input', { bubbles: true })));
     expect(target.querySelector('[role="listbox"][aria-label="Slash commands"]')?.textContent).toContain('/model');
     const key = (value: string) => flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true })));
     key('Tab');
-    expect(textarea.value).toBe('/model ');
+    expect(textarea.textContent).toBe('/model ');
     expect(target.querySelectorAll('[role="option"]')).toHaveLength(2);
     key('ArrowDown');
     key('Enter');
     expect(PM.AgentUI.setModel).toHaveBeenCalledExactlyOnceWith('gpt-5.6-terra', 'high');
     expect(PM.AgentUI.submit).not.toHaveBeenCalled();
-    expect(textarea.value).toBe('');
+    expect(textarea.textContent).toBe('');
     expect(document.activeElement).toBe(textarea);
     expect(target.querySelector('.agent-slash-menu')).toBeNull();
   });
 
   it('dismisses shortcuts without consuming a literal slash prompt, and keeps /new open while working', () => {
     renderPanel(snapshot({ legacyPhase: 'working', requestToken: 1 }));
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     flushSync(() => textarea.focus());
-    textarea.value = '/';
+    textarea.textContent = '/';
     flushSync(() => textarea.dispatchEvent(new InputEvent('input', { bubbles: true })));
     const menu = target.querySelector('.agent-slash-menu')!;
     expect(menu.textContent).toContain('/new');
     expect(menu.textContent).toContain('/stop');
     flushSync(() => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
     expect(target.querySelector('.agent-slash-menu')).toBeNull();
-    expect(textarea.value).toBe('/');
+    expect(textarea.textContent).toBe('/');
     textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     expect(PM.AgentUI.submit).toHaveBeenCalledExactlyOnceWith('/');
   });
 
   it('keeps IME confirmation and Shift+Enter local to the draft', () => {
     renderPanel(snapshot({ composerDraft: 'Animate this' }));
-    const textarea = target.querySelector<HTMLTextAreaElement>('textarea')!;
+    const textarea = target.querySelector<HTMLDivElement>('.agent-inline-prompt')!;
     textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }));
     textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
     expect(PM.AgentUI.submit).not.toHaveBeenCalled();
-    expect(textarea.value).toBe('Animate this');
+    expect(textarea.textContent).toBe('Animate this\n');
   });
 
   it('keeps error recovery inside the diagnostic card', () => {
@@ -635,7 +635,7 @@ describe('AgentPanel', () => {
     expect(target.textContent).not.toContain('Done');
     expect(log.querySelector('[aria-label="Add clip.mp4 to timeline"]')).toBeNull();
     expect(log.querySelector('[aria-label="Reveal clip.mp4 in Finder"]')).toBeNull();
-    expect(target.querySelector('textarea')?.disabled).toBe(false);
+    expect(target.querySelector('.agent-inline-prompt')?.getAttribute('aria-disabled')).toBe('false');
 
     flushSync(() => setAgentSnapshot(snapshot({
       legacyPhase: 'result', conversation: [{ role: 'assistant', text: 'No changes needed.' }],

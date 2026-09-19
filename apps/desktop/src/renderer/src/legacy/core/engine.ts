@@ -240,6 +240,9 @@ PM.pause = () => {
   const wasPlaying = PM.playing;
   PM.playing = false;
   E.fps = 0; clock.frames = 0;
+  // Playback has a continuous clock, but edits belong to the frame on screen.
+  // Leaving a fractional time here lets key creation round into the next frame.
+  if (wasPlaying) PM.setTime(Math.floor(PM.time * PM.proj.fps + 1e-7) / PM.proj.fps, { raw: true });
   PM.Audio.pause(); scrubVideos(PM.time);
   if (!wasPlaying) return;
   PM.bus.emit('transport');

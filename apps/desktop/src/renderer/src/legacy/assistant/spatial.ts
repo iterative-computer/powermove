@@ -311,7 +311,6 @@ scheduleHostRunResume();
 let threadSaveError = false;
 let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let changingThreadProject = false;
-let lastThreadWrite = '';
 const pendingThreadTitles = new Set<string>();
 
 /* Every thread owns its run. A run writes only into its own session, so an
@@ -434,10 +433,7 @@ function generateThreadTitle(projectId: string, threadId: string, firstRequest: 
 function persistThreads() {
   clearTimeout(threadSaveTimer); threadSaveTimer = undefined;
   captureThread();
-  const serialized = JSON.stringify([threads.projectId, threads.activeId, threads.threads]);
-  if (serialized === lastThreadWrite) return;
   threadSaveError = !threads.save();
-  if (!threadSaveError) lastThreadWrite = serialized;
 }
 
 function restoreThread() {
@@ -611,6 +607,12 @@ registerAgentPanel(PM, {
     S.composerDraft = value; captureThread();
     clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300);
     if (projectChanged || focusComposer) PM.AgentUI?.update({ flush: true, focusComposer });
+  },
+  setInlineDraft: (value: string, attachments: any[]) => {
+    ensureThreadProject();
+    S.composerDraft = value; S.attachments = attachments;
+    captureThread();
+    clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300);
   },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
@@ -1803,6 +1805,7 @@ Fix failures in the isolated extension staging directory and return the changed 
    trace, and the result when it lands. */
 const resumedHostRuns = new Set<string>();
 function scheduleHostRunResume(): void {
+  if (typeof window === 'undefined') return;
   const remote = (window as any).powermove?.remoteRuns;
   if (!remote) return;
   window.setTimeout(() => { void resumeHostRuns(remote); }, 0);

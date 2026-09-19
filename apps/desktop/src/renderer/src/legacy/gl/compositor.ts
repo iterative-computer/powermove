@@ -800,11 +800,13 @@ function contentQuad(L: any, T: any, W: any, H: any, clip?: RasterWindow) {
     if (!a) return null;
     const liveVideo = L.type === 'video' && useVideoPreviews ? layerVideoElement(PM, a, videoPath + L.id) : a.el;
     const preparedVideo = PM.preparedVideoFrames?.get(L.id+'@'+T);
-    const captured = L.type === 'video' && !preparedVideo && useVideoPreviews ? previewSeekFrame(liveVideo) : undefined;
-    let el = preparedVideo || captured?.canvas || liveVideo, sw = a.w || 1, sh = a.h || 1;
+    let captured: ReturnType<typeof previewSeekFrame>;
+    let el = preparedVideo || liveVideo, sw = a.w || 1, sh = a.h || 1;
     if (L.type === 'video') {
       const videoTime = useVideoPreviews ? (previewVideoTimes.get(videoPath + L.id) ?? T) : T;
       const vt = sequencePlaybackTime(a, sourceTime(PM,L,videoTime)) ?? PM.clamp(sourceTime(PM,L,videoTime), 0, Math.max(0, a.dur - .04));
+      if (!preparedVideo && useVideoPreviews) captured = previewSeekFrame(liveVideo, vt);
+      if (captured) el = captured.canvas;
       if (!PM.playing && el === liveVideo) seekPreviewVideo(el, vt, .0005);
       sw = el.videoWidth || sw; sh = el.videoHeight || sh;
     }
@@ -1529,7 +1531,8 @@ GL.render = (T: any, opt: any = {}) => {
       videoTextureVersion(video);
       if (!PM.playing) {
         seekPreviewVideo(video, clip.at, .0005);
-        if (video.seeking || video.readyState < 2 || Math.abs(video.currentTime - clip.at) > .0005) ready = false;
+        if (!previewSeekFrame(video, clip.at)
+            && (video.seeking || video.readyState < 2 || Math.abs(video.currentTime - clip.at) > .0005)) ready = false;
       } else if (clip.rate != null && (video.seeking || video.readyState < 2 || !video.videoWidth)) ready = false;
     }
     // Keep the last complete composition until all paused clips have decoded.

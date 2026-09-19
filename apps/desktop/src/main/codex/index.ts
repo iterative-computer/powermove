@@ -67,6 +67,7 @@ export interface CodexIpcContext {
   agentToolServerPath?: string;
   /** Defaults to process.execPath (Electron with ELECTRON_RUN_AS_NODE=1). */
   agentToolCommand?: string;
+  agentToolCommandArgs?: string[];
   /** Test seam; production resolves the same built-in resource root as main boot. */
   builtinExtensionsDir?: string;
 }
@@ -305,6 +306,7 @@ export function registerCodexIpc(
     ? new PowermoveAgentToolBridge(ipcMain, {
         mcpServerPath: ctx.agentToolServerPath,
         ...(ctx.agentToolCommand ? { command: ctx.agentToolCommand } : {}),
+        ...(ctx.agentToolCommandArgs ? { commandArgs: ctx.agentToolCommandArgs } : {}),
         stageForkRebase: ({ forkId, stagingDirectory }) => stageForkRebase({
           forkId,
           stagingDirectory,
