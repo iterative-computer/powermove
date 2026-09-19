@@ -1,10 +1,13 @@
-import { RELEASES, RELEASES_REPO } from './links';
+import { page } from '$app/state';
+import { fetchDownload, type Download } from './releases';
 
-type Asset = { name: string; browser_download_url: string };
-type Release = { draft: boolean; tag_name: string; assets: Asset[] };
+let latest = $state<Download | undefined>();
 
-/** Direct link to the newest macOS build. Falls back to the releases page until resolved. */
-export const download = $state({ href: RELEASES, version: '' });
+/** Use the prerendered release immediately, then refresh for newly published builds. */
+export const download = {
+  get href() { return (latest ?? page.data.download).href; },
+  get version() { return (latest ?? page.data.download).version; },
+};
 
 let started = false;
 
@@ -12,22 +15,8 @@ export async function resolveDownload() {
   if (started || typeof fetch === 'undefined') return;
   started = true;
   try {
-    const res = await fetch(`https://api.github.com/repos/${RELEASES_REPO}/releases?per_page=10`, {
-      headers: { Accept: 'application/vnd.github+json' },
-    });
-    if (!res.ok) return;
-    const releases = (await res.json()) as Release[];
-    const arm = /arm64|aarch64|apple/i;
-    for (const r of releases) {
-      if (r.draft) continue;
-      const dmgs = r.assets.filter((a) => a.name.endsWith('.dmg'));
-      if (!dmgs.length) continue;
-      const pick = dmgs.find((a) => arm.test(a.name)) ?? dmgs[0];
-      download.href = pick.browser_download_url;
-      download.version = r.tag_name.replace(/^v/, '');
-      return;
-    }
+    latest = await fetchDownload(fetch);
   } catch {
-    /* keep the releases page */
+    /* Keep the fully populated release embedded in the page. */
   }
 }
