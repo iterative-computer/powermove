@@ -2,15 +2,14 @@
 import type { PMRegistry } from '../registry';
 import { timelineService } from './services';
 
-type PathPart = string | number;
-type Patch = { path: PathPart[]; exists: boolean; value?: any };
+import { applyPatch, clonePatchValue, type Patch, type PathPart } from '../../../../shared/patch';
 
 // Patch entries are tiny for ordinary edits. Keep a deep practical timeline
 // while the byte budget remains the hard memory bound for structural changes.
 const MAX_ENTRIES = 1_000;
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 
-const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+const clone = clonePatchValue;
 const encodedBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 
 function isRecord(value: any): value is Record<string, any> {
@@ -53,27 +52,6 @@ function diff(before: any, after: any, path: PathPart[] = [], forward: Patch[] =
   forward.push({ path, exists: true, value: clone(after) });
   backward.push({ path, exists: true, value: clone(before) });
   return { forward, backward };
-}
-
-function applyPatch(root: any, patches: Patch[]): any {
-  let nextRoot = root;
-  for (const patch of patches) {
-    if (!patch.path.length) {
-      nextRoot = patch.exists ? clone(patch.value) : undefined;
-      continue;
-    }
-    let parent = nextRoot;
-    for (let index = 0; index < patch.path.length - 1; index++) {
-      parent = parent?.[patch.path[index]!];
-      if (parent == null) break;
-    }
-    if (parent == null) continue;
-    const key = patch.path.at(-1)!;
-    if (patch.exists) parent[key] = clone(patch.value);
-    else if (Array.isArray(parent) && typeof key === 'number') parent.splice(key, 1);
-    else delete parent[key];
-  }
-  return nextRoot;
 }
 
 function valueAt(root: any, path: PathPart[]): { exists: boolean; value?: any } {

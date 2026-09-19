@@ -150,6 +150,10 @@ export const WEB = {
   openWindow: 'web:open-window',
   focusWindow: 'web:focus-window',
   closeWindow: 'web:close-window',
+  /** Project sessions: tabs share one document through the host. */
+  syncJoin: 'web:sync-join',
+  syncLeave: 'web:sync-leave',
+  syncPatch: 'web:sync-patch',
   /** Server-side capabilities the browser bridge adapts to. */
   hello: 'web:hello'
 } as const;
