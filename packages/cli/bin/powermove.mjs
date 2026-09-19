@@ -17,4 +17,4 @@ try { version = JSON.parse(await readFile(path.join(distDir, 'build.json'), 'utf
 }
 
 const { main } = await import(path.join(distDir, 'server.mjs'));
-await main(process.argv.slice(2), { distDir, version });
+await main(process.argv.slice(2), { distDir, entry: fileURLToPath(import.meta.url), version });
