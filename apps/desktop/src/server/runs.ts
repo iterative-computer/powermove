@@ -12,6 +12,7 @@
 import { EventEmitter } from 'node:events';
 
 import { IPC, type AgentToolRequestEvent, type AgentToolResponseEvent, type CodexProgressEvent, type CodexRunResult } from '../shared/ipc';
+import { WEB } from '../shared/wire';
 import type { RemoteClient } from './clients';
 
 /** Tools that need a real UI: pixels, panel DOM, synthetic input. */
@@ -76,10 +77,16 @@ export class RunOwner extends EventEmitter {
   sendInputEvent(): void { throw new Error('Synthetic input needs an open Powermove tab.'); }
 
   /* ── attachment: tabs that want this run's stream ─────────── */
-  attach(tab: RemoteClient): void {
-    if (this.attached.has(tab)) return;
-    this.attached.add(tab);
-    tab.once('destroyed', () => this.attached.delete(tab));
+  attach(tab: RemoteClient, replay = false): void {
+    if (!this.attached.has(tab)) {
+      this.attached.add(tab);
+      tab.once('destroyed', () => this.attached.delete(tab));
+    }
+    if (!replay) return;
+    // A tab that was not there for the run so far: catch it up in order,
+    // then the finish if the run is already over.
+    for (const event of this.record.events) tab.send(IPC.codexEvent, event);
+    if (this.record.result) tab.send(WEB.runFinished, { id: this.record.id, result: this.record.result });
   }
   detach(tab: RemoteClient): void { this.attached.delete(tab); }
   get attachedTabs(): RemoteClient[] { return [...this.attached].filter((tab) => !tab.isDestroyed()); }
@@ -127,7 +134,10 @@ export class RunHub {
 
   finish(runId: string, result: CodexRunResult): void {
     const record = this.records.get(runId);
-    if (record) { record.result = result; record.finishedAt = Date.now(); }
+    if (!record) return;
+    record.result = result;
+    record.finishedAt = Date.now();
+    for (const tab of this.owners.get(runId)?.attachedTabs ?? []) tab.send(WEB.runFinished, { id: runId, result });
   }
 
   owner(runId: string): RunOwner | null { return this.owners.get(runId) ?? null; }

@@ -9,7 +9,7 @@
  * window.confirm, saves become downloads, dropped files are uploaded first,
  * notifications use the Notification API.
  */
-import { IPC, type AgentToolRequestEvent, type FileSaveResult, type MediaProxyResult, type PowermoveBridge, type ProjectOpenResult, type StoreErrorEvent } from '../../../shared/ipc';
+import { IPC, type AgentToolRequestEvent, type CodexRunResult, type FileSaveResult, type MediaProxyResult, type PowermoveBridge, type ProjectOpenResult, type RemoteRunRecord, type StoreErrorEvent } from '../../../shared/ipc';
 import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
@@ -152,6 +152,23 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
     },
     ping: () => link.invoke<string>(IPC.ping),
     remote: true,
+    remoteRuns: {
+      list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),
+      attach: (runId, hooks) => new Promise<CodexRunResult>((resolve, reject) => {
+        const offEvents = link.on(IPC.codexEvent, (progress) => {
+          const event = progress as { id: string; kind: 'progress' | 'trace'; text?: string; step?: unknown };
+          if (event.id !== runId) return;
+          if (event.kind === 'progress') hooks.onProgress?.(event.text ?? ''); else hooks.onTrace?.(event.step as never);
+        });
+        const offFinish = link.on(WEB.runFinished, (payload) => {
+          const finished = payload as { id: string; result: CodexRunResult };
+          if (finished.id !== runId) return;
+          offEvents(); offFinish();
+          resolve(finished.result);
+        });
+        link.invoke(WEB.runsAttach, runId).catch((error) => { offEvents(); offFinish(); reject(error); });
+      })
+    },
     versions: { electron: '', chrome: /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '', node: hello.node },
 
     fileUpload: {

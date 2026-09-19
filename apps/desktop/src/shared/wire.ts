@@ -157,6 +157,7 @@ export const WEB = {
   /** Agent runs owned by the host: list them for a project, attach to one's stream. */
   runsList: 'web:runs-list',
   runsAttach: 'web:runs-attach',
+  runFinished: 'web:run-finished',
   /** Server-side capabilities the browser bridge adapts to. */
   hello: 'web:hello'
 } as const;
