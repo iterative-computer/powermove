@@ -18,6 +18,7 @@
     "scripts/player-bundle.ts",
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
+    "src/server/**/*.ts",
     "src/shared/**/*.ts"
   ]
 }

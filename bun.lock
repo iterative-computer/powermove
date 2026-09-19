@@ -27,6 +27,7 @@
         "@playwright/test": "1.62.1",
         "@sveltejs/vite-plugin-svelte": "6.2.4",
         "@types/node": "26.3.0",
+        "@types/ws": "^8.18.1",
         "create-dmg": "^8.1.0",
         "electron": "44.0.0",
         "electron-builder": "26.15.3",
@@ -38,6 +39,7 @@
         "typescript": "5.9.3",
         "vite": "7.3.6",
         "vitest": "4.1.11",
+        "ws": "8",
       },
     },
     "apps/www": {
@@ -58,6 +60,21 @@
         "vite": "7.3.6",
       },
     },
+    "packages/cli": {
+      "name": "powermove",
+      "version": "1.0.0",
+      "bin": {
+        "powermove": "bin/powermove.mjs",
+      },
+      "dependencies": {
+        "@anthropic-ai/claude-code": "2.1.261",
+        "@openai/codex": "0.153.4",
+        "esbuild": "0.25.12",
+        "ffmpeg-static": "5.3.0",
+        "svelte": "5.56.10",
+        "ws": "^8.18.0",
+      },
+    },
     "packages/macos-haptics": {
       "name": "@powermove/macos-haptics",
       "version": "1.0.0",
@@ -75,13 +92,11 @@
     },
   },
   "trustedDependencies": [
+    "electron",
     "@anthropic-ai/claude-code",
     "esbuild",
-    "macos-alias",
-    "@powermove/macos-haptics",
-    "electron",
     "ffmpeg-static",
-    "fs-xattr",
+    "@powermove/macos-haptics",
   ],
   "packages": {
     "@anthropic-ai/claude-code": ["@anthropic-ai/claude-code@2.1.261", "", { "optionalDependencies": { "@anthropic-ai/claude-code-darwin-arm64": "2.1.261", "@anthropic-ai/claude-code-darwin-x64": "2.1.261", "@anthropic-ai/claude-code-linux-arm64": "2.1.261", "@anthropic-ai/claude-code-linux-arm64-musl": "2.1.261", "@anthropic-ai/claude-code-linux-x64": "2.1.261", "@anthropic-ai/claude-code-linux-x64-musl": "2.1.261", "@anthropic-ai/claude-code-win32-arm64": "2.1.261", "@anthropic-ai/claude-code-win32-x64": "2.1.261" }, "bin": { "claude": "bin/claude.exe" } }, "sha512-j6+AkfCl6/UJBcx66nlZUmWc4XGK3TscvW19Tiat+oDwkz3WqQfKzjvHO5FhR+shXTtktqs6vqSBrJmeSWpU3Q=="],
@@ -875,6 +890,8 @@
     "postcss": ["postcss@8.5.28", "", { "dependencies": { "nanoid": "^3.3.18", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A=="],
 
     "postject": ["postject@1.0.0-alpha.6", "", { "dependencies": { "commander": "^9.4.0" }, "bin": { "postject": "dist/cli.js" } }, "sha512-b9Eb8h2eVqNE8edvKdwqkrY6O7kAwmI8kcnBv1NScolYJbo59XUF0noFq+lxbC1yN20bmC0WBEbDC5H/7ASb0A=="],
+
+    "powermove": ["powermove@workspace:packages/cli"],
 
     "pretty-ms": ["pretty-ms@9.3.1", "", { "dependencies": { "parse-ms": "^4.0.0" } }, "sha512-HzMy3Geq23nVALD/M2LliU+F+M+gVNsvkQWWqeBZ8HDiCgzo6YPJ/Omrmtq24EFrIsk0a3EkQGEd7bDOo+IhGA=="],
 
