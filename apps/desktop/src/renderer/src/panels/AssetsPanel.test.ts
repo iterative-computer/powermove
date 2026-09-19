@@ -372,6 +372,35 @@ describe('AssetsPanel', () => {
     expect(document.activeElement).toBe(rows()[0]);
   });
 
+  it.each(['Enter', ' ', 'ArrowRight', 'Delete'])('leaves %s on a media action button to the button', (key) => {
+    const { PM } = setup();
+    const button = target.querySelector<HTMLButtonElement>('.asset-delete')!;
+    const shortcut = vi.fn();
+    document.addEventListener('keydown', shortcut);
+    button.focus();
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    button.dispatchEvent(event);
+    document.removeEventListener('keydown', shortcut);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(shortcut).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(button);
+    expect(PM.cmd).not.toHaveBeenCalled();
+    expect(PM.Viewer.preview.toggle).not.toHaveBeenCalled();
+    expect(PM.hist.do).not.toHaveBeenCalled();
+  });
+
+  it('still lets application shortcuts reach the window from media buttons', () => {
+    setup();
+    const shortcut = vi.fn();
+    document.addEventListener('keydown', shortcut);
+    target.querySelector<HTMLButtonElement>('.asset-add')!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 's', metaKey: true, bubbles: true, cancelable: true })
+    );
+    document.removeEventListener('keydown', shortcut);
+    expect(shortcut).toHaveBeenCalledOnce();
+  });
+
   it('deletes unreferenced media through history and preserves the legacy cleanup events', () => {
     const { PM, events, removeAsset } = setup();
 

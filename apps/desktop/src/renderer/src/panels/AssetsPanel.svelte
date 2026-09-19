@@ -383,6 +383,14 @@
   }
 
   function handleRowKeydown(event: KeyboardEvent, asset: Asset, index: number): void {
+    // Nested buttons own their keys, including native Enter/Space activation.
+    if (event.target !== event.currentTarget) {
+      if (!event.metaKey && !event.ctrlKey && !event.altKey
+        && ['Enter', ' ', 'ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End', 'Delete', 'Backspace', 'Escape'].includes(event.key)) {
+        event.stopPropagation();
+      }
+      return;
+    }
     if (moveSelection(event, index)) return;
     if (event.key === 'Delete' || event.key === 'Backspace') {
       event.preventDefault();
