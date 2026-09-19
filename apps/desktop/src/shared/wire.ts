@@ -154,6 +154,9 @@ export const WEB = {
   syncJoin: 'web:sync-join',
   syncLeave: 'web:sync-leave',
   syncPatch: 'web:sync-patch',
+  /** Content-addressed media on the host, so a second device can pull an asset it never imported. */
+  mediaCommit: 'web:media-commit',
+  mediaHas: 'web:media-has',
   /** Agent runs owned by the host: list them for a project, attach to one's stream. */
   runsList: 'web:runs-list',
   runsAttach: 'web:runs-attach',

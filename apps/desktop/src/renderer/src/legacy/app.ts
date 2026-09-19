@@ -369,6 +369,9 @@ PM.hydrateProject = hydrate;
   PM.Projects.list().forEach((m: any) => { if (!PM.Projects.get(m.id)) PM.Projects.remove(m.id); });
 })();
 
+/* Exposed for the remote host sync: a document that arrives with assets this
+   tab has not loaded needs the same restore pass a project open gets. */
+PM.restoreProjectAssets = (project: any, warn: any = true) => restoreProjectAssets(project, warn);
 async function restoreProjectAssets(project: any, warn: any = true) {
   const result = await PM.assets.restoreProject(project);
   if (result.stale || PM.proj !== project) return result;
