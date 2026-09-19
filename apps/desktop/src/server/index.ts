@@ -160,7 +160,7 @@ async function serveStatic(rendererRoot: string, requestedPath: string, response
 
 /* ── uploads from the browser (drag-drop media, Open Project…) ── */
 
-interface Upload { id: string; handle: FileHandle; filePath: string; size: number; received: number; owner: RemoteClient; writing: Promise<void> }
+interface Upload { id: string; handle: FileHandle; filePath: string; size: number; received: number; owner: RemoteClient }
 
 function safeFileName(value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.length > 255 || value.includes('\0')) return null;
@@ -321,7 +321,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const uploadsRoot = { media: path.join(userData, 'Remote Uploads'), project: path.join(userData, 'Remote Projects') };
   const discardUpload = async (upload: Upload, keepFile: boolean): Promise<void> => {
     uploads.delete(upload.id);
-    await upload.writing.catch(() => undefined);
     await upload.handle.close().catch(() => undefined);
     if (!keepFile) await rm(path.dirname(upload.filePath), { recursive: true, force: true });
   };
@@ -337,21 +336,23 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     await mkdir(dir, { recursive: true });
     const filePath = path.join(dir, name);
     const handle = await open(filePath, 'wx', 0o600);
-    const upload: Upload = { id, handle, filePath, size, received: 0, owner: event.sender, writing: Promise.resolve() };
+    const upload: Upload = { id, handle, filePath, size, received: 0, owner: event.sender };
     uploads.set(id, upload);
+    log(`[serve] client ${event.sender.id}: uploading ${name} (${(size / 1048576).toFixed(1)} MB)`);
     event.sender.once('destroyed', () => { if (uploads.get(id) === upload) void discardUpload(upload, false); });
     return id;
   });
   ipc.handle(WEB.uploadChunk, async (event, payload) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
-    const { id, data } = (payload ?? {}) as { id?: unknown; data?: unknown };
+    const { id, offset, data } = (payload ?? {}) as { id?: unknown; offset?: unknown; data?: unknown };
     const upload = typeof id === 'string' ? uploads.get(id) : undefined;
     if (!upload || upload.owner !== event.sender) throw new Error('upload: unknown upload');
-    if (!(data instanceof Uint8Array) || data.byteLength === 0 || data.byteLength > WEB_UPLOAD_CHUNK_BYTES || upload.received + data.byteLength > upload.size) throw new Error('upload: invalid chunk');
-    const offset = upload.received;
+    // Chunks arrive a few at a time and out of order; each names its offset.
+    if (!(data instanceof Uint8Array) || data.byteLength === 0 || data.byteLength > WEB_UPLOAD_CHUNK_BYTES
+      || typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset % WEB_UPLOAD_CHUNK_BYTES !== 0
+      || offset + data.byteLength > upload.size) throw new Error('upload: invalid chunk');
+    await upload.handle.write(data, 0, data.byteLength, offset);
     upload.received += data.byteLength;
-    upload.writing = upload.writing.then(async () => { await upload.handle.write(data, 0, data.byteLength, offset); });
-    await upload.writing;
   });
   ipc.handle(WEB.uploadFinish, async (event, id) => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -359,6 +360,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (!upload || upload.owner !== event.sender) throw new Error('upload: unknown upload');
     if (upload.received !== upload.size) { await discardUpload(upload, false); throw new Error('upload: incomplete'); }
     await discardUpload(upload, true);
+    log(`[serve] client ${event.sender.id}: upload complete ${path.basename(upload.filePath)}`);
     return upload.filePath;
   });
   ipc.handle(WEB.uploadAbort, async (event, id) => {
@@ -372,7 +374,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const root = await realpath(uploadsRoot.project).catch(() => uploadsRoot.project);
     const relative = path.relative(root, resolved);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('open: path is not an uploaded project');
-    return openProjectForWindow({ projects }, asWebContents(event.sender), resolved);
+    const result = await openProjectForWindow({ projects }, asWebContents(event.sender), resolved);
+    log(`[serve] client ${event.sender.id}: open ${path.basename(resolved)} → ${result.ok ? 'ok' : `failed: ${result.error ?? 'cancelled'}`}`);
+    return result;
   });
 
   /* http + ws */
