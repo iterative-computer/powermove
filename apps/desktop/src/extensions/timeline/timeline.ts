@@ -809,24 +809,37 @@ function buildRows() {
   const rows = [];
   const source = api.project.get().layers;
   const layers: any[] = [];
+  const children = new Map<string | null, any[]>();
+  const sourceIndices = new Map<any, number>();
+  source.forEach((layer: any, index: number) => {
+    const parent = layer.group || null;
+    const siblings = children.get(parent);
+    if (siblings) siblings.push(layer);
+    else children.set(parent, [layer]);
+    if (!sourceIndices.has(layer)) sourceIndices.set(layer, index);
+  });
   const seen = new Set<string>();
-  const visit = (parent: string | null) => {
-    for (const layer of source) {
-      if ((layer.group || null) !== parent || seen.has(layer.id)) continue;
-      seen.add(layer.id); layers.push(layer);
-      if (layer.type === 'group') visit(layer.id);
+  // Iterative depth-first traversal preserves sibling order without rescanning
+  // the project for each group or consuming the call stack for deep nesting.
+  const pending = [...(children.get(null) || [])].reverse();
+  while (pending.length) {
+    const layer = pending.pop();
+    if (seen.has(layer.id)) continue;
+    seen.add(layer.id); layers.push(layer);
+    if (layer.type === 'group') {
+      const siblings = children.get(layer.id) || [];
+      for (let i = siblings.length - 1; i >= 0; i--) pending.push(siblings[i]);
     }
-  };
-  visit(null);
+  }
   for (const layer of source) if (!seen.has(layer.id)) layers.push(layer);
+  const query = String(T.search || '').trim().toLowerCase();
   for (let i = 0; i < layers.length; i++) {
     const L = layers[i];
     const ancestors = api.groups.ancestors(L) || [];
     if (!T.search && ancestors.some((group: any) => api.uiState.getGroupCollapsed(group))) continue;
-    const query = String(T.search || '').trim().toLowerCase();
     const matching = query ? visibleProps(L).filter((p: any) => String(p.label).toLowerCase().includes(query)) : [];
     if (query && !L.name.toLowerCase().includes(query) && !matching.length) continue;
-    rows.push({ kind: 'layer', L, i: source.indexOf(L), depth: ancestors.length });
+    rows.push({ kind: 'layer', L, i: sourceIndices.get(L), depth: ancestors.length });
     if (!api.uiState.getLayerCollapsed(L) || query) {
       const props = query && matching.length ? matching : visibleProps(L);
       props.forEach((p: any) => rows.push({ kind: 'prop', L, ...p }));
