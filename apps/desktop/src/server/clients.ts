@@ -17,8 +17,16 @@ export interface Socket {
 type InvokeHandler = (event: RemoteEvent, ...args: unknown[]) => unknown;
 type Listener = (event: RemoteEvent, ...args: unknown[]) => void;
 
+/** Lets the host stand a different sender in front of main's handlers (run
+ *  owners for agent runs) and observe results. */
+export interface ChannelInterceptor {
+  sender?(client: RemoteClient, args: unknown[]): { id: number; isDestroyed(): boolean; send(channel: string, ...args: unknown[]): void } | null;
+  after?(client: RemoteClient, args: unknown[], value: unknown, error: unknown): void;
+}
+
 /** What handlers see. `returnValue` is the sendSync reply slot. */
 export interface RemoteEvent {
+  /** Usually the client; an interceptor may put a run owner here instead. */
   sender: RemoteClient;
   senderFrame: { url: string } | null;
   returnValue?: unknown;
@@ -34,6 +42,8 @@ export class RemoteClient extends EventEmitter {
   private readonly asks = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   readonly mainFrame: { url: string };
   readonly window: RemoteWindow;
+  /** 'tab' is a browser; 'engine' is the host's own document engine. */
+  kind: 'tab' | 'engine' = 'tab';
 
   constructor(readonly id: number, private readonly socket: Socket, readonly url: string, private readonly ipc: WebIpcMain) {
     super();
@@ -97,8 +107,11 @@ export class RemoteClient extends EventEmitter {
     }
   }
 
-  private event(): RemoteEvent {
-    return { sender: this, senderFrame: this.mainFrame, preventDefault() {} };
+  private event(channel?: string, args: unknown[] = []): RemoteEvent {
+    const stand = channel ? this.ipc.interceptors.get(channel)?.sender?.(this, args) : null;
+    // A run owner has the WebContents members main's modules use; the type is nominal only.
+    const sender = (stand ?? this) as unknown as RemoteClient;
+    return { sender, senderFrame: this.mainFrame, preventDefault() {} };
   }
 
   private async dispatch(message: ClientMessage): Promise<void> {
@@ -106,10 +119,13 @@ export class RemoteClient extends EventEmitter {
       case 'invoke': {
         const handler = this.ipc.handlerFor(message.ch);
         if (!handler) { this.push({ t: 'result', id: message.id, ok: false, error: `No handler registered for '${message.ch}'` }); return; }
+        const after = this.ipc.interceptors.get(message.ch)?.after;
         try {
-          const value = await handler(this.event(), ...message.args);
+          const value = await handler(this.event(message.ch, message.args), ...message.args);
+          after?.(this, message.args, value, null);
           this.push({ t: 'result', id: message.id, ok: true, value: value ?? null });
         } catch (error) {
+          after?.(this, message.args, undefined, error);
           this.push({ t: 'result', id: message.id, ok: false, error: error instanceof Error ? error.message : String(error) });
         }
         return;
@@ -125,7 +141,7 @@ export class RemoteClient extends EventEmitter {
         return;
       }
       case 'send':
-        try { this.ipc.emitOn(message.ch, this.event(), ...message.args); } catch (error) {
+        try { this.ipc.emitOn(message.ch, this.event(message.ch, message.args), ...message.args); } catch (error) {
           console.warn(`[serve] ${message.ch}: ${error instanceof Error ? error.message : String(error)}`);
         }
         return;
@@ -161,6 +177,9 @@ export class WebIpcMain {
   private readonly listeners = new Map<string, Set<Listener>>();
   private nextClientId = 1;
   private readonly clients = new Set<RemoteClient>();
+  readonly interceptors = new Map<string, ChannelInterceptor>();
+
+  intercept(channel: string, interceptor: ChannelInterceptor): void { this.interceptors.set(channel, interceptor); }
 
   handle(channel: string, handler: InvokeHandler): void {
     if (this.handlers.has(channel)) throw new Error(`Attempted to register a second handler for '${channel}'`);
@@ -202,9 +221,11 @@ export class WebIpcMain {
     client.once('destroyed', () => this.clients.delete(client));
     return client;
   }
-  all(): RemoteClient[] { return [...this.clients].filter((client) => !client.isDestroyed()); }
-  /** The most recently connected live client, for app-wide prompts. */
+  /** Live browser tabs (the engine is not a tab). */
+  all(): RemoteClient[] { return [...this.clients].filter((client) => !client.isDestroyed() && client.kind === 'tab'); }
+  /** The most recently connected live tab, for app-wide prompts. */
   current(): RemoteClient | null { return this.all().at(-1) ?? null; }
+  engine(): RemoteClient | null { return [...this.clients].find((client) => !client.isDestroyed() && client.kind === 'engine') ?? null; }
   fromWebContents(contents: unknown): RemoteWindow | null {
     return contents instanceof RemoteClient && this.clients.has(contents) ? contents.window : null;
   }

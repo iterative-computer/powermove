@@ -42,6 +42,8 @@ import { RemoteClient, RemoteWindow, WebIpcMain, type RemoteEvent } from './clie
 import { reachableAddresses } from './addresses';
 import { ensureCertificate } from './tls';
 import { ProjectSessions } from './sessions';
+import { RunHub, RunOwner } from './runs';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
 
 /** Electron's own types for main's modules; the remote stand-ins have the members they use. */
@@ -68,6 +70,8 @@ export interface ServeOptions {
   token?: string;
   /** Plain http instead of a self-signed https. Only for a TLS-terminating proxy in front. */
   insecure?: boolean;
+  /** The built document engine (engine.mjs). Runs stay tab-bound without it. */
+  engineScript?: string | null;
   log?: (line: string) => void;
 }
 
@@ -201,8 +205,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Every socket was authenticated at upgrade, so a live client is a trusted
   // sender. Typed loosely because main's modules pass Electron's event types.
   const isTrustedSender = (event: { sender: unknown; senderFrame?: unknown }): boolean =>
-    event.sender instanceof RemoteClient && !event.sender.isDestroyed() && event.senderFrame !== null;
-  const isTrustedSenderContents = (sender: unknown): boolean => sender instanceof RemoteClient && !sender.isDestroyed();
+    (event.sender instanceof RemoteClient || event.sender instanceof RunOwner) && !event.sender.isDestroyed() && event.senderFrame !== null;
+  const isTrustedSenderContents = (sender: unknown): boolean => (sender instanceof RemoteClient || sender instanceof RunOwner) && !sender.isDestroyed();
   const ctx = { isTrustedSender, isTrustedSenderContents };
   const trustedClient = (event: RemoteEvent): RemoteClient => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -234,6 +238,50 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const client = trustedClient(event);
     if (!isRecord(payload) || typeof payload.projectId !== 'string') throw new Error('sync: expected { projectId, patches }');
     return sessions.patch(client, payload.projectId, payload.patches);
+  });
+
+  /* agent runs outlive tabs: a RunOwner is the sender codex/index.ts sees */
+  const runs = new RunHub({
+    engine: () => ipc.engine(),
+    tabs: () => [...ipc.all()].reverse(),
+    respond: (owner, response) => ipc.emitOn(IPC.agentToolResponse, { sender: owner as unknown as RemoteClient, senderFrame: owner.mainFrame, preventDefault() {} }, response),
+    log
+  });
+  ipc.intercept(IPC.codexRun, {
+    sender: (client, args) => {
+      const request = args[0] as { id?: string; projectId?: string; threadId?: string; provider?: string; mode?: string; prompt?: string } | undefined;
+      if (!request || typeof request.id !== 'string' || typeof request.projectId !== 'string') return null;
+      return runs.begin({ id: request.id, projectId: request.projectId, threadId: request.threadId, provider: request.provider, mode: request.mode ?? 'editor', prompt: request.prompt ?? '' }, client);
+    },
+    after: (_client, args, value, error) => {
+      const request = args[0] as { id?: string } | undefined;
+      if (typeof request?.id !== 'string') return;
+      runs.finish(request.id, error ? { ok: false, error: error instanceof Error ? error.message : String(error), cancelled: false } : value as never);
+    }
+  });
+  const ownerFor = (_client: RemoteClient, args: unknown[]) => {
+    const request = args[0] as { id?: string } | undefined;
+    return typeof request?.id === 'string' ? runs.owner(request.id) : null;
+  };
+  ipc.intercept(IPC.codexSteer, { sender: ownerFor });
+  ipc.intercept(IPC.codexCancel, { sender: ownerFor });
+  ipc.intercept(IPC.agentToolResponse, {
+    sender: (_client, args) => {
+      const response = args[0] as { callId?: string } | undefined;
+      return typeof response?.callId === 'string' ? runs.claimResponse(response.callId) : null;
+    }
+  });
+  ipc.handle(WEB.runsList, (event, projectId) => {
+    trustedClient(event);
+    if (typeof projectId !== 'string') return [];
+    return runs.runsFor(projectId).map((record) => ({ ...record, events: undefined, eventCount: record.events.length }));
+  });
+  ipc.handle(WEB.runsAttach, (event, runId) => {
+    const client = trustedClient(event);
+    const owner = typeof runId === 'string' ? runs.owner(runId) : null;
+    if (!owner) throw new Error('That run is not on this host.');
+    owner.attach(client);
+    return owner.record;
   });
 
   /* extensions */
@@ -463,17 +511,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // The browser tab was opened for a project (window.open from another tab).
     const requested = url.searchParams.get('project');
     const projectId = requested && PROJECT_ID.test(requested) ? requested : null;
+    const isEngine = url.searchParams.get('engine') === '1' && isLoopback(request.socket.remoteAddress?.replace('::ffff:', '') ?? '');
     sockets.handleUpgrade(request, socket, head, (ws: WebSocket) => {
       const origin = `${request.headers.origin ?? `${scheme}://localhost`}/`;
       const client = ipc.connect({ send: (data) => ws.send(data), close: (code, reason) => ws.close(code, reason) }, origin);
-      editors.add(client.window, projectId);
-      log(`[serve] client ${client.id} connected${projectId ? ` (project ${projectId})` : ''}`);
+      if (isEngine) client.kind = 'engine'; else editors.add(client.window, projectId);
+      log(`[serve] ${isEngine ? 'engine' : 'client'} ${client.id} connected${projectId ? ` (project ${projectId})` : ''}`);
       ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         if (!isBinary) return;
         const bytes = Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         client.receive(bytes);
       });
-      ws.on('close', () => { log(`[serve] client ${client.id} disconnected`); editors.remove(client.window); client.destroy(); });
+      ws.on('close', () => { log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); });
       ws.on('error', (error: Error) => log(`[serve] client ${client.id}: ${error.message}`));
     });
   });
@@ -485,6 +534,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : options.port;
   const urls = reachableAddresses(options.host, port, scheme).map((base) => `${base}/?token=${token}`);
+
+  /* the document engine, kept running beside the host */
+  let engine: ChildProcess | null = null;
+  let engineStopped = false;
+  let engineRestarts = 0;
+  const startEngine = (): void => {
+    if (engineStopped || !options.engineScript) return;
+    const child = spawn(process.execPath, [options.engineScript, `${scheme === 'https' ? 'wss' : 'ws'}://127.0.0.1:${port}${WS_PATH}?engine=1`, token], { stdio: ['ignore', 'pipe', 'pipe'] });
+    engine = child;
+    child.stdout?.on('data', (chunk: Buffer) => { for (const line of chunk.toString().split('\n')) if (line.trim()) log(line); });
+    child.stderr?.on('data', (chunk: Buffer) => { for (const line of chunk.toString().split('\n')) if (line.trim()) log(`[engine] ${line}`); });
+    child.on('exit', (code) => {
+      if (engine !== child) return;
+      engine = null;
+      if (engineStopped) return;
+      const delay = Math.min(30_000, 1000 * 2 ** Math.min(engineRestarts++, 5));
+      log(`[engine] exited (${code}); restarting in ${Math.round(delay / 1000)}s`);
+      setTimeout(startEngine, delay).unref();
+    });
+  };
+  startEngine();
   if (isLoopback(options.host)) log('[serve] bound to loopback only; pass --host 0.0.0.0 to reach it from another machine');
 
   return {
@@ -492,6 +562,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     urls,
     token,
     async close() {
+      engineStopped = true;
+      engine?.kill();
+      runs.shutdown();
       stopWatcher?.();
       for (const client of ipc.all()) client.destroy();
       for (const socket of sockets.clients) socket.terminate();
