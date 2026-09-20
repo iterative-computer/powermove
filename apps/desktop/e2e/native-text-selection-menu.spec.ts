@@ -66,6 +66,10 @@ for (const surface of ['agent', 'floating agent', 'text tool'] as const) {
     const layersBefore = await page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => l.id));
     const value = () => editor.evaluate((el: any) => el.value ?? el.textContent);
     const invoke = async (label: string) => {
+      await expect.poll(() => app.evaluate((_electron, label) => {
+        const item = (globalThis as any).__selectionMenu.items.find((i: any) => i.label === label);
+        return Boolean(item && item.enabled !== false);
+      }, label)).toBe(true);
       await app.evaluate((_electron, label) => {
         const item = (globalThis as any).__selectionMenu.items.find((i: any) => i.label === label);
         if (!item || item.enabled === false) throw new Error(`Missing or disabled menu action: ${label}`);

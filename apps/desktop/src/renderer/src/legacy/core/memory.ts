@@ -72,7 +72,9 @@ export function install(PM: PMRegistry): void {
       const ratio = level === 'critical' ? 0.25 : 0.6;
       for (const [name, provider] of providers) {
         cancelPending(name);
-        provider?.trim?.(Math.floor((budgets[name] || 64 * MIB) * ratio));
+        const target = Math.floor((budgets[name] || 64 * MIB) * ratio);
+        if (provider?.pressure) provider.pressure(target);
+        else provider?.trim?.(target);
       }
     },
     stats() {

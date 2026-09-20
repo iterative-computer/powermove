@@ -508,9 +508,11 @@ describe('Svelte DockLayout panel pool', () => {
     expect(PM.Layout.setCollapsed('beta', true)).toBe(true);
     expect(panel.dataset.collapsed).toBe('1');
     expect(panel.style.flex).toBe('0 0 var(--hdr-h)');
+    expect(panel.style.minHeight).toBe('var(--hdr-h)');
     expect(body.style.display).toBe('none');
     expect(PM.Layout.setCollapsed('beta', false)).toBe(true);
     expect(panel.style.flex).toBe('0 0 140px');
+    expect(panel.style.minHeight).toBe('88px');
   });
 
   /* A side column can only scroll if its panels stop crushing. Regression for

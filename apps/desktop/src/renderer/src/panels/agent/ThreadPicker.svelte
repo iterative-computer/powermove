@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { agentState } from './agent-state.svelte';
   import { relativeOpened } from './threads';
 
@@ -44,6 +44,9 @@
   const reduce = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function finishClose(): void {
+    // Reopening can reuse this node before the close animation completes.
+    // Its old listener must not consume the next opening animation's end.
+    popup?.removeEventListener('animationend', finishClose);
     shown = false;
     if (closeTimer) { clearTimeout(closeTimer); closeTimer = undefined; }
     detach();
@@ -119,6 +122,11 @@
     window.removeEventListener('resize', onWindowClose);
     window.removeEventListener('blur', onWindowClose);
   }
+  onDestroy(() => {
+    if (closeTimer) clearTimeout(closeTimer);
+    popup?.removeEventListener('animationend', finishClose);
+    detach();
+  });
 
   // ── one hover layer glides between rows ──
   let gliderOn = false;

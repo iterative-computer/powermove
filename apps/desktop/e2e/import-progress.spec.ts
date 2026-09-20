@@ -13,10 +13,10 @@ test('single-file imports show persistent progress through storage and clear it 
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 16;
     canvas.toBlob(blob => { (window as any).pendingImport = PM.importFiles([new File([blob!], 'Artwork.png')]); });
   });
-  const card = page.getByRole('region', { name: 'Importing file', exact: true });
+  const card = page.getByRole('status', { name: 'Importing file', exact: true });
   await expect(card).toBeVisible();
-  await expect(card).toContainText('Saving media · Artwork.png');
-  await expect(card.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(card).toContainText('Importing file');
+  await expect(card.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
   for (const theme of ['light', 'dark']) {
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
     await card.screenshot({ path: test.info().outputPath(`import-progress-${theme}.png`) });
@@ -42,8 +42,8 @@ test('switching projects during import removes progress without adding media to 
     (window as any).releaseImport = () => { PM.MediaImport.fingerprint = original; release(); };
     (window as any).pendingImport = PM.importFiles([new File(['image'], 'Waiting.png', { type: 'image/png' })]);
   });
-  const card = page.getByRole('region', { name: 'Importing file', exact: true });
-  await expect(card).toContainText('Reading file · Waiting.png');
+  const card = page.getByRole('status', { name: 'Importing file', exact: true });
+  await expect(card).toContainText('Importing file');
   await page.evaluate(async () => {
     const PM = (window as any).PM;
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: PM.mkProject({ name: 'Another project' }) }));

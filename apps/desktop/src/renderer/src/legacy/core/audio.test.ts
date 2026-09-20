@@ -30,6 +30,20 @@ function audioLayer(): any {
 }
 
 describe('legacy audio install', () => {
+  it('hands the decoder its owned input without allocating a second full audio buffer', async () => {
+    const bytes = new ArrayBuffer(64);
+    const decoded = { duration: 1, length: 4, sampleRate: 4, numberOfChannels: 1, getChannelData: () => new Float32Array([0, .5, -.5, 0]) };
+    const decodeAudioData = vi.fn(async (_bytes: ArrayBuffer) => decoded);
+    const PM = audioRegistry({ host: { AudioContext: class {
+      destination = {};
+      createGain() { return { gain: { value: 0 }, connect() {} }; }
+      decodeAudioData = decodeAudioData;
+    } } });
+    const asset = await PM.Audio.prepareAsset({ id: 'audio', name: 'tone.wav', blob: { size: 64, arrayBuffer: async () => bytes } });
+    expect(decodeAudioData.mock.calls[0]?.[0]).toBe(bytes);
+    expect(asset.audioBuffer).toBe(decoded);
+    expect([...asset.peaks]).toEqual([0, .5, .5, 0]);
+  });
   function idleAudio() {
     const callbacks: Function[] = [];
     const resume = vi.fn();

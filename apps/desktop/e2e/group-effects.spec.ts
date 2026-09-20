@@ -63,7 +63,7 @@ test('groups composite their contents through visual layer features', async ({ s
   await expect(inspector.getByText('Gaussian Blur', { exact: true })).toBeVisible();
   await expect(inspector.getByText('Masks', { exact: true })).toBeVisible();
   await expect(inspector.getByRole('combobox', { name: 'Blend mode', exact: true })).toBeVisible();
-  await expect(inspector.getByRole('button', { name: 'Motion blur', exact: true })).toBeVisible();
+  await expect(inspector.getByRole('radiogroup', { name: 'Motion blur', exact: true })).toBeVisible();
   await expect(inspector.getByRole('combobox', { name: 'Track matte', exact: true })).toBeVisible();
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

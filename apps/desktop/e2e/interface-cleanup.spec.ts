@@ -21,7 +21,10 @@ test('panel reload keeps the project and canvas while simplifying editor control
   }
   await writeFile(path.join(fork, 'index.ts'), `import timeline from './timeline/index'; import inspector from './inspector/index'; import viewer from './viewer/index'; export default function activate(api) { timeline(api); inspector(api); viewer(api); }`);
   await writeFile(path.join(fork, 'manifest.json'), JSON.stringify({ id: 'interface-cleanup', name: 'Interface cleanup', version: '1.0.0', apiVersion: 1, entry: 'index.ts', replaces: ['timeline', 'inspector', 'viewer'] }));
-  await page.waitForFunction(() => (window as any).PM.Kernel.loader.activeIds().includes('interface-cleanup'));
+  await expect.poll(() => page.evaluate(() => {
+    const loader = (window as any).PM.Kernel.loader;
+    return loader.activeIds().includes('interface-cleanup') ? 'active' : loader.records().find((record: any) => record.id === 'interface-cleanup');
+  })).toBe('active');
   await expect(page.getByRole('combobox', { name: 'Source', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Animate Visible|Remove animation from Visible/ })).toHaveCount(0);
   await expect(page.getByRole('combobox', { name: 'Preview frame rate', exact: true })).toHaveCount(0);
@@ -31,14 +34,14 @@ test('panel reload keeps the project and canvas while simplifying editor control
     const PM = (window as any).PM, before = (window as any).__beforeCleanup;
     const head = document.querySelector('#tl-head')!.getBoundingClientRect();
     const canvas = document.querySelector('#tl-canvas')!.getBoundingClientRect();
-    const quality = document.querySelector('#preview-controls select')!.getBoundingClientRect();
-    const zoom = document.querySelector('#composition-zoom')!.getBoundingClientRect();
+    const quality = document.querySelector('#preview-controls [role=combobox]')!.getBoundingClientRect();
+    const zoom = document.querySelector('[role=combobox][aria-label="Composition zoom"]')!.getBoundingClientRect();
     return { sameProject: PM.serialize() === before.project, sameCanvas: PM.GL.canvas === before.canvas,
       inlineRuler: Math.abs(head.top - canvas.top) < 1, compact: head.width < canvas.width,
       adjacentMenus: zoom.left - quality.right >= 0 && zoom.left - quality.right < 20,
       alignedMenus: quality.top === zoom.top && quality.height === zoom.height };
   })).toEqual({ sameProject: true, sameCanvas: true, inlineRuler: true, compact: true, adjacentMenus: true, alignedMenus: true });
-  await page.getByRole('button', { name: 'Visible', exact: true }).click();
+  await page.getByRole('radiogroup', { name: 'Visible', exact: true }).getByRole('radio', { name: 'Off', exact: true }).click();
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].on)).toBe(false);
   await page.evaluate(() => (window as any).PM.hist.undo());
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].on)).toBe(true);

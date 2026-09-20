@@ -606,10 +606,17 @@ PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); })
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   APP.saving = true; PM.invalidate('status');
+  const toastKey = 'project-save';
+  const name = safeName((projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId))?.name || 'Project') + '.pmv';
+  const progress = (value: number | null) => PM.toast('Saving ' + name, 2200, {
+    key: toastKey, icon: 'export', error: false, sticky: true, dismissible: false, progress: value,
+  });
+  progress(null);
   try {
     (window.document.activeElement as HTMLElement | null)?.blur?.();
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
+    progress(0.05);
     const project = projectId === PM.proj.id ? PM.proj : PM.Projects.get(projectId);
     if (!project) throw new Error('This project is no longer available.');
     let projectJSON: string, snapshot: any, serialized: string;
@@ -629,8 +636,11 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     }
     const state = fileState(projectId);
     const suggestedName = safeName(project.name) + '.pmv';
-    const data = await packProjectFileBlob(snapshot, PM.MediaStore, serialized);
+    progress(0.25);
+    const data = await packProjectFileBlob(snapshot, PM.MediaStore, serialized, value => progress(0.25 + value * 0.4));
+    progress(0.65);
     const finish = async (path?: string) => {
+      progress(0.95);
       state.path = path || state.path;
       state.savedHash = await projectFingerprint(projectJSON);
       rememberFile(projectId, state);
@@ -638,7 +648,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       if (projectId === PM.proj.id) captureProjectSession();
       await PM.store.flush?.();
       PM.bus.emit('project:saved');
-      PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName), 2200, { error: false });
+      PM.toast('Saved ' + (state.path?.split(/[\\/]/).pop() || suggestedName), 2200, { key: toastKey, icon: 'export', error: false, progress: 1, completed: true });
       return true;
     };
     if (typeof window.powermove?.saveFile === 'function') {
@@ -652,12 +662,14 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
             // A subarray still owns the complete backing buffer. Electron's
             // context bridge would clone the entire project for every slice.
             await upload.chunk(token, new Uint8Array(await data.slice(offset, offset + 1024 * 1024).arrayBuffer()));
+            progress(0.65 + Math.min(1, (offset + 1024 * 1024) / data.size) * 0.25);
           }
           return await upload.finish(token, metadata);
         } finally { await upload.abort(token).catch(() => undefined); }
       })();
       if (result.ok) return await finish(result.path);
       if (!result.cancelled) throw new Error(result.error || 'Save failed');
+      PM.dismissToast?.(toastKey);
       return false;
     }
     let handle = saveAs ? null : state.handle;
@@ -670,10 +682,10 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
       return await finish(handle.name);
     }
     PM.download(data, safeName(PM.proj.name) + '.pmv');
-    PM.toast('Download started'); return false;
+    PM.toast('Download started', 2200, { key: toastKey, error: false }); return false;
   } catch (error: any) {
-    if (error.name === 'AbortError') return false;
-    PM.toast('Could not save project: ' + (error.message || 'Save failed'), 6000); return false;
+    if (error.name === 'AbortError') { PM.dismissToast?.(toastKey); return false; }
+    PM.toast('Could not save project: ' + (error.message || 'Save failed'), 6000, { key: toastKey, error: true }); return false;
   }
 }
 PM.saveProject = (options: any = {}) => {
@@ -905,7 +917,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
         assertCurrent();
         files = choice.files;
         if (choice.fps !== null) {
-          progress = createImportProgress('Importing image sequence');
+          progress = createImportProgress('Importing image sequence', PM);
           files = [await convertImageSequence(files, choice.fps, assertCurrent, update => progress!.update(update))];
           assertCurrent();
         }
@@ -916,7 +928,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
     for (const f of files) {
       if (/\.pmv$/i.test(f.name)) {
         if (replaceAssetId != null) throw new Error('Choose a media file to replace this media');
-        const opening = createImportProgress('Opening project');
+        const opening = createImportProgress('Opening project', PM);
         opening.update({ label: f.name });
         try { await openProjectFile(f); } finally { opening.close(); }
         continue;
@@ -925,7 +937,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       mediaFiles.push(f);
     }
     if (!mediaFiles.length) return;
-    progress ??= createImportProgress(mediaFiles.length === 1 ? 'Importing file' : `Importing ${mediaFiles.length} files`);
+    progress ??= createImportProgress(mediaFiles.length === 1 ? 'Importing file' : `Importing ${mediaFiles.length} files`, PM);
     progress.update({ label: mediaFiles.length === 1 ? mediaFiles[0].name : `Preparing files · 0 of ${mediaFiles.length}` });
     const results = await PM.assets.importBatch(mediaFiles, {
       replaceAssetId,
@@ -970,7 +982,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
       const svgWarnings = [...layerResults, ...replaced].flatMap((result: any) => result.asset.svg?.warnings || []);
       if (svgWarnings.length) parts.push(`${svgWarnings.length} SVG ${svgWarnings.length === 1 ? 'feature needs' : 'features need'} review`);
       if (volatile.length) parts.push('durable storage unavailable');
-      PM.toast(parts.join(' · '), volatile.length ? 6000 : 3400, { error: false });
+      progress.finish(parts.join(' · '), volatile.length ? 6000 : 3400);
     }
   } catch (error: any) {
     PM.toast(error.message || 'Could not import files', 6000, { error: true });

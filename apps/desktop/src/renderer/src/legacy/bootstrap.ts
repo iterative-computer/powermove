@@ -7,6 +7,7 @@ import { installShell } from '../shell/install';
 import { installSvelteLayout } from '../layout/install';
 import { installSvelteOverlays } from '../overlays/install';
 import { installForkUpdates } from '../shell/fork-updates';
+import { installExtensionUpdateNotices } from '../shell/extension-update-notices';
 import { installAppUpdates } from '../shell/app-updates';
 
 import { BUILTIN_EXTENSIONS } from '../kernel/builtins';
@@ -102,6 +103,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['overlays/svelte', installSvelteOverlays],
   ['shell/fork-updates', (PM) => void installForkUpdates(PM)],
   ['shell/app-updates', (PM) => void installAppUpdates(PM)],
+  ['shell/extension-update-notices', (PM) => void installExtensionUpdateNotices(PM)],
   ['runtime/bridge', installLegacyRuntime],
   ['panels/svelte', installSveltePanels],
   ['app', installApp],
@@ -109,7 +111,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/settings', installSettingsUi],
   /* Extensions load last: every kernel registry is populated and the whole
      legacy UI is mounted, so an extension can override any of it. */
-  ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).catch((error) => console.error('[kernel] boot failed', error))]
+  ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).then(() => PM.Kernel.events.emit('extensions:ready', {})).catch((error) => console.error('[kernel] boot failed', error))]
 ];
 
 for (const [name, install] of INSTALLS) {

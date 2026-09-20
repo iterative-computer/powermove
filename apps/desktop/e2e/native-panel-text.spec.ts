@@ -28,7 +28,7 @@ test('native pointer selection in the agent copies into its composer', async ({ 
   await page.keyboard.press('Meta+C');
   await expect.poll(() => session.app.evaluate(({ clipboard }) => clipboard.readText())).toBe('Native');
   await composer.click(); await page.keyboard.press('Meta+V');
-  await expect(composer).toHaveValue('Native');
+  await expect(composer).toHaveText('Native');
   const layersBefore = await page.evaluate(() => (window as any).PM.proj.layers.map((l: any) => l.id));
   const selectedBefore = await page.evaluate(() => [...(window as any).PM.sel.layers]);
   await reply.click(); await page.keyboard.press('Meta+A');
@@ -40,11 +40,12 @@ test('native pointer selection in the agent copies into its composer', async ({ 
 
 for (const field of ['input', 'textarea', 'contenteditable', 'shadow']) test(`native editing in a panel ${field}`, async ({ session }) => {
   const page = session.page;
-  await page.waitForSelector('#panel-agent textarea');
+  await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   await page.evaluate((kind) => {
     const body = document.querySelector('#panel-agent .body')!;
     const wrapper = document.createElement('div'); wrapper.id = 'native-text-fixture';
-    wrapper.style.cssText = 'position:fixed;left:400px;top:80px;z-index:100000;background:white;color:black;width:250px;padding:10px';
+    const bounds = body.getBoundingClientRect();
+    wrapper.style.cssText = `position:fixed;left:${bounds.left + 8}px;top:${bounds.top + 8}px;z-index:100000;background:white;color:black;width:${bounds.width - 16}px;padding:10px;box-sizing:border-box`;
     wrapper.innerHTML = kind === 'shadow' ? '<div></div>' : kind === 'contenteditable' ? '<div contenteditable="true"><span>Original text</span></div>' : `<${kind}>${kind === 'textarea' ? 'Original text' : ''}</${kind}>`;
     body.append(wrapper);
     const control = wrapper.firstElementChild as HTMLInputElement;

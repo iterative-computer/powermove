@@ -95,8 +95,8 @@ test('autosave persists during panning and captures its thumbnail after navigati
   const result=await page.evaluate(async()=>{
     const PM=(window as any).PM,viewer=PM.Kernel.services.get('viewer');
     viewer.fit=false;viewer.zoom=4.37;viewer.pan=[0,0];viewer.layout();
-    const original=PM.Export.snapshot;let captures=0;
-    PM.Export.snapshot=(...args:any[])=>{captures++;return original(...args);};
+    const canvas=PM.GL.canvas,original=canvas.toBlob;let captures=0;
+    canvas.toBlob=(...args:any[])=>{captures++;return original.apply(canvas,args);};
     PM.agentFrameCapture=false;
     try {
       PM.autosave();
@@ -107,9 +107,10 @@ test('autosave persists during panning and captures its thumbnail after navigati
       }
       const during=captures;
       const saved=!!PM.Projects.get(PM.proj.id);
-      await new Promise(resolve=>setTimeout(resolve,850));
+      const deadline=performance.now()+3000;
+      while(!captures&&performance.now()<deadline)await new Promise(resolve=>setTimeout(resolve,50));
       return {during,saved,after:captures};
-    }finally{PM.Export.snapshot=original;}
+    }finally{canvas.toBlob=original;}
   });
   expect(result).toEqual({during:0,saved:true,after:1});
   await page.evaluate(async()=>await (window as any).PM.flushProject());

@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { expect, test, repoRoot } from './helpers/app';
 
-test('exports each decoded video frame even when the preview is at another time', async ({ session }) => {
+test('exports each decoded video frame even when the preview is at another time', async ({ session }, info) => {
   await session.openEditor();
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-frames-'));
   const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
@@ -20,19 +20,22 @@ test('exports each decoded video frame even when the preview is at another time'
       const input = document.createElement('input'); input.type = 'file'; input.id = 'frame-source'; document.body.appendChild(input);
     });
     await session.page.locator('#frame-source').setInputFiles(source);
-    const bytes = await session.page.evaluate(async () => {
+    const output = path.join(root, 'export.webm');
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, output);
+    const result = await session.page.evaluate(async () => {
       const PM = (window as any).PM;
       await PM.importFiles([(document.querySelector('#frame-source') as HTMLInputElement).files![0]]);
       const layer = PM.proj.layers.find((l: any) => l.type === 'video'); layer.from = 0; layer.dur = 2;
       PM.setTime(1.5, { force: true });
       await new Promise(resolve => setTimeout(resolve, 300));
-      let data: number[] = [];
-      PM.download = async (blob: Blob) => { data = Array.from(new Uint8Array(await blob.arrayBuffer())); };
       const result = await PM.Export.run({ format: 'webm', scale: 1, fps: 10, range: 'all', quality: 'high', mblur: false, audio: false });
       if (result.error) throw new Error(result.error);
-      return data;
+      return result;
     });
-    const output = path.join(root, 'export.webm'); await writeFile(output, Buffer.from(bytes));
+    expect(result).toEqual({ cancelled: false });
+    await info.attach('encoded-webm', { path: output, contentType: 'video/webm' });
     const decoded = execFileSync(ffmpeg, ['-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']);
     const levels = Array.from({ length: decoded.length / 3 }, (_, i) => decoded[i * 3]);
     expect(levels.length).toBe(20);

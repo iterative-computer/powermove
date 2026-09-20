@@ -101,7 +101,7 @@ describe('CodexAppServerRunner steering', () => {
       mcp_servers: {
         powermove: {
           ...nativeTools,
-          startup_timeout_sec: 10,
+          startup_timeout_sec: 30,
           tool_timeout_sec: 120,
           required: true,
           enabled_tools: [

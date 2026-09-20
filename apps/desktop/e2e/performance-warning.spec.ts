@@ -10,8 +10,12 @@ test('identifies a slow extension and lets the user turn it off', async ({ sessi
       files: { 'index.js': `export default function(api) { api.commands.register({id:'slow-preview-test.measure',label:'Measure slow callback',run(){const end=performance.now()+65;while(performance.now()<end){}}}); }` }
     });
   });
-  await expect.poll(() => session.page.evaluate(() => !!(window as any).PM.Kernel.commands.get('slow-preview-test.measure'))).toBe(true);
-  await session.page.evaluate(() => (window as any).PM.Kernel.commands.get('slow-preview-test.measure').run());
+  await session.page.waitForFunction(() => {
+    const command = (window as any).PM.Kernel.commands.get('slow-preview-test.measure');
+    if (!command) return false;
+    command.run();
+    return true;
+  });
   const warning = session.page.getByRole('button', { name: /Performance · Slow preview test/ });
   await expect(warning).toBeVisible(); await warning.click();
   const dialog = session.page.getByRole('dialog', { name: 'What is slowing the editor down', exact: true });

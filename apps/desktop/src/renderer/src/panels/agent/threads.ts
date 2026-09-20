@@ -13,7 +13,6 @@ export interface AgentThread {
 interface ThreadArchive { version: 1; activeId: string; threads: AgentThread[] }
 interface Store { get(key: string, fallback: unknown): unknown; set(key: string, value: unknown): boolean | void }
 const isRecord = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
-const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 
 export function newAgentThread(id: string): AgentThread {
   return { id, title: 'New thread', updatedAt: Date.now(), conversation: [], composerDraft: '', attachments: [], scope: 'workspace' };
@@ -58,10 +57,14 @@ export class AgentThreads {
   threads: AgentThread[] = [];
   activeId = '';
   projectId = '';
+  private lastArchive = '';
+  private payloads = new Map<string, Record<string, string>>();
   constructor(private store: Store, private uid: () => string) {}
 
   load(projectId: string): void {
     this.projectId = projectId;
+    this.payloads.clear();
+    this.lastArchive = '';
     const saved = this.store.get(this.key, null);
     const seen = new Set<string>();
     this.threads = isRecord(saved) && saved.version === 1 && Array.isArray(saved.threads)
@@ -75,8 +78,8 @@ export class AgentThreads {
           && (m.text === undefined || typeof m.text === 'string')
           && (m.steps === undefined || Array.isArray(m.steps))
           && (m.attachments === undefined || Array.isArray(m.attachments)))
-          .map(m => ({ ...m, entering: false })),
-        attachments: Array.isArray(t.attachments) ? t.attachments.filter(isRecord) : [],
+          .map(m => ({ ...m, entering: false, ...(m.attachments ? { attachments: m.attachments.map(item => this.restoreAttachment(item)) } : {}) })),
+        attachments: Array.isArray(t.attachments) ? t.attachments.filter(isRecord).map(item => this.restoreAttachment(item)) : [],
         scope: typeof t.scope === 'string' ? t.scope : 'workspace',
         title: typeof t.title === 'string' ? t.title : threadTitle(t.conversation),
         updatedAt: Number.isFinite(t.updatedAt) ? t.updatedAt : 0,
@@ -113,10 +116,48 @@ export class AgentThreads {
     if (!this.threads.some(t => t.id === id)) return false;
     this.activeId = id; return true;
   }
+  private payloadKey(id: string): string { return `agentAttachment.${id}`; }
+  private restoreAttachment(item: any): any {
+    if (!isRecord(item) || !item.payloadStored || typeof item.id !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(item.id)) return item;
+    const key = this.payloadKey(item.id);
+    const payload = this.payloads.get(key) ?? this.store.get(key, null);
+    const { payloadStored: _, ...metadata } = item;
+    if (!isRecord(payload)) return metadata;
+    this.payloads.set(key, payload);
+    return { ...metadata, ...payload };
+  }
+  private archiveAttachment(item: any): any {
+    if (!isRecord(item) || typeof item.id !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(item.id)) return item;
+    const { dataUrl, dataBase64, content, ...metadata } = item;
+    const payload: Record<string, string> = {};
+    if (typeof dataUrl === 'string') payload.dataUrl = dataUrl;
+    if (typeof dataBase64 === 'string') payload.dataBase64 = dataBase64;
+    if (typeof content === 'string') payload.content = content;
+    if (!Object.keys(payload).length) return metadata;
+    const key = this.payloadKey(item.id), previous = this.payloads.get(key);
+    if (!previous || Object.keys(previous).length !== Object.keys(payload).length || Object.keys(payload).some(name => payload[name] !== previous[name])) {
+      if (this.store.set(key, payload) === false) throw new Error('Attachment storage failed');
+      this.payloads.set(key, payload);
+    }
+    return { ...metadata, payloadStored: true };
+  }
   save(): boolean {
     if (!this.projectId) return true;
-    const archive: ThreadArchive = { version: 1, activeId: this.activeId, threads: this.threads };
-    // Snapshot now: asynchronous native storage must not retain mutable objects.
-    try { return this.store.set(this.key, copy(archive)) !== false; } catch { return false; }
+    // Attachment bytes are immutable and stored once. Typing and moving a token
+    // only snapshot text/offsets, never re-serialize every attached file.
+    try {
+      const archive: ThreadArchive = { version: 1, activeId: this.activeId, threads: this.threads.map(thread => ({
+        ...thread,
+        attachments: thread.attachments.map(item => this.archiveAttachment(item)),
+        conversation: thread.conversation.map(message => ({ ...message, ...(message.attachments ? {
+          attachments: message.attachments.map(item => this.archiveAttachment(item))
+        } : {}) }))
+      })) };
+      const serialized = JSON.stringify(archive);
+      if (serialized === this.lastArchive) return true;
+      if (this.store.set(this.key, JSON.parse(serialized)) === false) return false;
+      this.lastArchive = serialized;
+      return true;
+    } catch { return false; }
   }
 }

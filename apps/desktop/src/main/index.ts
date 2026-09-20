@@ -1,3 +1,4 @@
+import { registerFontsIpc } from './fonts';
 import { registerAgentNotifications } from './agent-notifications';
 import { installUpdates } from './updates';
 import { installTextContextMenu } from './text-context-menu';
@@ -520,7 +521,9 @@ function registerWindowIpc(): void {
 /** Reopens last session's windows, or opens one window when the preference is
  *  off, nothing was open, or those projects are gone. */
 function restoreWindows(store: Store): void {
-  const snapshot = store.snapshot();
+  const snapshot = store.get
+    ? Object.fromEntries(['restoreWindows', 'projects', 'openWindows', 'openTabs'].map(key => [key, store.get!(key)]))
+    : store.snapshot();
   if (snapshot['restoreWindows'] === false) {
     createWindow();
     return;
@@ -670,6 +673,7 @@ if (!hasSingleInstanceLock) {
     registerShellIpc(ipcMain, { ...ctx, attachmentCacheDirectory: path.join(app.getPath('userData'), 'Attachment Cache') });
     registerThemeIpc(ipcMain, ctx);
     registerHapticsIpc(ipcMain, ctx);
+    registerFontsIpc(ipcMain, ctx);
     registerContextMenuIpc(ipcMain, ctx);
     registerConfirmIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);
@@ -730,6 +734,7 @@ if (!hasSingleInstanceLock) {
         ? path.join(process.resourcesPath, 'agent-tools', 'mcp-server.mjs')
         : path.join(app.getAppPath(), 'src/main/agent-tools/mcp-server.mjs'),
       agentToolCommand: process.execPath,
+      agentToolCommandArgs: [...(app.isPackaged ? [] : [app.getAppPath()]), '--powermove-agent-tools'],
       refreshExtensions: refreshRestoredExtensions,
       openExternal: async (url) => { await shell.openExternal(url); }
     });

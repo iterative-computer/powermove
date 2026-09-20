@@ -19,7 +19,7 @@ test('the error toast matches the status toast it stacks with', async ({ session
     .map(toast => {
       const shell = toast.getBoundingClientRect();
       const icon = toast.querySelector('.toast-icon')!.getBoundingClientRect();
-      const text = toast.querySelector('strong, span:not(.toast-icon)')!.getBoundingClientRect();
+      const text = toast.querySelector(':scope > .body > strong, :scope > span:not(.toast-icon)')!.getBoundingClientRect();
       return { icon: Math.round(icon.left - shell.left), text: Math.round(text.left - shell.left) };
     }));
   expect(columns[0].icon).toBe(columns[1].icon);

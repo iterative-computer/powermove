@@ -172,7 +172,7 @@ export default function activate(api: PowermoveAPI) {
     await expect(page.locator('#panel-timeline')).toContainText('Settings replacement');
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
-    await settings.getByRole('tab', { name: 'Extensions', exact: true }).click();
+    await settings.getByRole('button', { name: 'Extensions', exact: true }).click();
     await settings.screenshot({ path: '/private/tmp/powermove-extension-list.png' });
     await settings.getByRole('button', { name: 'Open Interface cleanup', exact: true }).click();
     const row = settings.locator('.settings-extension-detail[data-extension-id="settings-override"]');

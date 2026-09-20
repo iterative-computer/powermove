@@ -1,5 +1,6 @@
 import { prepareVideoPreview } from '../core/video-preview';
 import { disposeVideoInstances } from '../core/video-instances';
+import { cancelPreviewVideoSeek } from '../core/video-seek';
 import { importedSequences } from '../core/image-sequence';
 import { convertAnimatedImage, convertStillImage, isAnimatedImage, mayAnimate, readProxyFile } from '../core/media-conversion';
 import {
@@ -591,11 +592,18 @@ function disposeAsset(a: any) {
   }
   disposeVideoInstances(a);
   if (a.preview) {
+    cancelPreviewVideoSeek(a.preview.el);
     a.preview.el.pause(); a.preview.el.removeAttribute('src'); a.preview.el.load();
     window.URL.revokeObjectURL(a.preview.url); delete a.preview;
   }
   if ((a.kind === 'audio' || a.audioBlob) && PM.Audio) PM.Audio.disposeAsset(a);
   try { if (a.el && a.el.pause) a.el.pause(); } catch (e) { }
+  if (a.kind === 'video' && a.el) {
+    cancelPreviewVideoSeek(a.el);
+    // Revoking a Blob URL alone leaves the element's decoder and decoded
+    // frames alive. Only unload after the final live/history owner is gone.
+    try { a.el.removeAttribute('src'); a.el.load(); } catch (e) { }
+  }
   try { if (a.el && a.el.close) a.el.close(); } catch (e) { }
   if (a.url && String(a.url).startsWith('blob:')) window.URL.revokeObjectURL(a.url);
 }
@@ -733,7 +741,7 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
       }
     } else throw new Error('Unsupported media kind');
     const asset: any = {
-      id, name, kind, url, el,
+      id, name, kind, url, el, storageKey: meta.storageKey,
       w: w || meta.w || 0, h: hh || meta.h || 0,
       dur: dur || meta.dur || 0, size: sourceBlob.size || meta.size || 0,
       playbackProxy: playbackProxyUsed,
@@ -772,7 +780,10 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any) {
         asset.hasAudio = false;
       }
     } else if (kind === 'video') asset.hasAudio = false;
-    if (kind === 'video') asset.previewReady = prepareVideoPreview(PM, asset, sourceBlob, () => disposedAssets.has(asset));
+    if (kind === 'video') {
+      asset.previewReady = prepareVideoPreview(PM, asset, sourceBlob, () => disposedAssets.has(asset));
+      if (asset.playbackProxy && asset.playbackProxyVersion < 3) await asset.previewReady;
+    }
     return asset;
   } catch (error) {
     try { if (el && el.close) el.close(); } catch (e) { }
@@ -841,7 +852,7 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
     meta = { format: extension };
   }
   onStage?.('Preparing media');
-  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta, onStage });
+  const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey }, onStage });
   /* Images/audio can persist while they decode. Video preparation may replace
      an unsupported source with a much smaller playback proxy, so wait for that
      decision before writing any video bytes to durable storage. */
@@ -948,6 +959,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
 }
 PM.assets = {
   map: new Map<any, any>(),
+  loading: new Set<string>(),
   async add(file: any, options: any) {
     const result = await ingestAsset(file, options);
     result.asset.importResult = result;
@@ -1082,8 +1094,14 @@ PM.assets = {
   revokePoster,
   clear() {
     assetEpoch++;
-    for (const a of PM.assets.map.values()) disposeAsset(a);
+    for (const [id, a] of PM.assets.map) {
+      disposeAsset(a);
+      PM.GL?.dropMesh?.(id);
+    }
     PM.assets.map.clear();
+    PM.assets.loading.clear();
+    PM.GL?.dropTextures?.('a:');
+    PM.GL?.dropTextures?.('video:');
     for (const id of [...posterUrls.keys()]) revokePoster(id);
   },
   async restoreProject(project: any) {
@@ -1091,26 +1109,44 @@ PM.assets = {
     const metas: any[] = Object.values(project && project.assets || {})
       .filter((meta: any) => meta && meta.id && ['image', 'video', 'audio', 'model'].includes(meta.kind));
     const restored: any[] = [], missing: any[] = [];
+    const loading = new Set(metas.map(meta => String(meta.id)));
+    PM.assets.loading = loading;
+    PM.bus?.emit?.('assets');
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
-      const posterKey = meta.storageKey
-        ? PM.MediaImport.posterKeyFor(meta.storageKey)
-        : null;
-      const [blob, posterBlob] = await Promise.all([
-        PM.MediaStore.get(meta),
-        posterKey ? Promise.resolve(PM.MediaStore.get(posterKey)).catch(() => null) : Promise.resolve(null),
-      ]);
-      if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
-      if (!blob) return { meta, missing: true, posterBlob };
+      let posterBlob: any = null;
       try {
+        const posterKey = meta.storageKey
+          ? PM.MediaImport.posterKeyFor(meta.storageKey)
+          : null;
+        const [blob, storedPoster] = await Promise.all([
+          PM.MediaStore.get(meta),
+          posterKey ? Promise.resolve(PM.MediaStore.get(posterKey)).catch(() => null) : Promise.resolve(null),
+        ]);
+        if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
+        posterBlob = storedPoster;
+        if (!blob) return { meta, missing: true, posterBlob };
         const asset = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
         Object.assign(asset, {
           fingerprint: meta.fingerprint, storageKey: meta.storageKey, persisted: true,
           channels: asset.channels || meta.channels || 0,
           sampleRate: asset.sampleRate || meta.sampleRate || 0,
         });
+        if (epoch !== assetEpoch || PM.proj !== project || project.assets?.[meta.id] !== meta) {
+          disposeAsset(asset);
+          return { stale: true };
+        }
+        // Publish each ready asset without waiting for unrelated conversions.
+        PM.assets.map.set(asset.id, asset);
         return { asset, meta, posterBlob };
       } catch (error) { return { meta, missing: true, posterBlob, error }; }
+      finally {
+        loading.delete(String(meta.id));
+        if (epoch === assetEpoch && PM.proj === project) {
+          PM.bus?.emit?.('assets');
+          PM.invalidate?.('render');
+        }
+      }
     });
     results.forEach((result: any) => {
       if (result.asset) restored.push(result.asset);
@@ -1122,7 +1158,7 @@ PM.assets = {
     }
     let repairedPosterMetadata = false;
     results.forEach((result: any) => {
-      if (!result.posterBlob || !result.meta?.id) return;
+      if (!result.posterBlob || !result.meta?.id || project.assets?.[result.meta.id] !== result.meta) return;
       setPoster(result.meta.id, result.posterBlob);
       if (result.meta.poster !== true) {
         result.meta.poster = true;
@@ -1139,7 +1175,6 @@ PM.assets = {
          the editor UI and subsequent web exports also identify the asset. */
       const meta: any = project.assets?.[a.id];
       if (a.format && meta && meta.format !== a.format) meta.format = a.format;
-      PM.assets.map.set(a.id, a);
     });
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob);
     if (backfill.length) setTimeout(() => {

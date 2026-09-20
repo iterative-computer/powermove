@@ -10,7 +10,8 @@ for (const surface of ['floating', 'panel'] as const) test(`${surface} prompt pa
     else PM.SpatialAssistant.open();
   }, surface);
   const composer = page.locator(surface === 'floating' ? '.spatial-compose' : '.agent-composer');
-  const input = composer.locator('textarea');
+  const input = surface === 'floating' ? composer.locator('textarea') : composer.getByRole('textbox');
+  const value = () => input.evaluate((el: any) => el.value ?? (window as any).PM.AgentUI.state.composerDraft);
   await expect(input).toBeVisible();
   const layers = await page.evaluate(() => (window as any).PM.proj.layers.length);
   const originalClipboard = await app.evaluateHandle(async ({ clipboard, ClipboardItem }) => Promise.all((await clipboard.read()).map(async item => new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async type => [type, await item.getType(type)])))))));
@@ -24,11 +25,11 @@ for (const surface of ['floating', 'panel'] as const) test(`${surface} prompt pa
   try {
     await input.focus();
     await page.keyboard.press('Meta+V');
-    await expect(input).toHaveValue('Pasted text\nSecond line');
+    await expect.poll(value).toBe('Pasted text\nSecond line');
     expect(await app.evaluate(({ BrowserWindow }) => (BrowserWindow.getAllWindows()[0].webContents as any).__spatialPasteCount)).toBe(1);
     await input.selectText();
     await page.keyboard.press('Control+V');
-    await expect(input).toHaveValue('Pasted text\nSecond line');
+    await expect.poll(value).toBe('Pasted text\nSecond line');
     expect(await app.evaluate(({ BrowserWindow }) => (BrowserWindow.getAllWindows()[0].webContents as any).__spatialPasteCount)).toBe(2);
     const imageBytes = [...await page.screenshot()];
     await app.evaluate(async ({ clipboard, ClipboardItem }, data) => {
@@ -37,8 +38,8 @@ for (const surface of ['floating', 'panel'] as const) test(`${surface} prompt pa
     }, imageBytes);
     await input.focus();
     await page.keyboard.press('Meta+V');
-    await expect(composer.locator('.agent-attachment img')).toHaveCount(1);
-    await expect(input).toHaveValue('Pasted text\nSecond line');
+    await expect(composer.locator(surface === 'floating' ? '.agent-attachment img' : '.agent-inline-attachment img')).toHaveCount(1);
+    await expect.poll(value).toBe('Pasted text\nSecond line');
     expect(await page.evaluate(() => (window as any).PM.proj.layers.length)).toBe(layers);
   } finally {
     await app.evaluate(({ clipboard }, items) => clipboard.write(items), originalClipboard);

@@ -19,7 +19,7 @@ test.beforeEach(async ({ session }) => {
 test('inspector keyframes animate, linked scale edits undo together, and handles extend outside video', async ({ session }, info) => {
   const { page } = session;
   const x = page.getByRole('spinbutton', { name: 'Position X', exact: true });
-  await page.getByRole('button', { name: 'Animate Position X', exact: true }).click();
+  await page.getByRole('button', { name: 'Add keyframe for Position X', exact: true }).click();
   await page.evaluate(() => (window as any).PM.setTime(2));
   await x.click(); await x.fill('500'); await x.press('Enter');
   const animation = await page.evaluate(() => {

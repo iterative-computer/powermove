@@ -187,8 +187,8 @@ test.describe('@viewer After Effects tool behavior', () => {
     });
     expect(text).toEqual({ tool: 'text', type: 'text', text: '', position: [120, 80] });
 
-    // Dragging with Type creates an AE-style paragraph box whose dimensions
-    // are ordinary animation channels, not static source metadata.
+    // Dragging with Type creates a wrapping paragraph with automatic height.
+    // Both dimensions remain ordinary animation channels.
     await page.locator('#toolbar button[data-tool="text"]').click();
     const paragraphStart = await compositionPoint(page, 430, 60);
     const paragraphEnd = await compositionPoint(page, 590, 150);
@@ -204,7 +204,7 @@ test.describe('@viewer After Effects tool behavior', () => {
       };
     });
     expect(paragraph).toEqual({
-      type: 'text', position: [430, 60], box: [160, 90],
+      type: 'text', position: [430, 60], box: [160, 0],
       channels: ['c.boxWidth', 'c.boxHeight'],
     });
 

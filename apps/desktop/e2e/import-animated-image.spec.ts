@@ -1,5 +1,5 @@
 import { expect, test } from './helpers/app';
-import { importFixture } from './helpers/media';
+import { exportStillPixels, importFixture } from './helpers/media';
 
 /* An animated GIF, APNG or WebP is a clip, not a still. Chromium decodes the
    frames, the main process encodes them, and everything downstream treats the
@@ -49,26 +49,10 @@ for (const { file, container } of FIXTURES) {
 
     /* Every frame has an opaque left half and a transparent right half, so a
        still export proves both the frame order and that alpha survived. */
-    const frames = await page.evaluate(async () => {
-      const PM = (window as any).PM;
-      const original = PM.download;
-      const sampled: number[][][] = [];
-      PM.download = async (blob: Blob) => {
-        const image = await createImageBitmap(blob);
-        const cv = document.createElement('canvas'); cv.width = 160; cv.height = 90;
-        const ctx = cv.getContext('2d')!;
-        ctx.clearRect(0, 0, 160, 90); ctx.drawImage(image, 0, 0); image.close();
-        sampled.push([[...ctx.getImageData(40, 45, 1, 1).data], [...ctx.getImageData(120, 45, 1, 1).data]]);
-      };
-      try {
-        for (let frame = 0; frame < 3; frame++) {
-          PM.setTime(frame / 10, { raw: true, force: true });
-          const result = await PM.Export.run({ format: 'still', w: 160, h: 90, alpha: true, mblur: false });
-          if (result.error) throw new Error(result.error);
-        }
-        return sampled;
-      } finally { PM.download = original; }
-    });
+    const frames: number[][][] = [];
+    for (let frame = 0; frame < 3; frame++) {
+      frames.push(await exportStillPixels(session, frame / 10, 160, 90, [[40, 45], [120, 45]]));
+    }
 
     expect(frames).toHaveLength(3);
     frames.forEach(([opaque, transparent], index) => {

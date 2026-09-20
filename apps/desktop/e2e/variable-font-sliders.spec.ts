@@ -20,6 +20,7 @@ test('variable font numeric fields scrub, animate, undo, and persist', async ({ 
     const slider = page.locator(`[data-font-axis="${tag}"] [role="spinbutton"]`);
     await expect(slider).toBeVisible({ timeout: 30000 });
     await expect(page.locator('[data-font-axis] input[type=range]')).toHaveCount(0);
+    await slider.scrollIntoViewIfNeeded();
     const before = await slider.inputValue();
     const box = (await slider.boundingBox())!;
     await page.mouse.move(box.x + box.width * .5, box.y + box.height / 2);
@@ -32,7 +33,7 @@ test('variable font numeric fields scrub, animate, undo, and persist', async ({ 
     await page.keyboard.press('Escape'); await page.mouse.up();
     expect(await page.evaluate(({ id, tag }) => (window as any).PM.L(id).d['fontAxis.' + tag].v, { id, tag })).toBe(Number(before));
     await expect(slider).toHaveValue(before);
-    await page.getByRole('button', { name: `Animate ${name} · ${tag}`, exact: true }).click();
+    await page.getByRole('button', { name: `Add keyframe for ${name} · ${tag}`, exact: true }).click();
     await page.evaluate(() => (window as any).PM.setTime(1));
     await slider.focus(); await slider.press('ArrowUp'); await slider.press('Enter'); await slider.press('Tab');
     const saved = await page.evaluate(({ id, tag }) => {

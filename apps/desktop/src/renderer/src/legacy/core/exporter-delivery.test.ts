@@ -57,6 +57,83 @@ afterEach(() => {
 });
 
 describe('export delivery', () => {
+  it('waits for the native destination before showing progress or rendering', async () => {
+    const { X, PM } = setup();
+    PM.modal = vi.fn(PM.modal);
+    PM.renderFrameTo = vi.fn(PM.renderFrameTo);
+    let choose!: (token: string | null) => void;
+    const start = vi.fn(() => new Promise(resolve => { choose = resolve; }));
+    const write = vi.fn();
+    (window as any).powermove = { render: { start, write, finish: vi.fn(), cancel: vi.fn() } };
+    const result = X.run({ ...options, format: 'mp4' });
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    const openedProgress = PM.modal.mock.calls.length;
+    choose(null);
+    expect(await result).toEqual({ cancelled: true });
+    expect(openedProgress).toBe(0);
+    expect(PM.renderFrameTo).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(X.busy).toBe(false);
+  });
+
+  it.each(['still', 'web', 'json', 'png', 'webm', 'rec'])('cancels %s before export work begins', async format => {
+    const { X, PM, download } = setup();
+    PM.modal = vi.fn(PM.modal);
+    PM.pause = vi.fn();
+    PM.renderFrameTo = vi.fn(PM.renderFrameTo);
+    const choose = vi.fn(async (_name: string, _directory: boolean) => null);
+    const saveFile = vi.fn();
+    (window as any).powermove = { exportDestination: { choose, release: vi.fn() }, saveFile };
+    expect(await X.run({ ...options, format })).toEqual({ cancelled: true });
+    expect(choose).toHaveBeenCalledOnce();
+    expect(choose.mock.calls[0]).toEqual([expect.any(String), format === 'png']);
+    expect(PM.modal).not.toHaveBeenCalled();
+    expect(PM.pause).not.toHaveBeenCalled();
+    expect(PM.renderFrameTo).not.toHaveBeenCalled();
+    expect(saveFile).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(X.busy).toBe(false);
+  });
+
+  it.each(['still', 'web', 'png'])('delivers %s to the chosen destination and releases it', async format => {
+    const { X, download } = setup();
+    const choose = vi.fn(async () => 'destination');
+    const release = vi.fn(async () => {});
+    const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/export' }));
+    (window as any).powermove = { exportDestination: { choose, release }, saveFile };
+    expect(await X.run({ ...options, format })).toEqual({ cancelled: false });
+    expect(choose).toHaveBeenCalledOnce();
+    expect(saveFile).toHaveBeenCalledTimes(format === 'png' ? 2 : 1);
+    for (const call of saveFile.mock.calls) expect(call[0]).toMatchObject({ destinationToken: 'destination' });
+    expect(download).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith('destination');
+  });
+
+  it('releases the destination after rendering fails and allows another export', async () => {
+    const { X, PM } = setup();
+    const release = vi.fn(async () => {});
+    (window as any).powermove = { exportDestination: { choose: async () => 'destination', release } };
+    PM.renderFrameTo = () => { throw new Error('Render failed'); };
+    expect(await X.run({ ...options, format: 'still' })).toEqual({ error: 'Render failed' });
+    expect(release).toHaveBeenCalledWith('destination');
+    expect(X.busy).toBe(false);
+  });
+
+  it('streams the owned pixel buffer without copying a second complete frame', async () => {
+    const { X, frame } = setup();
+    const pixels = new Uint8ClampedArray(new ArrayBuffer(24), 4, 16);
+    pixels.set(Array.from({ length: 16 }, (_, i) => i * 15));
+    frame.getContext = () => ({ getImageData: () => ({ data: pixels }) });
+    const slice = vi.spyOn(Uint8Array.prototype, 'slice');
+    const write = vi.fn(async () => {});
+    (window as any).powermove = { render: {
+      start: async () => 'render', write, finish: async () => ({ path: '/tmp/render.mp4' }), cancel: vi.fn(),
+    } };
+    expect(await X.run({ ...options, format: 'mp4' })).toEqual({ cancelled: false });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(Array.from((write.mock.calls[0] as any)[1])).toEqual(Array.from(pixels));
+    expect(slice.mock.contexts.some(view => view instanceof Uint8Array && view.buffer === pixels.buffer && view.byteOffset === pixels.byteOffset)).toBe(true);
+  });
   it('cancels PNG export when destination selection is cancelled, without opening frame saves', async () => {
     const { X, toast, download } = setup();
     (window as any).showDirectoryPicker = vi.fn(async () => { throw new DOMException('Cancelled', 'AbortError'); });

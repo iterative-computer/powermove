@@ -190,7 +190,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   await expect(library.locator('.library-card .workspace-map').first()).toBeVisible();
   await library.getByRole('button', { name: /^Panels/ }).click();
   await library.getByRole('button', { name: 'New panel', exact: true }).click();
-  await expect(page.locator('#agent-composer-agent')).toHaveValue('Create a new panel that ');
+  await expect(page.locator('#agent-composer-agent')).toHaveText('Create a new panel that ');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 

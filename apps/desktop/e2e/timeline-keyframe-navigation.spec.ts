@@ -122,14 +122,14 @@ test('removing the last current key disables its diamond and Undo restores it', 
     PM.proj.layers.push(L); PM.selectLayers(L.id);
     PM.setKey(L, 'opacity', 1, 35); PM.setTime(1); PM.bus.emit('layers');
   });
-  const animation = page.getByRole('button', { name: 'Remove animation from Opacity', exact: true });
+  const animation = page.getByRole('button', { name: 'Remove keyframe for Opacity', exact: true });
   await expect(animation).toHaveAttribute('aria-pressed', 'true');
   // Uses the shared removal path called by the current-key diamond and menus.
   await page.evaluate(() => {
     const PM = (window as any).PM, p = PM.proj.layers[0].p.opacity;
     PM.hist.do('Remove current key', () => PM.removeKey(p, p.kf[0]));
   });
-  await expect(page.getByRole('button', { name: 'Animate Opacity', exact: true })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByRole('button', { name: 'Add keyframe for Opacity', exact: true })).toHaveAttribute('aria-pressed', 'false');
   expect(await page.evaluate(() => (window as any).PM.proj.layers[0].p.opacity.v)).toBe(35);
   await page.evaluate(() => (window as any).PM.hist.undo());
   await expect(animation).toHaveAttribute('aria-pressed', 'true');
@@ -147,12 +147,13 @@ for (const type of ['text', 'shape']) test(`${type} color diamonds animate visib
     const L = PM.mkLayer(type, { d: { color: '#ff0000' } });
     PM.proj.layers.push(L); PM.selectLayers(L.id); PM.setTime(0); PM.bus.emit('layers');
   }, type);
-  await page.getByRole('button', { name: type === 'text' ? 'Animate Color' : 'Animate Fill', exact: true }).click();
+  await page.getByRole('button', { name: type === 'text' ? 'Add keyframe for Color' : 'Add keyframe for Fill', exact: true }).click();
   await page.evaluate(() => (window as any).PM.setTime(2));
   const label = type === 'text' ? 'Text color' : 'Fill';
   await page.locator('#panel-inspector .row').filter({ has: page.locator('[data-property-path="c.color"]') }).locator('.color-field').click();
   await page.getByRole('textbox', { name: `${label} hex value`, exact: true }).fill('#0000ff');
-  await page.getByRole('button', { name: 'Close color picker', exact: true }).click();
+  const outside = (await page.locator('#tl-time').boundingBox())!;
+  await page.mouse.click(outside.x + 4, outside.y + 4); // The menu backdrop commits on an outside click.
   await expect.poll(() => page.evaluate(() => (window as any).PM.proj.layers[0].d.color.kf.length)).toBe(2);
   expect(await page.evaluate(() => {
     const PM = (window as any).PM;

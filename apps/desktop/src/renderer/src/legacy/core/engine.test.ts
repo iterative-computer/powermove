@@ -69,6 +69,7 @@ function engine({ layer = null, media = null, work = [0, 10], audioStartupDelay 
   install(PM);
   return {
     PM,
+    assets,
     audioCalls,
     reinstall() {
       install(PM);
@@ -93,6 +94,42 @@ afterEach(() => {
 });
 
 describe('legacy engine install', () => {
+  it('holds non-linear overlapping videos at one composition time until the complete frame is presented', () => {
+    const foreground = delayedVideo(), background = delayedVideo();
+    const layer = { id: 'foreground', type: 'video', from: 0, dur: 2, d: { asset: 'asset-1', speed: 1, trim: 1, timeRemap: true } };
+    const { PM, assets, runFrame } = engine({ layer, media: foreground });
+    assets.set('asset-2', { el: background.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'background', d: { asset: 'asset-2', speed: 2, trim: .5 } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.play(); runFrame(100); runFrame(200);
+    expect(PM.GL.render.mock.calls.map(([time]: number[]) => time)).toEqual([.1, .1]);
+    expect(foreground.el.currentTime).toBeCloseTo(1.1);
+    expect(background.el.currentTime).toBeCloseTo(.7);
+    expect(foreground.el.playCalls + background.el.playCalls).toBe(0);
+    // The transport/audio clock keeps running; a slow decode only drops video
+    // frames, and the next request catches up after the held frame is drawn.
+    expect(PM.time).toBe(.2);
+    PM.GL.render.mockReturnValue(true); runFrame(210); runFrame(240);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBeCloseTo(7 / 30);
+    expect(foreground.el.currentTime).toBeCloseTo(1 + 7 / 30);
+  });
+
+  it('discards a pending synchronized frame on a timeline jump and resumes streaming after the overlap', () => {
+    const foreground = delayedVideo(), background = delayedVideo();
+    const layer = { id: 'foreground', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0, timeRemap: true } };
+    const { PM, assets, runFrame } = engine({ layer, media: foreground });
+    assets.set('asset-2', { el: background.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'background', dur: 3, d: { ...layer.d, asset: 'asset-2', timeRemap: false } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.play(); runFrame(100);
+    PM.setTime(.5, { raw: true }); runFrame(116);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(.5);
+    PM.setTime(1.5, { raw: true }); runFrame(132);
+    expect(PM.videoFrameSync).toBe(false);
+    expect(background.el.playCalls).toBe(1);
+    expect(foreground.el.paused).toBe(true);
+  });
+
   it('starts the playback clock after synchronous audio device setup', () => {
     const { PM, runFrame, audioCalls } = engine({ audioStartupDelay: 250 });
     PM.time = 119 / 30;
@@ -231,7 +268,7 @@ describe('legacy engine install', () => {
 
   it('prepares an upcoming trimmed clip without playing it early', () => {
     const media = delayedVideo();
-    const layer = { id: 'incoming', type: 'video', from: .3, dur: 2, d: { asset: 'asset-1', speed: 1, trim: 1 } };
+    const layer = { id: 'incoming', type: 'video', from: .3, dur: 2, d: { asset: 'asset-1', speed: 1, trim: 1, timeRemap: true } };
     const { PM, runFrame } = engine({ layer, media });
     PM.play(); runFrame(16);
     expect(media.el.currentTime).toBe(1);
@@ -309,4 +346,26 @@ describe('legacy engine install', () => {
     runFrame(16);
     expect(media.el.playbackRate).toBe(1.5);
   });
+});
+
+it('pauses on the displayed project frame instead of leaving a fractional time that keys round forward', () => {
+  const { PM, runFrame } = engine();
+  PM.play();
+  runFrame(1590);
+  expect(PM.time).toBeCloseTo(1.59);
+  PM.pause();
+  expect(PM.time).toBe(47 / 30);
+  expect(PM.snapF(PM.time, PM.proj.fps)).toBe(47 / 30);
+});
+
+it('keeps transport and audio stopped until project media finishes restoring', () => {
+  const { PM, audioCalls } = engine();
+  PM.assets.loading = new Set(['cutout']); PM.toast = vi.fn();
+  PM.play();
+  expect(PM.playing).toBe(false);
+  expect(audioCalls).toEqual([]);
+  expect(PM.toast).toHaveBeenCalledWith('Loading project media…', 3000);
+  PM.assets.loading.clear(); PM.play();
+  expect(PM.playing).toBe(true);
+  expect(audioCalls[0][0]).toBe('start');
 });

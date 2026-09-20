@@ -1,12 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, rm, stat, rename, copyFile, appendFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, copyFile, appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { app, dialog, type IpcMain } from 'electron';
+import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
 import { IPC } from '../shared/ipc';
 
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number};
-type Job={dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
+type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string};
 export function encoderArgs(options:EncoderOptions,output:string):string[]{
   return ['-hide_banner','-loglevel','error','-f','rawvideo','-pixel_format','rgba','-video_size',`${options.width}x${options.height}`,'-framerate',String(options.fps),'-i','pipe:0','-an',
     '-vf','scale=in_range=full:out_range=limited:out_color_matrix=bt709',
@@ -37,9 +37,28 @@ export function registerRenderEncoder(ipc:IpcMain,ctx:{isTrustedSender:(event:an
   const binary=app.isPackaged?path.join(process.resourcesPath,'encoder','ffmpeg'):path.join(app.getAppPath(),'node_modules','ffmpeg-static','ffmpeg');
   const encoder=new RenderEncoder(binary,app.getPath('temp'));
   const trusted=(event:any)=>{if(!ctx.isTrustedSender(event))throw new Error('Unauthorized encoder request');return event.sender.id;};
-  ipc.handle(IPC.renderStart,(e,r)=>encoder.start(r,trusted(e)));
+  ipc.handle(IPC.renderStart,async(e,r)=>{
+    const owner=trusted(e),options=validateEncoderOptions(r);
+    const window=BrowserWindow.fromWebContents(e.sender);
+    if(!window||window.isDestroyed())throw new Error('Export window is unavailable');
+    const extension=options.format==='prores'?'mov':'mp4';
+    const result=await dialog.showSaveDialog(window,{defaultPath:options.name.replace(/[\\/:]/g,'_')+'.'+extension,filters:[{name:'Video',extensions:[extension]}]});
+    if(result.canceled||!result.filePath||window.isDestroyed())return null;
+    const token=await encoder.start(options,owner);
+    if(e.sender.isDestroyed()){await encoder.release(token,owner);return null;}
+    encoder.job(token,owner).destination=result.filePath;
+    return token;
+  });
   ipc.handle(IPC.renderWrite,(e,r)=>encoder.write(r.token,trusted(e),r.data,!!r.audio));
-  ipc.handle(IPC.renderFinish,async(e,r)=>{const owner=trusted(e),job=encoder.job(r.token,owner);try{const file=await encoder.finish(r.token,owner),result=await dialog.showSaveDialog({defaultPath:job.options.name.replace(/[\\/:]/g,'_')+(job.options.format==='prores'?'.mov':'.mp4'),filters:[{name:'Video',extensions:[job.options.format==='prores'?'mov':'mp4']}]});if(result.canceled||!result.filePath)return {cancelled:true};await copyFile(file,result.filePath);return {path:result.filePath};}finally{await encoder.release(r.token,owner);}});
+  ipc.handle(IPC.renderFinish,async(e,r)=>{
+    const owner=trusted(e),job=encoder.job(r.token,owner);
+    try{
+      if(!job.destination)throw new Error('Export destination is unavailable');
+      const file=await encoder.finish(r.token,owner);
+      await copyFile(file,job.destination);
+      return {path:job.destination};
+    }finally{await encoder.release(r.token,owner);}
+  });
   ipc.handle(IPC.renderCancel,(e,r)=>encoder.release(r.token,trusted(e)));
   app.on('web-contents-created',(_e,contents)=>contents.once('destroyed',()=>{for(const [token,job] of encoder.jobs)if(job.owner===contents.id)void encoder.release(token,job.owner);}));
 }

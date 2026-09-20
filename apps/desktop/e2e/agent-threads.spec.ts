@@ -7,11 +7,10 @@ test('Command+A selects the full agent composer draft', async ({ session }) => {
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await composer.fill('Select this entire composer draft');
   await composer.press('Meta+A');
-  await expect.poll(() => composer.evaluate((textarea: HTMLTextAreaElement) => ({
-    start: textarea.selectionStart,
-    end: textarea.selectionEnd,
-    length: textarea.value.length,
-  }))).toEqual({ start: 0, end: 33, length: 33 });
+  await expect.poll(() => composer.evaluate(element => {
+    const selection = window.getSelection();
+    return { text: selection?.toString(), inside: !!selection?.anchorNode && element.contains(selection.anchorNode) };
+  })).toEqual({ text: 'Select this entire composer draft', inside: true });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -50,7 +49,7 @@ test('selected agent text copies and pastes normally without copying layers', as
 
   await composer.click();
   await page.keyboard.press('Meta+V');
-  await expect(composer).toHaveValue(reply);
+  await expect(composer).toHaveText(reply);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -131,12 +130,12 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
   await page.getByRole('button', { name: 'New thread', exact: true }).click();
   const second = await activeThread();
   expect(second).not.toBe(first);
-  await expect(composer).toHaveValue('');
+  await expect(composer).toHaveText('');
   await composer.fill('Second thread draft');
   await pick(first);
-  await expect(composer).toHaveValue('First thread draft');
+  await expect(composer).toHaveText('First thread draft');
   await pick(second);
-  await expect(composer).toHaveValue('Second thread draft');
+  await expect(composer).toHaveText('Second thread draft');
   await expect.poll(() => page.evaluate(() => {
     const PM = (window as any).PM;
     return PM.store.get(`agentThreads.${PM.proj.id}`)?.activeId;
@@ -148,10 +147,10 @@ test('hidden renderer switches threads, keeps drafts, and restores history after
     return { activeId: state.threadId, threadIds: state.threads.map((thread: any) => thread.id) };
   })).toEqual({ activeId: second, threadIds: [second, first] });
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
-  await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveValue('Second thread draft');
+  await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveText('Second thread draft');
   await session.page.getByRole('button', { name: 'Switch thread', exact: true }).click();
   await session.page.locator('.thread-row').last().click();
-  await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveValue('First thread draft');
+  await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveText('First thread draft');
 });
 
 test('background app is never visible or focused, but can draw and accept input', async ({ session }, testInfo) => {
@@ -163,7 +162,7 @@ test('background app is never visible or focused, but can draw and accept input'
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await session.page.getByRole('button', { name: 'New thread', exact: true }).click();
   await session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Background input works');
-  await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveValue('Background input works');
+  await expect(session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true })).toHaveText('Background input works');
   await testInfo.attach('hidden-agent-threads', { body: await session.page.screenshot(), contentType: 'image/png' });
   expect(await state()).toEqual([{ visible: false, focused: false, devtools: false }]);
 });
@@ -195,6 +194,6 @@ test('thread transcripts and titles survive a hidden relaunch without leaking in
   await page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   await expect(page.getByRole('log')).toContainText('First conversation request');
   await expect(page.getByRole('log')).toContainText('A saved test reply');
-  await expect(page.getByRole('textbox', {name:'Message Powermove agent',exact:true})).toHaveValue('Last keystroke');
+  await expect(page.getByRole('textbox', {name:'Message Powermove agent',exact:true})).toHaveText('Last keystroke');
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

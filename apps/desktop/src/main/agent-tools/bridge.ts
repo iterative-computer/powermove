@@ -115,6 +115,8 @@ export interface PowermoveAgentToolBridgeOptions {
   /** Test/embedding seam. Production infers this from mcpServerPath. */
   resourcesDir?: string;
   command?: string;
+  /** Fixed Electron app entrypoint; omitted for standalone Node embeddings. */
+  commandArgs?: string[];
   timeoutMs?: number;
   stageForkRebase?(options: { forkId: string; stagingDirectory: string }): Promise<unknown>;
 }
@@ -149,9 +151,9 @@ export class PowermoveAgentToolBridge {
     const token = randomBytes(32).toString('hex');
     const mcpConfig: NativeMcpServerConfig = {
       command: this.options.command ?? process.execPath,
-      args: [this.options.mcpServerPath],
+      args: this.options.commandArgs ?? [this.options.mcpServerPath],
       env: {
-        ELECTRON_RUN_AS_NODE: '1',
+        ...(this.options.commandArgs ? {} : { ELECTRON_RUN_AS_NODE: '1' }),
         POWERMOVE_AGENT_TOOL_PORT: String(port),
         POWERMOVE_AGENT_TOOL_TOKEN: token,
         POWERMOVE_AGENT_RUN_ID: options.runId,

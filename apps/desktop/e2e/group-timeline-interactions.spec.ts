@@ -13,7 +13,7 @@ test.describe('@groups timeline selection and strip editing', () => {
       project.layers = [first, second];
       PM.replaceProject(project);
       const group = PM.groupLayers([first.id, second.id], 'Titles');
-      PM.UIState.setLayerCollapsed(group, true);
+      PM.UIState.setGroupCollapsed(group, true);
       PM.selectLayers(first.id);
       return { group: group.id, first: first.id, second: second.id };
     });
@@ -21,7 +21,7 @@ test.describe('@groups timeline selection and strip editing', () => {
     await page.waitForFunction(({ group, first, second }) => {
       const PM = (window as any).PM;
       const timeline = PM.Kernel.services.get('timeline');
-      return PM.UIState.getLayerCollapsed(PM.L(group)) === false
+      return PM.UIState.getGroupCollapsed(PM.L(group)) === false
         && timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id).join(',') === `${group},${first},${second}`;
     }, ids);
 

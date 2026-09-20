@@ -17,6 +17,7 @@ export interface AgentLegacyBridge {
   submit(value: string): void;
   stop(): void;
   setDraft(value: string): void;
+  setInlineDraft?(value: string, attachments: any[]): void;
   retry?(messageIndex?: number): void;
   continueWithProject?(messageIndex: number): void;
   setStepsExpanded(expanded: boolean): void;
@@ -87,6 +88,12 @@ export function registerAgentPanel(PM: LegacyPM, bridge: AgentLegacyBridge): voi
       bridge.setDraft(value);
       setAgentComposerDraft(value);
       if (focus) setAgentSnapshot(bridge.snapshot(), { focusComposer: true });
+    },
+    setInlineDraft(value: string, attachments: any[]) {
+      if (bridge.setInlineDraft) bridge.setInlineDraft(value, attachments);
+      else bridge.setDraft(value);
+      setAgentComposerDraft(value);
+      agentState.attachments = attachments;
     },
     setStepsExpanded: bridge.setStepsExpanded,
     setModel: bridge.setModel,

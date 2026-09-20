@@ -8,6 +8,7 @@
 
 export const IPC = {
   ping: 'app:ping',
+  fontFamilies: 'fonts:families',
 
   onboardingAnimationComplete: 'onboarding:animation-complete',
   onboardingAnimationEnding: 'onboarding:animation-ending',
@@ -17,6 +18,8 @@ export const IPC = {
   onboardingBegin: 'onboarding:begin',
 
   fileSave: 'file:save',
+  exportChoose: 'export:choose',
+  exportRelease: 'export:release',
   fileSaveUpload: 'file:save-upload',
   fileSaveChunk: 'file:save-chunk',
   fileSaveAbort: 'file:save-abort',
@@ -77,6 +80,8 @@ export const IPC = {
 
   storeSnapshot: 'store:snapshot',
   storeSnapshotSerializedSync: 'store:snapshot-serialized-sync',
+  storeBootstrapSync: 'store:bootstrap-sync',
+  storeGetEncodedSync: 'store:get-encoded-sync',
   storeSnapshotSync: 'store:snapshot-sync', // ipcRenderer.sendSync from preload, boot barrier only
   storeSet: 'store:set',
   storeSetSerialized: 'store:set-serialized',
@@ -188,6 +193,7 @@ export interface FileSaveRequest {
   data: Uint8Array;
   projectId?: string;
   saveAs?: boolean;
+  destinationToken?: string;
 }
 export type FileSaveResult = { ok: true; path: string } | { ok: false; cancelled: boolean; error?: string };
 export type ProjectOpenResult = {
@@ -516,6 +522,7 @@ export interface PowermoveBridge {
   };
   agentNotification(options: { sound: string; preview?: boolean }): Promise<void>;
   ping(): Promise<string>;
+  fontFamilies?(): Promise<string[] | null>;
   versions: { electron: string; chrome: string; node: string };
 
   fileUpload?: {
@@ -523,6 +530,10 @@ export interface PowermoveBridge {
     chunk(uploadId: string, data: Uint8Array): Promise<void>;
     finish(uploadId: string, metadata: Omit<FileSaveRequest, 'data'>): Promise<FileSaveResult>;
     abort(uploadId: string): Promise<void>;
+  };
+  exportDestination?: {
+    choose(name: string, directory?: boolean): Promise<string | null>;
+    release(token: string): Promise<void>;
   };
   saveFile(req: FileSaveRequest): Promise<FileSaveResult>;
   openProjectFile(): Promise<ProjectOpenResult>;
@@ -536,7 +547,7 @@ export interface PowermoveBridge {
   confirm(request: ConfirmRequest): Promise<boolean>;
 
   render: {
-    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string>;
+    start(options:{width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number}):Promise<string | null>;
     write(token:string,data:Uint8Array,audio?:boolean):Promise<void>;
     finish(token:string):Promise<{path?:string;cancelled?:boolean}>;
     cancel(token:string):Promise<void>;
@@ -608,6 +619,8 @@ export interface PowermoveBridge {
     snapshotSync(): StoreSnapshot;
     /** Keep large recovery trees out of contextBridge's recursive object copying. */
     snapshotSerializedSync?(): Record<string, string>;
+    bootstrapSerializedSync?(): Record<string, string>;
+    getEncodedSync?(key: string): string | null;
     snapshot(): Promise<StoreSnapshot>;
     set(key: string, value: unknown): void;
     setSerialized?(key: string, serialized: string): Promise<void>;

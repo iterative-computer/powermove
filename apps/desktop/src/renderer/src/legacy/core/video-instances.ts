@@ -1,5 +1,6 @@
 import { previewVideoElement } from './video-preview';
 import { cancelPreviewVideoSeek } from './video-seek';
+import { stopPlaybackVideoFrames } from './video-playback-frames';
 
 type Instance = { el: HTMLVideoElement; release: () => void };
 type Pool = { source: HTMLVideoElement; layers: Map<string, Instance> };
@@ -31,6 +32,7 @@ export function layerVideoElement(PM: any, asset: any, layerId: string): HTMLVid
     el.src = source.currentSrc || source.src;
   }
   pool.layers.set(layerId, { el, release: () => {
+    stopPlaybackVideoFrames(el);
     cancelPreviewVideoSeek(el);
     el.pause();
     if (el !== source) {
@@ -49,6 +51,7 @@ export function videoInstanceTextureKey(el: HTMLVideoElement): string {
 
 export function pauseVideoInstances(asset: object): void {
   for (const { el } of pools.get(asset)?.layers.values() ?? []) {
+    stopPlaybackVideoFrames(el);
     cancelPreviewVideoSeek(el); el.pause();
   }
 }

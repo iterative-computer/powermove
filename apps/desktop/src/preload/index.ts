@@ -39,12 +39,18 @@ const bridge: PowermoveBridge = {
   agentNotification: options => ipcRenderer.invoke('agent:notification', options),
   ping: () => ipcRenderer.invoke(IPC.ping) as Promise<string>,
 
+  fontFamilies: () => ipcRenderer.invoke(IPC.fontFamilies),
+
   versions: {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     node: process.versions.node
   },
 
+  exportDestination: {
+    choose: (name, directory) => ipcRenderer.invoke(IPC.exportChoose, { name, directory }),
+    release: token => ipcRenderer.invoke(IPC.exportRelease, token),
+  },
   fileUpload: {
     begin: size => ipcRenderer.invoke(IPC.fileSaveUpload, size),
     chunk: (uploadId, data) => ipcRenderer.invoke(IPC.fileSaveChunk, { uploadId, data }),
@@ -206,6 +212,8 @@ const bridge: PowermoveBridge = {
     setSerialized: (key, serialized) => ipcRenderer.invoke(IPC.storeSetSerialized, { key, serialized }),
     snapshotSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSync) as StoreSnapshot,
     snapshotSerializedSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSerializedSync) as Record<string, string>,
+    bootstrapSerializedSync: () => ipcRenderer.sendSync(IPC.storeBootstrapSync) as Record<string, string>,
+    getEncodedSync: (key) => ipcRenderer.sendSync(IPC.storeGetEncodedSync, { key }) as string | null,
     snapshot: () => ipcRenderer.invoke(IPC.storeSnapshot) as Promise<StoreSnapshot>,
     set: (key, value) => {
       ipcRenderer.send(IPC.storeSet, { key, value });

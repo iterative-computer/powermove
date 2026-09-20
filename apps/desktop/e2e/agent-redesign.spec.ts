@@ -19,7 +19,7 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
   const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
   await expect(page.getByText('Make your next move', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Animate a title', exact: true }).click();
-  await expect(composer).toHaveValue(/editable keyframes/);
+  await expect(composer).toHaveText(/editable keyframes/);
   await expect(composer).toBeFocused();
   await composer.fill('');
   await page.screenshot({ path: path.join(artifacts, 'agent-empty-dark.png') });
@@ -47,12 +47,13 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
   await expect(page.locator('.agent-tool-details .is-failed')).toContainText('Check the first preview render');
   await expect(page.getByRole('button', { name: 'Stop current run', exact: true })).toBeVisible();
   await page.screenshot({ path: path.join(artifacts, 'agent-working-dark.png') });
-  await expect.poll(() => page.locator('.atmosphere-field').getAttribute('data-atmosphere-renderer')).toMatch(/^(motion-gpu|static)$/);
+  // The current conversation uses the prompt halo for its live GPU signal.
+  await expect.poll(() => page.locator('.agent-prompt-signal').getAttribute('data-glow-renderer')).toBe('motion-gpu');
   await writeFile(path.join(artifacts, 'renderer-evidence.json'), JSON.stringify(await page.evaluate(() => ({
     hidden: document.hidden,
     gpu: 'gpu' in navigator,
-    renderer: (document.querySelector('.atmosphere-field') as HTMLElement)?.dataset,
-    canvas: [...document.querySelectorAll('.atmosphere-field canvas')].map(c => ({ width: (c as HTMLCanvasElement).width, height: (c as HTMLCanvasElement).height })),
+    renderer: (document.querySelector('.agent-prompt-signal') as HTMLElement)?.dataset,
+    canvas: [...document.querySelectorAll('.agent-prompt-signal canvas')].map(c => ({ width: (c as HTMLCanvasElement).width, height: (c as HTMLCanvasElement).height })),
   })), null, 2));
   await panel.evaluate(el => (el as HTMLElement).style.setProperty('--set-panel-height', '580px'));
   await page.locator('.agent-scroll').evaluate(el => { el.scrollTop = 0; });
@@ -64,7 +65,7 @@ test('studio agent keeps suggestions, steering, activity and narrow layouts usab
   await panel.evaluate(el => (el as HTMLElement).style.removeProperty('--set-panel-height'));
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect(page.locator('.atmosphere-field canvas')).toHaveCount(0);
+  await expect(page.locator('.agent-prompt-signal canvas')).toHaveCount(0);
   await expect(page.locator('.agent-prompt-signal canvas')).toHaveCount(0);
   await expect(page.locator('.agent-prompt-signal')).toHaveAttribute('data-glow-fallback', 'reduced-motion');
   await expect.poll(() => page.locator('.agent-tool-activity').evaluate(el => el.getAnimations({ subtree: true }).length)).toBe(0);

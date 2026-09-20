@@ -23,7 +23,7 @@ test('streamed text stays inline and keeps existing nodes as chunks arrive', asy
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Stream a reply');
   await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__streamChunk)).toBe('function');
-  expect(await page.evaluate(() => (window as any).__agentAnimations.some((a: any) => a.prompt && a.frames[0].transform.includes('translateY')))).toBe(true);
+  await expect(page.locator('.agent-prompt')).toHaveText('Stream a reply');
   await page.evaluate(() => (window as any).__streamChunk('Hello '));
   const text = page.locator('.agent-trace-text');
   await expect(text).toHaveText('Hello ');

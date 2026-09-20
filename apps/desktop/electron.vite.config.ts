@@ -9,7 +9,7 @@ export default defineConfig({
   main: {
     build: {
       outDir: 'out/main',
-      rollupOptions: { output: { format: 'cjs', entryFileNames: '[name].js' } }
+      rollupOptions: { input: { index: path.resolve(__dirname, 'src/main/entry.ts'), editor: path.resolve(__dirname, 'src/main/index.ts') }, output: { format: 'cjs', entryFileNames: '[name].js' } }
     }
   },
   preload: {

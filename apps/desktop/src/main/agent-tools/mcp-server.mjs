@@ -115,3 +115,6 @@ process.stdin.on('data', (chunk) => {
     });
   }
 });
+
+// Electron's headless app entrypoint must exit after the client closes stdin.
+process.stdin.once('end', () => { void chain.finally(() => process.exit(0)); });

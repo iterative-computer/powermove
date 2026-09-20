@@ -77,7 +77,8 @@ interface ParsedBuiltin {
 export function createExtensionRegistry(options: ExtensionRegistryOptions): ExtensionRegistry {
   const records = new Map<string, ExtensionRecord>();
   const buildCache = new Map<string, CachedBuild>();
-  const enabledState = readEnabledState(options.store.snapshot()[EXTENSIONS_STORE_KEY]);
+  const enabledState = readEnabledState(options.store.get
+    ? options.store.get(EXTENSIONS_STORE_KEY) : options.store.snapshot()[EXTENSIONS_STORE_KEY]);
   const compiler = options.compile ?? compileExtension;
   const scanner = options.scan ?? scanExtensionDirs;
   const now = options.now ?? Date.now;

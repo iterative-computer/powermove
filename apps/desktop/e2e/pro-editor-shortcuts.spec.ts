@@ -123,6 +123,8 @@ test('professional shortcuts split, cut, paste, nudge, and respect focused field
     return result;
   });
   expect(fieldResult).toEqual({ count: 3, focused: true });
+  // Paste starts at the playhead; split inside the pasted clip, not at its edge.
+  await page.evaluate(() => (window as any).PM.setTime(6));
 
   await page.locator('body').click({ position: { x: 20, y: 100 } });
   await app.evaluate(({ BrowserWindow }) => {

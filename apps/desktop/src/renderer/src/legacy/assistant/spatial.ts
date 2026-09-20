@@ -310,7 +310,6 @@ threads.load(PM.proj?.id || '');
 let threadSaveError = false;
 let threadSaveTimer: ReturnType<typeof setTimeout> | undefined;
 let changingThreadProject = false;
-let lastThreadWrite = '';
 const pendingThreadTitles = new Set<string>();
 
 /* Every thread owns its run. A run writes only into its own session, so an
@@ -433,10 +432,7 @@ function generateThreadTitle(projectId: string, threadId: string, firstRequest: 
 function persistThreads() {
   clearTimeout(threadSaveTimer); threadSaveTimer = undefined;
   captureThread();
-  const serialized = JSON.stringify([threads.projectId, threads.activeId, threads.threads]);
-  if (serialized === lastThreadWrite) return;
   threadSaveError = !threads.save();
-  if (!threadSaveError) lastThreadWrite = serialized;
 }
 
 function restoreThread() {
@@ -609,6 +605,12 @@ registerAgentPanel(PM, {
     S.composerDraft = value; captureThread();
     clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300);
     if (projectChanged || focusComposer) PM.AgentUI?.update({ flush: true, focusComposer });
+  },
+  setInlineDraft: (value: string, attachments: any[]) => {
+    ensureThreadProject();
+    S.composerDraft = value; S.attachments = attachments;
+    captureThread();
+    clearTimeout(threadSaveTimer); threadSaveTimer = setTimeout(persistThreads, 300);
   },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
@@ -816,7 +818,7 @@ function scheduleHint(x: any, y: any) {
   });
 }
 
-function activate(x: any, y: any) {
+function activate(x: any, y: any, options?: { capture?: Promise<ImageBitmap | null> }) {
   if (S.active) return;
   // Load the current project's thread before creating a selection. The first
   // composer publish must not reset this new overlay's region or arming phase.
@@ -836,7 +838,10 @@ function activate(x: any, y: any) {
      WGSL pass genuinely displaces instead of merely painting over the UI. */
   const cachedScene: any = S.sceneCache;
   if (cachedScene) { S.sceneCache = null; S.sceneCacheAt = 0; }
-  const sceneRequest: any = cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request();
+  // A caller that captured a particular interaction owns the choice of frame.
+  // Do not replace it with the earlier idle snapshot (or retain that bitmap).
+  if (options?.capture) cachedScene?.close?.();
+  const sceneRequest: any = options?.capture ?? (cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request());
   sceneRequest.then((sceneBitmap: any) => {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     /* Preserve clean pre-overlay pixels for the eventual selected-region

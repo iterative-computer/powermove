@@ -2,7 +2,8 @@ import { expect, test } from './helpers/app';
 
 test('agent opens and uses an extension panel through its real controls', async ({ session }) => {
   await session.openEditor();
-  await session.page.waitForSelector('#panel-agent textarea', { state: 'attached' });
+  await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
+  await session.page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   const result = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.PANELS['footage-fixture'] = { id: 'footage-fixture', title: 'Footage fixture', size: 260, build(body: HTMLElement) {
