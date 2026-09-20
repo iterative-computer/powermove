@@ -14,9 +14,9 @@ This repository is a bun workspace monorepo containing the desktop editor, the m
 
 ## Get Powermove
 
-### Download for Mac
+### Download for Mac (recommended)
 
-Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon, macOS 14 or newer. This is the recommended way to use Powermove.
+Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
 
 ### Run it on another machine
 
