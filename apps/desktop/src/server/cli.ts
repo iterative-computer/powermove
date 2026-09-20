@@ -23,6 +23,12 @@ async function durableEntry(entry: string, log: (line: string) => void): Promise
   const { stdout } = await run('npm', ['root', '-g']);
   const installed = path.join(stdout.trim(), PACKAGE, 'bin', 'powermove.mjs');
   if (!existsSync(installed)) throw new Error(`Global install did not land at ${installed}.`);
+  // The `powermove` command only exists if npm's global bin dir is on PATH.
+  const onPath = await run('sh', ['-c', 'command -v powermove']).then(() => true, () => false);
+  if (!onPath) {
+    const { stdout: prefix } = await run('npm', ['prefix', '-g']);
+    log(`note: \`powermove\` is not on your PATH. Add ${path.join(prefix.trim(), 'bin')} to PATH, or use \`npx ${PACKAGE} <command>\`.`);
+  }
   return installed;
 }
 
