@@ -14,27 +14,20 @@ This repository is a bun workspace monorepo containing the desktop editor, the m
 
 ## Get Powermove
 
-### Download for Mac (recommended)
+Download the Mac app from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
 
-Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
+<details>
+<summary><b>Also possible: run it on another machine</b></summary>
 
-### Run it on another machine
-
-If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove-cli` package runs the same editor as a host you use from a browser on any device:
-
-```sh
-npx powermove-cli@latest serve          # try it once, nothing installed
-```
-
-To keep it running, install it as a service (systemd on Linux, launchd on macOS) and reach it over Tailscale or your LAN:
+If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove-cli` package runs the same editor as a host you use from a browser on any device. The agents run on the host, so a request keeps going after you close your laptop, and edits, media and fonts stay in sync across every device with the project open.
 
 ```sh
-npm i -g powermove-cli
-powermove install                   # starts it now and after reboots
-powermove status                    # running? and the address to open
+npx powermove-cli@latest serve      # try it once, nothing installed
 ```
 
-The agents run on the host, so a request you send keeps going after you close your laptop, and the thread shows the result when you come back. Edits, media and fonts stay in sync across every device with the project open. Details in [packages/cli/README.md](packages/cli/README.md) and [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
+To keep it running as a service and reach it over Tailscale, see [packages/cli/README.md](packages/cli/README.md). Architecture in [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
+
+</details>
 
 ## Repository layout
 
