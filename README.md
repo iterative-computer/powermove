@@ -12,6 +12,24 @@ The kernel is intentionally tiny. Timeline, effects, inspector, the UI, all of i
 
 This repository is a bun workspace monorepo containing the desktop editor, the marketing website, and the packages they share.
 
+## Running Powermove on another machine
+
+The macOS app is the recommended way to use Powermove. If you also want it on a box you leave on, a Linux server or a Mac mini, the `powermove` package runs the same editor as a host you use from a browser on any device:
+
+```sh
+npx powermove@latest serve          # try it once, nothing installed
+```
+
+To keep it running, install it as a service (systemd on Linux, launchd on macOS) and reach it over Tailscale or your LAN:
+
+```sh
+npm i -g powermove
+powermove install                   # starts it now and after reboots
+powermove status                    # running? and the address to open
+```
+
+The agents run on the host, so a request you send keeps going after you close your laptop, and the thread shows the result when you come back. Edits, media and fonts stay in sync across every device with the project open. Details in [packages/cli/README.md](packages/cli/README.md) and [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
+
 ## Repository layout
 
 ```text
