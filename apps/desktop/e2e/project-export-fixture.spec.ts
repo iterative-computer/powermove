@@ -65,22 +65,18 @@ test('reopens a media project, preserves source, and exports advancing frames', 
       const PM = (window as any).PM;
       return PM.proj.layers.length > 0 && PM.proj.layers.filter((l: any) => l.type === 'video').every((l: any) => PM.assets.get(l.d.asset)?.el?.readyState >= 2);
     });
+    const output = process.env.POWERMOVE_EXPORT_OUTPUT || path.join(root, 'Export.webm');
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, output);
     const result = await session.page.evaluate(async () => {
       const PM = (window as any).PM;
-      let data = '';
-      PM.download = async (blob: Blob) => {
-        data = await new Promise<string>(resolve => {
-          const reader = new FileReader(); reader.onload = () => resolve((reader.result as string).split(',')[1]!); reader.readAsDataURL(blob);
-        });
-      };
       PM.setTime(PM.proj.work[1] - 0.5, { force: true });
       const exported = await PM.Export.run({ ...PM.proj.exportDefaults, format: 'webm', scale: 1, range: 'work' });
       if (exported.error) throw new Error(exported.error);
-      return { data, layers: PM.proj.layers, frames: Math.ceil((PM.proj.work[1] - PM.proj.work[0]) * PM.proj.fps) };
+      return { layers: PM.proj.layers, frames: Math.ceil((PM.proj.work[1] - PM.proj.work[0]) * PM.proj.fps) };
     });
     expect(result.layers).toEqual(sourceLayers);
-    const output = process.env.POWERMOVE_EXPORT_OUTPUT || path.join(root, 'Export.webm');
-    await writeFile(output, Buffer.from(result.data, 'base64'));
     const hashes = execFileSync(path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg'), ['-v', 'error', '-i', output, '-an', '-f', 'framemd5', 'pipe:1'], { encoding: 'utf8' })
       .split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1)!.trim());
     expect(hashes.length).toBe(result.frames);

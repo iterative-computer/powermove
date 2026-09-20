@@ -136,6 +136,7 @@ export function saveFiltersForName(name: string): FileFilter[] | undefined {
 
 export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcContext): void {
   const pending = new Set<object>();
+  const destinations = new Map<object, { token: string; path: string; directory: boolean }>();
   const watchedOwners = new WeakSet<object>();
   const uploads = new Map<object, { id: string; ready: Promise<FileUpload>; timer: ReturnType<typeof setTimeout> }>();
   const discardUpload = async (owner: object, id?: string) => {
@@ -149,9 +150,40 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
     if (watchedOwners.has(owner)) return;
     watchedOwners.add(owner);
     owner.once('destroyed', () => {
+      destinations.delete(owner);
       void discardUpload(owner).catch(() => undefined);
     });
   };
+  ipcMain.handle(IPC.exportChoose, async (event, request: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (!isRecord(request)) throw new Error('Invalid export destination');
+    const name = sanitizeSaveName(request.name);
+    if (!name || (request.directory !== undefined && typeof request.directory !== 'boolean')) throw new Error('Invalid export destination');
+    if (pending.has(event.sender) || destinations.has(event.sender)) throw new Error('An export is already in progress.');
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) throw new Error('Save window is unavailable');
+    pending.add(event.sender);
+    watchOwner(event.sender);
+    try {
+      let selectedPath: string | undefined;
+      if (request.directory) {
+        const result = await dialog.showOpenDialog(window, { title: 'Export PNG Sequence', properties: ['openDirectory', 'createDirectory'] });
+        if (!result.canceled) selectedPath = result.filePaths[0];
+      } else {
+        const options = { defaultPath: name, filters: saveFiltersForName(name) };
+        const result = ctx.dialogs?.showSave ? await ctx.dialogs.showSave(window, options) : await dialog.showSaveDialog(window, options);
+        if (!result.canceled) selectedPath = result.filePath;
+      }
+      if (!selectedPath || window.isDestroyed()) return null;
+      const token = randomUUID();
+      destinations.set(event.sender, { token, path: selectedPath, directory: !!request.directory });
+      return token;
+    } finally { pending.delete(event.sender); }
+  });
+  ipcMain.handle(IPC.exportRelease, (event, token: unknown) => {
+    if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (destinations.get(event.sender)?.token === token) destinations.delete(event.sender);
+  });
   ipcMain.handle(IPC.fileSaveUpload, async (event, size: unknown) => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 1) throw new Error('Invalid save size');
@@ -206,6 +238,12 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       throw new IpcValidationError(IPC.fileSave, 'invalid saveAs');
     }
 
+    const destination = payload.destinationToken === undefined ? undefined : destinations.get(event.sender);
+    if (payload.destinationToken !== undefined && (!destination || destination.token !== payload.destinationToken || projectId !== undefined)) {
+      throw new Error('Unknown export destination');
+    }
+    if (destination?.directory && (name !== payload.name || path.extname(name).toLowerCase() !== '.png')) throw new Error('Invalid export frame name');
+
     let data = payload['data'];
     let stream: AsyncIterable<Uint8Array> | undefined;
     if (payload.uploadId !== undefined) {
@@ -227,8 +265,8 @@ export function registerSaveIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: SaveIpcCo
       const window = BrowserWindow.fromWebContents(event.sender);
       if (!window || window.isDestroyed()) throw new Error('Save window is unavailable');
       const known = projectId && ctx.projects ? await ctx.projects.destination(projectId) : undefined;
-      let selectedPath: string | undefined;
-      if (!known || payload['saveAs']) {
+      let selectedPath = destination ? (destination.directory ? path.join(destination.path, name) : destination.path) : undefined;
+      if (!destination && (!known || payload['saveAs'])) {
         const options: SaveDialogOptions = { defaultPath: known || name, filters: saveFiltersForName(name) };
         const result = ctx.dialogs?.showSave
           ? await ctx.dialogs.showSave(window, options)

@@ -47,6 +47,10 @@ const bridge: PowermoveBridge = {
     node: process.versions.node
   },
 
+  exportDestination: {
+    choose: (name, directory) => ipcRenderer.invoke(IPC.exportChoose, { name, directory }),
+    release: token => ipcRenderer.invoke(IPC.exportRelease, token),
+  },
   fileUpload: {
     begin: size => ipcRenderer.invoke(IPC.fileSaveUpload, size),
     chunk: (uploadId, data) => ipcRenderer.invoke(IPC.fileSaveChunk, { uploadId, data }),

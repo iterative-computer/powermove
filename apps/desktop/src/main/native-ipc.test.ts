@@ -73,6 +73,40 @@ afterEach(() => {
 });
 
 describe('save IPC', () => {
+  it.each([false, true])('writes to a previously selected export destination (directory: %s)', async directory => {
+    const folder = await mkdtemp(path.join(tmpdir(), 'powermove-export-test-'));
+    const output = path.join(folder, 'chosen.png');
+    const showSave = vi.fn(async () => ({ canceled: false, filePath: output }));
+    electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: [folder] });
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
+    const sender = { once: vi.fn() };
+    const call = (channel: string, payload: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
+    try {
+      const token = await call(IPC.exportChoose, { name: 'chosen.png', directory });
+      expect(await readdir(folder)).toEqual([]);
+      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, { once: vi.fn() })).rejects.toThrow('Unknown export destination');
+      if (directory) await expect(call(IPC.fileSave, { name: '../escape.png', data: new Uint8Array([7]), destinationToken: token })).rejects.toThrow('Invalid export frame name');
+      expect(await call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token })).toEqual({ ok: true, path: output });
+      expect([...await readFile(output)]).toEqual([7]);
+      expect(showSave).toHaveBeenCalledTimes(directory ? 0 : 1);
+      await call(IPC.exportRelease, token);
+      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token })).rejects.toThrow('Unknown export destination');
+    } finally { await rm(folder, { recursive: true, force: true }); }
+  });
+
+  it('cancels destination selection without writing and permits retry', async () => {
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    const showSave = vi.fn(async () => ({ canceled: true, filePath: '' }));
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
+    const event = invokeEvent({ once: vi.fn() });
+    expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
+    expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
+    expect(showSave).toHaveBeenCalledTimes(2);
+  });
+
   it('reduces suggestions to a bounded basename and maps its extension', () => {
     expect(sanitizeSaveName('../folder\\project\0.pmv')).toBe('project.pmv');
     expect(sanitizeSaveName(`${'x'.repeat(250)}/project.pmv`)).toBe('project.pmv');

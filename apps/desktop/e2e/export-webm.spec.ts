@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
 import { inspectWebM } from './helpers/webm';
@@ -33,27 +35,15 @@ test.describe('@export-webm frame-exact WebM export', () => {
     });
     const opusAvailable = await page.evaluate(() => (window as any).PM.Audio.supportsOpus());
 
-    const numbers = await page.evaluate(async () => {
-      const PM = (window as any).PM;
-      return await new Promise<number[]>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('Timed out waiting for exported WebM')), 25_000);
-        PM.download = async (blob: Blob) => {
-          clearTimeout(timer);
-          resolve(Array.from(new Uint8Array(await blob.arrayBuffer())));
-        };
-        void PM.Export.run({
-          format: 'webm',
-          scale: 1,
-          fps: 30,
-          range: 'all',
-          quality: 'draft',
-          mblur: false,
-          alpha: false,
-          audio: true
-        });
-      });
-    });
-    const bytes = Uint8Array.from(numbers);
+    const output = path.join(session.userData, 'export.webm');
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, output);
+    expect(await page.evaluate(() => (window as any).PM.Export.run({
+      format: 'webm', scale: 1, fps: 30, range: 'all', quality: 'draft',
+      mblur: false, alpha: false, audio: true,
+    }))).toEqual({ cancelled: false });
+    const bytes = new Uint8Array(await readFile(output));
     expect([...bytes.subarray(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3]);
 
     const inspected = inspectWebM(bytes);
