@@ -165,6 +165,11 @@ export const WEB = {
   runsList: 'web:runs-list',
   runsAttach: 'web:runs-attach',
   runFinished: 'web:run-finished',
+  /** Host updates from the npm registry: same state shape as the desktop updater. */
+  updateStatus: 'web:update-status',
+  updateCheck: 'web:update-check',
+  updateInstall: 'web:update-install',
+  updateChanged: 'web:update-changed',
   /** Server-side capabilities the browser bridge adapts to. */
   hello: 'web:hello'
 } as const;

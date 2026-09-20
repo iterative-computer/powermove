@@ -40,6 +40,10 @@ Codex and Claude sign in with a browser flow that returns to `localhost` on the 
 - run `codex login` or `claude auth login` in a terminal on the host once, or
 - forward the callback port when you connect: `ssh -L 1455:localhost:1455 host`, then use Settings › Agents in the browser.
 
+## Updates
+
+The host is published to npm with every Powermove release, at the same version as the Mac app. It checks the registry and the editor shows the same update notice the desktop app does. Pressing it updates a global install in place and restarts the service; an `npx` run or a source checkout is handed the command to run instead.
+
 ## Options
 
 ```

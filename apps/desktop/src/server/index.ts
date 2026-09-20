@@ -44,6 +44,7 @@ import { ensureCertificate } from './tls';
 import { ProjectSessions } from './sessions';
 import { RunHub, RunOwner } from './runs';
 import { FontStore } from './fonts';
+import { UpdateChecker, type InstallKind } from './updates';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
 
@@ -73,6 +74,8 @@ export interface ServeOptions {
   insecure?: boolean;
   /** The built document engine (engine.mjs). Runs stay tab-bound without it. */
   engineScript?: string | null;
+  /** How this host was installed; decides whether it can update itself. */
+  installKind?: InstallKind;
   log?: (line: string) => void;
 }
 
@@ -455,6 +458,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     return result;
   });
 
+  /* updates: the npm registry says whether a newer host exists */
+  const updates = new UpdateChecker({
+    current: options.version,
+    installKind: options.installKind ?? 'unknown',
+    channel: /-beta\./.test(options.version) ? 'beta' : 'latest',
+    // POWERMOVE_FAKE_LATEST=x.y.z stands in for the registry while testing the update UI.
+    ...(process.env['POWERMOVE_FAKE_LATEST'] ? { fetchLatest: async () => process.env['POWERMOVE_FAKE_LATEST'] ?? null } : {}),
+    log
+  });
+  updates.onChanged((state) => { for (const client of ipc.all()) client.send(WEB.updateChanged, state); });
+  ipc.handle(WEB.updateStatus, (event) => { trustedClient(event); return updates.status(); });
+  ipc.handle(WEB.updateCheck, async (event) => { trustedClient(event); await updates.check(); });
+  ipc.handle(WEB.updateInstall, async (event) => { trustedClient(event); return updates.install(); });
+  if (options.installKind !== 'source' || process.env['POWERMOVE_FAKE_LATEST']) updates.start();
+
   /* fonts: what the host has, and faces a tab sends up */
   // POWERMOVE_FONTCONFIG=0 makes the host count only stored fonts (tests, odd boxes).
   const fontStore = new FontStore(path.join(userData, 'Fonts'), process.env['POWERMOVE_FONTCONFIG'] === '0' ? null : 'fc-list');
@@ -632,6 +650,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     urls,
     token,
     async close() {
+      updates.stop();
       engineStopped = true;
       engine?.kill();
       runs.shutdown();

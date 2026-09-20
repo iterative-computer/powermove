@@ -9,6 +9,7 @@ import path from 'node:path';
 
 import { serve, type ServeOptions } from './index';
 import { install, logs, status, uninstall, unitPath, unitText, type ServiceSpec } from './install';
+import { detectInstallKind } from './updates';
 
 const require = createRequire(import.meta.url);
 
@@ -127,7 +128,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     if (parsed.exportsDir) flags.push('--exports', parsed.exportsDir);
     if (parsed.token) flags.push('--token', parsed.token);
     if (parsed.insecure) flags.push('--http');
-    const spec: ServiceSpec = { entry: layout.entry, node: process.execPath, args: flags, userData };
+    const spec: ServiceSpec = { entry: layout.entry, node: process.execPath, args: flags, userData, version: layout.version };
     const say = (line: string) => console.log(line);
     try {
       switch (parsed.command) {
@@ -157,6 +158,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
     codexBinary: bundledCodexBinary(),
     claudeBinary: bundledClaudeBinary(),
     engineScript: existsSync(path.join(layout.distDir, 'engine', 'engine.mjs')) ? path.join(layout.distDir, 'engine', 'engine.mjs') : null,
+    installKind: detectInstallKind(layout.entry),
     ...(parsed.token ? { token: parsed.token } : {}),
     ...(parsed.insecure ? { insecure: true } : {})
   });

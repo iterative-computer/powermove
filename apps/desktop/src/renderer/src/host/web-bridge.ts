@@ -350,10 +350,16 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
     nativeEdit: (action) => { try { document.execCommand(action === 'selectAll' ? 'selectAll' : action); } catch { /* unsupported */ } },
     onMenuCommand: () => () => {},
     updates: {
-      status: async () => ({ status: 'idle', current: hello.version, version: null }),
-      check: async () => {},
-      install: async () => {},
-      onChanged: () => () => {}
+      status: () => link.invoke(WEB.updateStatus),
+      check: () => link.invoke(WEB.updateCheck),
+      install: async () => {
+        const result = await link.invoke<{ restarting: true } | { restarting: false; command: string }>(WEB.updateInstall);
+        if (result.restarting) { toast('Updating the host… this tab reconnects when it is back.', 8000, { error: false }); return; }
+        // The host cannot replace itself the way it was started: hand over the command.
+        try { await navigator.clipboard.writeText(result.command); } catch { /* clipboard may be blocked */ }
+        toast(`To update, run this on the host (copied): ${result.command}`, 12_000, { error: false });
+      },
+      onChanged: subscribe(WEB.updateChanged)
     },
 
     extensions: {
