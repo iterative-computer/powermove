@@ -12,9 +12,15 @@ The kernel is intentionally tiny. Timeline, effects, inspector, the UI, all of i
 
 This repository is a bun workspace monorepo containing the desktop editor, the marketing website, and the packages they share.
 
-## Running Powermove on another machine
+## Get Powermove
 
-The macOS app is the recommended way to use Powermove. If you also want it on a box you leave on, a Linux server or a Mac mini, the `powermove` package runs the same editor as a host you use from a browser on any device:
+### Download for Mac
+
+Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon, macOS 14 or newer. This is the recommended way to use Powermove.
+
+### Run it on another machine
+
+If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove` package runs the same editor as a host you use from a browser on any device:
 
 ```sh
 npx powermove@latest serve          # try it once, nothing installed
