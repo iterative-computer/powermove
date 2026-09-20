@@ -1,4 +1,4 @@
-import { ensureDockFill, type Workspace } from './model';
+import { ensureDockFill, keepPanelAtSetHeight, type Workspace } from './model';
 
 type Rect = {
   left: number;
@@ -143,9 +143,23 @@ export function transferPanelHeights(
    grows. Repairing here, on the render path, covers both. */
 export function visibleDockPlan(
   workspace: Workspace,
-  isDetached: (id: string) => boolean = () => false
+  isDetached: (id: string) => boolean = () => false,
+  isAvailable: (id: string) => boolean = () => true
 ): Array<{ dock: Workspace['layout']['docks'][number]; specs: Workspace['layout']['docks'][number]['panels'] }> {
   return (workspace.layout?.docks || [])
-    .map((dock) => ({ dock: ensureDockFill(dock) ?? dock, specs: (dock.panels || []).filter((spec) => !isDetached(spec.id)) }))
+    .map((dock) => {
+      ensureDockFill(dock);
+      /* A saved workspace can name a panel this build does not have, such as
+         one from an extension that is not installed here. It stays in the
+         model so it returns with its extension, but it must not take a slot:
+         an empty slot has no element for the neighbouring splitters to
+         measure, and if it was the column's fluid panel nothing fills. */
+      const specs = (dock.panels || []).filter((spec) => !isDetached(spec.id) && isAvailable(spec.id));
+      if (specs.length && !specs.some((spec) => spec.flex)) {
+        const fill = [...specs].reverse().find((spec) => !keepPanelAtSetHeight(spec)) ?? null;
+        if (fill) fill.flex = true;
+      }
+      return { dock, specs };
+    })
     .filter((item) => !item.dock.hidden && item.specs.length > 0);
 }

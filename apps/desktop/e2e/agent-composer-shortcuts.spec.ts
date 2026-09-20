@@ -121,3 +121,36 @@ test('inline file tokens preserve their place, bytes, and two-step deletion in t
   expect(await page.evaluate(() => (window as any).PM.AgentUI.state.attachments[0].dataBase64)).toBe(draft.bytes);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
+
+test('file-only drafts keep their caret and new text on the same line', async ({ session }) => {
+  await session.openEditor();
+  const { page } = session;
+  await page.evaluate(() => { (window as any).PM.AgentUI.state.conversation = [{ role: 'assistant', text: 'Ready.' }]; });
+  const input = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+  await input.fill('Before ');
+  await input.press('End');
+  await page.evaluate(async () => { await (window as any).PM.AgentUI.addAttachments([new File(['fixture'], 'backgrounds.aep')]); });
+  const token = input.locator('[data-attachment-id]');
+  await expect(token).toHaveCount(1);
+  // Delete the full prefix with the native editing path that previously added <br>.
+  await input.evaluate(element => {
+    const range = document.createRange(); range.selectNodeContents(element.firstChild!);
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+  });
+  await page.keyboard.press('Backspace');
+  await expect(input.locator('br')).toHaveCount(0);
+  await page.keyboard.type('Before ');
+  const bounds = await token.boundingBox();
+  await page.mouse.click(bounds!.x + bounds!.width + 5, bounds!.y + bounds!.height / 2);
+  await page.keyboard.type(' after');
+  await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.composerDraft)).toBe('Before  after');
+  await expect(input.locator('br')).toHaveCount(0);
+  const lineTops = await input.evaluate(element => [...element.childNodes].filter(node => node.textContent?.trim()).map(node => {
+    const range = document.createRange(); range.selectNodeContents(node); return range.getBoundingClientRect().top;
+  }));
+  expect(Math.max(...lineTops) - Math.min(...lineTops)).toBeLessThan(5);
+  await page.keyboard.press('Shift+Enter');
+  await page.keyboard.type('Next line');
+  await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.composerDraft)).toBe('Before  after\nNext line');
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});

@@ -49,3 +49,24 @@ describe('visibleDockPlan', () => {
     expect(plan[1]!.specs.map((spec) => !!spec.flex)).toEqual([true, false]);
   });
 });
+
+describe('visibleDockPlan with a panel this build does not have', () => {
+  it('leaves it out of the column and gives another panel the fluid role', () => {
+    // Jude's left column: an agent-authored curve editor from a different
+    // machine held the dock's only flex, so nothing filled and the splitters
+    // next to its empty slot had nothing to measure.
+    const workspace = {
+      layout: {
+        docks: [
+          { id: 'left', size: 300, panels: [{ id: 'assets', size: 347 }, { id: 'curve-editor', flex: true, size: 429 }, { id: 'agent', size: 574 }] }
+        ]
+      }
+    } as any;
+    const plan = visibleDockPlan(workspace, () => false, (id) => id !== 'curve-editor');
+    const left = plan[0]!.specs;
+    expect(left.map((spec) => spec.id)).toEqual(['assets', 'agent']);
+    expect(left.map((spec) => !!spec.flex)).toEqual([true, false]);
+    // The model keeps the panel for when its extension comes back.
+    expect(workspace.layout.docks[0].panels.map((spec: any) => spec.id)).toEqual(['assets', 'curve-editor', 'agent']);
+  });
+});

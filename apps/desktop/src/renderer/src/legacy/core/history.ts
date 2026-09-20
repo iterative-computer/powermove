@@ -3,78 +3,18 @@ import type { PMRegistry } from '../registry';
 import { timelineService } from './services';
 import { HistoryRecords, unpackHistory } from '../../../../shared/history-memory';
 
-type PathPart = string | number;
-type Patch = { path: PathPart[]; exists: boolean; value?: any };
+import { applyPatch, clonePatchValue, diffPatches as diff, type Patch, type PathPart } from '../../../../shared/patch';
 
 // Patch entries are tiny for ordinary edits. Keep a deep practical timeline
 // while the byte budget remains the hard memory bound for structural changes.
 const MAX_ENTRIES = 1_000;
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024;
 
-const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+const clone = clonePatchValue;
 const encodedBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 
 function isRecord(value: any): value is Record<string, any> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-/**
- * Record only changed leaves. Arrays with the same length are traversed so a
- * single keyframe/property edit stays tiny; structural array edits use one
- * replacement because index-by-index patches would be larger and less safe.
- */
-function diff(before: any, after: any, path: PathPart[] = [], forward: Patch[] = [], backward: Patch[] = []) {
-  if (Object.is(before, after)) return { forward, backward };
-  if (Array.isArray(before) && Array.isArray(after)) {
-    const identityOrderChanged = before.length === after.length && before.some((item, index) =>
-      isRecord(item) && isRecord(after[index]) && typeof item.id === 'string' && typeof after[index].id === 'string'
-      && item.id !== after[index].id);
-    if (before.length !== after.length || identityOrderChanged) {
-      forward.push({ path, exists: true, value: clone(after) });
-      backward.push({ path, exists: true, value: clone(before) });
-      return { forward, backward };
-    }
-    for (let index = 0; index < before.length; index++) {
-      diff(before[index], after[index], [...path, index], forward, backward);
-    }
-    return { forward, backward };
-  }
-  if (isRecord(before) && isRecord(after)) {
-    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
-    for (const key of keys) {
-      const inBefore = Object.hasOwn(before, key);
-      const inAfter = Object.hasOwn(after, key);
-      if (!inBefore || !inAfter) {
-        forward.push(inAfter ? { path: [...path, key], exists: true, value: clone(after[key]) } : { path: [...path, key], exists: false });
-        backward.push(inBefore ? { path: [...path, key], exists: true, value: clone(before[key]) } : { path: [...path, key], exists: false });
-      } else diff(before[key], after[key], [...path, key], forward, backward);
-    }
-    return { forward, backward };
-  }
-  forward.push({ path, exists: true, value: clone(after) });
-  backward.push({ path, exists: true, value: clone(before) });
-  return { forward, backward };
-}
-
-function applyPatch(root: any, patches: Patch[]): any {
-  let nextRoot = root;
-  for (const patch of patches) {
-    if (!patch.path.length) {
-      nextRoot = patch.exists ? clone(patch.value) : undefined;
-      continue;
-    }
-    let parent = nextRoot;
-    for (let index = 0; index < patch.path.length - 1; index++) {
-      parent = parent?.[patch.path[index]!];
-      if (parent == null) break;
-    }
-    if (parent == null) continue;
-    const key = patch.path.at(-1)!;
-    if (patch.exists) parent[key] = clone(patch.value);
-    else if (Array.isArray(parent) && typeof key === 'number') parent.splice(key, 1);
-    else delete parent[key];
-  }
-  return nextRoot;
 }
 
 function valueAt(root: any, path: PathPart[]): { exists: boolean; value?: any } {

@@ -369,8 +369,18 @@ PM.hydrateProject = hydrate;
   PM.Projects.list().forEach((m: any) => { if (!PM.Projects.get(m.id)) PM.Projects.remove(m.id); });
 })();
 
+/* Exposed for the remote host sync: a document that arrives with assets this
+   tab has not loaded needs the same restore pass a project open gets. */
+PM.restoreProjectAssets = (project: any, warn: any = true) => restoreProjectAssets(project, warn);
 async function restoreProjectAssets(project: any, warn: any = true) {
-  const result = await PM.assets.restoreProject(project);
+  /* While bytes are being read (or fetched from a remote host) the media
+     panel shows loading, not offline: only a finished restore can say a
+     file is missing. */
+  PM.assetsRestoring = (PM.assetsRestoring || 0) + 1;
+  PM.bus.emit('assets');
+  let result: any;
+  try { result = await PM.assets.restoreProject(project); }
+  finally { PM.assetsRestoring = Math.max(0, (PM.assetsRestoring || 1) - 1); PM.bus.emit('assets'); }
   if (result.stale || PM.proj !== project) return result;
   PM.bus.emit('assets');
   inspectorService(PM)?.refresh();

@@ -94,7 +94,8 @@
   }
 
   function isLoading(asset: Asset): boolean {
-    return !!PM.assets.loading?.has(asset.id);
+    if (liveAsset(asset)) return false;
+    return !!PM.assets.loading?.has(asset.id) || (PM.assetsRestoring || 0) > 0 || PM.MediaStore?.pending?.(asset) === true;
   }
 
   /* Only completed restoration can establish that media is offline. */
@@ -434,6 +435,7 @@
         class="asset-card"
         class:is-dragging={draggingId === asset.id}
         class:is-offline={offline}
+        class:is-loading={loading}
         role="option"
         aria-busy={loading}
         draggable={!offline && !loading}
@@ -464,7 +466,7 @@
             {/if}
           {/if}
           {#if loading}
-            <span class="asset-badge">Loading…</span>
+            <span class="asset-loading" role="status" aria-label="Loading media">Loading…</span>
           {:else if offline}
             <span class="asset-offline" role="img" aria-label="Media offline">
               <Icon {PM} name="missing" />

@@ -112,17 +112,16 @@ export class InlinePrompt {
     // Chromium needs real text on both sides of a noneditable inline node to
     // place a caret there without inventing a new line. These invisible stops
     // are presentation-only and never enter the draft or submitted message.
+    this.element.childNodes.forEach(node => {
+      if (node.nodeType !== Node.TEXT_NODE || !(node.textContent || '').replace(/\u200b/g, '')) return;
+      const text = node as Text;
+      for (let index = text.length - 1; index >= 0; index--) if (text.data[index] === '\u200b') text.deleteData(index, 1);
+    });
     this.element.querySelectorAll<HTMLElement>('[data-attachment-id]').forEach(token => {
       if (token.previousSibling?.nodeType !== Node.TEXT_NODE) token.before(document.createTextNode('\u200b'));
       else if (!token.previousSibling.textContent) token.previousSibling.textContent = '\u200b';
       if (token.nextSibling?.nodeType !== Node.TEXT_NODE) token.after(document.createTextNode('\u200b'));
       else if (!token.nextSibling.textContent) token.nextSibling.textContent = '\u200b';
-      // Once real text exists, an invisible stop would consume a Backspace
-      // before the visible character. deleteData keeps live caret ranges valid.
-      for (const node of [token.previousSibling, token.nextSibling]) {
-        if (!(node instanceof Text) || !node.data.replace(/\u200b/g, '')) continue;
-        for (let i = node.length - 1; i >= 0; i--) if (node.data[i] === '\u200b') node.deleteData(i, 1);
-      }
     });
   }
 

@@ -1,3 +1,4 @@
+import { sha256HexOf } from '../../../../shared/sha256';
 import { resolveContent } from './content-properties';
 /* Ported from js/core/media.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -102,21 +103,17 @@ PM.MediaStore = {
     return key ? ((await request('readwrite', (store: any) => store.delete(key))) as any).ok : false;
   },
 };
+/* On a remote host this browser's IndexedDB is one device's cache: the host
+   keeps the bytes for every device. Wrapped here, before the first project
+   restore, so a miss is filled from the host. */
+if (typeof window !== 'undefined' && (window as any).powermove?.wrapMediaStore) PM.MediaStore = (window as any).powermove.wrapMediaStore(PM.MediaStore);
 
 function normalizedName(value: any) {
   return String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
 }
 
 async function sha256(bytes: any) {
-  if (window.crypto && window.crypto.subtle) {
-    const digest: any = new Uint8Array(await window.crypto.subtle.digest('SHA-256', bytes));
-    return [...digest].map((value: any) => value.toString(16).padStart(2, '0')).join('');
-  }
-  /* Deterministic fallback for older WebViews. SHA-256 is preferred; this path
-     still keeps imports functional without reading the whole file. */
-  let hash: any = 2166136261;
-  for (const value of bytes) { hash ^= value; hash = Math.imul(hash, 16777619); }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  return sha256HexOf(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
 }
 
 async function fingerprint(file: any) {

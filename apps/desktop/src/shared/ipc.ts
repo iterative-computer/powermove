@@ -478,6 +478,19 @@ export type MenuCommand =
   | 'settings';
 export type NativeEditAction = 'undo' | 'redo' | 'cut' | 'copy' | 'paste' | 'selectAll';
 
+export interface RemoteRunRecord {
+  id: string;
+  projectId: string;
+  threadId: string | null;
+  provider: string;
+  mode: string;
+  prompt: string;
+  startedAt: number;
+  finishedAt: number | null;
+  result: CodexRunResult | null;
+  eventCount: number;
+}
+
 /* ── the preload surface ─────────────────────────────────── */
 import type { ExtensionsBridge } from './extensions';
 
@@ -524,6 +537,16 @@ export interface PowermoveBridge {
   ping(): Promise<string>;
   fontFamilies?(): Promise<string[] | null>;
   versions: { electron: string; chrome: string; node: string };
+  /** True when the page is served by `powermove serve` and the host is another machine. */
+  remote?: boolean;
+  /** Wraps the renderer's media store so imports reach the host and misses are filled from it. */
+  wrapMediaStore?<T extends object>(store: T, onChange?: () => void): T;
+  /** Agent runs the host owns: they keep going without this tab. */
+  remoteRuns?: {
+    list(projectId: string): Promise<RemoteRunRecord[]>;
+    /** Replays what happened so far, then streams, and resolves with the result. */
+    attach(runId: string, hooks: { onProgress?(text: string): void; onTrace?(step: CodexTraceEvent): void }): Promise<CodexRunResult>;
+  };
 
   fileUpload?: {
     begin(size: number): Promise<string>;

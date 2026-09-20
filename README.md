@@ -12,6 +12,34 @@ The kernel is intentionally tiny. Timeline, effects, inspector, the UI, all of i
 
 This repository is a bun workspace monorepo containing the desktop editor, the marketing website, and the packages they share.
 
+## Get Powermove
+
+### Download for Mac (recommended)
+
+Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
+
+### Run it on another machine
+
+If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove-cli` package runs the same editor as a host you use from a browser on any device. The agents run on the host, so a request keeps going after you close your laptop, and edits, media and fonts stay in sync across every device with the project open.
+
+#### Try it
+
+```sh
+npx powermove-cli@latest serve
+```
+
+Open the printed URL. Over Tailscale, use the `100.x` address.
+
+#### Keep it running
+
+```sh
+npx powermove-cli@latest install
+```
+
+Installs it and registers a service (systemd on Linux, launchd on macOS) that starts now and after reboots. `powermove status` shows whether it is running and the address to open.
+
+Details in [packages/cli/README.md](packages/cli/README.md); architecture in [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
+
 ## Repository layout
 
 ```text
@@ -22,6 +50,7 @@ packages/
   tokens/             @powermove/tokens    tokens.css, the design tokens shared by desktop and website
   player/             @powermove/player    browser bundle of the web player and SVG player, built from the desktop sources
   macos-haptics/      @powermove/macos-haptics   native macOS alignment-haptics addon
+  cli/                powermove            `npx powermove serve`: the editor host for any Linux or macOS box, used from a browser
 assets/
   brand/              powermove-light.svg, powermove-dark.svg, powermove-light.png
 docs/
@@ -49,6 +78,7 @@ bun run typecheck      # run every workspace's typecheck script
 bun run test:e2e       # desktop Playwright Electron coverage
 bun run dist:mac       # ad-hoc signed arm64 DMG, ZIP, and app in apps/desktop/dist/
 bun run dist:release   # guarded Developer ID, notarized release lane
+bun run serve          # build the remote host and run it here; open the printed URL in a browser
 ```
 
 To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or `cd` into the workspace). Run the desktop gates with `bun run test`, not `bunx vitest`: the latter runs Vitest under bun's runtime and skews a calibrated performance test.
@@ -59,6 +89,7 @@ To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or 
 - [Website](apps/www/README.md): the SvelteKit marketing site.
 - [Design language](docs/design.md): the implementation guide for every Powermove interface.
 - [macOS release process](apps/desktop/docs/release.md): signing, notarization, and the beta workflow.
+- [Remote host](apps/desktop/docs/remote-serve.md): how `powermove serve` runs the editor without Electron and what changes in a browser.
 
 ## License
 

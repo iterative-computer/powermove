@@ -1,0 +1,62 @@
+name: Publish npm
+# The remote host (powermove-cli) ships to npm at the same version as the Mac
+# app: this runs when a GitHub release is published, and can be run by hand
+# for a tag. Authentication is npm trusted publishing (OIDC): npm accepts this
+# workflow's identity once it is configured on the package, so no token lives
+# in the repo. Stable tags publish as `latest`, betas as `beta`.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v1.0.3
+        required: true
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Version from tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          node -e '
+            const t = process.env.RELEASE_TAG;
+            if (!/^v\d+\.\d+\.\d+(-beta\.\d+)?$/.test(t)) throw Error("Expected a vX.Y.Z or vX.Y.Z-beta.N tag, got " + t);
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `tag=${t}\nversion=${t.slice(1)}\ndisttag=${t.includes("-beta.") ? "beta" : "latest"}\n`);
+          '
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+      # No registry-url here: setup-node would write a placeholder auth token
+      # into .npmrc, and trusted publishing must see none.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Set package versions
+        run: |
+          for dir in apps/desktop packages/cli; do
+            current=$(node -p "require('./$dir/package.json').version")
+            if [ "$current" != "${{ steps.tag.outputs.version }}" ]; then
+              (cd "$dir" && bun pm version "${{ steps.tag.outputs.version }}" --no-git-tag-version)
+            fi
+          done
+      - name: Host tests
+        run: bun run --cwd apps/desktop test -- src/server src/shared src/engine
+      - name: Build the host
+        run: bun run --cwd packages/cli build
+      - name: Publish powermove-cli
+        working-directory: packages/cli
+        run: |
+          npm install -g npm@latest
+          npm --version
+          npm publish --access public --provenance --tag "${{ steps.tag.outputs.disttag }}" --ignore-scripts

@@ -103,9 +103,29 @@ export async function restoreProjectFileStream(document: any, media: ProjectMedi
   const assets = fileAssets(document);
   const sources = media.filter(source => assets[source.id]);
   if (!sources.length) { await restoreProjectFileMedia(document, store); return; }
+  /* A browser served by `powermove serve` stages in memory: OPFS needs a secure
+     context, and current Chromium keeps IndexedDB blobs as references to the
+     staged file, which is gone once staging is cleaned up. */
+  if ((typeof window !== 'undefined' && (window as any).powermove?.remote) || typeof navigator.storage?.getDirectory !== 'function') {
+    for (const source of sources) {
+      const chunks: Uint8Array[] = [];
+      for (let offset = 0; offset < source.length;) {
+        const length = Math.min(1024 * 1024, source.length - offset);
+        const chunk = await read(source.offset + offset, length);
+        if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project media is truncated.');
+        chunks.push(chunk);
+        offset += chunk.length;
+      }
+      if (!await store.put(source.id, new Blob(chunks as BlobPart[], { type: source.type }), assets[source.id])) {
+        throw new Error(`Could not restore ${assets[source.id].name || source.id}. Check available disk space.`);
+      }
+    }
+    return;
+  }
   const root = await navigator.storage.getDirectory();
   for (const source of sources) {
-    const name = 'project-import-' + crypto.randomUUID();
+    // crypto.randomUUID needs a secure context; the served app is plain http.
+    const name = 'project-import-' + (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
     const file = await root.getFileHandle(name, { create: true });
     let writer: FileSystemWritableFileStream | undefined;
     try {
