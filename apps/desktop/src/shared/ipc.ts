@@ -538,7 +538,7 @@ export interface PowermoveBridge {
   /** True when the page is served by `powermove serve` and the host is another machine. */
   remote?: boolean;
   /** Wraps the renderer's media store so imports reach the host and misses are filled from it. */
-  wrapMediaStore?<T extends object>(store: T): T;
+  wrapMediaStore?<T extends object>(store: T, onChange?: () => void): T;
   /** Agent runs the host owns: they keep going without this tab. */
   remoteRuns?: {
     list(projectId: string): Promise<RemoteRunRecord[]>;

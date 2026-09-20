@@ -153,7 +153,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
     },
     ping: () => link.invoke<string>(IPC.ping),
     remote: true,
-    wrapMediaStore: (store) => attachRemoteMedia(link, store as never) as never,
+    wrapMediaStore: (store, onChange) => attachRemoteMedia(link, store as never, onChange) as never,
     remoteRuns: {
       list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),
       attach: (runId, hooks) => new Promise<CodexRunResult>((resolve, reject) => {

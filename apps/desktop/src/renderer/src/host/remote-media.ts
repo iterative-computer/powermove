@@ -43,9 +43,12 @@ async function uploadBlob(link: MediaLink, key: string, blob: Blob): Promise<voi
 export interface RemoteMediaStore extends MediaStore {
   /** Sends up anything this browser has under these keys that the host lacks. */
   backfill(keys: string[]): Promise<void>;
+  /** True while this key is being fetched from the host. */
+  pending(key: unknown): boolean;
 }
 
-export function attachRemoteMedia(link: MediaLink, store: MediaStore): RemoteMediaStore {
+export function attachRemoteMedia(link: MediaLink, store: MediaStore, onChange: () => void = () => {}): RemoteMediaStore {
+  const fetching = new Set<string>();
   const mirrored = new Set<string>();
   const inflight = new Map<string, Promise<void>>();
 
@@ -89,6 +92,7 @@ export function attachRemoteMedia(link: MediaLink, store: MediaStore): RemoteMed
 
   const wrapped: RemoteMediaStore = {
     backfill,
+    pending: (value) => { const key = storageKey(value); return !!key && fetching.has(key); },
     async put(id, blob, meta = {}) {
       const stored = await store.put(id, blob, meta);
       const key = storageKey({ storageKey: meta['storageKey'], id });
@@ -101,7 +105,9 @@ export function attachRemoteMedia(link: MediaLink, store: MediaStore): RemoteMed
       const key = storageKey(value);
       if (!key) return null;
       let remote: Blob | null = null;
+      fetching.add(key); onChange();
       try { remote = await fetchFromHost(key); } catch (error) { console.warn('[remote-media] fetch failed', key, error); }
+      finally { fetching.delete(key); onChange(); }
       if (!remote) return null;
       const stored = await store.put(key, remote, value && typeof value === 'object' ? (value as Record<string, unknown>) : { storageKey: key });
       mirrored.add(key);
