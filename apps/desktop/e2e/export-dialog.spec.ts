@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { stat } from 'node:fs/promises';
 import { expect, launchApp, test } from './helpers/app';
 
 test('export inherits Settings spacing and rounded cards and controls in both themes', async ({ session }, testInfo) => {
@@ -116,27 +118,27 @@ test('export button shows rendered frames, finishes, and can export again', asyn
   try {
     await session.openEditor();
     const { page } = session;
+    const output = path.join(session.userData, 'lifecycle.webm');
+    await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, output);
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.pause();
       PM.proj = PM.mkProject({name:'Export lifecycle',w:64,h:64,fps:30,dur:1,bg:'#ff6633'});
       PM.proj.exportDefaults = {...PM.Export.defaults(),format:'webm',audio:false,mblur:false,range:'all'};
-      PM.download = async (blob: Blob) => { (window as any).__exportBytes = blob.size; };
       PM.Export.dialog();
     });
     await page.getByRole('button',{name:'Export video',exact:true}).click();
-    await page.waitForFunction(() => (window as any).__exportBytes > 0);
+    await expect.poll(async () => (await stat(output).catch(() => null))?.size || 0).toBeGreaterThan(0);
     await page.waitForFunction(() => !(window as any).PM.Export.busy);
     await expect(page.getByRole('dialog')).toHaveCount(0);
     const result = await page.evaluate(async () => {
       const PM = (window as any).PM;
-      (window as any).__exportBytes = 0;
       const result = await PM.Export.run({format:'webm',audio:false,mblur:false,range:'all'});
-      return {result,busy:PM.Export.busy,bytes:(window as any).__exportBytes};
+      return {result,busy:PM.Export.busy};
     });
     expect(result.result.error).toBeUndefined();
     expect(result.busy).toBe(false);
-    expect(result.bytes).toBeGreaterThan(0);
+    expect((await stat(output)).size).toBeGreaterThan(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally { await session.close(); }
 });
@@ -146,11 +148,11 @@ test('progress displays actual pixels and cancelling releases the export', async
   try {
     await session.openEditor();
     const {page} = session;
+    await session.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, path.join(session.userData, 'cancelled.webm'));
     await page.evaluate(() => {
       const PM = (window as any).PM;
       PM.pause();
       PM.proj = PM.mkProject({name:'Preview check',w:640,h:360,fps:60,dur:30,bg:'#ff6633'});
-      PM.download = async () => {};
       (window as any).__exportResult = PM.Export.run({format:'webm',audio:false,mblur:false,range:'all'});
     });
     const progress = page.getByRole('dialog', {name:'Exporting Preview check'});
