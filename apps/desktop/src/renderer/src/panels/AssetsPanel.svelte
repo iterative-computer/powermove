@@ -96,7 +96,14 @@
   /* Project meta without a live asset means the bytes could not be restored
      from the media store: the file is offline until the user locates it. */
   function isOffline(asset: Asset): boolean {
-    return !liveAsset(asset);
+    return !liveAsset(asset) && !isLoading(asset);
+  }
+
+  /* Bytes still on their way: the restore pass is running, or a remote host
+     is sending them. Not offline until that finishes without them. */
+  function isLoading(asset: Asset): boolean {
+    if (liveAsset(asset)) return false;
+    return (PM.assetsRestoring || 0) > 0 || PM.MediaStore?.pending?.(asset) === true;
   }
 
   function offlineDetail(asset: Asset): string {
@@ -422,11 +429,13 @@
     {#each assets as asset, index (asset.id)}
       {@const currentAsset = (doc.tick.assets, liveAsset(asset))}
       {@const posterSrc = (doc.tick.assets, posterUrl(asset))}
+      {@const loading = (doc.tick.assets, isLoading(asset))}
       {@const offline = !currentAsset}
       <div
         class="asset-card"
         class:is-dragging={draggingId === asset.id}
         class:is-offline={offline}
+        class:is-loading={loading}
         role="option"
         draggable={!offline}
         ondragstart={(event) => handleDragStart(event, asset)}
@@ -455,7 +464,9 @@
               <video src={videoSource(currentAsset)} muted playsinline preload="auto" use:poster></video>
             {/if}
           {/if}
-          {#if offline}
+          {#if loading}
+            <span class="asset-loading" role="status" aria-label="Loading media">Loading…</span>
+          {:else if offline}
             <span class="asset-offline" role="img" aria-label="Media offline">
               <Icon {PM} name="missing" />
               Media offline
@@ -493,7 +504,9 @@
         </span>
         <span class="asset-copy">
           <b title={asset.name}>{asset.name}</b>
-          {#if offline}
+          {#if loading}
+            <small>Loading…</small>
+          {:else if offline}
             <small class="asset-missing" title={offlineDetail(asset)}>{offlineDetail(asset)}</small>
           {:else}
             <small title={mediaDetails(asset)}>{mediaDetails(asset)}</small>
