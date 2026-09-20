@@ -10,10 +10,14 @@ const remote = await installWebBridge();
 await import('./legacy/bootstrap');
 if (remote) {
   // Other tabs on the same host edit the same document; keep this one in step.
-  const { attachRemoteSync } = await import('./host/remote-sync');
+  const [{ attachRemoteSync }, { attachRemoteFonts }] = await Promise.all([import('./host/remote-sync'), import('./host/remote-fonts')]);
   const link = remoteLink();
-  const PM = (window as unknown as { PM?: Parameters<typeof attachRemoteSync>[1] }).PM;
-  if (link && PM) attachRemoteSync(link, PM);
+  const PM = (window as unknown as { PM?: Parameters<typeof attachRemoteSync>[1] & Parameters<typeof attachRemoteFonts>[1] }).PM;
+  if (link && PM) {
+    attachRemoteSync(link, PM);
+    // Fonts travel with the project: the host keeps what any device sends.
+    attachRemoteFonts(link, PM);
+  }
 }
 const { autoEnhanceSelects } = await import('./controls/select/enhance');
 

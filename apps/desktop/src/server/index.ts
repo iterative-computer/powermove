@@ -43,6 +43,7 @@ import { reachableAddresses } from './addresses';
 import { ensureCertificate } from './tls';
 import { ProjectSessions } from './sessions';
 import { RunHub, RunOwner } from './runs';
+import { FontStore } from './fonts';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
 
@@ -454,6 +455,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     return result;
   });
 
+  /* fonts: what the host has, and faces a tab sends up */
+  // POWERMOVE_FONTCONFIG=0 makes the host count only stored fonts (tests, odd boxes).
+  const fontStore = new FontStore(path.join(userData, 'Fonts'), process.env['POWERMOVE_FONTCONFIG'] === '0' ? null : 'fc-list');
+  ipc.handle(WEB.fontsList, async (event) => { trustedClient(event); return fontStore.list(); });
+  ipc.handle(WEB.fontsHas, async (event, families) => {
+    trustedClient(event);
+    return fontStore.has(Array.isArray(families) ? families.filter((family): family is string => typeof family === 'string') : []);
+  });
+  ipc.handle(WEB.fontCommit, async (event, payload) => {
+    const client = trustedClient(event);
+    if (!isRecord(payload) || typeof payload.path !== 'string') throw new Error('font: expected { family, postscriptName, fullName, style, path }');
+    const face = await fontStore.commit({ family: String(payload.family ?? ''), postscriptName: String(payload.postscriptName ?? ''), fullName: String(payload.fullName ?? ''), style: String(payload.style ?? '') }, payload.path, uploadsRoot.blob);
+    log(`[serve] client ${client.id}: font ${face.family} / ${face.postscriptName} stored`);
+    return face;
+  });
+
   /* content-addressed media: an uploaded file becomes the bytes for a key */
   ipc.handle(WEB.mediaCommit, async (event, payload) => {
     trustedClient(event);
@@ -508,6 +525,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         const body = Buffer.from(await asset.arrayBuffer());
         response.writeHead(asset.status, headers('text/javascript; charset=utf-8', { 'Cache-Control': 'no-store', 'Content-Length': String(body.byteLength) }));
         response.end(body);
+        return;
+      }
+      if (pathname === '/__powermove/fonts/file') {
+        const face = await fontStore.file(url.searchParams.get('ps') ?? '');
+        if (!face) { text(response, 404, 'Not found'); return; }
+        response.writeHead(200, headers(face.type, { 'Content-Length': String(face.size), 'Cache-Control': 'private, max-age=31536000, immutable' }));
+        createReadStream(face.path).pipe(response);
         return;
       }
       if (pathname === '/__powermove/media') {

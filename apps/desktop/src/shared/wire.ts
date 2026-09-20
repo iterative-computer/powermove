@@ -157,6 +157,10 @@ export const WEB = {
   /** Content-addressed media on the host, so a second device can pull an asset it never imported. */
   mediaCommit: 'web:media-commit',
   mediaHas: 'web:media-has',
+  /** Fonts on the host: the picker's union, and faces a browser sends up when the host lacks a family. */
+  fontsList: 'web:fonts-list',
+  fontsHas: 'web:fonts-has',
+  fontCommit: 'web:font-commit',
   /** Agent runs owned by the host: list them for a project, attach to one's stream. */
   runsList: 'web:runs-list',
   runsAttach: 'web:runs-attach',

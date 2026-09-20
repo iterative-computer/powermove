@@ -53,6 +53,7 @@ Codex and Claude sign in with a browser flow that returns to `localhost` on the 
 
 - The host keeps the document. Every tab on a project sees the same document; an edit on one device appears on the others, and each device keeps its own undo.
 - Media you import is stored on the host, so a second device opening the project has the footage.
+- Fonts travel too. The font picker lists your machine's fonts and the host's. When a text layer uses a font the host does not have, the browser sends that family's files up once; any device that lacks the font renders it from the host.
 - Agent runs are owned by the host and served by its document engine, the editor's core running in Node. Close the tab and the run finishes anyway; open a tab later and the thread shows the result. Tools that need pixels (panel capture, panel interaction) wait for an open tab.
 - Projects, extensions, agent workspaces and history live in the profile on the host (`~/.powermove`).
 - Exports are written on the host and also downloaded by the browser.
