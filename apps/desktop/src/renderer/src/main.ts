@@ -17,6 +17,17 @@ if (remote) {
     attachRemoteSync(link, PM);
     // Fonts travel with the project: the host keeps what any device sends.
     attachRemoteFonts(link, PM);
+    // Media this browser holds that the host does not (imported before the
+    // host kept copies) goes up when a project loads, so other devices see it.
+    const registry = PM as unknown as { proj?: { assets?: Record<string, { storageKey?: string }> }; MediaStore?: { backfill?(keys: string[]): Promise<void> }; MediaImport?: { posterKeyFor(key: string): string }; bus: { on(event: string, fn: () => void): () => void } };
+    let backfillTimer: ReturnType<typeof setTimeout> | null = null;
+    const backfill = () => {
+      backfillTimer = null;
+      const keys = Object.values(registry.proj?.assets ?? {}).flatMap((asset) => asset.storageKey ? [asset.storageKey, registry.MediaImport?.posterKeyFor(asset.storageKey) ?? ''] : []);
+      void registry.MediaStore?.backfill?.(keys.filter(Boolean));
+    };
+    for (const event of ['project', 'assets']) registry.bus.on(event, () => { if (!backfillTimer) backfillTimer = setTimeout(backfill, 1500); });
+    backfill();
   }
 }
 const { autoEnhanceSelects } = await import('./controls/select/enhance');

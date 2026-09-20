@@ -40,7 +40,12 @@ async function uploadBlob(link: MediaLink, key: string, blob: Blob): Promise<voi
 }
 
 /** Wraps PM.MediaStore so puts reach the host and misses are filled from it. */
-export function attachRemoteMedia(link: MediaLink, store: MediaStore): MediaStore {
+export interface RemoteMediaStore extends MediaStore {
+  /** Sends up anything this browser has under these keys that the host lacks. */
+  backfill(keys: string[]): Promise<void>;
+}
+
+export function attachRemoteMedia(link: MediaLink, store: MediaStore): RemoteMediaStore {
   const mirrored = new Set<string>();
   const inflight = new Map<string, Promise<void>>();
 
@@ -68,7 +73,22 @@ export function attachRemoteMedia(link: MediaLink, store: MediaStore): MediaStor
     return null;
   };
 
-  const wrapped: MediaStore = {
+  /* media imported before the host kept copies, or on a host that lost them */
+  const backfill = async (keys: string[]): Promise<void> => {
+    const wanted = [...new Set(keys.filter((key) => key && !mirrored.has(key)))];
+    if (!wanted.length) return;
+    let present: string[] = [];
+    try { present = await link.invoke<string[]>(WEB.mediaHas, wanted); } catch { return; }
+    for (const key of present) mirrored.add(key);
+    for (const key of wanted) {
+      if (mirrored.has(key)) continue;
+      const blob = await store.get({ storageKey: key, id: key }).catch(() => null);
+      if (blob && blob.size > 0) await mirror(key, blob);
+    }
+  };
+
+  const wrapped: RemoteMediaStore = {
+    backfill,
     async put(id, blob, meta = {}) {
       const stored = await store.put(id, blob, meta);
       const key = storageKey({ storageKey: meta['storageKey'], id });
