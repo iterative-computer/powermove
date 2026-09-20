@@ -615,7 +615,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (engine !== child) return;
       engine = null;
       if (engineStopped) return;
-      const delay = Math.min(30_000, 1000 * 2 ** Math.min(engineRestarts++, 5));
+      if (engineRestarts >= 5) {
+        log('[engine] keeps exiting; giving up. Agent runs will need an open tab. Run `bun install` (or reinstall powermove) and restart the host.');
+        return;
+      }
+      const delay = Math.min(30_000, 1000 * 2 ** engineRestarts++);
       log(`[engine] exited (${code}); restarting in ${Math.round(delay / 1000)}s`);
       setTimeout(startEngine, delay).unref();
     });
