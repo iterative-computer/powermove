@@ -13,10 +13,9 @@ npx powermove-cli@latest serve
 Keep it running on a box:
 
 ```sh
-npm i -g powermove-cli
-powermove install          # systemd user service on Linux, launchd agent on macOS
-powermove status           # running? and the address to open
-powermove logs             # the host log
+npx powermove-cli@latest install   # installs globally, registers a service (systemd on Linux, launchd on macOS)
+powermove status                   # running? and the address to open
+powermove logs                     # the host log
 powermove uninstall
 ```
 

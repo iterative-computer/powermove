@@ -9,7 +9,22 @@ import path from 'node:path';
 
 import { serve, type ServeOptions } from './index';
 import { install, logs, status, uninstall, unitPath, unitText, type ServiceSpec } from './install';
-import { detectInstallKind } from './updates';
+import { detectInstallKind, PACKAGE } from './updates';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const run = promisify(execFile);
+
+/** A service must point at a durable install, not an npx cache: install globally first when needed. */
+async function durableEntry(entry: string, log: (line: string) => void): Promise<string> {
+  if (detectInstallKind(entry) !== 'npx') return entry;
+  log(`installing ${PACKAGE} globally so the service has a fixed path…`);
+  await run('npm', ['install', '-g', `${PACKAGE}@latest`], { maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await run('npm', ['root', '-g']);
+  const installed = path.join(stdout.trim(), PACKAGE, 'bin', 'powermove.mjs');
+  if (!existsSync(installed)) throw new Error(`Global install did not land at ${installed}.`);
+  return installed;
+}
 
 const require = createRequire(import.meta.url);
 
@@ -134,7 +149,7 @@ export async function main(argv: string[], layout: CliLayout): Promise<void> {
       switch (parsed.command) {
         case 'install':
           if (parsed.dryRun) { console.log(`# ${unitPath(spec)}\n${unitText(spec)}`); return; }
-          await install(spec, say); return;
+          await install({ ...spec, entry: await durableEntry(spec.entry, say) }, say); return;
         case 'uninstall': await uninstall(spec, say); return;
         case 'status': await status(spec, say); return;
         case 'logs': await logs(spec, Number.isInteger(parsed.lines) ? parsed.lines! : 200, say); return;

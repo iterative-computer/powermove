@@ -33,10 +33,10 @@ Open the printed URL. Over Tailscale, use the `100.x` address.
 #### Keep it running
 
 ```sh
-npm i -g powermove-cli
-powermove install       # a service: systemd on Linux, launchd on macOS
-powermove status        # running? and the address to open
+npx powermove-cli@latest install
 ```
+
+Installs it and registers a service (systemd on Linux, launchd on macOS) that starts now and after reboots. `powermove status` shows whether it is running and the address to open.
 
 Details in [packages/cli/README.md](packages/cli/README.md); architecture in [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
 
