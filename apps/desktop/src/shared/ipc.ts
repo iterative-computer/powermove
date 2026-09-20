@@ -80,6 +80,8 @@ export const IPC = {
 
   storeSnapshot: 'store:snapshot',
   storeSnapshotSerializedSync: 'store:snapshot-serialized-sync',
+  storeBootstrapSync: 'store:bootstrap-sync',
+  storeGetEncodedSync: 'store:get-encoded-sync',
   storeSnapshotSync: 'store:snapshot-sync', // ipcRenderer.sendSync from preload, boot barrier only
   storeSet: 'store:set',
   storeSetSerialized: 'store:set-serialized',
@@ -640,6 +642,8 @@ export interface PowermoveBridge {
     snapshotSync(): StoreSnapshot;
     /** Keep large recovery trees out of contextBridge's recursive object copying. */
     snapshotSerializedSync?(): Record<string, string>;
+    bootstrapSerializedSync?(): Record<string, string>;
+    getEncodedSync?(key: string): string | null;
     snapshot(): Promise<StoreSnapshot>;
     set(key: string, value: unknown): void;
     setSerialized?(key: string, serialized: string): Promise<void>;

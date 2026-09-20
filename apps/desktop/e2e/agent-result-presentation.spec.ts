@@ -4,6 +4,7 @@ import { test, expect } from './helpers/app';
 
 test('agent results collapse work above the reply and omit file and external activity panels', async ({ session }, testInfo) => {
   await session.openEditor();
+  await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
   const output = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
   await mkdir(output, { recursive: true });
@@ -12,6 +13,10 @@ test('agent results collapse work above the reply and omit file and external act
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.theme.apply('dark');
+    // This is a visual state fixture; late bridge publications must not replace it.
+    PM.AgentUI.update({ flush: true });
+    PM.AgentUI.update = () => {};
+
     PM.Kernel.loader.records = () => [{ id: 'pexels-browser', manifest: { name: 'Pexels Browser' }, health: { state: 'ok' } }];
     const entries = PM.Kernel.panels.entries.bind(PM.Kernel.panels);
     PM.Kernel.panels.entries = () => [...entries(), { id: 'pexels-panel', ownerId: 'pexels-browser', item: { id: 'pexels-panel', title: 'Pexels Browser' } }];
@@ -62,7 +67,7 @@ test('agent results collapse work above the reply and omit file and external act
     const composer = await page.locator('.agent-composer').evaluate(el => {
       const attach = el.querySelector('.agent-attach')!.getBoundingClientRect();
       const send = el.querySelector('.agent-send')!.getBoundingClientRect();
-      const input = el.querySelector('textarea')!.getBoundingClientRect();
+      const input = el.querySelector('[role="textbox"]')!.getBoundingClientRect();
       return { border: getComputedStyle(el).borderTopWidth, attach: attach.y + attach.height / 2, send: send.y + send.height / 2, inputBottom: input.bottom, attachTop: attach.top };
     });
     expect.soft(composer.border).toBe('0px');

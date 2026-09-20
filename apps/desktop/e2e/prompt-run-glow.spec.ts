@@ -19,10 +19,10 @@ test.describe('@prompt-glow run halo around the prompt being answered', () => {
     });
     const panel = page.locator('#panel-agent [data-svelte-panel="agent"]');
     await expect(panel).toHaveCount(1);
-    const glow = panel.locator('.agent-prompt-glow');
+    const glow = panel.locator('.agent-prompt-signal');
     await expect(glow).toHaveCount(0);
 
-    await panel.locator('textarea').fill('Make the timeline controls clearer');
+    await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Make the timeline controls clearer');
     await panel.locator('button.agent-send').click();
     await page.waitForFunction(() => Boolean((window as any).__glowRun));
 
@@ -35,7 +35,7 @@ test.describe('@prompt-glow run halo around the prompt being answered', () => {
 
     const geometry = await glow.evaluate(element => {
       const halo = element.getBoundingClientRect();
-      const bubble = element.parentElement!.querySelector('.agent-bubble')!.getBoundingClientRect();
+      const bubble = element.parentElement!.getBoundingClientRect();
       const canvas = element.querySelector('canvas')!.getBoundingClientRect();
       return {
         // Held clear of the bubble on every side.
@@ -48,12 +48,12 @@ test.describe('@prompt-glow run halo around the prompt being answered', () => {
         clickThrough: document.elementFromPoint(halo.left + 4, halo.top + 4) !== element
       };
     });
-    expect(geometry).toEqual({ left: 26, right: 26, top: 26, bottom: 26, canvasFills: 0, clickThrough: true });
+    expect(geometry).toEqual({ left: 8, right: 8, top: 8, bottom: 8, canvasFills: 0, clickThrough: true });
 
     // A steering follow-up hands the halo to the prompt now being answered.
     // Mid-run the send control is the stop button, so steering goes in on Enter.
-    await panel.locator('textarea').fill('Actually make them larger too');
-    await panel.locator('textarea').press('Enter');
+    await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Actually make them larger too');
+    await panel.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).press('Enter');
     await expect(glow).toHaveCount(1);
     await expect.poll(async () => glow.evaluate(element =>
       element.parentElement!.querySelector('.agent-bubble')!.textContent

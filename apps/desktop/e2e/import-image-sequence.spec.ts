@@ -1,3 +1,4 @@
+import { exportStillPixels } from './helpers/media';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
@@ -37,25 +38,26 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
     (window as any).releaseSequence = () => { window.createImageBitmap = original; release(); };
     (window as any).sequenceProgress = [];
     const observer = new MutationObserver(() => {
-      const card = document.querySelector('.import-progress');
-      if (card) (window as any).sequenceProgress.push(card.textContent);
+      const card = document.querySelector('.toast[aria-label="Importing image sequence"]');
+      if (card) (window as any).sequenceProgress.push(Number(card.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') || 0));
     });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true });
     (window as any).sequenceObserver = observer;
   });
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
-  const progress = page.getByRole('region', { name: 'Importing image sequence', exact: true });
-  await expect(progress).toContainText('Checking frames · 0 of 3');
-  await expect(progress.getByRole('progressbar')).toHaveAttribute('value', '0');
-  await progress.screenshot({ path: test.info().outputPath('sequence-progress.png') });
-  await page.evaluate(() => (window as any).releaseSequence());
+  const progress = page.getByRole('status', { name: 'Importing image sequence', exact: true });
+  try {
+    await expect(progress).toContainText('Importing image sequence');
+    await expect(progress.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0');
+    await progress.screenshot({ path: test.info().outputPath('sequence-progress.png') });
+  } finally { await page.evaluate(() => (window as any).releaseSequence()); }
   await page.waitForFunction(() => (window as any).PM.proj.layers.some((l: any) => l.name === 'frame sequence.webm'));
   await expect(progress).toHaveCount(0);
   const statuses = await page.evaluate(() => {
     (window as any).sequenceObserver.disconnect();
-    return (window as any).sequenceProgress as string[];
+    return (window as any).sequenceProgress as number[];
   });
-  expect(statuses.some(text => text.includes('Creating sequence · 3 of 3 frames'))).toBe(true);
+  expect(statuses.some(value => value > 0 && value <= 100)).toBe(true);
   const imported = await page.evaluate(() => {
     const PM = (window as any).PM, layer = PM.proj.layers[0];
     return { count: PM.proj.layers.length, type: layer.type, dur: layer.dur, from: layer.from, assets: Object.keys(PM.proj.assets).length, sourceDur: PM.assets.get(layer.d.asset).dur };
@@ -78,25 +80,7 @@ for (const fps of [12, 120]) test(`numbered images at ${fps} fps become one tran
   expect(previewAlpha[1]).toBeLessThanOrEqual(131);
   expect(previewAlpha[2]).toBe(255);
 
-  async function exportPixels(time: number) {
-    return session.page.evaluate(async time => {
-      const PM = (window as any).PM;
-      PM.setTime(time, { raw: true, force: true });
-      let pixels: number[][] = [];
-      const original = PM.download;
-      PM.download = async (blob: Blob) => {
-        const image = await createImageBitmap(blob);
-        const cv = document.createElement('canvas'); cv.width = cv.height = 64;
-        const ctx = cv.getContext('2d')!; ctx.drawImage(image, 0, 0, 64, 64); image.close();
-        pixels = [[...ctx.getImageData(32, 32, 1, 1).data], [...ctx.getImageData(0, 0, 1, 1).data], [...ctx.getImageData(4, 4, 1, 1).data]];
-      };
-      try {
-        const result = await PM.Export.run({ format: 'still', w: 64, h: 64, alpha: true, mblur: false });
-        if (result.error) throw new Error(result.error);
-        return pixels;
-      } finally { PM.download = original; }
-    }, time);
-  }
+  const exportPixels = (time: number) => exportStillPixels(session, time, 64, 64, [[32, 32], [0, 0], [4, 4]]);
   for (let frame = 0; frame < 3; frame++) {
     const pixels = await exportPixels(frame / fps);
     expect(pixels[0]![frame]).toBeGreaterThan(240);

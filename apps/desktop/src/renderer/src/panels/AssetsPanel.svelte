@@ -93,17 +93,14 @@
     return String(PM.assets.poster?.(asset.id) || '');
   }
 
-  /* Project meta without a live asset means the bytes could not be restored
-     from the media store: the file is offline until the user locates it. */
-  function isOffline(asset: Asset): boolean {
-    return !liveAsset(asset) && !isLoading(asset);
-  }
-
-  /* Bytes still on their way: the restore pass is running, or a remote host
-     is sending them. Not offline until that finishes without them. */
   function isLoading(asset: Asset): boolean {
     if (liveAsset(asset)) return false;
-    return (PM.assetsRestoring || 0) > 0 || PM.MediaStore?.pending?.(asset) === true;
+    return !!PM.assets.loading?.has(asset.id) || (PM.assetsRestoring || 0) > 0 || PM.MediaStore?.pending?.(asset) === true;
+  }
+
+  /* Only completed restoration can establish that media is offline. */
+  function isOffline(asset: Asset): boolean {
+    return !liveAsset(asset) && !isLoading(asset);
   }
 
   function offlineDetail(asset: Asset): string {
@@ -120,6 +117,7 @@
     event.stopPropagation();
     selectAsset(asset.id, event.currentTarget as HTMLElement);
     const sourcePath = finderPath(asset);
+    if (isLoading(asset)) return;
     const offline = isOffline(asset);
     PM.menu(event.currentTarget, [
       { header: asset.name },
@@ -197,6 +195,7 @@
 
   function addAsset(event: MouseEvent | KeyboardEvent, asset: Asset): void {
     event.stopPropagation();
+    if (isLoading(asset)) return;
     /* Offline media has nothing to put on the timeline; the primary action
        becomes locating the file, the same way a broken tile works in an NLE. */
     if (isOffline(asset)) {
@@ -355,6 +354,7 @@
   }
 
   function handleRowDoubleClick(event: MouseEvent, asset: Asset): void {
+    if (isLoading(asset)) return;
     if ((event.target as Element).closest('button')) return;
     event.preventDefault();
     event.stopPropagation();
@@ -430,20 +430,21 @@
       {@const currentAsset = (doc.tick.assets, liveAsset(asset))}
       {@const posterSrc = (doc.tick.assets, posterUrl(asset))}
       {@const loading = (doc.tick.assets, isLoading(asset))}
-      {@const offline = !currentAsset}
+      {@const offline = !currentAsset && !loading}
       <div
         class="asset-card"
         class:is-dragging={draggingId === asset.id}
         class:is-offline={offline}
         class:is-loading={loading}
         role="option"
-        draggable={!offline}
+        aria-busy={loading}
+        draggable={!offline && !loading}
         ondragstart={(event) => handleDragStart(event, asset)}
         ondragend={handleDragEnd}
         tabindex={activeAssetId ? (activeAssetId === asset.id ? 0 : -1) : (index === 0 ? 0 : -1)}
         aria-selected={activeAssetId === asset.id}
         data-asset-id={asset.id}
-        title={offline ? offlineDetail(asset) : 'Select media · double-click to preview, or drag onto the timeline'}
+        title={loading ? 'Loading media…' : offline ? offlineDetail(asset) : 'Select media · double-click to preview, or drag onto the timeline'}
         onpointerdown={(event) => handleRowPointerDown(event, asset)}
         oncontextmenu={(event) => showAssetMenu(event, asset)}
         ondblclick={(event) => handleRowDoubleClick(event, asset)}
@@ -483,7 +484,7 @@
                 <Icon {PM} name="link" />
               </button>
             {:else}
-              <button class="asset-add" type="button" title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
+              <button class="asset-add" type="button" disabled={loading} title="Add to timeline" aria-label={`Add ${asset.name} to timeline`} onclick={(event) => addAsset(event, asset)}>
                 <Icon {PM} name="plus" />
               </button>
             {/if}
@@ -505,7 +506,7 @@
         <span class="asset-copy">
           <b title={asset.name}>{asset.name}</b>
           {#if loading}
-            <small>Loading…</small>
+            <small>Loading media…</small>
           {:else if offline}
             <small class="asset-missing" title={offlineDetail(asset)}>{offlineDetail(asset)}</small>
           {:else}

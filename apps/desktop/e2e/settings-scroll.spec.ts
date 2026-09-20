@@ -14,7 +14,7 @@ test('Settings is a continuous page with section navigation and highlighted sear
   await expect(settings.getByRole('heading', { name: 'Project', exact: true })).toBeInViewport();
 
   await settings.locator('.sg-scroll').evaluate(el => el.scrollTo({ top: 0, behavior: 'instant' }));
-  await expect(navigation.getByRole('button', { name: 'General', exact: true })).toHaveAttribute('aria-current', 'location');
+  await expect(project).toHaveAttribute('aria-current', 'location');
   await navigation.getByRole('button', { name: 'General', exact: true }).focus();
   await page.keyboard.press('ArrowDown');
   await expect(navigation.getByRole('button', { name: 'Accounts', exact: true })).toBeFocused();
@@ -52,7 +52,7 @@ test('Settings is a continuous page with section navigation and highlighted sear
   await search.fill('frame rate');
   await expect(settings.getByLabel('Frame rate', { exact: true })).toBeInViewport();
   await page.screenshot({ path: '/tmp/powermove-settings-search-dark.png' });
-  await settings.getByRole('button', { name: 'Done', exact: true }).click();
+  await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
   expect(await page.evaluate(() => CSS.highlights.has('settings-search'))).toBe(false);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

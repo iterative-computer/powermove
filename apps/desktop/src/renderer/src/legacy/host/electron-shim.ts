@@ -1,6 +1,7 @@
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
+import { HistoryRecords, packStoredHistory, unpackStoredHistory } from '../../../../shared/history-memory';
 
 export function install(PM: PMRegistry): void {
   'use strict';
@@ -292,13 +293,16 @@ export function install(PM: PMRegistry): void {
 
   let snapshot = {};
   try {
-    snapshot = bridge.store.snapshotSerializedSync
-      ? Object.fromEntries(Object.entries(bridge.store.snapshotSerializedSync() as Record<string, string>).map(([key, value]) => [key, JSON.parse(value)]))
+    const serializedSnapshot = bridge.store.bootstrapSerializedSync || bridge.store.snapshotSerializedSync;
+    snapshot = serializedSnapshot
+      ? Object.fromEntries(Object.entries(serializedSnapshot() as Record<string, string>).map(([key, value]) => [key, JSON.parse(value)]))
       : bridge.store.snapshotSync() || {};
   } catch (error) {
     bridge.log('error', `store snapshot failed: ${errorText(error, 'unknown error')}`);
   }
   const cached = new Map(Object.entries(snapshot).map(([key, value]) => [`pm.${key}`, value]));
+  const historyRecords = new HistoryRecords();
+  const lazy = new Set<string>(Array.isArray((snapshot as any).__powermoveLazyKeys) ? (snapshot as any).__powermoveLazyKeys : []);
   const serviceKey = (key: any) => String(key).startsWith('pm.') ? String(key).slice(3) : String(key);
   const legacyKey = (key: any) => `pm.${serviceKey(key)}`;
   const saveErrors = new Map<string, string>();
@@ -310,12 +314,13 @@ export function install(PM: PMRegistry): void {
      write off this window's IPC channel. */
   const stale = new Set<string>();
   const refill = (service: string) => {
-    stale.delete(service);
-    if (!bridge.store.getSync) return;
+    const get = bridge.store.getEncodedSync || bridge.store.getSync;
+    if (!get) return;
     try {
-      const serialized = bridge.store.getSync(service);
+      const serialized = get(service);
       if (serialized === null) cached.delete(legacyKey(service));
       else cached.set(legacyKey(service), JSON.parse(serialized));
+      stale.delete(service); lazy.delete(service);
     } catch (error) {
       bridge.log('warn', `store refresh failed for ${service}: ${errorText(error, 'unknown error')}`);
     }
@@ -327,7 +332,7 @@ export function install(PM: PMRegistry): void {
     separateHistory: (snapshot as any).__powermoveAsyncStore === true && typeof bridge.store.setSerialized === 'function',
     get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
-      if (stale.has(serviceKey(key))) refill(serviceKey(key));
+      if (stale.has(serviceKey(key)) || lazy.has(serviceKey(key))) refill(serviceKey(key));
       if (!cached.has(stored)) return fallback;
       try {
         const value: any = cached.get(stored);
@@ -335,17 +340,18 @@ export function install(PM: PMRegistry): void {
           const { history, ...metadata } = value;
           return cloneValue(metadata);
         }
-        return cloneValue(value);
+        return unpackStoredHistory(serviceKey(key), cloneValue(value));
       } catch { return fallback; }
     },
     /** Internal immutable snapshots (history patches), serialized without blocking input. */
     setAsync(key: string, value: any) {
       if (!bridge.store.setSerialized) return Promise.resolve(PM.store.set(key, value));
       const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
-      stale.delete(service);
+      stale.delete(service); lazy.delete(service);
       writeVersions.set(service, version);
-      cached.set(legacyKey(service), value);
-      const write = stringifyAsync(value, async () => {
+      const packed = packStoredHistory(service, value, historyRecords);
+      cached.set(legacyKey(service), packed);
+      const write = stringifyAsync(packed, async () => {
         await new Promise<void>(resolve => setTimeout(resolve, 0));
         if (writeVersions.get(service) !== version) throw new Error('Snapshot superseded');
       }).then(async serialized => {
@@ -360,10 +366,10 @@ export function install(PM: PMRegistry): void {
     },
     set(key: any, value: any) {
       const service = serviceKey(key);
-      stale.delete(service);
+      stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       try {
-        const copy = cloneValue(value);
+        const copy = packStoredHistory(service, cloneValue(value), historyRecords);
         saveErrors.delete(service);
         bridge.store.set(service, copy);
         cached.set(legacyKey(service), copy);
@@ -376,7 +382,7 @@ export function install(PM: PMRegistry): void {
     },
     del(key: any) {
       const service = serviceKey(key);
-      stale.delete(service);
+      stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));
       bridge.store.delete(service);

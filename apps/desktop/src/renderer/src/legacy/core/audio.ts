@@ -242,7 +242,7 @@ async function decodeAsset(asset: any) {
   asset.audioDecoding = (async () => {
     try {
       const bytes: any = await asset.audioBlob.arrayBuffer();
-      const buffer: any = await decodeArrayBuffer(context(), bytes.slice(0));
+      const buffer: any = await decodeArrayBuffer(context(), bytes);
       if (!buffer || !(buffer.duration > 0)) throw new Error('The decoder returned an empty audio file');
       if (decodedBytes(buffer) > MAX_DECODED_BYTES) {
         const error: any = new Error('This audio file is too long to decode safely · use a shorter edit or split it first');

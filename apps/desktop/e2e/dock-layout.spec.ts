@@ -12,6 +12,7 @@ test.describe('@dock-layout Svelte DockLayout', () => {
         PM.registerPanel(id, {
           title: id,
           size: 260,
+          min: 240,
           build(body: HTMLElement) {
             const content = document.createElement('div');
             content.style.height = '220px';

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './electron-shim';
+import { HistoryRecords, packHistory } from '../../../../shared/history-memory';
 
 function flush(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
@@ -13,7 +14,7 @@ function decodeBase64(value: string): string {
   return Buffer.from(value, 'base64').toString('utf8');
 }
 
-function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string>; windows?: boolean; storeSync?: boolean } = {}) {
+function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string>; bootstrapJSON?: Record<string, string>; encodedValues?: Record<string, string>; windows?: boolean; storeSync?: boolean } = {}) {
   const emitted: Array<[string, unknown]> = [];
   const PM: PMRegistry = {
     uid: vi.fn((prefix: string) => `${prefix}test`),
@@ -38,6 +39,10 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
         ? vi.fn(() => { throw options.snapshotError; })
         : vi.fn(() => ({ 'project.demo': { layers: [{ id: 'one' }] }, __powermoveAsyncStore: options.nativeAsyncStore === true })),
       ...(options.snapshotJSON !== undefined ? { snapshotSerializedSync: vi.fn(() => options.snapshotJSON) } : {}),
+      ...(options.bootstrapJSON ? {
+        bootstrapSerializedSync: vi.fn(() => options.bootstrapJSON),
+        getEncodedSync: vi.fn((key: string) => options.encodedValues?.[key] ?? null),
+      } : {}),
       ...(options.serializedBridge ? { setSerialized: vi.fn(async () => undefined) } : {}),
       set: vi.fn(),
       delete: vi.fn(),
@@ -92,6 +97,39 @@ afterEach(() => {
 });
 
 describe('legacy Electron shim install', () => {
+  it('loads deferred history only on demand and exposes isolated legacy values', () => {
+    const history = { version: 1, index: -1, entries: [{ label: 'Add',
+      forward: [{ path: ['layers'], exists: true, value: [{ id: 'one' }] }], backward: [],
+    }] };
+    const { PM, bridge } = loadShim({
+      bootstrapJSON: { __powermoveLazyKeys: JSON.stringify(['projectHistory.demo', 'agentAttachment.other']) },
+      encodedValues: { 'projectHistory.demo': JSON.stringify(packHistory(new HistoryRecords().share(history))) },
+      storeSync: true,
+    });
+    expect(bridge.store.snapshotSync).not.toHaveBeenCalled();
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+    const loaded = PM.store.get('projectHistory.demo', null);
+    expect(loaded).toEqual(history);
+    loaded.entries[0].forward[0].value[0].id = 'changed';
+    expect(PM.store.get('projectHistory.demo', null)).toEqual(history);
+    expect(bridge.store.getEncodedSync).toHaveBeenCalledTimes(1);
+    bridge.store.onChanged.mock.calls[0][0](['projectHistory.demo']);
+    expect(PM.store.get('projectHistory.demo', null)).toEqual(history);
+    expect(bridge.store.getEncodedSync).toHaveBeenCalledTimes(2);
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalledWith('agentAttachment.other');
+  });
+
+  it('retries a failed deferred read and lets a local write supersede it', () => {
+    const { PM, bridge } = loadShim({ bootstrapJSON: {
+      __powermoveLazyKeys: JSON.stringify(['project.demo']),
+    }, encodedValues: { 'project.demo': '{"id":"demo"}' } });
+    bridge.store.getEncodedSync.mockImplementationOnce(() => { throw new Error('IPC unavailable'); });
+    expect(PM.store.get('project.demo', null)).toBeNull();
+    expect(PM.store.get('project.demo', null)).toEqual({ id: 'demo' });
+    PM.store.set('project.demo', { id: 'local' });
+    expect(PM.store.get('project.demo', null)).toEqual({ id: 'local' });
+    expect(bridge.store.getEncodedSync).toHaveBeenCalledTimes(2);
+  });
   it('requires agreement from native storage and preload before migrating undo history', () => {
     expect(loadShim({ serializedBridge: true }).PM.store.separateHistory).toBe(false);
     expect(loadShim({ nativeAsyncStore: true }).PM.store.separateHistory).toBe(false);

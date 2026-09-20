@@ -37,7 +37,9 @@ test.describe('@timeline Quick Offset', () => {
         bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1,
         clientX, clientY: y, pointerId: 71, metaKey: true, altKey: true,
       });
-      PM.Kernel.services.get('timeline').cv.dispatchEvent(event('pointerdown', x));
+      const down = event('pointerdown', x);
+      Object.defineProperties(down, { offsetX: { value: x - rect.left }, offsetY: { value: y - rect.top } });
+      PM.Kernel.services.get('timeline').cv.dispatchEvent(down);
       window.dispatchEvent(event('pointermove', x + 125));
       const overlay = { ...PM.Kernel.services.get('timeline').quickOffset };
       window.dispatchEvent(event('pointerup', x + 125));
@@ -90,7 +92,9 @@ test.describe('@timeline Quick Offset', () => {
         bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1,
         clientX, clientY: y, pointerId: 72, metaKey: true, altKey: true,
       });
-      PM.Kernel.services.get('timeline').cv.dispatchEvent(event('pointerdown', x));
+      const down = event('pointerdown', x);
+      Object.defineProperties(down, { offsetX: { value: x - rect.left }, offsetY: { value: y - rect.top } });
+      PM.Kernel.services.get('timeline').cv.dispatchEvent(down);
       window.dispatchEvent(event('pointermove', x + 125));
       window.dispatchEvent(event('pointerup', x + 125));
     });
@@ -139,7 +143,9 @@ test('one Graph Editor handle adjusts selected same-property keyframes across la
       bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1,
       clientX, clientY, pointerId: 73,
     });
-    PM.Kernel.services.get('timeline').cv.dispatchEvent(event('pointerdown', x, y));
+    const down = event('pointerdown', x, y);
+    Object.defineProperties(down, { offsetX: { value: x - rect.left }, offsetY: { value: y - rect.top } });
+    PM.Kernel.services.get('timeline').cv.dispatchEvent(down);
     window.dispatchEvent(event('pointermove', x + 16, y - 14));
     window.dispatchEvent(event('pointerup', x + 16, y - 14));
   }, ids[0]);

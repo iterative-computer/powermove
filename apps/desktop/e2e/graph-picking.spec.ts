@@ -106,7 +106,7 @@ test('vertical scrolling pans the graph without scrolling rows or editing animat
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('only selected keys and their curves appear, and clearing selection clears hit targets', async ({ session }, info) => {
+test('selected curves expose all their keys, and clearing selection clears hit targets', async ({ session }, info) => {
   const { page } = session;
   await graphFixture(page);
   await page.evaluate(() => {
@@ -114,7 +114,7 @@ test('only selected keys and their curves appear, and clearing selection clears 
     PM.sel.keys = [PM.findProp(PM.proj.layers[0], 'c.fontAxis.wght').kf[0].i];
     PM.bus.emit('sel'); PM.invalidate();
   });
-  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph?.points.length; })).toBe(1);
+  await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph?.points.length; })).toBe(2);
   expect(await page.evaluate(() => { const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline'); return timeline._graph.series.map((axis: any) => axis.key); })).toEqual(['c.fontAxis.wght']);
   await page.evaluate(() => {
     const PM = (window as any).PM, L = PM.proj.layers[0];

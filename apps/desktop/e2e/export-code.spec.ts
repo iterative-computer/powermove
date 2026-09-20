@@ -84,7 +84,8 @@ test('web export plays independently and matches editor frames', async ({ sessio
       PM.GL.resize(320, 180);
       for (const time of [0, .5, 1]) {
         await PM.prepareFrame(time);
-        PM.GL.render(time, { mblur: true, mbSamples: 6, shutter: .5 });
+        // Compare fully compiled export frames, not an asynchronous preview warmup.
+        PM.GL.render(time, { exporting: true, mblur: true, mbSamples: 6, shutter: .5 });
         if (PM.GL.errors.size) throw new Error([...PM.GL.errors.values()].join('\n'));
         const gl = PM.GL.gl, pixels = new Uint8Array(320 * 180 * 4);
         gl.readPixels(0, 0, 320, 180, gl.RGBA, gl.UNSIGNED_BYTE, pixels);

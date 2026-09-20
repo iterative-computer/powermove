@@ -489,7 +489,9 @@ function registerWindowIpc(): void {
 /** Reopens last session's windows, or opens one window when the preference is
  *  off, nothing was open, or those projects are gone. */
 function restoreWindows(store: Store): void {
-  const snapshot = store.snapshot();
+  const snapshot = store.get
+    ? Object.fromEntries(['restoreWindows', 'projects', 'openWindows', 'openTabs'].map(key => [key, store.get!(key)]))
+    : store.snapshot();
   if (snapshot['restoreWindows'] === false) {
     createWindow();
     return;

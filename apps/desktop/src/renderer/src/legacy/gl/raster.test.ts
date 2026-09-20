@@ -41,6 +41,32 @@ afterEach(() => {
 });
 
 describe('legacy raster install', () => {
+  it('releases obsolete GPU assets when a project closes', () => {
+    const dropTextures = vi.fn(), dropMesh = vi.fn();
+    const PM = rasterRegistry({ GL: { dropTextures, dropMesh } });
+    PM.assets.map.set('mesh', { id: 'mesh', kind: 'model' });
+    PM.assets.clear();
+    expect(dropTextures).toHaveBeenCalledWith('a:');
+    expect(dropTextures).toHaveBeenCalledWith('video:');
+    expect(dropMesh).toHaveBeenCalledWith('mesh');
+  });
+  it('unloads disposed source and preview video decoders exactly once', () => {
+    const PM = rasterRegistry();
+    const source = { pause: vi.fn(), removeAttribute: vi.fn(), load: vi.fn() };
+    const preview = { pause: vi.fn(), removeAttribute: vi.fn(), load: vi.fn() };
+    const revokeObjectURL = vi.fn();
+    (window as any).URL = { revokeObjectURL };
+    PM.assets.map.set('video', { id: 'video', kind: 'video', url: 'blob:source', el: source,
+      preview: { el: preview, url: 'blob:preview' } });
+    PM.assets.clear();
+    expect(source.removeAttribute).toHaveBeenCalledWith('src');
+    expect(source.load).toHaveBeenCalledTimes(1);
+    expect(preview.removeAttribute).toHaveBeenCalledWith('src');
+    expect(preview.load).toHaveBeenCalledTimes(1);
+    PM.assets.clear();
+    expect(source.load).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(2);
+  });
   it('reuses identical capped text bitmaps at larger zoom levels without changing lower-density sources', () => {
     const PM = rasterRegistry();
     const layer = { type: 'text', d: { text: 'W'.repeat(128), font: 'sans-serif', size: 18, color: '#ffffff' } };

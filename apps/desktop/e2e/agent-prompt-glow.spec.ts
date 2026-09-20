@@ -4,6 +4,7 @@ import { test, expect } from './helpers/app';
 
 test('prompt halo sits outside the message bubble and stays within the panel', async ({ session }, testInfo) => {
   await session.openEditor();
+  await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
   const output = process.env.POWERMOVE_AGENT_ARTIFACTS || testInfo.outputPath('visuals');
   await mkdir(output, { recursive: true });
@@ -11,6 +12,10 @@ test('prompt halo sits outside the message bubble and stays within the panel', a
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.theme.apply('dark');
+    // This is a visual state fixture; late bridge publications must not replace it.
+    PM.AgentUI.update({ flush: true });
+    PM.AgentUI.update = () => {};
+
     Object.assign(PM.AgentUI.state, { phase: 'running', legacyPhase: 'working', activity: '', trace: [],
       conversation: [{ role: 'user', text: '"Could not reach Pexels"' }], run: null, panelRun: null });
   });

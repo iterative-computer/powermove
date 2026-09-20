@@ -13,7 +13,7 @@ test('properties and timeline expose editable content animation, scrubbing, and 
     PM.proj.layers.push(layer); PM.selectLayers(layer.id); PM.bus.emit('layers'); PM.invalidate();
     return layer.id;
   });
-  const stopwatch = page.getByRole('button', { name: 'Animate Width', exact: true });
+  const stopwatch = page.getByRole('button', { name: 'Add keyframe for Width', exact: true });
   await expect(stopwatch).toBeVisible();
   const geometry = await stopwatch.evaluate(button => {
     const label = button.closest('.row')!.querySelector('.k')!;
@@ -21,7 +21,7 @@ test('properties and timeline expose editable content animation, scrubbing, and 
   });
   expect(geometry.button).toBeLessThan(geometry.label);
   await stopwatch.click();
-  await expect(page.getByRole('button', { name: 'Remove animation from Width', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Remove keyframe for Width', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.evaluate(() => (window as any).PM.setTime(1));
   const width = page.getByRole('spinbutton', { name: 'Width', exact: true });
   await width.focus(); await width.press('ArrowUp'); await width.press('Enter');
@@ -90,7 +90,7 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
       return type === 'text' ? ['c.text', 'c.font', 'c.size', 'c.color', 'c.align']
         : type === 'shader' ? ['u.uTint', 'u.uEnabled', 'u.uAmount']
         : type === 'extension' ? ['x.objectColor', 'x.autoRotate', 'x.size']
-        : ['l.on', 'l.blend', 'l.mblur', `${layer.fx[0].id}.$enabled`, `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
+        : ['l.blend', 'l.mblur', `${layer.fx[0].id}.$enabled`, `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
     }, type);
     for (const path of paths) {
       const button = page.locator(`[data-property-path="${path}"]`);

@@ -9,7 +9,7 @@ vi.mock('electron', () => ({
 import { BrowserWindow, Menu, shell } from 'electron';
 import { installTextContextMenu, textEditMenuItems } from './text-context-menu';
 
-const flags = { canUndo: true, canRedo: false, canCut: true, canCopy: true, canPaste: true, canSelectAll: true };
+const flags = { canUndo: true, canRedo: false, canCut: true, canCopy: true, canPaste: true, canSelectAll: true, canDelete: true, canEditRichly: true };
 const params = (overrides: Partial<ContextMenuParams> = {}) => ({
   isEditable: true, selectionText: 'Native controls', editFlags: flags, ...overrides
 }) as ContextMenuParams;
@@ -84,4 +84,22 @@ describe('native text context menus', () => {
     handler({}, params({ isEditable: false, selectionText: '' }));
     expect(popup).toHaveBeenCalledOnce();
   });
+});
+
+it('routes custom field history through its frame while preserving native clipboard actions', async () => {
+  const target = contents();
+  const popup = vi.fn();
+  vi.mocked(Menu.buildFromTemplate).mockReturnValue({ popup } as any);
+  const frame = { executeJavaScript: vi.fn().mockResolvedValue({ canUndo: true, canRedo: false }) } as any;
+  installTextContextMenu(target);
+  const handler = vi.mocked(target.on).mock.calls[0]![1] as Function;
+  await handler({}, params({ frame, editFlags: { ...flags, canUndo: false } }));
+  const items = vi.mocked(Menu.buildFromTemplate).mock.calls[0]![0];
+  expect(items.find(item => item.label === 'Undo')?.enabled).toBe(true);
+  expect(items.find(item => item.label === 'Redo')?.enabled).toBe(false);
+  items.find(item => item.label === 'Undo')?.click?.({} as never, undefined, {} as never);
+  expect(frame.executeJavaScript.mock.calls[1][0]).toContain("inputType: 'historyUndo'");
+  expect(target.undo).not.toHaveBeenCalled();
+  items.find(item => item.label === 'Copy')?.click?.({} as never, undefined, {} as never);
+  expect(target.copy).toHaveBeenCalledOnce();
 });

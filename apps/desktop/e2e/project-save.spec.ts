@@ -128,9 +128,7 @@ test('Projects screen exposes file state and saves active, duplicated, and opene
     }, action);
   };
 
-  await page.getByRole('button', { name: 'New project', exact: true }).click();
-  await page.getByRole('dialog', { name: 'New composition', exact: true })
-    .getByRole('button', { name: 'Create', exact: true }).click();
+  await session.openEditor();
   await rename(session, 'Velocity Study');
   await page.evaluate(() => (window as any).PM.ProjectsScreen.show('projects'));
   await expect(card('Velocity Study')).not.toContainText('.pmv');
@@ -184,7 +182,7 @@ test('cancel, disk-write failures, and external modifications never clear unsave
   expect(await session.page.evaluate(() => (window as any).PM.app.dirty)).toBe(true);
 });
 
-test('closing a tab and the native window honors Cancel and cancelled Save', async ({ session }) => {
+test('renderer and native window close honor Cancel and cancelled Save', async ({ session }) => {
   await session.openEditor();
   await rename(session, 'Keep this open');
   await session.app.evaluate(({ dialog }) => {
@@ -193,7 +191,7 @@ test('closing a tab and the native window honors Cancel and cancelled Save', asy
       return { response: 1, checkboxChecked: false };
     };
   });
-  await session.page.getByRole('button', { name: 'Close Keep this open', exact: true }).click();
+  await session.page.evaluate(() => (window as any).PM.windows.close());
   await expect.poll(() => session.app.evaluate(() => (globalThis as any).__closePrompts)).toBe(1);
   expect(await session.page.evaluate(() => (window as any).PM.proj.name)).toBe('Keep this open');
   await session.app.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]!.close(); });

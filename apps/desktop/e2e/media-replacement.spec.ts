@@ -33,11 +33,12 @@ test('replacement uses the import picker, progress, and image sequence flow', as
     (window as any).releaseReplacement = () => { PM.MediaStore.put = original; release(); };
   });
   await dialog.getByRole('button', { name: 'Import sequence', exact: true }).click();
-  const progress = page.getByRole('region', { name: 'Importing image sequence', exact: true });
-  await expect(progress).toContainText('Saving media · frame sequence.webm');
-  await progress.screenshot({ path: test.info().outputPath('replacement-progress.png') });
-  expect(await page.evaluate(id => (window as any).PM.proj.assets[id].name, before.id)).toBe('h264-aac.mp4');
-  await page.evaluate(async () => { (window as any).releaseReplacement(); await (window as any).PM.app.importQueue; });
+  const progress = page.getByRole('status', { name: 'Importing image sequence', exact: true });
+  try {
+    await expect(progress).toContainText('Importing image sequence');
+    await progress.screenshot({ path: test.info().outputPath('replacement-progress.png') });
+    expect(await page.evaluate(id => (window as any).PM.proj.assets[id].name, before.id)).toBe('h264-aac.mp4');
+  } finally { await page.evaluate(async () => { (window as any).releaseReplacement(); await (window as any).PM.app.importQueue; }); }
   await expect(progress).toHaveCount(0);
   expect(await page.evaluate(id => {
     const PM = (window as any).PM;

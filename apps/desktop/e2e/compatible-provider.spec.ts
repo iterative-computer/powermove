@@ -27,12 +27,12 @@ test('connects a local model, streams chat, recovers after a broken stream and r
     const page = session.page;
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
-    await settings.getByRole('tab', { name: 'Accounts', exact: true }).click();
+    await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
     await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
     await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('local-test');
     await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
     await expect(settings).toContainText('Connected model: local-test');
-    await settings.getByRole('button', { name: 'Done', exact: true }).click();
+    await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.locator('.agent-modelbar select[aria-label="Provider"]')).toHaveValue('compatible');
     const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
     await composer.fill('Hello'); await page.getByRole('button', { name: 'Send message', exact: true }).click();

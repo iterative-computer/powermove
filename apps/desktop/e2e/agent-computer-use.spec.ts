@@ -6,8 +6,7 @@ import net from 'node:net';
 import { expect, test, repoRoot } from './helpers/app';
 
 test('agent bridge captures and draws on a real extension canvas with native input', async ({ session }) => {
-  await session.page.getByRole('button', { name: 'New project', exact: true }).click();
-  await session.page.getByRole('button', { name: 'Create', exact: true }).click();
+  await session.openEditor();
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-panel-bridge-'));
   try {
     const bundle = path.join(directory, 'bridge.cjs');
@@ -38,12 +37,12 @@ test('agent bridge captures and draws on a real extension canvas with native inp
     const call = (tool: string, args: any = {}) => new Promise<any>((resolve, reject) => {
       const socket = net.createConnection({ host: '127.0.0.1', port: connection.port });
       let data = ''; socket.setEncoding('utf8');
-      socket.on('connect', () => socket.write(JSON.stringify({ ...connection, id: tool, tool, arguments: args }) + '\n'));
+      socket.on('connect', () => socket.write(JSON.stringify({ ...connection, workspace: directory, id: tool, tool, arguments: args }) + '\n'));
       socket.on('data', chunk => data += chunk); socket.on('error', reject);
       socket.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
     });
     const capture = await call('capture_panel', { panelId: 'canvas-fixture' });
-    expect(capture.ok).toBe(true);
+    expect(capture.ok, JSON.stringify(capture)).toBe(true);
     expect(capture.content[1].type).toBe('image');
     const metadata = JSON.parse(capture.content[0].text);
     const rect = await session.page.locator('#panel-canvas-fixture canvas').boundingBox();

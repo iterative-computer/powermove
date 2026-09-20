@@ -93,6 +93,7 @@ export class InlinePrompt {
     this.items.clear();
     this.render({ text, attachments });
     this.history = [this.read()]; this.historyIndex = 0;
+    this.historyAvailability();
   }
 
   private render(draft: Draft) {
@@ -133,6 +134,10 @@ export class InlinePrompt {
 
   private select(range: Range) { const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); this.bookmark = range.cloneRange(); }
   private disarm() { this.armed?.classList.remove('is-selected'); this.armed = null; }
+  private historyAvailability() {
+    this.element.dataset.promptCanUndo = String(this.historyIndex > 0);
+    this.element.dataset.promptCanRedo = String(this.historyIndex + 1 < this.history.length);
+  }
   private commit(typing: boolean) {
     this.element.normalize();
     this.caretStops();
@@ -144,6 +149,7 @@ export class InlinePrompt {
     else { this.history.push(draft); this.historyIndex++; }
     if (this.history.length > 100) { this.history.shift(); this.historyIndex--; }
     this.lastEdit = typing ? now : 0;
+    this.historyAvailability();
     this.change(draft); this.remember();
   }
   input = () => { this.disarm(); this.commit(true); };
@@ -157,6 +163,7 @@ export class InlinePrompt {
       const index = this.historyIndex + (event.shiftKey ? 1 : -1);
       if (index >= 0 && index < this.history.length) {
         this.historyIndex = index; this.render(this.history[index]!); this.change(this.read());
+        this.historyAvailability();
         const range = document.createRange(); range.selectNodeContents(this.element); range.collapse(false); this.select(range);
       }
       return true;

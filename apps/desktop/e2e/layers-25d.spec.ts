@@ -34,7 +34,7 @@ test('editable 2.5D layers render perspective, depth, keyframes and survive Undo
     expect(result.center[2]).toBeGreaterThan(result.center[0]);
     expect(result.saved).toEqual([{ threeD: true, z: 200, keys: 0 }, { threeD: true, z: -80, keys: 2 }]);
     expect(result.errors).toEqual([]);
-    await expect(page.getByRole('button', { name: '3D layer', exact: true })).toBeVisible();
+    await expect(page.getByRole('radiogroup', { name: '3D layer', exact: true })).toBeVisible();
     const perspective = page.getByRole('spinbutton', { name: 'Perspective', exact: true });
     await expect(perspective).toBeVisible();
     await perspective.focus();
@@ -46,9 +46,9 @@ test('editable 2.5D layers render perspective, depth, keyframes and survive Undo
     await perspective.focus();
     await perspective.fill('50');
     await perspective.press('Enter');
-    await page.getByRole('button', { name: '3D layer', exact: true }).click();
+    await page.getByRole('radiogroup', { name: '3D layer', exact: true }).getByRole('radio', { name: 'Off', exact: true }).click();
     await expect(page.getByRole('spinbutton', { name: 'Position Z', exact: true })).toHaveCount(0);
-    await page.getByRole('button', { name: '3D layer', exact: true }).click();
+    await page.getByRole('radiogroup', { name: '3D layer', exact: true }).getByRole('radio', { name: 'On', exact: true }).click();
     await expect(page.getByRole('spinbutton', { name: 'Position Z', exact: true })).toBeVisible();
     await page.screenshot({ path: '/tmp/powermove-25d-review.png' });
     const drag = await page.evaluate(() => { const PM = (window as any).PM, viewer = PM.Kernel.services.get('viewer'), l = PM.firstSel(), p = viewer.layerWorldPivot(l, 0), r = viewer.inner.getBoundingClientRect(); return { x: r.left + p.x * viewer.shown, y: r.top + p.y * viewer.shown, position: PM.ev(l, 'position.x', 0), zoom: viewer.shown }; });

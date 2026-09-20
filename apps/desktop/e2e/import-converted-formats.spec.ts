@@ -1,5 +1,5 @@
 import { expect, test } from './helpers/app';
-import { importFixture } from './helpers/media';
+import { exportStillPixels, importFixture } from './helpers/media';
 
 /* TIFF, HEIC and containers like Matroska never reach a Chromium decoder. The
    main process converts them on import, and the project stores the conversion. */
@@ -16,26 +16,6 @@ async function openFixtureSized(session: any) {
   });
 }
 
-async function centrePixel(page: any, time: number): Promise<number[]> {
-  return page.evaluate(async (at: number) => {
-    const PM = (window as any).PM;
-    PM.setTime(at, { raw: true, force: true });
-    let pixel: number[] = [];
-    const original = PM.download;
-    PM.download = async (blob: Blob) => {
-      const image = await createImageBitmap(blob);
-      const cv = document.createElement('canvas'); cv.width = 160; cv.height = 90;
-      const ctx = cv.getContext('2d')!;
-      ctx.clearRect(0, 0, 160, 90); ctx.drawImage(image, 0, 0); image.close();
-      pixel = [...ctx.getImageData(80, 45, 1, 1).data];
-    };
-    try {
-      const result = await PM.Export.run({ format: 'still', w: 160, h: 90, alpha: true, mblur: false });
-      if (result.error) throw new Error(result.error);
-      return pixel;
-    } finally { PM.download = original; }
-  }, time);
-}
 
 for (const file of ['still.tiff', 'still.heic']) {
   test(`a ${file.split('.').pop()!.toUpperCase()} still converts on import and renders its colour`, async ({ session }) => {
@@ -53,7 +33,7 @@ for (const file of ['still.tiff', 'still.heic']) {
     }, file);
     expect(imported).toEqual({ kind: 'image', format: file.split('.').pop(), w: 160, h: 90 });
 
-    const pixel = await centrePixel(page, 0);
+    const pixel = (await exportStillPixels(session, 0, 160, 90, [[80, 45]]))[0]!;
     expect(pixel[0]).toBeGreaterThan(200);
     expect(pixel[1]).toBeLessThan(60);
     expect(pixel[2]).toBeLessThan(60);
@@ -83,10 +63,10 @@ test('a Matroska video converts on import and plays both of its colours', async 
   expect(imported).toMatchObject({ kind: 'video', w: 160, h: 90, playbackProxy: true, hasAudio: true });
   expect(imported.dur).toBeCloseTo(2, 1);
 
-  const red = await centrePixel(page, 0.5);
+  const red = (await exportStillPixels(session, 0.5, 160, 90, [[80, 45]]))[0]!;
   expect(red[0]).toBeGreaterThan(180);
   expect(red[1]).toBeLessThan(80);
-  const green = await centrePixel(page, 1.5);
+  const green = (await exportStillPixels(session, 1.5, 160, 90, [[80, 45]]))[0]!;
   expect(green[1]).toBeGreaterThan(180);
   expect(green[0]).toBeLessThan(80);
 

@@ -84,6 +84,12 @@ async function startElectron(
   await ensureBuilt();
   const launchEnv = {
     ...process.env,
+    // Offline UI regressions must not depend on the developer's subscription
+    // state (or race a real account check that replaces the composer).
+    ...(process.env.POWERMOVE_E2E_LIVE ? {} : {
+      CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
+      POWERMOVE_FAKE_CHATGPT_STATUS: 'connected',
+    }),
     ...env,
     POWERMOVE_USER_DATA: userData,
     POWERMOVE_DEVTOOLS: '0',
@@ -157,6 +163,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     async openEditor() {
       const { page } = session;
       await page.waitForFunction(() => Boolean((window as any).PM?.ProjectsScreen && (window as any).PM?.mkProject));
+      await page.evaluate(async () => { await (window as any).PM.Kernel.loader.builtinsReady; });
       await page.evaluate(() => {
         const PM = (window as any).PM;
         if (!PM.ProjectsScreen.isOpen) return;
@@ -165,10 +172,17 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       });
       await page.waitForFunction(() => !(window as any).PM.ProjectsScreen.isOpen);
       await page.waitForSelector('#body .dock', { state: 'visible' });
+      await page.waitForFunction(() => {
+        const PM = (window as any).PM;
+        return Boolean(PM.GL?.gl && PM.Kernel.services.get('viewer')?.stage?.isConnected);
+      });
     },
     async close() {
       if (closed) return;
       closed = true;
+      // A failed close-decision assertion must not leave its Cancel mock
+      // preventing cleanup of this disposable test process.
+      await active.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
       await active.app.close().catch(() => undefined);
       if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
@@ -206,14 +220,16 @@ export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: La
 export { expect };
 
 /** Exercise the native menu IPC without showing an AppKit popup in hidden tests. */
-export async function chooseNativeMenu(session: LaunchedApp, label: string, trigger: () => Promise<unknown>): Promise<void> {
+export async function chooseNativeMenu(session: LaunchedApp, label: string | readonly string[], trigger: () => Promise<unknown>): Promise<string[]> {
   await session.app.evaluate(({ Menu }, label) => {
-    const state = { original: Menu.prototype.popup, result: 'waiting' };
+    const state = { original: Menu.prototype.popup, result: 'waiting', labels: [] as string[], choices: Array.isArray(label) ? [...label] : [label] };
     (globalThis as any).__testNativeMenu = state;
     Menu.prototype.popup = function (options) {
-      Menu.prototype.popup = state.original;
-      const item = this.items.find(item => item.label === label && item.enabled);
-      state.result = item ? 'selected' : `Missing enabled native menu item: ${label}; got ${this.items.map(item => item.label).join(', ')}`;
+      const choice = state.choices.shift();
+      if (!state.choices.length) Menu.prototype.popup = state.original;
+      state.labels = this.items.map(item => item.label);
+      const item = this.items.find(item => item.label === choice && item.enabled);
+      state.result = item ? (state.choices.length ? 'waiting' : 'selected') : `Missing enabled native menu item: ${choice}; got ${this.items.map(item => item.label).join(', ')}`;
       item?.click(item, options?.window, {} as any);
       options?.callback?.();
     };
@@ -221,6 +237,7 @@ export async function chooseNativeMenu(session: LaunchedApp, label: string, trig
   try {
     await trigger();
     await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenu.result)).toBe('selected');
+    return await session.app.evaluate(() => (globalThis as any).__testNativeMenu.labels);
   } finally {
     await session.app.evaluate(({ Menu }) => {
       const state = (globalThis as any).__testNativeMenu;

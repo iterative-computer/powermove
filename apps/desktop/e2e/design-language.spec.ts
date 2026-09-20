@@ -31,10 +31,10 @@ test('flat controls remain consistent across home, editor, settings, library, an
     await page.getByRole('button', { name: 'Open settings', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     for (const tab of ['General', 'Project', 'Extensions']) {
-      await settings.getByRole('tab', { name: tab, exact: true }).click();
+      await settings.getByRole('button', { name: tab, exact: true }).click();
       await inspect(`settings-${tab.toLowerCase()}-${theme}`);
     }
-    await settings.getByRole('button', { name: 'Done', exact: true }).click();
+    await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
     await page.getByRole('button', { name: 'Open panel library', exact: true }).click();
     await expect(page.getByRole('dialog', { name: 'Panel library', exact: true })).toBeVisible();
     await inspect(`library-${theme}`);

@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
-import { flushSync, mount, unmount } from 'svelte';
+import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import AgentPanel from '../AgentPanel.svelte';
+import ThreadPicker from './ThreadPicker.svelte';
 import { install as installSpatial } from '../../legacy/assistant/spatial';
 import { registerAgentPanel } from '../register-agent';
 import {
@@ -292,6 +293,41 @@ describe('AgentPanel', () => {
     expect(picker.disabled).toBe(true);
     expect(newThread.disabled).toBe(true);
     expect(picker.title).toContain('Finish applying');
+  });
+
+  it('keeps a rapidly reopened thread picker open when its new animation ends', async () => {
+    PM.AgentUI.switchThread = vi.fn();
+    renderPanel(snapshot({ threadId: 'first', threads: [
+      { id: 'first', title: 'First' }, { id: 'second', title: 'Second' }
+    ] }));
+    const picker = target.querySelector<HTMLButtonElement>('[aria-label="Switch thread"]')!;
+    flushSync(() => picker.click());
+    await tick(); flushSync();
+    flushSync(() => target.querySelector<HTMLElement>('.thread-row')!.click());
+    expect(picker.getAttribute('aria-expanded')).toBe('false');
+    flushSync(() => picker.click());
+    await tick(); flushSync();
+    const popup = target.querySelector<HTMLElement>('.thread-popup')!;
+    flushSync(() => popup.dispatchEvent(new Event('animationend')));
+    expect(picker.getAttribute('aria-expanded')).toBe('true');
+    expect(target.querySelector('.thread-popup')).toBe(popup);
+    flushSync(() => picker.click());
+    flushSync(() => popup.dispatchEvent(new Event('animationend')));
+    expect(target.querySelector('.thread-popup')).toBeNull();
+  });
+
+  it('releases an open thread picker’s global dismissal listeners when its panel unmounts', async () => {
+    const add = vi.spyOn(document, 'addEventListener');
+    const remove = vi.spyOn(document, 'removeEventListener');
+    setAgentSnapshot(snapshot({ threadId: 'first', threads: [{ id: 'first', title: 'First' }] }));
+    instance = mount(ThreadPicker, { target, props: { PM } });
+    flushSync();
+    flushSync(() => target.querySelector<HTMLButtonElement>('[aria-label="Switch thread"]')!.click());
+    await tick(); flushSync();
+    const registration = () => add.mock.calls.find(([type, , capture]) => type === 'scroll' && capture === true);
+    await vi.waitFor(() => expect(registration()).toBeDefined());
+    await unmount(instance!); instance = undefined;
+    expect(remove).toHaveBeenCalledWith('scroll', registration()![1], true);
   });
 
   it('filters threads by the picker search field', () => {

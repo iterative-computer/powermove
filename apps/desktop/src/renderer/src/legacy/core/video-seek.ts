@@ -32,7 +32,11 @@ export function seekPreviewVideo(video: HTMLVideoElement, target: number, tolera
         if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
         if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
         try {
-          canvas.getContext('2d')!.drawImage(video, 0, 0);
+          const context = canvas.getContext('2d')!;
+          // Recycled frames must replace transparent pixels too. Source-over
+          // leaves earlier silhouettes behind and accumulates partial alpha.
+          context.globalCompositeOperation = 'copy';
+          context.drawImage(video, 0, 0);
           if (recycled) state!.frames.splice(state!.frames.indexOf(recycled), 1);
           state!.frames.unshift({ canvas, time: video.currentTime, version: ++state!.version });
         } catch { /* An unavailable decoder will retry on its next completion. */ }

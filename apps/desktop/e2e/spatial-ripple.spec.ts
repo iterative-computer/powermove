@@ -64,7 +64,13 @@ test('change mode preserves captured colors beneath the intentional dim wash', a
   }));
 
   const samplePoint = { x: 96, y: 180 };
-  const before = await capturePixel(page, samplePoint.x, samplePoint.y);
+  // Hidden-window capture can trail DOM animation frames; measure only after
+  // the native compositor has actually presented the known reference swatch.
+  let before: number[] = [];
+  await expect.poll(async () => {
+    before = await capturePixel(page, samplePoint.x, samplePoint.y);
+    return Math.max(...[245, 174, 40].map((channel, index) => Math.abs(before[index]! - channel)));
+  }).toBeLessThanOrEqual(2);
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.SpatialAssistant.activate(window.innerWidth / 2, window.innerHeight / 2, {

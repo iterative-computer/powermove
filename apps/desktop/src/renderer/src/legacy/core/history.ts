@@ -1,6 +1,7 @@
 /* Compact, byte-budgeted project history. */
 import type { PMRegistry } from '../registry';
 import { timelineService } from './services';
+import { HistoryRecords, unpackHistory } from '../../../../shared/history-memory';
 
 import { applyPatch, clonePatchValue, diffPatches as diff, type Patch, type PathPart } from '../../../../shared/patch';
 
@@ -29,12 +30,8 @@ function valueAt(root: any, path: PathPart[]): { exists: boolean; value?: any } 
     : { exists: false };
 }
 
-function sameValue(left: any, right: any): boolean {
-  return left.exists === right.exists
-    && (!left.exists || JSON.stringify(left.value) === JSON.stringify(right.value));
-}
-
 export function install(PM: PMRegistry): void {
+  const records = new HistoryRecords();
   let maxBytes = PM.Memory?.budget?.('history') || DEFAULT_MAX_BYTES;
   type Entry = {
     id: string;
@@ -82,6 +79,8 @@ export function install(PM: PMRegistry): void {
   };
   const push = (entry: Omit<Entry, 'id'> & { id?: string }) => {
     discardRedo();
+    if (entry.forward) records.sharePatches(entry.forward);
+    if (entry.backward) records.sharePatches(entry.backward);
     const next: Entry = { ...entry, id: entry.id || PM.uid('history') };
     stack.push(next);
     totalBytes += next.bytes;
@@ -106,13 +105,21 @@ export function install(PM: PMRegistry): void {
   const scopedPatches = (current: any) => {
     const forward: Patch[] = [];
     const backward: Patch[] = [];
+    // Compare and count the same serialization. Structural scopes can contain
+    // megabytes; serializing them again solely for the budget delays commits.
+    const encoder = new TextEncoder();
+    let bytes = 4; // Two JSON arrays: [] and [].
     for (const item of current.scopes.values()) {
       const after = valueAt(PM.proj, item.path);
-      if (sameValue(item.before, after)) continue;
-      forward.push({ path: item.path, ...after });
-      backward.push({ path: item.path, ...item.before });
+      const next = { path: item.path, ...after }, previous = { path: item.path, ...item.before };
+      const nextJson = JSON.stringify(next), previousJson = JSON.stringify(previous);
+      if (nextJson === previousJson) continue;
+      if (forward.length) bytes += 2; // One comma in each array.
+      bytes += encoder.encode(nextJson).byteLength + encoder.encode(previousJson).byteLength;
+      forward.push(next);
+      backward.push(previous);
     }
-    return { forward, backward };
+    return { forward, backward, bytes };
   };
 
   const pathKey = (path: PathPart[]) => JSON.stringify(path);
@@ -155,7 +162,7 @@ export function install(PM: PMRegistry): void {
       if (!pending) return false;
       const current = pending;
       pending = null;
-      let patches: { forward: Patch[]; backward: Patch[] };
+      let patches: { forward: Patch[]; backward: Patch[]; bytes?: number };
       if (current.scoped) patches = scopedPatches(current);
       else {
         const afterJson = snap();
@@ -163,7 +170,7 @@ export function install(PM: PMRegistry): void {
         patches = diff(JSON.parse(current.before), JSON.parse(afterJson));
       }
       if (!patches.forward.length) return false;
-      const bytes = encodedBytes(patches.forward) + encodedBytes(patches.backward);
+      const bytes = patches.bytes ?? encodedBytes(patches.forward) + encodedBytes(patches.backward);
       push({
         label: label || current.label,
         group: current.group,
@@ -290,6 +297,8 @@ export function install(PM: PMRegistry): void {
     },
     import(saved: any) {
       H.clear();
+      try { saved = unpackHistory(structuredClone(saved)); }
+      catch { return false; }
       const validPatches = (patches: any) => Array.isArray(patches) && patches.every(patch =>
         patch && Array.isArray(patch.path) && typeof patch.exists === 'boolean'
         && patch.path.every((part: any) => typeof part === 'string'
@@ -299,8 +308,9 @@ export function install(PM: PMRegistry): void {
           || !Number.isInteger(saved.index) || saved.index < -1 || saved.index >= saved.entries.length
           || !saved.entries.every((entry: any) => typeof entry?.label === 'string'
             && validPatches(entry.forward) && validPatches(entry.backward))) return false;
+      records.share(saved);
       for (const source of saved.entries) {
-        const { label, forward, backward } = clone(source);
+        const { label, forward, backward } = source;
         stack.push({ id: PM.uid('history'), label, project: true, forward, backward,
           bytes: encodedBytes(forward) + encodedBytes(backward),
           undo: () => restorePatches(backward), redo: () => restorePatches(forward) });
@@ -320,16 +330,20 @@ export function install(PM: PMRegistry): void {
       idx = -1;
       pending = null;
       depth = 0;
+      records.clear();
       totalBytes = 0;
       publish();
     },
     list: () => stack.map(entry => entry.label),
-    stats: () => ({ entries: stack.length, bytes: totalBytes, maxBytes, estimated: false }),
+    stats: () => ({ entries: stack.length, bytes: totalBytes, maxBytes, estimated: false, byteKind: 'serialized' }),
   };
   PM.hist = H;
   PM.Memory?.register?.('history', {
     bytes: () => totalBytes,
     entries: () => stack.length,
+    // Undo is durable document data, not a reconstructible render cache.
+    // Release the optional lookup index without discarding any saved actions.
+    pressure: () => records.clear(),
     trim: (target: number) => {
       maxBytes = Math.max(0, target);
       while (totalBytes > target && stack.length > 1) {

@@ -11,7 +11,7 @@ test('3D groups transform flat children together, including nested groups, with 
   PM.Edit.apply({type:'group_layers',targets:[a.id,b.id],name:'Cards'});const inner=PM.firstSel();
   PM.Edit.apply({type:'group_layers',targets:[inner.id],name:'3D rig'});PM.invalidate();
  });
- await page.getByRole('button',{name:'3D layer',exact:true}).click();
+ await page.getByRole('radiogroup',{name:'3D layer',exact:true}).getByRole('radio',{name:'On',exact:true}).click();
  const result=await page.evaluate(()=>{
   const PM=(window as any).PM,g=PM.firstSel();
   const pixels=(time:number)=>{const cv=PM.renderFrameTo(time,640,360);return Array.from(cv.getContext('2d').getImageData(0,0,640,360).data);};

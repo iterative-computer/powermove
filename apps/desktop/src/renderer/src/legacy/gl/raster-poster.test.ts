@@ -166,6 +166,7 @@ describe('raster media posters', () => {
     const result = await PM.assets.restoreProject(PM.proj);
     expect(result.restored).toHaveLength(2);
     expect(first.poster).toBeUndefined();
+    assetsEvent.mockClear();
 
     await vi.runAllTimersAsync();
 
@@ -177,4 +178,26 @@ describe('raster media posters', () => {
     expect(PM.assets.poster('second')).not.toBe('');
     PM.assets.clear();
   });
+});
+
+it('publishes ready media while another restore waits, and clears loading on failure', async () => {
+  const { PM } = posterRegistry();
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  PM.proj.assets = {
+    fast: { id: 'fast', name: 'fast.png', kind: 'image' },
+    slow: { id: 'slow', name: 'slow.png', kind: 'image' },
+  };
+  PM.MediaStore.get = async (meta: any) => {
+    if (meta.id === 'slow') { await pending; throw new Error('Read failed'); }
+    return imageFile(meta.name);
+  };
+  const restore = PM.assets.restoreProject(PM.proj);
+  expect([...PM.assets.loading]).toEqual(['fast', 'slow']);
+  await vi.waitFor(() => expect(PM.assets.get('fast')).toBeDefined());
+  expect([...PM.assets.loading]).toEqual(['slow']);
+  release();
+  expect((await restore).missing.map((m: any) => m.id)).toEqual(['slow']);
+  expect(PM.assets.loading.size).toBe(0);
+  PM.assets.clear();
 });

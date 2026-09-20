@@ -119,6 +119,21 @@ describe('export delivery', () => {
     expect(X.busy).toBe(false);
   });
 
+  it('streams the owned pixel buffer without copying a second complete frame', async () => {
+    const { X, frame } = setup();
+    const pixels = new Uint8ClampedArray(new ArrayBuffer(24), 4, 16);
+    pixels.set(Array.from({ length: 16 }, (_, i) => i * 15));
+    frame.getContext = () => ({ getImageData: () => ({ data: pixels }) });
+    const slice = vi.spyOn(Uint8Array.prototype, 'slice');
+    const write = vi.fn(async () => {});
+    (window as any).powermove = { render: {
+      start: async () => 'render', write, finish: async () => ({ path: '/tmp/render.mp4' }), cancel: vi.fn(),
+    } };
+    expect(await X.run({ ...options, format: 'mp4' })).toEqual({ cancelled: false });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(Array.from((write.mock.calls[0] as any)[1])).toEqual(Array.from(pixels));
+    expect(slice.mock.contexts.some(view => view instanceof Uint8Array && view.buffer === pixels.buffer && view.byteOffset === pixels.byteOffset)).toBe(true);
+  });
   it('cancels PNG export when destination selection is cancelled, without opening frame saves', async () => {
     const { X, toast, download } = setup();
     (window as any).showDirectoryPicker = vi.fn(async () => { throw new DOMException('Cancelled', 'AbortError'); });

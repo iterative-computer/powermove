@@ -1,4 +1,4 @@
-import { expect, test } from './helpers/app';
+import { chooseNativeMenu, expect, test } from './helpers/app';
 
 test('compact layer rows keep names centered and parenting in dedicated controls',async({session})=>{
   await session.openEditor();
@@ -22,8 +22,7 @@ test('compact layer rows keep names centered and parenting in dedicated controls
   await page.mouse.click(box.x+110,box.y+box.ruler+box.row/2+9);
   expect(await page.evaluate(()=>(window as any).PM.firstSel().name)).toBe('Info glyph');
   await expect(page.getByRole('menu')).toHaveCount(0);
-  await page.mouse.click(box.x+box.gut-12,box.y+box.ruler+box.row/2);
-  await page.getByRole('menuitem',{name:'Info circle',exact:true}).click();
+  await chooseNativeMenu(session, 'Info circle', () => page.mouse.click(box.x+box.gut-12,box.y+box.ruler+box.row/2));
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.L(PM.firstSel().parent).name;})).toBe('Info circle');
   await page.mouse.move(box.x+box.gut-30,box.y+box.ruler+box.row/2);await page.mouse.down();
   await page.mouse.move(box.x+110,box.y+box.ruler+box.row*2.5,{steps:8});await page.mouse.up();

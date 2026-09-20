@@ -1,0 +1,951 @@
+{
+  "implementation": "production history-memory.ts and FileStore",
+  "date": "2026-09-19",
+  "histories": [
+    {
+      "file": "History A",
+      "node": "v26.7.0",
+      "entries": 160,
+      "index": 158,
+      "roundTripExact": true,
+      "heapBytes": {
+        "baseline": 8910800,
+        "parsed": 248348912,
+        "interned": 16999464,
+        "parsedIncrement": 239438112,
+        "internedIncrement": 8088664
+      },
+      "reductionPercent": 96.6218143250311,
+      "diskExperiment": {
+        "originalJsonBytes": 131744984,
+        "dictionaryJsonBytes": 4060804,
+        "dictionaryGzipBytes": 200616,
+        "diskRoundTripExact": true
+      },
+      "parseAndGcMs": 1125.855042,
+      "experimentalInternMs": 574.7659590000001,
+      "counts": {
+        "edits": {
+          "references": 48800,
+          "unique": 321,
+          "repeatedJsonBytes": 67072066,
+          "uniqueJsonBytes": 386806
+        },
+        "layers": {
+          "references": 48269,
+          "unique": 1544,
+          "repeatedJsonBytes": 63421949,
+          "uniqueJsonBytes": 2105688
+        }
+      }
+    },
+    {
+      "file": "History B",
+      "node": "v26.7.0",
+      "entries": 146,
+      "index": 145,
+      "roundTripExact": true,
+      "heapBytes": {
+        "baseline": 8910776,
+        "parsed": 93358552,
+        "interned": 11476248,
+        "parsedIncrement": 84447776,
+        "internedIncrement": 2565472
+      },
+      "reductionPercent": 96.96206090732336,
+      "diskExperiment": {
+        "originalJsonBytes": 42694326,
+        "dictionaryJsonBytes": 1142507,
+        "dictionaryGzipBytes": 46017,
+        "diskRoundTripExact": true
+      },
+      "parseAndGcMs": 345.751708,
+      "experimentalInternMs": 172.54950000000002,
+      "counts": {
+        "edits": {
+          "references": 54704,
+          "unique": 304,
+          "repeatedJsonBytes": 40966866,
+          "uniqueJsonBytes": 262475
+        },
+        "layers": {
+          "references": 690,
+          "unique": 66,
+          "repeatedJsonBytes": 1105012,
+          "uniqueJsonBytes": 100312
+        }
+      }
+    },
+    {
+      "file": "History C",
+      "node": "v26.7.0",
+      "entries": 49,
+      "index": 48,
+      "roundTripExact": true,
+      "heapBytes": {
+        "baseline": 8910808,
+        "parsed": 86345480,
+        "interned": 11724680,
+        "parsedIncrement": 77434672,
+        "internedIncrement": 2813872
+      },
+      "reductionPercent": 96.36613428155285,
+      "diskExperiment": {
+        "originalJsonBytes": 40362112,
+        "dictionaryJsonBytes": 1344496,
+        "dictionaryGzipBytes": 73501,
+        "diskRoundTripExact": true
+      },
+      "parseAndGcMs": 496.7955,
+      "experimentalInternMs": 256.2584999999999,
+      "counts": {
+        "edits": {
+          "references": 19600,
+          "unique": 249,
+          "repeatedJsonBytes": 39439231,
+          "uniqueJsonBytes": 574618
+        },
+        "layers": {
+          "references": 63,
+          "unique": 27,
+          "repeatedJsonBytes": 376598,
+          "uniqueJsonBytes": 168992
+        }
+      }
+    }
+  ],
+  "store": {
+    "node": "v26.7.0",
+    "results": [
+      {
+        "mode": "legacy",
+        "heapIncrement": 459723016,
+        "bootstrapBytes": 268781899,
+        "loadMs": 1776.9879999999998
+      },
+      {
+        "mode": "production",
+        "heapIncrement": 72034376,
+        "bootstrapBytes": 91509,
+        "loadMs": 4964.599417
+      },
+      {
+        "mode": "production-reopen",
+        "heapIncrement": 72031848,
+        "bootstrapBytes": 91509,
+        "loadMs": 261.805209
+      }
+    ],
+    "reductionPercent": 84.3309180761139
+  },
+  "desktop": {
+    "baseline": {
+      "readyMs": 6013.513125,
+      "renderer": {
+        "usedSize": 340023500,
+        "totalSize": 344440832,
+        "embedderHeapUsedSize": 6314664,
+        "backingStorageSize": 3489582
+      },
+      "main": {
+        "heapUsed": 305924492,
+        "memory": {
+          "private": 1340611,
+          "shared": 176
+        }
+      },
+      "resources": {
+        "memory": {
+          "history": {
+            "bytes": 40359804,
+            "budget": 134217728,
+            "entries": 49
+          },
+          "audio": {
+            "bytes": 0,
+            "budget": 134217728,
+            "entries": 0
+          },
+          "raster": {
+            "bytes": 0,
+            "budget": 100663296,
+            "entries": 0
+          },
+          "framebuffers": {
+            "bytes": 13202944,
+            "budget": 268435456,
+            "entries": 4
+          },
+          "textures": {
+            "bytes": 0,
+            "budget": 134217728,
+            "entries": 0
+          }
+        },
+        "domNodes": 1461,
+        "home": false,
+        "layers": 16,
+        "history": 49
+      },
+      "footprints": [
+        {
+          "type": "Browser",
+          "footprint": "1.3G",
+          "peak": "1.9G"
+        },
+        {
+          "type": "GPU",
+          "footprint": "402.8M",
+          "peak": "495.3M"
+        },
+        {
+          "type": "Tab",
+          "footprint": "476.8M",
+          "peak": "1.2G"
+        }
+      ]
+    },
+    "production": [
+      {
+        "pass": 1,
+        "readyMs": 4347.2799589999995,
+        "renderer": {
+          "usedSize": 80256624,
+          "totalSize": 84721664,
+          "embedderHeapUsedSize": 6341840,
+          "backingStorageSize": 3497232
+        },
+        "main": {
+          "heapUsed": 71139896,
+          "memory": {
+            "private": 624306,
+            "shared": 208
+          }
+        },
+        "resources": {
+          "memory": {
+            "history": {
+              "bytes": 40359804,
+              "budget": 134217728,
+              "entries": 49
+            },
+            "audio": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "raster": {
+              "bytes": 0,
+              "budget": 100663296,
+              "entries": 0
+            },
+            "framebuffers": {
+              "bytes": 13202944,
+              "budget": 268435456,
+              "entries": 4
+            },
+            "textures": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            }
+          },
+          "domNodes": 1461,
+          "home": false,
+          "layers": 16,
+          "history": 49
+        },
+        "footprints": [
+          {
+            "type": "Browser",
+            "footprint": "610.1M",
+            "peak": "1.2G"
+          },
+          {
+            "type": "GPU",
+            "footprint": "397.8M",
+            "peak": "496.5M"
+          },
+          {
+            "type": "Tab",
+            "footprint": "229.6M",
+            "peak": "286.7M"
+          }
+        ]
+      },
+      {
+        "pass": 2,
+        "readyMs": 1287.653542,
+        "renderer": {
+          "usedSize": 79200164,
+          "totalSize": 81313792,
+          "embedderHeapUsedSize": 6333128,
+          "backingStorageSize": 3497232
+        },
+        "main": {
+          "heapUsed": 71142504,
+          "memory": {
+            "private": 195489,
+            "shared": 752
+          }
+        },
+        "resources": {
+          "memory": {
+            "history": {
+              "bytes": 40359804,
+              "budget": 134217728,
+              "entries": 49
+            },
+            "audio": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "raster": {
+              "bytes": 0,
+              "budget": 100663296,
+              "entries": 0
+            },
+            "framebuffers": {
+              "bytes": 13202944,
+              "budget": 268435456,
+              "entries": 4
+            },
+            "textures": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            }
+          },
+          "domNodes": 1461,
+          "home": false,
+          "layers": 16,
+          "history": 49
+        },
+        "footprints": [
+          {
+            "type": "Browser",
+            "footprint": "192.0M",
+            "peak": "304.4M"
+          },
+          {
+            "type": "GPU",
+            "footprint": "322.4M",
+            "peak": "493.1M"
+          },
+          {
+            "type": "Tab",
+            "footprint": "168.7M",
+            "peak": "291.4M"
+          }
+        ]
+      }
+    ],
+    "limitations": "Single samples, store-only copy without media; earlier baseline physical readings overlapped another profiler and do not support whole-app percentage claims."
+  },
+  "desktopSequential": {
+    "baseline": [
+      {
+        "pass": 1,
+        "readyMs": 6073.8165,
+        "renderer": {
+          "usedSize": 292188536,
+          "totalSize": 293847040,
+          "embedderHeapUsedSize": 6368704,
+          "backingStorageSize": 3487710
+        },
+        "main": {
+          "heapUsed": 258949192,
+          "memory": {
+            "private": 1389795,
+            "shared": 176
+          }
+        },
+        "resources": {
+          "memory": {
+            "history": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "audio": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "raster": {
+              "bytes": 103752,
+              "budget": 100663296,
+              "entries": 1
+            },
+            "framebuffers": {
+              "bytes": 8856576,
+              "budget": 268435456,
+              "entries": 2
+            },
+            "textures": {
+              "bytes": 103752,
+              "budget": 134217728,
+              "entries": 1
+            }
+          },
+          "domNodes": 1461,
+          "home": false,
+          "layers": 16,
+          "history": 0
+        },
+        "footprints": [
+          {
+            "type": "Browser",
+            "footprint": "1.3G",
+            "peak": "2.0G"
+          },
+          {
+            "type": "GPU",
+            "footprint": "394.8M",
+            "peak": "490.6M"
+          },
+          {
+            "type": "Tab",
+            "footprint": "388.8M",
+            "peak": "860.1M"
+          }
+        ]
+      },
+      {
+        "pass": 2,
+        "readyMs": 5716.042167000001,
+        "renderer": {
+          "usedSize": 292172088,
+          "totalSize": 293584896,
+          "embedderHeapUsedSize": 6445240,
+          "backingStorageSize": 3487720
+        },
+        "main": {
+          "heapUsed": 258939508,
+          "memory": {
+            "private": 1443363,
+            "shared": 176
+          }
+        },
+        "resources": {
+          "memory": {
+            "history": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "audio": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "raster": {
+              "bytes": 103752,
+              "budget": 100663296,
+              "entries": 1
+            },
+            "framebuffers": {
+              "bytes": 8856576,
+              "budget": 268435456,
+              "entries": 2
+            },
+            "textures": {
+              "bytes": 103752,
+              "budget": 134217728,
+              "entries": 1
+            }
+          },
+          "domNodes": 1461,
+          "home": false,
+          "layers": 16,
+          "history": 0
+        },
+        "footprints": [
+          {
+            "type": "Browser",
+            "footprint": "1.4G",
+            "peak": "2.0G"
+          },
+          {
+            "type": "GPU",
+            "footprint": "301.6M",
+            "peak": "481.8M"
+          },
+          {
+            "type": "Tab",
+            "footprint": "437.7M",
+            "peak": "886.0M"
+          }
+        ]
+      }
+    ],
+    "production": [
+      {
+        "pass": 1,
+        "readyMs": 1635.8448749999998,
+        "renderer": {
+          "usedSize": 77255332,
+          "totalSize": 78692352,
+          "embedderHeapUsedSize": 6423328,
+          "backingStorageSize": 3501416
+        },
+        "main": {
+          "heapUsed": 69702180,
+          "memory": {
+            "private": 485298,
+            "shared": 352
+          }
+        },
+        "resources": {
+          "memory": {
+            "history": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "audio": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "raster": {
+              "bytes": 103752,
+              "budget": 100663296,
+              "entries": 1
+            },
+            "framebuffers": {
+              "bytes": 8856576,
+              "budget": 268435456,
+              "entries": 2
+            },
+            "textures": {
+              "bytes": 103752,
+              "budget": 134217728,
+              "entries": 1
+            }
+          },
+          "domNodes": 1461,
+          "home": false,
+          "layers": 16,
+          "history": 0
+        },
+        "footprints": [
+          {
+            "type": "Browser",
+            "footprint": "474.4M",
+            "peak": "1.1G"
+          },
+          {
+            "type": "GPU",
+            "footprint": "329.3M",
+            "peak": "495.5M"
+          },
+          {
+            "type": "Tab",
+            "footprint": "170.8M",
+            "peak": "262.2M"
+          }
+        ]
+      },
+      {
+        "pass": 2,
+        "readyMs": 690.6404169999996,
+        "renderer": {
+          "usedSize": 77313072,
+          "totalSize": 78430208,
+          "embedderHeapUsedSize": 6449392,
+          "backingStorageSize": 3501416
+        },
+        "main": {
+          "heapUsed": 69693280,
+          "memory": {
+            "private": 175185,
+            "shared": 752
+          }
+        },
+        "resources": {
+          "memory": {
+            "history": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "audio": {
+              "bytes": 0,
+              "budget": 134217728,
+              "entries": 0
+            },
+            "raster": {
+              "bytes": 103752,
+              "budget": 100663296,
+              "entries": 1
+            },
+            "framebuffers": {
+              "bytes": 8856576,
+              "budget": 268435456,
+              "entries": 2
+            },
+            "textures": {
+              "bytes": 103752,
+              "budget": 134217728,
+              "entries": 1
+            }
+          },
+          "domNodes": 1461,
+          "home": false,
+          "layers": 16,
+          "history": 0
+        },
+        "footprints": [
+          {
+            "type": "Browser",
+            "footprint": "171.9M",
+            "peak": "274.2M"
+          },
+          {
+            "type": "GPU",
+            "footprint": "327.7M",
+            "peak": "506.5M"
+          },
+          {
+            "type": "Tab",
+            "footprint": "169.8M",
+            "peak": "256.2M"
+          }
+        ]
+      }
+    ],
+    "conditions": "Sequential launches from the same frozen, disposable store copy; two passes per build. The source store had changed since the earlier profile: both builds now restore 16 layers and zero active history entries. Store-only fixture, no active media. Installed app untouched."
+  },
+  "historyEditLatency": {
+    "samples": {
+      "baseline": [
+        {
+          "layers": 884,
+          "results": {
+            "scoped-property": {
+              "samples": [
+                0.03333399999999642,
+                0.07954100000000608,
+                0.038375000000002046,
+                0.02337500000001569,
+                0.017916999999982863,
+                0.02908300000001418,
+                0.013832999999976892,
+                0.006709000000000742,
+                0.005374999999986585,
+                0.004000000000019099,
+                0.0037079999999889424,
+                0.004833000000019183
+              ],
+              "medianMs": 0.015874999999979877,
+              "maxMs": 0.07954100000000608
+            },
+            "structural-layers": {
+              "samples": [
+                21.234916,
+                19.19295900000003,
+                21.931083,
+                18.54487499999999,
+                21.393749999999955,
+                18.866540999999984,
+                20.329917000000023,
+                17.926499999999976,
+                20.624750000000006,
+                18.224125000000015,
+                21.19820900000002,
+                18.497874999999965
+              ],
+              "medianMs": 19.761438000000027,
+              "maxMs": 21.931083
+            }
+          }
+        },
+        {
+          "layers": 884,
+          "results": {
+            "scoped-property": {
+              "samples": [
+                0.020417000000001906,
+                0.015584000000004039,
+                0.01274999999999693,
+                0.010166000000005226,
+                0.020790999999995563,
+                0.014999999999993463,
+                0.008209000000000799,
+                0.017333999999998184,
+                0.01012500000000216,
+                0.004542000000000712,
+                0.008874999999996191,
+                0.015332999999998265
+              ],
+              "medianMs": 0.013874999999995197,
+              "maxMs": 0.020790999999995563
+            },
+            "structural-layers": {
+              "samples": [
+                20.690084000000013,
+                18.926791999999978,
+                20.97870800000001,
+                18.837249999999983,
+                20.600750000000005,
+                18.04804200000001,
+                20.330667000000005,
+                17.955457999999965,
+                20.833957999999996,
+                17.983666000000028,
+                20.670749999999998,
+                18.01108400000004
+              ],
+              "medianMs": 19.62872949999999,
+              "maxMs": 20.97870800000001
+            }
+          }
+        },
+        {
+          "layers": 884,
+          "results": {
+            "scoped-property": {
+              "samples": [
+                0.017749999999992383,
+                0.014583999999999264,
+                0.01300000000000523,
+                0.010417000000003895,
+                0.013499999999993406,
+                0.015041999999994005,
+                0.009749999999996817,
+                0.020458000000004972,
+                0.007874999999998522,
+                0.004874999999998408,
+                0.004458999999997104,
+                0.00420799999999133
+              ],
+              "medianMs": 0.011708500000004562,
+              "maxMs": 0.020458000000004972
+            },
+            "structural-layers": {
+              "samples": [
+                26.12258299999999,
+                20.811667,
+                42.450541999999984,
+                32.33237500000001,
+                29.806457999999964,
+                23.472125000000005,
+                24.71362499999998,
+                20.92966700000005,
+                28.728916999999967,
+                33.073667,
+                49.40387500000003,
+                27.353582999999958
+              ],
+              "medianMs": 28.041249999999962,
+              "maxMs": 49.40387500000003
+            }
+          }
+        }
+      ],
+      "production": [
+        {
+          "layers": 884,
+          "results": {
+            "scoped-property": {
+              "samples": [
+                0.02229099999999562,
+                0.019165999999998462,
+                0.014333000000000595,
+                0.013041999999998666,
+                0.014749999999999375,
+                0.018124999999997726,
+                0.009749999999996817,
+                0.006624999999999659,
+                0.0055419999999983816,
+                0.004833999999995342,
+                0.005417000000001337,
+                0.00462500000000432
+              ],
+              "medianMs": 0.011395999999997741,
+              "maxMs": 0.02229099999999562
+            },
+            "structural-layers": {
+              "samples": [
+                19.841624999999993,
+                20.834374999999994,
+                21.962458999999996,
+                21.85137499999999,
+                20.802333999999973,
+                20.697834,
+                21.72999999999996,
+                20.118791999999985,
+                20.30487499999998,
+                19.737459,
+                19.59470799999997,
+                19.846208000000047
+              ],
+              "medianMs": 20.50135449999999,
+              "maxMs": 21.962458999999996
+            }
+          }
+        },
+        {
+          "layers": 884,
+          "results": {
+            "scoped-property": {
+              "samples": [
+                0.0214160000000021,
+                0.03520799999999724,
+                0.016500000000000625,
+                0.009791999999997358,
+                0.01566700000000054,
+                0.01491699999999696,
+                0.007874999999998522,
+                0.006957999999997355,
+                0.005667000000002531,
+                0.004958000000002016,
+                0.004584000000001254,
+                0.003999999999997783
+              ],
+              "medianMs": 0.00883349999999794,
+              "maxMs": 0.03520799999999724
+            },
+            "structural-layers": {
+              "samples": [
+                20.19987499999999,
+                21.616500000000002,
+                20.731791999999984,
+                21.953249999999997,
+                20.365584000000013,
+                20.746083999999996,
+                22.13708300000002,
+                20.545041999999967,
+                20.449666999999977,
+                20.495834000000002,
+                20.43979200000001,
+                20.22195800000003
+              ],
+              "medianMs": 20.520437999999984,
+              "maxMs": 22.13708300000002
+            }
+          }
+        },
+        {
+          "layers": 884,
+          "results": {
+            "scoped-property": {
+              "samples": [
+                0.01958299999999724,
+                0.017250000000004206,
+                0.012040999999996416,
+                0.014082999999999402,
+                0.015959000000009382,
+                0.014625000000009436,
+                0.014250000000004093,
+                0.006083000000003835,
+                0.007457999999999743,
+                0.0038750000000078444,
+                0.0037080000000031532,
+                0.0037080000000031532
+              ],
+              "medianMs": 0.013061999999997909,
+              "maxMs": 0.01958299999999724
+            },
+            "structural-layers": {
+              "samples": [
+                19.874415999999997,
+                21.147582999999997,
+                20.636791999999986,
+                22.209791999999993,
+                19.927915999999982,
+                21.00712500000003,
+                22.01041699999996,
+                19.79641700000002,
+                19.960041999999987,
+                20.430375000000026,
+                19.92345899999998,
+                20.532916999999998
+              ],
+              "medianMs": 20.481646000000012,
+              "maxMs": 22.209791999999993
+            }
+          }
+        }
+      ]
+    },
+    "conditions": "Three alternating baseline/production Node processes, copied 884-layer project, 4 warmup plus 12 measured edits per case; all undo/redo states verified. Desktop system load is not controlled. Units are milliseconds."
+  },
+  "validation": {
+    "sourceFingerprintSha256": "9f3467f8b431cc02190fced85e9a04a92e7a1af9e85b0765f8ec9f4fa1a68e07",
+    "sourceFiles": 744,
+    "sourceMatchesWorkspace": true,
+    "unit": {
+      "filesPassed": 287,
+      "testsPassed": 2385,
+      "skipped": 0
+    },
+    "standaloneHistory": {
+      "passed": 6
+    },
+    "functionalE2E": {
+      "totalStandardCases": 337,
+      "fullRun": {
+        "total": 349,
+        "passed": 324,
+        "failed": 13,
+        "skipped": 12
+      },
+      "failedCasesClearedByFocusedReruns": 13,
+      "intermittentCaseRepetitions": {
+        "passed": 15,
+        "total": 15
+      }
+    },
+    "largeProjectPerformance": {
+      "layers": 884,
+      "baselineFailures": 5,
+      "integratedFailures": 5,
+      "thresholdsUnchanged": true,
+      "scrub": {
+        "baselineP95Ms": 22,
+        "baselineMaxMs": 359.8,
+        "integratedP95Ms": 13.2,
+        "integratedMaxMs": 147.5
+      },
+      "wheelRenders": {
+        "baseline": 61,
+        "integrated": 61
+      },
+      "regionRenders": {
+        "baseline": [
+          181,
+          181,
+          181
+        ],
+        "integrated": [
+          182,
+          181,
+          181
+        ]
+      }
+    },
+    "unavailableOptionalWorkflows": [
+      "live Codex execution",
+      "private 4K video source",
+      "saved project export fixture"
+    ],
+    "limitations": [
+      "One WebM export failed decoding once in the full run, then passed all six subsequent runs; original cause not established.",
+      "Five large-project performance ceilings fail in both builds.",
+      "Migration has a one-time CPU/I/O cost; small structural-edit CPU overhead remains measurable.",
+      "Session-only callback undo is not made durable by this change."
+    ],
+    "productionBuild": "passed",
+    "typecheck": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "boundaries": {
+      "extensions": 10,
+      "passed": true
+    }
+  }
+}

@@ -820,7 +820,7 @@ function scheduleHint(x: any, y: any) {
   });
 }
 
-function activate(x: any, y: any) {
+function activate(x: any, y: any, options?: { capture?: Promise<ImageBitmap | null> }) {
   if (S.active) return;
   // Load the current project's thread before creating a selection. The first
   // composer publish must not reset this new overlay's region or arming phase.
@@ -840,7 +840,10 @@ function activate(x: any, y: any) {
      WGSL pass genuinely displaces instead of merely painting over the UI. */
   const cachedScene: any = S.sceneCache;
   if (cachedScene) { S.sceneCache = null; S.sceneCacheAt = 0; }
-  const sceneRequest: any = cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request();
+  // A caller that captured a particular interaction owns the choice of frame.
+  // Do not replace it with the earlier idle snapshot (or retain that bitmap).
+  if (options?.capture) cachedScene?.close?.();
+  const sceneRequest: any = options?.capture ?? (cachedScene ? Promise.resolve(cachedScene) : PM.WindowCapture.request());
   sceneRequest.then((sceneBitmap: any) => {
     if (!S.active) { sceneBitmap?.close?.(); return; }
     /* Preserve clean pre-overlay pixels for the eventual selected-region

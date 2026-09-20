@@ -13,6 +13,7 @@ import {
   type StoreSnapshot
 } from '../shared/ipc';
 import { parseStoreKey, storeFileName } from '../shared/store-keys';
+import { HistoryRecords, isHistoryDictionary, packStoredHistory, unpackStoredHistory } from '../shared/history-memory';
 
 const WRITE_DELAY_MS = 150;
 const QUIT_FLUSH_CEILING_MS = 5_000;
@@ -28,7 +29,10 @@ export type StoreFileSystem = Pick<
 export interface Store {
   load(): Promise<void>;
   snapshot(): StoreSnapshot;
+  get?(key: string): unknown;
   getSerialized?(key: string): string | null;
+  getEncodedSerialized?(key: string): string | null;
+  bootstrapSerialized?(): Record<string, string>;
   snapshotSerialized?(): Record<string, string>;
   set(key: string, value: unknown): void;
   setSerialized?(key: string, serialized: string): void;
@@ -50,6 +54,7 @@ type PendingOperation =
   | { kind: 'delete' };
 
 class FileStore implements Store {
+  private readonly historyRecords = new HistoryRecords();
   private readonly values = new Map<string, unknown>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private readonly pending = new Map<string, PendingOperation>();
@@ -71,6 +76,7 @@ class FileStore implements Store {
     const names = await this.fs.readdir(this.directory);
     const loadedProjectIds = new Set<string>();
     this.values.clear();
+    this.historyRecords.clear();
 
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
@@ -92,7 +98,15 @@ class FileStore implements Store {
 
       try {
         const value: unknown = JSON.parse(serialized);
-        this.values.set(candidateKey, value);
+        const packed = packStoredHistory(candidateKey, value, this.historyRecords);
+        this.values.set(candidateKey, packed);
+        const before = candidateKey.startsWith('projectState.') && isRecord(value) ? value.history : value;
+        const after = candidateKey.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
+        // Finish lossless migration through the normal atomic writer. Otherwise
+        // inactive legacy histories re-create the same huge parse peak each boot.
+        if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
+          this.schedule(candidateKey, { kind: 'set', serialized: JSON.stringify(packed) });
+        }
         if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') {
           loadedProjectIds.add(parsedKey.id);
         }
@@ -105,19 +119,41 @@ class FileStore implements Store {
   }
 
   snapshot(): StoreSnapshot {
-    return structuredClone(Object.fromEntries(this.values));
+    const owned = structuredClone(Object.fromEntries(this.values));
+    return Object.fromEntries(Object.entries(owned).map(([key, value]) => [key, unpackStoredHistory(key, value)]));
+  }
+
+  get(key: string): unknown {
+    if (!parseStoreKey(key)) return undefined;
+    return unpackStoredHistory(key, structuredClone(this.values.get(key)));
   }
 
   getSerialized(key: string): string | null {
     if (!parseStoreKey(key)) return null;
-    const value = this.values.get(key);
+    const value = unpackStoredHistory(key, this.values.get(key));
     return value === undefined ? null : JSON.stringify(value);
   }
 
   snapshotSerialized(): Record<string, string> {
     // Strings are immutable: serializing the owned values needs no clone of
     // every project and undo stack before crossing the bootstrap IPC bridge.
-    return Object.fromEntries([...this.values].map(([key, value]) => [key, JSON.stringify(value)]));
+    return Object.fromEntries([...this.values].map(([key, value]) => [key, JSON.stringify(unpackStoredHistory(key, value))]));
+  }
+
+  getEncodedSerialized(key: string): string | null {
+    if (!parseStoreKey(key)) return null;
+    const value = this.values.get(key);
+    return value === undefined ? null : JSON.stringify(value);
+  }
+
+  bootstrapSerialized(): Record<string, string> {
+    const lazy: string[] = [], snapshot: Record<string, string> = {};
+    for (const [key, value] of this.values) {
+      if (/^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./.test(key)) lazy.push(key);
+      else snapshot[key] = JSON.stringify(value);
+    }
+    snapshot.__powermoveLazyKeys = JSON.stringify(lazy);
+    return snapshot;
   }
 
   set(key: string, value: unknown): void {
@@ -132,7 +168,7 @@ class FileStore implements Store {
     let cloned: unknown;
     let serialized: string | undefined;
     try {
-      cloned = structuredClone(value);
+      cloned = packStoredHistory(key, structuredClone(value), this.historyRecords);
       serialized = JSON.stringify(cloned);
     } catch (error) {
       throw new IpcValidationError(IPC.storeSet, `value is not JSON-serialisable: ${errorText(error)}`);
@@ -170,8 +206,9 @@ class FileStore implements Store {
     try { value = JSON.parse(serialized); }
     catch { throw new IpcValidationError(IPC.storeSetSerialized, 'invalid JSON'); }
     if (key.startsWith('projectState.')) { this.set(key, value); return; }
-    this.values.set(key, value);
-    this.schedule(key, { kind: 'set', serialized });
+    const packed = packStoredHistory(key, value, this.historyRecords);
+    this.values.set(key, packed);
+    this.schedule(key, { kind: 'set', serialized: packed === value ? serialized : JSON.stringify(packed) });
   }
 
   delete(key: string): void {
@@ -398,6 +435,19 @@ export function registerStoreIpc(
     event.returnValue = ctx.isTrustedSender(event)
       ? { ...(store.snapshotSerialized?.() ?? Object.fromEntries(Object.entries(store.snapshot()).map(([key, value]) => [key, JSON.stringify(value)]))), __powermoveAsyncStore: 'true' }
       : {};
+  });
+
+  ipcMain.on(IPC.storeBootstrapSync, (event) => {
+    event.returnValue = ctx.isTrustedSender(event)
+      ? { ...(store.bootstrapSerialized?.() ?? store.snapshotSerialized?.() ?? {}), __powermoveAsyncStore: 'true' }
+      : {};
+  });
+
+  ipcMain.on(IPC.storeGetEncodedSync, (event, payload: unknown) => {
+    if (!ctx.isTrustedSender(event) || !isRecord(payload) || typeof payload.key !== 'string') {
+      event.returnValue = null; return;
+    }
+    event.returnValue = store.getEncodedSerialized?.(payload.key) ?? store.getSerialized?.(payload.key) ?? null;
   });
 
   ipcMain.on(IPC.storeSnapshotSync, (event) => {

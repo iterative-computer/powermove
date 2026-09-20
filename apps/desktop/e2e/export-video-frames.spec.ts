@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { expect, test, repoRoot } from './helpers/app';
 
-test('exports each decoded video frame even when the preview is at another time', async ({ session }) => {
+test('exports each decoded video frame even when the preview is at another time', async ({ session }, info) => {
   await session.openEditor();
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-export-frames-'));
   const ffmpeg = path.join(repoRoot, 'node_modules/ffmpeg-static/ffmpeg');
@@ -35,6 +35,7 @@ test('exports each decoded video frame even when the preview is at another time'
       return result;
     });
     expect(result).toEqual({ cancelled: false });
+    await info.attach('encoded-webm', { path: output, contentType: 'video/webm' });
     const decoded = execFileSync(ffmpeg, ['-v', 'error', '-i', output, '-vf', 'scale=1:1', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']);
     const levels = Array.from({ length: decoded.length / 3 }, (_, i) => decoded[i * 3]);
     expect(levels.length).toBe(20);

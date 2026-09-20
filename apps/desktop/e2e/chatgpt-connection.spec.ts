@@ -22,6 +22,7 @@ test('Settings reads a ChatGPT subscription through the real main-process bridge
     const generalTab = settings.getByRole('button', { name: 'General', exact: true });
     const accountsTab = settings.getByRole('button', { name: 'Accounts', exact: true });
     const extensionsTab = settings.getByRole('button', { name: 'Extensions', exact: true });
+    await generalTab.click();
     await expect(generalTab).toHaveAttribute('aria-current', 'location');
     await expect(settings.getByRole('region', { name: 'Accounts', exact: true })).toBeVisible();
     await expect(settings.getByRole('region', { name: 'Extensions', exact: true })).toBeVisible();
@@ -139,7 +140,7 @@ test('Claude subscription status and structured runs cross the real hidden app b
     const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
     await expect(settings).toContainText('Claude');
     await expect(settings).toContainText('claude@example.com · Max plan');
-    await settings.getByRole('button', { name: 'Done', exact: true }).click();
+    await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
 
     const provider = page.locator('.agent-modelbar select[aria-label="Provider"]');
     await provider.selectOption('claude');

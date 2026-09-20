@@ -113,3 +113,32 @@ it('provides caret positions on both sides of a file-only draft without adding s
   expect(editor.requestText()).toBe('before [Attachment: reference.png] after');
   expect(element.querySelector('br')).toBeNull();
 });
+
+it('publishes custom undo and redo availability for native editing menus', () => {
+  const { editor, element } = setup();
+  expect(element.dataset.promptCanUndo).toBe('false');
+  expect(element.dataset.promptCanRedo).toBe('false');
+  editor.setText('changed');
+  expect(element.dataset.promptCanUndo).toBe('true');
+  editor.beforeinput(new InputEvent('beforeinput', { inputType: 'historyUndo', cancelable: true }));
+  expect(editor.read().text).toBe('hello world');
+  expect(element.dataset.promptCanUndo).toBe('false');
+  expect(element.dataset.promptCanRedo).toBe('true');
+  editor.beforeinput(new InputEvent('beforeinput', { inputType: 'historyRedo', cancelable: true }));
+  expect(editor.read().text).toBe('changed');
+  expect(element.dataset.promptCanRedo).toBe('false');
+  editor.sync('new thread', [], true);
+  expect(element.dataset.promptCanUndo).toBe('false');
+});
+
+it('removes invisible caret stops once typing supplies real text beside a token', () => {
+  const { editor, element } = setup('hello ');
+  const token = element.querySelector('[data-attachment-id]')!;
+  caretAfter(token);
+  editor.pasteText(' suffix', true);
+  expect(editor.read().text).toBe('hello  suffix');
+  expect(token.nextSibling!.textContent).toBe(' suffix');
+  const selection = window.getSelection()!;
+  expect(selection.anchorNode).toBe(token.nextSibling);
+  expect(selection.anchorOffset).toBe(' suffix'.length);
+});

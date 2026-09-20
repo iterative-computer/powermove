@@ -13,7 +13,7 @@ test.describe('@groups timeline selection and strip editing', () => {
       project.layers = [first, second];
       PM.replaceProject(project);
       const group = PM.groupLayers([first.id, second.id], 'Titles');
-      PM.UIState.setLayerCollapsed(group, true);
+      PM.UIState.setGroupCollapsed(group, true);
       PM.selectLayers(first.id);
       return { group: group.id, first: first.id, second: second.id };
     });
@@ -21,7 +21,7 @@ test.describe('@groups timeline selection and strip editing', () => {
     await page.waitForFunction(({ group, first, second }) => {
       const PM = (window as any).PM;
       const timeline = PM.Kernel.services.get('timeline');
-      return PM.UIState.getLayerCollapsed(PM.L(group)) === false
+      return PM.UIState.getGroupCollapsed(PM.L(group)) === false
         && timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id).join(',') === `${group},${first},${second}`;
     }, ids);
 
@@ -34,19 +34,25 @@ test.describe('@groups timeline selection and strip editing', () => {
       })).toEqual([ids.group, ids.first, ids.second]);
     }
 
-    const twirl = await page.evaluate(() => {
-      const PM = (window as any).PM;
-      const timeline = PM.Kernel.services.get('timeline');
-      const rect = timeline.cv.getBoundingClientRect();
-      return { x: rect.left + 64, y: rect.top + timeline.ruler + timeline.row / 2 - timeline.scrollY };
-    });
-    await page.mouse.click(twirl.x, twirl.y);
+    const clickDisclosure = async () => {
+      // Row state can update before the next canvas/layout frame clamps scroll.
+      // Click the presented disclosure at its current position each time.
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      const twirl = await page.evaluate(() => {
+        const PM = (window as any).PM;
+        const timeline = PM.Kernel.services.get('timeline');
+        const rect = timeline.cv.getBoundingClientRect();
+        return { x: rect.left + 64, y: rect.top + timeline.ruler + timeline.row / 2 - timeline.scrollY };
+      });
+      await page.mouse.click(twirl.x, twirl.y);
+    };
+    await clickDisclosure();
     await expect.poll(() => page.evaluate(() => {
       const PM = (window as any).PM;
       const timeline = PM.Kernel.services.get('timeline');
       return timeline.rows.filter((row: any) => row.kind === 'layer').map((row: any) => row.L.id);
     })).toEqual([ids.group]);
-    await page.mouse.click(twirl.x, twirl.y);
+    await clickDisclosure();
     await page.waitForFunction(({ group, first, second }) => {
       const PM = (window as any).PM;
       const timeline = PM.Kernel.services.get('timeline');

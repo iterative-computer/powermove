@@ -2,6 +2,7 @@ import { test, expect } from './helpers/app';
 
 test('agent image attachments open a fitted preview and Escape returns focus', async ({ session }, testInfo) => {
   await session.openEditor();
+  await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).waitFor();
   await page.evaluate(() => {
@@ -15,12 +16,19 @@ test('agent image attachments open a fitted preview and Escape returns focus', a
     ctx.fillStyle = '#ffffff';
     ctx.font = '80px sans-serif';
     ctx.fillText('Attachment preview', 120, 470);
-    Object.assign(PM.AgentUI.state, {
-      phase: 'idle', legacyPhase: 'idle', run: null, panelRun: null,
-      conversation: [{ role: 'user', text: 'Use this reference', attachments: [
-        { id: 'preview-reference', name: 'reference.png', type: 'image/png', dataUrl: canvas.toDataURL() }
-      ] }]
+    // Load a real saved thread so delayed account/status updates cannot replace
+    // a conversation injected only into the rendered view state.
+    const project = PM.mkProject({ name: 'Attachment preview' });
+    PM.store.set(`agentThreads.${project.id}`, {
+      version: 1, activeId: 'preview-thread', threads: [{
+        id: 'preview-thread', title: 'Use this reference', updatedAt: Date.now(),
+        composerDraft: '', attachments: [], scope: 'workspace',
+        conversation: [{ role: 'user', text: 'Use this reference', attachments: [
+          { id: 'preview-reference', name: 'reference.png', type: 'image/png', dataUrl: canvas.toDataURL() }
+        ] }]
+      }]
     });
+    window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
   });
   const trigger = page.getByRole('button', { name: 'View reference.png', exact: true });
   await trigger.click();

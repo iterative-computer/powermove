@@ -27,7 +27,7 @@ test('connection setup owns the empty panel and stays usable when resized', asyn
         (el.closest('.dock') as HTMLElement).style.flex = `0 0 ${width}px`;
       }, width);
       for (const provider of ['chatgpt', 'compatible']) {
-        await gate.getByRole('button', { name: provider === 'chatgpt' ? 'ChatGPT' : 'API / local', exact: true }).click();
+        await gate.getByRole('button', { name: provider === 'chatgpt' ? 'Codex' : 'API / local', exact: true }).click();
         await expect(gate.getByRole('button', { name: provider === 'chatgpt' ? 'Connect ChatGPT' : 'Open settings', exact: true })).toBeInViewport();
         const overflow = await gate.evaluate(root => [root, ...root.querySelectorAll('*')]
           .filter(el => el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1)

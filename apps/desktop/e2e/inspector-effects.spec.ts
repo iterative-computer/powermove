@@ -157,26 +157,31 @@ test('timeline controls occupy the ruler gutter without legacy navigation button
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('panel context menus stay wholly above or below the cursor', async ({ session }) => {
+test('panel context menus reach the native menu at the pointer position', async ({ session }) => {
   const { page } = session;
-  const assertPlacement = async (trigger: ReturnType<typeof page.locator>) => {
-    const box = await trigger.boundingBox();
-    if (!box) throw new Error('context-menu trigger is not visible');
-    const cursor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-    await page.mouse.click(cursor.x, cursor.y, { button: 'right' });
-    const menu = page.locator('.drop[role="menu"]');
-    await expect(menu).toBeVisible();
-    const placement = await menu.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return { top: rect.top, bottom: rect.bottom, side: element.getAttribute('data-side') };
-    });
-    expect(['above', 'below']).toContain(placement.side);
-    if (placement.side === 'below') expect(placement.top).toBeGreaterThan(cursor.y);
-    else expect(placement.bottom).toBeLessThan(cursor.y);
-    await page.keyboard.press('Escape');
-  };
-
-  await assertPlacement(page.locator('#panel-assets > header'));
-  await assertPlacement(page.locator('#panel-timeline .panel-move-handle'));
+  await session.app.evaluate(({ Menu }) => {
+    (globalThis as any).__panelMenus = [];
+    (globalThis as any).__panelMenuPopup = Menu.prototype.popup;
+    Menu.prototype.popup = function (options) {
+      (globalThis as any).__panelMenus.push({ x: options?.x, y: options?.y, items: this.items.length });
+      options?.callback?.();
+    };
+  });
+  try {
+    for (const [index, selector] of ['#panel-assets > header', '#panel-timeline .panel-move-handle'].entries()) {
+      const box = await page.locator(selector).boundingBox();
+      if (!box) throw new Error('context-menu trigger is not visible');
+      const cursor = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      await page.mouse.click(cursor.x, cursor.y, { button: 'right' });
+      await expect.poll(() => session.app.evaluate(() => (globalThis as any).__panelMenus.length)).toBe(index + 1);
+      const request = await session.app.evaluate((_, i) => (globalThis as any).__panelMenus[i], index);
+      expect(request.items).toBeGreaterThan(0);
+      expect(Math.abs(request.x - cursor.x)).toBeLessThanOrEqual(1);
+      expect(Math.abs(request.y - cursor.y)).toBeLessThanOrEqual(1);
+      await expect(page.locator('.drop[role="menu"]')).toHaveCount(0);
+    }
+  } finally {
+    await session.app.evaluate(({ Menu }) => { Menu.prototype.popup = (globalThis as any).__panelMenuPopup; });
+  }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

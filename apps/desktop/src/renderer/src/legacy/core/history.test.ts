@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createServicesRegistry } from '../../kernel/services';
 import type { PMRegistry } from '../registry';
 import { install } from './history';
+import { install as installMemory } from './memory';
 
 function historyRegistry(): PMRegistry {
   let nextId = 0;
@@ -23,6 +24,23 @@ function historyRegistry(): PMRegistry {
 }
 
 describe('legacy history install', () => {
+  it('retains the complete undo and redo chain under memory pressure', () => {
+    const previous = (globalThis as any).window;
+    (globalThis as any).window = { addEventListener: vi.fn() };
+    try {
+      const PM = historyRegistry();
+      installMemory(PM);
+      PM.Memory.setBudget('history', 1024 * 1024);
+      install(PM);
+      for (let i = 0; i < 4; i++) PM.hist.do(`Edit ${i}`, () => { PM.proj.text = String(i).repeat(100_000); });
+      PM.hist.undo();
+      const saved = PM.hist.export();
+      PM.Memory.pressure('critical');
+      expect(PM.hist.export()).toEqual(saved);
+      expect(PM.hist.redo()).toBe(true);
+      expect(PM.proj.text).toBe('3'.repeat(100_000));
+    } finally { (globalThis as any).window = previous; }
+  });
   it('records one source transaction and reverses and reapplies it', () => {
     const PM = historyRegistry();
 
@@ -46,6 +64,25 @@ describe('legacy history install', () => {
     expect(stats.entries).toBe(1);
     expect(stats.bytes).toBeLessThan(1_000);
     expect(stats.maxBytes).toBe(256 * 1024 * 1024);
+  });
+
+  it('counts scoped Unicode, added and removed patches with the unchanged serialized budget', () => {
+    const PM = historyRegistry();
+    PM.proj.old = 'remove me';
+    PM.hist.beginScoped('Several scopes');
+    PM.hist.track([['value'], ['old'], ['new'], ['layers']]);
+    PM.proj.value = '東京 🎬';
+    delete PM.proj.old;
+    PM.proj.new = 'added';
+    PM.hist.commit();
+    const entry = PM.hist.export().entries[0];
+    const encoder = new TextEncoder();
+    expect(PM.hist.stats().bytes).toBe(encoder.encode(JSON.stringify(entry.forward)).byteLength
+      + encoder.encode(JSON.stringify(entry.backward)).byteLength);
+    PM.hist.undo();
+    expect(PM.proj).toEqual({ value: 1, old: 'remove me', layers: [] });
+    PM.hist.redo();
+    expect(PM.proj).toEqual({ value: '東京 🎬', new: 'added', layers: [] });
   });
 
   it('publishes whether a project patch came from the agent or the interface', () => {

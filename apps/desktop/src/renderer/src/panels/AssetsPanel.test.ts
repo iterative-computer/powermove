@@ -429,3 +429,19 @@ describe('AssetsPanel', () => {
     expect(rows()[0]!.tabIndex).toBe(0);
   });
 });
+
+it('shows restoring media as loading instead of missing and prevents relink actions', () => {
+  const { PM } = setup([VIDEO], { offline: [VIDEO.id] });
+  PM.assets.loading = new Set([VIDEO.id]);
+  doc.tick.assets++;
+  flushSync();
+  const card = target.querySelector<HTMLElement>('.asset-card')!;
+  expect(card.textContent).toContain('Loading media…');
+  expect(card.querySelector('.asset-offline')).toBeNull();
+  expect(card.getAttribute('aria-busy')).toBe('true');
+  expect(card.querySelector<HTMLButtonElement>('.asset-add')!.disabled).toBe(true);
+  card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  expect(PM.pickFiles).not.toHaveBeenCalled();
+  PM.assets.loading.clear(); doc.tick.assets++; flushSync();
+  expect(card.querySelector('.asset-offline')).not.toBeNull();
+});

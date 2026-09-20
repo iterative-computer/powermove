@@ -16,8 +16,7 @@ test('closing an unchanged local project skips the save prompt, while edits stil
       detail: PM.mkProject({ name: 'Untouched close test' }),
     }));
   });
-  await session.page.getByRole('button', { name: 'Close Untouched close test', exact: true }).click();
-  await expect(session.page.getByRole('button', { name: 'Close Untouched close test', exact: true })).toHaveCount(0);
+  expect(await session.page.evaluate(() => (window as any).PM.prepareToClose())).toBe(true);
   expect(await session.app.evaluate(() => (globalThis as any).__closePrompts)).toBe(0);
 
   await session.page.evaluate(() => {
@@ -28,9 +27,9 @@ test('closing an unchanged local project skips the save prompt, while edits stil
     PM.proj.bg = '#ff0000';
     PM.autosave();
   });
-  await session.page.getByRole('button', { name: 'Close Edited close test', exact: true }).click();
+  expect(await session.page.evaluate(() => (window as any).PM.prepareToClose())).toBe(false);
   await expect.poll(() => session.app.evaluate(() => (globalThis as any).__closePrompts)).toBe(1);
-  await expect(session.page.getByRole('button', { name: 'Close Edited close test', exact: true })).toBeVisible();
+  expect(await session.page.evaluate(() => (window as any).PM.proj.name)).toBe('Edited close test');
   await session.app.evaluate(({ dialog }) => {
     dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
   });

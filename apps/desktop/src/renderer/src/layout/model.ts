@@ -201,6 +201,7 @@ export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean
   if ((PM.PANELS[id] ?? inst.def)?.headless) collapsed = false;
   current.spec.collapsed = !!collapsed;
   inst.el.dataset.collapsed = collapsed ? '1' : '0';
+  inst.el.style.minHeight = collapsed ? 'var(--hdr-h)' : `${panelMinHeight(current.spec, inst.def)}px`;
   inst.body.style.display = collapsed ? 'none' : '';
   inst.el.style.flex = collapsed
     ? '0 0 var(--hdr-h)'
