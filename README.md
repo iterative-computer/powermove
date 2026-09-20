@@ -20,16 +20,16 @@ Grab the latest release from [GitHub Releases](https://github.com/iterative-comp
 
 ### Run it on another machine
 
-If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove` package runs the same editor as a host you use from a browser on any device:
+If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove-cli` package runs the same editor as a host you use from a browser on any device:
 
 ```sh
-npx powermove@latest serve          # try it once, nothing installed
+npx powermove-cli@latest serve          # try it once, nothing installed
 ```
 
 To keep it running, install it as a service (systemd on Linux, launchd on macOS) and reach it over Tailscale or your LAN:
 
 ```sh
-npm i -g powermove
+npm i -g powermove-cli
 powermove install                   # starts it now and after reboots
 powermove status                    # running? and the address to open
 ```

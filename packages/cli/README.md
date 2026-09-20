@@ -1,17 +1,19 @@
-# powermove
+# powermove-cli
+
+The package is `powermove-cli` (npm refused `powermove` as too close to an unrelated package); the command it installs is `powermove`.
 
 The [Powermove](https://powermove.app) desktop app is the way to use Powermove. This package is for the other case: running the Powermove host on a machine you leave on, and using the editor from a browser on any device. The agents run on the host, edits made anywhere reach every open tab, and a run you started keeps going after you close the lid.
 
 Try it once, nothing installed:
 
 ```sh
-npx powermove@latest serve
+npx powermove-cli@latest serve
 ```
 
 Keep it running on a box:
 
 ```sh
-npm i -g powermove
+npm i -g powermove-cli
 powermove install          # systemd user service on Linux, launchd agent on macOS
 powermove status           # running? and the address to open
 powermove logs             # the host log
@@ -25,7 +27,7 @@ Open the printed URL. Over [Tailscale](https://tailscale.com), use the `100.x` a
 The certificate is self-signed, so the browser asks once whether to proceed. For a trusted one:
 
 ```sh
-npx powermove@latest serve --http
+npx powermove-cli@latest serve --http
 tailscale serve --bg https+insecure://localhost:4747
 ```
 
