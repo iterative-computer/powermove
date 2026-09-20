@@ -1,5 +1,5 @@
 {
-  "name": "powermove",
+  "name": "powermove-cli",
   "version": "1.0.1",
   "license": "GPL-3.0-or-later",
   "description": "Run the Powermove motion editor host on any machine and use it from a browser: `npx powermove serve`.",
