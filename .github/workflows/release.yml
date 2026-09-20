@@ -120,6 +120,7 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
   # The remote host ships to npm at the same version, so a box and the Mac
   # app are never out of step. Stable tags publish as `latest`, betas as `beta`.
+  # Authentication is npm trusted publishing (OIDC), not a token.
   publish-npm:
     needs: release
     runs-on: ubuntu-latest
@@ -156,10 +157,13 @@ jobs:
         run: bun run --cwd apps/desktop test -- src/server src/shared src/engine
       - name: Build the host
         run: bun run --cwd packages/cli build
+      # Trusted publishing: npm accepts this job's OIDC identity (repo +
+      # workflow file) as the publisher, so no token lives in the repo. Set up
+      # once on npmjs.com under the package's Settings › Trusted publisher.
+      # Needs a recent npm; the Node 22 runner ships an older one.
       - name: Publish powermove-cli
         working-directory: packages/cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          test -n "$NODE_AUTH_TOKEN"
+          npm install -g npm@latest
+          npm --version
           npm publish --access public --provenance --tag "${{ steps.tag.outputs.disttag }}" --ignore-scripts
