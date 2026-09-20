@@ -14,17 +14,31 @@ This repository is a bun workspace monorepo containing the desktop editor, the m
 
 ## Get Powermove
 
-Download the Mac app from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
+### Download for Mac (recommended)
+
+Grab the latest release from [GitHub Releases](https://github.com/iterative-computer/powermove/releases/latest) or [trypowermove.com](https://trypowermove.com). Apple Silicon.
 
 ### Run it on another machine
 
 If you also want Powermove on a box you leave on, a Linux server or a spare Mac, the `powermove-cli` package runs the same editor as a host you use from a browser on any device. The agents run on the host, so a request keeps going after you close your laptop, and edits, media and fonts stay in sync across every device with the project open.
 
+#### Try it
+
 ```sh
-npx powermove-cli@latest serve      # try it once, nothing installed
+npx powermove-cli@latest serve
 ```
 
-To keep it running as a service and reach it over Tailscale, see [packages/cli/README.md](packages/cli/README.md). Architecture in [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
+Open the printed URL. Over Tailscale, use the `100.x` address.
+
+#### Keep it running
+
+```sh
+npm i -g powermove-cli
+powermove install       # a service: systemd on Linux, launchd on macOS
+powermove status        # running? and the address to open
+```
+
+Details in [packages/cli/README.md](packages/cli/README.md); architecture in [apps/desktop/docs/remote-serve.md](apps/desktop/docs/remote-serve.md).
 
 ## Repository layout
 
