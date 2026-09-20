@@ -61,8 +61,8 @@
       },
     },
     "packages/cli": {
-      "name": "powermove",
-      "version": "1.0.0",
+      "name": "powermove-cli",
+      "version": "1.0.3",
       "bin": {
         "powermove": "bin/powermove.mjs",
       },
@@ -71,6 +71,7 @@
         "@openai/codex": "0.153.4",
         "esbuild": "0.25.12",
         "ffmpeg-static": "5.3.0",
+        "happy-dom": "20.11.6",
         "svelte": "5.56.10",
         "ws": "^8.18.0",
       },
@@ -891,7 +892,7 @@
 
     "postject": ["postject@1.0.0-alpha.6", "", { "dependencies": { "commander": "^9.4.0" }, "bin": { "postject": "dist/cli.js" } }, "sha512-b9Eb8h2eVqNE8edvKdwqkrY6O7kAwmI8kcnBv1NScolYJbo59XUF0noFq+lxbC1yN20bmC0WBEbDC5H/7ASb0A=="],
 
-    "powermove": ["powermove@workspace:packages/cli"],
+    "powermove-cli": ["powermove-cli@workspace:packages/cli"],
 
     "pretty-ms": ["pretty-ms@9.3.1", "", { "dependencies": { "parse-ms": "^4.0.0" } }, "sha512-HzMy3Geq23nVALD/M2LliU+F+M+gVNsvkQWWqeBZ8HDiCgzo6YPJ/Omrmtq24EFrIsk0a3EkQGEd7bDOo+IhGA=="],
 
