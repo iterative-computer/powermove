@@ -17,10 +17,11 @@ export default defineConfig({
     rollupOptions: {
       input: path.resolve(__dirname, 'src/engine/main.ts'),
       output: { format: 'es', entryFileNames: 'engine.mjs' },
-      external: ['happy-dom', 'ws']
+      external: ['ws']
     },
     sourcemap: true,
     minify: false
   },
-  ssr: { noExternal: true, external: ['happy-dom', 'ws'] }
+  // happy-dom is bundled so the engine has no runtime dependency beyond ws.
+  ssr: { noExternal: true, external: ['ws'] }
 });
