@@ -118,3 +118,48 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/certificate.p12"
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+  # The remote host ships to npm at the same version, so a box and the Mac
+  # app are never out of step. Stable tags publish as `latest`, betas as `beta`.
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Version from tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node -e '
+            const t = process.env.RELEASE_TAG;
+            if (!/^v\d+\.\d+\.\d+(-beta\.\d+)?$/.test(t)) throw Error("Select a vX.Y.Z or vX.Y.Z-beta.N tag");
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `version=${t.slice(1)}\ndisttag=${t.includes("-beta.") ? "beta" : "latest"}\n`);
+          '
+      - run: bun install --frozen-lockfile
+      - name: Set package versions
+        run: |
+          for dir in apps/desktop packages/cli; do
+            (cd "$dir" && bun pm version "${{ steps.tag.outputs.version }}" --no-git-tag-version)
+          done
+      - name: Host tests
+        run: bun run --cwd apps/desktop test -- src/server src/shared src/engine
+      - name: Build the host
+        run: bun run --cwd packages/cli build
+      - name: Publish powermove-cli
+        working-directory: packages/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN"
+          npm publish --access public --provenance --tag "${{ steps.tag.outputs.disttag }}" --ignore-scripts

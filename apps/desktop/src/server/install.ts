@@ -22,6 +22,8 @@ export interface ServiceSpec {
   userData: string;
   home?: string;
   platform?: NodeJS.Platform;
+  /** Installed version, for status. */
+  version?: string;
 }
 
 export const SERVICE_NAME = 'powermove';
@@ -147,6 +149,11 @@ export async function status(spec: ServiceSpec, log: (line: string) => void): Pr
     const url = [...text.matchAll(/https?:\/\/\S+\?token=\S+/g)].at(-1)?.[0];
     if (url) log(`last address: ${url}`);
   } catch { /* no log yet */ }
+  try {
+    const response = await fetch('https://registry.npmjs.org/powermove-cli/latest', { signal: AbortSignal.timeout(5000) });
+    const latest = ((await response.json()) as { version?: string }).version;
+    if (latest) log(`latest on npm: ${latest}${spec.version && latest !== spec.version ? `  (this install: ${spec.version}; update with npm i -g powermove-cli@latest)` : ''}`);
+  } catch { /* offline */ }
 }
 
 export async function logs(spec: ServiceSpec, lines: number, log: (line: string) => void): Promise<void> {
