@@ -52,10 +52,11 @@
   });
 
   onMount(() => {
+    const desktop = matchMedia('(min-width: 1024px)');
     let raf = 0;
     const update = () => {
       raf = 0;
-      if (!section) return;
+      if (!section || !desktop.matches) return;
       const r = section.getBoundingClientRect();
       const travel = r.height - window.innerHeight;
       const p = travel > 0 ? Math.min(1, Math.max(0, -r.top / travel)) : 0;
@@ -85,6 +86,14 @@
         </div>
       </div>
       <LightsCard target={active} />
+      <div class="showcase-controls">
+        <div class="showcase-choices" role="group" aria-label="Explore the editor">
+          {#each STEPS as s, i (s.key)}
+            <button type="button" aria-pressed={active === i} onclick={() => active = i}>{s.title}</button>
+          {/each}
+        </div>
+        <p class="showcase-caption" aria-live="polite">{STEPS[active].text}</p>
+      </div>
     </div>
   </div>
 </section>
