@@ -180,6 +180,7 @@ function apiFor(runtime: InspectorTestBackend, register = vi.fn()): PowermoveAPI
       drag: runtime.drag ?? vi.fn(), beginParentPick: runtime.beginParentPick ?? vi.fn(),
       openShaderEditor: runtime.openShaderEditor ?? vi.fn(), closeMenus: runtime.closeMenus ?? vi.fn()
     },
+    inspector: { sections: () => [] },
     media: { fonts: runtime.Fonts ?? { options: (value: string) => [value], ensure: vi.fn() } },
     util: { round: runtime.round ?? ((value: number) => value), clamp: runtime.clamp ?? ((value: number, min: number, max: number) => Math.max(min, Math.min(max, value))), uid: runtime.uid ?? (() => 'test-id') },
     services: {

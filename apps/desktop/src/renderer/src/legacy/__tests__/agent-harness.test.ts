@@ -22,6 +22,25 @@ function harnessEditor(): PMRegistry {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('agent harness oracle', () => {
+  it('selects panel targets directly and rejects missing IDs without partial selection or edits', async () => {
+    const PM = harnessEditor();
+    const a = PM.mkLayer('shape'), b = PM.mkLayer('text');
+    PM.proj.layers = [a, b]; PM.ProjectIndex.invalidate();
+    const before = JSON.stringify(PM.proj);
+    const call = (layerIds: string[], add = false) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'select-targets', callId: 'select', tool: 'select_layers', arguments: { layerIds, add }, baseRevision: 0
+    });
+    await call([a.id]);
+    expect(PM.sel.layers).toEqual([a.id]);
+    await expect(call([b.id, 'missing'])).rejects.toThrow('No selection was changed');
+    expect(PM.sel.layers).toEqual([a.id]);
+    await call([b.id], true);
+    expect(PM.sel.layers).toEqual([a.id, b.id]);
+    await call([]);
+    expect(PM.sel.layers).toEqual([]);
+    expect(JSON.stringify(PM.proj)).toBe(before);
+  });
+
   it('observes source without capturing frames unless the agent requests times', async () => {
     const PM = harnessEditor();
     const snapshot = vi.fn(PM.Export.snapshot);
@@ -124,6 +143,141 @@ describe('agent harness oracle', () => {
     const finish = await call('__finish_run', { commit: false });
     expect(finish.ok).toBe(false);
     expect(PM.L(video.id).name).toBe('User edit');
+  });
+
+  it('recovers from a stale run-start revision after reading the live project', async () => {
+    const PM = harnessEditor();
+    PM.proj.revision = 6;
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'stale-start', callId: tool, tool, arguments: args, baseRevision: 3,
+    });
+    const commands = [{ type: 'add_layer', id: 'fresh-title', layerType: 'text' }];
+    await expect(call('apply_commands', { commands })).rejects.toThrow('revision 3');
+    await call('get_project_state');
+    expect((await call('apply_commands', { commands })).ok).toBe(true);
+    expect(PM.L('fresh-title')).toBeTruthy();
+    await call('rollback_changes');
+    expect(PM.L('fresh-title')).toBeNull();
+    expect(PM.proj.revision).toBe(6);
+  });
+
+  it('resumes after interleaved user edits without absorbing them into agent Undo or rollback', async () => {
+    const PM = harnessEditor();
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'interleaved', callId: tool, tool, arguments: args, baseRevision: 0,
+    });
+    await call('apply_commands', { commands: [{ type: 'add_layer', id: 'first', layerType: 'text' }] });
+    PM.Edit.apply({ type: 'set_layer', target: 'first', patch: { name: 'User title' } });
+    const commands = [{ type: 'add_layer', id: 'second', layerType: 'text' }];
+    await expect(call('apply_commands', { commands })).rejects.toThrow('project changed');
+    await call('get_project_state');
+    expect((await call('apply_commands', { commands })).ok).toBe(true);
+    await expect(call('rollback_changes')).rejects.toThrow('Undo');
+    expect(PM.L('first').name).toBe('User title');
+    expect((await call('__finish_run', { commit: true })).ok).toBe(true);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.L('second')).toBeNull();
+    expect(PM.L('first').name).toBe('User title');
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.L('first').name).not.toBe('User title');
+  });
+
+  it('applies complete large batches, animation curves, and delete selections', async () => {
+    const PM = harnessEditor();
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'large-edit', callId: tool, tool, arguments: args, baseRevision: 0,
+    });
+    const commands = Array.from({ length: 90 }, (_, i) => ({ type: 'add_layer', id: `layer-${i}`, layerType: 'text' }));
+    await call('apply_commands', { commands });
+    expect(PM.proj.layers).toHaveLength(90);
+    const keyframes = Array.from({ length: 150 }, (_, i) => ({ time: i / 30, value: i }));
+    await call('apply_commands', { commands: [{ type: 'replace_keyframes', target: 'layer-0', path: 'opacity', keyframes }] });
+    expect(PM.L('layer-0').p.opacity.kf).toHaveLength(150);
+    await call('apply_commands', { commands: [{ type: 'delete_layers', targets: commands.map(c => c.id) }] });
+    expect(PM.proj.layers).toHaveLength(0);
+    await call('rollback_changes');
+    expect(PM.proj.layers).toHaveLength(0);
+  });
+
+  it('rejects an invalid command without partially applying the rest of its batch', async () => {
+    const PM = harnessEditor();
+    await expect(PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'invalid-batch', callId: 'apply', tool: 'apply_commands', baseRevision: 0,
+      arguments: { commands: [{ type: 'add_layer', layerType: 'text' }, { type: 'unknown_operation' }] },
+    })).rejects.toThrow();
+    expect(PM.proj.layers).toHaveLength(0);
+  });
+
+  it('requires another read if the project changes after inspection and isolates run baselines', async () => {
+    const PM = harnessEditor();
+    const call = (tool: string, runId = 'reader', args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId, callId: tool, tool, arguments: args, baseRevision: 0,
+    });
+    PM.proj.revision = 3;
+    await call('get_project_state');
+    PM.proj.revision = 6;
+    const args = { commands: [{ type: 'add_layer', id: 'fresh', layerType: 'text' }] };
+    await expect(call('apply_commands', 'reader', args)).rejects.toThrow('revision 3');
+    await call('get_project_state');
+    await expect(call('apply_commands', 'other-run', args)).rejects.toThrow('revision 0');
+    expect((await call('apply_commands', 'reader', args)).ok).toBe(true);
+  });
+
+  it('does not acknowledge a state read that exceeds the response budget', async () => {
+    const PM = harnessEditor();
+    const layer = PM.mkLayer('text');
+    layer.d.text = 'x'.repeat(2_000_000);
+    PM.proj.layers.push(layer);
+    PM.proj.revision = 6;
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'failed-read', callId: tool, tool, arguments: args, baseRevision: 3,
+    });
+    await expect(call('get_project_state')).rejects.toThrow('response budget');
+    await expect(call('apply_commands', { commands: [{ type: 'add_layer', layerType: 'text' }] })).rejects.toThrow('revision 3');
+  });
+
+  it('never refreshes or rolls a transaction into a different project with the same revision', async () => {
+    const PM = harnessEditor();
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'project-switch', callId: tool, tool, arguments: args, baseRevision: 0,
+    });
+    await call('apply_commands', { commands: [{ type: 'add_layer', layerType: 'text' }] });
+    PM.proj = PM.mkProject({ name: 'Other project' });
+    PM.proj.revision = 1;
+    await expect(call('get_project_state')).rejects.toThrow('active project changed');
+    await expect(call('apply_commands', { commands: [{ type: 'add_layer', layerType: 'text' }] })).rejects.toThrow('active project changed');
+    await expect(call('rollback_changes')).rejects.toThrow('active project changed');
+    expect((await call('__finish_run', { commit: false })).ok).toBe(false);
+    expect(PM.proj.layers).toHaveLength(0);
+  });
+
+  it('finishes successfully with separate Undo entries when the user edits after the last tool call', async () => {
+    const PM = harnessEditor();
+    const call = (tool: string, args: any = {}) => PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'finish-drift', callId: tool, tool, arguments: args, baseRevision: 0,
+    });
+    await call('apply_commands', { commands: [{ type: 'add_layer', id: 'title', layerType: 'text' }] });
+    PM.Edit.apply({ type: 'set_layer', target: 'title', patch: { name: 'User title' } });
+    const finish = await call('__finish_run', { commit: true });
+    expect(finish).toMatchObject({ ok: true, changed: true });
+    expect(finish.historyId).toBeUndefined();
+    expect(PM.hist.list()).toHaveLength(2);
+    expect(PM.L('title').name).toBe('User title');
+  });
+
+  it('supports larger state pages and returns complete editable content', () => {
+    const PM = harnessEditor();
+    PM.proj.layers = Array.from({ length: 25 }, () => PM.mkLayer('text'));
+    const layer = PM.proj.layers[0];
+    layer.d.text = 'Text '.repeat(200);
+    layer.d.code = 'code '.repeat(2000);
+    for (let i = 0; i < 120; i++) layer.p[`custom-${i}`] = PM.P(i);
+    layer.p.opacity.kf = Array.from({ length: 150 }, (_, t) => ({ t: t / 30, v: t }));
+    const state = PM.AgentHarness.projectState({ layerLimit: 25, propertyLimit: 200, keyframeLimit: 150 });
+    expect(state.layers).toHaveLength(25);
+    expect(state.layers[0].properties.length).toBeGreaterThan(100);
+    expect(state.layers[0].properties.find((p: any) => p.path === 'opacity').keyframes).toHaveLength(150);
+    expect(state.layers[0].content).toEqual(layer.d);
   });
 
   it('lets a native provider inspect and transactionally edit the live project through the preload bridge', async () => {

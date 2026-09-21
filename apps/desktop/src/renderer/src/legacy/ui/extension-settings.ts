@@ -34,6 +34,7 @@ function compareRecords(a: ExtensionRecord, b: ExtensionRecord): number {
 }
 
 const CAPABILITIES: Record<string, string> = {
+  inspector: 'Properties controls', media: 'Media import',
   panels: 'Panels', commands: 'Commands', keybindings: 'Keyboard shortcuts', effects: 'Effects', transitions: 'Transitions',
   layers: 'Layer types', themes: 'Appearance', palette: 'Command search', menus: 'Menus', status: 'Status bar', hooks: 'Editor behavior'
 };

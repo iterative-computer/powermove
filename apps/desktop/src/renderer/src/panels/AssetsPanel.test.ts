@@ -232,6 +232,17 @@ describe('AssetsPanel', () => {
     expect(PM.cmd).toHaveBeenCalledWith('addFromAsset', 'video-1');
   });
 
+  it('shows the load failure without claiming an existing file is missing', () => {
+    const { PM } = setup([VIDEO], { offline: ['video-1'] });
+    PM.assets.errors = new Map([['video-1', 'The source file has changed. Use Locate File to choose a replacement.']]);
+    PM.bus.emit('assets');
+    flushSync();
+    const card = rows()[0]!;
+    expect(card.querySelector('.asset-offline')?.textContent).toContain('Media unavailable');
+    expect(card.querySelector('.asset-missing')?.textContent).toContain('Could not load · The source file has changed');
+    expect(card.textContent).not.toContain('Missing ·');
+  });
+
   it('offers Locate instead of Add in the context menu for offline media', () => {
     const { PM } = setup([VIDEO], { offline: ['video-1'] });
 
@@ -495,4 +506,41 @@ it('shows restoring media as loading instead of missing and prevents relink acti
   expect(PM.pickFiles).not.toHaveBeenCalled();
   PM.assets.loading.clear(); doc.tick.assets++; flushSync();
   expect(card.querySelector('.asset-offline')).not.toBeNull();
+});
+
+it('shows restoring media as loading instead of missing and prevents relink actions', () => {
+  const { PM } = setup([VIDEO], { offline: [VIDEO.id] });
+  PM.assets.loading = new Set([VIDEO.id]);
+  doc.tick.assets++;
+  flushSync();
+  const card = target.querySelector<HTMLElement>('.asset-card')!;
+  expect(card.textContent).toContain('Loading media…');
+  expect(card.querySelector('.asset-offline')).toBeNull();
+  expect(card.getAttribute('aria-busy')).toBe('true');
+  expect(card.querySelector<HTMLButtonElement>('.asset-add')!.disabled).toBe(true);
+  card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  expect(PM.pickFiles).not.toHaveBeenCalled();
+  PM.assets.loading.clear(); doc.tick.assets++; flushSync();
+  expect(card.querySelector('.asset-offline')).not.toBeNull();
+});
+
+it('offers a visible cloud download action and prevents duplicate clicks while downloading', () => {
+  const { PM } = setup([VIDEO], { offline: ['video-1'] });
+  let state = { provider: 'iCloud', state: 'offloaded' };
+  PM.assets.cloud = { get: vi.fn(() => state), download: vi.fn() };
+  PM.bus.emit('assets'); flushSync();
+  const card = rows()[0]!;
+  expect(card.classList.contains('is-cloud')).toBe(true);
+  expect(card.querySelector('.asset-offline')?.textContent).toContain('In cloud');
+  expect(card.querySelector('.asset-missing')?.textContent).toContain('Stored in iCloud');
+  const button = card.querySelector<HTMLButtonElement>('.asset-download')!;
+  button.click();
+  expect(PM.assets.cloud.download).toHaveBeenCalledExactlyOnceWith('video-1');
+  expect(PM.pickFiles).not.toHaveBeenCalled();
+  state = { provider: 'iCloud', state: 'downloading' };
+  PM.bus.emit('assets'); flushSync();
+  expect(button.disabled).toBe(true);
+  expect(card.getAttribute('aria-busy')).toBe('true');
+  expect(card.querySelector('.asset-offline')?.textContent).toContain('Downloading');
+  expect(card.querySelector('.asset-missing')?.textContent).toBe('Downloading from iCloud…');
 });

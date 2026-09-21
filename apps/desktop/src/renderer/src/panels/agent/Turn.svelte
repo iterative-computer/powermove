@@ -40,7 +40,9 @@
   // Autonomous replies are stored as trace text. Keep the last reply outside
   // the disclosure so collapsing the work never hides the agent's answer.
   const steps = $derived(message.role === 'trace' ? message.steps ?? [] : []);
-  const replyIndex = $derived(steps.reduce((last, step, index) => step.kind === 'text' && step.text.trim() ? index : last, -1));
+  // Steering checkpoints remain inline, in stream order; they are not a
+  // completed reply whose earlier work belongs behind a disclosure.
+  const replyIndex = $derived(message.steering ? -1 : steps.reduce((last, step, index) => step.kind === 'text' && step.text.trim() ? index : last, -1));
   const reply = $derived(replyIndex >= 0 ? steps[replyIndex] : undefined);
   const traceRows = $derived(activityRows(steps.filter((_, index) => index !== replyIndex).map(step =>
     step.kind === 'thought' ? { kind: 'text' as const, id: step.id, text: step.label } : step)));
@@ -53,19 +55,25 @@
   });
 </script>
 
+{#snippet workRows()}
+  {#each traceRows as row (row.renderKey)}
+    {#if row.kind === 'text'}
+      <TextRow text={row.text} />
+    {:else if row.kind === 'tools'}
+      <ToolActivity {row} />
+    {/if}
+  {/each}
+{/snippet}
+
 {#if message.role === 'trace'}
   <div class="agent-trace is-archived">
-    {#if traceRows.length}
+    {#if message.steering}
+      {@render workRows()}
+    {:else if traceRows.length}
       <details class="agent-work-log">
         <summary><span>{workedFor ? `Worked for ${workedFor}` : 'Worked'}</span><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></summary>
         <div class="agent-work-details" aria-label="Thinking and activity">
-          {#each traceRows as row (row.renderKey)}
-            {#if row.kind === 'text'}
-              <TextRow text={row.text} />
-            {:else if row.kind === 'tools'}
-              <ToolActivity {row} />
-            {/if}
-          {/each}
+          {@render workRows()}
         </div>
       </details>
     {/if}

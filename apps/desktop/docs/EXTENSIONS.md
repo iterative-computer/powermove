@@ -74,7 +74,7 @@ reloaded, or removed. Return a `Disposable` or use `api.onDispose` for anything 
 | `name`, `version` (`x.y.z`), `apiVersion` (`1`) | yes | |
 | `description` | recommended | shown in the Mods list; one sentence |
 | `entry` | no | default `index.ts`; `.ts` `.js` `.mjs`; may import relative `.ts`, `.js`, `.svelte`, `.css` |
-| `contributes` | recommended | subset of `panels commands keybindings effects transitions layers themes palette menus status hooks` |
+| `contributes` | recommended | subset of `panels inspector media commands keybindings effects transitions layers themes palette menus status hooks` |
 | `replaces` | no | ids of extensions to deactivate while this one is enabled (e.g. `["timeline"]`) |
 | `dependsOn` | no | ids that must be enabled and load first |
 | `forkedFrom` | no | `"<id>@<version>"` when copied from a built-in |
@@ -111,6 +111,8 @@ Full types: `api.ts` (next to this file in the agent API pack). Summary:
 - **history** — raw transaction begin/commit/cancel, undo/redo, external entries, and transaction-aware selection history.
 - **edit** — validated one-shot edits, gesture transactions, dispatch, cancel/rollback, and structural mutation.
 - **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading.
+- **media import defaults** — `registerImportDefaults({ anchor: { x: 0.5, y: 0.5 } })` sets normalized anchors for future image, video and SVG imports and asset-to-timeline additions. `getImportDefaults()` reads the active override. Registration is owned by the mod; unloading restores the prior default. Existing layers/keyframes and audio/3D origins are untouched.
+- **inspector** — `registerSection({ id, title, after: 'content' | 'transform' | 'effects', when?, build })` adds controls to Properties. `build(target, { layerIds })` returns a disposer or cleanup function. Sections rebuild on selection changes, and disappear when the mod unloads. Use `sections()` to inspect active contributions.
 - **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots.
 - **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
 - **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, and edit/history-backed `gesture` construction.
@@ -137,6 +139,66 @@ typed namespaces above. Both forms, plus the standalone `PM` identifier, fail th
 built-in extension boundary lint.
 
 ## Patterns
+
+### Global import defaults and Properties controls
+
+These are supported extension capabilities; do not inject controls into another
+panel's DOM or rewrite already imported layers to implement a future default.
+Register defaults during activation so enabled user mods restore them in each
+editor window and after restart. Store configurable choices in `api.storage`.
+
+```ts
+import type { PowermoveAPI } from 'powermove';
+import AnchorPresets from './AnchorPresets.svelte';
+
+export default function activate(api: PowermoveAPI) {
+  api.media.registerImportDefaults({ anchor: { x: 0.5, y: 0.5 } });
+  api.inspector.registerSection({
+    id: 'anchor-presets', title: 'Anchor presets', after: 'transform',
+    when: ({ layerIds }) => layerIds.length > 0,
+    build(target, { layerIds }) {
+      // Mount a Svelte component through the shared runtime; returning its
+      // unmount function ties it to both selection changes and mod unloading.
+      return api.host.mount(AnchorPresets, target, { api, layerIds });
+    }
+  });
+}
+```
+
+This mod may declare `contributes: ["media", "inspector"]` in its manifest.
+
+Import anchors use normalized visual bounds (`0`, `0.5`, `1` for the nine
+presets). The editor compensates position so new content does not jump. Raster
+image/video coordinates are centered, so their center anchor is **0 px**, not
+half the source width. SVG content can have asymmetric bounds. Audio and model
+imports keep their native nonvisual/3D origins. Disposing a default registration
+changes only future imports; imported layers retain their own editable channels.
+
+Custom Properties controls must use `api.project.apply` or `api.edit` for edits.
+For an explicitly requested anchor change, set `preserveHandEdits: false` and
+compensate position with `api.anim.localMatrix` (or `api.space3d` for 3D).
+Preserve animation; do not flatten keyframe channels. Layer locks still apply.
+Subscribe to project/time events within the mounted component when its values
+need to update without rebuilding on every keystroke.
+
+### Finding an existing capability before declaring it unsupported
+
+- Read the current API types and use `get_workspace_state` for actual extension
+  health/errors and registered effects; use `render.gl.compileError` for shader
+  diagnostics. Do not infer a registration failure from a mock host.
+- Use `select_layers` with IDs from `get_project_state` to operate selection-based
+  panels. Extensions can use `api.selection.select` or `api.project.select`.
+- Use `group_layers`, `ungroup_layers`, and `move_to_group` for editable groups.
+  Inspect their documented semantics before substituting a group for a requested
+  nested composition; they are different structures.
+- Use `api.commands.list`, `api.panels.list`, and the typed namespaces for existing
+  workflows. When a built-in needs deeper changes, `fork_builtin_extension`
+  supplies its source in the isolated stage; contribute or override before forking.
+- Validate effects with `validate_effect`. Mod completion checks manifests and
+  compiles staged source before publication. A rejected change report includes
+  the actual staged IDs/actions; correct the report or revert unintended edits.
+  Native providers can correct these pre-publication failures twice in the same
+  stage. Never replay an already completed project edit or external action.
 
 ### Panels that import media and drop onto the timeline
 

@@ -68,8 +68,7 @@ function ensure() {
       h('button.btn', { onclick: installUpdate }, 'Restart to update'));
   };
   S.offAppUpdate = subscribeAppUpdates(paintAppUpdate);
-  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.appUpdate, S.updates,
-    h('div.ps-sidefoot', 'Local recovery is automatic. Use Save to update a .pmv file you can move, copy, or back up.'));
+  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.appUpdate, S.updates);
 
   S.title = h('b'); S.count = h('span');
   const view = h('div.ps-view', { role: 'group', 'aria-label': 'Project layout' },

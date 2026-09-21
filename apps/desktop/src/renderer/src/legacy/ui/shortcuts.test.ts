@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PMRegistry } from '../registry';
 import { install } from './shortcuts';
 import { makePM } from '../__tests__/make-pm';
+import { IMPORT_DEFAULTS_SERVICE } from '../../kernel/import-defaults';
 
 const previousWindow = (globalThis as any).window;
 
@@ -78,6 +79,25 @@ function expectStructuralReplay(before: any, PM: any, label: string) {
 }
 
 describe('legacy shortcut install', () => {
+  it('applies import anchor defaults to new visual layers in the normal undoable command', () => {
+    const PM: any = editorRuntime();
+    const existing = layer(PM, 'existing', { type: 'text' });
+    existing.p['anchor.x'].v = 77;
+    PM.proj.assets.image = { id: 'image', name: 'Photo.png', kind: 'image', w: 200, h: 100 };
+    PM.GL = { bounds: () => ({ x0: -100, y0: -50, x1: 100, y1: 50 }) };
+    const override = PM.Kernel.services.register(IMPORT_DEFAULTS_SERVICE, { anchor: { x: 1, y: 0 } });
+    const command = PM.commandForAsset('image');
+    expect(command.properties).toEqual({ 'anchor.x': 100, 'anchor.y': -50, 'position.x': 1060, 'position.y': 490 });
+    const result = PM.Edit.apply(command, { origin: 'import', label: 'Import photo' });
+    const imported = PM.L(result.data.results[0].data.id);
+    expect(PM.worldMatrix(imported, PM.time).slice(4)).toEqual([960, 540]);
+    expect(existing.p['anchor.x'].v).toBe(77);
+    expect(PM.hist.undo()).toBe(true);
+    expect(PM.proj.layers.map((value: any) => value.id)).toEqual(['existing']);
+    override.dispose();
+    expect(PM.commandForAsset('image').properties).toBeUndefined();
+  });
+
   it('does not register the removed shader-layer creation command', () => {
     const PM = shortcutsRegistry();
 

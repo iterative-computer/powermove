@@ -86,6 +86,53 @@ function harness(kernel: Kernel = createKernel()) {
 }
 
 describe('createExtensionAPI', () => {
+  it('owns import defaults, copies inputs and restores prior overrides on unload', () => {
+    const { kernel, deps } = harness();
+    const first = createExtensionAPI(kernel, record('first'), deps);
+    const second = createExtensionAPI(kernel, record('second'), deps);
+    expect(first.api.media.getImportDefaults()).toBeNull();
+    const defaults = { anchor: { x: 0.5, y: 0.5 } };
+    const registration = first.api.media.registerImportDefaults(defaults);
+    defaults.anchor.x = 0;
+    const read = first.api.media.getImportDefaults()!;
+    read.anchor.y = 1;
+    expect(second.api.media.getImportDefaults()).toEqual({ anchor: { x: 0.5, y: 0.5 } });
+    second.api.media.registerImportDefaults({ anchor: { x: 0, y: 1 } });
+    expect(first.api.media.getImportDefaults()).toEqual({ anchor: { x: 0, y: 1 } });
+    second.disposeAll();
+    expect(first.api.media.getImportDefaults()).toEqual({ anchor: { x: 0.5, y: 0.5 } });
+    for (const x of [NaN, Infinity, -1, 2, '0.5']) {
+      expect(() => first.api.media.registerImportDefaults({ anchor: { x: x as number, y: 0.5 } })).toThrow('finite numbers');
+    }
+    registration.dispose();
+    expect(first.api.media.getImportDefaults()).toBeNull();
+  });
+
+  it('owns Properties sections, guards failures and disposes mounted controls once', () => {
+    const { kernel, deps, reported } = harness();
+    const changed = vi.fn();
+    kernel.events.on('inspector:changed', changed);
+    const handle = createExtensionAPI(kernel, record(), deps);
+    const cleanup = vi.fn();
+    handle.api.inspector.registerSection({ id: 'anchors', title: 'Anchor presets', build(target) {
+      target.textContent = 'Nine anchor presets';
+      return cleanup;
+    } });
+    const target = document.createElement('div');
+    const mounted = handle.api.inspector.sections()[0]!.build(target, { layerIds: ['a'] });
+    expect(target.textContent).toBe('Nine anchor presets');
+    handle.disposeAll();
+    if (mounted && typeof mounted !== 'function') mounted.dispose();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(target.childNodes).toHaveLength(0);
+    expect(kernel.inspectorSections.list()).toEqual([]);
+    expect(changed).toHaveBeenCalledTimes(2);
+    const broken = createExtensionAPI(kernel, record('broken'), deps);
+    broken.api.inspector.registerSection({ id: 'broken', title: 'Broken', build() { throw new Error('bad control'); } });
+    expect(() => broken.api.inspector.sections()[0]!.build(target, { layerIds: [] })).not.toThrow();
+    expect(reported).toEqual([expect.objectContaining({ id: 'broken', error: expect.any(Error) })]);
+  });
+
   it('attributes every notice to the extension that raised it', () => {
     const { kernel, deps, toastCalls } = harness();
     const handle = createExtensionAPI(kernel, record(), deps);

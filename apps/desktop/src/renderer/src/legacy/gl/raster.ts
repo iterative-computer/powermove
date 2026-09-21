@@ -1,3 +1,4 @@
+import { createCloudMedia, cloudSourcePaths, readLocalMediaSource } from '../core/cloud-media';
 import { prepareVideoPreview } from '../core/video-preview';
 import { disposeVideoInstances } from '../core/video-instances';
 import { cancelPreviewVideoSeek } from '../core/video-seek';
@@ -651,7 +652,7 @@ async function playbackProxy(file: any, name: string, onStage?: (label: string) 
   }
   if (onStage) onStage('Optimizing video for playback');
   else PM.toast(`Optimizing “${name}” for smooth playback…`, 30_000, { error: false });
-  const result = await media.createPlaybackProxy(file);
+  const result = await media.createPlaybackProxy(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
   onStage?.('Loading optimized video');
   return readProxyFile(result, name, file.lastModified);
@@ -829,7 +830,7 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
   const resolved = settled || await resolveAssetKind(file);
   const kind = resolved.kind;
   if (!kind) throw new Error('Unsupported media file');
-  const sourcePath = window.powermove?.media?.sourcePath?.(file) || '';
+  const sourcePath = cloudSourcePaths.get(file) || window.powermove?.media?.sourcePath?.(file) || '';
   onStage?.('Reading file');
   /* Fingerprint the file the user chose, not the conversion, so re-importing
      the same GIF still resolves to the media already in the project. */
@@ -957,9 +958,29 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   }
   return result;
 }
+async function recoverSourceAsset(meta: any, file: File, current: () => boolean) {
+  const assertCurrentProject = () => { if (!current()) throw new Error('The project changed'); };
+  if (meta.fingerprint && await PM.MediaImport.fingerprint(file) !== meta.fingerprint) {
+    throw new Error('The source file has changed. Use Locate File to choose a replacement.');
+  }
+  assertCurrentProject();
+  const imported = await prepareImportedAsset(file, { id: meta.id, assertCurrentProject });
+  if (!current()) { disposeAsset(imported.prepared); return; }
+  Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared,
+    imported.fingerprint, imported.storageKey, imported.sourcePath, imported.persisted, meta.layerDefinition));
+  Object.assign(imported.prepared, meta);
+  PM.assets.map.set(meta.id, imported.prepared);
+  PM.assets.errors.delete(meta.id);
+  PM.touch();
+  checkpointAssetMetadata(PM.proj);
+  PM.Audio?.rebalanceCache?.();
+}
+const cloudMedia = createCloudMedia(PM, recoverSourceAsset);
 PM.assets = {
+  cloud: cloudMedia,
   map: new Map<any, any>(),
   loading: new Set<string>(),
+  errors: new Map<string, string>(),
   async add(file: any, options: any) {
     const result = await ingestAsset(file, options);
     result.asset.importResult = result;
@@ -1094,12 +1115,14 @@ PM.assets = {
   revokePoster,
   clear() {
     assetEpoch++;
+    cloudMedia.clear();
     for (const [id, a] of PM.assets.map) {
       disposeAsset(a);
       PM.GL?.dropMesh?.(id);
     }
     PM.assets.map.clear();
     PM.assets.loading.clear();
+    PM.assets.errors.clear();
     PM.GL?.dropTextures?.('a:');
     PM.GL?.dropTextures?.('video:');
     for (const id of [...posterUrls.keys()]) revokePoster(id);
@@ -1113,33 +1136,49 @@ PM.assets = {
     PM.assets.loading = loading;
     PM.bus?.emit?.('assets');
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
-      if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
+      const current = () => epoch === assetEpoch && PM.proj === project && project.assets?.[meta.id] === meta;
+      if (!current()) return { stale: true };
+      PM.assets.errors.delete(meta.id);
       let posterBlob: any = null;
+      let cacheError: unknown;
       try {
         const posterKey = meta.storageKey
           ? PM.MediaImport.posterKeyFor(meta.storageKey)
           : null;
         const [blob, storedPoster] = await Promise.all([
-          PM.MediaStore.get(meta),
+          Promise.resolve().then(() => PM.MediaStore.get(meta)).catch(error => { cacheError = error; return null; }),
           posterKey ? Promise.resolve(PM.MediaStore.get(posterKey)).catch(() => null) : Promise.resolve(null),
         ]);
-        if (epoch !== assetEpoch || PM.proj !== project) return { stale: true };
+        if (!current()) return { stale: true };
         posterBlob = storedPoster;
-        if (!blob) return { meta, missing: true, posterBlob };
-        const asset = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
-        Object.assign(asset, {
-          fingerprint: meta.fingerprint, storageKey: meta.storageKey, persisted: true,
-          channels: asset.channels || meta.channels || 0,
-          sampleRate: asset.sampleRate || meta.sampleRate || 0,
-        });
-        if (epoch !== assetEpoch || PM.proj !== project || project.assets?.[meta.id] !== meta) {
-          disposeAsset(asset);
-          return { stale: true };
+        if (blob) {
+          try {
+            const asset = await prepareAsset({ id: meta.id, name: meta.name, kind: meta.kind, blob, meta });
+            Object.assign(asset, {
+              fingerprint: meta.fingerprint, storageKey: meta.storageKey, persisted: true,
+              channels: asset.channels || meta.channels || 0,
+              sampleRate: asset.sampleRate || meta.sampleRate || 0,
+            });
+            if (!current()) { disposeAsset(asset); return { stale: true }; }
+            // Publish each ready asset without waiting for unrelated conversions.
+            PM.assets.map.set(asset.id, asset);
+            return { asset, meta, posterBlob };
+          } catch (error) { cacheError = error; }
         }
-        // Publish each ready asset without waiting for unrelated conversions.
-        PM.assets.map.set(asset.id, asset);
-        return { asset, meta, posterBlob };
-      } catch (error) { return { meta, missing: true, posterBlob, error }; }
+        const file = await readLocalMediaSource(meta, current);
+        if (!current()) return { stale: true };
+        if (file) {
+          await recoverSourceAsset(meta, file, current);
+          if (!current()) return { stale: true };
+          return { asset: PM.assets.get(meta.id), meta, posterBlob };
+        }
+        if (cacheError) throw cacheError;
+        return { meta, missing: true, posterBlob };
+      } catch (error) {
+        if (!current()) return { stale: true };
+        PM.assets.errors.set(meta.id, error instanceof Error ? error.message : 'Could not read this media file');
+        return { meta, missing: true, posterBlob, error };
+      }
       finally {
         loading.delete(String(meta.id));
         if (epoch === assetEpoch && PM.proj === project) {
@@ -1209,7 +1248,9 @@ PM.assets = {
         }
       })();
     }, 0);
-    return { restored, missing };
+    await cloudMedia.scan(project, missing);
+    if (epoch !== assetEpoch || PM.proj !== project) return { restored: [], missing: [], stale: true };
+    return { restored, missing: missing.filter(meta => !cloudMedia.get(meta.id) && !PM.assets.get(meta.id)) };
   },
   /** Procedural placeholder so demo projects work with zero imports. */
   gradient(name: any, c0: any, c1: any) {

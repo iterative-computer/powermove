@@ -580,6 +580,7 @@ function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
       const explicitOptions = typeof placement === 'object' && placement !== null;
       const options = typeof placement === 'string' ? { dock: placement } : (placement ?? {});
       const dock = options.dock;
+      PM?.Layout?.rememberPanelOpen?.(id);
       if (!PM?.Layout?.hasPanel?.(current(), id)) {
         PM?.WS?.mutate?.((workspace: any) => {
           /* A hidden panel remembers its dock, index and size — restore beats
@@ -606,12 +607,19 @@ function makePanelsBackend(PM: LegacyPM, kernel: Kernel): PanelsBackend {
       PM?.Layout?.refresh?.(id);
     },
     close: (id) => {
-      const hide = PM?.Layout?.hidePanel ?? PM?.Layout?.removePanel;
+      const hide = PM?.Layout?.closePanel ?? PM?.Layout?.hidePanel ?? PM?.Layout?.removePanel;
       if (!hide) return;
       PM?.WS?.mutate?.((workspace: unknown) => hide(workspace, id));
     },
     isOpen: (id) => !!PM?.Layout?.hasPanel?.(current(), id),
-    isHidden: (id) => ((current() as { hiddenPanels?: Array<{ id?: string }> } | undefined)?.hiddenPanels ?? []).some((item) => item.id === id),
+    isHidden: (id) => {
+      const hidden = ((current() as { hiddenPanels?: Array<{ id?: string }> } | undefined)?.hiddenPanels ?? []).some((item) => item.id === id);
+      /* Seed the global preference from the old per-workspace behavior. This
+         runs only for activation-time auto-open checks, so an intentionally
+         hidden extension panel does not reappear in another project. */
+      if (hidden) PM?.Layout?.rememberPanelClosed?.(id);
+      return hidden || PM?.Layout?.isPanelClosed?.(id) === true;
+    },
     refresh: (id) => PM?.Layout?.refresh?.(id),
     list: () => [...new Set([...kernel.panels.ids(), ...Object.keys(PM?.PANELS ?? {})])]
   };

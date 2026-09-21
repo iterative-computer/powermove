@@ -48,6 +48,12 @@ export const IPC = {
   mediaProxyRead: 'media-proxy:read',
   mediaProxyRelease: 'media-proxy:release',
   mediaRevealSource: 'media:reveal-source',
+  mediaOpenLocalSource: 'media:open-local-source',
+  cloudStatus: 'cloud:status',
+  cloudPrompt: 'cloud:prompt',
+  cloudDownload: 'cloud:download',
+  cloudRead: 'cloud:read',
+  cloudRelease: 'cloud:release',
   attachmentReveal: 'attachment:reveal',
 
   extensionFork: 'ext:fork',
@@ -579,16 +585,22 @@ export interface PowermoveBridge {
     beginPreview(size: number): Promise<string>;
     writePreview(token: string, offset: number, data: Uint8Array): Promise<void>;
     finishPreview(token: string): Promise<{ token: string; size: number }>;
+    cloudStatus(paths: string[]): Promise<Record<string, CloudFileState>>;
+    openLocalSource(path: string): Promise<{ token: string; size: number } | null>;
+    cloudPrompt(names: string[]): Promise<{ download: boolean; automatic: boolean }>;
+    downloadCloudSource(path: string): Promise<{ token: string; size: number }>;
+    readCloudSource(token: string, offset: number, length: number): Promise<Uint8Array>;
+    releaseCloudSource(token: string): Promise<void>;
     sourcePath(file: File): string | null;
     revealSource(sourcePath: string): Promise<void>;
-    createPlaybackProxy(file: File): Promise<MediaProxyResult>;
+    createPlaybackProxy(file: File, sourcePath?: string): Promise<MediaProxyResult>;
     createImageSequence(files: File[], fps: number, onProgress?: (completed: number) => void): Promise<MediaProxyResult>;
     /** Encode frames the renderer decoded from an animated image into a proxy. */
     beginAnimation(fps: number, repeats: number[]): Promise<string>;
     writeAnimationFrame(token: string, index: number, offset: number, data: Uint8Array): Promise<void>;
     finishAnimation(token: string, onProgress?: (completed: number) => void): Promise<MediaProxyResult>;
     /** Convert a still Chromium cannot decode, such as TIFF or HEIC, to PNG. */
-    createStillImage(file: File): Promise<MediaProxyResult>;
+    createStillImage(file: File, sourcePath?: string): Promise<MediaProxyResult>;
     readPlaybackProxy(token: string, offset: number, length: number): Promise<Uint8Array>;
     releasePlaybackProxy(token: string): Promise<void>;
   };
@@ -690,3 +702,5 @@ export interface PowermoveBridge {
 
   extensions: PowermoveExtensionsBridge;
 }
+
+export type CloudFileState = 'local' | 'icloud' | 'cloud' | 'missing' | 'unknown';

@@ -1,3 +1,4 @@
+import { COMMAND_JSON_LIMIT } from '../../shared/edit-limits';
 import { EXTENSION_ID } from '../../shared/extensions';
 
 export interface NativeMcpServerConfig {
@@ -30,8 +31,13 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'get_project_state',
-    description: 'Read the live Powermove composition, selection, layers, editable properties, keyframes, effects, markers, and current revision. Call this again after edits instead of assuming cached state. Results are paged: use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit; counts indicate omitted data.',
-    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1, maximum: 20 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1, maximum: 100 }, keyframeLimit: { type: 'integer', minimum: 0, maximum: 80 } })
+    description: 'Read the live Powermove composition, selection, layers, editable properties, keyframes, effects, markers, and current revision. Call this again after edits or a revision conflict to refresh the edit baseline, then adjust commands to the observed state and retry. Results are paged: use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit; counts indicate omitted data.',
+    inputSchema: closedObject({ layerOffset: { type: 'integer', minimum: 0 }, layerLimit: { type: 'integer', minimum: 1 }, keyframeOffset: { type: 'integer', minimum: 0 }, layerId: { type: 'string' }, propertyOffset: { type: 'integer', minimum: 0 }, propertyLimit: { type: 'integer', minimum: 1 }, keyframeLimit: { type: 'integer', minimum: 0 } })
+  },
+  {
+    name: 'select_layers',
+    description: 'Select existing layers by their IDs from get_project_state, or clear selection with an empty array. Use before inspecting or operating selection-based panel controls. Does not change layer properties, locks, or animation.',
+    inputSchema: closedObject({ layerIds: { type: 'array', items: { type: 'string' }, uniqueItems: true }, add: { type: 'boolean' } }, ['layerIds'])
   },
   {
     name: 'get_panel_layout',
@@ -82,16 +88,15 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'apply_commands',
-    description: 'Apply one to eighty typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for project-only runs; runs using panel controls retain normal editor Undo. Never edit the project JSON directly.',
+    description: 'Apply typed Powermove edit commands to the live composition as a guarded transaction. Commands remain editable and keyframeable and are grouped into one Undo for uninterrupted project-only runs; interleaved edits and panel controls retain normal editor Undo. Batches are never silently truncated. On a revision conflict, read get_project_state and retry against the refreshed state. Never edit the project JSON directly.',
     inputSchema: closedObject({
       label: { type: 'string', minLength: 1, maxLength: 80 },
       commands: {
         type: 'array',
         minItems: 1,
-        maxItems: 80,
         items: {
           oneOf: [
-            { type: 'string', maxLength: 50_000 },
+            { type: 'string', maxLength: COMMAND_JSON_LIMIT },
             { type: 'object' }
           ]
         }
@@ -120,7 +125,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'rollback_changes',
-    description: 'Roll back every live composition edit made by this agent run, without touching earlier project work. The run may make a fresh guarded edit after rolling back.',
+    description: 'Roll back every live composition edit made by this agent run, without touching earlier project work. Available for uninterrupted project-only runs; after interleaved edits or panel controls, use normal editor Undo. The run may make a fresh guarded edit after rolling back.',
     inputSchema: closedObject({})
   },
   {

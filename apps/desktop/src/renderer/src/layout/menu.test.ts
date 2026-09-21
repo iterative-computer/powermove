@@ -15,7 +15,7 @@ function harness(panelId = 'notes', x = 10, y = 10) {
   const menu = vi.fn();
   const PM: any = {
     Kernel: kernel,
-    Layout: { ws: workspace },
+    Layout: { ws: workspace, closePanel: vi.fn() },
     PANELS: { [panelId]: { id: panelId, title: panelId === 'viewer' ? 'Viewer' : 'Notes' } },
     Popout: { open: vi.fn() },
     WS: { mutate: vi.fn((fn: any) => fn(workspace)) },
@@ -47,7 +47,7 @@ describe('panel context menu contributions', () => {
   });
 
   it('only shows the essential built-in panel actions with native icons', () => {
-    const { open } = harness();
+    const { open, PM } = harness();
 
     expect(open().map((item) => item === '-' ? item : 'header' in item ? item.header : item.label))
       .toEqual(['Notes', 'Pop out to window', 'Close panel']);
@@ -56,6 +56,9 @@ describe('panel context menu contributions', () => {
       { label: 'Pop out to window', icon: 'export' },
       { label: 'Close panel', icon: 'x' }
     ]);
+    const close = open().find((item) => item !== '-' && 'label' in item && item.label === 'Close panel');
+    if (close && close !== '-' && 'run' in close) close.run?.();
+    expect(PM.Layout.closePanel).toHaveBeenCalledWith(PM.Layout.ws, 'notes');
   });
 
   it('appends contributed items after the built-in rows, behind a separator', () => {

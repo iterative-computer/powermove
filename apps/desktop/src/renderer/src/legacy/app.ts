@@ -387,7 +387,10 @@ async function restoreProjectAssets(project: any, warn: any = true) {
   PM.invalidate('all');
   if (warn && result.missing.length) {
     const count = result.missing.length;
-    PM.toast(count === 1
+    const loadFailed = result.missing.some((meta: any) => PM.assets.errors?.has(meta.id));
+    PM.toast(loadFailed
+      ? `${count === 1 ? 'One media file could' : `${count} media files could`} not be loaded · check the media panel`
+      : count === 1
       ? 'One media file is missing · import it again to relink it'
       : `${count} media files are missing · import them again to relink them`, 5000);
   }

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -9,6 +9,7 @@ import {
   agentWorkspaceRoot,
   clearSession,
   prepareAgentWorkspace,
+  preserveCancelledRun,
   readSession,
   safeAgentComponent,
   sessionPathFor,
@@ -17,6 +18,19 @@ import {
 } from './workspace';
 
 const temporaryDirectories: string[] = [];
+
+it('preserves a failed run before the provider has written its first thread session', async () => {
+  const userData = await temporaryDirectory();
+  const req = request({ threadId: 'never-started' });
+  const options = { ...workspaceOptions(), extensionsDir: path.join(userData, 'extensions') };
+  const original = await prepareAgentWorkspace(req, userData, 'project', agentResultSchema(), options);
+  await writeFile(path.join(original.stagingDirectory, 'draft.txt'), 'partial work');
+  expect(await readSession(original.sessionPath)).toBeNull();
+  await preserveCancelledRun(original);
+  const resumed = await prepareAgentWorkspace(req, userData, 'project', agentResultSchema(), options);
+  expect(resumed.runId).toBe(original.runId);
+  expect(await readFile(path.join(resumed.stagingDirectory, 'draft.txt'), 'utf8')).toBe('partial work');
+});
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'powermove-workspace-test-'));

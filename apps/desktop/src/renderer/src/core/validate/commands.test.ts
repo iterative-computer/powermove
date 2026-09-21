@@ -5,9 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { assertNever, COMMAND_TYPES, type EditCommand } from '../types/commands';
 import {
-  MAX_DELETE_TARGETS,
-  MAX_EASING_TARGETS,
-  MAX_KEYFRAMES,
+  COMMAND_JSON_LIMIT,
   ValidationError,
   parseAgentEditCommand,
   parseEditCommand,
@@ -111,11 +109,11 @@ const invalidCommands: unknown[] = [
   { type: 'transform_layers', transform: { edits: [] } }
 ];
 
-const huge = 'x'.repeat(50_001);
+const huge = 'x'.repeat(COMMAND_JSON_LIMIT + 1);
 const oversizedCommands: unknown[] = [
-  {type: 'group_layers', targets: ['x'.repeat(60000)]},
-  {type: 'ungroup_layers', targets: ['x'.repeat(60000)]},
-  {type: 'move_to_group', targets: ['x'.repeat(60000)], group: null},
+  {type: 'group_layers', targets: [huge]},
+  {type: 'ungroup_layers', targets: [huge]},
+  {type: 'move_to_group', targets: [huge], group: null},
   { type: 'set_property', path: 'opacity', value: huge },
   { type: 'replace_keyframes', path: 'opacity', keyframes: [{ time: 0, value: 0 }], expression: huge },
   { type: 'set_easing', keyframes: [huge], curve: [0, 0, 1, 1] },
@@ -308,14 +306,14 @@ describe('parseEditCommand', () => {
     }
   });
 
-  it('caps model-authored keyframes and delete targets', () => {
+  it('preserves complete model-authored keyframes and delete targets', () => {
     const keyframes = parseEditCommand({
       type: 'replace_keyframes', path: 'opacity',
       keyframes: Array.from({ length: 85 }, (_, index) => ({ time: index, value: index }))
     });
     expect(keyframes).not.toBeInstanceOf(ValidationError);
     if (!(keyframes instanceof ValidationError) && keyframes.type === 'replace_keyframes') {
-      expect(keyframes.keyframes).toHaveLength(MAX_KEYFRAMES);
+      expect(keyframes.keyframes).toHaveLength(85);
     }
 
     const deleted = parseEditCommand({
@@ -323,19 +321,19 @@ describe('parseEditCommand', () => {
     });
     expect(deleted).not.toBeInstanceOf(ValidationError);
     if (!(deleted instanceof ValidationError) && deleted.type === 'delete_layers') {
-      expect(deleted.targets).toHaveLength(MAX_DELETE_TARGETS);
+      expect(deleted.targets).toHaveLength(25);
     }
   });
 
-  it('allows the legacy 1000-keyframe easing target cap', () => {
+  it('preserves easing selections beyond 1000 keyframes', () => {
     const parsed = parseEditCommand({
       type: 'set_easing',
-      keyframes: Array.from({ length: MAX_EASING_TARGETS + 5 }, (_, index) => `key-${index}`),
+      keyframes: Array.from({ length: 1005 }, (_, index) => `key-${index}`),
       curve: 'power'
     });
     expect(parsed).not.toBeInstanceOf(ValidationError);
     if (!(parsed instanceof ValidationError) && parsed.type === 'set_easing') {
-      expect(parsed.keyframes).toHaveLength(MAX_EASING_TARGETS);
+      expect(parsed.keyframes).toHaveLength(1005);
     }
   });
 
@@ -404,10 +402,18 @@ describe('parseEditCommand', () => {
 });
 
 describe('parseEditCommands', () => {
-  it('bounds lists and returns only typed commands', () => {
-    const parsed = parseEditCommands(validCommands, { maxCommands: 3 });
-    expect(parsed).not.toBeInstanceOf(ValidationError);
-    if (!(parsed instanceof ValidationError)) expect(parsed.map(command => command.type)).toEqual(COMMAND_TYPES.slice(0, 3));
+  it('rejects explicitly limited batches instead of silently truncating them', () => {
+    expect(parseEditCommands(validCommands, { maxCommands: 3 })).toBeInstanceOf(ValidationError);
+    expect(parseEditCommands(validCommands.slice(0, 3), { maxCommands: 3 })).toHaveLength(3);
+    expect(parseEditCommands(Array.from({ length: 100 }, () => validCommands[0]))).toHaveLength(100);
+  });
+
+  it('accepts large command bodies and rejects oversized payloads explicitly', () => {
+    const command = { type: 'set_content', patch: { text: 'x'.repeat(60_000) } };
+    expect(parseEditCommand(JSON.stringify(command))).toEqual(command);
+    command.patch.text = 'x'.repeat(COMMAND_JSON_LIMIT);
+    expect(parseEditCommand(command)).toBeInstanceOf(ValidationError);
+    expect(parseEditCommand(JSON.stringify(command))).toBeInstanceOf(ValidationError);
   });
 
   it('skips invalid list members by default like sanitizeProposal', () => {

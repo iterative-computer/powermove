@@ -1,7 +1,6 @@
 import type { MenuContribution } from '../kernel/api';
 import type { PMRegistry } from '../legacy/registry';
 import {
-  hidePanel,
   type DockSpec,
   type PanelSpec,
   type Workspace
@@ -34,7 +33,7 @@ export function openPanelMenu(
     ...(spec.id === 'viewer' ? [] : [{
       label: 'Close panel',
       icon: 'x',
-      run: () => PM.WS.mutate((workspace: Workspace) => hidePanel(workspace, spec.id))
+      run: () => PM.WS.mutate((workspace: Workspace) => PM.Layout.closePanel(workspace, spec.id))
     }]),
     ...(contributions.length ? ['-' as const, ...contributions] : [])
   ];

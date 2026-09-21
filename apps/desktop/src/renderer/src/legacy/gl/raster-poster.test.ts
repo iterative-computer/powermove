@@ -22,6 +22,7 @@ function posterRegistry(): {
     toBlob: (callback: (blob: Blob) => void) => callback(posterBlob),
   };
   vi.stubGlobal('window', {
+    File,
     document: { createElement: () => canvas },
     navigator: { hardwareConcurrency: 4 },
     createImageBitmap: vi.fn(async () => ({ width: 640, height: 360, close: vi.fn() })),
@@ -200,4 +201,70 @@ it('publishes ready media while another restore waits, and clears loading on fai
   expect((await restore).missing.map((m: any) => m.id)).toEqual(['slow']);
   expect(PM.assets.loading.size).toBe(0);
   PM.assets.clear();
+});
+
+function localSourceRegistry() {
+  const registry = posterRegistry();
+  const { PM } = registry;
+  const meta = { id: 'local-image', kind: 'image', name: 'photo.png', sourcePath: '/photos/photo.png', fingerprint: 'fingerprint', storageKey: 'media:fingerprint' };
+  PM.proj.assets[meta.id] = meta;
+  const media = {
+    openLocalSource: vi.fn(async () => ({ token: 'local', size: 5 })),
+    readCloudSource: vi.fn(async () => new TextEncoder().encode('image')),
+    releaseCloudSource: vi.fn(async () => undefined),
+  };
+  (window as any).powermove = { media };
+  return { ...registry, meta, media };
+}
+
+it.each(['missing', 'read error', 'decode error'])('recovers the original file when the media cache has a %s', async failure => {
+  const { PM, meta, media, put } = localSourceRegistry();
+  PM.proj.layers = [{ id: 'clip', type: 'image', d: { asset: meta.id }, from: 2, to: 4 }];
+  const layers = JSON.stringify(PM.proj.layers);
+  if (failure === 'read error') PM.MediaStore.get.mockRejectedValue(new Error('Cache read failed'));
+  if (failure === 'decode error') {
+    PM.MediaStore.get.mockImplementation(async (value: any) => typeof value === 'object' ? imageFile() : null);
+    vi.mocked(window.createImageBitmap).mockRejectedValueOnce(new Error('Corrupt cache'));
+  }
+  const result = await PM.assets.restoreProject(PM.proj);
+  expect(result.missing).toEqual([]);
+  expect(result.restored).toHaveLength(1);
+  expect(PM.assets.get(meta.id)).toMatchObject({ id: meta.id, storageKey: meta.storageKey, persisted: true });
+  expect(JSON.stringify(PM.proj.layers)).toBe(layers);
+  expect(PM.proj.assets[meta.id]).toBe(meta);
+  expect(put).toHaveBeenCalledWith(meta.storageKey, expect.any(Blob), expect.objectContaining({ fingerprint: 'fingerprint' }));
+  expect(media.releaseCloudSource).toHaveBeenCalledWith('local');
+  expect(PM.assets.errors.size).toBe(0);
+  expect(PM.assets.loading.size).toBe(0);
+  PM.assets.clear();
+});
+
+it('rejects a changed source instead of silently replacing existing timeline media', async () => {
+  const { PM, meta, put } = localSourceRegistry();
+  PM.MediaImport.fingerprint.mockResolvedValue('different-file');
+  const original = JSON.stringify(meta);
+  const result = await PM.assets.restoreProject(PM.proj);
+  expect(result.missing).toEqual([meta]);
+  expect(PM.assets.get(meta.id)).toBeUndefined();
+  expect(PM.assets.errors.get(meta.id)).toContain('source file has changed');
+  expect(JSON.stringify(meta)).toBe(original);
+  expect(put).not.toHaveBeenCalled();
+  PM.assets.clear();
+});
+
+it('keeps loading visible until source recovery finishes and discards recovery after a project switch', async () => {
+  const { PM, meta, media, put } = localSourceRegistry();
+  let finish!: (value: { token: string; size: number }) => void;
+  media.openLocalSource.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const restore = PM.assets.restoreProject(PM.proj);
+  await vi.waitFor(() => expect(media.openLocalSource).toHaveBeenCalled());
+  expect(PM.assets.loading.has(meta.id)).toBe(true);
+  PM.assets.clear();
+  PM.proj = { assets: {}, layers: [] };
+  finish({ token: 'local', size: 5 });
+  expect(await restore).toMatchObject({ stale: true });
+  expect(PM.assets.map.size).toBe(0);
+  expect(PM.assets.errors.size).toBe(0);
+  expect(media.releaseCloudSource).toHaveBeenCalledWith('local');
+  expect(put).not.toHaveBeenCalled();
 });

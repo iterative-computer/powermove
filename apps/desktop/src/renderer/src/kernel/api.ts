@@ -522,6 +522,21 @@ export interface EditAPI {
 }
 
 export interface ImportPlacement { at: number; index?: number }
+/** Normalized anchor within imported visual content: 0 = start, 0.5 = center, 1 = end. */
+export interface ImportDefaults { anchor: { x: number; y: number } }
+export interface InspectorSectionContext { layerIds: string[] }
+export interface InspectorSectionDefinition {
+  id: string;
+  title: string;
+  after?: 'content' | 'transform' | 'effects';
+  when?(context: InspectorSectionContext): boolean;
+  /** Mount controls; return cleanup. Rebuilt when the selection changes. */
+  build(target: HTMLElement, context: InspectorSectionContext): void | (() => void) | Disposable;
+}
+export interface InspectorAPI {
+  registerSection(section: InspectorSectionDefinition): Disposable;
+  sections(): InspectorSectionDefinition[];
+}
 export interface ImportFilesOptions { project?: Project; placement?: ImportPlacement | null; sequence?: boolean; replaceAssetId?: string }
 export interface RuntimeAsset extends AssetRecord { blob?: Blob; sourceText?: string; [key: string]: unknown }
 export interface WaveformOptions { [key: string]: unknown }
@@ -538,6 +553,10 @@ export interface FontCatalog {
  * Media exposes timing queries, file import, layer-command creation, waveform drawing, runtime raster assets and fonts. Imports/assets/fonts may perform asynchronous I/O and invalidate caches; command creation and timing helpers do not mutate the project by themselves.
  */
 export interface MediaAPI {
+  /** Applies to future image, video and SVG imports and asset-to-timeline additions. */
+  registerImportDefaults(defaults: ImportDefaults): Disposable;
+  /** Latest active mod's override, or null for the native import behavior. */
+  getImportDefaults(): ImportDefaults | null;
   readonly timing: { isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number };
   importFiles(files: FileList | File[], options?: ImportFilesOptions): Promise<unknown>;
   commandForAsset(id?: string, at?: number): EditCommand | undefined;
@@ -845,6 +864,7 @@ export interface StorageAPI {
 /* ── events ──────────────────────────────────────────────── */
 
 export interface KernelEvents {
+  'inspector:changed': undefined;
   'project:changed': { kind: 'values' | 'structure' | 'project' | 'assets' | 'library' | 'history' | 'replace' };
   selection: Selection;
   time: number;
@@ -944,6 +964,7 @@ export interface PowermoveAPI {
   readonly history: HistoryAPI;
   readonly edit: EditAPI;
   readonly media: MediaAPI;
+  readonly inspector: InspectorAPI;
   readonly render: RenderAPI;
   readonly uiState: UIStateAPI;
   readonly ui: UIAPI;

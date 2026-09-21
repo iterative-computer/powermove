@@ -54,7 +54,7 @@ test('Settings › Project edits the live composition and its export settings', 
   }
 });
 
-test('New composition asks for the settings that matter before creating', async () => {
+test('New composition asks for the settings that matter before creating', async ({}, info) => {
   const session = await launchApp();
   try {
     const { page } = session;
@@ -71,12 +71,38 @@ test('New composition asks for the settings that matter before creating', async 
     await background.click();
     const colorPicker = page.getByRole('dialog', { name: 'Background', exact: true });
     await expect(colorPicker).toBeVisible();
+    await colorPicker.screenshot({ path: info.outputPath('background-picker.png') });
+    const geometry = await colorPicker.evaluate(element => {
+      const plane = element.querySelector('.fill-sv')!;
+      const hue = element.querySelector('.fill-hue')!;
+      const planeRect = plane.getBoundingClientRect();
+      const hueRect = hue.getBoundingClientRect();
+      const bounds = element.getBoundingClientRect();
+      return {
+        planeBackground: getComputedStyle(plane).backgroundImage,
+        hueHeight: hueRect.height,
+        hueBesidePlane: hueRect.left >= planeRect.right && Math.abs(hueRect.top - planeRect.top) < 1,
+        channelsInside: [...element.querySelectorAll('.color-channel input')].every(input => {
+          const rect = input.getBoundingClientRect();
+          return rect.width >= 30 && rect.height >= 20 && rect.left >= bounds.left && rect.right <= bounds.right;
+        }),
+        swatchesVisible: [...element.querySelectorAll('.color-compare-swatch')].every(swatch => swatch.getBoundingClientRect().height >= 24)
+      };
+    });
+    expect(geometry.planeBackground).toContain('linear-gradient');
+    expect(geometry.hueHeight).toBeGreaterThanOrEqual(148);
+    expect(geometry).toMatchObject({ hueBesidePlane: true, channelsInside: true, swatchesVisible: true });
+
+    const originalBackground = await background.textContent();
+    await colorPicker.getByRole('button', { name: '#0A84FF', exact: true }).click();
+    await expect(colorPicker.getByLabel('Background hex value')).toHaveValue('#0A84FF');
 
     // Dismissing the picker must not send focus back through a native colour
     // input and reopen it. The New composition dialog remains in place.
     await page.mouse.click(8, 8);
     await expect(colorPicker).toHaveCount(0);
     await expect(dialog).toBeVisible();
+    await expect(background).toHaveText(originalBackground!);
     await page.waitForTimeout(100);
     await expect(colorPicker).toHaveCount(0);
 

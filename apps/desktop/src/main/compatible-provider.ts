@@ -186,7 +186,7 @@ export class CompatibleProvider {
                   if (message.tool_calls.length !== 1) throw new Error('Call complete_task by itself after all other tools finish.');
                   completed = await workspace.finish(args, signal);
                   finished = true;
-                  result = { runId: req.id, callId: tool.id, ok: true, content: [{ type: 'text', text: 'Result saved. Powermove will load and verify changed extensions.' }] };
+                  result = { runId: req.id, callId: tool.id, ok: true, content: [{ type: 'text', text: 'Result saved. Powermove will check requested media imports and extensions, then continue any required live verification.' }] };
                 } else result = { runId: req.id, callId: tool.id, ok: true, content: await workspace.call(tool.function.name, args, signal) };
               } else result = await callTool!(tool.function.name, args);
             } catch (error) {
@@ -232,14 +232,42 @@ export class CompatibleProvider {
 export async function readCompletion(response: Response, signal: AbortSignal, onText: (text: string) => void): Promise<{ content: string; tool_calls?: any[] }> {
   if (!response.body) throw new Error('The provider returned no response stream.');
   const reader = response.body.getReader(), decoder = new TextDecoder();
-  let buffer = '', content = '', bytes = 0, finished = false;
+  let buffer = '', content = '', pendingData = '', bytes = 0, finished = false;
   const calls = new Map<number, any>();
+  const invalidStream = () => new Error('The provider returned an invalid response stream. Your conversation is kept; try again.');
+  const incompleteJson = (error: unknown, data: string) => {
+    if (!(error instanceof SyntaxError)) return false;
+    if (/unexpected end|unterminated string/i.test(error.message)) return true;
+    const position = /position (\d+)/i.exec(error.message);
+    return position !== null && Number(position[1]) >= data.length;
+  };
   const accept = (line: string) => {
     if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
+    let data = line.slice(5);
+    if (data.startsWith(' ')) data = data.slice(1);
     if (!data) return;
-    if (data === '[DONE]') { finished = true; return; }
-    const event = JSON.parse(data);
+    if (data.trim() === '[DONE]') {
+      if (pendingData) throw invalidStream();
+      finished = true;
+      return;
+    }
+    const candidates = pendingData ? [pendingData + data, `${pendingData}\n${data}`] : [data];
+    let event: any;
+    let parseError: unknown;
+    let incomplete = false;
+    for (const candidate of candidates) {
+      try { event = JSON.parse(candidate); parseError = undefined; break; }
+      catch (error) { parseError = error; incomplete ||= incompleteJson(error, candidate); }
+    }
+    if (parseError) {
+      if (!incomplete) throw invalidStream();
+      // Some compatible gateways turn one upstream JSON event into several
+      // data records. Keep the incomplete bytes until the next record arrives.
+      pendingData = candidates[0]!;
+      return;
+    }
+    pendingData = '';
+    if (!event || typeof event !== 'object' || Array.isArray(event)) throw invalidStream();
     if (event.error) throw new Error('The provider interrupted the response. Your conversation is kept; try again.');
     const choice = event.choices?.[0];
     if (choice?.finish_reason === 'length') throw new Error('The model reached its output limit. Try a smaller request.');
@@ -267,7 +295,8 @@ export async function readCompletion(response: Response, signal: AbortSignal, on
       while ((end = buffer.indexOf('\n')) !== -1) { accept(buffer.slice(0, end).replace(/\r$/, '')); buffer = buffer.slice(end + 1); }
       if (finished) break;
     }
-    buffer += decoder.decode(); if (buffer.trim()) accept(buffer.trim());
+    buffer += decoder.decode(); if (buffer.trim()) accept(buffer.replace(/\r$/, ''));
+    if (pendingData) throw new Error('The connection ended before the model finished. Your conversation is kept; try again.');
     if (!finished) throw new Error('The connection ended before the model finished. Your conversation is kept; try again.');
     const tool_calls = [...calls.values()];
     if (tool_calls.some(tool => !tool.id || !tool.function.name)) throw new Error('The model returned an incomplete tool call.');

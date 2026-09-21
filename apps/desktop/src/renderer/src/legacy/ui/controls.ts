@@ -177,7 +177,7 @@ function openColorPicker(initial: any, edit: any, label: any) {
   let chosen = before;
   let hsv = rgbToHsv(hexToRgb(chosen));
 
-  const sv = h('div.fill-sv.color-sv', { role: 'slider', tabindex: '0', 'aria-label': 'Saturation and brightness' }, h('i'));
+  const sv = h('div.fill-sv', { role: 'slider', tabindex: '0', 'aria-label': 'Saturation and brightness' }, h('i'));
   const hue = h('div.fill-hue.color-hue', { role: 'slider', tabindex: '0', 'aria-label': 'Hue' }, h('i'));
   const newSwatch = h('span.color-compare-swatch', { 'aria-hidden': 'true' });
   const oldSwatch = h('button.color-compare-swatch.is-before', { 'aria-label': `Restore original color ${before}`, title: `Original ${before}` });

@@ -180,7 +180,7 @@
       {#if item.action}
         <button type="button" class="toast-action" onclick={() => { item.action?.run(); dismiss(item.id); }}>{item.action.label}</button>
       {/if}
-      <button type="button" aria-label="Dismiss notification" onclick={() => dismiss(item.id, true)}>×</button>
+      <button type="button" class="toast-dismiss" aria-label="Dismiss notification" title="Dismiss notification" onclick={() => dismiss(item.id, true)}><Icon {PM} name="x" /></button>
     {/if}
   </div>
 {/snippet}
@@ -223,6 +223,14 @@
   .toast[data-toast-kind="alert"] :global(.toast-icon),
   .toast[data-toast-error]>button,
   .toast[data-toast-kind="alert"]>button{margin-top:1px}
+  /* Keep the close control on the trailing edge, aligned with the first line,
+     even when a short notice does not fill the minimum card width. */
+  .toast>.toast-dismiss{margin-left:auto;color:var(--tx-2)}
+  .toast[data-toast-error]>.toast-dismiss,
+  .toast[data-toast-kind="alert"]>.toast-dismiss{margin-top:-2px}
+  .toast-dismiss :global(.pm-icon){width:12px;height:12px}
+  .toast>.toast-dismiss:hover{color:var(--tx)}
+  .toast>.toast-dismiss:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .alert-body{display:flex;flex-direction:column;gap:2px;min-width:0;padding:1px 0}
   .alert-body>strong{font-weight:var(--fw-semibold);font-size:var(--fs-xs);line-height:14px;color:var(--tx-2)}
   .alert-body>span{min-width:0;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}

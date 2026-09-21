@@ -11,7 +11,7 @@
   ],
   "properties": {
     "summary": { "type": "string" },
-    "commands": { "type": "array", "maxItems": 80, "items": { "type": "string" } },
+    "commands": { "type": "array", "items": { "type": "string" } },
     "artifacts": {
       "type": "array",
       "items": {

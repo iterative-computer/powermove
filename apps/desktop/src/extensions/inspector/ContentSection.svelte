@@ -9,6 +9,17 @@
   const { api, doc, transport, mixed, edit: inspectorEdit } = inspectorContext();
   const { ColorField, FontField, NumField, Section, SelectField } = api.ui.controls;
   const { contentBinding } = api.ui.controls.binding;
+  const weightLabels: Record<number, string> = {
+    100: 'Thin',
+    200: 'Extra Light',
+    300: 'Light',
+    400: 'Regular',
+    500: 'Medium',
+    600: 'Semi Bold',
+    700: 'Bold',
+    800: 'Extra Bold',
+    900: 'Black',
+  };
 
   let { layer, fontsVersion = 0 }: { layer: any; fontsVersion?: number } = $props();
 
@@ -96,7 +107,7 @@
 
         get={get('weight', 400)}
         edit={edit('weight', 'Weight')}
-        options={weights.map((value) => ({ v: value, label: String(value) }))}
+        options={weights.map((value) => ({ v: value, label: weightLabels[value] ?? String(value) }))}
         label="Weight"
         onChange={(value: unknown) => api.media.fonts?.ensure?.(content.font, Number(value) || 400)}
       />
