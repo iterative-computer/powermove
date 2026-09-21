@@ -144,10 +144,16 @@ export function install(PM: PMRegistry): void {
         const covered = [...pending.scopes.values()].some((item: any) =>
           item.path.length <= path.length && item.path.every((part: any, index: number) => part === path[index]));
         if (covered) continue;
+        const before = valueAt(PM.proj, path);
         for (const [key, item] of pending.scopes) {
-          if (path.length < item.path.length && path.every((part, index) => part === item.path[index])) pending.scopes.delete(key);
+          if (path.length < item.path.length && path.every((part, index) => part === item.path[index])) {
+            // The live parent already includes earlier child edits. Fold the
+            // original child values into its snapshot before discarding them.
+            before.value = applyPatch(before.value, [{ path: item.path.slice(path.length), ...item.before }]);
+            pending.scopes.delete(key);
+          }
         }
-        pending.scopes.set(pathKey(path), { path, before: valueAt(PM.proj, path) });
+        pending.scopes.set(pathKey(path), { path, before });
       }
       return true;
     },
