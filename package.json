@@ -1,6 +1,6 @@
 {
   "name": "powermove-monorepo",
-  "license": "GPL-3.0-or-later",
+  "license": "AGPL-3.0-or-later",
   "private": true,
   "description": "Powermove: an AI-native motion editor for macOS, its website, and shared packages.",
   "workspaces": [

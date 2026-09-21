@@ -93,4 +93,4 @@ To run a script in one workspace, use `bun run --cwd apps/desktop <script>` (or 
 
 ## License
 
-Powermove is free software, licensed under the [GNU General Public License v3.0 or later](LICENSE).
+Powermove is free software, licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).

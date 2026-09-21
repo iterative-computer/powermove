@@ -2,7 +2,7 @@
   import Header from '$lib/Header.svelte';
   import { GITHUB } from '$lib/links';
 
-  const updated = 'September 15, 2026';
+  const updated = 'September 21, 2026';
 </script>
 
 <svelte:head>
@@ -22,7 +22,7 @@
 
   <h2>License</h2>
   <p>
-    The Powermove source code is available <a href={GITHUB} target="_blank" rel="noopener">on GitHub</a> under the <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GNU General Public License v3.0</a>. That license controls what you may do with the code, including running, studying, modifying, and redistributing it. These terms cover your use of the built app and this website, and add nothing that restricts rights the GPL grants you. Where these terms and the GPL conflict about the code, the GPL wins.
+    The Powermove source code is available <a href={GITHUB} target="_blank" rel="noopener">on GitHub</a> under the <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU Affero General Public License v3.0</a>. That license controls what you may do with the code, including running, studying, modifying, redistributing, and hosting it for others. These terms cover your use of the built app and this website, and add nothing that restricts rights the AGPL grants you. Where these terms and the AGPL conflict about the code, the AGPL wins.
   </p>
 
   <h2>Your content</h2>
