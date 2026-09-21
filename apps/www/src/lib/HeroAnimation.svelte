@@ -69,7 +69,7 @@
   });
 </script>
 
-<div class="hero-art" role="group" aria-label="Made in Powermove: animated typography showcasing a gradient editor, 3D system, and shader">
+<div class="hero-art" role="group" aria-label="Made in Powermove: animated typography showcasing a gradient editor, 3D system, and effect">
   {#if !ready}
     <!-- Match the player's opening hold exactly: separate text layers preserve
          its word spacing, anchor correction, and baselines during handoff. -->

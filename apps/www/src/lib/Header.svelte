@@ -6,7 +6,7 @@
   const items = [
     { label: 'Editor', href: '/#editor' },
     { label: 'Agent', href: '/#agent' },
-    { label: 'Mods', href: '/#mods' },
+    { label: 'Extensions', href: '/#extensions' },
     { label: 'Export', href: '/#export' },
   ];
 
