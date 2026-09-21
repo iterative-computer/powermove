@@ -428,6 +428,28 @@ describe('AssetsPanel', () => {
     expect(rows()).toHaveLength(1);
     expect(rows()[0]!.tabIndex).toBe(0);
   });
+
+  it('does not apply a pending deletion confirmation to a different project', async () => {
+    const { PM, project, removeAsset, events } = setup([IMAGE], { references: { 'image-1': 1 } });
+    let confirm!: (approved: boolean) => void;
+    const approval = new Promise<boolean>(resolve => { confirm = resolve; });
+    PM.confirm.mockReturnValueOnce(approval);
+    target.querySelector<HTMLButtonElement>('.asset-delete')!.click();
+    const nextProject = { id: 'project-2', assets: { [IMAGE.id]: { ...IMAGE } }, layers: [] };
+    PM.proj = nextProject;
+    doc.replace(nextProject as any);
+    flushSync();
+    confirm(true);
+    await approval;
+    flushSync();
+
+    expect(removeAsset).not.toHaveBeenCalled();
+    expect(PM.hist.do).not.toHaveBeenCalled();
+    expect(project.assets[IMAGE.id]).toBeDefined();
+    expect(nextProject.assets[IMAGE.id]).toBeDefined();
+    expect(events).toEqual([]);
+    expect(PM.toast).toHaveBeenCalledWith('Deletion stopped because you switched projects');
+  });
 });
 
 it('shows restoring media as loading instead of missing and prevents relink actions', () => {

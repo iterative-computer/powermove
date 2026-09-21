@@ -225,7 +225,12 @@
     }
   }
 
-  function deleteAsset(asset: Asset): void {
+  function deleteAsset(asset: Asset, project = PM.proj): void {
+    if (PM.proj !== project) {
+      status = 'Deletion stopped because you switched projects';
+      PM.toast(status);
+      return;
+    }
     const result = PM.hist.do('Delete media', () => PM.MediaImport.removeAsset(PM.proj, asset.id));
     selectedAssetId = null;
     PM.sel.layers = PM.sel.layers.filter((id: string) => !result.removedLayerIds.includes(id));
@@ -241,7 +246,8 @@
   }
 
   function requestDelete(asset: Asset): void {
-    const references = PM.MediaImport.referenceCount(PM.proj, asset.id);
+    const project = PM.proj;
+    const references = PM.MediaImport.referenceCount(project, asset.id);
     if (!references) {
       deleteAsset(asset);
       return;
@@ -250,7 +256,7 @@
       message: `Delete “${asset.name}”?`,
       detail: `This also removes ${references} ${references === 1 ? 'layer that uses' : 'layers that use'} this media. You can undo this.`,
       confirmLabel: 'Delete'
-    }).then((ok: boolean) => { if (ok) deleteAsset(asset); });
+    }).then((ok: boolean) => { if (ok) deleteAsset(asset, project); });
     status = `Confirm deletion of ${asset.name}`;
   }
 
