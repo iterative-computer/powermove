@@ -14,6 +14,23 @@ interface ThreadArchive { version: 1; activeId: string; threads: AgentThread[] }
 interface Store { get(key: string, fallback: unknown): unknown; set(key: string, value: unknown): boolean | void }
 const isRecord = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 
+/** Streamed replies live inside trace entries; retain their prose in follow-ups. */
+export function conversationForAgent(messages: AgentMessage[]): Array<{ role: string; text: string }> {
+  const turns = messages.map(message => ({
+    role: message.role === 'trace' ? 'assistant' : message.role,
+    text: message.role === 'trace'
+      ? (message.steps || []).filter(step => step.kind === 'text').map(step => step.text || '').join('\n').trim()
+      : message.text || '',
+  })).filter(message => message.text).slice(-12);
+  let remaining = 30_000;
+  return turns.reverse().flatMap(message => {
+    const text = message.text.slice(-Math.min(12_000, remaining));
+    if (!remaining) return [];
+    remaining -= text.length;
+    return [{ ...message, text }];
+  }).reverse();
+}
+
 export function newAgentThread(id: string): AgentThread {
   return { id, title: 'New thread', updatedAt: Date.now(), conversation: [], composerDraft: '', attachments: [], scope: 'workspace' };
 }

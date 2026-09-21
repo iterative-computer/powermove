@@ -15,6 +15,7 @@
   import StructuredSection from './StructuredSection.svelte';
   import RetimingSection from './RetimingSection.svelte';
   import TransformSection from './TransformSection.svelte';
+  import ContributedSections from './ContributedSections.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
 
   let { panelId, api }: PanelProps & { api: PowermoveAPI } = $props();
@@ -54,12 +55,15 @@
       {:else}
         <ContentSection layer={firstLayer} {fontsVersion} />
       {/if}
+      <ContributedSections {api} after="content" layerIds={selectedLayers.map(layer => layer.id)} />
       {#if firstLayer.type !== 'audio'}<TransformSection layer={firstLayer} />{/if}
+      <ContributedSections {api} after="transform" layerIds={selectedLayers.map(layer => layer.id)} />
       <StructuredSection layer={firstLayer} />
       {#if firstLayer.type !== 'audio'}
         {#if firstLayer.type === 'shader'}<ShaderUniforms layer={firstLayer} />{/if}
         {#if firstLayer.type === 'extension'}<ExtensionLayerParams layer={firstLayer} />{/if}
         <EffectsSection layer={firstLayer} />
+        <ContributedSections {api} after="effects" layerIds={selectedLayers.map(layer => layer.id)} />
         <MasksSection layer={firstLayer} />
       {/if}
       {#if firstLayer.type === 'video' || firstLayer.type === 'precomp'}<RetimingSection layer={firstLayer} />{/if}

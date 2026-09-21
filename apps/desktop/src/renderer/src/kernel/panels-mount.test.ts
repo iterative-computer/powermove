@@ -159,6 +159,17 @@ describe('panels backend over the legacy workspace', () => {
     kernel.uninstall();
   });
 
+  it('promotes an old workspace-local dismissal to the global panel preference', () => {
+    const { PM, kernel, backend } = pmHarness();
+    PM.WS.current.hiddenPanels = [{ id: 'notes' }];
+    PM.Layout.rememberPanelClosed = vi.fn();
+    PM.Layout.isPanelClosed = vi.fn(() => false);
+
+    expect(backend.isHidden?.('notes')).toBe(true);
+    expect(PM.Layout.rememberPanelClosed).toHaveBeenCalledWith('notes');
+    kernel.uninstall();
+  });
+
   it('lists kernel panels unioned with whatever the legacy registry still owns', () => {
     const { PM, kernel, backend } = pmHarness();
     PM.PANELS = { viewer: {} };

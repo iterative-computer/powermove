@@ -8,6 +8,7 @@ if (process.platform === 'darwin') {
 }
 
 module.exports = {
+  cloudFileState(path, download = false) { return native?.cloudFileState?.(path, download) ?? Promise.resolve("unknown"); },
   fontFamilies() { return native?.fontFamilies?.() ?? null; },
   triggerAlignment() {
     native?.triggerAlignment();

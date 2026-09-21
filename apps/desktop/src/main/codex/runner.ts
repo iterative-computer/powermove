@@ -16,6 +16,8 @@ import { EXTENSION_ID } from '../../shared/extensions';
 import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/guards';
 import { buildAutonomousArgv, buildEditorArgv } from './adapter';
 import { publishExtensionChanges } from './change-history';
+import { AgentResultValidationError, repairAgentResult } from './result-repair';
+import { validateStagedExtensions } from './validate-staged-extensions';
 import { collectArtifacts } from './artifacts';
 import { consumeToken } from './consent';
 import { discoverCodexBinary } from './env';
@@ -358,6 +360,7 @@ export class CodexRunner {
     };
     this.active.set(req.id, state);
     let editorDirectory: string | null = null;
+    let repairingResult = false;
     let timeout: NodeJS.Timeout | null = null;
 
     try {
@@ -420,8 +423,10 @@ export class CodexRunner {
 
       let resumeId = await readSession(layout.sessionPath);
       let attempt: AttemptResult | null = null;
-      for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
-        const resuming = Boolean(resumeId);
+      const executeAutonomous = async (prompt: string, sessionId: string | null) => {
+        if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
+        // A repair must produce a new report, never reuse the rejected output.
+        await rm(layout.outputPath, { force: true });
         const argv = buildAutonomousArgv({
           schemaPath: layout.schemaPath,
           outputPath: layout.outputPath,
@@ -431,23 +436,25 @@ export class CodexRunner {
             access: authority,
             extensionsDir: layout.extensionsDir
           }),
-          prompt: req.prompt,
+          prompt,
           imagePaths: layout.imagePaths,
           model: req.model,
           reasoningEffort: req.reasoningEffort,
           access: authority,
           extensionsDir: layout.extensionsDir,
-          sessionId: resumeId,
+          sessionId,
           disabledSkillPaths,
           nativeTools: options.nativeTools
         });
-        attempt = await this.execute(req, state, binary, argv, layout.root, codexHome, layout, options, (timer) => {
+        const result = await this.execute(req, state, binary, argv, layout.root, codexHome, layout, options, (timer) => {
           timeout = timer;
         });
-        if (this.cancelled.has(req.id)) {
-          await this.cleanupCancelled(state, options.userData);
-          return cancelledResult(state);
-        }
+        if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
+        return result;
+      };
+      for (let tryIndex = 0; tryIndex < 2; tryIndex += 1) {
+        const resuming = Boolean(resumeId);
+        attempt = await executeAutonomous(req.prompt, resumeId);
         const diagnostic = attemptOutput(attempt);
         const silentFailureBeforeTurn = attempt.code !== 0 &&
           !codexTurnStarted(attempt.stdout) && !attemptHasDiagnostic(attempt);
@@ -472,20 +479,31 @@ export class CodexRunner {
         return failure(attempt ? diagnosticText(attempt, 'The autonomous agent failed.') : 'The autonomous agent failed.');
       }
 
-      let parsed: Record<string, unknown>;
-      try {
-        const value: unknown = JSON.parse(await readFile(layout.outputPath, 'utf8'));
-        if (!isRecord(value)) throw new Error('not an object');
-        parsed = value;
-      } catch {
-        return failure('The autonomous agent returned an invalid result.');
-      }
-      const requested = Array.isArray(parsed.artifacts) ? parsed.artifacts : [];
-      parsed.artifacts = await collectArtifacts(layout.runDirectory, layout.runId, requested);
-      parsed.projectId = req.projectId;
-      parsed.access = authorityForAccess(req.access);
-      const extensions = parseAgentExtensionChanges(parsed.extensions);
-      const changeSet = await publishExtensionChanges(layout, extensions ?? []);
+      const { parsed, extensions, changeSet } = await repairAgentResult(async () => {
+        if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
+        let parsed: Record<string, unknown>;
+        try {
+          const value: unknown = JSON.parse(await readFile(layout.outputPath, 'utf8'));
+          if (!isRecord(value)) throw new Error('not an object');
+          parsed = value;
+        } catch {
+          throw new AgentResultValidationError('The autonomous agent returned an invalid result. Return a JSON object matching the result schema.');
+        }
+        const requested = Array.isArray(parsed.artifacts) ? parsed.artifacts : [];
+        parsed.artifacts = await collectArtifacts(layout.runDirectory, layout.runId, requested);
+        parsed.projectId = req.projectId;
+        parsed.access = authority;
+        const extensions = parseAgentExtensionChanges(parsed.extensions);
+        await validateStagedExtensions(layout, extensions ?? []);
+        if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
+        const changeSet = await publishExtensionChanges(layout, extensions ?? []);
+        return { parsed, extensions, changeSet };
+      }, async prompt => {
+        repairingResult = true;
+        const repaired = await executeAutonomous(prompt, await readSession(layout.sessionPath));
+        if (repaired.code !== 0) throw new Error(diagnosticText(repaired, 'The agent could not correct its result.'));
+      }, options.onProgress);
+      repairingResult = false;
       await discardExtensionStage(layout);
       return {
         ok: true,
@@ -498,6 +516,9 @@ export class CodexRunner {
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);
         return cancelledResult(state);
+      }
+      if ((error instanceof AgentResultValidationError || repairingResult) && state.layout) {
+        await preserveCancelledRun(state.layout).catch(checkpointError => options.onWarning?.(`Could not save the agent checkpoint: ${String(checkpointError)}`));
       }
       return failure(error instanceof Error ? error.message : String(error));
     } finally {

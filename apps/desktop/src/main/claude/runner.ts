@@ -7,6 +7,8 @@ import type { CodexRunRequest, CodexRunResult, CodexTraceEvent } from '../../sha
 import { isRecord } from '../../shared/guards';
 import { collectArtifacts } from '../codex/artifacts';
 import { publishExtensionChanges } from '../codex/change-history';
+import { AgentResultValidationError, repairAgentResult } from '../codex/result-repair';
+import { validateStagedExtensions } from '../codex/validate-staged-extensions';
 import { consumeToken } from '../codex/consent';
 import { agentInstructions, agentResultSchema } from '../codex/instructions';
 import { parseAgentExtensionChanges } from '../codex/runner';
@@ -140,6 +142,7 @@ export class ClaudeRunner {
     };
     this.active.set(req.id, state);
     let editorDirectory: string | null = null;
+    let repairingResult = false;
     try {
       const [binary, configDirectory] = await Promise.all([
         options.binary ?? discoverClaudeBinary(options.claudeBinaryPref ?? null),
@@ -181,14 +184,15 @@ export class ClaudeRunner {
       state.layout = layout;
       let sessionId = await readSession(layout.sessionPath);
       let attempt: Attempt | null = null;
-      for (let index = 0; index < 2; index += 1) {
-        attempt = await this.execute(req, state, binary, configDirectory, layout.root, buildClaudeArgv({
+      const executeAutonomous = async (prompt: string, resumeId: string | null) => {
+        if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
+        const result = await this.execute(req, state, binary, configDirectory, layout.root, buildClaudeArgv({
           schema: agentResultSchema(),
-          prompt: req.prompt,
+          prompt,
           imagePaths: layout.imagePaths,
           model: req.model,
           reasoningEffort: req.reasoningEffort,
-          sessionId,
+          sessionId: resumeId,
           access: req.access,
           extensionsDir: layout.extensionsDir,
           instructions: agentInstructions({
@@ -199,10 +203,11 @@ export class ClaudeRunner {
           }),
           nativeTools: options.nativeTools
         }), layout, options);
-        if (this.cancelled.has(req.id)) {
-          await this.cleanupCancelled(state, options.userData);
-          return failure('The Claude run was cancelled.', true);
-        }
+        if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
+        return result;
+      };
+      for (let index = 0; index < 2; index += 1) {
+        attempt = await executeAutonomous(req.prompt, sessionId);
         const diagnostic = `${attempt.stderr}\n${attempt.resultError ?? ''}`;
         if (index === 0 && sessionId && attempt.code !== 0 && unknownSession(diagnostic)) {
           options.onProgress?.('The saved Claude thread could not be resumed — starting a fresh run…');
@@ -218,20 +223,31 @@ export class ClaudeRunner {
         await clearSession(layout.sessionPath);
         return failure(attempt ? humanizeFailure(attempt, 'The Claude agent failed.') : 'The Claude agent failed.');
       }
-      const output = attempt.output ?? (() => {
-        try { return JSON.parse(attempt.resultText); } catch { return undefined; }
-      })();
-      if (!isRecord(output)) return failure('Claude returned an invalid autonomous result.');
-      const parsed: Record<string, unknown> = { ...output };
-      parsed.artifacts = await collectArtifacts(
-        layout.runDirectory,
-        layout.runId,
-        Array.isArray(parsed.artifacts) ? parsed.artifacts : []
-      );
-      parsed.projectId = req.projectId;
-      parsed.access = authority;
-      const extensions = parseAgentExtensionChanges(parsed.extensions);
-      const changeSet = await publishExtensionChanges(layout, extensions ?? []);
+      const { parsed, extensions, changeSet } = await repairAgentResult(async () => {
+        if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
+        const output = attempt!.output ?? (() => {
+          try { return JSON.parse(attempt!.resultText); } catch { return undefined; }
+        })();
+        if (!isRecord(output)) throw new AgentResultValidationError('Claude returned an invalid autonomous result. Return a JSON object matching the result schema.');
+        const parsed: Record<string, unknown> = { ...output };
+        parsed.artifacts = await collectArtifacts(
+          layout.runDirectory,
+          layout.runId,
+          Array.isArray(parsed.artifacts) ? parsed.artifacts : []
+        );
+        parsed.projectId = req.projectId;
+        parsed.access = authority;
+        const extensions = parseAgentExtensionChanges(parsed.extensions);
+        await validateStagedExtensions(layout, extensions ?? []);
+        if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
+        const changeSet = await publishExtensionChanges(layout, extensions ?? []);
+        return { parsed, extensions, changeSet };
+      }, async prompt => {
+        repairingResult = true;
+        attempt = await executeAutonomous(prompt, await readSession(layout.sessionPath));
+        if (attempt.code !== 0 || attempt.resultError) throw new Error(humanizeFailure(attempt, 'Claude could not correct its result.'));
+      }, options.onProgress);
+      repairingResult = false;
       await discardExtensionStage(layout);
       return {
         ok: true,
@@ -244,6 +260,9 @@ export class ClaudeRunner {
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);
         return failure('The Claude run was cancelled.', true);
+      }
+      if ((error instanceof AgentResultValidationError || repairingResult) && state.layout) {
+        await preserveCancelledRun(state.layout).catch(checkpointError => options.onWarning?.(`Could not save the agent checkpoint: ${String(checkpointError)}`));
       }
       return failure(error instanceof Error ? error.message : String(error));
     } finally {

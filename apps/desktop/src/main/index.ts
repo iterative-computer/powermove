@@ -34,6 +34,7 @@ import { registerLogIpc } from './log';
 import { MIME_TYPES } from './mime';
 import { registerHapticsIpc } from './haptics';
 import { registerContextMenuIpc } from './context-menu';
+import { registerCloudMediaIpc } from './cloud-media';
 import { registerConfirmIpc } from './native-confirm';
 import { MediaProxyService, playbackConverter, previewConverter, imageSequenceConverter, stillImageConverter, registerMediaProxyIpc } from './media-proxy';
 import { registerNativeEditIpc } from './native-edit';
@@ -46,6 +47,7 @@ import { createStore, installQuitFlush, registerStoreIpc, type Store } from './s
 import { registerThemeIpc } from './theme';
 import { backgroundTesting, backgroundWindowOptions } from './background-testing';
 import { EditorWindows, restorableProjects } from './windows';
+import { isPanelPopoutRequest } from './panel-popout';
 import { OnboardingFlow, onboardingCompleted, onboardingEnabled, persistOnboardingCompleted } from './onboarding';
 
 const APP_ORIGIN = 'app://powermove';
@@ -240,7 +242,26 @@ function secureWebContents(webContents: WebContents, devRendererUrl: string | un
   webContents.on('will-frame-navigate', (event) => guard(event, event.url));
   webContents.on('will-redirect', guard);
 
-  webContents.setWindowOpenHandler(({ url }) => {
+  webContents.setWindowOpenHandler(({ url, frameName }) => {
+    const opener = BrowserWindow.fromWebContents(webContents);
+    if (isPanelPopoutRequest(url, frameName,
+      !!opener && editors.has(opener) && isAllowedNavigation(webContents.getURL(), devRendererUrl)
+    )) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          ...backgroundWindowOptions(isBackgroundTest),
+          minWidth: 280,
+          minHeight: 240,
+          webPreferences: {
+            ...backgroundWindowOptions(isBackgroundTest).webPreferences,
+            contextIsolation: true,
+            sandbox: true,
+            nodeIntegration: false
+          }
+        }
+      };
+    }
     try {
       const target = new URL(url);
       if (target.protocol === 'https:' || target.protocol === 'http:') {
@@ -644,6 +665,7 @@ if (!hasSingleInstanceLock) {
     registerFontsIpc(ipcMain, ctx);
     registerContextMenuIpc(ipcMain, ctx);
     registerConfirmIpc(ipcMain, ctx);
+    registerCloudMediaIpc(ipcMain, ctx);
     registerAgentNotifications(ipcMain, ctx);
     registerNativeEditIpc(ipcMain, ctx);
     registerLogIpc(ipcMain, ctx);

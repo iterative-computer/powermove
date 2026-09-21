@@ -233,6 +233,14 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
       cancel: (token) => link.invoke(IPC.renderCancel, { token })
     },
     media: {
+      // Browser projects restore media through the host's media store. Native
+      // source paths and cloud placeholders belong to the desktop that saved them.
+      cloudStatus: async () => ({}),
+      openLocalSource: async () => null,
+      cloudPrompt: async () => ({ download: false, automatic: false }),
+      downloadCloudSource: async () => { throw new Error('Download cloud media in the desktop app, then save the project.'); },
+      readCloudSource: async () => { throw new Error('Native media sources are unavailable in the browser.'); },
+      releaseCloudSource: async () => {},
       beginPreview: (size) => link.invoke(IPC.mediaPreviewBegin, size),
       writePreview: (token, offset, data) => link.invoke(IPC.mediaPreviewChunk, { token, offset, data }),
       finishPreview: (token) => link.invoke(IPC.mediaPreviewFinish, token),

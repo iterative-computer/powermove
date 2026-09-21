@@ -464,6 +464,10 @@ it('keeps the prose the model streamed as the reply instead of replacing it with
   assert.equal(trace.steps[1].text, spoken);
   assert.ok(!conversation.some(turn => turn.role === 'assistant' && turn.text === 'Updated the panel.'), 'no duplicate summary turn');
   assert.equal(PM.AgentUI.state.run.summary, 'Updated the panel.');
+  PM.AgentUI.submit('Continue the previous work');
+  await vi.waitFor(() => assert.equal(PM.CodexBridge.request.mock.calls.length, 2));
+  assert.ok(PM.CodexBridge.request.mock.calls[1][0].includes(JSON.stringify(spoken)));
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
 });
 
 it('falls back to the structured summary when the run streamed no prose', async () => {
@@ -587,8 +591,9 @@ it('imports autonomous artifacts even when the project changed during the run', 
   const media = new File(['clip'], 'clip.mp4', { type: 'video/mp4' });
   PM.AgentArtifacts = { load: vi.fn(async () => media) };
   PM.assetKind = vi.fn(() => 'video');
-  PM.importFiles = vi.fn(async () => {});
+  PM.importFiles = vi.fn(async () => { PM.proj.layers.push({ id: 'imported-clip', name: 'clip.mp4' }); });
   PM.CodexBridge.request = vi.fn(async () => {
+    if (PM.CodexBridge.request.mock.calls.length > 1) return emptyAgentResult;
     PM.proj.revision = 1;
     return {
       text: JSON.stringify({
@@ -602,10 +607,76 @@ it('imports autonomous artifacts even when the project changed during the run', 
   PM.AgentUI.submit('Create and import a clip');
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
 
-  assert.equal(PM.CodexBridge.request.mock.calls.length, 1, 'an import does not need command reconciliation');
+  assert.equal(PM.CodexBridge.request.mock.calls.length, 2, 'continue after import without command reconciliation');
+  assert.match(PM.CodexBridge.request.mock.calls[1][0], /imported-clip/);
+  assert.match(PM.CodexBridge.request.mock.calls[1][0], /grouping/);
   assert.equal(PM.importFiles.mock.calls.length, 1);
   assert.equal(PM.AgentUI.state.run.artifacts[0].imported, true);
   assert.equal(PM.AgentUI.state.run.reviewError, '');
+});
+
+it.each([false, true])('verifies media imports alongside live edits (%s) without duplicate imports', async liveEditsApplied => {
+  const { PM, jobs } = placementHarness();
+  const media = new File(['png'], 'screen.png', { type: 'image/png' });
+  PM.AgentArtifacts = { load: vi.fn(async () => media) };
+  PM.assetKind = vi.fn(() => 'image');
+  PM.importFiles = vi.fn(async () => { PM.proj.layers.push({ id: 'screen-layer' }); });
+  PM.AgentHarness.rollback = vi.fn(() => true);
+  const artifact = { path: 'run/screen.png', importToTimeline: true };
+  const importedResult = {
+    text: JSON.stringify({ summary: 'Prepared screen', commands: [], artifacts: [artifact], notes: [], externalActions: [] }),
+    liveEditsApplied, liveEditHistoryId: liveEditsApplied ? 'native-edits' : undefined,
+  };
+  PM.AgentUI.submit('Import the screen, align it, and group it');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].resolve(importedResult);
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  assert.equal(PM.AgentUI.state.phase, 'running');
+  assert.match(jobs[1].prompt, /screen-layer/);
+  assert.match(jobs[1].prompt, /render_frames/);
+  assert.equal(jobs[1].options.threadId, jobs[0].options.threadId);
+  jobs[1].resolve({ ...importedResult, liveEditsApplied: false });
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(PM.importFiles.mock.calls.length, 1);
+  assert.deepEqual(PM.importFiles.mock.calls[0][1].placement, { at: 0 });
+  assert.equal(PM.AgentUI.state.run.artifacts[0].imported, true);
+  await PM.AgentUI.undoSceneRun();
+  assert.equal(PM.AgentHarness.rollback.mock.calls.length, liveEditsApplied ? 2 : 1);
+  if (liveEditsApplied) assert.equal(PM.AgentHarness.rollback.mock.calls[1][0].historyId, 'native-edits');
+});
+
+it('reports imports that return without creating a layer and supplies the failure to continuation', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentArtifacts = { load: vi.fn(async () => new File(['bad'], 'bad.png', { type: 'image/png' })) };
+  PM.assetKind = vi.fn(() => 'image');
+  PM.importFiles = vi.fn(async () => {});
+  PM.AgentUI.submit('Import this image');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].resolve({ text: JSON.stringify({ summary: 'Prepared image', commands: [], artifacts: [{ path: 'bad.png', importToTimeline: true }], notes: [], externalActions: [] }) });
+  await vi.waitFor(() => assert.equal(jobs.length, 2));
+  assert.match(jobs[1].prompt, /import did not create any timeline layers/);
+  jobs[1].resolve(emptyAgentResult);
+  await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
+  assert.equal(PM.AgentUI.state.run.artifacts[0].imported, false);
+  assert.match(PM.AgentUI.state.run.reviewError, /did not create/);
+});
+
+it('does not continue an agent stopped while media is importing', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentArtifacts = { load: vi.fn(async () => new File(['png'], 'screen.png', { type: 'image/png' })) };
+  PM.assetKind = vi.fn(() => 'image');
+  let finishImport;
+  PM.importFiles = vi.fn(() => new Promise(resolve => { finishImport = resolve; }));
+  PM.AgentUI.submit('Import screen');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  jobs[0].resolve({ text: JSON.stringify({ summary: 'Prepared', commands: [], artifacts: [{ path: 'screen.png', importToTimeline: true }], notes: [], externalActions: [] }) });
+  await vi.waitFor(() => assert.equal(PM.importFiles.mock.calls.length, 1));
+  PM.AgentUI.stop();
+  PM.proj.layers.push({ id: 'screen-layer' });
+  finishImport();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(jobs.length, 1);
+  assert.notEqual(PM.AgentUI.state.phase, 'result');
 });
 
 it('reconciles stale autonomous commands against the latest project before applying them', async () => {
@@ -941,6 +1012,7 @@ it('keeps the current run alive when its transport accepts live steering', async
   await vi.waitFor(() => assert.equal(jobs.length, 1));
   const firstSignal = jobs[0].options.signal;
   PM.CodexBridge.steer = vi.fn(async () => true);
+  jobs[0].options.onTrace({ kind: 'thought', text: 'Before live steering' });
 
   PM.AgentUI.submit('continue');
   await vi.waitFor(() => assert.equal(PM.CodexBridge.steer.mock.calls.length, 1));
@@ -948,6 +1020,7 @@ it('keeps the current run alive when its transport accepts live steering', async
   assert.equal(firstSignal.aborted, false, 'steering must not abort the active run');
   assert.equal(PM.AgentUI.state.conversation.at(-1)?.steering, true);
   assert.equal(PM.AgentUI.state.conversation.at(-1)?.text, 'continue');
+  assert.equal(PM.AgentUI.state.conversation.find(message => message.role === 'trace')?.steering, true);
 
   jobs[0].resolve(emptyAgentResult);
   await vi.waitFor(() => assert.equal(PM.AgentUI.state.phase, 'result'));
@@ -1214,6 +1287,7 @@ it('preserves traces arriving while a steering request falls back to a new run',
   await vi.waitFor(() => assert.equal(jobs.length, 2));
   const conversation = PM.AgentUI.state.conversation;
   assert.deepEqual(conversation.filter(message => message.role === 'trace').flatMap(message => message.steps).map(step => step.label), ['Before steering', 'While steering']);
+  assert.ok(conversation.filter(message => message.role === 'trace').every(message => message.steering === true));
   assert.equal(conversation.filter(message => message.text === 'New direction').length, 1);
   PM.AgentUI.stop();
   jobs.forEach(job => job.resolve(emptyAgentResult));

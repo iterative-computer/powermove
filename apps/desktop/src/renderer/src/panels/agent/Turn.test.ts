@@ -71,6 +71,24 @@ describe('assistant word reveal', () => {
     expect(target.querySelector('.agent-work-log')).toBeNull();
   });
 
+  it('keeps steering checkpoints visible in stream order, even after the run finishes', () => {
+    render({
+      role: 'trace', steering: true,
+      steps: [
+        { kind: 'thought', id: 'before', label: 'Inspecting the timing.', live: false },
+        { kind: 'text', id: 'progress', text: 'I found the transition.' },
+        { kind: 'tool', id: 'read', toolName: 'bash', label: 'Read timeline', status: 'continued' },
+        { kind: 'thought', id: 'after', label: 'Keeping the clips aligned.', live: false },
+      ]
+    });
+    expect(target.querySelector('.agent-work-log')).toBeNull();
+    expect([...target.querySelectorAll('.agent-trace-text')].map(row => row.textContent)).toEqual([
+      'Inspecting the timing.', 'I found the transition.', 'Keeping the clips aligned.'
+    ]);
+    expect(target.querySelectorAll('.agent-tool-activity')).toHaveLength(1);
+    expect(target.querySelector('.shimmer-text')).toBeNull();
+  });
+
   it.each([false, true])('collapses completed work above the final reply (tools: %s)', (withTools) => {
     render({
       role: 'trace', durationMs: 543000,

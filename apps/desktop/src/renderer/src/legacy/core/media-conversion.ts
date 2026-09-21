@@ -1,3 +1,4 @@
+import { cloudSourcePaths } from './cloud-media';
 import { MAX_SEQUENCE_FRAMES, animationTiming } from '../../../../shared/animated-image';
 import { imageMimeType, isAnimatedImageExtension, mediaExtension } from '../../../../shared/media-formats';
 
@@ -159,7 +160,7 @@ export async function convertStillImage(file: any, { onStage }: any = {}): Promi
   const media = (window as any).powermove?.media;
   if (!media?.createStillImage) throw new Error('Image conversion is unavailable');
   onStage?.('Converting image');
-  const result = await media.createStillImage(file);
+  const result = await media.createStillImage(file, cloudSourcePaths.get(file));
   if (!result.ok) throw new Error(result.error);
   return readProxyFile(result, `${String(file.name || 'image')}.png`, file.lastModified);
 }

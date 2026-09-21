@@ -24,6 +24,7 @@ import {
 } from './model';
 import { installPanelPopouts } from './popout';
 import { syncPanelMoveHandle } from './panel';
+import { applyPanelVisibility, preferredPanelVisibility, rememberPanelVisibility } from './panel-visibility';
 
 type LayoutInstance = ReturnType<typeof mount> & {
   apply(workspace: Workspace): void;
@@ -80,6 +81,20 @@ export function installSvelteLayout(PM: PMRegistry): void {
   if (mounted) void unmount(mounted);
   root.replaceChildren();
 
+  const closePanel = (workspace: Workspace, id: string): boolean => {
+    const closed = hidePanel(workspace, id);
+    if (closed) rememberPanelVisibility(PM, id, false);
+    return closed;
+  };
+  const reopenPanel = (workspace: Workspace, id: string): boolean => {
+    const opened = restorePanel(workspace, id);
+    if (opened) rememberPanelVisibility(PM, id, true);
+    return opened;
+  };
+  const showPanel = (workspace: Workspace, id: string, dockId?: string): void => {
+    rememberPanelVisibility(PM, id, true);
+    addPanel(workspace, id, dockId);
+  };
   const layout: Record<string, any> = {
     root,
     ws: null,
@@ -90,8 +105,12 @@ export function installSvelteLayout(PM: PMRegistry): void {
     visibleDockPlan,
     removePanel,
     hidePanel,
-    restorePanel,
-    addPanel,
+    closePanel,
+    restorePanel: reopenPanel,
+    addPanel: showPanel,
+    rememberPanelClosed: (id: string) => rememberPanelVisibility(PM, id, false),
+    rememberPanelOpen: (id: string) => rememberPanelVisibility(PM, id, true),
+    isPanelClosed: (id: string) => preferredPanelVisibility(PM, id) === false,
     movePanel,
     movePanelBy,
     ensureDock,
@@ -105,6 +124,7 @@ export function installSvelteLayout(PM: PMRegistry): void {
     if (applying) return;
     applying = true;
     try {
+      applyPanelVisibility(PM, workspace);
       layout.ws = workspace;
       flushSync(() => mounted?.apply(workspace));
       applyTheme(PM, workspace.theme || {});

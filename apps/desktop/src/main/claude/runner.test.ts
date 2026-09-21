@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { agentWorkspaceRoot, sessionPathFor } from '../codex/workspace';
 
@@ -31,7 +32,7 @@ function request(overrides: Partial<CodexRunRequest> = {}): CodexRunRequest {
   };
 }
 
-function successfulChild(): EventEmitter & { stdout: PassThrough; stderr: PassThrough; pid: number; killed: boolean; kill: ReturnType<typeof vi.fn> } {
+function successfulChild(output: unknown = { message: 'hello' }): EventEmitter & { stdout: PassThrough; stderr: PassThrough; pid: number; killed: boolean; kill: ReturnType<typeof vi.fn> } {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough; stderr: PassThrough; pid: number; killed: boolean; kill: ReturnType<typeof vi.fn>;
   };
@@ -41,9 +42,10 @@ function successfulChild(): EventEmitter & { stdout: PassThrough; stderr: PassTh
   child.killed = false;
   child.kill = vi.fn(() => { child.killed = true; return true; });
   queueMicrotask(() => {
+    child.stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init', session_id: '11111111-1111-4111-8111-111111111111' })}\n`);
     child.stdout.write(`${JSON.stringify({
       type: 'result', subtype: 'success', is_error: false,
-      result: '{"message":"hello"}', structured_output: { message: 'hello' }
+      result: JSON.stringify(output), structured_output: output
     })}\n`);
     child.stdout.end();
     child.emit('close', 0, null);
@@ -52,6 +54,34 @@ function successfulChild(): EventEmitter & { stdout: PassThrough; stderr: PassTh
 }
 
 describe('Claude runner', () => {
+  it('repairs broken mod source before publishing and resumes the same staged run', async () => {
+    const userData = await mkdtemp(path.join(tmpdir(), 'claude-mod-repair-'));
+    try {
+      const stages: string[] = [];
+      const prompts: string[][] = [];
+      const result = await new ClaudeRunner().run(request({ mode: 'autonomous', access: 'project', projectJSON: '{}', threadId: 'mod-repair' }), {
+        userData, extensionsDir: path.join(userData, 'extensions'), apiPackFiles: async () => [], binary: '/fake/claude',
+        spawnProcess: (_binary, args) => {
+          prompts.push([...args]);
+          const stage = args[args.indexOf('--add-dir') + 1]!;
+          stages.push(stage);
+          const dir = path.join(stage, 'anchor-presets');
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({ id: 'anchor-presets', name: 'Anchors', version: '1.0.0', apiVersion: 1, entry: 'index.ts' }));
+          writeFileSync(path.join(dir, 'index.ts'), stages.length === 1 ? 'export const = ;' : 'export default function activate() {}');
+          expect(existsSync(path.join(userData, 'extensions', 'anchor-presets'))).toBe(false);
+          return successfulChild({ summary: 'Added anchors', commands: [], artifacts: [], externalActions: [], notes: [], extensions: [{ id: 'anchor-presets', action: 'created' }] }) as never;
+        }
+      });
+      expect(result).toMatchObject({ ok: true, extensions: [{ id: 'anchor-presets', action: 'created' }] });
+      expect(stages).toHaveLength(2);
+      expect(stages[0]).toBe(stages[1]);
+      expect(prompts[1]).toContain('--resume');
+      expect(prompts[1]!.join(' ')).toContain('failed compilation');
+      expect(await readFile(path.join(userData, 'extensions', 'anchor-presets', 'index.ts'), 'utf8')).toContain('activate');
+    } finally { await rm(userData, { recursive: true, force: true }); }
+  });
+
   it('retains the native session and workspace checkpoint when cancelled', async () => {
     const userData = await mkdtemp(path.join(tmpdir(), 'claude-cancel-test-'));
     try {

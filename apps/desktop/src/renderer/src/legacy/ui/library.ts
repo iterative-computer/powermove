@@ -51,7 +51,7 @@ const WorkspaceEditor: any = {
       const panels: any = (PM.WS.current.layout?.docks || []).flatMap((dock: any) => dock.panels || []).filter((panel: any) => panel.id !== 'viewer');
       const hidden: any = PM.WS.current.hiddenPanels || [];
       PM.menu(remove, [
-        ...panels.map((panel: any) => ({ label: 'Hide ' + (PM.PANELS[panel.id]?.title || panel.id), run: () => PM.WS.mutate((workspace: any) => PM.Layout.hidePanel(workspace, panel.id)) })),
+        ...panels.map((panel: any) => ({ label: 'Hide ' + (PM.PANELS[panel.id]?.title || panel.id), run: () => PM.WS.mutate((workspace: any) => PM.Layout.closePanel(workspace, panel.id)) })),
         ...(panels.length && hidden.length ? ['-'] : []),
         ...hidden.filter((item: any) => PM.PANELS[item.id]).map((item: any) => ({ label: 'Restore ' + PM.PANELS[item.id].title, run: () => PM.WS.mutate((workspace: any) => PM.Layout.restorePanel(workspace, item.id)) })),
       ]);

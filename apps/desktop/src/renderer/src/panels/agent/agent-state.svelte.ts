@@ -13,9 +13,9 @@ export interface AgentOption {
 export interface AgentMessage {
   role: 'user' | 'assistant' | 'trace';
   text?: string;
-  /** A user follow-up sent while the current run was still active. */
+  /** A user follow-up or trace checkpoint captured while a run was steered. */
   steering?: boolean;
-  /** role 'trace': the sealed activity steps of a completed run. */
+  /** role 'trace': sealed activity steps from a run or steering checkpoint. */
   steps?: TraceStep[];
   /** Elapsed wall time captured when the run's activity is archived. */
   durationMs?: number;

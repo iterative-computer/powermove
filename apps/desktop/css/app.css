@@ -487,6 +487,19 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .kf.on i{border-color:var(--accent);background:var(--accent)}
 .color-field{flex:1 1 0;display:flex;flex-direction:row-reverse;justify-content:flex-end;align-items:center;gap:8px;padding:0 8px 0 4px}
 .color-field .sw{width:16px;height:16px;border-radius:var(--r-xs);box-shadow:inset 0 0 0 var(--hairline) rgb(var(--ink-rgb) / .14)}.color-dialog{display:flex;flex-direction:column;gap:12px}.color-dialog-value{display:flex;align-items:center;gap:10px}.color-hex{height:32px;flex:1;padding:0 10px;border:0;box-shadow:var(--ctl-edge-inset);border-radius:var(--r-sm);background:var(--bg-field);font-family:var(--f-mono)}.color-dialog-preview{width:34px;height:34px;border-radius:var(--r-md);background:var(--sw-color)}.color-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:7px}.color-choice{aspect-ratio:1;border-radius:var(--r-md);background:var(--sw-color)}.color-choice.on{box-shadow:0 0 0 2px var(--accent)}
+/* Modal colour fields share the fill picker's plane and vertical hue track.
+   Keep their layout separate from the compact Svelte colour popover. */
+.color-workbench{display:grid;grid-template-columns:minmax(0,1fr) 16px 100px;gap:12px;height:212px}
+.color-side{display:flex;flex-direction:column;gap:10px;min-width:0}
+.color-compare{display:flex;height:32px;flex:none;overflow:hidden;border-radius:var(--r-sm)}
+.color-compare-swatch{flex:1;min-width:0;background:var(--sw-color)}
+.color-channels{display:grid;gap:4px}
+.color-channel{display:grid;grid-template-columns:12px minmax(0,1fr) 10px;align-items:center;gap:4px;font-size:var(--fs-xs);color:var(--tx-3)}
+.color-channel input{width:100%;min-width:0;height:24px;padding:0 5px;border-radius:var(--r-xs);background:var(--bg-field);color:var(--tx);font:var(--fs-xs) var(--f-mono);text-align:right}
+.color-channel em{font-style:normal}
+.color-channels hr{height:1px;border:0;background:var(--line)}
+.color-dialog :is(.fill-sv,.fill-hue){touch-action:none}
+.color-dialog :is(button,[role="slider"]):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .sw{width:22px;height:18px;border-radius:var(--r-sm);background:var(--sw-fill,var(--sw-color,#808080));position:relative;flex:none}
 .fill-picker-layer{position:fixed;inset:0;z-index:460;background:transparent}
 .fill-picker{position:fixed;width:400px;max-height:min(560px,calc(100vh - 64px));display:flex;flex-direction:column;border:0;border-radius:var(--r-lg);background:var(--bg-float);box-shadow:var(--shadow-float);overflow:hidden}
@@ -583,10 +596,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;heigh
 .asset-actions{position:absolute;right:4px;top:4px;z-index:3;display:flex;gap:3px;opacity:0;transition:opacity var(--dur-1)}
 .asset-card:hover .asset-actions,.asset-card:focus-within .asset-actions{opacity:1}
 .asset-card:hover .asset-badge,.asset-card:focus-within .asset-badge{opacity:0}
-.asset-add,.asset-reveal,.asset-locate,.asset-delete{width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff}
-.asset-add svg,.asset-reveal svg,.asset-locate svg,.asset-delete svg{width:11px;height:11px}
+.asset-add,.asset-reveal,.asset-locate,.asset-download,.asset-delete{width:22px;height:22px;display:grid;place-items:center;border-radius:var(--r-xs);background:rgb(10 10 12 / .72);color:#fff}
+.asset-add svg,.asset-reveal svg,.asset-locate svg,.asset-download svg,.asset-delete svg{width:11px;height:11px}
 .asset-reveal:hover{background:var(--bg-float);color:var(--tx)}
-.asset-add:hover,.asset-locate:hover{background:var(--accent);color:var(--on-accent)}
+.asset-add:hover,.asset-locate:hover,.asset-download:hover{background:var(--accent);color:var(--on-accent)}
 .asset-delete:hover{background:var(--red);color:#fff}
 .asset-empty{grid-column:1/-1;min-height:160px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px 16px;color:var(--tx-4);text-align:center}
 .asset-empty svg{width:32px;height:32px;color:var(--tx-4)}
@@ -1351,3 +1364,9 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .agent-inline-attachment img{width:auto;height:100%;aspect-ratio:1;object-fit:cover;border-radius:max(0px,calc(var(--attachment-radius) - var(--attachment-padding)))}
 .agent-inline-attachment[draggable="true"]{cursor:grab}
 .agent-inline-attachment.is-range-selected,.agent-inline-attachment.is-selected{background:color-mix(in srgb,var(--accent) 24%,var(--ink-1));outline:1px solid var(--accent)}
+
+.asset-card.is-cloud .asset-preview{background:color-mix(in srgb,var(--accent) 10%,rgb(var(--ink-rgb) / .09))}
+.asset-card.is-cloud .asset-offline{background:var(--accent);color:var(--on-accent)}
+.asset-card.is-cloud .asset-copy small.asset-missing{color:var(--tx-3)}
+.asset-card.is-cloud .asset-actions{opacity:1}
+.asset-download:disabled{opacity:.5;cursor:wait}

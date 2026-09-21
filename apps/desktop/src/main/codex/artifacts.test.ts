@@ -89,6 +89,32 @@ describe('validatedArtifactPath', () => {
 });
 
 describe('artifact operations', () => {
+  it.each(['frame.png', 'run-1/frame.png', 'artifacts/run-1/frame.png', './artifacts/run-1/frame.png'])(
+    'preserves the import request for %s', async requestedPath => {
+      const { root } = await makeFixture();
+      const result = await collectArtifacts(path.join(root, 'run-1'), 'run-1', [{ path: requestedPath, importToTimeline: true }]);
+      expect(result[0]).toMatchObject({ path: 'run-1/frame.png', importToTimeline: true });
+    }
+  );
+
+  it('rejects missing imports instead of silently completing without layers', async () => {
+    const { root } = await makeFixture();
+    await expect(collectArtifacts(path.join(root, 'run-1'), 'run-1', [{ path: 'artifacts/old-run/frame.png', importToTimeline: true }]))
+      .rejects.toThrow('Requested import was not found');
+  });
+
+  it('rejects ambiguous basename imports and accepts an exact nested path', async () => {
+    const { root } = await makeFixture();
+    const run = path.join(root, 'run-1');
+    for (const folder of ['a', 'b']) {
+      await mkdir(path.join(run, folder));
+      await writeFile(path.join(run, folder, 'screen.png'), 'png');
+    }
+    await expect(collectArtifacts(run, 'run-1', [{ path: 'screen.png', importToTimeline: true }])).rejects.toThrow('ambiguous');
+    const result = await collectArtifacts(run, 'run-1', [{ path: 'artifacts/run-1/a/screen.png', importToTimeline: true }]);
+    expect(result.filter(item => item.importToTimeline).map(item => item.path)).toEqual(['run-1/a/screen.png']);
+  });
+
   it('reads bytes with a name and extension MIME type', async () => {
     const { root } = await makeFixture();
     const result = await readArtifact(root, 'run-1/frame.png');

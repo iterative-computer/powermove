@@ -90,12 +90,14 @@ if [ -d 'inputs' ]; then
     printf '%s\n' "{\"id\":\"$FAKE_CODEX_EXTENSION_ID\",\"name\":\"Fake extension\",\"version\":\"1.0.0\",\"apiVersion\":1,\"entry\":\"index.ts\",\"author\":\"agent\"}" > "$extensions_dir/$FAKE_CODEX_EXTENSION_ID/manifest.json"
     printf '%s\n' 'export default function activate() {}' > "$extensions_dir/$FAKE_CODEX_EXTENSION_ID/index.ts"
   fi
-  artifact_directory=''
-  for candidate in artifacts/*; do
-    if [ -d "$candidate" ]; then artifact_directory="$candidate"; break; fi
-  done
+  result_name=${output_path##*/}
+  run_name=${result_name#result-}
+  run_name=${run_name%.json}
+  artifact_directory="artifacts/$run_name"
   if [ -n "$artifact_directory" ]; then printf '%s\n' 'rendered output' > "$artifact_directory/deliverable.txt"; fi
-  if [ -n "${FAKE_CODEX_RESULT:-}" ]; then
+  if [ -n "${FAKE_CODEX_REPAIRED_RESULT:-}" ] && [ -n "${FAKE_CODEX_INVOCATIONS:-}" ] && [ "$(wc -l < "$FAKE_CODEX_INVOCATIONS" | tr -d ' ')" -gt 1 ]; then
+    printf '%s\n' "$FAKE_CODEX_REPAIRED_RESULT" > "$output_path"
+  elif [ -n "${FAKE_CODEX_RESULT:-}" ]; then
     printf '%s\n' "$FAKE_CODEX_RESULT" > "$output_path"
   else
     printf '%s\n' '{"summary":"done","commands":[],"artifacts":[{"path":"deliverable.txt","importToTimeline":true}],"externalActions":[],"notes":[]}' > "$output_path"

@@ -72,6 +72,7 @@ describe('agent extension isolation and recovery', () => {
     const hidden = await stage(root, 'hidden');
     await writeFile(path.join(hidden.stagingDirectory, 'safe-change', 'index.ts'), 'export default "hidden";');
     await expect(publishExtensionChanges(hidden, [])).rejects.toThrow(/did not match/i);
+    await expect(publishExtensionChanges(hidden, [])).rejects.toThrow('Actual staged extension changes: [{"id":"safe-change","action":"updated"}]');
     expect(await readFile(path.join(live, 'safe-change', 'index.ts'), 'utf8')).toContain('before');
 
     const conflict = await stage(root, 'conflict');

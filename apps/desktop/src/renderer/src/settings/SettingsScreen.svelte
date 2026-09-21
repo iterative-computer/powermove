@@ -59,6 +59,7 @@
   /* Reopening last session's windows is the default; the store only ever holds
      the opt-out, so an untouched profile needs no migration. */
   let restoreWindows = $state(true);
+  let autoDownloadCloudMedia = $state(false);
   const multiWindow = $derived(!!PM.windows?.supported);
   let controls = $state.raw<Controls | null>(null);
   let rootEl = $state<HTMLElement | null>(null);
@@ -121,6 +122,7 @@
     build();
     themeMode = PM.theme?.mode ?? 'system';
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
+    autoDownloadCloudMedia = PM.store?.get?.('autoDownloadCloudMedia', false) === true;
     const wanted = target ?? (controls?.project ? 'project' : 'general');
     const destination = wanted === 'project' && !controls?.project ? 'general' : wanted;
     page = destination;
@@ -370,6 +372,20 @@
                         <option {value}>{label}</option>
                       {/each}
                     </select>
+                  </div>
+                </div>
+              </section>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Media</h3>
+                <div class="sg-group">
+                  <div class="settings-row">
+                    <div class="settings-copy">
+                      <b>Automatically download cloud media</b>
+                      <span>Download offloaded files when opening a project.</span>
+                    </div>
+                    <button class="toggle" class:on={autoDownloadCloudMedia} type="button" aria-pressed={autoDownloadCloudMedia} aria-label="Automatically download cloud media"
+                      onclick={() => { autoDownloadCloudMedia = !autoDownloadCloudMedia; PM.store?.set?.('autoDownloadCloudMedia', autoDownloadCloudMedia); }}
+                    ><i aria-hidden="true"></i></button>
                   </div>
                 </div>
               </section>

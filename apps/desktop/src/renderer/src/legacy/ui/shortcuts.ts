@@ -13,6 +13,7 @@ import { inspectorService, timelineService, toolService, viewerService } from '.
  *     and dispatched by the one key listener the kernel installs.
  */
 import type { CommandDefinition } from '../../kernel/api';
+import { IMPORT_DEFAULTS_SERVICE } from '../../kernel/import-defaults';
 import { hasTextSelection, isFieldTarget, selectableTextRoot, selectTextContents } from '../../kernel/keychord';
 import { ensureKernel, registryView } from '../kernel-view';
 import type { PMRegistry } from '../registry';
@@ -161,7 +162,7 @@ def('centerAnchor', 'Center anchor point in layer content', '⌘⌥Home', () => 
   if (!commands.length) return false;
   return PM.Edit.apply(commands, { label: 'Center anchor point', origin: 'command' });
 }, 'Tool');
-PM.commandForAsset = (id?: any, at: any = PM.time) => {
+const nativeCommandForAsset = (id?: any, at: any = PM.time) => {
   const meta: any = PM.proj.assets[id]; if (!meta) return;
   const a: any = PM.assets?.get?.(id) || meta;
   if (a.kind === 'model') {
@@ -206,6 +207,25 @@ PM.commandForAsset = (id?: any, at: any = PM.time) => {
     content,
     select: true,
   };
+};
+PM.commandForAsset = (id?: any, at: any = PM.time) => {
+  const command = nativeCommandForAsset(id, at);
+  const defaults = kernel.services.get<import('../../kernel/api').ImportDefaults>(IMPORT_DEFAULTS_SERVICE);
+  if (!command || !defaults || !['image', 'video', 'shape'].includes(command.layerType)) return command;
+  // Measure a detached layer before insertion. No existing channel, keyframe,
+  // selection, revision, or history entry is modified by the default itself.
+  const layer = PM.mkLayer(command.layerType, { d: command.content });
+  const bounds = PM.GL?.bounds?.(layer, command.from);
+  if (!bounds) throw new Error('Import defaults could not measure the new layer bounds.');
+  const x = bounds.x0 + (bounds.x1 - bounds.x0) * defaults.anchor.x;
+  const y = bounds.y0 + (bounds.y1 - bounds.y0) * defaults.anchor.y;
+  if (![x, y].every(Number.isFinite)) throw new Error('Import defaults received invalid layer bounds.');
+  return { ...command, properties: {
+    'anchor.x': x, 'anchor.y': y,
+    // Compensate the new anchor so the imported content stays in place.
+    'position.x': layer.p['position.x'].v + x - layer.p['anchor.x'].v,
+    'position.y': layer.p['position.y'].v + y - layer.p['anchor.y'].v,
+  } };
 };
 def('addFromAsset', 'Add layer from asset', null, (id?: any) => {
   const command: any = PM.commandForAsset(id);

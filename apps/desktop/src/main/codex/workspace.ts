@@ -239,6 +239,7 @@ export async function discardPartialRun(workspace: Pick<AgentWorkspace, 'runDire
 
 export async function preserveCancelledRun(workspace: AgentWorkspace): Promise<void> {
   const file = `${workspace.sessionPath}.checkpoint.json`;
+  await mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
   const { liveDirectory, stagingDirectory, historyRoot, projectId, runId, baselineHashes, baselineRootHash } = workspace;
   await writeFile(temporary, JSON.stringify({ liveDirectory, stagingDirectory, historyRoot, projectId, runId, baselineHashes, baselineRootHash }), { mode: 0o600 });

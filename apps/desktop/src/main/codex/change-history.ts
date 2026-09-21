@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { AgentExtensionChange } from '../../shared/ipc';
 import { EXTENSION_ID, parseManifest } from '../../shared/extensions';
+import { AgentResultValidationError } from './result-repair';
 
 const MAX_FILES = 4_000;
 const MAX_BYTES = 32 * 1024 * 1024;
@@ -64,11 +65,18 @@ export async function publishExtensionChanges(
   const actualIds = changedIds(stage.baselineHashes, stagedHashes);
   const declared = new Map(declaredChanges.map((change) => [change.id, change]));
   const declaredIds = [...declared.keys()].sort();
+  const expectedChanges = actualIds.map(id => ({
+    id,
+    action: stage.baselineHashes[id] === undefined ? 'created' : stagedHashes[id] === undefined ? 'removed' : 'updated'
+  }));
+  const reportError = (message: string): never => {
+    throw new AgentResultValidationError(`${message} Nothing was applied. Actual staged extension changes: ${JSON.stringify(expectedChanges)}. Inspect these changes and return each once in extensions with the indicated action, or revert unintended staged edits before completing.`);
+  };
   if (new Set(declaredIds).size !== declaredChanges.length) {
-    throw new Error('The agent reported the same extension change more than once. Nothing was applied.');
+    reportError('The agent reported the same extension change more than once.');
   }
   if (actualIds.join('\0') !== declaredIds.join('\0')) {
-    throw new Error('The agent change report did not match its staged files. Nothing was applied.');
+    reportError('The agent change report did not match its staged files.');
   }
   if (actualIds.length === 0) return null;
 
@@ -77,7 +85,7 @@ export async function publishExtensionChanges(
     const after = stagedHashes[id];
     const expected = before === undefined ? 'created' : after === undefined ? 'removed' : 'updated';
     if (declared.get(id)?.action !== expected) {
-      throw new Error(`The agent reported ${id} as ${declared.get(id)?.action ?? 'missing'}, but it was ${expected}. Nothing was applied.`);
+      reportError(`The agent reported ${id} as ${declared.get(id)?.action ?? 'missing'}, but it was ${expected}.`);
     }
     if (after !== undefined) await validateExtensionDirectory(stage.stagingDirectory, id);
   }

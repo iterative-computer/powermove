@@ -114,6 +114,21 @@ it('decodes split Unicode and tool arguments and rejects truncated streams', asy
   expect(deltas.join('')).toBe('Hi 🟢'); expect(response.tool_calls?.[0].function.arguments).toBe('{}');
   await expect(readCompletion(streamed(event({ content: 'partial' })), new AbortController().signal, () => {})).rejects.toThrow('before the model finished');
 });
+it('reassembles JSON split across compatible SSE data records', async () => {
+  const payload = JSON.stringify({ choices: [{ delta: { content: 'Recovered response.' }, finish_reason: 'stop' }] });
+  for (const splitAt of [payload.indexOf('response'), payload.length - 2]) {
+    const response = await readCompletion(streamed(
+      `data: ${payload.slice(0, splitAt)}\n\ndata: ${payload.slice(splitAt)}\n\n`
+    ), new AbortController().signal, () => {});
+    expect(response.content).toBe('Recovered response.');
+  }
+});
+it('does not expose JSON parser exceptions for malformed provider events', async () => {
+  await expect(readCompletion(streamed('data: {"choices": nope}\n\n'), new AbortController().signal, () => {}))
+    .rejects.toThrow('invalid response stream');
+  await expect(readCompletion(streamed('data: null\n\n'), new AbortController().signal, () => {}))
+    .rejects.toThrow('invalid response stream');
+});
 it('keeps keys out of status, does not forward saved keys to another provider, and uses native tools', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'pm-provider-')); directories.push(directory);
   const requests: any[] = [];

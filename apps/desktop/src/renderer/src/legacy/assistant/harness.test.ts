@@ -16,7 +16,7 @@ function harnessRegistry(): PMRegistry {
 }
 
 describe('legacy assistant harness install', () => {
-  it('preserves hand edits, bounds keyframes, and rejects unknown commands', () => {
+  it('preserves hand edits and complete keyframe lists, and rejects unknown commands', () => {
     const PM = harnessRegistry();
     const cleaned = PM.AgentHarness.cleanCommand({
       type: 'set_property', target: 'title', path: 'position.x', value: 42,
@@ -38,9 +38,9 @@ describe('legacy assistant harness install', () => {
     expect(replaced.preserveHandEdits).toBe(false);
     expect(PM.AgentHarness.cleanCommand({ type: 'set_property', target: 'title', path: 'position.x', value: 12 }).preserveHandEdits).toBe(true);
     expect(Object.hasOwn(cleaned, 'unknownField')).toBe(false);
-    expect(replaced.keyframes).toHaveLength(80);
+    expect(replaced.keyframes).toHaveLength(85);
     expect(Object.hasOwn(replaced, 'unknownField')).toBe(false);
-    expect(easing.keyframes).toHaveLength(80);
+    expect(easing.keyframes).toHaveLength(85);
     expect(Object.hasOwn(easing, 'overrideLock')).toBe(false);
     expect(added.from).toBe(0);
     expect(PM.AgentHarness.cleanCommand({
@@ -48,6 +48,15 @@ describe('legacy assistant harness install', () => {
     })).toEqual({ type: 'create_section', section: { id: 'section-1', layers: [{ id: 'layer-1' }] } });
     expect(PM.AgentHarness.cleanCommand({ type: 'run_shell', command: 'whoami' })).toBeNull();
   });
+  it('preserves full section layer lists and returned proposal batches', () => {
+    const PM = harnessRegistry();
+    const layers = Array.from({ length: 250 }, (_, i) => ({ id: `layer-${i}` }));
+    expect(PM.AgentHarness.cleanCommand({ type: 'create_section', section: { id: 'section', layers } }).section.layers).toEqual(layers);
+    expect(PM.AgentHarness.cleanCommand({ type: 'update_section', sectionId: 'section', layers }).layers).toEqual(layers);
+    const commands = Array.from({ length: 100 }, (_, i) => ({ type: 'add_marker', time: i }));
+    expect(PM.AgentHarness.sanitizeProposal({ commands }).commands).toEqual(commands);
+  });
+
   it('keeps group commands available to live and returned agent edits', () => {
     const PM = harnessRegistry();
     for (const command of [

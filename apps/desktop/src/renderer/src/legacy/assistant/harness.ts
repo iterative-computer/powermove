@@ -3,6 +3,7 @@ import { openPanel, readPanel, interactPanel, panelBounds, preparePanelInput } f
 import { records as extensionRecords } from '../../kernel/extensions.svelte';
 import { editVideo, videoAssets } from './video-editing';
 import { validateEffect } from '../../kernel/glsl';
+import { COMMAND_JSON_LIMIT } from '../../../../shared/edit-limits';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 /* Ported from js/assistant/harness.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
@@ -13,9 +14,7 @@ import type {
 } from '../../../../shared/ipc';
 
 export function install(PM: PMRegistry): void {
-const MAX_COMMANDS = 80;
 const MAX_REPAIRS = 2;
-const MAX_KEYFRAMES = 80;
 const SCENE_OPERATIONS = new Set([
   'set_property', 'replace_keyframes', 'set_easing', 'set_expression', 'set_content',
   'set_layer', 'set_composition', 'add_layer', 'delete_layers',
@@ -72,8 +71,8 @@ function defaultTimes() {
 
 function propertyDigest(layer: any, options: any = {}) {
   const offset = Math.max(0, Math.trunc(Number(options.propertyOffset) || 0));
-  const limit = Math.max(1, Math.min(100, Math.trunc(Number(options.propertyLimit) || 100)));
-  const keys = options.keyframeLimit === undefined ? 8 : Math.max(0, Math.min(MAX_KEYFRAMES, Math.trunc(Number(options.keyframeLimit) || 0)));
+  const limit = Math.max(1, Math.trunc(Number(options.propertyLimit) || 100));
+  const keys = options.keyframeLimit === undefined ? 8 : Math.max(0, Math.trunc(Number(options.keyframeLimit) || 0));
   const keyOffset = Math.max(0, Math.trunc(Number(options.keyframeOffset) || 0));
   return PM.allProps(layer).slice(offset, offset + limit).map((item: any) => ({
     path: item.key,
@@ -92,7 +91,7 @@ function projectState(options: any = {}) {
   const p = PM.proj;
   const selectedIds = new Set(PM.sel?.layers || []);
   const layerOffset = Math.max(0, Math.trunc(Number(options.layerOffset) || 0));
-  const layerLimit = Math.max(1, Math.min(20, Math.trunc(Number(options.layerLimit) || 12)));
+  const layerLimit = Math.max(1, Math.trunc(Number(options.layerLimit) || 12));
   return {
     composition: {
       id: p.id, name: p.name, width: p.w, height: p.h, fps: p.fps,
@@ -107,10 +106,7 @@ function projectState(options: any = {}) {
       index: p.layers.indexOf(layer), id: layer.id, name: layer.name, type: layer.type, from: layer.from,
       duration: layer.dur, visible: layer.on, locked: layer.lock, parent: layer.parent, group: layer.group || null,
       blend: layer.blend, motionBlur: layer.mblur, color: layer.color,
-      content: Object.fromEntries(Object.entries(layer.d || {}).map(([key, value]) => [
-        key,
-        typeof value === 'string' ? value.slice(0, key === 'code' ? 8000 : 500) : clone(value),
-      ])),
+      content: clone(layer.d || {}),
       masks: (layer.masks || []).map((m: any) => ({ id: m.id, shape: m.shape, mode: m.mode, hasPath: !!m.path, vertices: m.path?.vertices?.length || 0 })),
       propertyCount: PM.allProps(layer).length,
       properties: propertyDigest(layer, options),
@@ -122,7 +118,7 @@ function projectState(options: any = {}) {
     markers: clone(p.markers || []),
     availableOperations: [...SCENE_OPERATIONS],
     availableCapabilities: PM.Capabilities?.catalog?.() || null,
-    pagination: { layerOffset, layerLimit, keyframeOffset: Number(options.keyframeOffset) || 0, propertyOffset: Number(options.propertyOffset) || 0, propertyLimit: Math.min(100, Number(options.propertyLimit) || 100), note: 'Properties and keyframes are sampled. Use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit for focused reads. Full source is in inputs/powermove-project.json (run-start snapshot).' },
+    pagination: { layerOffset, layerLimit, keyframeOffset: Number(options.keyframeOffset) || 0, propertyOffset: Number(options.propertyOffset) || 0, propertyLimit: Math.max(1, Math.trunc(Number(options.propertyLimit) || 100)), note: 'Properties and keyframes are sampled. Use layerOffset/layerLimit, layerId, propertyOffset/propertyLimit and keyframeOffset/keyframeLimit for focused reads. Full source is in inputs/powermove-project.json (run-start snapshot).' },
   };
 }
 
@@ -147,16 +143,15 @@ async function observe(times?: any) {
 function cleanCommand(raw: any) {
   let source: any = raw;
   if (typeof raw === 'string') {
-    if (raw.length > 50_000) return null;
+    if (raw.length > COMMAND_JSON_LIMIT) return null;
     try { source = JSON.parse(raw); } catch { return null; }
   }
   if (!source || typeof source !== 'object' || Array.isArray(source) || !SCENE_OPERATIONS.has(source.type)) return null;
   const out: any = {};
   for (const key of FIELDS[source.type]) if (source[key] !== undefined) out[key] = clone(source[key]);
-  if (JSON.stringify(out).length > 50_000) return null;
+  if (JSON.stringify(out).length > COMMAND_JSON_LIMIT) return null;
   if (out.type === 'replace_keyframes') {
     if (!Array.isArray(out.keyframes)) return null;
-    out.keyframes = out.keyframes.slice(0, MAX_KEYFRAMES);
   }
   /* Agent-authored layers are deterministic and reviewable regardless of where
      the human happened to leave the playhead. Interactive add-layer commands
@@ -164,20 +159,16 @@ function cleanCommand(raw: any) {
   if (out.type === 'add_layer' && out.from === undefined) out.from = 0;
   if (out.type === 'set_easing') {
     if (!Array.isArray(out.keyframes)) return null;
-    out.keyframes = out.keyframes.slice(0, MAX_KEYFRAMES);
   }
   if (out.type === 'create_section') {
     if (!out.section || !Array.isArray(out.section.layers)) return null;
-    /* Bound the section like every other list, and never persist proto keys. */
+    /* Never persist proto keys. */
     out.section = Object.fromEntries(Object.entries(out.section)
       .filter(([key]) => !['__proto__', 'prototype', 'constructor'].includes(key)));
-    out.section.layers = out.section.layers.slice(0, 200);
   }
   if (out.type === 'update_section') {
     if (!out.sectionId || !Array.isArray(out.layers) || !out.layers.length) return null;
-    out.layers = out.layers.slice(0, 200);
   }
-  if (out.type === 'delete_layers' && Array.isArray(out.targets)) out.targets = out.targets.slice(0, 20);
   /* Model-authored edits preserve hand intent by default; explicit overrides survive. */
   if (out.type === 'set_property' || out.type === 'replace_keyframes') out.preserveHandEdits = out.preserveHandEdits !== false;
   return out;
@@ -185,7 +176,7 @@ function cleanCommand(raw: any) {
 
 function sanitizeProposal(raw: any) {
   const commands = (Array.isArray(raw?.commands) ? raw.commands : [])
-    .slice(0, MAX_COMMANDS).map(cleanCommand).filter(Boolean);
+    .map(cleanCommand).filter(Boolean);
   return {
     label: text(raw?.label, 'Agent composition edit', 80),
     summary: text(raw?.summary, 'A structured composition change is ready to review.', 260),
@@ -216,7 +207,7 @@ function sceneSchema() {
     required: ['label', 'summary', 'commands', 'reviewTimes'],
     properties: {
       label: { type: 'string' }, summary: { type: 'string' },
-      commands: { type: 'array', maxItems: MAX_COMMANDS, items: { type: 'string' } },
+      commands: { type: 'array', items: { type: 'string' } },
       reviewTimes: { type: 'array', maxItems: 5, items: { type: 'number' } },
     },
   };
@@ -229,7 +220,7 @@ function reviewSchema() {
     properties: {
       status: { type: 'string', enum: ['pass', 'repair'] },
       message: { type: 'string' }, critique: { type: 'string' },
-      commands: { type: 'array', maxItems: MAX_COMMANDS, items: { type: 'string' } },
+      commands: { type: 'array', items: { type: 'string' } },
       reviewTimes: { type: 'array', maxItems: 5, items: { type: 'number' } },
     },
   };
@@ -325,6 +316,8 @@ function rollback(checkpoint: any) {
 }
 
 interface LiveToolTransaction {
+  projectId: string;
+  interleaved?: boolean;
   baseRevision: number;
   revision: number;
   historyMark: unknown;
@@ -336,6 +329,33 @@ interface LiveToolTransaction {
 }
 
 const liveToolTransactions = new Map<string, LiveToolTransaction>();
+const liveToolObservations = new Map<string, { projectId: string; revision: number }>();
+
+function assertTransactionProject(transaction: { projectId: string }): void {
+  if (transaction.projectId !== PM.proj.id) {
+    throw new Error('The active project changed. Start a new agent run in this project.');
+  }
+}
+
+function refreshLiveTransaction(request: AgentToolRequestEvent): void {
+  const observed = liveToolObservations.get(request.runId);
+  const transaction = liveToolTransactions.get(request.runId);
+  if (transaction || observed) assertTransactionProject((transaction || observed)!);
+  const revision = currentRevision();
+  liveToolObservations.set(request.runId, { projectId: PM.proj.id, revision });
+  if (!transaction || transaction.revision === revision) return;
+  // A read acknowledges newer work, but must never make that work part of the
+  // run's old rollback snapshot or a combined agent Undo entry.
+  if (transaction.changed || transaction.panelActions) {
+    transaction.interleaved = true;
+  } else {
+    transaction.baseRevision = revision;
+    transaction.snapshot = JSON.stringify(PM.proj);
+    transaction.historyMark = PM.hist.mark?.() ?? null;
+  }
+  transaction.historyGroup = PM.uid('native-agent-history-');
+  transaction.revision = revision;
+}
 
 function toolText(value: unknown): AgentToolContent {
   const serialized = JSON.stringify(value);
@@ -349,12 +369,19 @@ function currentRevision(): number {
 
 function beginLiveTransaction(request: AgentToolRequestEvent, label = 'Agent composition edit'): LiveToolTransaction {
   const existing = liveToolTransactions.get(request.runId);
-  if (existing) return existing;
+  if (existing) {
+    assertTransactionProject(existing);
+    return existing;
+  }
+  const observed = liveToolObservations.get(request.runId);
+  if (observed) assertTransactionProject(observed);
+  const expected = observed?.revision ?? request.baseRevision;
   const revision = currentRevision();
-  if (revision !== request.baseRevision) {
-    throw new Error(`The project changed before the agent could edit it (expected revision ${request.baseRevision}, found ${revision}). Inspect the live project again and retry.`);
+  if (revision !== expected) {
+    throw new Error(`The project changed before the agent could edit it (expected revision ${expected}, found ${revision}). Read get_project_state, adjust the commands to the current state, and retry.`);
   }
   const transaction: LiveToolTransaction = {
+    projectId: PM.proj.id,
     baseRevision: revision,
     revision,
     historyMark: PM.hist.mark?.() ?? null,
@@ -400,6 +427,8 @@ function panelLayoutDigest() {
 }
 
 async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promise<void> {
+  assertTransactionProject(transaction);
+  if (transaction.interleaved) throw new Error('Other edits occurred during this run. Use the editor Undo command to undo agent changes without restoring over that work.');
   if (transaction.panelActions) throw new Error('Panel controls use their normal editor Undo. Their actions cannot be automatically rolled back; use the editor Undo command.');
   if (!transaction.changed) return;
   const revision = currentRevision();
@@ -418,6 +447,16 @@ async function rollBackLiveTransaction(transaction: LiveToolTransaction): Promis
 }
 
 async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit<AgentToolResponseEvent, 'runId' | 'callId'>> {
+  if (request.tool === 'select_layers') {
+    const ids = request.arguments.layerIds;
+    if (!Array.isArray(ids) || !ids.every(id => typeof id === 'string' && PM.L(id))) {
+      throw new Error('Select existing layer IDs from get_project_state. No selection was changed.');
+    }
+    const observed = liveToolTransactions.get(request.runId) || liveToolObservations.get(request.runId);
+    if (observed) assertTransactionProject(observed);
+    PM.selectLayers([...new Set(ids)], request.arguments.add === true);
+    return { ok: true, content: [toolText({ selection: clone(PM.sel) })], revision: currentRevision() };
+  }
   if (request.tool === 'validate_effect') {
     const definition = validateEffect(request.arguments.definition as Parameters<typeof validateEffect>[0]);
     return { ok: true, content: [toolText({
@@ -426,9 +465,9 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     })], revision: currentRevision() };
   }
   if (request.tool === 'get_project_state') {
-    const transaction = liveToolTransactions.get(request.runId);
-    if (transaction?.panelActions) transaction.revision = currentRevision();
-    return { ok: true, content: [toolText(projectState(request.arguments))], revision: currentRevision() };
+    const content = toolText(projectState(request.arguments));
+    refreshLiveTransaction(request);
+    return { ok: true, content: [content], revision: currentRevision() };
   }
   if (request.tool === 'get_workspace_state') {
     const file = PM.projectFileState?.(PM.proj.id);
@@ -494,13 +533,17 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
   }
   if (request.tool === 'apply_commands' || request.tool === 'edit_video') {
     const rawCommands = Array.isArray(request.arguments.commands) ? request.arguments.commands : [];
-    const commands = rawCommands.slice(0, MAX_COMMANDS).map(cleanCommand).filter(Boolean);
+    const commands = rawCommands.map(cleanCommand);
+    const invalidIndex = commands.indexOf(null);
+    if (request.tool === 'apply_commands' && invalidIndex !== -1) {
+      throw new Error(`Invalid or oversized command at index ${invalidIndex}. No commands were applied. Each command must be valid JSON with a supported type and at most ${COMMAND_JSON_LIMIT} characters.`);
+    }
     if (request.tool === 'apply_commands' && !commands.length) throw new Error('No valid Powermove edit commands were supplied.');
     const label = text(request.arguments.label, 'Agent composition edit', 80);
     const transaction = beginLiveTransaction(request, label);
     const revision = currentRevision();
     if (revision !== transaction.revision) {
-      throw new Error(`The project changed during the agent run (expected revision ${transaction.revision}, found ${revision}). No commands were applied.`);
+      throw new Error(`The project changed during the agent run (expected revision ${transaction.revision}, found ${revision}). No commands were applied. Read get_project_state, adjust the commands to the current state, and retry.`);
     }
     const editMeta = {
       label,
@@ -538,22 +581,21 @@ async function handleLiveAgentTool(request: AgentToolRequestEvent): Promise<Omit
     };
   }
   if (request.tool === '__finish_run') {
+    liveToolObservations.delete(request.runId);
     const transaction = liveToolTransactions.get(request.runId);
     if (!transaction) {
       return { ok: true, content: [toolText({ changed: false })], changed: false, revision: currentRevision() };
     }
     const commit = request.arguments.commit === true;
     try {
+      assertTransactionProject(transaction);
       let historyId: string | undefined;
       if (transaction.panelActions) {
         transaction.changed ||= currentRevision() !== transaction.baseRevision;
         if (!commit && transaction.changed) return { ok: false, content: [], changed: true, revision: currentRevision(), error: 'Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.' };
       } else if (!commit) {
         await rollBackLiveTransaction(transaction);
-      } else if (transaction.changed) {
-        if (currentRevision() !== transaction.revision) {
-          throw new Error('The project changed after the agent edit. Powermove preserved all work but could not safely combine the agent changes into one Undo step.');
-        }
+      } else if (transaction.changed && !transaction.interleaved && currentRevision() === transaction.revision) {
         historyId = PM.hist.squash?.(
           transaction.historyMark,
           `Agent · ${transaction.label}`,

@@ -11,6 +11,7 @@ import type {
   EffectDefinition,
   ExtensionLayerDefinition,
   KernelEvents,
+  InspectorSectionDefinition,
   KeybindingDefinition,
   MenuContribution,
   MenuLocation,
@@ -119,6 +120,7 @@ export type CommandRunner = (command: string, args: unknown[]) => unknown;
 
 export interface Kernel {
   readonly panels: Registry<PanelDefinition>;
+  readonly inspectorSections: Registry<InspectorSectionDefinition>;
   readonly commands: Registry<CommandDefinition>;
   readonly keybindings: Registry<KeybindingEntry>;
   readonly effects: Registry<EffectDefinition>;
@@ -163,6 +165,7 @@ export interface Kernel {
 
 export function createKernel(): Kernel {
   const panels = new Registry<PanelDefinition>();
+  const inspectorSections = new Registry<InspectorSectionDefinition>();
   const commands = new Registry<CommandDefinition>();
   const keybindings = new Registry<KeybindingEntry>();
   const effects = new Registry<EffectDefinition>();
@@ -172,6 +175,7 @@ export function createKernel(): Kernel {
   const status = new Registry<StatusItem>();
   const services = createServicesRegistry();
   const events = new EventBus();
+  inspectorSections.onChange(() => events.emit('inspector:changed', undefined));
   const theme: ThemeState = { activeId: 'default', scheme: 'system' };
 
   const paletteProviders: PaletteProviderEntry[] = [];
@@ -180,6 +184,7 @@ export function createKernel(): Kernel {
 
   const kernel: Kernel = {
     panels,
+    inspectorSections,
     commands,
     keybindings,
     effects,
@@ -384,6 +389,7 @@ export function createKernel(): Kernel {
 
     disposeOwner(ownerId) {
       panels.disposeOwner(ownerId);
+      inspectorSections.disposeOwner(ownerId);
       commands.disposeOwner(ownerId);
       keybindings.disposeOwner(ownerId);
       effects.disposeOwner(ownerId);
@@ -405,6 +411,7 @@ export function createKernel(): Kernel {
     dispose() {
       for (const listener of [...keyListeners]) listener.dispose();
       panels.clear();
+      inspectorSections.clear();
       commands.clear();
       keybindings.clear();
       effects.clear();

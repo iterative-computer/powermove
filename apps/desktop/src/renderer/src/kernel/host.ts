@@ -69,6 +69,7 @@ import { chordOfEvent } from './keychord';
 import { runKernelCommand, type Kernel } from './registries';
 import { mountComponent } from './runtime-globals';
 import { performanceMonitor } from '../runtime/performance-monitor';
+import { IMPORT_DEFAULTS_SERVICE, validatedImportDefaults } from './import-defaults';
 
 export interface PanelsBackend {
   open(id: string, dock?: PanelDock | PanelOpenOptions): void;
@@ -416,7 +417,55 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     transport: deps.transport as TransportAPI,
     history: deps.history as HistoryAPI,
     edit: deps.edit as EditAPI,
-    media: deps.media as MediaAPI,
+    media: {
+      ...deps.media as MediaAPI,
+      get fonts() { return deps.media?.fonts as MediaAPI['fonts']; },
+      registerImportDefaults(defaults) {
+        return collect(kernel.services.register(IMPORT_DEFAULTS_SERVICE, validatedImportDefaults(defaults)));
+      },
+      getImportDefaults() {
+        const defaults = kernel.services.get<import('./api').ImportDefaults>(IMPORT_DEFAULTS_SERVICE);
+        return defaults ? validatedImportDefaults(defaults) : null;
+      }
+    },
+    inspector: {
+      registerSection(section) {
+        if (!section || typeof section.id !== 'string' || !section.id || typeof section.title !== 'string'
+          || typeof section.build !== 'function' || (section.when !== undefined && typeof section.when !== 'function')
+          || (section.after !== undefined && !['content', 'transform', 'effects'].includes(section.after))) {
+          throw new Error('inspector.registerSection requires id, title, build and a valid placement.');
+        }
+        const build = section.build;
+        const when = section.when;
+        const mounts = new Set<Disposable>();
+        const registration = kernel.inspectorSections.register(id, {
+          ...section,
+          after: section.after ?? 'transform',
+          ...(when ? { when: guard(when, `inspector ${section.id} visibility`, false) } : {}),
+          build: guard((target, context) => {
+            let cleanup: ReturnType<typeof build>;
+            try { cleanup = build(target, context); }
+            catch (error) { target.replaceChildren(); throw error; }
+            const release = guard(() => {
+              try {
+                if (typeof cleanup === 'function') cleanup();
+                else cleanup?.dispose();
+              } finally { target.replaceChildren(); }
+            }, 'onDispose handler', undefined);
+            const mount = { dispose() {
+              if (mounts.delete(mount)) release();
+            } };
+            mounts.add(mount);
+            return mount;
+          }, `inspector ${section.id}`, undefined)
+        });
+        return collect({ dispose() {
+          registration.dispose();
+          for (const mount of [...mounts]) mount.dispose();
+        } });
+      },
+      sections: () => kernel.inspectorSections.list()
+    },
     render: deps.render as RenderAPI,
     uiState: deps.uiState as UIStateAPI,
     ui: extensionUI,

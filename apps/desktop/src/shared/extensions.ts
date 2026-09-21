@@ -13,6 +13,8 @@ export const EXTENSION_VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
 
 export const CONTRIBUTION_KINDS = [
   'panels',
+  'inspector',
+  'media',
   'commands',
   'keybindings',
   'effects',

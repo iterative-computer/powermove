@@ -91,10 +91,16 @@ const bridge: PowermoveBridge = {
     beginPreview: size => ipcRenderer.invoke(IPC.mediaPreviewBegin, size),
     writePreview: (token, offset, data) => ipcRenderer.invoke(IPC.mediaPreviewChunk, { token, offset, data }),
     finishPreview: token => ipcRenderer.invoke(IPC.mediaPreviewFinish, token),
+    cloudStatus: (paths) => ipcRenderer.invoke(IPC.cloudStatus, paths),
+    openLocalSource: (path) => ipcRenderer.invoke(IPC.mediaOpenLocalSource, path),
+    cloudPrompt: (names) => ipcRenderer.invoke(IPC.cloudPrompt, names),
+    downloadCloudSource: (path) => ipcRenderer.invoke(IPC.cloudDownload, path),
+    readCloudSource: (token, offset, length) => ipcRenderer.invoke(IPC.cloudRead, { token, offset, length }),
+    releaseCloudSource: (token) => ipcRenderer.invoke(IPC.cloudRelease, token),
     sourcePath: (file) => webUtils.getPathForFile(file) || null,
     revealSource: (sourcePath) => ipcRenderer.invoke(IPC.mediaRevealSource, sourcePath) as Promise<void>,
-    createPlaybackProxy: (file) => {
-      const sourcePath = webUtils.getPathForFile(file);
+    createPlaybackProxy: (file, originalPath) => {
+      const sourcePath = originalPath || webUtils.getPathForFile(file);
       if (!sourcePath) return Promise.resolve({ ok: false, error: 'The original file is no longer available' });
       return ipcRenderer.invoke(IPC.mediaProxyCreate, {
         sourcePath,
@@ -126,8 +132,8 @@ const bridge: PowermoveBridge = {
         return await ipcRenderer.invoke(IPC.mediaAnimationFinish, { token, requestId }) as MediaProxyResult;
       } finally { ipcRenderer.removeListener(IPC.mediaAnimationProgress, listener); }
     },
-    createStillImage: (file) => {
-      const sourcePath = webUtils.getPathForFile(file);
+    createStillImage: (file, originalPath) => {
+      const sourcePath = originalPath || webUtils.getPathForFile(file);
       if (!sourcePath) return Promise.resolve({ ok: false, error: 'The original file is no longer available' });
       return ipcRenderer.invoke(IPC.mediaImageCreate, { sourcePath, name: file.name }) as Promise<MediaProxyResult>;
     },

@@ -105,6 +105,11 @@
 
   function offlineDetail(asset: Asset): string {
     const source = finderPath(asset);
+    const cloud = PM.assets.cloud?.get(asset.id);
+    if (cloud) return cloud.state === 'downloading' ? `Downloading from ${cloud.provider}…`
+      : cloud.state === 'error' ? `Download failed · ${cloud.error}` : `Stored in ${cloud.provider} · ${source}`;
+    const error = PM.assets.errors?.get(asset.id);
+    if (error) return `Could not load · ${error}`;
     return source ? `Missing · ${source}` : 'Missing · locate the file to relink it';
   }
 
@@ -121,6 +126,7 @@
     const offline = isOffline(asset);
     PM.menu(event.currentTarget, [
       { header: asset.name },
+      ...(offline && PM.assets.cloud?.get(asset.id) ? [{ label: 'Download from cloud', run: () => PM.assets.cloud.download(asset.id) }] : []),
       ...(offline ? [] : [{ label: 'Add to timeline', run: () => PM.cmd('addFromAsset', asset.id) }]),
       { label: offline ? 'Locate File…' : 'Replace File…', run: () => PM.pickFiles(false, { replaceAssetId: asset.id }) },
       ...(sourcePath ? [{ label: 'Reveal in Finder', run: () => revealAssetSource(asset) }] : []),
@@ -200,6 +206,7 @@
        becomes locating the file, the same way a broken tile works in an NLE. */
     if (isOffline(asset)) {
       selectAsset(asset.id);
+      if (PM.assets.cloud?.get(asset.id)) { void PM.assets.cloud.download(asset.id); return; }
       PM.pickFiles(false, { replaceAssetId: asset.id });
       return;
     }
@@ -366,6 +373,7 @@
     event.stopPropagation();
     selectAsset(asset.id, event.currentTarget as HTMLElement);
     if (isOffline(asset)) {
+      if (PM.assets.cloud?.get(asset.id)) { void PM.assets.cloud.download(asset.id); return; }
       PM.pickFiles(false, { replaceAssetId: asset.id });
       return;
     }
@@ -445,20 +453,25 @@
       {@const posterSrc = (doc.tick.assets, posterUrl(asset))}
       {@const loading = (doc.tick.assets, isLoading(asset))}
       {@const offline = !currentAsset && !loading}
+      {@const cloud = (doc.tick.assets, offline ? PM.assets.cloud?.get(asset.id) : undefined)}
+      {@const loadError = (doc.tick.assets, offline ? PM.assets.errors?.get(asset.id) : undefined)}
+      {@const downloading = cloud?.state === 'downloading'}
+      {@const detail = (doc.tick.assets, offlineDetail(asset))}
       <div
         class="asset-card"
         class:is-dragging={draggingId === asset.id}
         class:is-offline={offline}
         class:is-loading={loading}
+        class:is-cloud={!!cloud}
         role="option"
-        aria-busy={loading}
+        aria-busy={loading || downloading}
         draggable={!offline && !loading}
         ondragstart={(event) => handleDragStart(event, asset)}
         ondragend={handleDragEnd}
         tabindex={activeAssetId ? (activeAssetId === asset.id ? 0 : -1) : (index === 0 ? 0 : -1)}
         aria-selected={activeAssetId === asset.id}
         data-asset-id={asset.id}
-        title={loading ? 'Loading media…' : offline ? offlineDetail(asset) : 'Select media · double-click to preview, or drag onto the timeline'}
+        title={loading ? 'Loading media…' : offline ? detail : 'Select media · double-click to preview, or drag onto the timeline'}
         onpointerdown={(event) => handleRowPointerDown(event, asset)}
         oncontextmenu={(event) => showAssetMenu(event, asset)}
         ondblclick={(event) => handleRowDoubleClick(event, asset)}
@@ -482,9 +495,9 @@
           {#if loading}
             <span class="asset-loading" role="status" aria-label="Loading media">Loading…</span>
           {:else if offline}
-            <span class="asset-offline" role="img" aria-label="Media offline">
-              <Icon {PM} name="missing" />
-              Media offline
+            <span class="asset-offline" role="img" aria-label={cloud ? 'Media in cloud' : loadError ? 'Media unavailable' : 'Media offline'}>
+              <Icon {PM} name={cloud ? 'download' : 'missing'} />
+              {downloading ? 'Downloading…' : cloud ? 'In cloud' : loadError ? 'Media unavailable' : 'Media offline'}
             </span>
           {:else if asset.dur}<span class="asset-badge">{mediaDuration(asset.dur)}</span>{/if}
           <span class="asset-actions">
@@ -493,7 +506,11 @@
                 <Icon {PM} name="project" />
               </button>
             {/if}
-            {#if offline}
+            {#if cloud}
+              <button class="asset-download" type="button" disabled={downloading} title={downloading ? 'Downloading…' : cloud.state === 'error' ? 'Retry download' : 'Download from cloud'} aria-label={`Download ${asset.name} from cloud`} onclick={(event) => addAsset(event, asset)}>
+                <Icon {PM} name="download" />
+              </button>
+            {:else if offline}
               <button class="asset-locate" type="button" title="Locate file" aria-label={`Locate ${asset.name}`} onclick={(event) => addAsset(event, asset)}>
                 <Icon {PM} name="link" />
               </button>
@@ -522,7 +539,7 @@
           {#if loading}
             <small>Loading media…</small>
           {:else if offline}
-            <small class="asset-missing" title={offlineDetail(asset)}>{offlineDetail(asset)}</small>
+            <small class="asset-missing" title={detail}>{detail}</small>
           {:else}
             <small title={mediaDetails(asset)}>{mediaDetails(asset)}</small>
           {/if}
