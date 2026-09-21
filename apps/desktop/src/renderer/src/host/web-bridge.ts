@@ -14,21 +14,31 @@ import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
 import { attachRemoteMedia } from './remote-media';
+import { ReconnectingLink, isDisconnectError } from './reconnect';
 
 const WS_PATH = '/__powermove/ws';
 
-/** The live connection, for modules that attach after the engines boot (remote-sync). */
-let activeLink: Connection | null = null;
-export function remoteLink(): Connection | null { return activeLink; }
+/** The live link, for modules that attach after the engines boot (remote-sync). It outlives any one socket. */
+let activeLink: ReconnectingLink | null = null;
+export function remoteLink(): ReconnectingLink | null { return activeLink; }
 const CONNECT_TIMEOUT_MS = 4000;
+const LINK_TOAST = 'host-link';
 
-function connect(url: string): Promise<Connection> {
+function openSocket(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     const timer = setTimeout(() => { socket.close(); reject(new Error('timeout')); }, CONNECT_TIMEOUT_MS);
-    socket.addEventListener('open', () => { clearTimeout(timer); resolve(new Connection(socket)); }, { once: true });
+    socket.addEventListener('open', () => { clearTimeout(timer); resolve(socket); }, { once: true });
     socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('unreachable')); }, { once: true });
   });
+}
+
+/** The browser tells us when the network is back or the tab is looked at again: good moments to retry. */
+function wakeOn(retry: () => void): () => void {
+  const visible = () => { if (document.visibilityState === 'visible') retry(); };
+  window.addEventListener('online', retry);
+  document.addEventListener('visibilitychange', visible);
+  return () => { window.removeEventListener('online', retry); document.removeEventListener('visibilitychange', visible); };
 }
 
 /* ── browser-side helpers ─────────────────────────────────── */
@@ -67,7 +77,7 @@ const toast: Toast = (text, ms, options) => {
 const UPLOAD_PARALLEL = 4;
 
 /** A server-side path for a browser File: uploaded in 1 MiB chunks, a few in flight. */
-async function upload(link: Connection, file: File, kind: 'media' | 'project'): Promise<string> {
+async function upload(link: ReconnectingLink, file: File, kind: 'media' | 'project'): Promise<string> {
   const label = file.name || (kind === 'project' ? 'project' : 'media');
   const megabytes = (file.size / 1048576).toFixed(file.size < 10 * 1048576 ? 1 : 0);
   toast(`Uploading ${label} (${megabytes} MB) to the host…`, 60_000, { error: false });
@@ -101,7 +111,7 @@ async function upload(link: Connection, file: File, kind: 'media' | 'project'): 
   }
 }
 
-function withProgress<T>(link: Connection, channel: string, requestId: string, onProgress: ((completed: number) => void) | undefined, run: () => Promise<T>): Promise<T> {
+function withProgress<T>(link: ReconnectingLink, channel: string, requestId: string, onProgress: ((completed: number) => void) | undefined, run: () => Promise<T>): Promise<T> {
   const off = link.on(channel, (progress) => {
     const value = progress as { requestId?: string; completed?: number };
     if (value?.requestId === requestId && typeof value.completed === 'number') onProgress?.(value.completed);
@@ -121,7 +131,7 @@ let nextMediaRequest = 0;
 
 /* ── the bridge ───────────────────────────────────────────── */
 
-function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<string, string>, initialProject: { projectId: string | null; taken: string[] }): PowermoveBridge {
+function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Record<string, string>, initialProject: { projectId: string | null; taken: string[] }): PowermoveBridge {
   // Keys another tab wrote arrive as names; the value is re-read before the
   // shim is told, so its synchronous refill sees the fresh string.
   const serialized = new Map(Object.entries(storeSnapshot));
@@ -133,6 +143,46 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
       const value = await link.sync<string | null>(IPC.storeGetSync, { key }).catch(() => null);
       if (value === null) serialized.delete(key); else serialized.set(key, value);
     })).then(() => { for (const listener of storeChangedListeners) listener(keys); });
+  });
+
+  // After a reconnect the host may hold writes from other tabs made while this
+  // one was away: adopt every key whose bytes differ, the way storeChanged does.
+  link.on('__reconnected', () => {
+    void link.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync).then((fresh) => {
+      const changed: string[] = [];
+      for (const [key, value] of Object.entries(fresh)) if (serialized.get(key) !== value) { serialized.set(key, value); changed.push(key); }
+      for (const key of [...serialized.keys()]) if (!(key in fresh)) { serialized.delete(key); changed.push(key); }
+      if (changed.length) for (const listener of storeChangedListeners) listener(changed);
+    }).catch(() => undefined);
+  });
+
+  /** Events seen per run, so a re-attach after a drop asks only for what was missed. */
+  const runEventCounts = new Map<string, number>();
+  link.on(IPC.codexEvent, (progress) => {
+    const id = (progress as { id?: unknown })?.id;
+    if (typeof id === 'string') runEventCounts.set(id, (runEventCounts.get(id) ?? 0) + 1);
+  });
+  const followRun = (runId: string, onProgress?: (text: string) => void, onTrace?: (step: never) => void): Promise<CodexRunResult> => new Promise<CodexRunResult>((resolve, reject) => {
+    const offEvents = link.on(IPC.codexEvent, (progress) => {
+      const event = progress as { id: string; kind: 'progress' | 'trace'; text?: string; step?: unknown };
+      if (event.id !== runId) return;
+      if (event.kind === 'progress') onProgress?.(event.text ?? ''); else onTrace?.(event.step as never);
+    });
+    const offFinish = link.on(WEB.runFinished, (payload) => {
+      const finished = payload as { id: string; result: CodexRunResult };
+      if (finished.id !== runId) return;
+      offEvents(); offFinish(); runEventCounts.delete(runId);
+      resolve(finished.result);
+    });
+    link.invoke(WEB.runsAttach, { runId, since: runEventCounts.get(runId) ?? 0 }).catch((error) => { offEvents(); offFinish(); reject(error); });
+  });
+  // A new socket is a new window to the host: tell it which project this tab is on.
+  let claimed: string | null = initialProject.projectId;
+  link.on('__reconnected', () => { if (claimed) void link.invoke(IPC.windowClaimProject, { projectId: claimed }).catch(() => undefined); });
+  /** Resolves once the link is up again (or at once if it already is). */
+  const whenReconnected = (): Promise<void> => new Promise<void>((resolve) => {
+    if (link.isConnected) { resolve(); return; }
+    const off = link.on('__reconnected', () => { off(); resolve(); });
   });
 
   const subscribe = <T,>(channel: string) => (cb: (value: T) => void) => link.on(channel, (value) => cb(value as T));
@@ -156,20 +206,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
     wrapMediaStore: (store, onChange) => attachRemoteMedia(link, store as never, onChange) as never,
     remoteRuns: {
       list: (projectId) => link.invoke<RemoteRunRecord[]>(WEB.runsList, projectId),
-      attach: (runId, hooks) => new Promise<CodexRunResult>((resolve, reject) => {
-        const offEvents = link.on(IPC.codexEvent, (progress) => {
-          const event = progress as { id: string; kind: 'progress' | 'trace'; text?: string; step?: unknown };
-          if (event.id !== runId) return;
-          if (event.kind === 'progress') hooks.onProgress?.(event.text ?? ''); else hooks.onTrace?.(event.step as never);
-        });
-        const offFinish = link.on(WEB.runFinished, (payload) => {
-          const finished = payload as { id: string; result: CodexRunResult };
-          if (finished.id !== runId) return;
-          offEvents(); offFinish();
-          resolve(finished.result);
-        });
-        link.invoke(WEB.runsAttach, runId).catch((error) => { offEvents(); offFinish(); reject(error); });
-      })
+      attach: (runId, hooks) => followRun(runId, hooks.onProgress, hooks.onTrace)
     },
     versions: { electron: '', chrome: /Chrome\/(\S+)/.exec(navigator.userAgent)?.[1] ?? '', node: hello.node },
 
@@ -287,7 +324,17 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
           if (event.id !== req.id) return;
           if (event.kind === 'progress') onProgress?.(event.text ?? ''); else onTrace?.(event.step as never);
         });
-        try { return await link.invoke(IPC.codexRun, req); } finally { off(); }
+        try {
+          return await link.invoke<CodexRunResult>(IPC.codexRun, req);
+        } catch (error) {
+          // The run lives on the host, not in this socket: after a drop, pick
+          // it back up where the stream left off rather than reporting failure.
+          if (!isDisconnectError(error)) throw error;
+          onProgress?.('Reconnecting to the run on the host…');
+          await whenReconnected();
+          off();
+          return await followRun(req.id, onProgress, onTrace);
+        } finally { off(); }
       },
       steer: (req) => link.invoke(IPC.codexSteer, req),
       cancel: (id, preserveChanges = false) => link.invoke(IPC.codexCancel, { id, preserveChanges }),
@@ -336,7 +383,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
 
     windows: {
       initialProject: () => initialProject,
-      claimProject: (projectId) => link.invoke(IPC.windowClaimProject, { projectId }),
+      claimProject: (projectId) => { claimed = projectId; return link.invoke(IPC.windowClaimProject, { projectId }); },
       openProject: (projectId) => link.invoke(IPC.windowOpenProject, { projectId }),
       create: () => link.invoke(IPC.windowNew),
       close: () => link.send(IPC.windowClose)
@@ -393,9 +440,16 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
   });
   link.on(WEB.focusWindow, () => window.focus());
   link.on(WEB.closeWindow, () => window.close());
+  type LinkToast = { toast?: (text: string, ms?: number, options?: Record<string, unknown>) => void; dismissToast?: (key: string) => void };
+  const pm = () => (window as unknown as { PM?: LinkToast }).PM;
   link.on('__closed', () => {
     document.documentElement.classList.add('host-disconnected');
-    (window as unknown as { PM?: { toast?: (text: string, ms?: number) => void } }).PM?.toast?.('Lost the connection to the Powermove host. Reload to reconnect.', 8000);
+    pm()?.toast?.('Connection to the Powermove host lost. Reconnecting…', 60_000, { key: LINK_TOAST, sticky: true, dismissible: false, error: false });
+  });
+  link.on('__reconnected', () => {
+    document.documentElement.classList.remove('host-disconnected');
+    pm()?.dismissToast?.(LINK_TOAST);
+    pm()?.toast?.('Reconnected to the Powermove host.', 2500, { error: false });
   });
 
   return bridge;
@@ -415,13 +469,28 @@ export async function installWebBridge(): Promise<boolean> {
   const url = new URL(WS_PATH, location.href);
   url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (project) url.searchParams.set('project', project);
-  let link: Connection;
-  try { link = await connect(url.toString()); } catch { return false; }
+  let first: Connection;
+  try { first = new Connection(await openSocket(url.toString())); } catch { return false; }
   const [hello, snapshot, initialProject] = await Promise.all([
-    link.invoke<WebHello>(WEB.hello),
-    link.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync),
-    link.sync<{ projectId: string | null; taken: string[] }>(IPC.windowInitialProject)
+    first.invoke<WebHello>(WEB.hello),
+    first.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync),
+    first.sync<{ projectId: string | null; taken: string[] }>(IPC.windowInitialProject)
   ]);
+  // Later sockets reconnect to the project this tab is on, not the URL's.
+  const reconnectUrl = new URL(url);
+  reconnectUrl.searchParams.delete('project');
+  const link = new ReconnectingLink({
+    open: () => openSocket(reconnectUrl.toString()),
+    handshake: async (connection) => {
+      const next = await connection.invoke<WebHello>(WEB.hello);
+      // A different host version means a different renderer: reload rather than
+      // run old code against a new host.
+      if (next.version !== hello.version) { location.reload(); await new Promise(() => undefined); }
+    },
+    wake: wakeOn,
+    log: (line) => console.info(line)
+  });
+  link.adopt(first);
   activeLink = link;
   scope.powermove = createBridge(link, hello, snapshot, initialProject);
   document.documentElement.classList.add('remote-app');

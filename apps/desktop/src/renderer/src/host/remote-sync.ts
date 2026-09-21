@@ -124,10 +124,19 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     applyRemote(next, PM.sel);
   });
 
+  // A new socket is a new member to the host: join again, bringing what this
+  // tab has now. The host's copy still wins when the two differ.
+  const offReconnect = link.on('__reconnected', () => {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    joined = null;
+    track();
+  });
+
   track();
   return () => {
     for (const off of offs) off();
     offRemote();
+    offReconnect();
     if (flushTimer) clearTimeout(flushTimer);
     if (joined) link.send(WEB.syncLeave, joined);
     joined = null;
