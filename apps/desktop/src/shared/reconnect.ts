@@ -11,7 +11,7 @@
  * Consumers that keep state on the host (project sessions, run attachment)
  * listen for `__reconnected` to re-establish it.
  */
-import { Connection, type LinkSocket } from '../../../shared/link';
+import { Connection, type LinkSocket } from './link';
 
 type Listener = (...args: unknown[]) => void;
 type AskHandler = (...args: unknown[]) => Promise<unknown> | unknown;
