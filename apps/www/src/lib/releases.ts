@@ -19,3 +19,25 @@ export async function fetchDownload(fetcher: typeof fetch): Promise<Download> {
   }
   throw new Error('No macOS release available');
 }
+
+/** Stargazer count, or null when GitHub is unreachable so the page still builds. */
+export async function fetchStars(fetcher: typeof fetch): Promise<number | null> {
+  try {
+    const response = await fetcher(`https://api.github.com/repos/${RELEASES_REPO}`, {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return null;
+    const repo = (await response.json()) as { stargazers_count?: unknown };
+    return typeof repo.stargazers_count === 'number' ? repo.stargazers_count : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 230 → "230", 1240 → "1.2k", 12400 → "12k". */
+export function formatStars(count: number): string {
+  if (count < 1000) return String(count);
+  const k = count / 1000;
+  return `${k < 10 ? k.toFixed(1).replace(/\.0$/, '') : Math.round(k)}k`;
+}

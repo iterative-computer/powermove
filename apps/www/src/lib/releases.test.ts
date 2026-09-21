@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchDownload } from './releases';
+import { fetchDownload, fetchStars, formatStars } from './releases';
 
 function mockFetch(body: unknown, status = 200) {
   return (async () => new Response(JSON.stringify(body), { status })) as typeof fetch;
@@ -26,5 +26,24 @@ describe('macOS download metadata', () => {
   test('rejects failed and empty lookups so a build cannot publish an empty label', async () => {
     await assert.rejects(fetchDownload(mockFetch({}, 403)), /403/);
     await assert.rejects(fetchDownload(mockFetch([])), /No macOS release/);
+  });
+});
+
+describe('GitHub stars', () => {
+  test('reads the stargazer count', async () => {
+    assert.equal(await fetchStars(mockFetch({ stargazers_count: 230 })), 230);
+  });
+
+  test('returns null instead of failing the build when GitHub is unavailable', async () => {
+    assert.equal(await fetchStars(mockFetch({}, 403)), null);
+    assert.equal(await fetchStars(mockFetch({ stargazers_count: 'n/a' })), null);
+    assert.equal(await fetchStars((async () => { throw new Error('offline'); }) as typeof fetch), null);
+  });
+
+  test('formats counts compactly', () => {
+    assert.equal(formatStars(230), '230');
+    assert.equal(formatStars(1000), '1k');
+    assert.equal(formatStars(1240), '1.2k');
+    assert.equal(formatStars(12400), '12k');
   });
 });
