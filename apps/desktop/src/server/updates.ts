@@ -5,9 +5,10 @@
  * and reports the same AppUpdateState the desktop's updater does, so the web
  * client's existing update UI works unchanged.
  *
- * Installing depends on how the host got here. A global npm install can
- * replace itself and restart (a service brings it back; a terminal run is
- * told to restart). An `npx` run cannot, so the tab is handed the command.
+ * Installing depends on how the host got here. A global npm install, or the
+ * managed copy `powermove install` keeps under the profile, can replace
+ * itself and restart (a service brings it back; a terminal run is told to
+ * restart). An `npx` run cannot, so the tab is handed the command.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -17,11 +18,14 @@ import type { AppUpdateState } from '../shared/ipc';
 const run = promisify(execFile);
 
 export const PACKAGE = 'powermove-cli';
-export type InstallKind = 'global' | 'npx' | 'source' | 'unknown';
+/** 'managed' is the copy `powermove install` keeps under the profile (userData/host). */
+export type InstallKind = 'global' | 'managed' | 'npx' | 'source' | 'unknown';
 
 /** Where the running entry lives says how it was installed. */
-export function detectInstallKind(entry: string): InstallKind {
+export function detectInstallKind(entry: string, managedPrefix?: string): InstallKind {
   const path = entry.replace(/\\/g, '/');
+  if (managedPrefix && path.startsWith(`${managedPrefix.replace(/\\/g, '/').replace(/\/$/, '')}/`)) return 'managed';
+  if (/\/\.powermove\/host\/node_modules\/powermove-cli\//.test(path)) return 'managed';
   if (/\/_npx\//.test(path) || /\/\.npm\/_npx\//.test(path)) return 'npx';
   if (/\/node_modules\/powermove-cli\//.test(path)) return 'global';
   if (/\/packages\/cli\//.test(path)) return 'source';
@@ -48,6 +52,7 @@ export function isNewer(candidate: string, current: string): boolean {
 export function updateCommand(kind: InstallKind): string {
   switch (kind) {
     case 'global': return `npm i -g ${PACKAGE}@latest`;
+    case 'managed': return `npx ${PACKAGE}@latest install`;
     case 'npx': return `npx ${PACKAGE}@latest serve`;
     case 'source': return 'git pull && bun run --cwd packages/cli build';
     default: return `npm i -g ${PACKAGE}@latest`;
@@ -61,6 +66,8 @@ export interface UpdateCheckerOptions {
   channel?: 'latest' | 'beta';
   fetchLatest?: (channel: string) => Promise<string | null>;
   intervalMs?: number;
+  /** userData/host for a managed install: where the self-update writes. */
+  managedPrefix?: string;
   log?: (line: string) => void;
   /** Runs the self-update; resolves when the new version is in place. */
   selfUpdate?: () => Promise<void>;
@@ -118,12 +125,15 @@ export class UpdateChecker {
   /** Self-update when possible; otherwise the command the user runs. */
   async install(): Promise<{ restarting: true } | { restarting: false; command: string }> {
     const command = updateCommand(this.options.installKind);
-    if (this.options.installKind !== 'global') return { restarting: false, command };
+    const kind = this.options.installKind;
+    if (kind !== 'global' && !(kind === 'managed' && this.options.managedPrefix)) return { restarting: false, command };
     if (this.state.status !== 'ready') await this.check();
     if (this.state.status !== 'ready') return { restarting: false, command };
     this.set({ ...this.state, status: 'downloading' });
     try {
-      await (this.options.selfUpdate ?? (async () => { await run('npm', ['i', '-g', `${PACKAGE}@${this.state.version}`], { timeout: 10 * 60 * 1000 }); }))();
+      const target = `${PACKAGE}@${this.state.version}`;
+      const args = kind === 'managed' ? ['install', '--prefix', this.options.managedPrefix!, '--no-fund', '--no-audit', '--loglevel', 'error', target] : ['i', '-g', target];
+      await (this.options.selfUpdate ?? (async () => { await run('npm', args, { timeout: 30 * 60 * 1000 }); }))();
     } catch (error) {
       this.options.log?.(`[updates] self-update failed: ${error instanceof Error ? error.message : String(error)}`);
       this.set({ ...this.state, status: 'ready' });

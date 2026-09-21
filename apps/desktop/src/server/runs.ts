@@ -66,7 +66,11 @@ export class RunOwner extends EventEmitter {
     if (channel === IPC.codexEvent) {
       const event = payload as CodexProgressEvent;
       this.record.events.push(event);
-      if (this.record.events.length > MAX_BUFFERED_EVENTS) this.record.events.splice(0, this.record.events.length - MAX_BUFFERED_EVENTS);
+      if (this.record.events.length > MAX_BUFFERED_EVENTS) {
+        const excess = this.record.events.length - MAX_BUFFERED_EVENTS;
+        this.record.events.splice(0, excess);
+        this.trimmed += excess;
+      }
       for (const tab of this.attached) if (!tab.isDestroyed()) tab.send(channel, payload);
       return;
     }
@@ -77,17 +81,24 @@ export class RunOwner extends EventEmitter {
   sendInputEvent(): void { throw new Error('Synthetic input needs an open Powermove tab.'); }
 
   /* ── attachment: tabs that want this run's stream ─────────── */
-  attach(tab: RemoteClient, replay = false): void {
+  /**
+   * `replay` catches the tab up: everything so far, or from `since` events in
+   * for a tab that followed the run live until its socket dropped. The buffer
+   * keeps the last MAX_BUFFERED_EVENTS, so an offset before it replays what
+   * is left.
+   */
+  attach(tab: RemoteClient, replay: boolean | { since: number } = false): void {
     if (!this.attached.has(tab)) {
       this.attached.add(tab);
       tab.once('destroyed', () => this.attached.delete(tab));
     }
     if (!replay) return;
-    // A tab that was not there for the run so far: catch it up in order,
-    // then the finish if the run is already over.
-    for (const event of this.record.events) tab.send(IPC.codexEvent, event);
+    const since = typeof replay === 'object' ? Math.max(0, replay.since - this.trimmed) : 0;
+    for (const event of this.record.events.slice(since)) tab.send(IPC.codexEvent, event);
     if (this.record.result) tab.send(WEB.runFinished, { id: this.record.id, result: this.record.result });
   }
+  /** Events dropped from the front of the buffer, so `since` offsets stay meaningful. */
+  private trimmed = 0;
   detach(tab: RemoteClient): void { this.attached.delete(tab); }
   get attachedTabs(): RemoteClient[] { return [...this.attached].filter((tab) => !tab.isDestroyed()); }
 
