@@ -6,8 +6,8 @@
   import LogoCloud from '$lib/LogoCloud.svelte';
   import Features from '$lib/Features.svelte';
   import Showcase from '$lib/Showcase.svelte';
-  import { GITHUB, PRODUCT_HUNT, PRODUCT_HUNT_BADGE } from '$lib/links';
-  import { download, resolveDownload } from '$lib/download.svelte';
+  import { GITHUB } from '$lib/links';
+  import { download, resolveDownload, stars } from '$lib/download.svelte';
 
 
   const year = new Date().getFullYear();
@@ -51,7 +51,7 @@
 
 <main id="top">
   <section class="hero" aria-labelledby="headline">
-    <a class="eyebrow ph" href={PRODUCT_HUNT} target="_blank" rel="noopener"><img src={PRODUCT_HUNT_BADGE} alt="Powermove on Product Hunt" width="250" height="54" /></a>
+    <a class="eyebrow" href={GITHUB} target="_blank" rel="noopener">Free and open source{#if stars.label}<span class="eyebrow-sep" aria-hidden="true"></span><span class="muted">{stars.label} stars on GitHub</span>{/if}</a>
     <h1 id="headline" class="sr-only">Shape your video editor</h1>
     <HeroAnimation />
     <div class="wrap hero-intro">
@@ -100,8 +100,7 @@
       <p class="final-note">Free and open source for macOS.</p>
       <div class="cta center">
         <a class="button primary lg" href={download.href}>Download for macOS</a>
-        <a class="button lg" href={PRODUCT_HUNT} target="_blank" rel="noopener">Upvote on Product Hunt <ArrowUpRight size={15} /></a>
-        <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub <ArrowUpRight size={15} /></a>
+        <a class="button lg" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="muted">{stars.label}</span>{/if} <ArrowUpRight size={15} /></a>
       </div>
     </div>
   </section>
@@ -115,7 +114,7 @@
       </div>
       <div>
         <span class="foot-title">Company</span>
-        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href={PRODUCT_HUNT} target="_blank" rel="noopener">Product Hunt</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
+        <ul><li><a href={GITHUB} target="_blank" rel="noopener">GitHub</a></li><li><a href="mailto:hello@iterative.computer">hello@iterative.computer</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/terms">Terms</a></li></ul>
       </div>
       <div class="foot-copy">© Iterative Computer {year}. Open source.</div>
     </div>
