@@ -14,7 +14,7 @@ vi.mock('electron', () => import('./electron-stub'));
 import { Connection, type LinkSocket } from '../shared/link';
 import { IPC } from '../shared/ipc';
 import { WEB, type WebHello } from '../shared/wire';
-import { ReconnectingLink } from '../renderer/src/host/reconnect';
+import { ReconnectingLink } from '../shared/reconnect';
 import { serve, type RunningServer } from './index';
 
 let dir: string;

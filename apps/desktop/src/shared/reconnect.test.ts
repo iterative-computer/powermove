@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { Connection, type LinkSocket } from '../../../shared/link';
-import { decodeFrame, encodeFrame } from '../../../shared/wire';
+import { Connection, type LinkSocket } from './link';
+import { decodeFrame, encodeFrame } from './wire';
 import { DISCONNECTED_MESSAGE, ReconnectingLink, isDisconnectError } from './reconnect';
 
 /** A socket whose far end is the test: records frames, answers on demand, drops on command. */

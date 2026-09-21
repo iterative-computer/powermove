@@ -14,7 +14,7 @@ import { EXT_IPC, type ExtensionRecord } from '../../../shared/extensions';
 import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../../../shared/wire';
 import { Connection } from '../../../shared/link';
 import { attachRemoteMedia } from './remote-media';
-import { ReconnectingLink, isDisconnectError } from './reconnect';
+import { ReconnectingLink, isDisconnectError } from '../../../shared/reconnect';
 
 const WS_PATH = '/__powermove/ws';
 
