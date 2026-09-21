@@ -1,4 +1,4 @@
-import { chooseNativeMenu, expect, test } from './helpers/app';
+import { chooseNativeMenu, inspectNativeMenu, expect, test } from './helpers/app';
 
 for (const [label, expected] of [
   ['By word', ['Hello', 'world', 'Hello', '👨‍👩‍👧‍👦!']],
@@ -71,20 +71,14 @@ test('wrapped lines, locked layers and blank text', async ({ session }) => {
     const group = PM.firstSel();
     return PM.proj.layers.filter((layer: any) => layer.group === group.id && layer.on.v !== false).map((layer: any) => layer.d.text);
   })).toEqual(await page.evaluate(() => (window as any).expectedLines));
-  await session.app.evaluate(({ Menu }) => {
-    (globalThis as any).__splitPopup = Menu.prototype.popup;
-    Menu.prototype.popup = function (options) {
-      Menu.prototype.popup = (globalThis as any).__splitPopup;
-      (globalThis as any).__splitDisabled = this.items.find(item => item.label === 'Split text into layers…')?.enabled === false;
-      options?.callback?.();
-    };
-  });
   await page.evaluate(() => {
     const PM = (window as any).PM; PM.hist.undo();
     const layer = PM.proj.layers[0]; layer.lock = true;
-    PM.showLayerMenu(layer, {clientX: 300, clientY: 200});
   });
-  await expect.poll(() => session.app.evaluate(() => (globalThis as any).__splitDisabled)).toBe(true);
+  const menu = await inspectNativeMenu(session, () => page.evaluate(() => {
+    const PM = (window as any).PM; PM.showLayerMenu(PM.proj.layers[0], {clientX: 300, clientY: 200});
+  }));
+  expect(menu).toContainEqual({ label: 'Split text into layers…', enabled: false });
   const before = await page.evaluate(() => {
     const PM = (window as any).PM, layer = PM.proj.layers[0]; layer.lock = false; layer.d.text = '';
     return JSON.stringify(PM.proj);
