@@ -6,7 +6,7 @@ import {
   calculateResize, composeLocalLinear, compositionFramePosition, compositionIsOutOfView, editableTextAtPoint,
   createViewerRuntime, layerContainsPoint, layerWorldPivot,
   localRotationForWorldDirection, multiplyLinear, resolveSelectionGeometry, resizeCursorForHandle,
-  previewRenderSize, previewRenderViewport, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
+  previewRenderSize, previewRenderViewport, effectViewportPadding, effectViewportSafe, resizeLocksAspect, rotateLinear, selectionTransformRoots, solveLocalTransformForWorldLinear,
   selectionBoundsCenter, shapeBoxFromDrag, transformPointAround, viewerWheelMode, zoomPanForPoint,
 } from './viewer';
 import type { PreviewViewport } from './viewer';
@@ -161,6 +161,17 @@ describe('viewer runtime', () => {
     });
     expect(viewport!.renderWidth).toBeLessThan(1920 * 8);
     expect(previewRenderViewport(1920, 1080, 1, 1200, 800, 0, 0, 2, 1)).toBeNull();
+  });
+  it('allows registered viewport-safe effects and budgets their sample radius', () => {
+    const api = viewerApi() as any;
+    api.effects = { get: (id: string) => id === 'blur'
+      ? { viewportSafe: true, viewportPadding: ['amount'] }
+      : undefined };
+    const layer = { fx: [{ id: 'fx', type: 'blur', on: true, p: { amount: { v: 24 } } }] };
+    expect(effectViewportSafe(api, layer, 0)).toBe(true);
+    expect(effectViewportPadding(api, { layers: [layer] }, 0)).toBe(24);
+    layer.fx[0]!.type = 'unknown';
+    expect(effectViewportSafe(api, layer, 0)).toBe(false);
   });
   it('retains the presented viewport through pans covered by its overscan', () => {
     const first = previewRenderViewport(1920, 1080, 8, 1200, 800, -7080, -3920, 2, 1)!;

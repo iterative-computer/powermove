@@ -34,6 +34,48 @@ export function previewRenderSize(width: number, height: number, zoom: number, d
   };
 }
 
+/** Effects may use the cropped viewer only when their shader has opted into
+ * the viewport coordinate contract. Unknown effects stay on the full-frame
+ * path so extensions do not silently change their visual result. */
+export function effectViewportSafe(api: PowermoveAPI, layer: any, time: number): boolean {
+  for (const effect of layer?.fx || []) {
+    const enabled = effect?.on === false ? false
+      : effect?.on && typeof effect.on === 'object'
+        ? (api.anim.evP?.(layer, effect.on, time, `${effect.id}.$enabled`) ?? effect.on.v) !== false
+        : true;
+    if (!enabled) continue;
+    if (api.effects?.get?.(effect.type)?.viewportSafe !== true) return false;
+  }
+  return true;
+}
+
+/** Return the largest source radius required by viewport-safe effects, in
+ * effect parameter pixels. The viewer converts it to CSS pixels before
+ * adding it to the overscan. */
+export function effectViewportPadding(api: PowermoveAPI, project: any, time: number): number {
+  let padding = 0;
+  for (const layer of project?.layers || []) {
+    for (const effect of layer?.fx || []) {
+      const enabled = effect?.on === false ? false
+        : effect?.on && typeof effect.on === 'object'
+          ? (api.anim.evP?.(layer, effect.on, time, `${effect.id}.$enabled`) ?? effect.on.v) !== false
+          : true;
+      if (!enabled) continue;
+      const definition = api.effects?.get?.(effect.type);
+      if (!definition || definition.viewportSafe !== true) continue;
+      for (const key of definition.viewportPadding || []) {
+        const prop = effect.p?.[key];
+        const value = prop && typeof prop === 'object'
+          ? (api.anim.evP?.(layer, prop, time, `${effect.id}.${key}`) ?? prop.v)
+          : prop;
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) padding = Math.max(padding, Math.abs(numeric));
+      }
+    }
+  }
+  return padding;
+}
+
 export type PreviewViewport = {
   x: number; y: number; width: number; height: number;
   compWidth: number; compHeight: number;
@@ -807,15 +849,18 @@ V.layout = (panOnly = false) => {
   V.inner.style.top = position.y + 'px';
   V.inner.style.transform = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  /* Cropped high-zoom rendering is exact for ordinary 2D source layers. Keep
-     complex full-frame/3D pipelines on the established full-composition path
-     until their coordinate-dependent effects can consume a viewport origin. */
+  /* Cropped high-zoom rendering is exact for ordinary 2D source layers and
+     effects that opt into the viewport coordinate contract. Keep complex
+     full-frame/3D pipelines on the established full-composition path. */
+  const time = api.transport.time();
   const viewportSafe = p.layers.every((layer: any) => !layer.threeD
-    && !(layer.fx || []).some((effect: any) => effect?.on !== false)
+    && effectViewportSafe(api, layer, time)
     && !(layer.masks || []).length && !layer.matteSource && !layer.transitionIn && !layer.transitionOut
     && !['adjustment', 'shader', 'extension', 'precomp'].includes(layer.type));
+  const effectPadding = viewportSafe ? effectViewportPadding(api, p, time) : 0;
+  const renderDensity = Math.min(2, Math.max(1, dpr)) * Math.max(.25, Math.min(1, api.transport.quality));
   const viewport = viewportSafe
-    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128, api.render.gl.previewViewport as PreviewViewport | null)
+    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128 + effectPadding / renderDensity, api.render.gl.previewViewport as PreviewViewport | null)
     : null;
   requestedViewport = viewport;
   visibleRegion = viewport ? { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
