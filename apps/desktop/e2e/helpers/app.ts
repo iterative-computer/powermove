@@ -246,3 +246,27 @@ export async function chooseNativeMenu(session: LaunchedApp, label: string | rea
     });
   }
 }
+
+/** Inspect native menu labels and enabled states without opening an AppKit popup or running an action. */
+export async function inspectNativeMenu(session: LaunchedApp, trigger: () => Promise<unknown>): Promise<{ label: string; enabled: boolean }[]> {
+  await session.app.evaluate(({ Menu }) => {
+    const state = { original: Menu.prototype.popup, items: null as { label: string; enabled: boolean }[] | null };
+    (globalThis as any).__testNativeMenuInspection = state;
+    Menu.prototype.popup = function (options) {
+      Menu.prototype.popup = state.original;
+      state.items = this.items.filter(item => item.type !== 'separator').map(item => ({ label: item.label, enabled: item.enabled }));
+      options?.callback?.();
+    };
+  });
+  try {
+    await trigger();
+    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__testNativeMenuInspection.items)).not.toBeNull();
+    return await session.app.evaluate(() => (globalThis as any).__testNativeMenuInspection.items);
+  } finally {
+    await session.app.evaluate(({ Menu }) => {
+      const state = (globalThis as any).__testNativeMenuInspection;
+      if (state) Menu.prototype.popup = state.original;
+      delete (globalThis as any).__testNativeMenuInspection;
+    });
+  }
+}

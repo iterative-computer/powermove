@@ -1,4 +1,4 @@
-import { chooseNativeMenu, expect, test } from './helpers/app';
+import { chooseNativeMenu, inspectNativeMenu, expect, test } from './helpers/app';
 
 async function cleanProject(page: any, name: string) {
   return page.evaluate(async (projectName: string) => {
@@ -59,6 +59,11 @@ test.describe('@viewer After Effects tool behavior', () => {
       buttons.map((button) => button.dataset.tool));
     expect(tools).toEqual(['select', 'hand', 'shape', 'text']);
     await page.locator('#toolbar').screenshot({ path: '/private/tmp/powermove-toolbar.png' });
+    const previousTool = await page.evaluate(() => (window as any).PM.Kernel.services.get('tool').tool);
+    const menu = await inspectNativeMenu(session, () =>
+      page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click());
+    expect(menu).toContainEqual({ label: 'Rotation Tool (W)', enabled: true });
+    expect(await page.evaluate(() => (window as any).PM.Kernel.services.get('tool').tool)).toBe(previousTool);
     await chooseNativeMenu(session, 'Rotation Tool (W)', () =>
       page.getByRole('button', { name: 'Selection and transform tools', exact: true }).click());
     await expect(page.locator('#toolbar button[data-tool="rotate"]')).toHaveAttribute('aria-pressed', 'true');
