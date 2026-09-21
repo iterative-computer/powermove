@@ -76,6 +76,8 @@ export interface ServeOptions {
   engineScript?: string | null;
   /** How this host was installed; decides whether it can update itself. */
   installKind?: InstallKind;
+  /** userData/host: where a managed install writes its update. */
+  managedPrefix?: string;
   log?: (line: string) => void;
 }
 
@@ -92,6 +94,7 @@ const SANDBOX_PATH = 'host/sandbox.html';
 /** The sandbox document's own policy: eval inside, no network, same-origin script only. */
 const SANDBOX_CSP = "default-src 'none'; script-src 'self' 'unsafe-eval'; worker-src blob:; connect-src 'none'";
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024;
+const HEARTBEAT_MS = 25_000;
 const MEDIA_KEY = /^media:[A-Za-z0-9:._-]{1,200}$/;
 /** One file per key; the key's own characters are safe once ':' is folded. */
 const mediaFileName = (key: string): string => key.replace(/[^A-Za-z0-9._-]/g, '_');
@@ -283,11 +286,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     if (typeof projectId !== 'string') return [];
     return runs.runsFor(projectId).map((record) => ({ ...record, events: undefined, eventCount: record.events.length }));
   });
-  ipc.handle(WEB.runsAttach, (event, runId) => {
+  ipc.handle(WEB.runsAttach, (event, payload) => {
     const client = trustedClient(event);
-    const owner = typeof runId === 'string' ? runs.owner(runId) : null;
+    // A bare id replays the whole run; { runId, since } resumes a tab that saw `since` events already.
+    const runId = typeof payload === 'string' ? payload : isRecord(payload) && typeof payload.runId === 'string' ? payload.runId : null;
+    const since = isRecord(payload) && typeof payload.since === 'number' && Number.isSafeInteger(payload.since) && payload.since > 0 ? payload.since : 0;
+    const owner = runId ? runs.owner(runId) : null;
     if (!owner) throw new Error('That run is not on this host.');
-    owner.attach(client, true);
+    owner.attach(client, since > 0 ? { since } : true);
     return { ...owner.record, events: undefined, eventCount: owner.record.events.length };
   });
 
@@ -462,6 +468,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const updates = new UpdateChecker({
     current: options.version,
     installKind: options.installKind ?? 'unknown',
+    ...(options.managedPrefix ? { managedPrefix: options.managedPrefix } : {}),
     channel: /-beta\./.test(options.version) ? 'beta' : 'latest',
     // POWERMOVE_FAKE_LATEST=x.y.z stands in for the registry while testing the update UI.
     ...(process.env['POWERMOVE_FAKE_LATEST'] ? { fetchLatest: async () => process.env['POWERMOVE_FAKE_LATEST'] ?? null } : {}),
@@ -599,14 +606,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     sockets.handleUpgrade(request, socket, head, (ws: WebSocket) => {
       const origin = `${request.headers.origin ?? `${scheme}://localhost`}/`;
       const client = ipc.connect({ send: (data) => ws.send(data), close: (code, reason) => ws.close(code, reason) }, origin);
-      if (isEngine) client.kind = 'engine'; else editors.add(client.window, projectId);
+      if (isEngine) { client.kind = 'engine'; engineRestarts = 0; } else editors.add(client.window, projectId);
       log(`[serve] ${isEngine ? 'engine' : 'client'} ${client.id} connected${projectId ? ` (project ${projectId})` : ''}`);
       ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         if (!isBinary) return;
         const bytes = Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         client.receive(bytes);
       });
-      ws.on('close', () => { log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); });
+      // Idle proxies and NATs drop silent sockets, and a peer that vanished
+      // (lid closed, phone off the network) never sends a close frame. Ping
+      // on a timer; a socket that misses two answers is gone.
+      let alive = true;
+      ws.on('pong', () => { alive = true; });
+      const heartbeat = setInterval(() => {
+        if (!alive) { log(`[serve] ${client.kind} ${client.id}: no heartbeat; dropping`); ws.terminate(); return; }
+        alive = false;
+        try { ws.ping(); } catch { ws.terminate(); }
+      }, HEARTBEAT_MS);
+      heartbeat.unref();
+      ws.on('close', () => { clearInterval(heartbeat); log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); });
       ws.on('error', (error: Error) => log(`[serve] client ${client.id}: ${error.message}`));
     });
   });
