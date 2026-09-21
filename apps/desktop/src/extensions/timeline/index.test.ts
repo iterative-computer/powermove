@@ -343,6 +343,34 @@ describe('timeline extension', () => {
     expect(value.api.edit.commit).toHaveBeenCalledExactlyOnceWith('Trim clip');
   });
 
+  it.each(['move', 'in', 'out'] as const)('expands the selection once for a large %s gesture while respecting locks', (gesture) => {
+    const value = harness();
+    const layers = Array.from({ length: 1000 }, (_, index) => ({
+      id: `clip-${index}`, type: 'solid', name: `Clip ${index}`, from: 2, dur: 3,
+      lock: index === 1, collapsed: true, p: {}, d: {},
+    }));
+    value.state.project.layers = layers;
+    value.state.selection.layers = [layers[0]!.id];
+    vi.mocked(value.api.groups.expand).mockImplementation(() => layers.map(layer => layer.id));
+    vi.mocked(value.api.groups.ancestors).mockImplementation((layer: any) => layer.id === 'clip-2' ? [{ lock: true } as any] : []);
+    activate(value);
+    const canvas = build(value).querySelector<HTMLCanvasElement>('#tl-canvas')!;
+    const timeline = value.state.timeline as any;
+    timeline.rows = [{ kind: 'layer', L: layers[0] }];
+    timeline.pps = 100;
+    timeline.scrollT = 0;
+    const x = timeline.gut + (gesture === 'in' ? 2 : gesture === 'out' ? 5 : 3) * timeline.pps;
+    pointer(canvas, x, timeline.ruler + timeline.row / 2);
+    const drag = vi.mocked(value.api.ui.drag).mock.calls.at(-1)![1];
+    drag.move!(100, 0, { shiftKey: false } as any);
+    const commands = vi.mocked(value.api.edit.dispatch).mock.calls.map(([command]) => command as any);
+    expect(commands.map(command => command.target)).toEqual(layers.filter(layer => !['clip-1', 'clip-2'].includes(layer.id)).map(layer => layer.id));
+    expect(commands[0].patch).toEqual(gesture === 'move' ? { from: 3 } : gesture === 'in' ? { from: 3, duration: 2 } : { duration: 4 });
+    drag.up!({} as any);
+    expect(value.api.edit.commit).toHaveBeenCalledExactlyOnceWith(gesture === 'move' ? 'Move clip' : 'Trim clip');
+    expect(value.api.groups.expand).toHaveBeenCalledTimes(1);
+  });
+
   it('releases an external text field when the timeline starts a pointer gesture', () => {
     const value = harness();
     vi.mocked(value.api.ui.drag).mockImplementation((event: PointerEvent, handlers: any) => {
