@@ -47,7 +47,9 @@
     : []);
   const filtered = $derived((list: StoreListing[]) => kind === 'all' ? list : list.filter((l) => l.kind === kind));
   const viewKey = $derived(detail ? `detail:${coordinate(detail)}` : query ? 'search' : page);
-  const slide = $derived(reduced() ? { duration: 0 } : { x: direction * SLIDE, duration: 220, easing: cubicOut });
+  /* Sibling pages swap in place. Only pushing into and popping out of a
+     detail slides, in the direction you moved. */
+  const slide = $derived(reduced() || direction === 0 ? { duration: 0 } : { x: direction * SLIDE, duration: 220, easing: cubicOut });
 
   export function open(target: StorePage = 'browse'): void {
     window.clearTimeout(leaveTimer);
@@ -87,8 +89,7 @@
   }
 
   function show(id: StorePage): void {
-    const order = NAV.findIndex((n) => n.id === id) - NAV.findIndex((n) => n.id === page);
-    direction = detail ? -1 : Math.sign(order);
+    direction = 0;
     page = id;
     detail = null;
     void tick().then(() => scrollEl?.scrollTo({ top: 0, behavior: 'instant' }));
