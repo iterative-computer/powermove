@@ -22,6 +22,7 @@ import {
   REQUEST_ID,
   type ArtifactRef,
   type ChatGPTAccountStatus,
+  type CodexModelOption,
   type ClaudeAccountStatus,
   type CodexCancelRequest,
   type AgentChangeSetRestoreRequest,
@@ -74,6 +75,7 @@ export interface CodexIpcContext {
 
 export interface ChatGPTAccountController {
   status(): Promise<ChatGPTAccountStatus>;
+  models?(): Promise<CodexModelOption[]>;
   connect(): Promise<ChatGPTAccountStatus>;
   disconnect(): Promise<ChatGPTAccountStatus>;
   shutdown(): Promise<void>;
@@ -333,6 +335,11 @@ export function registerCodexIpc(
   ipcMain.handle(IPC.chatgptStatus, async (event) => {
     requireTrusted(event, ctx);
     return account.status();
+  });
+
+  ipcMain.handle(IPC.chatgptModels, async (event) => {
+    requireTrusted(event, ctx);
+    return account.models?.() ?? [];
   });
 
   ipcMain.handle(IPC.chatgptConnect, async (event) => {

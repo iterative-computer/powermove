@@ -56,6 +56,15 @@ class FakeAppServer extends EventEmitter {
         account: this.account,
         requiresOpenaiAuth: true
       });
+      else if (message.method === 'model/list') this.respond(message.id, {
+        data: [
+          { model: 'gpt-6-sol', displayName: 'GPT-6 Sol', supportedReasoningEfforts: [
+            { reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'max' }
+          ] },
+          { model: 'hidden-model', displayName: 'Hidden', hidden: true },
+          { model: '../invalid', displayName: 'Invalid' }
+        ], nextCursor: null
+      });
       else if (message.method === 'account/login/start') this.respond(message.id, {
         type: 'chatgpt',
         loginId: 'login-123',
@@ -93,6 +102,17 @@ function harness(authUrl?: string) {
 }
 
 describe('ChatGPTAccountClient', () => {
+  it('lists picker-visible models and effort options from App Server', async () => {
+    const { child, client } = harness();
+    await expect(client.models()).resolves.toEqual([{
+      id: 'gpt-6-sol', label: 'GPT-6 Sol', reasoningEfforts: ['low', 'medium', 'max']
+    }]);
+    expect(child.messages.find(message => message.method === 'model/list')?.params).toEqual({
+      limit: 100, includeHidden: false
+    });
+    await client.shutdown();
+  });
+
   it('initializes App Server before reading the ChatGPT account', async () => {
     const { child, client, spawnProcess } = harness();
     await expect(client.status()).resolves.toMatchObject({ state: 'disconnected' });

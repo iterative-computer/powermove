@@ -68,6 +68,7 @@ export const IPC = {
   agentToolRequest: 'agent-tool:request', // main → renderer
   agentToolResponse: 'agent-tool:response', // renderer → main
   chatgptStatus: 'chatgpt:status',
+  chatgptModels: 'chatgpt:models',
   chatgptConnect: 'chatgpt:connect',
   chatgptDisconnect: 'chatgpt:disconnect',
   chatgptChanged: 'chatgpt:changed', // main → renderer
@@ -236,6 +237,12 @@ export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
+
+export interface CodexModelOption {
+  id: string;
+  label: string;
+  reasoningEfforts: ReasoningEffort[];
+}
 
 export interface CodexAttachment {
   name: string;
@@ -630,6 +637,7 @@ export interface PowermoveBridge {
 
   chatgpt: {
     status(): Promise<ChatGPTAccountStatus>;
+    models?(): Promise<CodexModelOption[]>;
     connect(): Promise<ChatGPTAccountStatus>;
     disconnect(): Promise<ChatGPTAccountStatus>;
     onChanged(cb: (status: ChatGPTAccountStatus) => void): () => void;

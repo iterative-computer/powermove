@@ -312,6 +312,7 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
 
     chatgpt: {
       status: () => link.invoke(IPC.chatgptStatus),
+      models: () => link.invoke(IPC.chatgptModels),
       connect: () => link.invoke(IPC.chatgptConnect),
       disconnect: () => link.invoke(IPC.chatgptDisconnect),
       onChanged: subscribe(IPC.chatgptChanged)

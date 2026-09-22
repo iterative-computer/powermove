@@ -16,7 +16,7 @@ import { AgentThreads, conversationForAgent, normalizeGeneratedThreadTitle, thre
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '../../../../shared/effect-authoring';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
-import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort } from '../../../../shared/agent-models';
+import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
@@ -271,7 +271,34 @@ const AGENT_PROVIDERS: any = [
   { id: 'claude', label: 'Claude' },
   { id: 'compatible', label: 'API / local model' },
 ];
+function ensureClaudeModelChoice(model: string): void {
+  if (/^claude-[a-z0-9-]{1,100}$/.test(model) && !AGENT_MODELS.claude.some(item => item.id === model)) {
+    AGENT_MODELS.claude.push({ id: model, label: model });
+  }
+}
+if (S.provider === 'claude') ensureClaudeModelChoice(S.model);
 S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort) || S.reasoningEffort;
+async function refreshCodexModels(): Promise<void> {
+  try {
+    const models = await globalThis.window?.powermove?.chatgpt?.models?.();
+    if (!models?.length) return;
+    setDiscoveredCodexModels(models);
+    if (S.provider === 'chatgpt' && !AGENT_MODELS.chatgpt.some(item => item.id === S.model)) {
+      S.model = AGENT_MODELS.chatgpt[0]!.id;
+      PM.store.set('agentModel.chatgpt', S.model);
+    }
+    if (S.provider === 'chatgpt') {
+      S.reasoningEffort = modelEffort('chatgpt', S.model, S.reasoningEffort) || S.reasoningEffort;
+    }
+    PM.AgentUI?.update();
+  } catch {
+    // Keep the bundled catalog when the runtime is offline or too old.
+  }
+}
+void refreshCodexModels();
+globalThis.window?.powermove?.chatgpt?.onChanged?.((status) => {
+  if (status.state === 'connected') void refreshCodexModels();
+});
 function selectedModelName(provider: string, model: string): string {
   return provider === 'compatible' && model === 'configured' ? AGENT_MODELS.compatible[0]!.label : model;
 }
@@ -616,7 +643,9 @@ registerAgentPanel(PM, {
   },
   setStepsExpanded: (expanded: boolean) => { S.stepsExpanded = expanded; PM.AgentUI?.update(); },
   setModel: (model: string, effort: string) => {
-    if (!AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS].some((item) => item.id === model) || !REASONING_EFFORTS.includes(effort as ReasoningEffort)) return;
+    if (!REASONING_EFFORTS.includes(effort as ReasoningEffort)) return;
+    if (S.provider === 'claude') ensureClaudeModelChoice(model);
+    if (!AGENT_MODELS[S.provider as keyof typeof AGENT_MODELS].some(item => item.id === model)) return;
     S.model = model; S.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, model), effort as ReasoningEffort) || effort;
     PM.store.set(`agentModel.${S.provider}`, model); PM.store.set('agentReasoningEffort', S.reasoningEffort);
     PM.AgentUI?.update({ focusComposer: true });
@@ -625,9 +654,11 @@ registerAgentPanel(PM, {
     if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || S.activeRequest) return;
     S.provider = provider;
     S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
+    if (provider === 'claude') ensureClaudeModelChoice(S.model);
     S.reasoningEffort = modelEffort(provider, selectedModelName(provider, S.model), S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
+    if (provider === 'chatgpt') void refreshCodexModels();
   },
   retry: (messageIndex?: number) => {
     if (S.activeRequest) return;
@@ -1942,7 +1973,8 @@ async function sendRequest(input: any) {
   const session: any = activeSession();
   if ((!typedRequest && !S.attachments.length) || session.phase === 'applying') return;
   const threadIdAtStart: any = threads.activeId;
-  session.provider = S.provider; session.model = S.model; session.reasoningEffort = S.reasoningEffort;
+  session.provider = S.provider; session.model = S.model;
+  session.reasoningEffort = modelEffort(S.provider, selectedModelName(S.provider, S.model), S.reasoningEffort);
   const request: any = typedRequest || 'Review the attached files and make the relevant editable change.';
   const focus = panelFocusContext(S.scope, PM.WS?.current, PM.PANELS || {});
   const context = S.context ? JSON.parse(JSON.stringify(S.context)) : null;

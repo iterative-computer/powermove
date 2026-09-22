@@ -9,6 +9,7 @@ import {
   type ChatGPTAccountStatus,
   type ClaudeAccountStatus,
   type CodexProgressEvent,
+  type CodexModelOption,
   type CodexRunResult,
   type ConsentResult,
   type ExtensionForkResult,
@@ -187,6 +188,7 @@ const bridge: PowermoveBridge = {
 
   chatgpt: {
     status: () => ipcRenderer.invoke(IPC.chatgptStatus) as Promise<ChatGPTAccountStatus>,
+    models: () => ipcRenderer.invoke(IPC.chatgptModels) as Promise<CodexModelOption[]>,
     connect: () => ipcRenderer.invoke(IPC.chatgptConnect) as Promise<ChatGPTAccountStatus>,
     disconnect: () => ipcRenderer.invoke(IPC.chatgptDisconnect) as Promise<ChatGPTAccountStatus>,
     onChanged: (cb) => {

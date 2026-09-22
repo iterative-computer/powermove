@@ -9,7 +9,7 @@ export interface SlashCommand {
 }
 
 export function slashCommands(draft: string, state: Pick<AgentSnapshot,
-  'models' | 'providers' | 'reasoningEfforts' | 'threadSwitchBlocked' | 'legacyPhase'>): SlashCommand[] {
+  'models' | 'providers' | 'provider' | 'reasoningEfforts' | 'threadSwitchBlocked' | 'legacyPhase'>): SlashCommand[] {
   if (!draft.startsWith('/') || /[\r\n]/.test(draft)) return [];
   const [command = '', ...args] = draft.slice(1).toLowerCase().split(/\s+/);
   if (args.length) {
@@ -17,10 +17,15 @@ export function slashCommands(draft: string, state: Pick<AgentSnapshot,
     const choices = command === 'model' ? state.models
       : command === 'provider' ? state.providers
       : command === 'effort' ? state.reasoningEfforts.map(id => ({ id, label: id === 'xhigh' ? 'Extra high' : id.charAt(0).toUpperCase() + id.slice(1) })) : [];
-    return choices.filter(item => `${item.id} ${item.label}`.toLowerCase().includes(query)).map(item => ({
+    const matching = choices.filter(item => `${item.id} ${item.label}`.toLowerCase().includes(query)).map(item => ({
       id: `${command}-${item.id}`, label: item.label, description: `Set ${command}`,
       action: command as 'model' | 'provider' | 'effort', value: item.id,
     }));
+    if (command === 'model' && state.provider === 'claude' && /^claude-[a-z0-9-]{1,100}$/.test(query)
+      && !state.models.some(item => item.id === query)) {
+      matching.push({ id: `model-${query}`, label: query, description: 'Use Claude model ID', action: 'model', value: query });
+    }
+    return matching;
   }
   const working = state.legacyPhase === 'working';
   const commands: SlashCommand[] = [

@@ -1,18 +1,19 @@
-import type { ReasoningEffort } from './ipc';
+import type { CodexModelOption, ReasoningEffort } from './ipc';
 
-// Explicit provider IDs; existing aliases remain valid for saved selections.
-// Sources: developers.openai.com/api/docs/models/gpt-6-astra and
-// code.claude.com/docs/en/model-config (2026-09-05).
+// These entries keep the picker usable when live Codex discovery is unavailable.
+// Claude aliases resolve to the current model supported by the installed CLI.
 export const AGENT_MODELS = {
   compatible: [{ id: 'configured', label: 'Connected model' }],
   chatgpt: [
     { id: 'gpt-6-astra', label: 'GPT 6 Astra' },
+    { id: 'gpt-6-sol', label: 'GPT 6 Sol' },
     { id: 'gpt-5.6-sol', label: '5.6 Sol' },
     { id: 'gpt-5.6-terra', label: '5.6 Terra' },
     { id: 'gpt-5.6-luna', label: '5.6 Luna' },
   ],
   claude: [
     { id: 'claude-fable-5-1', label: 'Fable 5.1' },
+    { id: 'claude-opus-5-5', label: 'Opus 5.5' },
     { id: 'claude-opus-5', label: 'Opus 5' },
     { id: 'claude-sonnet-5', label: 'Sonnet 5' },
     { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
@@ -29,10 +30,23 @@ export const AGENT_MODELS = {
 };
 
 export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const discoveredCodexEfforts = new Map<string, ReasoningEffort[]>();
+
+export function setDiscoveredCodexModels(models: CodexModelOption[]): void {
+  if (!models.length) return;
+  discoveredCodexEfforts.clear();
+  AGENT_MODELS.chatgpt = models.map(({ id, label, reasoningEfforts }) => {
+    discoveredCodexEfforts.set(id, reasoningEfforts);
+    return { id, label };
+  });
+}
 
 export function modelEfforts(provider: string, model: string | null): ReasoningEffort[] {
+  if (provider === 'chatgpt' && model && discoveredCodexEfforts.has(model)) {
+    return discoveredCodexEfforts.get(model)!;
+  }
   if (provider === 'compatible') {
-    if (/^gpt-(6-astra|5\.6)(?:-|$)/.test(model || '')) return REASONING_EFFORTS;
+    if (/^gpt-(6-(?:astra|sol)|5\.6)(?:-|$)/.test(model || '')) return REASONING_EFFORTS;
     if (/^gpt-5\.[2345]-chat(?:-|$)/.test(model || '')) return [];
     if (/^gpt-5\.[245]-pro(?:-|$)/.test(model || '')) return ['medium', 'high', 'xhigh'];
     if (/^gpt-5\.[2345](?:-|$)/.test(model || '')) return ['low', 'medium', 'high', 'xhigh'];
@@ -52,5 +66,8 @@ export function modelEffort(provider: string, model: string | null, effort: Reas
   if (!effort) return null;
   const supported = modelEfforts(provider, model);
   if (!supported.length) return null;
-  return supported.includes(effort) ? effort : 'high';
+  if (supported.includes(effort)) return effort;
+  const rank = REASONING_EFFORTS.indexOf(effort);
+  return REASONING_EFFORTS.filter(item => supported.includes(item)).filter(item => REASONING_EFFORTS.indexOf(item) <= rank).at(-1)
+    ?? supported[0]!;
 }

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { AGENT_MODELS, modelEffort, modelEfforts } from '../shared/agent-models';
+import { AGENT_MODELS, modelEffort, modelEfforts, setDiscoveredCodexModels } from '../shared/agent-models';
 import { buildClaudeArgv } from './claude/adapter';
 import { isCodexRunRequest } from './codex/runner';
 
@@ -23,4 +23,13 @@ it('accepts Astra requests at every exposed effort through IPC validation', () =
       projectId: 'test', projectName: 'Test', projectJSON: '{}', attachments: [], consentToken: null,
     })).toBe(true);
   }
+});
+
+it('uses discovered Codex models and their available efforts', () => {
+  setDiscoveredCodexModels([{
+    id: 'gpt-6-sol', label: 'GPT-6 Sol', reasoningEfforts: ['low', 'medium', 'max']
+  }]);
+  expect(AGENT_MODELS.chatgpt).toEqual([{ id: 'gpt-6-sol', label: 'GPT-6 Sol' }]);
+  expect(modelEfforts('chatgpt', 'gpt-6-sol')).toEqual(['low', 'medium', 'max']);
+  expect(modelEffort('chatgpt', 'gpt-6-sol', 'high')).toBe('medium');
 });
