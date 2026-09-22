@@ -43,9 +43,10 @@ export function mountNavGlide(nav: HTMLElement, options: NavGlideOptions): () =>
 
   const settle = (instant = false) => place(hovered ?? selectedRow(), instant);
 
+  /* Off a row, even inside the nav, the highlight settles back on the selection. */
   const over = (event: PointerEvent) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>(options.row);
-    if (!row || !nav.contains(row)) return;
+    if (!row || !nav.contains(row)) { hovered = null; settle(); return; }
     hovered = row;
     place(row);
   };
