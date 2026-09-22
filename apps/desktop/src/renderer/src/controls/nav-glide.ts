@@ -43,16 +43,27 @@ export function mountNavGlide(nav: HTMLElement, options: NavGlideOptions): () =>
 
   const settle = (instant = false) => place(hovered ?? selectedRow(), instant);
 
-  /* Off a row, even inside the nav, the highlight settles back on the selection. */
-  const over = (event: PointerEvent) => {
-    const row = (event.target as HTMLElement).closest<HTMLElement>(options.row);
-    if (!row || !nav.contains(row)) { hovered = null; settle(); return; }
-    hovered = row;
-    place(row);
+  /* Off a row the highlight settles back on the selection, a touch slower
+     than it follows the pointer. A row keeps the pointer for a few pixels
+     past its bottom edge so drifting off the last one is not abrupt. */
+  const GRACE = 14;
+  const rowAt = (x: number, y: number): HTMLElement | null => {
+    for (const row of rows()) {
+      const r = row.getBoundingClientRect();
+      if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom + GRACE) return row;
+    }
+    return null;
   };
-  const leave = () => { hovered = null; settle(); };
+  const move = (event: PointerEvent) => {
+    const row = rowAt(event.clientX, event.clientY);
+    if (row === hovered) return;
+    hovered = row;
+    glider.classList.toggle('settling', !row);
+    settle();
+  };
+  const leave = () => { hovered = null; glider.classList.add('settling'); settle(); };
 
-  nav.addEventListener('pointerover', over);
+  nav.addEventListener('pointermove', move);
   nav.addEventListener('pointerleave', leave);
   /* The glider's own writes must not re-enter: only the rows' changes count. */
   const observer = new MutationObserver((records) => {
@@ -66,7 +77,7 @@ export function mountNavGlide(nav: HTMLElement, options: NavGlideOptions): () =>
   settle(true);
 
   return () => {
-    nav.removeEventListener('pointerover', over);
+    nav.removeEventListener('pointermove', move);
     nav.removeEventListener('pointerleave', leave);
     observer.disconnect();
     resize.disconnect();

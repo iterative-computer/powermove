@@ -1108,6 +1108,7 @@ body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibi
 /* Sidebar highlight: one layer that glides between rows (controls/nav-glide.ts). */
 .nav-glider{position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:transform 220ms var(--nav-glide-ease),width 220ms var(--nav-glide-ease),height 220ms var(--nav-glide-ease),opacity 150ms ease}
 .nav-glider.on{opacity:1}
+.nav-glider.settling{transition-duration:340ms,340ms,340ms,150ms}
 @media (prefers-reduced-motion:reduce){.nav-glider{transition:none}}.ps-navbtn.on::after{display:none}
 .ps-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}.ps-navbtn:hover svg,.ps-navbtn.on svg{color:var(--tx)}.ps-navbtn span:not(.count){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
 .ps-updates[hidden]{display:none}
