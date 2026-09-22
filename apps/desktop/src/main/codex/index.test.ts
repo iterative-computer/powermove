@@ -181,6 +181,7 @@ describe('registerCodexIpc', () => {
       IPC.chatgptConnect,
       IPC.chatgptDisconnect,
       IPC.claudeStatus,
+      IPC.claudeModels,
       IPC.claudeConnect,
       IPC.claudeDisconnect,
       IPC.compatibleStatus,

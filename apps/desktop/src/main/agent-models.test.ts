@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { AGENT_MODELS, modelEffort, modelEfforts, setDiscoveredCodexModels } from '../shared/agent-models';
+import { AGENT_MODELS, modelEffort, modelEfforts, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../shared/agent-models';
 import { buildClaudeArgv } from './claude/adapter';
 import { isCodexRunRequest } from './codex/runner';
 
@@ -46,4 +46,15 @@ it('uses discovered Codex models and their available efforts', () => {
     schema: null, images: [], model: 'gpt-6-sol', reasoningEffort: 'ultra', access: 'project',
     projectId: 'test', projectName: 'Test', projectJSON: '{}', attachments: [], consentToken: null,
   })).toBe(true);
+});
+
+it('adds live Claude models while preserving bundled choices and effort limits', () => {
+  setDiscoveredClaudeModels([
+    { id: 'claude-opus-5-5', label: 'Opus', reasoningEfforts: ['low', 'medium', 'high', 'max'] },
+    { id: 'claude-new-6', label: 'Claude New 6', reasoningEfforts: ['low', 'high'] },
+  ]);
+  expect(AGENT_MODELS.claude.find(model => model.id === 'claude-opus-5-5')?.label).toBe('Opus 5.5');
+  expect(AGENT_MODELS.claude.find(model => model.id === 'claude-new-6')?.label).toBe('Claude New 6');
+  expect(modelEfforts('claude', 'claude-new-6')).toEqual(['low', 'high']);
+  expect(modelEffort('claude', 'claude-new-6', 'max')).toBe('high');
 });

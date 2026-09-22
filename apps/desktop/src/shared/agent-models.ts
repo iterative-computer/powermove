@@ -1,6 +1,6 @@
-import type { CodexModelOption, ReasoningEffort } from './ipc';
+import type { ClaudeModelOption, CodexModelOption, ReasoningEffort } from './ipc';
 
-// These entries keep the picker usable when live Codex discovery is unavailable.
+// These entries keep the picker usable when live provider discovery is unavailable.
 // Claude aliases resolve to the current model supported by the installed CLI.
 export const AGENT_MODELS = {
   compatible: [{ id: 'configured', label: 'Connected model' }],
@@ -33,7 +33,9 @@ export const AGENT_MODELS = {
 export const REASONING_EFFORTS: ReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const STANDARD_REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const bundledCodexModels = [...AGENT_MODELS.chatgpt];
+const bundledClaudeModels = [...AGENT_MODELS.claude];
 const discoveredCodexEfforts = new Map<string, ReasoningEffort[]>();
+const discoveredClaudeEfforts = new Map<string, ReasoningEffort[]>();
 
 export function setDiscoveredCodexModels(models: CodexModelOption[]): void {
   if (!models.length) return;
@@ -49,12 +51,28 @@ export function setDiscoveredCodexModels(models: CodexModelOption[]): void {
   ];
 }
 
+export function setDiscoveredClaudeModels(models: ClaudeModelOption[]): void {
+  if (!models.length) return;
+  discoveredClaudeEfforts.clear();
+  const discovered = models.map(({ id, label, reasoningEfforts }) => {
+    discoveredClaudeEfforts.set(id, reasoningEfforts);
+    return { id, label };
+  });
+  AGENT_MODELS.claude = [
+    ...bundledClaudeModels,
+    ...discovered.filter(model => !bundledClaudeModels.some(bundled => bundled.id === model.id)),
+  ];
+}
+
 export function modelEfforts(provider: string, model: string | null): ReasoningEffort[] {
   if (provider === 'chatgpt' && model && discoveredCodexEfforts.has(model)) {
     return discoveredCodexEfforts.get(model)!;
   }
   if (provider === 'chatgpt') {
     return model === 'gpt-6-sol' ? [...STANDARD_REASONING_EFFORTS, 'ultra'] : STANDARD_REASONING_EFFORTS;
+  }
+  if (provider === 'claude' && model && discoveredClaudeEfforts.has(model)) {
+    return discoveredClaudeEfforts.get(model)!;
   }
   if (provider === 'compatible') {
     if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(model || '')) return REASONING_EFFORTS.slice(0, -1);

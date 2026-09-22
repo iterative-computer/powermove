@@ -16,7 +16,7 @@ import { AgentThreads, conversationForAgent, normalizeGeneratedThreadTitle, thre
 import { AGENT_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
 import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '../../../../shared/effect-authoring';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
-import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredCodexModels } from '../../../../shared/agent-models';
+import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
 import { idlePreload } from './idle-preload';
 
 const AGENT_EDITABLE_CATALOG_CHARS = 72_000;
@@ -296,8 +296,26 @@ async function refreshCodexModels(): Promise<void> {
   }
 }
 void refreshCodexModels();
+async function refreshClaudeModels(): Promise<void> {
+  try {
+    const models = await globalThis.window?.powermove?.claude?.models?.();
+    if (!models?.length) return;
+    setDiscoveredClaudeModels(models);
+    ensureClaudeModelChoice(S.model);
+    if (S.provider === 'claude') {
+      S.reasoningEffort = modelEffort('claude', S.model, S.reasoningEffort) || S.reasoningEffort;
+    }
+    PM.AgentUI?.update();
+  } catch {
+    // Keep the bundled catalog when Claude is unavailable.
+  }
+}
+void refreshClaudeModels();
 globalThis.window?.powermove?.chatgpt?.onChanged?.((status) => {
   if (status.state === 'connected') void refreshCodexModels();
+});
+globalThis.window?.powermove?.claude?.onChanged?.((status) => {
+  if (status.state === 'connected') void refreshClaudeModels();
 });
 function selectedModelName(provider: string, model: string): string {
   return provider === 'compatible' && model === 'configured' ? AGENT_MODELS.compatible[0]!.label : model;
@@ -659,6 +677,7 @@ registerAgentPanel(PM, {
     PM.store.set('agentProvider', provider);
     PM.AgentUI?.update({ focusComposer: true });
     if (provider === 'chatgpt') void refreshCodexModels();
+    if (provider === 'claude') void refreshClaudeModels();
   },
   retry: (messageIndex?: number) => {
     if (S.activeRequest) return;

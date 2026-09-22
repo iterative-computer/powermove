@@ -73,6 +73,7 @@ export const IPC = {
   chatgptDisconnect: 'chatgpt:disconnect',
   chatgptChanged: 'chatgpt:changed', // main → renderer
   claudeStatus: 'claude:status',
+  claudeModels: 'claude:models',
   claudeConnect: 'claude:connect',
   claudeDisconnect: 'claude:disconnect',
   claudeChanged: 'claude:changed', // main → renderer
@@ -243,6 +244,8 @@ export interface CodexModelOption {
   label: string;
   reasoningEfforts: ReasoningEffort[];
 }
+
+export type ClaudeModelOption = CodexModelOption;
 
 export interface CodexAttachment {
   name: string;
@@ -645,6 +648,7 @@ export interface PowermoveBridge {
 
   claude: {
     status(): Promise<ClaudeAccountStatus>;
+    models?(): Promise<ClaudeModelOption[]>;
     connect(): Promise<ClaudeAccountStatus>;
     disconnect(): Promise<ClaudeAccountStatus>;
     onChanged(cb: (status: ClaudeAccountStatus) => void): () => void;

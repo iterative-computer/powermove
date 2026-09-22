@@ -8,6 +8,7 @@ import {
   type CaptureResult,
   type ChatGPTAccountStatus,
   type ClaudeAccountStatus,
+  type ClaudeModelOption,
   type CodexProgressEvent,
   type CodexModelOption,
   type CodexRunResult,
@@ -200,6 +201,7 @@ const bridge: PowermoveBridge = {
 
   claude: {
     status: () => ipcRenderer.invoke(IPC.claudeStatus) as Promise<ClaudeAccountStatus>,
+    models: () => ipcRenderer.invoke(IPC.claudeModels) as Promise<ClaudeModelOption[]>,
     connect: () => ipcRenderer.invoke(IPC.claudeConnect) as Promise<ClaudeAccountStatus>,
     disconnect: () => ipcRenderer.invoke(IPC.claudeDisconnect) as Promise<ClaudeAccountStatus>,
     onChanged: (cb) => {
