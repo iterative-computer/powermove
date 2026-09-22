@@ -1103,7 +1103,8 @@ body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibi
 .ps-search svg,.ps-navbtn svg,.ps-view svg,.ps-more svg,.ps-empty > svg{stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 /* One sidebar language across the home, the Store and Settings: medium rows, 15px icons in the quiet ink, a filled selection. */
 .ps-nav{display:flex;flex-direction:column;gap:2px}.ps-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
-.ps-navs{position:relative;display:flex;flex-direction:column;gap:12px}
+/* Fills the sidebar like the Store's nav, so the highlight stays on the last row until the pointer leaves the column. */
+.ps-navs{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:12px}
 .ps-navbtn{position:relative;z-index:1}.ps-navbtn:hover{color:var(--tx)}.ps-navbtn.on{color:var(--tx)}
 /* Sidebar highlight: one layer that glides between rows (controls/nav-glide.ts). */
 .nav-glider{position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:transform 220ms var(--nav-glide-ease),width 220ms var(--nav-glide-ease),height 220ms var(--nav-glide-ease),opacity 150ms ease}
