@@ -1,0 +1,8 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "powermove-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "account_id": "98dbb6e46f4901896327e5ff4035d637",
+  "observability": { "enabled": true }
+}
