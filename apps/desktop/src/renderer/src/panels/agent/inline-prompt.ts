@@ -3,6 +3,12 @@ import type { PromptAttachment } from './attachments';
 export type InlineAttachment = PromptAttachment & { promptOffset?: number };
 type Draft = { text: string; attachments: InlineAttachment[] };
 
+/** The request marks where each file sat for the model; the transcript shows
+    the files as chips instead, so the bubble reads as what was typed. */
+export function displayPromptText(text: string): string {
+  return text.replace(/[ \t]*\[Attachment: [^\]\n]*\][ \t]*/g, ' ').replace(/ {2,}/g, ' ').trim();
+}
+
 /** Owns the editable DOM so reactive renders never interrupt the caret or IME. */
 export class InlinePrompt {
   private items = new Map<string, InlineAttachment>();

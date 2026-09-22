@@ -14,6 +14,7 @@
   import TextRow from './TextRow.svelte';
   import ToolActivity from './ToolActivity.svelte';
   import { splitUIPlacementText } from './ui-placement';
+  import { displayPromptText } from './inline-prompt';
 
   let {
     PM,
@@ -87,7 +88,7 @@
     {/if}
     <div class="agent-prompt" class:is-answering={answering}>
       {#if answering}<div class="agent-prompt-signal" data-prompt-halo aria-hidden="true" use:promptSignal out:glowFade={{duration: 220}}></div>{/if}
-      <div class="agent-bubble">{message.text}</div>
+      <div class="agent-bubble">{displayPromptText(message.text || '') || (message.attachments?.length ? `Attached ${message.attachments.length} file${message.attachments.length === 1 ? '' : 's'}` : '')}</div>
     </div>
   </div>
 {:else}

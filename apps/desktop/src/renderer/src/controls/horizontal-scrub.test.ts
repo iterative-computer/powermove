@@ -10,6 +10,7 @@ it('groups horizontal movement, preserves vertical scrolling, and cancels on dis
   expect(wheel(1, 20).defaultPrevented).toBe(false);
   expect(options.begin).not.toHaveBeenCalled();
   expect(wheel(20, 1).defaultPrevented).toBe(true);
+  expect(wheel(0, 20).defaultPrevented).toBe(true);
   wheel(-10, 0);
   expect(options.begin).toHaveBeenCalledTimes(1);
   expect(options.move).toHaveBeenLastCalledWith(-2.5, expect.anything());

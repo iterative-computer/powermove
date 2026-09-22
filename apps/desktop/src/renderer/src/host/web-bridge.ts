@@ -317,6 +317,9 @@ function createBridge(link: Connection, hello: WebHello, storeSnapshot: Record<s
       disconnect: () => link.invoke(IPC.chatgptDisconnect),
       onChanged: subscribe(IPC.chatgptChanged)
     },
+    agentRuntime: {
+      update: (provider) => link.invoke(IPC.agentRuntimeUpdate, provider)
+    },
     claude: {
       status: () => link.invoke(IPC.claudeStatus),
       connect: () => link.invoke(IPC.claudeConnect),

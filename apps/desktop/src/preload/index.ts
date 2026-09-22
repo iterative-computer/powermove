@@ -199,6 +199,10 @@ const bridge: PowermoveBridge = {
     }
   },
 
+  agentRuntime: {
+    update: (provider) => ipcRenderer.invoke(IPC.agentRuntimeUpdate, provider) as Promise<{ provider: 'claude' | 'codex'; version: string }>
+  },
+
   claude: {
     status: () => ipcRenderer.invoke(IPC.claudeStatus) as Promise<ClaudeAccountStatus>,
     models: () => ipcRenderer.invoke(IPC.claudeModels) as Promise<ClaudeModelOption[]>,

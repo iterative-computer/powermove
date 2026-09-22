@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, it, vi } from 'vitest';
-import { InlinePrompt } from './inline-prompt';
+import { InlinePrompt, displayPromptText } from './inline-prompt';
 const file = { id: 'file', name: 'reference.png', type: 'image/png', size: 1, promptOffset: 6 };
 function setup(text = 'hello world') {
   const element = document.createElement('div'); element.contentEditable = 'true'; document.body.append(element);
@@ -141,4 +141,11 @@ it('removes invisible caret stops once typing supplies real text beside a token'
   const selection = window.getSelection()!;
   expect(selection.anchorNode).toBe(token.nextSibling);
   expect(selection.anchorOffset).toBe(' suffix'.length);
+});
+
+it('drops the model-facing attachment markers from what the transcript shows', () => {
+  expect(displayPromptText('[Attachment: image.png]now it looks like this')).toBe('now it looks like this');
+  expect(displayPromptText('before [Attachment: a.png] after')).toBe('before after');
+  expect(displayPromptText('hello [Attachment: a.png]world')).toBe('hello world');
+  expect(displayPromptText('[Attachment: a.png]')).toBe('');
 });

@@ -39,6 +39,8 @@ import { readArtifact, revealArtifact } from './artifacts';
 import { requestComputerConsent } from './consent';
 import { CodexRunner, isCodexRunRequest } from './runner';
 import { ChatGPTAccountClient } from './app-server-account';
+import { forgetCodexDescription } from './env';
+import { installLatestRuntime } from '../runtime-updates';
 import { CodexAppServerRunner } from './app-server-runner';
 import { ClaudeAccountClient, ClaudeRunner } from '../claude';
 import { buildFixPrompt, buildRebasePrompt } from './instructions';
@@ -372,6 +374,21 @@ export function registerCodexIpc(
   ipcMain.handle(IPC.claudeDisconnect, async (event) => {
     requireTrusted(event, ctx);
     return claudeAccount.disconnect();
+  });
+
+  ipcMain.handle(IPC.agentRuntimeUpdate, async (event, provider: unknown) => {
+    requireTrusted(event, ctx);
+    if (provider !== 'claude' && provider !== 'codex') throw new Error('Unknown agent runtime.');
+    const result = await installLatestRuntime(provider);
+    // Long-lived processes still run the old binary; restart them on the new one.
+    if (provider === 'codex') {
+      forgetCodexDescription();
+      await Promise.all([account.shutdown(), appServerRunner.shutdown()]);
+      void account.status();
+    } else {
+      void claudeAccount.status();
+    }
+    return result;
   });
 
   ipcMain.handle(IPC.compatibleStatus, async (event) => { requireTrusted(event, ctx); return compatible.status(); });

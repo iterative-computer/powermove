@@ -1,6 +1,22 @@
 import type { PMRegistry } from '../registry';
 import { splitTextLayers, type TextSplitMode } from '../core/split-text';
 import { evaluatedValue } from '../core/content-properties';
+import { validMatteSource } from '../core/matte';
+
+/** Apply the lower of two stack-selected layers as an alpha track matte for the upper layer. */
+export function applySelectedLayerMatte(PM: PMRegistry, selected: any[], origin = 'timeline'): boolean {
+  if (selected.length !== 2) return false;
+  const layers = selected.slice().sort((a, b) => PM.proj.layers.indexOf(a) - PM.proj.layers.indexOf(b));
+  const top = layers[0];
+  const bottom = layers[1];
+  if (!top || !bottom || top === bottom || ['audio', 'null', 'adjustment', 'group'].includes(bottom.type)) return false;
+  if (top.lock || bottom.lock || (PM.groupAncestors?.(top) || []).some((group: any) => group.lock)
+    || (PM.groupAncestors?.(bottom) || []).some((group: any) => group.lock)) return false;
+  if (!validMatteSource(PM.proj.layers, top, bottom.id)) return false;
+  PM.Edit.apply({ type: 'set_layer', target: top.id, patch: { matteSource: bottom.id } },
+    { label: 'Use bottom layer as mask', origin });
+  return true;
+}
 
 export function parentMenuItems(PM: PMRegistry, ids: string[], origin = 'timeline'): any[] {
   const selected = ids.map(id => PM.L(id)).filter((layer: any) => layer && PM.TYPE_META[layer.type]?.transform !== false);
@@ -29,6 +45,14 @@ export function installLayerMenu(PM: PMRegistry): void {
       { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
       { label: 'Group layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
     ];
+    if (selected.length === 2) {
+      const matteLayers = selected.slice().sort((a: any, b: any) => PM.proj.layers.indexOf(a) - PM.proj.layers.indexOf(b));
+      const canMatte = matteLayers[0] && matteLayers[1]
+        && !['audio', 'null', 'adjustment', 'group'].includes(matteLayers[1].type)
+        && validMatteSource(PM.proj.layers, matteLayers[0], matteLayers[1].id);
+      items.push({ label: 'Use bottom layer as mask', icon: 'mask', disabled: !editable || !canMatte,
+        run: () => applySelectedLayerMatte(PM, selected, editOrigin) });
+    }
     if (selected.every((item: any) => item.type === 'text')) items.push({ label: 'Split text into layers…', icon: 'type', disabled: !editable, run: () => more('Split text into layers',
       ([['By word', 'words'], ['By character', 'characters'], ['By line', 'lines']] as const).map(([label, mode]) => ({ label, run: () => splitTextLayers(PM, selected.map((item: any) => item.id), mode as TextSplitMode) }))) });
     if (selected.every((item: any) => item.type !== 'audio' && item.type !== 'adjustment')) items.push({ label: '3D layer', icon: 'cube', on: selected.every((item: any) => item.threeD), disabled: !editable, run: () => patch({threeD: !selected.every((item: any) => item.threeD)}, '3D layer') });

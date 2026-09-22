@@ -77,6 +77,7 @@ export const IPC = {
   claudeConnect: 'claude:connect',
   claudeDisconnect: 'claude:disconnect',
   claudeChanged: 'claude:changed', // main → renderer
+  agentRuntimeUpdate: 'agent-runtime:update',
   compatibleStatus: 'compatible:status',
   compatibleConfigure: 'compatible:configure',
   consentComputer: 'consent:computer',
@@ -644,6 +645,11 @@ export interface PowermoveBridge {
     connect(): Promise<ChatGPTAccountStatus>;
     disconnect(): Promise<ChatGPTAccountStatus>;
     onChanged(cb: (status: ChatGPTAccountStatus) => void): () => void;
+  };
+
+  /** Install the newest runtime for a provider; resolves with the installed version. */
+  agentRuntime?: {
+    update(provider: 'claude' | 'codex'): Promise<{ provider: 'claude' | 'codex'; version: string }>;
   };
 
   claude: {

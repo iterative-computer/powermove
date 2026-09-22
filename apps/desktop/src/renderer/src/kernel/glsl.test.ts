@@ -43,7 +43,7 @@ describe('toLegacyFx', () => {
   it('produces the legacy FX shape with generated uniforms, u_pass, and a main()', () => {
     const fx = toLegacyFx(effect({ passes: 2 }), PRE);
 
-    expect(fx).toMatchObject({ label: 'VHS', group: 'Stylize', passes: 2, keepOrig: false, params });
+    expect(fx).toMatchObject({ label: 'VHS', group: 'Stylize', passes: 2, keepOrig: false, backdrop: false, params });
     expect(fx.frag.startsWith(PRE)).toBe(true);
     expect(fx.frag).toContain('uniform float u_amount;');
     expect(fx.frag).toContain('uniform vec3 u_tint;');
@@ -57,6 +57,13 @@ describe('toLegacyFx', () => {
   it('defaults passes to 1 and adds u_orig only when keepOrig', () => {
     expect(toLegacyFx(effect(), PRE).passes).toBe(1);
     expect(toLegacyFx(effect({ keepOrig: true }), PRE).frag).toContain('uniform sampler2D u_orig;');
+  });
+
+  it('declares the backdrop sampler only for backdrop effects', () => {
+    const fx = toLegacyFx(effect({ backdrop: true }), PRE);
+    expect(fx.backdrop).toBe(true);
+    expect(fx.frag).toContain('uniform sampler2D u_backdrop;');
+    expect(toLegacyFx(effect(), PRE).frag).not.toContain('u_backdrop');
   });
 
   it('passes rawShader frag through untouched', () => {
@@ -76,6 +83,7 @@ describe('toLegacyFx', () => {
     expect(() => validateEffect(effect({ group: '' }))).toThrow(/group/);
     expect(() => validateEffect(effect({ params: [params[0]!, params[0]!] }))).toThrow(/duplicate param key/);
     expect(() => validateEffect(effect({ frag: '' }))).toThrow(/non-empty/);
+    expect(() => validateEffect(effect({ backdrop: 'yes' as never }))).toThrow(/backdrop/);
   });
 });
 

@@ -176,7 +176,12 @@ export type EffectParamDefinition =
  * Fragment shader body contract (GLSL ES 3.00). The kernel prepends the common
  * preamble (`v_uv`, `v_st`, `u_tex`, `u_res`, `u_texel`, `u_time`, helpers) and
  * a `uniform` declaration for every param named `u_<k>` (float for numbers and
- * toggles, vec3 for colors), plus `u_pass` (int) and, when `keepOrig`, `u_orig`.
+ * toggles, vec3 for colors), plus `u_pass` (int), `u_orig` when `keepOrig`, and
+ * `u_backdrop` when `backdrop` is enabled. `u_backdrop` contains the pixels
+ * accumulated beneath the layer before the effect is applied.
+ * `v_uv` is composition-normalized and `v_px` is in composition pixels even
+ * when the editor is rendering a cropped high-zoom viewport; `u_coordRes` is
+ * the full composition size in those pixels.
  * Output is `o` (vec4). Provide only the body of `main()` in `frag`, or a full
  * shader with `void main` when `rawShader` is true (legacy positional u_p<i>
  * uniforms remain supported for raw shaders).
@@ -191,7 +196,16 @@ export interface EffectDefinition {
   frag: string;
   passes?: number; // 1..8
   keepOrig?: boolean;
+  /** Expose the already-composited pixels beneath this layer as `u_backdrop`. */
+  backdrop?: boolean;
   rawShader?: boolean;
+  /**
+   * The shader can run on a cropped high-zoom viewport. Viewport-safe effects
+   * must use the supplied `v_uv`/`v_px` coordinates for spatial calculations.
+   */
+  viewportSafe?: boolean;
+  /** Numeric parameter keys whose values are sampled outside the viewport. */
+  viewportPadding?: string[];
 }
 
 /**

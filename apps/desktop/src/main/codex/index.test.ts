@@ -184,6 +184,7 @@ describe('registerCodexIpc', () => {
       IPC.claudeModels,
       IPC.claudeConnect,
       IPC.claudeDisconnect,
+      IPC.agentRuntimeUpdate,
       IPC.compatibleStatus,
       IPC.compatibleConfigure,
       IPC.codexRun,

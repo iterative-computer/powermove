@@ -10,9 +10,13 @@ const PAGE_SIZE = 60;
 const wasOpen = !!PM.ProjectsScreen?.isOpen;
 const previousSection = PM.ProjectsScreen?.section;
 PM.__disposeProjectsScreen?.();
+const storedSection = PM.store.get('projectsSection', 'recents');
 const S: any = {
   el: null, nav: null, grid: null, title: null, count: null, search: null,
-  section: PM.store.get('projectsSection', 'recents'),
+  // Projects used to be a separate sidebar tab. Keep the section available
+  // for callers that open it directly, but make old saved selections land on
+  // the remaining default tab after the navigation entry is removed.
+  section: storedSection === 'projects' ? 'recents' : storedSection,
   view: PM.store.get('projectsView', 'grid'),
   sort: PM.store.get('projectsSort', 'recent'),
   page: 0, queryKey: '',
@@ -118,7 +122,6 @@ function paint() {
   const live = [...PM.Projects.list()], trash = [...PM.Projects.trashList()];
   S.nav.textContent = '';
   S.nav.append(navButton('recents', 'Recents', 'clock', Math.min(12, live.length)),
-    navButton('projects', 'Projects', 'project', live.length),
     navButton('trash', 'Trash', 'trash', trash.length));
   const labels: any = { recents: 'Recents', projects: 'Projects', trash: 'Trash' };
   let metas = S.section === 'trash' ? trash : live;
@@ -329,5 +332,5 @@ PM.__disposeProjectsScreen = () => {
   S.el?.remove?.();
   S.el = null;
 };
-if (wasOpen) window.queueMicrotask(() => PM.ProjectsScreen.show(previousSection));
+if (wasOpen) window.queueMicrotask(() => PM.ProjectsScreen.show(previousSection === 'projects' ? 'recents' : previousSection));
 }

@@ -94,7 +94,9 @@ mac:
   hardenedRuntime: false
   category: public.app-category.graphics-design
   entitlementsInherit: resources/entitlements.mac.plist
-  icon: resources/icon.icns
+  # Apple Icon Composer catalog. electron-builder invokes actool so macOS can
+  # select light, dark, tinted, and clear renditions from icon.json.
+  icon: resources/icon/Powermove.icon
   extendInfo:
     UTExportedTypeDeclarations:
       - UTTypeIdentifier: com.zellzoi.powermove.project

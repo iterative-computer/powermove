@@ -398,6 +398,11 @@ async function restoreProjectAssets(project: any, warn: any = true) {
 }
 
 PM.proj = loadBootProject();
+// The Svelte runtime bridge is installed before the legacy app hydrates its
+// boot project. Publish the initial reference now so panels render the restored
+// layers immediately instead of waiting for the asynchronous media pass to
+// emit an `assets` event.
+PM.bus.emit('project');
 
 /* Extension boot happens after project hydration. Revalidate placeholders on
    registry changes so a saved effect/transition becomes live as soon as its

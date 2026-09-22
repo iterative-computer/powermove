@@ -138,7 +138,7 @@ describe('legacy compositor install', () => {
 
     expect(source).toMatch(/L\.type !== ["']group["']/);
     expect(source).toContain('groupParent: L.id');
-    expect(source).toMatch(/runEffects\(L, T, res, W, H\)/);
+    expect(source).toMatch(/runEffects\(L, T, res, W, H, acc\)/);
     expect(source).toMatch(/applyMasks\(L, T, res, W, H\)/);
     expect(source).toMatch(/applyTrackMatte\(L, T, res, W, H/);
     expect(source).toMatch(/compositeAlpha = L\.type === ["']group["'] \? alpha : 1/);

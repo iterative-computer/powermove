@@ -217,7 +217,12 @@ it('shows a readable error with the raw diagnostic behind details', () => {
   render({ role: 'assistant', error: true, text: raw, entering: true });
   expect(target.querySelector('[role="alert"]')).toBeTruthy();
   expect(target.querySelector('strong')?.textContent).toBe('Agent session couldn’t reopen');
-  expect(target.querySelector('details')?.open).toBe(false);
+  const toggle = target.querySelector<HTMLButtonElement>('.log-toggle')!;
+  expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  expect(target.querySelector('pre')).toBeNull();
+  toggle.click();
+  flushSync();
+  expect(toggle.getAttribute('aria-expanded')).toBe('true');
   expect(target.querySelector('pre')?.textContent).toBe(raw);
   expect(target.querySelector('p')?.textContent).not.toContain('-32600');
 });
