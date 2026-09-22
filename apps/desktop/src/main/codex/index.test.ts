@@ -182,6 +182,7 @@ describe('registerCodexIpc', () => {
       IPC.claudeStatus,
       IPC.claudeConnect,
       IPC.claudeDisconnect,
+      IPC.agentRuntimeUpdate,
       IPC.compatibleStatus,
       IPC.compatibleConfigure,
       IPC.codexRun,
