@@ -24,6 +24,8 @@
 #store-screen.on{display:flex}
 #store-screen:focus-visible{outline:0}
 body:has(#store-screen.on) #body,body:has(#store-screen.on) #status{visibility:hidden}
+/* Settings opens over the Store as a whole screen, not on top of it. */
+body:has(#settings-screen.on) #store-screen{visibility:hidden}
 /* Only the sidebar hands over sideways: the home's nav eases out to the left
    while the Store's nav glides in from the right, and back again on Done.
    The sheet itself never moves; its contents simply swap with a short fade. */
@@ -49,11 +51,12 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-search svg{width:14px;height:14px;flex:none}
 .st-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
 .st-search input::placeholder{color:var(--tx-3)}
-.st-nav{min-height:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.st-nav{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.st-navbtn{position:relative;z-index:1}
 .st-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border:0;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
 .st-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}
-.st-navbtn:hover{background:var(--bg-row);color:var(--tx)}
-.st-navbtn.on{background:var(--ink-2);color:var(--tx)}
+.st-navbtn:hover{color:var(--tx)}
+.st-navbtn.on{color:var(--tx)}
 .st-navbtn.on svg{color:var(--tx)}
 .st-navbtn:focus-visible{outline:0}
 .st-done{margin-top:auto;width:auto;flex:none;color:var(--tx-3)}

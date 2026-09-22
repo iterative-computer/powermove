@@ -1103,7 +1103,12 @@ body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibi
 .ps-search svg,.ps-navbtn svg,.ps-view svg,.ps-more svg,.ps-empty > svg{stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 /* One sidebar language across the home, the Store and Settings: medium rows, 15px icons in the quiet ink, a filled selection. */
 .ps-nav{display:flex;flex-direction:column;gap:2px}.ps-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
-.ps-navbtn:hover{background:var(--bg-row);color:var(--tx)}.ps-navbtn.on{background:var(--ink-2);color:var(--tx);box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none}.ps-navbtn.on::after{display:none}
+.ps-navs{position:relative;display:flex;flex-direction:column;gap:12px}
+.ps-navbtn{position:relative;z-index:1}.ps-navbtn:hover{color:var(--tx)}.ps-navbtn.on{color:var(--tx)}
+/* Sidebar highlight: one layer that glides between rows (controls/nav-glide.ts). */
+.nav-glider{position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;border-radius:var(--r-md);background:var(--ink-2);transition:transform 220ms var(--nav-glide-ease),width 220ms var(--nav-glide-ease),height 220ms var(--nav-glide-ease),opacity 150ms ease}
+.nav-glider.on{opacity:1}
+@media (prefers-reduced-motion:reduce){.nav-glider{transition:none}}.ps-navbtn.on::after{display:none}
 .ps-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}.ps-navbtn:hover svg,.ps-navbtn.on svg{color:var(--tx)}.ps-navbtn span:not(.count){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ps-navbtn .count{margin-left:auto;color:var(--tx-4);font-size:var(--fs-xs)}
 .ps-updates[hidden]{display:none}
 .ps-updates{margin-top:auto;display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:var(--r-md);background:var(--bg-row);color:var(--tx-2);font-size:var(--fs-sm);line-height:1.45}

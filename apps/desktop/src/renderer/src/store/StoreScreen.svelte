@@ -5,6 +5,7 @@
   import Icon from '../panels/Icon.svelte';
   import { createExtensionSettingsControl } from '../legacy/ui/extension-settings';
   import { mountSquircles, SQUIRCLE_SELECTOR } from '../settings/squircle';
+  import { mountNavGlide } from '../controls/nav-glide';
   import {
     ALL, FEATURED, KIND_LABEL, KIND_PLURAL, NEW, PICKS, coordinate,
     type StoreKind, type StoreListing
@@ -106,12 +107,19 @@
     detail = null;
   }
 
+  /* Only Escape is ours; app shortcuts such as ⌘, keep working over the Store. */
   function keydown(event: KeyboardEvent): void {
-    event.stopPropagation();
     if (event.key !== 'Escape') return;
+    event.stopPropagation();
     event.preventDefault();
     if (detail) back();
     else close();
+  }
+
+  /* The sidebar highlight glides between rows. */
+  function glide(node: HTMLElement) {
+    const unmount = mountNavGlide(node, { row: '.st-navbtn', selected: '.on' });
+    return { destroy: unmount };
   }
 
   /* Installed reuses the Settings › Extensions control as is: the same rows,
@@ -170,7 +178,7 @@
       <Icon {PM} name="search" />
       <input type="search" placeholder="Search extensions" aria-label="Search extensions" bind:value={searchText} />
     </label>
-    <nav class="st-nav" aria-label="Store sections">
+    <nav class="st-nav" aria-label="Store sections" use:glide>
       {#each NAV as item (item.id)}
         <button
           class="st-navbtn"

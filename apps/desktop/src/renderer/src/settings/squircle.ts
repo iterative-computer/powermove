@@ -31,6 +31,7 @@ const CONTROL_HEIGHT = 40;
 export const SQUIRCLE_SELECTOR = [
   '.sg-group',
   '.sg-navbtn',
+  '.nav-glider',
   '.sg-search',
   '.sg-column .pm-select',
   '.sg-column .settings-input',

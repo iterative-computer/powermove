@@ -6,6 +6,7 @@
   import { createExtensionSettingsControl } from '../legacy/ui/extension-settings';
   import { createProjectSettingsControl, type ProjectSettingsBridge } from '../legacy/ui/project-settings';
   import { mountSquircles } from './squircle';
+  import { mountNavGlide } from '../controls/nav-glide';
   import { clearSettingsSearch, searchSettings } from './search';
 
   export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
@@ -248,6 +249,11 @@
     return { update: place };
   }
 
+  function glide(node: HTMLElement) {
+    const unmount = mountNavGlide(node, { row: '.sg-navbtn', selected: '.on' });
+    return { destroy: unmount };
+  }
+
   function applyAppearance(event: Event): void {
     const value = (event.currentTarget as HTMLSelectElement).value;
     themeMode = value;
@@ -303,7 +309,7 @@
         bind:value={searchText}
       />
     </label>
-    <nav class="sg-nav" aria-label="Settings sections">
+    <nav class="sg-nav" aria-label="Settings sections" use:glide>
       {#each groups as group (group.title)}
         <div class="sg-nav-group">
           <span class="sg-nav-title">{group.title}</span>
