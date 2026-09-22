@@ -1,8 +1,12 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import { fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
   import Icon from '../panels/Icon.svelte';
+  import { createExtensionSettingsControl } from '../legacy/ui/extension-settings';
+  import { mountSquircles, SQUIRCLE_SELECTOR } from '../settings/squircle';
   import {
-    ALL, FEATURED, INSTALLED, KIND_LABEL, KIND_PLURAL, NEW, PICKS, coordinate,
+    ALL, FEATURED, KIND_LABEL, KIND_PLURAL, NEW, PICKS, coordinate,
     type StoreKind, type StoreListing
   } from './fixtures';
 
@@ -16,15 +20,25 @@
     { id: 'yours', label: 'Yours', icon: 'code' }
   ];
 
+  /* Screen motion: the whole surface glides in from the right over the home,
+     and glides back out. Views inside slide the way you moved: deeper goes
+     right-to-left, back goes left-to-right, a sibling page just settles. */
+  const SLIDE = 24;
+  const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   let shown = $state(false);
+  let leaving = $state(false);
   let page = $state<StorePage>('browse');
   let searchText = $state('');
   let kind = $state<StoreKind | 'all'>('all');
   let featuredIndex = $state(0);
   let detail = $state<StoreListing | null>(null);
+  let direction = $state(0);
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
+  let installed = $state.raw<ReturnType<typeof createExtensionSettingsControl> | null>(null);
   let lastFocus: HTMLElement | null = null;
+  let leaveTimer = 0;
 
   const query = $derived(searchText.trim().toLowerCase());
   const featured = $derived(FEATURED[featuredIndex]!);
@@ -32,10 +46,15 @@
     ? ALL.filter((l) => `${l.name} ${l.tagline} ${l.publisher}`.toLowerCase().includes(query))
     : []);
   const filtered = $derived((list: StoreListing[]) => kind === 'all' ? list : list.filter((l) => l.kind === kind));
+  const viewKey = $derived(detail ? `detail:${coordinate(detail)}` : query ? 'search' : page);
+  const slide = $derived(reduced() ? { duration: 0 } : { x: direction * SLIDE, duration: 220, easing: cubicOut });
 
   export function open(target: StorePage = 'browse'): void {
+    window.clearTimeout(leaveTimer);
+    leaving = false;
     page = target;
     detail = null;
+    direction = 0;
     searchText = '';
     if (!shown) {
       lastFocus = document.activeElement as HTMLElement | null;
@@ -49,12 +68,18 @@
   }
 
   export function close(): void {
-    if (!shown) return;
-    shown = false;
-    PM.bus?.emit?.('store:screen');
-    const focus = lastFocus;
-    lastFocus = null;
-    if (focus?.isConnected) focus.focus();
+    if (!shown || leaving) return;
+    leaving = true;
+    const finish = () => {
+      shown = false;
+      leaving = false;
+      PM.bus?.emit?.('store:screen');
+      const focus = lastFocus;
+      lastFocus = null;
+      if (focus?.isConnected) focus.focus();
+    };
+    if (reduced()) finish();
+    else leaveTimer = window.setTimeout(finish, 200);
   }
 
   export function isOpen(): boolean {
@@ -62,22 +87,60 @@
   }
 
   function show(id: StorePage): void {
+    const order = NAV.findIndex((n) => n.id === id) - NAV.findIndex((n) => n.id === page);
+    direction = detail ? -1 : Math.sign(order);
     page = id;
     detail = null;
     void tick().then(() => scrollEl?.scrollTo({ top: 0, behavior: 'instant' }));
   }
 
   function openDetail(listing: StoreListing): void {
+    direction = 1;
     detail = listing;
     void tick().then(() => scrollEl?.scrollTo({ top: 0, behavior: 'instant' }));
+  }
+
+  function back(): void {
+    direction = -1;
+    detail = null;
   }
 
   function keydown(event: KeyboardEvent): void {
     event.stopPropagation();
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    if (detail) detail = null;
+    if (detail) back();
     else close();
+  }
+
+  /* Installed reuses the Settings › Extensions control as is: the same rows,
+     switch and in-place detail, so the two places never drift apart. */
+  $effect(() => {
+    if (!shown || page !== 'installed' || installed) return;
+    installed = createExtensionSettingsControl(undefined, { includeBuiltin: true });
+  });
+  $effect(() => {
+    if (shown) return;
+    installed?.destroy();
+    installed = null;
+  });
+
+  /* Lisse squircles on the cards, previews and controls while the screen is up. */
+  $effect(() => {
+    if (!shown || !rootEl) return;
+    const root = rootEl;
+    const selector = `${SQUIRCLE_SELECTOR}, .st-card, .st-thumb, .st-hero, .st-hero-frame, .st-navbtn, .st-search, .st-kind`;
+    let unmount = mountSquircles(root, selector);
+    const observer = new MutationObserver(() => { unmount(); unmount = mountSquircles(root, selector); });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => { observer.disconnect(); unmount(); };
+  });
+
+  type Hosted = HTMLElement | null | undefined;
+  function host(node: HTMLElement, hosted: Hosted) {
+    const place = (next: Hosted) => node.replaceChildren(...(next ? [next] : []));
+    place(hosted);
+    return { update: place };
   }
 
   function art(listing: StoreListing): string {
@@ -94,6 +157,7 @@
 <div
   id="store-screen"
   class:on={shown}
+  class:leaving
   role="dialog"
   aria-label="Store"
   tabindex="-1"
@@ -126,153 +190,156 @@
   </aside>
 
   <main class="st-main">
-    <div class="st-actions">
-      <button class="btn" type="button" onclick={close}>Done</button>
-    </div>
     <div class="st-scroll" bind:this={scrollEl}>
-      <div class="st-column">
-        {#if detail}
-          {@const l = detail}
-          <button class="st-back" type="button" onclick={() => (detail = null)}>
-            <Icon {PM} name="chev" /><span>Back</span>
-          </button>
-          <div class="st-hero is-detail" style={art(l)}></div>
-          <header class="st-detail-head">
-            <div class="st-detail-title">
-              <h2>{l.name}</h2>
-              <span class="st-tag">{l.version}</span>
-            </div>
-            <p class="st-byline">{byline(l)} · Updated {l.updated}</p>
-            <p class="st-lede">{l.tagline}</p>
-            <div class="st-detail-actions">
-              {#if l.installed}
-                <button class="btn" type="button">Installed</button>
-              {:else}
-                <button class="btn pri" type="button">Install</button>
-              {/if}
-              <button class="btn" type="button">Fork and edit</button>
-              <button class="btn ghost" type="button">View source</button>
-            </div>
-          </header>
-          {#if l.about}<p class="st-about">{l.about}</p>{/if}
-
-          <section class="st-sec">
-            <h3 class="st-sec-title">About</h3>
-            <div class="st-card">
-              <div class="st-kv"><span>Identifier</span><b>{coordinate(l)}</b></div>
-              <div class="st-kv"><span>Version</span><b>{l.version}</b></div>
-              {#if l.forkedFrom}<div class="st-kv"><span>Based on</span><b>{l.forkedFrom}</b></div>{/if}
-              <div class="st-kv"><span>Includes</span><b>{KIND_PLURAL[l.kind]}, Inspector</b></div>
-              <div class="st-kv"><span>Requires</span><b>Powermove 1.0 or later</b></div>
-            </div>
-            <p class="st-note">Extensions run inside Powermove with the same access as the app. Read the source or install from people you know.</p>
-          </section>
-
-          {#if l.files}
-            <section class="st-sec">
-              <h3 class="st-sec-title">Source</h3>
-              <div class="st-card">
-                {#each l.files as file (file)}
-                  <button class="st-file" type="button"><span>{file}</span><Icon {PM} name="chev" /></button>
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-          {#if l.versions}
-            <section class="st-sec">
-              <h3 class="st-sec-title">Versions</h3>
-              <div class="st-card">
-                {#each l.versions as v (v.version)}
-                  <div class="st-kv is-version"><span>{v.version} <i>{v.date}</i></span><b>{v.note}</b></div>
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-        {:else if query}
-          <header class="st-heading">
-            <h2>Search</h2>
-            <p>{results.length} {results.length === 1 ? 'extension' : 'extensions'} matching “{searchText.trim()}”</p>
-          </header>
-          <div class="st-grid">
-            {#each results as l (coordinate(l))}
-              {@render row(l)}
-            {/each}
-          </div>
-
-        {:else if page === 'browse'}
-          <header class="st-heading">
-            <div>
-              <h2>Store</h2>
-              <p>Effects, transitions, panels and themes made by people using Powermove.</p>
-            </div>
-            <select class="st-kind" aria-label="Kind" bind:value={kind}>
-              <option value="all">All kinds</option>
-              {#each Object.entries(KIND_PLURAL) as [value, label] (value)}
-                <option {value}>{label}</option>
-              {/each}
-            </select>
-          </header>
-
-          {#if kind === 'all'}
-            <div class="st-featured">
-              <div class="st-hero" style={art(featured)}>
-                <button class="st-hero-open" type="button" aria-label={featured.name} onclick={() => openDetail(featured)}></button>
-                <div class="st-hero-copy">
-                  <span class="st-hero-kind">{byline(featured)}</span>
-                  <b>{featured.name}</b>
-                  <span class="st-hero-line">{featured.tagline}</span>
+      {#key viewKey}
+        <div class="st-column" in:fly={slide}>
+          {#if detail}
+            {@const l = detail}
+            <button class="st-back" type="button" onclick={back}>
+              <Icon {PM} name="chev" /><span>Back</span>
+            </button>
+            <header class="st-detail-head">
+              <span class="st-thumb is-large" style={art(l)}></span>
+              <div class="st-detail-copy">
+                <div class="st-detail-title">
+                  <h2>{l.name}</h2>
+                  <span class="st-tag">{l.version}</span>
                 </div>
-                <button class="btn pri st-hero-install" type="button">Install</button>
+                <p class="st-byline">{byline(l)} · Updated {l.updated}</p>
+                <p class="st-lede">{l.tagline}</p>
               </div>
-              <div class="st-pager" role="tablist" aria-label="Featured">
-                {#each FEATURED as f, i (f.id)}
-                  <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
+              <div class="st-detail-actions">
+                {#if l.installed}
+                  <button class="btn" type="button">Installed</button>
+                {:else}
+                  <button class="btn pri" type="button">Install</button>
+                {/if}
+                <button class="btn" type="button">Fork and edit</button>
+              </div>
+            </header>
+            <div class="st-hero-frame is-detail" style={art(l)}></div>
+            {#if l.about}<p class="st-about">{l.about}</p>{/if}
+
+            <section class="st-sec">
+              <h3 class="st-sec-title">About</h3>
+              <div class="st-card">
+                <div class="st-kv"><span>Identifier</span><b>{coordinate(l)}</b></div>
+                <div class="st-kv"><span>Version</span><b>{l.version}</b></div>
+                {#if l.forkedFrom}<div class="st-kv"><span>Based on</span><b>{l.forkedFrom}</b></div>{/if}
+                <div class="st-kv"><span>Includes</span><b>{KIND_PLURAL[l.kind]}, Inspector</b></div>
+                <div class="st-kv"><span>Requires</span><b>Powermove 1.0 or later</b></div>
+              </div>
+              <p class="st-note">Extensions run inside Powermove with the same access as the app. Read the source or install from people you know.</p>
+            </section>
+
+            {#if l.files}
+              <section class="st-sec">
+                <h3 class="st-sec-title">Source</h3>
+                <div class="st-card">
+                  {#each l.files as file (file)}
+                    <button class="st-file" type="button"><span>{file}</span><Icon {PM} name="chev" /></button>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+
+            {#if l.versions}
+              <section class="st-sec">
+                <h3 class="st-sec-title">Versions</h3>
+                <div class="st-card">
+                  {#each l.versions as v (v.version)}
+                    <div class="st-kv is-version"><span>{v.version} <i>{v.date}</i></span><b>{v.note}</b></div>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+
+          {:else if query}
+            <header class="st-heading">
+              <div>
+                <h2>Search</h2>
+                <p>{results.length} {results.length === 1 ? 'extension' : 'extensions'} matching “{searchText.trim()}”</p>
+              </div>
+            </header>
+            <div class="st-grid">
+              {#each results as l (coordinate(l))}
+                {@render row(l)}
+              {/each}
+            </div>
+
+          {:else if page === 'browse'}
+            <header class="st-heading">
+              <div>
+                <h2>Store</h2>
+                <p>Effects, transitions, panels and themes made by people using Powermove.</p>
+              </div>
+              <select class="st-kind" aria-label="Kind" bind:value={kind}>
+                <option value="all">All kinds</option>
+                {#each Object.entries(KIND_PLURAL) as [value, label] (value)}
+                  <option {value}>{label}</option>
                 {/each}
+              </select>
+            </header>
+
+            {#if kind === 'all'}
+              <!-- One extension at a time: its preview frame beside its copy, on
+                   a card. The pager and Install share the card's last line. -->
+              <div class="st-hero">
+                <button class="st-hero-frame" type="button" style={art(featured)} aria-label={`Open ${featured.name}`} onclick={() => openDetail(featured)}></button>
+                <div class="st-hero-copy">
+                  <div class="st-hero-text">
+                    <span class="st-hero-kind">{byline(featured)}</span>
+                    <b>{featured.name}</b>
+                    <span class="st-hero-line">{featured.tagline}</span>
+                  </div>
+                  <div class="st-hero-foot">
+                    <div class="st-pager" role="tablist" aria-label="Featured">
+                      {#each FEATURED as f, i (f.id)}
+                        <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
+                      {/each}
+                    </div>
+                    <button class="btn pri" type="button">Install</button>
+                  </div>
+                </div>
               </div>
+            {/if}
+
+            {@render section('Picks', filtered(PICKS))}
+            {@render section('New', filtered(NEW))}
+            {#if kind === 'all'}
+              {@render section('Effects', ALL.filter((l) => l.kind === 'effects'))}
+              {@render section('Transitions', ALL.filter((l) => l.kind === 'transitions'))}
+            {/if}
+
+          {:else if page === 'installed'}
+            <header class="st-heading">
+              <div>
+                <h2>Installed</h2>
+                <p>Extensions from the store, and the ones you or your agent made.</p>
+              </div>
+            </header>
+            <div class="sg-column st-installed-host" use:host={installed?.element}></div>
+
+          {:else}
+            <header class="st-heading">
+              <div>
+                <h2>Yours</h2>
+                <p>Extensions you have published, and their forks.</p>
+              </div>
+            </header>
+            <div class="st-empty">
+              <b>Nothing published yet</b>
+              <span>Publishing puts an extension’s source on the store under your name. Forks record where they came from.</span>
+              <button class="btn" type="button">Publish an extension…</button>
             </div>
           {/if}
-
-          {@render section('Picks', filtered(PICKS))}
-          {@render section('New', filtered(NEW))}
-          {#if kind === 'all'}
-            {@render section('Effects', ALL.filter((l) => l.kind === 'effects'))}
-            {@render section('Transitions', ALL.filter((l) => l.kind === 'transitions'))}
-          {/if}
-
-        {:else if page === 'installed'}
-          <header class="st-heading">
-            <div>
-              <h2>Installed</h2>
-              <p>Extensions from the store, and the ones you or your agent made.</p>
-            </div>
-          </header>
-          <div class="st-grid is-one">
-            {#each INSTALLED as l (coordinate(l))}
-              {@render row(l, l.id === 'paper' ? 'Update' : 'Installed')}
-            {/each}
-          </div>
-
-        {:else}
-          <header class="st-heading">
-            <div>
-              <h2>Yours</h2>
-              <p>Extensions you have published, and their forks.</p>
-            </div>
-          </header>
-          <div class="st-empty">
-            <b>Nothing published yet</b>
-            <span>Publishing puts an extension’s source on the store under your name. Forks record where they came from.</span>
-            <button class="btn" type="button">Publish an extension…</button>
-          </div>
-        {/if}
-      </div>
+        </div>
+      {/key}
     </div>
   </main>
 </div>
 
-{#snippet row(l: StoreListing, trailing: string = l.installed ? 'Installed' : 'Install')}
+{#snippet row(l: StoreListing)}
   <div class="st-row">
     <button class="st-row-open" type="button" onclick={() => openDetail(l)}>
       <span class="st-thumb" style={art(l)}></span>
@@ -282,12 +349,10 @@
         <span class="st-row-by">{l.publisher}</span>
       </span>
     </button>
-    {#if trailing === 'Install'}
-      <button class="btn st-install" type="button">Install</button>
-    {:else if trailing === 'Update'}
-      <button class="btn st-install" type="button">Update</button>
-    {:else}
+    {#if l.installed}
       <span class="st-installed">Installed</span>
+    {:else}
+      <button class="btn st-install" type="button">Install</button>
     {/if}
   </div>
 {/snippet}

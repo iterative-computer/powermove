@@ -2,15 +2,46 @@
    A full-screen surface under the titlebar, laid out like Settings and the
    Projects home: the sidebar sits on the window colour, the page is one inset
    sheet. Listings are quiet rows recalled by name; the only picture in a row
-   is the extension's own preview. Fills carry hierarchy, not outlines. */
+   is the extension's own square preview. Corners are Lisse squircles
+   (settings/squircle.ts). Fills carry hierarchy, not outlines.
+
+   Motion: the screen glides in from the right over the home and glides back
+   out; views inside slide the way you moved (StoreScreen.svelte). */
 
 #store-screen{
   --ctl-h:30px;
+  --sg-group-radius:var(--r-xl);
+  --sg-row-padding:var(--gut);
+  --sg-control-radius:max(0px,calc(var(--sg-group-radius) - var(--sg-row-padding)));
+  --sg-edge:var(--line-2);
+  --sg-group-edge:var(--ink-1);
+  --sg-edge-hot:var(--line-strong);
+  --sg-edge-focus:var(--line-strong);
+  --sg-row:var(--bg-panel);
+  --st-glide:220ms;
   position:fixed;inset:44px 0 0;z-index:36;display:none;min-height:0;padding:0 10px 10px 0;background:transparent;
 }
 #store-screen.on{display:flex}
 #store-screen:focus-visible{outline:0}
-body:has(#store-screen.on) #body,body:has(#store-screen.on) #status,body:has(#store-screen.on) #projects-screen{visibility:hidden}
+body:has(#store-screen.on) #body,body:has(#store-screen.on) #status{visibility:hidden}
+/* Only the sidebar hands over sideways: the home's nav eases out to the left
+   while the Store's nav glides in from the right, and back again on Done.
+   The sheet itself never moves; its contents simply swap with a short fade. */
+#store-screen.on .st-sidebar{animation:st-glide-in var(--st-glide) var(--ease) both}
+#store-screen.leaving .st-sidebar{animation:st-glide-out 180ms var(--ease-io) both}
+#store-screen.on .st-main{animation:st-fade-in 160ms var(--ease) both}
+#store-screen.leaving .st-main{animation:st-fade-out 140ms var(--ease-io) both}
+#projects-screen.on .ps-sidebar{transition:opacity var(--st-glide,220ms) var(--ease),transform var(--st-glide,220ms) var(--ease)}
+body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-sidebar{opacity:0;transform:translate3d(-20px,0,0);pointer-events:none}
+body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hidden}
+@keyframes st-glide-in{from{opacity:0;transform:translate3d(20px,0,0)}to{opacity:1;transform:none}}
+@keyframes st-glide-out{from{opacity:1;transform:none}to{opacity:0;transform:translate3d(20px,0,0)}}
+@keyframes st-fade-in{from{opacity:0}to{opacity:1}}
+@keyframes st-fade-out{from{opacity:1}to{opacity:0}}
+@media (prefers-reduced-motion:reduce){
+  #store-screen .st-sidebar,#store-screen .st-main{animation:none!important}
+  #projects-screen.on .ps-sidebar{transition:none}
+}
 
 /* ── sidebar ── */
 .st-sidebar{width:236px;flex:none;display:flex;flex-direction:column;gap:14px;padding:6px 12px 8px}
@@ -24,76 +55,70 @@ body:has(#store-screen.on) #body,body:has(#store-screen.on) #status,body:has(#st
 .st-navbtn:hover{background:var(--bg-row);color:var(--tx)}
 .st-navbtn.on{background:var(--ink-2);color:var(--tx)}
 .st-navbtn.on svg{color:var(--tx)}
-.st-navbtn:focus-visible{outline:0;box-shadow:inset 0 0 0 2px var(--accent)}
+.st-navbtn:focus-visible{outline:0}
 .st-done{margin-top:auto;width:auto;flex:none;color:var(--tx-3)}
 .st-done svg{transform:rotate(180deg)}
 .st-done:hover{color:var(--tx)}
 
 /* ── the inset sheet ── */
 .st-main{position:relative;min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}
-.st-actions{position:absolute;top:0;right:0;z-index:2;height:48px;display:flex;align-items:center;padding:8px 16px}
-.st-actions .btn{height:32px;padding:0 14px}
-.st-scroll{min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:56px 40px 96px;container-type:inline-size}
+.st-scroll{position:relative;min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:56px 40px 96px;container-type:inline-size}
 .st-column{width:960px;max-width:100%;margin:0 auto;display:flex;flex-direction:column;gap:40px}
 
 /* ── heading ── */
 .st-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
 .st-heading h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
 .st-heading p{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
-.st-kind{height:30px;flex:none;padding:0 28px 0 10px;border:0;border-radius:var(--r-sm);background:var(--bg-float);color:var(--tx-2);font:inherit;font-size:var(--fs-sm);font-weight:var(--fw-medium);outline:0}
-.st-kind:focus-visible{box-shadow:var(--focus-ring)}
+#store-screen .pm-select.st-kind{height:30px;flex:none;padding:0 28px 0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium)}
+#store-screen .pm-select.st-kind:hover,#store-screen .pm-select.st-kind[aria-expanded="true"]{background:var(--bg-row-hi);color:var(--tx)}
+#store-screen .pm-select.st-kind:focus-visible{box-shadow:none}
 
-/* ── featured ── */
-/* One extension at a time. The artwork is the extension's own preview frame;
-   copy sits on a scrim so the type stays legible over any render. */
-.st-featured{display:flex;flex-direction:column;gap:6px;margin-top:-8px}
-.st-hero{position:relative;display:block;width:100%;aspect-ratio:2.6/1;padding:0;border:0;border-radius:var(--r-xl);overflow:hidden;text-align:left;color:#fff;cursor:default;
+/* ── artwork ── */
+/* Stand-ins until the registry ships preview renders: two hues per extension. */
+.st-art,.st-thumb,.st-hero-frame{
   background:
     radial-gradient(120% 90% at 82% 18%, var(--art-b) 0%, transparent 60%),
     radial-gradient(90% 120% at 12% 100%, color-mix(in oklch, var(--art-a) 70%, black) 0%, transparent 65%),
-    linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)));
-  transition:transform var(--dur-2) var(--ease),box-shadow var(--dur-2)}
-.st-hero::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;box-shadow:inset 0 0 0 var(--hairline) rgb(255 255 255 / .14)}
-.st-hero::after{content:"";position:absolute;inset:auto 0 0;height:62%;pointer-events:none;background:linear-gradient(to top, rgb(0 0 0 / .55), rgb(0 0 0 / 0))}
-.st-hero:hover{box-shadow:var(--shadow-lift)}
-.st-hero:active{transform:scale(.995)}
-.st-hero:focus-visible{outline:0;box-shadow:0 0 0 2px var(--bg-content),0 0 0 4px var(--accent)}
-.st-hero.is-detail{aspect-ratio:21/8;border-radius:var(--r-lg)}
-.st-hero.is-detail::after{display:none}
-.st-hero-open{position:absolute;inset:0;z-index:1;padding:0;border:0;background:transparent;border-radius:inherit}
-.st-hero-open:focus-visible{outline:0;box-shadow:inset 0 0 0 2px #fff}
-.st-hero-install{position:absolute;right:20px;bottom:20px;z-index:2;height:32px;padding:0 16px;border-radius:var(--r-pill)}
-.st-hero-copy{position:absolute;left:24px;right:140px;bottom:22px;z-index:1;display:flex;flex-direction:column;gap:2px;max-width:56ch;pointer-events:none}
-.st-hero-kind{font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:rgb(255 255 255 / .72)}
-.st-hero-copy b{margin-top:4px;font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;text-shadow:0 1px 2px rgb(0 0 0 / .2)}
-.st-hero-line{font-size:var(--fs-md);line-height:18px;color:rgb(255 255 255 / .82);text-wrap:pretty}
-.st-pager{display:flex;gap:6px;padding:8px 2px}
-.st-pager button{width:20px;height:2px;padding:0;border:0;border-radius:var(--r-pill);background:var(--ink-3);transition:background var(--dur-2),width var(--dur-2) var(--ease)}
-.st-pager button[aria-selected="true"]{width:32px;background:var(--tx)}
-.st-pager button:focus-visible{outline:0;box-shadow:0 0 0 2px var(--bg-content),0 0 0 4px var(--accent)}
+    linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
+.st-thumb{position:relative;display:block;flex:none;width:44px;height:44px;border-radius:var(--r-lg);overflow:hidden}
+.st-thumb.is-large{width:64px;height:64px;border-radius:var(--r-xl)}
+
+/* ── featured ── */
+.st-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;margin:-8px -14px 0;padding:14px;border-radius:var(--r-xl);background:var(--bg-panel)}
+.st-hero-frame{position:relative;display:block;width:100%;aspect-ratio:16/9;padding:0;border:0;border-radius:var(--r-lg);overflow:hidden;cursor:default;transition:transform var(--dur-2) var(--ease)}
+.st-hero-frame:active{transform:scale(.992)}
+.st-hero-frame:focus-visible{outline:0}
+.st-hero-frame.is-detail{aspect-ratio:21/9;border-radius:var(--r-xl);margin:0 -14px;width:auto}
+.st-hero-copy{min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:20px;padding:8px 6px 2px 0}
+.st-hero-text{display:flex;flex-direction:column;gap:2px}
+.st-hero-kind{font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
+.st-hero-text b{margin-top:6px;font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
+.st-hero-line{margin-top:4px;font-size:var(--fs-md);line-height:19px;color:var(--tx-2);text-wrap:pretty}
+.st-hero-foot{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.st-hero-foot .btn{height:32px;padding:0 16px;border-radius:var(--r-pill)}
+.st-pager{display:flex;gap:6px;padding:8px 0}
+.st-pager button{width:16px;height:2px;padding:0;border:0;border-radius:var(--r-pill);background:var(--ink-3);transition:background var(--dur-2),width var(--dur-2) var(--ease)}
+.st-pager button[aria-selected="true"]{width:28px;background:var(--tx)}
+.st-pager button:hover:not([aria-selected="true"]){background:var(--tx-4)}
+.st-pager button:focus-visible{outline:0;box-shadow:0 0 0 2px var(--bg-panel),0 0 0 4px var(--accent)}
+@container (max-width:44rem){.st-hero{grid-template-columns:minmax(0,1fr)}}
 
 /* ── sections ── */
 .st-sec{display:flex;flex-direction:column}
-.st-sec-head{display:flex;align-items:center;justify-content:space-between;height:32px;margin-bottom:10px;padding:0 2px}
+.st-sec-head{display:flex;align-items:center;justify-content:space-between;height:32px;margin-bottom:8px;padding:0 2px}
 .st-sec-head h3{font-size:var(--fs-lg);line-height:20px;font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}
 .st-sec-head .btn{height:28px;padding:0 10px;color:var(--tx-3)}
 .st-sec-title{height:20px;padding:0 2px 8px;box-sizing:content-box;font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
 .st-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 24px;margin:0 -10px}
-.st-grid.is-one{grid-template-columns:minmax(0,1fr)}
 @container (max-width:44rem){.st-grid{grid-template-columns:minmax(0,1fr)}}
 
 /* ── row ── */
 /* Whole row is a destination; the trailing button is the one other target. */
-.st-row{display:flex;align-items:center;gap:10px;min-height:64px;padding:0 10px 0 0;border-radius:var(--r-lg);transition:background var(--dur-1)}
+.st-row{display:flex;align-items:center;gap:10px;min-height:60px;padding:0 10px 0 0;border-radius:var(--r-lg);transition:background var(--dur-1)}
 .st-row:hover{background:var(--ink-1)}
 .st-row-open{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:8px 0 8px 10px;border:0;text-align:left;color:inherit;font:inherit;cursor:default}
 .st-row-open:focus-visible{outline:0}
 .st-row:has(.st-row-open:focus-visible){box-shadow:inset 0 0 0 2px var(--accent)}
-.st-thumb{position:relative;flex:none;width:72px;aspect-ratio:16/10;border-radius:var(--r-sm);overflow:hidden;
-  background:
-    radial-gradient(120% 90% at 82% 18%, var(--art-b) 0%, transparent 60%),
-    linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
-.st-thumb::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 var(--hairline) rgb(255 255 255 / .12)}
 .st-row-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .st-row-copy b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .st-row-line{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -101,18 +126,24 @@ body:has(#store-screen.on) #body,body:has(#store-screen.on) #status,body:has(#st
 .st-install{flex:none;min-width:68px;border-radius:var(--r-pill)}
 .st-installed{flex:none;min-width:68px;text-align:center;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-4)}
 
+/* ── installed (hosted Settings › Extensions control) ── */
+.st-installed-host{width:auto;margin:-8px 0 0}
+.st-installed-host .settings-extension-root{gap:32px}
+.st-installed-host .settings-section-heading>b{display:none}
+
 /* ── detail ── */
 .st-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-4px 0 -28px -6px;padding:0 8px 0 3px;border:0;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
 .st-back svg{width:12px;height:12px;transform:rotate(180deg)}
 .st-back:hover{color:var(--tx);background:var(--ink-1)}
-.st-detail-head{display:flex;flex-direction:column;margin-top:-12px}
+.st-detail-head{display:flex;align-items:center;gap:16px}
+.st-detail-copy{flex:1;min-width:0;display:flex;flex-direction:column}
 .st-detail-title{display:flex;align-items:center;gap:9px}
 .st-detail-title h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
 .st-tag{flex:none;margin-top:2px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
 .st-byline{margin-top:2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4)}
-.st-lede{margin-top:8px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
-.st-detail-actions{display:flex;gap:6px;margin-top:16px}
-.st-detail-actions .btn{height:32px;padding:0 14px}
+.st-lede{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
+.st-detail-actions{flex:none;display:flex;gap:6px}
+.st-detail-actions .btn{height:32px;padding:0 14px;border-radius:var(--r-pill)}
 .st-about{margin-top:-16px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}
 .st-card{margin:0 -14px;display:flex;flex-direction:column;border-radius:var(--r-xl);background:var(--bg-panel);overflow:hidden}
 .st-kv{display:flex;align-items:baseline;gap:16px;min-height:44px;padding:12px 14px}
@@ -132,6 +163,6 @@ body:has(#store-screen.on) #body,body:has(#store-screen.on) #status,body:has(#st
 .st-empty .btn{margin-top:10px}
 
 #store-screen .btn:not(.pri){box-shadow:none}
-#store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn{user-select:none;-webkit-user-select:none}
+#store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager{user-select:none;-webkit-user-select:none}
 
 @media (max-width:760px){.st-sidebar{width:180px}.st-scroll{padding:56px 20px 64px}}
