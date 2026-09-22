@@ -160,6 +160,22 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-file svg{width:12px;height:12px;color:var(--tx-4)}
 .st-note{margin-top:8px;padding:0 1px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);text-wrap:pretty}
 
+/* Lineage reads as a sentence with the origin as a link, GitHub style. */
+.st-lineage{margin-top:6px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.st-link{padding:0;border:0;color:var(--tx-2);font:inherit;font-weight:var(--fw-medium);text-decoration:underline;text-decoration-color:var(--tx-4);text-underline-offset:2px;transition:color var(--dur-1)}
+.st-link:hover{color:var(--tx)}
+
+/* Setup: one row per variable, field on the right, like a Settings row. */
+.st-var{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px 14px}
+.st-var-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.st-var-copy>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
+.st-var-copy>span{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.st-var-copy code{margin-left:4px;font:var(--fs-xs)/16px var(--f-mono);color:var(--tx-4)}
+.st-var-req{margin-left:6px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-regular);line-height:16px;vertical-align:1px}
+#store-screen .st-var-input{width:220px;height:30px;flex:none;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);color:var(--tx);font-size:var(--fs-md)}
+#store-screen .st-var-input::placeholder{color:var(--tx-4)}
+#store-screen .st-var-input:focus-visible{outline:0;box-shadow:0 0 0 3px var(--ink-2)}
+
 /* Facts: four quiet label/value pairs in one line, no rules. */
 .st-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:-8px 0}
 .st-facts>div{min-width:0;display:flex;flex-direction:column;gap:2px}

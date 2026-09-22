@@ -13,7 +13,12 @@ export type StoreListing = {
   version: string;
   updated: string;
   installed?: boolean;
+  /** Registry coordinate this was published from, as `publisher/id@version`. */
   forkedFrom?: string;
+  /** Variables the extension reads at runtime. Values live on this Mac, never
+   *  in the package, so publishing can't leak them. Required ones are asked
+   *  for at install. */
+  vars?: Array<{ key: string; label: string; secret?: boolean; required?: boolean; hint?: string }>;
   /** Two hues for the preview artwork, until real preview renders exist. */
   art: [string, string];
   about?: string;
@@ -83,9 +88,15 @@ export const NEW: StoreListing[] = [
   { publisher: 'ana', id: 'wipe-set', name: 'Wipe set', kind: 'transitions', version: '0.3.0', updated: 'Today',
     tagline: 'Twelve wipes with a shared feather and angle.', art: ['oklch(60% .1 100)', 'oklch(80% .06 90)'] },
   { publisher: 'kai', id: 'color-match', name: 'Colour match', kind: 'commands', version: '0.1.2', updated: 'Yesterday',
-    tagline: 'Pull a palette from one layer onto another.', art: ['oklch(55% .14 10)', 'oklch(72% .12 280)'] },
+    tagline: 'Pull a palette from one layer onto another.', art: ['oklch(55% .14 10)', 'oklch(72% .12 280)'],
+    about: 'Reads the dominant colours of one layer and maps them onto another, keeping luminance. Uses a hosted model for the mapping, so it needs a key.',
+    vars: [
+      { key: 'OPENAI_API_KEY', label: 'OpenAI API key', secret: true, required: true, hint: 'Used for the colour mapping model.' },
+      { key: 'PALETTE_SIZE', label: 'Palette size', hint: 'How many colours to pull. Defaults to 5.' }
+    ] },
   { publisher: 'noor', id: 'timeline-mini', name: 'Timeline mini', kind: 'panels', version: '1.0.0', updated: 'Sep 19', forkedFrom: 'powermove/timeline@1.0.0',
-    tagline: 'The built-in timeline, cut down to one strip.', art: ['oklch(35% .03 260)', 'oklch(55% .05 240)'] },
+    tagline: 'The built-in timeline, cut down to one strip.', art: ['oklch(35% .03 260)', 'oklch(55% .05 240)'],
+    about: 'Noor’s cut of the built-in timeline: one track strip, no keyframe lanes, for when the composition is simple and the panel should be small.' },
   { publisher: 'ollie', id: 'nord', name: 'Nord', kind: 'themes', version: '2.0.0', updated: 'Sep 19',
     tagline: 'The Nord palette on Powermove’s surfaces.', art: ['oklch(40% .04 250)', 'oklch(70% .06 210)'] }
 ];

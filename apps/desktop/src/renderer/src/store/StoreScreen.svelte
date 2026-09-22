@@ -215,13 +215,17 @@
                   <span class="st-tag">{l.version}</span>
                 </div>
                 <p class="st-lede">{l.tagline}</p>
+                {#if l.forkedFrom}
+                  <p class="st-lineage">Forked from <button class="st-link" type="button">{l.forkedFrom.split('@')[0]}</button></p>
+                {/if}
                 <div class="st-detail-actions">
                   {#if l.installed}
                     <button class="btn" type="button">Installed</button>
+                  {:else if l.vars?.some((v) => v.required)}
+                    <button class="btn pri" type="button">Install and set up</button>
                   {:else}
                     <button class="btn pri" type="button">Install</button>
                   {/if}
-                  <button class="btn" type="button">Fork and edit</button>
                 </div>
               </div>
             </header>
@@ -246,11 +250,33 @@
               </section>
             {/if}
 
+            {#if l.vars?.length}
+              <!-- Variables: keys the extension reads at runtime. Values are kept
+                   on this Mac beside the extension, outside the package, so
+                   publishing never carries them. Required ones are asked for at
+                   install; the rest can be set here any time. -->
+              <section class="st-sec">
+                <h3 class="st-sec-title">Setup</h3>
+                <div class="st-card">
+                  {#each l.vars as v (v.key)}
+                    <div class="st-var">
+                      <div class="st-var-copy">
+                        <b>{v.label}{#if v.required} <span class="st-var-req">Required</span>{/if}</b>
+                        <span>{v.hint ?? ''} <code>{v.key}</code></span>
+                      </div>
+                      <input class="settings-input st-var-input" type={v.secret ? 'password' : 'text'} placeholder={v.secret ? '••••••••' : 'Not set'} aria-label={v.label} />
+                    </div>
+                  {/each}
+                </div>
+                <p class="st-note">Stays on this Mac. Never included when you publish or share this extension.</p>
+              </section>
+            {/if}
+
             <section class="st-sec">
               <h3 class="st-sec-title">Details</h3>
               <div class="st-card">
                 <div class="st-kv"><span>Identifier</span><b>{coordinate(l)}</b></div>
-                {#if l.forkedFrom}<div class="st-kv"><span>Based on</span><b>{l.forkedFrom}</b></div>{/if}
+                {#if l.forkedFrom}<div class="st-kv"><span>Forked from</span><b>{l.forkedFrom}</b></div>{/if}
                 <div class="st-kv"><span>Includes</span><b>{KIND_PLURAL[l.kind]}, Inspector</b></div>
                 <div class="st-kv"><span>Requires</span><b>Powermove 1.0 or later</b></div>
               </div>
