@@ -68,7 +68,9 @@ function ensure() {
       h('button.btn', { onclick: installUpdate }, 'Restart to update'));
   };
   S.offAppUpdate = subscribeAppUpdates(paintAppUpdate);
-  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.appUpdate, S.updates);
+  /* The Store is its own screen; from home it reads as one more place to go. */
+  const store = h('div.ps-nav', h('button.ps-navbtn', { onclick: () => (PM as any).StoreUI?.open?.() }, PM.icon('sparkle'), h('span', 'Store')));
+  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, store, S.appUpdate, S.updates);
 
   S.title = h('b'); S.count = h('span');
   const view = h('div.ps-view', { role: 'group', 'aria-label': 'Project layout' },

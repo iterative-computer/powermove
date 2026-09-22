@@ -1,6 +1,7 @@
 import '@powermove/tokens/tokens.css';
 import '../../../css/app.css';
 import '../../../css/settings.css';
+import '../../../css/store.css';
 import './legacy/core/image-sequence.css';
 import { installWebBridge, remoteLink } from './host/web-bridge';
 
