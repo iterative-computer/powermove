@@ -141,7 +141,11 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     el.dataset.side = side;
     el.style.maxHeight = `${Math.min(MAX_HEIGHT, side === 'bottom' ? below : above)}px`;
     const top = side === 'bottom' ? a.bottom + GAP : a.top - GAP - el.offsetHeight;
-    const left = Math.max(EDGE, Math.min(a.left, vw - el.offsetWidth - EDGE));
+    // A trigger on the right half of the window hangs its list from its right
+    // edge, so a menu never drifts past the control that opened it.
+    const alignEnd = a.left + a.width / 2 > vw / 2;
+    const wanted = alignEnd ? a.right - el.offsetWidth : a.left;
+    const left = Math.max(EDGE, Math.min(wanted, vw - el.offsetWidth - EDGE));
     el.style.top = `${Math.round(top)}px`;
     el.style.left = `${Math.round(left)}px`;
   }

@@ -47,6 +47,7 @@ import { install as installSpatial } from './assistant/spatial';
 import { install as installProjectsUi } from './ui/projects';
 import { install as installApp } from './app';
 import { install as installSettingsUi } from '../settings/install';
+import { install as installStoreUi } from '../store/install';
 
 declare global {
   interface Window {
@@ -109,6 +110,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['app', installApp],
   /* Settings reads PM.theme and PM.exportDefaults, which the app install owns. */
   ['ui/settings', installSettingsUi],
+  ['ui/store', installStoreUi],
   /* Extensions load last: every kernel registry is populated and the whole
      legacy UI is mounted, so an extension can override any of it. */
   ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).then(() => PM.Kernel.events.emit('extensions:ready', {})).catch((error) => console.error('[kernel] boot failed', error))]

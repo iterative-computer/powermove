@@ -1,0 +1,196 @@
+/* ── Store ──────────────────────────────────────────────────
+   A full-screen surface under the titlebar, laid out like Settings and the
+   Projects home: the sidebar sits on the window colour, the page is one inset
+   sheet. Listings are quiet rows recalled by name; the only picture in a row
+   is the extension's own square preview. Corners are Lisse squircles
+   (settings/squircle.ts). Fills carry hierarchy, not outlines.
+
+   Motion: the screen glides in from the right over the home and glides back
+   out; views inside slide the way you moved (StoreScreen.svelte). */
+
+#store-screen{
+  --ctl-h:30px;
+  --sg-group-radius:var(--r-xl);
+  --sg-row-padding:var(--gut);
+  --sg-control-radius:max(0px,calc(var(--sg-group-radius) - var(--sg-row-padding)));
+  --sg-edge:var(--line-2);
+  --sg-group-edge:var(--ink-1);
+  --sg-edge-hot:var(--line-strong);
+  --sg-edge-focus:var(--line-strong);
+  --sg-row:var(--bg-panel);
+  --st-glide:220ms;
+  position:fixed;inset:44px 0 0;z-index:36;display:none;min-height:0;padding:0 10px 10px 0;background:transparent;
+}
+#store-screen.on{display:flex}
+#store-screen:focus-visible{outline:0}
+body:has(#store-screen.on) #body,body:has(#store-screen.on) #status{visibility:hidden}
+/* Settings opens over the Store as a whole screen, not on top of it. */
+body:has(#settings-screen.on) #store-screen{visibility:hidden}
+/* Only the sidebar hands over sideways: the home's nav eases out to the left
+   while the Store's nav glides in from the right, and back again on Done.
+   The sheet itself never moves; its contents simply swap with a short fade. */
+#store-screen.on .st-sidebar{animation:st-glide-in var(--st-glide) var(--ease) both}
+#store-screen.leaving .st-sidebar{animation:st-glide-out 180ms var(--ease-io) both}
+#store-screen.on .st-main{animation:st-fade-in 160ms var(--ease) both}
+#store-screen.leaving .st-main{animation:st-fade-out 140ms var(--ease-io) both}
+#projects-screen.on .ps-sidebar{transition:opacity var(--st-glide,220ms) var(--ease),transform var(--st-glide,220ms) var(--ease)}
+body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-sidebar{opacity:0;transform:translate3d(-20px,0,0);pointer-events:none}
+body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hidden}
+@keyframes st-glide-in{from{opacity:0;transform:translate3d(20px,0,0)}to{opacity:1;transform:none}}
+@keyframes st-glide-out{from{opacity:1;transform:none}to{opacity:0;transform:translate3d(20px,0,0)}}
+@keyframes st-fade-in{from{opacity:0}to{opacity:1}}
+@keyframes st-fade-out{from{opacity:1}to{opacity:0}}
+@media (prefers-reduced-motion:reduce){
+  #store-screen .st-sidebar,#store-screen .st-main{animation:none!important}
+  #projects-screen.on .ps-sidebar{transition:none}
+}
+
+/* ── sidebar ── */
+.st-sidebar{width:236px;flex:none;display:flex;flex-direction:column;gap:14px;padding:6px 12px 8px}
+.st-search{height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);color:var(--tx-3)}
+.st-search svg{width:14px;height:14px;flex:none}
+.st-search input{min-width:0;flex:1;font-size:var(--fs-md);color:var(--tx)}
+.st-search input::placeholder{color:var(--tx-3)}
+.st-nav{position:relative;min-height:0;flex:1;display:flex;flex-direction:column;gap:2px}
+.st-navbtn{position:relative;z-index:1}
+.st-navbtn{height:32px;width:100%;display:flex;align-items:center;gap:9px;padding:0 9px;border:0;border-radius:var(--r-md);color:var(--tx-2);font-size:var(--fs-md);font-weight:var(--fw-medium);text-align:left;transition:background var(--dur-1),color var(--dur-1)}
+.st-navbtn svg{width:15px;height:15px;flex:none;color:var(--tx-3);transition:color var(--dur-1)}
+.st-navbtn:hover{color:var(--tx)}
+.st-navbtn.on{color:var(--tx)}
+.st-navbtn.on svg{color:var(--tx)}
+.st-navbtn:focus-visible{outline:0}
+.st-done{margin-top:auto;width:auto;flex:none;color:var(--tx-3)}
+.st-done svg{transform:rotate(180deg)}
+.st-done:hover{color:var(--tx)}
+
+/* ── the inset sheet ── */
+.st-main{position:relative;min-width:0;flex:1;display:flex;flex-direction:column;overflow:hidden;border-radius:var(--r-lg);background:var(--bg-content);box-shadow:0 0 0 var(--hairline) var(--line)}
+.st-scroll{position:relative;min-height:0;flex:1;overflow:auto;scrollbar-gutter:stable both-edges;padding:56px 40px 96px;container-type:inline-size}
+.st-column{width:960px;max-width:100%;margin:0 auto;display:flex;flex-direction:column;gap:40px}
+
+/* ── heading ── */
+.st-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.st-heading h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
+.st-heading p{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
+#store-screen .pm-select.st-kind{height:30px;flex:none;padding:0 28px 0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);box-shadow:none;color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium)}
+#store-screen .pm-select.st-kind:hover,#store-screen .pm-select.st-kind[aria-expanded="true"]{background:var(--bg-row-hi);color:var(--tx)}
+#store-screen .pm-select.st-kind:focus-visible{box-shadow:none}
+
+/* ── artwork ── */
+/* Stand-ins until the registry ships preview renders: two hues per extension. */
+.st-thumb{
+  background:
+    radial-gradient(120% 90% at 82% 18%, var(--art-b) 0%, transparent 60%),
+    radial-gradient(90% 120% at 12% 100%, color-mix(in oklch, var(--art-a) 70%, black) 0%, transparent 65%),
+    linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
+.st-thumb{position:relative;display:block;flex:none;width:44px;height:44px;border-radius:var(--r-lg);overflow:hidden}
+.st-thumb.is-featured{width:88px;height:88px;border-radius:var(--r-xl)}
+.st-thumb.is-hero{width:96px;height:96px;border-radius:var(--r-xl)}
+
+/* ── featured ── */
+/* One extension at a time, on a card: its icon, its copy, one Install. The
+   pager sits under the copy. The card is the destination; Install is the
+   one other target. */
+.st-hero{position:relative;display:flex;align-items:center;gap:20px;margin:-8px -14px 0;padding:18px 20px 18px 18px;border-radius:var(--r-xl);background:var(--bg-panel);transition:background var(--dur-1)}
+.st-hero:hover{background:var(--bg-row)}
+.st-hero-open{position:absolute;inset:0;z-index:1;padding:0;border:0;border-radius:inherit;background:transparent}
+.st-hero-open:focus-visible{outline:0;box-shadow:inset 0 0 0 2px var(--accent)}
+.st-hero>.st-thumb{position:relative;z-index:0}
+.st-hero-copy{position:relative;z-index:0;flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;pointer-events:none}
+.st-hero-kind{font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
+.st-hero-copy b{font-size:var(--fs-xl);line-height:24px;font-weight:var(--fw-medium);letter-spacing:-.012em;color:var(--tx)}
+.st-hero-line{font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:56ch}
+.st-hero-install{position:relative;z-index:2;flex:none;height:32px;padding:0 16px;border-radius:var(--r-pill)}
+.st-pager{display:flex;gap:6px;padding:10px 0 0;pointer-events:auto;position:relative;z-index:2;width:max-content}
+.st-pager button{width:16px;height:2px;padding:0;border:0;border-radius:var(--r-pill);background:var(--ink-3);transition:background var(--dur-2),width var(--dur-2) var(--ease)}
+.st-pager button[aria-selected="true"]{width:28px;background:var(--tx)}
+.st-pager button:hover:not([aria-selected="true"]){background:var(--tx-4)}
+.st-pager button:focus-visible{outline:0;box-shadow:0 0 0 2px var(--bg-panel),0 0 0 4px var(--accent)}
+
+/* ── sections ── */
+.st-sec{display:flex;flex-direction:column}
+.st-sec-head{display:flex;align-items:center;justify-content:space-between;height:32px;margin-bottom:8px;padding:0 2px}
+.st-sec-head h3{font-size:var(--fs-lg);line-height:20px;font-weight:var(--fw-semibold);letter-spacing:-.01em;color:var(--tx)}
+.st-sec-head .btn{height:28px;padding:0 10px;color:var(--tx-3)}
+.st-sec-title{height:20px;padding:0 2px 8px;box-sizing:content-box;font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
+.st-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 24px;margin:0 -10px}
+@container (max-width:44rem){.st-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* ── row ── */
+/* Whole row is a destination; the trailing button is the one other target. */
+.st-row{display:flex;align-items:center;gap:10px;min-height:60px;padding:0 10px 0 0;border-radius:var(--r-lg);transition:background var(--dur-1)}
+.st-row:hover{background:var(--ink-1)}
+.st-row-open{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:8px 0 8px 10px;border:0;text-align:left;color:inherit;font:inherit;cursor:default}
+.st-row-open:focus-visible{outline:0}
+.st-row:has(.st-row-open:focus-visible){box-shadow:inset 0 0 0 2px var(--accent)}
+.st-row-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.st-row-copy b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-row-line{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-row-by{font-size:var(--fs-xs);line-height:14px;color:var(--tx-4)}
+.st-install{flex:none;min-width:68px;border-radius:var(--r-pill)}
+.st-installed{flex:none;min-width:68px;text-align:center;font-size:var(--fs-sm);font-weight:var(--fw-medium);color:var(--tx-4)}
+
+/* ── installed (hosted Settings › Extensions control) ── */
+.st-installed-host{width:auto;margin:-8px 0 0}
+.st-installed-host .settings-extension-root{gap:32px}
+.st-installed-host .settings-section-heading>b{display:none}
+
+/* ── detail ── */
+.st-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-4px 0 -28px -6px;padding:0 8px 0 3px;border:0;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
+.st-back svg{width:12px;height:12px;transform:rotate(180deg)}
+.st-back:hover{color:var(--tx);background:var(--ink-1)}
+.st-detail-head{display:flex;align-items:flex-start;gap:20px}
+.st-detail-copy{flex:1;min-width:0;display:flex;flex-direction:column;padding-top:4px}
+.st-detail-title{display:flex;align-items:center;gap:9px}
+.st-detail-title h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
+.st-tag{flex:none;margin-top:2px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
+.st-byline{margin-top:2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4)}
+.st-lede{margin-top:2px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
+.st-detail-actions{display:flex;gap:6px;margin-top:14px}
+.st-detail-actions .btn{height:32px;padding:0 14px;border-radius:var(--r-pill)}
+.st-about{margin-top:-8px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}
+.st-card{margin:0 -14px;display:flex;flex-direction:column;border-radius:var(--r-xl);background:var(--bg-panel);overflow:hidden}
+.st-kv{display:flex;align-items:baseline;gap:16px;min-height:44px;padding:12px 14px}
+.st-kv>span{flex:none;width:120px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.st-kv>span>i{margin-left:6px;font-style:normal;color:var(--tx-4)}
+.st-kv>b{min-width:0;font-size:var(--fs-md);line-height:16px;font-weight:var(--fw-regular);color:var(--tx);overflow-wrap:anywhere}
+.st-kv.is-version>b{color:var(--tx-2)}
+.st-file{display:flex;align-items:center;justify-content:space-between;gap:12px;height:40px;padding:0 12px 0 14px;border:0;text-align:left;color:var(--tx);font:var(--fs-sm)/16px var(--f-mono);transition:background var(--dur-1)}
+.st-file:hover{background:var(--ink-1)}
+.st-file svg{width:12px;height:12px;color:var(--tx-4)}
+.st-note{margin-top:8px;padding:0 1px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);text-wrap:pretty}
+
+/* Lineage reads as a sentence with the origin as a link, GitHub style. */
+.st-lineage{margin-top:6px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.st-link{padding:0;border:0;color:var(--tx-2);font:inherit;font-weight:var(--fw-medium);text-decoration:underline;text-decoration-color:var(--tx-4);text-underline-offset:2px;transition:color var(--dur-1)}
+.st-link:hover{color:var(--tx)}
+
+/* Setup: one row per variable, field on the right, like a Settings row. */
+.st-var{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px 14px}
+.st-var-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.st-var-copy>b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
+.st-var-copy>span{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3);text-wrap:pretty}
+.st-var-copy code{margin-left:4px;font:var(--fs-xs)/16px var(--f-mono);color:var(--tx-4)}
+.st-var-req{margin-left:6px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-regular);line-height:16px;vertical-align:1px}
+#store-screen .st-var-input{width:220px;height:30px;flex:none;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);color:var(--tx);font-size:var(--fs-md)}
+#store-screen .st-var-input::placeholder{color:var(--tx-4)}
+#store-screen .st-var-input:focus-visible{outline:0;box-shadow:0 0 0 3px var(--ink-2)}
+
+/* Facts: four quiet label/value pairs in one line, no rules. */
+.st-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:-8px 0}
+.st-facts>div{min-width:0;display:flex;flex-direction:column;gap:2px}
+.st-facts dt{font-size:var(--fs-xs);line-height:14px;font-weight:var(--fw-medium);color:var(--tx-4)}
+.st-facts dd{font-size:var(--fs-md);line-height:18px;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-sec-sub{margin-left:6px;font-weight:var(--fw-regular);color:var(--tx-4)}
+.st-whatsnew{padding:0 2px;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty;max-width:68ch}
+
+/* ── empty ── */
+.st-empty{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:24px 0}
+.st-empty b{font-size:var(--fs-md);font-weight:var(--fw-medium);color:var(--tx)}
+.st-empty span{max-width:52ch;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
+.st-empty .btn{margin-top:10px}
+
+#store-screen .btn:not(.pri){box-shadow:none}
+#store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager,#store-screen .st-facts{user-select:none;-webkit-user-select:none}
+
+@media (max-width:760px){.st-sidebar{width:180px}.st-scroll{padding:56px 20px 64px}}

@@ -3,6 +3,7 @@ import type { PMRegistry } from '../registry';
 import { subscribeForkUpdates, updateAll, type ForkUpdate } from '../../shell/fork-updates';
 import { installUpdate, subscribeAppUpdates } from '../../shell/app-updates';
 import type { AppUpdateState } from '../../../../shared/ipc';
+import { mountNavGlide } from '../../controls/nav-glide';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -68,7 +69,12 @@ function ensure() {
       h('button.btn', { onclick: installUpdate }, 'Restart to update'));
   };
   S.offAppUpdate = subscribeAppUpdates(paintAppUpdate);
-  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), S.nav, S.appUpdate, S.updates);
+  /* The Store is its own screen; from home it reads as one more place to go. */
+  const store = h('div.ps-nav', h('button.ps-navbtn', { onclick: () => (PM as any).StoreUI?.open?.() }, PM.icon('sparkle'), h('span', 'Store')));
+  /* One nav block so the highlight can glide from the sections to Store. */
+  const nav = h('div.ps-navs', S.nav, store);
+  S.offGlide = mountNavGlide(nav, { row: '.ps-navbtn', selected: '.on' });
+  const sidebar = h('aside.ps-sidebar', h('label.ps-search', PM.icon('search'), S.search), nav, S.appUpdate, S.updates);
 
   S.title = h('b'); S.count = h('span');
   const view = h('div.ps-view', { role: 'group', 'aria-label': 'Project layout' },
@@ -85,9 +91,10 @@ function ensure() {
   S.content = h('div.ps-content', S.grid, S.pager);
   S.el = h('div#projects-screen', sidebar, h('main.ps-main', top, S.content));
   document.body.appendChild(S.el);
+  /* Only Escape is the home's; app shortcuts such as ⌘, keep working over it. */
   S.el.addEventListener('keydown', (e: any) => {
-    e.stopPropagation();
-    if (e.key === 'Escape') { e.preventDefault(); PM.ProjectsScreen.hide(); }
+    if (e.key !== 'Escape') return;
+    e.stopPropagation(); e.preventDefault(); PM.ProjectsScreen.hide();
   });
   S.el.addEventListener('dragover', (e: any) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
   S.el.addEventListener('drop', async (e: any) => {
@@ -325,6 +332,7 @@ const offOpen = PM.bus.on('projects:open', () => { if (PM.ProjectsScreen.isOpen)
 PM.__disposeProjectsScreen = () => {
   S.offUpdates?.(); S.offUpdates = null;
   S.offAppUpdate?.(); S.offAppUpdate = null;
+  S.offGlide?.(); S.offGlide = null;
   offOpen?.();
   S.el?.remove?.();
   S.el = null;

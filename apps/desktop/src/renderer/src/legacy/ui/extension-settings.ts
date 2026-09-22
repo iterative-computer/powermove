@@ -56,8 +56,14 @@ function icon(name: string): Element | null {
  * view for one extension with its state, what it contributes, its files and
  * the delete action. Both views paint from the same records.
  */
+export interface ExtensionSettingsOptions {
+  /** Settings hides the built-ins; the Store's Installed page lists them too. */
+  includeBuiltin?: boolean;
+}
+
 export function createExtensionSettingsControl(
-  api: ExtensionsBridge | undefined = window.powermove?.extensions
+  api: ExtensionsBridge | undefined = window.powermove?.extensions,
+  options: ExtensionSettingsOptions = {}
 ): ExtensionSettingsControl {
   const element = el('div', 'settings-extension-root');
   const section = createSettingsSection('Installed', 'Loading…');
@@ -298,7 +304,7 @@ export function createExtensionSettingsControl(
 
   const render = (records: ExtensionRecord[]): void => {
     if (!alive) return;
-    const sorted = records.filter(record => record.scope !== 'builtin').sort(compareRecords);
+    const sorted = records.filter(record => options.includeBuiltin || record.scope !== 'builtin').sort(compareRecords);
     const open = openId ? sorted.find(record => record.id === openId) ?? null : null;
     if (openId && !open) openId = null;
     renderList(records, sorted);
