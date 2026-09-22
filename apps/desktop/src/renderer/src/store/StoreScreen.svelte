@@ -138,7 +138,7 @@
   $effect(() => {
     if (!shown || !rootEl) return;
     const root = rootEl;
-    const selector = `${SQUIRCLE_SELECTOR}, .st-card, .st-thumb, .st-hero, .st-hero-frame, .st-navbtn, .st-search, .st-kind`;
+    const selector = `${SQUIRCLE_SELECTOR}, .st-card, .st-thumb, .st-hero, .st-navbtn, .st-search, .st-kind`;
     let unmount = mountSquircles(root, selector);
     const observer = new MutationObserver(() => { unmount(); unmount = mountSquircles(root, selector); });
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -208,32 +208,48 @@
               <Icon {PM} name="chev" /><span>Back</span>
             </button>
             <header class="st-detail-head">
-              <span class="st-thumb is-large" style={art(l)}></span>
+              <span class="st-thumb is-hero" style={art(l)}></span>
               <div class="st-detail-copy">
                 <div class="st-detail-title">
                   <h2>{l.name}</h2>
                   <span class="st-tag">{l.version}</span>
                 </div>
-                <p class="st-byline">{byline(l)} · Updated {l.updated}</p>
                 <p class="st-lede">{l.tagline}</p>
-              </div>
-              <div class="st-detail-actions">
-                {#if l.installed}
-                  <button class="btn" type="button">Installed</button>
-                {:else}
-                  <button class="btn pri" type="button">Install</button>
-                {/if}
-                <button class="btn" type="button">Fork and edit</button>
+                <div class="st-detail-actions">
+                  {#if l.installed}
+                    <button class="btn" type="button">Installed</button>
+                  {:else}
+                    <button class="btn pri" type="button">Install</button>
+                  {/if}
+                  <button class="btn" type="button">Fork and edit</button>
+                </div>
               </div>
             </header>
-            <div class="st-hero-frame is-detail" style={art(l)}></div>
+
+            <dl class="st-facts">
+              <div><dt>Author</dt><dd>{l.publisher}</dd></div>
+              <div><dt>Kind</dt><dd>{KIND_LABEL[l.kind]}</dd></div>
+              <div><dt>Updated</dt><dd>{l.updated}</dd></div>
+              <div><dt>Version</dt><dd>{l.version}</dd></div>
+            </dl>
+
             {#if l.about}<p class="st-about">{l.about}</p>{/if}
 
+            {#if l.versions?.[0]}
+              {@const v = l.versions[0]}
+              <section class="st-sec">
+                <div class="st-sec-head">
+                  <h3>What’s new <span class="st-sec-sub">{v.version}</span></h3>
+                  <button class="btn ghost" type="button">Version history</button>
+                </div>
+                <p class="st-whatsnew">{v.note}</p>
+              </section>
+            {/if}
+
             <section class="st-sec">
-              <h3 class="st-sec-title">About</h3>
+              <h3 class="st-sec-title">Details</h3>
               <div class="st-card">
                 <div class="st-kv"><span>Identifier</span><b>{coordinate(l)}</b></div>
-                <div class="st-kv"><span>Version</span><b>{l.version}</b></div>
                 {#if l.forkedFrom}<div class="st-kv"><span>Based on</span><b>{l.forkedFrom}</b></div>{/if}
                 <div class="st-kv"><span>Includes</span><b>{KIND_PLURAL[l.kind]}, Inspector</b></div>
                 <div class="st-kv"><span>Requires</span><b>Powermove 1.0 or later</b></div>
@@ -252,16 +268,6 @@
               </section>
             {/if}
 
-            {#if l.versions}
-              <section class="st-sec">
-                <h3 class="st-sec-title">Versions</h3>
-                <div class="st-card">
-                  {#each l.versions as v (v.version)}
-                    <div class="st-kv is-version"><span>{v.version} <i>{v.date}</i></span><b>{v.note}</b></div>
-                  {/each}
-                </div>
-              </section>
-            {/if}
 
           {:else if query}
             <header class="st-heading">
@@ -294,22 +300,19 @@
               <!-- One extension at a time: its preview frame beside its copy, on
                    a card. The pager and Install share the card's last line. -->
               <div class="st-hero">
-                <button class="st-hero-frame" type="button" style={art(featured)} aria-label={`Open ${featured.name}`} onclick={() => openDetail(featured)}></button>
+                <button class="st-hero-open" type="button" aria-label={`Open ${featured.name}`} onclick={() => openDetail(featured)}></button>
+                <span class="st-thumb is-featured" style={art(featured)}></span>
                 <div class="st-hero-copy">
-                  <div class="st-hero-text">
-                    <span class="st-hero-kind">{byline(featured)}</span>
-                    <b>{featured.name}</b>
-                    <span class="st-hero-line">{featured.tagline}</span>
-                  </div>
-                  <div class="st-hero-foot">
-                    <div class="st-pager" role="tablist" aria-label="Featured">
-                      {#each FEATURED as f, i (f.id)}
-                        <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
-                      {/each}
-                    </div>
-                    <button class="btn pri" type="button">Install</button>
+                  <span class="st-hero-kind">{byline(featured)}</span>
+                  <b>{featured.name}</b>
+                  <span class="st-hero-line">{featured.tagline}</span>
+                  <div class="st-pager" role="tablist" aria-label="Featured">
+                    {#each FEATURED as f, i (f.id)}
+                      <button role="tab" type="button" aria-selected={i === featuredIndex} aria-label={f.name} onclick={() => (featuredIndex = i)}></button>
+                    {/each}
                   </div>
                 </div>
+                <button class="btn pri st-hero-install" type="button">Install</button>
               </div>
             {/if}
 

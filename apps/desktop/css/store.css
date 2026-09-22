@@ -78,33 +78,34 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 
 /* ── artwork ── */
 /* Stand-ins until the registry ships preview renders: two hues per extension. */
-.st-art,.st-thumb,.st-hero-frame{
+.st-thumb{
   background:
     radial-gradient(120% 90% at 82% 18%, var(--art-b) 0%, transparent 60%),
     radial-gradient(90% 120% at 12% 100%, color-mix(in oklch, var(--art-a) 70%, black) 0%, transparent 65%),
     linear-gradient(135deg, var(--art-a), color-mix(in oklch, var(--art-b) 60%, var(--art-a)))}
 .st-thumb{position:relative;display:block;flex:none;width:44px;height:44px;border-radius:var(--r-lg);overflow:hidden}
-.st-thumb.is-large{width:64px;height:64px;border-radius:var(--r-xl)}
+.st-thumb.is-featured{width:88px;height:88px;border-radius:var(--r-xl)}
+.st-thumb.is-hero{width:96px;height:96px;border-radius:var(--r-xl)}
 
 /* ── featured ── */
-.st-hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;margin:-8px -14px 0;padding:14px;border-radius:var(--r-xl);background:var(--bg-panel)}
-.st-hero-frame{position:relative;display:block;width:100%;aspect-ratio:16/9;padding:0;border:0;border-radius:var(--r-lg);overflow:hidden;cursor:default;transition:transform var(--dur-2) var(--ease)}
-.st-hero-frame:active{transform:scale(.992)}
-.st-hero-frame:focus-visible{outline:0}
-.st-hero-frame.is-detail{aspect-ratio:21/9;border-radius:var(--r-xl);margin:0 -14px;width:auto}
-.st-hero-copy{min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:20px;padding:8px 6px 2px 0}
-.st-hero-text{display:flex;flex-direction:column;gap:2px}
+/* One extension at a time, on a card: its icon, its copy, one Install. The
+   pager sits under the copy. The card is the destination; Install is the
+   one other target. */
+.st-hero{position:relative;display:flex;align-items:center;gap:20px;margin:-8px -14px 0;padding:18px 20px 18px 18px;border-radius:var(--r-xl);background:var(--bg-panel);transition:background var(--dur-1)}
+.st-hero:hover{background:var(--bg-row)}
+.st-hero-open{position:absolute;inset:0;z-index:1;padding:0;border:0;border-radius:inherit;background:transparent}
+.st-hero-open:focus-visible{outline:0;box-shadow:inset 0 0 0 2px var(--accent)}
+.st-hero>.st-thumb{position:relative;z-index:0}
+.st-hero-copy{position:relative;z-index:0;flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;pointer-events:none}
 .st-hero-kind{font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--tx-3)}
-.st-hero-text b{margin-top:6px;font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
-.st-hero-line{margin-top:4px;font-size:var(--fs-md);line-height:19px;color:var(--tx-2);text-wrap:pretty}
-.st-hero-foot{display:flex;align-items:center;justify-content:space-between;gap:16px}
-.st-hero-foot .btn{height:32px;padding:0 16px;border-radius:var(--r-pill)}
-.st-pager{display:flex;gap:6px;padding:8px 0}
+.st-hero-copy b{font-size:var(--fs-xl);line-height:24px;font-weight:var(--fw-medium);letter-spacing:-.012em;color:var(--tx)}
+.st-hero-line{font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:56ch}
+.st-hero-install{position:relative;z-index:2;flex:none;height:32px;padding:0 16px;border-radius:var(--r-pill)}
+.st-pager{display:flex;gap:6px;padding:10px 0 0;pointer-events:auto;position:relative;z-index:2;width:max-content}
 .st-pager button{width:16px;height:2px;padding:0;border:0;border-radius:var(--r-pill);background:var(--ink-3);transition:background var(--dur-2),width var(--dur-2) var(--ease)}
 .st-pager button[aria-selected="true"]{width:28px;background:var(--tx)}
 .st-pager button:hover:not([aria-selected="true"]){background:var(--tx-4)}
 .st-pager button:focus-visible{outline:0;box-shadow:0 0 0 2px var(--bg-panel),0 0 0 4px var(--accent)}
-@container (max-width:44rem){.st-hero{grid-template-columns:minmax(0,1fr)}}
 
 /* ── sections ── */
 .st-sec{display:flex;flex-direction:column}
@@ -138,16 +139,16 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-4px 0 -28px -6px;padding:0 8px 0 3px;border:0;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
 .st-back svg{width:12px;height:12px;transform:rotate(180deg)}
 .st-back:hover{color:var(--tx);background:var(--ink-1)}
-.st-detail-head{display:flex;align-items:center;gap:16px}
-.st-detail-copy{flex:1;min-width:0;display:flex;flex-direction:column}
+.st-detail-head{display:flex;align-items:flex-start;gap:20px}
+.st-detail-copy{flex:1;min-width:0;display:flex;flex-direction:column;padding-top:4px}
 .st-detail-title{display:flex;align-items:center;gap:9px}
 .st-detail-title h2{font-size:22px;line-height:28px;font-weight:var(--fw-medium);letter-spacing:-.015em;color:var(--tx)}
 .st-tag{flex:none;margin-top:2px;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
 .st-byline{margin-top:2px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4)}
-.st-lede{margin-top:4px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
-.st-detail-actions{flex:none;display:flex;gap:6px}
+.st-lede{margin-top:2px;font-size:var(--fs-md);line-height:18px;color:var(--tx-2);text-wrap:pretty;max-width:64ch}
+.st-detail-actions{display:flex;gap:6px;margin-top:14px}
 .st-detail-actions .btn{height:32px;padding:0 14px;border-radius:var(--r-pill)}
-.st-about{margin-top:-16px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}
+.st-about{margin-top:-8px;max-width:68ch;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty}
 .st-card{margin:0 -14px;display:flex;flex-direction:column;border-radius:var(--r-xl);background:var(--bg-panel);overflow:hidden}
 .st-kv{display:flex;align-items:baseline;gap:16px;min-height:44px;padding:12px 14px}
 .st-kv>span{flex:none;width:120px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
@@ -159,6 +160,14 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-file svg{width:12px;height:12px;color:var(--tx-4)}
 .st-note{margin-top:8px;padding:0 1px;font-size:var(--fs-sm);line-height:16px;color:var(--tx-4);text-wrap:pretty}
 
+/* Facts: four quiet label/value pairs in one line, no rules. */
+.st-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:-8px 0}
+.st-facts>div{min-width:0;display:flex;flex-direction:column;gap:2px}
+.st-facts dt{font-size:var(--fs-xs);line-height:14px;font-weight:var(--fw-medium);color:var(--tx-4)}
+.st-facts dd{font-size:var(--fs-md);line-height:18px;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-sec-sub{margin-left:6px;font-weight:var(--fw-regular);color:var(--tx-4)}
+.st-whatsnew{padding:0 2px;font-size:var(--fs-md);line-height:20px;color:var(--tx-2);text-wrap:pretty;max-width:68ch}
+
 /* ── empty ── */
 .st-empty{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:24px 0}
 .st-empty b{font-size:var(--fs-md);font-weight:var(--fw-medium);color:var(--tx)}
@@ -166,6 +175,6 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-empty .btn{margin-top:10px}
 
 #store-screen .btn:not(.pri){box-shadow:none}
-#store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager{user-select:none;-webkit-user-select:none}
+#store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager,#store-screen .st-facts{user-select:none;-webkit-user-select:none}
 
 @media (max-width:760px){.st-sidebar{width:180px}.st-scroll{padding:56px 20px 64px}}
