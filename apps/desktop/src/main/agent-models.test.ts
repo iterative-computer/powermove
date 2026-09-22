@@ -27,9 +27,23 @@ it('accepts Astra requests at every exposed effort through IPC validation', () =
 
 it('uses discovered Codex models and their available efforts', () => {
   setDiscoveredCodexModels([{
-    id: 'gpt-6-sol', label: 'GPT-6 Sol', reasoningEfforts: ['low', 'medium', 'max']
+    id: 'gpt-6-astra', label: 'GPT-6 Astra', reasoningEfforts: ['low', 'medium', 'max']
+  }, {
+    id: 'gpt-5.5', label: 'GPT-5.5', reasoningEfforts: ['none', 'low', 'medium']
   }]);
-  expect(AGENT_MODELS.chatgpt).toEqual([{ id: 'gpt-6-sol', label: 'GPT-6 Sol' }]);
-  expect(modelEfforts('chatgpt', 'gpt-6-sol')).toEqual(['low', 'medium', 'max']);
-  expect(modelEffort('chatgpt', 'gpt-6-sol', 'high')).toBe('medium');
+  expect(AGENT_MODELS.chatgpt.map(model => model.id)).toEqual([
+    'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'
+  ]);
+  expect(modelEfforts('chatgpt', 'gpt-6-astra')).toEqual(['low', 'medium', 'max']);
+  expect(modelEffort('chatgpt', 'gpt-6-astra', 'high')).toBe('medium');
+  expect(modelEfforts('chatgpt', 'gpt-6-sol')).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  expect(modelEfforts('chatgpt', 'gpt-5.5')).toEqual(['none', 'low', 'medium']);
+  expect(modelEfforts('compatible', 'gpt-6-sol')).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+  expect(modelEfforts('claude', 'claude-opus-5-5')).not.toContain('none');
+  expect(modelEfforts('claude', 'claude-opus-5-5')).not.toContain('ultra');
+  expect(isCodexRunRequest({
+    id: 'sol-model-test', provider: 'chatgpt', mode: 'autonomous', prompt: 'test',
+    schema: null, images: [], model: 'gpt-6-sol', reasoningEffort: 'ultra', access: 'project',
+    projectId: 'test', projectName: 'Test', projectJSON: '{}', attachments: [], consentToken: null,
+  })).toBe(true);
 });

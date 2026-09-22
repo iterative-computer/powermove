@@ -235,7 +235,7 @@ export interface MediaProxyReadRequest {
 /* ── codex ───────────────────────────────────────────────── */
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
 
 export interface CodexModelOption {

@@ -59,7 +59,8 @@ class FakeAppServer extends EventEmitter {
       else if (message.method === 'model/list') this.respond(message.id, {
         data: [
           { model: 'gpt-6-sol', displayName: 'GPT-6 Sol', supportedReasoningEfforts: [
-            { reasoningEffort: 'low' }, { reasoningEffort: 'medium' }, { reasoningEffort: 'max' }
+            { reasoningEffort: 'none' }, { reasoningEffort: 'low' }, { reasoningEffort: 'medium' },
+            { reasoningEffort: 'max' }, { reasoningEffort: 'ultra' }
           ] },
           { model: 'hidden-model', displayName: 'Hidden', hidden: true },
           { model: '../invalid', displayName: 'Invalid' }
@@ -105,7 +106,7 @@ describe('ChatGPTAccountClient', () => {
   it('lists picker-visible models and effort options from App Server', async () => {
     const { child, client } = harness();
     await expect(client.models()).resolves.toEqual([{
-      id: 'gpt-6-sol', label: 'GPT-6 Sol', reasoningEfforts: ['low', 'medium', 'max']
+      id: 'gpt-6-sol', label: 'GPT-6 Sol', reasoningEfforts: ['none', 'low', 'medium', 'max', 'ultra']
     }]);
     expect(child.messages.find(message => message.method === 'model/list')?.params).toEqual({
       limit: 100, includeHidden: false

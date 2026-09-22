@@ -7,6 +7,7 @@ export const AGENT_MODELS = {
   chatgpt: [
     { id: 'gpt-6-astra', label: 'GPT 6 Astra' },
     { id: 'gpt-6-sol', label: 'GPT 6 Sol' },
+    { id: 'gpt-6-luna', label: 'GPT 6 Luna' },
     { id: 'gpt-5.6-sol', label: '5.6 Sol' },
     { id: 'gpt-5.6-terra', label: '5.6 Terra' },
     { id: 'gpt-5.6-luna', label: '5.6 Luna' },
@@ -29,24 +30,35 @@ export const AGENT_MODELS = {
   ],
 };
 
-export const REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const REASONING_EFFORTS: ReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const STANDARD_REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const bundledCodexModels = [...AGENT_MODELS.chatgpt];
 const discoveredCodexEfforts = new Map<string, ReasoningEffort[]>();
 
 export function setDiscoveredCodexModels(models: CodexModelOption[]): void {
   if (!models.length) return;
   discoveredCodexEfforts.clear();
-  AGENT_MODELS.chatgpt = models.map(({ id, label, reasoningEfforts }) => {
+  const discovered = models.map(({ id, label, reasoningEfforts }) => {
     discoveredCodexEfforts.set(id, reasoningEfforts);
     return { id, label };
   });
+  const discoveredById = new Map(discovered.map(model => [model.id, model]));
+  AGENT_MODELS.chatgpt = [
+    ...bundledCodexModels.map(model => discoveredById.get(model.id) ?? model),
+    ...discovered.filter(model => !bundledCodexModels.some(bundled => bundled.id === model.id)),
+  ];
 }
 
 export function modelEfforts(provider: string, model: string | null): ReasoningEffort[] {
   if (provider === 'chatgpt' && model && discoveredCodexEfforts.has(model)) {
     return discoveredCodexEfforts.get(model)!;
   }
+  if (provider === 'chatgpt') {
+    return model === 'gpt-6-sol' ? [...STANDARD_REASONING_EFFORTS, 'ultra'] : STANDARD_REASONING_EFFORTS;
+  }
   if (provider === 'compatible') {
-    if (/^gpt-(6-(?:astra|sol)|5\.6)(?:-|$)/.test(model || '')) return REASONING_EFFORTS;
+    if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(model || '')) return REASONING_EFFORTS.slice(0, -1);
+    if (/^gpt-(6-astra|5\.6)(?:-|$)/.test(model || '')) return STANDARD_REASONING_EFFORTS;
     if (/^gpt-5\.[2345]-chat(?:-|$)/.test(model || '')) return [];
     if (/^gpt-5\.[245]-pro(?:-|$)/.test(model || '')) return ['medium', 'high', 'xhigh'];
     if (/^gpt-5\.[2345](?:-|$)/.test(model || '')) return ['low', 'medium', 'high', 'xhigh'];
@@ -54,12 +66,12 @@ export function modelEfforts(provider: string, model: string | null): ReasoningE
     // Compatible services also host models without this OpenAI parameter.
     return [];
   }
-  if (provider !== 'claude') return REASONING_EFFORTS;
+  if (provider !== 'claude') return STANDARD_REASONING_EFFORTS;
   if (model?.includes('haiku')) return [];
   if (model === 'claude-opus-4-6' || model === 'claude-sonnet-4-6') {
     return ['low', 'medium', 'high', 'max'];
   }
-  return REASONING_EFFORTS;
+  return STANDARD_REASONING_EFFORTS;
 }
 
 export function modelEffort(provider: string, model: string | null, effort: ReasoningEffort | null): ReasoningEffort | null {

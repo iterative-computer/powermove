@@ -10,7 +10,7 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_DETAIL_CHARS = 500;
 const MODEL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
-const EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORTS: readonly ReasoningEffort[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
 type JsonRpcId = number;
 
