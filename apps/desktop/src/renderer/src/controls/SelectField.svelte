@@ -24,7 +24,9 @@
     edit: EditBinding;
     options: SelectOption[];
     label?: string;
-    onChange?: (value: unknown) => void;
+    /** Return false to keep the selection as a UI-only action (for example,
+     * an "Import…" command that opens a picker instead of editing a value). */
+    onChange?: (value: unknown) => void | boolean;
     mixed?: (edit: EditBinding, value: unknown) => boolean;
   } = $props();
 
@@ -41,9 +43,14 @@
     const option = options[Number((event.currentTarget as HTMLSelectElement).value)];
     if (!option) return;
     const next = optionValue(option);
+    if (onChange?.(next) === false) {
+      // Command-like options (such as Import…) must not leave the native
+      // select displaying a value that is not part of the bound document.
+      (event.currentTarget as HTMLSelectElement).value = String(selectedIndex);
+      return;
+    }
     gesture.once(next);
     api.transport.invalidate();
-    onChange?.(next);
   }
 </script>
 

@@ -31,6 +31,7 @@
     typeof shaderMeta?.shaderKey === 'string' ? api.render.gl.compileError(shaderMeta.shaderKey) ?? '' : ''));
   let editingText = false;
   let hasVariableWeight = $state(false);
+  const IMPORT_SOURCE = '__powermove_import_source__';
 
   const get = (key: string, fallback?: unknown) => () => content[key] == null ? fallback : content[key];
   const edit = (key: string, label: string): EditBinding =>
@@ -64,7 +65,32 @@
     return assets
       .filter((asset) => asset?.kind === kind)
       .map((asset) => ({ v: asset.id, label: String(asset.name) }))
+      .concat([{ v: IMPORT_SOURCE, label: 'Import file…' }])
       .concat([{ v: null, label: 'none' }]);
+  }
+
+  async function importSource(kind: 'image' | 'video'): Promise<void> {
+    try {
+      const files = await api.assets.pick({ accept: kind === 'image' ? 'image/*' : 'video/*' });
+      const file = files[0];
+      if (!file) return;
+      if (api.media.assets.kind(file) !== kind) throw new Error(`Choose a ${kind} file for this source`);
+      const asset = await api.assets.import(file);
+      inspectorEdit.apply({
+        type: 'set_content',
+        target: layer.id,
+        patch: { asset: asset.id }
+      }, { label: 'Import source', origin: 'inspector' });
+      api.transport.invalidate();
+    } catch (error) {
+      api.ui.toast(error instanceof Error ? error.message : 'Could not import this file', { kind: 'alert', error: true });
+    }
+  }
+
+  function selectSource(kind: 'image' | 'video', value: unknown): boolean | void {
+    if (value !== IMPORT_SOURCE) return;
+    void importSource(kind);
+    return false;
   }
 
 
@@ -135,7 +161,7 @@
     {/if}
   {/if}
 {:else if layer.type === 'image' || layer.type === 'video'}
-  <AnimatedRow {layer} label="Source"><SelectField {api} {mixed} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" /></AnimatedRow>
+  <AnimatedRow {layer} label="Source"><SelectField {api} {mixed} get={get('asset', null)} edit={edit('asset', 'Source')} options={mediaOptions(layer.type)} label="Source" onChange={(value: unknown) => selectSource(layer.type, value)} /></AnimatedRow>
   <AnimatedRow {layer} label="Fit" path="c.fit"><SelectField {api} {mixed} get={get('fit', 'cover')} edit={edit('fit', 'Fit')} options={['cover', 'contain', 'stretch']} label="Fit" /></AnimatedRow>
   <AnimatedRow {layer} label="Width" path="c.w"><NumField {api} {mixed} get={get('w', 0)} edit={edit('w', 'Width')} label="Width" step={1} min={1} unit="px" /></AnimatedRow>
   <AnimatedRow {layer} label="Height" path="c.h"><NumField {api} {mixed} get={get('h', 0)} edit={edit('h', 'Height')} label="Height" step={1} min={1} unit="px" /></AnimatedRow>

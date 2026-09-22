@@ -543,7 +543,10 @@ export function splitLayers(PM: PMRegistry): unknown {
     const hierarchy = layers.filter((layer: any) => ids.has(layer.id));
     return { root, hierarchy };
   }).filter(({ root, hierarchy }: any) => crossesPlayhead(splitSpan(PM, root), T)
-    && hierarchy.length > 1
+    // A group with one child is still a real editable layer strip.  Do not
+    // reject it here: ⌘⇧D must split singleton groups just like larger
+    // hierarchies.
+    && hierarchy.length > 0
     && !hierarchy.some((layer: any) => layer.lock
       || (PM.groupAncestors?.(layer) || []).some((group: any) => group.lock && !hierarchy.includes(group))));
   if (!ordinaryTargets.length && !groupPlans.length) return false;

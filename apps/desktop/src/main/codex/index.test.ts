@@ -177,9 +177,11 @@ describe('registerCodexIpc', () => {
   it('registers every frozen Codex, consent, and artifact channel', () => {
     expect([...handlers.keys()]).toEqual([
       IPC.chatgptStatus,
+      IPC.chatgptModels,
       IPC.chatgptConnect,
       IPC.chatgptDisconnect,
       IPC.claudeStatus,
+      IPC.claudeModels,
       IPC.claudeConnect,
       IPC.claudeDisconnect,
       IPC.agentRuntimeUpdate,

@@ -114,6 +114,10 @@ describe('legacy projects screen install', () => {
     install(PM);
     PM.ProjectsScreen.show('projects');
     const text = elements.flatMap(el => el.children).filter(value => typeof value === 'string');
+    const nav = elements.find(el => el.tag === 'div.ps-nav')!;
+    expect(nav.children).toHaveLength(2);
+    expect(nav.children.map(button => button.children.find((child: any) => child instanceof FakeElement && child.tag === 'span')?.children[0]))
+      .toEqual(['Recents', 'Trash']);
     expect(elements.some(el => el.attrs.placeholder === 'Search projects')).toBe(true);
     expect(text).not.toContain('All Projects');
     expect(text).toContain('Recently edited');

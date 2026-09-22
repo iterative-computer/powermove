@@ -45,7 +45,7 @@ import {
 
 const MODES = ['editor', 'autonomous'] as const;
 const ACCESS = ['editor', 'project', 'computer'] as const;
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+const EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 const PROVIDERS = ['chatgpt', 'claude', 'compatible'] as const;
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;

@@ -256,6 +256,8 @@ describe('preload bridge', () => {
     electronMocks.invoke.mockResolvedValue(connected);
     await expect(bridge().claude.status()).resolves.toEqual(connected);
     expect(electronMocks.invoke).toHaveBeenCalledWith(IPC.claudeStatus);
+    await expect(bridge().claude.models?.()).resolves.toEqual(connected);
+    expect(electronMocks.invoke).toHaveBeenCalledWith(IPC.claudeModels);
     await expect(bridge().claude.connect()).resolves.toEqual(connected);
     expect(electronMocks.invoke).toHaveBeenCalledWith(IPC.claudeConnect);
     await expect(bridge().claude.disconnect()).resolves.toEqual(connected);

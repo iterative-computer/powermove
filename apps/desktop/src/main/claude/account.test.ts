@@ -3,7 +3,7 @@ import { PassThrough } from 'node:stream';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { ClaudeAccountClient, claudeAccountStatusFromJson } from './account';
+import { ClaudeAccountClient, claudeAccountStatusFromJson, claudeModelsFromSdk } from './account';
 
 function childThatCloses(stdoutText: string, code: number): EventEmitter & {
   stdout: PassThrough; stderr: PassThrough; killed: boolean; kill: ReturnType<typeof vi.fn>;
@@ -36,6 +36,17 @@ function waitingChild(): EventEmitter & {
 }
 
 describe('Claude account client', () => {
+  it('includes resolved Claude model IDs from SDK aliases', () => {
+    expect(claudeModelsFromSdk([
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: '', supportedEffortLevels: ['low', 'high', 'max'] },
+      { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku', description: '' },
+    ])).toEqual([
+      { id: 'opus', label: 'Opus', reasoningEfforts: ['low', 'high', 'max'] },
+      { id: 'claude-opus-5-5', label: 'claude-opus-5-5', reasoningEfforts: ['low', 'high', 'max'] },
+      { id: 'haiku', label: 'Haiku', reasoningEfforts: [] },
+      { id: 'claude-haiku-4-5-20251001', label: 'claude-haiku-4-5-20251001', reasoningEfforts: [] },
+    ]);
+  });
   it('maps only Claude Code status metadata into the renderer contract', () => {
     expect(claudeAccountStatusFromJson({
       loggedIn: true,

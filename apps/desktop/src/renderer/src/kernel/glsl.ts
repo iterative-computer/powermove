@@ -24,6 +24,7 @@ export interface LegacyFx {
   params: EffectParamDefinition[];
   frag: string;
   keepOrig: boolean;
+  backdrop: boolean;
 }
 
 export interface LegacyTransition {
@@ -60,6 +61,7 @@ export function validateEffect(def: EffectDefinition): EffectDefinition {
   if (typeof def.id !== 'string' || !EFFECT_ID.test(def.id)) throw new Error(`effect: invalid id "${String(def.id)}"`);
   if (typeof def.label !== 'string' || !def.label) throw new Error(`${what}: "label" is required`);
   if (typeof def.group !== 'string' || !def.group) throw new Error(`${what}: "group" is required`);
+  if (def.backdrop != null && typeof def.backdrop !== 'boolean') throw new Error(`${what}: "backdrop" must be a boolean`);
   const passes = def.passes ?? 1;
   if (!Number.isInteger(passes) || passes < 1 || passes > MAX_PASSES) throw new Error(`${what}: "passes" must be an integer 1..${MAX_PASSES}`);
   validateParams(def.params, what);
@@ -114,6 +116,7 @@ export function toLegacyFx(def: EffectDefinition, pre: string): LegacyFx {
   const params = def.params;
   const passes = def.passes ?? 1;
   const keepOrig = def.keepOrig === true;
+  const backdrop = def.backdrop === true;
   const frag = def.rawShader
     ? def.frag
     : assemble(
@@ -122,11 +125,12 @@ export function toLegacyFx(def: EffectDefinition, pre: string): LegacyFx {
           ...paramDeclarations(params),
           ...unlessDeclared(pre, 'pass', 'uniform int u_pass;'),
           ...(keepOrig ? unlessDeclared(pre, 'orig', 'uniform sampler2D u_orig;') : []),
+          ...(backdrop ? unlessDeclared(pre, 'backdrop', 'uniform sampler2D u_backdrop;') : []),
           ...paramAliases(params)
         ],
         def.frag
       );
-  return { label: def.label, group: def.group, passes, params, frag, keepOrig };
+  return { label: def.label, group: def.group, passes, params, frag, keepOrig, backdrop };
 }
 
 /** Build the legacy transition shape from a kernel transition definition. */
