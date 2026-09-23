@@ -11,11 +11,12 @@
     { "binding": "TARS", "bucket_name": "powermove-tars" },
     { "binding": "ICONS", "bucket_name": "powermove-icons" }
   ],
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["sign-in@trypowermove.com"] }],
   "unsafe": { "bindings": [
     { "name": "RL_UPLOAD", "type": "ratelimit", "namespace_id": "1", "simple": { "limit": 60, "period": 60 } },
     { "name": "RL_AUTH", "type": "ratelimit", "namespace_id": "2", "simple": { "limit": 10, "period": 60 } }
   ] },
   "triggers": { "crons": ["0 */6 * * *"] },
-  "vars": { "APP_ORIGIN": "https://cloud.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com" },
+  "vars": { "APP_ORIGIN": "https://cloud.trypowermove.com", "HANDLE_MAIL_DOMAIN": "users.trypowermove.com", "EMAIL_FROM": "Powermove <sign-in@trypowermove.com>" },
   "observability": { "enabled": true }
 }

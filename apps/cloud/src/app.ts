@@ -91,8 +91,22 @@ export function createApp(deps: {
     '/v1/store',
     storeUtility,
   ).route('/v1/installs', installRoutes);
-  app.post('/v1/auth/sign-in/social', (c) => createAuth(c.var.data, c.env).handler(c.req.raw));
-  app.on(['GET', 'POST'], '/v1/auth/callback/*', (c) => createAuth(c.var.data, c.env).handler(c.req.raw));
+  app.post('/v1/auth/sign-in/oauth2', async (c) => {
+    const body = await c.req.json().catch(() => null) as { providerId?: unknown; callbackURL?: unknown } | null;
+    if (body?.providerId !== 'google') return c.json({ error: 'not_found' }, 404);
+    const url = new URL(c.req.url);
+    url.pathname = '/v1/auth/sign-in/social';
+    return createAuth(c.var.data, c.env).handler(new Request(url, {
+      method: 'POST', headers: c.req.raw.headers,
+      body: JSON.stringify({ provider: 'google', callbackURL: body.callbackURL }),
+    }));
+  });
+  app.get('/v1/auth/oauth2/callback/:providerId', (c) => {
+    if (c.req.param('providerId') !== 'google') return c.json({ error: 'not_found' }, 404);
+    const url = new URL(c.req.url);
+    url.pathname = '/v1/auth/callback/google';
+    return createAuth(c.var.data, c.env).handler(new Request(url, c.req.raw));
+  });
   app.get('/v1/auth/error', (c) => createAuth(c.var.data, c.env).handler(c.req.raw));
   app.all('/v1/auth/*', (c) => c.json({ error: 'not_found' }, 404));
   return routes;

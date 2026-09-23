@@ -40,7 +40,7 @@ function bridgeWith(over: Partial<CloudBridge> = {}): CloudBridge {
   };
 }
 
-const PM = { ICONS: { google: '', github: '', chev: '' }, toast: vi.fn() };
+const PM = { ICONS: { google: '', chev: '' }, toast: vi.fn() };
 
 let component: ReturnType<typeof mount> | null = null;
 afterEach(() => {
@@ -153,9 +153,9 @@ describe('account', () => {
 
     (await import('./account')).openSignIn();
     await settle();
-    (document.querySelector<HTMLButtonElement>('button[data-provider="github"]'))!.click();
+    (document.querySelector<HTMLButtonElement>('button[data-provider="google"]'))!.click();
     await settle();
-    expect(bridge.signInSocial).toHaveBeenCalledWith({ provider: 'github' });
+    expect(bridge.signInSocial).toHaveBeenCalledWith({ provider: 'google' });
     expect(heading(document.body)).toBe('Finish signing in in your browser');
 
     changed!(WITH_HANDLE);

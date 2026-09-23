@@ -1,14 +1,10 @@
 import { expect, test } from 'bun:test';
 import { createApp } from '../src/app';
 import { withData } from './db';
-import { makeEnv } from './env';
+import { FakeEmail, makeEnv } from './env';
 test('email OTP signs in and returns a usable bearer', async () =>
   withData(async (data) => {
     const env = makeEnv(data), app = createApp({ data: () => data });
-    let otp = '';
-    env.OTP_SENDER = async (_email, code) => {
-      otp = code;
-    };
     {
       const sent = await app.request('/v1/auth/email/send', {
         method: 'POST',
@@ -17,6 +13,11 @@ test('email OTP signs in and returns a usable bearer', async () =>
       }, env);
       expect(sent.status).toBe(200);
     }
+    const message = (env.EMAIL as FakeEmail).outbox[0]!;
+    expect(message.to).toBe('otp@example.com');
+    expect(message.from).toBe(env.EMAIL_FROM);
+    expect(message.subject).toBe('Your Powermove sign-in code');
+    const otp = message.text.match(/\b\d{6}\b/)?.[0];
     expect(otp).toBeTruthy();
     const verified = await app.request('/v1/auth/email/verify', {
       method: 'POST',
@@ -43,6 +44,7 @@ test('email OTP signs in and returns a usable bearer', async () =>
 test('OTP delivery without a configured sender fails without logging a code', () =>
   withData(async (data) => {
     const env = makeEnv(data), app = createApp({ data: () => data });
+    delete (env as Partial<CloudflareBindings>).EMAIL;
     const calls: unknown[][] = [];
     const previous = console.log;
     console.log = (...args) => {
@@ -55,7 +57,7 @@ test('OTP delivery without a configured sender fails without logging a code', ()
         body: JSON.stringify({ email: 'nodelivery@example.com' }),
       }, env);
       expect(response.status).toBe(400);
-      expect(await response.json() as any).toEqual({ error: 'bad_request' });
+      expect(await response.json() as any).toEqual({ error: 'bad_request', detail: "Couldn't send the code. Try again." });
     } finally {
       console.log = previous;
     }
@@ -65,9 +67,7 @@ test('OTP delivery without a configured sender fails without logging a code', ()
 test('OTP sender failure becomes bad_request', () =>
   withData(async (data) => {
     const env = makeEnv(data), app = createApp({ data: () => data });
-    env.OTP_SENDER = async () => {
-      throw new Error('delivery failed');
-    };
+    env.EMAIL = { send: async () => { throw Object.assign(new Error('delivery failed'), { code: 'E_RATE_LIMIT_EXCEEDED' }); } };
     const response = await app.request('/v1/auth/email/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

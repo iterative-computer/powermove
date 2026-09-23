@@ -33,7 +33,6 @@ const LEGACY_STORE_KEY = 'cloudAccount';
 
 export const PROVIDER_LABEL: Record<AccountProvider, string> = {
   google: 'Google',
-  github: 'GitHub',
   email: 'email'
 };
 

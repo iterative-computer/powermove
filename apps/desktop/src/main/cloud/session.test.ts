@@ -47,20 +47,20 @@ describe('cloud session', () => {
   it('seals the token with safeStorage and reads it back', async () => {
     const { dir, make } = await harness();
     const session = make();
-    await session.save({ token: 'bearer-abc', expiresAt: future() }, 'github');
+    await session.save({ token: 'bearer-abc', expiresAt: future() }, 'google');
     expect(session.currentToken()).toBe('bearer-abc');
 
     const sealed = await fs.readFile(path.join(dir, 'session.bin'));
     expect(sealed.toString('utf8')).not.toContain('bearer-abc');
     expect(JSON.parse(safeStorage.decryptString(sealed))).toMatchObject({ origin: ORIGIN, token: 'bearer-abc' });
     const cache = JSON.parse(await fs.readFile(path.join(dir, 'session.json'), 'utf8'));
-    expect(cache).toMatchObject({ origin: ORIGIN, me: null, provider: 'github' });
+    expect(cache).toMatchObject({ origin: ORIGIN, me: null, provider: 'google' });
     expect(JSON.stringify(cache)).not.toContain('bearer-abc');
 
     const reloaded = make();
     await reloaded.load();
     expect(reloaded.currentToken()).toBe('bearer-abc');
-    expect(reloaded.provider()).toBe('github');
+    expect(reloaded.provider()).toBe('google');
   });
 
   it('clear removes both files', async () => {

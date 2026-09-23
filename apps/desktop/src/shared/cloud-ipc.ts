@@ -29,7 +29,7 @@ export const CLOUD_IPC = {
   signInFailed: 'cloud:sign-in-failed'
 } as const;
 
-export type CloudSocialProvider = 'google' | 'github';
+export type CloudSocialProvider = 'google';
 export type CloudProvider = CloudSocialProvider | 'email';
 
 export interface CloudAccount {

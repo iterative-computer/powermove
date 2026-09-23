@@ -37,6 +37,7 @@ bun run types:emit   # emits dist/types (AppType) for the desktop's typed client
 bun test
 bun run build        # wrangler deploy --dry-run
 bun run dev          # wrangler dev on http://localhost:8787 (500s without DATABASE_URL)
+bun run dev:emulate  # seeded Google OAuth emulator on http://localhost:4002
 ```
 
 `bun test` runs on an in-memory PGlite database with the checked-in
@@ -59,18 +60,18 @@ Nothing below has been created yet. Do these once, in order.
    with `DATABASE_URL` set, or `psql -f`). CI may create a branch per run.
 2. **R2.** Buckets `powermove-objects`, `powermove-tars`, `powermove-icons`
    (names in `wrangler.jsonc`). No public access; the Worker serves them.
-3. **OAuth apps.** Google and GitHub, redirect URI
-   `https://cloud.trypowermove.com/v1/auth/callback/<provider>`.
-4. **Resend.** Verified sending domain `users.trypowermove.com` (also the
-   handle mail domain used in commit identities).
+3. **OAuth app.** Google, redirect URI
+   `https://cloud.trypowermove.com/v1/auth/oauth2/callback/google`.
+4. **Cloudflare Email Service.** Onboard the sending domain
+   `trypowermove.com` (PENDING(provision)). The `send_email` binding allows
+   `sign-in@trypowermove.com` as its sender and requires Workers Paid.
 5. **DNS.** `cloud.trypowermove.com` as the Worker's custom domain.
 6. **Workers Paid plan** (interactive Postgres transactions and the Rate
    Limiting binding). Rate limiters are declared as `unsafe.bindings` in
    `wrangler.jsonc`; confirm the account has them enabled.
 7. **Secrets** (`bunx wrangler secret put <NAME>`), never in `vars` or git:
    `DATABASE_URL`, `BETTER_AUTH_SECRET` (≥ 32 random chars),
-   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`,
-   `GITHUB_CLIENT_SECRET`, `RESEND_API_KEY`, `ADMIN_TOKEN` (moderation
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ADMIN_TOKEN` (moderation
    endpoint; unset means moderation is disabled).
 8. **Deploy** `bun run deploy`, then `curl https://cloud.trypowermove.com/health`.
 9. **The `powermove` publisher.** Sign in once from the desktop app with the
@@ -80,10 +81,35 @@ Nothing below has been created yet. Do these once, in order.
    Reserved handles (`src/handles.ts`) can only be claimed this way.
 10. **Built-ins.** See below.
 
-Without `GOOGLE_*`/`GITHUB_*` the social providers are omitted so local boot
-works. Without `RESEND_API_KEY` email sign-in fails with `bad_request`; set
-`DEV_LOG_OTP=1` in a local `.dev.vars` to print codes to the console
-instead. Never set that in production.
+Without `GOOGLE_CLIENT_ID` Google sign-in is omitted so local boot works.
+The Email Sending binding delivers sign-in codes. Local `wrangler dev`
+simulates delivery by logging messages and writing them to local files.
+If the binding is absent locally, `DEV_LOG_OTP=1` prints codes to the console.
+Never set that in production.
+
+## Local sign-in with the Google emulator
+
+Run `bun run dev:emulate` alongside `bun run dev`. The emulator seeds the
+OAuth client `powermove-local` and two users, `jude@example.com` and
+`mara@example.com`. Its consent page offers a button for each seeded user;
+clicking one posts the user's email and OAuth request fields to
+`/o/oauth2/v2/auth/callback`.
+
+Put these values in local `.dev.vars`:
+
+```dotenv
+GOOGLE_CLIENT_ID=powermove-local
+GOOGLE_CLIENT_SECRET=powermove-local-secret
+GOOGLE_DISCOVERY_URL=http://localhost:4002/.well-known/openid-configuration
+APP_ORIGIN=http://localhost:8787
+DEV_LOG_OTP=1
+```
+
+`GOOGLE_DISCOVERY_URL` is optional and defaults to Google's production OIDC
+discovery URL. The emulator documents local and self-hosted `--base-url`
+setups; its docs do not describe a hosted `emulators.dev` instance. A
+deployed development Worker needs an HTTPS-reachable emulator and a matching
+registered callback URI.
 
 ## Publishing built-ins
 

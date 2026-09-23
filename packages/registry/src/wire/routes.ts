@@ -21,7 +21,7 @@ const iconPng = z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A
 ).optional();
 
 export const Auth = {
-  DesktopStart: { Req: Req(Empty, z.object({ provider: z.enum(['google', 'github']), state: z.string().regex(/^[a-fA-F0-9]{16,64}$/), challenge: z.string().regex(/^[A-Za-z0-9_-]+$/) })), Res: z.string() },
+  DesktopStart: { Req: Req(Empty, z.object({ provider: z.enum(['google']), state: z.string().regex(/^[a-fA-F0-9]{16,64}$/), challenge: z.string().regex(/^[A-Za-z0-9_-]+$/) })), Res: z.string() },
   DesktopDone: { Req: Req(Empty, z.object({ state: z.string() })), Res: z.string() },
   DesktopExchange: { Req: Req(Empty, Empty, z.object({ state: z.string(), token: z.string(), verifier: z.string() })), Res: SessionDto },
   EmailSend: { Req: Req(Empty, Empty, z.object({ email: z.email() })), Res: Ok },

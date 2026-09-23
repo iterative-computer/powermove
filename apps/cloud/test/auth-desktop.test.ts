@@ -1,11 +1,23 @@
 import { createAuth } from '../src/auth';
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { createApp } from '../src/app';
 import { desktopAuth } from '../src/db/schema';
 import { eq } from 'drizzle-orm';
 import { withData } from './db';
 import { makeEnv } from './env';
 import { seedSession } from './helpers';
+const discoveryURL = 'https://accounts.google.test/.well-known/openid-configuration';
+const originalFetch = globalThis.fetch;
+beforeAll(() => {
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === discoveryURL) return Promise.resolve(Response.json({
+      authorization_endpoint: 'https://accounts.google.test/o/oauth2/v2/auth',
+      token_endpoint: 'https://accounts.google.test/oauth2/token',
+    }));
+    return originalFetch(input, init);
+  }) as typeof fetch;
+});
+afterAll(() => { globalThis.fetch = originalFetch; });
 const b64 = (bytes: Uint8Array) =>
   btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 async function setup(
@@ -112,6 +124,7 @@ test('desktop social start carries a state cookie accepted by Better Auth verifi
     const env = makeEnv(data);
     env.GOOGLE_CLIENT_ID = 'test-google-client';
     env.GOOGLE_CLIENT_SECRET = 'test-google-secret';
+    env.GOOGLE_DISCOVERY_URL = discoveryURL;
     const app = createApp({ data: () => data });
     const state = crypto.randomUUID().replaceAll('-', '');
     const challenge = b64(crypto.getRandomValues(new Uint8Array(32)));
@@ -146,6 +159,7 @@ test('duplicate desktop state is a bad request and done page is not cacheable', 
     const env = makeEnv(data), browser = await seedSession(data, env), app = createApp({ data: () => data });
     env.GOOGLE_CLIENT_ID = 'test-google-client';
     env.GOOGLE_CLIENT_SECRET = 'test-google-secret';
+    env.GOOGLE_DISCOVERY_URL = discoveryURL;
     const state = crypto.randomUUID().replaceAll('-', '');
     const challenge = b64(crypto.getRandomValues(new Uint8Array(32)));
     const path = `/v1/auth/desktop?provider=google&state=${state}&challenge=${challenge}`;

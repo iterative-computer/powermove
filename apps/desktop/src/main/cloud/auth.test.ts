@@ -91,9 +91,9 @@ describe('challenge', () => {
 describe('browser sign-in', () => {
   it('opens the registry with a hex state and a challenge the server accepts', async () => {
     const h = await harness();
-    await h.auth.beginSocialSignIn('github');
+    await h.auth.beginSocialSignIn('google');
     const { provider, state, challenge } = started(h.opened);
-    expect(provider).toBe('github');
+    expect(provider).toBe('google');
     expect(state).toMatch(/^[a-f0-9]{32}$/);
     expect(challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(h.auth.hasPending()).toBe(true);
@@ -161,7 +161,7 @@ describe('browser sign-in', () => {
     const h = await harness();
     await h.auth.beginSocialSignIn('google');
     const first = started(h.opened).state;
-    await h.auth.beginSocialSignIn('github');
+    await h.auth.beginSocialSignIn('google');
     const second = started(h.opened).state;
     expect(second).not.toBe(first);
     await h.auth.handleDeepLink(`powermove://auth?state=${first}&token=t`);

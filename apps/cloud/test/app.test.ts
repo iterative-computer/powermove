@@ -43,6 +43,7 @@ test('auth passthrough denies one-time-token and native OTP endpoints', () =>
         '/v1/auth/one-time-token/verify',
         '/v1/auth/email-otp/send-verification-otp',
         '/v1/auth/sign-in/email-otp',
+        '/v1/auth/sign-in/social',
       ]
     ) {
       const response = await app.request(path, {
@@ -53,6 +54,9 @@ test('auth passthrough denies one-time-token and native OTP endpoints', () =>
       expect(response.status).toBe(404);
       expect(await response.json() as any).toEqual({ error: 'not_found' });
     }
+    const callback = await app.request('/v1/auth/oauth2/callback/github', {}, env);
+    expect(callback.status).toBe(404);
+    expect(await callback.json() as any).toEqual({ error: 'not_found' });
   }));
 test('malformed JSON and settings validation use the API error shape', () =>
   withData(async (data) => {

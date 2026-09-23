@@ -26,7 +26,7 @@
   type Step = 'start' | 'browser' | 'code' | 'handle';
   type HandleProblem = 'invalid' | 'taken' | 'reserved' | null;
 
-  const PROVIDERS: CloudSocialProvider[] = ['google', 'github'];
+  const PROVIDERS: CloudSocialProvider[] = ['google'];
   const CODE_LENGTH = 6;
   const RESEND_AFTER = 30;
   const TERMS = 'https://trypowermove.com/terms';

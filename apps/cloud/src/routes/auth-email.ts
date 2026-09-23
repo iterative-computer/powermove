@@ -16,11 +16,11 @@ export const email = new Hono<Env>()
     }),
     async (c) => {
       await rateAuth(c);
-      if (!c.env.OTP_SENDER && !c.env.RESEND_API_KEY && c.env.DEV_LOG_OTP !== '1') {
-        throw new ApiError({ error: 'bad_request' });
+      if (!c.env.OTP_SENDER && !c.env.EMAIL && c.env.DEV_LOG_OTP !== '1') {
+        throw new ApiError({ error: 'bad_request', detail: "Couldn't send the code. Try again." });
       }
       const { email } = c.req.valid('json');
-      let delivery: Promise<void> | undefined;
+      let delivery: Promise<boolean> | undefined;
       try {
         await createAuth(c.var.data, c.env, (pending) => {
           delivery = pending;
@@ -28,9 +28,9 @@ export const email = new Hono<Env>()
           body: { email, type: 'sign-in' },
           headers: c.req.raw.headers,
         });
-        await delivery;
+        if (!delivery || !await delivery) throw new Error('delivery failed');
       } catch {
-        throw new ApiError({ error: 'bad_request' });
+        throw new ApiError({ error: 'bad_request', detail: "Couldn't send the code. Try again." });
       }
       return c.json({ ok: true as const });
     },

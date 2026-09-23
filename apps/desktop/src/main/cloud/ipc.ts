@@ -50,7 +50,7 @@ const email = z.email().max(CLOUD_EMAIL_MAX);
 const none = z.union([z.undefined(), z.null(), z.strictObject({})]);
 export const cloudSchemas = {
   'cloud:account-get': none,
-  'cloud:sign-in-social': z.strictObject({ provider: z.enum(['google', 'github']) }),
+  'cloud:sign-in-social': z.strictObject({ provider: z.enum(['google']) }),
   'cloud:email-send': z.strictObject({ email }),
   'cloud:email-verify': z.strictObject({ email, otp: z.string().regex(CLOUD_OTP) }),
   'cloud:claim-handle': z.strictObject({ handle: z.string().regex(CLOUD_HANDLE) }),

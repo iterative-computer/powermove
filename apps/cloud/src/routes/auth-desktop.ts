@@ -48,7 +48,7 @@ export const desktop = new Hono<Env>()
     }),
     async (c) => {
       await rateAuth(c);
-      const { provider, state, challenge } = c.req.valid('query');
+      const { state, challenge } = c.req.valid('query');
       if (decode(challenge)?.length !== 32) {
         throw new ApiError({ error: 'bad_request' });
       }
@@ -74,7 +74,7 @@ export const desktop = new Hono<Env>()
       try {
         const result = await createAuth(c.var.data, c.env).api.signInSocial({
           body: {
-            provider,
+            provider: 'google',
             callbackURL: `${c.env.APP_ORIGIN}/v1/auth/desktop/done?state=${encodeURIComponent(state)}`,
           },
           headers: c.req.raw.headers,

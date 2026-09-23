@@ -27,7 +27,7 @@ const Cache = z.object({
   origin: z.string(),
   me: MeDto.nullable(),
   fetchedAt: z.string(),
-  provider: z.enum(['google', 'github', 'email']).optional()
+  provider: z.enum(['google', 'email']).optional()
 });
 type Cache = z.infer<typeof Cache>;
 
