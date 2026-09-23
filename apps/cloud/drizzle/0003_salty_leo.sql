@@ -1,0 +1,1 @@
+ALTER TABLE "releases" ADD COLUMN "files" jsonb DEFAULT '[]'::jsonb NOT NULL;

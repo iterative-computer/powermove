@@ -172,7 +172,7 @@ export function publishRoutes(deps: PublishDeps = {}) { return new Hono<Env>()
           if (!changed.length) { const [ref]=await tx.select().from(refs).where(and(eq(refs.repoId,repo.id),eq(refs.name,'main'))); throw new ApiError({error:'head_moved',head:ref?.sha ?? '0'.repeat(40)}); }
         } else await tx.insert(refs).values({repoId:repo.id,name:'main',sha:body.commitSha});
         let release;
-        try { [release] = await tx.insert(releases).values({id:releaseId,repoId:repo.id,version:body.version,commitSha:body.commitSha,treeSha:snap.treeSha,tarKey,tarSha256,manifest,notes:body.notes ?? null,basedOnReleaseId:body.basedOnReleaseId ?? null,apiVersion:manifest.apiVersion,fileCount:snap.files.length,sizeBytes:snap.totalBytes,scanWaivers:waived}).returning(); }
+        try { [release] = await tx.insert(releases).values({id:releaseId,repoId:repo.id,version:body.version,commitSha:body.commitSha,treeSha:snap.treeSha,tarKey,tarSha256,manifest,files:snap.files,notes:body.notes ?? null,basedOnReleaseId:body.basedOnReleaseId ?? null,apiVersion:manifest.apiVersion,fileCount:snap.files.length,sizeBytes:snap.totalBytes,scanWaivers:waived}).returning(); }
         catch (e) { if (unique(e)) throw new ApiError({error:'version_exists'}); throw e; }
         if (!release) throw new Error('release insert failed');
         await tx.insert(releaseObjects).values(shas.map(sha=>({releaseId,sha})));
