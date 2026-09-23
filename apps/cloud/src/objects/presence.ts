@@ -14,18 +14,23 @@ export async function presentShas(db: Db, userId: string, shas: string[], ctx: P
   ))` : sql`false`;
   const visibleIds = [ctx.originReleaseId, ctx.basedOnReleaseId].filter((x): x is string => !!x);
   const visible = visibleIds.length ? sql`(rel.id in (${sql.join(visibleIds.map(id => sql`${id}::uuid`), sql`, `)})
-    and repo.visibility in ('public','unlisted') and repo.moderation = 'none' and repo.tombstoned_at is null)` : sql`false`;
+    and rel.yanked_at is null and repo.visibility in ('public','unlisted') and repo.moderation = 'none' and repo.tombstoned_at is null)` : sql`false`;
   const rows = await db.select({ sha: objects.sha, gcState: objects.gcState, authorized: sql<boolean>`(
     exists (select 1 from object_leases l where l.sha = ${sha} and l.user_id = ${userId} and l.expires_at > now())
     or ${hasReleaseReference(sha, sql`${owned} or ${visible}`)}
   )` }).from(objects).where(inArray(objects.sha, unique));
   const present = new Set<string>();
-  for (const row of rows) {
-    if (!row.authorized) continue;
-    // A claimed row can be rescued while its key still exists. The GC delete
-    // checks the state again, so a successful rescue prevents row deletion.
-    if (row.gcState === 'claimed') await db.update(objects).set({ gcState: 'live', lastSeenAt: new Date() }).where(and(eq(objects.sha, row.sha), eq(objects.gcState, 'claimed')));
-    if (await bucket.head(`objects/${row.sha}`)) present.add(row.sha);
-  }
+  const authorized = rows.filter(row => row.authorized && row.gcState !== 'deleting');
+  let next = 0;
+  await Promise.all(Array.from({length:Math.min(6,authorized.length)},async () => {
+    while (next < authorized.length) {
+      const row = authorized[next++]!;
+      if (row.gcState === 'claimed') {
+        const rescued = await db.update(objects).set({gcState:'live',lastSeenAt:new Date()}).where(and(eq(objects.sha,row.sha),eq(objects.gcState,'claimed'))).returning({sha:objects.sha});
+        if (!rescued.length) continue;
+      }
+      if (await bucket.head(`objects/${row.sha}`)) present.add(row.sha);
+    }
+  }));
   return present;
 }

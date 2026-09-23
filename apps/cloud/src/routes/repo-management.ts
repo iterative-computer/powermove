@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { ApiError, Admin, Publish, Store } from '@powermove/registry/wire';
-import { sha256Hex } from '@powermove/registry/git';
+import { storeIcon } from '../objects/icon';
+import { constantTimeEqual } from '../constant-time';
 import type { Env } from '../env';
 import { extensions, moderationLog, publishers, releases, repos, reports } from '../db/schema';
 import { lineageFor, toListing, toRelease } from '../dto';
@@ -21,15 +22,6 @@ async function listing(c: import('hono').Context<Env>, repo: typeof repos.$infer
   if (!extension) throw new ApiError({error:'internal'});
   const [latest]=extension.latestReleaseId ? await c.var.data.db.select().from(releases).where(eq(releases.id,extension.latestReleaseId)).limit(1) : [];
   return toListing(repo,extension,owner,latest ?? null,await lineageFor(c.var.data.db,repo));
-}
-async function icon(bucket:R2Bucket, raw?:string) {
-  if (raw === undefined) return undefined;
-  let bytes:Uint8Array;
-  try { bytes=Uint8Array.from(atob(raw),x=>x.charCodeAt(0)); } catch { throw new ApiError({error:'bad_request',detail:'invalid PNG'}); }
-  if (bytes.length > 256*1024 || bytes.length<8 || ![137,80,78,71,13,10,26,10].every((v,i)=>bytes[i]===v)) throw new ApiError({error:'bad_request',detail:'invalid PNG'});
-  const key=`${await sha256Hex(bytes)}.png`;
-  await bucket.put(`icons/${key}`,bytes,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'image/png'}});
-  return key;
 }
 export const repoManagement = new Hono<Env>()
  .post('/:handle/:slug/releases/:version/yank',async c=>{
@@ -51,7 +43,7 @@ export const repoManagement = new Hono<Env>()
    const {handle,slug}=Publish.PatchRepo.Req.shape.params.parse(c.req.param());
    const body=Publish.PatchRepo.Req.shape.body.parse(await c.req.json().catch(()=>null));
    const {owner,repo}=await owned(c,handle,slug);
-   const iconKey=await icon(c.env.ICONS,body.iconPng);
+   const iconKey=await storeIcon(c.env.ICONS,body.iconPng);
    const [updated]=await c.var.data.db.update(repos).set({...(body.visibility?{visibility:body.visibility}:{}),updatedAt:new Date()}).where(eq(repos.id,repo.id)).returning();
    if (body.listing || iconKey) await c.var.data.db.update(extensions).set({...body.listing,...(iconKey?{iconKey}:{})}).where(eq(extensions.repoId,repo.id));
    return c.json(await listing(c,updated!,owner));
@@ -66,17 +58,14 @@ export const repoManagement = new Hono<Env>()
    return c.body(null,204);
  });
 
-function constantTimeEqual(a:string,b:string) {
-  const x=new TextEncoder().encode(a),y=new TextEncoder().encode(b);
-  let diff=x.length^y.length;
-  for(let i=0;i<Math.max(x.length,y.length);i++) diff |= (x[i]??0)^(y[i]??0);
-  return diff===0;
-}
 export const adminRoutes = new Hono<Env>().post('/repos/:repoId/moderation',async c=>{
   if (!c.env.ADMIN_TOKEN || !constantTimeEqual(c.req.header('X-Admin-Token')??'',c.env.ADMIN_TOKEN)) throw new ApiError({error:'unauthorized'});
   const {repoId}=Admin.Moderate.Req.shape.params.parse(c.req.param());
   const body=Admin.Moderate.Req.shape.body.parse(await c.req.json().catch(()=>null));
   const repo=await c.var.data.tx(async tx=>{
+    const [previous]=await tx.select().from(repos).where(eq(repos.id,repoId)).for('update').limit(1);
+    if (!previous) throw new ApiError({error:'not_found'});
+    if (body.action==='unhide' && previous.moderation==='removed') throw new ApiError({error:'bad_request'});
     const [updated]=await tx.update(repos).set({moderation:body.action==='unhide'?'none':body.action==='hide'?'hidden':'removed',updatedAt:new Date()}).where(eq(repos.id,repoId)).returning();
     if (!updated) throw new ApiError({error:'not_found'});
     await tx.insert(moderationLog).values({repoId,action:body.action,reason:body.reason,actor:'admin'});
@@ -89,9 +78,15 @@ export const storeUtility = new Hono<Env>()
  .get('/icons/:key',async c=>{
    const {key}=Store.Icon.Req.shape.params.parse(c.req.param());
    if (!/^[a-f0-9]{64}\.png$/.test(key)) throw new ApiError({error:'not_found'});
+   const session=c.var.session;
+   const [publisher]=session ? await c.var.data.db.select().from(publishers).where(eq(publishers.userId,session.userId)).limit(1) : [];
+   const rows=await c.var.data.db.select({repo:repos}).from(extensions).innerJoin(repos,eq(repos.id,extensions.repoId)).where(eq(extensions.iconKey,key));
+   const readable=rows.filter(row=>canViewDetail(row.repo,{publisherId:publisher?.id ?? null,admin:false})==='ok');
+   if (!readable.length) throw new ApiError({error:'not_found'});
+   const publiclyReadable=readable.some(row=>canViewDetail(row.repo,{publisherId:null,admin:false})==='ok');
    const obj=await c.env.ICONS.get(`icons/${key}`);
    if (!obj) throw new ApiError({error:'not_found'});
-   return new Response(obj.body,{headers:{'Content-Type':'image/png','Cache-Control':'public, max-age=31536000, immutable'}});
+   return new Response(obj.body,{headers:{'Content-Type':'image/png','Cache-Control':publiclyReadable?'public, max-age=300':'private, no-store',...(publiclyReadable?{'ETag':`"${key.slice(0,-4)}"`}:{})}});
  })
  .post('/x/:handle/:slug/report',async c=>{
    await rateAuth(c);

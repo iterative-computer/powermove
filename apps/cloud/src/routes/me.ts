@@ -5,13 +5,140 @@ import { and, eq, sql } from 'drizzle-orm';
 import type { Env } from '../env';
 import { user } from '../db/auth-schema';
 import { extensions, installs, publishers, releases, repos, userSettings } from '../db/schema';
-import { HANDLE_RE, isReserved } from '../handles';
+import { isReserved } from '../handles';
 import { lineageFor, toListing } from '../dto';
 import { canViewDetail } from '../lifecycle';
 import { requireSession } from './session';
 export const me = new Hono<Env>()
- .get('/', async c => { const s=requireSession(c); const [u]=await c.var.data.db.select().from(user).where(eq(user.id,s.userId)).limit(1); if (!u) throw new ApiError({ error: 'unauthorized' }); const [p]=await c.var.data.db.select().from(publishers).where(eq(publishers.userId,s.userId)).limit(1); const [settings]=await c.var.data.db.select().from(userSettings).where(eq(userSettings.userId,s.userId)).limit(1); return c.json({ user: { id:u.id, name:u.name, email:u.email, image:u.image }, publisher:p ? {id:p.id,handle:p.handle,tombstoned:p.tombstonedAt!==null} : null, settings:{rememberInstalls:settings?.rememberInstalls ?? true} } satisfies MeDto); })
- .post('/handle', async c => { const raw=await c.req.json().catch(()=>null); const handle=raw?.handle; if (typeof handle!=='string'||!HANDLE_RE.test(handle)) throw new ApiError({ error: 'handle_invalid' }); if (isReserved(handle)) throw new ApiError({ error: 'handle_reserved' }); const s=requireSession(c); try { const publisher=await c.var.data.tx(async tx => { const [existing]=await tx.select().from(publishers).where(eq(publishers.userId,s.userId)).limit(1); if (existing) throw new ApiError({ error: 'handle_already_set' }); const [p]=await tx.insert(publishers).values({handle,userId:s.userId}).returning(); await tx.update(user).set({username:handle,displayUsername:handle}).where(eq(user.id,s.userId)); return p; }); return c.json({publisher:{id:publisher.id,handle:publisher.handle,tombstoned:false}}); } catch(e) { if (e instanceof ApiError) throw e; if (((e as {code?:string;cause?:{code?:string}}).code==='23505' || (e as {cause?:{code?:string}}).cause?.code==='23505')) throw new ApiError({error: 'handle_taken'}); throw e; } })
- .patch('/settings', zValidator('json',Me.Settings.Req.shape.body), async c => { const s=requireSession(c), body=c.req.valid('json'); const result=await c.var.data.tx(async tx => { await tx.execute(sql`select id from "user" where id = ${s.userId} for update`); const [old]=await tx.select().from(userSettings).where(eq(userSettings.userId,s.userId)).limit(1); const rememberInstalls=body.rememberInstalls ?? old?.rememberInstalls ?? true; await tx.insert(userSettings).values({userId:s.userId,rememberInstalls}).onConflictDoUpdate({target:userSettings.userId,set:{rememberInstalls}}); if (!rememberInstalls) { const removed=await tx.delete(installs).where(eq(installs.userId,s.userId)).returning({repoId:installs.repoId,removedAt:installs.removedAt}); for (const row of removed) if (row.removedAt===null) await tx.update(extensions).set({installCount:sql`${extensions.installCount}-1`}).where(eq(extensions.repoId,row.repoId)); } return rememberInstalls; }); return c.json({settings:{rememberInstalls:result}}); })
- .delete('/', async c => { const s=requireSession(c); await c.var.data.tx(async tx => { await tx.update(publishers).set({userId:null,tombstonedAt:new Date()}).where(eq(publishers.userId,s.userId)); const removed=await tx.delete(installs).where(eq(installs.userId,s.userId)).returning({repoId:installs.repoId,removedAt:installs.removedAt}); for (const row of removed) if (row.removedAt===null) await tx.update(extensions).set({installCount:sql`${extensions.installCount}-1`}).where(eq(extensions.repoId,row.repoId)); await tx.delete(user).where(eq(user.id,s.userId)); }); return c.body(null,204); })
- .get('/repos', async c => { const s=requireSession(c); const rows=await c.var.data.db.select({repo:repos,extension:extensions,owner:publishers,latest:releases}).from(repos).innerJoin(publishers,eq(repos.ownerId,publishers.id)).innerJoin(extensions,eq(extensions.repoId,repos.id)).leftJoin(releases,eq(extensions.latestReleaseId,releases.id)).where(eq(publishers.userId,s.userId)); return c.json({items:await Promise.all(rows.filter(row=>canViewDetail(row.repo,{publisherId:row.owner.id,admin:false})==='ok').map(async row=>toListing(row.repo,row.extension,row.owner,row.latest,await lineageFor(c.var.data.db,row.repo))))}); });
+  .get('/', async (c) => {
+    const s = requireSession(c);
+    const [u] = await c.var.data.db.select().from(user).where(eq(user.id, s.userId)).limit(1);
+    if (!u) {
+      throw new ApiError({ error: 'unauthorized' });
+    }
+    const [p] = await c.var.data.db.select().from(publishers).where(eq(publishers.userId, s.userId)).limit(1);
+    const [settings] = await c.var.data.db.select().from(userSettings).where(eq(userSettings.userId, s.userId)).limit(
+      1,
+    );
+    return c.json(
+      {
+        user: { id: u.id, name: u.name, email: u.email, image: u.image },
+        publisher: p ? { id: p.id, handle: p.handle, tombstoned: p.tombstonedAt !== null } : null,
+        settings: { rememberInstalls: settings?.rememberInstalls ?? true },
+      } satisfies MeDto,
+    );
+  })
+  .post('/handle', async (c) => {
+    const s = requireSession(c);
+    const raw = await c.req.json().catch(() => null);
+    const parsed = Me.SetHandle.Req.shape.body.safeParse(raw);
+    if (!parsed.success) {
+      throw new ApiError({ error: 'handle_invalid' });
+    }
+    const handle = parsed.data.handle;
+    if (isReserved(handle)) {
+      throw new ApiError({ error: 'handle_reserved' });
+    }
+    try {
+      const publisher = await c.var.data.tx(async (tx) => {
+        const [existing] = await tx.select().from(publishers).where(eq(publishers.userId, s.userId)).limit(1);
+        if (existing) {
+          throw new ApiError({ error: 'handle_already_set' });
+        }
+        const [p] = await tx.insert(publishers).values({ handle, userId: s.userId }).returning();
+        await tx.update(user).set({ username: handle, displayUsername: handle }).where(eq(user.id, s.userId));
+        return p;
+      });
+      return c.json({ publisher: { id: publisher.id, handle: publisher.handle, tombstoned: false } });
+    } catch (e) {
+      if (e instanceof ApiError) {
+        throw e;
+      }
+      if (
+        ((e as {
+              code?: string;
+              cause?: {
+                code?: string;
+              };
+            }).code === '23505' || (e as {
+                cause?: {
+                  code?: string;
+                };
+              }).cause?.code === '23505')
+      ) {
+        throw new ApiError({ error: 'handle_taken' });
+      }
+      throw e;
+    }
+  })
+  .patch(
+    '/settings',
+    zValidator('json', Me.Settings.Req.shape.body, (result) => {
+      if (!result.success) {
+        throw result.error;
+      }
+    }),
+    async (c) => {
+      const s = requireSession(c), body = c.req.valid('json');
+      const result = await c.var.data.tx(async (tx) => {
+        await tx.execute(sql`select id from "user" where id = ${s.userId} for update`);
+        const [old] = await tx.select().from(userSettings).where(eq(userSettings.userId, s.userId)).limit(1);
+        const rememberInstalls = body.rememberInstalls ?? old?.rememberInstalls ?? true;
+        await tx.insert(userSettings).values({ userId: s.userId, rememberInstalls }).onConflictDoUpdate({
+          target: userSettings.userId,
+          set: { rememberInstalls },
+        });
+        if (!rememberInstalls) {
+          const removed = await tx.delete(installs).where(eq(installs.userId, s.userId)).returning({
+            repoId: installs.repoId,
+            removedAt: installs.removedAt,
+          });
+          for (const row of removed) {
+            if (row.removedAt === null) {
+              await tx.update(extensions).set({ installCount: sql`${extensions.installCount}-1` }).where(
+                eq(extensions.repoId, row.repoId),
+              );
+            }
+          }
+        }
+        return rememberInstalls;
+      });
+      return c.json({ settings: { rememberInstalls: result } });
+    },
+  )
+  .delete('/', async (c) => {
+    const s = requireSession(c);
+    await c.var.data.tx(async (tx) => {
+      await tx.update(publishers).set({ userId: null, tombstonedAt: new Date() }).where(
+        eq(publishers.userId, s.userId),
+      );
+      const removed = await tx.delete(installs).where(eq(installs.userId, s.userId)).returning({
+        repoId: installs.repoId,
+        removedAt: installs.removedAt,
+      });
+      for (const row of removed) {
+        if (row.removedAt === null) {
+          await tx.update(extensions).set({ installCount: sql`${extensions.installCount}-1` }).where(
+            eq(extensions.repoId, row.repoId),
+          );
+        }
+      }
+      await tx.delete(user).where(eq(user.id, s.userId));
+    });
+    return c.body(null, 204);
+  })
+  .get('/repos', async (c) => {
+    const s = requireSession(c);
+    const rows = await c.var.data.db.select({ repo: repos, extension: extensions, owner: publishers, latest: releases })
+      .from(repos).innerJoin(publishers, eq(repos.ownerId, publishers.id)).innerJoin(
+        extensions,
+        eq(extensions.repoId, repos.id),
+      ).leftJoin(releases, eq(extensions.latestReleaseId, releases.id)).where(eq(publishers.userId, s.userId));
+    return c.json({
+      items: await Promise.all(
+        rows.filter((row) => canViewDetail(row.repo, { publisherId: row.owner.id, admin: false }) === 'ok').map(async (
+          row,
+        ) => toListing(row.repo, row.extension, row.owner, row.latest, await lineageFor(c.var.data.db, row.repo))),
+      ),
+    });
+  });

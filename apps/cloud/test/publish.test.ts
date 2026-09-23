@@ -1,142 +1,476 @@
-import { test, expect } from 'bun:test';
+import { expect, test } from 'bun:test';
 import { eq } from 'drizzle-orm';
 import { ListingDto, ReleaseDto } from '@powermove/registry/wire';
-import { sha256Hex, encodeCommit, encodeTree, encodeLoose, hashObject } from '@powermove/registry/git';
-import { objectLeases, releaseObjects, repos, refs, extensions, moderationLog, reports } from '../src/db/schema';
+import { encodeCommit, encodeLoose, encodeTree, hashObject, sha256Hex } from '@powermove/registry/git';
+import { extensions, moderationLog, objectLeases, refs, releaseObjects, reports, repos } from '../src/db/schema';
 import { createApp } from '../src/app';
 import { presentShas } from '../src/objects/presence';
 import { withData } from './db';
 import { makeEnv } from './env';
-import { files,publisher,uploadTree,publishRequest } from './publish-fixture';
-const txt=(s:string)=>new TextEncoder().encode(s);
-test('first publish stores canonical release, tar, refs and reachable objects',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),built=await uploadTree(data,env,a,files());
-  const r=await publishRequest(data,env,a,'demo',built.commitSha);expect(r.status).toBe(201);
-  const body=await r.json() as any;ListingDto.parse(body.repo);ReleaseDto.parse(body.release);
-  expect(body.repo.latest.id).toBe(body.release.id);
-  const tar=await env.TARS.get(`tars/${body.release.id}.tar.gz`);expect(tar).not.toBeNull();expect(await sha256Hex(new Uint8Array(await tar!.arrayBuffer()))).toBe(body.release.tarSha256);
-  expect((await data.db.select().from(refs))[0]?.sha).toBe(built.commitSha);
-  expect(await data.db.select().from(releaseObjects)).toHaveLength(built.snap.objects.length+1);
-  const mine=await createApp({data:()=>data}).request('/v1/me/repos',{headers:a.headers},env);expect((await mine.json() as any).items).toHaveLength(1);
-}));
-test('parent, version, author, objects, manifest and scanner failures',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice');const first=await uploadTree(data,env,a,files());expect((await publishRequest(data,env,a,'demo',first.commitSha)).status).toBe(201);
-  const wrong=await uploadTree(data,env,a,files('demo','2.0.0',[{path:'new.txt',bytes:txt('new')}]),{parents:['0'.repeat(40)]});
-  let r=await publishRequest(data,env,a,'demo',wrong.commitSha,{version:'2.0.0'});expect((await r.json() as any).error).toBe('head_moved');
-  const second=await uploadTree(data,env,a,files('demo','1.0.0',[{path:'new.txt',bytes:txt('new')}]),{parents:[first.commitSha]});r=await publishRequest(data,env,a,'demo',second.commitSha);expect((await r.json() as any).error).toBe('version_exists');
-  const badAuthor=await uploadTree(data,env,a,files('other'),{author:'mallory'});r=await publishRequest(data,env,a,'other',badAuthor.commitSha);expect((await r.json() as any).error).toBe('author_mismatch');
-  r=await publishRequest(data,env,a,'other','a'.repeat(40));expect((await r.json() as any).error).toBe('commit_missing');
-  const manifestSha=first.snap.files.find(x=>x.path==='manifest.json')!.sha;
-  const treeBody=encodeTree([{mode:'100644',name:'.hidden',sha:manifestSha},{mode:'100644',name:'manifest.json',sha:manifestSha}]);
-  const treeSha=await hashObject('tree',treeBody);
-  const ident={name:'alice',email:`alice@${env.HANDLE_MAIL_DOMAIN}`,time:1,tz:'+0000'};
-  const commitBody=encodeCommit({tree:treeSha,parents:[],author:ident,committer:ident,message:'hidden'});
-  const mismatchSha=await hashObject('commit',commitBody);
-  const form=new FormData();for(const x of [{sha:treeSha,type:'tree' as const,body:treeBody},{sha:mismatchSha,type:'commit' as const,body:commitBody}]) form.append(x.sha,new Blob([new Uint8Array(await encodeLoose(x.type,x.body))],{type:'application/x-git-loose-object'}),'object');
-  await createApp({data:()=>data}).request('/v1/objects',{method:'POST',headers:a.headers,body:form},env);
-  r=await publishRequest(data,env,a,'other',mismatchSha);expect((await r.json() as any).error).toBe('tree_invalid');
-  const id=await uploadTree(data,env,a,files('wrong'));r=await publishRequest(data,env,a,'other',id.commitSha);expect((await r.json() as any).error).toBe('manifest_invalid');
-  const secret=await uploadTree(data,env,a,files('secret','1.0.0',[{path:'secret.ts',bytes:txt('export const key="sk-abcdefghijklmnopqrstuvwxyz123456"')} ]));r=await publishRequest(data,env,a,'secret',secret.commitSha);expect((await r.json() as any).error).toBe('scan_blocked');
-}));
-test('racing first publish deletes provisional tar and keeps winning repo',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),built=await uploadTree(data,env,a,files());
-  const r=await publishRequest(data,env,a,'demo',built.commitSha,{},async()=>{await data.db.insert(repos).values({ownerId:a.publisher.id,slug:'demo'});});
-  expect(r.status).toBe(409);expect((await r.json() as any).error).toBe('head_moved');expect(await data.db.select().from(repos)).toHaveLength(1);expect((await env.TARS.list()).objects).toHaveLength(0);
-}));
-test('fork release preserves reachable objects after origin removal',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),b=await publisher(data,env,'bob');const built=await uploadTree(data,env,a,files());
-  const origin=await (await publishRequest(data,env,a,'demo',built.commitSha)).json() as any;
-  const manifest={id:'fork',name:'Fork',version:'1.0.0',apiVersion:1,forkedFrom:'alice/demo@1.0.0'};
-  const fork=await uploadTree(data,env,b,[{path:'manifest.json',bytes:txt(JSON.stringify(manifest))},{path:'index.ts',bytes:txt('export default 2')},{path:'nested/readme.md',bytes:txt('nested file\n')}],{parents:[built.commitSha]});
-  const r=await publishRequest(data,env,b,'fork',fork.commitSha,{originReleaseId:origin.release.id});expect(r.status).toBe(201);const body=await r.json() as any;
-  expect((await data.db.select().from(extensions).where(eq(extensions.repoId,origin.repo.repoId)))[0]?.forkCount).toBe(1);
-  expect(body.repo.forkedFrom).toEqual({repoId:origin.repo.repoId,handle:'alice',slug:'demo',releaseId:origin.release.id,version:'1.0.0'});
-  await data.db.update(repos).set({moderation:'removed'}).where(eq(repos.id,origin.repo.repoId));
-  const inherited=built.snap.files.find(x=>x.path==='nested/readme.md')!.sha;
-  expect((await data.db.select().from(releaseObjects).where(eq(releaseObjects.releaseId,body.release.id))).some(x=>x.sha===inherited)).toBe(true);
-  await data.db.update(objectLeases).set({expiresAt:new Date(0)}).where(eq(objectLeases.userId,b.id));
-  const present=await presentShas(data.db,b.id,[inherited],{repoId:body.repo.repoId},env.OBJECTS);expect(present.has(inherited)).toBe(true);
-}));
-test('yank, patch, tombstone, moderation and reports',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),first=await uploadTree(data,env,a,files());const initial=await (await publishRequest(data,env,a,'demo',first.commitSha)).json() as any;
-  const app=createApp({data:()=>data});const json=(body:unknown)=>({method:'POST',headers:{...a.headers,'Content-Type':'application/json'},body:JSON.stringify(body)});
-  let r=await app.request('/v1/repos/alice/demo/releases/1.0.0/yank',json({}),env);expect(r.status).toBe(200);expect((await r.json() as any).repo.latest).toBeNull();
-  r=await app.request('/v1/repos/alice/demo',{method:'PATCH',headers:{...a.headers,'Content-Type':'application/json'},body:JSON.stringify({visibility:'unlisted',listing:{tagline:'Changed'}})},env);expect((await r.json() as any).tagline).toBe('Changed');
-  r=await app.request('/v1/admin/repos/'+initial.repo.repoId+'/moderation',json({action:'hide',reason:'review'}),env);expect(r.status).toBe(401);
-  env.ADMIN_TOKEN='test-admin-token';const admin=(action:string,reason:string)=>({method:'POST',headers:{'X-Admin-Token':'test-admin-token','Content-Type':'application/json'},body:JSON.stringify({action,reason})});
-  r=await app.request('/v1/admin/repos/'+initial.repo.repoId+'/moderation',admin('hide','review'),env);expect(r.status).toBe(200);
-  r=await app.request('/v1/store/x/alice/demo/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'problem'})},env);expect(r.status).toBe(404);
-  await app.request('/v1/admin/repos/'+initial.repo.repoId+'/moderation',admin('unhide','cleared'),env);
-  r=await app.request('/v1/store/x/alice/demo/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reason:'problem'})},env);expect(r.status).toBe(204);expect(await data.db.select().from(reports)).toHaveLength(1);
-  r=await app.request('/v1/repos/alice/demo',{method:'DELETE',headers:a.headers},env);expect(r.status).toBe(204);expect(await data.db.select().from(moderationLog)).toHaveLength(4);
-  const mine=await app.request('/v1/me/repos',{headers:a.headers},env);expect((await mine.json() as any).items).toHaveLength(0);
-}));
-test('waived entropy is stored and invalid waiver is rejected',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice');
-  const random='aB9dE8fG7hI6jK5lM4nO3pQ2rS1tU0vW9xY8zZ7aB6cD5';
-  const built=await uploadTree(data,env,a,files('entropy','1.0.0',[{path:'secret.ts',bytes:txt(`export const sample = "${random}";`)}]));
-  let r=await publishRequest(data,env,a,'entropy',built.commitSha,{waivers:[{path:'wrong.ts',line:1,reason:'test value'}]});expect(r.status).toBe(400);
-  r=await publishRequest(data,env,a,'entropy',built.commitSha,{waivers:[{path:'secret.ts',line:1,reason:'test value'}]});expect(r.status).toBe(201);
-  const [row]=await data.db.select().from((await import('../src/db/schema')).releases);
-  expect(row?.scanWaivers).toEqual([{path:'secret.ts',line:1,kind:'high_entropy',reason:'test value'}]);
-}));
-test('fork rejects unchanged tree and self origin',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),b=await publisher(data,env,'bob'),built=await uploadTree(data,env,a,files());
-  const origin=await (await publishRequest(data,env,a,'demo',built.commitSha)).json() as any;
-  const self=await uploadTree(data,env,a,files('self'),{parents:[built.commitSha]});
-  let r=await publishRequest(data,env,a,'self',self.commitSha,{originReleaseId:origin.release.id});expect((await r.json() as any).error).toBe('self_origin');
-  // An unchanged tree carries the origin's manifest id, so publish detects the tree first.
-  const same=await uploadTree(data,env,b,files(),{parents:[built.commitSha]});
-  r=await publishRequest(data,env,b,'demo',same.commitSha,{originReleaseId:origin.release.id});expect((await r.json() as any).error).toBe('same_as_origin');
-}));
-test('yank selects previous non-yanked release',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),first=await uploadTree(data,env,a,files());
-  const one=await (await publishRequest(data,env,a,'demo',first.commitSha)).json() as any;
-  const second=await uploadTree(data,env,a,files('demo','2.0.0'),{parents:[first.commitSha]});
-  const r=await publishRequest(data,env,a,'demo',second.commitSha,{version:'2.0.0'});expect(r.status).toBe(201);
-  const yank=await createApp({data:()=>data}).request('/v1/repos/alice/demo/releases/2.0.0/yank',{method:'POST',headers:a.headers},env);
-  expect((await yank.json() as any).repo.latest.id).toBe(one.release.id);
-}));
-test('missing walked object, file cap and publish counter',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice');
-  const built=await uploadTree(data,env,a,files());
-  await env.OBJECTS.delete(`objects/${built.snap.files.find(x=>x.path==='nested/readme.md')!.sha}`);
-  let r=await publishRequest(data,env,a,'demo',built.commitSha);expect(r.status).toBe(422);expect((await r.json() as any).error).toBe('object_missing');
-  const again=await uploadTree(data,env,a,files());
-  const {publishCounter}=await import('../src/db/schema');
-  const hour=new Date();hour.setUTCMinutes(0,0,0);
-  await data.db.insert(publishCounter).values({userId:a.id,hour,count:20});
-  r=await publishRequest(data,env,a,'demo',again.commitSha);expect(r.status).toBe(429);expect((await r.json() as any).error).toBe('rate_limited');
-  expect((await env.TARS.list()).objects).toHaveLength(0);
-}));
-test('401 files is limit_exceeded',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice');
-  const {hashObject,encodeTree,encodeCommit,encodeLoose}=await import('@powermove/registry/git');
-  const blob=txt('x');const blobSha=await hashObject('blob',blob);
-  const manifest=txt(JSON.stringify({id:'many',name:'Many',version:'1.0.0',apiVersion:1}));const manifestSha=await hashObject('blob',manifest);
-  const entries=Array.from({length:400},(_,i)=>({mode:'100644' as const,name:`f${String(i).padStart(3,'0')}.txt`,sha:blobSha}));entries.push({mode:'100644',name:'manifest.json',sha:manifestSha});
-  const treeBody=encodeTree(entries),treeSha=await hashObject('tree',treeBody);
-  const ident={name:'alice',email:`alice@${env.HANDLE_MAIL_DOMAIN}`,time:1,tz:'+0000'};
-  const commitBody=encodeCommit({tree:treeSha,parents:[],author:ident,committer:ident,message:'many'}),commitSha=await hashObject('commit',commitBody);
-  const form=new FormData();for(const x of [{sha:blobSha,type:'blob' as const,body:blob},{sha:manifestSha,type:'blob' as const,body:manifest},{sha:treeSha,type:'tree' as const,body:treeBody},{sha:commitSha,type:'commit' as const,body:commitBody}])form.append(x.sha,new Blob([new Uint8Array(await encodeLoose(x.type,x.body))],{type:'application/x-git-loose-object'}),'object');
-  expect((await createApp({data:()=>data}).request('/v1/objects',{method:'POST',headers:a.headers,body:form},env)).status).toBe(200);
-  const r=await publishRequest(data,env,a,'many',commitSha);expect(r.status).toBe(422);expect((await r.json() as any)).toEqual({error:'limit_exceeded',code:'too_many_files'});
-}));
-test('icon is content addressed and served with immutable cache',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),built=await uploadTree(data,env,a,files());
-  const png=Uint8Array.from([137,80,78,71,13,10,26,10,0,0,0,0]);
-  const iconPng=btoa(String.fromCharCode(...png));
-  const r=await publishRequest(data,env,a,'demo',built.commitSha,{iconPng});expect(r.status).toBe(201);
-  const listing=(await r.json() as any).repo;expect(listing.iconUrl).toContain('/v1/store/icons/');
-  const image=await createApp({data:()=>data}).request(listing.iconUrl,{},env);
-  expect(image.status).toBe(200);expect(image.headers.get('Cache-Control')).toBe('public, max-age=31536000, immutable');expect(image.headers.get('Content-Type')).toBe('image/png');
-}));
-test('main ref changed before commit causes head_moved and tar cleanup',()=>withData(async data=>{
-  const env=makeEnv(data),a=await publisher(data,env,'alice'),first=await uploadTree(data,env,a,files());
-  const published=await publishRequest(data,env,a,'demo',first.commitSha);expect(published.status).toBe(201);
-  const next=await uploadTree(data,env,a,files('demo','2.0.0'),{parents:[first.commitSha]});
-  const winner='f'.repeat(40);
-  const r=await publishRequest(data,env,a,'demo',next.commitSha,{version:'2.0.0'},async()=>{await data.db.update(refs).set({sha:winner});});
-  expect(r.status).toBe(409);expect(await r.json() as any).toEqual({error:'head_moved',head:winner});
-  expect((await env.TARS.list()).objects).toHaveLength(1);
-}));
+import { files, publisher, publishRequest, uploadTree } from './publish-fixture';
+const txt = (s: string) => new TextEncoder().encode(s);
+test('first publish stores canonical release, tar, refs and reachable objects', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), built = await uploadTree(data, env, a, files());
+    const r = await publishRequest(data, env, a, 'demo', built.commitSha);
+    expect(r.status).toBe(201);
+    const body = await r.json() as any;
+    ListingDto.parse(body.repo);
+    ReleaseDto.parse(body.release);
+    expect(body.repo.latest.id).toBe(body.release.id);
+    const tar = await env.TARS.get(`tars/${body.release.id}.tar.gz`);
+    expect(tar).not.toBeNull();
+    expect(await sha256Hex(new Uint8Array(await tar!.arrayBuffer()))).toBe(body.release.tarSha256);
+    expect((await data.db.select().from(refs))[0]?.sha).toBe(built.commitSha);
+    expect(await data.db.select().from(releaseObjects)).toHaveLength(built.snap.objects.length + 1);
+    const mine = await createApp({ data: () => data }).request('/v1/me/repos', { headers: a.headers }, env);
+    expect((await mine.json() as any).items).toHaveLength(1);
+  }));
+test('parent, version, author, objects, manifest and scanner failures', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice');
+    const first = await uploadTree(data, env, a, files());
+    expect((await publishRequest(data, env, a, 'demo', first.commitSha)).status).toBe(201);
+    const wrong = await uploadTree(data, env, a, files('demo', '2.0.0', [{ path: 'new.txt', bytes: txt('new') }]), {
+      parents: ['0'.repeat(40)],
+    });
+    let r = await publishRequest(data, env, a, 'demo', wrong.commitSha, { version: '2.0.0' });
+    expect((await r.json() as any).error).toBe('head_moved');
+    const second = await uploadTree(data, env, a, files('demo', '1.0.0', [{ path: 'new.txt', bytes: txt('new') }]), {
+      parents: [first.commitSha],
+    });
+    r = await publishRequest(data, env, a, 'demo', second.commitSha);
+    expect((await r.json() as any).error).toBe('version_exists');
+    const badAuthor = await uploadTree(data, env, a, files('other'), { author: 'mallory' });
+    r = await publishRequest(data, env, a, 'other', badAuthor.commitSha);
+    expect((await r.json() as any).error).toBe('author_mismatch');
+    r = await publishRequest(data, env, a, 'other', 'a'.repeat(40));
+    expect((await r.json() as any).error).toBe('commit_missing');
+    const manifestSha = first.snap.files.find((x) => x.path === 'manifest.json')!.sha;
+    const treeBody = encodeTree([{ mode: '100644', name: '.hidden', sha: manifestSha }, {
+      mode: '100644',
+      name: 'manifest.json',
+      sha: manifestSha,
+    }]);
+    const treeSha = await hashObject('tree', treeBody);
+    const ident = { name: 'alice', email: `alice@${env.HANDLE_MAIL_DOMAIN}`, time: 1, tz: '+0000' };
+    const commitBody = encodeCommit({ tree: treeSha, parents: [], author: ident, committer: ident, message: 'hidden' });
+    const mismatchSha = await hashObject('commit', commitBody);
+    const form = new FormData();
+    for (
+      const x of [{ sha: treeSha, type: 'tree' as const, body: treeBody }, {
+        sha: mismatchSha,
+        type: 'commit' as const,
+        body: commitBody,
+      }]
+    ) {
+      form.append(
+        x.sha,
+        new Blob([new Uint8Array(await encodeLoose(x.type, x.body))], { type: 'application/x-git-loose-object' }),
+        'object',
+      );
+    }
+    await createApp({ data: () => data }).request(
+      '/v1/objects',
+      { method: 'POST', headers: a.headers, body: form },
+      env,
+    );
+    r = await publishRequest(data, env, a, 'other', mismatchSha);
+    expect((await r.json() as any).error).toBe('tree_invalid');
+    const id = await uploadTree(data, env, a, files('wrong'));
+    r = await publishRequest(data, env, a, 'other', id.commitSha);
+    expect((await r.json() as any).error).toBe('manifest_invalid');
+    const secret = await uploadTree(
+      data,
+      env,
+      a,
+      files('secret', '1.0.0', [{
+        path: 'secret.ts',
+        bytes: txt('export const key="sk-abcdefghijklmnopqrstuvwxyz123456"'),
+      }]),
+    );
+    r = await publishRequest(data, env, a, 'secret', secret.commitSha);
+    expect((await r.json() as any).error).toBe('scan_blocked');
+  }));
+test('simulated first-publish collision deletes provisional tar', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), built = await uploadTree(data, env, a, files());
+    const r = await publishRequest(data, env, a, 'demo', built.commitSha, {}, async () => {
+      await data.db.insert(repos).values({ ownerId: a.publisher.id, slug: 'demo' });
+    });
+    expect(r.status).toBe(409);
+    expect((await r.json() as any).error).toBe('head_moved');
+    expect(await data.db.select().from(repos)).toHaveLength(1);
+    expect((await env.TARS.list()).objects).toHaveLength(0);
+  }));
+test('fork release preserves reachable objects after origin removal', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), b = await publisher(data, env, 'bob');
+    const built = await uploadTree(data, env, a, files());
+    const origin = await (await publishRequest(data, env, a, 'demo', built.commitSha)).json() as any;
+    const manifest = { id: 'fork', name: 'Fork', version: '1.0.0', apiVersion: 1, forkedFrom: 'alice/demo@1.0.0' };
+    const fork = await uploadTree(data, env, b, [{ path: 'manifest.json', bytes: txt(JSON.stringify(manifest)) }, {
+      path: 'index.ts',
+      bytes: txt('export default 2'),
+    }, { path: 'nested/readme.md', bytes: txt('nested file\n') }], { parents: [built.commitSha] });
+    const r = await publishRequest(data, env, b, 'fork', fork.commitSha, { originReleaseId: origin.release.id });
+    expect(r.status).toBe(201);
+    const body = await r.json() as any;
+    expect((await data.db.select().from(extensions).where(eq(extensions.repoId, origin.repo.repoId)))[0]?.forkCount)
+      .toBe(1);
+    expect(body.repo.forkedFrom).toEqual({
+      repoId: origin.repo.repoId,
+      handle: 'alice',
+      slug: 'demo',
+      releaseId: origin.release.id,
+      version: '1.0.0',
+    });
+    await data.db.update(repos).set({ moderation: 'removed' }).where(eq(repos.id, origin.repo.repoId));
+    const inherited = built.snap.files.find((x) => x.path === 'nested/readme.md')!.sha;
+    expect(
+      (await data.db.select().from(releaseObjects).where(eq(releaseObjects.releaseId, body.release.id))).some((x) =>
+        x.sha === inherited
+      ),
+    ).toBe(true);
+    await data.db.update(objectLeases).set({ expiresAt: new Date(0) }).where(eq(objectLeases.userId, b.id));
+    const present = await presentShas(data.db, b.id, [inherited], { repoId: body.repo.repoId }, env.OBJECTS);
+    expect(present.has(inherited)).toBe(true);
+  }));
+test('yank, patch, tombstone, moderation and reports', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), first = await uploadTree(data, env, a, files());
+    const initial = await (await publishRequest(data, env, a, 'demo', first.commitSha)).json() as any;
+    const app = createApp({ data: () => data });
+    const json = (body: unknown) => ({
+      method: 'POST',
+      headers: { ...a.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let r = await app.request('/v1/repos/alice/demo/releases/1.0.0/yank', json({}), env);
+    expect(r.status).toBe(200);
+    expect((await r.json() as any).repo.latest).toBeNull();
+    r = await app.request('/v1/repos/alice/demo', {
+      method: 'PATCH',
+      headers: { ...a.headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visibility: 'unlisted', listing: { tagline: 'Changed' } }),
+    }, env);
+    expect((await r.json() as any).tagline).toBe('Changed');
+    r = await app.request(
+      '/v1/admin/repos/' + initial.repo.repoId + '/moderation',
+      json({ action: 'hide', reason: 'review' }),
+      env,
+    );
+    expect(r.status).toBe(401);
+    env.ADMIN_TOKEN = 'test-admin-token';
+    const admin = (action: string, reason: string) => ({
+      method: 'POST',
+      headers: { 'X-Admin-Token': 'test-admin-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, reason }),
+    });
+    r = await app.request('/v1/admin/repos/' + initial.repo.repoId + '/moderation', admin('hide', 'review'), env);
+    expect(r.status).toBe(200);
+    r = await app.request('/v1/store/x/alice/demo/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'problem' }),
+    }, env);
+    expect(r.status).toBe(404);
+    await app.request('/v1/admin/repos/' + initial.repo.repoId + '/moderation', admin('unhide', 'cleared'), env);
+    r = await app.request('/v1/store/x/alice/demo/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'problem' }),
+    }, env);
+    expect(r.status).toBe(204);
+    expect(await data.db.select().from(reports)).toHaveLength(1);
+    r = await app.request('/v1/repos/alice/demo', { method: 'DELETE', headers: a.headers }, env);
+    expect(r.status).toBe(204);
+    expect(await data.db.select().from(moderationLog)).toHaveLength(4);
+    const mine = await app.request('/v1/me/repos', { headers: a.headers }, env);
+    expect((await mine.json() as any).items).toHaveLength(0);
+  }));
+test('waived entropy is stored and invalid waiver is rejected', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice');
+    const random = 'aB9dE8fG7hI6jK5lM4nO3pQ2rS1tU0vW9xY8zZ7aB6cD5';
+    const built = await uploadTree(
+      data,
+      env,
+      a,
+      files('entropy', '1.0.0', [{ path: 'secret.ts', bytes: txt(`export const sample = "${random}";`) }]),
+    );
+    let r = await publishRequest(data, env, a, 'entropy', built.commitSha, {
+      waivers: [{ path: 'wrong.ts', line: 1, reason: 'test value' }],
+    });
+    expect(r.status).toBe(400);
+    r = await publishRequest(data, env, a, 'entropy', built.commitSha, {
+      waivers: [{ path: 'secret.ts', line: 1, reason: 'test value' }],
+    });
+    expect(r.status).toBe(201);
+    const [row] = await data.db.select().from((await import('../src/db/schema')).releases);
+    expect(row?.scanWaivers).toEqual([{ path: 'secret.ts', line: 1, kind: 'high_entropy', reason: 'test value' }]);
+  }));
+test('fork rejects unchanged tree and self origin', () =>
+  withData(async (data) => {
+    const env = makeEnv(data),
+      a = await publisher(data, env, 'alice'),
+      b = await publisher(data, env, 'bob'),
+      built = await uploadTree(data, env, a, files());
+    const origin = await (await publishRequest(data, env, a, 'demo', built.commitSha)).json() as any;
+    const self = await uploadTree(data, env, a, files('self'), { parents: [built.commitSha] });
+    let r = await publishRequest(data, env, a, 'self', self.commitSha, { originReleaseId: origin.release.id });
+    expect((await r.json() as any).error).toBe('self_origin');
+    // An unchanged tree carries the origin's manifest id, so publish detects the tree first.
+    const same = await uploadTree(data, env, b, files(), { parents: [built.commitSha] });
+    r = await publishRequest(data, env, b, 'demo', same.commitSha, { originReleaseId: origin.release.id });
+    expect((await r.json() as any).error).toBe('same_as_origin');
+  }));
+test('yank selects previous non-yanked release', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), first = await uploadTree(data, env, a, files());
+    const one = await (await publishRequest(data, env, a, 'demo', first.commitSha)).json() as any;
+    const second = await uploadTree(data, env, a, files('demo', '2.0.0'), { parents: [first.commitSha] });
+    const r = await publishRequest(data, env, a, 'demo', second.commitSha, { version: '2.0.0' });
+    expect(r.status).toBe(201);
+    const yank = await createApp({ data: () => data }).request('/v1/repos/alice/demo/releases/2.0.0/yank', {
+      method: 'POST',
+      headers: a.headers,
+    }, env);
+    expect((await yank.json() as any).repo.latest.id).toBe(one.release.id);
+  }));
+test('missing walked object, file cap and publish counter', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice');
+    const built = await uploadTree(data, env, a, files());
+    await env.OBJECTS.delete(`objects/${built.snap.files.find((x) => x.path === 'nested/readme.md')!.sha}`);
+    let r = await publishRequest(data, env, a, 'demo', built.commitSha);
+    expect(r.status).toBe(422);
+    expect((await r.json() as any).error).toBe('object_missing');
+    const again = await uploadTree(data, env, a, files());
+    const { publishCounter } = await import('../src/db/schema');
+    const hour = new Date();
+    hour.setUTCMinutes(0, 0, 0);
+    await data.db.insert(publishCounter).values({ userId: a.id, hour, count: 20 });
+    r = await publishRequest(data, env, a, 'demo', again.commitSha);
+    expect(r.status).toBe(429);
+    expect((await r.json() as any).error).toBe('rate_limited');
+    expect((await env.TARS.list()).objects).toHaveLength(0);
+  }));
+test('401 files is limit_exceeded', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice');
+    const { hashObject, encodeTree, encodeCommit, encodeLoose } = await import('@powermove/registry/git');
+    const blob = txt('x');
+    const blobSha = await hashObject('blob', blob);
+    const manifest = txt(JSON.stringify({ id: 'many', name: 'Many', version: '1.0.0', apiVersion: 1 }));
+    const manifestSha = await hashObject('blob', manifest);
+    const entries = Array.from(
+      { length: 400 },
+      (_, i) => ({ mode: '100644' as const, name: `f${String(i).padStart(3, '0')}.txt`, sha: blobSha }),
+    );
+    entries.push({ mode: '100644', name: 'manifest.json', sha: manifestSha });
+    const treeBody = encodeTree(entries), treeSha = await hashObject('tree', treeBody);
+    const ident = { name: 'alice', email: `alice@${env.HANDLE_MAIL_DOMAIN}`, time: 1, tz: '+0000' };
+    const commitBody = encodeCommit({ tree: treeSha, parents: [], author: ident, committer: ident, message: 'many' }),
+      commitSha = await hashObject('commit', commitBody);
+    const form = new FormData();
+    for (
+      const x of [
+        { sha: blobSha, type: 'blob' as const, body: blob },
+        { sha: manifestSha, type: 'blob' as const, body: manifest },
+        { sha: treeSha, type: 'tree' as const, body: treeBody },
+        { sha: commitSha, type: 'commit' as const, body: commitBody },
+      ]
+    ) {
+      form.append(
+        x.sha,
+        new Blob([new Uint8Array(await encodeLoose(x.type, x.body))], { type: 'application/x-git-loose-object' }),
+        'object',
+      );
+    }
+    expect(
+      (await createApp({ data: () => data }).request(
+        '/v1/objects',
+        { method: 'POST', headers: a.headers, body: form },
+        env,
+      )).status,
+    ).toBe(200);
+    const r = await publishRequest(data, env, a, 'many', commitSha);
+    expect(r.status).toBe(422);
+    expect(await r.json() as any).toEqual({ error: 'limit_exceeded', code: 'too_many_files' });
+  }));
+test('icon is content addressed and served with bounded cache', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), built = await uploadTree(data, env, a, files());
+    const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
+    const iconPng = btoa(String.fromCharCode(...png));
+    const r = await publishRequest(data, env, a, 'demo', built.commitSha, { iconPng });
+    expect(r.status).toBe(201);
+    const listing = (await r.json() as any).repo;
+    expect(listing.iconUrl).toContain('/v1/store/icons/');
+    const image = await createApp({ data: () => data }).request(listing.iconUrl, {}, env);
+    expect(image.status).toBe(200);
+    expect(image.headers.get('Cache-Control')).toBe('public, max-age=300');
+    expect(image.headers.get('Content-Type')).toBe('image/png');
+    const app = createApp({ data: () => data });
+    await data.db.update(repos).set({ moderation: 'hidden' }).where(eq(repos.id, listing.repoId));
+    expect((await app.request(listing.iconUrl, {}, env)).status).toBe(404);
+    const ownerImage = await app.request(listing.iconUrl, { headers: a.headers }, env);
+    expect(ownerImage.status).toBe(200);
+    expect(ownerImage.headers.get('Cache-Control')).toBe('private, no-store');
+    await data.db.update(repos).set({ moderation: 'removed' }).where(eq(repos.id, listing.repoId));
+    expect((await app.request(listing.iconUrl, { headers: a.headers }, env)).status).toBe(404);
+  }));
+test('main ref changed before commit causes head_moved and tar cleanup', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), a = await publisher(data, env, 'alice'), first = await uploadTree(data, env, a, files());
+    const published = await publishRequest(data, env, a, 'demo', first.commitSha);
+    expect(published.status).toBe(201);
+    const next = await uploadTree(data, env, a, files('demo', '2.0.0'), { parents: [first.commitSha] });
+    const winner = 'f'.repeat(40);
+    const r = await publishRequest(data, env, a, 'demo', next.commitSha, { version: '2.0.0' }, async () => {
+      await data.db.update(refs).set({ sha: winner });
+    });
+    expect(r.status).toBe(409);
+    expect(await r.json() as any).toEqual({ error: 'head_moved', head: winner });
+    expect((await env.TARS.list()).objects).toHaveLength(1);
+  }));
+test('unleased commit and subtree are rejected before content validation', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), alice = await publisher(data, env, 'alice'), bob = await publisher(data, env, 'bob');
+    const foreign = await uploadTree(
+      data,
+      env,
+      bob,
+      files('secret', '1.0.0', [{
+        path: 'private.txt',
+        bytes: txt('AWS_SECRET_ACCESS_KEY=abcdef1234567890abcdef1234567890'),
+      }]),
+    );
+    let response = await publishRequest(data, env, alice, 'secret', foreign.commitSha);
+    expect(response.status).toBe(422);
+    expect(await response.json() as any).toEqual({ error: 'commit_missing' });
+    const ownCommit = await uploadTree(data, env, alice, files('secret'), { treeOverride: foreign.snap.treeSha });
+    response = await publishRequest(data, env, alice, 'secret', ownCommit.commitSha);
+    expect(response.status).toBe(422);
+    expect(await response.json() as any).toEqual({ error: 'object_missing', shas: [foreign.snap.treeSha] });
+  }));
+test('yanked release cannot be the origin of a new fork', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), alice = await publisher(data, env, 'alice'), bob = await publisher(data, env, 'bob');
+    const original = await uploadTree(data, env, alice, files());
+    const published = await (await publishRequest(data, env, alice, 'demo', original.commitSha)).json() as any;
+    const app = createApp({ data: () => data });
+    expect(
+      (await app.request('/v1/repos/alice/demo/releases/1.0.0/yank', { method: 'POST', headers: alice.headers }, env))
+        .status,
+    ).toBe(200);
+    const fork = await uploadTree(data, env, bob, [
+      {
+        path: 'manifest.json',
+        bytes: txt(
+          JSON.stringify({ id: 'fork', name: 'Fork', version: '1.0.0', apiVersion: 1, forkedFrom: 'alice/demo@1.0.0' }),
+        ),
+      },
+      { path: 'index.ts', bytes: txt('export default 2') },
+    ], { parents: [original.commitSha] });
+    const response = await publishRequest(data, env, bob, 'fork', fork.commitSha, {
+      originReleaseId: published.release.id,
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json() as any).toEqual({ error: 'not_found' });
+  }));
+test('GC claim before pin aborts publish without a dangling release', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), alice = await publisher(data, env, 'alice');
+    const built = await uploadTree(data, env, alice, files());
+    const response = await publishRequest(data, env, alice, 'demo', built.commitSha, {}, async () => {
+      await data.db.update(objectLeases).set({ expiresAt: new Date(0) });
+      await data.db.update((await import('../src/db/schema')).objects).set({ lastSeenAt: new Date(0) });
+      const claimed = await (await import('../src/gc')).claimGcCandidates(data);
+      expect(claimed.length).toBeGreaterThan(0);
+      await (await import('../src/gc')).sweepClaimed(data, env, claimed);
+    });
+    expect(response.status).toBe(422);
+    expect((await response.json() as any).error).toBe('object_missing');
+    expect(await data.db.select().from(releaseObjects)).toHaveLength(0);
+    expect((await env.TARS.list()).objects).toHaveLength(0);
+  }));
+test('file route serves a blob at the 2 MiB boundary', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), alice = await publisher(data, env, 'alice');
+    const content = new Uint8Array(2 * 1024 * 1024);
+    const built = await uploadTree(data, env, alice, files('big', '1.0.0', [{ path: 'large.txt', bytes: content }]));
+    expect((await publishRequest(data, env, alice, 'big', built.commitSha)).status).toBe(201);
+    const response = await createApp({ data: () => data }).request(
+      '/v1/store/x/alice/big/r/1.0.0/file/large.txt',
+      {},
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect((await response.arrayBuffer()).byteLength).toBe(content.length);
+  }));
+test('walk stops when repeated blobs exceed the tree byte limit', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), alice = await publisher(data, env, 'alice');
+    const payload = new Uint8Array(2 * 1024 * 1024);
+    const sha = await hashObject('blob', payload);
+    const manifest = txt(JSON.stringify({ id: 'large', name: 'Large', version: '1.0.0', apiVersion: 1 }));
+    const manifestSha = await hashObject('blob', manifest);
+    const entries = Array.from({ length: 5 }, (_, i) => ({ mode: '100644' as const, name: `f${i}.txt`, sha }));
+    entries.push({ mode: '100644', name: 'manifest.json', sha: manifestSha });
+    const treeBody = encodeTree(entries), treeSha = await hashObject('tree', treeBody);
+    const identity = { name: 'alice', email: `alice@${env.HANDLE_MAIL_DOMAIN}`, time: 1, tz: '+0000' };
+    const commitBody = encodeCommit({
+      tree: treeSha,
+      parents: [],
+      author: identity,
+      committer: identity,
+      message: 'large',
+    });
+    const commitSha = await hashObject('commit', commitBody);
+    const form = new FormData();
+    for (
+      const entry of [
+        { sha, type: 'blob' as const, body: payload },
+        { sha: manifestSha, type: 'blob' as const, body: manifest },
+        { sha: treeSha, type: 'tree' as const, body: treeBody },
+        { sha: commitSha, type: 'commit' as const, body: commitBody },
+      ]
+    ) {
+      form.append(
+        entry.sha,
+        new Blob([new Uint8Array(await encodeLoose(entry.type, entry.body))], {
+          type: 'application/x-git-loose-object',
+        }),
+        'object',
+      );
+    }
+    expect(
+      (await createApp({ data: () => data }).request('/v1/objects', {
+        method: 'POST',
+        headers: alice.headers,
+        body: form,
+      }, env)).status,
+    ).toBe(200);
+    const response = await publishRequest(data, env, alice, 'large', commitSha);
+    expect(await response.json() as any).toEqual({ error: 'limit_exceeded', code: 'tree_too_large' });
+  }));
+test('later release cannot invent store lineage', () =>
+  withData(async (data) => {
+    const env = makeEnv(data), alice = await publisher(data, env, 'alice');
+    const first = await uploadTree(data, env, alice, files());
+    expect((await publishRequest(data, env, alice, 'demo', first.commitSha)).status).toBe(201);
+    const second = await uploadTree(data, env, alice, [
+      {
+        path: 'manifest.json',
+        bytes: txt(
+          JSON.stringify({ id: 'demo', name: 'Demo', version: '2.0.0', apiVersion: 1, forkedFrom: 'other/repo@1.0.0' }),
+        ),
+      },
+      { path: 'index.ts', bytes: txt('export default 2') },
+    ], { parents: [first.commitSha] });
+    const response = await publishRequest(data, env, alice, 'demo', second.commitSha, { version: '2.0.0' });
+    expect(response.status).toBe(400);
+    expect((await response.json() as any).error).toBe('manifest_invalid');
+  }));

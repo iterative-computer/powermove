@@ -22,17 +22,26 @@ export async function claimGcCandidates(data: Data, limit = 500): Promise<string
 
 export async function sweepClaimed(data: Data, env: CloudflareBindings, shas: string[]): Promise<void> {
   for (const sha of shas) {
-    const [row] = await data.db.select({sha:objects.sha, referenced: sql<boolean>`${hasReleaseReference(sql`${objects.sha}`)}`,
-      leased: sql<boolean>`exists (select 1 from object_leases l where l.sha = ${objects.sha} and l.expires_at > now())`})
-      .from(objects).where(and(eq(objects.sha,sha),eq(objects.gcState,'claimed'))).limit(1);
-    if (!row) continue;
-    if (row.referenced || row.leased) {
-      await data.db.update(objects).set({gcState:'live',lastSeenAt:new Date()}).where(and(eq(objects.sha,sha),eq(objects.gcState,'claimed')));
-      continue;
-    }
+    const deleting = await data.tx(async tx => {
+      const [row] = await tx.select({sha:objects.sha,gcState:objects.gcState,referenced:sql<boolean>`${hasReleaseReference(sql`${objects.sha}`)}`,
+        leased:sql<boolean>`exists (select 1 from object_leases l where l.sha = ${objects.sha} and l.expires_at > now())`})
+        .from(objects).where(eq(objects.sha,sha)).for('update').limit(1);
+      if (!row) return false;
+      if (row.gcState === 'deleting') return true;
+      if (row.gcState !== 'claimed') return false;
+      if (row.referenced || row.leased) {
+        await tx.update(objects).set({gcState:'live',lastSeenAt:new Date()}).where(eq(objects.sha,sha));
+        return false;
+      }
+      await tx.update(objects).set({gcState:'deleting'}).where(eq(objects.sha,sha));
+      return true;
+    });
+    if (!deleting) continue;
     await env.OBJECTS.delete(`objects/${sha}`);
-    await data.db.delete(objects).where(and(eq(objects.sha,sha),eq(objects.gcState,'claimed'),
-      sql`not ${hasReleaseReference(sql`${objects.sha}`)}`, noLease(sql`${objects.sha}`)));
+    await data.tx(async tx => {
+      await tx.delete(objectLeases).where(and(eq(objectLeases.sha,sha),sql`${objectLeases.expiresAt} <= now()`));
+      await tx.delete(objects).where(and(eq(objects.sha,sha),eq(objects.gcState,'deleting')));
+    });
   }
 }
 
@@ -40,7 +49,7 @@ export async function runGc(data: Data, env: CloudflareBindings): Promise<void> 
   await data.db.delete(objectLeases).where(sql`${objectLeases.expiresAt} < now()`);
   await data.db.delete(desktopAuth).where(sql`${desktopAuth.expiresAt} < now() - interval '1 hour'`);
   // Resume rows left claimed by an interrupted cron before claiming new work.
-  const prior = await data.db.select({sha:objects.sha}).from(objects).where(eq(objects.gcState,'claimed')).limit(500);
+  const prior = await data.db.select({sha:objects.sha}).from(objects).where(sql`${objects.gcState} in ('claimed','deleting')`).limit(500);
   const claimed = [...prior.map(row => row.sha), ...await claimGcCandidates(data, 500-prior.length)];
   await sweepClaimed(data,env,claimed);
 }
