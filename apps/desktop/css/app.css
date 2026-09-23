@@ -1193,6 +1193,11 @@ select.pm-select-native{position:absolute!important;width:1px!important;height:1
 .pm-menu-check{position:absolute;right:8px;width:13px;height:13px;color:var(--tx);opacity:0}
 .pm-menu-item[aria-selected=true] .pm-menu-check{opacity:1}
 @media(prefers-reduced-motion:reduce){.pm-menu[data-state]{animation:none}.pm-menu-glider{transition:none}}
+/* Button menus (controls/popover-menu.ts): the listbox sheet with actions
+   instead of options, an optional header, and separators. */
+.pm-popover .pm-menu-item{padding:0 10px 0 8px}
+.pm-menu-header{position:relative;z-index:1;padding:6px 8px 8px}
+.pm-menu-sep{height:1px;margin:4px 8px;background:var(--line)}
 
 /* ── titlebar tabs ─────────────────────────────────────── */
 .ps-pagination{display:flex;align-items:center;justify-content:center;gap:16px;padding:24px 0 0;color:var(--tx-3);font-size:var(--fs-sm)}
