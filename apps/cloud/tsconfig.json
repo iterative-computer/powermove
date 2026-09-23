@@ -9,7 +9,7 @@
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["./worker-configuration.d.ts", "bun"]
+    "types": ["./worker-configuration.d.ts", "../../node_modules/.bun/@cloudflare+workers-types@5.20260921.1/node_modules/@cloudflare/workers-types", "bun"]
   },
-  "include": ["worker-configuration.d.ts", "src/**/*.ts"]
+  "include": ["worker-configuration.d.ts", "src/**/*.ts", "test/**/*.ts"]
 }

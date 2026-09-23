@@ -1,21 +1,6 @@
-import { Hono } from 'hono';
-import { HTTPException } from 'hono/http-exception';
-import type { Env } from './env';
-import { health } from './routes/health';
-
-const app = new Hono<Env>();
-
-app.notFound((c) => c.json({ error: 'not_found' }, 404));
-
-app.onError((err, c) => {
-  if (err instanceof HTTPException) return err.getResponse();
-  console.error(err);
-  return c.json({ error: 'internal' }, 500);
-});
-
-// Routes are chained so `AppType` carries every route for the typed client.
-const routes = app.route('/health', health);
-
-export type AppType = typeof routes;
-
-export default app;
+import { createApp } from './app';
+import { neonData } from './db/client';
+import { gc } from './gc';
+const app = createApp({ data: env => neonData(env.DATABASE_URL) });
+export type { AppType } from './app';
+export default { fetch: app.fetch, scheduled: gc, request: app.request.bind(app) };
