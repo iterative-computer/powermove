@@ -125,7 +125,8 @@ Full types: `api.ts` (next to this file in the agent API pack). Summary:
 - **services** — LIFO typed runtime service registration; disposing an override restores the previous implementation.
 - **storage** — per-extension `get/set/delete` (persisted).
 - **events / on** — `project:changed`, `selection`, `time`, `transport`, `fonts` (complete family list), `layout`, `theme:changed`, `frame:rendered`, `extension:loaded/unloaded`.
-- **extensions** — introspection: `list`, `fork`, `rebase`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`.
+- **extensions** — introspection: `list`, `fork`, `rebase`, `setEnabled`, `remove`, `reload`, `reveal`, `requestFix`, `setUp` (opens the values sheet).
+- **vars** — `get(key)`, `has(key)`, `keys()`: the values the user entered for this extension's declared `vars` (see "Variables").
 - **model.cloneLayer** — `cloneLayer(layer): Layer` deep-clones a layer and refreshes its layer/keyframe ids and numbered name.
 - **model.normalizeFill** — `normalizeFill(value, fallback?): Fill` canonicalizes solid, gradient, radial, and empty fills.
 - **uiState.getShaderMeta** — `getShaderMeta(layer): ShaderMeta | null` reads the compositor metadata cached for a layer.
@@ -312,6 +313,32 @@ Keep controls source-connected and undoable. An explicit user style request
 overrides this default only for the requested surface.
 
 `--accent --bg-window --bg-panel --bg-panel-2 --bg-sunken --bg-field --tx --tx-2 --line --r-base --f-ui --f-mono --row-h --ctl-h --fs-md --dur-2 --ease`
+
+## Variables
+
+An extension that needs an API key, account id or similar value declares it and
+reads it at runtime. It never carries the value in its source.
+
+- **Declare** each value in `manifest.json` with `apiVersion: 2`:
+  `"vars": [{ "key": "OPENAI_API_KEY", "label": "OpenAI API key", "secret": true, "required": true }]`.
+  `hint` is optional; `secret` masks the field; `required` keeps the extension off,
+  shown as "Needs setup", until the value is set.
+- **Read** with `api.vars.get('OPENAI_API_KEY')`, `has(key)` and `keys()`. Values are
+  fetched once per activation; setting or removing one reloads the extension. Only
+  declared keys are delivered.
+- **Never in source.** When the agent saves an extension, its text files are scanned
+  for credentials (provider key prefixes, JWTs, private keys, long high-entropy
+  strings). A finding blocks the change and nothing is published. A long random
+  string that is not a secret can be waived on its line with
+  `// powermove-secret-ok: <reason>`; known key formats cannot be waived.
+- **Values live outside the folder**, in the app profile at `env/<envKey>.env`
+  (mode 600, secrets sealed with the macOS keychain through `safeStorage`). The user
+  enters them in Settings › Extensions (Set up, or Variables… on the extension's
+  page). Removing the extension asks whether to delete them too.
+- **Shared realm.** Extensions run in one renderer, so a value delivered to one
+  extension is readable by any running extension. Treat values as belonging to the
+  Powermove profile.
+- `powermove serve` hosts do not support variables yet.
 
 ## Rules the kernel enforces
 

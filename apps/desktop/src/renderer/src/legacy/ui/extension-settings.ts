@@ -6,7 +6,7 @@ export interface ExtensionSettingsControl {
   destroy(): void;
 }
 
-type DisplayState = { label: string; tone: 'ok' | 'quiet' | 'warning'; detail?: string };
+type DisplayState = { label: string; tone: 'ok' | 'quiet' | 'warning' | 'setup'; detail?: string };
 
 function displayState(record: ExtensionRecord): DisplayState {
   const health = record.health;
@@ -14,6 +14,7 @@ function displayState(record: ExtensionRecord): DisplayState {
   if (health.state === 'ok') return { label: 'Active', tone: 'ok' };
   if (health.state === 'replaced') return { label: 'Replaced', tone: 'quiet', detail: `Replaced by ${health.by}` };
   if (health.state === 'needs-update') return { label: 'Update needed', tone: 'warning', detail: health.error };
+  if (health.state === 'needs-setup') return { label: 'Needs setup', tone: 'setup' };
   return { label: 'Needs attention', tone: 'warning', detail: health.error };
 }
 
@@ -45,6 +46,15 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text 
   if (text) node.textContent = text;
   return node;
 };
+
+/** The values sheet (vars/setup.ts), installed on PM at boot. */
+function openSetup(record: ExtensionRecord): void {
+  (window as any).PM?.Vars?.openSetup?.(record);
+}
+
+function hasVars(record: ExtensionRecord): boolean {
+  return record.scope === 'user' && (record.manifest?.vars?.length ?? 0) > 0;
+}
 
 function icon(name: string): Element | null {
   const svg = (window as any).PM?.icon?.(name);
@@ -113,6 +123,17 @@ export function createExtensionSettingsControl(
     return toggle;
   };
 
+  const setupButton = (record: ExtensionRecord, label: string, primary = true): HTMLButtonElement => {
+    const button = el('button', primary ? 'btn pri settings-extension-setup' : 'btn settings-extension-setup', label);
+    button.type = 'button';
+    button.setAttribute('aria-label', label === 'Set up' ? `Set up ${nameOf(record)}` : `Variables for ${nameOf(record)}`);
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openSetup(record);
+    });
+    return button;
+  };
+
   const dotFor = (tone: DisplayState['tone']): HTMLElement => {
     const dot = el('i', 'settings-extension-dot');
     dot.dataset.tone = tone;
@@ -144,9 +165,9 @@ export function createExtensionSettingsControl(
       heading.append(dotFor(state.tone), el('b', '', nameOf(record)));
       if (record.scope !== 'builtin' && record.manifest?.author !== 'agent') heading.append(el('span', 'settings-extension-tag', sourceLabel(record)));
       copy.append(heading);
-      const hint = state.detail ?? record.manifest?.description ?? '';
+      const hint = state.tone === 'setup' ? state.label : state.detail ?? record.manifest?.description ?? '';
       if (hint) {
-        const line = el('span', state.tone === 'warning' ? 'settings-extension-error' : '', hint);
+        const line = el('span', state.tone === 'warning' ? 'settings-extension-error' : state.tone === 'setup' ? 'settings-extension-setup-note' : '', hint);
         line.title = hint;
         copy.append(line);
       }
@@ -154,6 +175,7 @@ export function createExtensionSettingsControl(
 
       const controls = el('div', 'settings-extension-controls');
       if (state.tone === 'warning') controls.append(el('span', `settings-extension-status is-${state.tone}`, state.label));
+      if (state.tone === 'setup') controls.append(setupButton(record, 'Set up'));
       controls.append(toggleFor(record, (message) => { summary.textContent = message; }));
       const chevron = el('i', 'settings-extension-chevron');
       chevron.setAttribute('aria-hidden', 'true');
@@ -164,7 +186,7 @@ export function createExtensionSettingsControl(
       const show = (): void => { openId = record.id; pendingDelete = null; render(records); };
       open.addEventListener('click', show);
       row.addEventListener('click', (event) => {
-        if ((event.target as HTMLElement).closest('.toggle, .settings-extension-open')) return;
+        if ((event.target as HTMLElement).closest('.toggle, .settings-extension-open, .settings-extension-setup')) return;
         show();
       });
       row.append(open, controls);
@@ -238,7 +260,18 @@ export function createExtensionSettingsControl(
       about.body.append(rowOf(label, owned.map((entry: any) => entry.item.title ?? entry.item.label ?? entry.item.key ?? entry.id).join(', ')));
     }
 
-    detail.append(back, head, status.element, about.element);
+    detail.append(back, head, status.element);
+
+    if (hasVars(record)) {
+      const values = createSettingsSection('Setup');
+      const waiting = record.health.state === 'needs-setup';
+      const valuesRow = rowOf('Values', setupButton(record, waiting ? 'Set up' : 'Variables…', waiting));
+      if (waiting) valuesRow.querySelector('.settings-copy')!.append(el('span', '', 'Turns on once required values are set.'));
+      values.body.append(valuesRow);
+      detail.append(values.element);
+    }
+
+    detail.append(about.element);
 
     if (record.scope !== 'builtin') {
       const files = createSettingsSection('Files');

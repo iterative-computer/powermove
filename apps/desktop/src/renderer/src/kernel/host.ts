@@ -116,7 +116,7 @@ export interface HostDeps {
   space3d?: Space3DAPI;
   assets: AssetsAPI;
   storage(id: string): StorageAPI;
-  extensions: Omit<ExtensionsAPI, 'fork'> & Partial<Pick<ExtensionsAPI, 'fork'>>;
+  extensions: Omit<ExtensionsAPI, 'fork' | 'setUp'> & Partial<Pick<ExtensionsAPI, 'fork' | 'setUp'>>;
   panelsBackend: PanelsBackend;
   paletteOpen(query?: string): void;
   /** Called for every guarded callback that throws — the loader's error policy hook. */
@@ -134,7 +134,22 @@ export interface ExtensionHandle {
 
 const FALLBACK_MANIFEST = (id: string): ExtensionManifest => ({ id, name: id, version: '0.0.0', apiVersion: 1 });
 
-export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps: HostDeps): ExtensionHandle {
+/** `api.vars` over a frozen copy of the values delivered for one activation. */
+export function createVarsAPI(values: Readonly<Record<string, string>> = {}): import('./api').VarsAPI {
+  const own = new Map(Object.entries(values).filter(([, value]) => typeof value === 'string'));
+  return Object.freeze({
+    get: (key: string) => own.get(key),
+    has: (key: string) => own.has(key),
+    keys: () => [...own.keys()]
+  });
+}
+
+export function createExtensionAPI(
+  kernel: Kernel,
+  record: ExtensionRecord,
+  deps: HostDeps,
+  vars: Readonly<Record<string, string>> = {}
+): ExtensionHandle {
   const id = record.id;
   const manifest = record.manifest ?? FALLBACK_MANIFEST(id);
   const disposers: Array<() => void> = [];
@@ -200,7 +215,8 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     ...deps.extensions,
     fork: deps.extensions.fork ?? (async () => {
       throw new Error('Forking built-in extensions is unavailable in this host.');
-    })
+    }),
+    setUp: deps.extensions.setUp ?? (() => undefined)
   };
 
   /* ── panels ────────────────────────────────────────────── */
@@ -478,6 +494,7 @@ export function createExtensionAPI(kernel: Kernel, record: ExtensionRecord, deps
     storage: deps.storage(id),
     events,
     extensions,
+    vars: createVarsAPI(vars),
     host: {
       pm: deps.pm,
       state: deps.state,

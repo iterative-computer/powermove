@@ -363,3 +363,61 @@ it('does not overwrite an auto-disable received while compilation is pending', a
   await refresh;
   expect(setup.registry.list()[0]?.enabled).toBe(false);
 });
+
+describe('extension values', () => {
+  async function writeVarsExtension(root: string, id: string): Promise<void> {
+    const directory = path.join(root, id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest(id, {
+      apiVersion: 2,
+      vars: [
+        { key: 'API_KEY', label: 'API key', secret: true, required: true },
+        { key: 'REGION', label: 'Region' }
+      ]
+    })));
+    await fs.writeFile(path.join(directory, 'index.ts'), 'export default () => undefined');
+  }
+
+  it('keeps a user extension with a missing required value off until it is set', async () => {
+    const stored = new Map<string, { value: string | null; secret: boolean }>();
+    const { resolveVars } = await import('../env/resolve');
+    const resolver = vi.fn(async (_id: string, decls: NonNullable<ExtensionManifest['vars']>) => resolveVars(decls, stored));
+    const setup = await harness({ resolveVars: resolver });
+    await writeVarsExtension(setup.userDir, 'colour-match');
+
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]).toMatchObject({
+      id: 'colour-match',
+      enabled: true,
+      bundleUrl: null,
+      bundleHash: null,
+      health: { state: 'needs-setup', missing: ['API_KEY'] }
+    });
+    expect(resolver).toHaveBeenCalledWith('colour-match', expect.any(Array));
+
+    // A stale renderer report cannot flip it to ok.
+    setup.registry.reportHealth({ id: 'colour-match', health: { state: 'ok' } });
+    expect(setup.registry.list()[0]?.health.state).toBe('needs-setup');
+
+    stored.set('API_KEY', { value: 'sk-test', secret: true });
+    await setup.registry.refresh(['colour-match']);
+    expect(setup.registry.list()[0]).toMatchObject({ health: { state: 'ok' } });
+    expect(setup.registry.list()[0]?.bundleUrl).toMatch(/^app:\/\/powermove\/ext\/colour-match\/bundle\.js/);
+    expect(setup.compile).toHaveBeenCalledTimes(1);
+
+    // Undecryptable values need re-entry too.
+    stored.set('REGION', { value: null, secret: true });
+    await setup.registry.refresh(['colour-match']);
+    expect(setup.registry.list()[0]?.health).toEqual({ state: 'needs-setup', missing: ['REGION'] });
+  });
+
+  it('without a resolver treats every value as unset, and a disabled extension stays disabled', async () => {
+    const store = memoryStore({ extensions: { 'colour-match': false } });
+    const setup = await harness({ store });
+    await writeVarsExtension(setup.userDir, 'colour-match');
+    await setup.registry.refresh();
+    expect(setup.registry.list()[0]?.health).toEqual({ state: 'disabled' });
+    await setup.registry.setEnabled({ id: 'colour-match', enabled: true });
+    expect(setup.registry.list()[0]).toMatchObject({ bundleUrl: null, health: { state: 'needs-setup', missing: ['API_KEY'] } });
+  });
+});

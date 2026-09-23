@@ -49,6 +49,7 @@ import { install as installApp } from './app';
 import { install as installSettingsUi } from '../settings/install';
 import { install as installStoreUi } from '../store/install';
 import { installCloudAccount } from '../cloud/account';
+import { installVars } from '../vars/setup';
 
 declare global {
   interface Window {
@@ -113,6 +114,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/settings', installSettingsUi],
   ['ui/store', installStoreUi],
   ['cloud/account', installCloudAccount],
+  ['vars', installVars],
   /* Extensions load last: every kernel registry is populated and the whole
      legacy UI is mounted, so an extension can override any of it. */
   ['kernel/boot', (PM) => void bootExtensions(PM.Kernel, BUILTIN_EXTENSIONS).then(() => PM.Kernel.events.emit('extensions:ready', {})).catch((error) => console.error('[kernel] boot failed', error))]

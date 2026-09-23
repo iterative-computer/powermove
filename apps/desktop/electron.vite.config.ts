@@ -8,12 +8,17 @@ export default defineConfig({
   // `"type": "module"` in package.json cannot silently flip it to .mjs.
   main: {
     build: {
+      // @powermove/registry ships TypeScript sources, which Electron cannot
+      // require at runtime: bundle it (and in the preload, which is sandboxed
+      // and may only require electron).
+      externalizeDeps: { exclude: ['@powermove/registry'] },
       outDir: 'out/main',
       rollupOptions: { input: { index: path.resolve(__dirname, 'src/main/entry.ts'), editor: path.resolve(__dirname, 'src/main/index.ts') }, output: { format: 'cjs', entryFileNames: '[name].js' } }
     }
   },
   preload: {
     build: {
+      externalizeDeps: { exclude: ['@powermove/registry'] },
       outDir: 'out/preload',
       rollupOptions: {
         input: {

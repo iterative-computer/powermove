@@ -909,6 +909,43 @@ export interface ExtensionsAPI {
   requestFix(id: string): void;
   /** Ask the agent to rebase a stale user fork onto its newly shipped built-in. */
   rebase(id: string): void;
+  /** Open the sheet where the user enters an extension's declared `vars` values. */
+  setUp(id: string): void;
+}
+
+/* ── vars (values the user entered) ──────────────────────── */
+
+/**
+ * `api.vars`: values the user entered for this extension, such as an API key
+ * or an account id. Read them here; never write a credential into source.
+ *
+ * Declare every value in `manifest.json` (this needs `"apiVersion": 2`):
+ *
+ *   "vars": [
+ *     { "key": "OPENAI_API_KEY", "label": "OpenAI API key", "secret": true, "required": true },
+ *     { "key": "MODEL", "label": "Model", "hint": "Defaults to gpt-image-1" }
+ *   ]
+ *
+ * `key` is `^[A-Z][A-Z0-9_]{1,63}$`. The user enters values in Settings ›
+ * Extensions › Set up. An extension with a `required` value stays off
+ * ("Needs setup") until it is set, so `get` of a required key is always a
+ * string inside `activate`. Values are fetched once per activation; setting
+ * or removing one reloads the extension.
+ *
+ * Values live in the app profile, never in the extension folder, so they are
+ * never published or shared with the source. A key, token or private key
+ * written into the source blocks the change from being saved.
+ *
+ * Extensions share one renderer: a value delivered here is readable by any
+ * running extension. Treat it as belonging to this Powermove profile, not to
+ * this extension alone.
+ */
+export interface VarsAPI {
+  /** The value for a declared key, or undefined when it is not set. */
+  get(key: string): string | undefined;
+  has(key: string): boolean;
+  /** Declared keys that have a value. */
+  keys(): string[];
 }
 
 /* ── the API object ──────────────────────────────────────── */
@@ -977,6 +1014,8 @@ export interface PowermoveAPI {
   readonly storage: StorageAPI;
   readonly events: EventsAPI;
   readonly extensions: ExtensionsAPI;
+  /** Values the user entered for this extension's declared `vars`. See VarsAPI. */
+  readonly vars: VarsAPI;
   readonly host: HostAPI;
 
   /** Shorthand for events.on. */

@@ -19,8 +19,10 @@ import {
   type ExtensionRecord,
   type ExtensionSetEnabledRequest,
   type ExtensionSourceFile,
+  type ExtensionVarDecl,
   type ExtensionsChangedEvent
 } from '../../shared/extensions';
+import { missingKeys, resolveVars, type VarsResolution } from '../env/resolve';
 import type { Store } from '../storage';
 import { compileExtension } from './compiler';
 import { scanExtensionDirs, type DiscoveredExtension } from './discovery';
@@ -44,6 +46,12 @@ export interface ExtensionRegistryOptions {
   broadcast?: (event: ExtensionsChangedEvent) => void;
   revealPath?: (fullPath: string) => void;
   now?: () => number;
+  /**
+   * Resolves a user extension's declared values. Without one (the
+   * `powermove serve` host, where values are not available yet) nothing is
+   * set, so required values keep the extension in "Needs setup".
+   */
+  resolveVars?: (id: string, decls: ExtensionVarDecl[]) => Promise<VarsResolution>;
 }
 
 export interface ExtensionRegistry {
@@ -82,6 +90,16 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
   const compiler = options.compile ?? compileExtension;
   const scanner = options.scan ?? scanExtensionDirs;
   const now = options.now ?? Date.now;
+  const resolveFor = async (id: string, decls: ExtensionVarDecl[]): Promise<VarsResolution> => {
+    if (!options.resolveVars) return resolveVars(decls, new Map());
+    try {
+      return await options.resolveVars(id, decls);
+    } catch (error) {
+      // Unreadable values behave as unset: the extension waits for setup.
+      console.error(`[extensions] could not read values for ${id}`, error);
+      return resolveVars(decls, new Map());
+    }
+  };
   let refreshQueue = Promise.resolve();
 
   const enabledFor = (id: string): boolean => enabledState.get(id) ?? true;
@@ -201,6 +219,30 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       if (!result.ok) {
         records.set(id, buildErrorRecord(candidate, candidate.manifest, enabled, result.error, updatedAt, update));
         continue;
+      }
+
+      /* Values gate activation: a user extension missing a required value
+         (or holding one this Mac cannot decrypt) gets no bundle URL, so the
+         loader never imports it. */
+      const decls = candidate.manifest.vars ?? [];
+      if (candidate.scope === 'user' && decls.length > 0 && enabled) {
+        const resolution = await resolveFor(id, decls);
+        enabled = enabledFor(id);
+        if (enabled && resolution.status === 'needs-setup') {
+          records.set(id, {
+            id,
+            scope: candidate.scope,
+            manifest: candidate.manifest,
+            ...(update === undefined ? {} : { update }),
+            dir: candidate.dir,
+            enabled,
+            bundleUrl: null,
+            bundleHash: null,
+            health: { state: 'needs-setup', missing: missingKeys(resolution) },
+            updatedAt
+          });
+          continue;
+        }
       }
 
       records.set(id, {
@@ -360,6 +402,8 @@ export function createExtensionRegistry(options: ExtensionRegistryOptions): Exte
       const id = validateId(report.id);
       const health = validateReportedHealth(report.health);
       const record = requireRecord(records, id);
+      // Nothing of an extension waiting for setup ever ran; a report is stale.
+      if (record.health.state === 'needs-setup') return;
       if (record.enabled && health.state === 'runtime-error') {
         enabledState.set(id, false);
         persistEnabledState(options.store, enabledState);

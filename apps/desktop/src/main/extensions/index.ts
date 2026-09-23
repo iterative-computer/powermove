@@ -26,6 +26,11 @@ export function registerExtensionsIpc(
     registry: ExtensionRegistry;
     resourcesDir: string;
     isTrusted(event: ExtensionsIpcEvent): boolean;
+    /**
+     * Runs before a user extension is removed (it may ask the user something).
+     * A returned function runs only after the removal succeeded.
+     */
+    beforeRemove?(event: IpcMainInvokeEvent, id: string): Promise<(() => Promise<void>) | undefined>;
   }
 ): void {
   const { registry } = options;
@@ -48,9 +53,20 @@ export function registerExtensionsIpc(
     return registry.setEnabled(payload as unknown as ExtensionSetEnabledRequest);
   });
 
-  ipcMain.handle(EXT_IPC.remove, (event, payload: unknown) => {
+  ipcMain.handle(EXT_IPC.remove, async (event, payload: unknown) => {
     requireTrusted(event, EXT_IPC.remove);
-    return registry.remove(extensionIdRequest(payload, EXT_IPC.remove));
+    const request = extensionIdRequest(payload, EXT_IPC.remove);
+    const after = await options.beforeRemove?.(event, request.id);
+    const records = await registry.remove(request);
+    if (after) {
+      try {
+        await after();
+      } catch (error) {
+        // The folder is already gone; a leftover values file is harmless.
+        console.error('[extensions] cleanup after remove failed', error);
+      }
+    }
+    return records;
   });
 
   ipcMain.handle(EXT_IPC.reload, (event, payload: unknown) => {

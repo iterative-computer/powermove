@@ -5,12 +5,15 @@
     record,
     quiet = false,
     onToggle,
-    onMenu
+    onMenu,
+    onSetup
   }: {
     record: ExtensionRecord;
     quiet?: boolean;
     onToggle: (record: ExtensionRecord, next: boolean) => void;
     onMenu: (record: ExtensionRecord, anchor: HTMLElement) => void;
+    /** Opens the values sheet for an extension waiting on required values. */
+    onSetup?: (record: ExtensionRecord) => void;
   } = $props();
 
   const ERROR_STATES = ['build-error', 'manifest-error', 'activation-error', 'runtime-error', 'needs-update'];
@@ -26,6 +29,7 @@
   const fullError = $derived('error' in health ? health.error : '');
   const shortError = $derived(broken ? summarise(fullError) : '');
   const notes = $derived(notesFor(record));
+  const waiting = $derived(health.state === 'needs-setup' && record.enabled);
 
   /** First line, clipped — the row stays one glance; the title carries the rest. */
   function summarise(text: string): string {
@@ -96,6 +100,14 @@
     {#each notes as note (note)}
       <div class="note">{note}</div>
     {/each}
+    {#if waiting}
+      <div class="setup">Needs setup</div>
+      {#if onSetup}
+        <div class="repair">
+          <button type="button" class="link" onclick={() => onSetup?.(record)}>Set up</button>
+        </div>
+      {/if}
+    {/if}
     {#if shortError}
       <div class="error" title={fullError}>{shortError}</div>
       <div class="repair">
@@ -192,6 +204,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .setup {
+    margin-top: 2px;
+    color: var(--tx-2);
+    font-size: var(--fs-xs);
+    line-height: var(--lh-tight);
   }
 
   .repair {

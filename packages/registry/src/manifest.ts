@@ -190,6 +190,7 @@ export type ExtensionHealth =
   | { state: 'activation-error'; error: string }
   | { state: 'runtime-error'; error: string }
   | { state: 'needs-update'; error: string }
+  | { state: 'needs-setup'; missing: string[] }
   | { state: 'replaced'; by: string };
 
 export interface ExtensionRecord {

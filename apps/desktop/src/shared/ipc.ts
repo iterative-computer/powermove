@@ -701,6 +701,9 @@ export interface PowermoveBridge {
   };
 
   extensions: PowermoveExtensionsBridge;
+
+  /** Values the user entered for extensions that declare `vars`. */
+  vars: import('./vars-ipc').VarsBridge;
 }
 
 export type CloudFileState = 'local' | 'icloud' | 'cloud' | 'missing' | 'unknown';

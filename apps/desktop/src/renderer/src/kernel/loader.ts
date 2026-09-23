@@ -11,6 +11,7 @@
  */
 import type { Disposable, ExtensionModule, UIAPI } from './api';
 import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionsBridge, ExtensionsChangedEvent } from '../../../shared/extensions';
+import type { VarsBridge } from '../../../shared/vars-ipc';
 import { MANIFEST_LIMITS } from '../../../shared/extensions';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps } from './host';
 
@@ -26,6 +27,8 @@ export type BuiltinFactory = () => Promise<ExtensionModule>;
 export interface LoaderOptions {
   kernel: Kernel;
   bridge: ExtensionsBridge | null;
+  /** Delivers each extension's values to `api.vars` before it activates. */
+  vars?: Pick<VarsBridge, 'values'> | null;
   /** id → dynamic import of the built-in module. Key order IS the load order. */
   builtins: Record<string, BuiltinFactory>;
   deps: Omit<HostDeps, 'reportRuntimeError'>;
@@ -61,7 +64,7 @@ const DEFAULT_WINDOW = 10_000;
 const DEFAULT_LIMIT = 2;
 
 /** Health states that mean "there is nothing worth trying to import". */
-const BLOCKED = new Set(['build-error', 'manifest-error', 'needs-update']);
+const BLOCKED = new Set(['build-error', 'manifest-error', 'needs-update', 'needs-setup']);
 
 const nameOf = (record: ExtensionRecord | undefined, id: string): string => record?.manifest?.name ?? id;
 
@@ -229,7 +232,7 @@ export function createLoader(options: LoaderOptions): Loader {
       return false;
     }
 
-    const handle = createExtensionAPI(kernel, record, hostDeps);
+    const handle = createExtensionAPI(kernel, record, hostDeps, await valuesFor(record));
     try {
       // Compiled bundles expose inert CSS. The activation owns every style,
       // including extracted Svelte styles, so cached modules can be re-enabled.
@@ -267,6 +270,20 @@ export function createLoader(options: LoaderOptions): Loader {
     reportHealth(id, { state: 'ok' });
     kernel.events.emit('extension:loaded', { id });
     return true;
+  }
+
+  /** Fetched once per activation. A declared value that is missing is simply absent. */
+  async function valuesFor(record: ExtensionRecord): Promise<Record<string, string>> {
+    const declared = new Set((record.manifest?.vars ?? []).map((decl) => decl.key));
+    if (!declared.size || record.scope === 'builtin' || !options.vars) return {};
+    try {
+      const values = await withTimeout(options.vars.values({ id: record.id }), timeoutMs, 'values timed out');
+      return Object.fromEntries(Object.entries(values ?? {})
+        .filter(([key, value]) => declared.has(key) && typeof value === 'string'));
+    } catch (error) {
+      console.warn(`[kernel] values for "${record.id}" are unavailable`, error);
+      return {};
+    }
   }
 
   function failActivation(record: ExtensionRecord, error: unknown): void {

@@ -9,6 +9,7 @@ import {
   BrowserWindow,
   ipcMain,
   protocol,
+  safeStorage,
   screen,
   session,
   shell,
@@ -29,6 +30,10 @@ import { registerCodexIpc } from './codex';
 import { recoverAllInterruptedExtensionTransactions } from './codex/change-history';
 import { extensionAssetCorsHeaders, registerExtensionsIpc, serveExtensionAsset } from './extensions';
 import { createExtensionRegistry } from './extensions/registry';
+import { createProvenanceStore } from './cloud/provenance';
+import { createEnvStore } from './env/store';
+import { createVarsService } from './env/service';
+import { createRemoveValuesPrompt, registerVarsIpc } from './env/ipc';
 import { startExtensionWatcher } from './extensions/watcher';
 import { registerLogIpc } from './log';
 import { MIME_TYPES } from './mime';
@@ -627,18 +632,26 @@ if (!hasSingleInstanceLock) {
       } catch {
         // No built-in directory (tests / partial checkouts): kernel still boots.
       }
+      // Extension values live in the profile, never in an extension folder.
+      const vars = createVarsService({
+        env: createEnvStore({ dir: path.join(app.getPath('userData'), 'env'), safeStorage: () => safeStorage }),
+        provenance: createProvenanceStore(app.getPath('userData'))
+      });
       const extensionRegistry = createExtensionRegistry({
         store,
         userDir,
         buildDir,
         builtinIds,
-        resourcesDir: builtinResourcesDir
+        resourcesDir: builtinResourcesDir,
+        resolveVars: (id, decls) => vars.resolve(id, decls)
       });
       registerExtensionsIpc(ipcMain, {
         registry: extensionRegistry,
         resourcesDir: builtinResourcesDir,
-        isTrusted: isTrustedSender
+        isTrusted: isTrustedSender,
+        beforeRemove: createRemoveValuesPrompt({ registry: extensionRegistry, vars })
       });
+      registerVarsIpc(ipcMain, { registry: extensionRegistry, vars, isTrusted: isTrustedSender });
       refreshRestoredExtensions = async (ids) => {
         await extensionRegistry.refresh(ids);
         extensionRegistry.emitChanged({ ids, reason: 'reload' });

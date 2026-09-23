@@ -29,6 +29,7 @@ import {
   type ExtensionSourceFile,
   type ExtensionsChangedEvent
 } from '../shared/extensions';
+import { VARS_IPC, type VarsStatus } from '../shared/vars-ipc';
 
 let nextMediaRequest = 0;
 const bridge: PowermoveBridge = {
@@ -306,6 +307,14 @@ const bridge: PowermoveBridge = {
       ipcRenderer.on(EXT_IPC.changed, listener);
       return () => ipcRenderer.removeListener(EXT_IPC.changed, listener);
     }
+  },
+
+  vars: {
+    status: (req) => ipcRenderer.invoke(VARS_IPC.status, { id: req.id }) as Promise<VarsStatus>,
+    set: (req) => ipcRenderer.invoke(VARS_IPC.set, { id: req.id, key: req.key, value: req.value }) as Promise<VarsStatus>,
+    delete: (req) => ipcRenderer.invoke(VARS_IPC.delete, { id: req.id, key: req.key }) as Promise<VarsStatus>,
+    reveal: (req) => ipcRenderer.invoke(VARS_IPC.reveal, { id: req.id, key: req.key }) as Promise<void>,
+    values: (req) => ipcRenderer.invoke(VARS_IPC.values, { id: req.id }) as Promise<Record<string, string>>
   }
 };
 

@@ -17,6 +17,7 @@ import { attachRemoteMedia } from './remote-media';
 import { ReconnectingLink, isDisconnectError } from '../../../shared/reconnect';
 
 const WS_PATH = '/__powermove/ws';
+const VARS_UNAVAILABLE = 'Variables are not available in powermove serve yet';
 
 /** The live link, for modules that attach after the engines boot (remote-sync). It outlives any one socket. */
 let activeLink: ReconnectingLink | null = null;
@@ -428,6 +429,16 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       readSource: (req) => link.invoke(EXT_IPC.readSource, req),
       reportHealth: (req) => link.send(EXT_IPC.reportHealth, req),
       onChanged: subscribe(EXT_IPC.changed)
+    },
+
+    /* Values stay on the Mac that runs Powermove; the served host has no
+       setup flow yet (store plan §2.2b). */
+    vars: {
+      status: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      set: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      delete: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      reveal: () => Promise.reject(new Error(VARS_UNAVAILABLE)),
+      values: () => Promise.reject(new Error(VARS_UNAVAILABLE))
     }
   };
 

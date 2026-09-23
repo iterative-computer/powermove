@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ExtensionModule, ExtensionRecord, Project, ProjectAPI } from './api';
+import type { ExtensionModule, ExtensionRecord, PowermoveAPI, Project, ProjectAPI } from './api';
 import type { ExtensionsBridge, ExtensionsChangedEvent, ExtensionHealthReport } from '../../../shared/extensions';
 import { resetExtensionsStore } from './extensions.svelte';
 import type { HostDeps } from './host';
@@ -679,4 +679,55 @@ it('publishes record changes after the async bridge read and runtime state befor
   await loader.whenIdle();
   expect(unloaded).toMatchObject([{ enabled: false, health: { state: 'runtime-error' } }]);
   await loader.dispose();
+});
+
+describe('api.vars', () => {
+  const declared = { apiVersion: 2, vars: [{ key: 'API_KEY', label: 'API key', secret: true, required: true }, { key: 'REGION', label: 'Region' }] };
+
+  function capture(): { factory: BuiltinFactory; seen: Array<PowermoveAPI['vars']> } {
+    const seen: Array<PowermoveAPI['vars']> = [];
+    return { seen, factory: async () => ({ default: (api) => void seen.push(api.vars) }) };
+  }
+
+  it('delivers values fetched before activate, keeping only declared keys', async () => {
+    const { deps } = fakeDeps();
+    const { factory, seen } = capture();
+    const values = vi.fn(async () => ({ API_KEY: 'sk-test', UNDECLARED: 'nope' }));
+    const loader = createLoader({ kernel, bridge: null, vars: { values }, deps, builtins: { weather: factory } });
+    expect(await loader.activate(rec('weather', { manifest: declared as never }))).toBe(true);
+    expect(values).toHaveBeenCalledWith({ id: 'weather' });
+    const vars = seen[0]!;
+    expect(vars.get('API_KEY')).toBe('sk-test');
+    expect(vars.has('API_KEY')).toBe(true);
+    expect(vars.get('REGION')).toBeUndefined();
+    expect(vars.has('UNDECLARED')).toBe(false);
+    expect(vars.keys()).toEqual(['API_KEY']);
+  });
+
+  it('gives an extension without vars an empty API and never asks for values', async () => {
+    const { deps } = fakeDeps();
+    const { factory, seen } = capture();
+    const values = vi.fn(async () => ({ API_KEY: 'sk-test' }));
+    const loader = createLoader({ kernel, bridge: null, vars: { values }, deps, builtins: { plain: factory } });
+    await loader.activate(rec('plain'));
+    expect(values).not.toHaveBeenCalled();
+    expect(seen[0]!.keys()).toEqual([]);
+    expect(seen[0]!.get('API_KEY')).toBeUndefined();
+  });
+
+  it('activates with no values when the host cannot deliver them', async () => {
+    const { deps } = fakeDeps();
+    const { factory, seen } = capture();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const values = vi.fn(async () => { throw new Error('Variables are not available in powermove serve yet'); });
+    const loader = createLoader({ kernel, bridge: null, vars: { values }, deps, builtins: { weather: factory } });
+    expect(await loader.activate(rec('weather', { manifest: declared as never }))).toBe(true);
+    expect(seen[0]!.keys()).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it('never imports an extension waiting for setup', () => {
+    const plan = planLoad([rec('weather', { health: { state: 'needs-setup', missing: ['API_KEY'] } })], []);
+    expect(plan.order).toEqual([]);
+  });
 });

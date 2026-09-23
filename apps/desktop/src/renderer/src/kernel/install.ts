@@ -44,6 +44,7 @@ import type {
   WorkspaceAPI
 } from './api';
 import type { ExtensionsBridge } from '../../../shared/extensions';
+import type { VarsBridge } from '../../../shared/vars-ipc';
 import type { PowermoveExtensionsBridge } from '../../../shared/ipc';
 import { createExtensionAPI, type ExtensionHandle, type HostDeps, type PanelsBackend } from './host';
 import { createLoader, type BuiltinFactory, type Loader } from './loader';
@@ -646,6 +647,10 @@ function makeExtensionsAPI(PM: LegacyPM, bridge: ExtensionsHostBridge | null, ge
     rebase: (id) => {
       if (typeof PM?.requestExtensionRebase === 'function') PM.requestExtensionRebase(id);
       else PM?.cmd?.('agent');
+    },
+    setUp: (id) => {
+      const record = storeRecords().find((item) => item.id === id);
+      if (record) PM?.Vars?.openSetup?.(record);
     }
   };
 }
@@ -654,6 +659,11 @@ function resolveBridge(PM: LegacyPM): ExtensionsHostBridge | null {
   const candidate = (globalThis as Record<string, any>)?.powermove?.extensions ?? PM?.extensionsBridge ?? null;
   if (candidate && typeof candidate.list === 'function' && typeof candidate.onChanged === 'function') return candidate as ExtensionsHostBridge;
   return null;
+}
+
+function resolveVarsBridge(): Pick<VarsBridge, 'values'> | null {
+  const candidate = (globalThis as Record<string, any>)?.powermove?.vars;
+  return candidate && typeof candidate.values === 'function' ? candidate as VarsBridge : null;
 }
 
 /* ── install ─────────────────────────────────────────────── */
@@ -889,6 +899,7 @@ export async function bootExtensions(installed: InstalledKernel, builtins: Recor
   const loader = createLoader({
     kernel: installed,
     bridge: installed.bridge,
+    vars: resolveVarsBridge(),
     builtins,
     deps: installed.deps
   });
