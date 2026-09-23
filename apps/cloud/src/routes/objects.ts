@@ -9,6 +9,7 @@ import { hasReleaseReference } from '../objects/references';
 import { parseMultipart } from '../objects/multipart';
 import { presentShas } from '../objects/presence';
 import { requireSession } from './session';
+import { enforce, rateLimited } from '../abuse';
 
 const leaseExpiry = () => new Date(Date.now() + UPLOAD_ENVELOPE.leaseHours * 3_600_000);
 const envelope = () => new ApiError({ error: 'too_large', limit: 'envelope' });
@@ -18,7 +19,8 @@ export const objectRoutes = new Hono<Env>()
   .post('/missing', async c => {
     const userId = requireSession(c).userId;
     const limited = await c.env.RL_UPLOAD.limit({key:userId});
-    if (!limited.success) throw new ApiError({error:'rate_limited'});
+    if (!limited.success) rateLimited(c, 60);
+    await enforce(c, 'missing_req_user', userId);
     const body = Objects.Missing.Req.shape.body.parse(await c.req.json().catch(() => null));
     const shas = [...new Set(body.shas)];
     const present = await presentShas(c.var.data.db, userId, shas, body, c.env.OBJECTS);
@@ -29,7 +31,8 @@ export const objectRoutes = new Hono<Env>()
   .post('/', async c => {
     const userId = requireSession(c).userId;
     const limited = await c.env.RL_UPLOAD.limit({ key: userId });
-    if (!limited.success) throw new ApiError({ error: 'rate_limited' });
+    if (!limited.success) rateLimited(c, 60);
+    await enforce(c, 'upload_req_user', userId);
     const length = Number(c.req.header('content-length'));
     if (Number.isFinite(length) && length > UPLOAD_ENVELOPE.compressedBytesPerRequest) throw envelope();
     if (!c.req.raw.body) throw new ApiError({ error: 'bad_request' });

@@ -247,10 +247,8 @@ test('missing walked object, file cap and publish counter', () =>
     expect(r.status).toBe(422);
     expect((await r.json() as any).error).toBe('object_missing');
     const again = await uploadTree(data, env, a, files());
-    const { publishCounter } = await import('../src/db/schema');
-    const hour = new Date();
-    hour.setUTCMinutes(0, 0, 0);
-    await data.db.insert(publishCounter).values({ userId: a.id, hour, count: 20 });
+    const { consume } = await import('../src/abuse');
+    for (let i = 0; i < 19; i++) await consume(data.db, 'publish_user_hour', a.id);
     r = await publishRequest(data, env, a, 'demo', again.commitSha);
     expect(r.status).toBe(429);
     expect((await r.json() as any).error).toBe('rate_limited');

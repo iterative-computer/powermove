@@ -9,6 +9,7 @@ import { user } from '../db/auth-schema';
 import { lineageFor, toListing, toRelease } from '../dto';
 import { requirePublisher, rateAuth } from './session';
 import { canViewDetail } from '../lifecycle';
+import { clientIp, enforce } from '../abuse';
 
 async function owned(c: import('hono').Context<Env>, handle: string, slug: string) {
   const owner=await requirePublisher(c);
@@ -70,6 +71,8 @@ export const adminRoutes = new Hono<Env>()
     with the admin token, for an existing user: this is how `powermove` gets
     its publisher before the built-ins are published. */
  .post('/publishers', async c => {
+   await rateAuth(c);
+   await enforce(c, 'admin_ip', clientIp(c));
    requireAdmin(c);
    const body = Admin.SeedPublisher.Req.shape.body.parse(await c.req.json().catch(() => null));
    try {
@@ -92,6 +95,8 @@ export const adminRoutes = new Hono<Env>()
    }
  })
  .post('/repos/:repoId/moderation',async c=>{
+  await rateAuth(c);
+  await enforce(c, 'admin_ip', clientIp(c));
   if (!c.env.ADMIN_TOKEN || !constantTimeEqual(c.req.header('X-Admin-Token')??'',c.env.ADMIN_TOKEN)) throw new ApiError({error:'unauthorized'});
   const {repoId}=Admin.Moderate.Req.shape.params.parse(c.req.param());
   const body=Admin.Moderate.Req.shape.body.parse(await c.req.json().catch(()=>null));
@@ -123,6 +128,8 @@ export const storeUtility = new Hono<Env>()
  })
  .post('/x/:handle/:slug/report',async c=>{
    await rateAuth(c);
+   const ip = clientIp(c);
+   await enforce(c, 'report_ip', ip);
    const {handle,slug}=Store.Report.Req.shape.params.parse(c.req.param());
    const body=Store.Report.Req.shape.body.parse(await c.req.json().catch(()=>null));
    const [row]=await c.var.data.db.select({repo:repos,owner:publishers}).from(repos).innerJoin(publishers,eq(repos.ownerId,publishers.id)).where(and(eq(publishers.handle,handle),eq(repos.slug,slug))).limit(1);
@@ -131,6 +138,7 @@ export const storeUtility = new Hono<Env>()
    if (decision==='not_found') throw new ApiError({error:'not_found'});
    if (decision==='gone_removed') throw new ApiError({error:'gone',reason:'removed'});
    if (decision==='gone_tombstoned') throw new ApiError({error:'gone',reason:'tombstoned'});
+   await enforce(c, 'report_repo_ip', `${ip}|${row.repo.id}`);
    await c.var.data.db.insert(reports).values({repoId:row.repo.id,reporterId:c.var.session?.userId ?? null,reason:body.reason});
    return c.body(null,204);
  });

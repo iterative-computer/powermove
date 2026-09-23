@@ -69,6 +69,7 @@ export function createApp(deps: {
   });
   app.onError((err, c) => {
     if (err instanceof ApiError) {
+      if (err.status === 429 && !c.res.headers.has('Retry-After')) c.header('Retry-After', '60');
       return c.json(err.body, err.status as 400);
     }
     if (err instanceof HTTPException) {

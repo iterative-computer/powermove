@@ -5,6 +5,7 @@ import type { Env } from '../env';
 import { extensions, installs, publishers, releases, repos, userSettings } from '../db/schema';
 import { canReadFiles } from '../lifecycle';
 import { requireSession } from './session';
+import { enforce } from '../abuse';
 
 export const installRoutes = new Hono<Env>()
   .get('/', async c => {
@@ -17,6 +18,7 @@ export const installRoutes = new Hono<Env>()
   })
   .post('/', async c => {
     const session = requireSession(c);
+    await enforce(c, 'install_user', session.userId);
     const { repoId, releaseId } = Installs.Add.Req.shape.body.parse(await c.req.json().catch(() => null));
     await c.var.data.tx(async tx => {
       await tx.execute(sql`select id from "user" where id = ${session.userId} for update`);
@@ -38,6 +40,7 @@ export const installRoutes = new Hono<Env>()
   })
   .delete('/:repoId', async c => {
     const session = requireSession(c);
+    await enforce(c, 'install_user', session.userId);
     const { repoId } = Installs.Delete.Req.shape.params.parse(c.req.param());
     await c.var.data.tx(async tx => {
       const removed = await tx.update(installs).set({ removedAt: new Date() })

@@ -6,6 +6,8 @@ import { createAuth } from '../auth';
 import { rateAuth } from './session';
 import { session as sessionTable } from '../db/auth-schema';
 import { eq } from 'drizzle-orm';
+import { clientIp, enforce } from '../abuse';
+const verifyDetail = "Couldn't verify the code. Try again.";
 export const email = new Hono<Env>()
   .post(
     '/send',
@@ -16,10 +18,14 @@ export const email = new Hono<Env>()
     }),
     async (c) => {
       await rateAuth(c);
+      const { email } = c.req.valid('json');
+      await enforce(c, 'email_send_addr', email.trim().toLowerCase());
+      await enforce(c, 'email_send_ip', clientIp(c));
+      await enforce(c, 'email_send_global', '*');
+      await new Promise(resolve => setTimeout(resolve, 30));
       if (!c.env.OTP_SENDER && !c.env.EMAIL && c.env.DEV_LOG_OTP !== '1') {
         throw new ApiError({ error: 'bad_request', detail: "Couldn't send the code. Try again." });
       }
-      const { email } = c.req.valid('json');
       let delivery: Promise<boolean> | undefined;
       try {
         await createAuth(c.var.data, c.env, (pending) => {
@@ -44,6 +50,9 @@ export const email = new Hono<Env>()
     }),
     async (c) => {
       const { email, otp } = c.req.valid('json');
+      await rateAuth(c);
+      await enforce(c, 'email_verify_addr', email.trim().toLowerCase());
+      await enforce(c, 'email_verify_ip', clientIp(c));
       try {
         const result = await createAuth(c.var.data, c.env).api.signInEmailOTP({
           body: { email, otp },
@@ -56,7 +65,7 @@ export const email = new Hono<Env>()
         }
         return c.json({ token: session.token, expiresAt: session.expiresAt.toISOString() });
       } catch {
-        throw new ApiError({ error: 'unauthorized' });
+        throw new ApiError({ error: 'bad_request', detail: verifyDetail });
       }
     },
   );

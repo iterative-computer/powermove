@@ -9,6 +9,7 @@ import { isReserved } from '../handles';
 import { lineageFor, toListing } from '../dto';
 import { canViewDetail } from '../lifecycle';
 import { requireSession } from './session';
+import { enforce } from '../abuse';
 export const me = new Hono<Env>()
   .get('/', async (c) => {
     const s = requireSession(c);
@@ -30,6 +31,7 @@ export const me = new Hono<Env>()
   })
   .post('/handle', async (c) => {
     const s = requireSession(c);
+    await enforce(c, 'handle_claim_user', s.userId);
     const raw = await c.req.json().catch(() => null);
     const parsed = Me.SetHandle.Req.shape.body.safeParse(raw);
     if (!parsed.success) {

@@ -8,7 +8,8 @@ import { parseForkedFrom, parseManifest } from '@powermove/registry/manifest';
 import { scanFiles } from '@powermove/registry/scan';
 import { writeTarGz } from '@powermove/registry/tar';
 import type { Env } from '../env';
-import { extensions, objects, publishCounter, publishers, refs, releaseObjects, releases, repos } from '../db/schema';
+import { extensions, objects, publishers, refs, releaseObjects, releases, repos } from '../db/schema';
+import { enforce } from '../abuse';
 import { presentShas } from '../objects/presence';
 import { storeIcon } from '../objects/icon';
 import { canReadFiles } from '../lifecycle';
@@ -16,11 +17,6 @@ import { lineageFor, toListing, toRelease } from '../dto';
 import { requirePublisher, requireSession } from './session';
 const invalid = (detail?: string) => new ApiError({ error: 'tree_invalid', detail });
 const missing = (shas: string[]) => new ApiError({ error: 'object_missing', shas });
-const hour = () => {
-  const date = new Date();
-  date.setUTCMinutes(0, 0, 0);
-  return date;
-};
 const unique = (e: unknown) =>
   (e as {
       code?: string;
@@ -123,6 +119,8 @@ export function publishRoutes(deps: PublishDeps = {}) {
   return new Hono<Env>()
     .put('/:handle/:slug/releases', async (c) => {
       const session = requireSession(c), publisher = await requirePublisher(c);
+      await enforce(c, 'publish_user_hour', session.userId);
+      await enforce(c, 'publish_user_day', session.userId);
       const { handle, slug } = Publish.PutRelease.Req.shape.params.parse(c.req.param());
       if (handle !== publisher.handle) {
         throw new ApiError({ error: 'not_owner' });
@@ -350,21 +348,6 @@ export function publishRoutes(deps: PublishDeps = {}) {
             if (!repo) {
               throw new Error('repo insert failed');
             }
-            const nowHour = hour();
-            await tx.insert(publishCounter).values({ userId: session.userId, hour: nowHour, count: 0 })
-              .onConflictDoNothing();
-            await tx.execute(
-              sql`select count from publish_counter where user_id = ${session.userId} and hour = ${nowHour} for update`,
-            );
-            const [counter] = await tx.select().from(publishCounter).where(
-              and(eq(publishCounter.userId, session.userId), eq(publishCounter.hour, nowHour)),
-            ).limit(1);
-            if (!counter || counter.count >= 20) {
-              throw new ApiError({ error: 'rate_limited' });
-            }
-            await tx.update(publishCounter).set({ count: counter.count + 1 }).where(
-              and(eq(publishCounter.userId, session.userId), eq(publishCounter.hour, nowHour)),
-            );
             const locked = await tx.update(objects).set({ gcState: 'live', lastSeenAt: new Date() }).where(
               and(
                 sql`${objects.sha} in (${sql.join(shas.map((sha) => sql`${sha}`), sql`, `)})`,

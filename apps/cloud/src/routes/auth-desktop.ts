@@ -7,6 +7,7 @@ import type { Env } from '../env';
 import { createAuth } from '../auth';
 import { rateAuth } from './session';
 import { constantTimeEqual } from '../constant-time';
+import { clientIp, enforce } from '../abuse';
 function decode(value: string): Uint8Array | null {
   try {
     if (!/^[A-Za-z0-9_-]+$/.test(value)) {
@@ -48,6 +49,7 @@ export const desktop = new Hono<Env>()
     }),
     async (c) => {
       await rateAuth(c);
+      await enforce(c, 'auth_start_ip', clientIp(c));
       const { state, challenge } = c.req.valid('query');
       if (decode(challenge)?.length !== 32) {
         throw new ApiError({ error: 'bad_request' });
@@ -147,6 +149,8 @@ export const desktop = new Hono<Env>()
     }),
     async (c) => {
       const { state, token, verifier } = c.req.valid('json');
+      await rateAuth(c);
+      await enforce(c, 'exchange_ip', clientIp(c));
       try {
         const session = await c.var.data.tx(async (tx) => {
           const [row] = await tx.select().from(desktopAuth).where(eq(desktopAuth.state, state)).for('update').limit(1);

@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import type { Data } from './db/client';
-import { desktopAuth, objectLeases, objects } from './db/schema';
+import { abuseCounters, desktopAuth, objectLeases, objects } from './db/schema';
 import { hasReleaseReference } from './objects/references';
 import { neonData } from './db/client';
 
@@ -48,6 +48,7 @@ export async function sweepClaimed(data: Data, env: CloudflareBindings, shas: st
 export async function runGc(data: Data, env: CloudflareBindings): Promise<void> {
   await data.db.delete(objectLeases).where(sql`${objectLeases.expiresAt} < now()`);
   await data.db.delete(desktopAuth).where(sql`${desktopAuth.expiresAt} < now() - interval '1 hour'`);
+  await data.db.delete(abuseCounters).where(sql`${abuseCounters.windowStart} < now() - interval '2 days'`);
   // Resume rows left claimed by an interrupted cron before claiming new work.
   const prior = await data.db.select({sha:objects.sha}).from(objects).where(sql`${objects.gcState} in ('claimed','deleting')`).limit(500);
   const claimed = [...prior.map(row => row.sha), ...await claimGcCandidates(data, 500-prior.length)];

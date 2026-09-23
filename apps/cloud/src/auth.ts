@@ -27,6 +27,10 @@ export function createAuth(data: Data, env: CloudflareBindings, trackOtpDelivery
         immutableUsername: true,
       }),
       emailOTP({
+        expiresIn: 300,
+        otpLength: 6,
+        allowedAttempts: 3,
+        storeOTP: 'hashed',
         sendVerificationOTP: async ({ email, otp }) => {
           const delivery = (async () => {
             if (env.OTP_SENDER) {

@@ -36,6 +36,13 @@
       "when": 1790160000000,
       "tag": "0004_gc_deleting",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790184880777,
+      "tag": "0005_lush_magneto",
+      "breakpoints": true
     }
   ]
 }

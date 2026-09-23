@@ -16,6 +16,6 @@ export async function pgliteData(): Promise<Data> {
 }
 export async function withData<T>(fn: (data: Data) => Promise<T>): Promise<T> {
   const data = process.env.TEST_DATABASE_URL ? neonData(process.env.TEST_DATABASE_URL) : await pgliteData();
-  try { if (process.env.TEST_DATABASE_URL) await data.authDb().execute(sql`truncate table "user", "session", "account", verification, publishers, repos, refs, extensions, releases, release_objects, objects, object_leases, installs, user_settings, desktop_auth, featured, publish_counter, moderation_log, reports cascade`); return await fn(data); }
+  try { if (process.env.TEST_DATABASE_URL) await data.authDb().execute(sql`truncate table "user", "session", "account", verification, publishers, repos, refs, extensions, releases, release_objects, objects, object_leases, installs, user_settings, desktop_auth, featured, abuse_counters, moderation_log, reports cascade`); return await fn(data); }
   finally { if (process.env.TEST_DATABASE_URL) await data.end(); else await (data as Data & {close():Promise<void>}).close(); }
 }
