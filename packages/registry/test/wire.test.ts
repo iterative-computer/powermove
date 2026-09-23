@@ -17,13 +17,13 @@ const samples: [string, z.ZodType, unknown][] = [
 ];
 for (const [name, schema, sample] of samples) test(name, () => { expect(schema.safeParse(sample).success).toBe(true); expect(schema.safeParse(null).success).toBe(false); });
 test('error codes and status are exhaustive', () => {
-  expect(Object.keys(W.API_ERROR_STATUS).sort()).toEqual(Object.values(W.ApiErrorCode).sort());
-  for (const code of Object.values(W.ApiErrorCode)) expect(W.API_ERROR_STATUS[code]).toBeGreaterThanOrEqual(400);
+  expect(Object.keys(W.API_ERROR_STATUS).sort()).toEqual([...W.API_ERROR_CODES].sort());
+  for (const code of [...W.API_ERROR_CODES]) expect(W.API_ERROR_STATUS[code]).toBeGreaterThanOrEqual(400);
   expect(W.ApiErrorBody.safeParse({ error: 'head_moved', head: sha }).success).toBe(true);
   expect(W.ApiErrorBody.safeParse({ error: 'head_moved' }).success).toBe(false);
   expect(W.ApiErrorBody.safeParse({ error: 'client_too_old', minimum: '1.2.0' }).success).toBe(true);
   expect(W.ApiErrorBody.safeParse({ error: 'bogus' }).success).toBe(false);
-  expect(new W.ApiError({ error: W.ApiErrorCode.not_found }).status).toBe(404);
+  expect(new W.ApiError({ error: 'not_found' }).status).toBe(404);
 });
 const e = { params: {}, query: {}, body: {} }, coordinate = { handle: 'my-handle', slug: 'my-extension' }, releaseCoordinate = { ...coordinate, version: '1.0.0' };
 const req: Record<string, unknown> = {
@@ -59,7 +59,7 @@ test('every API error variant parses with its required fields', () => {
     scan_blocked: { findings: [{ path: 'index.ts', line: 1, kind: 'github_token' }] },
     limit_exceeded: { code: 'file_too_large' }, client_too_old: { minimum: '1.2.0' }
   };
-  for (const error of Object.values(W.ApiErrorCode)) {
+  for (const error of [...W.API_ERROR_CODES]) {
     expect(W.ApiErrorBody.safeParse({ error, ...fields[error] }).success).toBe(true);
   }
 });
