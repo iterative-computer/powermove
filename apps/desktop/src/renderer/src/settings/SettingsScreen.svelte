@@ -8,6 +8,8 @@
   import { mountSquircles } from './squircle';
   import { mountNavGlide } from '../controls/nav-glide';
   import { clearSettingsSearch, searchSettings } from './search';
+  import Avatar from '../cloud/Avatar.svelte';
+  import { openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
 
   export type SettingsPage = 'general' | 'accounts' | 'extensions' | 'project';
 
@@ -69,6 +71,9 @@
   let matchedPages = $state<string[]>([]);
   let matchCount = $state(0);
   let lastFocus: HTMLElement | null = null;
+  let account = $state<CloudUser | null>(null);
+
+  $effect(() => subscribeAccount((user) => { account = user; }));
 
   const hasProject = $derived(!!controls?.project);
   const groups = $derived(NAV
@@ -419,8 +424,31 @@
             {:else if item.id === 'accounts'}
               <header class="sg-heading">
                 <h2>Accounts</h2>
-                <p>Sign in with a subscription, or connect an API or local model.</p>
+                <p>Your Powermove account, and the models your agent works with.</p>
               </header>
+              <section class="sg-section">
+                <h3 class="sg-section-title">Powermove</h3>
+                <div class="sg-group">
+                  {#if account}
+                    <div class="settings-row acct-profile">
+                      <Avatar user={account} size={32} />
+                      <div class="settings-copy">
+                        <b>{account.name}</b>
+                        <span>@{account.handle} · {account.email}</span>
+                      </div>
+                      <button class="btn" type="button" onclick={signOut}>Sign Out</button>
+                    </div>
+                  {:else}
+                    <div class="settings-row">
+                      <div class="settings-copy">
+                        <b>Powermove account</b>
+                        <span>Publish and manage your extensions on the Store.</span>
+                      </div>
+                      <button class="btn" type="button" onclick={() => openSignIn()}>Sign In…</button>
+                    </div>
+                  {/if}
+                </div>
+              </section>
               <section class="sg-section">
                 <h3 class="sg-section-title">Subscriptions</h3>
                 <div class="sg-group" use:host={[controls?.chatgpt.element, controls?.claude.element]}></div>

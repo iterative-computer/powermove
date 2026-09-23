@@ -189,6 +189,7 @@ body:has(#store-screen.on:not(.leaving)) #projects-screen .ps-main{visibility:hi
 .st-empty b{font-size:var(--fs-md);font-weight:var(--fw-medium);color:var(--tx)}
 .st-empty span{max-width:52ch;font-size:var(--fs-md);line-height:18px;color:var(--tx-3);text-wrap:pretty}
 .st-empty .btn{margin-top:10px}
+.st-empty .st-coord{font:var(--fs-sm)/18px var(--f-mono);color:var(--tx-2)}
 
 #store-screen .btn:not(.pri){box-shadow:none}
 #store-screen .st-row,#store-screen .st-hero,#store-screen .st-navbtn,#store-screen .st-pager,#store-screen .st-facts{user-select:none;-webkit-user-select:none}

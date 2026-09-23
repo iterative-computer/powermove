@@ -6,6 +6,7 @@
   import { createExtensionSettingsControl } from '../legacy/ui/extension-settings';
   import { mountSquircles, SQUIRCLE_SELECTOR } from '../settings/squircle';
   import { mountNavGlide } from '../controls/nav-glide';
+  import { openSignIn, subscribeAccount, type CloudUser } from '../cloud/account';
   import {
     ALL, FEATURED, KIND_LABEL, KIND_PLURAL, NEW, PICKS, coordinate,
     type StoreKind, type StoreListing
@@ -40,6 +41,9 @@
   let installed = $state.raw<ReturnType<typeof createExtensionSettingsControl> | null>(null);
   let lastFocus: HTMLElement | null = null;
   let leaveTimer = 0;
+  let account = $state<CloudUser | null>(null);
+
+  $effect(() => subscribeAccount((user) => { account = user; }));
 
   const query = $derived(searchText.trim().toLowerCase());
   const featured = $derived(FEATURED[featuredIndex]!);
@@ -362,14 +366,24 @@
             <header class="st-heading">
               <div>
                 <h2>Yours</h2>
-                <p>Extensions you have published, and their forks.</p>
+                <p>{account ? `Extensions you have published as @${account.handle}, and their forks.` : 'Extensions you have published, and their forks.'}</p>
               </div>
             </header>
-            <div class="st-empty">
-              <b>Nothing published yet</b>
-              <span>Publishing puts an extension’s source on the store under your name. Forks record where they came from.</span>
-              <button class="btn" type="button">Publish an extension…</button>
-            </div>
+            {#if account}
+              <div class="st-empty">
+                <b>Nothing published yet</b>
+                <span>Publishing puts an extension’s source on the store under your name. Forks record where they came from.</span>
+                <button class="btn" type="button">Publish an extension…</button>
+              </div>
+            {:else}
+              <!-- Publishing needs a publisher: the account's handle is the
+                   namespace every listing lives under. -->
+              <div class="st-empty">
+                <b>Sign in to publish</b>
+                <span>Extensions you publish live under your handle, like <code class="st-coord">you/glass-blur</code>. Installing never needs an account.</span>
+                <button class="btn" type="button" onclick={() => openSignIn()}>Sign In…</button>
+              </div>
+            {/if}
           {/if}
         </div>
       {/key}
